@@ -332,6 +332,23 @@ class GameSession:
         if agent is not None and hasattr(agent, "cancel"):
             agent.cancel()
 
+    def set_paused(self, paused: bool):
+        """Pause or resume the AI players from the game screen.
+
+        A pause stops the game, clocks included: the turn in progress stops counting, and an AI that is
+        mid-turn holds before its next model call until play resumes (see LLMAgent.play_turn).
+        """
+        with self.lock:
+            if paused == self.paused:
+                return
+            self.paused = paused
+            self.pause_reason = None
+            if paused:
+                self.metrics.pause()
+            else:
+                self.metrics.unpause()
+            self.cond.notify_all()
+
     def suspend(self, reason: Optional[dict] = None):
         """Pause the game immediately, aborting any AI turn in progress (used for quiet hours and benchmark pauses).
         The interrupted turn is excluded from metrics and replayed from its current state on resume().
@@ -341,6 +358,7 @@ class GameSession:
         with self.lock:
             self.paused = True
             self.pause_reason = reason
+            self.metrics.pause()
             for pid in list(self.agents):
                 self.cancel_agent(pid)
             self.metrics.interrupt_open()
@@ -354,6 +372,7 @@ class GameSession:
         with self.lock:
             self.paused = False
             self.pause_reason = None
+            self.metrics.unpause()
             self._track_turn()
             self.cond.notify_all()
         self.mark_live()

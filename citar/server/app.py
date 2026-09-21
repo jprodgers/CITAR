@@ -562,8 +562,7 @@ def control(gid: str, body: Control, request: Request, p: Principal = Depends(pr
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     with s.lock:
         if body.paused is not None:
-            s.paused = body.paused
-            s.pause_reason = None          # a person paused or resumed it: no longer the game's own pause
+            s.set_paused(body.paused)      # a person paused or resumed it: no longer the game's own pause
         if body.ai_delay is not None:
             s.ai_delay = max(0.0, min(30.0, body.ai_delay))
         s.cond.notify_all()
@@ -1328,6 +1327,76 @@ def lab_overview():
     """What the bot lab is doing: runner health, experiments, per-game progress and the log."""
     from .. import lab
     return lab.overview()
+
+
+@app.get("/api/queue", dependencies=[Depends(require_user)])
+def work_queue_view():
+    """Everything waiting to run, in the order it will run.
+
+    Per model machine: what is using it now, and the benchmark jobs and probe runs waiting for it, best
+    first (see citar.pool.queue). Then this server's CPU: the lab's experiments, the lab runner, and the
+    load average, since the lab's bot games share the CPU with every game being played here.
+    """
+    import os
+    from .. import lab, servers as registry
+    from ..db.models import Server
+    from ..pool import queue as work_queue, seats as pool_seats
+    from .workers import hub
+    _scheduler()
+    _probes()
+    items = work_queue.waiting()
+    names = {sv["id"]: sv["name"] for sv in registry.list_servers()}
+    from .. import db as _db
+    with _db.session() as s:
+        for sv in s.query(Server):
+            names[sv.id] = sv.name
+    ids = list(dict.fromkeys([i["server_id"] for i in items if i.get("server_id")] +
+                             [sid for sid in names if pool_seats.occupied(sid)]))
+    machines = []
+    for sid in ids:
+        waiting = [dict(it, position=n + 1) for n, it in enumerate(i for i in items if i.get("server_id") == sid)]
+        machines.append({"server_id": sid, "name": names.get(sid, sid), "online": hub().is_online(sid) or None,
+                         "busy_with": pool_seats.occupied(sid), "waiting": waiting})
+    try:
+        overview = lab.overview()
+    except Exception:
+        overview = {"experiments": [], "runner": {}}
+    cpu = {"cpus": os.cpu_count(), "load": [round(x, 2) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None,
+           "lab_runner": overview.get("runner"), "lab_running": overview.get("running", []),
+           "experiments": sorted([e for e in overview.get("experiments", []) if e.get("state") != "complete"],
+                                 key=lambda e: (-(e.get("priority") or 0), e.get("submitted") or ""))}
+    return {"machines": machines, "cpu": cpu}
+
+
+class PriorityBody(BaseModel):
+    """A new priority for a benchmark run, a probe run or a lab experiment. Higher goes first."""
+    kind: str
+    id: str
+    priority: int
+
+
+@app.post("/api/queue/priority", dependencies=[Depends(require_user)])
+def work_queue_priority(body: PriorityBody):
+    """Move work up or down the queue."""
+    import json as _json
+    from ..pool import queue as work_queue
+    if body.kind in work_queue.KINDS:
+        return {"kind": body.kind, "id": body.id, "priority": work_queue.set_priority(body.kind, body.id, body.priority)}
+    if body.kind == "lab":
+        from .. import lab
+        import re as _re
+        if not _re.fullmatch(r"[A-Za-z0-9._-]{1,80}", body.id or ""):
+            raise HTTPException(400, "Invalid experiment name.")
+        path = lab.QUEUE / f"{body.id}.json"
+        if not path.exists():
+            raise HTTPException(404, "No queued experiment of that name.")
+        spec = _json.loads(path.read_text(encoding="utf-8"))
+        spec["priority"] = max(-100, min(100, body.priority))
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(spec, indent=1), encoding="utf-8")
+        tmp.replace(path)
+        return {"kind": "lab", "id": body.id, "priority": spec["priority"]}
+    raise HTTPException(400, "kind is benchmark, probe or lab.")
 
 
 @app.get("/api/lab/report/{name}", dependencies=[Depends(require_user)])

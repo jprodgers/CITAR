@@ -3,7 +3,7 @@ import { api } from "./api.js";
 import { el, clear } from "./util.js";
 import * as auth from "./auth.js";
 
-const PAGES = [["games", "#/", "Games"], ["benchmarks", "#/benchmarks", "Benchmarks"], ["models", "#/models", "Models"], ["editor", "#/editor", "Map editor"], ["scenarios", "#/scenarios", "Scenarios"], ["probes", "#/probes", "Probes"], ["lab", "#/lab", "Lab"], ["pool", "#/pool", "Servers"], ["reports", "#/reports", "Reports"]];
+const PAGES = [["games", "#/", "Games"], ["benchmarks", "#/benchmarks", "Benchmarks"], ["queue", "#/queue", "Queue"], ["models", "#/models", "Models"], ["editor", "#/editor", "Map editor"], ["scenarios", "#/scenarios", "Scenarios"], ["probes", "#/probes", "Probes"], ["lab", "#/lab", "Lab"], ["pool", "#/pool", "Servers"], ["reports", "#/reports", "Reports"]];
 
 // Shown only to administrators: everything on it is server-wide configuration.
 const ADMIN_PAGES = [["console", "#/console", "Server"]];

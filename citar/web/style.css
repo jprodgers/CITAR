@@ -490,3 +490,14 @@ dl.paths dd { margin: 0; }
 .helper-cmd { display: flex; gap: 8px; align-items: center; margin: 6px 0; background: #0f131b; border: 1px solid var(--border);
   border-radius: 6px; padding: 6px 8px; }
 .helper-cmd code { flex: 1; overflow-x: auto; white-space: nowrap; font-size: 12px; }
+
+/* Queue page */
+.q-machine h3, .card h3 { font-size: 16px; }
+.q-now { margin: 8px 0; }
+.q-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
+.q-table th { text-align: left; color: var(--muted); font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.q-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.q-table tr.q-next td { background: rgba(79, 140, 255, .08); }
+.q-prio-box { display: inline-flex; gap: 3px; align-items: center; white-space: nowrap; }
+.q-prio { width: 52px; }
+.q-load { margin: 8px 0; }

@@ -284,6 +284,38 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(s.info()["pause_reason"])
         self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
 
+    def test_pausing_mid_turn_stops_the_turn_and_its_clock(self):
+        """Pausing from the game screen used to let an AI's turn run on, and its duration kept counting."""
+        steps = []
+        holder = {}
+
+        class PausingConversation(ScriptedConversation):
+            def step(self):
+                steps.append(time.time())
+                if len(steps) == 1:
+                    for _ in range(100):                  # the driver can get here before create() has returned
+                        if "s" in holder:
+                            break
+                        time.sleep(0.05)
+                    holder["s"].set_paused(True)          # the person presses Pause while the model is thinking
+                    return StepResult(text="looking", tool_calls=[ToolCall("q", "get_empire", {})])
+                return super().step()
+
+        ScriptedConversation.scripts = {}
+        with mock.patch("citar.agents.llm_agent.make_conversation", PausingConversation):
+            s = self.manager.create({"map_size": "duel", "seed": 4}, [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
+            holder["s"] = s
+            self.assertTrue(self._wait(lambda: s.agent_status.get(0) == "paused"), "the AI should hold mid-turn")
+            time.sleep(2.0)
+            self.assertEqual(len(steps), 1, "no model calls while paused")
+            self.assertEqual(s.game.turn, 1)
+            s.set_paused(False)
+            self.assertTrue(self._wait(lambda: s.game.turn >= 2))
+        self.manager.delete(s.id)
+        rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
+        self.assertGreaterEqual(rec["paused_s"], 2.0)
+        self.assertLess(rec["wall_s"], rec["ended"] - rec["started"] - 1.9, "paused time must not count")
+
     def test_open_games_come_back_after_a_restart(self):
         """A server restart used to drop every lobby game until someone reloaded it by hand."""
         from citar.server.session import SAVE_DIR

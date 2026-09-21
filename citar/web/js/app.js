@@ -16,6 +16,7 @@ import { renderAccount } from "./account.js";
 import { renderSetup } from "./setup.js";
 import { renderConsole } from "./console.js";
 import { renderLanding } from "./landing.js";
+import { renderQueue } from "./queue.js";
 import * as auth from "./auth.js";
 
 let rules = null;
@@ -94,6 +95,8 @@ async function route() {
       screen = await renderServers(root, parts[1] || null);
     } else if (parts[0] === "reports") {
       screen = await renderReports(root, parts[1] || null);
+    } else if (parts[0] === "queue") {
+      screen = await renderQueue(root);
     } else if (parts[0] === "lab") {
       screen = await renderLab(root);
     } else if (parts[0] === "models") {

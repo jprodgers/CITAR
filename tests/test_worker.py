@@ -251,6 +251,36 @@ class PooledWork(unittest.TestCase):
         self.assertEqual(waiting["status"], "waiting (machine busy)")
         self.assertIn("long one", waiting["waiting"])
 
+    def test_one_queue_orders_benchmarks_and_probes_by_priority_then_age(self):
+        from citar import probes
+        from citar.pool import queue as work_queue
+        from citar.server.benchmarks import BenchmarkScheduler
+        runner = probes.ProbeRunner.__new__(probes.ProbeRunner)
+        runner.manager, runner.lock, runner.live, runner._stop_run, runner._thread = self.manager, threading.Lock(), {}, set(), None
+        rid = f"test-old-probe-{int(time.time() * 1000) % 100000}"
+        runner._write({"id": rid, "name": "old probe", "llm": {"server_id": self.server_id}, "status": "queued",
+                       "jobs": [], "created": time.time() - 3600})
+        runner.queue = [rid]
+        work_queue.register("probe", runner.queue_items)
+        sch = BenchmarkScheduler(self.manager, self.dir, autostart=False)
+        try:
+            run = sch.create_run({"name": "t", "mode": "sequential", "repeats": 1,
+                                  "servers": [{"server_id": self.server_id, "models": [{"model": "m1"}]}],
+                                  "scenarios": [{"name": "s", "map_size": "duel", "turn_limit": 2, "opponents": 1}]})
+            sch.tick()
+            job = run["jobs"][0]
+            self.assertEqual(job["status"], "queued", "the probe run queued an hour earlier goes first")
+            self.assertIn("old probe goes first", job["waiting"])
+            self.assertEqual([i["id"] for i in work_queue.waiting(self.server_id)], [rid, job["id"]])
+            work_queue.set_priority("benchmark", run["id"], 5)
+            self.assertEqual(work_queue.waiting(self.server_id)[0]["id"], job["id"])
+            sch.tick()
+            self.assertIn(job["status"], ("loading", "running"), "a higher priority jumps the queue")
+        finally:
+            sch.stop()
+            work_queue.set_priority("benchmark", run["id"], 0)
+            work_queue.register("probe", lambda: [])
+
     def test_a_probe_run_holds_its_machine(self):
         from citar.pool import seats
         seats.claim(self.server_id, "probe run “x”")

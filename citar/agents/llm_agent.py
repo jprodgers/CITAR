@@ -429,6 +429,17 @@ class LLMAgent:
                 with session.lock:
                     if session.game.s.current != pid or session.game.s.phase != "playing" or session.game.turn != turn:
                         return
+                if session.paused:
+                    # paused from the game screen mid-turn: hold before the next model call, and do not count the
+                    # pause against the turn's time
+                    held = time.time()
+                    self._status(session, pid, "paused")
+                    while session.paused and not self._halted(session):
+                        time.sleep(0.5)
+                    self._waited += time.time() - held
+                    if self._halted(session):
+                        continue
+                    self._status(session, pid, "thinking")
                 if steps >= self.max_steps:
                     self._limit(session, pid, "step_limit", f"reached {self.max_steps} model steps")
                     return

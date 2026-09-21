@@ -738,7 +738,7 @@ export class GameScreen {
         el("button", { class: `end-turn ${needs === 0 ? "ready" : ""}`, onclick: () => this.endTurn() }, "End Turn"));
     } else {
       const st = this.agentStatus[v.current_player];
-      box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)" : ""}`));
+      box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)" : st === "paused" ? " (paused mid-turn)" : ""}`));
     }
   }
 

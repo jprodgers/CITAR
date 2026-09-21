@@ -391,6 +391,8 @@ class ProbeRunner:
         self._thread: Optional[threading.Thread] = None
         self._stop_run: set = set()
         RUNS.mkdir(parents=True, exist_ok=True)
+        from .pool import queue as work_queue
+        work_queue.register("probe", self.queue_items)
         for run in self.list_runs():      # runs interrupted by a server restart go back in the queue
             if run["status"] in ("queued", "running", "waiting (quiet hours)", "waiting (restricted hours)",
                                  "waiting (machine busy)"):
@@ -497,8 +499,7 @@ class ProbeRunner:
     def _loop(self):
         """The worker thread: take the next queued run and execute it."""
         while True:
-            with self.lock:
-                queue = list(self.queue)
+            queue = self._ordered_queue()
             # the first run whose machine is free, so one busy machine does not hold up every other run
             rid = next((r for r in queue if not self._machine_busy(r)), None)
             if rid is None and queue:
@@ -552,15 +553,46 @@ class ProbeRunner:
         finally:
             pool_seats.release(server_id, f"probe run “{run['name']}”")
 
+    def queue_items(self) -> list[dict]:
+        """Queued runs, for the shared work queue (see citar.pool.queue)."""
+        with self.lock:
+            rids = list(self.queue)
+        out = []
+        for rid in rids:
+            try:
+                run = self.get_run(rid)
+            except (ProbeError, OSError, ValueError):
+                continue
+            out.append({"kind": "probe", "id": rid, "group": rid, "run": run["name"], "label": run["name"],
+                        "server_id": run["llm"].get("server_id"), "server": run["llm"].get("server"),
+                        "created": run.get("created") or 0, "waiting": run.get("waiting")})
+        return out
+
+    def _ordered_queue(self) -> list[str]:
+        """The queued runs, highest priority first, then oldest."""
+        from .pool import queue as work_queue
+        items = self.queue_items()
+        for it in items:
+            it["priority"] = work_queue.priority("probe", it["group"])
+        return [it["id"] for it in sorted(items, key=work_queue.rank)]
+
     def _machine_busy(self, rid: str) -> bool:
-        """Whether a queued run's machine is in use by a game; if so, the run says what it is waiting for."""
+        """Whether a queued run cannot start yet - its machine is in use, or higher-priority work is waiting for
+        it; if so, the run says what it is waiting for."""
         from .pool import seats as pool_seats
+        from .pool import queue as work_queue
         try:
             run = self.get_run(rid)
         except ProbeError:
             return False
-        held = pool_seats.occupied(run["llm"].get("server_id"))
+        server_id = run["llm"].get("server_id")
+        held = pool_seats.occupied(server_id)
         note = f"waiting for {', '.join(held)}" if held else None
+        if not held and server_id:
+            first = work_queue.ahead_of(server_id, "probe", (-work_queue.priority("probe", rid), run.get("created") or 0))
+            if first is not None:
+                held = [first["label"]]
+                note = f"waiting: {first['label']} goes first (priority {first['priority']})"
         status = "waiting (machine busy)" if held else "queued"
         if run.get("waiting") != note or run["status"] != status:
             run["waiting"], run["status"] = note, status

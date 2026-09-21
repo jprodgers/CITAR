@@ -86,11 +86,33 @@ class Metrics:
         if rec is None:
             return
         rec["ended"] = time.time()
-        rec["wall_s"] = round(rec["ended"] - rec["started"], 3)
+        self._unpause_rec(rec, rec["ended"])
+        # a paused game is not a slow player: time spent paused is left out of the turn's duration
+        rec["wall_s"] = round(rec["ended"] - rec["started"] - rec.get("paused_s", 0.0), 3)
         if reason and not rec["end_reason"]:
             rec["end_reason"] = reason
         rec["end_reason"] = rec["end_reason"] or "end_turn"
         self._open.pop(pid, None)
+
+    def pause(self):
+        """The game was paused: stop the clock on every turn in progress."""
+        now = time.time()
+        for rec in self._open.values():
+            if rec["ended"] is None and rec.get("paused_at") is None:
+                rec["paused_at"] = now
+
+    def unpause(self):
+        """The game was resumed: restart the clock, remembering how long it was stopped."""
+        now = time.time()
+        for rec in self._open.values():
+            self._unpause_rec(rec, now)
+
+    @staticmethod
+    def _unpause_rec(rec: dict, now: float):
+        """Fold a pause in progress into a turn record's paused time."""
+        if rec.get("paused_at") is not None:
+            rec["paused_s"] = round(rec.get("paused_s", 0.0) + max(0.0, now - rec["paused_at"]), 3)
+            rec["paused_at"] = None
 
     def interrupt_open(self):
         """Mark every turn in progress as interrupted (game suspended mid-turn): its timing would include the pause, so

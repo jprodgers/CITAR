@@ -225,8 +225,20 @@ class BenchmarkScheduler:
         self._progress_flushed = 0.0
         self._clock = datetime.now     # overridable in tests
         self._load()
+        from ..pool import queue as work_queue
+        work_queue.register("benchmark", self.queue_items)
         if autostart:
             self.start()
+
+    def queue_items(self) -> list[dict]:
+        """Queued jobs, for the shared work queue (see citar.pool.queue)."""
+        with self.lock:
+            return [{"kind": "benchmark", "id": job["id"], "group": run["id"], "run": run["name"],
+                     "label": f"{job['label']} · {job['scenario_name']} #{job['repeat']}",
+                     "server_id": job["server_key"], "server": job.get("server_name"), "created": job["created"],
+                     "waiting": job.get("waiting")}
+                    for run in self.runs.values() if run["status"] == "running"
+                    for job in run["jobs"] if job["status"] == "queued"]
 
     # ------------------------------------------------------------------ persistence
     def _load(self):
@@ -706,9 +718,11 @@ class BenchmarkScheduler:
         others: dict[str, list] = {}
         for sid in {j["server_key"] for r in self.runs.values() for j in r["jobs"] if j["status"] == "queued"}:
             others[sid] = pool_seats.occupied(sid, exclude=frozenset(ours))
-        for run in sorted(self.runs.values(), key=lambda r: r["created"]):
+        from ..pool import queue as work_queue
+        for run in sorted(self.runs.values(), key=lambda r: (-work_queue.priority("benchmark", r["id"]), r["created"])):
             if run["status"] != "running":
                 continue
+            prio = work_queue.priority("benchmark", run["id"])
             run_busy = sum(1 for j in run["jobs"] if j["status"] in ACTIVE)
             for job in run["jobs"]:
                 if job["status"] != "queued":
@@ -721,6 +735,13 @@ class BenchmarkScheduler:
                 held = others.get(job["server_key"]) or []
                 if busy.get(job["server_key"], 0) + len(held) >= limit:
                     note = f"waiting: {job['server_name']} is in use by {', '.join(held)}" if held else None
+                    if job.get("waiting") != note:
+                        job["waiting"] = note
+                        self._touch(run)
+                    continue
+                first = work_queue.ahead_of(job["server_key"], "benchmark", (-prio, job["created"]))
+                if first is not None:
+                    note = f"waiting: {first['label']} goes first on {job['server_name']} (priority {first['priority']})"
                     if job.get("waiting") != note:
                         job["waiting"] = note
                         self._touch(run)
