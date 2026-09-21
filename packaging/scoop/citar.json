@@ -12,7 +12,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/jprodgers/CITAR/releases/download/v0.1.0/CITAR-0.1.0-windows-x64.zip",
-            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+            "hash": "b485879157709ec95c73cf76854dca1d3e010dde3dae96c02be085b8654f3caf"
         }
     },
     "extract_dir": "CITAR",
