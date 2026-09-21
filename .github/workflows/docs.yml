@@ -74,16 +74,18 @@ jobs:
         run: python scripts/build_wiki.py
 
       - name: Push them to the wiki repository
-        # The wiki is a separate repository, so this needs a token with permission to write it.
-        # GITHUB_TOKEN cannot, so a personal access token is used if one is configured; without it
-        # the job says so and succeeds, because a missing wiki should not fail a docs build.
+        # A wiki is a separate git repository, and GITHUB_TOKEN cannot write to it. Nor can a
+        # fine-grained personal access token - wikis are not among the permissions those can
+        # grant - so WIKI_TOKEN has to be a *classic* token with the `repo` scope.
+        #
+        # Without it this job says so and succeeds, because a wiki that is a little out of date
+        # should not turn a docs build red. The wiki is then published from a working copy with
+        # `python scripts/build_wiki.py --push`, which uses that machine's own git credentials.
         env:
           WIKI_TOKEN: ${{ secrets.WIKI_TOKEN }}
         run: |
           if [ -z "$WIKI_TOKEN" ]; then
-            echo "::notice::No WIKI_TOKEN secret, so the wiki was not updated."
-            echo "Generated pages are in wiki/ and can be pushed by hand:"
-            echo "  git clone https://github.com/${{ github.repository }}.wiki.git"
+            echo "::notice::No WIKI_TOKEN secret, so the wiki was not updated. Run 'python scripts/build_wiki.py --push' to publish it."
             exit 0
           fi
           git clone "https://x-access-token:${WIKI_TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki-repo

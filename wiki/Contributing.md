@@ -112,6 +112,19 @@ Most content is data, not code: a new building or unit is a JSON entry.
 [docs/MODDING.md](Modding) covers it, including how to check that the rule text you wrote
 is one the engine understands.
 
+Documentation lives in `docs/` and nowhere else. The [wiki](https://github.com/jprodgers/CITAR/wiki)
+and the [site](https://jprodgers.github.io/CITAR) are both generated from it, so editing a wiki page
+directly only means losing that edit on the next build. The site publishes itself when `docs/`
+changes; the wiki needs a push:
+
+```
+python scripts/build_wiki.py --push
+```
+
+That uses your own git credentials. The docs workflow can do it instead, but only with a `WIKI_TOKEN`
+secret holding a **classic** personal access token with the `repo` scope — `GITHUB_TOKEN` cannot
+write to a wiki, and fine-grained tokens have no wiki permission to grant.
+
 ## Releasing
 
 For maintainers: bump `citar/__init__.py`, add the section to `CHANGELOG.md`, tag `vX.Y.Z` and
