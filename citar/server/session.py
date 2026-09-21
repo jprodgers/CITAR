@@ -346,6 +346,7 @@ class GameSession:
             self.metrics.interrupt_open()
             self._metrics_current = None
             self.cond.notify_all()
+        self.mark_live()
         self._broadcast({"type": "control", "paused": True, "ai_delay": self.ai_delay, "pause_reason": reason})
 
     def resume(self):
@@ -355,6 +356,7 @@ class GameSession:
             self.pause_reason = None
             self._track_turn()
             self.cond.notify_all()
+        self.mark_live()
         self._broadcast({"type": "control", "paused": False, "ai_delay": self.ai_delay, "pause_reason": None})
 
     RECONNECT_POLL_SECONDS = 10.0     # how often a game paused by a disconnect checks whether the server is back
@@ -528,6 +530,35 @@ class GameSession:
         return path
 
     AUTOSAVE_MIN_SECONDS = 3.0
+    LIVE_MARK = "live.json"
+
+    def mark_live(self):
+        """Record that this lobby game is open, and whether it is paused, so a restart can bring it back.
+
+        Only games the lobby lists: benchmark games are reloaded by their scheduler, and probe cases are
+        not registered at all. A finished game has nothing to come back to, so its mark is removed. A
+        game the server paused because a model server was unreachable comes back running: whatever was
+        wrong is retried, and the disconnect rule applies again if it is still wrong.
+        """
+        if not getattr(self, "registered", False) or self._stop:
+            return
+        path = SAVE_DIR / self.id / self.LIVE_MARK
+        try:
+            if self.benchmark or self.game.s.phase != "playing":
+                path.unlink(missing_ok=True)
+                return
+            paused = self.paused and (self.pause_reason or {}).get("kind") != "disconnect"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"paused": paused, "name": self.name, "at": time.time()}), encoding="utf-8")
+        except OSError:
+            pass
+
+    def unmark_live(self):
+        """The game was closed on purpose: do not bring it back on the next start."""
+        try:
+            (SAVE_DIR / self.id / self.LIVE_MARK).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def autosave(self, force: bool = False):
         """Write the autosave, at most once per turn unless forced.
@@ -545,6 +576,7 @@ class GameSession:
             self.save("autosave")
         except Exception:
             self.errors.append({"t": time.time(), "where": "autosave", "trace": traceback.format_exc()})
+        self.mark_live()
 
     @classmethod
     def from_save(cls, data: dict) -> "GameSession":
@@ -611,6 +643,7 @@ class SessionManager:
         cfg["players"] = players
         game = Game.new(cfg)
         s = GameSession(game, seats, name)
+        s.registered = True
         with self.lock:
             self.sessions[s.id] = s
         if track:
@@ -660,6 +693,7 @@ class SessionManager:
         g.invalidate()
         s = GameSession(g, seats, name or scn.get("name") or "Scenario")
         if register:
+            s.registered = True
             with self.lock:
                 self.sessions[s.id] = s
             self.track(s)
@@ -672,6 +706,7 @@ class SessionManager:
         """Load a save into a live session."""
         data = load_save_file(path)
         s = GameSession.from_save(data)
+        s.registered = True
         with self.lock:
             if s.id in self.sessions:
                 self.sessions[s.id].stop()
@@ -679,7 +714,33 @@ class SessionManager:
         s.paused = True
         s.start()
         self.track(s)
+        s.mark_live()
         return s
+
+    def restore_live(self) -> list[str]:
+        """Bring back the lobby games that were open when the server last stopped.
+
+        Every open lobby game keeps a mark beside its autosave (see ``GameSession.mark_live``). Each is
+        reloaded from that autosave - so a restart costs at most the turn in progress - and resumed
+        unless it was paused. Benchmark games are the scheduler's to reload, and are not marked.
+        """
+        restored = []
+        for mark in sorted(SAVE_DIR.glob(f"*/{GameSession.LIVE_MARK}")):
+            try:
+                state = json.loads(mark.read_text(encoding="utf-8"))
+                save = mark.parent / "autosave.citar"
+                if not save.exists() or mark.parent.name in self.sessions:
+                    continue
+                s = self.load(save)
+                if s.benchmark or s.game.s.phase != "playing":
+                    s.unmark_live()
+                    continue
+                if not state.get("paused"):
+                    s.resume()
+                restored.append(f"{s.name} (turn {s.game.turn}{', paused' if state.get('paused') else ''})")
+            except Exception:
+                traceback.print_exc()
+        return restored
 
     def get(self, sid: str) -> Optional[GameSession]:
         """A session by id, or None."""
@@ -690,6 +751,7 @@ class SessionManager:
         with self.lock:
             s = self.sessions.pop(sid, None)
         if s:
+            s.unmark_live()
             s.stop()
 
     _save_meta_cache: dict = {}

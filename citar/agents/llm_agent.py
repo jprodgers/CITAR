@@ -254,6 +254,10 @@ class LLMAgent:
                     slept += 0.5
                 if unreachable:
                     self._waited += time.time() - now
+                    if self.cfg.get("provider") != "worker" or reachable(self.cfg):
+                        # back to "thinking" as the retry goes out: a reply can take minutes, and the game
+                        # screen should not say "reconnecting" all that time
+                        self._status(session, pid, "thinking")
 
     def _meter(self, session, conv, seconds: float, d: dict):
         """Record a model call (time and tokens) in the usage ledger, which reports turn into costs."""

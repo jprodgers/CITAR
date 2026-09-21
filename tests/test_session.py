@@ -284,6 +284,32 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(s.info()["pause_reason"])
         self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
 
+    def test_open_games_come_back_after_a_restart(self):
+        """A server restart used to drop every lobby game until someone reloaded it by hand."""
+        from citar.server.session import SAVE_DIR
+        running = self.manager.create({"map_size": "duel", "seed": 9}, [{"type": "human"}, {"type": "bot"}], name="running")
+        held = self.manager.create({"map_size": "duel", "seed": 10}, [{"type": "human"}, {"type": "bot"}], name="held")
+        held.suspend()
+        closed = self.manager.create({"map_size": "duel", "seed": 11}, [{"type": "human"}, {"type": "bot"}], name="closed")
+        for s in (running, held, closed):
+            s.autosave(force=True)
+        self.manager.delete(closed.id)
+        self.assertFalse((SAVE_DIR / closed.id / "live.json").exists())
+        # the process stops without anyone closing the games...
+        for s in (running, held):
+            s.stop()
+        # ...and a new one starts
+        after = SessionManager()
+        try:
+            restored = after.restore_live()
+            self.assertEqual(len(restored), 2, restored)
+            self.assertFalse(after.get(running.id).paused)
+            self.assertTrue(after.get(held.id).paused)
+            self.assertIsNone(after.get(closed.id))
+        finally:
+            for sid in list(after.sessions):
+                after.delete(sid)
+
     def test_save_and_load(self):
         s = self.manager.create({"map_size": "duel", "seed": 9}, [{"type": "human"}, {"type": "bot"}])
         pid = 0

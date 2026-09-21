@@ -58,6 +58,10 @@ async def _startup():
     from .workers import hub
     hub().attach_loop(_loop)                      # lets game threads reach connected workers
     asyncio.create_task(hub().ping_loop(citar_settings.get().worker_ping_seconds))
+    # lobby games first, so queued benchmarks and probes see which machines they hold
+    restored = manager.restore_live()
+    if restored:
+        print("restored games: " + "; ".join(restored), flush=True)
     if scheduler is None:
         scheduler = BenchmarkScheduler(manager)   # reloads benchmark games that were in progress
     _probes()                                     # resumes probe runs that were queued or running
@@ -563,6 +567,7 @@ def control(gid: str, body: Control, request: Request, p: Principal = Depends(pr
         if body.ai_delay is not None:
             s.ai_delay = max(0.0, min(30.0, body.ai_delay))
         s.cond.notify_all()
+    s.mark_live()
     s._broadcast({"type": "control", "paused": s.paused, "ai_delay": s.ai_delay, "pause_reason": None})
     return {"paused": s.paused, "ai_delay": s.ai_delay}
 
