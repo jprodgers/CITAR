@@ -66,17 +66,37 @@ Then `scoop bucket add citar https://github.com/jprodgers/scoop-citar && scoop i
 ## winget
 
 winget manifests live in Microsoft's own repository, and a submission is a pull request that a
-validation pipeline checks. The three files here are the manifest set for one version; `wingetcreate`
-automates the submission:
+validation pipeline checks. The three files here are the complete manifest set for one version, so
+`wingetcreate` has nothing to generate and only has to submit them.
 
-```bash
-wingetcreate update JimmieRodgers.CITAR --version 0.1.0 \
-  --urls https://github.com/jprodgers/CITAR/releases/download/v0.1.0/CITAR-0.1.0-setup.exe \
-  --submit
+On a Windows machine, once:
+
+```powershell
+winget install Microsoft.WingetCreate
+wingetcreate token --store
 ```
 
-The first submission is reviewed by a human and can take a few days. Later versions are usually
-automatic. Note that the package identifier must stay the same forever once accepted.
+`token --store` opens a GitHub sign-in. It needs a **classic** personal access token with the
+`public_repo` scope - fine-grained tokens are not supported - and it creates the fork of
+`microsoft/winget-pkgs` that the pull request comes from.
+
+Then, per release:
+
+```powershell
+wingetcreate submit --prtitle "New package: JimmieRodgers.CITAR 0.1.0" packaging\winget
+```
+
+`submit` is the right command for a first version. `wingetcreate update JimmieRodgers.CITAR` is for
+later ones and only works once the package is already in the repository - used too early it fails,
+because there is nothing there to update.
+
+The first submission is reviewed by a person and can take a few days; later versions are usually
+automatic. The package identifier is permanent once accepted, so `JimmieRodgers.CITAR` is a
+decision rather than a placeholder.
+
+`ManifestVersion` is the schema version the files are written against, not CITAR's version. Check
+what current submissions in `winget-pkgs` use before a release and match it: an old schema is
+accepted for a while, and then one day is not.
 
 ## Code signing
 

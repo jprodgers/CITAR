@@ -49,4 +49,4 @@ Documentation:
   - DocumentLabel: Running a server
     DocumentUrl: https://github.com/jprodgers/CITAR/blob/main/docs/server/DEPLOY.md
 ManifestType: defaultLocale
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0

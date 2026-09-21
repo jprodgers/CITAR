@@ -15,7 +15,7 @@ InstallModes:
   - silent
   - silentWithProgress
 UpgradeBehavior: install
-ReleaseDate: 2026-09-20
+ReleaseDate: 2026-09-21
 InstallerSwitches:
   # Inno's own switches. /NORESTART matters: without it a silent install may reboot the machine.
   Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
@@ -30,4 +30,4 @@ Installers:
     InstallerUrl: https://github.com/jprodgers/CITAR/releases/download/v0.1.0/CITAR-0.1.0-setup.exe
     InstallerSha256: BBFD316C2D74722C298C2F747104E25E82FBC0B2B55C3C9EBA99A7D060985907
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
