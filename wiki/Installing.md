@@ -116,11 +116,18 @@ long as the ruleset version has not changed; when it has, the release notes say 
 
 ```bash
 brew install jprodgers/citar/citar             # macOS and Linux
-scoop bucket add citar https://github.com/jprodgers/scoop-citar && scoop install citar
-winget install JimmieRodgers.CITAR             # Windows
 ```
 
-These lag PyPI by a day or so, because each needs the release to be published first. See
+```powershell
+scoop bucket add citar https://github.com/jprodgers/scoop-citar
+scoop install citar
+```
+
+winget is not available yet: the manifest is written, but a first submission to
+`microsoft/winget-pkgs` is reviewed by a person and has not been accepted yet. Until it is, use
+Scoop or the [installer](https://github.com/jprodgers/CITAR/releases/latest) on Windows.
+
+All three lag PyPI, because each needs the release published before it can point at anything. See
 [packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md).
 
 ---

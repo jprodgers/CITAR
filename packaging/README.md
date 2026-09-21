@@ -36,11 +36,12 @@ A personal tap, not homebrew-core. Core requires every Python dependency to be l
 `resource` block, which for CITAR is around forty of them, regenerated on every dependency change —
 worth doing if CITAR is ever submitted to core, and not worth doing before anyone has asked for it.
 
+The tap exists: [jprodgers/homebrew-citar](https://github.com/jprodgers/homebrew-citar). Each
+release, after `release_checksums.py` has filled in the version and hash:
+
 ```bash
-# once
-gh repo create jprodgers/homebrew-citar --public
-# each release
-cp packaging/homebrew/citar.rb ../homebrew-citar/Formula/citar.rb   # after updating the version
+cp packaging/homebrew/citar.rb ../homebrew-citar/Formula/citar.rb
+cd ../homebrew-citar && git commit -am "CITAR X.Y.Z" && git push
 ```
 
 Then `brew install jprodgers/citar/citar`.
@@ -50,10 +51,15 @@ Then `brew install jprodgers/citar/citar`.
 A bucket is a repository with a `bucket/` directory of JSON manifests. The manifest points at the
 GitHub release asset, so it needs the release to exist first.
 
+The bucket exists: [jprodgers/scoop-citar](https://github.com/jprodgers/scoop-citar).
+
 ```bash
-gh repo create jprodgers/scoop-citar --public
-# each release: update version + hash, copy to bucket/citar.json
+cp packaging/scoop/citar.json ../scoop-citar/bucket/citar.json
+cd ../scoop-citar && git commit -am "CITAR X.Y.Z" && git push
 ```
+
+The manifest carries `checkver` and `autoupdate` blocks, so Scoop's own tooling can raise the
+version from a new GitHub release without either file being edited by hand.
 
 Then `scoop bucket add citar https://github.com/jprodgers/scoop-citar && scoop install citar`.
 
