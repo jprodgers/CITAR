@@ -212,7 +212,7 @@ class SessionTests(unittest.TestCase):
             s = self.manager.create({"map_size": "duel", "seed": 4, "on_disconnect": "skip", "reconnect_seconds": 30},
                                     [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
             self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the turn should finish once the server is back")
-        self.manager.delete(s.id)
+            self.manager.delete(s.id)     # inside the patch: turn 2 must not reach the real provider
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "end_turn")
         self.assertFalse(any(e["type"] == "agent_error" for e in s.game.s.events))
@@ -237,7 +237,7 @@ class SessionTests(unittest.TestCase):
                                     [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
             self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the turn should be played once the slot frees")
             self.assertFalse(s.paused)
-        self.manager.delete(s.id)
+            self.manager.delete(s.id)
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "end_turn")
 
@@ -253,7 +253,7 @@ class SessionTests(unittest.TestCase):
                                     [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
             self.assertTrue(self._wait(lambda: s.game.turn >= 2))
             self.assertGreaterEqual(time.time() - t0, 2, "the turn must not be skipped before the window is over")
-        self.manager.delete(s.id)
+            self.manager.delete(s.id)
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "disconnected")
         self.assertTrue(any(e["type"] == "agent_error" and "unreachable" in e["text"] for e in s.game.s.events))
@@ -280,7 +280,7 @@ class SessionTests(unittest.TestCase):
             server_up["v"] = True
             self.assertTrue(self._wait(lambda: not s.paused), "the game should resume when the server is back")
             self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the interrupted turn is replayed and finished")
-        self.manager.delete(s.id)
+            self.manager.delete(s.id)
         self.assertIsNone(s.info()["pause_reason"])
         self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
 
@@ -311,7 +311,7 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(s.game.turn, 1)
             s.set_paused(False)
             self.assertTrue(self._wait(lambda: s.game.turn >= 2))
-        self.manager.delete(s.id)
+            self.manager.delete(s.id)
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertGreaterEqual(rec["paused_s"], 2.0)
         self.assertLess(rec["wall_s"], rec["ended"] - rec["started"] - 1.9, "paused time must not count")
@@ -333,8 +333,9 @@ class SessionTests(unittest.TestCase):
         # ...and a new one starts
         after = SessionManager()
         try:
-            restored = after.restore_live()
-            self.assertEqual(len(restored), 2, restored)
+            after.restore_live()
+            # only this test's games: others in the shared saves folder may have been left open
+            self.assertEqual({running.id, held.id} & set(after.sessions), {running.id, held.id})
             self.assertFalse(after.get(running.id).paused)
             self.assertTrue(after.get(held.id).paused)
             self.assertIsNone(after.get(closed.id))

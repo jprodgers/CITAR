@@ -81,6 +81,7 @@ class GameSession:
         self.errors: list[dict] = []
         self._responding: set = set()
         self._stop = False
+        self._mark_lock = threading.Lock()   # a live mark is never written after the game is closed
         self._driver: Optional[threading.Thread] = None
         self._last_round = game.turn
         self.version = 0
@@ -559,25 +560,30 @@ class GameSession:
         game the server paused because a model server was unreachable comes back running: whatever was
         wrong is retried, and the disconnect rule applies again if it is still wrong.
         """
-        if not getattr(self, "registered", False) or self._stop:
+        if not getattr(self, "registered", False):
             return
         path = SAVE_DIR / self.id / self.LIVE_MARK
-        try:
-            if self.benchmark or self.game.s.phase != "playing":
-                path.unlink(missing_ok=True)
+        with self._mark_lock:
+            if self._stop:
                 return
-            paused = self.paused and (self.pause_reason or {}).get("kind") != "disconnect"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"paused": paused, "name": self.name, "at": time.time()}), encoding="utf-8")
-        except OSError:
-            pass
+            try:
+                if self.benchmark or self.game.s.phase != "playing":
+                    path.unlink(missing_ok=True)
+                    return
+                paused = self.paused and (self.pause_reason or {}).get("kind") != "disconnect"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"paused": paused, "name": self.name, "at": time.time()}), encoding="utf-8")
+            except OSError:
+                pass
 
     def unmark_live(self):
-        """The game was closed on purpose: do not bring it back on the next start."""
-        try:
-            (SAVE_DIR / self.id / self.LIVE_MARK).unlink(missing_ok=True)
-        except OSError:
-            pass
+        """The game was closed on purpose: do not bring it back on the next start. Call after stop(), so an
+        autosave already under way cannot put the mark back."""
+        with self._mark_lock:
+            try:
+                (SAVE_DIR / self.id / self.LIVE_MARK).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def autosave(self, force: bool = False):
         """Write the autosave, at most once per turn unless forced.
@@ -770,8 +776,8 @@ class SessionManager:
         with self.lock:
             s = self.sessions.pop(sid, None)
         if s:
-            s.unmark_live()
             s.stop()
+            s.unmark_live()
 
     _save_meta_cache: dict = {}
 
