@@ -5,6 +5,7 @@ import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
 import { openMetrics } from "./metrics.js";
 import { seatServers } from "./lobby.js";
+import { mapOptionsForm } from "./mapoptions.js";
 
 const STATUS_CLASS = { running: "live", loading: "live", resuming: "live", paused: "warn", queued: "", done: "good", failed: "bad", cancelled: "muted" };
 const COLORS = { llm: "#4f8cff", bot: "#e8c547" };
@@ -406,7 +407,11 @@ function openSuiteEditor(suite, ctx, isNew) {
         field("Seed (blank = random)", num("seed")),
         field("Turn limit (0 = speed's normal length)", num("turn_limit", { min: 0, max: 2000 })),
         field("Max minutes per model turn", num("max_turn_minutes", { min: 1, max: 600 })),
-        el("div", { class: "field" }, el("label", {}, "Victory conditions"), el("div", { class: "row" }, ...Object.keys(rules.victories).map((k) => vic(k, k))))));
+        el("div", { class: "field" }, el("label", {}, "Victory conditions"), el("div", { class: "row" }, ...Object.keys(rules.victories).map((k) => vic(k, k))))),
+      mapOptionsForm(rules, {
+        initial: { map_edges: sc.map_edges, river_density: sc.river_density, resources: sc.resources },
+        onChange: (v) => { sc.map_edges = v.map_edges; sc.river_density = v.river_density; sc.resources = v.resources; },
+      }).node);
   }
 
   draw();

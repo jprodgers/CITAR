@@ -108,6 +108,19 @@ class BenchmarkTests(unittest.TestCase):
         sch.delete_suite(saved["id"])
         self.assertEqual(sch.list_suites(), [])
 
+    def test_scenario_map_options_reach_the_game(self):
+        sch = self.scheduler()
+        suite = dry_suite(models=("dry-a",))
+        suite["scenarios"][0].update({"map_edges": "wrap_x", "river_density": 0,
+                                      "resources": {"strategic": {"each": {"Uranium": {"mode": "off"}}}}})
+        run = sch.create_run(suite)
+        job = run["jobs"][0]
+        self.assertTrue(wait_for(lambda: job.get("game_id") and self.manager.get(job["game_id"]), sch=sch))
+        g = self.manager.get(job["game_id"]).game
+        self.assertTrue(g.grid.wrap_x)
+        self.assertFalse(any(t.river for t in g.s.tiles))
+        self.assertFalse(any(t.resource == "Uranium" for t in g.s.tiles))
+
     def test_sequential_run_plays_each_model_to_the_turn_limit(self):
         sch = self.scheduler()
         run = sch.create_run(dry_suite())

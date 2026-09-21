@@ -59,12 +59,23 @@ function resourceTable(names) {
       return each;
     },
     reset() { for (const r of Object.values(rows)) { r.mode.value = "normal"; r.num.value = ""; r.sync(); } },
+    set(each) {
+      this.reset();
+      for (const [name, rule] of Object.entries(each || {})) {
+        const r = rows[name];
+        if (!r || !rule || !MODES.some(([v]) => v === rule.mode)) continue;
+        r.mode.value = rule.mode;
+        r.num.value = rule.value ?? "";
+        r.sync();
+      }
+    },
   };
 }
 
 // The whole form. Returns { node, value() } where value() is the config fragment
 // { map_edges, river_density, resources } to merge into a game config or a map-generation request.
-export function mapOptionsForm(rules, { open = false } = {}) {
+// `initial` is such a fragment to start from; `onChange(value)` is called whenever the form changes.
+export function mapOptionsForm(rules, { open = false, initial = null, onChange = null } = {}) {
   const edges = el("select", {}, ...MAP_EDGES.map(([v, t, d]) => el("option", { value: v, title: d }, t)));
   const edgeNote = el("div", { class: "muted mo-note" });
   const syncEdge = () => { edgeNote.textContent = (MAP_EDGES.find((e) => e[0] === edges.value) || [])[2] || ""; };
@@ -130,8 +141,21 @@ export function mapOptionsForm(rules, { open = false } = {}) {
       el("div", {}, el("h4", {}, "Strategic"), stratTable.node),
       el("div", {}, el("h4", {}, "Luxury"), luxTable.node)),
     el("div", { class: "row" }, reset));
-  form.node.addEventListener("input", refreshSummary);
-  form.node.addEventListener("change", refreshSummary);
+  if (initial) {
+    const r = initial.resources || {};
+    if (MAP_EDGES.some((e) => e[0] === initial.map_edges)) { edges.value = initial.map_edges; syncEdge(); }
+    if (initial.river_density != null) rivers.set(initial.river_density);
+    if (r.density != null) overall.set(r.density);
+    if ((r.strategic || {}).density != null) strat.set(r.strategic.density);
+    if ((r.luxury || {}).density != null) lux.set(r.luxury.density);
+    if ((r.bonus || {}).density != null) bonus.set(r.bonus.density);
+    stratTable.set((r.strategic || {}).each);
+    luxTable.set((r.luxury || {}).each);
+  }
+  const changed = () => { refreshSummary(); if (onChange) onChange(form.value()); };
+  form.node.addEventListener("input", changed);
+  form.node.addEventListener("change", changed);
+  reset.addEventListener("click", () => { if (onChange) onChange(form.value()); });
   refreshSummary();
   return form;
 }

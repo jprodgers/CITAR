@@ -811,7 +811,9 @@ class BenchmarkScheduler:
                       "turn_limit": int(sc.get("turn_limit") or 0) or None, "seed": job["seed"],
                       "victories": sc.get("victories") or {}, "city_states": sc.get("city_states"),
                       "religion": sc.get("religion", True), "espionage": sc.get("espionage", True),
-                      "tech_trading": sc.get("tech_trading", True), "ruins": sc.get("ruins", True)}
+                      "tech_trading": sc.get("tech_trading", True), "ruins": sc.get("ruins", True),
+                      # map generation: edges, rivers and resources (see mapgen.MapOptions); absent = defaults
+                      **{k: sc[k] for k in ("map_edges", "river_density", "resources") if sc.get(k) is not None}}
             n_opp = int(sc.get("opponents") or 1)
             nations = _seat_nations(sc, n_opp + 1)
             seats = [{"type": "llm", "civ_name": None, "llm": llm, "nation": nations[0]}]
