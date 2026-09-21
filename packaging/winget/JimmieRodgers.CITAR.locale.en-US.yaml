@@ -1,3 +1,5 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+#
 # winget locale manifest for CITAR. Everything a person sees in `winget show` and in the store UI.
 
 PackageIdentifier: JimmieRodgers.CITAR
@@ -43,7 +45,7 @@ Tags:
   - strategy
   - turn-based
 ReleaseNotesUrl: https://github.com/jprodgers/CITAR/releases/tag/v0.1.0
-Documentation:
+Documentations:
   - DocumentLabel: Getting started
     DocumentUrl: https://github.com/jprodgers/CITAR/blob/main/docs/QUICKSTART.md
   - DocumentLabel: Running a server

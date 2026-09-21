@@ -80,6 +80,26 @@ wingetcreate token --store
 `public_repo` scope - fine-grained tokens are not supported - and it creates the fork of
 `microsoft/winget-pkgs` that the pull request comes from.
 
+Validate before submitting, every time:
+
+```powershell
+winget validate --manifest packaging\winget
+```
+
+This is not optional politeness. `wingetcreate submit` validates too, but when it fails it
+prints `ERROR: Path does not exist` underneath the real errors, which sends you looking at the
+path instead of at the manifests. `winget validate` says what is actually wrong.
+
+Two things it catches that nothing else does:
+
+* **The schema header.** Every file must *begin* with its
+  `# yaml-language-server: $schema=https://aka.ms/winget-manifest.<type>.<version>.schema.json`
+  line. Without it the whole set is rejected with "Schema header not found", however correct
+  the contents are.
+* **Field names.** The published JSON schemas do not set `additionalProperties: false`, so a
+  misspelled or renamed field validates happily against them and is silently dropped. It was
+  `Documentations`, not `Documentation`, and only winget's own validator said so.
+
 Then, per release:
 
 ```powershell
