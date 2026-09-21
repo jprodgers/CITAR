@@ -177,6 +177,29 @@ class Authentication(unittest.TestCase):
             s.add(WorkerToken(server_id=server.id, token_hash=hashed,
                               prefix=tokens.prefix(self.raw), label="test"))
 
+    def test_a_seat_on_a_pooled_machine_plays_through_its_helper(self):
+        """A machine from the Servers page is not in the registry; a seat naming it must still resolve,
+        to the worker provider, instead of failing with 'No server'."""
+        from citar import servers
+        cfg = servers.resolve_llm({"server_id": self.server_id, "model": "qwen/qwen3.8-27b", "reconnect_seconds": 30})
+        self.assertEqual(cfg["provider"], "worker")
+        self.assertEqual(cfg["server_id"], self.server_id)
+        self.assertEqual(cfg["model"], "qwen/qwen3.8-27b")
+        self.assertEqual(cfg["reconnect_seconds"], 30)
+        info = servers.describe_seat({"server_id": self.server_id, "model": "qwen/qwen3.8-27b"})
+        self.assertEqual(info["server"], "Box")
+        self.assertFalse(info["missing_server"])
+
+    def test_a_game_on_an_offline_pooled_machine_is_refused(self):
+        from citar.pool import seats as pool_seats
+        with db.session() as s:
+            owner = s.query(Server).get(self.server_id).owner_id
+            from citar.db.models import User
+            user = s.get(User, owner)
+            with self.assertRaises(ValueError):
+                pool_seats.authorize(s, user, [{"type": "llm", "llm": {"server_id": self.server_id, "model": "m"}}])
+            pool_seats.authorize(s, user, [{"type": "bot"}, {"type": "llm", "llm": {"provider": "mock"}}])
+
     def test_valid_token_authenticates(self):
         result = W.authenticate(self.raw)
         self.assertIsNotNone(result)

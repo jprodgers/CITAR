@@ -216,16 +216,39 @@ export function defaultLLM() {
 }
 
 function pickDefault(reg) {
-  // a server with models, preferring the machine running CITAR, then other PCs, then APIs with a key, then the dry run
-  const rank = (s) => (s.is_host ? 0 : s.kind === "owned" || s.kind === "leased" ? 1 : s.kind === "api" ? (s.key_status && s.key_status.present ? 2 : 4) : 3);
+  // a server with models, preferring a connected machine with a model loaded, then the machine running CITAR, then
+  // other PCs, then APIs with a key, then the dry run
+  const rank = (s) => (s.pooled ? (s.online && s.models.some((m) => m.loaded) ? -1 : s.online ? 0.5 : 5)
+    : s.is_host ? 0 : s.kind === "owned" || s.kind === "leased" ? 1 : s.kind === "api" ? (s.key_status && s.key_status.present ? 2 : 4) : 3);
   return [...reg.servers].filter((s) => s.models.some((m) => m.enabled)).sort((a, b) => rank(a) - rank(b))[0];
+}
+
+// Machines from the Servers page, reached through the CITAR helper running on them, in the registry's shape so the
+// seat form can offer them beside the registry servers. Models are what the helper reports now, loaded ones first.
+function pooledEntries(pool) {
+  return (pool.servers || []).filter((s) => s.enabled !== false).map((s) => {
+    const source = (s.live_models && s.live_models.length) ? s.live_models : (s.models || []);
+    const models = source.filter((m) => m.key && !/embed/i.test(m.key))
+      .map((m) => ({ id: m.key, key: m.key, label: (m.label || m.key) + (m.loaded ? " (loaded)" : ""), enabled: true,
+                     loaded: !!m.loaded, profiles: [], inference: {}, info: {} }))
+      .sort((a, b) => b.loaded - a.loaded);
+    return { id: s.id, name: s.name, kind: "pool", pooled: true, online: s.online, admission: s.admission,
+             connection: { provider: "worker" }, models };
+  });
+}
+
+async function seatServers() {
+  const [reg, pool] = await Promise.all([
+    registry().catch(() => ({ servers: [] })),          // the registry is for administrators
+    api.poolServers("game").catch(() => ({ servers: [] }))]);
+  return { ...reg, servers: [...(reg.servers || []), ...pooledEntries(pool)] };
 }
 
 // Editable LLM seat configuration: server -> model -> load profile, plus overrides. `rerender` redraws the parent.
 export function llmForm(L, rerender, { seat = true } = {}) {
   const field = (label, input, extra = {}) => el("div", { class: "field", ...extra }, el("label", {}, label), input);
   const box = el("div", { class: "seat-extra" }, el("span", { class: "muted small" }, "Loading servers…"));
-  registry().then((reg) => {
+  seatServers().then((reg) => {
     clear(box);
     if (!reg.servers.length) { box.appendChild(el("span", { class: "warn" }, "No servers yet: add one on the Servers page.")); return; }
     let sv = reg.servers.find((s) => s.id === L.server_id);
@@ -242,7 +265,8 @@ export function llmForm(L, rerender, { seat = true } = {}) {
     L.server = sv.name; L.provider = sv.connection.provider;
     const serverSel = el("select", { onchange: (e) => { L.server_id = e.target.value; L.model_id = null; L.profile_id = null; rerender(); } },
       ...reg.servers.filter((s) => s.models.length).map((s) => el("option", { value: s.id, selected: s.id === sv.id },
-        `${s.name}${s.restricted_until ? " 🌙" : ""}${s.kind === "api" && !(s.key_status || {}).present ? " (no key)" : ""}`)));
+        `${s.name}${s.restricted_until ? " 🌙" : ""}${s.kind === "api" && !(s.key_status || {}).present ? " (no key)" : ""}`
+        + (s.pooled ? (s.online ? " — helper connected" : " — offline") : ""))));
     const modelSel = el("select", { onchange: (e) => { L.model_id = e.target.value; L.profile_id = null; rerender(); } },
       ...models.map((x) => el("option", { value: x.id, selected: m && x.id === m.id }, (x.label || x.key) + (x.info && x.info.params ? ` (${x.info.params})` : ""))));
     const profSel = profiles.length ? el("select", { onchange: (e) => { L.profile_id = e.target.value; } },
@@ -251,6 +275,9 @@ export function llmForm(L, rerender, { seat = true } = {}) {
     if (sv.restricted_until) notes.push(el("div", { class: "warn small" }, `🌙 ${sv.name} is in its restricted hours until ${sv.restricted_until}.`));
     if (sv.kind === "api" && !(sv.key_status || {}).present) notes.push(el("div", { class: "bad small" }, `${sv.name} has no API key yet (Servers page).`));
     if (!m) notes.push(el("div", { class: "warn small" }, `${sv.name} has no models in its catalog yet (Servers page).`));
+    if (sv.pooled && !sv.online) notes.push(el("div", { class: "warn small" }, `${sv.name}'s helper is not connected: start it on that machine.`));
+    else if (sv.pooled && sv.admission && !sv.admission.allowed) notes.push(el("div", { class: "warn small" }, sv.admission.reason));
+    if (sv.pooled && m && !m.loaded && sv.models.some((x) => x.loaded)) notes.push(el("div", { class: "muted small" }, `${m.key} is not the loaded model on ${sv.name}; LM Studio will load it on the first turn if it can.`));
     const provider = sv.connection.provider;
     box.append(...[
       field("Server", serverSel),
@@ -263,7 +290,7 @@ export function llmForm(L, rerender, { seat = true } = {}) {
         oninput: (e) => { L.max_tool_calls_per_turn = +e.target.value; } })),
       provider === "anthropic" ? field("Effort", el("select", { onchange: (e) => { L.effort = e.target.value; } },
         ...["", "low", "medium", "high", "xhigh", "max"].map((v) => el("option", { value: v, selected: (L.effort || "") === v }, v || `server default (${(m && m.inference.effort) || "high"})`)))) : null,
-      ["lmstudio", "ollama", "openai_compatible"].includes(provider) ? field("Reasoning effort", el("select", { onchange: (e) => { L.reasoning_effort = e.target.value; } },
+      ["lmstudio", "ollama", "openai_compatible", "worker"].includes(provider) ? field("Reasoning effort", el("select", { onchange: (e) => { L.reasoning_effort = e.target.value; } },
         ...[["", `server default (${(m && m.inference.reasoning_effort) || "model default"})`], ["low", "low"], ["medium", "medium"], ["high", "high"],
           ["on", "on"], ["off", "off"]].map(([v, t]) =>
           el("option", { value: v, selected: (L.reasoning_effort || "") === v }, t)))) : null,

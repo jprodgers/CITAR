@@ -668,6 +668,12 @@ def resolve_llm(llm: dict, with_key: bool = True) -> dict:
     blocks without a server_id (tests, scripts) are passed through unchanged."""
     if not llm or not llm.get("server_id"):
         return dict(llm or {})
+    if find(llm["server_id"]) is None:
+        # not in the registry: a machine from the Servers page, played through its helper
+        from .pool import seats as pool_seats
+        pooled = pool_seats.lookup(llm["server_id"])
+        if pooled is not None:
+            return pool_seats.resolve(llm, pooled)
     sv = get(llm["server_id"])
     m = model_entry(sv, llm.get("model_id") or llm.get("model"))
     if m is None:
@@ -721,6 +727,11 @@ def resolve_llm(llm: dict, with_key: bool = True) -> dict:
 def describe_seat(llm: dict) -> dict:
     """Display info for a seat's llm block (server name, model label, profile) without resolving keys."""
     sv = find(llm.get("server_id"))
+    if sv is None and llm.get("server_id"):
+        from .pool import seats as pool_seats
+        pooled = pool_seats.lookup(llm["server_id"])
+        if pooled is not None:
+            return pool_seats.describe(llm, pooled)
     m = model_entry(sv, llm.get("model_id") or llm.get("model")) if sv else None
     return {"server_id": llm.get("server_id"), "server": sv["name"] if sv else llm.get("server"),
             "model": (m or {}).get("key") or llm.get("model"), "label": (m or {}).get("label") or (m or {}).get("key") or llm.get("model"),

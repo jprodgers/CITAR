@@ -467,6 +467,11 @@ def create_game(body: CreateGame, request: Request,
     _game_limit(sdb, me)
     if body.visibility not in ("private", "allowlist", "link", "public"):
         raise HTTPException(400, "Visibility is private, allowlist, link or public.")
+    from ..pool import seats as pool_seats
+    try:
+        pool_seats.authorize(sdb, me, body.seats)
+    except ValueError as e:
+        raise HTTPException(403, str(e))
     try:
         s = manager.create(body.config, body.seats, body.name)
     except ValueError as e:

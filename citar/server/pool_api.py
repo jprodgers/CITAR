@@ -102,6 +102,9 @@ def list_servers(request: Request, purpose: str = "game", p: Principal = Depends
         entry = pool.public_server(s, server, me)
         entry["admission"] = decision.client()
         entry["online"] = _liveness(server.id)
+        # what the helper reports right now, with which model is loaded - what a game seat can pick
+        from ..pool.seats import live_models
+        entry["live_models"] = live_models(server.id)
         out.append(entry)
     return {"servers": out, "purposes": list(admission.PURPOSES), "viewer_tz": me.tz}
 
