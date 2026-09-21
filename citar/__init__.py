@@ -17,5 +17,5 @@ The command line is ``citar`` (see :mod:`citar.cli`); ``citar serve`` starts the
 ``citar setup`` walks through first-time configuration.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __all__ = ["__version__"]

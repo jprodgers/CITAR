@@ -30,7 +30,7 @@ until enough people have run it. Click **More info → Run anyway**, or check th
 SHA-256 published on the release page first:
 
 ```powershell
-Get-FileHash .\CITAR-0.1.1-setup.exe -Algorithm SHA256
+Get-FileHash .\CITAR-0.1.2-setup.exe -Algorithm SHA256
 ```
 
 Every artifact is built in a [public CI run](https://github.com/jprodgers/CITAR/actions) whose log

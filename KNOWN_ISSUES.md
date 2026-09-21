@@ -1,6 +1,6 @@
 # Known issues and limitations
 
-What is broken, missing or misleading in 0.1.1. Written plainly, because finding this out after
+What is broken, missing or misleading in 0.1.2. Written plainly, because finding this out after
 installing something is worse than reading it first.
 
 ---

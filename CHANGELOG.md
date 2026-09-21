@@ -8,6 +8,21 @@ and arguments may still change between minor versions, and the release notes wil
 
 Nothing yet.
 
+## [0.1.2] - 2026-09-21
+
+### Fixed
+
+- **Machines on the Servers page can play.** A game seat could only use a server from the admin
+  registry, so machines registered on the Servers page and connected through the CITAR helper never
+  appeared in the new-game form. They now do, with the models their helper reports (the loaded
+  one first), and a seat on one plays through the helper. Creating a game checks that you may use
+  the machine for games right now, and says why not if you can't.
+- **The Linux helper connects on any distribution.** It carried its own OpenSSL, which looked for
+  CA certificates only where the Ubuntu build machine keeps them, so on Fedora, Arch and others
+  every connection failed with `CERTIFICATE_VERIFY_FAILED`. The helper now also uses the
+  certificates it ships with and the usual system bundles; verification is as strict as before.
+  The release build checks the Linux helper's handshake inside a Fedora container.
+
 ## [0.1.1] - 2026-09-21
 
 ### Compatibility
@@ -170,6 +185,7 @@ somebody else can install.
 The scripted bot is limited by happiness and stalls at two to five cities by turn 150, which caps
 how hard it can push a model. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/jprodgers/CITAR/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jprodgers/CITAR/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jprodgers/CITAR/releases/tag/v0.1.0
