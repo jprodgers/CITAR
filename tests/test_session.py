@@ -73,9 +73,19 @@ class SessionTests(unittest.TestCase):
             with s.lock:
                 s.game.meet(0, 1)
                 s.game.player(0).gold = 50       # UnCiv civs start with no gold
+            # Wait for what the assertions below actually need, not for a turn number. The turn
+            # counter moves when the turn ends, which is not the same moment as the script for
+            # that turn having run: on a fast machine this loop saw turn 3 and paused the game
+            # before the negotiation script had been called at all, and the test failed with an
+            # empty negotiation list.
+            def ready():
+                negotiations = s.game.s.negotiations
+                return (s.game.turn >= 3 and negotiations and negotiations[0]["status"] != "open"
+                        and captured.get("results"))
+
             deadline = time.time() + 60
-            while time.time() < deadline and s.game.turn < 3:
-                time.sleep(0.2)
+            while time.time() < deadline and not ready():
+                time.sleep(0.1)
             s.paused = True
         self.assertGreaterEqual(s.game.turn, 3, s.errors)
         self.assertEqual(s.game.player(0).name, "Mockonia")

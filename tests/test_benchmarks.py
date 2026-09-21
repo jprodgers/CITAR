@@ -141,7 +141,10 @@ class BenchmarkTests(unittest.TestCase):
         sch = self.scheduler()
         clock = {"now": datetime(2026, 1, 1, 0, 30)}
         sch._clock = lambda: clock["now"]
-        run = sch.create_run(dry_suite(models=("q",), turn_limit=30, restricted={
+        # A long game, deliberately: this test watches a job being paused and resumed, so the game
+        # has to still be playing while it looks. At turn_limit=30 a dry run finished in under
+        # twenty seconds on a fast machine and the job was already `done` on the first check.
+        run = sch.create_run(dry_suite(models=("q",), turn_limit=200, delay=0.02, restricted={
             "enabled": True, "unload_models": False, "grace_minutes": 0,
             "windows": [{"days": list(range(7)), "start": "01:00", "end": "02:00"}]}))
         job = run["jobs"][0]
@@ -178,7 +181,9 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_user_pause_resume_and_skip(self):
         sch = self.scheduler()
-        run = sch.create_run(dry_suite(models=("p", "s"), turn_limit=40))
+        # Long enough that the first job is still playing when the test pauses it; see the note in
+        # test_restricted_hours_pause_and_resume.
+        run = sch.create_run(dry_suite(models=("p", "s"), turn_limit=200, delay=0.02))
         first, second = run["jobs"]
         self.assertEqual(started(sch, run, first, timeout=20), "running", why(sch, run))
         sch.control_run(run["id"], "pause")
