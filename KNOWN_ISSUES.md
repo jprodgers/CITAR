@@ -1,6 +1,6 @@
 # Known issues and limitations
 
-What is broken, missing or misleading in 0.1.0. Written plainly, because finding this out after
+What is broken, missing or misleading in 0.1.1. Written plainly, because finding this out after
 installing something is worse than reading it first.
 
 ---
@@ -46,8 +46,10 @@ run it, and some antivirus products flag PyInstaller output on sight. SHA-256 ha
 for every asset and every build is a public CI run. See
 [packaging/README.md](packaging/README.md#code-signing).
 
-**macOS binaries are not notarised**, for the same reason. The `pip`, `pipx` and Homebrew routes
-are unaffected.
+**macOS binaries are not notarised**, for the same reason — including the CITAR helper, which
+needs `xattr -d com.apple.quarantine` before macOS will run it. The `pip`, `pipx` and Homebrew routes
+are unaffected. There is no helper build for Intel Macs; `pipx install "citar[worker]"` and
+`citar worker` do the same job there.
 
 **Homebrew, Scoop and winget lag the release** by a day or so — each needs the GitHub release to
 exist before its manifest can be updated.
@@ -97,8 +99,10 @@ most changes.
 **The browser client assumes a recent browser.** ES modules, no transpilation, no polyfills.
 Current Chrome, Firefox, Safari and Edge.
 
-**Mobile is not supported.** The layout adapts, but a hex map and a city screen on a phone are not
-something anyone should endure.
+**Phones get a check-in site, not the game.** On a phone the server shows games, standings, AI
+status, benchmarks, reports and machines, with pause and resume. Playing still wants a bigger
+screen: a hex map and a city screen on a phone are not something anyone should endure. Tablets get
+the full site.
 
 ---
 

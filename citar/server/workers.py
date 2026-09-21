@@ -217,7 +217,7 @@ class WorkerHub:
         connection = self.get(server_id)
         if connection is None:
             raise WorkerError(
-                "That server's worker is not connected. Start citar-worker on the machine.",
+                "That server's worker is not connected. Start the CITAR helper (citar-worker) on the machine.",
                 refusal="closed", retryable=True)
         if connection.in_flight >= connection.max_concurrent:
             raise WorkerError(f"{connection.hostname or server_id} is busy "

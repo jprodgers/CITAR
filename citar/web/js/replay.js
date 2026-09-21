@@ -117,7 +117,7 @@ export class ReplayScreen {
     const cities = frame.cities.map(([id, name, o, idx, pop, capital]) => ({ id, name, owner: o, x: idx % W, y: Math.floor(idx / W), pop, capital }))
       .filter((c) => !explored || explored[c.y * W + c.x]);
     const players = Object.fromEntries(d.players.map((p) => [p.id, p]));
-    return { width: d.width, height: d.height, tiles, units, cities, players, you: null };
+    return { width: d.width, height: d.height, wrapX: !!d.wrap_x, wrapY: !!d.wrap_y, tiles, units, cities, players, you: null };
   }
 
   show() {

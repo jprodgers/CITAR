@@ -8,6 +8,65 @@ and arguments may still change between minor versions, and the release notes wil
 
 Nothing yet.
 
+## [0.1.1] - 2026-09-21
+
+### Compatibility
+
+- **The same seed now makes a different map.** The generator changed (ice, rivers, noise, and the
+  luxuries that used to be missing), so a benchmark suite run on 0.1.0 and on 0.1.1 did not play
+  the same worlds, and scores across the two are not directly comparable. The scripted bot is
+  unchanged.
+- Saves from 0.1.0 load as they were: an old game keeps its map and simply does not wrap.
+
+### Maps
+
+- **Map edges** are a lobby option: ice caps north and south (the default), wrap east-west, wrap
+  north-south, wrap both ways, or boxed in with ice on all four sides. Wrapping is real, not a
+  picture: movement, distances, borders, sight lines, paths and the LLM briefing all go the short
+  way round, the map scrolls without end, and the noise that shapes the land repeats across the
+  seam so no coastline is cut off.
+- **Polar ice** is now a band one to four tiles deep that drifts slowly along the edge, instead of
+  scattered blobs of sea ice.
+- **Rivers** always reach the sea and never cross. Every hex corner learns its way downhill to the
+  coast first, and rivers follow that drainage, so two that meet merge into one. A **river
+  density** option (0–300%) sets how many there are.
+- **Resource controls**: overall density, a density for each of strategic, luxury and bonus
+  resources, and per-resource rules for strategic and luxury resources — off, at most N tiles, or a
+  percentage share of their kind. The map editor's generator has the same options.
+
+### Fixed
+
+- Fourteen luxuries (Cotton, Dyes, Gems, Gold Ore, Silver, Ivory, Silk, Spices, Sugar, Marble,
+  Citrus, Copper, Salt, Truffles) never appeared on generated maps: their "doesn't generate
+  naturally *on hills*" rule was read as "doesn't generate naturally". Maps now carry the whole
+  luxury set.
+- A free technology (the Great Library, Liberty, ruins) can be chosen by a human player again: the
+  tech tree now says a free pick is waiting, highlights what can be taken, and a click learns it
+  instead of changing the current research.
+- An LLM whose server dropped for a few seconds no longer loses dozens of turns. A worker's
+  disconnection was reported as a model error, which skipped the turn at once, and the next one,
+  and every one after, while the bots played on.
+- The worker (helper) gave up for good when the server refused its connection — which is what it
+  sees while CITAR restarts — so every worker stayed offline after a server deploy. It now retries;
+  only a refused token stops it.
+
+### AI players
+
+- **Reconnect wait and disconnect rule**: a seat that cannot reach its model server keeps retrying
+  for a set time (180 s by default, per game or per seat), without that time counting against the
+  turn. If the server is still gone, the game either **pauses** — everyone, until the server answers
+  again, then resumes by itself — or **skips** that seat's turn, as chosen in the lobby.
+
+### Phones and the helper
+
+- **A phone site**: phones get a check-in view of the server — running games, standings, whose
+  turn it is, AIs thinking or reconnecting, benchmarks, reports and machines — with Pause/Resume.
+  The full site is a tap away and the choice is remembered.
+- **The CITAR helper**: the worker as a single download for Windows, macOS (Apple silicon) and
+  Linux (x64, ARM64), built with every release. The Servers and Models pages offer the right file
+  for the visitor's computer. Started with no arguments it asks for the server and token once and
+  remembers them.
+
 ## [0.1.0] - 2026-09-20
 
 The first public release. CITAR has existed for a while as a private project; this is the version
@@ -111,5 +170,6 @@ somebody else can install.
 The scripted bot is limited by happiness and stalls at two to five cities by turn 150, which caps
 how hard it can push a model. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/jprodgers/CITAR/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jprodgers/CITAR/releases/tag/v0.1.0

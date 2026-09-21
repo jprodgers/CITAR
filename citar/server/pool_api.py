@@ -371,14 +371,18 @@ def worker_status(server_id: str, request: Request, p: Principal = Depends(princ
     return {"online": connection is not None,
             "worker": connection.client() if connection else None,
             "tokens": tokens_out,
-            "command": _worker_command(server)}
+            "command": _worker_command(server), "args": _worker_args(server)}
+
+
+def _worker_args(server) -> str:
+    """The worker's arguments on their own, for the page to put after whichever helper file was downloaded."""
+    from .. import settings as cfg
+    return f"--server {cfg.get().public_origin} --token YOUR_TOKEN --name \"{server.name}\""
 
 
 def _worker_command(server) -> str:
-    """The exact command the machine's owner should run to connect it."""
-    from .. import settings as cfg
-    return (f"python -m citar.worker --server {cfg.get().public_origin} "
-            f"--token YOUR_TOKEN --name \"{server.name}\"")
+    """The exact command the machine's owner should run to connect it (with CITAR installed there)."""
+    return "python -m citar.worker " + _worker_args(server)
 
 
 class TokenBody(BaseModel):
@@ -405,6 +409,7 @@ def create_worker_token(server_id: str, body: TokenBody, request: Request,
     return {
         "id": row.id, "token": raw, "prefix": row.prefix,
         "command": _worker_command(server).replace("YOUR_TOKEN", raw),
+        "args": _worker_args(server).replace("YOUR_TOKEN", raw),
         "warning": "This is the only time the token is shown. Store it now.",
     }
 

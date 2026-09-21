@@ -660,7 +660,7 @@ def seat_ref(server_id: str, model_ref: str, profile_id: Optional[str] = None, *
 
 
 SEAT_OVERRIDES = ("persona", "max_tool_calls_per_turn", "max_turn_seconds", "reasoning_effort", "effort", "tool_mode",
-                  "max_tokens", "temperature", "max_steps_per_turn", "stall_steps")
+                  "max_tokens", "temperature", "max_steps_per_turn", "stall_steps", "reconnect_seconds", "on_disconnect")
 
 
 def resolve_llm(llm: dict, with_key: bool = True) -> dict:

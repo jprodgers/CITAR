@@ -1,10 +1,14 @@
 """Procedural map generation: landmass shapes (continents, pangaea, archipelago, inland sea, fractal) followed by
 UnCiv's MapGenerator steps (MPL-2.0): climate-driven terrain from the ruleset's "Occurs at temperature..." uniques,
-mountains and hills, lakes and coasts, vegetation, rare features, ice, edge rivers, terrain conversion, natural wonders
-with their placement constraints, strategic/luxury/bonus resources from the resources' generation uniques, start
-positions with nation start biases, city-state sites and ancient ruins."""
+mountains and hills, lakes and coasts, vegetation, rare features, polar ice, rivers along tile edges, terrain
+conversion, natural wonders with their placement constraints, strategic/luxury/bonus resources from the resources'
+generation uniques, start positions with nation start biases, city-state sites and ancient ruins.
+
+The lobby can change what happens at the map's edges (ice caps, wrapping, boxed in), how many rivers there are,
+and how much of each resource is generated - see :class:`MapOptions`."""
 from __future__ import annotations
 
+import heapq
 import math
 import random
 
@@ -18,6 +22,83 @@ from .uniques import multi_filter, terrain_matches
 
 MAP_TYPES = ["continents", "pangaea", "archipelago", "inland_sea", "fractal"]
 
+# What happens at the edges of the map: (wraps east-west, wraps north-south, sides that get an ice cap).
+EDGE_MODES = {
+    "ice_caps": (False, False, "ns"),       # the default: polar ice north and south, open ocean east and west
+    "wrap_x": (True, False, "ns"),          # a cylinder, like a globe: east-west wraps, ice at the poles
+    "wrap_y": (False, True, ""),            # north-south wraps, open ocean east and west
+    "wrap_both": (True, True, ""),          # a torus: no edges and no ice at all
+    "boxed": (False, False, "nsew"),        # boxed in: ice on all four sides
+}
+DEFAULT_EDGES = "ice_caps"
+RESOURCE_MODES = ("normal", "off", "cap", "share")
+
+
+def edge_wraps(edges: Optional[str]) -> tuple[bool, bool]:
+    """Whether a map with these edges wraps east-west and north-south."""
+    wx, wy, _ = EDGE_MODES.get(edges or DEFAULT_EDGES, EDGE_MODES[DEFAULT_EDGES])
+    return wx, wy
+
+
+def _num(v, default: float, lo: float, hi: float) -> float:
+    """A number from a lobby option, with a default and clamped to a sane range."""
+    try:
+        return max(lo, min(hi, float(v)))
+    except (TypeError, ValueError):
+        return default
+
+
+class MapOptions:
+    """The generator's knobs, read from a game or map configuration.
+
+    ``map_edges`` picks a key of :data:`EDGE_MODES`. ``river_density`` scales how many rivers are
+    traced (0 = none, 1 = normal). ``resources`` is::
+
+        {"density": 1.0,                                   # scales every kind of resource
+         "strategic": {"density": 1.0, "each": {"Uranium": {"mode": "cap", "value": 1}}},
+         "luxury":    {"density": 0.5, "each": {"Silk": {"mode": "off"}}},
+         "bonus":     {"density": 1.0}}
+
+    A resource's mode is ``normal``, ``off`` (never generated), ``cap`` (at most ``value`` tiles of it)
+    or ``share`` (``value`` percent of all the resources of its kind). Unknown names are ignored, so a
+    configuration written for one ruleset does not break another.
+    """
+
+    def __init__(self, cfg: Optional[dict] = None, rules: Optional[Rules] = None):
+        cfg = cfg or {}
+        self.edges = cfg.get("map_edges") if cfg.get("map_edges") in EDGE_MODES else DEFAULT_EDGES
+        self.wrap_x, self.wrap_y, self.ice_sides = EDGE_MODES[self.edges]
+        self.rivers = _num(cfg.get("river_density"), 1.0, 0.0, 5.0)
+        res = cfg.get("resources") if isinstance(cfg.get("resources"), dict) else {}
+        overall = _num(res.get("density"), 1.0, 0.0, 5.0)
+        self.density: dict[str, float] = {}
+        self.rule: dict[str, tuple[str, float]] = {}
+        for kind in ("Strategic", "Luxury", "Bonus"):
+            sub = res.get(kind.lower()) if isinstance(res.get(kind.lower()), dict) else {}
+            self.density[kind] = overall * _num(sub.get("density"), 1.0, 0.0, 5.0)
+            each = sub.get("each") if isinstance(sub.get("each"), dict) else {}
+            for name, r in each.items():
+                if not isinstance(r, dict) or r.get("mode") not in RESOURCE_MODES or r.get("mode") == "normal":
+                    continue
+                if rules is not None:
+                    name = rules.resolve("resource", name) or name
+                    if name not in rules.resources or rules.resources[name]["resourceType"] != kind:
+                        continue
+                value = 0.0 if r["mode"] == "off" else _num(r.get("value"), 0.0, 0.0, 10000.0)
+                self.rule[name] = (r["mode"], value)
+
+    def describe(self) -> str:
+        """A one-line summary for a generated map's description."""
+        parts = [f"edges {self.edges.replace('_', ' ')}"]
+        if self.rivers != 1:
+            parts.append(f"rivers x{self.rivers:g}")
+        for kind, d in self.density.items():
+            if d != 1:
+                parts.append(f"{kind.lower()} x{d:g}")
+        for name, (mode, v) in sorted(self.rule.items()):
+            parts.append(f"{name} {'off' if mode == 'off' else f'max {v:g}' if mode == 'cap' else f'{v:g}%'}")
+        return ", ".join(parts)
+
 
 # ----------------------------------------------------------------------------
 # Noise
@@ -28,24 +109,36 @@ class ValueNoise:
     The basis for terrain generation. Cheaper than Perlin and good enough for deciding where land is,
     and with no dependency beyond the standard library - which matters, because the engine has none.
     """
-    def __init__(self, rng: random.Random, width: float, height: float, cell: float):
-        self.cell = cell
-        self.gw = int(width / cell) + 3
-        self.gh = int(height / cell) + 3
+    def __init__(self, rng: random.Random, width: float, height: float, cell: float,
+                 period_x: Optional[float] = None, period_y: Optional[float] = None):
+        # On a wrapping axis the lattice repeats with the map, so the two sides of the seam are the
+        # same noise and no coastline is cut off at the edge. The cell is stretched slightly so a whole
+        # number of cells fits the period.
+        self.per_x = max(1, round(period_x / cell)) if period_x else 0
+        self.per_y = max(1, round(period_y / cell)) if period_y else 0
+        self.cx = period_x / self.per_x if self.per_x else cell
+        self.cy = period_y / self.per_y if self.per_y else cell
+        self.gw = self.per_x or int(width / cell) + 3
+        self.gh = self.per_y or int(height / cell) + 3
         self.vals = [rng.random() for _ in range(self.gw * self.gh)]
 
     def at(self, fx: float, fy: float) -> float:
         """The noise value at a point, interpolated from the surrounding lattice."""
-        gx, gy = fx / self.cell, fy / self.cell
-        x0, y0 = int(gx), int(gy)
+        gx, gy = fx / self.cx, fy / self.cy
+        x0, y0 = math.floor(gx), math.floor(gy)
         tx, ty = gx - x0, gy - y0
         tx = tx * tx * (3 - 2 * tx)
         ty = ty * ty * (3 - 2 * ty)
+        x1, y1 = x0 + 1, y0 + 1
+        if self.per_x:
+            x0, x1 = x0 % self.per_x, x1 % self.per_x
+        if self.per_y:
+            y0, y1 = y0 % self.per_y, y1 % self.per_y
         g = self.gw
         v00 = self.vals[y0 * g + x0]
-        v10 = self.vals[y0 * g + x0 + 1]
-        v01 = self.vals[(y0 + 1) * g + x0]
-        v11 = self.vals[(y0 + 1) * g + x0 + 1]
+        v10 = self.vals[y0 * g + x1]
+        v01 = self.vals[y1 * g + x0]
+        v11 = self.vals[y1 * g + x1]
         a = v00 + (v10 - v00) * tx
         b = v01 + (v11 - v01) * tx
         return a + (b - a) * ty
@@ -61,7 +154,7 @@ def fractal_field(rng, grid: HexGrid, base_cell: float, octaves: int = 4, persis
     cell = base_cell
     amp = 1.0
     for _ in range(octaves):
-        layers.append((ValueNoise(rng, grid.width + 2, grid.height + 2, max(cell, 1.0)), amp))
+        layers.append((_value_noise(rng, grid, max(cell, 1.0)), amp))
         cell /= 2
         amp *= persistence
     total_amp = sum(a for _, a in layers)
@@ -72,6 +165,13 @@ def fractal_field(rng, grid: HexGrid, base_cell: float, octaves: int = 4, persis
         v = sum(n.at(px, py) * a for n, a in layers) / total_amp
         out.append(v)
     return _normalize(out)
+
+
+def _value_noise(rng, grid: HexGrid, cell: float) -> ValueNoise:
+    """Value noise for this grid, repeating along whichever axes the map wraps."""
+    return ValueNoise(rng, grid.width + 2, grid.height + 2, cell,
+                      period_x=grid.width if grid.wrap_x else None,
+                      period_y=grid.height * 0.866 if grid.wrap_y else None)
 
 
 def _normalize(vals: list[float]) -> list[float]:
@@ -90,15 +190,28 @@ def _pos(grid: HexGrid, i: int) -> tuple[float, float]:
 # ----------------------------------------------------------------------------
 # Land shape
 # ----------------------------------------------------------------------------
-def _land_scores(rng, grid: HexGrid, map_type: str, num_players: int) -> tuple[list[float], float]:
+def _land_scores(rng, grid: HexGrid, map_type: str, num_players: int, ice: set[int]
+                 ) -> tuple[list[float], float]:
     """Score every tile for how land-like it is, shaped by the map type.
 
     This is where continents, pangaea and archipelago differ: the same noise is masked differently -
     pushed away from the edges, split down the middle, or broken up - and everything after this point
-    is identical.
+    is identical. On a wrapping axis every distance is measured the short way round, so a continent
+    can straddle the seam.
     """
     w, h = grid.width, grid.height
     cw, ch = w / 2, h * 0.866 / 2
+    ph = h * 0.866
+
+    def dx(a, b):
+        """Horizontal separation, the short way round on a map that wraps east-west."""
+        d = a - b
+        return (d + w / 2) % w - w / 2 if grid.wrap_x else d
+
+    def dy(a, b):
+        """Vertical separation, the short way round on a map that wraps north-south."""
+        d = a - b
+        return (d + ph / 2) % ph - ph / 2 if grid.wrap_y else d
     noise = fractal_field(rng, grid, base_cell=max(w, h) / 5, octaves=5, persistence=0.55)
     scores = [0.0] * grid.size
     land_fraction = 0.40
@@ -106,7 +219,7 @@ def _land_scores(rng, grid: HexGrid, map_type: str, num_players: int) -> tuple[l
     if map_type == "pangaea":
         for i in range(grid.size):
             px, py = _pos(grid, i)
-            d = math.hypot((px - cw) / (w * 0.42), (py - ch) / (h * 0.866 * 0.40))
+            d = math.hypot(dx(px, cw) / (w * 0.42), dy(py, ch) / (h * 0.866 * 0.40))
             scores[i] = noise[i] * 0.9 - d * 0.9
         land_fraction = 0.42
     elif map_type == "continents":
@@ -125,7 +238,7 @@ def _land_scores(rng, grid: HexGrid, map_type: str, num_players: int) -> tuple[l
             centers.append((cx, cy))
         for i in range(grid.size):
             px, py = _pos(grid, i)
-            ds = sorted(math.hypot((px - cx) / w, (py - cy) / (h * 0.866)) for cx, cy in centers)
+            ds = sorted(math.hypot(dx(px, cx) / w, dy(py, cy) / (h * 0.866)) for cx, cy in centers)
             gap = ds[1] - ds[0] if len(ds) > 1 else 1.0
             gap_penalty = max(0.0, 0.07 - gap) * 9.0
             scores[i] = noise[i] * 0.85 - ds[0] * 1.6 - gap_penalty
@@ -136,13 +249,13 @@ def _land_scores(rng, grid: HexGrid, map_type: str, num_players: int) -> tuple[l
         centers = [(rng.uniform(w * 0.08, w * 0.92), rng.uniform(h * 0.866 * 0.1, h * 0.866 * 0.9)) for _ in range(n)]
         for i in range(grid.size):
             px, py = _pos(grid, i)
-            d = min(math.hypot(px - cx, py - cy) for cx, cy in centers) / max(w, h)
+            d = min(math.hypot(dx(px, cx), dy(py, cy)) for cx, cy in centers) / max(w, h)
             scores[i] = noise2[i] * 0.8 + noise[i] * 0.2 - d * 3.2
         land_fraction = 0.30
     elif map_type == "inland_sea":
         for i in range(grid.size):
             px, py = _pos(grid, i)
-            d = math.hypot((px - cw) / (w * 0.5), (py - ch) / (h * 0.866 * 0.5))
+            d = math.hypot(dx(px, cw) / (w * 0.5), dy(py, ch) / (h * 0.866 * 0.5))
             inner = max(0.0, 0.45 - d) * 2.2
             scores[i] = noise[i] * 0.7 - inner
         land_fraction = 0.58
@@ -150,13 +263,85 @@ def _land_scores(rng, grid: HexGrid, map_type: str, num_players: int) -> tuple[l
         scores = list(noise)
         land_fraction = 0.40
 
-    # push edges to water
+    # Push land away from the edges that do not wrap, and from the ice. The ice itself is always sea;
+    # the three rows inside it are discouraged the same way a bare map edge is, so land meets the ice
+    # at a coastline rather than being cut off by it.
+    near_ice = _distance_from(grid, ice, 3)
     for i in range(grid.size):
+        if i in ice:
+            scores[i] = -1e9
+            continue
         x, y = grid.xy(i)
-        edge = min(x, y, w - 1 - x, h - 1 - y)
+        edges = []
+        if not grid.wrap_x:
+            edges += [x, w - 1 - x]
+        if not grid.wrap_y:
+            edges += [y, h - 1 - y]
+        edge = min(edges) if edges else 99
+        if i in near_ice:
+            edge = min(edge, near_ice[i] - 1)
         if edge < 3:
             scores[i] -= (3 - edge) * 0.35
     return scores, land_fraction
+
+
+def _distance_from(grid: HexGrid, sources: set[int], limit: int) -> dict[int, int]:
+    """Steps from the nearest source tile, for every tile within ``limit`` of one."""
+    dist = dict.fromkeys(sources, 0)
+    frontier = list(sources)
+    for d in range(1, limit + 1):
+        nxt = []
+        for c in frontier:
+            for n in grid.neighbors(c):
+                if n not in dist:
+                    dist[n] = d
+                    nxt.append(n)
+        frontier = nxt
+    return dist
+
+
+def _ice_band(rng, grid: HexGrid, sides: str) -> set[int]:
+    """The polar ice: a band one to four tiles deep along each capped side.
+
+    The depth drifts slowly along the edge - a smooth profile rather than noise - so the ice reads as a
+    ragged but essentially straight shelf, not as scattered floes. On a small map the band is thinner,
+    so it never eats more than about a quarter of the height.
+    """
+    band: set[int] = set()
+    w, h = grid.width, grid.height
+    for side in sides:
+        along = w if side in "ns" else h
+        across = h if side in "ns" else w
+        periodic = grid.wrap_x if side in "ns" else grid.wrap_y
+        hi = max(1, min(4, across // 8))
+        for s, depth in enumerate(_ice_profile(rng, along, periodic, 1, hi)):
+            for d in range(depth):
+                x, y = {"n": (s, d), "s": (s, h - 1 - d), "w": (d, s), "e": (w - 1 - d, s)}[side]
+                band.add(y * w + x)
+    return band
+
+
+def _ice_profile(rng, n: int, periodic: bool, lo: int, hi: int) -> list[int]:
+    """Depths lo..hi along an edge of length n: smoothed random control points about seven tiles apart.
+
+    Periodic when the edge runs along a wrapping axis, so the shelf meets itself at the seam.
+    """
+    if hi <= lo:
+        return [lo] * n
+    k = max(1, round(n / 7))
+    step = n / k
+    pts = [rng.random() for _ in range(k if periodic else k + 1)]
+    out = []
+    for s in range(n):
+        f = s / step
+        i0 = int(f)
+        t = f - i0
+        t = t * t * (3 - 2 * t)
+        a = pts[i0 % len(pts)]
+        b = pts[(i0 + 1) % len(pts)] if periodic else pts[min(i0 + 1, len(pts) - 1)]
+        v = a + (b - a) * t
+        out.append(lo + min(hi - lo, int(v * (hi - lo + 1))))
+    return out
 
 
 def _threshold(scores: list[float], fraction: float) -> float:
@@ -193,8 +378,12 @@ def _components(grid: HexGrid, mask: list[bool]) -> list[list[int]]:
 class _Map:
     """The map being generated: tiles, grid, rules and per-tile climate."""
 
-    def __init__(self, rules: Rules, grid: HexGrid, tiles: list[Tile], rng: random.Random):
+    def __init__(self, rules: Rules, grid: HexGrid, tiles: list[Tile], rng: random.Random,
+                 opts: Optional[MapOptions] = None, ice: Optional[set[int]] = None):
         self.R, self.grid, self.tiles, self.rng = rules, grid, tiles, rng
+        self.opts = opts or MapOptions()
+        self.ice = ice or set()
+        self.placed: dict[str, int] = {}       # resource -> tiles holding it, for caps and shares
         self.temp = [0.0] * grid.size
         self.humid = [0.0] * grid.size
         half = max(1.0, (grid.height - 1) / 2)
@@ -335,7 +524,7 @@ def _noise(rng, grid: HexGrid, scale: float, octaves: int = 1) -> list[float]:
     layers = []
     cell, amp = max(scale, 1.0), 1.0
     for _ in range(octaves):
-        layers.append((ValueNoise(rng, grid.width + 2, grid.height + 2, max(cell, 1.0)), amp))
+        layers.append((_value_noise(rng, grid, max(cell, 1.0)), amp))
         cell /= 2
         amp *= 0.5
     tot = sum(a for _, a in layers)
@@ -512,19 +701,15 @@ def _rare_features(m: _Map):
 
 
 def _ice(m: _Map):
-    """MapGenerator.spawnIce."""
-    tmp = _noise(m.rng, m.grid, 6, 1)
-    for i in range(m.grid.size):
+    """Freeze the polar band (see :func:`_ice_band`). There is no other sea ice: scattered floes out in
+    the ocean were the old behaviour and read as noise rather than as a pole."""
+    if "Ice" not in m.R.terrains:
+        return
+    occurs = m.td("Ice").get("occursOn") or ["Ocean", "Coast"]
+    for i in m.ice:
         t = m.tiles[i]
-        if t.terrain not in ("Ocean", "Coast") or t.features:
-            continue
-        lt = 1.0 - 2.0 * m.lat[i]
-        it = (lt + tmp[i]) / 2.0
-        it = abs(it) ** 0.4 * (1 if it >= 0 else -1)
-        it = max(-1.0, min(1.0, it))
-        if "Ice" in m.R.terrains and t.terrain in m.td("Ice")["occursOn"] and m.climate_ok("Ice", i, it) \
-                and _fits(m, "Ice", i):
-            t.features.append("Ice")
+        if t.terrain in occurs:
+            t.features = ["Ice"]
 
 
 def _fits(m: _Map, name: str, i: int) -> bool:
@@ -591,67 +776,103 @@ def _common(grid: HexGrid, a: int, b: int) -> list[int]:
     return [c for c in grid.neighbors(a) if c in nb]
 
 
+def _salt(m: _Map, i: int) -> bool:
+    """Whether a tile is sea - the water a river has to reach. Lakes do not count."""
+    return m.water(i) and not m.has_u(m.tiles[i].terrain, U.FreshWater)
+
+
 def _rivers(m: _Map):
-    """Trace rivers from high ground down to the sea."""
+    """Trace rivers from high ground down to the sea, along hex edges.
+
+    Rivers run between tiles, so the walk is over hex *corners*: each corner is where three tiles meet,
+    and stepping to the next corner runs the river along the edge between the two tiles they share.
+
+    Every corner first learns its way to the sea: a shortest-path search outward from the river mouths
+    (corners where two land tiles meet the sea), over land-to-land edges, with random costs so the
+    channels meander and a penalty for running between two mountains. That gives a drainage *tree*,
+    and every river just follows it downhill. So a river always reaches the sea - a source that
+    cannot drain is never used - and two rivers that meet merge into one channel instead of crossing,
+    exactly as tributaries do.
+    """
     grid = m.grid
     land = [i for i in range(grid.size) if m.land(i)]
-    if not land or len(land) == grid.size:
+    n = round(len(land) * 0.01 * m.opts.rivers)
+    if not land or len(land) == grid.size or n <= 0:
         return
-    n = round(len(land) * 0.01)
+    rng = m.rng
 
-    def far_from_water(i):
-        """Whether a tile is far enough from water to be worth starting a river at."""
-        return not any(m.water(j) for j in grid.within(i, 4))
-    opts = [i for i in land if m.tiles[i].terrain == "Mountain" and far_from_water(i)]
-    if len(opts) < n:
-        opts += [i for i in land if m.hill(i) and far_from_water(i)]
-    if len(opts) < n:
-        opts = [i for i in land if far_from_water(i)]
-    starts = _spread_out(m, n, opts)
-    for s in starts:
-        target = None
-        for dist in range(1, max(grid.width, grid.height)):
-            ws = [j for j in grid.ring(s, dist) if m.water(j)]
-            if ws:
-                target = m.rng.choice(ws)
-                break
-        if target is None:
+    corners: set[frozenset] = set()
+    for a in range(grid.size):
+        for b in grid.neighbors(a):
+            for c in _common(grid, a, b):
+                corners.add(frozenset((a, b, c)))
+
+    def steps(v: frozenset):
+        """(next corner, the edge's two tiles) for each land-to-land edge leaving a corner."""
+        vs = tuple(v)
+        for x in range(3):
+            for y in range(x + 1, 3):
+                a, b = vs[x], vs[y]
+                if m.water(a) or m.water(b):
+                    continue
+                for c in _common(grid, a, b):
+                    if c not in v:
+                        yield frozenset((a, b, c)), a, b
+
+    # mouths: two land tiles and one sea tile, so the last edge of the river runs straight into the sea
+    dist: dict[frozenset, float] = {}
+    down: dict[frozenset, tuple] = {}         # corner -> (next corner, edge tile a, edge tile b)
+    heap = []
+    for v in corners:
+        if sum(1 for t in v if _salt(m, t)) == 1 and sum(1 for t in v if m.land(t)) == 2:
+            dist[v] = 0.0
+            heap.append((0.0, rng.random(), v))
+    heapq.heapify(heap)
+    cost: dict[frozenset, float] = {}
+    while heap:
+        d, _, v = heapq.heappop(heap)
+        if d > dist.get(v, math.inf):
             continue
-        nbs = grid.neighbors(s)
-        pairs = [(s, b, c) for b in nbs for c in _common(grid, s, b)]
-        if not pairs:
+        for u, a, b in steps(v):
+            key = frozenset((a, b))
+            if key not in cost:
+                both_mountains = m.tiles[a].terrain == "Mountain" and m.tiles[b].terrain == "Mountain"
+                cost[key] = 1.0 + rng.random() * 1.5 + (4.0 if both_mountains else 0.0)
+            nd = d + cost[key]
+            if nd < dist.get(u, math.inf):
+                dist[u] = nd
+                down[u] = (v, a, b)
+                heapq.heappush(heap, (nd, rng.random(), u))
+
+    # Sources: high, inland tiles, spread out. A source corner must lie entirely on land and drain.
+    to_sea = _distance_from(grid, {i for i in range(grid.size) if _salt(m, i)}, grid.width + grid.height)
+    far = [i for i in land if to_sea.get(i, 0) >= 3]
+    opts = [i for i in far if m.tiles[i].terrain == "Mountain"]
+    if len(opts) < n:
+        opts += [i for i in far if m.hill(i) and i not in opts]
+    if len(opts) < n:
+        opts = far or [i for i in land if to_sea.get(i, 0) >= 2]
+    on_river: set[frozenset] = set()
+    for s in _spread_out(m, n, opts):
+        heads = [v for v in corners if s in v and v in down and all(m.land(t) for t in v)]
+        if not heads:
             continue
-        vertex = frozenset(m.rng.choice(pairs))
-        came = None
-        seen = {vertex}
-        for _ in range(200):
-            if any(m.water(x) for x in vertex):
-                break
-            options = []
-            vs = list(vertex)
-            for x in range(3):
-                for y in range(x + 1, 3):
-                    a, b = vs[x], vs[y]
-                    edge = frozenset((a, b))
-                    if edge == came:
-                        continue
-                    others = [c for c in _common(grid, a, b) if c not in vertex]
-                    if not others:
-                        continue
-                    nv = frozenset((a, b, others[0]))
-                    if nv in seen:
-                        continue
-                    score = min(grid.distance(t, target) for t in nv)
-                    options.append((score, a, b, nv))
-            if not options:
-                break
-            best = min(o[0] for o in options)
-            _, a, b, nv = m.rng.choice([o for o in options if o[0] == best])
-            if not (m.water(a) or m.water(b)):
-                _paint_river(m, a, b)
-            came = frozenset((a, b))
-            vertex = nv
-            seen.add(nv)
+        v = max(heads, key=lambda v: dist[v])
+        if v in on_river:
+            continue
+        path, visited = [], []
+        while v in down and v not in on_river:
+            nv, a, b = down[v]
+            path.append((a, b))
+            visited.append(v)
+            v = nv
+        if len(path) < 2:
+            continue
+        # v is now a mouth, or a corner of an earlier river that this one flows into
+        on_river.update(visited)
+        on_river.add(v)
+        for a, b in path:
+            _paint_river(m, a, b)
 
 
 def _convert_terrains(m: _Map):
@@ -796,7 +1017,9 @@ def _start_candidates(m: _Map) -> list[int]:
         if not m.land(i) or m.impassable(i) or m.continent[i] < 0 or sizes[m.continent[i]] < 25:
             continue
         x, y = grid.xy(i)
-        if x < 2 or y < 2 or x > grid.width - 3 or y > grid.height - 3:
+        if not grid.wrap_x and (x < 2 or x > grid.width - 3):
+            continue
+        if not grid.wrap_y and (y < 2 or y > grid.height - 3):
             continue
         if m.tiles[i].terrain in ("Snow",) or m.last(i) in ("Marsh", "Oasis", "Ice"):
             continue
@@ -963,14 +1186,45 @@ def _place_wonder(m: _Map, w: str, i: int):
 # ----------------------------------------------------------------------------
 # Resources
 # ----------------------------------------------------------------------------
-def _can_hold(m: _Map, res: str, i: int) -> bool:
-    """TileResource.generatesNaturallyOn."""
+def _kind(m: _Map, res: str) -> str:
+    """Bonus, Strategic or Luxury."""
+    return m.R.resources[res]["resourceType"]
+
+
+def _allowed(m: _Map, res: str) -> bool:
+    """Whether the lobby's resource settings still let this resource be placed.
+
+    'off' never; 'cap' until the cap is reached; a kind at zero density not at all. Shares are settled
+    afterwards by :func:`_rebalance`, so here they are allowed like any normal resource.
+    """
+    if m.opts.density.get(_kind(m, res), 1.0) <= 0:
+        return False
+    mode, value = m.opts.rule.get(res, ("normal", 0))
+    if mode == "off":
+        return False
+    if mode == "cap":
+        return m.placed.get(res, 0) < int(value)
+    return True
+
+
+def _never_generates(d: dict) -> bool:
+    """Whether a resource has an unconditional "Doesn't generate naturally".
+
+    Most luxuries carry the unique with a condition (Silk: not on hills; Gems: only on some terrain),
+    which restricts where they go rather than whether they exist - see :func:`_natural_on`.
+    """
+    return any(not x.mods for x in d["_umap"].get(U.NoNaturalGeneration))
+
+
+def _natural_on(m: _Map, res: str, i: int) -> bool:
+    """TileResource.generatesNaturallyOn, ignoring what is on the tile now and the lobby settings."""
     d = m.R.resources[res]
-    if m.tiles[i].wonder or m.tiles[i].resource:
+    if m.tiles[i].wonder:
         return False
     if m.last(i) not in d.get("terrainsCanBeFoundOn", []):
         return False
-    if d["_umap"].has_tag(U.NoNaturalGeneration):
+    # "Doesn't generate naturally <in [Hill] tiles>": only where the conditions hold
+    if any(m.cond(i, x) for x in d["_umap"].get(U.NoNaturalGeneration)):
         return False
     for tn in m.all_terrains(i):
         for x in m.td(tn)["_umap"].get(U.BlocksResources):
@@ -981,12 +1235,21 @@ def _can_hold(m: _Map, res: str, i: int) -> bool:
     return True
 
 
+def _can_hold(m: _Map, res: str, i: int) -> bool:
+    """Whether this resource may be generated on this empty tile now."""
+    if m.tiles[i].resource or m.tiles[i].wonder:
+        return False
+    return _allowed(m, res) and _natural_on(m, res, i)
+
+
 def _set_resource(m: _Map, res: str, i: int, major: Optional[bool] = None):
     """Place a resource on a tile, with the amount its definition calls for."""
+    _clear_resource(m, i)
     d = m.R.resources[res]
     t = m.tiles[i]
     t.resource = res
     t.resource_amount = 0
+    m.placed[res] = m.placed.get(res, 0) + 1
     if d["resourceType"] != "Strategic":
         return
     for x in d["_umap"].get(U.ResourceAmountOnTiles):
@@ -997,6 +1260,25 @@ def _set_resource(m: _Map, res: str, i: int, major: Optional[bool] = None):
         major = m.rng.random() < 0.5
     amt = d.get("majorDepositAmount" if major else "minorDepositAmount", {})
     t.resource_amount = int(amt.get("default", 1 if not major else 3))
+
+
+def _clear_resource(m: _Map, i: int):
+    """Take the resource off a tile, keeping the per-resource counts right."""
+    t = m.tiles[i]
+    if t.resource:
+        m.placed[t.resource] = max(0, m.placed.get(t.resource, 0) - 1)
+    t.resource = None
+    t.resource_amount = 0
+
+
+def _scaled(m: _Map, count: float, kind: str) -> int:
+    """A placement count scaled by the lobby's density for a kind of resource.
+
+    The fraction is settled randomly, so half density on a quantity of one still places it half the time.
+    """
+    x = count * m.opts.density.get(kind, 1.0)
+    whole = int(x)
+    return whole + (1 if m.rng.random() < x - whole else 0)
 
 
 def _weighted(m: _Map, i: int, resources: list[str], ph: str) -> Optional[str]:
@@ -1017,26 +1299,30 @@ def _weighted(m: _Map, i: int, resources: list[str], ph: str) -> Optional[str]:
 def _strategic(m: _Map):
     """Major deposits: 'Every [n] tiles with this terrain will receive a major deposit'; minor deposits spread."""
     R = m.R
+    if m.opts.density["Strategic"] <= 0:
+        return
     strat = [r for r, d in R.resources.items() if d["resourceType"] == "Strategic"
-             and not d["_umap"].has_tag(U.NoNaturalGeneration)]
+             and not _never_generates(d)]
+    # at high density the usual two-tile spacing between major deposits cannot fit them all
+    spacing = 2 if m.opts.density["Strategic"] <= 1.5 else 1
     for tn, td in R.terrains.items():
         for x in td["_umap"].get(U.MajorStrategicFrequency):
             freq = int(x.n(0))
             tiles = [i for i in range(m.grid.size) if tn in m.all_terrains(i) and not m.tiles[i].resource]
-            count = len(tiles) // max(freq, 1)
+            count = _scaled(m, len(tiles) / max(freq, 1), "Strategic")
             m.rng.shuffle(tiles)
             placed = 0
             for i in tiles:
                 if placed >= count:
                     break
                 r = _weighted(m, i, strat, U.ResourceWeighting)
-                if r is None or any(m.tiles[n].resource for n in m.grid.within(i, 2)):
+                if r is None or any(m.tiles[n].resource for n in m.grid.within(i, spacing)):
                     continue
                 _set_resource(m, r, i, major=True)
                 placed += 1
     land = [i for i in range(m.grid.size) if m.land(i) and not m.impassable(i)]
     minor = [i for i in land if not m.tiles[i].resource]
-    for i in _spread_out(m, int(len(land) * 0.03), minor):
+    for i in _spread_out(m, _scaled(m, len(land) * 0.03, "Strategic"), minor):
         r = _weighted(m, i, strat, U.MinorDepositWeighting)
         if r is not None:
             _set_resource(m, r, i, major=False)
@@ -1045,6 +1331,8 @@ def _strategic(m: _Map):
 def _bonus(m: _Map):
     """'Generated on every [n] tiles <in [filter] tiles>'."""
     R = m.R
+    if m.opts.density["Bonus"] <= 0:
+        return
     for r, d in R.resources.items():
         if d["resourceType"] != "Bonus":
             continue
@@ -1052,17 +1340,19 @@ def _bonus(m: _Map):
             if any(mm.ph == "in [] Regions" for mm in x.mods):
                 continue
             tiles = [i for i in range(m.grid.size) if _can_hold(m, r, i) and m.cond(i, x)]
-            count = len(tiles) // max(int(x.n(0)), 1)
+            count = _scaled(m, len(tiles) / max(int(x.n(0)), 1), "Bonus")
             for i in _spread_out(m, count, tiles):
-                if not any(m.tiles[n].resource for n in m.grid.neighbors(i)):
+                if not any(m.tiles[n].resource for n in m.grid.neighbors(i)) and _can_hold(m, r, i):
                     _set_resource(m, r, i)
 
 
 def _luxuries(m: _Map, starts: list[int], cs_starts: list[int]) -> dict[int, str]:
     """Each civ gets a regional luxury near its start; others are scattered; city-states get their own."""
     R = m.R
+    if m.opts.density["Luxury"] <= 0:
+        return {}
     lux = [r for r, d in R.resources.items() if d["resourceType"] == "Luxury"
-           and not d["_umap"].has_tag(U.NoNaturalGeneration) and not d["_umap"].has_tag(U.CityStateOnlyResource)]
+           and not _never_generates(d) and not d["_umap"].has_tag(U.CityStateOnlyResource)]
     m.rng.shuffle(lux)
     regional: dict[int, str] = {}
     free = list(lux)
@@ -1079,10 +1369,13 @@ def _luxuries(m: _Map, starts: list[int], cs_starts: list[int]) -> dict[int, str
         regional[s] = best
         spots = [i for i in area if _can_hold(m, best, i)]
         m.rng.shuffle(spots)
-        for i in sorted(spots, key=lambda i: m.grid.distance(i, s))[: 2 + m.rng.randrange(2)]:
-            _set_resource(m, best, i)
+        for i in sorted(spots, key=lambda i: m.grid.distance(i, s))[: _scaled(m, 2 + m.rng.randrange(2), "Luxury")]:
+            if _can_hold(m, best, i):
+                _set_resource(m, best, i)
     near_cs = [r for r in lux if R.resources[r]["_umap"].has_tag(U.LuxuryWeightingForCityStates)]
     for c in cs_starts:
+        if not _scaled(m, 1, "Luxury"):
+            continue
         area = m.grid.within(c, 3)[1:]
         opts = [r for r in (near_cs or lux) if any(_can_hold(m, r, i) for i in area)]
         if opts:
@@ -1091,7 +1384,7 @@ def _luxuries(m: _Map, starts: list[int], cs_starts: list[int]) -> dict[int, str
             _set_resource(m, r, m.rng.choice(spots))
     land = [i for i in range(m.grid.size) if not m.impassable(i)]
     random_lux = free or lux
-    count = int(sum(1 for i in land if m.land(i)) * 0.02)
+    count = _scaled(m, sum(1 for i in land if m.land(i)) * 0.02, "Luxury")
     spots = [i for i in land if any(_can_hold(m, r, i) for r in random_lux)
              and min((m.grid.distance(i, s) for s in starts), default=99) > 3]
     for i in _spread_out(m, count, spots):
@@ -1101,12 +1394,69 @@ def _luxuries(m: _Map, starts: list[int], cs_starts: list[int]) -> dict[int, str
     return regional
 
 
+def _rebalance(m: _Map, kind: str, starts: list[int]):
+    """Make each 'share' resource the lobby's percentage of all the resources of its kind.
+
+    The kind's total stays what the density produced; only the mix changes. A resource short of its
+    share first takes over tiles held by 'normal' resources of the kind where its terrain allows, then
+    goes onto fresh tiles, each paid for by removing a normal one elsewhere. One over its share hands
+    the surplus back to normal resources, or clears it if none fit. Tiles near a start are the last
+    to change, so the start positions stay as balanced as they were. When the shares add up to more
+    than 100%, or no normal resource of the kind is left to make up the rest, they are scaled to
+    exactly 100%.
+    """
+    R = m.R
+    shares = {r: v for r, (mode, v) in m.opts.rule.items() if mode == "share" and _kind(m, r) == kind}
+    if not shares:
+        return
+    total = sum(1 for t in m.tiles if t.resource and _kind(m, t.resource) == kind)
+    if not total:
+        return
+    normal = [r for r, d in R.resources.items() if d["resourceType"] == kind and r not in shares
+              and not _never_generates(d) and _allowed(m, r)
+              and not d["_umap"].has_tag(U.CityStateOnlyResource)]
+    s = sum(shares.values())
+    scale = 100.0 / s if s > 100 or (not normal and s > 0) else 1.0
+    want = {r: round(total * v * scale / 100) for r, v in shares.items()}
+
+    def remoteness(i):
+        """Distance from the nearest start: tiles far from everyone change first."""
+        return min((m.grid.distance(i, st) for st in starts), default=99)
+
+    for r, n in want.items():
+        extra = sorted((i for i in range(m.grid.size) if m.tiles[i].resource == r), key=remoteness, reverse=True)
+        for i in extra[:max(0, m.placed.get(r, 0) - n)]:
+            _clear_resource(m, i)
+            opts = [x for x in normal if _can_hold(m, x, i)]
+            if opts:
+                _set_resource(m, m.rng.choice(opts), i)
+    for r, n in want.items():
+        need = n - m.placed.get(r, 0)
+        if need <= 0:
+            continue
+        swap = [i for i in range(m.grid.size) if m.tiles[i].resource in normal and _natural_on(m, r, i)]
+        swap.sort(key=remoteness, reverse=True)
+        for i in swap[:need]:
+            _set_resource(m, r, i)
+        need = n - m.placed.get(r, 0)
+        if need <= 0:
+            continue
+        empty = [i for i in range(m.grid.size) if _can_hold(m, r, i)
+                 and not any(m.tiles[x].resource for x in m.grid.neighbors(i))]
+        victims = sorted((i for i in range(m.grid.size) if m.tiles[i].resource in normal),
+                         key=remoteness, reverse=True)
+        for i in _spread_out(m, need, empty):
+            _set_resource(m, r, i)
+            if victims:
+                _clear_resource(m, victims.pop(0))
+
+
 def _normalize_start(m: _Map, s: int):
     """Keep starts playable (MapRegions.normalizeStart in spirit): no mountains/snow next door, some food and
     production bonuses, and horses and iron within reach."""
     t = m.tiles[s]
     t.features = [f for f in t.features if f == "Hill"]
-    t.resource = None
+    _clear_resource(m, s)
     t.improvement = None
     for n in m.grid.within(s, 1)[1:]:
         nt = m.tiles[n]
@@ -1139,7 +1489,7 @@ def _normalize_start(m: _Map, s: int):
                     _set_resource(m, r, n, major)
                     return True
         return False
-    for _ in range(max(0, 2 - count("Bonus", 2, food=True))):
+    for _ in range(max(0, 2 - count("Bonus", 2, food=True)) if m.opts.density["Bonus"] > 0 else 0):
         if not add(food_bonus, 2):
             for n in m.grid.within(s, 2)[1:]:
                 nt = m.tiles[n]
@@ -1178,23 +1528,30 @@ def _ruins(m: _Map, starts: list[int], cs_starts: list[int]):
 # Entry point
 # ----------------------------------------------------------------------------
 def generate_map(rules: Rules, width: int, height: int, map_type: str, num_players: int, num_city_states: int,
-                 rng: random.Random, ruins: bool = True, nations: Optional[list] = None
-                 ) -> tuple[list[Tile], list[int], list[int], list[int]]:
-    """Returns (tiles, major start tiles, city-state start tiles, continent id per tile (-1 = water))."""
+                 rng: random.Random, ruins: bool = True, nations: Optional[list] = None,
+                 options: Optional[dict] = None) -> tuple[list[Tile], list[int], list[int], list[int]]:
+    """Returns (tiles, major start tiles, city-state start tiles, continent id per tile (-1 = water)).
+
+    ``options`` carries the lobby's map settings (see :class:`MapOptions`): the edges, river density
+    and resource settings. A map that wraps north-south needs an even height; the caller is expected
+    to have rounded it up, and an odd height simply does not wrap.
+    """
     if map_type not in MAP_TYPES:
         map_type = "continents"
-    grid = HexGrid(width, height)
+    opts = MapOptions(options, rules)
+    grid = HexGrid(width, height, wrap_x=opts.wrap_x, wrap_y=opts.wrap_y)
     nations = list(nations or [None] * num_players)
     radius = rules.map_size_predefined(width, height)["radius"]
     for attempt in range(12):
-        scores, frac = _land_scores(rng, grid, map_type, num_players)
+        ice = _ice_band(rng, grid, opts.ice_sides)
+        scores, frac = _land_scores(rng, grid, map_type, num_players, ice)
         thr = _threshold(scores, frac)
         is_land = [s >= thr for s in scores]
         for i in range(grid.size):
             if is_land[i] and not any(is_land[n] for n in grid.neighbors(i)):
                 is_land[i] = False
         tiles = [Tile(terrain="Plains" if is_land[i] else "Ocean") for i in range(grid.size)]
-        m = _Map(rules, grid, tiles, rng)
+        m = _Map(rules, grid, tiles, rng, opts, ice)
         _humidity_and_temperature(m)
         _mountains_and_hills(m)
         _lakes_and_coasts(m)
@@ -1216,6 +1573,8 @@ def generate_map(rules: Rules, width: int, height: int, map_type: str, num_playe
     _bonus(m)
     for s in starts + cs_starts:
         _normalize_start(m, s)
+    for kind in ("Strategic", "Luxury"):
+        _rebalance(m, kind, starts)
     if ruins:
         _ruins(m, starts, cs_starts)
     _assign_continents(m)

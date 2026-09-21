@@ -158,10 +158,46 @@ def _game_limit(sdb: DbSession, user) -> None:
 # ----------------------------------------------------------------------------
 # static
 # ----------------------------------------------------------------------------
+_STARTED = time.time()
+_PHONE = ("iphone", "ipod", "android", "mobile", "blackberry", "iemobile", "opera mini", "windows phone")
+SITE_COOKIE = "citar_site"
+
+
+def _wants_mobile(request: Request) -> bool:
+    """Whether to serve the phone site: an explicit choice (a cookie) wins, otherwise the user agent.
+
+    Tablets are left on the full site: an iPad reports itself as a Mac, and an Android tablet's user
+    agent has no "Mobile" in it, which is exactly the split wanted - the full game plays fine on a
+    tablet, and badly on a phone.
+    """
+    choice = request.cookies.get(SITE_COOKIE)
+    if choice in ("mobile", "desktop"):
+        return choice == "mobile"
+    ua = (request.headers.get("user-agent") or "").lower()
+    return any(k in ua for k in _PHONE) and "ipad" not in ua
+
+
 @app.get("/")
-def index():
-    """The web client. Everything else in the browser is loaded from here."""
-    return FileResponse(WEB_DIR / "index.html")
+def index(request: Request, site: Optional[str] = None):
+    """The web client. Everything else in the browser is loaded from here.
+
+    Phones get the check-in site (mobile.html) instead of the full game client. ``/?site=desktop`` or
+    ``/?site=mobile`` switches, and the choice is remembered for a year in a cookie.
+    """
+    if site in ("mobile", "desktop"):
+        from fastapi.responses import RedirectResponse
+        resp = RedirectResponse("/", status_code=303)
+        resp.set_cookie(SITE_COOKIE, site, max_age=365 * 86400, samesite="lax",
+                        secure=request.url.scheme == "https")
+        return resp
+    page = "mobile.html" if _wants_mobile(request) else "index.html"
+    return FileResponse(WEB_DIR / page, headers={"Vary": "User-Agent, Cookie", "Cache-Control": "no-cache"})
+
+
+@app.get("/m")
+def mobile_index():
+    """The phone site, whatever the device (handy for checking it from a desktop browser)."""
+    return FileResponse(WEB_DIR / "mobile.html", headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
@@ -322,6 +358,103 @@ def list_games(request: Request, p: Principal = Depends(principal), sdb: DbSessi
     return out
 
 
+@app.get("/api/status")
+def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """A check-in on the whole server, for the phone site's overview.
+
+    Everyone signed in sees the games they may see and what the benchmark queue is doing; an
+    administrator also sees the machine (load, memory, disk) and every connected worker.
+    """
+    import os
+    import shutil
+    import sys
+    from .. import __version__, paths
+    from .workers import hub
+    if p.user is None:
+        raise HTTPException(401, "Sign in to continue.")
+    admin = p.user.role == "admin"
+    games = {"playing": 0, "paused": 0, "over": 0, "ai_thinking": 0, "ai_reconnecting": 0, "problems": 0}
+    for s in list(manager.sessions.values()):
+        _row, perms = ownership.resolve(sdb, s, p.user)
+        if access.VIEW not in perms:
+            continue
+        phase = s.game.s.phase
+        games["over" if phase != "playing" else "paused" if s.paused else "playing"] += 1
+        statuses = list(s.agent_status.values())
+        games["ai_thinking"] += statuses.count("thinking")
+        games["ai_reconnecting"] += statuses.count("reconnecting")
+        if any(getattr(a, "last_error", None) for a in s.agents.values()) or (s.pause_reason or {}).get("kind") == "disconnect":
+            games["problems"] += 1
+    workers = hub().status()
+    out = {"version": __version__, "uptime": round(time.time() - _STARTED), "user": p.user.handle, "admin": admin,
+           "mode": "server" if citar_settings.get().server_mode else "local", "games": games,
+           "benchmarks": ({k: v for k, v in scheduler.status().items() if k != "log"} if scheduler else None),
+           "workers_online": len(workers) if admin else None}
+    if admin:
+        host = {"python": sys.version.split()[0], "platform": sys.platform}
+        if hasattr(os, "getloadavg"):
+            host["load"] = [round(x, 2) for x in os.getloadavg()]
+        host["cpus"] = os.cpu_count()
+        try:
+            mem = dict(line.split(":", 1) for line in open("/proc/meminfo", encoding="utf-8"))
+            total, avail = (int(mem[k].split()[0]) * 1024 for k in ("MemTotal", "MemAvailable"))
+            host["memory"] = {"total": total, "used": total - avail}
+        except (OSError, KeyError, ValueError):
+            pass
+        try:
+            du = shutil.disk_usage(paths.state_dir())
+            host["disk"] = {"total": du.total, "used": du.used}
+        except OSError:
+            pass
+        out["host"] = host
+        out["workers"] = [{"server_id": w["server_id"], "hostname": w["hostname"], "models": len(w["models"] or []),
+                           "in_flight": w["in_flight"], "max_concurrent": w["max_concurrent"], "alive": w["alive"]}
+                          for w in workers]
+    return out
+
+
+@app.get("/api/games/{gid}/summary")
+def game_summary(gid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """One game at a glance, for the phone site: standings, whose turn, what each AI is doing, recent news.
+
+    Standings are shown to whoever manages the game, or to anyone once the game is over or has no
+    human in it; a spectator of a game somebody is still playing gets names and the turn, nothing
+    the fog of war would hide.
+    """
+    from ..engine import research, victory
+    s, _row, perms = _gate(sdb, gid, p, access.VIEW, request)
+    with s.lock:
+        g = s.game
+        full = access.MANAGE in perms or s.god_view_allowed()
+        seats = {seat.player: seat for seat in s.seats}
+        players = []
+        for pl in g.s.players:
+            if pl.kind != "major":
+                continue
+            seat = seats.get(pl.id)
+            d = {"id": pl.id, "name": pl.name, "color": pl.color, "alive": pl.alive,
+                 "seat": seat.type if seat else None,
+                 "model": (seat.llm.get("model") or seat.llm.get("model_id")) if seat and seat.type == "llm" else None,
+                 "status": s.agent_status.get(pl.id),
+                 "error": getattr(s.agents.get(pl.id), "last_error", None) if full else None}
+            if full:
+                cities = g.player_cities(pl.id)
+                d.update({"score": victory.score(g, pl.id)["total"], "cities": len(cities),
+                          "pop": sum(c.pop for c in cities), "techs": len(pl.techs),
+                          "era": g.rules.era_list[research.player_era(g, pl.id)]})
+            players.append(d)
+        if full:
+            players.sort(key=lambda d: (not d["alive"], -d.get("score", 0)))
+        events = [{"turn": e["turn"], "type": e["type"], "text": e["text"]}
+                  for e in g.s.events[-300:] if e.get("players") is None][-20:]
+        info = s.info()
+        current = g.player(g.s.current).name if g.s.phase == "playing" else None
+        return {**{k: info[k] for k in ("id", "name", "turn", "phase", "winner", "victory", "paused", "pause_reason",
+                                        "ai_delay", "created", "config")},
+                "turn_limit": g.total_turns(), "current": current, "players": players, "events": events,
+                "full": full, "can_manage": access.MANAGE in perms}
+
+
 @app.post("/api/games")
 def create_game(body: CreateGame, request: Request,
                 me=Depends(require_cap("create_games")), sdb: DbSession = Depends(get_db)):
@@ -421,10 +554,11 @@ def control(gid: str, body: Control, request: Request, p: Principal = Depends(pr
     with s.lock:
         if body.paused is not None:
             s.paused = body.paused
+            s.pause_reason = None          # a person paused or resumed it: no longer the game's own pause
         if body.ai_delay is not None:
             s.ai_delay = max(0.0, min(30.0, body.ai_delay))
         s.cond.notify_all()
-    s._broadcast({"type": "control", "paused": s.paused, "ai_delay": s.ai_delay})
+    s._broadcast({"type": "control", "paused": s.paused, "ai_delay": s.ai_delay, "pause_reason": None})
     return {"paused": s.paused, "ai_delay": s.ai_delay}
 
 
@@ -774,6 +908,9 @@ class MapGenBody(BaseModel):
     ruins: bool = False
     blank: Optional[str] = None       # a terrain name: an empty map of that terrain instead of a generated one
     name: str = ""
+    map_edges: Optional[str] = None   # ice_caps | wrap_x | wrap_y | wrap_both | boxed
+    river_density: Optional[float] = None
+    resources: Optional[dict] = None  # density and per-resource rules, as in a game's config
 
 
 @app.post("/api/maps/generate", dependencies=[Depends(require_user)])
@@ -789,8 +926,9 @@ def maps_generate(body: MapGenBody):
         return _map_call(maps.blank_map, w, h, body.blank, body.name)
     players = body.players if body.players is not None else size["players"]
     cs = body.city_states if body.city_states is not None else size["city_states"]
+    options = {"map_edges": body.map_edges, "river_density": body.river_density, "resources": body.resources}
     return _map_call(maps.generated_map, R, w, h, body.map_type, max(1, players), max(0, cs), body.seed,
-                     body.ruins, body.name)
+                     body.ruins, body.name, options)
 
 
 @app.post("/api/games/{gid}/export_map")
@@ -1217,6 +1355,7 @@ def _replay_payload(s: GameSession) -> dict:
         g = s.game
         return {
             "id": s.id, "name": s.name, "width": g.s.width, "height": g.s.height,
+            "wrap_x": g.grid.wrap_x, "wrap_y": g.grid.wrap_y,
             "terrain": [[t.terrain, 1 if t.hills else 0, int(t.river or 0), t.resource, t.wonder] for t in g.s.tiles],
             "improvement_ids": list(g.rules.improvements), "feature_ids": list(g.rules.terrains),
             "players": [{"id": p.id, "name": p.name, "leader": p.leader, "color": p.color, "kind": p.kind, "alive": p.alive,

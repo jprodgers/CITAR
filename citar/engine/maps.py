@@ -78,18 +78,26 @@ def blank_map(width: int, height: int, terrain: str = "Ocean", name: str = "") -
 
 
 def generated_map(rules, width: int, height: int, map_type: str, players: int, city_states: int,
-                  seed: Optional[int] = None, ruins: bool = True, name: str = "") -> dict:
-    """A map from the random generator, as a starting point for editing."""
+                  seed: Optional[int] = None, ruins: bool = True, name: str = "",
+                  options: Optional[dict] = None) -> dict:
+    """A map from the random generator, as a starting point for editing.
+
+    ``options`` are the lobby's map settings (edges, rivers, resources; see ``mapgen.MapOptions``).
+    """
     from . import mapgen
     _check_size(width, height)
+    opts = mapgen.MapOptions(options, rules)
+    if opts.wrap_y and height % 2:
+        height = height + 1 if height < MAX_SIDE else height - 1
     seed = seed if seed is not None else random.randrange(1, 2**31)
     tiles, starts, cs_starts, _ = mapgen.generate_map(rules, width, height, map_type, players, city_states,
-                                                      random.Random(seed), ruins=ruins)
+                                                      random.Random(seed), ruins=ruins, options=options)
     return {"format": "citar-map", "version": 1, "id": slug(name) if name else "",
             "name": name or f"{map_type.replace('_', ' ').title()} {width}x{height} (seed {seed})",
-            "description": f"Generated: {map_type}, {players} players, {city_states} city-states, seed {seed}.",
-            "width": width, "height": height, "tiles": [tile_row(t) for t in tiles],
-            "starts": list(starts), "cs_starts": list(cs_starts)}
+            "description": f"Generated: {map_type}, {players} players, {city_states} city-states, seed {seed}; "
+                           f"{opts.describe()}.",
+            "width": width, "height": height, "wrap_x": opts.wrap_x, "wrap_y": opts.wrap_y,
+            "tiles": [tile_row(t) for t in tiles], "starts": list(starts), "cs_starts": list(cs_starts)}
 
 
 def map_from_game(g, name: str = "") -> dict:
@@ -112,6 +120,7 @@ def map_from_game(g, name: str = "") -> dict:
         rows.append(row)
     return {"format": "citar-map", "version": 1, "id": slug(name) if name else "", "name": name or "Map from game",
             "description": f"Terrain of game turn {g.turn}.", "width": g.s.width, "height": g.s.height,
+            "wrap_x": g.grid.wrap_x, "wrap_y": g.grid.wrap_y,
             "tiles": rows, "starts": starts, "cs_starts": cs_starts}
 
 
@@ -140,7 +149,8 @@ def validate(rules, data: dict, fix: bool = True) -> tuple[dict, list[str]]:
     tiles = tiles_from_rows(rows)
     R = rules
     warnings: list[str] = []
-    grid = HexGrid(width, height)
+    wrap_x, wrap_y = bool(data.get("wrap_x")), bool(data.get("wrap_y")) and height % 2 == 0
+    grid = HexGrid(width, height, wrap_x=wrap_x, wrap_y=wrap_y)
 
     def warn(i, msg):
         """Record a problem with a tile."""
@@ -227,8 +237,10 @@ def validate(rules, data: dict, fix: bool = True) -> tuple[dict, list[str]]:
     cs_starts = [s for s in clean_starts("cs_starts") if s not in starts]
     clean = {"format": "citar-map", "version": 1, "id": data.get("id") or slug(data.get("name", "")),
              "name": str(data.get("name") or "Untitled map")[:80], "description": str(data.get("description") or "")[:2000],
-             "width": width, "height": height, "tiles": [tile_row(t) for t in tiles],
-             "starts": starts, "cs_starts": cs_starts}
+             "width": width, "height": height, "wrap_x": wrap_x, "wrap_y": wrap_y,
+             "tiles": [tile_row(t) for t in tiles], "starts": starts, "cs_starts": cs_starts}
+    if data.get("wrap_y") and not wrap_y:
+        warnings.append("North-south wrapping needs an even height; this map does not wrap north-south.")
     for k in ("created", "modified", "author", "recommended"):
         if k in data:
             clean[k] = data[k]
@@ -239,7 +251,8 @@ def summary(data: dict) -> dict:
     """A map's headline facts, for lists."""
     land = sum(1 for r in data["tiles"] if r[0] not in ("Ocean", "Coast", "Lakes"))
     return {"id": data.get("id"), "name": data.get("name"), "description": data.get("description", ""),
-            "width": data["width"], "height": data["height"], "starts": len(data.get("starts") or []),
+            "width": data["width"], "height": data["height"], "wrap_x": bool(data.get("wrap_x")),
+            "wrap_y": bool(data.get("wrap_y")), "starts": len(data.get("starts") or []),
             "cs_starts": len(data.get("cs_starts") or []), "land_share": round(land / max(1, len(data["tiles"])), 3),
             "modified": data.get("modified")}
 
@@ -315,7 +328,7 @@ def prepare(rules, data: dict, n_major: int, n_cs: int, rng: random.Random, nati
     clean, _ = validate(rules, data)
     width, height = clean["width"], clean["height"]
     tiles = tiles_from_rows(clean["tiles"])
-    grid = HexGrid(width, height)
+    grid = HexGrid(width, height, wrap_x=bool(clean.get("wrap_x")), wrap_y=bool(clean.get("wrap_y")))
     m = mapgen._Map(rules, grid, tiles, rng)
     mapgen._assign_continents(m)
     starts = clean["starts"][:n_major]

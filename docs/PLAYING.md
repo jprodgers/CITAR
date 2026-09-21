@@ -11,6 +11,21 @@ The lobby lists running games and saved ones.
   civilization or takes a random one; you can rename your civ and your cities afterwards.
   **BenchmarkCiv** has no unique abilities, units or buildings, which is what benchmark seats use
   so that a comparison is about the player and not the civ.
+- **Map generation** (the fold-out panel above the seats) changes the world itself:
+  - **Map edges**: ice caps north and south (the default), wrapping east-west like a globe,
+    wrapping north-south, wrapping both ways (no edges and no ice at all), or boxed in with ice on
+    all four sides. The ice is a band one to four tiles deep that drifts slowly along the edge. On a
+    wrapping map, units, borders and distances all go the short way round, and the view scrolls
+    without end.
+  - **Rivers**: 0% for none, 100% for normal, up to 300%. Every river runs downhill to the sea, and
+    rivers that meet join into one instead of crossing.
+  - **Resources**: an overall density, a density each for strategic, luxury and bonus resources,
+    and a rule for any single strategic or luxury resource — **Off**, **At most** a number of tiles
+    (1 gives the whole world a single source), or **Share %** of every resource of its kind. Sparse
+    luxuries, heaps of strategics and no uranium is: luxury 30%, strategic 300%, Uranium off.
+- **If an AI's model server disconnects**: pause the game until it answers again, or skip that
+  AI's turn. Either way the seat first keeps retrying for the reconnect wait (180 seconds by
+  default), so a short drop costs nothing — see [AI_PLAYERS.md](AI_PLAYERS.md#when-the-model-server-goes-away).
 - **Load** on a saved game with a human seat takes you straight in. Games with no LLM seats resume
   automatically; games with them start paused so you can check the model settings first.
 - **▶ Play** resumes a running game. **Watch** opens a game with no human seat with full vision.
@@ -24,6 +39,15 @@ named save beside it.
 With no human seat you can watch with full vision, pause, put a delay between AI turns, view the
 map as a particular civilization saw it, and read each AI's reasoning as it arrives. This is the
 most useful thing in CITAR for understanding *why* a model is losing.
+
+## On a phone
+
+Opening the server on a phone gives the **phone site**: a check-in rather than the game — running
+games and their standings, whose turn it is, what each AI is doing (and whether one is waiting for
+its model server), benchmark progress, reports, and which machines are online, with Pause/Resume
+for games you manage. **Desktop site** at the bottom switches to the full client, and the choice is
+remembered; **📱 Mobile site** in the full client's header switches back. `/m` always opens the
+phone site, which is handy for looking at it from a desktop.
 
 ## The map
 

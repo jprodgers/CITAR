@@ -1,5 +1,6 @@
 // Lobby: running games, saves, and the new-game form.
 import { api } from "./api.js";
+import { mapOptionsForm } from "./mapoptions.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { openMetrics } from "./metrics.js";
 import { setupState, welcomeBanner } from "./setup.js";
@@ -255,6 +256,9 @@ export function llmForm(L, rerender, { seat = true } = {}) {
       field("Server", serverSel),
       field("Model", modelSel, { style: { gridColumn: "span 2", minWidth: "0" } }),
       profSel ? field("Load profile", profSel) : null,
+      !seat ? null : field("Reconnect wait (s)", el("input", { type: "number", min: 0, max: 86400, value: L.reconnect_seconds ?? "",
+        placeholder: "game default", title: "How long this seat keeps retrying its model server before the game's disconnect rule applies",
+        oninput: (e) => { L.reconnect_seconds = e.target.value === "" ? null : +e.target.value; } })),
       !seat ? null : field("Max tool calls / turn", el("input", { type: "number", value: L.max_tool_calls_per_turn || (m && m.inference.max_tool_calls_per_turn) || 150,
         oninput: (e) => { L.max_tool_calls_per_turn = +e.target.value; } })),
       provider === "anthropic" ? field("Effort", el("select", { onchange: (e) => { L.effort = e.target.value; } },
@@ -292,14 +296,21 @@ function renderNewGame(card, rules, meta, refresh) {
   f.ruins = el("input", { type: "checkbox", checked: true });
   f.religion = el("input", { type: "checkbox", checked: true });
   f.espionage = el("input", { type: "checkbox", checked: true });
+  f.onDisconnect = sel([["pause", "Pause the game until it is back"], ["skip", "Skip that AI's turn"]], "pause");
+  f.onDisconnect.title = "What happens when an AI model's server (LM Studio, a worker, an API) stays unreachable for the whole reconnect wait. "
+    + "A paused game resumes by itself as soon as the server answers again.";
+  f.reconnect = el("input", { type: "number", min: 0, max: 86400, value: 180,
+    title: "How long an AI keeps retrying its model server before the disconnect rule applies. Short drops inside this window cost nothing." });
   // custom maps from the map editor
   f.map = sel([["", "Generate a new map"]], "");
   f.map.title = "Play on a map made in the map editor, or generate one from the size and type below.";
   const wantMap = new URLSearchParams((location.hash.split("?")[1] || "")).get("map") || "";
   let customMaps = {};
+  const gen = mapOptionsForm(rules);
   const syncMap = () => {
     const mp = customMaps[f.map.value];
     f.size.disabled = f.type.disabled = !!mp;
+    gen.node.style.display = mp ? "none" : "";
     if (mp && mp.starts && seats.length !== mp.starts) setSeatCount(mp.starts);
     renderSeats();
   };
@@ -317,11 +328,13 @@ function renderNewGame(card, rules, meta, refresh) {
     field("Difficulty", f.difficulty), field("Barbarians", f.barbs), field("Barbarian difficulty", f.barbDiff),
     field("Turn limit (0 = speed default)", f.turns),
     field("City-states", f.cs), field("Seed", f.seed),
+    field("If an AI's model server disconnects", f.onDisconnect), field("Keep reconnecting for (seconds)", f.reconnect),
     el("div", { class: "field" }, el("label", {}, "Victory conditions"),
       el("div", { class: "row" }, ...Object.entries(f.victories).map(([k, cb]) => el("label", {}, cb, ` ${k}`)))),
     el("div", { class: "field" }, el("label", {}, "Options"),
       el("div", { class: "row" }, el("label", {}, f.tech, " Tech trading"), el("label", {}, f.ruins, " Ancient ruins"),
         el("label", {}, f.religion, " Religion"), el("label", {}, f.espionage, " Espionage")))));
+  card.appendChild(gen.node);
 
   card.appendChild(el("h3", { style: { marginTop: "14px" } }, "Seats"));
   const seatsBox = el("div");
@@ -404,6 +417,8 @@ function renderNewGame(card, rules, meta, refresh) {
           city_states: f.cs.value === "" ? null : +f.cs.value,
           victories: Object.fromEntries(Object.entries(f.victories).map(([k, cb]) => [k, cb.checked])),
           tech_trading: f.tech.checked, ruins: f.ruins.checked, religion: f.religion.checked, espionage: f.espionage.checked,
+          on_disconnect: f.onDisconnect.value, reconnect_seconds: f.reconnect.value === "" ? null : +f.reconnect.value,
+          ...(f.map.value ? {} : gen.value()),
         },
         seats: seats.map((s) => ({ type: s.type, civ_name: s.civ_name || null, nation: s.nation === "random" ? null : s.nation,
                                    difficulty: s.difficulty || null, color: s.color, llm: s.llm, bot: s.bot })),

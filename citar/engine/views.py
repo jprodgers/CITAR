@@ -514,7 +514,8 @@ def tech_tree(g: Game, pid: int) -> dict:
         if _uniques(t):
             row["effects"] = _uniques(t)
         out.append(row)
-    return {"researching": research.current(g, pid), "queue": list(p.research_queue), "techs": out}
+    return {"researching": research.current(g, pid), "queue": list(p.research_queue), "free_techs": p.free_techs,
+            "techs": out}
 
 
 def policies_info(g: Game, pid: int) -> dict:
@@ -735,7 +736,7 @@ def client_view(g: Game, pid: Optional[int], event_limit: int = 150) -> dict:
     view = {
         "turn": g.turn, "year": g.year_text(), "current_player": g.s.current, "phase": g.s.phase,
         "winner": g.s.winner, "victory": g.s.victory, "you": pid, "width": g.s.width, "height": g.s.height,
-        "tiles": tiles, "units": units, "cities": cities, "players": players_overview(g, pid),
+        "wrap_x": g.grid.wrap_x, "wrap_y": g.grid.wrap_y, "tiles": tiles, "units": units, "cities": cities, "players": players_overview(g, pid),
         "turn_limit": g.total_turns(),
         "config": {k: g.s.config.get(k) for k in ("map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians",
                                                   "turn_limit", "victories", "tech_trading", "religion", "espionage")},

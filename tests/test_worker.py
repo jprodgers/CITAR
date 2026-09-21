@@ -117,6 +117,16 @@ class Hub(unittest.TestCase):
         self.assertEqual(caught.exception.refusal, "closed")
         self.assertTrue(caught.exception.retryable)
 
+    def test_missing_worker_reads_as_a_connection_problem_to_the_agent(self):
+        """The turn driver waits out connection errors; a dropped worker must look like one, not like a
+        broken model (which used to skip the turn instantly, every turn, until the worker came back)."""
+        from citar.agents.providers.worker_provider import WorkerConversation, WorkerConnectionError
+        from citar.agents.llm_agent import _is_unreachable
+        conv = WorkerConversation({"server_id": "sv-nobody", "model": "m"}, "system", [])
+        with self.assertRaises(WorkerConnectionError) as caught:
+            conv.step()
+        self.assertTrue(_is_unreachable(caught.exception))
+
     def test_disconnect_fails_everything_in_flight(self):
         """Work in flight when the socket drops can never be answered; the waiting thread must be
         released rather than blocking until its timeout."""
@@ -386,6 +396,33 @@ class EndToEnd(unittest.TestCase):
         # A bad token will never start working, so the worker stops instead of retrying forever.
         self.assertFalse(thread.is_alive(), "worker kept retrying a token that will never work")
         self.assertFalse(worker.running)
+
+    def test_unreachable_server_is_retried_not_abandoned(self):
+        """'Connection refused' is what a worker sees while the server restarts; it must keep trying."""
+        import socket
+        from citar.worker.agent import Worker, WorkerConfig
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed_port = s.getsockname()[1]
+        worker = Worker(WorkerConfig(server_url=f"http://127.0.0.1:{closed_port}", token="t", collect_hardware=False))
+        worker.discover_models = lambda: _async_value([])
+        loop = asyncio.new_event_loop()
+
+        def run():
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(worker.run())
+            except asyncio.CancelledError:
+                pass
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=4)
+        self.assertTrue(thread.is_alive(), "worker gave up on a server that was only unreachable")
+        self.assertTrue(worker.running)
+        worker.stop()
+        loop.call_soon_threadsafe(lambda: [t.cancel() for t in asyncio.all_tasks(loop)])
+        thread.join(timeout=10)
 
     def test_worker_error_reaches_the_caller_as_a_failure(self):
         def broken(data):

@@ -8,6 +8,10 @@ history or a process list:
 
     python -m citar.worker --config worker.json
 
+The standalone "CITAR helper" download is this same program. Started with nothing on the command line
+(double-clicked, say), it asks for the server and token once, saves them to ``helper.json`` in the
+per-user CITAR folder, and connects straight away on every later start.
+
 A minimal worker.json:
 
     {
@@ -67,6 +71,39 @@ def _parse_quiet(values) -> list:
     return out
 
 
+def saved_config_path() -> Path:
+    """Where the helper keeps the server and token it was given on its first run."""
+    from ..paths import _user_base
+    return _user_base() / "helper.json"
+
+
+def _first_run(data: dict) -> dict:
+    """Ask for the server and token on a terminal, and offer to remember them.
+
+    Only when nothing was given on the command line, in the environment or in a saved file, and only
+    when there is someone at the keyboard to answer.
+    """
+    print("CITAR helper - first run")
+    print("On your CITAR server, open Servers, pick this machine (or add it), and issue a worker token.\n")
+    server = input("CITAR server address (e.g. https://citar.example.com): ").strip()
+    token = input("Worker token: ").strip()
+    if not server or not token:
+        raise SystemExit("A server address and a token are both needed.")
+    if not server.startswith(("http://", "https://")):
+        server = "https://" + server
+    data = dict(data, server_url=server, token=token)
+    path = saved_config_path()
+    if input(f"Remember these in {path}? [Y/n] ").strip().lower() in ("", "y", "yes"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        print(f"Saved. Delete {path} to forget them.\n")
+    return data
+
+
 def build_config(args) -> WorkerConfig:
     """Build the worker's configuration from arguments, a file and the environment."""
     data: dict = {}
@@ -75,6 +112,11 @@ def build_config(args) -> WorkerConfig:
         if not path.exists():
             raise SystemExit(f"No such config file: {path}")
         data = json.loads(path.read_text(encoding="utf-8"))
+    elif saved_config_path().exists():
+        data = json.loads(saved_config_path().read_text(encoding="utf-8"))
+    given = args.server_url or args.token or os.environ.get("CITAR_WORKER_SERVER") or os.environ.get("CITAR_WORKER_TOKEN")
+    if not given and not (data.get("server_url") and data.get("token")) and sys.stdin and sys.stdin.isatty():
+        data = _first_run(data)
 
     def pick(name, env, default=None):
         """The first of an argument, a file value and an environment variable that is set."""
@@ -151,7 +193,14 @@ def main(argv=None) -> int:
     except ImportError:
         raise SystemExit("The worker needs the 'websockets' package:\n    pip install websockets")
 
-    config = build_config(args)
+    try:
+        config = build_config(args)
+    except SystemExit as exc:
+        # a double-clicked helper would otherwise vanish before anyone could read why
+        if getattr(sys, "frozen", False) and sys.stdin and sys.stdin.isatty():
+            print(exc.code if isinstance(exc.code, str) else "")
+            input("Press Enter to close.")
+        raise
     worker = Worker(config)
 
     print(f"CITAR worker {config.name or ''}".rstrip())

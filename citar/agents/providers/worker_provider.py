@@ -25,6 +25,15 @@ from .base import Conversation, StepResult, ToolCall
 log = logging.getLogger("citar.worker_provider")
 
 
+class WorkerConnectionError(ConnectionError):
+    """The machine serving this seat cannot be reached right now - its worker is disconnected, reconnecting or
+    busy. The name matters: the turn driver treats "Connection" errors as something to wait out."""
+
+    def __init__(self, message: str, refusal: str = ""):
+        super().__init__(message)
+        self.refusal = refusal
+
+
 class WorkerConversation(Conversation):
     """A conversation whose completions are executed by a remote worker."""
 
@@ -81,8 +90,12 @@ class WorkerConversation(Conversation):
         try:
             answer = hub().submit(self.server_id, request, timeout=timeout)
         except WorkerError as exc:
-            # A refusal is not a model failure. Surfacing it as one would make the agent retry a
-            # prompt against a machine that has told us it is busy or closed for the night.
+            # A dropped or busy worker is worth waiting for: the agent retries it for the game's
+            # reconnect window and then applies the disconnect policy. Anything else - a refusal, a
+            # machine closed for the night - is not a model failure, and retrying it would only make
+            # the agent hammer a machine that has said no.
+            if exc.retryable:
+                raise WorkerConnectionError(str(exc), exc.refusal) from exc
             raise RuntimeError(str(exc)) from exc
 
         usage = answer.get("usage") or {}

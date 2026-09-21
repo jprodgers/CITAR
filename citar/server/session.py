@@ -71,6 +71,7 @@ class GameSession:
         self.cond = threading.Condition(self.lock)
         self.spectator_token = secrets.token_urlsafe(12)
         self.paused = False
+        self.pause_reason: Optional[dict] = None   # why the game is paused, when the game paused itself
         self.ai_delay = 0.0
         self.created = time.time()
         self.subscribers: list[Callable[[dict], None]] = []
@@ -119,9 +120,11 @@ class GameSession:
         d = {
             "id": self.id, "name": self.name, "turn": g.turn, "phase": g.s.phase, "current_player": g.s.current,
             "winner": g.s.winner, "victory": g.s.victory, "paused": self.paused, "ai_delay": self.ai_delay,
+            "pause_reason": self.pause_reason if self.paused else None,
             "created": self.created, "config": {k: g.s.config.get(k) for k in (
                 "map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians", "turn_limit", "victories", "city_states", "religion",
-                "espionage", "tech_trading", "ruins", "seed")},
+                "espionage", "tech_trading", "ruins", "seed", "map_edges", "wrap_x", "wrap_y", "river_density",
+                "resources", "on_disconnect", "reconnect_seconds")},
             "players": [{"id": p.id, "name": p.name, "color": p.color, "alive": p.alive, "kind": p.kind,
                          **({"difficulty": p.difficulty or g.s.config.get("difficulty")} if p.kind == "major" else {})}
                         for p in g.s.players],
@@ -328,25 +331,62 @@ class GameSession:
         if agent is not None and hasattr(agent, "cancel"):
             agent.cancel()
 
-    def suspend(self):
+    def suspend(self, reason: Optional[dict] = None):
         """Pause the game immediately, aborting any AI turn in progress (used for quiet hours and benchmark pauses).
-        The interrupted turn is excluded from metrics and replayed from its current state on resume()."""
+        The interrupted turn is excluded from metrics and replayed from its current state on resume().
+
+        ``reason`` is shown on the game screen; any pause replaces the one before it, which is also how a
+        disconnect watcher knows that someone else has since paused the game for their own reasons."""
         with self.lock:
             self.paused = True
+            self.pause_reason = reason
             for pid in list(self.agents):
                 self.cancel_agent(pid)
             self.metrics.interrupt_open()
             self._metrics_current = None
             self.cond.notify_all()
-        self._broadcast({"type": "control", "paused": True, "ai_delay": self.ai_delay})
+        self._broadcast({"type": "control", "paused": True, "ai_delay": self.ai_delay, "pause_reason": reason})
 
     def resume(self):
         """Resume a paused game."""
         with self.lock:
             self.paused = False
+            self.pause_reason = None
             self._track_turn()
             self.cond.notify_all()
-        self._broadcast({"type": "control", "paused": False, "ai_delay": self.ai_delay})
+        self._broadcast({"type": "control", "paused": False, "ai_delay": self.ai_delay, "pause_reason": None})
+
+    RECONNECT_POLL_SECONDS = 10.0     # how often a game paused by a disconnect checks whether the server is back
+
+    def pause_for_disconnect(self, pid: int, message: str, cfg: dict):
+        """Pause the whole game because a seat's model server is unreachable, and resume by itself when it answers.
+
+        Called from the seat's own turn (on the driver thread). A watcher thread then checks the server every
+        few seconds; when it is reachable again the game resumes and the interrupted turn is replayed. Pressing
+        Resume works too, and pausing for any other reason (quiet hours, a person) retires the watcher.
+        """
+        from ..agents.llm_agent import reachable
+        reason = {"kind": "disconnect", "player": pid, "message": message, "since": time.time()}
+        self.suspend(reason)
+        with self.lock:
+            self.game.emit("game_paused", f"Game paused: {message}. It resumes by itself when the server answers "
+                                          f"again, or press Resume.", None, player=pid)
+
+        def watch():
+            """Resume once the server is back, unless the pause has since become someone else's."""
+            while not self._stop:
+                time.sleep(self.RECONNECT_POLL_SECONDS)
+                if self._stop or not self.paused or self.pause_reason is not reason:
+                    return
+                if reachable(cfg):
+                    with self.lock:
+                        if not self.paused or self.pause_reason is not reason:
+                            return
+                        self.game.emit("game_resumed", f"{self.game.player(pid).name}'s model server is reachable "
+                                                       f"again; the game has resumed.", None, player=pid)
+                    self.resume()
+                    return
+        threading.Thread(target=watch, name=f"reconnect-{self.id}-{pid}", daemon=True).start()
 
     def stop(self):
         """Close the game: halt the driver and abort any AI turn (including in-flight model requests)."""

@@ -3,6 +3,7 @@ import { api } from "./api.js";
 import { el, clear, toast } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
 import { renderComparison } from "./metrics.js";
+import { helperCard } from "./helper.js";
 
 const open = new Set();
 
@@ -12,7 +13,8 @@ export async function renderModels(root) {
   page.appendChild(pageHeader("models"));
   const board = el("div", { class: "card" });
   const compare = el("div", { class: "card" });
-  page.append(board, compare);
+  // models live on the machines people connect: the way to add one is the helper
+  page.append(helperCard({ compact: true }), board, compare);
   const refresh = async () => {
     try { drawBoard(board, await api.modelScores(), refresh); } catch (e) { toast(e.message, "error"); }
   };

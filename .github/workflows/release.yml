@@ -155,6 +155,60 @@ jobs:
             dist/*.zip
             dist/*.sha256
 
+  # ---------------------------------------------------------------------------------- the helper
+  # The CITAR helper is the worker as one self-contained executable: what someone downloads onto the
+  # machine with the GPU. The file names carry no version on purpose - the server's download links
+  # point at releases/latest/download/<name>, which then always gives the newest build.
+  build-helper:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, asset: citar-helper-windows-x64.exe, name: citar-helper-windows-x64 }
+          - { os: macos-latest, asset: citar-helper-macos-arm64, name: citar-helper-macos-arm64 }
+          # 22.04's older glibc lets the Linux build run on more distributions
+          - { os: ubuntu-22.04, asset: citar-helper-linux-x64, name: citar-helper-linux-x64 }
+          - { os: ubuntu-24.04-arm, asset: citar-helper-linux-arm64, name: citar-helper-linux-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.12", cache: pip }
+
+      - name: Install
+        # only what the worker needs, so the executable stays small
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[worker,openai]" pyinstaller
+
+      - name: Bundle
+        shell: bash
+        run: |
+          icon=""
+          if [ "$RUNNER_OS" = "Windows" ]; then pip install pillow && python installer/make_icon.py && icon="--icon $(pwd -W)/installer/citar.ico"; fi
+          python -m PyInstaller --onefile --noconfirm --name "${{ matrix.name }}" $icon \
+            --collect-submodules citar.worker --hidden-import citar.agents.providers.openai_provider \
+            --collect-submodules websockets \
+            --exclude-module fastapi --exclude-module starlette --exclude-module uvicorn \
+            --exclude-module sqlalchemy --exclude-module alembic --exclude-module anthropic \
+            --exclude-module tkinter --exclude-module numpy --exclude-module PIL \
+            --distpath dist --workpath build installer/helper_entry.py
+
+      - name: The helper runs
+        shell: bash
+        run: |
+          ./dist/${{ matrix.asset }} --help
+          cd dist && (sha256sum "${{ matrix.asset }}" 2>/dev/null || shasum -a 256 "${{ matrix.asset }}") \
+            | cut -d' ' -f1 > "${{ matrix.asset }}.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+
   # ---------------------------------------------------------------------------------- container
   publish-image:
     needs: verify
@@ -197,7 +251,7 @@ jobs:
 
   # ---------------------------------------------------------------------------------- release
   github-release:
-    needs: [build-python, build-windows]
+    needs: [build-python, build-windows, build-helper]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -211,7 +265,7 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -type f \( -name '*.exe' -o -name '*.zip' -o -name '*.whl' \
-            -o -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} release/ \;
+            -o -name '*.tar.gz' -o -name '*.sha256' -o -name 'citar-helper-*' \) -exec cp {} release/ \;
           ls -la release
 
       - name: Notes for this version
@@ -229,7 +283,7 @@ jobs:
           echo "" >> notes.md
           echo "### Checksums" >> notes.md
           echo '```' >> notes.md
-          (cd release && sha256sum *.exe *.zip *.whl *.tar.gz 2>/dev/null || true) >> notes.md
+          (cd release && sha256sum *.exe *.zip *.whl *.tar.gz citar-helper-macos-* citar-helper-linux-* 2>/dev/null || true) >> notes.md
           echo '```' >> notes.md
 
       - uses: softprops/action-gh-release@v3

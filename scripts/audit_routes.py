@@ -37,6 +37,7 @@ os.environ.setdefault("CITAR_MODE", "local")
 INTENTIONALLY_PUBLIC = {
     "/": "the web client shell; it renders the sign-in screen for anonymous visitors",
     "/static": "the client's own JavaScript and CSS",
+    "/m": "the phone site's shell; like /, it renders the sign-in screen for anonymous visitors",
     "/api/rules": "the ruleset — public game data, identical for everyone",
     "/api/tools": "the tool schema — public game data",
     "/api/meta": "server version and capabilities",

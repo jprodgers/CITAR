@@ -635,10 +635,10 @@ class BenchmarkScheduler:
                 threading.Thread(target=self._in_job_thread,
                                  args=(self._resume_job, run["id"], job["id"]), daemon=True).start()
             elif job["status"] == "running" and s.paused and not s.stopped:
-                # paused from the game screen: reflect it on the run page
-                job["status"], job["pause_reason"] = "paused", "user"
+                # paused from the game screen, or by the game itself when a model server went away
+                job["status"], job["pause_reason"] = "paused", (s.pause_reason or {}).get("kind") or "user"
                 self._touch(run)
-            elif job["status"] == "paused" and job["pause_reason"] == "user" and not s.paused:
+            elif job["status"] == "paused" and job["pause_reason"] in ("user", "disconnect") and not s.paused:
                 job["status"], job["pause_reason"] = "running", None     # resumed from the game screen
                 self._touch(run)
             if _now() - self._progress_at.get(job["id"], 0) > 5:

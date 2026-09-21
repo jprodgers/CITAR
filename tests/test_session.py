@@ -191,6 +191,75 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(rec["end_reason"], "time_limit")
         self.assertEqual(s.errors, [])
 
+    def _wait(self, cond, timeout=30):
+        t0 = time.time()
+        while time.time() - t0 < timeout and not cond():
+            time.sleep(0.1)
+        return cond()
+
+    def test_short_disconnect_is_ridden_out(self):
+        """A server that drops for a few seconds costs a wait, not a turn."""
+        up_at = time.time() + 2.5
+
+        class FlakyConversation(ScriptedConversation):
+            def step(self):
+                if time.time() < up_at:
+                    raise ConnectionError("connection refused")
+                return super().step()
+
+        ScriptedConversation.scripts = {}
+        with mock.patch("citar.agents.llm_agent.make_conversation", FlakyConversation):
+            s = self.manager.create({"map_size": "duel", "seed": 4, "on_disconnect": "skip", "reconnect_seconds": 30},
+                                    [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
+            self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the turn should finish once the server is back")
+        self.manager.delete(s.id)
+        rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
+        self.assertEqual(rec["end_reason"], "end_turn")
+        self.assertFalse(any(e["type"] == "agent_error" for e in s.game.s.events))
+
+    def test_disconnect_skip_policy_skips_after_the_window(self):
+        class DownConversation(ScriptedConversation):
+            def step(self):
+                raise ConnectionError("connection refused")
+
+        ScriptedConversation.scripts = {}
+        with mock.patch("citar.agents.llm_agent.make_conversation", DownConversation):
+            t0 = time.time()
+            s = self.manager.create({"map_size": "duel", "seed": 4, "on_disconnect": "skip", "reconnect_seconds": 2},
+                                    [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
+            self.assertTrue(self._wait(lambda: s.game.turn >= 2))
+            self.assertGreaterEqual(time.time() - t0, 2, "the turn must not be skipped before the window is over")
+        self.manager.delete(s.id)
+        rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
+        self.assertEqual(rec["end_reason"], "disconnected")
+        self.assertTrue(any(e["type"] == "agent_error" and "unreachable" in e["text"] for e in s.game.s.events))
+
+    def test_disconnect_pause_policy_pauses_and_resumes(self):
+        server_up = {"v": False}
+
+        class SwitchableConversation(ScriptedConversation):
+            def step(self):
+                if not server_up["v"]:
+                    raise ConnectionError("connection refused")
+                return super().step()
+
+        ScriptedConversation.scripts = {}
+        with mock.patch("citar.agents.llm_agent.make_conversation", SwitchableConversation), \
+                mock.patch("citar.agents.llm_agent.reachable", lambda cfg, timeout=5.0: server_up["v"]), \
+                mock.patch.object(GameSession, "RECONNECT_POLL_SECONDS", 0.3):
+            s = self.manager.create({"map_size": "duel", "seed": 4, "on_disconnect": "pause", "reconnect_seconds": 1},
+                                    [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
+            self.assertTrue(self._wait(lambda: s.paused), "the game should pause when the server stays down")
+            self.assertEqual(s.info()["pause_reason"]["kind"], "disconnect")
+            time.sleep(1.5)
+            self.assertEqual(s.game.turn, 1, "nobody - bots included - plays while the game is paused")
+            server_up["v"] = True
+            self.assertTrue(self._wait(lambda: not s.paused), "the game should resume when the server is back")
+            self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the interrupted turn is replayed and finished")
+        self.manager.delete(s.id)
+        self.assertIsNone(s.info()["pause_reason"])
+        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
+
     def test_save_and_load(self):
         s = self.manager.create({"map_size": "duel", "seed": 9}, [{"type": "human"}, {"type": "bot"}])
         pid = 0

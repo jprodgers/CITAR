@@ -135,6 +135,10 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .tech .u { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tech .bar { height: 3px; background: #333; margin-top: 3px; border-radius: 2px; }
 .tech .bar div { height: 100%; background: var(--sci); border-radius: 2px; }
+.tech-tree.free-pick .tech.available { box-shadow: 0 0 0 2px #7CFC00; background: #1f3b2a; }
+.tech-tree.free-pick .era-label { top: 38px; }
+.free-tech-banner { position: sticky; left: 0; top: 0; z-index: 2; display: inline-block; padding: 6px 12px; border-radius: 6px;
+  background: #1f3b2a; border: 1px solid #7CFC00; color: #eaffe0; font-weight: 600; font-size: 13px; }
 .era-label { position: absolute; top: 0; font-weight: 700; color: var(--muted); text-transform: uppercase; font-size: 12px; letter-spacing: 1px; }
 
 /* diplomacy */
@@ -462,3 +466,27 @@ dl.paths dd { margin: 0; }
   .landing-cards { grid-template-columns: 1fr; }
   .hero-text h1 { font-size: 34px; }
 }
+
+/* map generation options (lobby and map editor) */
+.map-options { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+.map-options > summary { cursor: pointer; padding: 2px 0; }
+.map-options[open] > summary { margin-bottom: 8px; }
+.mo-note { font-size: 12px; margin: 4px 0; }
+.mo-slider { display: flex; align-items: center; gap: 8px; }
+.mo-slider input { flex: 1; }
+.mo-pct { min-width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
+.mo-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 6px 0 10px; }
+.mo-tables h4 { margin: 4px 0; }
+.mo-res { display: flex; flex-direction: column; gap: 3px; }
+.mo-res-row { display: grid; grid-template-columns: 1fr 110px 70px; gap: 6px; align-items: center; font-size: 13px; }
+.mo-res-row.changed .mo-res-name { color: var(--gold); font-weight: 600; }
+
+/* CITAR helper download card (Servers and Models pages) */
+.helper-card h3 { font-size: 16px; }
+.helper-card .row { gap: 10px; align-items: center; }
+.helper-main { margin: 10px 0 6px; }
+.helper-others { gap: 12px; }
+.helper-steps { margin: 10px 0 6px; padding-left: 20px; line-height: 1.5; }
+.helper-cmd { display: flex; gap: 8px; align-items: center; margin: 6px 0; background: #0f131b; border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; }
+.helper-cmd code { flex: 1; overflow-x: auto; white-space: nowrap; font-size: 12px; }

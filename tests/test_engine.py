@@ -126,6 +126,108 @@ class MapTests(unittest.TestCase):
         self.assertEqual(len({p.nation for p in g.majors() if p.nation != "BenchmarkCiv"}), 3)
 
 
+class MapOptionTests(unittest.TestCase):
+    """Map edges, ice, wrapping, rivers and the resource settings."""
+
+    def test_wrapping_grid_distances_match_walking(self):
+        from citar.engine.hexmap import HexGrid
+        for wx, wy in ((True, False), (False, True), (True, True)):
+            grid = HexGrid(14, 10, wx, wy)
+            a = grid.idx(0, 0)
+            dist, frontier = {a: 0}, [a]
+            for c in frontier:
+                for n in grid.neighbors(c):
+                    if n not in dist:
+                        dist[n] = dist[c] + 1
+                        frontier.append(n)
+            self.assertEqual([grid.distance(a, b) for b in range(grid.size)], [dist[b] for b in range(grid.size)])
+        grid = HexGrid(14, 10, True, False)
+        self.assertEqual(grid.distance(grid.idx(0, 4), grid.idx(13, 4)), 1)
+        self.assertEqual(grid.line(grid.idx(12, 4), grid.idx(1, 4)), [grid.idx(x, 4) for x in (12, 13, 0, 1)])
+
+    def test_edges(self):
+        for edges, wrap_x, wrap_y, ice in (("ice_caps", False, False, True), ("wrap_x", True, False, True),
+                                           ("wrap_y", False, True, False), ("wrap_both", True, True, False),
+                                           ("boxed", False, False, True)):
+            g = new_game(map_size="small", map_edges=edges, players=[{}, {}, {}])
+            self.assertEqual((g.grid.wrap_x, g.grid.wrap_y), (wrap_x, wrap_y), edges)
+            iced = [i for i, t in enumerate(g.s.tiles) if "Ice" in t.features]
+            self.assertEqual(bool(iced), ice, edges)
+            for i in iced:
+                x, y = g.grid.xy(i)
+                depth = min(y, g.s.height - 1 - y)
+                if edges == "boxed":
+                    depth = min(depth, x, g.s.width - 1 - x)
+                self.assertLess(depth, 4, f"{edges}: ice at ({x},{y}) is not in the polar band")
+            if ice:
+                # the band is continuous: every column has ice at the top and the bottom
+                for x in range(g.s.width):
+                    self.assertIn("Ice", g.s.tiles[g.grid.idx(x, 0)].features)
+                    self.assertIn("Ice", g.s.tiles[g.grid.idx(x, g.s.height - 1)].features)
+            # the saved game remembers the wrapping
+            from citar.engine.game import Game
+            from citar.engine.state import GameState
+            self.assertEqual(Game(GameState.from_dict(g.s.to_dict())).grid.wrap_x, wrap_x)
+
+    def test_rivers_reach_the_sea_and_never_cross(self):
+        for seed, mt in ((3, "continents"), (4, "pangaea"), (5, "fractal")):
+            g = new_game(map_size="small", map_type=mt, seed=seed, river_density=2, players=[{}, {}, {}])
+            grid = g.grid
+            edges = {frozenset((i, grid.neighbor_in_dir(i, d))) for i, t in enumerate(g.s.tiles)
+                     for d in range(6) if t.river & (1 << d)}
+            self.assertTrue(edges)
+
+            def corners(e, grid=grid):
+                a, b = tuple(e)
+                return [frozenset((a, b, c)) for c in grid.neighbors(a) if c in grid.neighbors(b)]
+            at = {}
+            for e in edges:
+                for c in corners(e):
+                    at.setdefault(c, set()).add(e)
+            # at most three river edges meet at a corner (a confluence); four or more would be a crossing
+            self.assertLessEqual(max(len(v) for v in at.values()), 3)
+            seen = set()
+            for e in edges:
+                if e in seen:
+                    continue
+                comp, stack = [], [e]
+                seen.add(e)
+                while stack:
+                    x = stack.pop()
+                    comp.append(x)
+                    for c in corners(x):
+                        for y in at[c] - seen:
+                            seen.add(y)
+                            stack.append(y)
+                mouth = any(g.s.tiles[t].terrain in ("Ocean", "Coast") for x in comp for c in corners(x) for t in c)
+                self.assertTrue(mouth, f"a river on {mt} never reaches the sea")
+        g = new_game(map_size="small", river_density=0, players=[{}, {}])
+        self.assertFalse(any(t.river for t in g.s.tiles))
+
+    def test_resource_rules(self):
+        def count(g, name):
+            return sum(1 for t in g.s.tiles if t.resource == name)
+
+        def kind(g, k):
+            return sum(1 for t in g.s.tiles if t.resource and g.rules.resources[t.resource]["resourceType"] == k)
+        base = new_game(map_size="small", players=[{}, {}, {}, {}])
+        lux = {t.resource for t in base.s.tiles if t.resource and base.rules.resources[t.resource]["resourceType"] == "Luxury"}
+        self.assertGreater(len(lux), 8, "luxuries with conditional 'Doesn't generate naturally' should still appear")
+        g = new_game(map_size="small", players=[{}, {}, {}, {}], resources={
+            "luxury": {"density": 0.3}, "strategic": {"density": 3, "each": {"Uranium": {"mode": "off"}}}})
+        self.assertEqual(count(g, "Uranium"), 0)
+        self.assertLess(kind(g, "Luxury"), kind(base, "Luxury"))
+        self.assertGreater(kind(g, "Strategic"), 2 * kind(base, "Strategic"))
+        g = new_game(map_size="small", players=[{}, {}, {}, {}],
+                     resources={"strategic": {"each": {"Uranium": {"mode": "cap", "value": 1}}}})
+        self.assertEqual(count(g, "Uranium"), 1)
+        g = new_game(map_size="small", players=[{}, {}, {}, {}],
+                     resources={"strategic": {"each": {"Iron": {"mode": "share", "value": 50}}}})
+        self.assertAlmostEqual(count(g, "Iron") / kind(g, "Strategic"), 0.5, delta=0.06)
+        g = new_game(map_size="small", players=[{}, {}, {}, {}], resources={"density": 0})
+        self.assertFalse(any(t.resource for t in g.s.tiles))
+
+
 class TurnTests(unittest.TestCase):
     def test_found_city_and_production(self):
         g = new_game()
@@ -300,9 +402,15 @@ class VisibilityTests(unittest.TestCase):
 
     def test_hills_see_further(self):
         from citar.engine import visibility
-        g = new_game()
-        flat = next(i for i, t in enumerate(g.s.tiles) if t.terrain == "Grassland" and not t.features
-                    and all(not g.s.tiles[n].features and g.s.tiles[n].terrain != "Mountain" for n in g.grid.within(i, 3)))
+        # a patch of open grassland; which seed has one depends on the map generator, so look at a few
+        for seed in range(21, 61):
+            g = new_game(seed=seed)
+            flat = next((i for i, t in enumerate(g.s.tiles) if t.terrain == "Grassland" and not t.features
+                         and all(not g.s.tiles[n].features and g.s.tiles[n].terrain != "Mountain"
+                                 for n in g.grid.within(i, 3))), None)
+            if flat is not None:
+                break
+        self.assertIsNotNone(flat, "no open grassland on any of the maps tried")
         seen = visibility.viewable_from(g, flat, 2)
         self.assertEqual(len(seen), len(g.grid.within(flat, 2)))
 

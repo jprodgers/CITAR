@@ -242,7 +242,7 @@ def _check_capacity(session, server: Server, grant: Optional[AccessGrant], *,
     if online is False:
         return _deny("offline",
                      f"“{server.name}” is offline — its worker is not connected. "
-                     "The owner needs to start citar-worker on that machine.",
+                     "The owner needs to start the CITAR helper (citar-worker) on that machine.",
                      server=server, grant=grant)
 
     limit = grant.concurrency if (grant and grant.concurrency) else (server.max_concurrent or 1)

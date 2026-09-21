@@ -346,7 +346,7 @@ export async function openTechTree(game) {
       };
       return walk(id);
     };
-    const W = 180, H = 58, GX = 30, GY = 8, TOP = 26;
+    const W = 180, H = 58, GX = 30, GY = 8, TOP = tree.free_techs > 0 ? 64 : 26;
     const pos = {};
     const cols = {};
     for (const t of tree.techs) { const col = R.techs[t.name].column; (cols[col] = cols[col] || []).push(t); }
@@ -388,6 +388,15 @@ export async function openTechTree(game) {
       const box = el("div", { class: cls, style: { left: x + "px", top: y + "px", width: W + "px" }, title: unl.join(", "),
         onclick: async () => {
           if (t.status === "known") return;
+          // a granted free technology (Great Library, Liberty, ruins...) is spent before anything else:
+          // clicking an available tech takes it for free rather than changing what is being researched
+          if (tree.free_techs > 0 && t.status === "available") {
+            const res = await game.tool("choose_free_tech", { tech: t.name });
+            if (!res) return;
+            toast(`Learned ${res.learned || t.name} for free`);
+            if (res.free_techs_left > 0) draw(); else m.close();
+            return;
+          }
           const res = await game.tool("set_research", { tech: t.name });
           if (!res) return;
           toast(`Researching ${res.researching || t.name}`);
@@ -399,7 +408,13 @@ export async function openTechTree(game) {
         t.progress ? el("div", { class: "bar" }, el("div", { style: { width: Math.min(100, t.progress / t.cost * 100) + "%" } })) : null);
       content.appendChild(box);
     }
-    const cur = tree.researching ? pos[tree.researching] : null;
+    if (tree.free_techs > 0) {
+      content.classList.add("free-pick");
+      content.appendChild(el("div", { class: "free-tech-banner" },
+        `⚗ Choose ${tree.free_techs} free technolog${tree.free_techs === 1 ? "y" : "ies"}: click any highlighted technology to learn it now.`));
+    } else content.classList.remove("free-pick");
+    const firstAvail = tree.free_techs > 0 ? tree.techs.find((t) => t.status === "available") : null;
+    const cur = firstAvail ? pos[firstAvail.name] : tree.researching ? pos[tree.researching] : null;
     if (cur) setTimeout(() => { content.parentElement.scrollLeft = Math.max(0, cur[0] - 200); }, 10);
   }
   draw();

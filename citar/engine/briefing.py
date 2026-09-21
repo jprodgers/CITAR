@@ -60,13 +60,21 @@ def ascii_map(g: Game, pid: int, cx: Optional[int] = None, cy: Optional[int] = N
         a = _anchor(g, pid)
         cx, cy = g.grid.xy(a if a is not None else 0)
     radius = max(2, min(int(radius), 20))
-    x0, x1 = max(0, cx - radius * 2), min(g.s.width - 1, cx + radius * 2)
-    y0, y1 = max(0, cy - radius), min(g.s.height - 1, cy + radius)
-    lines = ["      " + "".join(f"{x:<3}" if x % 5 == 0 else "   " for x in range(x0, x1 + 1)).rstrip()]
+    W, H, grid = g.s.width, g.s.height, g.grid
+
+    def span(c, r, n, wraps):
+        """The window along one axis: clamped at an edge, or running across a wrapping seam."""
+        if wraps and 2 * r + 1 < n:
+            return c - r, c + r
+        return max(0, c - r), min(n - 1, c + r)
+    x0, x1 = span(cx, radius * 2, W, grid.wrap_x)
+    y0, y1 = span(cy, radius, H, grid.wrap_y)
+    window = {grid.wrap(x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)}
+    lines = ["      " + "".join(f"{x % W:<3}" if x % 5 == 0 else "   " for x in range(x0, x1 + 1)).rstrip()]
     for y in range(y0, y1 + 1):
-        row = f"y={y:<3} " + (" " if y & 1 else "")
+        row = f"y={y % H:<3} " + (" " if y & 1 else "")
         for x in range(x0, x1 + 1):
-            idx = g.grid.idx(x, y)
+            idx = grid.wrap(x, y)
             if not p.explored[idx]:
                 row += "   "
                 continue
@@ -107,18 +115,18 @@ def ascii_map(g: Game, pid: int, cx: Optional[int] = None, cy: Optional[int] = N
     ents = []
     for c in g.s.cities.values():
         x, y = g.grid.xy(c.idx)
-        if x0 <= x <= x1 and y0 <= y <= y1 and c.idx in vis:
+        if c.idx in window and c.idx in vis:
             ents.append(f"  city '{c.name}' #{c.id} ({x},{y}) owner {g.player(c.owner).name} pop {c.pop}")
     from .visibility import unit_visible_to
     for u in g.s.units.values():
         x, y = g.grid.xy(u.idx)
-        if x0 <= x <= x1 and y0 <= y <= y1 and u.idx in vis and unit_visible_to(g, pid, u):
+        if u.idx in window and u.idx in vis and unit_visible_to(g, pid, u):
             owner = "yours" if u.owner == pid else g.player(u.owner).name
             ents.append(f"  unit #{u.id} {u.type} ({x},{y}) {owner} hp {u.hp}")
     for idx in g.grid.within(g.grid.idx(cx, cy), radius * 2):
         x, y = g.grid.xy(idx)
         t = g.s.tiles[idx]
-        if not (x0 <= x <= x1 and y0 <= y <= y1) or not p.explored[idx]:
+        if idx not in window or not p.explored[idx]:
             continue
         if t.wonder:
             ents.append(f"  natural wonder {t.wonder} ({x},{y})")
@@ -127,7 +135,8 @@ def ascii_map(g: Game, pid: int, cx: Optional[int] = None, cy: Optional[int] = N
             imp = f", improved: {t.improvement}" if t.improvement and idx in vis and not t.pillaged else ""
             amt = f" x{t.resource_amount}" if t.resource_amount else ""
             ents.append(f"  resource {t.resource}{amt} ({x},{y}){owner}{imp}")
-    out = f"Map around ({cx},{cy}), x {x0}-{x1}, y {y0}-{y1}:\n" + "\n".join(lines)
+    seam = " (the map wraps: this window runs across its edge)" if (x0 < 0 or x1 >= W or y0 < 0 or y1 >= H) else ""
+    out = f"Map around ({cx},{cy}), x {x0 % W}-{x1 % W}, y {y0 % H}-{y1 % H}{seam}:\n" + "\n".join(lines)
     if ents:
         out += "\nIn this window:\n" + "\n".join(ents[:120])
     return out
@@ -476,6 +485,12 @@ def briefing(g: Game, pid: int) -> str:
     turn_note = "YOUR TURN" if g.s.current == pid else f"waiting ({g.player(g.s.current).name}'s turn)"
     lines.append(f"=== TURN {g.turn}/{g.total_turns()} ({g.year_text()}) — {p.name} (player {pid}, {p.nation}) — "
                  f"{era} — {turn_note} ===")
+    if g.grid.wraps:
+        axes = " and ".join(a for a, w in (("east-west", g.grid.wrap_x), ("north-south", g.grid.wrap_y)) if w)
+        seams = "; ".join(s for s, w in ((f"x={g.s.width - 1} is next to x=0", g.grid.wrap_x),
+                                          (f"y={g.s.height - 1} is next to y=0", g.grid.wrap_y)) if w)
+        lines.append(f"The map ({g.s.width}x{g.s.height}) wraps {axes}: moving off one edge comes back on the "
+                     f"opposite edge ({seams}). Distances are measured the short way round.")
     st = economy.civ_stats(g, pid)
     hap = economy.happiness(g, pid)
     cur = research.current(g, pid)

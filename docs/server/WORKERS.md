@@ -45,6 +45,22 @@ way.
 
 ## For the person lending the machine
 
+The simplest way is the **CITAR helper**: the worker as one file, with nothing else to install.
+The **Servers** and **Models** pages offer the right download for your computer (Windows, macOS on
+Apple silicon, Linux x64 and ARM64); the files are also on every
+[GitHub release](https://github.com/jprodgers/CITAR/releases/latest). Start it with no arguments —
+double-click it on Windows — and it asks for the server's address and the token once, remembers
+them in `helper.json` in your CITAR folder, and connects straight away every time after that. It
+takes the same options as `citar worker` below.
+
+On macOS and Linux, make the download executable first (`chmod +x citar-helper-*`; on macOS also
+`xattr -d com.apple.quarantine citar-helper-macos-arm64`, since the build is not notarised).
+
+If the server restarts, the helper reconnects by itself (after 2 s, then backing off to a minute).
+Only a refused token stops it for good.
+
+Or install CITAR itself on that machine:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jprodgers/CITAR/main/install.sh | bash -s -- --worker
 ```

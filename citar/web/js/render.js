@@ -1,5 +1,5 @@
 // Canvas renderer for the hex map: terrain, features, rivers, routes, borders, fog, cities, units, overlays.
-import { hexCenter, hexCorners, pixelToHex, neighbor, EDGE_CORNERS, SQRT3 } from "./hex.js";
+import { hexCenter, hexCorners, pixelToHex, neighbor, stepRaw, mod, EDGE_CORNERS, SQRT3 } from "./hex.js";
 
 export const TERRAIN_COLORS = {
   Grassland: "#5b8f3d", Plains: "#a19f4c", Desert: "#d9c47f", Tundra: "#8c9b88", Snow: "#e6edf0",
@@ -63,11 +63,54 @@ export class MapRenderer {
   }
 
   centerOn(x, y) {
+    [x, y] = this.nearestCopy(x, y);
     const [cx, cy] = hexCenter(x, y, this.size);
     const r = this.canvas.getBoundingClientRect();
     this.cam.x = cx - r.width / 2;
     this.cam.y = cy - r.height / 2;
     this.invalidate();
+  }
+
+  // pixel size of one whole map (the period of a wrapping map)
+  worldSize() {
+    const m = this.model;
+    return m ? [m.width * this.size * SQRT3, m.height * this.size * 1.5] : [0, 0];
+  }
+
+  // the copy of a tile (on a wrapping map) closest to the middle of the view, in unwrapped tile coordinates
+  nearestCopy(x, y) {
+    const m = this.model;
+    if (!m || !(m.wrapX || m.wrapY)) return [x, y];
+    const r = this.canvas.getBoundingClientRect();
+    const midX = (this.cam.x + r.width / 2) / (this.size * SQRT3), midY = (this.cam.y + r.height / 2) / (this.size * 1.5);
+    if (m.wrapX) x += Math.round((midX - x) / m.width) * m.width;
+    if (m.wrapY) y += Math.round((midY - y) / m.height) * m.height;
+    return [x, y];
+  }
+
+  // keep the camera inside the first copy of a wrapping map; the picture is periodic, so this never shows
+  normalizeCam() {
+    const m = this.model;
+    if (!m) return;
+    const [ww, wh] = this.worldSize();
+    if (m.wrapX && ww > 0) this.cam.x = mod(this.cam.x, ww);
+    if (m.wrapY && wh > 0) this.cam.y = mod(this.cam.y, wh);
+  }
+
+  // a chain of tiles (a path) made continuous across a wrapping edge: each point is moved to the copy
+  // nearest the one before it, so the line does not shoot across the whole map at the seam
+  unwrapPath(pts) {
+    const m = this.model;
+    if (!m || !(m.wrapX || m.wrapY) || !pts.length) return pts;
+    const out = [this.nearestCopy(pts[0][0], pts[0][1])];
+    for (let i = 1; i < pts.length; i++) {
+      let [x, y] = pts[i];
+      const [px, py] = out[i - 1];
+      if (m.wrapX) x += Math.round((px - x) / m.width) * m.width;
+      if (m.wrapY) y += Math.round((py - y) / m.height) * m.height;
+      out.push([x, y]);
+    }
+    return out;
   }
 
   zoomAt(factor, sx, sy) {
@@ -86,6 +129,7 @@ export class MapRenderer {
 
   // visible and not hidden behind the overlay panels (unit panel bottom-left, event/city panel top-right)
   isOnScreen(x, y, margin = 60) {
+    [x, y] = this.nearestCopy(x, y);
     const [cx, cy] = hexCenter(x, y, this.size);
     const r = this.canvas.getBoundingClientRect();
     const sx = cx - this.cam.x, sy = cy - this.cam.y;
@@ -107,7 +151,9 @@ export class MapRenderer {
   screenToTile(sx, sy) {
     if (!this.model) return null;
     const [wx, wy] = this.screenToWorld(sx, sy);
-    const [x, y] = pixelToHex(wx, wy, this.size);
+    let [x, y] = pixelToHex(wx, wy, this.size);
+    if (this.model.wrapX) x = mod(x, this.model.width);
+    if (this.model.wrapY) y = mod(y, this.model.height);
     if (x < 0 || y < 0 || x >= this.model.width || y >= this.model.height) return null;
     return { x, y };
   }
@@ -127,43 +173,49 @@ export class MapRenderer {
     ctx.fillStyle = "#0b0d12";
     ctx.fillRect(0, 0, W, H);
     if (!m) return;
+    this.normalizeCam();
     const size = this.size;
     ctx.translate(-this.cam.x, -this.cam.y);
 
+    // The visible tiles as [x, y, vx, vy]: (x, y) is the tile, (vx, vy) where it is drawn. They differ
+    // only on a wrapping map, where the view can run past the edge into the next copy of the world.
     const hexW = size * SQRT3, rowH = size * 1.5;
-    const y0 = Math.max(0, Math.floor(this.cam.y / rowH) - 1);
-    const y1 = Math.min(m.height - 1, Math.ceil((this.cam.y + H) / rowH) + 1);
-    const x0 = Math.max(0, Math.floor(this.cam.x / hexW) - 1);
-    const x1 = Math.min(m.width - 1, Math.ceil((this.cam.x + W) / hexW) + 1);
+    let y0 = Math.floor(this.cam.y / rowH) - 1, y1 = Math.ceil((this.cam.y + H) / rowH) + 1;
+    let x0 = Math.floor(this.cam.x / hexW) - 1, x1 = Math.ceil((this.cam.x + W) / hexW) + 1;
+    if (!m.wrapY) { y0 = Math.max(0, y0); y1 = Math.min(m.height - 1, y1); }
+    if (!m.wrapX) { x0 = Math.max(0, x0); x1 = Math.min(m.width - 1, x1); }
     const range = [];
-    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) range.push([x, y]);
+    for (let vy = y0; vy <= y1; vy++) for (let vx = x0; vx <= x1; vx++) {
+      range.push([m.wrapX ? mod(vx, m.width) : vx, m.wrapY ? mod(vy, m.height) : vy, vx, vy]);
+    }
 
     const tileAt = (x, y) => m.tiles[y * m.width + x];
+    const wrapped = (x, y, d) => neighbor(x, y, d, m.width, m.height, m.wrapX, m.wrapY);
 
     // terrain
-    for (const [x, y] of range) {
+    for (const [x, y, vx, vy] of range) {
       const t = tileAt(x, y);
       if (!t) continue;
-      const [cx, cy] = hexCenter(x, y, size);
+      const [cx, cy] = hexCenter(vx, vy, size);
       this.hexPath(cx, cy, size + 0.6);
       ctx.fillStyle = TERRAIN_COLORS[t.terrain] || "#444";
       ctx.fill();
       if (this.showGrid && size > 14) { ctx.strokeStyle = "rgba(0,0,0,0.15)"; ctx.lineWidth = 1; ctx.stroke(); }
     }
     // owner tint
-    for (const [x, y] of range) {
+    for (const [x, y, vx, vy] of range) {
       const t = tileAt(x, y);
       if (!t || t.owner == null) continue;
-      const [cx, cy] = hexCenter(x, y, size);
+      const [cx, cy] = hexCenter(vx, vy, size);
       this.hexPath(cx, cy, size);
       ctx.fillStyle = hexAlpha(this.playerColor(t.owner), 0.13);
       ctx.fill();
     }
     // relief & features
-    for (const [x, y] of range) {
+    for (const [x, y, vx, vy] of range) {
       const t = tileAt(x, y);
       if (!t) continue;
-      const [cx, cy] = hexCenter(x, y, size);
+      const [cx, cy] = hexCenter(vx, vy, size);
       if (t.terrain === "Mountain") this.drawMountain(cx, cy, size);
       else if (t.hills) this.drawHills(cx, cy, size);
       for (const f of t.features) if (f !== "Hill") this.drawFeature(f, cx, cy, size);
@@ -173,10 +225,10 @@ export class MapRenderer {
     ctx.lineCap = "round";
     ctx.strokeStyle = "#5fb2f0";
     ctx.lineWidth = Math.max(1.5, size * 0.11);
-    for (const [x, y] of range) {
+    for (const [x, y, vx, vy] of range) {
       const t = tileAt(x, y);
       if (!t || !t.river) continue;
-      const [cx, cy] = hexCenter(x, y, size);
+      const [cx, cy] = hexCenter(vx, vy, size);
       const corners = hexCorners(cx, cy, size);
       for (let d = 0; d < 6; d++) {
         if (!(t.river & (1 << d))) continue;
@@ -185,20 +237,20 @@ export class MapRenderer {
       }
     }
     // routes
-    for (const [x, y] of range) {
+    for (const [x, y, vx, vy] of range) {
       const t = tileAt(x, y);
       const cityHere = this._cityIndex.get(y * m.width + x);
       if (!t || (!t.route && !cityHere)) continue;
-      const [cx, cy] = hexCenter(x, y, size);
+      const [cx, cy] = hexCenter(vx, vy, size);
       for (let d = 0; d < 3; d++) {
-        const n = neighbor(x, y, d, m.width, m.height);
+        const n = wrapped(x, y, d);
         if (!n) continue;
         const nt = tileAt(n[0], n[1]);
         const nCity = this._cityIndex.get(n[1] * m.width + n[0]);
         if (!nt || (!nt.route && !nCity)) continue;
         if (cityHere && nCity) continue;
         const rail = (t.route === "Railroad" || cityHere) && (nt.route === "Railroad" || nCity) && (t.route === "Railroad" || nt.route === "Railroad");
-        const [nx, ny] = hexCenter(n[0], n[1], size);
+        const [nx, ny] = hexCenter(...stepRaw(vx, vy, d), size);
         const pill = t.routePillaged || nt.routePillaged;
         ctx.strokeStyle = pill ? "rgba(90,60,40,0.5)" : rail ? "#3a3a3a" : "#8a6a44";
         ctx.lineWidth = Math.max(1, size * (rail ? 0.1 : 0.08));
@@ -208,25 +260,25 @@ export class MapRenderer {
       }
     }
     // improvements, resources, camps, villages
-    for (const [x, y] of range) {
+    for (const [x, y, vx, vy] of range) {
       const t = tileAt(x, y);
       if (!t) continue;
-      const [cx, cy] = hexCenter(x, y, size);
+      const [cx, cy] = hexCenter(vx, vy, size);
       if (t.improvement && !t.camp && !t.village && t.improvement !== "City center") this.drawImprovement(t.improvement, cx, cy, size, t.pillaged);
       if (t.resource) this.drawResource(t.resource, cx, cy, size);
       if (t.camp) this.drawCamp(cx, cy, size);
       if (t.village) this.drawVillage(cx, cy, size);
     }
     // borders
-    for (const [x, y] of range) {
+    for (const [x, y, vx, vy] of range) {
       const t = tileAt(x, y);
       if (!t || t.owner == null) continue;
-      const [cx, cy] = hexCenter(x, y, size);
+      const [cx, cy] = hexCenter(vx, vy, size);
       const corners = hexCorners(cx, cy, size - Math.max(1, size * 0.05));
       ctx.strokeStyle = this.playerColor(t.owner);
       ctx.lineWidth = Math.max(1.5, size * 0.09);
       for (let d = 0; d < 6; d++) {
-        const n = neighbor(x, y, d, m.width, m.height);
+        const n = wrapped(x, y, d);
         const nt = n ? tileAt(n[0], n[1]) : null;
         if (nt && nt.owner === t.owner) continue;
         const [a, b] = EDGE_CORNERS[d];
@@ -234,9 +286,9 @@ export class MapRenderer {
       }
     }
     // fog
-    for (const [x, y] of range) {
+    for (const [x, y, vx, vy] of range) {
       const t = tileAt(x, y);
-      const [cx, cy] = hexCenter(x, y, size);
+      const [cx, cy] = hexCenter(vx, vy, size);
       if (!t) {
         this.hexPath(cx, cy, size + 0.8);
         ctx.fillStyle = "#07080b";
@@ -247,7 +299,53 @@ export class MapRenderer {
         ctx.fill();
       }
     }
-    // overlays
+    // overlays are in tile coordinates: draw them once for every copy of the world in view
+    const [ww, wh] = this.worldSize();
+    const copies = [];
+    const kx = m.wrapX ? [Math.floor((this.cam.x - hexW) / ww), Math.floor((this.cam.x + W + hexW) / ww)] : [0, 0];
+    const ky = m.wrapY ? [Math.floor((this.cam.y - rowH) / wh), Math.floor((this.cam.y + H + rowH) / wh)] : [0, 0];
+    for (let j = ky[0]; j <= ky[1]; j++) for (let i = kx[0]; i <= kx[1]; i++) copies.push([i * ww, j * wh]);
+    for (const [ox, oy] of copies) {
+      ctx.save();
+      ctx.translate(ox, oy);
+      this.drawOverlays(size, ox, oy);
+      ctx.restore();
+    }
+    // cities, then their banners (units are drawn on top so a banner never hides one)
+    const visibleCities = [];
+    for (const [x, y, vx, vy] of range) {
+      const c = this._cityIndex.get(y * m.width + x);
+      if (c) visibleCities.push([c, (vx - x) * hexW, (vy - y) * rowH]);
+    }
+    for (const [c, ox, oy] of visibleCities) { ctx.save(); ctx.translate(ox, oy); this.drawCity(c, size); ctx.restore(); }
+    this._banners = [];
+    for (const [c, ox, oy] of visibleCities) { ctx.save(); ctx.translate(ox, oy); this.drawCityBanner(c, size, ox, oy); ctx.restore(); }
+    // units
+    for (const [x, y, vx, vy] of range) {
+      const us = this._unitIndex.get(y * m.width + x);
+      if (!us) continue;
+      const [cx, cy] = hexCenter(vx, vy, size);
+      const city = this._cityIndex.get(y * m.width + x);
+      const military = us.filter((u) => u.class !== "civilian" && u.domain !== "air");
+      const civilians = us.filter((u) => u.class === "civilian");
+      const air = us.filter((u) => u.domain === "air");
+      let offX = city ? size * 0.42 : 0, offY = city ? size * 0.28 : 0;
+      military.forEach((u, i) => this.drawUnit(u, cx + offX + i * size * 0.3, cy + offY, size * (city ? 0.78 : 1)));
+      civilians.forEach((u) => this.drawUnit(u, cx - size * 0.38 + (city ? -size * 0.05 : 0), cy + size * 0.3, size * 0.72));
+      if (air.length) this.drawAirStack(air, cx - size * 0.45, cy - size * 0.3, size);
+    }
+    // selection & hover
+    for (const [ox, oy] of copies) {
+      ctx.save();
+      ctx.translate(ox, oy);
+      this.drawSelection(size);
+      ctx.restore();
+    }
+  }
+
+  // overlays drawn under the cities and units (tile coordinates, one copy of the world)
+  drawOverlays(size) {
+    const ctx = this.ctx;
     const ov = this.overlay;
     if (ov.cityTiles) for (const [x, y, worked, locked] of ov.cityTiles) {
       const [cx, cy] = hexCenter(x, y, size);
@@ -272,7 +370,7 @@ export class MapRenderer {
     if (ov.path && ov.path.length) {
       ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
       ctx.beginPath();
-      ov.path.forEach(([x, y], i) => { const [cx, cy] = hexCenter(x, y, size); i ? ctx.lineTo(cx, cy) : ctx.moveTo(cx, cy); });
+      this.unwrapPath(ov.path).forEach(([x, y], i) => { const [cx, cy] = hexCenter(x, y, size); i ? ctx.lineTo(cx, cy) : ctx.moveTo(cx, cy); });
       ctx.stroke(); ctx.setLineDash([]);
     }
     if (ov.sites) ov.sites.forEach((st, i) => {
@@ -285,9 +383,10 @@ export class MapRenderer {
     if (ov.preview && ov.preview.length > 1) {
       ctx.strokeStyle = "rgba(255,230,120,0.95)"; ctx.lineWidth = Math.max(2, size * 0.1); ctx.lineJoin = "round";
       ctx.beginPath();
-      ov.preview.forEach(([x, y], i) => { const [cx, cy] = hexCenter(x, y, size); i ? ctx.lineTo(cx, cy) : ctx.moveTo(cx, cy); });
+      const pv = this.unwrapPath(ov.preview);
+      pv.forEach(([x, y], i) => { const [cx, cy] = hexCenter(x, y, size); i ? ctx.lineTo(cx, cy) : ctx.moveTo(cx, cy); });
       ctx.stroke();
-      const [ex, ey] = ov.preview[ov.preview.length - 1];
+      const [ex, ey] = pv[pv.length - 1];
       const [cx, cy] = hexCenter(ex, ey, size);
       ctx.beginPath(); ctx.arc(cx, cy, Math.max(9, size * 0.34), 0, Math.PI * 2);
       ctx.fillStyle = "rgba(20,20,20,0.85)"; ctx.fill(); ctx.strokeStyle = "rgba(255,230,120,0.95)"; ctx.lineWidth = 2; ctx.stroke();
@@ -327,29 +426,12 @@ export class MapRenderer {
       const [cx, cy] = hexCenter(yy.x, yy.y, size);
       this.drawYields(yy.yields, cx, cy, size);
     }
-    // cities, then their banners (units are drawn on top so a banner never hides one)
-    const visibleCities = [];
-    for (const [x, y] of range) {
-      const c = this._cityIndex.get(y * m.width + x);
-      if (c) { this.drawCity(c, size); visibleCities.push(c); }
-    }
-    this._banners = [];
-    for (const c of visibleCities) this.drawCityBanner(c, size);
-    // units
-    for (const [x, y] of range) {
-      const us = this._unitIndex.get(y * m.width + x);
-      if (!us) continue;
-      const [cx, cy] = hexCenter(x, y, size);
-      const city = this._cityIndex.get(y * m.width + x);
-      const military = us.filter((u) => u.class !== "civilian" && u.domain !== "air");
-      const civilians = us.filter((u) => u.class === "civilian");
-      const air = us.filter((u) => u.domain === "air");
-      let offX = city ? size * 0.42 : 0, offY = city ? size * 0.28 : 0;
-      military.forEach((u, i) => this.drawUnit(u, cx + offX + i * size * 0.3, cy + offY, size * (city ? 0.78 : 1)));
-      civilians.forEach((u) => this.drawUnit(u, cx - size * 0.38 + (city ? -size * 0.05 : 0), cy + size * 0.3, size * 0.72));
-      if (air.length) this.drawAirStack(air, cx - size * 0.45, cy - size * 0.3, size);
-    }
-    // selection & hover
+  }
+
+  // selection, hover and flash, drawn above everything
+  drawSelection(size) {
+    const ctx = this.ctx;
+    const ov = this.overlay;
     if (ov.selected) {
       const [cx, cy] = hexCenter(ov.selected[0], ov.selected[1], size);
       this.hexPath(cx, cy, size * 0.95);
@@ -574,7 +656,7 @@ export class MapRenderer {
     if (c.capital) this.label("★", cx, cy - r * 1.05, "#ffd84a", Math.max(10, s * 0.4));
   }
 
-  drawCityBanner(c, s) {
+  drawCityBanner(c, s, ox = 0, oy = 0) {
     const ctx = this.ctx;
     const [cx, cy] = hexCenter(c.x, c.y, s);
     const color = c.owner != null ? this.playerColor(c.owner) : "#999";
@@ -586,7 +668,7 @@ export class MapRenderer {
       const tw = ctx.measureText(name).width;
       const bw = tw + fs * 2.2, bh = fs * 1.45;
       const bx = cx - bw / 2, by = cy + s * 0.6;
-      this._banners.push({ id: c.id, x0: bx, y0: by, x1: bx + bw, y1: by + bh });
+      this._banners.push({ id: c.id, x0: bx + ox, y0: by + oy, x1: bx + bw + ox, y1: by + bh + oy });
       ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, bh / 2);
       ctx.fillStyle = c.stale ? "rgba(30,30,30,0.75)" : hexAlpha(shade(color, -0.45), 0.92); ctx.fill();
       ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
@@ -759,5 +841,6 @@ export function modelFromView(view) {
   }
   const players = {};
   for (const p of view.players) players[p.id] = p;
-  return { width: view.width, height: view.height, tiles, units: view.units, cities: view.cities, players, you: view.you };
+  return { width: view.width, height: view.height, wrapX: !!view.wrap_x, wrapY: !!view.wrap_y, tiles, units: view.units,
+           cities: view.cities, players, you: view.you };
 }

@@ -42,6 +42,11 @@ DEFAULT_CONFIG = {
     "nuclear_weapons": True,
     "tech_trading": True,
     "ruins": True,
+    "map_edges": "ice_caps",        # ice_caps | wrap_x | wrap_y | wrap_both | boxed (see mapgen.EDGE_MODES)
+    "river_density": 1.0,           # 0 = no rivers, 1 = normal, 2 = twice as many ...
+    "resources": None,              # resource density and per-resource off/cap/share (see mapgen.MapOptions)
+    "on_disconnect": "pause",       # an AI model's server stays unreachable: "pause" the game or "skip" its turn
+    "reconnect_seconds": 180,       # how long a seat keeps retrying an unreachable server before that applies
     "players": [],                  # [{"name", "color", "leader", "nation", "controller"}]
 }
 
@@ -64,7 +69,8 @@ class Game:
     def __init__(self, state: GameState, rules: Optional[Rules] = None):
         self.s = state
         self.rules = rules or get_rules()
-        self.grid = HexGrid(state.width, state.height)
+        self.grid = HexGrid(state.width, state.height, wrap_x=bool(state.config.get("wrap_x")),
+                            wrap_y=bool(state.config.get("wrap_y")))
         self.rng = random.Random()
         if state.rng_state is not None:
             st = state.rng_state
@@ -122,6 +128,17 @@ class Game:
         size = rules.const["map_sizes"].get(cfg["map_size"], rules.const["map_sizes"]["small"])
         width = cfg.get("width") or size["width"]
         height = cfg.get("height") or size["height"]
+        # The grid reads the wrap flags from the saved config, so they are settled here. A generated
+        # map takes them from its edges; a map from the editor carries its own.
+        if custom is not None:
+            cfg["wrap_x"], cfg["wrap_y"] = bool(custom.get("wrap_x")), bool(custom.get("wrap_y")) and height % 2 == 0
+            cfg["map_edges"] = None
+        else:
+            if cfg.get("map_edges") not in mapgen.EDGE_MODES:
+                cfg["map_edges"] = mapgen.DEFAULT_EDGES
+            cfg["wrap_x"], cfg["wrap_y"] = mapgen.edge_wraps(cfg["map_edges"])
+            if cfg["wrap_y"] and height % 2:
+                height += 1                 # odd rows are offset: only an even height tiles north-south
         default_players = len(custom.get("starts") or []) or size["players"] if custom else size["players"]
         players_cfg = list(cfg["players"]) or [{} for _ in range(default_players)]
         n = len(players_cfg)
@@ -161,7 +178,7 @@ class Game:
         else:
             tiles, starts, cs_starts, continents = mapgen.generate_map(
                 rules, width, height, cfg["map_type"], n, len(cs_nations), rng, ruins=cfg["ruins"],
-                nations=chosen)
+                nations=chosen, options=cfg)
 
         players = []
         for i, pc in enumerate(players_cfg):

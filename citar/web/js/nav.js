@@ -33,6 +33,9 @@ export function pageHeader(active) {
         : [])),
     el("span", { class: "muted grow tagline" }, "Civ Inspired Tool for AI Research"),
     badge,
+    // someone on a phone who switched to the full site needs a way back to the phone one
+    /iPhone|iPod|Android.*Mobile|Windows Phone/i.test(navigator.userAgent) || matchMedia("(max-width: 720px)").matches
+      ? el("a", { class: "pill", href: "/?site=mobile", title: "The phone-sized check-in site" }, "📱 Mobile site") : null,
     accountMenu());
   const update = async () => {
     if (!document.body.contains(header)) { clearInterval(timer); return; }

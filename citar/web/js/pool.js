@@ -6,6 +6,7 @@
 import { api } from "./api.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { pageHeader } from "./nav.js";
+import { helperCard } from "./helper.js";
 import * as auth from "./auth.js";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -193,9 +194,9 @@ async function workerDialog(server) {
             `${info.worker.hostname} · ${info.worker.models.length} models · `
             + `${info.worker.in_flight}/${info.worker.max_concurrent} busy`) : null),
         el("p", { class: "muted" },
-          "The worker dials out to this server, so nothing on your machine needs to be reachable "
-          + "from the internet. Run this where the model is:"),
-        el("pre", { class: "code-block" }, info.command),
+          "The helper dials out to this server, so nothing on your machine needs to be reachable "
+          + "from the internet. Run it where the model is:"),
+        helperCard({ args: info.args }),
         el("h3", {}, "Tokens"),
         ...(info.tokens.length
           ? info.tokens.map((t) => el("div", { class: "row between listrow" },
@@ -225,6 +226,8 @@ async function workerDialog(server) {
               body.append(
                 el("h3", {}, "New worker token"),
                 el("p", { class: "warn-box" }, created.warning),
+                helperCard({ args: created.args }),
+                el("p", { class: "muted small" }, "With CITAR installed on that machine instead:"),
                 el("pre", { class: "code-block" }, created.command),
                 el("button", {
                   class: "primary",
@@ -282,9 +285,10 @@ export async function renderPool(root) {
   }
 
   page.appendChild(el("h2", {}, "Your machines"));
+  page.appendChild(helperCard({ compact: mine.length > 0 }));
   if (!mine.length) {
     page.appendChild(el("p", { class: "muted" },
-      "None yet. Add a server, then run citar-worker on the machine that has the model — it "
+      "None yet. Add a server, then run the CITAR helper on the machine that has the model — it "
       + "connects outward, so you do not need to open any ports."));
   }
   for (const server of mine) {
@@ -483,7 +487,7 @@ function newServerDialog(groups, reload) {
     title: "Add a server",
     content: el("div", { class: "col gap" },
       el("p", { class: "muted" },
-        "Register the machine here, then run citar-worker on it. The worker connects outward to "
+        "Register the machine here, then run the CITAR helper on it. The helper connects outward to "
         + "this server, so you do not need a port forward, a static address or a firewall hole."),
       el("label", { class: "field" }, el("span", { class: "field-label" }, "Name"), name),
       el("label", { class: "field" }, el("span", { class: "field-label" }, "What serves the model"), provider),

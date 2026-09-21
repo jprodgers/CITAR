@@ -43,6 +43,14 @@ BACKOFF_START = 2.0
 BACKOFF_MAX = 60.0
 
 
+class Rejected(Exception):
+    """The server answered the hello with an error: a refused token or an incompatible protocol.
+
+    The one failure that retrying cannot fix. Everything else - connection refused while the server
+    restarts, a timeout, a dropped socket - is worth trying again, and is.
+    """
+
+
 @dataclass
 class WorkerConfig:
     """Everything the worker needs: where to connect, with what token, and what to serve."""
@@ -264,7 +272,7 @@ class Worker:
             raw = await asyncio.wait_for(websocket.recv(), timeout=30)
             welcome = P.parse(raw)
             if welcome.get("t") == P.ERROR:
-                raise RuntimeError(welcome.get("message") or "The server refused the connection.")
+                raise Rejected(welcome.get("message") or "The server refused this worker.")
             if welcome.get("t") != P.WELCOME:
                 raise RuntimeError(f"Unexpected first frame: {welcome.get('t')}")
 
@@ -314,13 +322,21 @@ class Worker:
                     log.warning("connection closed by the server; reconnecting")
             except asyncio.CancelledError:
                 raise
+            except Rejected as exc:
+                # A bad token will never start working. Say so plainly instead of retrying
+                # every minute forever and filling the owner's log.
+                log.error("The server rejected this worker: %s", exc)
+                log.error("Check the token. Issue a new one on the Servers page if needed.")
+                self.running = False
+                return
             except Exception as exc:
+                # Anything else - including "connection refused", which is what a worker sees while
+                # the CITAR server restarts - is temporary. Giving up here used to strand every
+                # worker after a server deploy.
                 message = str(exc) or exc.__class__.__name__
-                if "401" in message or "refused" in message.lower() or "token" in message.lower():
-                    # A bad token will never start working. Say so plainly instead of retrying
-                    # every minute forever and filling the owner's log.
-                    log.error("The server rejected this worker: %s", message)
-                    log.error("Check the token. Issue a new one on the Servers page if needed.")
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status in (401, 403):
+                    log.error("The server rejected this worker (HTTP %s). Check the token.", status)
                     self.running = False
                     return
                 log.warning("connection failed (%s); retrying in %.0fs", message, backoff)

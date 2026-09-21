@@ -4,6 +4,7 @@
 import { api } from "./api.js";
 import { el, clear, toast, modal, prompt as askText, confirmBox } from "./util.js";
 import { MapRenderer } from "./render.js";
+import { mapOptionsForm } from "./mapoptions.js";
 import { hexCenter, hexCorners, neighbor, hexDistance, EDGE_CORNERS } from "./hex.js";
 import { pageHeader } from "./nav.js";
 
@@ -564,13 +565,15 @@ class MapEditor {
     const body = el("div", { class: "grid2" }, field("Start from", f.how), field("Size", f.size), field("Width", f.w), field("Height", f.h),
       field("Map type (generated)", f.type), field("Fill terrain (blank)", f.fill), field("Civilizations (generated)", f.players),
       field("City-states (generated)", f.cs), field("Seed", f.seed), field("Place ancient ruins", f.ruins));
+    const gen = mapOptionsForm(R);
     const go = el("button", { class: "primary", onclick: async () => {
       go.disabled = true;
       go.textContent = "Working…";
       const custom = f.size.value === "custom";
       const req = { map_size: custom ? null : f.size.value, width: custom ? +f.w.value : null, height: custom ? +f.h.value : null,
         map_type: f.type.value, players: f.players.value ? +f.players.value : null, city_states: f.cs.value !== "" ? +f.cs.value : null,
-        seed: f.seed.value ? +f.seed.value : null, ruins: f.ruins.checked, blank: f.how.value === "blank" ? f.fill.value : null };
+        seed: f.seed.value ? +f.seed.value : null, ruins: f.ruins.checked, blank: f.how.value === "blank" ? f.fill.value : null,
+        ...gen.value() };
       try {
         const map = await api.generateMap(req);
         dlg.close();
@@ -580,7 +583,7 @@ class MapEditor {
       } catch (e) { toast(e.message, "error"); go.disabled = false; go.textContent = "Create"; }
     } }, "Create");
     let dlg;
-    this.guard(() => { dlg = modal({ title: "New map", content: el("div", {}, body, el("p", { class: "muted small" }, "Large generated maps take a few seconds.")), footer: go }); });
+    this.guard(() => { dlg = modal({ title: "New map", content: el("div", {}, body, gen.node, el("p", { class: "muted small" }, "Large generated maps take a few seconds.")), footer: go }); });
   }
 
   download() {

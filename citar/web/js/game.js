@@ -211,7 +211,8 @@ export class GameScreen {
 
   maybeToastEvent(ev) {
     const important = ["war_declared", "peace", "city_captured", "eliminated", "victory", "first_contact", "deal", "city_destroyed", "era", "agent_error"];
-    if (ev.type === "agent_error") { toast(ev.text, "error", 12000); return; }
+    if (ev.type === "agent_error" || ev.type === "game_paused") { toast(ev.text, "error", 12000); return; }
+    if (ev.type === "game_resumed") { toast(ev.text, "info", 6000); return; }
     const mine = this.you != null && ev.players && ev.players.includes(this.you);
     if (important.includes(ev.type) || (mine && ["unit_killed", "unit_captured", "negotiation", "message", "camp_cleared", "ruins", "tech",
         "wonder_built", "great_person_born", "golden_age", "natural_wonder", "spy", "un_vote"].includes(ev.type))) {
@@ -287,7 +288,8 @@ export class GameScreen {
     if (!idle.length) { if (center) toast("No units need orders."); return false; }
     let u;
     if (near) {
-      u = idle.reduce((best, x) => (hexDistance(x.x, x.y, near.x, near.y) < hexDistance(best.x, best.y, near.x, near.y) ? x : best));
+      const map = this.model;
+      u = idle.reduce((best, x) => (hexDistance(x.x, x.y, near.x, near.y, map) < hexDistance(best.x, best.y, near.x, near.y, map) ? x : best));
     } else {
       const idx = idle.findIndex((x) => x.id === this.selectedUnit);
       u = idle[(idx + 1) % idle.length];
@@ -387,7 +389,7 @@ export class GameScreen {
     const hostileHere = this.view.units.some((u) => u.x === tile.x && u.y === tile.y && u.class !== "civilian" && this.isHostile(u.owner))
       || this.view.cities.some((c) => c.x === tile.x && c.y === tile.y && c.owner !== this.you);
     if (hostileHere && d.class !== "civilian") {
-      const options = await Promise.all(neighbors(tile.x, tile.y, this.view.width, this.view.height).map(async ([x, y]) => {
+      const options = await Promise.all(neighbors(tile.x, tile.y, this.view.width, this.view.height, !!this.view.wrap_x, !!this.view.wrap_y).map(async ([x, y]) => {
         if (x === d.x && y === d.y) return { x, y, turns: 0, len: 0 };
         try { const p = await api.path(this.gid, this.token, d.id, x, y); return p.path ? { x, y, turns: p.turns, len: p.path.length } : null; }
         catch (e) { return null; }
@@ -478,7 +480,7 @@ export class GameScreen {
   // hostile (at war or barbarian) military units a city can bombard
   bombardTargets(c) {
     const v = this.view;
-    return v.units.filter((u) => u.owner !== this.you && u.class !== "civilian" && this.isHostile(u.owner) && hexDistance(u.x, u.y, c.x, c.y) <= 2);
+    return v.units.filter((u) => u.owner !== this.you && u.class !== "civilian" && this.isHostile(u.owner) && hexDistance(u.x, u.y, c.x, c.y, this.model) <= 2);
   }
 
   isHostile(pid) {
@@ -736,7 +738,7 @@ export class GameScreen {
         el("button", { class: `end-turn ${needs === 0 ? "ready" : ""}`, onclick: () => this.endTurn() }, "End Turn"));
     } else {
       const st = this.agentStatus[v.current_player];
-      box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${st === "thinking" ? " (thinking…)" : ""}`));
+      box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)" : ""}`));
     }
   }
 
@@ -748,7 +750,10 @@ export class GameScreen {
       b.textContent = `🏆 ${w ? w.name : "No one"} wins — ${v.victory || "game over"}`;
       b.style.display = "block";
     } else if (v.session && v.session.paused) {
-      b.textContent = "AI players are paused";
+      const why = v.session.pause_reason;
+      b.textContent = why && why.kind === "disconnect"
+        ? `⏸ Paused: ${why.message}. The game resumes by itself when the server answers again.`
+        : "AI players are paused";
       b.style.display = "block";
     } else b.style.display = "none";
   }
@@ -885,7 +890,10 @@ export class GameScreen {
     const vx = this.renderer.cam.x / (size * Math.sqrt(3)), vy = this.renderer.cam.y / (size * 1.5);
     const vw = r.width / (size * Math.sqrt(3)), vh = r.height / (size * 1.5);
     ctx.strokeStyle = "#ffe066"; ctx.lineWidth = 1;
-    ctx.strokeRect(vx * sx, vy * sy, vw * sx, vh * sy);
+    // on a wrapping map the view can straddle the seam: draw the box again one map over, so both halves show
+    for (const ox of m.wrapX ? [0, -v.width] : [0]) {
+      for (const oy of m.wrapY ? [0, -v.height] : [0]) ctx.strokeRect((vx + ox) * sx, (vy + oy) * sy, vw * sx, vh * sy);
+    }
   }
 }
 

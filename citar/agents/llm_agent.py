@@ -29,6 +29,48 @@ class _TimeUp(Exception):
     """Raised internally when the turn's time budget runs out, including while a model request is in progress."""
 
 
+class _Disconnected(Exception):
+    """Raised internally when the model's server stayed unreachable for the whole reconnect window."""
+
+
+# How long a seat keeps trying to reach its model's server before the game's disconnect policy applies
+# (pause the game, or skip the turn). Overridden per game (config "reconnect_seconds") or per seat.
+DEFAULT_RECONNECT_SECONDS = 180
+DISCONNECT_POLICIES = ("pause", "skip")
+# Failures worth retrying: the server may come back. The first group is "cannot reach it at all" - a dropped
+# connection or a worker that went away - which is what the disconnect policy is about.
+_UNREACHABLE = ("Connection", "ConnectTimeout", "ServiceUnavailable", "Unavailable")
+_TRANSIENT = _UNREACHABLE + ("Timeout", "RateLimit", "InternalServer", "Overloaded")
+
+
+def _is_unreachable(e: Exception) -> bool:
+    """Whether an error means the model's server could not be reached (rather than that it answered badly)."""
+    return any(k in type(e).__name__ for k in _UNREACHABLE)
+
+
+def reachable(cfg: dict, timeout: float = 5.0) -> bool:
+    """A cheap check that a seat's model server answers at all, used to resume a game paused by a disconnect.
+
+    A worker seat is reachable when its worker is connected. Anything else is asked for its model list:
+    any HTTP answer below 500 - even 401 - means the server is back.
+    """
+    provider = (cfg.get("provider") or "anthropic").lower()
+    if provider == "worker":
+        from ..server.workers import hub
+        return hub().is_online(cfg.get("server_id") or "")
+    if provider == "dryrun":
+        return True
+    base = cfg.get("base_url") or {"anthropic": "https://api.anthropic.com/v1",
+                                   "openai": "https://api.openai.com/v1"}.get(provider)
+    if not base:
+        return False
+    try:
+        import httpx
+        return httpx.get(base.rstrip("/") + "/models", timeout=timeout).status_code < 500
+    except Exception:
+        return False
+
+
 def _tool_defs(names: set | None = None) -> list[dict]:
     """The tool definitions sent to a model, from the one registry."""
     out = []
@@ -87,6 +129,7 @@ class LLMAgent:
         self.last_error: str | None = None
         self.cancelled = False
         self._active: set = set()
+        self._waited = 0.0          # seconds this turn spent waiting for the server to come back (not counted against it)
 
     # ------------------------------------------------------------------
     def cancel(self):
@@ -102,16 +145,46 @@ class LLMAgent:
         """Whether the game has stopped and this turn should be abandoned."""
         return self.cancelled or session.stopped
 
+    def reconnect_seconds(self, session) -> float:
+        """How long to keep trying an unreachable server: the seat's setting, else the game's, else the default."""
+        for v in (self.cfg.get("reconnect_seconds"), session.game.s.config.get("reconnect_seconds")):
+            try:
+                if v not in (None, ""):
+                    return max(0.0, float(v))
+            except (TypeError, ValueError):
+                pass
+        return float(DEFAULT_RECONNECT_SECONDS)
+
+    def disconnect_policy(self, session) -> str:
+        """What happens when the server stays unreachable: "pause" the game or "skip" this seat's turn."""
+        for v in (self.cfg.get("on_disconnect"), session.game.s.config.get("on_disconnect")):
+            if v in DISCONNECT_POLICIES:
+                return v
+        return "pause"
+
+    def _status(self, session, pid: int, status: str):
+        """Tell the game screen what the seat is doing ("thinking", "reconnecting")."""
+        session.agent_status[pid] = status
+        session._broadcast({"type": "agent", "player": pid, "status": status})
+
     def _step(self, session, pid: int, conv, deadline: float | None = None):
-        """One model call (timed and metered), retrying transient connection problems before giving up.
-        With a deadline (end of the turn's time budget) the request may only use the time left, and running out of
-        time raises _TimeUp instead of an error."""
-        delays = [3, 10, 30]
-        for attempt in range(len(delays) + 1):
+        """One model call (timed and metered), riding out connection problems.
+
+        A transient failure is retried with backoff for up to the reconnect window, so a server that drops for
+        a few seconds - a worker reconnecting, LM Studio restarting, Wi-Fi blinking - costs nothing but the wait.
+        Time spent waiting does not count against the turn. If the server is still unreachable when the window
+        closes, _Disconnected is raised and the game's disconnect policy decides what happens next.
+
+        With a deadline (end of the turn's time budget) the request may only use the time left, and running out
+        of time raises _TimeUp instead of an error."""
+        delays = [2, 3, 5, 10, 15, 20, 30]
+        first_failure = None
+        attempt = 0
+        while True:
             if self._halted(session):
                 raise _Halted()
             if deadline is not None:
-                remaining = deadline - time.time()
+                remaining = deadline + self._waited - time.time()
                 if remaining <= 5:
                     raise _TimeUp()
                 conv.request_timeout = remaining
@@ -126,25 +199,46 @@ class LLMAgent:
                     pid, seconds, input_tokens=d.get("input_tokens", 0), output_tokens=d.get("output_tokens", 0),
                     reasoning_tokens=d.get("reasoning_tokens", 0), malformed=step.malformed)
                 self._meter(session, conv, seconds, d)
+                if first_failure is not None:
+                    self._thought(session, pid, f"(reconnected after {time.time() - first_failure:.0f}s)", "system")
+                    self._status(session, pid, "thinking")
                 return step
             except Exception as e:
                 if self._halted(session):
                     raise _Halted()
                 name = type(e).__name__
                 self._meter(session, conv, time.perf_counter() - t0, {})
-                if deadline is not None and time.time() >= deadline - 5:
+                unreachable = _is_unreachable(e)
+                if not unreachable and deadline is not None and time.time() >= deadline + self._waited - 5:
                     session.metrics.model_step(pid, time.perf_counter() - t0)
                     raise _TimeUp()
-                transient = any(k in name for k in ("Connection", "Timeout", "RateLimit", "InternalServer", "ServiceUnavailable"))
-                if not transient or attempt == len(delays):
+                if not any(k in name for k in _TRANSIENT):
                     raise
-                if deadline is not None and time.time() + delays[attempt] >= deadline - 5:
-                    raise _TimeUp()
-                self._thought(session, pid, f"(model call failed: {name}: {e}; retrying in {delays[attempt]}s)", "system")
-                for _ in range(delays[attempt] * 2):
+                now = time.time()
+                if first_failure is None:
+                    first_failure = now
+                window = self.reconnect_seconds(session)
+                if now - first_failure >= window:
+                    if unreachable:
+                        raise _Disconnected(f"{name}: {e}") from e
+                    raise
+                delay = min(delays[min(attempt, len(delays) - 1)], max(1.0, window - (now - first_failure)))
+                attempt += 1
+                if unreachable:
+                    self._status(session, pid, "reconnecting")
+                self._thought(session, pid, f"(model call failed: {name}: {e}; retrying in {delay:.0f}s — will keep "
+                                            f"trying for {window - (now - first_failure):.0f}s more)", "system")
+                slept = 0.0
+                while slept < delay:
                     if self._halted(session):
                         raise _Halted()
+                    # a worker that reconnects is tried straight away rather than at the end of the backoff
+                    if self.cfg.get("provider") == "worker" and slept >= 1 and reachable(self.cfg):
+                        break
                     time.sleep(0.5)
+                    slept += 0.5
+                if unreachable:
+                    self._waited += time.time() - now
 
     def _meter(self, session, conv, seconds: float, d: dict):
         """Record a model call (time and tokens) in the usage ledger, which reports turn into costs."""
@@ -307,6 +401,7 @@ class LLMAgent:
         state = _TurnState()
         calls_made = steps = nudges = 0
         started = time.time()
+        self._waited = 0.0
         try:
             while True:
                 if self._halted(session):
@@ -321,7 +416,7 @@ class LLMAgent:
                 if calls_made >= self.max_calls:
                     self._limit(session, pid, "tool_limit", f"reached {self.max_calls} tool calls")
                     return
-                if self.max_turn_seconds and time.time() - started > self.max_turn_seconds:
+                if self.max_turn_seconds and time.time() - started - self._waited > self.max_turn_seconds:
                     self._limit(session, pid, "time_limit", f"exceeded {int(self.max_turn_seconds)}s")
                     return
                 step = self._step(session, pid, conv,
@@ -370,6 +465,9 @@ class LLMAgent:
             self._limit(session, pid, "time_limit", f"exceeded {int(self.max_turn_seconds)}s (the model was still "
                                                    "generating when time ran out)")
             return
+        except _Disconnected as e:
+            self._disconnected(session, pid, str(e))
+            return
         except Exception as e:
             if self._halted(session):
                 return
@@ -379,6 +477,29 @@ class LLMAgent:
         finally:
             self._active.discard(conv)
             self._record_usage(conv)
+
+    def _disconnected(self, session, pid: int, detail: str):
+        """The server stayed unreachable for the whole reconnect window: apply the game's disconnect policy.
+
+        "pause" stops the whole game - bots included - until the server answers again (or someone presses
+        Resume); the interrupted turn is then replayed from where it stood. "skip" ends this seat's turn, and the
+        next turn tries again, waiting out another reconnect window first.
+        """
+        self._end_reason(session, pid, "disconnected")
+        self.last_error = f"server unreachable: {detail}"
+        where = self.cfg.get("base_url") or self.cfg.get("server_id") or self.cfg.get("provider") or "the model server"
+        window = self.reconnect_seconds(session)
+        with session.lock:
+            name = session.game.player(pid).name
+        if self.disconnect_policy(session) == "pause":
+            self._thought(session, pid, f"(server still unreachable after {window:.0f}s: pausing the game)", "system")
+            session.pause_for_disconnect(pid, f"{name}'s model server ({where}) has been unreachable for "
+                                              f"{window:.0f}s", self.cfg)
+            return
+        self._thought(session, pid, f"(server still unreachable after {window:.0f}s: skipping this turn)", "system")
+        with session.lock:
+            session.game.emit("agent_error", f"{name}'s model server ({where}) was unreachable for {window:.0f}s, so "
+                                             f"its turn was skipped ({detail[:200]}).", None, player=pid)
 
     def _check_context(self, session, pid: int, conv):
         """Record the model's context window (LM Studio) and warn once if it is too small for CITAR's prompts."""

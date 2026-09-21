@@ -1,7 +1,7 @@
 ; Windows installer for CITAR.
 ;
 ;   python -m PyInstaller installer/citar.spec --noconfirm
-;   ISCC.exe /DAppVersion=0.1.0 installer\citar.iss
+;   ISCC.exe /DAppVersion=0.1.1 installer\citar.iss
 ;
 ; Produces installer\output\CITAR-<version>-setup.exe.
 ;
@@ -12,7 +12,7 @@
 ; program's files.
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 
 #define AppName       "CITAR"
