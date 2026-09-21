@@ -121,6 +121,19 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(any(t.river for t in g.s.tiles))
         self.assertFalse(any(t.resource == "Uranium" for t in g.s.tiles))
 
+    def test_a_job_ends_when_its_model_is_eliminated(self):
+        sch = self.scheduler()
+        run = sch.create_run(dry_suite(models=("dry-a",), turn_limit=200, delay=0.05))
+        job = run["jobs"][0]
+        self.assertTrue(wait_for(lambda: job["status"] == "running" and self.manager.get(job["game_id"]), sch=sch))
+        s = self.manager.get(job["game_id"])
+        with s.lock:
+            s.game.player(0).alive = False
+        self.assertTrue(wait_for(lambda: job["status"] == "done", sch=sch, timeout=30))
+        self.assertEqual(job["result"]["outcome"], "eliminated")
+        self.assertEqual(job["result"]["performance"], 0)
+        self.assertTrue(s.stopped, "the bots should not play out a settled game")
+
     def test_sequential_run_plays_each_model_to_the_turn_limit(self):
         sch = self.scheduler()
         run = sch.create_run(dry_suite())

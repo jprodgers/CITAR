@@ -49,11 +49,22 @@ def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list
     for s in all_sessions():
         if s.id in exclude or s.stopped or s.game.s.phase != "playing":
             continue
-        if any(seat.type == "llm" and (seat.llm or {}).get("server_id") == server_id for seat in s.seats):
+        # only a seat still in the game: an eliminated model will never be asked anything again, even if
+        # the bots play on to the end
+        if any(seat.type == "llm" and (seat.llm or {}).get("server_id") == server_id and _alive(s, seat.player)
+               for seat in s.seats):
             out.append(f"game “{s.name}”")
     with _claims_lock:
         out.extend(sorted(_claims.get(server_id, ())))
     return out
+
+
+def _alive(session, pid: int) -> bool:
+    """Whether a seat's civilization is still in the game."""
+    try:
+        return bool(session.game.player(pid).alive)
+    except Exception:
+        return True
 
 
 def max_parallel(pooled: dict) -> int:

@@ -213,6 +213,15 @@ class PooledWork(unittest.TestCase):
         finally:
             sch.stop()
 
+    def test_an_eliminated_model_frees_its_machine(self):
+        from citar.pool import seats
+        game = self.manager.create({"map_size": "duel", "seed": 3},
+                                   [{"type": "llm", "llm": {"server_id": self.server_id, "model": "m1"}}, {"type": "bot"}])
+        game.suspend()
+        self.assertEqual(len(seats.occupied(self.server_id)), 1)
+        game.game.player(0).alive = False       # the bots play on; the model will never be asked again
+        self.assertEqual(seats.occupied(self.server_id), [])
+
     def test_a_probe_run_holds_its_machine(self):
         from citar.pool import seats
         seats.claim(self.server_id, "probe run “x”")

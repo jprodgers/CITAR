@@ -656,7 +656,9 @@ class BenchmarkScheduler:
                 job.update({"status": "cancelled", "error": "The game was closed.", "finished": _now()})
                 self._touch(run)
                 continue
-            if s.game.s.phase != "playing":
+            if s.game.s.phase != "playing" or not s.game.player((s.benchmark or {}).get("llm_player", 0)).alive:
+                # once the model is eliminated the result is settled (performance 0), and the bots playing
+                # on would only hold the machine and the CPU for nothing
                 self._finish_job(run, job, s)
                 continue
             if job["status"] == "resuming" and job["server_id"] not in self._restricted and run["status"] == "running":
@@ -880,6 +882,8 @@ class BenchmarkScheduler:
         self._record_progress(run, job, s)
         job["result"] = job["progress"]
         job.update({"status": "done", "finished": _now(), "pause_reason": None})
+        if s.game.s.phase == "playing":
+            s.stop()                # the model was eliminated: stop the bots playing out a settled game
         try:
             s.save("benchmark")
         except Exception as e:
@@ -948,7 +952,7 @@ def game_progress(s: GameSession) -> dict:
     alive = {p.id: p.alive for p in majors}
     rep = s.metrics.summary({llm: {"name": g.player(llm).name, "controller": "llm", "model": (s.benchmark or {}).get("model")}})[llm]
     best_opp = max((scores[p.id] for p in majors if p.id != llm), default=0)
-    outcome = None
+    outcome = "eliminated" if not alive.get(llm) else None
     if g.s.phase != "playing":
         outcome = "won" if g.s.winner == llm else ("eliminated" if not alive.get(llm) else f"lost ({g.s.victory or 'game over'})")
     series = [{"turn": e["turn"], "llm": (e["players"].get(str(llm)) or {}).get("score", 0),
