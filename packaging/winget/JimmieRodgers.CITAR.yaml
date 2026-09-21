@@ -3,7 +3,7 @@
 # winget version manifest for CITAR: the file that ties the installer and locale manifests together.
 
 PackageIdentifier: JimmieRodgers.CITAR
-PackageVersion: 0.1.0
+PackageVersion: 0.1.2
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.12.0

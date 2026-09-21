@@ -1,5 +1,5 @@
 {
-    "version": "0.1.0",
+    "version": "0.1.2",
     "description": "Civilization V-style 4X game for benchmarking language models",
     "homepage": "https://github.com/jprodgers/CITAR",
     "license": "MPL-2.0",
@@ -11,8 +11,8 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/jprodgers/CITAR/releases/download/v0.1.0/CITAR-0.1.0-windows-x64.zip",
-            "hash": "b485879157709ec95c73cf76854dca1d3e010dde3dae96c02be085b8654f3caf"
+            "url": "https://github.com/jprodgers/CITAR/releases/download/v0.1.2/CITAR-0.1.2-windows-x64.zip",
+            "hash": "6622427b05a6560fcdad969bb7015c0709758272321e3785cacf09ab4a8d6da3"
         }
     },
     "extract_dir": "CITAR",
