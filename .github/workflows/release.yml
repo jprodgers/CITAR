@@ -189,11 +189,22 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then pip install pillow && python installer/make_icon.py && icon="--icon $(pwd -W)/installer/citar.ico"; fi
           python -m PyInstaller --onefile --noconfirm --name "${{ matrix.name }}" $icon \
             --collect-submodules citar.worker --hidden-import citar.agents.providers.openai_provider \
-            --collect-submodules websockets \
+            --collect-submodules websockets --collect-data certifi \
             --exclude-module fastapi --exclude-module starlette --exclude-module uvicorn \
             --exclude-module sqlalchemy --exclude-module alembic --exclude-module anthropic \
             --exclude-module tkinter --exclude-module numpy --exclude-module PIL \
             --distpath dist --workpath build installer/helper_entry.py
+
+      - name: TLS works on a distribution that keeps its certificates elsewhere
+        # The bundled OpenSSL looks for CA roots where the build machine keeps them (Ubuntu's
+        # /usr/lib/ssl). Fedora does not, and 0.1.1's helper failed every handshake there. Any answer
+        # from the server is fine here (a 404 is expected); a certificate error is not.
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          out=$(docker run --rm -v "$PWD/dist:/d" fedora:latest timeout 15 /d/${{ matrix.asset }} \
+                --server https://github.com --token x --no-hardware --base-url http://127.0.0.1:9/v1 2>&1 || true)
+          echo "$out"
+          if echo "$out" | grep -q CERTIFICATE_VERIFY_FAILED; then exit 1; fi
 
       - name: The helper runs
         shell: bash

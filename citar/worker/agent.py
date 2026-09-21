@@ -43,6 +43,38 @@ BACKOFF_START = 2.0
 BACKOFF_MAX = 60.0
 
 
+#: Where Linux distributions keep their CA bundle. A frozen helper carries its own OpenSSL, which only
+#: looks where the build machine kept it (Ubuntu's /usr/lib/ssl); Fedora, Arch and friends keep it
+#: elsewhere, and there the helper failed every TLS handshake.
+SYSTEM_CA_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+                     "/etc/ssl/ca-bundle.pem", "/etc/ssl/cert.pem", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem")
+
+
+def tls_context():
+    """A verifying TLS context that finds CA certificates wherever this machine keeps them.
+
+    The platform defaults (which honour SSL_CERT_FILE and SSL_CERT_DIR), plus the certifi bundle that
+    ships with the helper, plus the usual Linux system bundles. Verification is never relaxed; there
+    are just more places to find the roots.
+    """
+    import os
+    import ssl
+    ctx = ssl.create_default_context()
+    extra = list(SYSTEM_CA_BUNDLES)
+    try:
+        import certifi
+        extra.insert(0, certifi.where())
+    except ImportError:
+        pass
+    for path in extra:
+        if os.path.isfile(path):
+            try:
+                ctx.load_verify_locations(cafile=path)
+            except (OSError, ssl.SSLError):
+                pass
+    return ctx
+
+
 class Rejected(Exception):
     """The server answered the hello with an error: a refused token or an incompatible protocol.
 
@@ -252,16 +284,18 @@ class Worker:
             platform=f"{platform.system()} {platform.release()}")
 
         ssl_context = None
-        if self.cfg.insecure and self.cfg.ws_url.startswith("wss://"):
+        if self.cfg.ws_url.startswith("wss://"):
             import ssl
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            log.warning("TLS verification is OFF (--insecure). Use this only against a test server.")
+            if self.cfg.insecure:
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                log.warning("TLS verification is OFF (--insecure). Use this only against a test server.")
+            else:
+                ssl_context = tls_context()
 
-        # `ssl` must be OMITTED for the library to pick its own default for a wss:// URI — passing
-        # ssl=None explicitly is rejected outright. Only include it when overriding with a custom
-        # context, which is the --insecure path.
+        # `ssl` must be OMITTED for the library to pick its own default for a ws:// URI — passing
+        # ssl=None explicitly is rejected outright — so it is only set for wss://.
         connect_kwargs = {"max_size": P.MAX_FRAME_BYTES, "ping_interval": 20, "ping_timeout": 20}
         if ssl_context is not None:
             connect_kwargs["ssl"] = ssl_context

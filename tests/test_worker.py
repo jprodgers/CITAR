@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import tests  # noqa: F401
@@ -396,6 +397,18 @@ class EndToEnd(unittest.TestCase):
         # A bad token will never start working, so the worker stops instead of retrying forever.
         self.assertFalse(thread.is_alive(), "worker kept retrying a token that will never work")
         self.assertFalse(worker.running)
+
+    def test_tls_context_finds_roots_when_the_platform_paths_are_wrong(self):
+        """A frozen helper's OpenSSL looks where the build machine kept its CA roots; on another Linux
+        distribution that is nowhere, and every handshake failed. The bundled roots must still load."""
+        import os
+        import ssl
+        from citar.worker.agent import tls_context
+        with mock.patch.dict(os.environ, {"SSL_CERT_FILE": "/nonexistent/cert.pem", "SSL_CERT_DIR": "/nonexistent"}):
+            ctx = tls_context()
+        self.assertGreater(ctx.cert_store_stats()["x509_ca"], 50)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
 
     def test_unreachable_server_is_retried_not_abandoned(self):
         """'Connection refused' is what a worker sees while the server restarts; it must keep trying."""
