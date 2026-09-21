@@ -472,7 +472,7 @@ class ProbeRunner:
         """Ask a run to stop after the current case."""
         run = self.get_run(rid)
         with self.lock:
-            if rid in self.queue and run["status"] == "queued":
+            if rid in self.queue and (run["status"] == "queued" or run["status"].startswith("waiting")):
                 self.queue.remove(rid)
                 run["status"] = "cancelled"
                 self._write(run)
@@ -498,7 +498,17 @@ class ProbeRunner:
         """The worker thread: take the next queued run and execute it."""
         while True:
             with self.lock:
-                rid = self.queue.pop(0) if self.queue else None
+                queue = list(self.queue)
+            # the first run whose machine is free, so one busy machine does not hold up every other run
+            rid = next((r for r in queue if not self._machine_busy(r)), None)
+            if rid is None and queue:
+                time.sleep(15)
+                continue
+            with self.lock:
+                if rid is not None:
+                    if rid not in self.queue:
+                        continue            # stopped meanwhile
+                    self.queue.remove(rid)
             if rid is None:
                 # nothing left: free the GPU of whatever this runner loaded
                 if self._loaded_by_us:
@@ -541,6 +551,21 @@ class ProbeRunner:
             self._run_cases(rid, run, probe, scn, done, cases, act)
         finally:
             pool_seats.release(server_id, f"probe run “{run['name']}”")
+
+    def _machine_busy(self, rid: str) -> bool:
+        """Whether a queued run's machine is in use by a game; if so, the run says what it is waiting for."""
+        from .pool import seats as pool_seats
+        try:
+            run = self.get_run(rid)
+        except ProbeError:
+            return False
+        held = pool_seats.occupied(run["llm"].get("server_id"))
+        note = f"waiting for {', '.join(held)}" if held else None
+        status = "waiting (machine busy)" if held else "queued"
+        if run.get("waiting") != note or run["status"] != status:
+            run["waiting"], run["status"] = note, status
+            self._write(run)
+        return bool(held)
 
     def _wait_free(self, rid: str, server_id):
         """Wait while the run's machine is being used by a game, so the run does not fight it for the slot."""

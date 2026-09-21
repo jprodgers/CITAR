@@ -222,6 +222,35 @@ class PooledWork(unittest.TestCase):
         game.game.player(0).alive = False       # the bots play on; the model will never be asked again
         self.assertEqual(seats.occupied(self.server_id), [])
 
+    def test_the_probe_queue_skips_a_run_whose_machine_is_busy(self):
+        """One busy machine must not hold up probe runs on every other machine."""
+        from citar import probes
+        from citar.pool import seats
+        runner = probes.ProbeRunner.__new__(probes.ProbeRunner)     # no background thread: drive _loop by hand
+        runner.manager, runner.lock, runner.live, runner._stop_run = self.manager, threading.Lock(), {}, set()
+        runner._thread = None
+        ids = []
+        for n, server in (("busy", self.server_id), ("free", "sv-elsewhere")):
+            rid = f"test-{n}-{int(time.time() * 1000) % 100000}"
+            runner._write({"id": rid, "name": n, "llm": {"server_id": server}, "status": "queued", "jobs": []})
+            ids.append(rid)
+        runner.queue = list(ids)
+        started = []
+
+        def fake_run(rid):
+            started.append(rid)
+            runner.queue.clear()            # stop the loop once something has run
+        runner._run = fake_run
+        seats.claim(self.server_id, "game “long one”")
+        try:
+            runner._loop()
+        finally:
+            seats.release(self.server_id, "game “long one”")
+        self.assertEqual(started, [ids[1]], "the run on the free machine should go first")
+        waiting = runner.get_run(ids[0])
+        self.assertEqual(waiting["status"], "waiting (machine busy)")
+        self.assertIn("long one", waiting["waiting"])
+
     def test_a_probe_run_holds_its_machine(self):
         from citar.pool import seats
         seats.claim(self.server_id, "probe run “x”")
