@@ -4,7 +4,7 @@ import { api } from "./api.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
 import { openMetrics } from "./metrics.js";
-import { registry } from "./servers.js";
+import { seatServers } from "./lobby.js";
 
 const STATUS_CLASS = { running: "live", loading: "live", resuming: "live", paused: "warn", queued: "", done: "good", failed: "bad", cancelled: "muted" };
 const COLORS = { llm: "#4f8cff", bot: "#e8c547" };
@@ -159,6 +159,7 @@ function renderJob(run, job, ctx) {
   } }, label);
   let statusText = job.status;
   if (job.status === "paused" && job.pause_reason) statusText = `paused (${job.pause_reason === "restricted" ? "restricted hours" : job.pause_reason})`;
+  if (job.status === "queued" && job.waiting) statusText = `queued — ${job.waiting.replace(/^waiting: /, "")}`;
   if (job.status === "loading") statusText = "loading model…";
   if (job.status === "running" && p.llm_to_move) statusText = p.agent_status === "thinking" ? "model thinking" : "model's turn";
   else if (job.status === "running") statusText = "bots moving";
@@ -233,7 +234,7 @@ function renderSuites(card, suites, ctx) {
     el("span", { class: "muted" }, "Saved configurations: servers, models and scenarios. Swap the models and run again."),
     el("span", { class: "grow" }), importInput,
     el("button", { onclick: () => importInput.click() }, "Import JSON"),
-    el("button", { class: "primary", onclick: async () => { ctx.registry = await registry(true); openSuiteEditor(await api.newSuite(), ctx, true); } }, "+ New suite")));
+    el("button", { class: "primary", onclick: async () => { ctx.registry = await seatServers(true); openSuiteEditor(await api.newSuite(), ctx, true); } }, "+ New suite")));
   if (!suites.length) { card.appendChild(el("p", { class: "muted" }, "No suites saved yet.")); return; }
   const table = el("table", { class: "list" }, el("tr", {}, ...["Suite", "Servers & models", "Scenarios", "Games", "Updated", ""].map((h) => el("th", {}, h))));
   for (const s of suites) {
@@ -245,7 +246,7 @@ function renderSuites(card, suites, ctx) {
       el("td", {}, s.updated ? new Date(s.updated * 1000).toLocaleString() : "–"),
       el("td", { class: "actions" },
         el("button", { class: "small primary", onclick: () => startRun({ suite_id: s.id }, s.name, s.jobs, ctx) }, "▶ Run"),
-        el("button", { class: "small", onclick: async () => { ctx.registry = await registry(true); openSuiteEditor(await api.suite(s.id), ctx, false); } }, "Edit"),
+        el("button", { class: "small", onclick: async () => { ctx.registry = await seatServers(true); openSuiteEditor(await api.suite(s.id), ctx, false); } }, "Edit"),
         el("button", { class: "small", onclick: async () => {
           const full = await api.suite(s.id);
           delete full.id; full.name = `${full.name} (copy)`;
@@ -342,7 +343,8 @@ function openSuiteEditor(suite, ctx, isNew) {
     if (!server) pick.prepend(el("option", { value: sv.server_id || "", selected: true }, "(deleted server — pick another)"));
     box.append(el("div", { class: "row" }, el("span", { class: "server-icon" }, server && server.kind === "test" ? "🧪" : server && server.kind === "api" ? "🔑" : "🖥"),
       pick, server ? el("span", { class: "muted small" }, `${server.connection.max_parallel} game${server.connection.max_parallel > 1 ? "s" : ""} at once · ` +
-        (server.restricted_hours.enabled ? "has restricted hours" : "no restricted hours") + " · change these on the Servers page") : null,
+        (server.pooled ? `connected through the CITAR helper${server.online ? "" : " (offline now)"}; jobs wait while a game is using it`
+          : (server.restricted_hours.enabled ? "has restricted hours" : "no restricted hours") + " · change these on the Servers page")) : null,
       el("span", { class: "grow" }),
       el("button", { class: "small danger", onclick: () => { S.servers.splice(i, 1); draw(); } }, "Remove server")));
     if (!server) return box;

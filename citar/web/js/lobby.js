@@ -233,13 +233,14 @@ function pooledEntries(pool) {
                      loaded: !!m.loaded, profiles: [], inference: {}, info: {} }))
       .sort((a, b) => b.loaded - a.loaded);
     return { id: s.id, name: s.name, kind: "pool", pooled: true, online: s.online, admission: s.admission,
-             connection: { provider: "worker" }, models };
+             connection: { provider: "worker", max_parallel: s.max_concurrent || 1 }, restricted_hours: { enabled: false },
+             models };
   });
 }
 
-async function seatServers() {
+export async function seatServers(force = false) {
   const [reg, pool] = await Promise.all([
-    registry().catch(() => ({ servers: [] })),          // the registry is for administrators
+    registry(force).catch(() => ({ servers: [] })),     // the registry is for administrators
     api.poolServers("game").catch(() => ({ servers: [] }))]);
   return { ...reg, servers: [...(reg.servers || []), ...pooledEntries(pool)] };
 }

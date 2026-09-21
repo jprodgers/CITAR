@@ -8,7 +8,60 @@ creates the game may use the machine.
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
+
+# ---------------------------------------------------------------------------- who is using a machine
+# Game sessions are found through every SessionManager; work that runs games outside one (a probe
+# case plays in an unregistered session) holds a claim instead, for as long as it runs.
+_claims: dict[str, set] = {}
+_claims_lock = threading.Lock()
+
+
+def claim(server_id: Optional[str], holder: str) -> None:
+    """Mark a machine as in use by something that is not a registered game (a probe run, say)."""
+    if server_id:
+        with _claims_lock:
+            _claims.setdefault(server_id, set()).add(holder)
+
+
+def release(server_id: Optional[str], holder: str) -> None:
+    """Undo :func:`claim`."""
+    if server_id:
+        with _claims_lock:
+            _claims.get(server_id, set()).discard(holder)
+
+
+def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list[str]:
+    """What is using a model server right now: the names of live games with an AI seat on it, and claims.
+
+    A game counts while it is being played - not finished, not closed - even between its AI's turns,
+    because its next turn will want the machine. A paused game counts too: it resumes where it left
+    off. ``exclude`` holds session ids the caller already accounts for (its own games).
+
+    This is what lets queued benchmarks and probes wait for a machine instead of fighting a running
+    game for its single slot.
+    """
+    if not server_id:
+        return []
+    from ..server.session import all_sessions
+    out = []
+    for s in all_sessions():
+        if s.id in exclude or s.stopped or s.game.s.phase != "playing":
+            continue
+        if any(seat.type == "llm" and (seat.llm or {}).get("server_id") == server_id for seat in s.seats):
+            out.append(f"game “{s.name}”")
+    with _claims_lock:
+        out.extend(sorted(_claims.get(server_id, ())))
+    return out
+
+
+def max_parallel(pooled: dict) -> int:
+    """How many requests a pooled machine takes at once (its registration, or 1)."""
+    try:
+        return max(1, int(((pooled.get("config") or {}).get("connection") or {}).get("max_parallel") or 1))
+    except (TypeError, ValueError):
+        return 1
 
 #: Settings a model entry may carry for its seats, copied into the agent configuration.
 _INFERENCE = ("reasoning_effort", "max_tokens", "temperature", "max_tool_calls_per_turn", "tool_mode")
@@ -85,5 +138,6 @@ def authorize(session, user, seats: list[dict]) -> None:
         server = session.get(Server, llm["server_id"])
         decision = admission.check(session, user, server, "game", online=hub().is_online(server.id),
                                    in_flight=hub().in_flight(server.id))
-        if not decision.allowed:
+        # "busy right now" is fine for a game: its turns take their place in the machine's queue
+        if not decision.allowed and decision.code != "concurrency":
             raise ValueError(f"{server.name}: {decision.reason}")

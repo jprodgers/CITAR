@@ -180,6 +180,7 @@ class LLMAgent:
         delays = [2, 3, 5, 10, 15, 20, 30]
         first_failure = None
         attempt = 0
+        busy_noted = False
         while True:
             if self._halted(session):
                 raise _Halted()
@@ -208,6 +209,20 @@ class LLMAgent:
                     raise _Halted()
                 name = type(e).__name__
                 self._meter(session, conv, time.perf_counter() - t0, {})
+                if getattr(e, "refusal", "") == "busy":
+                    # The machine is answering someone else (another game sharing it). That is a queue, not a
+                    # failure: wait for the slot, without counting it against the reconnect window or the turn.
+                    if not busy_noted:
+                        busy_noted = True
+                        self._thought(session, pid, f"(waiting for a free slot: {e})", "system")
+                    first_failure = None
+                    now = time.time()
+                    for _ in range(4):
+                        if self._halted(session):
+                            raise _Halted()
+                        time.sleep(0.5)
+                    self._waited += time.time() - now
+                    continue
                 unreachable = _is_unreachable(e)
                 if not unreachable and deadline is not None and time.time() >= deadline + self._waited - 5:
                     session.metrics.model_step(pid, time.perf_counter() - t0)

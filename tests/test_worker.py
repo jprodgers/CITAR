@@ -161,6 +161,68 @@ class Hub(unittest.TestCase):
         self.assertEqual(self.hub.in_flight("sv1"), 1)
 
 
+class PooledWork(unittest.TestCase):
+    """Benchmarks on a machine from the Servers page, and waiting for a game that holds it."""
+
+    def setUp(self):
+        _reset()
+        with db.session() as s:
+            owner = accounts.create_user(s, handle="owner", email="o@x.cc", password="a long enough phrase",
+                                         status="active", email_verified=True)
+            server = Server(owner_id=owner.id, name="GPU box", kind="owned", provider="lmstudio",
+                            config={"id": "sv_gpu", "models": [{"key": "m1"}]})
+            s.add(server)
+            s.flush()
+            self.server_id = server.id
+        from citar.server.session import SessionManager
+        self.manager = SessionManager()
+        self.dir = Path(tempfile.mkdtemp(prefix="citar-pooled-"))
+
+    def tearDown(self):
+        for sid in list(self.manager.sessions):
+            self.manager.delete(sid)
+
+    def test_a_queued_benchmark_job_waits_for_a_game_on_its_machine(self):
+        from citar.pool import seats
+        from citar.server.benchmarks import BenchmarkScheduler, resolve_group
+        group = resolve_group({"server_id": self.server_id, "models": [{"model": "m1"}]})
+        self.assertFalse(group["missing"])
+        self.assertTrue(group["pooled"])
+        self.assertEqual(group["models"][0]["model"], "m1")
+
+        game = self.manager.create({"map_size": "duel", "seed": 3},
+                                   [{"type": "llm", "llm": {"server_id": self.server_id, "model": "m1"}}, {"type": "bot"}])
+        game.suspend()                      # a paused game still holds its machine: it will resume
+        self.assertEqual(len(seats.occupied(self.server_id)), 1)
+
+        sch = BenchmarkScheduler(self.manager, self.dir, autostart=False)
+        try:
+            run = sch.create_run({"name": "t", "mode": "sequential", "repeats": 1,
+                                  "servers": [{"server_id": self.server_id, "models": [{"model": "m1"}]}],
+                                  "scenarios": [{"name": "s", "map_size": "duel", "turn_limit": 2, "opponents": 1}]})
+            sch.tick()
+            job = run["jobs"][0]
+            self.assertEqual(job["status"], "queued")
+            self.assertIn("GPU box is in use by", job["waiting"])
+
+            self.manager.delete(game.id)     # the game ends: the machine is free, the job may start
+            self.assertEqual(seats.occupied(self.server_id), [])
+            sch.tick()
+            self.assertIn(job["status"], ("loading", "running"))
+            self.assertIsNone(job["waiting"])
+        finally:
+            sch.stop()
+
+    def test_a_probe_run_holds_its_machine(self):
+        from citar.pool import seats
+        seats.claim(self.server_id, "probe run “x”")
+        try:
+            self.assertEqual(seats.occupied(self.server_id), ["probe run “x”"])
+        finally:
+            seats.release(self.server_id, "probe run “x”")
+        self.assertEqual(seats.occupied(self.server_id), [])
+
+
 class Authentication(unittest.TestCase):
     def setUp(self):
         _reset()

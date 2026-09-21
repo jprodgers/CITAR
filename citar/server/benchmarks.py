@@ -107,6 +107,11 @@ def resolve_group(group: dict) -> dict:
     """A suite's server group joined with the registry: display fields and each model's key (so runs keep a readable
     record even if the registry changes later)."""
     sv = REG.find(group.get("server_id"))
+    if sv is None:
+        from ..pool import seats as pool_seats
+        pooled = pool_seats.lookup(group.get("server_id"))
+        if pooled is not None:
+            return _resolve_pooled(group, pooled)
     out = {"id": group.get("server_id"), "server_id": group.get("server_id"), "missing": sv is None,
            "name": sv["name"] if sv else f"(deleted server {group.get('server_id')})",
            "provider": sv["connection"]["provider"] if sv else None, "base_url": sv["connection"].get("base_url") if sv else None,
@@ -121,6 +126,30 @@ def resolve_group(group: dict) -> dict:
             mm["profile_name"] = prof["name"] if prof else None
             mm["label"] = m.get("label") or entry.get("label") or entry["key"]
         else:
+            mm["missing"] = True
+        out["models"].append(mm)
+    return out
+
+
+def _resolve_pooled(group: dict, pooled: dict) -> dict:
+    """A suite group on a machine from the Servers page, played through its helper.
+
+    Models are named by key (what the helper reports); there are no load profiles, because CITAR does not
+    load or unload models on somebody else's machine. How many games may run on it at once is its
+    registration's max_parallel.
+    """
+    from ..pool import seats as pool_seats
+    known = {m.get("key") for m in (pooled["config"].get("models") or [])} | \
+        {m.get("key") for m in pool_seats.live_models(pooled["id"])}
+    out = {"id": pooled["id"], "server_id": pooled["id"], "missing": False, "pooled": True, "name": pooled["name"],
+           "provider": "worker", "base_url": None, "max_parallel": pool_seats.max_parallel(pooled), "models": []}
+    for m in group.get("models") or []:
+        mm = dict(m)
+        key = m.get("model") or m.get("model_id")
+        mm["model_id"] = mm["model"] = key
+        mm["profile_id"] = mm["profile_name"] = None
+        mm["label"] = m.get("label") or key
+        if key not in known:
             mm["missing"] = True
         out["models"].append(mm)
     return out
@@ -661,11 +690,20 @@ class BenchmarkScheduler:
     def _start_jobs(self):
         # paused jobs keep their slot: their model stays assigned to the server and resumes where it left off
         """Start as many queued jobs as the servers' limits allow."""
+        from ..pool import seats as pool_seats
         busy: dict[str, int] = {}
+        ours = set()
         for run in self.runs.values():
             for job in run["jobs"]:
                 if job["status"] in ACTIVE:
                     busy[job["server_key"]] = busy.get(job["server_key"], 0) + 1
+                if job.get("game_id"):
+                    ours.add(job["game_id"])
+        # Games that are not ours - somebody's lobby game, a probe - hold their machine too. A queued job
+        # waits for them rather than fighting a running game for the machine's slot.
+        others: dict[str, list] = {}
+        for sid in {j["server_key"] for r in self.runs.values() for j in r["jobs"] if j["status"] == "queued"}:
+            others[sid] = pool_seats.occupied(sid, exclude=frozenset(ours))
         for run in sorted(self.runs.values(), key=lambda r: r["created"]):
             if run["status"] != "running":
                 continue
@@ -678,8 +716,14 @@ class BenchmarkScheduler:
                 if job["server_id"] in self._restricted:
                     continue
                 limit = self._server(run, job).get("max_parallel", 1)
-                if busy.get(job["server_key"], 0) >= limit:
+                held = others.get(job["server_key"]) or []
+                if busy.get(job["server_key"], 0) + len(held) >= limit:
+                    note = f"waiting: {job['server_name']} is in use by {', '.join(held)}" if held else None
+                    if job.get("waiting") != note:
+                        job["waiting"] = note
+                        self._touch(run)
                     continue
+                job["waiting"] = None
                 busy[job["server_key"]] = busy.get(job["server_key"], 0) + 1
                 run_busy += 1
                 job["status"] = "loading"
@@ -719,6 +763,8 @@ class BenchmarkScheduler:
 
     def _ensure_model(self, run: dict, job: dict) -> float:
         """Load the model a job needs, if CITAR manages loading on that server."""
+        if self._server(run, job).get("pooled"):
+            return 0.0              # somebody else's machine: its owner decides what is loaded
         sv = REG.get(job["server_id"])
         m = self._model_cfg(run, job)
         entry = REG.model_entry(sv, m.get("model_id") or m["model"])

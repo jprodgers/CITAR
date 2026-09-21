@@ -18,6 +18,9 @@ An experiment is a JSON object:
                {"label": "old", "bot": "frozen_ab12cd34"}, ...],
      "rotate": true}
 
+Optional map generation keys pass straight to the generator: "map_edges" (ice_caps, wrap_x, wrap_y, wrap_both,
+boxed), "river_density" (1 = normal) and "resources" (densities and per-resource rules; see mapgen.MapOptions).
+
 Game i uses seed+i and maps[i % len(maps)]; with "rotate" the seat list is rotated by i so every label plays every
 start position. "turns" 0 plays to the speed's time-victory turn. Seats with "bot": "basic" are frozen when the
 experiment is submitted, so later edits to basic.py don't mix into a running experiment (use "live" to opt out).
@@ -205,7 +208,9 @@ def game_spec(exp: dict, i: int) -> dict:
             "speed": exp["speed"], "turns": exp.get("turns") or 0, "difficulty": exp.get("difficulty") or "Prince",
             "barbarians": exp.get("barbarians", "normal"), "barbarian_difficulty": exp.get("barbarian_difficulty"),
             "nation": exp.get("nation"), "city_states": exp.get("city_states"), "seats": seats,
-            "ai_base_values": exp.get("ai_base_values")}
+            "ai_base_values": exp.get("ai_base_values"),
+            # map generation (see mapgen.MapOptions); absent means the generator's defaults
+            **{k: exp[k] for k in ("map_edges", "river_density", "resources") if exp.get(k) is not None}}
 
 
 # ----------------------------------------------------------------------------
@@ -239,6 +244,7 @@ def play(spec: dict) -> dict:
                   "difficulty": spec["difficulty"], "speed": spec["speed"], "city_states": spec.get("city_states"),
                   "ai_base_values": spec.get("ai_base_values") or "unciv",
                   "turn_limit": spec["turns"] or None,
+                  **{k: spec[k] for k in ("map_edges", "river_density", "resources") if spec.get(k) is not None},
                   "players": [{"controller": "bot", "nation": seat.get("nation") or spec.get("nation"),
                                "difficulty": seat.get("difficulty")} for seat in seats]})
     bots = {}

@@ -103,12 +103,12 @@ function drawRuns(card, runs, ctx) {
     const open = openRuns.has(r.id);
     table.appendChild(el("tr", { class: "clickable", onclick: () => { open ? openRuns.delete(r.id) : openRuns.add(r.id); ctx.redrawRuns(); } },
       el("td", {}, el("b", {}, r.name), el("div", { class: "muted small" }, `${r.provider || ""} ${r.model || ""} · ${new Date(r.created * 1000).toLocaleString()}`)),
-      el("td", {}, el("span", { class: `pill ${r.status === "running" ? "live" : r.status === "finished" ? "good" : r.status === "failed" ? "bad" : ""}` }, r.status)),
+      el("td", {}, el("span", { class: `pill ${r.status === "running" ? "live" : r.status === "finished" ? "good" : r.status === "failed" ? "bad" : ""}`, title: r.waiting || null }, r.status)),
       el("td", {}, bar(r.done / Math.max(1, r.total), `${r.done} / ${r.total}`)),
       el("td", {}, r.summary && r.summary.pass_rate != null ? `${Math.round(r.summary.pass_rate * 100)}%` : "–"),
       el("td", { class: "small" }, Object.entries(outcomes).map(([k, v]) => el("span", { class: `pill ${OUTCOME_CLASS[k] || ""}`, style: { marginRight: "3px" } }, `${k} ${v}`))),
       el("td", {}, el("div", { class: "row" },
-        ["running", "queued"].includes(r.status) ? el("button", { class: "small", onclick: async (e) => { e.stopPropagation(); await api.probeStop(r.id); ctx.refresh(); } }, "Stop") :
+        (["running", "queued"].includes(r.status) || r.status.startsWith("waiting")) ? el("button", { class: "small", onclick: async (e) => { e.stopPropagation(); await api.probeStop(r.id); ctx.refresh(); } }, "Stop") :
           el("button", { class: "small", onclick: async (e) => {
             e.stopPropagation();
             if (!(await confirmBox("Delete run", `Delete the run "${r.name}" and its results?`))) return;

@@ -217,6 +217,30 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(rec["end_reason"], "end_turn")
         self.assertFalse(any(e["type"] == "agent_error" for e in s.game.s.events))
 
+    def test_a_busy_machine_is_waited_for_not_treated_as_a_disconnect(self):
+        """Two games sharing a machine take turns on its slot. 'Busy' must never pause a game or skip a turn,
+        however short the reconnect window."""
+        free_at = time.time() + 3
+
+        class Busy(ConnectionError):
+            refusal = "busy"
+
+        class SharedConversation(ScriptedConversation):
+            def step(self):
+                if time.time() < free_at:
+                    raise Busy("GPU box is busy (1/1 in flight).")
+                return super().step()
+
+        ScriptedConversation.scripts = {}
+        with mock.patch("citar.agents.llm_agent.make_conversation", SharedConversation):
+            s = self.manager.create({"map_size": "duel", "seed": 4, "on_disconnect": "pause", "reconnect_seconds": 1},
+                                    [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
+            self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the turn should be played once the slot frees")
+            self.assertFalse(s.paused)
+        self.manager.delete(s.id)
+        rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
+        self.assertEqual(rec["end_reason"], "end_turn")
+
     def test_disconnect_skip_policy_skips_after_the_window(self):
         class DownConversation(ScriptedConversation):
             def step(self):

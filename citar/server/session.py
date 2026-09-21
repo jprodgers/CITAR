@@ -7,6 +7,7 @@ import secrets
 import threading
 import time
 import traceback
+import weakref
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -575,11 +576,23 @@ def load_save_file(path: Path) -> dict:
         return json.load(f)
 
 
+_MANAGERS: Optional[weakref.WeakSet] = None
+
+
+def all_sessions() -> list:
+    """Every live session in this process, across session managers (for "is this machine in use?")."""
+    return [s for m in list(_MANAGERS or ()) for s in list(m.sessions.values())]
+
+
 class SessionManager:
     """Every live game, and the operations that create or load one."""
     def __init__(self):
+        global _MANAGERS
         self.sessions: dict[str, GameSession] = {}
         self.lock = threading.Lock()
+        if _MANAGERS is None:
+            _MANAGERS = weakref.WeakSet()
+        _MANAGERS.add(self)
 
     def create(self, config: dict, seats_cfg: list[dict], name: str = "", track: bool = True) -> GameSession:
         """Create a game from a lobby configuration and start its session."""

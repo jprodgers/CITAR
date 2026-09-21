@@ -392,7 +392,8 @@ class ProbeRunner:
         self._stop_run: set = set()
         RUNS.mkdir(parents=True, exist_ok=True)
         for run in self.list_runs():      # runs interrupted by a server restart go back in the queue
-            if run["status"] in ("queued", "running", "waiting (quiet hours)", "waiting (restricted hours)"):
+            if run["status"] in ("queued", "running", "waiting (quiet hours)", "waiting (restricted hours)",
+                                 "waiting (machine busy)"):
                 self.queue.append(run["id"])
         self._kick()
 
@@ -452,7 +453,10 @@ class ProbeRunner:
         model = "scripted bot" if llm.get("provider") == "bot" else (llm.get("model") or llm.get("provider") or "model")
         if llm.get("server_id"):
             from . import servers
-            sv = servers.get(llm["server_id"])
+            from .pool import seats as pool_seats
+            sv = servers.find(llm["server_id"]) or pool_seats.lookup(llm["server_id"])
+            if sv is None:
+                raise ProbeError(f"No server '{llm['server_id']}'.")
             model = f"{model} @ {sv['name']}"
         run = {"id": rid, "name": name or f"{probe['name']} · {model}", "probe": probe, "llm": {k: v for k, v in llm.items() if k != "api_key"},
                "repeats": n_rep, "jobs": [{"case": c["id"], "rep": r} for c in chosen for r in range(n_rep)],
@@ -526,9 +530,43 @@ class ProbeRunner:
         cases = {c["id"]: c for c in probe["cases"]}
         act = f"probe:{rid}"
         from . import usage
+        from .pool import seats as pool_seats
         usage.tracker().activity(act, "probe", run["name"], parent={"kind": "probe", "id": probe["id"], "name": probe["name"]},
                                  ref={"probe_run": rid, "scenario": probe.get("scenario")},
                                  server_id=run["llm"].get("server_id"), model=run["llm"].get("model"))
+        server_id = run["llm"].get("server_id")
+        self._wait_free(rid, server_id)
+        pool_seats.claim(server_id, f"probe run “{run['name']}”")
+        try:
+            self._run_cases(rid, run, probe, scn, done, cases, act)
+        finally:
+            pool_seats.release(server_id, f"probe run “{run['name']}”")
+
+    def _wait_free(self, rid: str, server_id):
+        """Wait while the run's machine is being used by a game, so the run does not fight it for the slot."""
+        from .pool import seats as pool_seats
+        waited = False
+        while server_id and rid not in self._stop_run:
+            held = pool_seats.occupied(server_id)
+            if not held:
+                break
+            if not waited:
+                waited = True
+                run = self.get_run(rid)
+                run["status"] = "waiting (machine busy)"
+                run["waiting"] = f"waiting for {', '.join(held)}"
+                self._write(run)
+                self.live = {"run": rid, "case": f"(waiting: the machine is in use by {', '.join(held)})",
+                             "since": time.time()}
+            time.sleep(15)
+        if waited:
+            run = self.get_run(rid)
+            run["status"], run["waiting"] = "running", None
+            self._write(run)
+
+    def _run_cases(self, rid, run, probe, scn, done, cases, act):
+        """Every case of a run, in order, with the configured repeats."""
+        from . import usage
         self._prepare_model(run)
         for job in run["jobs"]:
             if rid in self._stop_run:

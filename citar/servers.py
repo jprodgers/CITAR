@@ -649,6 +649,15 @@ def display_name(server: Optional[dict], model: Optional[dict], key: str = "") -
 
 def seat_ref(server_id: str, model_ref: str, profile_id: Optional[str] = None, **extra) -> dict:
     """The small, saveable description of an LLM seat: which server, model and load profile, plus seat overrides."""
+    if find(server_id) is None:
+        from .pool import seats as pool_seats
+        pooled = pool_seats.lookup(server_id)
+        if pooled is not None:
+            # a machine from the Servers page: the model is named by its key, and there are no load profiles
+            d = {"server_id": pooled["id"], "model_id": model_ref, "model": model_ref, "profile_id": None,
+                 "server": pooled["name"], "provider": "worker"}
+            d.update({k: v for k, v in extra.items() if v is not None})
+            return d
     sv = get(server_id)
     m = model_entry(sv, model_ref)
     if m is None:
