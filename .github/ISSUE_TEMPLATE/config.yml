@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea
+    url: https://github.com/jprodgers/CITAR/discussions
+    about: For anything that is not a specific bug or request - how to do something, what a result means, showing off a game.
+  - name: Security problem
+    url: https://github.com/jprodgers/CITAR/security/advisories/new
+    about: Please report vulnerabilities privately here rather than in a public issue.

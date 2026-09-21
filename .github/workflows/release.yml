@@ -1,0 +1,240 @@
+# Build and publish a release.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Everything below is derived from that tag. The jobs run in an order that matters: the Python
+# package is published first because every other install route installs *from* PyPI, and the
+# GitHub release is created last because the Homebrew, Scoop and winget manifests point at the
+# files attached to it.
+#
+# PyPI publishing uses trusted publishing (OpenID Connect), so there is no API token in this
+# repository's secrets. It has to be configured once, at
+# https://pypi.org/manage/project/citar/settings/publishing/, naming this repository, the workflow
+# file `release.yml` and the environment `pypi`.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, without the leading v (a dry run; nothing is published)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------------- checks
+  verify:
+    name: tests must pass first
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -e ".[all]"
+      - run: python -m unittest discover -s tests
+      - run: python scripts/audit_routes.py --strict
+
+      - name: The tag matches the version in the source
+        # A tag that disagrees with citar/__init__.py produces a release whose artifacts all report
+        # a different version from the one people downloaded.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          source="$(python -c 'import citar; print(citar.__version__)')"
+          if [ "$tag" != "$source" ]; then
+            echo "::error::tag v$tag does not match citar.__version__ ($source)"
+            exit 1
+          fi
+          echo "v$tag matches the source"
+
+      - name: The changelog has an entry for this version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          grep -q "## \[\?$tag\]\?" CHANGELOG.md || {
+            echo "::error::CHANGELOG.md has no section for $tag"
+            exit 1
+          }
+
+  # ---------------------------------------------------------------------------------- python
+  build-python:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package
+          path: dist/*
+
+  publish-pypi:
+    needs: build-python
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # trusted publishing; no token in secrets
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: python-package, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ---------------------------------------------------------------------------------- windows
+  build-windows:
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all]"
+          pip install pyinstaller pillow
+
+      - name: Icon
+        run: python installer/make_icon.py
+
+      - name: Bundle
+        run: python -m PyInstaller installer/citar.spec --noconfirm --distpath dist --workpath build
+
+      - name: The bundle runs
+        # Catches a missing hidden import, which PyInstaller reports as a clean build and a
+        # program that dies on first launch.
+        run: |
+          dist\CITAR\citar.exe --version
+          dist\CITAR\citar.exe where
+          dist\CITAR\citar.exe doctor --quiet
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF}" != "${GITHUB_REF#refs/tags/v}" ]; then
+            echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Installer
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.version.outputs.value }} installer\citar.iss
+
+      - name: Portable zip
+        # For Scoop, and for anyone who would rather not run an installer at all.
+        shell: bash
+        run: |
+          cd dist
+          7z a -tzip "CITAR-${{ steps.version.outputs.value }}-windows-x64.zip" CITAR >/dev/null
+          sha256sum "CITAR-${{ steps.version.outputs.value }}-windows-x64.zip" \
+            | cut -d' ' -f1 > "CITAR-${{ steps.version.outputs.value }}-windows-x64.zip.sha256"
+
+      - name: Checksum the installer
+        shell: bash
+        run: |
+          cd installer/output
+          sha256sum *.exe | cut -d' ' -f1 > "CITAR-${{ steps.version.outputs.value }}-setup.exe.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            installer/output/*.exe
+            installer/output/*.sha256
+            dist/*.zip
+            dist/*.sha256
+
+  # ---------------------------------------------------------------------------------- container
+  publish-image:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/citar
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # arm64 is here for the Raspberry Pi and Apple silicon cases; it builds under emulation
+          # and is the slowest step in the release.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------------- release
+  github-release:
+    needs: [build-python, build-windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+
+      - name: Collect the assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.exe' -o -name '*.zip' -o -name '*.whl' \
+            -o -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} release/ \;
+          ls -la release
+
+      - name: Notes for this version
+        # The section of CHANGELOG.md for this tag, so the release page and the changelog cannot
+        # disagree.
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[?" v "\\]?" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          echo "" >> notes.md
+          echo "---" >> notes.md
+          echo "" >> notes.md
+          echo "### Checksums" >> notes.md
+          echo '```' >> notes.md
+          (cd release && sha256sum *.exe *.zip *.whl *.tar.gz 2>/dev/null || true) >> notes.md
+          echo '```' >> notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') }}

@@ -1,0 +1,183 @@
+{
+ "Route": {
+  "name": "Route",
+  "influence": 50,
+  "weightForCityStateType": {
+   "Friendly": 2,
+   "Hostile": 0.2,
+   "Maritime": 1.2,
+   "Mercantile": 1.5
+  },
+  "id": "route"
+ },
+ "Clear Barbarian Camp": {
+  "name": "Clear Barbarian Camp",
+  "type": "Global",
+  "influence": 50,
+  "minimumCivs": 1,
+  "weightForCityStateType": {
+   "Cultured": 3,
+   "Maritime": 3,
+   "Mercantile": 3,
+   "Militaristic": 9,
+   "Religious": 3
+  },
+  "id": "clear_barbarian_camp"
+ },
+ "Connect Resource": {
+  "name": "Connect Resource",
+  "weightForCityStateType": {
+   "Maritime": 2,
+   "Mercantile": 3
+  },
+  "id": "connect_resource"
+ },
+ "Construct Wonder": {
+  "name": "Construct Wonder",
+  "weightForCityStateType": {
+   "Cultured": 3
+  },
+  "id": "construct_wonder"
+ },
+ "Acquire Great Person": {
+  "name": "Acquire Great Person",
+  "weightForCityStateType": {
+   "Cultured": 3
+  },
+  "id": "acquire_great_person"
+ },
+ "Conquer City State": {
+  "name": "Conquer City State",
+  "influence": 80,
+  "weightForCityStateType": {
+   "Hostile": 2,
+   "Friendly": 0.2,
+   "Militaristic": 2
+  },
+  "id": "conquer_city_state"
+ },
+ "Find Player": {
+  "name": "Find Player",
+  "influence": 35,
+  "weightForCityStateType": {
+   "Maritime": 3,
+   "Mercantile": 2
+  },
+  "id": "find_player"
+ },
+ "Find Natural Wonder": {
+  "name": "Find Natural Wonder",
+  "weightForCityStateType": {
+   "Hostile": 0.3,
+   "Militaristic": 0.5
+  },
+  "id": "find_natural_wonder"
+ },
+ "Give Gold": {
+  "name": "Give Gold",
+  "influence": 20,
+  "duration": 30,
+  "weightForCityStateType": {
+   "Cultured": 3,
+   "Maritime": 3,
+   "Mercantile": 3.5,
+   "Militaristic": 2,
+   "Religious": 3
+  },
+  "id": "give_gold"
+ },
+ "Pledge to Protect": {
+  "name": "Pledge to Protect",
+  "influence": 20,
+  "duration": 30,
+  "weightForCityStateType": {
+   "Cultured": 3.5,
+   "Maritime": 3,
+   "Mercantile": 3,
+   "Militaristic": 2,
+   "Religious": 3
+  },
+  "id": "pledge_to_protect"
+ },
+ "Contest Culture": {
+  "name": "Contest Culture",
+  "type": "Global",
+  "duration": 30,
+  "minimumCivs": 3,
+  "weightForCityStateType": {
+   "Cultured": 2,
+   "Maritime": 0.5,
+   "Mercantile": 0.5,
+   "Militaristic": 0.5,
+   "Religious": 0.5
+  },
+  "id": "contest_culture"
+ },
+ "Contest Faith": {
+  "name": "Contest Faith",
+  "type": "Global",
+  "duration": 30,
+  "minimumCivs": 3,
+  "weightForCityStateType": {
+   "Cultured": 0.5,
+   "Maritime": 0.5,
+   "Mercantile": 0.5,
+   "Militaristic": 0.5,
+   "Religious": 2
+  },
+  "id": "contest_faith"
+ },
+ "Contest Technologies": {
+  "name": "Contest Technologies",
+  "type": "Global",
+  "duration": 30,
+  "minimumCivs": 3,
+  "weightForCityStateType": {
+   "Religious": 0.5
+  },
+  "id": "contest_technologies"
+ },
+ "Invest": {
+  "name": "Invest",
+  "type": "Global",
+  "influence": 0,
+  "duration": 30,
+  "minimumCivs": 2,
+  "weightForCityStateType": {
+   "Mercantile": 1.5
+  },
+  "id": "invest",
+  "params": [
+   50.0
+  ]
+ },
+ "Bully City State": {
+  "name": "Bully City State",
+  "duration": 30,
+  "weightForCityStateType": {
+   "Hostile": 2,
+   "Irrational": 1.5,
+   "Friendly": 0.3
+  },
+  "id": "bully_city_state"
+ },
+ "Denounce Civilization": {
+  "name": "Denounce Civilization",
+  "duration": 30,
+  "weightForCityStateType": {
+   "Cultured": 1.5,
+   "Maritime": 2,
+   "Mercantile": 1.5,
+   "Militaristic": 1.5,
+   "Religious": 2.5
+  },
+  "id": "denounce_civilization"
+ },
+ "Spread Religion": {
+  "name": "Spread Religion",
+  "weightForCityStateType": {
+   "Religious": 3
+  },
+  "id": "spread_religion"
+ }
+}

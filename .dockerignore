@@ -1,0 +1,33 @@
+# Everything that must not reach the image, either because it is state, because it is private, or
+# because including it would bust the build cache on every edit.
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+*.egg-info
+build
+dist
+installer/output
+installer/build
+
+# State and secrets. The image starts empty and writes to its volume.
+saves
+benchmarks/runs
+benchmarks/suites/*.json
+config/servers.json
+ops
+citar.env
+.env
+*.db
+*.db-wal
+*.db-shm
+
+# Not needed at runtime.
+docs
+wiki
+site
+tests
+scripts/vps_*.sh
+.claude

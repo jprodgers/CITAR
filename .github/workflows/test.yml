@@ -1,0 +1,233 @@
+# Tests, lint and the checks that a review cannot do by eye.
+#
+# The matrix is deliberately asymmetric. Every push runs the full suite on Linux across the
+# supported Python versions, because that is what the server runs on; Windows and macOS run one
+# version each, because what they catch is platform behaviour (path separators, file locking, the
+# console encoding) and not version differences, and three full matrices for that is a lot of
+# runner minutes for very little.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes the run in flight for the same branch.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all]"
+
+      - name: Tests
+        # Not pytest: the suite is unittest and is run the same way here as on a laptop, so a
+        # failure can be reproduced with the command in the contributing guide.
+        run: python -m unittest discover -s tests -v
+
+      - name: Route audit
+        # Every HTTP route must declare a gate or be listed as public with a reason. This is the
+        # check that a new route added in a hurry cannot quietly skip.
+        run: python scripts/audit_routes.py --strict
+
+      - name: Ruleset integrity
+        run: |
+          python scripts/check_refs.py
+          python scripts/check_uniques.py
+
+      - name: requirements.txt matches pyproject.toml
+        # The server installs from requirements.txt while everything else installs the package.
+        # Two lists of dependencies that disagree produce a deployment that starts and then fails
+        # on an import nobody tested.
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: python scripts/sync_requirements.py --check
+
+      - name: Documentation links
+        # Only once: the answer cannot differ by platform, and a broken link failing five jobs
+        # says the same thing five times.
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: python scripts/check_links.py --strict
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ruff
+      - run: ruff check --output-format=github .
+
+  frontend:
+    name: front-end syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Parse every module as an ES module
+        # `node --check` on a .js file parses it as CommonJS, where `import` is a syntax error only
+        # in some positions — a broken template literal inside a ternary once passed this check and
+        # broke the whole module graph in the browser. Copying to .mjs forces module parsing.
+        run: |
+          mkdir -p /tmp/esm
+          failed=0
+          for file in citar/web/js/*.js; do
+            cp "$file" "/tmp/esm/$(basename "${file%.js}").mjs"
+          done
+          for file in /tmp/esm/*.mjs; do
+            node --check "$file" || failed=1
+          done
+          exit $failed
+
+  package:
+    name: wheel installs and runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build
+        run: |
+          pip install build
+          python -m build
+
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install --quiet dist/*.whl
+
+      - name: It runs, and its data came with it
+        # The failure this catches is a packaging change that drops the ruleset or the web client:
+        # the wheel installs, the command runs, and the first game fails with a missing file.
+        run: |
+          /tmp/fresh/bin/citar --version
+          /tmp/fresh/bin/citar where
+          /tmp/fresh/bin/citar doctor --quiet
+          /tmp/fresh/bin/python -c "
+          from citar import paths
+          from citar.engine.rules import get_rules
+          assert (paths.package_data() / 'ruleset').is_dir(), 'ruleset missing from the wheel'
+          assert (paths.web_dir() / 'index.html').is_file(), 'web client missing from the wheel'
+          assert (paths.migrations_dir() / 'env.py').is_file(), 'migrations missing from the wheel'
+          assert list((paths.migrations_dir() / 'versions').glob('*.py')), 'no migrations in the wheel'
+          assert len(get_rules().techs) > 50, 'the ruleset did not load'
+          print('package contents OK')
+          "
+
+      - name: An installed copy writes to the user directory, not site-packages
+        # The bug this pins: every module used to resolve its own directory from __file__, which
+        # put saved games inside site-packages once CITAR was installed from a wheel.
+        run: |
+          /tmp/fresh/bin/python -c "
+          from citar import paths
+          assert not paths.in_source_checkout(), 'an installed copy thinks it is a checkout'
+          assert 'site-packages' not in str(paths.save_dir()), paths.save_dir()
+          print('state directory OK:', paths.save_dir())
+          "
+
+      - name: Metadata is valid for PyPI
+        run: |
+          pip install twine
+          twine check dist/*
+
+  installer:
+    name: install.sh works
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: Build a wheel for the installer to use
+        # --from lets the script install a local wheel instead of PyPI, so the installer is tested
+        # on the code in the pull request rather than on the last release.
+        run: |
+          pip install build
+          python -m build --wheel
+
+      - name: Install
+        run: bash install.sh --from "$(ls dist/*.whl)" --no-setup
+
+      - name: It installed, and it runs
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          citar --version
+          citar where
+          citar doctor --quiet
+          # The unattended path the installers use. With no model server running on a CI runner it
+          # configures for scripted bots, which is the correct outcome and the one least tested by
+          # hand.
+          citar setup --local --non-interactive
+
+      - name: Uninstall leaves no program behind, and no data missing
+        run: |
+          bash install.sh --uninstall
+          test ! -e "$HOME/.local/share/citar-app" || { echo "prefix survived the uninstall"; exit 1; }
+          test ! -e "$HOME/.local/bin/citar" || { echo "command survived the uninstall"; exit 1; }
+          echo "uninstall is clean"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: citar:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: It starts and answers
+        run: |
+          docker run -d --name citar-ci -p 8765:8765 citar:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8765/api/auth/config >/dev/null 2>&1; then
+              echo "answered after ${attempt}s"
+              docker rm -f citar-ci
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the container never answered:"
+          docker logs citar-ci
+          exit 1

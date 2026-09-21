@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up the CITAR database, configuration and saves
+Documentation=file:///opt/citar/docs/RUNBOOK.md
+
+[Service]
+Type=oneshot
+User=root
+# Root because the database is citar:citar 0750 and the env file is root:citar 0640.
+ExecStart=/usr/local/bin/citar-backup
+Nice=10
+IOSchedulingClass=idle

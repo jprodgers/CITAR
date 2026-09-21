@@ -1,0 +1,117 @@
+# Documentation site, published to GitHub Pages by .github/workflows/docs.yml.
+#
+#   mkdocs serve      preview at http://127.0.0.1:8000
+#   mkdocs build      into site/
+#
+# The Markdown in docs/ is the source of truth and is written to read well on GitHub as well as
+# here, so this configuration adds navigation, search and an API reference and changes nothing
+# about the prose.
+
+site_name: CITAR
+site_description: Civ Inspired Tool for AI Research - a Civilization V-style 4X game for benchmarking language models
+site_url: https://jprodgers.github.io/CITAR/
+repo_url: https://github.com/jprodgers/CITAR
+repo_name: jprodgers/CITAR
+edit_uri: edit/main/docs/
+copyright: MPL-2.0. Rules and data derived from UnCiv.
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  logo: assets/icon.png
+  favicon: assets/icon.png
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    # Follows the reader's system setting, with a manual override. CITAR's own client is dark, and
+    # forcing either on somebody reading documentation at 2am is rude.
+    - media: "(prefers-color-scheme)"
+      toggle: { icon: material/brightness-auto, name: Follow system }
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle: { icon: material/brightness-7, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle: { icon: material/brightness-4, name: Light mode }
+
+nav:
+  - Home: index.md
+  - Playing:
+      - Quick start: QUICKSTART.md
+      - Installing: INSTALL.md
+      - In the browser: PLAYING.md
+      - AI players: AI_PLAYERS.md
+  - Research:
+      - Benchmarks: BENCHMARKS.md
+      - Scenarios and probes: SCENARIOS.md
+      - Servers, costs and reports: REPORTS.md
+      - Scripted bots: BOTS.md
+      - Bot tuning log: research/BOT_TUNING.md
+  - Running a server:
+      - Deploying: server/DEPLOY.md
+      - Preparing a VPS: server/VPS.md
+      - Single sign-on: server/OAUTH.md
+      - Workers: server/WORKERS.md
+      - Runbook: server/RUNBOOK.md
+      - Design notes: server/ACCOUNTS.md
+  - Building on it:
+      - Architecture: ARCHITECTURE.md
+      - HTTP and tool API: API.md
+      - Modding: MODDING.md
+      - Configuration: CONFIGURATION.md
+      - Python reference: reference.md
+  - Help:
+      - Troubleshooting: TROUBLESHOOTING.md
+      - Questions: FAQ.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      check_paths: true
+      base_path: [.]
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            # The codebase explains itself in prose: module docstrings say what a module is for and
+            # why it is shaped that way. Showing them, and the source, makes the reference useful
+            # rather than a list of signatures.
+            show_source: true
+            show_root_heading: true
+            show_if_no_docstring: false
+            heading_level: 2
+            members_order: source
+            docstring_style: google
+            separate_signature: true
+            show_signature_annotations: true
+            filters: ["!^_"]
+
+watch:
+  - citar

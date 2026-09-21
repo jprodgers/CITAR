@@ -1,0 +1,49 @@
+{
+ "Scientific": {
+  "name": "Scientific",
+  "milestones": [
+   "Build [Apollo Program]",
+   "Add all [spaceship parts] in capital"
+  ],
+  "requiredSpaceshipParts": [
+   "SS Engine",
+   "SS Stasis Chamber",
+   "SS Cockpit",
+   "SS Booster",
+   "SS Booster",
+   "SS Booster"
+  ],
+  "id": "scientific"
+ },
+ "Cultural": {
+  "name": "Cultural",
+  "milestones": [
+   "Complete [5] Policy branches",
+   "Build [Utopia Project]"
+  ],
+  "id": "cultural"
+ },
+ "Domination": {
+  "name": "Domination",
+  "milestones": [
+   "Capture all capitals"
+  ],
+  "id": "domination"
+ },
+ "Diplomatic": {
+  "name": "Diplomatic",
+  "milestones": [
+   "Anyone should build [United Nations]",
+   "Win diplomatic vote"
+  ],
+  "id": "diplomatic"
+ },
+ "Time": {
+  "name": "Time",
+  "hiddenInVictoryScreen": true,
+  "milestones": [
+   "Have highest score after max turns"
+  ],
+  "id": "time"
+ }
+}

@@ -1,0 +1,98 @@
+# Publish the documentation.
+#
+# The Markdown in docs/ is the source of truth, and it is reviewable in a pull request like any
+# other change. This workflow turns it into the two places people actually read it:
+#
+#   * a searchable site at https://jprodgers.github.io/CITAR
+#   * the repository's GitHub wiki, which is its own git repository and cannot be updated by a
+#     normal push to this one
+#
+# Both are derived, never edited by hand. An edit made directly in the wiki is overwritten by the
+# next run, which is why every generated page says so at the bottom.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "citar/**/*.py"          # the API reference is generated from docstrings
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs
+  cancel-in-progress: true
+
+jobs:
+  site:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: Install
+        # The package itself is installed because mkdocstrings imports the modules it documents.
+        run: pip install -e ".[dev]"
+
+      - name: Build
+        run: mkdocs build --strict
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  wiki:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: Generate the wiki pages
+        run: python scripts/build_wiki.py
+
+      - name: Push them to the wiki repository
+        # The wiki is a separate repository, so this needs a token with permission to write it.
+        # GITHUB_TOKEN cannot, so a personal access token is used if one is configured; without it
+        # the job says so and succeeds, because a missing wiki should not fail a docs build.
+        env:
+          WIKI_TOKEN: ${{ secrets.WIKI_TOKEN }}
+        run: |
+          if [ -z "$WIKI_TOKEN" ]; then
+            echo "::notice::No WIKI_TOKEN secret, so the wiki was not updated."
+            echo "Generated pages are in wiki/ and can be pushed by hand:"
+            echo "  git clone https://github.com/${{ github.repository }}.wiki.git"
+            exit 0
+          fi
+          git clone "https://x-access-token:${WIKI_TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki-repo
+          # Everything except .git is replaced, so a page deleted from docs/ disappears from the
+          # wiki instead of lingering as a stale copy nobody links to.
+          find wiki-repo -mindepth 1 -maxdepth 1 -not -name .git -exec rm -rf {} +
+          cp wiki/*.md wiki-repo/
+          cd wiki-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --staged --quiet; then
+            echo "The wiki is already up to date."
+          else
+            git commit -m "docs: sync from ${{ github.sha }}"
+            git push
+          fi

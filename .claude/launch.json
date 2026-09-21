@@ -1,0 +1,41 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "citar",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "citar.server",
+        "--port",
+        "8790",
+        "--debug"
+      ],
+      "port": 8790
+    },
+    {
+      "name": "citar-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "scripts/dev_server.py",
+        "--port",
+        "8799"
+      ],
+      "port": 8799
+    },
+    {
+      "name": "citar-dev-server",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "scripts/dev_server.py",
+        "--server",
+        "--port",
+        "8800",
+        "--reset",
+        "--registration",
+        "open"
+      ],
+      "port": 8800
+    }
+  ]
+}

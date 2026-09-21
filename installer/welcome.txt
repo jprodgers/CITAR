@@ -1,0 +1,31 @@
+CITAR - Civ Inspired Tool for AI Research
+
+A Civilization V-style strategy game whose players can be language models. You can play against
+them, watch them play each other, and measure how well they do it.
+
+WHAT THIS INSTALLS
+
+  CITAR itself, with everything it needs built in. No Python, no command line, no account.
+  It runs entirely on this computer and listens only to this computer.
+
+WHAT YOU NEED AS WELL
+
+  A model for the AI players to use. When CITAR first opens it will look for one and, if it
+  does not find one, tell you exactly what to install for the hardware in this machine.
+
+  You can also play right away against the built-in scripted opponent, which needs nothing
+  else installed. That opponent is what AI players are scored against, so it is worth a game
+  of your own.
+
+WHERE THINGS GO
+
+  The program            in the folder you choose on the next screen
+  Your games and results in %LOCALAPPDATA%\CITAR
+
+  Uninstalling removes the program and asks before touching anything you have made.
+
+PRIVACY
+
+  CITAR sends nothing anywhere. It has no telemetry, no analytics and no account system in
+  this mode. The only network connections it makes are to model servers you configure - which
+  may be on this machine, and stay on it unless you choose a hosted API.

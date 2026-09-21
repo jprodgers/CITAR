@@ -1,0 +1,77 @@
+{
+  "_doc": "CITAR game constants. Formula constants mirror UnCiv's ModConstants and hard-coded rules (MPL-2.0); map sizes, lobby options and AI-interface limits are CITAR's own.",
+  "move_scale": 60,
+  "map_sizes": {
+    "duel":     {"name": "Duel",     "width": 44, "height": 28, "players": 2, "city_states": 4},
+    "small":    {"name": "Small",    "width": 60, "height": 38, "players": 4, "city_states": 8},
+    "standard": {"name": "Standard", "width": 76, "height": 48, "players": 6, "city_states": 12},
+    "large":    {"name": "Large",    "width": 92, "height": 58, "players": 8, "city_states": 16},
+    "huge":     {"name": "Huge",     "width": 112, "height": 70, "players": 12, "city_states": 24},
+    "gargantuan": {"name": "Gargantuan", "width": 160, "height": 100, "players": 24, "city_states": 32}
+  },
+  "map_size_predefined": [
+    {"name": "Tiny",   "radius": 10, "tech_cost_multiplier": 1.0, "tech_cost_per_city": 0.05,   "policy_cost_per_city": 0.1},
+    {"name": "Small",  "radius": 15, "tech_cost_multiplier": 1.0, "tech_cost_per_city": 0.05,   "policy_cost_per_city": 0.1},
+    {"name": "Medium", "radius": 20, "tech_cost_multiplier": 1.1, "tech_cost_per_city": 0.05,   "policy_cost_per_city": 0.1},
+    {"name": "Large",  "radius": 30, "tech_cost_multiplier": 1.2, "tech_cost_per_city": 0.0375, "policy_cost_per_city": 0.075},
+    {"name": "Huge",   "radius": 40, "tech_cost_multiplier": 1.3, "tech_cost_per_city": 0.025,  "policy_cost_per_city": 0.05}
+  ],
+  "map_types": {
+    "continents":  {"name": "Continents"},
+    "pangaea":     {"name": "Pangaea"},
+    "archipelago": {"name": "Archipelago"},
+    "inland_sea":  {"name": "Inland Sea"},
+    "fractal":     {"name": "Fractal"}
+  },
+  "default_speed": "Standard",
+  "benchmark_speed": "Quick",
+  "default_difficulty": "Prince",
+  "max_players": 24,
+
+  "constants": {
+    "max_xp_from_barbarians": 30,
+    "city_strength_base": 8.0,
+    "city_strength_per_pop": 0.4,
+    "city_strength_from_techs_multiplier": 5.5,
+    "city_strength_from_techs_exponent": 2.8,
+    "city_strength_from_techs_full_multiplier": 1.0,
+    "city_strength_from_garrison": 0.2,
+    "unit_supply_per_population": 0.5,
+    "minimal_city_distance": 3,
+    "minimal_city_distance_other_continents": 2,
+    "base_city_bombard_range": 2,
+    "city_work_range": 3,
+    "city_expand_range": 5,
+    "city_air_unit_capacity": 6,
+    "unit_upgrade_cost": {"base": 10, "per_production": 2, "era_multiplier": 0, "exponent": 1, "round_to": 5},
+    "ancient_ruin_count_multiplier": 0.025,
+    "religion_limit_base": 1,
+    "religion_limit_multiplier": 0.5,
+    "pantheon_base": 10,
+    "pantheon_growth": 5,
+    "minimum_war_duration": 10,
+    "base_turns_until_revolt": 4,
+    "city_state_election_turns": 15,
+    "max_gold_trade_offer": 10000,
+    "tribute_global_modifier": 100,
+    "tribute_local_modifier": 100,
+    "max_spy_rank": 3,
+    "spy_rank_skill_percent_bonus": 30,
+    "spy_rank_steal_percent_bonus": 25,
+    "spy_tech_steal_cost_modifier": 1.25,
+    "score_from_population": 3,
+    "score_from_wonders": 40
+  },
+
+  "barbarians": {
+    "levels": {
+      "off":    null,
+      "normal": {"name": "Normal"},
+      "raging": {"name": "Raging", "raging": true}
+    }
+  },
+  "diplomacy": {
+    "max_negotiation_exchanges": 12,
+    "negotiations_per_pair_per_turn": 2
+  }
+}

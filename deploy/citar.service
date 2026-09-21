@@ -1,0 +1,64 @@
+[Unit]
+Description=CITAR — Civ Inspired Tool for AI Research
+Documentation=https://citar.example.com
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting. The box is small; a transient OOM should recover on its own rather
+# than needing a human. (This key belongs in [Unit] — systemd ignores it in [Service].)
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=citar
+Group=citar
+WorkingDirectory=/opt/citar
+EnvironmentFile=/etc/citar/citar.env
+ExecStart=/opt/citar/.venv/bin/python -m citar.server
+
+Restart=on-failure
+RestartSec=5s
+
+# --- memory ---
+# This box has 961 MB and also serves a resume site, a Flarum forum and MariaDB. Measured CITAR
+# usage is ~95 MB plus 2-7 MB per game, so 400 MB is generous headroom — its purpose is not to be
+# reached in normal use. What it guarantees is that when something DOES go wrong, the kernel kills
+# CITAR rather than choosing MariaDB or php-fpm. The forum must never go down because a game leaked.
+MemoryMax=400M
+MemoryHigh=320M
+# Prefer this process when the OOM killer is choosing a victim, for the same reason.
+OOMScoreAdjust=500
+
+# --- filesystem ---
+# The service can write to its data directory and nothing else. A bug, or a compromise through the
+# web app, then cannot touch the forum's files, nginx config or anyone's home directory.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/citar
+PrivateTmp=yes
+
+# --- privileges ---
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# AF_UNIX is needed too: SQLite and the resolver use it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# --- logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=citar
+
+[Install]
+WantedBy=multi-user.target

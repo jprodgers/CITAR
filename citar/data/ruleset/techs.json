@@ -1,0 +1,1155 @@
+{
+ "columns": [
+  {
+   "columnNumber": 0,
+   "era": "Ancient era",
+   "techCost": 20,
+   "buildingCost": 40,
+   "wonderCost": 185
+  },
+  {
+   "columnNumber": 1,
+   "era": "Ancient era",
+   "techCost": 35,
+   "buildingCost": 60,
+   "wonderCost": 185
+  },
+  {
+   "columnNumber": 2,
+   "era": "Ancient era",
+   "techCost": 55,
+   "buildingCost": 75,
+   "wonderCost": 185
+  },
+  {
+   "columnNumber": 3,
+   "era": "Classical era",
+   "techCost": 105,
+   "buildingCost": 100,
+   "wonderCost": 250
+  },
+  {
+   "columnNumber": 4,
+   "era": "Classical era",
+   "techCost": 175,
+   "buildingCost": 100,
+   "wonderCost": 250
+  },
+  {
+   "columnNumber": 5,
+   "era": "Medieval era",
+   "techCost": 275,
+   "buildingCost": 120,
+   "wonderCost": 300
+  },
+  {
+   "columnNumber": 6,
+   "era": "Medieval era",
+   "techCost": 485,
+   "buildingCost": 160,
+   "wonderCost": 400
+  },
+  {
+   "columnNumber": 7,
+   "era": "Renaissance era",
+   "techCost": 780,
+   "buildingCost": 200,
+   "wonderCost": 500
+  },
+  {
+   "columnNumber": 8,
+   "era": "Renaissance era",
+   "techCost": 1150,
+   "buildingCost": 250,
+   "wonderCost": 625
+  },
+  {
+   "columnNumber": 9,
+   "era": "Industrial era",
+   "techCost": 1600,
+   "buildingCost": 300,
+   "wonderCost": 750
+  },
+  {
+   "columnNumber": 10,
+   "era": "Industrial era",
+   "techCost": 2350,
+   "buildingCost": 360,
+   "wonderCost": 900
+  },
+  {
+   "columnNumber": 11,
+   "era": "Modern era",
+   "techCost": 3100,
+   "buildingCost": 500,
+   "wonderCost": 1060
+  },
+  {
+   "columnNumber": 12,
+   "era": "Modern era",
+   "techCost": 4100,
+   "buildingCost": 500,
+   "wonderCost": 1250
+  },
+  {
+   "columnNumber": 13,
+   "era": "Atomic era",
+   "techCost": 5100,
+   "buildingCost": 500,
+   "wonderCost": 1250
+  },
+  {
+   "columnNumber": 14,
+   "era": "Atomic era",
+   "techCost": 6400,
+   "buildingCost": 500,
+   "wonderCost": 1250
+  },
+  {
+   "columnNumber": 15,
+   "era": "Information era",
+   "techCost": 7700,
+   "buildingCost": 750,
+   "wonderCost": 1250
+  },
+  {
+   "columnNumber": 16,
+   "era": "Information era",
+   "techCost": 8800,
+   "buildingCost": 750,
+   "wonderCost": 1250
+  },
+  {
+   "columnNumber": 17,
+   "era": "Future era",
+   "techCost": 9500,
+   "buildingCost": 750,
+   "wonderCost": 1250
+  }
+ ],
+ "techs": {
+  "Agriculture": {
+   "name": "Agriculture",
+   "uniques": [
+    "Starting tech"
+   ],
+   "id": "agriculture",
+   "era": "Ancient era",
+   "column": 0,
+   "cost": 20,
+   "prerequisites": []
+  },
+  "Pottery": {
+   "name": "Pottery",
+   "prerequisites": [
+    "Agriculture"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "pottery",
+   "era": "Ancient era",
+   "column": 1,
+   "cost": 35
+  },
+  "Animal Husbandry": {
+   "name": "Animal Husbandry",
+   "prerequisites": [
+    "Agriculture"
+   ],
+   "id": "animal_husbandry",
+   "era": "Ancient era",
+   "column": 1,
+   "cost": 35
+  },
+  "Archery": {
+   "name": "Archery",
+   "prerequisites": [
+    "Agriculture"
+   ],
+   "uniques": [
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "archery",
+   "era": "Ancient era",
+   "column": 1,
+   "cost": 35
+  },
+  "Mining": {
+   "name": "Mining",
+   "prerequisites": [
+    "Agriculture"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "mining",
+   "era": "Ancient era",
+   "column": 1,
+   "cost": 35
+  },
+  "Sailing": {
+   "name": "Sailing",
+   "prerequisites": [
+    "Pottery"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "sailing",
+   "era": "Ancient era",
+   "column": 2,
+   "cost": 55
+  },
+  "Calendar": {
+   "name": "Calendar",
+   "prerequisites": [
+    "Pottery"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "calendar",
+   "era": "Ancient era",
+   "column": 2,
+   "cost": 55
+  },
+  "Writing": {
+   "name": "Writing",
+   "prerequisites": [
+    "Pottery"
+   ],
+   "uniques": [
+    "Enables establishment of embassies"
+   ],
+   "id": "writing",
+   "era": "Ancient era",
+   "column": 2,
+   "cost": 55
+  },
+  "Trapping": {
+   "name": "Trapping",
+   "prerequisites": [
+    "Animal Husbandry"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "trapping",
+   "era": "Ancient era",
+   "column": 2,
+   "cost": 55
+  },
+  "The Wheel": {
+   "name": "The Wheel",
+   "prerequisites": [
+    "Animal Husbandry",
+    "Archery"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "the_wheel",
+   "era": "Ancient era",
+   "column": 2,
+   "cost": 55
+  },
+  "Masonry": {
+   "name": "Masonry",
+   "prerequisites": [
+    "Mining"
+   ],
+   "id": "masonry",
+   "era": "Ancient era",
+   "column": 2,
+   "cost": 55
+  },
+  "Bronze Working": {
+   "name": "Bronze Working",
+   "prerequisites": [
+    "Mining"
+   ],
+   "uniques": [
+    "[+50]% weight to this choice for AI decisions"
+   ],
+   "id": "bronze_working",
+   "era": "Ancient era",
+   "column": 2,
+   "cost": 55
+  },
+  "Optics": {
+   "name": "Optics",
+   "cost": 85,
+   "prerequisites": [
+    "Sailing"
+   ],
+   "uniques": [
+    "Enables embarkation for land units"
+   ],
+   "id": "optics",
+   "era": "Classical era",
+   "column": 3
+  },
+  "Horseback Riding": {
+   "name": "Horseback Riding",
+   "prerequisites": [
+    "Trapping",
+    "The Wheel"
+   ],
+   "uniques": [
+    "[+50]% weight to this choice for AI decisions"
+   ],
+   "id": "horseback_riding",
+   "era": "Classical era",
+   "column": 3,
+   "cost": 105
+  },
+  "Mathematics": {
+   "name": "Mathematics",
+   "prerequisites": [
+    "The Wheel"
+   ],
+   "id": "mathematics",
+   "era": "Classical era",
+   "column": 3,
+   "cost": 105
+  },
+  "Construction": {
+   "name": "Construction",
+   "prerequisites": [
+    "Masonry",
+    "The Wheel"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "construction",
+   "era": "Classical era",
+   "column": 3,
+   "cost": 105
+  },
+  "Philosophy": {
+   "name": "Philosophy",
+   "prerequisites": [
+    "Writing",
+    "Calendar"
+   ],
+   "id": "philosophy",
+   "era": "Classical era",
+   "column": 4,
+   "cost": 175
+  },
+  "Drama and Poetry": {
+   "name": "Drama and Poetry",
+   "prerequisites": [
+    "Writing"
+   ],
+   "id": "drama_and_poetry",
+   "era": "Classical era",
+   "column": 4,
+   "cost": 175
+  },
+  "Currency": {
+   "name": "Currency",
+   "prerequisites": [
+    "Mathematics"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "currency",
+   "era": "Classical era",
+   "column": 4,
+   "cost": 175
+  },
+  "Engineering": {
+   "name": "Engineering",
+   "prerequisites": [
+    "Mathematics",
+    "Construction"
+   ],
+   "uniques": [
+    "Roads connect tiles across rivers",
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "engineering",
+   "era": "Classical era",
+   "column": 4,
+   "cost": 175
+  },
+  "Iron Working": {
+   "name": "Iron Working",
+   "prerequisites": [
+    "Bronze Working"
+   ],
+   "uniques": [
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "iron_working",
+   "era": "Classical era",
+   "column": 4,
+   "cost": 175
+  },
+  "Theology": {
+   "name": "Theology",
+   "prerequisites": [
+    "Philosophy",
+    "Drama and Poetry"
+   ],
+   "id": "theology",
+   "era": "Medieval era",
+   "column": 5,
+   "cost": 275
+  },
+  "Civil Service": {
+   "name": "Civil Service",
+   "prerequisites": [
+    "Currency",
+    "Horseback Riding",
+    "Drama and Poetry"
+   ],
+   "uniques": [
+    "Enables Open Borders agreements",
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "civil_service",
+   "era": "Medieval era",
+   "column": 5,
+   "cost": 275
+  },
+  "Guilds": {
+   "name": "Guilds",
+   "prerequisites": [
+    "Currency"
+   ],
+   "uniques": [
+    "Enables conversion of city production to [Gold]"
+   ],
+   "id": "guilds",
+   "era": "Medieval era",
+   "column": 5,
+   "cost": 275
+  },
+  "Metal Casting": {
+   "name": "Metal Casting",
+   "prerequisites": [
+    "Engineering",
+    "Iron Working"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "metal_casting",
+   "era": "Medieval era",
+   "column": 5,
+   "cost": 275
+  },
+  "Compass": {
+   "name": "Compass",
+   "cost": 375,
+   "prerequisites": [
+    "Optics",
+    "Theology"
+   ],
+   "uniques": [
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "compass",
+   "era": "Medieval era",
+   "column": 6
+  },
+  "Education": {
+   "name": "Education",
+   "prerequisites": [
+    "Theology",
+    "Civil Service"
+   ],
+   "uniques": [
+    "Enables conversion of city production to [Science]",
+    "Enables Research agreements",
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "education",
+   "era": "Medieval era",
+   "column": 6,
+   "cost": 485
+  },
+  "Chivalry": {
+   "name": "Chivalry",
+   "prerequisites": [
+    "Civil Service",
+    "Guilds"
+   ],
+   "uniques": [
+    "Enables Defensive Pacts"
+   ],
+   "id": "chivalry",
+   "era": "Medieval era",
+   "column": 6,
+   "cost": 485
+  },
+  "Machinery": {
+   "name": "Machinery",
+   "prerequisites": [
+    "Guilds",
+    "Engineering"
+   ],
+   "uniques": [
+    "Improves movement speed on roads"
+   ],
+   "id": "machinery",
+   "era": "Medieval era",
+   "column": 6,
+   "cost": 485
+  },
+  "Physics": {
+   "name": "Physics",
+   "prerequisites": [
+    "Metal Casting"
+   ],
+   "id": "physics",
+   "era": "Medieval era",
+   "column": 6,
+   "cost": 485
+  },
+  "Steel": {
+   "name": "Steel",
+   "prerequisites": [
+    "Metal Casting"
+   ],
+   "uniques": [
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "steel",
+   "era": "Medieval era",
+   "column": 6,
+   "cost": 485
+  },
+  "Astronomy": {
+   "name": "Astronomy",
+   "uniques": [
+    "[+1] Movement <for [Embarked] units>",
+    "Enables [Embarked] units to enter ocean tiles",
+    "[+50]% weight to this choice for AI decisions"
+   ],
+   "prerequisites": [
+    "Compass",
+    "Education"
+   ],
+   "id": "astronomy",
+   "era": "Renaissance era",
+   "column": 7,
+   "cost": 780
+  },
+  "Acoustics": {
+   "name": "Acoustics",
+   "prerequisites": [
+    "Education"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "acoustics",
+   "era": "Renaissance era",
+   "column": 7,
+   "cost": 780
+  },
+  "Banking": {
+   "name": "Banking",
+   "prerequisites": [
+    "Chivalry",
+    "Education"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "banking",
+   "era": "Renaissance era",
+   "column": 7,
+   "cost": 780
+  },
+  "Printing Press": {
+   "name": "Printing Press",
+   "prerequisites": [
+    "Machinery",
+    "Physics",
+    "Chivalry"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "printing_press",
+   "era": "Renaissance era",
+   "column": 7,
+   "cost": 780
+  },
+  "Gunpowder": {
+   "name": "Gunpowder",
+   "prerequisites": [
+    "Physics",
+    "Steel"
+   ],
+   "uniques": [
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "gunpowder",
+   "era": "Renaissance era",
+   "column": 7,
+   "cost": 780
+  },
+  "Navigation": {
+   "name": "Navigation",
+   "prerequisites": [
+    "Astronomy"
+   ],
+   "id": "navigation",
+   "era": "Renaissance era",
+   "column": 8,
+   "cost": 1150
+  },
+  "Architecture": {
+   "name": "Architecture",
+   "prerequisites": [
+    "Acoustics",
+    "Banking"
+   ],
+   "id": "architecture",
+   "era": "Renaissance era",
+   "column": 8,
+   "cost": 1150
+  },
+  "Economics": {
+   "name": "Economics",
+   "prerequisites": [
+    "Banking",
+    "Printing Press"
+   ],
+   "uniques": [
+    "[+50]% weight to this choice for AI decisions"
+   ],
+   "id": "economics",
+   "era": "Renaissance era",
+   "column": 8,
+   "cost": 1150
+  },
+  "Metallurgy": {
+   "name": "Metallurgy",
+   "prerequisites": [
+    "Printing Press",
+    "Gunpowder"
+   ],
+   "uniques": [
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "metallurgy",
+   "era": "Renaissance era",
+   "column": 8,
+   "cost": 1150
+  },
+  "Chemistry": {
+   "name": "Chemistry",
+   "prerequisites": [
+    "Gunpowder"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "chemistry",
+   "era": "Renaissance era",
+   "column": 8,
+   "cost": 1150
+  },
+  "Archaeology": {
+   "name": "Archaeology",
+   "prerequisites": [
+    "Navigation",
+    "Architecture"
+   ],
+   "uniques": [
+    "[+50]% weight to this choice for AI decisions"
+   ],
+   "id": "archaeology",
+   "era": "Industrial era",
+   "column": 9,
+   "cost": 1600
+  },
+  "Scientific Theory": {
+   "name": "Scientific Theory",
+   "prerequisites": [
+    "Architecture",
+    "Economics"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "scientific_theory",
+   "era": "Industrial era",
+   "column": 9,
+   "cost": 1600
+  },
+  "Industrialization": {
+   "name": "Industrialization",
+   "prerequisites": [
+    "Economics"
+   ],
+   "uniques": [
+    "[+50]% weight to this choice for AI decisions"
+   ],
+   "id": "industrialization",
+   "era": "Industrial era",
+   "column": 9,
+   "cost": 1600
+  },
+  "Rifling": {
+   "name": "Rifling",
+   "prerequisites": [
+    "Economics",
+    "Metallurgy"
+   ],
+   "uniques": [
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "rifling",
+   "era": "Industrial era",
+   "column": 9,
+   "cost": 1600
+  },
+  "Military Science": {
+   "name": "Military Science",
+   "prerequisites": [
+    "Metallurgy",
+    "Chemistry"
+   ],
+   "id": "military_science",
+   "era": "Industrial era",
+   "column": 9,
+   "cost": 1600
+  },
+  "Fertilizer": {
+   "name": "Fertilizer",
+   "prerequisites": [
+    "Chemistry"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "fertilizer",
+   "era": "Industrial era",
+   "column": 9,
+   "cost": 1600
+  },
+  "Biology": {
+   "name": "Biology",
+   "prerequisites": [
+    "Archaeology",
+    "Scientific Theory"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "biology",
+   "era": "Industrial era",
+   "column": 10,
+   "cost": 2350
+  },
+  "Electricity": {
+   "name": "Electricity",
+   "prerequisites": [
+    "Scientific Theory"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "electricity",
+   "era": "Industrial era",
+   "column": 10,
+   "cost": 2350
+  },
+  "Steam Power": {
+   "name": "Steam Power",
+   "uniques": [
+    "[+1] Movement <for [Embarked] units>"
+   ],
+   "prerequisites": [
+    "Industrialization",
+    "Scientific Theory",
+    "Rifling"
+   ],
+   "id": "steam_power",
+   "era": "Industrial era",
+   "column": 10,
+   "cost": 2350
+  },
+  "Dynamite": {
+   "name": "Dynamite",
+   "prerequisites": [
+    "Fertilizer",
+    "Military Science"
+   ],
+   "id": "dynamite",
+   "era": "Industrial era",
+   "column": 10,
+   "cost": 2350
+  },
+  "Refrigeration": {
+   "name": "Refrigeration",
+   "prerequisites": [
+    "Biology",
+    "Electricity"
+   ],
+   "uniques": [
+    "[-75]% weight to this choice for AI decisions"
+   ],
+   "id": "refrigeration",
+   "era": "Modern era",
+   "column": 11,
+   "cost": 3100
+  },
+  "Radio": {
+   "name": "Radio",
+   "prerequisites": [
+    "Electricity"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "radio",
+   "era": "Modern era",
+   "column": 11,
+   "cost": 3100
+  },
+  "Replaceable Parts": {
+   "name": "Replaceable Parts",
+   "prerequisites": [
+    "Electricity",
+    "Steam Power"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "replaceable_parts",
+   "era": "Modern era",
+   "column": 11,
+   "cost": 3100
+  },
+  "Flight": {
+   "name": "Flight",
+   "prerequisites": [
+    "Steam Power"
+   ],
+   "id": "flight",
+   "era": "Modern era",
+   "column": 11,
+   "cost": 3100
+  },
+  "Railroads": {
+   "name": "Railroads",
+   "prerequisites": [
+    "Steam Power",
+    "Dynamite"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "railroads",
+   "era": "Modern era",
+   "column": 11,
+   "cost": 3100
+  },
+  "Plastics": {
+   "name": "Plastics",
+   "prerequisites": [
+    "Radio",
+    "Replaceable Parts"
+   ],
+   "uniques": [
+    "[+200]% weight to this choice for AI decisions"
+   ],
+   "id": "plastics",
+   "era": "Modern era",
+   "column": 12,
+   "cost": 4100
+  },
+  "Electronics": {
+   "name": "Electronics",
+   "prerequisites": [
+    "Replaceable Parts",
+    "Flight"
+   ],
+   "id": "electronics",
+   "era": "Modern era",
+   "column": 12,
+   "cost": 4100
+  },
+  "Ballistics": {
+   "name": "Ballistics",
+   "prerequisites": [
+    "Flight"
+   ],
+   "id": "ballistics",
+   "era": "Modern era",
+   "column": 12,
+   "cost": 4100
+  },
+  "Combustion": {
+   "name": "Combustion",
+   "prerequisites": [
+    "Railroads"
+   ],
+   "uniques": [
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "combustion",
+   "era": "Modern era",
+   "column": 12,
+   "cost": 4100
+  },
+  "Pharmaceuticals": {
+   "name": "Pharmaceuticals",
+   "prerequisites": [
+    "Plastics",
+    "Refrigeration"
+   ],
+   "id": "pharmaceuticals",
+   "era": "Atomic era",
+   "column": 13,
+   "cost": 5100
+  },
+  "Atomic Theory": {
+   "name": "Atomic Theory",
+   "prerequisites": [
+    "Plastics",
+    "Electronics"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "atomic_theory",
+   "era": "Atomic era",
+   "column": 13,
+   "cost": 5100
+  },
+  "Radar": {
+   "name": "Radar",
+   "prerequisites": [
+    "Ballistics",
+    "Electronics"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "radar",
+   "era": "Atomic era",
+   "column": 13,
+   "cost": 5100
+  },
+  "Combined Arms": {
+   "name": "Combined Arms",
+   "prerequisites": [
+    "Ballistics",
+    "Combustion"
+   ],
+   "id": "combined_arms",
+   "era": "Atomic era",
+   "column": 13,
+   "cost": 5100
+  },
+  "Ecology": {
+   "name": "Ecology",
+   "prerequisites": [
+    "Atomic Theory",
+    "Pharmaceuticals"
+   ],
+   "id": "ecology",
+   "era": "Atomic era",
+   "column": 14,
+   "cost": 6400
+  },
+  "Nuclear Fission": {
+   "name": "Nuclear Fission",
+   "prerequisites": [
+    "Atomic Theory",
+    "Radar"
+   ],
+   "id": "nuclear_fission",
+   "era": "Atomic era",
+   "column": 14,
+   "cost": 6400
+  },
+  "Rocketry": {
+   "name": "Rocketry",
+   "prerequisites": [
+    "Radar"
+   ],
+   "uniques": [
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "rocketry",
+   "era": "Atomic era",
+   "column": 14,
+   "cost": 6400
+  },
+  "Computers": {
+   "name": "Computers",
+   "prerequisites": [
+    "Combined Arms",
+    "Radar"
+   ],
+   "id": "computers",
+   "era": "Atomic era",
+   "column": 14,
+   "cost": 6400
+  },
+  "Telecommunications": {
+   "name": "Telecommunications",
+   "prerequisites": [
+    "Ecology"
+   ],
+   "id": "telecommunications",
+   "era": "Information era",
+   "column": 15,
+   "cost": 7700
+  },
+  "Mobile Tactics": {
+   "name": "Mobile Tactics",
+   "prerequisites": [
+    "Ecology",
+    "Nuclear Fission"
+   ],
+   "id": "mobile_tactics",
+   "era": "Information era",
+   "column": 15,
+   "cost": 7700
+  },
+  "Advanced Ballistics": {
+   "name": "Advanced Ballistics",
+   "prerequisites": [
+    "Nuclear Fission",
+    "Rocketry"
+   ],
+   "id": "advanced_ballistics",
+   "era": "Information era",
+   "column": 15,
+   "cost": 7700
+  },
+  "Satellites": {
+   "name": "Satellites",
+   "prerequisites": [
+    "Rocketry"
+   ],
+   "uniques": [
+    "Reveals the entire map",
+    "[+200]% weight to this choice for AI decisions"
+   ],
+   "id": "satellites",
+   "era": "Information era",
+   "column": 15,
+   "cost": 7700
+  },
+  "Robotics": {
+   "name": "Robotics",
+   "prerequisites": [
+    "Rocketry",
+    "Computers"
+   ],
+   "id": "robotics",
+   "era": "Information era",
+   "column": 15,
+   "cost": 7700
+  },
+  "Lasers": {
+   "name": "Lasers",
+   "prerequisites": [
+    "Computers"
+   ],
+   "uniques": [
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "lasers",
+   "era": "Information era",
+   "column": 15,
+   "cost": 7700
+  },
+  "Globalization": {
+   "name": "Globalization",
+   "prerequisites": [
+    "Telecommunications"
+   ],
+   "uniques": [
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "globalization",
+   "era": "Information era",
+   "column": 16,
+   "cost": 8800
+  },
+  "Particle Physics": {
+   "name": "Particle Physics",
+   "prerequisites": [
+    "Telecommunications",
+    "Mobile Tactics",
+    "Advanced Ballistics"
+   ],
+   "id": "particle_physics",
+   "era": "Information era",
+   "column": 16,
+   "cost": 8800
+  },
+  "Nuclear Fusion": {
+   "name": "Nuclear Fusion",
+   "prerequisites": [
+    "Advanced Ballistics",
+    "Satellites",
+    "Robotics"
+   ],
+   "uniques": [
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "nuclear_fusion",
+   "era": "Information era",
+   "column": 16,
+   "cost": 8800
+  },
+  "Nanotechnology": {
+   "name": "Nanotechnology",
+   "prerequisites": [
+    "Robotics"
+   ],
+   "id": "nanotechnology",
+   "era": "Information era",
+   "column": 16,
+   "cost": 8800
+  },
+  "Stealth": {
+   "name": "Stealth",
+   "prerequisites": [
+    "Robotics",
+    "Lasers"
+   ],
+   "uniques": [
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "stealth",
+   "era": "Information era",
+   "column": 16,
+   "cost": 8800
+  },
+  "Future Tech": {
+   "name": "Future Tech",
+   "prerequisites": [
+    "Globalization",
+    "Particle Physics",
+    "Nuclear Fusion",
+    "Nanotechnology",
+    "Stealth"
+   ],
+   "uniques": [
+    "Can be continually researched"
+   ],
+   "id": "future_tech",
+   "era": "Future era",
+   "column": 17,
+   "cost": 9500
+  }
+ }
+}

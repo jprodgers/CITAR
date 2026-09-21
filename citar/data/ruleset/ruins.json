@@ -1,0 +1,112 @@
+{
+ "discover cultural artifacts": {
+  "name": "discover cultural artifacts",
+  "uniques": [
+   "Gain [20] [Culture] <(modified by game speed)>"
+  ],
+  "id": "discover_cultural_artifacts"
+ },
+ "squatters willing to work for you": {
+  "name": "squatters willing to work for you",
+  "uniques": [
+   "Free [Worker] found in the ruins",
+   "Unavailable <on [Prince] difficulty or higher>"
+  ],
+  "excludedDifficulties": [
+   "Prince",
+   "King",
+   "Emperor",
+   "Immortal",
+   "Deity"
+  ],
+  "id": "squatters_willing_to_work_for_you"
+ },
+ "squatters wishing to settle under your rule": {
+  "name": "squatters wishing to settle under your rule",
+  "uniques": [
+   "Free [Settler] found in the ruins",
+   "Unavailable <on [Prince] difficulty or higher>"
+  ],
+  "excludedDifficulties": [
+   "Warlord",
+   "Prince",
+   "King",
+   "Emperor",
+   "Immortal",
+   "Deity"
+  ],
+  "id": "squatters_wishing_to_settle_under_your_rule"
+ },
+ "your exploring unit receives training": {
+  "name": "your exploring unit receives training",
+  "uniques": [
+   "[This Unit] gains [10] XP",
+   "Only available <after turn number [10]>",
+   "Unavailable <for [Civilian] units>"
+  ],
+  "id": "your_exploring_unit_receives_training"
+ },
+ "survivors (adds population to a city)": {
+  "name": "survivors (adds population to a city)",
+  "uniques": [
+   "[+1] population in a random city"
+  ],
+  "id": "survivors_adds_population_to_a_city"
+ },
+ "a stash of gold": {
+  "name": "a stash of gold",
+  "uniques": [
+   "Gain [50]-[100] [Gold] <(modified by game speed)>"
+  ],
+  "id": "a_stash_of_gold"
+ },
+ "discover a lost technology": {
+  "name": "discover a lost technology",
+  "uniques": [
+   "[1] free random researchable Tech(s) from the [Ancient era]"
+  ],
+  "id": "discover_a_lost_technology"
+ },
+ "advanced weaponry for your explorer": {
+  "name": "advanced weaponry for your explorer",
+  "uniques": [
+   "[This Unit] upgrades for free including special upgrades"
+  ],
+  "id": "advanced_weaponry_for_your_explorer"
+ },
+ "reveal nearby Barbarian camps": {
+  "name": "reveal nearby Barbarian camps",
+  "uniques": [
+   "Reveal up to [All] [Barbarian encampment] within a [10] tile radius"
+  ],
+  "id": "reveal_nearby_barbarian_camps"
+ },
+ "find a crudely-drawn map": {
+  "name": "find a crudely-drawn map",
+  "uniques": [
+   "From a randomly chosen tile [4] tiles away from the ruins, reveal tiles up to [4] tiles away with [80]% chance"
+  ],
+  "id": "find_a_crudely_drawn_map"
+ },
+ "discover holy symbols": {
+  "name": "discover holy symbols",
+  "uniques": [
+   "Only available <when religion is enabled>",
+   "Gain enough Faith for a Pantheon",
+   "Only available <before founding a Pantheon>",
+   "Only available <after turn number [20]>"
+  ],
+  "id": "discover_holy_symbols"
+ },
+ "an ancient prophecy": {
+  "name": "an ancient prophecy",
+  "uniques": [
+   "Only available <when religion is enabled>",
+   "Gain enough Faith for [33]% of a Great Prophet",
+   "Unavailable <after generating a Great Prophet>",
+   "Only available <after founding a Pantheon>",
+   "Only available <after turn number [20]>"
+  ],
+  "id": "an_ancient_prophecy"
+ }
+}

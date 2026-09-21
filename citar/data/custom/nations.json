@@ -1,0 +1,21 @@
+{
+ "_doc": "CITAR additions to the UnCiv nations. BenchmarkCiv has no unique ability, unit, building or improvement and no start bias, so benchmark seats differ only in how they are played.",
+ "BenchmarkCiv": {
+  "name": "BenchmarkCiv",
+  "leaderName": "Benchmark Leader",
+  "adjective": "Benchmark",
+  "startBias": [],
+  "preferredVictoryType": "Neutral",
+  "kind": "major",
+  "benchmark": true,
+  "cities": [
+   "Aldermoor", "Brightwater", "Cinderfall", "Duskhaven", "Emberlee", "Frosthold", "Goldcrest", "Harrowgate",
+   "Ironvale", "Juniper Hollow", "Kingsreach", "Larkspur", "Mistral", "Northwatch", "Oakheart", "Pennant",
+   "Quarry Row", "Ravenscar", "Saltmarsh", "Thornbury", "Umberlight", "Valewood", "Westmere", "Yarrowdale",
+   "Zephyr Point", "Amberfield", "Bramblewick", "Coldharbor", "Dawnspire", "Eastfold", "Fairhaven", "Greystone",
+   "Highmoor", "Islemark", "Jasper Bay", "Kestrel Rock", "Lowbridge", "Meadowmere", "Nettlecombe", "Oldcastle",
+   "Pinecrest", "Redcliff", "Silverrun", "Tidewater", "Underhill", "Violet Reach", "Windermere", "Stonebridge",
+   "Copperton", "Sunhollow", "Marrowby", "Crowmarsh", "Starfall", "Hearthwick", "Glimmerdeep", "Rookhaven"
+  ]
+ }
+}

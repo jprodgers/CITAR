@@ -1,0 +1,52 @@
+"""Adapter that lets the scripted BasicBot occupy a seat in a live session."""
+from __future__ import annotations
+
+import time
+
+from ..bots.basic import BasicBot
+
+
+class BotAgent:
+    """Wraps the scripted bot in the same interface a model uses.
+
+    So that a bot seat and a model seat are driven identically by the session: same turn loop, same
+    negotiation handling, same metrics. A benchmark comparing a model against the bot is then comparing
+    two players of the same game rather than two code paths.
+    """
+    def __init__(self, aggression: float = 0.4):
+        self.bot = BasicBot(aggression=float(aggression))
+
+    def _bind(self, session, pid):
+        """Give the bot a way to call tools against this session."""
+        def ex(g, p, _tool, **args):
+            """Execute one tool call on the bot's behalf."""
+            res = session.call_tool(p, _tool, args)
+            return res["result"] if res["ok"] else None
+        self.bot.ex = ex
+
+    def play_turn(self, session, pid: int):
+        """Play the bot's turn."""
+        self._bind(session, pid)
+        with session.lock:
+            g = session.game
+            if g.s.current != pid:
+                return
+            self.bot.play_turn(g, pid, end_turn=False)
+        # give counterparts a chance to answer negotiations we opened
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            with session.lock:
+                g = session.game
+                mine = [n for n in g.s.negotiations if n["status"] == "open" and pid in (n["initiator"], n["responder"])]
+                if not mine:
+                    break
+                for n in mine:
+                    if n["awaiting"] == pid:
+                        self.bot.respond(g, pid, n["id"])
+                session.cond.wait(timeout=1.0)
+
+    def respond_negotiation(self, session, pid: int, nid: int):
+        """Answer a negotiation as the bot."""
+        self._bind(session, pid)
+        with session.lock:
+            self.bot.respond(session.game, pid, nid)

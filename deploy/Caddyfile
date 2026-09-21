@@ -1,0 +1,33 @@
+# Caddy site for CITAR, used by docker-compose.yml.
+#
+# Caddy gets and renews the certificate itself, which is the step most often got wrong by hand.
+# The two settings that matter for CITAR are the WebSocket upgrade (live game state, benchmark
+# progress and the worker connection all ride on it) and a read timeout long enough for a model
+# turn, which can take minutes on a large local model.
+
+{$CITAR_DOMAIN} {
+	encode zstd gzip
+
+	reverse_proxy citar:8765 {
+		# A model turn is not a slow request, it is a long one. The default timeout cuts those
+		# off mid-turn, and the game records it as the model failing.
+		transport http {
+			read_timeout 1800s
+			write_timeout 1800s
+		}
+	}
+
+	header {
+		# CITAR serves its own client and talks to nothing else. A page that cannot be framed
+		# cannot be clickjacked into ending somebody's turn.
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

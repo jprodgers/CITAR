@@ -1,0 +1,86 @@
+# Packaging
+
+How each install route is published, and what has to happen for a release to reach it.
+
+| Route | Lives in | Published by | Needs |
+|---|---|---|---|
+| `pip install citar` | [`../pyproject.toml`](../pyproject.toml) | `.github/workflows/release.yml` | PyPI trusted publishing |
+| `curl … \| bash` | [`../install.sh`](../install.sh) | the file on `main` | nothing — it installs from PyPI |
+| `iwr … \| iex` | [`../install.ps1`](../install.ps1) | the file on `main` | nothing |
+| Windows installer | [`../installer/`](../installer/) | release workflow | a Windows runner |
+| Docker image | [`../Dockerfile`](../Dockerfile) | release workflow | GHCR (no secret; `GITHUB_TOKEN` is enough) |
+| Homebrew | [`homebrew/citar.rb`](homebrew/citar.rb) | you, once per release | a `homebrew-citar` tap repository |
+| Scoop | [`scoop/citar.json`](scoop/citar.json) | you, once per release | a `scoop-citar` bucket repository |
+| winget | [`winget/`](winget/) | you, once per release | a pull request to `microsoft/winget-pkgs` |
+
+The first five are automatic on a tag. The last three need a repository or a pull request outside
+this one, which is why they are checked in here as files you copy rather than as workflow steps
+that would fail on a fork.
+
+## The order things have to happen in
+
+A release is not a single event. Each of these depends on the one before it:
+
+1. **Tag and push.** `release.yml` builds the wheel, the installer and the image.
+2. **PyPI.** Everything else installs *from* PyPI, so nothing below works until this has landed.
+3. **GitHub release.** The installer `.exe` and its checksum are attached here; Scoop and winget
+   point at those URLs.
+4. **Homebrew, Scoop, winget.** Each needs the SHA-256 of a file that did not exist until step 3.
+
+`scripts/release_checksums.py` prints the hashes and the edited manifests once the release assets
+are up, so this is copy and paste rather than arithmetic.
+
+## Homebrew
+
+A personal tap, not homebrew-core. Core requires every Python dependency to be listed as a pinned
+`resource` block, which for CITAR is around forty of them, regenerated on every dependency change —
+worth doing if CITAR is ever submitted to core, and not worth doing before anyone has asked for it.
+
+```bash
+# once
+gh repo create jprodgers/homebrew-citar --public
+# each release
+cp packaging/homebrew/citar.rb ../homebrew-citar/Formula/citar.rb   # after updating the version
+```
+
+Then `brew install jprodgers/citar/citar`.
+
+## Scoop
+
+A bucket is a repository with a `bucket/` directory of JSON manifests. The manifest points at the
+GitHub release asset, so it needs the release to exist first.
+
+```bash
+gh repo create jprodgers/scoop-citar --public
+# each release: update version + hash, copy to bucket/citar.json
+```
+
+Then `scoop bucket add citar https://github.com/jprodgers/scoop-citar && scoop install citar`.
+
+## winget
+
+winget manifests live in Microsoft's own repository, and a submission is a pull request that a
+validation pipeline checks. The three files here are the manifest set for one version; `wingetcreate`
+automates the submission:
+
+```bash
+wingetcreate update JimmieRodgers.CITAR --version 0.1.0 \
+  --urls https://github.com/jprodgers/CITAR/releases/download/v0.1.0/CITAR-0.1.0-setup.exe \
+  --submit
+```
+
+The first submission is reviewed by a human and can take a few days. Later versions are usually
+automatic. Note that the package identifier must stay the same forever once accepted.
+
+## Code signing
+
+None of the Windows artifacts are signed, because a certificate costs money every year and a
+personal one now needs a hardware token. What that means in practice:
+
+- SmartScreen shows "Windows protected your PC" on the installer until enough people have run it.
+- Some antivirus products flag PyInstaller output on sight, regardless of contents.
+
+The honest mitigations, all of which this release does: publish the SHA-256 of every asset, build
+the artifacts in a public CI run whose log anyone can read, and tell people plainly in the README
+what they will see. If CITAR ever gets a certificate, the signing step goes in `release.yml` between
+the build and the upload.

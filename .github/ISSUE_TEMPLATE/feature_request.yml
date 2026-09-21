@@ -1,0 +1,40 @@
+name: Idea or feature request
+description: Something CITAR should do that it does not
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: >
+        The situation rather than the solution. "I want to compare two models on the same map and
+        I cannot tell which differences are the map's fault" is more useful than "add a seed
+        field", because there may be a better answer than the one you had in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you think would help
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of CITAR
+      multiple: true
+      options:
+        - The game itself (rules, map, combat, diplomacy)
+        - Playing in the browser
+        - AI players (LLM adapter, MCP, prompts)
+        - Scripted bots
+        - Benchmarks and model scoring
+        - Scenarios and probes
+        - Reports and costing
+        - Running a server (accounts, sharing, workers)
+        - Installation and setup
+        - Documentation
+    validations:
+      required: false

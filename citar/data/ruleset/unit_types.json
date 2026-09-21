@@ -1,0 +1,166 @@
+{
+ "Civilian": {
+  "name": "Civilian",
+  "movementType": "Land",
+  "id": "civilian"
+ },
+ "Sword": {
+  "name": "Sword",
+  "movementType": "Land",
+  "id": "sword"
+ },
+ "Gunpowder": {
+  "name": "Gunpowder",
+  "movementType": "Land",
+  "id": "gunpowder"
+ },
+ "Archery": {
+  "name": "Archery",
+  "movementType": "Land",
+  "id": "archery"
+ },
+ "Ranged Gunpowder": {
+  "name": "Ranged Gunpowder",
+  "movementType": "Land",
+  "id": "ranged_gunpowder"
+ },
+ "Scout": {
+  "name": "Scout",
+  "movementType": "Land",
+  "id": "scout"
+ },
+ "Mounted": {
+  "name": "Mounted",
+  "movementType": "Land",
+  "id": "mounted"
+ },
+ "Armored": {
+  "name": "Armored",
+  "movementType": "Land",
+  "id": "armored"
+ },
+ "Siege": {
+  "name": "Siege",
+  "movementType": "Land",
+  "id": "siege"
+ },
+ "Civilian Water": {
+  "name": "Civilian Water",
+  "movementType": "Water",
+  "id": "civilian_water"
+ },
+ "Melee Water": {
+  "name": "Melee Water",
+  "movementType": "Water",
+  "id": "melee_water"
+ },
+ "Ranged Water": {
+  "name": "Ranged Water",
+  "movementType": "Water",
+  "id": "ranged_water"
+ },
+ "Submarine": {
+  "name": "Submarine",
+  "movementType": "Water",
+  "uniques": [
+   "Can enter ice tiles",
+   "Invisible to non-adjacent units",
+   "Can see invisible [Submarine] units"
+  ],
+  "id": "submarine"
+ },
+ "Aircraft Carrier": {
+  "name": "Aircraft Carrier",
+  "movementType": "Water",
+  "id": "aircraft_carrier"
+ },
+ "Fighter": {
+  "name": "Fighter",
+  "movementType": "Air",
+  "uniques": [
+   "Aircraft",
+   "[+4] Sight",
+   "Can see over obstacles",
+   "Can perform Air Sweep"
+  ],
+  "id": "fighter"
+ },
+ "Bomber": {
+  "name": "Bomber",
+  "movementType": "Air",
+  "uniques": [
+   "Aircraft"
+  ],
+  "id": "bomber"
+ },
+ "Atomic Bomber": {
+  "name": "Atomic Bomber",
+  "movementType": "Air",
+  "uniques": [
+   "Aircraft"
+  ],
+  "id": "atomic_bomber"
+ },
+ "Missile": {
+  "name": "Missile",
+  "movementType": "Air",
+  "uniques": [
+   "Self-destructs when attacking",
+   "Cannot be intercepted"
+  ],
+  "id": "missile"
+ },
+ "Helicopter": {
+  "name": "Helicopter",
+  "movementType": "Land",
+  "uniques": [
+   "Can pass through impassable tiles"
+  ],
+  "id": "helicopter"
+ },
+ "Melee": {
+  "name": "Melee",
+  "movementType": "Land",
+  "id": "melee"
+ },
+ "Ranged": {
+  "name": "Ranged",
+  "movementType": "Land",
+  "id": "ranged"
+ },
+ "Armor": {
+  "name": "Armor",
+  "movementType": "Land",
+  "id": "armor"
+ },
+ "WaterCivilian": {
+  "name": "WaterCivilian",
+  "movementType": "Water",
+  "id": "watercivilian"
+ },
+ "WaterMelee": {
+  "name": "WaterMelee",
+  "movementType": "Water",
+  "id": "watermelee"
+ },
+ "WaterRanged": {
+  "name": "WaterRanged",
+  "movementType": "Water",
+  "id": "waterranged"
+ },
+ "WaterSubmarine": {
+  "name": "WaterSubmarine",
+  "movementType": "Water",
+  "id": "watersubmarine"
+ },
+ "WaterAircraftCarrier": {
+  "name": "WaterAircraftCarrier",
+  "movementType": "Water",
+  "id": "wateraircraftcarrier"
+ },
+ "AtomicBomber": {
+  "name": "AtomicBomber",
+  "movementType": "Air",
+  "id": "atomicbomber"
+ }
+}

@@ -1,0 +1,81 @@
+name: Bug report
+description: Something does not work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this.
+
+        The single most useful thing you can include is the output of `citar doctor`. It reports
+        versions, where your files are, what is configured and what CITAR can reach, which is most
+        of what anyone would otherwise have to ask you for.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        I created a game with an LLM seat on LM Studio and pressed End Turn.
+        I expected the AI to take its turn. Instead it skipped, and the seat showed a red error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: citar doctor
+      description: Run `citar doctor` and paste the output. It contains no keys or passwords.
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install CITAR?
+      options:
+        - pip or pipx
+        - the Windows installer
+        - install.sh
+        - Docker
+        - Homebrew
+        - Scoop or winget
+        - a git checkout
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How are you running it?
+      options:
+        - On my own machine (local mode)
+        - As a server other people sign in to
+        - As a worker serving models to a server
+    validations:
+      required: true
+
+  - type: textarea
+    id: models
+    attributes:
+      label: Which model, if the problem involves an AI player
+      description: >
+        The model and where it runs - "qwen3-8b in LM Studio on this PC", "claude-sonnet-5 through
+        the Anthropic API". If the problem is with a local model, its context length and quantisation
+        are often the cause.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Errors or logs
+      description: >
+        Anything red in the browser, the server's console output, or for an AI seat,
+        `/api/games/<id>/debug/errors`. Please remove anything you would not want public.
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,202 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "citar"
+dynamic = ["version"]
+description = "Civ Inspired Tool for AI Research - a Civilization V-style 4X game for benchmarking language models"
+readme = "README.md"
+license = "MPL-2.0"
+license-files = ["LICENSE", "NOTICE.md"]
+requires-python = ">=3.11"
+authors = [{ name = "Jimmie Rodgers" }]
+keywords = [
+    "llm", "benchmark", "agents", "evaluation", "game", "4x", "civilization",
+    "mcp", "ai-research", "strategy",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Games/Entertainment :: Turn Based Strategy",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The floor for everything CITAR needs to start, play a game, and run a public server. Optional
+# provider clients live in the extras below: a home user playing against local models should not
+# have to install the Anthropic SDK, and a headless benchmark box should not need Authlib.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
+    "argon2-cffi>=23.1",          # argon2id password hashing
+    "itsdangerous>=2.2",          # signed one-shot tokens
+    "python-multipart>=0.0.9",    # form posts on the auth screens
+    "email-validator>=2.1",
+    "tzlocal>=5.2",               # the machine's IANA zone, for availability windows
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=1.0"]
+openai = ["openai>=1.40"]
+mcp = ["mcp>=2.0"]
+oauth = ["Authlib>=1.3"]                     # Google, GitHub, Discord, Microsoft sign-in
+keyring = ["keyring>=25.0", "cryptography>=42.0"]   # OS credential store for API keys
+worker = ["websockets>=12.0"]                # the outbound worker agent
+postgres = ["psycopg[binary]>=3.1"]
+
+# Everything a person would want on a workstation.
+all = [
+    "citar[anthropic,openai,mcp,oauth,keyring,worker]",
+]
+# What a public deployment needs, without the local-model client libraries.
+server = [
+    "citar[anthropic,oauth,keyring,worker]",
+]
+dev = [
+    "citar[all]",
+    "ruff>=0.6",
+    "build>=1.2",
+    "twine>=5.1",
+    "pip-audit>=2.7",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+]
+
+[project.urls]
+Homepage = "https://github.com/jprodgers/CITAR"
+Documentation = "https://github.com/jprodgers/CITAR/wiki"
+Source = "https://github.com/jprodgers/CITAR"
+Issues = "https://github.com/jprodgers/CITAR/issues"
+Changelog = "https://github.com/jprodgers/CITAR/blob/main/CHANGELOG.md"
+
+[project.scripts]
+citar = "citar.cli:main"
+citar-admin = "citar.server.admin_cli:main"
+citar-worker = "citar.worker.__main__:main"
+citar-mcp = "citar.agents.mcp_server:main"
+
+# --------------------------------------------------------------------------------- build
+
+[tool.hatch.version]
+path = "citar/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["citar"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Nothing here yet; data files are picked up by the include rules below.
+
+[tool.hatch.build.targets.sdist]
+# A source distribution should be able to build the wheel and run the tests, and nothing else needs
+# to travel: no operator notes, no saved games, no benchmark history.
+include = [
+    "/citar",
+    "/tests",
+    "/scripts",
+    "/docs",
+    "/deploy",
+    "/installer",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE.md",
+    "/CHANGELOG.md",
+    "/DESIGN.md",
+    "/alembic.ini",
+    "/pyproject.toml",
+]
+
+[tool.hatch.build]
+# Data that must reach an installed copy: the ruleset, the browser client, the migration
+# environment, and the hardware collectors offered for download on the Servers page.
+artifacts = [
+    "citar/data/**/*.json",
+    "citar/data/**/*.md",
+    "citar/data/collectors/*",
+    "citar/web/**/*",
+    "citar/migrations/**/*.py",
+    "citar/migrations/**/*.mako",
+]
+exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/.DS_Store",
+]
+
+# --------------------------------------------------------------------------------- lint
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["citar/migrations/versions", "citar/bots/frozen_*.py"]
+
+[tool.ruff.lint]
+# Rules that find mistakes, not rules that find differences of opinion.
+#
+# The wider default sets were tried and rejected. `UP045`/`UP037`/`UP006` alone wanted 1,300 edits
+# to rewrite `Optional[X]` as `X | None` and unquote annotations, and `I001` wanted to reorder the
+# imports of every module — all of it mechanical, none of it a bug, and a 63,000-line diff through
+# an engine is a poor trade for a stylistic preference. The codebase is internally consistent as it
+# stands, which is the property that actually matters.
+#
+# So: pyflakes (unused and undefined names), the pycodestyle checks that catch real errors,
+# bugbear (mutable defaults, loop-variable capture in closures, bare except), comprehension
+# misuse, and a couple of RUF rules for hygiene.
+select = [
+    "E4",     # imports: shadowed, misplaced
+    "E7",     # statement errors: comparisons to None/True, lambda assignment
+    "E9",     # syntax and IO errors
+    "F",      # pyflakes
+    "B",      # bugbear
+    "C4",     # comprehensions
+    "RUF100", # noqa comments that no longer suppress anything
+]
+ignore = [
+    "B008",   # FastAPI's Depends() in a default argument is the framework's own idiom
+    "B011",   # assert False is used in tests to mark unreachable paths
+
+    # `raise X from exc`. Worth having where the cause is interesting, and CITAR's API layer
+    # deliberately does the opposite: `except ServerError as e: raise HTTPException(400, str(e))`
+    # converts an internal error into an HTTP status, and chaining the original would put an
+    # internal traceback into a response body. Where the cause does matter, the code chains
+    # explicitly.
+    "B904",
+
+    # Unused loop variables. The engine iterates over `(index, tile)` and similar pairs constantly
+    # and uses one half; renaming those to `_tile` throughout would be 32 edits that make the code
+    # marginally harder to read to satisfy a linter.
+    "B007",
+
+    # `zip(..., strict=True)`. Correct advice in general; here the zipped sequences are built one
+    # from the other a line or two above, so a length mismatch is not a thing that can happen, and
+    # `strict=` on every call site is noise.
+    "B905",
+
+    # Section-local imports. app.py imports `copy`, `secrets` and `threading` at the top of the
+    # scenario-editor section rather than at the top of a 900-line module, which keeps each
+    # section's dependencies visible. The module is not import-order sensitive.
+    "E402",
+
+    # `a.clear(); b += 1` on one line. Used in the engine for pairs of statements that are one
+    # thought (invalidate a cache and bump its generation), in code that is read as a block.
+    "E702",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]                  # tests import `tests` first, on purpose
+"citar/migrations/env.py" = ["E402"]  # sys.path is set up before the package imports
+
+[tool.ruff.lint.isort]
+known-first-party = ["citar"]

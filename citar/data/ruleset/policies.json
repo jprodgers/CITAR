@@ -1,0 +1,968 @@
+{
+ "branches": {
+  "Tradition": {
+   "name": "Tradition",
+   "era": "Ancient era",
+   "priorities": {
+    "Neutral": 5,
+    "Cultural": 5,
+    "Diplomatic": 5,
+    "Domination": 5,
+    "Scientific": 5
+   },
+   "uniques": [
+    "[+3 Culture] [in capital]",
+    "[-25]% Culture cost of natural border growth [in all cities]"
+   ],
+   "id": "tradition",
+   "members": [
+    "Aristocracy",
+    "Legalism",
+    "Oligarchy",
+    "Landed Elite",
+    "Monarchy"
+   ]
+  },
+  "Liberty": {
+   "name": "Liberty",
+   "era": "Ancient era",
+   "priorities": {
+    "Neutral": 10,
+    "Cultural": 10,
+    "Diplomatic": 10,
+    "Domination": 10,
+    "Scientific": 10
+   },
+   "uniques": [
+    "[+1 Culture] [in all cities]"
+   ],
+   "id": "liberty",
+   "members": [
+    "Republic",
+    "Citizenship",
+    "Collective Rule",
+    "Representation",
+    "Meritocracy"
+   ]
+  },
+  "Honor": {
+   "name": "Honor",
+   "era": "Ancient era",
+   "priorities": {
+    "Neutral": 5,
+    "Cultural": 5,
+    "Diplomatic": 5,
+    "Domination": 5,
+    "Scientific": 5
+   },
+   "uniques": [
+    "[+33]% Strength <vs [Barbarian] units>",
+    "Earn [100]% of killed [Barbarian] unit's [Strength] as [Culture]",
+    "Notified of new Barbarian encampments"
+   ],
+   "id": "honor",
+   "members": [
+    "Warrior Code",
+    "Discipline",
+    "Military Tradition",
+    "Military Caste",
+    "Professional Army"
+   ]
+  },
+  "Piety": {
+   "name": "Piety",
+   "era": "Classical era",
+   "priorities": {
+    "Neutral": 0,
+    "Cultural": 0,
+    "Diplomatic": 0,
+    "Domination": 0,
+    "Scientific": 0
+   },
+   "uniques": [
+    "[+100]% Production when constructing [Shrine] buildings [in all cities]",
+    "[+100]% Production when constructing [Temple] buildings [in all cities]",
+    "Only available <before adopting [Rationalism]>",
+    "[-100]% weight to this choice for AI decisions <when religion is disabled>"
+   ],
+   "id": "piety",
+   "members": [
+    "Organized Religion",
+    "Mandate Of Heaven",
+    "Theocracy",
+    "Reformation",
+    "Free Religion"
+   ]
+  },
+  "Patronage": {
+   "name": "Patronage",
+   "era": "Medieval era",
+   "priorities": {
+    "Neutral": 5,
+    "Cultural": 5,
+    "Diplomatic": 10,
+    "Domination": 5,
+    "Scientific": 5
+   },
+   "uniques": [
+    "[-25]% City-State Influence degradation",
+    "[-100]% weight to this choice for AI decisions <when number of [Remaining [City-State] Civilizations] is less than [2]>"
+   ],
+   "id": "patronage",
+   "members": [
+    "Philantropy",
+    "Aesthetics",
+    "Scholasticism",
+    "Cultural Diplomacy",
+    "Educated Elite"
+   ]
+  },
+  "Commerce": {
+   "name": "Commerce",
+   "era": "Medieval era",
+   "priorities": {
+    "Neutral": 5,
+    "Cultural": 5,
+    "Diplomatic": 5,
+    "Domination": 5,
+    "Scientific": 5
+   },
+   "uniques": [
+    "[+25]% [Gold] [in capital]"
+   ],
+   "id": "commerce",
+   "members": [
+    "Naval Tradition",
+    "Trade Unions",
+    "Merchant Navy",
+    "Mercantilism",
+    "Protectionism"
+   ]
+  },
+  "Rationalism": {
+   "name": "Rationalism",
+   "era": "Renaissance era",
+   "priorities": {
+    "Neutral": 10,
+    "Cultural": 10,
+    "Diplomatic": 10,
+    "Domination": 10,
+    "Scientific": 10
+   },
+   "uniques": [
+    "[+15]% [Science] <while the empire is happy>",
+    "Only available <before adopting [Piety]>"
+   ],
+   "id": "rationalism",
+   "members": [
+    "Secularism",
+    "Humanism",
+    "Free Thought",
+    "Sovereignty",
+    "Scientific Revolution"
+   ]
+  },
+  "Freedom": {
+   "name": "Freedom",
+   "era": "Industrial era",
+   "priorities": {
+    "Neutral": 5,
+    "Cultural": 10,
+    "Diplomatic": 5,
+    "Domination": 5,
+    "Scientific": 10
+   },
+   "uniques": [
+    "[+25]% Great Person generation [in all cities]",
+    "Only available <before adopting [Autocracy]>",
+    "Only available <before adopting [Order]>"
+   ],
+   "id": "freedom",
+   "members": [
+    "Constitution",
+    "Universal Suffrage",
+    "Civil Society",
+    "Free Speech",
+    "Democracy"
+   ]
+  },
+  "Autocracy": {
+   "name": "Autocracy",
+   "era": "Industrial era",
+   "priorities": {
+    "Neutral": 5,
+    "Cultural": 5,
+    "Diplomatic": 5,
+    "Domination": 10,
+    "Scientific": 5
+   },
+   "uniques": [
+    "[-33]% maintenance costs <for [All] units>",
+    "Upon capturing a city, receive [10] times its [Culture] production as [Culture] immediately",
+    "Only available <before adopting [Order]>",
+    "Only available <before adopting [Freedom]>"
+   ],
+   "id": "autocracy",
+   "members": [
+    "Populism",
+    "Militarism",
+    "Fascism",
+    "Police State",
+    "Total War"
+   ]
+  },
+  "Order": {
+   "name": "Order",
+   "era": "Industrial era",
+   "priorities": {
+    "Neutral": 10,
+    "Cultural": 5,
+    "Diplomatic": 10,
+    "Domination": 5,
+    "Scientific": 5
+   },
+   "uniques": [
+    "[+1 Happiness] [in all cities]",
+    "Only available <before adopting [Autocracy]>",
+    "Only available <before adopting [Freedom]>"
+   ],
+   "id": "order",
+   "members": [
+    "United Front",
+    "Planned Economy",
+    "Nationalism",
+    "Socialism",
+    "Communism"
+   ]
+  }
+ },
+ "policies": {
+  "Aristocracy": {
+   "name": "Aristocracy",
+   "uniques": [
+    "[+15]% Production when constructing [All] wonders [in all cities]",
+    "[+1 Happiness] per [10] population [in all cities]"
+   ],
+   "id": "aristocracy",
+   "branch": "Tradition",
+   "requires": [
+    "Tradition"
+   ]
+  },
+  "Legalism": {
+   "name": "Legalism",
+   "uniques": [
+    "Provides the cheapest [Culture] building in your first [4] cities for free"
+   ],
+   "id": "legalism",
+   "branch": "Tradition",
+   "requires": [
+    "Tradition"
+   ]
+  },
+  "Oligarchy": {
+   "name": "Oligarchy",
+   "uniques": [
+    "Units in cities cost no Maintenance",
+    "[+50]% Strength for cities <with a garrison> <when attacking>",
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "oligarchy",
+   "branch": "Tradition",
+   "requires": [
+    "Tradition"
+   ]
+  },
+  "Landed Elite": {
+   "name": "Landed Elite",
+   "uniques": [
+    "[+10]% growth [in capital]",
+    "[+2 Food] [in capital]"
+   ],
+   "requires": [
+    "Legalism"
+   ],
+   "id": "landed_elite",
+   "branch": "Tradition"
+  },
+  "Monarchy": {
+   "name": "Monarchy",
+   "uniques": [
+    "[+1 Gold, +1 Happiness] per [2] population [in capital]"
+   ],
+   "requires": [
+    "Legalism"
+   ],
+   "id": "monarchy",
+   "branch": "Tradition"
+  },
+  "Tradition Complete": {
+   "name": "Tradition Complete",
+   "uniques": [
+    "[+15]% growth [in all cities]",
+    "Provides a [Aqueduct] in your first [4] cities for free"
+   ],
+   "id": "tradition_complete",
+   "branch": "Tradition",
+   "requires": [
+    "Tradition"
+   ],
+   "is_finisher": true
+  },
+  "Republic": {
+   "name": "Republic",
+   "uniques": [
+    "[+1 Production] [in all cities]",
+    "[+5]% Production when constructing [All] buildings [in all cities]"
+   ],
+   "id": "republic",
+   "branch": "Liberty",
+   "requires": [
+    "Liberty"
+   ]
+  },
+  "Citizenship": {
+   "name": "Citizenship",
+   "uniques": [
+    "Can build [all] improvements at a [+25]% rate",
+    "Free [Worker] appears",
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "citizenship",
+   "branch": "Liberty",
+   "requires": [
+    "Liberty"
+   ]
+  },
+  "Collective Rule": {
+   "name": "Collective Rule",
+   "uniques": [
+    "[+50]% Production when constructing [Settler] units [in capital]",
+    "Free [Settler] appears"
+   ],
+   "requires": [
+    "Republic"
+   ],
+   "id": "collective_rule",
+   "branch": "Liberty"
+  },
+  "Representation": {
+   "name": "Representation",
+   "uniques": [
+    "Each city founded increases culture cost of policies [33]% less than normal",
+    "Empire enters golden age"
+   ],
+   "requires": [
+    "Citizenship"
+   ],
+   "id": "representation",
+   "branch": "Liberty"
+  },
+  "Meritocracy": {
+   "name": "Meritocracy",
+   "uniques": [
+    "[+1 Happiness] [in all cities connected to capital]",
+    "[-5]% Unhappiness from [Population] [in all non-occupied cities]",
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "requires": [
+    "Citizenship"
+   ],
+   "id": "meritocracy",
+   "branch": "Liberty"
+  },
+  "Liberty Complete": {
+   "name": "Liberty Complete",
+   "uniques": [
+    "Free Great Person"
+   ],
+   "id": "liberty_complete",
+   "branch": "Liberty",
+   "requires": [
+    "Liberty"
+   ],
+   "is_finisher": true
+  },
+  "Warrior Code": {
+   "name": "Warrior Code",
+   "uniques": [
+    "[+15]% Production when constructing [Melee] units [in all cities]",
+    "Free [Great General] appears"
+   ],
+   "id": "warrior_code",
+   "branch": "Honor",
+   "requires": [
+    "Honor"
+   ]
+  },
+  "Discipline": {
+   "name": "Discipline",
+   "uniques": [
+    "[+15]% Strength <for [Melee] units> <when adjacent to a [Melee] unit>"
+   ],
+   "id": "discipline",
+   "branch": "Honor",
+   "requires": [
+    "Honor"
+   ]
+  },
+  "Military Tradition": {
+   "name": "Military Tradition",
+   "uniques": [
+    "[+50]% XP gained from combat <for [Military] units>"
+   ],
+   "requires": [
+    "Warrior Code"
+   ],
+   "id": "military_tradition",
+   "branch": "Honor"
+  },
+  "Military Caste": {
+   "name": "Military Caste",
+   "uniques": [
+    "[+1 Happiness, +2 Culture] [in all cities with a garrison]"
+   ],
+   "requires": [
+    "Discipline"
+   ],
+   "id": "military_caste",
+   "branch": "Honor"
+  },
+  "Professional Army": {
+   "name": "Professional Army",
+   "uniques": [
+    "[-33]% Gold cost of upgrading <for [Military] units>",
+    "[+1 Happiness] from every [Walls]",
+    "[+1 Happiness] from every [Castle]",
+    "[+1 Happiness] from every [Arsenal]",
+    "[+1 Happiness] from every [Military Base]"
+   ],
+   "requires": [
+    "Military Caste"
+   ],
+   "id": "professional_army",
+   "branch": "Honor"
+  },
+  "Honor Complete": {
+   "name": "Honor Complete",
+   "uniques": [
+    "Earn [10]% of killed [Military] unit's [Cost] as [Gold]"
+   ],
+   "id": "honor_complete",
+   "branch": "Honor",
+   "requires": [
+    "Honor"
+   ],
+   "is_finisher": true
+  },
+  "Organized Religion": {
+   "name": "Organized Religion",
+   "uniques": [
+    "[+1 Faith] from every [Shrine]",
+    "[+1 Faith] from every [Temple]"
+   ],
+   "id": "organized_religion",
+   "branch": "Piety",
+   "requires": [
+    "Piety"
+   ]
+  },
+  "Mandate Of Heaven": {
+   "name": "Mandate Of Heaven",
+   "uniques": [
+    "[50]% of excess happiness converted to [Culture]"
+   ],
+   "id": "mandate_of_heaven",
+   "branch": "Piety",
+   "requires": [
+    "Piety"
+   ]
+  },
+  "Theocracy": {
+   "name": "Theocracy",
+   "uniques": [
+    "[+10]% [Gold] from every [Temple]"
+   ],
+   "requires": [
+    "Organized Religion"
+   ],
+   "id": "theocracy",
+   "branch": "Piety"
+  },
+  "Reformation": {
+   "name": "Reformation",
+   "uniques": [
+    "[+33]% [Culture] [in all cities with a world wonder]",
+    "Empire enters golden age"
+   ],
+   "requires": [
+    "Organized Religion"
+   ],
+   "id": "reformation",
+   "branch": "Piety"
+  },
+  "Free Religion": {
+   "name": "Free Religion",
+   "uniques": [
+    "[-10]% Culture cost of adopting new Policies"
+   ],
+   "requires": [
+    "Mandate Of Heaven",
+    "Reformation"
+   ],
+   "id": "free_religion",
+   "branch": "Piety"
+  },
+  "Piety Complete": {
+   "name": "Piety Complete",
+   "uniques": [
+    "[Faith] cost of purchasing items in cities [-20]%",
+    "[+3 Gold, +3 Culture] from every [Holy site]"
+   ],
+   "id": "piety_complete",
+   "branch": "Piety",
+   "requires": [
+    "Piety"
+   ],
+   "is_finisher": true
+  },
+  "Philantropy": {
+   "name": "Philantropy",
+   "uniques": [
+    "Gifts of Gold to City-States generate [25]% more Influence"
+   ],
+   "id": "philantropy",
+   "branch": "Patronage",
+   "requires": [
+    "Patronage"
+   ]
+  },
+  "Aesthetics": {
+   "name": "Aesthetics",
+   "uniques": [
+    "Resting point for Influence with City-States is increased by [20]"
+   ],
+   "id": "aesthetics",
+   "branch": "Patronage",
+   "requires": [
+    "Patronage"
+   ]
+  },
+  "Scholasticism": {
+   "name": "Scholasticism",
+   "uniques": [
+    "Allied City-States provide [Science] equal to [25]% of what they produce for themselves"
+   ],
+   "requires": [
+    "Philantropy"
+   ],
+   "id": "scholasticism",
+   "branch": "Patronage"
+  },
+  "Cultural Diplomacy": {
+   "name": "Cultural Diplomacy",
+   "uniques": [
+    "[+100]% resources gifted by City-States",
+    "[+50]% Happiness from luxury resources gifted by City-States"
+   ],
+   "requires": [
+    "Scholasticism"
+   ],
+   "id": "cultural_diplomacy",
+   "branch": "Patronage"
+  },
+  "Educated Elite": {
+   "name": "Educated Elite",
+   "requires": [
+    "Scholasticism",
+    "Aesthetics"
+   ],
+   "uniques": [
+    "Allied City-States will occasionally gift Great People"
+   ],
+   "id": "educated_elite",
+   "branch": "Patronage"
+  },
+  "Patronage Complete": {
+   "name": "Patronage Complete",
+   "uniques": [
+    "Influence of all other civilizations with all city-states degrades [33]% faster"
+   ],
+   "id": "patronage_complete",
+   "branch": "Patronage",
+   "requires": [
+    "Patronage"
+   ],
+   "is_finisher": true
+  },
+  "Naval Tradition": {
+   "name": "Naval Tradition",
+   "uniques": [
+    "[+1] Movement <for [{Military} {Water}] units>",
+    "[+1] Sight <for [{Military} {Water}] units>",
+    "Free [Great Admiral] appears",
+    "[+2] Movement <for [Great Admiral] units>"
+   ],
+   "id": "naval_tradition",
+   "branch": "Commerce",
+   "requires": [
+    "Commerce"
+   ]
+  },
+  "Trade Unions": {
+   "name": "Trade Unions",
+   "uniques": [
+    "[-33]% maintenance on road & railroads",
+    "[+1 Gold] from every [Harbor]",
+    "[+1 Gold] from every [Seaport]"
+   ],
+   "id": "trade_unions",
+   "branch": "Commerce",
+   "requires": [
+    "Commerce"
+   ]
+  },
+  "Merchant Navy": {
+   "name": "Merchant Navy",
+   "uniques": [
+    "[+3 Production] [in all coastal cities]"
+   ],
+   "requires": [
+    "Naval Tradition"
+   ],
+   "id": "merchant_navy",
+   "branch": "Commerce"
+  },
+  "Mercantilism": {
+   "name": "Mercantilism",
+   "uniques": [
+    "[Gold] cost of purchasing items in cities [-25]%",
+    "[+1 Science] from every [Mint]",
+    "[+1 Science] from every [Market]",
+    "[+1 Science] from every [Bank]",
+    "[+1 Science] from every [Stock Exchange]"
+   ],
+   "requires": [
+    "Trade Unions"
+   ],
+   "id": "mercantilism",
+   "branch": "Commerce"
+  },
+  "Protectionism": {
+   "name": "Protectionism",
+   "uniques": [
+    "[+2] Happiness from each type of luxury resource"
+   ],
+   "requires": [
+    "Mercantilism"
+   ],
+   "id": "protectionism",
+   "branch": "Commerce"
+  },
+  "Commerce Complete": {
+   "name": "Commerce Complete",
+   "uniques": [
+    "[+1 Gold] from every [Trading post]",
+    "[+100]% Gold from Great Merchant trade missions",
+    "May buy [Great Merchant] units for [1000] [Faith] [in all cities in which the majority religion is a major religion] at an increasing price ([500]) <starting from the [Industrial era]>"
+   ],
+   "id": "commerce_complete",
+   "branch": "Commerce",
+   "requires": [
+    "Commerce"
+   ],
+   "is_finisher": true
+  },
+  "Secularism": {
+   "name": "Secularism",
+   "uniques": [
+    "[+2 Science] from every specialist [in all cities]"
+   ],
+   "id": "secularism",
+   "branch": "Rationalism",
+   "requires": [
+    "Rationalism"
+   ]
+  },
+  "Humanism": {
+   "name": "Humanism",
+   "uniques": [
+    "[+1 Happiness] from every [University]",
+    "[+1 Happiness] from every [Observatory]",
+    "[+1 Happiness] from every [Public School]",
+    "[-50]% weight to this choice for AI decisions"
+   ],
+   "id": "humanism",
+   "branch": "Rationalism",
+   "requires": [
+    "Rationalism"
+   ]
+  },
+  "Free Thought": {
+   "name": "Free Thought",
+   "uniques": [
+    "[+1 Science] from every [Trading post]",
+    "[+17]% [Science] from every [University]"
+   ],
+   "requires": [
+    "Secularism"
+   ],
+   "id": "free_thought",
+   "branch": "Rationalism"
+  },
+  "Sovereignty": {
+   "name": "Sovereignty",
+   "uniques": [
+    "[+1 Gold] from all [Science] buildings"
+   ],
+   "requires": [
+    "Humanism"
+   ],
+   "id": "sovereignty",
+   "branch": "Rationalism"
+  },
+  "Scientific Revolution": {
+   "name": "Scientific Revolution",
+   "uniques": [
+    "Science gained from research agreements [+50]%",
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "requires": [
+    "Free Thought"
+   ],
+   "id": "scientific_revolution",
+   "branch": "Rationalism"
+  },
+  "Rationalism Complete": {
+   "name": "Rationalism Complete",
+   "uniques": [
+    "[2] Free Technologies",
+    "May buy [Great Scientist] units for [1000] [Faith] [in all cities in which the majority religion is a major religion] at an increasing price ([500]) <starting from the [Industrial era]>"
+   ],
+   "id": "rationalism_complete",
+   "branch": "Rationalism",
+   "requires": [
+    "Rationalism"
+   ],
+   "is_finisher": true
+  },
+  "Constitution": {
+   "name": "Constitution",
+   "uniques": [
+    "[+2 Culture] from every [Wonder]",
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "constitution",
+   "branch": "Freedom",
+   "requires": [
+    "Freedom"
+   ]
+  },
+  "Universal Suffrage": {
+   "name": "Universal Suffrage",
+   "uniques": [
+    "[+33]% Strength for cities <when defending>",
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "universal_suffrage",
+   "branch": "Freedom",
+   "requires": [
+    "Freedom"
+   ]
+  },
+  "Civil Society": {
+   "name": "Civil Society",
+   "uniques": [
+    "[-50]% Food consumption by [Specialists] [in all cities]"
+   ],
+   "id": "civil_society",
+   "branch": "Freedom",
+   "requires": [
+    "Freedom"
+   ]
+  },
+  "Free Speech": {
+   "name": "Free Speech",
+   "uniques": [
+    "[8] units cost no maintenance"
+   ],
+   "requires": [
+    "Constitution"
+   ],
+   "id": "free_speech",
+   "branch": "Freedom"
+  },
+  "Democracy": {
+   "name": "Democracy",
+   "uniques": [
+    "[-50]% Unhappiness from [Specialists] [in all cities]"
+   ],
+   "requires": [
+    "Civil Society"
+   ],
+   "id": "democracy",
+   "branch": "Freedom"
+  },
+  "Freedom Complete": {
+   "name": "Freedom Complete",
+   "uniques": [
+    "[+100]% Yield from every [Great Improvement]",
+    "[+50]% Golden Age length",
+    "May buy [Great Artist] units for [1000] [Faith] [in all cities in which the majority religion is a major religion] at an increasing price ([500]) <starting from the [Industrial era]>"
+   ],
+   "id": "freedom_complete",
+   "branch": "Freedom",
+   "requires": [
+    "Freedom"
+   ],
+   "is_finisher": true
+  },
+  "Populism": {
+   "name": "Populism",
+   "uniques": [
+    "[+25]% Strength <for [Wounded] units>",
+    "[+100]% weight to this choice for AI decisions"
+   ],
+   "id": "populism",
+   "branch": "Autocracy",
+   "requires": [
+    "Autocracy"
+   ]
+  },
+  "Militarism": {
+   "name": "Militarism",
+   "uniques": [
+    "[Gold] cost of purchasing [All] units [-33]%"
+   ],
+   "id": "militarism",
+   "branch": "Autocracy",
+   "requires": [
+    "Autocracy"
+   ]
+  },
+  "Fascism": {
+   "name": "Fascism",
+   "uniques": [
+    "[+100]% [Strategic] resource production",
+    "[+2] Movement <for [Great General] units>"
+   ],
+   "requires": [
+    "Populism",
+    "Militarism"
+   ],
+   "id": "fascism",
+   "branch": "Autocracy"
+  },
+  "Police State": {
+   "name": "Police State",
+   "uniques": [
+    "[+3 Happiness] from every [Courthouse]",
+    "[+100]% Production when constructing [Courthouse] buildings [in all cities]",
+    "[-25]% enemy spy effectiveness [in all cities]"
+   ],
+   "requires": [
+    "Militarism"
+   ],
+   "id": "police_state",
+   "branch": "Autocracy"
+  },
+  "Total War": {
+   "name": "Total War",
+   "uniques": [
+    "[+25]% Production when constructing [Military] units [in all cities]",
+    "New [Military] units start with [15] XP [in all cities]"
+   ],
+   "requires": [
+    "Police State",
+    "Fascism"
+   ],
+   "id": "total_war",
+   "branch": "Autocracy"
+  },
+  "Autocracy Complete": {
+   "name": "Autocracy Complete",
+   "uniques": [
+    "[+25]% Strength <when attacking> <for [Military] units> <for [50] turns>",
+    "May buy [Great General] units for [1000] [Faith] [in all cities in which the majority religion is a major religion] at an increasing price ([500]) <starting from the [Industrial era]>"
+   ],
+   "id": "autocracy_complete",
+   "branch": "Autocracy",
+   "requires": [
+    "Autocracy"
+   ],
+   "is_finisher": true
+  },
+  "United Front": {
+   "name": "United Front",
+   "uniques": [
+    "Militaristic City-States grant units [2] times as fast when you are at war with a common nation",
+    "[-100]% weight to this choice for AI decisions"
+   ],
+   "id": "united_front",
+   "branch": "Order",
+   "requires": [
+    "Order"
+   ]
+  },
+  "Planned Economy": {
+   "name": "Planned Economy",
+   "uniques": [
+    "[+25]% [Science] from every [Factory]",
+    "[+100]% Production when constructing [Factory] buildings [in all cities]"
+   ],
+   "id": "planned_economy",
+   "branch": "Order",
+   "requires": [
+    "Order"
+   ]
+  },
+  "Nationalism": {
+   "name": "Nationalism",
+   "uniques": [
+    "[+15]% Strength <for [All] units> <when fighting in [Friendly Land] tiles>"
+   ],
+   "id": "nationalism",
+   "branch": "Order",
+   "requires": [
+    "Order"
+   ]
+  },
+  "Socialism": {
+   "name": "Socialism",
+   "requires": [
+    "Planned Economy"
+   ],
+   "uniques": [
+    "[-15]% maintenance cost for [all] buildings [in all cities]"
+   ],
+   "id": "socialism",
+   "branch": "Order"
+  },
+  "Communism": {
+   "name": "Communism",
+   "requires": [
+    "Socialism"
+   ],
+   "uniques": [
+    "[+2 Production] [in all cities]",
+    "[+1 Production] from every [Mine]",
+    "[+1 Production] from every [Quarry]"
+   ],
+   "id": "communism",
+   "branch": "Order"
+  },
+  "Order Complete": {
+   "name": "Order Complete",
+   "uniques": [
+    "[+2 Food, +2 Production, +2 Science, +2 Gold, +2 Culture] [in all cities]",
+    "May buy [Great Engineer] units for [1000] [Faith] [in all cities in which the majority religion is a major religion] at an increasing price ([500]) <starting from the [Industrial era]>"
+   ],
+   "id": "order_complete",
+   "branch": "Order",
+   "requires": [
+    "Order"
+   ],
+   "is_finisher": true
+  }
+ }
+}

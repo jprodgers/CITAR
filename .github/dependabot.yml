@@ -1,0 +1,34 @@
+# Dependency updates.
+#
+# Weekly rather than daily: CITAR has a small dependency surface and a stream of individual bumps
+# is noise. Grouped into one pull request per ecosystem for the same reason - the question worth
+# answering is "does everything still work together", which is one test run, not twelve.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      python:
+        patterns: ["*"]
+    labels: ["dependencies"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: ["dependencies", "ci"]
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    labels: ["dependencies", "docker"]

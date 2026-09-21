@@ -1,0 +1,71 @@
+# A public CITAR server, with TLS.
+#
+#   1. Point a DNS A record at this machine.
+#   2. Copy .env.docker.example to .env and fill in CITAR_DOMAIN, CITAR_SECRET_KEY and ACME_EMAIL.
+#   3. docker compose up -d
+#   4. docker compose exec citar citar admin create-admin --handle you --email you@example.com
+#
+# Caddy is the proxy because it obtains and renews the certificate on its own, which removes the
+# step people most often get wrong. If you already run nginx or Traefik, delete the caddy service,
+# publish CITAR on 127.0.0.1:8765 instead, and proxy to it — docs/server/DEPLOY.md has an nginx
+# site that does the WebSocket upgrade and the long read timeout correctly.
+
+services:
+  citar:
+    image: ghcr.io/jprodgers/citar:latest
+    # To build from this checkout instead of pulling the published image:
+    # build: .
+    restart: unless-stopped
+    environment:
+      CITAR_MODE: server
+      CITAR_PUBLIC_ORIGIN: "https://${CITAR_DOMAIN:?set CITAR_DOMAIN in .env}"
+      CITAR_SECRET_KEY: "${CITAR_SECRET_KEY:?generate one: python -c 'import secrets;print(secrets.token_urlsafe(48))'}"
+      CITAR_STATE_DIR: /var/lib/citar
+      CITAR_REGISTRATION: "${CITAR_REGISTRATION:-invite}"
+      # Caddy adds exactly one X-Forwarded-For entry. Too high here and a client can forge its own
+      # address past the rate limiter; too low and every request looks like it came from Caddy.
+      CITAR_BEHIND_PROXY: "1"
+      CITAR_TRUSTED_PROXY_HOPS: "1"
+      # Optional, all of them. See .env.docker.example for the full list.
+      CITAR_SMTP_HOST: "${CITAR_SMTP_HOST:-}"
+      CITAR_SMTP_PORT: "${CITAR_SMTP_PORT:-587}"
+      CITAR_SMTP_SECURITY: "${CITAR_SMTP_SECURITY:-starttls}"
+      CITAR_SMTP_USER: "${CITAR_SMTP_USER:-}"
+      CITAR_SMTP_PASSWORD: "${CITAR_SMTP_PASSWORD:-}"
+      CITAR_MAIL_FROM: "${CITAR_MAIL_FROM:-}"
+      CITAR_OAUTH_GITHUB_CLIENT_ID: "${CITAR_OAUTH_GITHUB_CLIENT_ID:-}"
+      CITAR_OAUTH_GITHUB_CLIENT_SECRET: "${CITAR_OAUTH_GITHUB_CLIENT_SECRET:-}"
+      CITAR_HCAPTCHA_SITE_KEY: "${CITAR_HCAPTCHA_SITE_KEY:-}"
+      CITAR_HCAPTCHA_SECRET: "${CITAR_HCAPTCHA_SECRET:-}"
+    volumes:
+      - citar-state:/var/lib/citar
+    expose:
+      - "8765"
+    # Games are CPU-bound and a busy one will happily use every core. On a shared machine this is
+    # what keeps the rest of it responsive; raise it if CITAR has the box to itself.
+    deploy:
+      resources:
+        limits:
+          cpus: "${CITAR_CPUS:-2.0}"
+          memory: "${CITAR_MEMORY:-1g}"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - citar
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CITAR_DOMAIN: "${CITAR_DOMAIN}"
+      ACME_EMAIL: "${ACME_EMAIL:-}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data           # certificates and account keys - losing this re-issues them
+      - caddy-config:/config
+
+volumes:
+  citar-state:
+  caddy-data:
+  caddy-config:

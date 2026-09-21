@@ -1,0 +1,412 @@
+"""The worker agent: protocol, the hub, and a real connection end to end.
+
+The end-to-end test runs a real uvicorn server and a real worker agent in the same process,
+connected by a real websocket, and drives a completion through both. Mocking the socket would leave
+the interesting part — the thread/event-loop bridge — untested, and that bridge is where this design
+is most likely to deadlock.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+import tests  # noqa: F401
+
+_TMP = Path(tempfile.mkdtemp(prefix="citar_worker_"))
+os.environ["CITAR_DATA_DIR"] = str(_TMP)
+os.environ["CITAR_DB_URL"] = "sqlite:///" + (_TMP / "test.db").as_posix()
+os.environ.setdefault("CITAR_MODE", "server")
+os.environ.setdefault("CITAR_PUBLIC_ORIGIN", "https://citar.test")
+os.environ.setdefault("CITAR_SECRET_KEY", "test-secret-key-that-is-long-enough-to-pass")
+os.environ["CITAR_REQUIRE_HTTPS"] = "0"
+os.environ["CITAR_BEHIND_PROXY"] = "0"
+
+from citar import db, settings
+from citar.auth import accounts, policy, tokens
+from citar.db.models import Base, Server, WorkerToken
+from citar.server import workers as W
+from citar.worker import protocol as P
+
+settings.reset()
+db.configure(os.environ["CITAR_DB_URL"])
+db.create_all()
+
+
+def _reset():
+    db.dispose()
+    db.configure(os.environ["CITAR_DB_URL"])
+    Base.metadata.drop_all(db.engine())
+    db.create_all()
+    policy.invalidate()
+
+
+class Protocol(unittest.TestCase):
+    def test_frames_round_trip(self):
+        raw = P.request_frame(P.Request(id="r1", model="m", messages=[{"role": "user", "content": "hi"}]))
+        data = P.parse(raw)
+        self.assertEqual(data["t"], P.REQUEST)
+        self.assertEqual(data["id"], "r1")
+        self.assertEqual(len(data["messages"]), 1)
+
+    def test_malformed_frames_are_rejected(self):
+        for bad in ("not json", "[]", '{"no":"type"}', '"a string"'):
+            with self.assertRaises(P.ProtocolError, msg=bad):
+                P.parse(bad)
+
+    def test_oversized_frame_is_rejected(self):
+        with self.assertRaises(P.ProtocolError):
+            P.parse("x" * (P.MAX_FRAME_BYTES + 1))
+
+    def test_tokens_are_never_logged(self):
+        # `hello` carries a live credential; a debug log must not.
+        redacted = P.redact({"t": "hello", "token": "SECRET-TOKEN", "models": [{"key": "m"}]})
+        self.assertEqual(redacted["token"], "<redacted>")
+        self.assertNotIn("SECRET-TOKEN", str(redacted))
+
+    def test_summary_is_readable(self):
+        self.assertIn("request", P.summarize({"t": P.REQUEST, "id": "a", "model": "m", "messages": []}))
+
+
+class Hub(unittest.TestCase):
+    """The hub without a socket: registration, liveness, and the failure paths."""
+
+    def setUp(self):
+        _reset()
+        self.hub = W.WorkerHub()
+
+    def _connection(self, server_id="sv1", **hello):
+        payload = {"hostname": "testbox", "provider": "lmstudio",
+                   "models": [{"key": "m1"}], "max_concurrent": 1, **hello}
+        return W.WorkerConnection(websocket=None, server_id=server_id, hello=payload, loop=None)
+
+    def test_unknown_server_is_offline(self):
+        self.assertFalse(self.hub.is_online("nope"))
+        self.assertEqual(self.hub.in_flight("nope"), 0)
+
+    def test_register_and_unregister(self):
+        c = self._connection()
+        self.hub.register(c)
+        self.assertTrue(self.hub.is_online("sv1"))
+        self.hub.unregister(c)
+        self.assertFalse(self.hub.is_online("sv1"))
+
+    def test_reconnect_replaces_the_previous_connection(self):
+        """A flapping link must not lock the owner out of their own server for a minute."""
+        first = self._connection()
+        self.hub.register(first)
+        second = self._connection()
+        previous = self.hub.register(second)
+        self.assertIs(previous, first)
+        self.assertTrue(first.closed)
+        self.assertTrue(self.hub.is_online("sv1"))
+
+    def test_stale_connection_counts_as_offline(self):
+        c = self._connection()
+        self.hub.register(c)
+        c.last_seen = time.time() - (W.STALE_AFTER + 5)
+        self.assertFalse(self.hub.is_online("sv1"))
+
+    def test_submit_without_a_worker_refuses_rather_than_hanging(self):
+        with self.assertRaises(W.WorkerError) as caught:
+            self.hub.submit("sv1", P.Request(id="r", model="m", messages=[]), timeout=1)
+        self.assertEqual(caught.exception.refusal, "closed")
+        self.assertTrue(caught.exception.retryable)
+
+    def test_disconnect_fails_everything_in_flight(self):
+        """Work in flight when the socket drops can never be answered; the waiting thread must be
+        released rather than blocking until its timeout."""
+        c = self._connection()
+        self.hub.register(c)
+        pending = c.open_request("r1")
+        released = threading.Event()
+
+        def waiter():
+            pending.event.wait(5)
+            released.set()
+
+        threading.Thread(target=waiter, daemon=True).start()
+        self.hub.unregister(c)
+        self.assertTrue(released.wait(3), "waiting thread was not released on disconnect")
+        self.assertIsNotNone(pending.error)
+
+    def test_late_answer_to_a_forgotten_request_is_ignored(self):
+        c = self._connection()
+        self.hub.register(c)
+        c.resolve("never-heard-of-it", result={"text": "hi"})   # must not raise
+
+    def test_in_flight_counts_open_requests(self):
+        c = self._connection()
+        self.hub.register(c)
+        self.assertEqual(self.hub.in_flight("sv1"), 0)
+        c.open_request("a")
+        c.open_request("b")
+        self.assertEqual(self.hub.in_flight("sv1"), 2)
+        c.resolve("a", result={})
+        self.assertEqual(self.hub.in_flight("sv1"), 1)
+
+
+class Authentication(unittest.TestCase):
+    def setUp(self):
+        _reset()
+        with db.session() as s:
+            owner = accounts.create_user(s, handle="hostess", email="h@x.cc",
+                                         password="a long enough phrase", status="active",
+                                         email_verified=True)
+            server = Server(owner_id=owner.id, name="Box", kind="owned", provider="lmstudio",
+                            config={"id": "sv_x"})
+            s.add(server)
+            s.flush()
+            self.server_id = server.id
+            self.raw, hashed = tokens.new_pair()
+            s.add(WorkerToken(server_id=server.id, token_hash=hashed,
+                              prefix=tokens.prefix(self.raw), label="test"))
+
+    def test_valid_token_authenticates(self):
+        result = W.authenticate(self.raw)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], self.server_id)
+
+    def test_unknown_and_empty_tokens_are_refused(self):
+        self.assertIsNone(W.authenticate("not-a-real-token"))
+        self.assertIsNone(W.authenticate(""))
+
+    def test_revoked_token_stops_working(self):
+        from datetime import datetime, timezone
+        with db.session() as s:
+            row = s.query(WorkerToken).first()
+            row.revoked_at = datetime.now(timezone.utc)
+        self.assertIsNone(W.authenticate(self.raw))
+
+    def test_disabled_server_refuses_its_worker(self):
+        with db.session() as s:
+            s.get(Server, self.server_id).enabled = False
+        self.assertIsNone(W.authenticate(self.raw))
+
+    def test_only_the_hash_is_stored(self):
+        """A leaked database backup must not yield a usable worker credential."""
+        with db.session() as s:
+            row = s.query(WorkerToken).first()
+            self.assertNotEqual(row.token_hash, self.raw)
+            self.assertNotIn(self.raw, row.token_hash)
+            self.assertEqual(row.token_hash, tokens.hash_token(self.raw))
+
+
+class EndToEnd(unittest.TestCase):
+    """A real server, a real worker, a real websocket, and a completion driven from a thread."""
+
+    @classmethod
+    def setUpClass(cls):
+        _reset()
+        import uvicorn
+        from citar.server.app import app
+
+        with db.session() as s:
+            owner = accounts.create_user(s, handle="hostess", email="h@x.cc",
+                                         password="a long enough phrase", status="active",
+                                         email_verified=True)
+            server = Server(owner_id=owner.id, name="Test box", kind="owned",
+                            provider="lmstudio", config={"id": "sv_e2e"}, max_concurrent=2)
+            s.add(server)
+            s.flush()
+            cls.server_id = server.id
+            cls.token, hashed = tokens.new_pair()
+            s.add(WorkerToken(server_id=server.id, token_hash=hashed,
+                              prefix=tokens.prefix(cls.token), label="e2e"))
+
+        cls.port = 8791
+        config = uvicorn.Config(app, host="127.0.0.1", port=cls.port, log_level="error")
+        cls.server = uvicorn.Server(config)
+        cls.thread = threading.Thread(target=cls.server.run, daemon=True)
+        cls.thread.start()
+        for _ in range(100):
+            if cls.server.started:
+                break
+            time.sleep(0.1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.should_exit = True
+        cls.thread.join(timeout=10)
+
+    def _run_worker(self, *, fake_completion=None, max_concurrent=1, quiet=None):
+        """Start a worker in a background thread with its local model call stubbed out.
+
+        Stubbing only `_complete` keeps everything that matters real: the websocket, the handshake,
+        the framing, the thread bridge and the concurrency accounting.
+        """
+        from citar.worker.agent import Worker, WorkerConfig
+
+        cfg = WorkerConfig(server_url=f"http://127.0.0.1:{self.port}", token=self.token,
+                           max_concurrent=max_concurrent, name="testbox",
+                           collect_hardware=False, quiet_hours=quiet or [])
+        worker = Worker(cfg)
+        worker.discover_models = lambda: _async_value([{"key": "test-model", "label": "Test"}])
+        worker._complete = fake_completion or (lambda data: {
+            "text": "hello from the worker",
+            "thinking": "", "stop_reason": "stop", "malformed": 0,
+            "tool_calls": [{"id": "c1", "name": "end_turn", "args": {}}],
+            "usage": {"input_tokens": 11, "output_tokens": 7, "reasoning_tokens": 0},
+        })
+
+        loop = asyncio.new_event_loop()
+
+        def run():
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(worker.run())
+            except asyncio.CancelledError:
+                pass          # how the worker is stopped; not an error
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        for _ in range(100):
+            if W.hub().is_online(self.server_id):
+                break
+            time.sleep(0.1)
+        return worker, loop, thread
+
+    def _stop_worker(self, worker, loop, thread):
+        """Stop the worker and wait for its thread, quietly.
+
+        worker.stop() clears the run flag, then cancelling the tasks interrupts the `await` it is
+        currently sitting in. The runner below swallows the resulting CancelledError, which is the
+        expected outcome of a cancel rather than a failure worth printing.
+        """
+        worker.stop()
+        loop.call_soon_threadsafe(
+            lambda: [task.cancel() for task in asyncio.all_tasks(loop)])
+        thread.join(timeout=5)
+
+    def test_worker_connects_and_serves_a_completion(self):
+        worker, loop, thread = self._run_worker()
+        try:
+            self.assertTrue(W.hub().is_online(self.server_id), "worker did not connect")
+            connection = W.hub().get(self.server_id)
+            self.assertEqual(connection.hostname, "testbox")
+            self.assertEqual(connection.model_keys(), ["test-model"])
+
+            # Submit from a plain thread, exactly as the turn driver does.
+            result = {}
+
+            def caller():
+                result["answer"] = W.hub().submit(
+                    self.server_id,
+                    P.Request(id="req-1", model="test-model",
+                              messages=[{"role": "user", "content": "go"}], timeout=20),
+                    timeout=20)
+
+            t = threading.Thread(target=caller)
+            t.start()
+            t.join(timeout=25)
+            self.assertFalse(t.is_alive(), "submit() never returned — the thread bridge deadlocked")
+            answer = result.get("answer") or {}
+            self.assertEqual(answer.get("text"), "hello from the worker")
+            self.assertEqual(answer["usage"]["input_tokens"], 11)
+            self.assertEqual(len(answer["tool_calls"]), 1)
+        finally:
+            self._stop_worker(worker, loop, thread)
+
+    def test_worker_refuses_when_busy(self):
+        def slow(data):
+            time.sleep(2)
+            return {"text": "done", "tool_calls": [], "usage": {}, "stop_reason": "stop",
+                    "thinking": "", "malformed": 0}
+
+        worker, loop, thread = self._run_worker(fake_completion=slow, max_concurrent=1)
+        try:
+            errors = []
+            results = []
+
+            def caller(n):
+                try:
+                    results.append(W.hub().submit(
+                        self.server_id,
+                        P.Request(id=f"busy-{n}", model="test-model", messages=[], timeout=20),
+                        timeout=20))
+                except W.WorkerError as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=caller, args=(i,)) for i in range(3)]
+            for t in threads:
+                t.start()
+                time.sleep(0.15)
+            for t in threads:
+                t.join(timeout=25)
+
+            # The machine's own limit is what protects it; the hub reports "busy", not an error.
+            self.assertTrue(errors, "expected at least one busy refusal")
+            self.assertTrue(any(e.refusal == "busy" for e in errors),
+                            f"refusals were {[e.refusal for e in errors]}")
+            self.assertTrue(all(e.retryable for e in errors))
+        finally:
+            self._stop_worker(worker, loop, thread)
+
+    def test_worker_enforces_its_own_quiet_hours(self):
+        """The owner's machine has the last word: even though the server admitted the request, the
+        worker refuses during its local quiet hours."""
+        from datetime import datetime
+        now = datetime.now()
+        # A window covering right now, on today's weekday.
+        window = [(now.weekday(), 0, 1440)]
+        worker, loop, thread = self._run_worker(quiet=window)
+        try:
+            with self.assertRaises(W.WorkerError) as caught:
+                W.hub().submit(self.server_id,
+                               P.Request(id="quiet-1", model="test-model", messages=[], timeout=15),
+                               timeout=15)
+            self.assertEqual(caught.exception.refusal, "closed")
+            self.assertIn("quiet hours", str(caught.exception))
+        finally:
+            self._stop_worker(worker, loop, thread)
+
+    def test_bad_token_is_refused_and_the_worker_gives_up(self):
+        from citar.worker.agent import Worker, WorkerConfig
+
+        cfg = WorkerConfig(server_url=f"http://127.0.0.1:{self.port}", token="wrong-token",
+                           collect_hardware=False)
+        worker = Worker(cfg)
+        worker.discover_models = lambda: _async_value([])
+        loop = asyncio.new_event_loop()
+
+        def run():
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(worker.run())
+            except asyncio.CancelledError:
+                pass
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=15)
+        # A bad token will never start working, so the worker stops instead of retrying forever.
+        self.assertFalse(thread.is_alive(), "worker kept retrying a token that will never work")
+        self.assertFalse(worker.running)
+
+    def test_worker_error_reaches_the_caller_as_a_failure(self):
+        def broken(data):
+            raise RuntimeError("the local model is not loaded")
+
+        worker, loop, thread = self._run_worker(fake_completion=broken)
+        try:
+            with self.assertRaises(W.WorkerError) as caught:
+                W.hub().submit(self.server_id,
+                               P.Request(id="err-1", model="test-model", messages=[], timeout=15),
+                               timeout=15)
+            self.assertIn("not loaded", str(caught.exception))
+        finally:
+            self._stop_worker(worker, loop, thread)
+
+
+def _async_value(value):
+    async def _inner():
+        return value
+    return _inner()
+
+
+if __name__ == "__main__":
+    unittest.main()
