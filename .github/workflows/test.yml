@@ -132,13 +132,19 @@ jobs:
       - name: It runs, and its data came with it
         # The failure this catches is a packaging change that drops the ruleset or the web client:
         # the wheel installs, the command runs, and the first game fails with a missing file.
+        #
+        # Run from /tmp, and with -P. `python -c` puts the current directory at the front of
+        # sys.path, so running this from the checkout imported the *source tree* and asserted
+        # nothing at all about the wheel - it passed while the wheel was broken.
+        working-directory: /tmp
         run: |
           /tmp/fresh/bin/citar --version
           /tmp/fresh/bin/citar where
           /tmp/fresh/bin/citar doctor --quiet
-          /tmp/fresh/bin/python -c "
+          /tmp/fresh/bin/python -P -c "
           from citar import paths
           from citar.engine.rules import get_rules
+          assert 'site-packages' in paths.PACKAGE.as_posix(), f'not testing the wheel: {paths.PACKAGE}'
           assert (paths.package_data() / 'ruleset').is_dir(), 'ruleset missing from the wheel'
           assert (paths.web_dir() / 'index.html').is_file(), 'web client missing from the wheel'
           assert (paths.migrations_dir() / 'env.py').is_file(), 'migrations missing from the wheel'
@@ -150,9 +156,11 @@ jobs:
       - name: An installed copy writes to the user directory, not site-packages
         # The bug this pins: every module used to resolve its own directory from __file__, which
         # put saved games inside site-packages once CITAR was installed from a wheel.
+        working-directory: /tmp
         run: |
-          /tmp/fresh/bin/python -c "
+          /tmp/fresh/bin/python -P -c "
           from citar import paths
+          assert 'site-packages' in paths.PACKAGE.as_posix(), f'not testing the wheel: {paths.PACKAGE}'
           assert not paths.in_source_checkout(), 'an installed copy thinks it is a checkout'
           assert 'site-packages' not in str(paths.save_dir()), paths.save_dir()
           print('state directory OK:', paths.save_dir())

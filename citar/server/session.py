@@ -683,8 +683,16 @@ class SessionManager:
     @staticmethod
     def delete_save(rel_path: str, whole_game: bool = False) -> list[str]:
         """Delete one save."""
-        p = (SAVE_DIR / rel_path).resolve()
-        if SAVE_DIR.resolve() not in p.parents or not p.exists() or p.suffix != ".citar":
+        # Two paths to the same file, on purpose. `p` stays rooted at SAVE_DIR as written, so the
+        # names reported back can be made relative to it; `p.resolve()` is what the containment
+        # check has to use, because that is what stops a `..` in rel_path escaping the directory.
+        #
+        # Mixing them was a bug: resolving the candidate and comparing it against an unresolved
+        # SAVE_DIR raised "is not in the subpath of" wherever the two differ - a macOS temporary
+        # directory (/var -> /private/var), a Windows 8.3 short path, or any save directory reached
+        # through a symlink or a junction. Deleting a save failed there and nowhere else.
+        p = SAVE_DIR / rel_path
+        if SAVE_DIR.resolve() not in p.resolve().parents or not p.exists() or p.suffix != ".citar":
             raise KeyError(rel_path)
         targets = sorted(p.parent.glob("*.citar")) if whole_game else [p]
         removed = []

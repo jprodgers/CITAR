@@ -182,6 +182,37 @@ class SaveListTests(unittest.TestCase):
                 with self.assertRaises(KeyError):
                     m.delete_save("../outside.citar")
 
+    def test_delete_save_when_the_save_directory_resolves_elsewhere(self):
+        """A save directory whose resolved form differs from the path CITAR holds.
+
+        This is every macOS temporary directory (/var is a symlink to /private/var), a Windows 8.3
+        short path, and any save directory reached through a symlink or junction. Deleting a save
+        used to raise "is not in the subpath of" on exactly those machines and nowhere else, which
+        is why it reached CI before it reached anybody's laptop.
+
+        Reproduced portably by pointing SAVE_DIR at a path with a redundant segment, so that
+        `resolve()` gives a different string from the one held.
+        """
+        from citar.server import session as sess
+        with tempfile.TemporaryDirectory() as tmp:
+            indirect = Path(tmp) / "sub" / ".."
+            (Path(tmp) / "sub").mkdir()
+            self.assertNotEqual(str(indirect), str(indirect.resolve()), "the test needs the two to differ")
+            with mock.patch.object(sess, "SAVE_DIR", indirect):
+                m = sess.SessionManager()
+                s = m.create({"map_size": "duel", "seed": 4, "barbarians": "off", "name": "Symlinked"},
+                             [{"type": "human"}, {"type": "bot"}])
+                s.paused = True
+                s.save("manual")
+                entry = [x for x in m.list_saves() if x["game_id"] == s.id][0]
+                m.delete(s.id)
+                removed = m.delete_save(entry["path"], whole_game=True)
+                self.assertTrue(removed)
+                self.assertFalse((indirect / s.id).exists())
+                # The escape check still has to work through the indirection.
+                with self.assertRaises(KeyError):
+                    m.delete_save("../../outside.citar")
+
 
 class PathPreviewTests(unittest.TestCase):
     def test_path_endpoint_returns_route_and_turns(self):

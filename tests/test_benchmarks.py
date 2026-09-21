@@ -42,6 +42,35 @@ def wait_for(pred, timeout=90, step=0.2, sch=None):
     return False
 
 
+def why(sch, run):
+    """Everything the scheduler knows about why a run is not where the test expected it.
+
+    A job that never starts fails an `assertTrue(wait_for(...))` as "False is not true", and the
+    reason - which the scheduler does record - sits in `job["error"]` and in `sch.log`, neither of
+    which unittest ever prints. `_launch_job` marks a job failed and returns quietly, so without
+    this the only evidence left behind is that a timeout elapsed. Used as the message of every
+    wait a test does on job state.
+    """
+    jobs = ", ".join(f"{j['label']}={j['status']}" + (f" ({j['error']})" if j.get("error") else "")
+                     for j in run["jobs"])
+    tail = " | ".join(entry["msg"] for entry in sch.log[-8:])
+    return "\n".join([f"run={run['status']} jobs: {jobs}",
+                      f"restricted={sorted(sch._restricted)}",
+                      f"log: {tail}"])
+
+
+def started(sch, run, job, timeout=30):
+    """Wait until a job has left the queue, and return whatever it became.
+
+    Deliberately not a wait for ``"running"``. A job that fails during launch goes straight to
+    ``failed``, and a caller waiting for ``running`` then burns its whole timeout before saying
+    nothing useful; a job can also pass through ``running`` between two polls. Waiting for "no
+    longer starting up" and asserting on what it became reports the real state either way.
+    """
+    wait_for(lambda: job["status"] not in ("queued", "loading"), timeout=timeout, sch=sch)
+    return job["status"]
+
+
 class BenchmarkTests(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="citar-bench-"))
@@ -105,7 +134,7 @@ class BenchmarkTests(unittest.TestCase):
         sch = self.scheduler()
         run = sch.create_run(dry_suite(mode="parallel", models=("m",), servers=2, turn_limit=12))
         both = wait_for(lambda: sum(1 for j in run["jobs"] if j["status"] in ("loading", "running")) == 2, timeout=40, step=0.05, sch=sch)
-        self.assertTrue(both, "jobs on different servers should run at the same time")
+        self.assertTrue(both, "jobs on different servers should run at the same time: " + why(sch, run))
         self.assertTrue(wait_for(lambda: run["status"] == "done", timeout=300, sch=sch))
 
     def test_restricted_hours_pause_and_resume(self):
@@ -116,7 +145,7 @@ class BenchmarkTests(unittest.TestCase):
             "enabled": True, "unload_models": False, "grace_minutes": 0,
             "windows": [{"days": list(range(7)), "start": "01:00", "end": "02:00"}]}))
         job = run["jobs"][0]
-        self.assertTrue(wait_for(lambda: job["status"] == "running", timeout=20, sch=sch))
+        self.assertEqual(started(sch, run, job, timeout=20), "running", why(sch, run))
         game = self.manager.get(job["game_id"])
         self.assertTrue(wait_for(lambda: game.game.turn >= 2, timeout=30, sch=sch))
 
@@ -151,15 +180,16 @@ class BenchmarkTests(unittest.TestCase):
         sch = self.scheduler()
         run = sch.create_run(dry_suite(models=("p", "s"), turn_limit=40))
         first, second = run["jobs"]
-        self.assertTrue(wait_for(lambda: first["status"] == "running", timeout=20, sch=sch))
+        self.assertEqual(started(sch, run, first, timeout=20), "running", why(sch, run))
         sch.control_run(run["id"], "pause")
         self.assertEqual((run["status"], first["status"], first["pause_reason"]), ("paused", "paused", "user"))
         self.assertEqual(second["status"], "queued")
         sch.control_run(run["id"], "resume")
-        self.assertTrue(wait_for(lambda: first["status"] == "running", timeout=10, sch=sch))
+        self.assertTrue(wait_for(lambda: first["status"] == "running", timeout=10, sch=sch), why(sch, run))
         sch.control_job(run["id"], first["id"], "skip")
         self.assertEqual(first["status"], "cancelled")
-        self.assertTrue(wait_for(lambda: second["status"] == "running", timeout=20, sch=sch), "the next job starts after a skip")
+        self.assertTrue(wait_for(lambda: second["status"] == "running", timeout=20, sch=sch),
+                        "the next job starts after a skip: " + why(sch, run))
         sch.control_run(run["id"], "cancel")
         self.assertEqual(run["status"], "cancelled")
 

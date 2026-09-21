@@ -632,7 +632,8 @@ class BenchmarkScheduler:
                 continue
             if job["status"] == "resuming" and job["server_id"] not in self._restricted and run["status"] == "running":
                 job["status"] = "loading"
-                threading.Thread(target=self._resume_job, args=(run["id"], job["id"]), daemon=True).start()
+                threading.Thread(target=self._in_job_thread,
+                                 args=(self._resume_job, run["id"], job["id"]), daemon=True).start()
             elif job["status"] == "running" and s.paused and not s.stopped:
                 # paused from the game screen: reflect it on the run page
                 job["status"], job["pause_reason"] = "paused", "user"
@@ -684,9 +685,38 @@ class BenchmarkScheduler:
                 job["status"] = "loading"
                 job["started"] = _now()
                 self._touch(run)
-                threading.Thread(target=self._launch_job, args=(run["id"], job["id"]), daemon=True).start()
+                threading.Thread(target=self._in_job_thread,
+                                 args=(self._launch_job, run["id"], job["id"]), daemon=True).start()
 
     # ------------------------------------------------------------------ job threads
+    def _in_job_thread(self, what, run_id: str, job_id: str):
+        """Run a job thread so that a failure is reported instead of disappearing.
+
+        `_launch_job` and `_resume_job` run on daemon threads. An exception on one of those has
+        nowhere to go: Python prints it to stderr, the thread ends, and the job is left in
+        `loading` or `resuming` for ever. A run would then sit at "starting" indefinitely with
+        nothing anywhere saying why - which is exactly what it did, on one platform, until a test
+        timed out and said only that the job never started.
+
+        So every path out of a job thread ends here, and a failure becomes a failed job with the
+        traceback in the log.
+        """
+        try:
+            what(run_id, job_id)
+        except Exception as exc:                            # deliberately everything: the point is that nothing escapes
+            detail = f"{type(exc).__name__}: {exc}"
+            with self.lock:
+                try:
+                    run, job = self._job(run_id, job_id)
+                except KeyError:
+                    self._log(f"job thread failed after the run went away: {detail}")
+                    return
+                job.update({"status": "failed", "error": detail, "finished": _now()})
+                self._log(f"{job.get('label', job_id)}: {detail}")
+                self.log.append({"t": _now(), "msg": traceback.format_exc()})
+                self._touch(run)
+                self._flush()
+
     def _ensure_model(self, run: dict, job: dict) -> float:
         """Load the model a job needs, if CITAR manages loading on that server."""
         sv = REG.get(job["server_id"])

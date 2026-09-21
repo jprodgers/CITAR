@@ -53,6 +53,11 @@ jobs:
         run: mkdocs build --strict
 
       - uses: actions/configure-pages@v5
+        # `enablement` switches the repository's Pages source to GitHub Actions. Without it the
+        # action only *reads* the Pages configuration, and a repository whose Pages is still set to
+        # "deploy from a branch" - which is what a freshly enabled one is - fails the whole job with
+        # "Get Pages site failed". It is idempotent: on every later run the setting already matches.
+        with: { enablement: true }
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }
       - id: deploy
