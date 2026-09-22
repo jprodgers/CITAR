@@ -875,18 +875,14 @@ def _handle_city_defeated(g, a: Combatant, d: Combatant) -> Optional[dict]:
     """Capture a city brought to the brink, if the attacker is a melee unit that may."""
     if d.city is None or not d.defeated(g) or a.unit is None or not a.is_melee(g):
         return None
+    city = d.city
+    if g.is_barbarian(a.owner):
+        # barbarians never capture or raze: they sack the city and leave it to its owner
+        from . import barbarians
+        return barbarians.sack_city(g, city, a.unit)
     from .units import unit_has
     if unit_has(g, a.unit, U.CannotCaptureCities, with_civ=True):
         return None
-    city = d.city
-    if g.is_barbarian(a.owner):
-        city.health = 2
-        cp = g.player(city.owner)
-        ransom = min(200, int(max(0, cp.gold)))
-        cp.gold -= ransom
-        g.emit("city_raided", f"Barbarians raided {city.name} and stole {ransom} gold!", [city.owner], idx=city.idx)
-        g.remove_unit(a.unit)
-        return {"raided_city": city.name, "gold_stolen": ransom}
     from . import conquest
     return conquest.conquer(g, city, a.unit)
 

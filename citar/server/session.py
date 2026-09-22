@@ -124,7 +124,7 @@ class GameSession:
             "winner": g.s.winner, "victory": g.s.victory, "paused": self.paused, "ai_delay": self.ai_delay,
             "pause_reason": self.pause_reason if self.paused else None,
             "created": self.created, "config": {k: g.s.config.get(k) for k in (
-                "map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians", "turn_limit", "victories", "city_states", "religion",
+                "map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians", "barbarian_aggression", "turn_limit", "victories", "city_states", "religion",
                 "espionage", "tech_trading", "ruins", "seed", "map_edges", "wrap_x", "wrap_y", "river_density",
                 "resources", "on_disconnect", "reconnect_seconds")},
             "players": [{"id": p.id, "name": p.name, "color": p.color, "alive": p.alive, "kind": p.kind,
