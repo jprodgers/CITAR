@@ -7,7 +7,7 @@
 # downloads it and checks.
 
 PackageIdentifier: JimmieRodgers.CITAR
-PackageVersion: 0.1.2
+PackageVersion: 0.1.3
 InstallerType: inno
 # Per-user, matching how the installer is built: no elevation prompt, and it works for somebody
 # without administrator rights on their own machine.
@@ -29,7 +29,7 @@ ExpectedReturnCodes:
     ReturnResponse: cancelledByUser
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/jprodgers/CITAR/releases/download/v0.1.2/CITAR-0.1.2-setup.exe
-    InstallerSha256: 5E3832EC12A51D9A6D1E853F4160F7FDA69A9C1499B94DEB63EC57F198940CF1
+    InstallerUrl: https://github.com/jprodgers/CITAR/releases/download/v0.1.3/CITAR-0.1.3-setup.exe
+    InstallerSha256: 4F28B2C93D629B90E2079E2A21B0F7EF6DEC92657738F64C67828356DC63A4C4
 ManifestType: installer
 ManifestVersion: 1.12.0
