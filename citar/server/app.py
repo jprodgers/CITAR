@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -65,9 +66,22 @@ async def _startup():
     if scheduler is None:
         scheduler = BenchmarkScheduler(manager)   # reloads benchmark games that were in progress
     _probes()                                     # resumes probe runs that were queued or running
+    asyncio.create_task(_close_finished_loop())   # finished lobby games leave the list after a while
     from .. import usage
     usage.start_power_sampler()                   # live power samples of this machine for cost reports
     usage.tracker().start()
+
+
+async def _close_finished_loop():
+    """Every minute, close finished lobby games nobody is watching (see SessionManager.close_finished)."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            closed = await asyncio.to_thread(manager.close_finished)
+            if closed:
+                print("closed finished games: " + "; ".join(closed), flush=True)
+        except Exception:
+            traceback.print_exc()
 
 
 @app.on_event("shutdown")
@@ -243,7 +257,7 @@ async def _security_headers(request: Request, call_next):
         "style-src 'self' 'unsafe-inline' https://*.hcaptcha.com; "
         "img-src 'self' data: https:; "
         "connect-src 'self' https://*.hcaptcha.com; "
-        "frame-src https://*.hcaptcha.com; "
+        "frame-src 'self' https://*.hcaptcha.com; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
     if cfg.require_https:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")

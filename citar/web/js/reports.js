@@ -217,6 +217,7 @@ async function renderViewer(root, id) {
     el("span", { class: "grow" }),
     el("a", { class: "button small", href: `/api/reports/${id}/html`, target: "_blank" }, "Open in new tab"),
     el("a", { class: "button small primary", href: `/api/reports/${id}/download` }, "Download HTML")));
-  page.appendChild(el("iframe", { class: "report-frame", src: `/api/reports/${id}/html`, title: meta.title || "Report" }));
+  page.appendChild(el("iframe", { class: "report-frame", src: `/api/reports/${id}/html`, title: meta.title || "Report",
+    sandbox: "allow-popups allow-popups-to-escape-sandbox" }));
   return {};
 }

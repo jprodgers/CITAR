@@ -817,6 +817,31 @@ class SessionManager:
                 traceback.print_exc()
         return restored
 
+    FINISHED_GRACE_SECONDS = 600.0    # how long a finished lobby game stays in the list for its players
+
+    def close_finished(self, now: Optional[float] = None) -> list[str]:
+        """Close lobby games that have been over for a while and that nobody is watching.
+
+        A finished game used to stay under the lobby's current games until someone pressed Close. It stays for a
+        few minutes after the end so its players see the result, then leaves the list; its saves (and replay)
+        are kept, as with Close. Benchmark games are released by their scheduler in the same way.
+        """
+        now = now or time.time()
+        closed = []
+        for s in list(self.sessions.values()):
+            if s.benchmark or s.stopped or s.game.s.phase == "playing":
+                s.__dict__.pop("_over_since", None)
+                continue
+            since = s.__dict__.setdefault("_over_since", now)
+            if now - since >= self.FINISHED_GRACE_SECONDS and not s.subscribers:
+                try:
+                    s.save("final")
+                except Exception:
+                    pass
+                self.delete(s.id)
+                closed.append(s.name)
+        return closed
+
     def get(self, sid: str) -> Optional[GameSession]:
         """A session by id, or None."""
         return self.sessions.get(sid)

@@ -368,6 +368,26 @@ class SessionTests(unittest.TestCase):
             for sid in list(after.sessions):
                 after.delete(sid)
 
+    def test_finished_games_leave_the_list_by_themselves(self):
+        """A finished game stayed under current games until someone pressed Close."""
+        from citar.server.session import SAVE_DIR
+        done = self.manager.create({"map_size": "duel", "seed": 9}, [{"type": "human"}, {"type": "bot"}], name="done")
+        watched = self.manager.create({"map_size": "duel", "seed": 10}, [{"type": "human"}, {"type": "bot"}], name="watched")
+        playing = self.manager.create({"map_size": "duel", "seed": 11}, [{"type": "human"}, {"type": "bot"}], name="playing")
+        for s in (done, watched):
+            with s.lock:
+                s.game.s.phase = "over"
+        watched.subscribers.append(lambda msg: None)
+        t0 = time.time()
+        self.assertEqual(self.manager.close_finished(t0), [], "players get a few minutes to see the result")
+        self.assertEqual(self.manager.close_finished(t0 + SessionManager.FINISHED_GRACE_SECONDS + 1), ["done"])
+        self.assertIsNone(self.manager.get(done.id))
+        self.assertIsNotNone(self.manager.get(watched.id), "someone is still looking at it")
+        self.assertIsNotNone(self.manager.get(playing.id))
+        self.assertTrue((SAVE_DIR / done.id / "final.citar").exists(), "its saves are kept")
+        import shutil
+        shutil.rmtree(SAVE_DIR / done.id, ignore_errors=True)
+
     def test_save_and_load(self):
         s = self.manager.create({"map_size": "duel", "seed": 9}, [{"type": "human"}, {"type": "bot"}])
         pid = 0

@@ -347,7 +347,12 @@ def reports_rerun(rid: str):
 def reports_html(rid: str):
     """A report's HTML, for viewing in place."""
     p = _call(reports_runner().html_path, rid)
-    return HTMLResponse(p.read_text(encoding="utf-8"), headers={"Cache-Control": "no-cache"})
+    # Shown in a frame on the Reports page, so this page (and only this one) may be framed by the site itself.
+    # A report is static HTML and inline SVG with no scripts; its own policy says so.
+    return HTMLResponse(p.read_text(encoding="utf-8"), headers={
+        "Cache-Control": "no-cache", "X-Frame-Options": "SAMEORIGIN",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; "
+                                   "font-src data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"})
 
 
 @router.get("/api/reports/{rid}/download")
