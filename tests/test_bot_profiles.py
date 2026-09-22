@@ -252,7 +252,7 @@ class RatingTests(unittest.TestCase):
     def test_multiplayer_pairs_are_weighted(self):
         pairs = ratings.comparisons([self._game(["a", "b", "c", "d"])])
         self.assertAlmostEqual(pairs[("a", "b")][1], 1 / 3)
-        self.assertAlmostEqual(sum(n for _, n in pairs.values()), 2.0, "4 seats x 3 pairs / 2 x 1/3")
+        self.assertAlmostEqual(sum(n for _, n in pairs.values()), 2.0, msg="4 seats x 3 pairs / 2 x 1/3")
 
     def test_rankings_from_lab_results(self):
         from citar import lab

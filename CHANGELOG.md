@@ -4,6 +4,14 @@ Notable changes to CITAR. The format follows [Keep a Changelog](https://keepacha
 versions follow [semantic versioning](https://semver.org) — with the pre-1.0 caveat that tool names
 and arguments may still change between minor versions, and the release notes will say when they do.
 
+## [Unreleased]
+
+### Fixed
+
+- A rating test passed its message as `assertAlmostEqual`'s `places` argument, so it raised a `TypeError`
+  on Python 3.11 whenever the weighted pair count was not exactly 2.0. Tests only; the shipped code is
+  unaffected.
+
 ## [0.1.4] - 2026-09-22
 
 ### Added
