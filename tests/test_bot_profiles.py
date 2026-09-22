@@ -163,6 +163,34 @@ class LabProfileTests(unittest.TestCase):
             (lab.QUEUE / "api-ab.json").unlink(missing_ok=True)
 
 
+class NegotiationTests(unittest.TestCase):
+    def test_a_refused_counter_still_ends_the_bots_move(self):
+        """A live game waited 90 s on a bot whose counter-offer the rules refused (2026-09-22)."""
+        from citar.engine.game import Game
+        from citar.engine import tools
+        g = Game.new({"map_size": "duel", "seed": 21, "barbarians": "off",
+                      "players": [{"controller": "bot"}, {"controller": "bot"}]})
+        a, b = 0, 1
+        g.player(a).met.add(b) if isinstance(g.player(a).met, set) else g.player(a).met.append(b)
+        g.player(b).met.add(a) if isinstance(g.player(b).met, set) else g.player(b).met.append(a)
+        g.player(a).gold = 50
+        n = tools.execute(g, a, "open_negotiation", {"to": b, "message": "Friends?",
+                                                     "give": [{"type": "gold", "amount": 40}], "receive": []})
+        nid = n.get("negotiation_id") or n.get("id") or g.s.negotiations[-1]["id"]
+        g.s.current = b
+        # B asks A for more gold than A has: any counter A builds from that proposal is refused
+        tools.execute(g, b, "respond_negotiation", {"negotiation_id": nid, "action": "counter", "message": "More.",
+                                                    "give": [], "receive": [{"type": "gold", "amount": 45}]})
+        g.s.current = a
+        g.player(b).gold = 1000                   # B can pay, so A counters rather than rejecting outright...
+        g.player(a).gold = 30                     # ...but A can no longer pay the 45 on the table: the counter is refused
+        bot = profiles.make_bot("standard", seed=1)
+        bot.p["counter_max_gap"] = 10 ** 6         # make it try to counter whatever the value
+        bot.respond(g, a, nid)
+        neg = next(x for x in g.s.negotiations if x["id"] == nid)
+        self.assertNotEqual((neg["status"], neg["awaiting"]), ("open", a), neg)
+
+
 class BestBotTests(unittest.TestCase):
     def test_best_is_pinned_when_a_game_is_created(self):
         from unittest import mock

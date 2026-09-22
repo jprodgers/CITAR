@@ -2510,8 +2510,12 @@ class BasicBot:
                         message="We cannot fulfil those terms.")
         elif n["exchanges"] < P["counter_rounds"] and value > -P["counter_max_gap"] and g.player(other).gold >= -value:
             ask = int(-value) + P["counter_margin"]
-            self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="counter",
-                    message=f"Add {ask} gold and we have a deal.", give=give,
-                    receive=receive + [{"type": "gold", "amount": ask}])
+            if self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="counter",
+                       message=f"Add {ask} gold and we have a deal.", give=give,
+                       receive=receive + [{"type": "gold", "amount": ask}]) is None:
+                # a counter the rules refuse (we can't pay what they asked, say) must still end our move, or the
+                # negotiation stays open waiting on us until it times out
+                self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="reject",
+                        message="That does not interest us.")
         else:
             self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="reject", message="That does not interest us.")

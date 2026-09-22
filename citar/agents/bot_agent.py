@@ -49,7 +49,12 @@ class BotAgent:
                     break
                 for n in mine:
                     if n["awaiting"] == pid:
+                        before = len(n["history"])
                         self.bot.respond(g, pid, n["id"])
+                        if n["status"] == "open" and n["awaiting"] == pid and len(n["history"]) == before:
+                            # the bot's answer was refused and nothing moved: end it rather than stall the game
+                            session.call_tool(pid, "respond_negotiation",
+                                              {"negotiation_id": n["id"], "action": "reject"})
                 session.cond.wait(timeout=1.0)
 
     def respond_negotiation(self, session, pid: int, nid: int):
