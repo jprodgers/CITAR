@@ -239,8 +239,16 @@ class BenchmarkScheduler:
     def running_items(self) -> list[dict]:
         """Jobs using their machine now, for the queue page."""
         with self.lock:
-            return [self._item(run, job) for run in self.runs.values()
+            return [dict(self._item(run, job), state=self._state(job)) for run in self.runs.values()
                     for job in run["jobs"] if job["status"] in ACTIVE and not self._preempted(job)]
+
+    @staticmethod
+    def _state(job: dict) -> str:
+        """What a job holding its machine is doing, in words for the queue page."""
+        if job["status"] != "paused":
+            return job["status"]
+        return {"restricted": "paused (quiet hours)", "quiet": "paused (quiet hours)", "user": "paused by a person",
+                "disconnect": "paused (model server unreachable)"}.get(job.get("pause_reason"), "paused")
 
     @staticmethod
     def _preempted(job: dict) -> bool:

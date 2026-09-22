@@ -66,11 +66,12 @@ function machineCard(m, refresh) {
     seen.add(`${it.kind}:${it.group}`);
     const outranks = !it.now && lowestRunning != null && (it.priority || 0) > lowestRunning;
     table.append(el("tr", { class: it.now ? "q-now-row" : it.position === 1 ? "q-next" : "" },
-      el("td", {}, it.now ? el("span", { class: "pill live" }, "running") : it.position === 1 ? "next" : it.position),
+      el("td", {}, it.now ? (it.state && it.state.startsWith("paused") ? el("span", { class: "pill quiet" }, "paused")
+        : el("span", { class: "pill live" }, "running")) : it.position === 1 ? "next" : it.position),
       el("td", {}, it.label, it.kind === "benchmark" ? el("div", { class: "muted small" }, it.run) : null),
       el("td", {}, KIND_LABEL[it.kind] || it.kind),
       el("td", {}, first ? priorityControl(it.kind, it.group, it.priority || 0, refresh, top) : el("span", { class: "muted" }, it.priority)),
-      el("td", { class: "muted small" }, it.now ? "using the machine"
+      el("td", { class: "muted small" }, it.now ? (it.state && it.state !== "running" ? `${it.state}; keeps its place on the machine` : "using the machine")
         : outranks ? "higher priority: starts once the running work finishes its current turn"
           : (it.waiting || "").replace(/^waiting:? ?(for )?/, ""))));
   }
