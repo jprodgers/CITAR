@@ -931,7 +931,7 @@ class BenchmarkScheduler:
             try:
                 s = self.manager.create(config, seats, name=f"Bench · {job['label']} · {sc['name']}"
                                                             + (f" #{job['repeat']}" if run["suite"]["repeats"] > 1 else ""),
-                                        track=False)
+                                        track=False, start=False)
             except Exception as e:
                 job.update({"status": "failed", "error": f"Could not create the game: {e}", "finished": _now()})
                 self._touch(run)
@@ -944,6 +944,7 @@ class BenchmarkScheduler:
                            "server_id": job["server_id"], "profile": job.get("profile")}
             self.manager.track(s)
             s.autosave(force=True)
+            s.start()       # only now: a game started before `benchmark` is set plays its first turn as a lobby game
             job.update({"status": "running", "game_id": s.id, "load_seconds": load_s, "tool_mode": llm.get("tool_mode")})
             self._log(f"Started {job['label']} on {sc['name']} (game {s.id}).")
             self._touch(run)

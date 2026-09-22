@@ -195,6 +195,22 @@ class BenchmarkTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: job["status"] == "running" and not game.paused, timeout=10, sch=sch))
         self.assertTrue(wait_for(lambda: game.game.turn > turn, timeout=30, sch=sch))
 
+    def test_benchmark_game_ignores_lobby_quiet_hours_from_its_first_turn(self):
+        """Quiet hours for a benchmark come from its scheduler, and its clock, only. The game used to start
+        before it was marked as a benchmark, so the model's first turn went through the lobby's quiet-hours
+        check on the real wall clock: between 01:00 and 02:00 test_restricted_hours_pause_and_resume
+        found its job paused, with the scheduler's `_restricted` empty."""
+        sch = self.scheduler()
+        lobby_quiet = mock.patch.object(REG, "restricted_now", lambda sid: datetime.now() + timedelta(hours=1))
+        with lobby_quiet:
+            run = sch.create_run(dry_suite(models=("lq",), turn_limit=200, delay=0.02))
+            job = run["jobs"][0]
+            self.assertEqual(started(sch, run, job, timeout=20), "running", why(sch, run))
+            game = self.manager.get(job["game_id"])
+            self.assertTrue(wait_for(lambda: game.game.turn >= 2, timeout=30, sch=sch), why(sch, run))
+            self.assertFalse(game.paused)
+            self.assertEqual(job["status"], "running", why(sch, run))
+
     def test_restricted_hours_follow_the_machine_the_game_uses(self):
         """A seat moved to a re-registered machine (new id) must pause with that machine's hours, not the old id's."""
         sch = self.scheduler()
