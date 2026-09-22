@@ -49,6 +49,8 @@ Single-player fixes and more dangerous barbarians.
 - **More luxury variety on big maps.** Huge and gargantuan maps now carry every luxury type, large at
   least 90%, standard 75% and small maps half; every map has every strategic resource.
 - The wonder-built event names the civilization first ("Rome has built The Pyramids in Rome.").
+- Bot seats in live games are seeded from the game's seed, as lab games already were, so the same seed
+  and seats play the same game. Before, each live bot seeded itself from the clock.
 
 ### Fixed
 

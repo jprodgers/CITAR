@@ -302,7 +302,9 @@ class GameSession:
         agent = None
         if seat.type == "bot":
             from ..agents.bot_agent import BotAgent
-            agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")})
+            # seeded from the game, as the lab seeds its bots, so the same map seed plays the same game
+            agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")},
+                             seed=int(self.game.s.config.get("seed") or 0) * 101 + pid)
         elif seat.type == "llm":
             from ..agents.llm_agent import LLMAgent
             from .. import servers
