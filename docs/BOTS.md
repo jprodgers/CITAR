@@ -42,8 +42,9 @@ A **profile** is a named configuration of the bot: which *code* it runs (the liv
 snapshot, or the idle bot), an optional fixed *aggression*, and *parameter overrides* on top of that
 code's defaults. Profiles are what lab experiments, lobby seats, benchmark opponents and probe runs
 play; a seat that names none plays **Standard**, the live bot with its defaults. In the new-game form a bot
-seat defaults to **Best bot**: the best-ranked profile on the server whose current version has been rated
-(falling back to the best-ranked at all, then Standard; never Idle). It is resolved when the game is created and
+seat defaults to **Best bot**: the best-ranked profile on the server whose rating describes its current settings
+(its current revision, or the same parameters and aggression on earlier code of the live bot; falling back to the
+best-ranked at all, then Standard; never Idle). It is resolved when the game is created and
 recorded in the seat, so a game keeps its bot when the rankings change. Benchmarks default to Standard.
 
 The **Bots** page lists them, edits them and ranks them:

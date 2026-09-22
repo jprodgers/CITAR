@@ -179,15 +179,23 @@ class BestBotTests(unittest.TestCase):
             finally:
                 m.delete(s.id)
 
-    def test_best_skips_idle_and_prefers_a_rated_current_revision(self):
-        def entry(profile, fp, rating):
-            return {"profile": profile, "fingerprint": fp, "difficulty": "Prince", "rated": True, "rating": rating}
+    def test_best_skips_idle_and_prefers_a_rating_of_the_current_settings(self):
+        def entry(profile, fp, rating, params=None):
+            return {"profile": profile, "fingerprint": fp, "difficulty": "Prince", "rated": True, "rating": rating,
+                    "params": params or {}, "aggression": None, "last": "2026-09-22T00:00:00"}
         idle_fp = profiles.fingerprint("idle", {}, None)
         board = [entry("idle", idle_fp, 2000), entry("standard", "old-code", 1700),
                  entry("v1", profiles.fingerprint("frozen_7149efb1", {}, None), 1500)]
-        self.assertEqual(ratings.best_profile(board), "v1", "Standard's rating is from older code")
+        self.assertEqual(ratings.best_profile(board), "standard",
+                         "same settings on earlier live code still describe Standard")
         order = [p["id"] for p in ratings.ranked_profiles(board)]
         self.assertEqual(order[:3], ["idle", "standard", "v1"])
+        p = profiles.save({"name": "Tuned", "engine": "basic", "params": {"war_prep_rate": 2.0}})
+        try:
+            board.append(entry(p["id"], "tuned-old-settings", 1900, params={"war_prep_rate": 3.0}))
+            self.assertEqual(ratings.best_profile(board), "standard", "a rating of different settings doesn't count")
+        finally:
+            profiles.delete(p["id"])
         self.assertEqual(ratings.best_profile([]), "standard")
 
 

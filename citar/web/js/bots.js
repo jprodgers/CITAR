@@ -534,7 +534,7 @@ export function profileSelect(obj, key = "profile", onChange = null, { best = fa
     if (best) s.appendChild(el("option", { value: "best" }, `★ Best bot${top ? ` (now: ${top.name})` : ""}`));
     for (const p of profiles) {
       const r = p.rating && p.rating.rated ? p.rating : null;
-      const label = r ? `#${p.rank} ${p.name} · ${Math.round(r.rating)}${p.rating_is_current ? "" : " (earlier version)"}`
+      const label = r ? `#${p.rank} ${p.name} · ${Math.round(r.rating)}${p.rating_is_current ? "" : p.rating_same_settings ? " (earlier code)" : " (earlier version)"}`
         : `${p.name} · unrated`;
       s.appendChild(el("option", { value: p.id }, label));
     }

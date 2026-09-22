@@ -906,7 +906,8 @@ def summarize(results: list[dict]) -> dict:
     labels = {}
     for lab, rows in sorted(by_label.items()):
         ps = [p for _, p in rows]
-        wins = sum(1 for r, p in rows if r["winner_label"] == lab) / max(1, len({r["i"] for r, _ in rows}))
+        # share of this label's games that a seat of this label won (a label with two seats in a game wins it once)
+        wins = len({r["i"] for r, p in rows if r["winner_label"] == lab}) / max(1, len({r["i"] for r, _ in rows}))
         share, share_ci = _ci([p["score_share"] for p in ps])
         d = {"seats": len(ps), "win_share": round(wins, 3),
              "wins_by_type": dict(Counter(r["victory"] for r, p in rows if r["winner_label"] == lab and r["winner"] is not None

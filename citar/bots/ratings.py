@@ -355,8 +355,13 @@ def profile_summary(pid: str, board: Optional[list] = None) -> dict:
 
 
 def profile_rating(p: dict, board: list) -> dict:
-    """A profile with its rating: the Prince entry of its current revision when that has games, otherwise its best
-    rated entry from an earlier revision or code version (flagged), otherwise none."""
+    """A profile with its rating, the most relevant Prince entry first:
+
+    * exactly the current revision (same fingerprint): ``rating_is_current``;
+    * else the same settings (parameters and aggression) on earlier code of the live bot - the profile's own
+      rating from before the last code change, ``rating_same_settings``, the latest such code first;
+    * else its best rated entry from an earlier revision (flagged by both being false).
+    """
     mine = [b for b in board if b.get("profile") == p["id"]]
     rated = [b for b in mine if b.get("rated")]
     best = ([b for b in rated if b["difficulty"] == "Prince"] or rated or [None])[0]
@@ -364,9 +369,18 @@ def profile_rating(p: dict, board: list) -> dict:
         live = profiles.fingerprint(p["engine"], p.get("params"), p.get("aggression"))
     except profiles.ProfileError:
         live = None
-    current = next((b for b in mine if b["fingerprint"] == live and b["difficulty"] == "Prince"), None)
-    return {**p, "fingerprint": live, "rating": current or best,
-            "rating_is_current": current is not None and bool(current.get("rated")), "entries": len(mine)}
+    current = next((b for b in mine if b["fingerprint"] == live and b["difficulty"] == "Prince" and b.get("rated")),
+                   None)
+    same = None
+    if current is None and p.get("engine") == "basic":
+        agg = p.get("aggression")
+        cands = [b for b in rated if b["difficulty"] == "Prince" and (b.get("params") or {}) == (p.get("params") or {})
+                 and (b.get("aggression") is None and agg is None
+                      or b.get("aggression") is not None and agg is not None and abs(b["aggression"] - agg) < 1e-6)]
+        same = max(cands, key=lambda b: b.get("last") or "", default=None)
+    return {**p, "fingerprint": live, "rating": current or same or best,
+            "rating_is_current": current is not None, "rating_same_settings": current is not None or same is not None,
+            "entries": len(mine)}
 
 
 def ranked_profiles(board: Optional[list] = None) -> list[dict]:
@@ -387,13 +401,13 @@ def ranked_profiles(board: Optional[list] = None) -> list[dict]:
 
 
 def best_profile(board: Optional[list] = None) -> str:
-    """The id "Best bot" stands for: the highest-rated profile whose current revision has been rated (so the
-    rating describes what will actually play), else the highest-rated at all, else Standard. Never the idle bot
-    or an archived profile."""
+    """The id "Best bot" stands for: the highest-rated profile whose rating describes its current settings (its
+    current revision, or the same settings on earlier code of the live bot), else the highest-rated at all, else
+    Standard. Never the idle bot or an archived profile."""
     try:
         ranked = [p for p in ranked_profiles(board) if p["engine"] != "idle" and not p.get("archived")
                   and p["rating"] and p["rating"].get("rated")]
     except Exception:           # ratings must never stop a game from being created
         return profiles.DEFAULT_PROFILE
-    current = [p for p in ranked if p["rating_is_current"]]
+    current = [p for p in ranked if p["rating_same_settings"]]
     return (current or ranked or [{"id": profiles.DEFAULT_PROFILE}])[0]["id"]
