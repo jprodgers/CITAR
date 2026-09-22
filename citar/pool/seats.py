@@ -50,6 +50,9 @@ def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list
     for s in all_sessions():
         if s.id in exclude or s.stopped or s.game.s.phase != "playing":
             continue
+        # a game that paused to make way for higher-priority work gives the machine up until its turn comes
+        if s.paused and (s.pause_reason or {}).get("kind") == "queue":
+            continue
         # only a seat still in the game: an eliminated model will never be asked anything again, even if
         # the bots play on to the end
         if any(seat.type == "llm" and (seat.llm or {}).get("server_id") == server_id and _alive(s, seat.player)

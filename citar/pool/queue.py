@@ -7,6 +7,12 @@ long it has waited - and an item may only start on a machine when nothing from t
 ahead of it for that same machine. Within one producer the existing order holds (a benchmark run's jobs
 in turn; probe runs by rank).
 
+Running work is in the same order. When something waiting has a *higher* priority than what is using a
+machine, the running work yields at its next safe point - a benchmark or lobby game after the model's turn,
+a probe run between cases - and goes back in the queue at its own rank; it carries on when nothing above it
+is waiting (see ``preempting`` and ``first_ahead``). Equal priorities never interrupt each other: they wait
+their turn, oldest first.
+
 Priority belongs to a benchmark run or a probe run as a whole: higher goes first, 0 is normal, and
 the value is kept in ``saves/queue-priorities.json`` so it survives restarts. The lab's experiments are
 a separate queue - they run on this server's CPU, not on a model machine - but the queue page edits
@@ -20,8 +26,9 @@ from typing import Callable, Optional
 
 from .. import paths
 
-KINDS = ("benchmark", "probe", "report")
+KINDS = ("benchmark", "probe", "report", "game")
 _providers: dict[str, Callable[[], list]] = {}
+_running: dict[str, Callable[[], list]] = {}
 _lock = threading.Lock()
 _cache: Optional[dict] = None
 
@@ -65,13 +72,15 @@ def set_priority(kind: str, group: str, value: int) -> int:
     return value
 
 
-def register(kind: str, waiting: Callable[[], list]) -> None:
-    """Tell the queue how to list a producer's waiting items.
+def register(kind: str, waiting: Callable[[], list], running: Optional[Callable[[], list]] = None) -> None:
+    """Tell the queue how to list a producer's waiting items (and, for the queue page, its running ones).
 
     Each item is a dict with ``kind``, ``id`` (the item), ``group`` (the run it belongs to), ``label``,
     ``server_id`` and ``created``; the queue adds ``priority``.
     """
     _providers[kind] = waiting
+    if running is not None:
+        _running[kind] = running
 
 
 def rank(item: dict) -> tuple:
@@ -97,6 +106,46 @@ def waiting(server_id: Optional[str] = None, skip: Optional[str] = None) -> list
             out.append(it)
     out.sort(key=rank)
     return out
+
+
+def running(server_id: Optional[str] = None) -> list[dict]:
+    """What is using a machine (or every machine) now, best first, with priorities."""
+    out = []
+    for kind, fn in list(_running.items()):
+        try:
+            items = fn() or []
+        except Exception:
+            continue
+        for it in items:
+            if server_id is not None and it.get("server_id") != server_id:
+                continue
+            it = dict(it)
+            it["priority"] = priority(it["kind"], it["group"])
+            out.append(it)
+    out.sort(key=rank)
+    return out
+
+
+def preempting(server_id: Optional[str], kind: str, item_id: str, item_priority: int) -> Optional[dict]:
+    """Waiting work with a higher priority than a running item, which that item should now make way for."""
+    if not server_id:
+        return None
+    for it in waiting(server_id):
+        if it["kind"] == kind and it["id"] == item_id:
+            continue
+        return it if it["priority"] > item_priority else None
+    return None
+
+
+def first_ahead(server_id: Optional[str], item_rank: tuple, exclude: tuple = ()) -> Optional[dict]:
+    """The best waiting item (any producer) that ranks ahead of this one on a machine, if any."""
+    if not server_id:
+        return None
+    for it in waiting(server_id):
+        if (it["kind"], it["id"]) == tuple(exclude):
+            continue
+        return it if rank(it) < item_rank else None
+    return None
 
 
 def ahead_of(server_id: str, kind: str, item_rank: tuple) -> Optional[dict]:

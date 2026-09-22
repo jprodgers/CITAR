@@ -213,6 +213,39 @@ class BenchmarkTests(unittest.TestCase):
         quiet["on"] = False
         self.assertTrue(wait_for(lambda: job["status"] in ("running", "resuming", "loading"), timeout=10, sch=sch))
 
+    def test_higher_priority_work_takes_the_machine_and_gives_it_back(self):
+        """A report put at the top of the queue waited for the whole running game to finish."""
+        from citar.pool import queue as work_queue
+        sch = self.scheduler()
+        sch.PREEMPT_GRACE = 0
+        run = sch.create_run(dry_suite(models=("q",), turn_limit=200, delay=0.02))
+        job = run["jobs"][0]
+        self.assertEqual(started(sch, run, job, timeout=20), "running", why(sch, run))
+        game = self.manager.get(job["game_id"])
+        machine = job["server_key"]
+        other = {"items": []}
+        work_queue.register("report", lambda: other["items"])
+        try:
+            same = {"kind": "report", "id": "r0", "group": "r0", "label": "report “same”", "server_id": machine,
+                    "created": time.time()}
+            other["items"] = [same]
+            sch.tick()
+            self.assertEqual(job["status"], "running", "equal priority never interrupts running work")
+            work_queue.set_priority("report", "r1", 5)
+            other["items"] = [dict(same, id="r1", group="r1", label="report “urgent”")]
+            self.assertTrue(wait_for(lambda: job["status"] == "paused", timeout=20, sch=sch), why(sch, run))
+            self.assertEqual(job["pause_reason"], "preempted")
+            self.assertTrue(game.paused)
+            self.assertEqual(game.pause_reason["kind"], "queue")
+            from citar.pool import seats as pool_seats
+            self.assertEqual(pool_seats.occupied(machine), [], "a game that made way does not hold the machine")
+            self.assertIn(job["id"], [it["id"] for it in work_queue.waiting(machine)], "it waits in the queue at its rank")
+            other["items"] = []                          # the urgent work has run
+            self.assertTrue(wait_for(lambda: job["status"] == "running" and not game.paused, timeout=20, sch=sch), why(sch, run))
+        finally:
+            work_queue.set_priority("report", "r1", 0)
+            work_queue._providers.pop("report", None)
+
     def test_overnight_restricted_window(self):
         sv = REG.normalize_server({"id": "sv_x", "name": "x", "restricted_hours": {"enabled": True, "windows": [
             {"days": [4], "start": "22:30", "end": "07:00"}]}})                  # Fridays only

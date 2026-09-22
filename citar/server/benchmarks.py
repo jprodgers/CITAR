@@ -226,19 +226,34 @@ class BenchmarkScheduler:
         self._clock = datetime.now     # overridable in tests
         self._load()
         from ..pool import queue as work_queue
-        work_queue.register("benchmark", self.queue_items)
+        work_queue.register("benchmark", self.queue_items, self.running_items)
         if autostart:
             self.start()
 
     def queue_items(self) -> list[dict]:
-        """Queued jobs, for the shared work queue (see citar.pool.queue)."""
+        """Queued jobs - and jobs that paused to make way for higher-priority work - for the shared work queue."""
         with self.lock:
-            return [{"kind": "benchmark", "id": job["id"], "group": run["id"], "run": run["name"],
-                     "label": f"{job['label']} · {job['scenario_name']} #{job['repeat']}",
-                     "server_id": job["server_key"], "server": job.get("server_name"), "created": job["created"],
-                     "waiting": job.get("waiting")}
-                    for run in self.runs.values() if run["status"] == "running"
-                    for job in run["jobs"] if job["status"] == "queued"]
+            return [self._item(run, job) for run in self.runs.values() if run["status"] == "running"
+                    for job in run["jobs"] if job["status"] == "queued" or self._preempted(job)]
+
+    def running_items(self) -> list[dict]:
+        """Jobs using their machine now, for the queue page."""
+        with self.lock:
+            return [self._item(run, job) for run in self.runs.values()
+                    for job in run["jobs"] if job["status"] in ACTIVE and not self._preempted(job)]
+
+    @staticmethod
+    def _preempted(job: dict) -> bool:
+        """Whether a job paused to make way for higher-priority work on its machine."""
+        return job["status"] == "paused" and job.get("pause_reason") == "preempted"
+
+    def _item(self, run: dict, job: dict) -> dict:
+        """A job as the shared queue lists it."""
+        return {"kind": "benchmark", "id": job["id"], "group": run["id"], "run": run["name"],
+                "label": f"{job['label']} · {job['scenario_name']} #{job['repeat']}",
+                "server_id": self._machine(job) if job.get("game_id") else job["server_key"],
+                "server": job.get("server_name"), "created": job["created"],
+                "waiting": job.get("waiting") or ("paused for higher-priority work" if self._preempted(job) else None)}
 
     # ------------------------------------------------------------------ persistence
     def _load(self):
@@ -506,12 +521,13 @@ class BenchmarkScheduler:
         self.tick()
         return job
 
-    def _pause_job(self, job: dict, reason: str):
+    def _pause_job(self, job: dict, reason: str, first: Optional[dict] = None):
         """Pause a job and record why, so the page can say whether it was a person or a window."""
         if job["status"] in ("running", "resuming"):
             s = self.manager.get(job["game_id"]) if job["game_id"] else None
             if s is not None:
-                s.suspend()
+                s.suspend({"kind": "queue", "message": f"making way for {first['label']} (priority {first['priority']})"}
+                          if reason == "preempted" and first else None)
             job["status"], job["pause_reason"] = "paused", reason
         elif job["status"] == "paused" and reason == "user":
             job["pause_reason"] = "user"
@@ -699,6 +715,7 @@ class BenchmarkScheduler:
             elif job["status"] == "paused" and job["pause_reason"] in ("user", "disconnect") and not s.paused:
                 job["status"], job["pause_reason"] = "running", None     # resumed from the game screen
                 self._touch(run)
+            self._queue_turn(run, job, s)
             if _now() - self._progress_at.get(job["id"], 0) > 5:
                 self._record_progress(run, job, s)
         states = [j["status"] for j in run["jobs"]]
@@ -706,6 +723,51 @@ class BenchmarkScheduler:
             run["status"], run["finished"] = "done", _now()
             self._log(f"Run '{run['name']}' finished.")
             self._touch(run)
+
+    PREEMPT_GRACE = 900        # seconds a model's turn in progress may run on before higher-priority work takes over
+
+    def _queue_turn(self, run: dict, job: dict, s: GameSession):
+        """Make way for higher-priority work on this job's machine, or take the machine back once it has gone.
+
+        A running job pauses after the model's turn in progress (or after PREEMPT_GRACE) when something waiting
+        for its machine has a higher priority than its run. A job paused that way resumes when nothing waiting
+        ranks ahead of it and the machine is free again.
+        """
+        from ..pool import queue as work_queue, seats as pool_seats
+        prio = work_queue.priority("benchmark", run["id"])
+        machine = self._machine(job)
+        if job["status"] == "running" and not s.paused:
+            first = work_queue.preempting(machine, "benchmark", job["id"], prio)
+            if first is None:
+                if job.get("pause_pending") == "preempted":
+                    job.pop("pause_pending", None)
+                    job.pop("preempt_since", None)
+                    self._touch(run)
+                return
+            pid = (s.benchmark or {}).get("llm_player", 0)
+            mid_turn = s.game.s.current == pid and s.agent_status.get(pid) == "thinking"
+            since = job.setdefault("preempt_since", _now())
+            if mid_turn and _now() - since < self.PREEMPT_GRACE:
+                if job.get("pause_pending") != "preempted":
+                    job["pause_pending"] = "preempted"
+                    self._touch(run)
+                return
+            job.pop("pause_pending", None)
+            job.pop("preempt_since", None)
+            self._pause_job(job, "preempted", first)
+            self._log(f"{job['label']} · {job['scenario_name']} #{job['repeat']} paused on {job['server_name']} "
+                      f"for {first['label']} (priority {first['priority']}).")
+            self._touch(run)
+        elif self._preempted(job) and run["status"] == "running" and machine not in self._restricted:
+            ours = frozenset(j["game_id"] for r in self.runs.values() for j in r["jobs"] if j.get("game_id"))
+            limit = self._server(run, job).get("max_parallel", 1)
+            in_use = sum(1 for r in self.runs.values() for j in r["jobs"]
+                         if j["status"] in ACTIVE and not self._preempted(j) and self._machine(j) == machine)
+            if in_use + len(pool_seats.occupied(machine, exclude=ours)) >= limit:
+                return
+            if work_queue.first_ahead(machine, (-prio, job["created"]), exclude=("benchmark", job["id"])) is None:
+                self._request_resume(run, job)
+                self._touch(run)
 
     def _close_finished_view(self, job: dict):
         """Release a finished job's game once nobody is watching it."""
@@ -724,7 +786,7 @@ class BenchmarkScheduler:
         ours = set()
         for run in self.runs.values():
             for job in run["jobs"]:
-                if job["status"] in ACTIVE:
+                if job["status"] in ACTIVE and not self._preempted(job):
                     busy[job["server_key"]] = busy.get(job["server_key"], 0) + 1
                 if job.get("game_id"):
                     ours.add(job["game_id"])

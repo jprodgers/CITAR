@@ -392,7 +392,7 @@ class ProbeRunner:
         self._stop_run: set = set()
         RUNS.mkdir(parents=True, exist_ok=True)
         from .pool import queue as work_queue
-        work_queue.register("probe", self.queue_items)
+        work_queue.register("probe", self.queue_items, self.running_items)
         for run in self.list_runs():      # runs interrupted by a server restart go back in the queue
             if run["status"] in ("queued", "running", "waiting (quiet hours)", "waiting (restricted hours)",
                                  "waiting (machine busy)"):
@@ -568,6 +568,38 @@ class ProbeRunner:
                         "created": run.get("created") or 0, "waiting": run.get("waiting")})
         return out
 
+    def running_items(self) -> list[dict]:
+        """The run using its machine now, for the queue page."""
+        rid = (self.live or {}).get("run")
+        if not rid:
+            return []
+        try:
+            run = self.get_run(rid)
+        except (ProbeError, OSError, ValueError):
+            return []
+        if run["status"] != "running":
+            return []
+        return [{"kind": "probe", "id": rid, "group": rid, "run": run["name"], "label": run["name"],
+                 "server_id": run["llm"].get("server_id"), "server": run["llm"].get("server"),
+                 "created": run.get("created") or 0, "waiting": None}]
+
+    def _make_way(self, rid: str, run: dict) -> bool:
+        """Between cases: if higher-priority work is waiting for this run's machine, put the run back in the queue
+        (it keeps its rank and carries on from the next case). Returns True if it did."""
+        from .pool import queue as work_queue
+        first = work_queue.preempting(run["llm"].get("server_id"), "probe", rid, work_queue.priority("probe", rid))
+        if first is None:
+            return False
+        run = self.get_run(rid)
+        run["status"] = "queued"
+        run["waiting"] = f"paused for {first['label']} (priority {first['priority']})"
+        self._write(run)
+        with self.lock:
+            if rid not in self.queue:
+                self.queue.append(rid)
+        self.live = {}
+        return True
+
     def _ordered_queue(self) -> list[str]:
         """The queued runs, highest priority first, then oldest."""
         from .pool import queue as work_queue
@@ -631,6 +663,8 @@ class ProbeRunner:
             key = (job["case"], job["rep"])
             if key in done:
                 continue
+            if self._make_way(rid, run):
+                return
             if self._wait_quiet(rid, run["llm"]):
                 self._prepare_model(run)
             self.live = {"run": rid, "case": job["case"], "rep": job["rep"], "since": time.time()}

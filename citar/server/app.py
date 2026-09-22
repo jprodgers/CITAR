@@ -60,6 +60,8 @@ async def _startup():
     hub().attach_loop(_loop)                      # lets game threads reach connected workers
     asyncio.create_task(hub().ping_loop(citar_settings.get().worker_ping_seconds))
     # lobby games first, so queued benchmarks and probes see which machines they hold
+    from .session import register_games_with_queue
+    register_games_with_queue()
     restored = manager.restore_live()
     if restored:
         print("restored games: " + "; ".join(restored), flush=True)
@@ -1363,18 +1365,20 @@ def work_queue_view():
     from .admin_api import reports_runner
     reports_runner()                  # registers queued reports with the shared queue
     items = work_queue.waiting()
+    active = work_queue.running()
     names = {sv["id"]: sv["name"] for sv in registry.list_servers()}
     from .. import db as _db
     with _db.session() as s:
         for sv in s.query(Server):
             names[sv.id] = sv.name
-    ids = list(dict.fromkeys([i["server_id"] for i in items if i.get("server_id")] +
+    ids = list(dict.fromkeys([i["server_id"] for i in active + items if i.get("server_id")] +
                              [sid for sid in names if pool_seats.occupied(sid)]))
     machines = []
     for sid in ids:
         waiting = [dict(it, position=n + 1) for n, it in enumerate(i for i in items if i.get("server_id") == sid)]
         machines.append({"server_id": sid, "name": names.get(sid, sid), "online": hub().is_online(sid) or None,
-                         "busy_with": pool_seats.occupied(sid), "waiting": waiting})
+                         "busy_with": pool_seats.occupied(sid), "waiting": waiting,
+                         "running": [i for i in active if i.get("server_id") == sid]})
     try:
         overview = lab.overview()
     except Exception:
@@ -1414,7 +1418,7 @@ def work_queue_priority(body: PriorityBody):
         tmp.write_text(_json.dumps(spec, indent=1), encoding="utf-8")
         tmp.replace(path)
         return {"kind": "lab", "id": body.id, "priority": spec["priority"]}
-    raise HTTPException(400, "kind is benchmark, probe, report or lab.")
+    raise HTTPException(400, "kind is benchmark, probe, report, game or lab.")
 
 
 @app.get("/api/lab/report/{name}", dependencies=[Depends(require_user)])

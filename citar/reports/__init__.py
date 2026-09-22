@@ -105,7 +105,8 @@ class ReportRunner:
             elif m["status"] == "queued":
                 requeue.append(m["id"])
         from ..pool import queue as work_queue
-        work_queue.register("report", self.queue_items)
+        work_queue.register("report", self.queue_items, self.running_items)
+        self._current: Optional[str] = None
         for rid in reversed(requeue):          # list() is newest first
             self.queue.append(rid)
         if self.queue:
@@ -204,6 +205,17 @@ class ReportRunner:
                         "waiting": m.get("waiting")})
         return out
 
+    def running_items(self) -> list[dict]:
+        """The report whose analysis a model is writing now, for the queue page."""
+        rid = self._current
+        sid = self._machine(rid) if rid else None
+        if not sid:
+            return []
+        from .. import servers
+        title = self.meta(rid).get("title") or "report"
+        return [{"kind": "report", "id": rid, "group": rid, "run": title, "label": f"report “{title}”",
+                 "server_id": sid, "server": servers.server_name(sid), "created": self.meta(rid).get("created") or 0}]
+
     def _blocked(self, rid: str) -> Optional[str]:
         """Why a queued report cannot start yet (None when it can): its machine is in its quiet hours, in use, or
         higher-priority work is waiting for it. Reports without a written analysis never wait."""
@@ -295,12 +307,14 @@ class ReportRunner:
             from ..pool import seats as pool_seats
             holder = f"report “{self.meta(rid).get('title') or rid}”"
             pool_seats.claim(sid, holder)         # benchmarks and probes wait while the model writes
+            self._current = rid
             try:
                 self.run(rid)
             except Exception as e:
                 self._set(rid, status="failed", error=f"{type(e).__name__}: {e}", trace=traceback.format_exc(limit=8),
                           finished=_now())
             finally:
+                self._current = None
                 pool_seats.release(sid, holder)
 
     def run(self, rid: str):

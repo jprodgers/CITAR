@@ -341,6 +341,30 @@ class SessionTests(unittest.TestCase):
             self.manager.delete(s.id)
         self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
 
+    def test_a_lobby_game_makes_way_for_higher_priority_work(self):
+        from citar.pool import queue as work_queue
+        from citar.server.session import register_games_with_queue
+        register_games_with_queue()
+        other = {"items": []}
+        work_queue.register("report", lambda: other["items"])
+        ScriptedConversation.scripts = {}
+        try:
+            with mock.patch("citar.agents.llm_agent.make_conversation", ScriptedConversation),                     mock.patch.object(GameSession, "QUEUE_POLL_SECONDS", 0.3):
+                work_queue.set_priority("report", "r9", 3)
+                other["items"] = [{"kind": "report", "id": "r9", "group": "r9", "label": "report “urgent”",
+                                   "server_id": "sv_desk", "created": time.time()}]
+                s = self.manager.create({"map_size": "duel", "seed": 4},
+                                        [{"type": "llm", "llm": {"provider": "mock", "server_id": "sv_desk"}}, {"type": "bot"}])
+                self.assertTrue(self._wait(lambda: s.paused), "the game should make way before its AI's turn")
+                self.assertEqual(s.info()["pause_reason"]["kind"], "queue")
+                self.assertIn(s.id, [it["id"] for it in work_queue.waiting("sv_desk")])
+                other["items"] = []
+                self.assertTrue(self._wait(lambda: not s.paused), "and take the machine back afterwards")
+                self.manager.delete(s.id)
+        finally:
+            work_queue.set_priority("report", "r9", 0)
+            work_queue._providers.pop("report", None)
+
     def test_open_games_come_back_after_a_restart(self):
         """A server restart used to drop every lobby game until someone reloaded it by hand."""
         from citar.server.session import SAVE_DIR

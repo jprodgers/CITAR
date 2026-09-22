@@ -21,18 +21,24 @@ async function setPriority(kind, id, priority) {
   return res.json();
 }
 
-// ▲ / ▼ and the number: one step moves work past everything at the default priority
-function priorityControl(kind, id, value, refresh) {
+// ▲ / ▼ and the number: one step moves work past everything at the default priority; ⤒ puts it above everything
+// on its machine - running work included, which then makes way at its next safe point
+function priorityControl(kind, id, value, refresh, top) {
   const change = async (v) => {
     try { await setPriority(kind, id, v); refresh(); } catch (e) { toast(e.message, "error"); }
   };
   const input = el("input", { type: "number", value, min: -100, max: 100, class: "q-prio",
     title: "Priority: higher runs first, 0 is normal", onchange: (e) => change(+e.target.value || 0) });
+  const toTop = top != null && value <= top
+    ? el("button", { class: "small", title: "Run this first: above everything on this machine", onclick: () => change(top + 1) }, "⤒ top")
+    : null;
   return el("span", { class: "q-prio-box" },
     el("button", { class: "small", title: "Raise priority", onclick: () => change(value + 1) }, "▲"),
     input,
-    el("button", { class: "small", title: "Lower priority", onclick: () => change(value - 1) }, "▼"));
+    el("button", { class: "small", title: "Lower priority", onclick: () => change(value - 1) }, "▼"), toTop);
 }
+
+const KIND_LABEL = { benchmark: "benchmark job", probe: "probe run", report: "report (written analysis)", game: "game" };
 
 function machineCard(m, refresh) {
   const card = el("div", { class: "card q-machine" });
@@ -41,24 +47,35 @@ function machineCard(m, refresh) {
     el("span", { class: `pill ${m.online ? "live" : ""}` }, m.online ? "helper connected" : m.online === false ? "offline" : "—"),
     el("span", { class: "grow" }),
     el("span", { class: "muted" }, `${m.waiting.length} waiting`)));
-  card.append(el("div", { class: "q-now" }, el("b", {}, "Now: "),
-    m.busy_with.length ? m.busy_with.join(", ") : el("span", { class: "muted" }, "free — the first item below starts next")));
-  if (!m.waiting.length) { card.append(el("p", { class: "muted" }, "Nothing waiting.")); return card; }
-  // runs are prioritised as a whole, so the controls sit on the first item of each run
+  const running = m.running || [];
+  const others = m.busy_with.filter((b) => !running.some((r) => b.includes(r.run || r.label)));
+  if (!running.length && !m.waiting.length) {
+    card.append(el("p", { class: "muted" }, m.busy_with.length ? `In use by ${m.busy_with.join(", ")}.` : "Free, and nothing waiting."));
+    return card;
+  }
+  // one ranked list: what runs now, then what waits, in the order it will run. Runs are prioritised as a whole,
+  // so the controls sit on the first item of each run.
+  const all = [...running.map((it) => ({ ...it, now: true })), ...m.waiting];
+  const top = Math.max(0, ...all.map((it) => it.priority || 0));
+  const lowestRunning = running.length ? Math.min(...running.map((r) => r.priority || 0)) : null;
   const seen = new Set();
   const table = el("table", { class: "q-table" }, el("tr", {}, el("th", {}, "#"), el("th", {}, "What"), el("th", {}, "Kind"),
-    el("th", {}, "Priority"), el("th", {}, "Why it is waiting")));
-  for (const it of m.waiting) {
+    el("th", {}, "Priority"), el("th", {}, "State")));
+  for (const it of all) {
     const first = !seen.has(`${it.kind}:${it.group}`);
     seen.add(`${it.kind}:${it.group}`);
-    table.append(el("tr", { class: it.position === 1 ? "q-next" : "" },
-      el("td", {}, it.position === 1 ? "next" : it.position),
+    const outranks = !it.now && lowestRunning != null && (it.priority || 0) > lowestRunning;
+    table.append(el("tr", { class: it.now ? "q-now-row" : it.position === 1 ? "q-next" : "" },
+      el("td", {}, it.now ? el("span", { class: "pill live" }, "running") : it.position === 1 ? "next" : it.position),
       el("td", {}, it.label, it.kind === "benchmark" ? el("div", { class: "muted small" }, it.run) : null),
-      el("td", {}, ({ benchmark: "benchmark job", probe: "probe run", report: "report (written analysis)" })[it.kind] || it.kind),
-      el("td", {}, first ? priorityControl(it.kind, it.group, it.priority, refresh) : el("span", { class: "muted" }, it.priority)),
-      el("td", { class: "muted small" }, (it.waiting || "").replace(/^waiting:? ?(for )?/, ""))));
+      el("td", {}, KIND_LABEL[it.kind] || it.kind),
+      el("td", {}, first ? priorityControl(it.kind, it.group, it.priority || 0, refresh, top) : el("span", { class: "muted" }, it.priority)),
+      el("td", { class: "muted small" }, it.now ? "using the machine"
+        : outranks ? "higher priority: starts once the running work finishes its current turn"
+          : (it.waiting || "").replace(/^waiting:? ?(for )?/, ""))));
   }
   card.append(table);
+  if (others.length) card.append(el("p", { class: "muted small" }, `Also holding the machine: ${others.join(", ")}.`));
   return card;
 }
 
@@ -96,8 +113,9 @@ export async function renderQueue(root) {
   page.appendChild(pageHeader("queue"));
   const body = el("div");
   page.append(el("div", { class: "card" }, el("h2", { style: { margin: 0 } }, "Queue"),
-    el("p", { class: "muted" }, "Benchmark jobs, probe runs and reports with a written analysis share one queue per model machine; the lab has its own on this server's CPU. ",
-      "Higher priority starts first, then whatever has waited longest. Work never interrupts a game already using a machine: it starts when the machine is free.")), body);
+    el("p", { class: "muted" }, "Everything that uses a model machine (games, benchmark jobs, probe runs and reports with a written analysis) is in one ranked list per machine; the lab has its own on this server's CPU. ",
+      "Higher priority runs first, then whatever has waited longest. Put something above the running work (⤒ top) and the running work makes way at its next safe point, ",
+      "a game after the model's current turn and a probe run between cases, then carries on when it is back on top.")), body);
   const refresh = async () => {
     try {
       const q = await get("/api/queue");

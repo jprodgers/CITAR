@@ -458,6 +458,68 @@ class GameSession:
         threading.Thread(target=watch, name=f"quiet-{self.id}-{pid}", daemon=True).start()
         return True
 
+    QUEUE_POLL_SECONDS = 10.0         # how often a game that made way checks whether its turn has come back
+
+    def queue_machine(self) -> Optional[str]:
+        """The model machine this lobby game's AI plays on (the first live LLM seat's), for the shared queue."""
+        if self.benchmark or not getattr(self, "registered", False) or self.game.s.phase != "playing":
+            return None
+        for seat in self.seats:
+            sid = (seat.llm or {}).get("server_id") if seat.type == "llm" else None
+            if sid:
+                try:
+                    if not self.game.player(seat.player).alive:
+                        continue
+                except Exception:
+                    pass
+                return sid
+        return None
+
+    def _make_way(self, pid: int, seat) -> bool:
+        """Before an AI seat's turn: if higher-priority work is waiting for its machine, pause the game until that
+        work is done and nothing else ranks ahead of it. Returns True if the game paused."""
+        if seat.type != "llm" or self.benchmark or not getattr(self, "registered", False):
+            return False
+        from ..pool import queue as work_queue, seats as pool_seats
+        from .. import servers
+        server_id = (seat.llm or {}).get("server_id")
+        prio = work_queue.priority("game", self.id)
+        try:
+            first = work_queue.preempting(server_id, "game", self.id, prio)
+        except Exception:
+            return False
+        if first is None:
+            return False
+        name = servers.server_name(server_id)
+        reason = {"kind": "queue", "player": pid, "since": time.time(),
+                  "message": f"making way on {name} for {first['label']} (priority {first['priority']})"}
+        self.suspend(reason)
+        with self.lock:
+            self.game.emit("game_paused", f"Game paused: {reason['message']}. It carries on by itself when that is done.",
+                           None, player=pid)
+
+        def watch():
+            """Take the machine back when nothing waiting ranks ahead of this game and the machine is free."""
+            while not self._stop:
+                time.sleep(self.QUEUE_POLL_SECONDS)
+                if self._stop or not self.paused or self.pause_reason is not reason:
+                    return
+                try:
+                    ahead = work_queue.first_ahead(server_id, (-work_queue.priority("game", self.id), self.created),
+                                                   exclude=("game", self.id))
+                    busy = pool_seats.occupied(server_id, exclude=frozenset({self.id}))
+                except Exception:
+                    continue
+                if ahead is None and not busy:
+                    with self.lock:
+                        if not self.paused or self.pause_reason is not reason:
+                            return
+                        self.game.emit("game_resumed", f"{name} is free again; the game has resumed.", None, player=pid)
+                    self.resume()
+                    return
+        threading.Thread(target=watch, name=f"queue-{self.id}-{pid}", daemon=True).start()
+        return True
+
     def stop(self):
         """Close the game: halt the driver and abort any AI turn (including in-flight model requests)."""
         if self.usage_act and not self._stop:
@@ -491,7 +553,7 @@ class GameSession:
                     self.cond.wait(timeout=1)
                     continue
                 turn_marker = (g.turn, pid)
-            if self._quiet_hours(pid, seat):
+            if self._quiet_hours(pid, seat) or self._make_way(pid, seat):
                 continue
             agent = self.get_agent(pid)
             self.agent_status[pid] = "thinking"
@@ -620,7 +682,7 @@ class GameSession:
                     path.unlink(missing_ok=True)
                     return
                 # paused by the server (a disconnect, quiet hours) comes back running: the check that paused it runs again
-                paused = self.paused and (self.pause_reason or {}).get("kind") not in ("disconnect", "restricted")
+                paused = self.paused and (self.pause_reason or {}).get("kind") not in ("disconnect", "restricted", "queue")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps({"paused": paused, "name": self.name, "at": time.time()}), encoding="utf-8")
             except OSError:
@@ -684,6 +746,28 @@ def load_save_file(path: Path) -> dict:
 
 
 _MANAGERS: Optional[weakref.WeakSet] = None
+
+
+def _game_items(want_waiting: bool) -> list[dict]:
+    """Lobby games on model machines, for the shared queue: those waiting (they made way), or those playing."""
+    out = []
+    for s in all_sessions():
+        sid = s.queue_machine() if not s.stopped else None
+        if not sid:
+            continue
+        made_way = s.paused and (s.pause_reason or {}).get("kind") == "queue"
+        if made_way != want_waiting:
+            continue
+        out.append({"kind": "game", "id": s.id, "group": s.id, "run": s.name, "label": f"game “{s.name}”",
+                    "server_id": sid, "created": s.created,
+                    "waiting": (s.pause_reason or {}).get("message") if made_way else None})
+    return out
+
+
+def register_games_with_queue():
+    """Let the shared work queue list lobby games (see citar.pool.queue)."""
+    from ..pool import queue as work_queue
+    work_queue.register("game", lambda: _game_items(True), lambda: _game_items(False))
 
 
 def all_sessions() -> list:
