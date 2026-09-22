@@ -1898,6 +1898,7 @@ class BasicBot:
             if "add_to_spaceship" in ok:
                 self.ex(g, pid, "unit_action", unit_id=u.id, action="add_to_spaceship")
             elif cap is not None:
+                self._clear_civilian_slot(g, pid, cap.idx, keep=u)
                 self._move(g, pid, u, cap.idx)
             return
         if "found_religion" in acts:
@@ -1971,6 +1972,21 @@ class BasicBot:
                 self._move(g, pid, u, front.idx if front.idx != u.idx else u.idx)
         elif u.activity is None:
             self.ex(g, pid, "unit_order", unit_id=u.id, order="sleep")
+
+    def _clear_civilian_slot(self, g: Game, pid: int, idx: int, keep):
+        """A tile holds one civilian: move our other civilian (a parked general, a missionary) off `idx` so `keep`
+        can enter. Spaceship parts must be in the capital to be added, and one sleeping unit there used to block
+        every part for the rest of the game."""
+        if g.grid.distance(keep.idx, idx) > 2:
+            return
+        from ..engine import movement
+        for x in list(g.units_at(idx)):
+            xd = _ud(g, x)
+            if x.owner != pid or x.id == keep.id or xd["_military"] or xd["_umap"].get(U.SpaceshipPart) or x.moves <= 0:
+                continue
+            spots = [n for n in g.grid.neighbors(idx) if not g.is_water(n) and movement.can_stand(g, pid, xd, n, x)]
+            if spots:
+                self._move(g, pid, x, spots[0])
 
     def handle_scout(self, g: Game, pid: int, u, ctx: dict):
         """Keep a scout exploring."""
