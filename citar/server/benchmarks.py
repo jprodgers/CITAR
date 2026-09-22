@@ -406,6 +406,23 @@ class BenchmarkScheduler:
         self.tick()
         return run
 
+    def _machine(self, job: dict) -> str:
+        """The machine a job's model actually plays on, for restricted hours.
+
+        Normally the suite's server. But a game's AI seat can be moved to another machine (a machine removed
+        from the Servers page and registered again gets a new id), and what must pause is the machine the
+        game is really using - so a job with a game takes it from the game's seat, and remembers it for
+        while the game is paused and unloaded.
+        """
+        s = self.manager.get(job["game_id"]) if job.get("game_id") else None
+        if s is not None:
+            pid = (s.benchmark or {}).get("llm_player", 0)
+            seat = s.seats[pid] if pid < len(s.seats) else None
+            sid = ((seat.llm if seat else None) or {}).get("server_id")
+            if sid:
+                job["machine_id"] = sid
+        return job.get("machine_id") or job["server_id"]
+
     def _server(self, run: dict, job: dict) -> dict:
         """The server configuration a job belongs to."""
         return next(sv for sv in run["suite"]["servers"] if sv["id"] == job["server_id"])
@@ -597,7 +614,7 @@ class BenchmarkScheduler:
     def _check_restrictions(self):
         """Enter/leave each server's restricted hours: games on it finish the model's turn in progress (up to the
         server's grace minutes), then pause; when the window ends they resume."""
-        server_ids = {j["server_id"] for r in self.runs.values() for j in r["jobs"]}
+        server_ids = {self._machine(j) for r in self.runs.values() for j in r["jobs"]}
         for sid in server_ids:
             end = self.restricted_until(sid)
             was = sid in self._restricted
@@ -610,7 +627,7 @@ class BenchmarkScheduler:
                 self._log(f"Restricted hours are over on {REG.server_name(sid)}; resuming its games.")
                 for run in self.runs.values():
                     for job in run["jobs"]:
-                        if job["server_id"] == sid and job["status"] == "paused" and job["pause_reason"] in ("restricted", "quiet"):
+                        if self._machine(job) == sid and job["status"] == "paused" and job["pause_reason"] in ("restricted", "quiet"):
                             self._request_resume(run, job)
                             self._touch(run)
         for sid, st in list(self._restricted.items()):
@@ -619,7 +636,7 @@ class BenchmarkScheduler:
             pending = False
             for run in self.runs.values():
                 for job in run["jobs"]:
-                    if job["server_id"] != sid or job["status"] not in ("running", "resuming", "loading"):
+                    if self._machine(job) != sid or job["status"] not in ("running", "resuming", "loading"):
                         continue
                     if job["status"] == "resuming":
                         job["status"], job["pause_reason"] = "paused", "restricted"
@@ -671,7 +688,7 @@ class BenchmarkScheduler:
                 # on would only hold the machine and the CPU for nothing
                 self._finish_job(run, job, s)
                 continue
-            if job["status"] == "resuming" and job["server_id"] not in self._restricted and run["status"] == "running":
+            if job["status"] == "resuming" and self._machine(job) not in self._restricted and run["status"] == "running":
                 job["status"] = "loading"
                 threading.Thread(target=self._in_job_thread,
                                  args=(self._resume_job, run["id"], job["id"]), daemon=True).start()
@@ -822,7 +839,7 @@ class BenchmarkScheduler:
         with self.lock:
             if job["status"] != "loading":      # cancelled while loading
                 return
-            if job["server_id"] in self._restricted or run["status"] != "running":
+            if self._machine(job) in self._restricted or run["status"] != "running":
                 job["status"], job["started"] = "queued", None
                 self._touch(run)
                 return
@@ -880,8 +897,8 @@ class BenchmarkScheduler:
             s = self.manager.get(job["game_id"])
             if s is None:
                 job.update({"status": "cancelled", "error": "The game was closed.", "finished": _now()})
-            elif job["server_id"] in self._restricted or run["status"] != "running":
-                job["status"], job["pause_reason"] = "paused", "restricted" if job["server_id"] in self._restricted else "user"
+            elif self._machine(job) in self._restricted or run["status"] != "running":
+                job["status"], job["pause_reason"] = "paused", "restricted" if self._machine(job) in self._restricted else "user"
             else:
                 s.resume()
                 job["status"], job["pause_reason"] = "running", None

@@ -4,8 +4,9 @@ import shutil
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from citar import servers as REG
 from citar.server.benchmarks import BenchmarkScheduler, normalize_suite, performance
@@ -193,6 +194,24 @@ class BenchmarkTests(unittest.TestCase):
         clock["now"] = datetime(2026, 1, 1, 2, 5)        # quiet hours over
         self.assertTrue(wait_for(lambda: job["status"] == "running" and not game.paused, timeout=10, sch=sch))
         self.assertTrue(wait_for(lambda: game.game.turn > turn, timeout=30, sch=sch))
+
+    def test_restricted_hours_follow_the_machine_the_game_uses(self):
+        """A seat moved to a re-registered machine (new id) must pause with that machine's hours, not the old id's."""
+        sch = self.scheduler()
+        run = sch.create_run(dry_suite(models=("q",), turn_limit=200, delay=0.02))
+        job = run["jobs"][0]
+        self.assertEqual(started(sch, run, job, timeout=20), "running", why(sch, run))
+        game = self.manager.get(job["game_id"])
+        quiet = {"on": True}
+        sch.restricted_until = lambda sid: datetime.now() + timedelta(hours=1) if quiet["on"] and sid == "sv_moved" else None
+        with game.lock:
+            game.seats[0].llm = dict(game.seats[0].llm, server_id="sv_moved")
+        with mock.patch.object(REG, "restriction_config", lambda sid: {"grace_minutes": 0}):
+            sch.tick()
+        self.assertEqual((job["status"], job["pause_reason"]), ("paused", "restricted"))
+        self.assertEqual(job["machine_id"], "sv_moved")
+        quiet["on"] = False
+        self.assertTrue(wait_for(lambda: job["status"] in ("running", "resuming", "loading"), timeout=10, sch=sch))
 
     def test_overnight_restricted_window(self):
         sv = REG.normalize_server({"id": "sv_x", "name": "x", "restricted_hours": {"enabled": True, "windows": [
