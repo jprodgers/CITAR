@@ -23,7 +23,7 @@ function eta(minutes) {
 }
 
 const STATE = {
-  running: ["live", "running"], queued: ["", "queued"], complete: ["good", "complete"],
+  running: ["live", "● running"], queued: ["", "queued"], complete: ["good", "✓ complete"],
   stalled: ["bad", "stalled"],
 };
 
@@ -144,7 +144,7 @@ function drawSide(card, d) {
   if (!d.side_runs.length) { card.appendChild(el("p", { class: "muted" }, "None.")); return; }
   for (const s of d.side_runs) {
     card.append(el("div", { class: "row" }, el("b", {}, s.name),
-      el("span", { class: `pill ${s.active ? "live" : "muted"}` }, s.active ? "● running" : "finished"),
+      el("span", { class: `pill ${s.active ? "live" : "good"}` }, s.active ? "● running" : "✓ finished"),
       el("span", { class: "muted small" }, `last output ${new Date(s.modified).toLocaleString()}`)),
       el("pre", { class: "lab-report" }, s.tail.join("\n")));
   }

@@ -72,7 +72,9 @@ input { width: 100%; }
 .m-empty { text-align: center; padding: 18px 0; margin: 0; }
 
 .m-pill { flex: none; font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
-.m-pill.live { color: var(--good); border-color: #2e6b3a; }
+/* Running is blue, done is green — never the same colour (see style.css). */
+.m-pill.live { color: #9cc7ff; border-color: #3987e5; }
+.m-pill.good { color: #8fe3bf; border-color: #199e70; }
 .m-pill.warn { color: var(--warn); border-color: #6b5a1c; }
 .m-pill.bad { color: var(--bad); border-color: #6b2a2a; }
 

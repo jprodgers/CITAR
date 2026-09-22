@@ -168,7 +168,7 @@ async function benchPage() {
     const jobs = r.jobs || [];
     const done = jobs.filter((j) => ["done", "failed", "cancelled"].includes(j.status)).length;
     return section(null,
-      el("div", { class: "row" }, el("div", { class: "m-row-title" }, r.name || r.id), el("span", { class: `m-pill ${r.status === "running" ? "live" : ""}` }, r.status)),
+      el("div", { class: "row" }, el("div", { class: "m-row-title" }, r.name || r.id), el("span", { class: `m-pill ${r.status === "running" ? "live" : r.status === "done" ? "good" : ""}` }, r.status)),
       meter(`${done} of ${jobs.length} jobs done`, done, jobs.length),
       ...jobs.filter((j) => !["done", "cancelled"].includes(j.status)).slice(0, 8).map((j) => el("div", { class: "row m-line" },
         el("span", {}, j.model || j.label || j.id),

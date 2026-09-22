@@ -178,7 +178,7 @@ function renderSaves(card, saves, refresh) {
     shown++;
     const pick = el("select", { title: "Which save to load" }, ...list.map((x) =>
       el("option", { value: x.path }, `${x.name}${x.turn != null ? " (T" + x.turn + ")" : ""}`)));
-    const status = s.phase && s.phase !== "playing" ? el("span", { class: "pill" }, `finished${s.winner ? ": " + s.winner + " won" : ""}`) : null;
+    const status = s.phase && s.phase !== "playing" ? el("span", { class: "pill good" }, `✓ finished${s.winner ? ": " + s.winner + " won" : ""}`) : null;
     table.appendChild(el("tr", {},
       el("td", {}, el("b", {}, s.game_name || gid), " ", s.benchmark ? el("span", { class: "pill live" }, "benchmark") : null, " ", status,
         el("div", { class: "muted", style: { fontSize: "11px" } }, gid)),

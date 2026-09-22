@@ -37,6 +37,10 @@ and arguments may still change between minor versions, and the release notes wil
 
 ### Changed
 
+- **Running and finished work no longer share a colour.** Anything in progress — a running experiment or
+  benchmark job, a connected helper, a live runner — is blue; anything finished or ready is green, with a ✓.
+  Finished saves in the lobby and finished side runs in the lab say so in green instead of grey, so a glance
+  at a list tells you what is still working and what is ready to read.
 - **Long moves keep their route.** A move order's route is planned once, when the order is given, and a standing
   order follows that route every turn instead of re-planning it. When a unit steps onto the route - your own or
   anyone else's - the moving unit waits with its order intact and carries on when the way clears; it used to lose

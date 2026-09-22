@@ -33,7 +33,7 @@ h1, h2, h3 { margin: 0 0 8px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .col { display: flex; flex-direction: column; gap: 6px; }
 .grow { flex: 1; }
-.pill { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); font-size: 12px; }
+.pill { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); font-size: 12px; white-space: nowrap; }
 .pill.war { background: #4a1616; border-color: #a33; }
 .pill.peace { background: #173a22; border-color: #2f7a45; }
 .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; border: 1px solid #0006; }
@@ -174,9 +174,11 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 .page-nav a:hover { color: var(--text); border-color: var(--border); }
 .page-nav a.active { color: var(--text); background: var(--panel-2); border-color: var(--accent); }
 .bench-badge { display: flex; gap: 6px; text-decoration: none; }
-.pill.live { background: #173a22; border-color: #2f7a45; color: #bff5c9; }
+/* Work in progress is blue, finished work is green: the two states must never share a colour, because
+   "running" and "done" sit next to each other in the lab, benchmark, queue and save lists. */
+.pill.live { background: #12283f; border-color: #3987e5; color: #cfe2ff; }
 .pill.quiet { background: #25204a; border-color: #5a4fb0; color: #d6d0ff; }
-.pill.good { background: #173a22; border-color: #2f7a45; }
+.pill.good { background: #143528; border-color: #199e70; color: #bff5c9; }
 .pill.bad { background: #4a1616; border-color: #a33; }
 .pill.warn { background: #3d3212; border-color: #9a7b1c; }
 .pill.muted { color: var(--muted); }
@@ -186,7 +188,7 @@ a.pill { text-decoration: none; color: inherit; margin-top: 4px; }
 /* ---------- bars ---------- */
 .bar { position: relative; height: 18px; background: #0d1016; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; min-width: 90px; }
 .bar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent-2); opacity: .75; }
-.bar.good .fill { background: #2f7a45; }
+.bar.good .fill { background: #199e70; }
 .bar.bad .fill { background: #7a2a2a; }
 .bar .label { position: relative; padding: 0 6px; font-size: 11px; line-height: 16px; white-space: nowrap; }
 
