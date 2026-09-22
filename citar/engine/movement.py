@@ -576,17 +576,37 @@ def terrain_promotions(g: "Game", u: Unit):
                     add_promotion(g, u, promo, free=True)
 
 
-def move_toward(g: "Game", u: Unit, target: int, set_goto: bool = True) -> dict:
+ORDER_PATIENCE = 3       # turns a standing move order waits for its next tile to clear before it is given up
+WAITING = ("out of moves", "blocked by a friendly unit", "blocked by a foreign unit")
+
+
+def move_toward(g: "Game", u: Unit, target: int, set_goto: bool = True, continuing: bool = False) -> dict:
     """Move a unit toward a target, as far as this turn allows, remembering the destination.
 
     The standing order is what makes a distant move one instruction rather than one per turn - and is
     why a unit that appears to have done nothing may simply have had its movement spent by the order
     it was already carrying out.
+
+    A new order plans its route; carrying on with a standing order (``continuing``) follows the route planned
+    when the order was given and never re-plans it. A unit whose next tile is taken (by one of its own units it
+    can't stop on, or by a foreign unit) waits there with its order intact and carries on when the way clears.
+    The order ends when the unit arrives, when a new enemy comes into view, when the route turns out to be
+    impassable, when the unit is no longer on its route, or after ORDER_PATIENCE turns without getting further.
     """
     from . import visibility
-    path = find_path(g, u, target)
-    if path is None:
-        raise ActionError(f"No path from {g.fmt_xy(u.idx)} to {g.fmt_xy(target)}.")
+    if continuing and u.path:
+        if u.path[-1] != target or u.idx not in u.path:
+            u.activity, u.goto, u.path, u.order_wait = None, None, None, 0
+            return {"from": g.xy(u.idx), "to": g.xy(u.idx), "arrived": False, "moves_left": round(u.moves / scale(g), 2),
+                    "stopped": "no longer on its planned route", "order_kept": False, "gave_up": True,
+                    "turns_remaining": 0}
+        path = u.path[u.path.index(u.idx):]
+    else:
+        path = find_path(g, u, target)       # a new order (or one saved before routes were kept)
+        if path is None:
+            raise ActionError(f"No path from {g.fmt_xy(u.idx)} to {g.fmt_xy(target)}.")
+        if not continuing:
+            u.order_wait = 0
     ud = g.rules.units[u.type]
     start = u.idx
     stop_reason = None
@@ -594,12 +614,17 @@ def move_toward(g: "Game", u: Unit, target: int, set_goto: bool = True) -> dict:
         if u.moves <= 0:
             stop_reason = "out of moves"
             break
-        foreign = any(o.owner != u.owner and not is_air(g.rules.units[o.type]) for o in g.units_at(nb))
-        if not foreign and stack_reason(g, u.owner, ud, nb, u.id):
+        others = [o for o in g.units_at(nb) if o.owner != u.owner and not is_air(g.rules.units[o.type])]
+        if not others and stack_reason(g, u.owner, ud, nb, u.id):
             cost = enter_cost(g, u, u.idx, nb)
             if nb == target or cost >= u.moves:
                 stop_reason = "blocked by a friendly unit"
                 break
+        capturable = bool(others) and ud["_military"] and g.at_war(u.owner, others[0].owner) \
+            and not any(g.rules.units[o.type]["_military"] for o in others)
+        if others and not capturable:
+            stop_reason = "blocked by a foreign unit"
+            break
         seen_before = {m.id for m in _visible_enemies(g, u.owner)}
         reason = step(g, u, nb)
         if reason:
@@ -615,20 +640,34 @@ def move_toward(g: "Game", u: Unit, target: int, set_goto: bool = True) -> dict:
             break
     alive = g.unit(u.id) is not None
     arrived = alive and u.idx == target
+    gave_up = False
     if alive:
         if arrived:
             if u.activity == "goto":
                 u.activity = None
-            u.goto = None
-        elif set_goto and stop_reason in ("out of moves", "blocked by a friendly unit"):
-            u.activity = "goto"
-            u.goto = target
+            u.goto, u.path, u.order_wait = None, None, 0
+        elif set_goto and stop_reason in WAITING:
+            if u.idx != start:
+                u.order_wait = 0
+            elif stop_reason != "out of moves":
+                u.order_wait += 1           # held up where it stands: wait for the way to clear, but not forever
+            if u.order_wait >= ORDER_PATIENCE:
+                gave_up = True
+                stop_reason = f"{stop_reason}, no progress for {u.order_wait} turns"
+                u.goto, u.path, u.order_wait = None, None, 0
+                if u.activity == "goto":
+                    u.activity = None
+            else:
+                u.activity = "goto"
+                u.goto = target
+                u.path = path if not continuing or not u.path else u.path
         elif stop_reason != "out of moves":
-            u.goto = None
+            u.goto, u.path, u.order_wait = None, None, 0
             if u.activity == "goto":
                 u.activity = None
     return {"from": g.xy(start), "to": g.xy(u.idx) if alive else None, "arrived": arrived,
             "moves_left": round(u.moves / scale(g), 2) if alive else 0, "stopped": None if arrived else stop_reason,
+            "order_kept": bool(alive and u.goto == target), "gave_up": gave_up,
             "turns_remaining": (_remaining_turns(g, u, path, target) if (not arrived and alive and u.goto) else 0)}
 
 

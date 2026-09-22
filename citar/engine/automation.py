@@ -44,14 +44,11 @@ def run_unit_orders(g: "Game", pid: int):
                        idx=u.idx, unit=u.id)
             if u.activity == "goto" and u.goto is not None:
                 dest = u.goto
-                res = movement.move_toward(g, u, dest)
-                if res.get("stopped") == "blocked by a friendly unit" and res["from"] == res["to"]:
-                    u.activity, u.goto = None, None
-                    g.emit("orders_interrupted", f"{u.type} #{u.id} could not continue to {g.fmt_xy(dest)}: "
-                           f"the way is blocked by your own unit.", [pid], idx=u.idx, unit=u.id)
-                elif res.get("stopped") and res["stopped"] not in ("out of moves", "blocked by a friendly unit"):
-                    g.emit("orders_interrupted", f"{u.type} #{u.id} stopped its move: {res['stopped']}.",
-                           [pid], idx=u.idx, unit=u.id)
+                res = movement.move_toward(g, u, dest, continuing=True)
+                # a unit held up on its route waits with its order intact; only an order that has ended is news
+                if res.get("stopped") and not res.get("order_kept") and not res.get("arrived"):
+                    g.emit("orders_interrupted", f"{u.type} #{u.id} stopped its move to {g.fmt_xy(dest)}: "
+                           f"{res['stopped']}.", [pid], idx=u.idx, unit=u.id)
             elif u.activity == "explore":
                 explore(g, u)
             elif u.activity == "automate":
@@ -62,7 +59,7 @@ def run_unit_orders(g: "Game", pid: int):
                     g.emit("unit_woke", f"{u.type} #{u.id} woke up: enemies nearby.", [pid], idx=u.idx, unit=u.id)
         except ActionError:
             if u.activity == "goto":
-                u.activity, u.goto = None, None
+                u.activity, u.goto, u.path = None, None, None
 
 
 def _threat_reach(g: "Game", enemy: "Unit") -> int:

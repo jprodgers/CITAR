@@ -383,6 +383,11 @@ PARAM_GROUPS: list[tuple[str, str, list[dict]]] = [
         _n("heal_below_hp", 50, "Heal below", "", 0, 100, "hp"),
         _n("heal_city_radius", 4, "Heal in a city within", "", 0, 20, "tiles"),
         _n("naval_heal_hp", 60, "Ships heal below", "", 0, 100, "hp"),
+        _c("garrison_mode", "all", "Garrisons", "all: every city keeps a unit (the whole army can end up in cities); "
+           "exposed: only the capital and cities near a foreign city, a barbarian camp or enemies in sight.",
+           ["all", "exposed"]),
+        _n("garrison_exposed_radius", 6, "Exposed within", "A foreign city or barbarian camp this close makes a city "
+           "exposed.", 1, 20, "tiles"),
         _n("garrison_radius", 10, "Garrison empty cities within", "", 0, 30, "tiles"),
         _n("defend_radius", 8, "Defend a city within", "", 0, 30, "tiles"),
         _n("defend_radius_campaign", 5, "... while campaigning", "", 0, 30, "tiles"),
@@ -431,6 +436,10 @@ PARAM_GROUPS: list[tuple[str, str, list[dict]]] = [
         _n("declare_ratio", 1.35, "Declare: power ratio", "Declare when power > theirs x (ratio - aggr x "
            "aggression).", 0.5, 5, "x"),
         _n("declare_ratio_aggr", 0.4, "Declare: aggression discount", "", 0, 2),
+        _n("war_target_max_dist", 99, "Target within", "Only attack cities this close to one of ours; with none in "
+           "reach, a war is fought defensively (99 = anywhere on our continent).", 3, 99, "tiles"),
+        _c("war_target_pick", "smallest", "Chosen war target", "smallest: the rival's smallest reachable city "
+           "(nearest breaks ties); nearest: its nearest city.", ["smallest", "nearest"]),
         _n("target_pop_weight", 0.5, "Target: population weight", "Target score = distance + size x this - bonus "
            "if damaged; lowest wins.", 0, 5),
         _n("target_damaged_bonus", 6, "Target: damaged city bonus", "", 0, 30),
@@ -736,7 +745,15 @@ class BasicBot:
                 if t.resource and T.resource_visible(g, pid, t.resource) \
                         and not T.resource_improved_by(g, t.resource, t.improvement):
                     pending_res.add(t.resource)
-        return {"lux_owned": lux_owned, "pending_res": pending_res,
+        exposed = None
+        if P["garrison_mode"] == "exposed":
+            r = P["garrison_exposed_radius"]
+            others = [c.idx for c in g.s.cities.values() if c.owner != pid and g.player(c.owner).kind != "city_state"]
+            camps = [cp["idx"] for cp in g.s.camps.values() if not cp.get("destroyed")]
+            exposed = {c.id for c in cities if c.id == (p.capital if p.capital is not None else c.id) or threat[c.id] > 0
+                       or any(g.grid.distance(c.idx, o) <= r for o in others)
+                       or any(g.grid.distance(c.idx, o) <= r for o in camps)}
+        return {"lux_owned": lux_owned, "pending_res": pending_res, "exposed": exposed,
                 "cities": cities, "units": units, "military": military, "hostile": hostile, "threat": threat,
                 "near_enemies": near_enemies, "gpt": st["gold"], "hap": hap["total"],
                 "era": research.player_era(g, pid), "wars": wars, "gold": p.gold, "supply": supply,
@@ -751,6 +768,10 @@ class BasicBot:
             if m and m.owner == city.owner:
                 s += _power(_ud(g, m)) * m.hp / 100
         return s
+
+    def needs_garrison(self, city, ctx: dict) -> bool:
+        """Whether a city should keep a unit in it (always, with garrison_mode "all")."""
+        return ctx.get("exposed") is None or city.id in ctx["exposed"]
 
     def in_danger(self, g: Game, city, ctx: dict) -> bool:
         """Whether the enemies near a city outweigh its defence enough to drop everything for it."""
@@ -1129,7 +1150,8 @@ class BasicBot:
         # --- overrides ---------------------------------------------------------------------------------
         if defender and danger:
             return defender
-        if defender and g.military_at(c.idx) is None and (g.turn > P["garrison_after_turn"] or ctx["hostile"]):
+        if defender and g.military_at(c.idx) is None and (g.turn > P["garrison_after_turn"] or ctx["hostile"]) \
+                and self.needs_garrison(c, ctx):
             return defender
         if defender and self._need_escort.get(pid) == c.idx:
             self._need_escort.pop(pid, None)
@@ -1299,7 +1321,7 @@ class BasicBot:
         if defender:
             if danger:
                 options.append((P["c_danger"], defender))
-            elif garrison is None and (g.turn > P["garrison_after_turn"] or ctx["hostile"]):
+            elif garrison is None and (g.turn > P["garrison_after_turn"] or ctx["hostile"]) and self.needs_garrison(c, ctx):
                 options.append((P["c_garrison"], defender))
             affordable = len(ctx["units"]) < ctx["supply"] and ctx["gpt"] >= P["c_military_min_gpt"]
             target = ctx["army_target"]
@@ -1636,7 +1658,7 @@ class BasicBot:
         """Give every unit its orders for the turn."""
         ctx = ctx or self.context(g, pid)
         self._garrisons = {c.id: m.id for c in ctx["cities"] for m in [g.military_at(c.idx)]
-                           if m and m.owner == pid and _ud(g, m)["_domain"] == "Land"}
+                           if m and m.owner == pid and _ud(g, m)["_domain"] == "Land" and self.needs_garrison(c, ctx)}
         order = sorted(g.player_units(pid), key=lambda u: (0 if _ud(g, u)["_ranged"] else 1, u.id))
         for u in order:
             if g.unit(u.id) is None or g.s.current != pid:
@@ -1690,7 +1712,9 @@ class BasicBot:
         return u.id in self._garrisons.values()
 
     def _move(self, g: Game, pid: int, u, idx: int):
-        """Move a unit toward a tile."""
+        """Move a unit toward a tile. (Returns None, as a refused move would, when it is already there.)"""
+        if idx == u.idx:
+            return None
         x, y = g.grid.xy(idx)
         return self.ex(g, pid, "move_unit", unit_id=u.id, x=x, y=y)
 
@@ -1844,6 +1868,9 @@ class BasicBot:
             self.ex(g, pid, "unit_action", unit_id=u.id, action="enhance_religion",
                     beliefs=self.choose_beliefs(g, pid, need))
             return
+        if "enhance_religion" in acts and p.religion_state == "religion" and g.city_at(u.idx) is None and ctx["cities"]:
+            self._move(g, pid, u, min(ctx["cities"], key=lambda c: g.grid.distance(c.idx, u.idx)).idx)
+            return
         for a in ("hurry_research", "trade_mission", "hurry_construction"):
             if a in ok and (a != "hurry_construction" or g.city_at(u.idx).queue):
                 self.ex(g, pid, "unit_action", unit_id=u.id, action=a)
@@ -1851,6 +1878,10 @@ class BasicBot:
         trig = [k for k in ok if k.startswith("trigger:")]
         if trig:
             self.ex(g, pid, "unit_action", unit_id=u.id, action=trig[0])
+            return
+        if ("spread_religion" in acts or "remove_heresy" in acts) and not u.religion and "remove_heresy" not in acts:
+            if u.activity is None:
+                self.ex(g, pid, "unit_order", unit_id=u.id, order="sleep")
             return
         if "spread_religion" in acts or "remove_heresy" in acts:
             here = g.city(g.s.tiles[u.idx].city) if g.s.tiles[u.idx].city is not None else None
@@ -2025,7 +2056,7 @@ class BasicBot:
             if u.activity not in ("heal", "fortify"):
                 self.ex(g, pid, "unit_order", unit_id=u.id, order="heal")
             return
-        empty = [c for c in ctx["cities"] if c.id not in self._garrisons]
+        empty = [c for c in ctx["cities"] if c.id not in self._garrisons and self.needs_garrison(c, ctx)]
         if empty:
             c = min(empty, key=lambda c: g.grid.distance(c.idx, u.idx))
             if g.grid.distance(c.idx, u.idx) <= P["garrison_radius"]:
@@ -2141,6 +2172,8 @@ class BasicBot:
             for c in g.s.cities.values():
                 if c.owner in ctx["wars"] and p.explored[c.idx]:
                     d = min((g.grid.distance(c.idx, mc.idx) for mc in ctx["cities"]), default=99)
+                    if d > P["war_target_max_dist"]:
+                        continue                  # out of reach: this war is fought at home
                     score = d + c.pop * P["target_pop_weight"] - (P["target_damaged_bonus"] if c.damaged_turn >= g.turn - 1 else 0)
                     if score < best_score:
                         best, best_score = c, score
@@ -2320,8 +2353,15 @@ class BasicBot:
         p = g.player(pid)
         cont = g.s.continents
         ours = {cont[c.idx] for c in ctx["cities"]}
+        P = self.p
         near = [c for c in g.s.cities.values() if c.owner == q and p.explored[c.idx] and cont[c.idx] in ours]
-        return min(near, key=lambda c: (c.pop, min(g.grid.distance(c.idx, mc.idx) for mc in ctx["cities"]))) if near else None
+        dist = {c.id: min(g.grid.distance(c.idx, mc.idx) for mc in ctx["cities"]) for c in near}
+        near = [c for c in near if dist[c.id] <= P["war_target_max_dist"]]
+        if not near:
+            return None
+        if P["war_target_pick"] == "nearest":
+            return min(near, key=lambda c: (dist[c.id], c.pop))
+        return min(near, key=lambda c: (c.pop, dist[c.id]))
 
     def trade_luxuries(self, g: Game, pid: int):
         """Offer luxury trades, which raise happiness on both sides."""

@@ -68,11 +68,15 @@ def unit_actions(g: "Game", u: "Unit") -> list[dict]:
         if usable_action(g, u, U.MayEnhanceReligion):
             p = g.player(pid)
             reason = None if p.religion_state == "religion" else "You must have founded a (not yet enhanced) religion."
+            if reason is None and g.city_at(u.idx) is None:
+                reason = "Move the Great Prophet into a city to enhance your religion."
             out.append(_action("enhance_religion", "Enhance your religion", no_moves or reason,
                                {"beliefs": "list of belief names (see get_religion)"}))
         if usable_action(g, u, U.CanSpreadReligion):
             t = g.s.tiles[u.idx]
             reason = None if t.city is not None else "Move next to or into a city's territory to spread religion."
+            if not u.religion:
+                reason = "This unit carries no religion."
             out.append(_action("spread_religion", f"Spread {religion.display_name(g, u.religion) if u.religion else 'religion'}",
                                no_moves or reason))
         if usable_action(g, u, U.CanRemoveHeresy):

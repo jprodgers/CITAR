@@ -97,7 +97,7 @@ class MoveOrderTests(unittest.TestCase):
         captured = [u for u in g.units_at(nb) if u.type == "Worker"]   # UnCiv replaces a captured unit with a new one
         self.assertEqual([u.owner for u in captured], [0])
 
-    def test_blocked_standing_order_is_cancelled_and_reported(self):
+    def test_blocked_standing_order_waits_then_gives_up_and_reports(self):
         g = game(barbarians="off")
         city = found_capital(g)
         units = [u for u in g.player_units(0) if g.rules.units[u.type]["_military"]]
@@ -107,11 +107,69 @@ class MoveOrderTests(unittest.TestCase):
         near = next(n for n in g.grid.neighbors(city.idx) if movement.can_stand(g, 0, g.rules.units["Warrior"], n))
         g.place_unit(walker, near)
         walker.activity, walker.goto = "goto", city.idx
+        # held up: the order waits for the way to clear, for ORDER_PATIENCE turns, then gives up and says so
+        for _ in range(movement.ORDER_PATIENCE - 1):
+            walker.moves = movement.max_moves(g, walker)
+            automation.run_unit_orders(g, 0)
+            self.assertEqual((walker.activity, walker.goto), ("goto", city.idx))
+            self.assertFalse(any(e["type"] == "orders_interrupted" for e in g.s.events))
         walker.moves = movement.max_moves(g, walker)
         automation.run_unit_orders(g, 0)
         self.assertIsNone(walker.activity)
         self.assertIsNone(walker.goto)
         self.assertTrue(any(e["type"] == "orders_interrupted" and "blocked" in e["text"] for e in g.s.events))
+
+    def _long_order(self):
+        """A warrior with a standing order to a tile several turns away, and its planned route."""
+        g = game(barbarians="off")
+        found_capital(g)
+        w = next(u for u in g.player_units(0) if u.type == "Warrior")
+        pl = g.player(0)
+        pl.explored = [True] * len(pl.explored)       # a known route: nothing hidden in the fog to stop it
+        dest = next(n for n in sorted(g.grid.within(w.idx, 7), key=lambda n: -g.grid.distance(n, w.idx))
+                    if movement.find_path(g, w, n) and len(movement.find_path(g, w, n)) >= 6)
+        x, y = g.grid.xy(dest)
+        tools.execute(g, 0, "move_unit", {"unit_id": w.id, "x": x, "y": y})
+        return g, w, dest
+
+    def test_standing_order_follows_its_original_route(self):
+        g, w, dest = self._long_order()
+        route = list(w.path)
+        self.assertEqual((route[-1], w.goto, w.activity), (dest, dest, "goto"))
+        while w.goto is not None:
+            w.moves = movement.max_moves(g, w)
+            automation.run_unit_orders(g, 0)
+            self.assertIn(w.idx, route, "a standing order never leaves the route it was given")
+            if w.goto is not None:
+                self.assertEqual(w.path, route)
+        self.assertEqual(w.idx, dest)
+
+    def test_unit_on_the_route_holds_the_order_up_instead_of_cancelling_it(self):
+        g, w, dest = self._long_order()
+        route = list(w.path)
+        nxt = route[route.index(w.idx) + 1]
+        other = next(p for p in g.majors() if p.id != 0).id
+        # a neutral foreign unit steps onto the next tile of the route
+        blocker = g.create_unit(other, "Warrior", nxt)
+        w.moves = movement.max_moves(g, w)
+        here = w.idx
+        automation.run_unit_orders(g, 0)
+        self.assertEqual((w.idx, w.goto, w.path), (here, dest, route), "it waits, order and route intact")
+        self.assertFalse(any(e["type"] == "orders_interrupted" for e in g.s.events))
+        g.remove_unit(blocker)
+        g.invalidate()
+        w.moves = movement.max_moves(g, w)
+        automation.run_unit_orders(g, 0)
+        self.assertNotEqual(w.idx, here, "and carries on along the same route once the way is clear")
+        self.assertIn(w.idx, route)
+
+    def test_a_new_order_plans_a_new_route(self):
+        g, w, dest = self._long_order()
+        back = w.path[0]
+        w.moves = movement.max_moves(g, w)
+        x, y = g.grid.xy(back)
+        tools.execute(g, 0, "move_unit", {"unit_id": w.id, "x": x, "y": y})
+        self.assertTrue(w.goto is None or w.path[-1] == back)
 
 
 class WorkerSafetyTests(unittest.TestCase):

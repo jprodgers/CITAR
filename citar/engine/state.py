@@ -75,6 +75,8 @@ class Unit:
     activity: Optional[str] = None      # fortify | sleep | build | goto | explore | automate | heal | setup
     build: Optional[dict] = None        # {"target": str, "progress": int, "total": int}
     goto: Optional[int] = None
+    path: Optional[list] = None         # the route fixed when the move order was given (followed, never re-planned)
+    order_wait: int = 0                 # turns a move order has been held up without making progress
     attacks: int = 0                    # attacks made this turn
     acted: bool = False
     name: Optional[str] = None

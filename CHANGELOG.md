@@ -22,8 +22,21 @@ and arguments may still change between minor versions, and the release notes wil
   finishing order) per exact configuration and difficulty, with standard errors, head-to-head
   records, score index, win rate and a rating-over-time chart. Older results are rated too.
 
+### Fixed
+
+- "Enhance religion" was offered as available away from a city, and "Spread religion" for a unit carrying no
+  religion; both were then refused. The scripted bot's Great Prophets could retry the refused enhance for the rest
+  of a game instead of walking to a city. Both actions now say what is missing, and the bot moves its prophet.
+- Lab reports and `citar bench` left eliminated civilizations out of their results (see Added).
+
 ### Changed
 
+- **Long moves keep their route.** A move order's route is planned once, when the order is given, and a standing
+  order follows that route every turn instead of re-planning it. When a unit steps onto the route - your own or
+  anyone else's - the moving unit waits with its order intact and carries on when the way clears; it used to lose
+  its order and need re-directing. An order still ends on arrival, when a new enemy comes into view, when the route
+  turns out to be impassable, or after three turns without getting any further (with a notice). Only a new move
+  order plans a new route.
 - The bot's code was reorganised so its constants are parameters. With default parameters it plays
   exactly as before: seeded 250-turn games with both production modes and every optional behaviour
   switched on give bit-identical results to the previous version.
