@@ -28,6 +28,8 @@ and arguments may still change between minor versions, and the release notes wil
   religion; both were then refused. The scripted bot's Great Prophets could retry the refused enhance for the rest
   of a game instead of walking to a city. Both actions now say what is missing, and the bot moves its prophet.
 - Lab reports and `citar bench` left eliminated civilizations out of their results (see Added).
+- The per-turn **production** statistic (graphs, replays, lab checkpoints) was always 0: it read a city attribute
+  that doesn't exist. It now records the civilization's production.
 
 ### Changed
 

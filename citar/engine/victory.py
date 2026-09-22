@@ -445,8 +445,7 @@ def record_stats(g: "Game"):
             "science": round(y["science"], 1),
             "culture": round(y["culture"], 1),
             "faith": round(y["faith"], 1),
-            "production": round(sum(c.last_production for c in g.player_cities(p.id)), 1)
-            if all(hasattr(c, "last_production") for c in g.player_cities(p.id)) else 0,
+            "production": round(y["production"], 1),
             "happiness": economy.happiness(g, p.id)["total"],
             "era": research.player_era(g, p.id),
             "units": len(g.player_units(p.id)),
