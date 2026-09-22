@@ -927,7 +927,8 @@ class BenchmarkScheduler:
             seats = [{"type": "llm", "civ_name": None, "llm": llm, "nation": nations[0]}]
             seats += [{"type": "bot", "civ_name": None, "nation": nations[i + 1],
                        "difficulty": sc.get("bot_difficulty") or None,
-                       "bot": {"aggression": float(sc.get("bot_aggression", 0.4))}} for i in range(n_opp)]
+                       "bot": {"aggression": float(sc.get("bot_aggression", 0.4)),
+                               "profile": sc.get("bot_profile") or None}} for i in range(n_opp)]
             try:
                 s = self.manager.create(config, seats, name=f"Bench · {job['label']} · {sc['name']}"
                                                             + (f" #{job['repeat']}" if run["suite"]["repeats"] > 1 else ""),

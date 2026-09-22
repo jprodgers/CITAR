@@ -3,6 +3,7 @@
 import { api } from "./api.js";
 import { el, clear, toast, keepPlace } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
+import { abDialog } from "./bots.js";
 
 const openReports = new Map();   // experiment name -> report text (null while loading)
 let labAutoRefresh = true;
@@ -26,7 +27,7 @@ const STATE = {
   stalled: ["bad", "stalled"],
 };
 
-export async function renderLab(root) {
+export async function renderLab(root, rules) {
   const page = el("div", { class: "lobby lab" });
   root.appendChild(page);
   page.appendChild(pageHeader("lab"));
@@ -39,7 +40,7 @@ export async function renderLab(root) {
   let data = null;
   const refresh = async () => {
     try { data = await api.lab(); } catch (e) { top.replaceChildren(el("p", { class: "bad" }, "Lab status unavailable: " + e.message)); return; }
-    keepPlace(top, () => drawTop(top, data));
+    keepPlace(top, () => drawTop(top, data, rules));
     keepPlace(exps, () => drawExperiments(exps, data, refresh));
     keepPlace(games, () => drawGames(games, data));
     keepPlace(side, () => drawSide(side, data));
@@ -50,7 +51,7 @@ export async function renderLab(root) {
   return { destroy() { clearInterval(timer); } };
 }
 
-function drawTop(card, d) {
+function drawTop(card, d, rules) {
   clear(card);
   const r = d.runner;
   const stale = r.updated_age != null && r.updated_age > 120;
@@ -63,6 +64,7 @@ function drawTop(card, d) {
   card.append(
     el("div", { class: "row" }, el("h2", { style: { margin: 0 } }, "Bot-tuning lab"), health,
       el("span", { class: "grow" }), el("span", { class: "muted small" }, `updated ${new Date(d.now).toLocaleTimeString()}`),
+      rules ? el("button", { title: "Queue an experiment between bot profiles", onclick: () => abDialog(rules) }, "A/B test…") : null,
       el("label", { class: "small", title: "Turn off to freeze the page while reading" },
         el("input", { type: "checkbox", checked: labAutoRefresh, onchange: (e) => { labAutoRefresh = e.target.checked; } }), " live updates")),
     el("div", { class: "lab-stats" },

@@ -79,12 +79,13 @@ def run_model(manager: SessionManager, args, model: str) -> dict:
         summary = report["summary"].get(0, {})
         p = g.player(0)
         from .engine.victory import score
-        bot_scores = [score(g, q.id)["total"] for q in g.majors() if q.id != 0]
+        bots = [q for q in g.majors(alive_only=False) if q.id != 0]
+        bot_scores = [score(g, q.id)["total"] if q.alive else 0 for q in bots]
         outcome = {
             "turns_played": g.turn - 1, "civ_name": p.name, "cities": len(g.player_cities(0)), "units": len(g.player_units(0)),
             "techs": len(p.techs), "score": score(g, 0)["total"], "bot_score": max(bot_scores or [0]),
-            "bot_scores": bot_scores, "bot_techs": [len(q.techs) for q in g.majors() if q.id != 0],
-            "bot_cities": [len(g.player_cities(q.id)) for q in g.majors() if q.id != 0],
+            "bot_scores": bot_scores, "bot_techs": [len(q.techs) for q in bots],
+            "bot_cities": [len(g.player_cities(q.id)) for q in bots],
             "winner": g.s.winner, "victory": g.s.victory,
             "population": sum(c.pop for c in g.player_cities(0)), "gold": int(p.gold),
         }

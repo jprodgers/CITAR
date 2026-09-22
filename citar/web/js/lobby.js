@@ -1,5 +1,6 @@
 // Lobby: running games, saves, and the new-game form.
 import { api } from "./api.js";
+import { profileSelect, profileFor } from "./bots.js";
 import { mapOptionsForm } from "./mapoptions.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { openMetrics } from "./metrics.js";
@@ -44,7 +45,10 @@ export async function renderLobby(root, rules) {
 
 function seatLabel(s) {
   if (s.type === "llm") return `LLM: ${(s.llm_info && s.llm_info.label) || s.llm.model || s.llm.provider || "?"}${s.llm_info && s.llm_info.server ? " @ " + s.llm_info.server : ""}`;
-  if (s.type === "bot") return "Bot";
+  if (s.type === "bot") {
+    const b = s.bot || {};
+    return `Bot: ${b.profile || "standard"}${b.chosen_as === "best" ? " (best)" : ""}`;
+  }
   if (s.type === "mcp") return `MCP${s.connected ? " (connected)" : ""}`;
   return "Human";
 }
@@ -412,7 +416,16 @@ function renderNewGame(card, rules, meta, refresh) {
         row.appendChild(llmForm(s.llm, renderSeats));
       } else if (s.type === "bot") {
         s.bot = s.bot || { aggression: 0.4 };
-        row.appendChild(el("div", { class: "seat-extra" }, field("Aggression", el("input", { type: "range", min: 0, max: 1, step: 0.1, value: s.bot.aggression, oninput: (e) => { s.bot.aggression = +e.target.value; } }))));
+        const aggBox = el("div");
+        const drawAgg = (prof) => {
+          clear(aggBox);
+          aggBox.appendChild(prof && prof.aggression != null
+            ? field("Aggression", el("span", { class: "muted small" }, `${prof.aggression} (fixed by the profile)`))
+            : field("Aggression", el("input", { type: "range", min: 0, max: 1, step: 0.1, value: s.bot.aggression, oninput: (e) => { s.bot.aggression = +e.target.value; } })));
+        };
+        if (s.bot.profile == null) s.bot.profile = "best";
+        profileFor(s.bot.profile).then(drawAgg);
+        row.appendChild(el("div", { class: "seat-extra" }, field("Bot", profileSelect(s.bot, "profile", drawAgg, { best: true, fallback: "best" })), aggBox));
       } else if (s.type === "mcp") {
         row.appendChild(el("div", { class: "seat-extra muted" }, "After creating the game, open Join / Seats for the MCP command to connect Claude Code or another MCP client."));
       }

@@ -15,8 +15,13 @@ An experiment is a JSON object:
      "size": "small", "maps": ["continents", "pangaea"], "speed": "Quick", "turns": 0,
      "difficulty": "Prince", "barbarians": "normal", "barbarian_difficulty": null, "nation": "BenchmarkCiv",
      "seats": [{"label": "new", "bot": "basic", "difficulty": "Prince", "params": {}},
-               {"label": "old", "bot": "frozen_ab12cd34"}, ...],
+               {"label": "old", "bot": "frozen_ab12cd34"}, {"profile": "my-profile"}, ...],
      "rotate": true}
+
+A seat can name a bot profile ("profile": id; see citar.bots.profiles) instead of a bot and parameters: the profile's
+engine, overrides and aggression are resolved and frozen into the experiment when it is submitted, so later edits to
+the profile don't change a queued experiment. "params" on such a seat are layered on top of the profile's. Factorial
+experiments may name a "profile" as their base bot in the same way.
 
 Optional map generation keys pass straight to the generator: "map_edges" (ice_caps, wrap_x, wrap_y, wrap_both,
 boxed), "river_density" (1 = normal) and "resources" (densities and per-resource rules; see mapgen.MapOptions).
@@ -93,14 +98,36 @@ DEFAULTS = {"priority": 0, "games": 12, "seed": 1000, "size": "small", "maps": [
 
 
 def freeze_bot(src: str = "basic") -> str:
-    """Copy a bot module to citar/bots/frozen_<hash>.py and return the module name."""
-    text = (BOTS / f"{src}.py").read_text(encoding="utf-8")
-    name = "frozen_" + hashlib.sha1(text.encode()).hexdigest()[:8]
-    path = BOTS / f"{name}.py"
-    if not path.exists():
-        path.write_text(f"# Frozen copy of citar/bots/{src}.py made by citar.lab on {datetime.now():%Y-%m-%d %H:%M}\n"
-                        + text, encoding="utf-8")
-    return name
+    """Copy the live bot to a frozen_<hash> module (see citar.bots.profiles.freeze) and return the module name."""
+    from .bots import profiles
+    return profiles.freeze(src)
+
+
+def _resolve_seat(seat: dict) -> dict:
+    """A seat as it will be played: a profile resolved into engine, parameters and aggression (frozen now), or a raw
+    bot seat with its live code frozen. Records the profile revision and the fingerprint of what plays."""
+    from .bots import profiles
+    seat = dict(seat)
+    if seat.get("profile"):
+        r = profiles.resolve(seat, freeze_code=True)
+        seat.update({"bot": r["engine"], "params": r["params"], "aggression": r["aggression"],
+                     "profile_rev": r["profile_rev"], "profile_name": r["profile_name"],
+                     "fingerprint": r["fingerprint"]})
+        seat.setdefault("label", r["profile_name"])
+        if not seat.get("label"):
+            seat["label"] = r["profile_name"]
+        return seat
+    seat.setdefault("bot", "basic")
+    if seat["bot"] == "basic":
+        seat["bot"] = freeze_bot("basic")
+    elif seat["bot"] == "live":
+        seat["bot"] = "basic"
+    if seat["bot"] != "idle":
+        try:
+            seat["fingerprint"] = profiles.fingerprint(seat["bot"], seat.get("params"), seat.get("aggression"))
+        except profiles.ProfileError:
+            pass
+    return seat
 
 
 def normalize(spec: dict) -> dict:
@@ -110,22 +137,28 @@ def normalize(spec: dict) -> dict:
     if not s.get("name"):
         raise ValueError("An experiment needs a name.")
     if s.get("factors"):
-        if s.get("bot", "basic") == "basic":
+        if s.get("profile"):
+            from .bots import profiles
+            r = profiles.resolve(s["profile"], freeze_code=True)
+            s["bot"] = r["engine"]
+            s["base_params"] = {**r["params"], **(s.get("base_params") or {})}
+            if r["aggression"] is not None and s.get("aggression") is None:
+                s["aggression"] = r["aggression"]
+            s["profile_rev"] = r["profile_rev"]
+        elif s.get("bot", "basic") == "basic":
             s["bot"] = freeze_bot("basic")
         s["seats"] = [{"label": "factorial"}]
     if not s.get("seats"):
         raise ValueError("An experiment needs seats.")
     seats = []
     for i, seat in enumerate(s["seats"]):
-        seat = dict(seat)
-        seat.setdefault("bot", "basic")
+        if s.get("factors"):
+            seats.append(dict(seat))
+            continue
+        seat = _resolve_seat(seat)
         seat.setdefault("label", seat["bot"])
         seat.setdefault("difficulty", None)
         seat.setdefault("params", {})
-        if seat["bot"] == "basic":
-            seat["bot"] = freeze_bot("basic")
-        elif seat["bot"] == "live":
-            seat["bot"] = "basic"
         seats.append(seat)
     s["seats"] = seats
     s["submitted"] = s.get("submitted") or datetime.now().isoformat(timespec="seconds")
@@ -154,6 +187,33 @@ def load_queue() -> list[dict]:
             continue
     out.sort(key=lambda s: (-s.get("priority", 0), s.get("submitted", "")))
     return out
+
+
+def complete_players(exp: dict, r: dict) -> dict:
+    """A result with every seat present. Results written before 2026-09-22 left out civilizations that had been
+    eliminated (the writer only looked at living ones); who sat in the missing seats is known from the experiment's
+    seat list and rotation, so they are put back as eliminated with a score of 0, sharing last place."""
+    if not exp or r.get("crash") or not r.get("players"):
+        return r
+    seats = game_spec(exp, r["i"])["seats"]
+    if len(r["players"]) >= len(seats):
+        return r
+    r = dict(r)
+    players = dict(r["players"])
+    last = len(seats) - 1
+    for pid, seat in enumerate(seats):
+        if str(pid) in players:
+            continue
+        players[str(pid)] = {"label": seat.get("label"), "bot": seat.get("bot"), "alive": False,
+                             "difficulty": seat.get("difficulty") or exp.get("difficulty") or "Prince",
+                             "levels": seat.get("levels"), "profile": seat.get("profile"),
+                             "profile_rev": seat.get("profile_rev"), "fingerprint": seat.get("fingerprint"),
+                             "score": 0, "score_share": 0.0, "rank": last, "techs": None, "cities": 0,
+                             "policies": None, "religion": None, "great_people": None, "spaceship": 0,
+                             "unhappy_share": None, "checkpoints": {}, "era_turn": {}, "events": {}, "built_top": {},
+                             "reconstructed": True}
+    r["players"] = players
+    return r
 
 
 def load_results(name: str) -> list[dict]:
@@ -189,7 +249,8 @@ def factorial_seats(exp: dict, i: int) -> list[dict]:
             seat_levels[j][f] = order[j]
     bot = exp.get("bot") or "basic"
     return [{"label": ",".join(f"{f}={v}" for f, v in seat_levels[j].items()), "bot": bot,
-             "difficulty": exp.get("seat_difficulty"), "params": seat_params[j], "levels": seat_levels[j]}
+             "difficulty": exp.get("seat_difficulty"), "params": seat_params[j], "levels": seat_levels[j],
+             "aggression": exp.get("aggression"), "profile": exp.get("profile")}
             for j in range(n)]
 
 
@@ -229,6 +290,19 @@ def make_bot(seat: dict, seed: int, aggression: float):
         return mod.BasicBot(aggression=agg, seed=seed, params=seat.get("params") or {})
     except TypeError:                     # bots frozen before params existed
         return mod.BasicBot(aggression=agg, seed=seed)
+
+
+def _seat_fingerprint(seat: dict):
+    """The fingerprint of what a seat plays (recorded with its result, so ratings need not re-derive it)."""
+    if seat.get("fingerprint"):
+        return seat["fingerprint"]
+    if seat.get("bot") in (None, "idle"):
+        return "idle" if seat.get("bot") == "idle" else None
+    try:
+        from .bots import profiles
+        return profiles.fingerprint(seat["bot"], seat.get("params"), seat.get("aggression"))
+    except Exception:
+        return None
 
 
 def play(spec: dict) -> dict:
@@ -296,11 +370,12 @@ def play(spec: dict) -> dict:
             g.end_turn(pid)
 
     stats = {e["turn"]: e["players"] for e in g.s.stats}
-    final = {p.id: (score(g, p.id)["total"] if p.alive else 0) for p in g.majors()}
+    majors = g.majors(alive_only=False)      # eliminated civs too: a lost seat is a result, not a missing row
+    final = {p.id: (score(g, p.id)["total"] if p.alive else 0) for p in majors}
     total = sum(final.values()) or 1
     ranking = sorted(final, key=lambda q: -final[q])
     players = {}
-    for p in g.majors():
+    for p in majors:
         k = str(p.id)
         cps = {}
         for cp in CHECKPOINTS:
@@ -311,7 +386,9 @@ def play(spec: dict) -> dict:
         seat = seats[p.id]
         players[k] = {
             "label": seat.get("label"), "bot": seat.get("bot"), "difficulty": p.difficulty, "alive": p.alive,
-            "levels": seat.get("levels"),
+            "levels": seat.get("levels"), "profile": seat.get("profile"), "profile_rev": seat.get("profile_rev"),
+            "fingerprint": _seat_fingerprint(seat), "aggression": round(bots[p.id].aggression, 3)
+            if hasattr(bots[p.id], "aggression") else None,
             "score": final[p.id], "score_share": round(final[p.id] / total, 4), "rank": ranking.index(p.id),
             "techs": len(p.techs), "cities": len(g.player_cities(p.id)), "policies": len(p.policies),
             "religion": p.religion_state, "great_people": p.great_people_earned,
@@ -837,9 +914,9 @@ def summarize(results: list[dict]) -> dict:
              "score_share": round(share, 3), "score_share_ci": round(share_ci, 3) if share_ci else None,
              "mean_rank": round(_mean([p["rank"] for p in ps]), 2),
              "eliminated": round(sum(1 for p in ps if not p["alive"]) / len(ps), 3),
-             "final_techs": round(_mean([p["techs"] for p in ps]), 1),
+             "final_techs": round(_mean([p["techs"] for p in ps]) or 0, 1),
              "final_cities": round(_mean([p["cities"] for p in ps]), 1),
-             "unhappy_share": round(_mean([p["unhappy_share"] for p in ps]), 3),
+             "unhappy_share": round(_mean([p["unhappy_share"] for p in ps]) or 0, 3),
              "religion_share": round(sum(1 for p in ps if p["religion"] in ("religion", "enhancing", "enhanced")) / len(ps), 2),
              "captured": round(_mean([p["events"].get("captured_city", 0) for p in ps]), 2),
              "wars": round(_mean([p["events"].get("declared_war", 0) for p in ps]), 2)}
@@ -923,7 +1000,7 @@ def cmd_report(names):
         exp = queue.get(name)
         if exp is None and (DONE / f"{name}.json").exists():
             exp = json.loads((DONE / f"{name}.json").read_text(encoding="utf-8"))
-        results = load_results(name)
+        results = [complete_players(exp, r) for r in load_results(name)]
         if exp and exp.get("factors"):
             s = summarize(results)
             print(f"=== {name} (factorial): {s['games']} games of {exp['games']} | victories {s['victories']} | "

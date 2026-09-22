@@ -20,7 +20,10 @@ of heuristics that can be read, reasoned about, and changed on purpose.
 - **War.** Against weaker neighbours it builds an army with siege units, gathers at a rally point
   near the target, then sieges and captures cities.
 
-`aggression` (0–1, per seat) controls army size and how readily it starts wars.
+`aggression` (0–1, per seat or per profile) controls army size and how readily it starts wars. Every
+other number the bot decides with — about 360 of them, from the weight of a point of food in a
+building to the power ratio at which it declares war — is a named, documented **parameter**
+(`PARAM_GROUPS` in `basic.py`), which a bot profile can change.
 
 ## Its limits
 
@@ -30,6 +33,55 @@ turn 150 and stops expanding. That is a real ceiling and it is the main open pie
 
 What it means for a score: the bot is a competent but limited opponent. Beating it is not the same
 as playing Civ well, and losing to it badly is meaningful.
+
+---
+
+## Bot profiles and rankings
+
+A **profile** is a named configuration of the bot: which *code* it runs (the live `basic.py`, a frozen
+snapshot, or the idle bot), an optional fixed *aggression*, and *parameter overrides* on top of that
+code's defaults. Profiles are what lab experiments, lobby seats, benchmark opponents and probe runs
+play; a seat that names none plays **Standard**, the live bot with its defaults. In the new-game form a bot
+seat defaults to **Best bot**: the best-ranked profile on the server whose current version has been rated
+(falling back to the best-ranked at all, then Standard; never Idle). It is resolved when the game is created and
+recorded in the seat, so a game keeps its bot when the rankings change. Benchmarks default to Standard.
+
+The **Bots** page lists them, edits them and ranks them:
+
+- **Profiles.** Built-in profiles (Standard, Classic production, the dated snapshots v0, v1 and
+  22 Sep, Idle) can't be edited; *Fork* one to make your own. The editor shows every parameter in
+  its group with an explanation, its default and a sensible range; changed values are highlighted,
+  *changed only* shows just the overrides, and lists (policy order, belief preferences) can be
+  reordered or picked from named presets.
+- **Revisions.** Saving a change to what plays (code, aggression or parameters) makes a new
+  revision, with a note, and keeps the old one. Results are recorded against a revision.
+- **A/B test.** Pick two or more profiles and queue a lab experiment: they take the seats in turn
+  (A, B, A, B), the seat order rotates every game, and every profile plays every start position on
+  the same maps. The profiles are frozen into the experiment when it is queued.
+- **Rankings.** Every lab game counts. An *entry* is one exact configuration — its
+  **fingerprint** hashes the code, the overrides and the aggression — at one difficulty, so a Deity
+  bot and a Prince bot of the same code are separate entries (the ladder experiments become a
+  handicap scale). Each game's finishing order is split into pairwise results (weighted 1/(players−1)
+  so a seat counts about one game) and fitted with a Bradley–Terry model on the Elo scale: 400 points
+  is 10:1 odds of finishing ahead. Two drawn games against a 1500 anchor keep thin entries near 1500.
+  The standard error ignores the correlation between pairs from one game, so read it as a lower
+  bound. Results from before fingerprints were recorded are mapped through their experiment's seat
+  list, so the whole history is rated.
+- **Over time.** The chart refits the ratings on the games finished by the end of each day. A
+  profile on the live bot gets a new entry whenever the code changes (the fingerprint changes), so
+  the Standard line is the history of the bot itself.
+
+From the command line, a profile id works anywhere a bot name does: `citar balance --bots
+standard,my-profile`, or `{"profile": "my-profile"}` as a lab seat (with optional `"params"` layered
+on top), or `"profile"` as the base of a factorial experiment.
+
+HTTP (signed in; changes need an administrator): `GET /api/bots/profiles`, `GET|PUT|DELETE
+/api/bots/profiles/{id}`, `POST /api/bots/profiles`, `POST /api/bots/profiles/{id}/fork`,
+`GET /api/bots/schema?engine=basic`, `GET /api/bots/engines`, `GET /api/bots/rankings`, and
+`POST /api/bots/experiments` to queue an A/B experiment.
+
+Saved profiles live in `saves/bots/profiles/`. On a server whose package directory is read-only,
+frozen bot code goes to `saves/bots/frozen/` instead of `citar/bots/`.
 
 ---
 

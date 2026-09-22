@@ -1,3 +1,4 @@
+# Frozen copy of citar/bots/basic.py made by citar.lab on 2026-09-22 01:05
 """The standard rule-based player: the sparring partner for AI models.
 
 It plays exclusively through the public tool registry (like any AI would), so it also exercises the API. Each turn it

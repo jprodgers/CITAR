@@ -49,10 +49,15 @@ class IdleBot:
 
 
 def make_bot(kind: str, seed: int, aggression: float):
-    """Instantiate a bot by name, live or frozen."""
+    """Instantiate a bot by name: a bot profile id, the idle bot, or a module in citar/bots (live or frozen)."""
     if kind == "idle":
         return IdleBot()
-    if kind.startswith("snapshot"):
+    from .bots import profiles
+    try:
+        return profiles.make_bot(kind, seed=seed, aggression=aggression)
+    except profiles.ProfileError:
+        pass
+    if kind.startswith(("snapshot", "frozen_")):
         # a copy of basic.py saved as citar/bots/<kind>.py, for A/B testing bot changes
         import importlib
         return importlib.import_module(f"citar.bots.{kind}").BasicBot(aggression=aggression, seed=seed)

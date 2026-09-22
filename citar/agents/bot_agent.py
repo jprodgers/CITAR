@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from ..bots.basic import BasicBot
+from ..bots import profiles
 
 
 class BotAgent:
@@ -13,8 +13,15 @@ class BotAgent:
     negotiation handling, same metrics. A benchmark comparing a model against the bot is then comparing
     two players of the same game rather than two code paths.
     """
-    def __init__(self, aggression: float = 0.4):
-        self.bot = BasicBot(aggression=float(aggression))
+    def __init__(self, aggression: float = 0.4, profile: str = None):
+        # the profile decides what plays; the seat's aggression applies when the profile leaves it open
+        ref = profile or profiles.DEFAULT_PROFILE
+        try:
+            self.profile = profiles.resolve(ref)
+        except profiles.ProfileError:            # deleted since the game was set up: play the standard bot
+            ref = profiles.DEFAULT_PROFILE
+            self.profile = profiles.resolve(ref)
+        self.bot = profiles.make_bot(ref, aggression=float(aggression) if aggression is not None else None)
 
     def _bind(self, session, pid):
         """Give the bot a way to call tools against this session."""

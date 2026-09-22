@@ -6,6 +6,7 @@ import { ReplayScreen } from "./replay.js";
 import { renderBenchmarks } from "./benchmarks.js";
 import { renderModels } from "./models.js";
 import { renderLab } from "./lab.js";
+import { renderBots } from "./bots.js";
 import { renderEditor } from "./editor.js";
 import { renderScenarios, renderScenarioEditor } from "./scenario.js";
 import { renderProbes } from "./probes.js";
@@ -98,7 +99,9 @@ async function route() {
     } else if (parts[0] === "queue") {
       screen = await renderQueue(root);
     } else if (parts[0] === "lab") {
-      screen = await renderLab(root);
+      screen = await renderLab(root, rules);
+    } else if (page === "bots") {
+      screen = await renderBots(root, rules, parts[1] ? parts[1].split("?")[0] : null);
     } else if (parts[0] === "models") {
       screen = await renderModels(root);
     } else {

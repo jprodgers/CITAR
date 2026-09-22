@@ -6,7 +6,28 @@ and arguments may still change between minor versions, and the release notes wil
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Bot profiles and a Bots page.** Every number the scripted bot decides with (about 360) is now a
+  named parameter with a label, an explanation and a range. A *profile* chooses the bot's code (the
+  live bot or a frozen snapshot), its aggression and any parameter overrides. The new **Bots** page
+  lists the profiles, forks and edits them (grouped parameters, search, "changed only", reorderable
+  preference lists), keeps a revision history with notes, and queues an **A/B test** between
+  profiles as a lab experiment. Lobby seats, benchmark scenarios and probe runs can pick a profile.
+- **"Best bot" for new games.** A bot seat in the new-game form defaults to **Best bot**: the highest-rated
+  profile on the server (one whose current version has been rated), fixed into the seat when the game is created
+  so the game keeps that bot. The dropdown lists every profile in ranking order with its rating. Benchmark
+  scenarios and probes offer it too but keep Standard as their default, so benchmarks stay comparable.
+- **Bot rankings.** Every lab game feeds an Elo-scale rating (a Bradley–Terry fit on each game's
+  finishing order) per exact configuration and difficulty, with standard errors, head-to-head
+  records, score index, win rate and a rating-over-time chart. Older results are rated too.
+
+### Changed
+
+- The bot's code was reorganised so its constants are parameters. With default parameters it plays
+  exactly as before: seeded 250-turn games with both production modes and every optional behaviour
+  switched on give bit-identical results to the previous version.
+- Lab results record each seat's profile, revision, fingerprint and actual aggression.
 
 ## [0.1.3] - 2026-09-22
 

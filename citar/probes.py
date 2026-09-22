@@ -204,7 +204,8 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
     seats = [None] * len(scn.get("seats") or [])
     seats = [{} for _ in range(max(len(seats), subject + 1, (cp or 0) + 1))]
     is_bot = llm_cfg.get("provider") == "bot"       # the scripted bot as the subject: the baseline
-    seats[subject] = {"type": "bot", "bot": {"aggression": float(llm_cfg.get("aggression", 0.4))}} if is_bot \
+    seats[subject] = {"type": "bot", "bot": {"aggression": float(llm_cfg.get("aggression", 0.4)),
+                                             "profile": llm_cfg.get("profile")}} if is_bot \
         else {"type": "llm", "llm": llm_cfg}
     if cp is not None:
         seats[cp] = {"type": "script"}
@@ -461,7 +462,7 @@ class ProbeRunner:
         if not chosen:
             raise ProbeError("No cases selected.")
         rid = datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
-        model = "scripted bot" if llm.get("provider") == "bot" else (llm.get("model") or llm.get("provider") or "model")
+        model = f"scripted bot ({llm.get('profile') or 'standard'})" if llm.get("provider") == "bot" else (llm.get("model") or llm.get("provider") or "model")
         if llm.get("server_id"):
             from . import servers
             from .pool import seats as pool_seats

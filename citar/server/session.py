@@ -302,7 +302,7 @@ class GameSession:
         agent = None
         if seat.type == "bot":
             from ..agents.bot_agent import BotAgent
-            agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression",)})
+            agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")})
         elif seat.type == "llm":
             from ..agents.llm_agent import LLMAgent
             from .. import servers
@@ -775,6 +775,15 @@ def all_sessions() -> list:
     return [s for m in list(_MANAGERS or ()) for s in list(m.sessions.values())]
 
 
+
+def _pin_best(bot: dict) -> dict:
+    """A bot seat asking for "best" gets the profile that is best-ranked right now, recorded in the seat, so the
+    game keeps playing (and reporting) that bot even after the rankings change."""
+    if bot.get("profile") != "best":
+        return bot
+    from ..bots.ratings import best_profile
+    return {**bot, "profile": best_profile(), "chosen_as": "best"}
+
 class SessionManager:
     """Every live game, and the operations that create or load one."""
     def __init__(self):
@@ -797,7 +806,7 @@ class SessionManager:
                             "leader": sc.get("leader"), "nation": sc.get("nation"), "controller": stype,
                             "difficulty": sc.get("difficulty") or None})
             seats.append(Seat(player=i, type=stype, name=sc.get("name") or "", llm=sc.get("llm") or {},
-                              bot=sc.get("bot") or {}))
+                              bot=_pin_best(sc.get("bot") or {})))
         cfg = dict(config)
         cfg["players"] = players
         game = Game.new(cfg)
@@ -848,7 +857,7 @@ class SessionManager:
             if sc.get("difficulty"):
                 p.difficulty = g.rules.resolve("difficulty", sc["difficulty"]) or p.difficulty
             seats.append(Seat(player=p.id, type=stype, name=sc.get("name") or sc.get("label") or "",
-                              llm=sc.get("llm") or {}, bot=sc.get("bot") or {}))
+                              llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {})))
         g.invalidate()
         s = GameSession(g, seats, name or scn.get("name") or "Scenario")
         if register:

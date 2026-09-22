@@ -1,6 +1,7 @@
 // Benchmarks page: scheduler status, live runs grouped by server, and the suite library/editor. Suites pick servers,
 // models and load profiles from the server registry (Servers page), which also holds each server's restricted hours.
 import { api } from "./api.js";
+import { profileSelect } from "./bots.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
 import { openMetrics } from "./metrics.js";
@@ -403,7 +404,8 @@ function openSuiteEditor(suite, ctx, isNew) {
           ...rules.major_nations.filter((n) => n !== "BenchmarkCiv").sort().map((n) => [n, `Everyone plays ${n}`])])),
         field("Barbarians", sel("barbarians", Object.entries(rules.barbarian_levels).map(([k, v]) => [k, v]))),
         field("Bot opponents", num("opponents", { min: 1, max: 23 })),
-        field("Bot aggression (0–1)", num("bot_aggression", { min: 0, max: 1, step: 0.1 })),
+        field("Bot", profileSelect(sc, "bot_profile", null, { best: true })),
+        field("Bot aggression (0–1, unless the profile fixes it)", num("bot_aggression", { min: 0, max: 1, step: 0.1 })),
         field("Seed (blank = random)", num("seed")),
         field("Turn limit (0 = speed's normal length)", num("turn_limit", { min: 0, max: 2000 })),
         field("Max minutes per model turn", num("max_turn_minutes", { min: 1, max: 600 })),

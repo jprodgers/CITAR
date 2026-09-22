@@ -27,6 +27,7 @@ from .setup_api import router as setup_router
 from .auth_api import router as auth_router
 from .pool_api import router as pool_router
 from .share_api import router as share_router
+from .bots_api import router as bots_router
 from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_user
@@ -38,6 +39,7 @@ app = FastAPI(title="CITAR — Civ Inspired Tool for AI Research", version="1.0"
 app.include_router(auth_router)
 app.include_router(pool_router)
 app.include_router(share_router)
+app.include_router(bots_router)
 app.include_router(admin_router)
 app.include_router(setup_router)
 manager = SessionManager()

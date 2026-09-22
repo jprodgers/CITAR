@@ -1,6 +1,7 @@
 // Probes page (#/probes): write probe files (a scenario + a queue of cases: deal offers, messages or whole turns),
 // run them against a model and watch the results come in. Every case starts from the scenario's saved state.
 import { api } from "./api.js";
+import { profileSelect } from "./bots.js";
 import { el, clear, toast, modal, confirmBox, keepPlace } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
 import { llmForm, defaultLLM } from "./lobby.js";
@@ -301,14 +302,19 @@ function runDialog(p, ctx) {
   const repeats = el("input", { type: "number", min: 1, max: 50, value: p.repeats || 1, style: { width: "70px" } });
   const who = el("select", {}, el("option", { value: "model" }, "A model"),
     el("option", { value: "bot" }, "The scripted bot (baseline to compare models with)"));
-  const draw = () => { clear(box); if (who.value === "model") box.append(llmForm(L, draw)); };
+  const botCfg = { profile: null };
+  const draw = () => {
+    clear(box);
+    if (who.value === "model") box.append(llmForm(L, draw));
+    else box.append(el("div", { class: "field" }, el("label", {}, "Bot"), profileSelect(botCfg, "profile", null, { best: true })));
+  };
   who.onchange = draw;
   draw();
   const go = el("button", { class: "primary", onclick: async () => {
     go.disabled = true;
     try {
       if (who.value === "model") lastLLM = L;
-      await api.runProbe(p.id, { llm: who.value === "bot" ? { provider: "bot", aggression: 0.4 } : L, repeats: +repeats.value || 1 });
+      await api.runProbe(p.id, { llm: who.value === "bot" ? { provider: "bot", aggression: 0.4, profile: botCfg.profile } : L, repeats: +repeats.value || 1 });
       dlg.close();
       toast("Probe run queued", "success");
       ctx.refresh();

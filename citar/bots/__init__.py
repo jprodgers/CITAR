@@ -13,3 +13,9 @@ and the linter is told to leave them alone.
 See ``docs/BOTS.md`` for what the bot does and how to change it without fooling yourself about the
 result.
 """
+
+# Frozen copies made on a machine whose package directory is read-only (an installed server) are written to the
+# saves directory instead; adding it to the package path lets `citar.bots.frozen_<hash>` import from either place.
+from .. import paths as _paths
+
+__path__.append(str(_paths.saves_path("bots", "frozen")))
