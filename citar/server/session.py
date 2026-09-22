@@ -794,8 +794,14 @@ class SessionManager:
             _MANAGERS = weakref.WeakSet()
         _MANAGERS.add(self)
 
-    def create(self, config: dict, seats_cfg: list[dict], name: str = "", track: bool = True) -> GameSession:
-        """Create a game from a lobby configuration and start its session."""
+    def create(self, config: dict, seats_cfg: list[dict], name: str = "", track: bool = True,
+               start: bool = True) -> GameSession:
+        """Create a game from a lobby configuration and start its session.
+
+        ``start=False`` leaves the game stopped so the caller can finish setting it up first: the driver plays
+        the first AI turn at once, so anything that turn reads (``benchmark``, which exempts the game from the
+        lobby's quiet hours and queue) must be in place before ``start()``.
+        """
         players = []
         seats = []
         for i, sc in enumerate(seats_cfg):
@@ -817,7 +823,8 @@ class SessionManager:
         if track:
             self.track(s)
         s.autosave(force=True)
-        s.start()
+        if start:
+            s.start()
         return s
 
     @staticmethod
