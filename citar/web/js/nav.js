@@ -42,7 +42,7 @@ export function pageHeader(active) {
     try {
       const s = await api.benchStatus();
       clear(badge);
-      for (const r of s.restricted || []) badge.append(el("a", { class: "pill quiet", href: "#/servers", title: "Restricted hours: queued work on this server is paused" }, `🌙 ${r.name} until ${r.until}`));
+      for (const r of s.restricted || []) badge.append(el("a", { class: "pill quiet", href: "#/pool", title: "Quiet hours: work on this machine is paused until then" }, `🌙 ${r.name} until ${r.until}`));
       if (s.active_jobs) badge.append(el("span", { class: "pill live" }, `● ${s.active_jobs} benchmark game${s.active_jobs > 1 ? "s" : ""} running`));
       else if (s.queued_jobs) badge.append(el("span", { class: "pill" }, `${s.queued_jobs} queued`));
       const lab = await api.lab();

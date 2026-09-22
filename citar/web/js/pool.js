@@ -48,7 +48,7 @@ function windowEditor(initial, ownerTz) {
     clear(rows);
     if (!model.length) {
       rows.appendChild(el("span", { class: "muted small" },
-        "No windows — available at any time."));
+        "No limit — they may use it at any hour (the machine's quiet hours still apply)."));
     }
     model.forEach((w, index) => {
       const day = el("select", {}, ...DAYS.map((d, i) =>
@@ -76,7 +76,9 @@ function windowEditor(initial, ownerTz) {
   return {
     node: el("div", { class: "col gap" },
       el("span", { class: "muted small" },
-        `Entered in your zone (${ownerTz}). Other people see these translated into theirs.`),
+        `The hours they MAY use it; outside them they cannot start work. Entered in your zone (${ownerTz}); `
+        + "other people see them translated into theirs. This limits the people you share with, never you: "
+        + "to keep the machine idle for everyone, set Quiet hours on the machine instead."),
       rows,
       el("div", { class: "row gap wrap" },
         el("button", { class: "small", onclick: () => { model.push({ weekday: 0, start_min: 0, end_min: 360 }); redraw(); } }, "+ window"),
@@ -159,7 +161,7 @@ function grantDialog(group, existing, onSaved) {
         el("div", { class: "col" }, ...purposeBoxes.map((p) => p.node)),
         el("span", { class: "muted small" }, "Nothing ticked means every kind of work.")),
       el("div", { class: "field" },
-        el("span", { class: "field-label" }, "When"), windows.node),
+        el("span", { class: "field-label" }, "Allowed hours"), windows.node),
       el("label", { class: "field" },
         el("span", { class: "field-label" }, "Simultaneous games"), concurrency,
         el("span", { class: "muted small" }, "0 uses the server's own limit.")),
@@ -369,6 +371,10 @@ function serverCard(server, groups, reload) {
       ? el("div", { class: "row gap wrap", style: { marginTop: "6px" } },
           ...server.models.slice(0, 10).map((m) => el("span", { class: "chip" }, m.label || m.key)))
       : null,
+    (server.restricted_hours && server.restricted_hours.enabled && (server.restricted_hours.windows || []).length)
+      ? el("div", { class: "small muted", style: { marginTop: "6px" } },
+          `🌙 Quiet hours (nothing runs): ${describeQuiet(server.restricted_hours)} ${server.owner_tz || ""}`)
+      : null,
     el("div", { style: { marginTop: "8px" } }, admissionLine(server)));
 }
 
@@ -388,7 +394,7 @@ function quietHoursDialog(server, reload) {
   const draw = () => {
     clear(body);
     body.append(
-      el("p", { class: "muted" }, "During these hours nothing runs on this machine, for anyone: games, benchmark jobs and probe runs ",
+      el("p", { class: "muted" }, "The hours this machine must REST. Nothing runs on it then, for anyone, you included: games, benchmark jobs and probe runs ",
         "finish the AI turn in progress, pause, and resume by themselves when the hours end. A window that ends before it ",
         `starts runs overnight into the next morning. Times are in the owner's time zone (${server.owner_tz || "UTC"}).`),
       el("label", { class: "row gap" }, el("input", { type: "checkbox", checked: !!rh.enabled, onchange: (e) => { rh.enabled = e.target.checked; } }),
@@ -409,7 +415,7 @@ function quietHoursDialog(server, reload) {
   };
   draw();
   const m = modal({
-    title: `Quiet hours — ${server.name}`, content: body,
+    title: `Quiet hours — when ${server.name} must rest`, content: body,
     footer: [el("button", { onclick: () => m.close() }, "Cancel"),
       el("button", { class: "primary", onclick: async () => {
         try {
@@ -462,8 +468,8 @@ function grantRow(group, grant, reload) {
             : (grant.subject ? grant.subject.display_name : "somebody")),
         el("span", { class: "muted small" }, `may run ${grant.purpose_label}`)),
       el("div", { class: "row gap" },
-        grant.open_now ? el("span", { class: "pill live" }, "open now")
-                       : el("span", { class: "pill quiet" }, "closed now"),
+        grant.open_now ? el("span", { class: "pill live", title: "Inside the allowed hours" }, "allowed now")
+                       : el("span", { class: "pill quiet", title: "Outside the allowed hours" }, "not allowed now"),
         group.can_manage
           ? el("button", { class: "small", onclick: () => grantDialog(group, grant, reload) }, "Edit")
           : null,
@@ -478,7 +484,8 @@ function grantRow(group, grant, reload) {
             }, "Revoke")
           : null)),
     el("div", { class: "row gap wrap small", style: { marginTop: "4px" } },
-      el("span", { class: "muted" }, `⏰ ${av.owner_text || "Any time"}`),
+      el("span", { class: "muted" }, `⏰ allowed ${av.always ? "at any time" : (av.owner_text || "at any time")}`),
+      group.is_mine && !av.always ? el("span", { class: "muted" }, "(limits them, not you)") : null,
       // Both readings, because the owner's midnight is somebody else's afternoon.
       av.same_zone ? null : el("span", { class: "muted" }, `(your ${av.viewer_text})`),
       budget.limited
