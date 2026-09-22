@@ -116,6 +116,7 @@ Record every experiment below: name, question, result, decision.
 | 14 | `lux-buyer-vs-standard` (24 games) | Buy a missing luxury from a neighbour for gold per turn (`lux_buy`) | −0.004 ± 0.044; unhappy turns 0.58 vs 0.53 | Rejected (neutral) |
 | 15 | `league-1` (24 games, one seat each, frozen_4f6e040a + v1) | v2c (v2a + war + space + lux_buy) vs v2a vs Standard vs v1 | Time 22, **Scientific 2** (v2a T323, v2c T311). Share v2a 0.317, v2c 0.295, Standard 0.210, v1 0.178. v2a and v2c each beat Standard and v1 significantly (+0.08 to +0.14); v2a − v2c +0.022 ± 0.084. v2c builds 1.67 spaceship parts per game vs v2a 0.58, with less military at T300 (865 vs 1,240) | v2a stays the best measured profile. Next: `league-2` separates war and space |
 | 16 | `league-2` (24 games, one seat each, frozen_4f6e040a) | 2x2 on v2a: war settings (field army, overseas) × space settings | Time 21, Scientific 3 (v2a, v2a+space, v2d). Share v2a+space 0.269, v2a+war 0.253, v2a 0.244, v2d 0.234; every pair within noise (largest +0.035 ± 0.068). Main effects: space +0.006, war −0.026. War raises captures (0.54 and 0.42 per game vs 0.08 and 0.17). Ratings: v2a+space 1642 ± 70, v2a 1623, v2c 1602, v2a+war 1586, v2d 1544 | Both bundles are neutral on share. Keep space (science wins, no cost) → base for `fac6`; keep war as an opt-in profile |
+| 17 | `fac6` (40 games, full length, factorial on v2a+space) | Screen `u_science` [2, 3], `u_happiness_low` [6, 10], `u_food` [3.6, 5], `settler_min_hap` [2, 0], `buy_cap_per_era` [60, 120], `gold_reserve` [60, 20], `u_gpp` [0.5, 1.5], `garrison_mode` [all, exposed] | Time 34, **Scientific 6** (3 of 24 in league-2, so the space base is working). `u_happiness_low` 10 is significantly bad: −0.045 ± 0.042 share, −3.4 techs, −1.6 techs by T200 (a high happiness weight crowds out science buildings). `u_gpp` 1.5 +0.039 ± 0.043 and `u_food` 5 +0.025 ± 0.043 (both starred at 39 games, borderline at 40). `u_science` 3 costs 2.7 cities with no tech gain; gold knobs, settler gate and garrison mode neutral | Keep `u_happiness_low` 6. Confirm `u_gpp` and `u_food` in `league-3` |
 | 9 | `fac3` (40 games, 200 turns, factorial on v1) | Screen `war_prep_rate` [1, 2.5], `settler_min_hap` [2, 0], `u_culture` [1, 2], `u_production` [2, 3], `u_gold` [0.67, 1], `site_new_lux` [0, 8], `tech_cost_exp` [0.8, 0.5], `workers_per_city` [1.8, 2.5] | Only `settler_min_hap` 2 vs 0 is significant: −1.5 cities (−0.026 share, +0.8 techs). All other knobs are within noise: `site_new_lux` 8 +0.033, `u_culture` 2 +0.023, `u_gold` 1.0 −0.031, `war_prep_rate` 2.5 −0.024 | Keep `settler_min_hap` 0; `site_new_lux` and `u_culture` are candidates for v2 (weak positive) |
 
 ### Findings from single-game traces (2026-09-18)
@@ -260,9 +261,9 @@ Reports: Lab page, or `python -m citar.lab report NAME` on the server.
 
 Progress of everything queued is on the web GUI **Lab page** (http://localhost:8765/#/lab): runner health, per-experiment progress and ETA, each game's current turn, side runs and the runner log. Click an experiment to see its report.
 
-1. **`fac6`** (queued 2026-09-22, 40 games, full length, base v2a+space): `u_science` 2/3, `u_happiness_low` 6/10,
-   `u_food` 3.6/5, `settler_min_hap` 2/0, `buy_cap_per_era` 60/120, `gold_reserve` 60/20, `u_gpp` 0.5/1.5,
-   `garrison_mode` all/exposed. Fold significant knobs into the base, then set v2 defaults and confirm against v1.
+1. **`league-3`** (queued 2026-09-22, 24 games): v2 candidate E (v2a+space with `u_gpp` 1.5 and `u_food` 5),
+   the GPP-only variant, v2a+space and Standard. Confirms fac6's two borderline knobs against a rated baseline.
+   Then fold the winner into `DEFAULT_PARAMS` as v2 and confirm against v1 before the v0.1.4 release.
    LLM side (web server benchmarks): gemma-4-e2b on the Framework Desktop and a second Acer pass, both on the
    Acer's seeds, to separate machine differences from game-to-game variation.
 2. Science wins are now possible but rare at the Quick 330-turn limit: v2c averages 1.67 of 6 parts. Pace (science
