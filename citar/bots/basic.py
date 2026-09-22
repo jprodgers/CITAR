@@ -233,6 +233,8 @@ PARAM_GROUPS: list[tuple[str, str, list[dict]]] = [
         _n("u_project", 40.0, "Project", "Value of a project (Apollo, Manhattan...) in a strong city ...", 0, 500),
         _n("u_project_low", 10.0, "... in a weak city", "", 0, 500),
         _n("u_spaceship", 20.0, "Spaceship part", "Value of a spaceship part in a strong city.", 0, 5000),
+        _n("u_space_program", 0.0, "Space program", "Extra value of the building that enables spaceship parts "
+           "(Apollo Program) in a strong city.", 0, 5000),
         _n("space_reserve", 0, "Keep for the spaceship", "From the space era (see Research), keep this many of each "
            "resource spaceship parts need (Aluminum) free: no units or buildings that would use them. 0 = off.",
            0, 6),
@@ -1324,6 +1326,9 @@ class BasicBot:
         if over_avg and any(x.ph in ("Triggers a Cultural Victory upon completion", "Triggers victory")
                             for x in bd["_umap"].all):
             v += P["u_victory_building"]
+        if P["u_space_program"] and over_avg and any(x.ph == "Enables construction of Spaceship parts"
+                                                     for x in bd["_umap"].all):
+            v += P["u_space_program"]
         return v
 
     def _choose_production_classic(self, g: Game, pid: int, c, ctx: dict, counts: dict, army: int, danger: bool) -> Optional[str]:
