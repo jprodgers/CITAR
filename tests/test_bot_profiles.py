@@ -69,9 +69,9 @@ class ProfileTests(unittest.TestCase):
                 profiles.delete(p["id"])
 
     def test_clean_params_coerces_drops_defaults_and_refuses_unknown(self):
-        out = profiles.clean_params("basic", {"war_prep_rate": "2", "u_food": 3.6, "prep_gather": "true",
+        out = profiles.clean_params("basic", {"war_prep_rate": "2", "u_food": 3.6, "war_overseas": "true",
                                               "site_candidates": 8.0})
-        self.assertEqual(out, {"war_prep_rate": 2.0, "prep_gather": True, "site_candidates": 8})
+        self.assertEqual(out, {"war_prep_rate": 2.0, "war_overseas": True, "site_candidates": 8})
         with self.assertRaises(profiles.ProfileError):
             profiles.clean_params("basic", {"no_such_knob": 1})
         with self.assertRaises(profiles.ProfileError):

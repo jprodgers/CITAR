@@ -117,7 +117,42 @@ Record every experiment below: name, question, result, decision.
 | 15 | `league-1` (24 games, one seat each, frozen_4f6e040a + v1) | v2c (v2a + war + space + lux_buy) vs v2a vs Standard vs v1 | Time 22, **Scientific 2** (v2a T323, v2c T311). Share v2a 0.317, v2c 0.295, Standard 0.210, v1 0.178. v2a and v2c each beat Standard and v1 significantly (+0.08 to +0.14); v2a − v2c +0.022 ± 0.084. v2c builds 1.67 spaceship parts per game vs v2a 0.58, with less military at T300 (865 vs 1,240) | v2a stays the best measured profile. Next: `league-2` separates war and space |
 | 16 | `league-2` (24 games, one seat each, frozen_4f6e040a) | 2x2 on v2a: war settings (field army, overseas) × space settings | Time 21, Scientific 3 (v2a, v2a+space, v2d). Share v2a+space 0.269, v2a+war 0.253, v2a 0.244, v2d 0.234; every pair within noise (largest +0.035 ± 0.068). Main effects: space +0.006, war −0.026. War raises captures (0.54 and 0.42 per game vs 0.08 and 0.17). Ratings: v2a+space 1642 ± 70, v2a 1623, v2c 1602, v2a+war 1586, v2d 1544 | Both bundles are neutral on share. Keep space (science wins, no cost) → base for `fac6`; keep war as an opt-in profile |
 | 17 | `fac6` (40 games, full length, factorial on v2a+space) | Screen `u_science` [2, 3], `u_happiness_low` [6, 10], `u_food` [3.6, 5], `settler_min_hap` [2, 0], `buy_cap_per_era` [60, 120], `gold_reserve` [60, 20], `u_gpp` [0.5, 1.5], `garrison_mode` [all, exposed] | Time 34, **Scientific 6** (3 of 24 in league-2, so the space base is working). `u_happiness_low` 10 is significantly bad: −0.045 ± 0.042 share, −3.4 techs, −1.6 techs by T200 (a high happiness weight crowds out science buildings). `u_gpp` 1.5 +0.039 ± 0.043 and `u_food` 5 +0.025 ± 0.043 (both starred at 39 games, borderline at 40). `u_science` 3 costs 2.7 cities with no tech gain; gold knobs, settler gate and garrison mode neutral | Keep `u_happiness_low` 6. Confirm `u_gpp` and `u_food` in `league-3` |
+| 18 | `league-3` (24 games, one seat each, frozen_4f6e040a) | Confirm fac6: v2 candidate E (v2a+space, `u_gpp` 1.5, `u_food` 5) and a GPP-only variant against v2a+space and Standard | Time 21, Scientific 3. Share: v2a+space+gpp 0.281, v2e 0.274, v2a+space 0.244, Standard 0.201. Both GPP seats beat Standard significantly (−0.080 ± 0.075 and −0.073 ± 0.052); GPP vs GPP+food is +0.007 ± 0.089, so the food change adds nothing. Captures: Standard 0.42 per game, v2a+space 0.08 | **`u_gpp` 1.5 adopted, `u_food` left at 3.6. These are the v2 defaults (see below)** |
 | 9 | `fac3` (40 games, 200 turns, factorial on v1) | Screen `war_prep_rate` [1, 2.5], `settler_min_hap` [2, 0], `u_culture` [1, 2], `u_production` [2, 3], `u_gold` [0.67, 1], `site_new_lux` [0, 8], `tech_cost_exp` [0.8, 0.5], `workers_per_city` [1.8, 2.5] | Only `settler_min_hap` 2 vs 0 is significant: −1.5 cities (−0.026 share, +0.8 techs). All other knobs are within noise: `site_new_lux` 8 +0.033, `u_culture` 2 +0.023, `u_gold` 1.0 −0.031, `war_prep_rate` 2.5 −0.024 | Keep `settler_min_hap` 0; `site_new_lux` and `u_culture` are candidates for v2 (weak positive) |
+
+### The v2 defaults (shipped in 0.1.4, 2026-09-22)
+
+`DEFAULT_PARAMS` changed in nine places. Every one was measured, and the package as a whole was the winning seat of
+`league-3`; Standard now plays exactly what that seat played.
+
+| Parameter | v1 | v2 | Evidence |
+|---|---|---|---|
+| `u_wonder_gate` | True | **False** | fac4: gating costs 0.061 share and 1.5 techs |
+| `u_wonder_bonus` | 4 | **12** | fac4: +0.052 share |
+| `bv_cache_turns` | 5 | **0** | fac4: the cache costs 0.9 techs by T200 |
+| `prep_gather` | False | **True** | fac5: +0.031 ± 0.032 (see the caveat below) |
+| `u_gpp` | 0.5 | **1.5** | fac6 +0.039 ± 0.043, confirmed in league-3 |
+| `u_spaceship` | 20 | **1500** | A part is 750 production; at 20 it was never worth building |
+| `u_space_program` | 0 | **1500** | Apollo is what unlocks the parts |
+| `u_victory_building` | 20 | **1500** | Same reasoning for Utopia and friends |
+| `space_reserve` | 0 | **3** | Keeps Aluminum for the parts, including against unit upgrades |
+
+Measured effect, in one place:
+
+- **v2 against Standard (v1 defaults): +0.08 to +0.10 share** across `v2a-vs-standard` (24 games), `league-1`
+  (24) and `league-3` (24). Ratings put the shipped configuration at about 1640 against Standard's 1500.
+- **Science victories exist now:** 0 in the project's whole history before 2026-09-22, then 2 of 24 (`league-1`),
+  3 of 24 (`league-2`), 6 of 40 (`fac6`), 3 of 24 (`league-3`). Four separate causes had to be fixed first
+  (row 13), one of them an engine bug that affected human players too.
+- **Unhappiness improved but is not solved:** 0.41-0.52 of turns against 0.53-0.60 for Standard.
+- Techs at T330 are unchanged (67-68). v2 wins on cities, wonders, great people and the endgame, not on pace.
+
+**The caveat, and the first job for the next version.** v2 barely fights: 0.08 captured cities per game in
+league-3, against Standard's 0.42. In the duel regression test a v2 bot at aggression 0.5 never declares war at
+all in 200 turns - it settles 19 cities and leaves its defenceless neighbour alone (at aggression 0.9 it still
+conquers, at T147). The suspect is `prep_gather` in a wide empire: the field army it must assemble before
+declaring scales with city count, so the gather may never finish. `v2-wars` (24 games, queued 2026-09-22) puts
+the shipped defaults against the same bot without `prep_gather`, with the war settings, and with both.
 
 ### Findings from single-game traces (2026-09-18)
 
@@ -261,10 +296,15 @@ Reports: Lab page, or `python -m citar.lab report NAME` on the server.
 
 Progress of everything queued is on the web GUI **Lab page** (http://localhost:8765/#/lab): runner health, per-experiment progress and ETA, each game's current turn, side runs and the runner log. Click an experiment to see its report.
 
-1. **`league-3`** (queued 2026-09-22, 24 games): v2 candidate E (v2a+space with `u_gpp` 1.5 and `u_food` 5),
-   the GPP-only variant, v2a+space and Standard. Confirms fac6's two borderline knobs against a rated baseline.
-   Then fold the winner into `DEFAULT_PARAMS` as v2 and confirm against v1 before the v0.1.4 release.
-   LLM side (web server benchmarks): gemma-4-e2b on the Framework Desktop and a second Acer pass, both on the
+1. **`v2-wars`** (queued 2026-09-22, 24 games, frozen_e744bbf8 = the 0.1.4 bot): the shipped defaults against
+   themselves without `prep_gather`, with the war settings, and with both. The bots stopped fighting; find out
+   which setting did it and what fighting is worth. See the caveat above.
+2. **Science pace.** Parts get built now, but only 3-6 games in 24-40 reach a launch by T330. The lever is
+   science per turn, not part values: the tech tree costs about 150k science and a bot makes about 21k by T300.
+3. **Gold still piles up** (about 600 by T300) and the city-state gift sink is untouched; `buy_cap_per_era` and
+   `gold_reserve` were both neutral in fac6, so the spending rule itself is what needs work, not its limits.
+4. **Difficulty ladder.** Deity is 0.73-0.81 share against Prince's 0.05-0.07: the handicaps, not the bot.
+5. **LLM side** (web server benchmarks): gemma-4-e2b on the Framework Desktop and a second Acer pass, both on the
    Acer's seeds, to separate machine differences from game-to-game variation.
 2. Science wins are now possible but rare at the Quick 330-turn limit: v2c averages 1.67 of 6 parts. Pace (science
    per turn) is the next lever, rather than part values.

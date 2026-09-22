@@ -4,7 +4,7 @@ Notable changes to CITAR. The format follows [Keep a Changelog](https://keepacha
 versions follow [semantic versioning](https://semver.org) — with the pre-1.0 caveat that tool names
 and arguments may still change between minor versions, and the release notes will say when they do.
 
-## [Unreleased]
+## [0.1.4] - 2026-09-22
 
 ### Added
 
@@ -37,6 +37,16 @@ and arguments may still change between minor versions, and the release notes wil
 
 ### Changed
 
+- **A stronger scripted bot (v2 defaults).** Nine of the bot's parameters changed, each one measured in the
+  lab over roughly 200 full-length games: wonders are no longer gated to high-production cities and are worth
+  more, building values are no longer cached between turns, great-person points count for three times as much,
+  the field army gathers before a war is declared, and spaceship parts, Apollo and victory buildings are finally
+  valued as what they are — the things that win the game — with Aluminum kept in reserve for them. Against the
+  old defaults this is worth about +0.09 score share (roughly 140 rating points), with more cities, more wonders
+  and fewer unhappy turns. **Science victories now happen** (3 to 6 games in 24 to 40, where the bot had never
+  achieved one). The trade-off: this bot expands rather than fights, and captures far fewer cities than before —
+  the first thing being worked on for the next version. Every old configuration is still available as a bot
+  profile, and existing profiles keep playing what they played.
 - **Running and finished work no longer share a colour.** Anything in progress — a running experiment or
   benchmark job, a connected helper, a live runner — is blue; anything finished or ready is green, with a ✓.
   Finished saves in the lobby and finished side runs in the lab say so in green instead of grey, so a glance
@@ -51,6 +61,13 @@ and arguments may still change between minor versions, and the release notes wil
   exactly as before: seeded 250-turn games with both production modes and every optional behaviour
   switched on give bit-identical results to the previous version.
 - Lab results record each seat's profile, revision, fingerprint and actual aggression.
+
+### Known issues
+
+The scripted bot now expands well but rarely fights: about 0.08 captured cities per game against the
+old defaults' 0.42, and a bot of middling aggression may never declare war. Model scores are
+comparable within a release and **not across 0.1.3 and 0.1.4**, because the bot changed.
+See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## [0.1.3] - 2026-09-22
 
@@ -278,7 +295,8 @@ somebody else can install.
 The scripted bot is limited by happiness and stalls at two to five cities by turn 150, which caps
 how hard it can push a model. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/jprodgers/CITAR/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jprodgers/CITAR/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jprodgers/CITAR/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jprodgers/CITAR/compare/v0.1.0...v0.1.1

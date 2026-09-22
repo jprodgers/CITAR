@@ -96,13 +96,15 @@ class BotTests(unittest.TestCase):
             self.assertGreaterEqual(p["checkpoints"][50]["cities"], 2)
             self.assertGreaterEqual(p["techs"], 6)
 
-    def test_bot_conquers_a_defenceless_neighbour(self):
+    def test_aggressive_bot_conquers_a_defenceless_neighbour(self):
+        # Aggression 0.9, because since the v2 defaults a middling bot (0.5) out-expands its neighbour on this
+        # map instead of attacking it: 19 cities by T200 and no war declared at all. See docs/research/BOT_TUNING.md.
         from citar.bots.basic import BasicBot
         from citar.balance import IdleBot
         from citar.sim import resolve_negotiations
         g = Game.new({"map_type": "pangaea", "map_size": "duel", "seed": 1001, "barbarians": "normal",
                       "players": [{"controller": "bot"}, {"controller": "bot"}], "turn_limit": 200, "speed": "Quick"})
-        bots = {0: BasicBot(aggression=0.5, seed=1), 1: IdleBot()}
+        bots = {0: BasicBot(aggression=0.9, seed=1), 1: IdleBot()}
         while g.s.phase == "playing":
             pid = g.s.current
             bots[pid].play_turn(g, pid, end_turn=False)

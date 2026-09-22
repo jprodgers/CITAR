@@ -1,20 +1,22 @@
 # Known issues and limitations
 
-What is broken, missing or misleading in 0.1.3. Written plainly, because finding this out after
+What is broken, missing or misleading in 0.1.4. Written plainly, because finding this out after
 installing something is worse than reading it first.
 
 ---
 
-## The scripted bot stalls at two to five cities
+## The scripted bot expands instead of fighting
 
 **The big one**, because the bot is what every model score is measured against.
 
-On a Quick Small map the bot reaches two to five cities by about turn 150 and stops expanding. It
-is limited by happiness: it will not settle into unhappiness, and it does not push hard enough on
-the things that would fix that.
+The 0.1.4 bot no longer stalls: on a Quick Small map it reaches 12 to 13 cities by turn 300 (0.1.3:
+two to five by turn 150), finishes the tech tree and wins by science often enough to see. What it
+does not do is fight. It captures about 0.08 cities per game, where the old defaults captured 0.42,
+and a bot of middling aggression may play a whole game without declaring war at all.
 
-What it means for a score: a model that beats the bot has beaten a competent but self-limiting
-opponent, not a good Civ player. A model that loses badly to it is genuinely struggling.
+What it means for a score: a model that beats the bot has beaten a strong builder that will mostly
+leave it alone, not an opponent that will punish a weak army. A model that loses badly to it is
+genuinely struggling. Unhappiness is still a real limit — bots are unhappy on 41 to 52% of turns.
 
 Work in progress — the campaign log is [docs/research/BOT_TUNING.md](docs/research/BOT_TUNING.md).
 Scores are comparable within a release and **not across releases where the bot changed**; the
