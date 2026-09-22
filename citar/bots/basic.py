@@ -495,6 +495,11 @@ PARAM_GROUPS: list[tuple[str, str, list[dict]]] = [
         _n("lux_sell_gpt", 3, "Sell a luxury for", "Gold per turn asked when they have no luxury to swap.", 0, 50,
            "gold"),
         _n("lux_buyer_min_gold", 20, "Buyer needs gold", "", 0, 500, "gold"),
+        _b("lux_buy", False, "Buy luxuries", "While happiness is short, offer gold per turn for a luxury type we lack "
+           "to a civ with a spare (bots otherwise only offer their own surplus)."),
+        _n("lux_buy_gpt", 2, "Pay for a luxury", "Gold per turn offered for a luxury we lack.", 1, 20, "gold"),
+        _n("lux_buy_hap_margin", 2, "Buy luxuries below happiness", "Happiness is short below cities + this.",
+           -10, 30),
     ]),
     ("Deals", "What deal items are worth, in gold. The same values judge offers made and received.", [
         _n("deal_gpt", 0.8, "Gold per turn", "Value per gold per turn per turn of the deal.", 0, 2),
@@ -2418,6 +2423,8 @@ class BasicBot:
         mine = economy.luxury_resources(g, pid)
         surplus = [r for r, d in mine.items() if d["net"] >= P["lux_spare_at"]]
         if not surplus:
+            if P["lux_buy"]:
+                self._buy_luxury(g, pid, mine)
             return
         for q in p.met:
             other = g.player(q)
@@ -2435,6 +2442,31 @@ class BasicBot:
             self.ex(g, pid, "open_negotiation", to=q, message="We have luxuries to spare. Shall we trade?",
                     give=[{"type": "resource", "resource": give, "amount": 1}], receive=receive)
             return
+        if P["lux_buy"]:
+            self._buy_luxury(g, pid, mine)
+
+    def _buy_luxury(self, g: Game, pid: int, mine: dict):
+        """While happiness is short, offer gold per turn for a luxury type we lack to a civ that has one to spare:
+        a new luxury type is +4 happiness empire-wide, the cheapest happiness there is."""
+        from ..engine import economy
+        P = self.p
+        p = g.player(pid)
+        if economy.happiness(g, pid)["total"] >= len(g.player_cities(pid)) + P["lux_buy_hap_margin"]:
+            return
+        if economy.civ_stats(g, pid)["gold"] < P["lux_buy_gpt"]:
+            return
+        for q in p.met:
+            other = g.player(q)
+            if not other.alive or other.kind != "major" or g.at_war(pid, q):
+                continue
+            theirs = economy.luxury_resources(g, q)
+            want = next((r for r, d in theirs.items() if d["net"] >= P["lux_spare_at"] and mine[r]["net"] <= 0), None)
+            if want is None:
+                continue
+            if self.ex(g, pid, "open_negotiation", to=q, message="We would pay for a luxury you have to spare.",
+                       give=[{"type": "gold_per_turn", "amount": P["lux_buy_gpt"], "turns": g.speed["dealDuration"]}],
+                       receive=[{"type": "resource", "resource": want, "amount": 1}]) is not None:
+                return
 
     def evaluate(self, g: Game, pid: int, other: int, give: list, receive: list) -> float:
         """Value a proposed deal from this civilization's point of view.
