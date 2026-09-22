@@ -222,41 +222,54 @@ class PooledWork(unittest.TestCase):
         game.game.player(0).alive = False       # the bots play on; the model will never be asked again
         self.assertEqual(seats.occupied(self.server_id), [])
 
-    def test_the_probe_queue_skips_a_run_whose_machine_is_busy(self):
-        """One busy machine must not hold up probe runs on every other machine."""
+    def _bare_runner(self):
+        """A probe runner without its background dispatcher, to drive by hand."""
         from citar import probes
+        runner = probes.ProbeRunner.__new__(probes.ProbeRunner)
+        runner.manager, runner.lock, runner._stop_run, runner._thread = self.manager, threading.Lock(), set(), None
+        runner.lives, runner._workers, runner._loaded = {}, {}, {}
+        runner.POLL_SECONDS = 0.05
+        return runner
+
+    def test_probe_runs_on_different_machines_do_not_wait_for_each_other(self):
+        """One busy machine held up probe runs on every other machine, and runs went one at a time."""
         from citar.pool import seats
-        runner = probes.ProbeRunner.__new__(probes.ProbeRunner)     # no background thread: drive _loop by hand
-        runner.manager, runner.lock, runner.live, runner._stop_run = self.manager, threading.Lock(), {}, set()
-        runner._thread = None
+        runner = self._bare_runner()
         ids = []
-        for n, server in (("busy", self.server_id), ("free", "sv-elsewhere")):
+        for n, server in (("busy", self.server_id), ("free", "sv-elsewhere"), ("third", "sv-third")):
             rid = f"test-{n}-{int(time.time() * 1000) % 100000}"
             runner._write({"id": rid, "name": n, "llm": {"server_id": server}, "status": "queued", "jobs": []})
             ids.append(rid)
         runner.queue = list(ids)
-        started = []
+        started, both = [], threading.Event()
+        release = threading.Event()
 
         def fake_run(rid):
             started.append(rid)
-            runner.queue.clear()            # stop the loop once something has run
+            if len([r for r in started if r != ids[0]]) == 2:
+                both.set()
+            release.wait(10)
         runner._run = fake_run
         seats.claim(self.server_id, "game “long one”")
+        loop = threading.Thread(target=runner._loop, daemon=True)
         try:
-            runner._loop()
+            loop.start()
+            self.assertTrue(both.wait(10), f"runs on two free machines should run at the same time: {started}")
+            self.assertNotIn(ids[0], started, "the busy machine's run waits")
+            waiting = runner.get_run(ids[0])
+            self.assertEqual(waiting["status"], "waiting (machine busy)")
+            self.assertIn("long one", waiting["waiting"])
         finally:
             seats.release(self.server_id, "game “long one”")
-        self.assertEqual(started, [ids[1]], "the run on the free machine should go first")
-        waiting = runner.get_run(ids[0])
-        self.assertEqual(waiting["status"], "waiting (machine busy)")
-        self.assertIn("long one", waiting["waiting"])
+            release.set()
+        loop.join(10)
+        self.assertFalse(loop.is_alive(), "the dispatcher stops when everything has run")
+        self.assertEqual(set(started), set(ids))
 
     def test_one_queue_orders_benchmarks_and_probes_by_priority_then_age(self):
-        from citar import probes
         from citar.pool import queue as work_queue
         from citar.server.benchmarks import BenchmarkScheduler
-        runner = probes.ProbeRunner.__new__(probes.ProbeRunner)
-        runner.manager, runner.lock, runner.live, runner._stop_run, runner._thread = self.manager, threading.Lock(), {}, set(), None
+        runner = self._bare_runner()
         rid = f"test-old-probe-{int(time.time() * 1000) % 100000}"
         runner._write({"id": rid, "name": "old probe", "llm": {"server_id": self.server_id}, "status": "queued",
                        "jobs": [], "created": time.time() - 3600})

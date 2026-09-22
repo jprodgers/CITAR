@@ -382,12 +382,21 @@ def _check(case: dict, rec: dict) -> Optional[bool]:
 # the runner (one run at a time: runs usually share a single GPU)
 # ----------------------------------------------------------------------------
 class ProbeRunner:
-    """Runs probes in the background, one case at a time, and records the results."""
+    """Runs probes in the background and records the results.
+
+    Each model machine gets its own worker thread, one run at a time on it, so a run waiting for its machine
+    (a game using it, its quiet hours, higher-priority work) never holds up runs for other machines. A
+    dispatcher thread starts the best-ranked queued run for every machine that is free.
+    """
+    POLL_SECONDS = 5.0
+
     def __init__(self, manager):
         self.manager = manager
         self.lock = threading.Lock()
         self.queue: list[str] = []
-        self.live: dict = {}
+        self.lives: dict = {}                       # run id -> what it is doing now (shown on the Probes page)
+        self._workers: dict = {}                    # machine -> the thread running a run on it
+        self._loaded: dict = {}                     # server id -> model this runner loaded there
         self._thread: Optional[threading.Thread] = None
         self._stop_run: set = set()
         RUNS.mkdir(parents=True, exist_ok=True)
@@ -491,43 +500,83 @@ class ProbeRunner:
         shutil.rmtree(self._run_dir(rid), ignore_errors=True)
 
     def _kick(self):
-        """Make sure the worker thread is running."""
+        """Make sure the dispatcher thread is running."""
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._loop, daemon=True, name="probe-runner")
             self._thread.start()
 
+    @property
+    def live(self) -> dict:
+        """What the most recently started run is doing (the Probes page's live panel)."""
+        lives = [v for v in list(self.lives.values()) if v]
+        return max(lives, key=lambda v: v.get("started", 0)) if lives else {}
+
+    def _set_live(self, rid: str, value: Optional[dict]):
+        """Record what a run is doing now (None when it is not running)."""
+        if value is None:
+            self.lives.pop(rid, None)
+        else:
+            value.setdefault("started", (self.lives.get(rid) or {}).get("started") or time.time())
+            self.lives[rid] = value
+
+    def _machine_of(self, rid: str) -> str:
+        """The machine a run plays on ("" when it names none)."""
+        try:
+            return self.get_run(rid)["llm"].get("server_id") or ""
+        except (ProbeError, OSError, ValueError):
+            return ""
+
     def _loop(self):
-        """The worker thread: take the next queued run and execute it."""
+        """The dispatcher: start the best-ranked queued run on every machine that is free, each on its own thread."""
         while True:
-            queue = self._ordered_queue()
-            # the first run whose machine is free, so one busy machine does not hold up every other run
-            rid = next((r for r in queue if not self._machine_busy(r)), None)
-            if rid is None and queue:
-                time.sleep(15)
-                continue
             with self.lock:
-                if rid is not None:
+                active = {m for m, t in self._workers.items() if t.is_alive()}
+            for rid in self._ordered_queue():
+                machine = self._machine_of(rid)
+                if machine in active or self._machine_busy(rid):
+                    continue
+                with self.lock:
                     if rid not in self.queue:
                         continue            # stopped meanwhile
                     self.queue.remove(rid)
-            if rid is None:
-                # nothing left: free the GPU of whatever this runner loaded
-                if self._loaded_by_us:
-                    from . import servers
-                    sv = servers.find(self._loaded_by_us[0])
-                    if sv:
-                        servers.unload_models(sv, [self._loaded_by_us[1]])
-                    self._loaded_by_us = None
+                    worker = threading.Thread(target=self._work, args=(rid,), daemon=True, name=f"probe-{rid}")
+                    self._workers[machine] = worker
+                active.add(machine)
+                worker.start()
+            with self.lock:
+                idle = not self.queue and not any(t.is_alive() for t in self._workers.values())
+                if idle:
+                    self._thread = None
+            if idle:
+                self._unload_all()          # nothing left: free the GPUs of whatever this runner loaded
                 return
+            time.sleep(self.POLL_SECONDS)
+
+    def _work(self, rid: str):
+        """One machine's worker: execute a run, recording a failure instead of losing it."""
+        try:
+            self._run(rid)
+        except Exception:
             try:
-                self._run(rid)
+                run = self.get_run(rid)
+                run["status"], run["error"] = "failed", traceback.format_exc(limit=6)
+                self._write(run)
             except Exception:
+                pass
+        finally:
+            self._set_live(rid, None)
+
+    def _unload_all(self):
+        """Unload every model this runner loaded."""
+        from . import servers
+        for sid, model in list(self._loaded.items()):
+            sv = servers.find(sid)
+            if sv:
                 try:
-                    run = self.get_run(rid)
-                    run["status"], run["error"] = "failed", traceback.format_exc(limit=6)
-                    self._write(run)
+                    servers.unload_models(sv, [model])
                 except Exception:
                     pass
+            self._loaded.pop(sid, None)
 
     def _run(self, rid: str):
         """Execute one run: every case, in order, with the configured repeats."""
@@ -569,19 +618,19 @@ class ProbeRunner:
         return out
 
     def running_items(self) -> list[dict]:
-        """The run using its machine now, for the queue page."""
-        rid = (self.live or {}).get("run")
-        if not rid:
-            return []
-        try:
-            run = self.get_run(rid)
-        except (ProbeError, OSError, ValueError):
-            return []
-        if run["status"] != "running":
-            return []
-        return [{"kind": "probe", "id": rid, "group": rid, "run": run["name"], "label": run["name"],
-                 "server_id": run["llm"].get("server_id"), "server": run["llm"].get("server"),
-                 "created": run.get("created") or 0, "waiting": None}]
+        """The runs using their machines now, for the queue page."""
+        out = []
+        for rid in list(self.lives):
+            try:
+                run = self.get_run(rid)
+            except (ProbeError, OSError, ValueError):
+                continue
+            if run["status"] != "running":
+                continue
+            out.append({"kind": "probe", "id": rid, "group": rid, "run": run["name"], "label": run["name"],
+                        "server_id": run["llm"].get("server_id"), "server": run["llm"].get("server"),
+                        "created": run.get("created") or 0, "waiting": None})
+        return out
 
     def _make_way(self, rid: str, run: dict) -> bool:
         """Between cases: if higher-priority work is waiting for this run's machine, put the run back in the queue
@@ -597,7 +646,7 @@ class ProbeRunner:
         with self.lock:
             if rid not in self.queue:
                 self.queue.append(rid)
-        self.live = {}
+        self._set_live(rid, None)
         return True
 
     def _ordered_queue(self) -> list[str]:
@@ -645,8 +694,8 @@ class ProbeRunner:
                 run["status"] = "waiting (machine busy)"
                 run["waiting"] = f"waiting for {', '.join(held)}"
                 self._write(run)
-                self.live = {"run": rid, "case": f"(waiting: the machine is in use by {', '.join(held)})",
-                             "since": time.time()}
+                self._set_live(rid, {"run": rid, "case": f"(waiting: the machine is in use by {', '.join(held)})",
+                                     "since": time.time()})
             time.sleep(15)
         if waited:
             run = self.get_run(rid)
@@ -667,9 +716,9 @@ class ProbeRunner:
                 return
             if self._wait_quiet(rid, run["llm"]):
                 self._prepare_model(run)
-            self.live = {"run": rid, "case": job["case"], "rep": job["rep"], "since": time.time()}
+            self._set_live(rid, {"run": rid, "case": job["case"], "rep": job["rep"], "since": time.time()})
             rec = run_case(self.manager, scn, probe, cases[job["case"]], run["llm"],
-                           save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar", live=self.live,
+                           save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar", live=self.lives[rid],
                            should_stop=lambda: rid in self._stop_run, usage_act=act)
             rec["rep"] = job["rep"]
             with open(self._run_dir(rid) / "results.jsonl", "a", encoding="utf-8") as f:
@@ -688,11 +737,9 @@ class ProbeRunner:
         self._write(run)
         usage.tracker().update(act, status=run["status"], ended=run["finished"], cases_run=run.get("done"),
                                pass_rate=run["summary"].get("pass_rate"))
-        self.live = {}
+        self._set_live(rid, None)
 
     # ---------------------------------------------------------------- models
-    _loaded_by_us: Optional[tuple] = None     # (server id, model key) this runner loaded
-
     def _prepare_model(self, run: dict) -> bool:
         """Loads the run's model with its load profile on a server CITAR manages (LM Studio), swapping out a model this
         runner loaded earlier but never one the user loaded."""
@@ -703,13 +750,14 @@ class ProbeRunner:
             return False
         model = llm.get("model")
         entry = servers.model_entry(sv, llm.get("model_id") or model)
-        if self._loaded_by_us and self._loaded_by_us[1] != model:
-            servers.unload_models(servers.find(self._loaded_by_us[0]) or sv, [self._loaded_by_us[1]])
-            self._loaded_by_us = None
-        self.live = {"run": run["id"], "case": "(loading the model)", "since": time.time()}
+        loaded = self._loaded.get(sv["id"])
+        if loaded and loaded != model:
+            servers.unload_models(sv, [loaded])
+            self._loaded.pop(sv["id"], None)
+        self._set_live(run["id"], {"run": run["id"], "case": "(loading the model)", "since": time.time()})
         try:
             if servers.ensure_model(sv, model, servers.profile(entry, llm.get("profile_id"))) > 0:
-                self._loaded_by_us = (sv["id"], model)
+                self._loaded[sv["id"]] = model
         except Exception as e:      # still try: LM Studio may load it just in time
             run = self.get_run(run["id"])
             run["error"] = f"Could not load {model}: {e}"
@@ -728,11 +776,10 @@ class ProbeRunner:
                 run = self.get_run(rid)
                 run["status"] = "waiting (restricted hours)"
                 self._write(run)
-                if self._loaded_by_us and sv and sv["restricted_hours"].get("unload_models"):
-                    servers.unload_models(servers.find(self._loaded_by_us[0]) or sv, [self._loaded_by_us[1]])
-                    self._loaded_by_us = None
-                self.live = {"run": rid, "case": f"(paused: {servers.server_name(llm.get('server_id'))} is in its restricted hours)",
-                             "since": time.time()}
+                if sv and self._loaded.get(sv["id"]) and sv["restricted_hours"].get("unload_models"):
+                    servers.unload_models(sv, [self._loaded.pop(sv["id"])])
+                self._set_live(rid, {"run": rid, "case": f"(paused: {servers.server_name(llm.get('server_id'))} is in its restricted hours)",
+                                     "since": time.time()})
             time.sleep(30)
         if waited:
             run = self.get_run(rid)
@@ -754,7 +801,10 @@ class ProbeRunner:
                 pass
         if live.get("since"):
             live["seconds"] = round(time.time() - live["since"], 1)
-        return {"queue": list(self.queue), "live": live}
+        running = [{"run": v.get("run"), "case": v.get("case"), "rep": v.get("rep"),
+                    "seconds": round(time.time() - v["since"], 1) if v.get("since") else None}
+                   for v in list(self.lives.values()) if v]
+        return {"queue": list(self.queue), "live": live, "running": running}
 
 
 def summarize(results: list[dict]) -> dict:

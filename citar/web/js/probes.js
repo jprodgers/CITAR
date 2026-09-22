@@ -74,6 +74,10 @@ function drawLive(card, status, runs) {
   const run = runs.find((r) => r.id === lv.run);
   card.appendChild(el("div", { class: "row" }, el("h2", { style: { margin: 0 } }, "Probes"),
     run ? el("span", { class: "pill live" }, `● running ${run.name}`) : el("span", { class: "pill muted" }, "idle"),
+    ...(status.running || []).filter((r) => r.run !== lv.run).map((r) => {
+      const other = runs.find((x) => x.id === r.run);
+      return other ? el("span", { class: "pill live", title: `case ${r.case}` }, `● also running ${other.name}`) : null;
+    }),
     status.queue && status.queue.length ? el("span", { class: "pill" }, `${status.queue.length} queued`) : null,
     el("span", { class: "grow" }),
     el("label", { class: "small", title: "Turn off to freeze the page while reading" },
