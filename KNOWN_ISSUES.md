@@ -1,6 +1,6 @@
 # Known issues and limitations
 
-What is broken, missing or misleading in 0.1.2. Written plainly, because finding this out after
+What is broken, missing or misleading in 0.1.3. Written plainly, because finding this out after
 installing something is worse than reading it first.
 
 ---
@@ -36,6 +36,15 @@ far apart in strength can finish close on score.
 
 **Speed is hardware.** The 15% speed component of the overall score measures the machine as much as
 the model. Reports separate them; the single score does not.
+
+**Energy on helper machines is estimated.** The CITAR helper does not report power draw, so a
+machine on the Servers page is costed from the watts entered under Power & costs (idle, and extra
+while the model generates). Only the machine CITAR itself runs on is sampled live. A plug-in meter
+reading makes the energy and cost-per-task figures far better than the hardware-class guesses.
+
+**Priority takes effect at a safe point.** Work moved to the top of a machine's queue waits for the
+running work to reach its next safe point: the end of the model's turn (at most 15 minutes) for a
+game or benchmark job, the end of the case for a probe run. A report already being written finishes.
 
 ---
 

@@ -8,6 +8,55 @@ and arguments may still change between minor versions, and the release notes wil
 
 Nothing yet.
 
+## [0.1.3] - 2026-09-22
+
+### Added
+
+- **One prioritised queue per model machine.** Games, benchmark jobs, probe runs and reports whose
+  analysis a model writes share a single ranked list for each machine, on a new **Queue** page.
+  Higher priority runs first, then whatever has waited longest. Running work is in the same list:
+  put something above it ("⤒ top") and the running work makes way at its next safe point, then
+  carries on by itself when it is back on top. Equal priorities never interrupt each other. The
+  page also shows the lab's experiments, with their own priorities, and this server's CPU load.
+- **Quiet hours for Servers-page machines.** Each machine has a **Quiet hours** setting, read in its
+  owner's time zone, that applies to everyone including its owner: games, benchmark jobs and probe
+  runs finish the turn in progress, pause, and resume by themselves when the hours end. Lobby games
+  now pause in quiet hours too (they used to keep running).
+- **Costs for Servers-page machines, and energy per task.** Machines registered through the helper
+  were recorded in the usage ledger but never priced. Each machine card now has **Power & costs**
+  (watts, hardware price and lifespan, electricity plan), reports include these machines, and a new
+  report section, **Energy and efficiency**, compares each model on each machine: kWh, electricity
+  cost, Wh per game, per model turn and per probe case, output tokens per Wh and per second,
+  performance per kWh, and cost per task. A machine registered again keeps its earlier usage.
+- **Reports can be written on a helper machine** and wait for it in the queue like other work.
+- **Benchmark scenarios take the map options** (edges, rivers, resources).
+- **`deploy/citar-lab.service`** runs the bot-vs-bot lab as a low-priority service beside the server.
+
+### Changed
+
+- **Pausing a game stops its clock.** Paused time no longer counts toward a turn's duration or its
+  time limit, and an AI paused mid-turn waits before its next model call instead of playing on.
+- **Finished games leave the current-games list by themselves**, ten minutes after the end once
+  nobody is watching. Their saves and replay are kept, as with Close.
+- **Probe runs on different machines run side by side**, and a run waiting for its machine no
+  longer holds up runs for other machines.
+- **A machine is freed as soon as its model is eliminated**; a benchmark job whose model is out ends
+  there instead of watching the bots play on.
+- **The Servers page says which hours are which:** a group's window is now "Allowed hours" (when the
+  people you share with may use a machine, never limiting you), distinct from the machine's quiet hours.
+
+### Fixed
+
+- **Lobby games survive a server restart.** Open games used to disappear until reloaded by hand.
+- **Reports show on the Reports page.** The site's security policy blocked the report frame, so the
+  page looked blank; reports are now served with their own strict policy (no scripts, framable only
+  by the site).
+- **A closed game stays closed.** Closing a game during an autosave could bring it back after the
+  next restart.
+- **Benchmark jobs pause with the machine their game really uses**, even after its seat was moved to
+  a re-registered machine.
+- **Queued work waits for a machine a game is using** instead of fighting it for the slot.
+
 ## [0.1.2] - 2026-09-21
 
 ### Fixed
@@ -185,7 +234,8 @@ somebody else can install.
 The scripted bot is limited by happiness and stalls at two to five cities by turn 150, which caps
 how hard it can push a model. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/jprodgers/CITAR/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jprodgers/CITAR/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jprodgers/CITAR/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jprodgers/CITAR/releases/tag/v0.1.0
