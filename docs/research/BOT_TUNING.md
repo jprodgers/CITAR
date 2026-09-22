@@ -147,6 +147,63 @@ Scratch tools: trace.py (per-turn decisions of one civ), settlers.py, prodexplai
   `small_city_focus`, `workers_per_city`, `worker_unimproved`. City-state gifts are now typed (`cs_gift_mode`). UnCiv's own AI researches almost at random among the cheapest techs, so research
   order is a minor lever.
 
+### Analysis of 2026-09-22: traced games, all recorded data
+
+Data: 12 fully traced games (8 four-player small Prince games, 4 duels on the benchmark maps) with every tool
+call, each bot's per-turn situation, and in a second batch of 4 the refusal messages, the happiness breakdown and
+the state of each siege; 352 laptop lab games, 42 server lab games, 13 LLM-vs-bot games (server and laptop), and
+154 CIGAR-era balance games. Tools (scratchpad, not in the repo): a tracer that wraps a bot's `ex` and `context`,
+a report over traces, and replay probes (games are deterministic, so a traced seed can be replayed to any turn and
+inspected unit by unit).
+
+**Eliminated seats were missing from every lab result** (the writer iterated living civs only), so every report
+showed 0 eliminations and averages skipped the civs that were wiped out. Fixed in `lab.play`; old results get the
+missing seats back from the experiment's seat list (`lab.complete_players`). This reversed the ladder conclusion
+(see 8c): the Chieftain/Prince "inversion" was survivorship.
+
+Findings, most important first:
+
+1. **Wars fail because the army never arrives.** 62 wars in the 8 four-player games, 8 took a city. In 69 traced
+   war plans the median number of the attacker's units within 3 tiles of the target was 0, and in most the target
+   never lost a hit point. Replays showed why:
+   * every city keeps a garrison, so at war 10-12 of 15 military units sit in cities and the field army is 1-6;
+   * "weak target" compared *total* power (garrisons included) and advanced with 2 field units;
+   * wars the bot did not choose aim at the enemy's nearest city however far away (32-36 tiles on a pangaea);
+     units march there on standing orders and the war times out into peace (about 25 turns) before they arrive;
+   * the war target it does choose is the rival's *smallest* reachable city, not its nearest.
+   New parameters (defaults unchanged): `garrison_mode` (all / exposed), `garrison_exposed_radius`,
+   `war_target_max_dist`, `war_target_pick` (smallest / nearest). Profile **Field army** switches them on with
+   `weak_power_ratio` 1000 and 4 units to advance → `field-army-vs-standard`.
+2. **No war across water.** 0 wars in 4 of 4 bot duels on the benchmark continents map, and none in the LLM globe
+   duels, although one side led 2-3x: `_reachable_city` only considers our own continent and ships only wait.
+   Not addressed yet.
+3. **Happiness is a ceiling the bot sits on.** Median happiness stays between -1 and +1.5 all game; it is below the
+   settler threshold (2) on 60% of turns before T200, and settlers are 8% of builds when happy, 0.7% when not:
+   4 cities by T78, 6 by T150. The breakdown: citizens -137 and cities -38 by T300 against buildings +108, policies
+   +34, religion +25 - and **luxuries +9 all game (2-3 types)**. Workers improve every luxury in the borders; there
+   just aren't more. Profile **Luxury seeker** (`site_new_lux` 8, typed city-state gifts) → `luxury-vs-standard`.
+4. **No science victories: spaceship parts are never built.** A v2a leader finished the tech tree by T306 and
+   built Apollo and a Spaceship Factory, then no parts: a part is worth `u_spaceship` 20 over 750 production, a
+   late building about 10x more per point. Profile **v2 candidate B** (v2a + `u_spaceship` 1500).
+5. **Wasted and refused actions.** Great Prophets retried "enhance religion" outside a city for the rest of a
+   game (400 refusals in one game) because the engine reported it available; missionaries without a religion
+   tried to spread one; moves onto a unit's own tile; long moves re-planned every turn and cancelled when a unit
+   stepped onto the route (721 "orders interrupted" in one game). Fixed (engine: action availability, move routes
+   kept; bot: prophets walk to a city). Refused calls per game 901 → 42, tool calls 7,282 → 4,048.
+6. **A live game could wait 90 s on a bot** whose counter-offer the rules refused (it had no reject fallback).
+   Fixed in the bot and in `BotAgent`.
+7. **v2a (fac4/fac5 winners) beats Standard decisively** (`v2a-vs-standard`, 24 games: 20 wins, share 0.301 vs
+   0.199, +0.10 ± 0.04). The score breakdown of two traced games: the winning v2a seat had half its score from
+   wonders (31-37 wonders, 1,240-1,480 points) but also 3x anyone's population and the whole tech tree; the second
+   v2a seat was ordinary. Real strength plus wonder snowballing.
+8. **LLM games.** The bot beats gemma-4-e2b/e4b every time and eliminates them in four-player games (T265, T407,
+   T433). The LLMs bank 1,000-2,600 gold and are unhappy 70-90% of turns in duels.
+9. **Gold** is spent (median 48 purchases per game, mostly buildings), but the balance still climbs to about 600
+   by T300. **Research and policies** look sane (Pottery/Mining first, Writing about 6th; Tradition or Honor by
+   aggression).
+10. **History:** unhappiness has been 40-60% of turns since the CIGAR bot of 2026-09-16; gold banked late went from
+    about 100-200 to about 600 with the UnCiv rules.
+
 ## LLM vs bot checks (GPU)
 
 - `python -m citar.bench --model M --opponents 3 --map-size small --turns N [--gpu max] [--load-context C]` plays one

@@ -232,7 +232,10 @@ PARAM_GROUPS: list[tuple[str, str, list[dict]]] = [
            "gold"),
         _n("u_project", 40.0, "Project", "Value of a project (Apollo, Manhattan...) in a strong city ...", 0, 500),
         _n("u_project_low", 10.0, "... in a weak city", "", 0, 500),
-        _n("u_spaceship", 20.0, "Spaceship part", "Value of a spaceship part in a strong city.", 0, 500),
+        _n("u_spaceship", 20.0, "Spaceship part", "Value of a spaceship part in a strong city.", 0, 5000),
+        _n("space_reserve", 0, "Keep for the spaceship", "From the space era (see Research), keep this many of each "
+           "resource spaceship parts need (Aluminum) free: no units or buildings that would use them. 0 = off.",
+           0, 6),
         _n("garrison_after_turn", 12, "Garrison after turn", "An empty city builds a defender first after this turn "
            "(sooner with enemies in sight).", 0, 100, "turn"),
         _n("danger_ratio", 0.5, "City in danger at", "A city is in danger when nearby enemy strength exceeds this "
@@ -665,6 +668,7 @@ class BasicBot:
         self._retreats: dict = {}                   # (pid, site) -> times a settler turned back from it
         self._need_escort: dict = {}                # pid -> city idx where a settler waits for an escort
         self._bv_cache: dict = {}                   # (city id, building) -> (turn, signature, value)
+        self._space_res: Optional[set] = None       # resources spaceship parts need (from the ruleset, once)
 
     # ------------------------------------------------------------------
     def ex(self, g: Game, pid: int, _tool: str, **args):
@@ -768,6 +772,25 @@ class BasicBot:
             if m and m.owner == city.owner:
                 s += _power(_ud(g, m)) * m.hp / 100
         return s
+
+    def _breaks_space_reserve(self, g: Game, pid: int, name: str, era: int) -> bool:
+        """Whether building `name` would use a resource kept for spaceship parts (see space_reserve)."""
+        P = self.p
+        if not P["space_reserve"] or era < P["tech_space_era"] or not g.victory_enabled("Scientific"):
+            return False
+        R = g.rules
+        d = R.units.get(name) or R.buildings.get(name) or {}
+        res = d.get("requiredResource")
+        if not res or (name in R.units and R.units[name]["_umap"].get(U.SpaceshipPart)):
+            return False
+        need = self._space_res
+        if need is None:
+            need = self._space_res = {u.get("requiredResource") for u in R.units.values()
+                                      if u["_umap"].get(U.SpaceshipPart) and u.get("requiredResource")}
+        if res not in need:
+            return False
+        from ..engine import economy
+        return (economy.strategic_resources(g, pid).get(res) or {}).get("available", 0) - 1 < P["space_reserve"]
 
     def needs_garrison(self, city, ctx: dict) -> bool:
         """Whether a city should keep a unit in it (always, with garrison_mode "all")."""
@@ -1213,7 +1236,8 @@ class BasicBot:
         # --- buildings ------------------------------------------------------------------------------------
         wonders = items["wonders"] if (not c.puppet and (not P["u_wonder_gate"] or (over_avg and total_pop >= P["wonder_gate_pop"]))) else []
         for b in items["buildings"] + wonders:
-            add(b, self._building_value_unciv(g, pid, c, b, ctx, over_avg))
+            if not self._breaks_space_reserve(g, pid, b, ctx["era"]):
+                add(b, self._building_value_unciv(g, pid, c, b, ctx, over_avg))
         for name in items.get("other", []):
             if name not in cm.PERPETUAL and R.buildings.get(name) is not None:
                 add(name, P["u_project"] if over_avg else P["u_project_low"])     # projects: Apollo, Manhattan...
@@ -1368,6 +1392,8 @@ class BasicBot:
                         sum(max(1.0, cm.city_stats(g, x)["total"]["production"]) for x in cities) / max(1, n))):
             wonders = []
         for b in items["buildings"] + wonders:
+            if self._breaks_space_reserve(g, pid, b, ctx["era"]):
+                continue
             v = self._building_value(g, pid, c, b, ctx)
             if v <= 0:
                 continue
@@ -1447,8 +1473,15 @@ class BasicBot:
         P = self.p
         ranged_w = P["unit_ranged_pref"] if prefer_ranged else P["unit_ranged_nopref"]
         best, best_v = None, -1.0
+        era = None
         for name in units:
             ud = g.rules.units[name]
+            if P["space_reserve"] and ud.get("requiredResource"):
+                if era is None:
+                    from ..engine import research
+                    era = research.player_era(g, city.owner)
+                if self._breaks_space_reserve(g, city.owner, name, era):
+                    continue
             if not ud["_military"] or _is_recon(ud) or ud["_domain"] != domain:
                 continue
             if ud["_umap"].get(U.NuclearWeapon) or ud["_umap"].get(U.SelfDestructs):
