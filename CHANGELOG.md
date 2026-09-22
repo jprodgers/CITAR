@@ -6,11 +6,64 @@ and arguments may still change between minor versions, and the release notes wil
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-22
+
+Single-player fixes and more dangerous barbarians.
+
+### Added
+
+- **A research queue.** Shift+click a technology to add it (and whatever it still needs) to the end of
+  the queue, or Shift+click a queued one to take it off, along with anything queued that depends on it.
+  The tech tree numbers the queue on the technologies themselves and lists it along the top with the turn
+  each will finish. A plain click still replaces the queue. The `set_research` tool takes `append`, and a
+  new `dequeue_research` tool removes a queued technology.
+- **Barbarian aggression**, a 0-100 slider next to the barbarian setting in the new-game form (Normal
+  defaults to 50, Raging to 85; the `barbarian_aggression` config key). It sets how far barbarians look
+  for targets, what odds they accept, how many gather before storming a city, how fast camps spawn, and
+  how hard a sack hits.
+
+### Changed
+
+- **Barbarians are a threat.** Barbarian units could not plan a path across their own unexplored map, so
+  they only ever attacked what was already next to them. They now hunt cities, units, workers and
+  settlers, and the most valuable improvements (luxury and strategic resources first). As in
+  Civilization V they never capture or raze a city: one they bring down is *sacked* instead, losing
+  gold, possibly a citizen and a building (never a wonder or the palace), and is then left alone for 5 to
+  10 turns. Over 100 turns of a four-bot Quick Small game, units killed went from about 50 to about 240
+  on Normal and from about 90 to about 650 on Raging.
+- **Events no longer name civilizations you have not met.** Every player, human or AI, reads "Unknown
+  Civilization has built The Pyramids in an unknown city." until the two civilizations meet; unmet
+  city-states are "Unknown City-State", and such events drop their location. Spectators and replays
+  still see everything.
+- **End Turn waits for decisions.** The button is greyed out while research, a policy, a free
+  technology or great person, a pantheon, a promotion, a city with nothing to build, a unit without
+  orders, a negotiation or a UN vote is waiting; clicking it lists them and goes to the first.
+  Ctrl+click (or Ctrl+Shift+Enter) ends the turn anyway.
+- **Player colours are unique.** A new 24-colour palette, picked for contrast on the map and against
+  the city-state and barbarian colours. The seat editor offers it as swatches, greys out colours other
+  seats hold and accepts a custom hex value that is not too close to one of them; the server enforces
+  the same rule, first come first served.
+- **The tech tree is easier to read.** More room between technologies, right-angled links that never
+  share a vertical run, and hovering a technology highlights everything it needs and what it leads to.
+  The tree reopens where it was left, or at the current era.
+- **More luxury variety on big maps.** Huge and gargantuan maps now carry every luxury type, large at
+  least 90%, standard 75% and small maps half; every map has every strategic resource.
+- The wonder-built event names the civilization first ("Rome has built The Pyramids in Rome.").
+
 ### Fixed
 
+- The Bombard button stayed after a city had fired, because the city's own view never said whether it
+  still could.
+- Accepting or rejecting a proposal left the diplomacy window open while play went on; it now closes.
 - A rating test passed its message as `assertAlmostEqual`'s `places` argument, so it raised a `TypeError`
   on Python 3.11 whenever the weighted pair count was not exactly 2.0. Tests only; the shipped code is
   unaffected.
+
+### Known issues
+
+Model scores are **not comparable across 0.1.4 and 0.1.5**: barbarians fight far harder, and agents no
+longer learn about civilizations they have not met from the event feed. See
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ## [0.1.4] - 2026-09-22
 
@@ -303,7 +356,8 @@ somebody else can install.
 The scripted bot is limited by happiness and stalls at two to five cities by turn 150, which caps
 how hard it can push a model. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/jprodgers/CITAR/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/jprodgers/CITAR/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/jprodgers/CITAR/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/jprodgers/CITAR/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jprodgers/CITAR/compare/v0.1.1...v0.1.2

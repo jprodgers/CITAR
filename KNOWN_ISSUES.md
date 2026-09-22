@@ -1,6 +1,6 @@
 # Known issues and limitations
 
-What is broken, missing or misleading in 0.1.4. Written plainly, because finding this out after
+What is broken, missing or misleading in 0.1.5. Written plainly, because finding this out after
 installing something is worse than reading it first.
 
 ---
@@ -21,6 +21,8 @@ genuinely struggling. Unhappiness is still a real limit — bots are unhappy on 
 Work in progress — the campaign log is [docs/research/BOT_TUNING.md](docs/research/BOT_TUNING.md).
 Scores are comparable within a release and **not across releases where the bot changed**; the
 changelog says when that is.
+0.1.5 did not change the bot, but it made barbarians far more aggressive and stopped the event feed
+naming civilizations an agent has not met, so 0.1.5 scores are not comparable with 0.1.4 either.
 
 ## Models are not very good at this yet
 
