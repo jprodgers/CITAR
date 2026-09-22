@@ -174,6 +174,26 @@ Scratch tools: trace.py (per-turn decisions of one civ), settlers.py, prodexplai
     - A spare strategic resource was worth 12 gold at any era; it's now 12 × (era + 1). The Iron lowball goes from "add 24 gold" to "add 120 gold".
 - Future LLM runs: use the Benchmarks page (server scheduler) so the user can watch them. CLI runs must write to saves/lab/*.out, which the Lab page shows as side runs.
 
+## Server lab (citar.jimmieprodgers.com)
+
+The web server runs its own lab (one game at a time, about 6 small 4-bot games an hour on its single CPU; see the
+Queue and Lab pages). Its results are separate from the laptop's `saves/lab` above and use the 0.1.x map generator.
+
+Done: `v012-baseline-prince4` (12), `v012-ladder` (8), `v012-scarce-luxuries` (6). Running: `v012-globe-wrap` (6).
+
+Queued 2026-09-22, bot `frozen_d95d50cb` (basic.py as of that day, including the deal-pricing fixes above) unless
+stated. Highest priority first:
+
+| Experiment | Games | Question |
+|---|---|---|
+| `bench-mirror-globe`, `-boxed`, `-scarce` | 12 each | Bot vs bot on the three duel benchmark scenarios (game 0 of each is the exact benchmark map: seeds 7, 21, 33). The reference an LLM's result on that scenario is read against. |
+| `duel-chieftain-vs-prince`, `duel-king-vs-prince`, `duel-emperor-vs-prince` | 10 each | A difficulty ladder against the benchmarks' Prince bot on the globe duel, to place a model's result on ("plays like a King bot"). |
+| `current-vs-v1` | 24 | Current bot vs frozen v1 (`frozen_7149efb1`), 2v2, full length: has the yardstick moved since v1? |
+| `noise-prince4` | 24 | Four identical Prince bots, fresh seeds. With `v012-baseline-prince4`: the between-seat spread for sample-size and significance planning. |
+| `map-wrap-both`, `map-no-rivers`, `map-rich-resources`, `map-boxed` | 8 each | How map options move pace, victory mix and balance (vs the ice-cap baseline), before choosing benchmark scenarios. |
+
+Reports: Lab page, or `python -m citar.lab report NAME` on the server.
+
 ## Next steps (keep current)
 
 Progress of everything queued is on the web GUI **Lab page** (http://localhost:8765/#/lab): runner health, per-experiment progress and ETA, each game's current turn, side runs and the runner log. Click an experiment to see its report.
