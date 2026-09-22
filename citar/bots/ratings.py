@@ -194,6 +194,29 @@ def fit(pairs: dict, prior: float = PRIOR_GAMES, iterations: int = 2000) -> dict
     return out
 
 
+def groups(pairs: dict) -> dict:
+    """entry -> group number: entries linked, directly or through others, by games played together. Ratings only
+    compare within a group (each group sits around the 1500 anchor on its own); 1 is the largest group."""
+    adj: dict = defaultdict(set)
+    for a, b in pairs:
+        adj[a].add(b)
+        adj[b].add(a)
+    comps, seen = [], set()
+    for e in sorted(adj):
+        if e in seen:
+            continue
+        comp, stack = set(), [e]
+        while stack:
+            x = stack.pop()
+            if x not in comp:
+                comp.add(x)
+                stack.extend(adj[x] - comp)
+        seen |= comp
+        comps.append(comp)
+    comps.sort(key=lambda c: (-len(c), min(c)))
+    return {e: i + 1 for i, c in enumerate(comps) for e in c}
+
+
 def expected(ra: float, rb: float) -> float:
     """Chance that a player rated ra finishes ahead of one rated rb."""
     return 1 / (1 + 10 ** ((rb - ra) / 400))
@@ -265,6 +288,8 @@ def rankings(include_factorial: bool = False, history: bool = True) -> dict:
     keep = {s["entry"] for g in rated for s in g["seats"]}
     pairs = comparisons(rated, keep)
     ratings = fit(pairs)
+    group = groups(pairs)
+    group_size = Counter(group.values())
     compared = Counter()
     for (a, b), (_, n) in pairs.items():
         compared[a] += n
@@ -285,13 +310,15 @@ def rankings(include_factorial: bool = False, history: bool = True) -> dict:
                       "experiments": sorted(e["experiments"]), "factorial": e["factorial"],
                       "first": e["first"], "last": e["last"], "rating": round(r, 1),
                       "se": round(se, 1) if se else None, "compared": round(compared[eid], 2),
-                      "rated": compared[eid] > 0, **stats.get(eid, {})})
+                      "rated": compared[eid] > 0, "group": group.get(eid),
+                      "group_size": group_size.get(group.get(eid), 0), **stats.get(eid, {})})
     board.sort(key=lambda b: (not b["rated"], -b["rating"]))
     for i, b in enumerate(board):
         b["rank"] = i + 1
     hist = _history(rated, keep) if history else {}
     value = {"generated": datetime.now().isoformat(timespec="seconds"), "games": len(rated),
              "entries": board, "history": hist, "head_to_head": _head_to_head(rated, keep),
+             "groups": len(group_size),
              "method": {"model": "Bradley-Terry on pairwise finishing order, Elo scale", "prior_games": PRIOR_GAMES,
                         "pair_weight": "1/(players-1)"}}
     _cache.update(key=key, value=value)

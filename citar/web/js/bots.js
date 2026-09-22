@@ -141,6 +141,7 @@ async function drawRankings(body) {
       el("th", { title: "Mean score share × players: 1.00 is an even share" }, "Score index"),
       el("th", { title: "Share of games this entry won outright (any victory, or top score at the time limit)" }, "Wins"),
       el("th", {}, "Techs"), el("th", {}, "Cities"), el("th", { title: "Cities captured per game" }, "Captures"),
+      el("th", { title: "Ratings only compare within a group: entries linked by games played together" }, "Group"),
       el("th", {}, "Last game")));
     rows.forEach((e, i) => {
       const color = charted.get(e.id);
@@ -158,10 +159,15 @@ async function drawRankings(body) {
         el("td", {}, e.score_index != null ? e.score_index.toFixed(2) : "–"),
         el("td", {}, e.win_rate != null ? `${Math.round(e.win_rate * 100)}%` : "–"),
         el("td", {}, e.techs ?? "–"), el("td", {}, e.cities ?? "–"), el("td", {}, e.captured ?? "–"),
+        el("td", { class: "small", title: `${e.group_size} entries in this group` }, e.group ? `${e.group}` : "–"),
         el("td", { class: "small muted" }, e.last ? e.last.slice(0, 16).replace("T", " ") : "–")));
-      if (expanded.has(e.id)) table.appendChild(el("tr", {}, el("td", { colspan: 11 }, headToHead(e, data))));
+      if (expanded.has(e.id)) table.appendChild(el("tr", {}, el("td", { colspan: 12 }, headToHead(e, data))));
     });
-    tableCard.append(el("h3", {}, "Leaderboard"), rows.length ? table : el("p", { class: "muted" }, "No games recorded yet."));
+    tableCard.append(el("h3", {}, "Leaderboard"),
+      data.groups > 1 ? el("p", { class: "muted small" }, `These entries form ${data.groups} groups that have never played each other ` +
+        "(the Group column). A rating only compares with others in its group; a league experiment that seats profiles from " +
+        "several groups together (or a pinned snapshot such as v1 in every experiment) links them.") : null,
+      rows.length ? table : el("p", { class: "muted" }, "No games recorded yet."));
   }
   redraw();
 }
