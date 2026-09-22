@@ -3,7 +3,7 @@
 # winget locale manifest for CITAR. Everything a person sees in `winget show` and in the store UI.
 
 PackageIdentifier: JimmieRodgers.CITAR
-PackageVersion: 0.1.3
+PackageVersion: 0.1.4
 PackageLocale: en-US
 Publisher: Jimmie Rodgers
 PublisherUrl: https://github.com/jprodgers
@@ -44,7 +44,7 @@ Tags:
   - research
   - strategy
   - turn-based
-ReleaseNotesUrl: https://github.com/jprodgers/CITAR/releases/tag/v0.1.3
+ReleaseNotesUrl: https://github.com/jprodgers/CITAR/releases/tag/v0.1.4
 Documentations:
   - DocumentLabel: Getting started
     DocumentUrl: https://github.com/jprodgers/CITAR/blob/main/docs/QUICKSTART.md
