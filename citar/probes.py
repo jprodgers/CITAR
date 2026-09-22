@@ -697,7 +697,7 @@ class ProbeRunner:
                 if self._loaded_by_us and sv and sv["restricted_hours"].get("unload_models"):
                     servers.unload_models(servers.find(self._loaded_by_us[0]) or sv, [self._loaded_by_us[1]])
                     self._loaded_by_us = None
-                self.live = {"run": rid, "case": f"(paused: {sv['name'] if sv else 'server'} is in its restricted hours)",
+                self.live = {"run": rid, "case": f"(paused: {servers.server_name(llm.get('server_id'))} is in its restricted hours)",
                              "since": time.time()}
             time.sleep(30)
         if waited:

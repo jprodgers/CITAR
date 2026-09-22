@@ -319,11 +319,16 @@ function serverCard(server, groups, reload) {
     el("div", { class: "row between wrap" },
       el("div", { class: "row gap" },
         el("h3", {}, server.name), statusPill(server),
+        server.restricted_until ? el("span", { class: "pill quiet", title: "Quiet hours: all work on this machine is paused" },
+          `🌙 quiet until ${server.restricted_until}`) : null,
         server.is_mine ? null : el("span", { class: "muted small" },
           `owned by ${server.owner ? server.owner.display_name : "someone else"}`)),
       el("div", { class: "row gap" },
         server.can_manage
           ? el("button", { class: "small", onclick: () => workerDialog(server) }, "Worker")
+          : null,
+        server.can_manage
+          ? el("button", { class: "small", onclick: () => quietHoursDialog(server, reload) }, "Quiet hours")
           : null,
         el("button", {
           class: "small",
@@ -365,6 +370,55 @@ function serverCard(server, groups, reload) {
           ...server.models.slice(0, 10).map((m) => el("span", { class: "chip" }, m.label || m.key)))
       : null,
     el("div", { style: { marginTop: "8px" } }, admissionLine(server)));
+}
+
+const QUIET_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function describeQuiet(rh) {
+  if (!rh || !rh.enabled || !(rh.windows || []).length) return "No quiet hours.";
+  return rh.windows.map((w) => `${w.days.length === 7 ? "every day" : w.days.map((d) => QUIET_DAYS[d]).join(" ")} ${w.start}–${w.end}`).join("; ");
+}
+
+// Quiet hours belong to the machine and apply to everyone, its owner included: games, benchmarks and probes on it
+// finish the turn in progress, pause, and carry on by themselves when the hours end.
+function quietHoursDialog(server, reload) {
+  const rh = JSON.parse(JSON.stringify(server.restricted_hours || { enabled: false, windows: [], grace_minutes: 15 }));
+  rh.windows = rh.windows || [];
+  const body = el("div", { class: "col gap" });
+  const draw = () => {
+    clear(body);
+    body.append(
+      el("p", { class: "muted" }, "During these hours nothing runs on this machine, for anyone: games, benchmark jobs and probe runs ",
+        "finish the AI turn in progress, pause, and resume by themselves when the hours end. A window that ends before it ",
+        `starts runs overnight into the next morning. Times are in the owner's time zone (${server.owner_tz || "UTC"}).`),
+      el("label", { class: "row gap" }, el("input", { type: "checkbox", checked: !!rh.enabled, onchange: (e) => { rh.enabled = e.target.checked; } }),
+        " Quiet hours on"));
+    rh.windows.forEach((w, i) => {
+      const days = el("div", { class: "row gap wrap" }, ...QUIET_DAYS.map((d, n) => el("label", { class: "small" },
+        el("input", { type: "checkbox", checked: w.days.includes(n), onchange: (e) => {
+          w.days = e.target.checked ? [...new Set([...w.days, n])].sort() : w.days.filter((x) => x !== n);
+        } }), d)));
+      body.append(el("div", { class: "row gap wrap" },
+        el("input", { type: "time", value: w.start, onchange: (e) => { w.start = e.target.value; } }), el("span", {}, "→"),
+        el("input", { type: "time", value: w.end, onchange: (e) => { w.end = e.target.value; } }), days,
+        el("button", { class: "small danger", onclick: () => { rh.windows.splice(i, 1); draw(); } }, "✕")));
+    });
+    body.append(el("div", { class: "row gap wrap" },
+      el("button", { class: "small", onclick: () => { rh.windows.push({ days: [0, 1, 2, 3, 4, 5, 6], start: "22:00", end: "06:00" }); rh.enabled = true; draw(); } }, "+ window"),
+      el("button", { class: "small", onclick: () => { rh.windows = [{ days: [0, 1, 2, 3, 4, 5, 6], start: "22:00", end: "06:00" }]; rh.enabled = true; draw(); } }, "Every night 22:00–06:00")));
+  };
+  draw();
+  const m = modal({
+    title: `Quiet hours — ${server.name}`, content: body,
+    footer: [el("button", { onclick: () => m.close() }, "Cancel"),
+      el("button", { class: "primary", onclick: async () => {
+        try {
+          const saved = await api.setQuietHours(server.id, rh);
+          toast(`${server.name}: ${describeQuiet(saved.restricted_hours)}`, "good", 6000);
+          m.close(); reload();
+        } catch (e) { toast(e.message, "error"); }
+      } }, "Save")],
+  });
 }
 
 function groupCard(group, reload) {

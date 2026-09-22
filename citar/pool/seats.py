@@ -9,6 +9,7 @@ creates the game may use the machine.
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from typing import Optional
 
 # ---------------------------------------------------------------------------- who is using a machine
@@ -84,15 +85,54 @@ def lookup(server_id: Optional[str]) -> Optional[dict]:
         return None
     try:
         from .. import db
-        from ..db.models import Server
+        from ..db.models import Server, User
         with db.session() as s:
             sv = s.get(Server, server_id)
             if sv is None:
                 return None
+            owner = s.get(User, sv.owner_id)
             return {"id": sv.id, "name": sv.name, "provider": sv.provider, "enabled": sv.enabled,
-                    "config": dict(sv.config or {})}
+                    "config": dict(sv.config or {}), "owner_tz": (owner.tz if owner else None) or "UTC"}
     except Exception:
         return None
+
+
+def restricted(pooled: Optional[dict], when: Optional[datetime] = None) -> Optional[datetime]:
+    """When a pooled machine is inside its quiet hours: the moment they end, else None.
+
+    The hours are the owner's wall clock ("21:00-06:00" means 9pm where the machine is), so they are read in
+    the owner's zone. Like ``servers.restricted``, ``when`` and the result are naive local times of the
+    computer CITAR runs on, which is what every caller compares them with.
+    """
+    if not pooled:
+        return None
+    from .. import servers
+    from .windows import zone
+    z = zone(pooled.get("owner_tz"))
+    local = (when or datetime.now()).astimezone(z).replace(tzinfo=None)
+    end = servers.restricted({"restricted_hours": (pooled.get("config") or {}).get("restricted_hours")}, local)
+    if end is None:
+        return None
+    return end.replace(tzinfo=z).astimezone().replace(tzinfo=None)
+
+
+def restriction_status() -> list[dict]:
+    """Pooled machines in their quiet hours right now (for the page header)."""
+    try:
+        from .. import db
+        from ..db.models import Server
+        with db.session() as s:
+            ids = [sv.id for sv in s.query(Server).all()
+                   if ((sv.config or {}).get("restricted_hours") or {}).get("enabled")]
+    except Exception:
+        return []
+    out = []
+    for sid in ids:
+        pooled = lookup(sid)
+        end = restricted(pooled)
+        if end:
+            out.append({"id": sid, "name": pooled["name"], "until": end.strftime("%H:%M"), "until_ts": end.timestamp()})
+    return out
 
 
 def live_models(server_id: str) -> list[dict]:
@@ -129,8 +169,9 @@ def resolve(llm: dict, pooled: dict) -> dict:
 def describe(llm: dict, pooled: dict) -> dict:
     """Display info for a seat on a pooled server, in the shape ``servers.describe_seat`` returns."""
     key = llm.get("model") or llm.get("model_id")
+    end = restricted(pooled)
     return {"server_id": pooled["id"], "server": pooled["name"], "model": key, "label": key, "profile": None,
-            "missing_server": False, "restricted_until": None, "pooled": True}
+            "missing_server": False, "restricted_until": end.strftime("%H:%M") if end else None, "pooled": True}
 
 
 def authorize(session, user, seats: list[dict]) -> None:

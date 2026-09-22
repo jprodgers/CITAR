@@ -188,15 +188,40 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
         "gpus": [g.get("name") for g in (hardware.get("gpus") or [])],
         "ram_gb": (hardware.get("memory") or {}).get("ram_gb"),
     }
+    # quiet hours are public: anyone who may use the machine needs to know when it is off limits
+    from . import seats
+    base["owner_tz"] = (owner.tz if owner else None) or "UTC"
+    base["restricted_hours"] = config.get("restricted_hours") or registry.default_restricted()
+    end = seats.restricted({"config": config, "owner_tz": base["owner_tz"]})
+    base["restricted_until"] = end.strftime("%H:%M") if end else None
     if access.MANAGE in perms:
         try:
             base["config"] = registry.public(config)
+            base["config"]["restricted_until"] = base["restricted_until"]
         except Exception:
             # Stored configs can predate a registry change; showing the raw dict to its owner beats
             # failing the whole request over a missing optional field.
             log.debug("registry.public() failed for server %s", server.id, exc_info=True)
             base["config"] = config
     return base
+
+
+def set_quiet_hours(session, actor: User, server: Server, restricted_hours: dict) -> dict:
+    """Change only a machine's quiet hours (restricted hours), leaving the rest of its configuration alone."""
+    from .. import servers as registry
+
+    access.on(session, actor, server).require(access.MANAGE)
+    config = dict(server.config or {})
+    try:
+        rh = registry.normalize_server({"id": server.id, "name": server.name, "kind": server.kind,
+                                        "restricted_hours": restricted_hours or {}})["restricted_hours"]
+    except (registry.ServerError, ValueError) as exc:
+        raise PoolError(str(exc)) from exc
+    config["restricted_hours"] = rh
+    server.config = config
+    audit.record(session, "server.quiet_hours", actor=actor, object_type="server", object_id=server.id,
+                 enabled=rh["enabled"], windows=len(rh["windows"]))
+    return rh
 
 
 # ---------------------------------------------------------------------------- grants

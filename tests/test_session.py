@@ -316,6 +316,31 @@ class SessionTests(unittest.TestCase):
         self.assertGreaterEqual(rec["paused_s"], 2.0)
         self.assertLess(rec["wall_s"], rec["ended"] - rec["started"] - 1.9, "paused time must not count")
 
+    def test_quiet_hours_pause_a_lobby_game_and_lift_by_themselves(self):
+        """A machine's quiet hours used to stop only benchmarks and probes; a game you started kept using it."""
+        from datetime import datetime, timedelta
+        quiet = {"on": True}
+
+        def restricted_now(server_id):
+            return datetime.now() + timedelta(hours=1) if quiet["on"] and server_id == "sv_desk" else None
+
+        ScriptedConversation.scripts = {}
+        with mock.patch("citar.agents.llm_agent.make_conversation", ScriptedConversation), \
+                mock.patch("citar.servers.restricted_now", restricted_now), \
+                mock.patch("citar.servers.server_name", lambda sid: "Desk"), \
+                mock.patch.object(GameSession, "QUIET_POLL_SECONDS", 0.3):
+            s = self.manager.create({"map_size": "duel", "seed": 4},
+                                    [{"type": "llm", "llm": {"provider": "mock", "server_id": "sv_desk"}}, {"type": "bot"}])
+            self.assertTrue(self._wait(lambda: s.paused), "the game should pause before the AI's turn")
+            self.assertEqual(s.info()["pause_reason"]["kind"], "restricted")
+            time.sleep(1.0)
+            self.assertEqual(s.game.turn, 1, "no turns in quiet hours")
+            quiet["on"] = False
+            self.assertTrue(self._wait(lambda: not s.paused), "the game should resume when the hours end")
+            self.assertTrue(self._wait(lambda: s.game.turn >= 2))
+            self.manager.delete(s.id)
+        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
+
     def test_open_games_come_back_after_a_restart(self):
         """A server restart used to drop every lobby game until someone reloaded it by hand."""
         from citar.server.session import SAVE_DIR

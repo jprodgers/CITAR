@@ -633,9 +633,9 @@ export class GameScreen {
         el("span", { class: "pill live", title: `Run: ${bench.run_name} · server: ${bench.server}` }, `Benchmark: ${bench.model} · ${bench.scenario}`));
     }
     if (!bench && v.session) {
-      // games you start yourself keep running in a server's restricted hours: just say so
+      // a game pauses itself before its AI's next turn in a server's restricted hours; until then, say so
       const late = (v.session.seats || []).filter((st) => st.type === "llm" && st.llm_info && st.llm_info.restricted_until);
-      for (const st of late) tb.append(el("span", { class: "pill quiet", title: "This server is in its restricted hours (Servers page). Benchmarks and probes pause there; this game does not." },
+      for (const st of late) tb.append(el("span", { class: "pill quiet", title: "This server is in its restricted hours (Servers page): the game pauses before its AI's next turn and resumes when they end." },
         `🌙 ${st.llm_info.server} restricted until ${st.llm_info.restricted_until}`));
     }
     const cur = v.players.find((p) => p.id === v.current_player);

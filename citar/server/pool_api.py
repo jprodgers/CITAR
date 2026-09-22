@@ -170,6 +170,24 @@ def update_server(server_id: str, body: ServerUpdate, request: Request,
     return pool.public_server(s, server, me)
 
 
+class QuietHours(BaseModel):
+    """A machine's quiet hours: when every kind of work on it pauses."""
+    restricted_hours: dict
+
+
+@router.put("/servers/{server_id}/quiet-hours")
+def set_quiet_hours(server_id: str, body: QuietHours, request: Request,
+                    p: Principal = Depends(principal), s: Session = Depends(get_db)):
+    """Change a machine's quiet hours, in its owner's time zone."""
+    me = require_user(request, p)
+    server = _server(s, server_id, me, access.MANAGE)
+    try:
+        pool.set_quiet_hours(s, me, server, body.restricted_hours)
+    except pool.PoolError as exc:
+        raise _fail(exc)
+    return pool.public_server(s, server, me)
+
+
 @router.delete("/servers/{server_id}")
 def delete_server(server_id: str, request: Request, p: Principal = Depends(principal),
                   s: Session = Depends(get_db)):

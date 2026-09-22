@@ -677,7 +677,7 @@ function restricted(S, draw) {
   const rh = S.restricted_hours;
   return el("div", { class: "col" },
     el("p", { class: "muted" }, "During these windows benchmark games, probe runs and lab model runs on this server finish the model turn in progress, " +
-      "then pause until the window ends. Games you start yourself only show a warning. A window listed for a day covers " +
+      "then pause until the window ends; games you start yourself pause before their AI's next turn. A window listed for a day covers " +
       "overnight hours into the next morning. Uses this computer's clock."),
     chk(rh, "enabled", " Restrict this server", draw),
     windowsEditor(rh.windows, draw),

@@ -411,6 +411,53 @@ class GameSession:
                     return
         threading.Thread(target=watch, name=f"reconnect-{self.id}-{pid}", daemon=True).start()
 
+    QUIET_POLL_SECONDS = 30.0         # how often a game paused for quiet hours checks whether they are over
+
+    def _quiet_hours(self, pid: int, seat) -> bool:
+        """Before an AI seat's turn: if its model server is in its restricted (quiet) hours, pause the whole game
+        and resume it by itself when they end. Returns True if the game was paused.
+
+        Checked between turns, so a turn in progress always finishes. Lobby games only: benchmark games are
+        paused by their scheduler (with its grace period), and probe cases wait in the probe runner.
+        """
+        if seat.type != "llm" or self.benchmark or not getattr(self, "registered", False):
+            return False
+        from .. import servers
+        server_id = (seat.llm or {}).get("server_id")
+        try:
+            end = servers.restricted_now(server_id)
+        except Exception:
+            return False
+        if not end:
+            return False
+        name = servers.server_name(server_id)
+        message = f"{name} is in its quiet hours until {end:%H:%M}"
+        reason = {"kind": "restricted", "player": pid, "message": message, "since": time.time(),
+                  "until": end.timestamp()}
+        self.suspend(reason)
+        with self.lock:
+            self.game.emit("game_paused", f"Game paused: {message}. It resumes by itself when they end.", None, player=pid)
+
+        def watch():
+            """Resume once the quiet hours are over, unless the pause has since become someone else's."""
+            while not self._stop:
+                time.sleep(self.QUIET_POLL_SECONDS)
+                if self._stop or not self.paused or self.pause_reason is not reason:
+                    return
+                try:
+                    still = servers.restricted_now(server_id)
+                except Exception:
+                    still = None
+                if not still:
+                    with self.lock:
+                        if not self.paused or self.pause_reason is not reason:
+                            return
+                        self.game.emit("game_resumed", f"{name}'s quiet hours are over; the game has resumed.", None, player=pid)
+                    self.resume()
+                    return
+        threading.Thread(target=watch, name=f"quiet-{self.id}-{pid}", daemon=True).start()
+        return True
+
     def stop(self):
         """Close the game: halt the driver and abort any AI turn (including in-flight model requests)."""
         if self.usage_act and not self._stop:
@@ -444,6 +491,8 @@ class GameSession:
                     self.cond.wait(timeout=1)
                     continue
                 turn_marker = (g.turn, pid)
+            if self._quiet_hours(pid, seat):
+                continue
             agent = self.get_agent(pid)
             self.agent_status[pid] = "thinking"
             self._broadcast({"type": "agent", "player": pid, "status": "thinking"})
@@ -570,7 +619,8 @@ class GameSession:
                 if self.benchmark or self.game.s.phase != "playing":
                     path.unlink(missing_ok=True)
                     return
-                paused = self.paused and (self.pause_reason or {}).get("kind") != "disconnect"
+                # paused by the server (a disconnect, quiet hours) comes back running: the check that paused it runs again
+                paused = self.paused and (self.pause_reason or {}).get("kind") not in ("disconnect", "restricted")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps({"paused": paused, "name": self.name, "at": time.time()}), encoding="utf-8")
             except OSError:

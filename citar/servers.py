@@ -607,19 +607,49 @@ def restricted(server: Optional[dict], when: Optional[datetime] = None) -> Optio
     return hit[1] if hit else None
 
 
+def restricted_at(server_id: Optional[str], when: Optional[datetime] = None) -> Optional[datetime]:
+    """The same, by server id: a server in this registry, or a machine on the Servers page (whose quiet hours
+    are its owner's wall clock - see citar.pool.seats.restricted)."""
+    sv = find(server_id)
+    if sv is not None or not server_id:
+        return restricted(sv, when)
+    from .pool import seats as pool_seats
+    return pool_seats.restricted(pool_seats.lookup(server_id), when)
+
+
 def restricted_now(server_id: Optional[str]) -> Optional[datetime]:
-    """The same, by server id."""
-    return restricted(find(server_id))
+    """The same, now."""
+    return restricted_at(server_id)
+
+
+def server_name(server_id: Optional[str]) -> str:
+    """A server's name, whichever list it is in (or its id)."""
+    sv = find(server_id)
+    if sv is None and server_id:
+        from .pool import seats as pool_seats
+        sv = pool_seats.lookup(server_id)
+    return sv["name"] if sv else (server_id or "server")
+
+
+def restriction_config(server_id: Optional[str]) -> dict:
+    """A server's restricted-hours settings, whichever list it is in."""
+    sv = find(server_id)
+    if sv is None and server_id:
+        from .pool import seats as pool_seats
+        pooled = pool_seats.lookup(server_id)
+        return ((pooled or {}).get("config") or {}).get("restricted_hours") or {}
+    return (sv or {}).get("restricted_hours") or {}
 
 
 def restriction_status() -> list[dict]:
-    """Servers currently in restricted hours (for the page header)."""
+    """Servers currently in restricted hours (for the page header), including Servers-page machines."""
     out = []
     for sv in list_servers():
         end = restricted(sv)
         if end:
             out.append({"id": sv["id"], "name": sv["name"], "until": end.strftime("%H:%M"), "until_ts": end.timestamp()})
-    return out
+    from .pool import seats as pool_seats
+    return out + pool_seats.restriction_status()
 
 
 # ----------------------------------------------------------------------------- models & seats

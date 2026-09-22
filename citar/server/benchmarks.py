@@ -314,7 +314,7 @@ class BenchmarkScheduler:
 
     def restricted_until(self, server_id: Optional[str]) -> Optional[datetime]:
         """End of the restricted window the server is in now (None when it may be used)."""
-        return REG.restricted(REG.find(server_id), self._clock())
+        return REG.restricted_at(server_id, self._clock())
 
     # ------------------------------------------------------------------ suites
     def list_suites(self) -> list[dict]:
@@ -603,21 +603,19 @@ class BenchmarkScheduler:
             was = sid in self._restricted
             if end and not was:
                 self._restricted[sid] = {"since": _now(), "unloaded": False}
-                sv = REG.find(sid)
-                self._log(f"Restricted hours started on {sv['name'] if sv else sid} (until {end:%H:%M}); "
+                self._log(f"Restricted hours started on {REG.server_name(sid)} (until {end:%H:%M}); "
                           f"its games pause after the current model turn.")
             elif not end and was:
                 self._restricted.pop(sid, None)
-                sv = REG.find(sid)
-                self._log(f"Restricted hours are over on {sv['name'] if sv else sid}; resuming its games.")
+                self._log(f"Restricted hours are over on {REG.server_name(sid)}; resuming its games.")
                 for run in self.runs.values():
                     for job in run["jobs"]:
                         if job["server_id"] == sid and job["status"] == "paused" and job["pause_reason"] in ("restricted", "quiet"):
                             self._request_resume(run, job)
                             self._touch(run)
         for sid, st in list(self._restricted.items()):
-            sv = REG.find(sid)
-            grace = float(((sv or {}).get("restricted_hours") or {}).get("grace_minutes", 15)) * 60
+            sv = REG.find(sid)     # None for a Servers-page machine: its helper keeps its models loaded
+            grace = float(REG.restriction_config(sid).get("grace_minutes", 15)) * 60
             pending = False
             for run in self.runs.values():
                 for job in run["jobs"]:
