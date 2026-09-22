@@ -752,6 +752,36 @@ function planEditor(p, draw, plans) {
 }
 
 // ---------------------------------------------------------------------------- shared model picker (seats, suites, probes, reports)
+// The Power and Costs editors, for a machine on the Servers page. Its settings have the same shape as a registry
+// server's; saving goes through `save({power, components, costs})`.
+export async function openCostEditor(machine, save) {
+  if (!state) state = await api.servers();
+  const S = clone(machine.config || {});
+  S.id = machine.id; S.kind = machine.kind || S.kind || "owned";
+  S.power = S.power || { idle_w: null, cpu_max_w: null, gpu_max_w: null, sampling: "off", measured_overhead_pct: 10, source: "unset" };
+  S.components = S.components || []; S.costs = S.costs && S.costs.length ? S.costs : [{ from: "2000-01-01", electricity_plan_id: null, fixed_monthly: 0 }];
+  let tab = "power";
+  const body = el("div", { class: "col" });
+  const tabs = el("div", { class: "tabbar" });
+  const rates = el("div", { class: "muted small" });
+  const showRates = () => api.machineRates(machine.id).then((r) => {
+    rates.textContent = `With the saved settings an hour on ${machine.name} costs ≈ ${money(r.idle.total)} idle and ${money(r.busy.total)} with the model generating` +
+      (r.busy.kwh_price != null ? ` (electricity ${money(r.busy.kwh_price)}/kWh).` : " (no electricity plan yet).");
+  }).catch(() => {});
+  const draw = () => {
+    clear(tabs).append(...[["power", "Power"], ["costs", "Hardware & electricity"]].map(([k, t]) =>
+      el("button", { class: tab === k ? "active" : "", onclick: () => { tab = k; draw(); } }, t)));
+    clear(body).appendChild(tab === "power" ? power(S, draw) : costs(S, draw));
+  };
+  draw(); showRates();
+  const m = modal({ title: `Power & costs — ${machine.name}`, content: el("div", { class: "col" }, tabs, body, rates), footer: [
+    el("button", { onclick: () => m.close() }, "Close"),
+    el("button", { class: "primary", onclick: async () => {
+      try { await save({ power: S.power, components: S.components, costs: S.costs }); toast("Saved"); showRates(); }
+      catch (e) { toast(e.message, "error"); }
+    } }, "Save")] });
+}
+
 let pickerCache = null;
 export async function registry(force = false) {
   if (!pickerCache || force || Date.now() - pickerCache.t > 15000) pickerCache = { t: Date.now(), data: await api.servers() };

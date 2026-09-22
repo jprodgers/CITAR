@@ -206,6 +206,34 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
     return base
 
 
+def set_costing(session, actor: User, server: Server, body: dict) -> dict:
+    """Change a machine's power figures, components (for depreciation) and cost periods, leaving the rest alone.
+
+    Cost periods name electricity plans from the registry (Models page → Electricity plans)."""
+    from .. import servers as registry
+
+    access.on(session, actor, server).require(access.MANAGE)
+    config = dict(server.config or {})
+    for key in ("power", "components", "costs"):
+        if body.get(key) is not None:
+            config[key] = body[key]
+    try:
+        normalized = registry.normalize_server({**config, "id": server.id, "name": server.name, "kind": server.kind})
+    except (registry.ServerError, ValueError, TypeError) as exc:
+        raise PoolError(str(exc)) from exc
+    plans = {p["id"] for p in registry.load()["electricity_plans"]}
+    for period in normalized["costs"]:
+        if period.get("electricity_plan_id") and period["electricity_plan_id"] not in plans:
+            raise PoolError(f"Unknown electricity plan '{period['electricity_plan_id']}'.")
+    for key in ("power", "components", "costs"):
+        config[key] = normalized[key]
+    if body.get("former_ids") is not None:
+        config["former_ids"] = [str(x)[:40] for x in body["former_ids"] if x and str(x) != server.id][:10]
+    server.config = config
+    audit.record(session, "server.costing", actor=actor, object_type="server", object_id=server.id)
+    return {k: config.get(k) for k in ("power", "components", "costs", "former_ids")}
+
+
 def set_quiet_hours(session, actor: User, server: Server, restricted_hours: dict) -> dict:
     """Change only a machine's quiet hours (restricted hours), leaving the rest of its configuration alone."""
     from .. import servers as registry

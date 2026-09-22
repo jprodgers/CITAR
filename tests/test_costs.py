@@ -32,6 +32,29 @@ class CostTests(unittest.TestCase):
         self.assertAlmostEqual(c["energy_estimated_h"], 1.0)
         self.assertEqual(c["in"], 1000)
 
+    def test_servers_page_machines_are_priced_under_old_ids_too(self):
+        """A machine registered through the helper used to be left out of every cost report."""
+        from unittest import mock
+        plan = S.load()["electricity_plans"][0]["id"]
+        machine = {"id": "sv_desk", "name": "Desk", "kind": "owned", "config": {
+            "power": {"idle_w": 20, "cpu_max_w": 60, "gpu_max_w": 100},
+            "components": [{"name": "Desk", "price": 876.6, "purchased": "2026-01-01", "lifespan_years": 1}],
+            "costs": [{"from": "2000-01-01", "electricity_plan_id": plan}],
+            "former_ids": ["sv_desk_old"]}}
+        with mock.patch("citar.pool.seats.all_machines", lambda: [machine]):
+            reg = S.with_pooled()
+        self.assertEqual(reg["aliases"], {"sv_desk_old": "sv_desk"})
+        spans = [{"act": a, "srv": srv, "t0": T0, "t1": T0 + 3600, "held": 3600, "busy": 1800, "cpu": 0, "model": "m"}
+                 for a, srv in (("new", "sv_desk"), ("old", "sv_desk_old"))]
+        r = costing.compute(T0, T0 + 3600, reg, ledger(spans))
+        for a in ("new", "old"):
+            c = r["acts"][a]["total"]
+            self.assertAlmostEqual(c["kwh_idle"], 0.01, places=6)          # 20 W for an hour, split by two holders
+            self.assertAlmostEqual(c["kwh_dynamic"], 0.05, places=6)       # both generating half the time: 100 W all hour, split
+            self.assertAlmostEqual(c["depreciation"], 0.05, places=6)      # 876.6 / 8766 h, split by two
+            self.assertGreater(c["energy_idle"] + c["energy_dynamic"], 0)
+        self.assertFalse(any("deleted server" in n for n in r["notes"]))
+
     def test_concurrent_holders_split_the_calendar(self):
         reg = S.load()
         spans = [{"act": a, "srv": "sv_host", "t0": T0, "t1": T0 + 3600, "held": 3600, "cpu": 900, "busy": 0} for a in ("a", "b")]

@@ -12,7 +12,7 @@ from .data import config_rollup
 
 SECTION_TITLES = {
     "summary": "Summary", "narrative": "Analysis", "costs": "Where the money went", "cost_per_unit": "Cost per unit of work",
-    "servers": "Servers", "server_trend": "Costs over time", "models": "Model comparison", "benchmarks": "Benchmark runs",
+    "efficiency": "Energy and efficiency", "servers": "Servers", "server_trend": "Costs over time", "models": "Model comparison", "benchmarks": "Benchmark runs",
     "probes": "Scenario probes", "behavior": "Model behavior", "lab": "Bot lab experiments", "whatif": "What if it ran elsewhere",
     "depreciation": "Hardware lifespan sensitivity", "hardware": "Hardware", "data_quality": "Data quality",
     "activities": "All activities", "methodology": "How costs are calculated",
@@ -196,6 +196,34 @@ def s_cost_per_unit(x: Ctx) -> str:
     chart = C.hbar("Cost per model turn", sorted(items, key=lambda kv: kv[1]), fmt=x.mfmt,
                    color_index=x.color_of) if len(items) > 1 else ""
     return x.f("cost_per_unit") + C.table(head, rows) + chart
+
+
+def s_efficiency(x: Ctx) -> str:
+    """Energy per unit of work, per model on each machine: the compute-per-watt comparison."""
+    def n(v, fmt):
+        return fmt.format(v) if v is not None else "–"
+    rows, items = [], []
+    for k in x.config_order:
+        c = x.roll[k]
+        if not c["kwh"]:
+            continue
+        rows.append([k, f"{c['kwh']:.3f}", x.money(c["energy_cost"]), n(c["wh_per_game"], "{:,.0f}"), n(c["wh_per_turn"], "{:,.1f}"),
+                     n(c["wh_per_case"], "{:,.1f}"), n(c["out_per_wh"], "{:,.0f}"), n(c["out_per_s"], "{:,.1f}"),
+                     n(c["perf_per_kwh"], "{:,.1f}"), x.money(c["per_game"]), x.money(c["per_turn"]), x.money(c["per_case"]),
+                     "measured" if (c.get("measured_share") or 0) > 0.5 else "estimated"])
+        if c["out_per_wh"]:
+            items.append((k, c["out_per_wh"]))
+    if not rows:
+        return (x.f("efficiency") + '<p class="lead">No energy recorded in scope: give the machines power figures '
+                '(Servers page → Power &amp; costs) to see it.</p>')
+    head = ["Configuration", "kWh", "Electricity", "Wh per game", "Wh per model turn", "Wh per probe case",
+            "Output tokens per Wh", "Output tokens / s", "Performance per kWh", "Cost per game", "Cost per model turn",
+            "Cost per probe case", "Energy is"]
+    chart = C.hbar("Output tokens per watt-hour (higher is better)", sorted(items, key=lambda kv: -kv[1]),
+                   fmt=lambda v: f"{v:,.0f}", color_index=x.color_of) if len(items) > 1 else ""
+    return (x.f("efficiency") + '<p class="lead">Energy is the whole machine at the wall: idle power for the time the '
+            'work held the machine, plus the extra drawn while the model generated. Cost columns include hardware wear '
+            '(depreciation) and fixed charges as well as electricity.</p>' + C.table(head, rows) + chart)
 
 
 def s_servers(x: Ctx) -> str:
@@ -555,7 +583,7 @@ def s_methodology(x: Ctx) -> str:
             '</div>')
 
 
-SECTIONS = {"summary": s_summary, "costs": s_costs, "cost_per_unit": s_cost_per_unit, "servers": s_servers,
+SECTIONS = {"summary": s_summary, "costs": s_costs, "cost_per_unit": s_cost_per_unit, "efficiency": s_efficiency, "servers": s_servers,
             "server_trend": s_server_trend, "models": s_models, "benchmarks": s_benchmarks, "probes": s_probes,
             "behavior": s_behavior, "lab": s_lab, "whatif": s_whatif, "depreciation": s_depreciation, "hardware": s_hardware,
             "data_quality": s_data_quality, "activities": s_activities, "methodology": s_methodology}

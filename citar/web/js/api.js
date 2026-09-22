@@ -184,6 +184,8 @@ export const api = {
   poolServer: (id) => request("GET", `/api/pool/servers/${id}`),
   createPoolServer: (body) => request("POST", "/api/pool/servers", body),
   updatePoolServer: (id, body) => request("PUT", `/api/pool/servers/${id}`, body),
+  setMachineCosting: (id, body) => request("PUT", `/api/pool/servers/${id}/costing`, body),
+  machineRates: (id) => request("GET", `/api/pool/servers/${id}/rates`),
   setQuietHours: (id, restricted_hours) => request("PUT", `/api/pool/servers/${id}/quiet-hours`, { restricted_hours }),
   deletePoolServer: (id) => request("DELETE", `/api/pool/servers/${id}`),
   // Built without a nested template literal: they are valid but awkward to read and easy to

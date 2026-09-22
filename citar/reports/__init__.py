@@ -26,19 +26,19 @@ from typing import Optional
 from .. import paths
 
 REPORTS = paths.saves_path("reports")
-ALL_SECTIONS = ["summary", "costs", "cost_per_unit", "servers", "server_trend", "models", "benchmarks", "probes", "behavior",
+ALL_SECTIONS = ["summary", "costs", "cost_per_unit", "efficiency", "servers", "server_trend", "models", "benchmarks", "probes", "behavior",
                 "lab", "whatif", "depreciation", "hardware", "data_quality", "activities", "methodology"]
 
 PRESETS = {
     "item_cost": {"name": "Cost of a game, run or experiment",
                   "description": "What one thing (or a few) cost, broken down by server and cost component.",
-                  "sections": ["summary", "costs", "cost_per_unit", "benchmarks", "probes", "lab", "activities", "data_quality", "methodology"]},
+                  "sections": ["summary", "costs", "cost_per_unit", "efficiency", "benchmarks", "probes", "lab", "activities", "data_quality", "methodology"]},
     "model_comparison": {"name": "Model comparison",
                          "description": "Performance, speed, reliability and cost of each model side by side, with what-if pricing.",
-                         "sections": ["summary", "models", "cost_per_unit", "costs", "benchmarks", "behavior", "whatif", "data_quality", "methodology"]},
+                         "sections": ["summary", "models", "cost_per_unit", "efficiency", "costs", "benchmarks", "behavior", "whatif", "data_quality", "methodology"]},
     "server_comparison": {"name": "Server comparison over time",
                           "description": "What each server cost, how busy it was, idle vs allocated, and lifespan sensitivity.",
-                          "sections": ["summary", "servers", "server_trend", "costs", "whatif", "depreciation", "hardware", "data_quality", "methodology"]},
+                          "sections": ["summary", "servers", "efficiency", "server_trend", "costs", "whatif", "depreciation", "hardware", "data_quality", "methodology"]},
     "behavior": {"name": "Model behavior in scenarios",
                  "description": "Probe outcomes per case and model, tool use, how turns ended and common errors.",
                  "sections": ["summary", "probes", "behavior", "models", "data_quality"]},
@@ -298,7 +298,7 @@ def complete(cfg: dict, system: str, prompt: str) -> tuple[str, dict, Optional[s
 def scope_options() -> dict:
     """What the report builder can pick from: servers, models, and recent items (runs, experiments, games)."""
     from .. import servers, usage
-    reg = servers.load()
+    reg = servers.with_pooled()
     ledger = usage.read()
     items: dict = {}
     models = set()

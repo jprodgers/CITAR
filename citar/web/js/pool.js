@@ -7,6 +7,7 @@ import { api } from "./api.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { pageHeader } from "./nav.js";
 import { helperCard } from "./helper.js";
+import { openCostEditor } from "./servers.js";
 import * as auth from "./auth.js";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -331,6 +332,10 @@ function serverCard(server, groups, reload) {
           : null,
         server.can_manage
           ? el("button", { class: "small", onclick: () => quietHoursDialog(server, reload) }, "Quiet hours")
+          : null,
+        server.can_manage
+          ? el("button", { class: "small", title: "Watts, hardware prices and the electricity plan, for the cost reports",
+              onclick: () => openCostEditor(server, async (body) => { await api.setMachineCosting(server.id, body); reload(); }) }, "Power & costs")
           : null,
         el("button", {
           class: "small",

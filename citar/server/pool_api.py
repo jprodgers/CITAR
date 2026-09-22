@@ -170,6 +170,40 @@ def update_server(server_id: str, body: ServerUpdate, request: Request,
     return pool.public_server(s, server, me)
 
 
+class Costing(BaseModel):
+    """A machine's power figures, components and cost periods (any may be left out)."""
+    power: Optional[dict] = None
+    components: Optional[list] = None
+    costs: Optional[list] = None
+    former_ids: Optional[list] = None
+
+
+@router.put("/servers/{server_id}/costing")
+def set_costing(server_id: str, body: Costing, request: Request,
+                p: Principal = Depends(principal), s: Session = Depends(get_db)):
+    """Change what a machine costs to run: watts, hardware prices and the electricity plan."""
+    me = require_user(request, p)
+    server = _server(s, server_id, me, access.MANAGE)
+    try:
+        pool.set_costing(s, me, server, body.model_dump())
+    except pool.PoolError as exc:
+        raise _fail(exc)
+    return pool.public_server(s, server, me)
+
+
+@router.get("/servers/{server_id}/rates")
+def machine_rates(server_id: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+    """What an hour on this machine costs, idle and with the model busy."""
+    from .. import costing, servers as registry
+    me = require_user(request, p)
+    _server(s, server_id, me, access.MANAGE)
+    reg = registry.with_pooled()
+    sv = next((x for x in reg["servers"] if x["id"] == server_id), None)
+    if sv is None:
+        raise HTTPException(404, "No such server.")
+    return {"idle": costing.hourly_profile(sv, reg, busy_fraction=0.0), "busy": costing.hourly_profile(sv, reg, busy_fraction=1.0)}
+
+
 class QuietHours(BaseModel):
     """A machine's quiet hours: when every kind of work on it pauses."""
     restricted_hours: dict

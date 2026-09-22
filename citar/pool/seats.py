@@ -143,6 +143,18 @@ def restriction_status() -> list[dict]:
     return out
 
 
+def all_machines() -> list[dict]:
+    """Every machine on the Servers page: id, name, kind and stored config."""
+    try:
+        from .. import db
+        from ..db.models import Server
+        with db.session() as s:
+            return [{"id": sv.id, "name": sv.name, "kind": sv.kind, "config": dict(sv.config or {})}
+                    for sv in s.query(Server).all()]
+    except Exception:
+        return []
+
+
 def live_models(server_id: str) -> list[dict]:
     """What the machine's helper reports right now: key, whether it is loaded, context length."""
     try:

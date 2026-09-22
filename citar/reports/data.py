@@ -166,8 +166,9 @@ def gather(spec: dict, progress=lambda msg: None) -> dict:
     presented can each be changed without disturbing the other two.
     """
     since, until = time_range(spec)
-    reg = S.snapshot()
+    reg = S.with_pooled()
     servers_by_id = {s["id"]: s for s in reg["servers"]}
+    servers_by_id.update({old: servers_by_id[new] for old, new in (reg.get("aliases") or {}).items() if new in servers_by_id})
     basis = (spec.get("options") or {}).get("electricity_basis", "full")
     progress("Reading the usage ledger")
     ledger = U.read(since, until)
@@ -243,7 +244,8 @@ def config_rollup(data: dict) -> dict:
                                      "perf": [], "cost": 0.0, "cost_marginal": 0.0, "cost_games": 0.0, "cost_probes": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
                                      "busy_h": 0.0, "held_h": 0.0, "probe_cases": 0, "probe_passed": 0, "probe_checked": 0,
                                      "avg_turn_s": [], "error_rate": [], "clean_end": [], "kinds": set(),
-                                     "servers": set(), "kwh": 0.0, "measured_h": 0.0, "estimated_h": 0.0, "act_costs": []})
+                                     "servers": set(), "kwh": 0.0, "measured_h": 0.0, "estimated_h": 0.0, "act_costs": [],
+                                     "kwh_games": 0.0, "kwh_probes": 0.0, "energy_cost": 0.0})
     probe_results = {r["id"]: r for r in data["probe_runs"]}
     for a in data["acts"]:
         c = out[a["config"]]
@@ -267,7 +269,13 @@ def config_rollup(data: dict) -> dict:
                 c[f] += sc.get(f, 0)
             c["busy_h"] += sc.get("busy_h", 0)
             c["held_h"] += sc.get("held_h", 0)
-            c["kwh"] += sc.get("kwh_idle", 0) + sc.get("kwh_dynamic", 0)
+            kwh = sc.get("kwh_idle", 0) + sc.get("kwh_dynamic", 0)
+            c["kwh"] += kwh
+            if a["kind"] in ("game", "benchmark", "lab"):
+                c["kwh_games"] += kwh
+            elif a["kind"] == "probe":
+                c["kwh_probes"] += kwh
+            c["energy_cost"] += (sc.get("energy_dynamic", 0) + (sc.get("energy_idle", 0) if data.get("basis", "full") == "full" else 0))
             c["measured_h"] += sc.get("energy_measured_h", 0)
             c["estimated_h"] += sc.get("energy_estimated_h", 0)
         g = a.get("game")
@@ -316,6 +324,13 @@ def config_rollup(data: dict) -> dict:
         c["per_win"] = c["cost_games"] / c["wins"] if c["wins"] else None
         c["per_case"] = c["cost_probes"] / c["probe_cases"] if c["probe_cases"] else None
         c["pass_rate"] = c["probe_passed"] / c["probe_checked"] if c["probe_checked"] else None
+        # energy per unit of work: what "compute per watt" means for a model on a machine
+        c["wh_per_game"] = c["kwh_games"] * 1000 / c["games"] if c["games"] and c["kwh_games"] else None
+        c["wh_per_turn"] = c["kwh_games"] * 1000 / c["model_turns"] if c["model_turns"] and c["kwh_games"] else None
+        c["wh_per_case"] = c["kwh_probes"] * 1000 / c["probe_cases"] if c["probe_cases"] and c["kwh_probes"] else None
+        c["out_per_wh"] = c["out"] / (c["kwh"] * 1000) if c["kwh"] else None
+        c["perf_per_kwh"] = sum(c["perf"]) / c["kwh_games"] if c["perf"] and c["kwh_games"] else None
+        c["out_per_s"] = c["out"] / (c["busy_h"] * 3600) if c["busy_h"] else None
         c["measured_share"] = c["measured_h"] / (c["measured_h"] + c["estimated_h"]) if (c["measured_h"] + c["estimated_h"]) else None
         c["incomplete"] = sorted(c.pop("_incomplete", set()))
     return dict(out)

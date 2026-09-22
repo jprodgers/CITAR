@@ -140,9 +140,10 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
         "acts": {act_id: {"info": act row, "servers": {srv: cost}, "models": {model: {...}}}},
         "servers": {srv: {"allocated": cost, "calendar": {...}, "power": {...}}},
         "days": {date: {srv: cost}}, "notes": [...]}"""
-    reg = reg or S.load()
+    reg = reg or S.with_pooled()
     ledger = ledger or U.read(since, until)
     servers = {s["id"]: s for s in reg["servers"]}
+    aliases = reg.get("aliases") or {}           # a re-registered machine's old ids -> its current one
     acts_out: dict = {}
     notes: set = set()
 
@@ -158,7 +159,7 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
     hours: dict = defaultdict(lambda: defaultdict(float))    # "YYYY-MM-DD HH:00" -> srv -> cost
     buckets: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0])))   # srv -> m -> act -> [held, busy, cpu]
     for sp in ledger["spans"]:
-        srv = sp.get("srv") or "unassigned"
+        srv = aliases.get(sp.get("srv"), sp.get("srv")) or "unassigned"
         t0, t1 = float(sp["t0"]), float(sp["t1"])
         if since:
             t0c = max(t0, since)
@@ -219,6 +220,7 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
     # ---- measured power, per server per minute
     power: dict = {}
     for srv, rows in (ledger.get("power") or {}).items():
+        srv = aliases.get(srv, srv)
         sv = servers.get(srv)
         if not sv:
             continue

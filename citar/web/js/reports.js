@@ -9,6 +9,7 @@ const SECTION_INFO = {
   summary: ["Summary", "Headline numbers and the key findings"],
   costs: ["Where the money went", "Cost by model, server and activity type, split into depreciation, fixed costs, energy and tokens"],
   cost_per_unit: ["Cost per unit of work", "Per game, per model turn, per million tokens, per performance point, per win, per probe case"],
+  efficiency: ["Energy and efficiency", "Wh per game, per model turn and per probe case, output tokens per Wh, performance per kWh"],
   servers: ["Servers", "Allocated vs unallocated fixed costs, how busy each server was, metered energy"],
   server_trend: ["Costs over time", "Daily and cumulative cost per server"],
   models: ["Model comparison", "Performance with confidence intervals, speed, reliability, tokens, cost-efficiency frontier"],

@@ -455,6 +455,35 @@ def snapshot() -> dict:
     return copy.deepcopy(load())
 
 
+def with_pooled(reg: Optional[dict] = None) -> dict:
+    """The registry plus every machine on the Servers page, for pricing and reports.
+
+    Pooled machines keep their power figures, components and cost periods in the same shape as registry servers
+    (their stored config went through normalize_server), and refer to the registry's electricity plans. A machine
+    that was removed and registered again lists its old ids in ``former_ids``; ``aliases`` maps each to the
+    current id, so usage recorded under the old one is priced with the machine's current settings.
+    """
+    reg = copy.deepcopy(reg or load())
+    reg.setdefault("aliases", {})
+    known = {s["id"] for s in reg["servers"]}
+    from .pool import seats as pool_seats
+    for row in pool_seats.all_machines():
+        if row["id"] in known:
+            continue
+        try:
+            sv = normalize_server({**(row["config"] or {}), "id": row["id"], "name": row["name"],
+                                   "kind": row.get("kind") or "owned"})
+        except (ServerError, ValueError, TypeError):
+            continue
+        sv["pooled"] = True
+        reg["servers"].append(sv)
+        known.add(sv["id"])
+        for old in (row["config"] or {}).get("former_ids") or []:
+            if isinstance(old, str) and old not in known:
+                reg["aliases"][old] = sv["id"]
+    return reg
+
+
 def list_servers() -> list[dict]:
     """Every server in the registry."""
     return load()["servers"]
