@@ -124,6 +124,11 @@ env $(grep -v '^#' citar.env | xargs) citar serve
 Migrations run at startup, so deploying a new version is: install, restart. `deploy/citar.service`
 is a unit file to adapt.
 
+`deploy/citar-lab.service` runs the [lab](../BOTS.md) (bot-vs-bot experiments) as a second service at low
+priority, so it only uses CPU the web server leaves idle, and is the first thing killed if memory runs out.
+Queue experiments with `python -m citar.lab submit SPEC.json` as the service user; they show on the Queue and
+Lab pages.
+
 ---
 
 ## After it is up

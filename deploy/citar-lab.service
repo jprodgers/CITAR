@@ -1,0 +1,64 @@
+# /etc/systemd/system/citar-lab.service
+[Unit]
+Description=CITAR lab runner — bot-vs-bot experiments on this server's spare CPU
+Documentation=https://citar.example.com
+After=network-online.target citar.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=citar
+Group=citar
+WorkingDirectory=/opt/citar
+EnvironmentFile=/etc/citar/citar.env
+# One game at a time, day and night; the runner re-reads saves/lab/config.json to change that.
+# Stopping it is safe: a game in progress is replayed from the start next time.
+ExecStart=/opt/citar/.venv/bin/python -m citar.lab run --workers 1 --night-workers 1
+
+Restart=on-failure
+RestartSec=30s
+
+# --- sharing the box ---
+# The lab only uses CPU the web server and the other sites leave idle: games spend most of their time
+# waiting for model machines, so there is usually room. It yields at once when anything else wants the CPU.
+Nice=10
+CPUWeight=20
+IOWeight=20
+# Runner plus the game it is playing (~60 MB). If something goes wrong the lab dies first, not CITAR,
+# the forum or MariaDB.
+MemoryMax=450M
+MemoryHigh=380M
+OOMScoreAdjust=800
+
+# --- filesystem ---
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/citar
+PrivateTmp=yes
+
+# --- privileges ---
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# --- logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=citar-lab
+
+[Install]
+WantedBy=multi-user.target
