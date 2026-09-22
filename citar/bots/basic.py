@@ -1563,7 +1563,8 @@ class BasicBot:
         reserve = P["gold_reserve"] + P["gold_reserve_per_era"] * ctx["era"]
         for u in ctx["military"]:
             target, err, cost = unitmod.check_upgrade(g, u)
-            if target and err is None and p.gold - cost > reserve:
+            if target and err is None and p.gold - cost > reserve \
+                    and not self._breaks_space_reserve(g, pid, target, ctx["era"]):
                 self.ex(g, pid, "upgrade_unit", unit_id=u.id)
         for c in sorted(cities, key=lambda c: cm.city_stats(g, c)["total"]["production"]):
             head = cm.current_construction(c)
