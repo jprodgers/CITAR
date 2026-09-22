@@ -820,15 +820,24 @@ def city_status(g: Game, pid: int, city_id: int, status: str):
 # EMPIRE
 # ============================================================================
 @tool("set_research", "Research a technology. If it is not available yet, it becomes your goal and prerequisites are "
-      "researched automatically in order.", {"tech": STR}, ["tech"], category="empire")
-def set_research(g: Game, pid: int, tech: str):
+      "researched automatically in order. append=true adds it to the end of your research queue instead of "
+      "replacing the queue.", {"tech": STR, "append": BOOL}, ["tech"], category="empire")
+def set_research(g: Game, pid: int, tech: str, append: bool = False):
     """Choose what to research, or set a distant technology as a goal.
 
     A technology that is not yet available becomes a goal and its prerequisites are researched in order,
     which means a caller can name what it wants rather than planning the path.
     """
     from . import research
-    return research.set_research(g, pid, tech)
+    return research.set_research(g, pid, tech, append=bool(append))
+
+
+@tool("dequeue_research", "Remove a technology from your research queue, together with any queued technology that "
+      "needs it.", {"tech": STR}, ["tech"], category="empire")
+def dequeue_research(g: Game, pid: int, tech: str):
+    """Take a technology (and whatever queued depends on it) off the research queue."""
+    from . import research
+    return research.dequeue_research(g, pid, tech)
 
 
 @tool("choose_free_tech", "Pick a free technology you have been granted (it must be researchable now).",
@@ -900,7 +909,8 @@ def set_civ_name(g: Game, pid: int, name: str, leader: Optional[str] = None):
     if leader:
         p.leader = clean_name(leader, 48)
     if old != name:
-        g.emit("civ_renamed", f"{old} is now known as {name}" + (f", led by {p.leader}" if p.leader else "") + ".", None)
+        g.emit("civ_renamed", f"{old} is now known as {name}" + (f", led by {p.leader}" if p.leader else "") + ".", None,
+               mentions={old: pid}, player=pid)
     return {"name": p.name, "leader": p.leader}
 
 

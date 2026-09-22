@@ -415,7 +415,7 @@ export class GameScreen {
     const k = e.key.toLowerCase();
     if (k === "escape") this.deselect();
     else if (k === "n" || k === "tab") { e.preventDefault(); this.selectNextIdle(); }
-    else if (k === "enter" && e.shiftKey) this.endTurn();
+    else if (k === "enter" && e.shiftKey) this.endTurn(e.ctrlKey || e.metaKey);
     else if (k === "t") openTechTree(this);
     else if (k === "o") openPolicies(this);
     else if (k === "d") openDiplomacy(this);
@@ -448,30 +448,35 @@ export class GameScreen {
     if (r) { toast(`${a.name}: done`, "info", 2500); this.afterOrder(d.id); }
   }
 
-  async endTurn() {
+  // decisions still open this turn; any of them keeps End Turn greyed out (Ctrl+click ends the turn anyway)
+  turnBlockers() {
+    const v = this.view;
+    if (!v || this.you == null) return [];
+    const BLOCKING = ["research", "free_tech", "policy", "great_person", "pantheon", "promotion", "negotiation", "un_vote", "idle_city"];
+    const out = (v.alerts || []).filter((a) => BLOCKING.includes(a.type));
+    const idle = v.units.filter((u) => u.owner === this.you && !u.activity && u.moves > 0);
+    if (idle.length) out.push({ type: "unit", text: `${idle.length} unit${idle.length === 1 ? " needs" : "s need"} orders.`, unit: idle[0].id });
+    return out;
+  }
+
+  // take the player to the first open decision
+  goToBlocker(a) {
+    if (a.type === "unit") return this.selectNextIdle();
+    const open = { research: openTechTree, free_tech: openTechTree, policy: openPolicies, great_person: openGreatPeople,
+                   pantheon: openReligion, un_vote: openDiplomacy, negotiation: openDiplomacy }[a.type];
+    if (open) return open(this);
+    if (a.x != null) this.renderer.centerOn(a.x, a.y);
+    if (a.city != null) this.selectCity(a.city);
+    else if (a.unit != null) this.selectUnit(a.unit);
+  }
+
+  async endTurn(force = false) {
     if (!this.myTurn) return;
-    const idleCities = this.view.cities.filter((c) => c.owner === this.you && !c.puppet && (!c.queue || !c.queue.length));
-    const noResearch = this.view.empire && !this.view.empire.researching;
-    if (idleCities.length || noResearch) {
-      const choice = await new Promise((resolve) => {
-        let done = false;
-        const pick = (v) => { done = true; m.close(); resolve(v); };
-        const m = modal({
-          title: "End turn?", narrow: true,
-          content: el("p", {}, `${idleCities.length ? `${idleCities.map((c) => c.name).join(", ")} ${idleCities.length === 1 ? "has" : "have"} nothing to build. ` : ""}` +
-            `${noResearch ? "No research is selected. " : ""}`),
-          footer: [
-            el("button", { class: "primary", onclick: () => pick("fix") }, noResearch ? "Choose research" : `Open ${idleCities[0].name}`),
-            el("button", { onclick: () => pick("end") }, "End turn anyway")],
-          onClose: () => { if (!done) resolve(null); },
-        });
-      });
-      if (choice === "fix") {
-        if (noResearch) openTechTree(this);
-        else { this.renderer.centerOn(idleCities[0].x, idleCities[0].y); this.selectCity(idleCities[0].id); }
-        return;
-      }
-      if (choice !== "end") return;
+    const blockers = this.turnBlockers();
+    if (blockers.length && !force) {
+      toast(`Before ending the turn: ${blockers.map((a) => a.text).join(" ")} (Ctrl+click End Turn to end it anyway.)`, "info", 5000);
+      this.goToBlocker(blockers[0]);
+      return;
     }
     this.deselect();
     await this.tool("end_turn");
@@ -480,6 +485,7 @@ export class GameScreen {
   // hostile (at war or barbarian) military units a city can bombard
   bombardTargets(c) {
     const v = this.view;
+    if (c.owner === this.you && c.can_bombard === false) return [];   // already fired this turn, or in resistance
     return v.units.filter((u) => u.owner !== this.you && u.class !== "civilian" && this.isHostile(u.owner) && hexDistance(u.x, u.y, c.x, c.y, this.model) <= 2);
   }
 
@@ -716,7 +722,7 @@ export class GameScreen {
           onclick: () => { this.renderer.centerOn(next.x, next.y); this.selectCity(next.id); } },
           idleCities.length === 1 ? `⚒ ${next.name} needs production` : `⚒ ${idleCities.length} cities need production`));
       }
-      // cities with an enemy in bombard range that haven't fired yet (view.cities has attacked_this_turn for own cities)
+      // cities with an enemy in bombard range that haven't fired yet (view.cities has can_bombard for own cities)
       const gunners = v.cities.filter((c) => c.owner === this.you && this.bombardTargets(c).length);
       if (gunners.length) {
         const c = gunners.find((x) => x.id !== this.selectedCity) || gunners[0];
@@ -735,7 +741,12 @@ export class GameScreen {
           promos.length === 1 ? `▲ Promote ${u.name}` : `▲ ${promos.length} promotions`));
       }
       box.append(el("button", { disabled: !needs, onclick: () => this.selectNextIdle() }, `Next unit (${needs})`),
-        el("button", { class: `end-turn ${needs === 0 ? "ready" : ""}`, onclick: () => this.endTurn() }, "End Turn"));
+        (() => {
+          const blockers = this.turnBlockers();
+          return el("button", { class: `end-turn ${blockers.length ? "blocked" : "ready"}`, "aria-disabled": blockers.length ? "true" : "false",
+            title: blockers.length ? `Still to do:\n${blockers.map((a) => "• " + a.text).join("\n")}\n\nClick to go to the first one; Ctrl+click to end the turn anyway.` : "End your turn (Shift+Enter)",
+            onclick: (e) => this.endTurn(e.ctrlKey || e.metaKey) }, "End Turn");
+        })());
     } else {
       const st = this.agentStatus[v.current_player];
       box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)" : st === "paused" ? " (paused mid-turn)" : ""}`));

@@ -106,8 +106,12 @@ def current(g: "Game", pid: int) -> Optional[str]:
     return q[0] if q else None
 
 
-def set_research(g: "Game", pid: int, tech: str) -> dict:
-    """Set the current research, or a goal whose prerequisites are researched first."""
+def set_research(g: "Game", pid: int, tech: str, append: bool = False) -> dict:
+    """Set the current research, or a goal whose prerequisites are researched first.
+
+    With ``append`` the technology (and whatever it still needs that is not already queued) goes on the
+    end of the research queue instead of replacing it.
+    """
     name = g.rules.resolve("tech", tech)
     if name is None:
         raise ActionError(f"Unknown technology '{tech}'. Use names like 'Bronze Working'.")
@@ -117,13 +121,40 @@ def set_research(g: "Game", pid: int, tech: str) -> dict:
     path = path_to(g, pid, name)
     if not path:
         raise ActionError(f"{name} cannot be researched.")
+    if append:
+        if name in p.research_queue and not is_repeatable(g, name):
+            raise ActionError(f"{name} is already queued.")
+        path = p.research_queue + [t for t in path if t not in p.research_queue]
     p.research_queue = path
-    p.research_goal = name if len(path) > 1 else None
+    p.research_goal = path[-1] if len(path) > 1 else None
     update_research_progress(g, pid)
-    out = {"researching": p.research_queue[0] if p.research_queue else None, "turns": turns_left(g, pid)}
+    out = {"researching": p.research_queue[0] if p.research_queue else None, "turns": turns_left(g, pid),
+           "queue": list(p.research_queue)}
     if len(path) > 1:
-        out.update({"goal": name, "path": path})
+        out.update({"goal": path[-1], "path": path})
     return out
+
+
+def dequeue_research(g: "Game", pid: int, tech: str) -> dict:
+    """Take a technology off the research queue, along with every queued technology that needs it."""
+    name = g.rules.resolve("tech", tech)
+    p = g.player(pid)
+    if name is None or name not in p.research_queue:
+        raise ActionError(f"{tech} is not in your research queue.")
+    R = g.rules
+
+    def needs(t, seen=None):
+        seen = seen if seen is not None else set()
+        for pre in R.techs[t]["prerequisites"]:
+            if pre == name or (pre not in seen and (seen.add(pre) or needs(pre, seen))):
+                return True
+        return False
+
+    removed = [t for t in p.research_queue if t == name or needs(t)]
+    p.research_queue = [t for t in p.research_queue if t not in removed]
+    p.research_goal = p.research_queue[-1] if len(p.research_queue) > 1 else None
+    update_research_progress(g, pid)
+    return {"removed": removed, "researching": current(g, pid), "queue": list(p.research_queue)}
 
 
 def turns_left(g: "Game", pid: int, tech: Optional[str] = None) -> Optional[int]:
