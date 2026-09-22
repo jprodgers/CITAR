@@ -1150,17 +1150,20 @@ def equivalent_building(g: "Game", pid: int, name: str) -> str:
     return R.unique_buildings.get(nation, {}).get(name, name)
 
 
-def count_constructed(g: "Game", pid: int, name: str) -> int:
+def count_constructed(g: "Game", pid: int, name: str, exclude: Optional[City] = None) -> int:
     """How many of this thing the civilization has, including queued and in the spaceship.
 
     Queued items count, which is what stops a limited wonder from being started in four cities at once
-    and wasting three cities' production.
+    and wasting three cities' production. The city being checked (``exclude``) doesn't count its own queue:
+    otherwise an item's own place in the queue counted against its limit, and a queue check removed the last
+    one allowed (the third spaceship booster with two built, say) the turn after it was ordered.
     """
     in_space = g.s.spaceship.get(pid, {}).get(name, 0)
     if name in g.rules.buildings:
-        return in_space + sum(1 for c in g.player_cities(pid) if contains_building(g, c, name) or name in c.queue)
+        return in_space + sum(1 for c in g.player_cities(pid)
+                              if contains_building(g, c, name) or (name in c.queue and c is not exclude))
     return in_space + sum(1 for u in g.player_units(pid) if u.type == name) + \
-        sum(1 for c in g.player_cities(pid) if name in c.queue)
+        sum(1 for c in g.player_cities(pid) if name in c.queue and c is not exclude)
 
 
 def _not_met(g, u: Unique, ctx: Ctx, pid: int, built_variant: bool) -> list[tuple[str, str]]:
@@ -1244,7 +1247,7 @@ def rejection_reasons(g: "Game", city: City, name: str, pid: Optional[int] = Non
                     out.append(("MustOwnTile", f"{name} requires an owned {u.p(0)} within {u.p(1)} tiles."))
             elif ph == U.ObsoleteWith and g.has_tech(pid, u.p(0)):
                 out.append(("Obsoleted", f"{name} is obsolete."))
-            elif ph == U.MaxNumberBuildable and count_constructed(g, pid, name) >= u.n(0):
+            elif ph == U.MaxNumberBuildable and count_constructed(g, pid, name, exclude=city) >= u.n(0):
                 out.append(("MaxNumberBuildable", f"{name} is limited to {int(u.n(0))}."))
             elif ph == U.SpaceshipPart and not g.civ_has(pid, U.EnablesConstructionOfSpaceshipParts):
                 out.append(("RequiresBuildingInSomeCity", "Apollo Program not built."))
@@ -1315,7 +1318,7 @@ def rejection_reasons(g: "Game", city: City, name: str, pid: Optional[int] = Non
         if p.kind == "city_state" and ud["_umap"].get(U.FoundCity):
             out.append(("NoSettlerForOneCityPlayers", "City-states cannot build settlers."))
         for u in ud["_umap"].matching(U.MaxNumberBuildable, ctx):
-            if count_constructed(g, pid, name) >= u.n(0):
+            if count_constructed(g, pid, name, exclude=city) >= u.n(0):
                 out.append(("MaxNumberBuildable", f"{name} is limited to {int(u.n(0))}."))
         if p.kind != "barbarian":
             rr = ud.get("requiredResource")

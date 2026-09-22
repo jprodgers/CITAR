@@ -401,3 +401,46 @@ class DifficultyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PerCivLimitTests(unittest.TestCase):
+    """Items "Limited to [n] per Civilization" (spaceship parts, the Recycling Center)."""
+
+    def _space_ready_city(self):
+        from unittest import mock
+        g = game()
+        s = next(u for u in g.player_units(0) if u.type == "Settler")
+        tools.execute(g, 0, "found_city", {"unit_id": s.id})
+        city = g.player_cities(0)[0]
+        p = g.player(0)
+        for t in g.rules.techs:
+            p.techs.add(t) if isinstance(p.techs, set) else p.techs.append(t)
+        cities.add_building(g, city, "Apollo Program")
+        city.queue = []
+        g.invalidate()
+        patch = mock.patch.object(type(g), "resource_amount", lambda self, pid, res: 9)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return g, city
+
+    def test_the_last_allowed_part_stays_in_the_queue(self):
+        g, city = self._space_ready_city()
+        # limited to 1 and none built: it used to count its own place in the queue and be dropped at once
+        tools.execute(g, 0, "set_production", {"city_id": city.id, "item": "SS Cockpit"})
+        cities.validate_queue(g, city)
+        self.assertEqual(city.queue[:1], ["SS Cockpit"])
+        # limited to 3 with two built: the third one may be built
+        for _ in range(2):
+            g.create_unit(0, "SS Booster", city.idx)
+        tools.execute(g, 0, "set_production", {"city_id": city.id, "item": "SS Booster"})
+        cities.validate_queue(g, city)
+        self.assertIn("SS Booster", city.queue)
+        self.assertEqual(cities.count_constructed(g, 0, "SS Booster"), 3)
+        self.assertEqual(cities.count_constructed(g, 0, "SS Booster", exclude=city), 2)
+
+    def test_the_limit_still_holds(self):
+        g, city = self._space_ready_city()
+        for _ in range(3):
+            g.create_unit(0, "SS Booster", city.idx)
+        with self.assertRaises(ActionError):
+            tools.execute(g, 0, "set_production", {"city_id": city.id, "item": "SS Booster"})

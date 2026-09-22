@@ -28,6 +28,10 @@ and arguments may still change between minor versions, and the release notes wil
   religion; both were then refused. The scripted bot's Great Prophets could retry the refused enhance for the rest
   of a game instead of walking to a city. Both actions now say what is missing, and the bot moves its prophet.
 - Lab reports and `citar bench` left eliminated civilizations out of their results (see Added).
+- **A spaceship could never be finished, so there were no science victories.** Items "Limited to [n] per
+  Civilization" counted their own place in the build queue against the limit, so the last one allowed was
+  accepted and then silently dropped from the queue the next turn. Parts limited to 1 (Cockpit, Engine, Stasis
+  Chamber) could never be built, the third Booster neither, nor a civilization's fifth Recycling Center.
 - The per-turn **production** statistic (graphs, replays, lab checkpoints) was always 0: it read a city attribute
   that doesn't exist. It now records the civilization's production.
 
