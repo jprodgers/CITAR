@@ -116,6 +116,14 @@ def restricted(pooled: Optional[dict], when: Optional[datetime] = None) -> Optio
     return end.replace(tzinfo=z).astimezone().replace(tzinfo=None)
 
 
+def clock_text(pooled: Optional[dict], end: Optional[datetime]) -> Optional[str]:
+    """A time from :func:`restricted` as the machine's owner reads it ("06:00" where the machine is)."""
+    if end is None:
+        return None
+    from .windows import zone
+    return end.astimezone(zone((pooled or {}).get("owner_tz"))).strftime("%H:%M")
+
+
 def restriction_status() -> list[dict]:
     """Pooled machines in their quiet hours right now (for the page header)."""
     try:
@@ -131,7 +139,7 @@ def restriction_status() -> list[dict]:
         pooled = lookup(sid)
         end = restricted(pooled)
         if end:
-            out.append({"id": sid, "name": pooled["name"], "until": end.strftime("%H:%M"), "until_ts": end.timestamp()})
+            out.append({"id": sid, "name": pooled["name"], "until": clock_text(pooled, end), "until_ts": end.timestamp()})
     return out
 
 
@@ -171,7 +179,7 @@ def describe(llm: dict, pooled: dict) -> dict:
     key = llm.get("model") or llm.get("model_id")
     end = restricted(pooled)
     return {"server_id": pooled["id"], "server": pooled["name"], "model": key, "label": key, "profile": None,
-            "missing_server": False, "restricted_until": end.strftime("%H:%M") if end else None, "pooled": True}
+            "missing_server": False, "restricted_until": clock_text(pooled, end), "pooled": True}
 
 
 def authorize(session, user, seats: list[dict]) -> None:

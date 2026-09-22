@@ -431,7 +431,7 @@ class GameSession:
         if not end:
             return False
         name = servers.server_name(server_id)
-        message = f"{name} is in its quiet hours until {end:%H:%M}"
+        message = f"{name} is in its quiet hours until {servers.restricted_text(server_id, end)}"
         reason = {"kind": "restricted", "player": pid, "message": message, "since": time.time(),
                   "until": end.timestamp()}
         self.suspend(reason)

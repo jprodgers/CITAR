@@ -631,6 +631,19 @@ def server_name(server_id: Optional[str]) -> str:
     return sv["name"] if sv else (server_id or "server")
 
 
+def restricted_text(server_id: Optional[str], end: Optional[datetime]) -> str:
+    """A restriction's end as the server's owner reads it: this computer's clock for a registry server, the
+    owner's zone for a Servers-page machine."""
+    if end is None:
+        return ""
+    if find(server_id) is None and server_id:
+        from .pool import seats as pool_seats
+        pooled = pool_seats.lookup(server_id)
+        if pooled is not None:
+            return pool_seats.clock_text(pooled, end)
+    return end.strftime("%H:%M")
+
+
 def restriction_config(server_id: Optional[str]) -> dict:
     """A server's restricted-hours settings, whichever list it is in."""
     sv = find(server_id)

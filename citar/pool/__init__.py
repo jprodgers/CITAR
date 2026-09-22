@@ -192,8 +192,8 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
     from . import seats
     base["owner_tz"] = (owner.tz if owner else None) or "UTC"
     base["restricted_hours"] = config.get("restricted_hours") or registry.default_restricted()
-    end = seats.restricted({"config": config, "owner_tz": base["owner_tz"]})
-    base["restricted_until"] = end.strftime("%H:%M") if end else None
+    view = {"config": config, "owner_tz": base["owner_tz"]}
+    base["restricted_until"] = seats.clock_text(view, seats.restricted(view))
     if access.MANAGE in perms:
         try:
             base["config"] = registry.public(config)

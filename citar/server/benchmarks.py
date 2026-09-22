@@ -603,7 +603,7 @@ class BenchmarkScheduler:
             was = sid in self._restricted
             if end and not was:
                 self._restricted[sid] = {"since": _now(), "unloaded": False}
-                self._log(f"Restricted hours started on {REG.server_name(sid)} (until {end:%H:%M}); "
+                self._log(f"Restricted hours started on {REG.server_name(sid)} (until {REG.restricted_text(sid, end)}); "
                           f"its games pause after the current model turn.")
             elif not end and was:
                 self._restricted.pop(sid, None)
