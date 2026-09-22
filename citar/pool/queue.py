@@ -1,4 +1,5 @@
-"""One queue for work that waits for a model machine: benchmark jobs and probe runs, in priority order.
+"""One queue for work that waits for a model machine: benchmark jobs, probe runs and reports whose analysis
+is written by a model, in priority order.
 
 The benchmark scheduler and the probe runner each keep their own list of waiting work, and each decides
 when to start its own. What they share is this: every waiting item has a *rank* - its priority, then how
@@ -19,7 +20,7 @@ from typing import Callable, Optional
 
 from .. import paths
 
-KINDS = ("benchmark", "probe")
+KINDS = ("benchmark", "probe", "report")
 _providers: dict[str, Callable[[], list]] = {}
 _lock = threading.Lock()
 _cache: Optional[dict] = None

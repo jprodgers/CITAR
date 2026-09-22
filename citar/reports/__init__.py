@@ -98,9 +98,18 @@ class ReportRunner:
         self.lock = threading.Lock()
         self.queue: list[str] = []
         self._thread: Optional[threading.Thread] = None
+        requeue = []
         for m in self.list():
-            if m["status"] in ("queued", "running"):
+            if m["status"] == "running":
                 self._set(m["id"], status="failed", error="The CITAR server restarted while this report was running; run it again.")
+            elif m["status"] == "queued":
+                requeue.append(m["id"])
+        from ..pool import queue as work_queue
+        work_queue.register("report", self.queue_items)
+        for rid in reversed(requeue):          # list() is newest first
+            self.queue.append(rid)
+        if self.queue:
+            self._wake()
 
     # ------------------------------------------------------------------ storage
     def _path(self, rid: str) -> Path:
@@ -157,11 +166,87 @@ class ReportRunner:
         return p
 
     def delete(self, rid: str):
-        """Delete a report and everything it produced."""
+        """Delete a report and everything it produced. A queued report is taken out of the queue."""
         m = self.meta(rid)
-        if m["status"] in ("queued", "running"):
+        if m["status"] == "running":
             raise ValueError("The report is still running.")
+        with self.lock:
+            if rid in self.queue:
+                self.queue.remove(rid)
         shutil.rmtree(self._path(rid), ignore_errors=True)
+
+    # ------------------------------------------------------------------ the shared queue
+    def _machine(self, rid: str) -> Optional[str]:
+        """The model machine a report needs (for its written analysis), or None."""
+        try:
+            n = self.spec(rid)["narrative"]
+        except (KeyError, OSError, ValueError):
+            return None
+        return n.get("server_id") if n.get("enabled") else None
+
+    def queue_items(self) -> list[dict]:
+        """Queued reports that need a model machine, for the shared work queue (see citar.pool.queue)."""
+        from .. import servers
+        with self.lock:
+            rids = list(self.queue)
+        out = []
+        for rid in rids:
+            sid = self._machine(rid)
+            if not sid:
+                continue
+            try:
+                m = self.meta(rid)
+            except KeyError:
+                continue
+            title = m.get("title") or "report"
+            out.append({"kind": "report", "id": rid, "group": rid, "run": title, "label": f"report “{title}”",
+                        "server_id": sid, "server": servers.server_name(sid), "created": m.get("created") or 0,
+                        "waiting": m.get("waiting")})
+        return out
+
+    def _blocked(self, rid: str) -> Optional[str]:
+        """Why a queued report cannot start yet (None when it can): its machine is in its quiet hours, in use, or
+        higher-priority work is waiting for it. Reports without a written analysis never wait."""
+        sid = self._machine(rid)
+        if not sid:
+            return None
+        from .. import servers
+        from ..pool import queue as work_queue, seats as pool_seats
+        name = servers.server_name(sid)
+        end = servers.restricted_now(sid)
+        if end:
+            return f"{name} is in its quiet hours until {servers.restricted_text(sid, end)}"
+        held = pool_seats.occupied(sid)
+        if held:
+            return f"{name} is in use by {', '.join(held)}"
+        m = self.meta(rid)
+        first = work_queue.ahead_of(sid, "report", (-work_queue.priority("report", rid), float(m.get("created") or 0)))
+        if first is not None:
+            return f"{first['label']} goes first on {name} (priority {first['priority']})"
+        return None
+
+    def _next(self) -> Optional[str]:
+        """The queued report to build now: the best-ranked one that is not waiting for its machine."""
+        from ..pool import queue as work_queue
+        with self.lock:
+            rids = list(self.queue)
+        ranked = []
+        for rid in rids:
+            try:
+                created = float(self.meta(rid).get("created") or 0)
+            except KeyError:
+                with self.lock:
+                    if rid in self.queue:
+                        self.queue.remove(rid)
+                continue
+            ranked.append(((-work_queue.priority("report", rid), created), rid))
+        for _, rid in sorted(ranked):
+            why = self._blocked(rid)
+            if why is None:
+                return rid
+            if self.meta(rid).get("waiting") != why:
+                self._set(rid, waiting=why, progress=f"Waiting: {why}")
+        return None
 
     # ------------------------------------------------------------------ running
     def start(self, spec: dict) -> dict:
@@ -175,23 +260,48 @@ class ReportRunner:
                       finished=None, progress="Waiting", error=None, summary=None, narrative=spec["narrative"]["enabled"])
         with self.lock:
             self.queue.append(rid)
+        self._wake()
+        return m
+
+    POLL_SECONDS = 5.0
+
+    def _wake(self):
+        """Start the worker thread if it is not running."""
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._loop, daemon=True, name="reports")
             self._thread.start()
-        return m
 
     def _loop(self):
-        """The worker thread: build queued reports in order."""
+        """The worker thread: build queued reports, best first. One that needs a busy model machine waits for it
+        (in the shared queue) while the others go ahead."""
         while True:
             with self.lock:
-                rid = self.queue.pop(0) if self.queue else None
+                if not self.queue:
+                    self._thread = None
+                    return
+            try:
+                rid = self._next()
+            except Exception:
+                traceback.print_exc()
+                rid = None
             if rid is None:
-                return
+                time.sleep(self.POLL_SECONDS)
+                continue
+            with self.lock:
+                if rid in self.queue:
+                    self.queue.remove(rid)
+            self._set(rid, waiting=None)
+            sid = self._machine(rid)
+            from ..pool import seats as pool_seats
+            holder = f"report “{self.meta(rid).get('title') or rid}”"
+            pool_seats.claim(sid, holder)         # benchmarks and probes wait while the model writes
             try:
                 self.run(rid)
             except Exception as e:
                 self._set(rid, status="failed", error=f"{type(e).__name__}: {e}", trace=traceback.format_exc(limit=8),
                           finished=_now())
+            finally:
+                pool_seats.release(sid, holder)
 
     def run(self, rid: str):
         """Build one report: gather, cost, render, write."""
@@ -216,13 +326,17 @@ class ReportRunner:
         """Ask the chosen model for the written analysis; its usage is recorded as a 'report' activity."""
         from .. import servers, usage
         n = spec["narrative"]
-        try:
-            sv = servers.get(n["server_id"])
-        except servers.ServerError as e:
-            return "", f"The narrative was skipped: {e}"
-        end = servers.restricted(sv)
+        sv = servers.find(n["server_id"])
+        if sv is None:
+            from ..pool import seats as pool_seats
+            pooled = pool_seats.lookup(n["server_id"])
+            if pooled is None:
+                return "", f"The narrative was skipped: no server '{n['server_id']}'."
+            sv = {"id": pooled["id"], "name": pooled["name"], "pooled": True}
+        end = servers.restricted_now(sv["id"])
         if end:
-            return "", f"The narrative was skipped: {sv['name']} is in its restricted hours until {end:%H:%M}."
+            return "", (f"The narrative was skipped: {sv['name']} is in its restricted hours until "
+                        f"{servers.restricted_text(sv['id'], end)}.")
         try:
             ref = servers.seat_ref(sv["id"], n["model_id"], n["profile_id"])
             cfg = servers.resolve_llm(ref)
@@ -237,10 +351,11 @@ class ReportRunner:
         tr.register(act, lambda: {sid: {"threads": []} for sid in {sv["id"], host} if sid} if holding["on"] else None)
         prompt = brief + ("\n\nExtra instructions from the reader:\n" + n["instructions"] if n.get("instructions") else "")
         try:
-            try:
-                servers.ensure_model(sv, cfg["model"], cfg.get("load"))
-            except Exception:
-                pass
+            if not sv.get("pooled"):          # CITAR does not load models on somebody else's machine
+                try:
+                    servers.ensure_model(sv, cfg["model"], cfg.get("load"))
+                except Exception:
+                    pass
             t0 = time.perf_counter()
             text, tokens, served = complete(cfg, NARRATIVE_SYSTEM, prompt)
             secs = time.perf_counter() - t0
@@ -258,6 +373,8 @@ class ReportRunner:
 def complete(cfg: dict, system: str, prompt: str) -> tuple[str, dict, Optional[str]]:
     """One plain completion (no tools). Returns (text, token counts for the ledger, model that served it)."""
     provider = cfg.get("provider")
+    if provider == "worker":
+        return _complete_on_worker(cfg, system, prompt)
     if provider == "dryrun":
         time.sleep(float(cfg.get("dry_run_delay") or 0))
         text = ("(Dry run narrative.) This is where a model's written analysis of the figures would appear. The computed "
@@ -293,6 +410,24 @@ def complete(cfg: dict, system: str, prompt: str) -> tuple[str, dict, Optional[s
     if r.usage:
         toks = {"input_tokens": r.usage.prompt_tokens or 0, "output_tokens": r.usage.completion_tokens or 0}
     return text, toks, cfg.get("model")
+
+
+def _complete_on_worker(cfg: dict, system: str, prompt: str, busy_wait: float = 1800) -> tuple[str, dict, Optional[str]]:
+    """The same, on a machine reached through its helper. A busy machine (another game's turn) is waited for."""
+    from ..agents.providers.worker_provider import WorkerConversation, WorkerConnectionError
+    conv = WorkerConversation(dict(cfg, tool_mode="native"), system, [])
+    conv.add_user_text(prompt)
+    deadline = time.time() + busy_wait
+    while True:
+        try:
+            step = conv.step()
+            break
+        except WorkerConnectionError as e:
+            if time.time() > deadline:
+                raise
+            time.sleep(5 if getattr(e, "refusal", "") == "busy" else 15)
+    text = re.sub(r"<think>.*?</think>", "", step.text or "", flags=re.S).strip()
+    return text, {"input_tokens": conv.usage.get("input_tokens", 0), "output_tokens": conv.usage.get("output_tokens", 0)}, cfg.get("model")
 
 
 def scope_options() -> dict:

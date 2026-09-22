@@ -66,6 +66,8 @@ async def _startup():
     if scheduler is None:
         scheduler = BenchmarkScheduler(manager)   # reloads benchmark games that were in progress
     _probes()                                     # resumes probe runs that were queued or running
+    from .admin_api import reports_runner
+    reports_runner()                              # resumes queued reports (some wait for a model machine)
     asyncio.create_task(_close_finished_loop())   # finished lobby games leave the list after a while
     from .. import usage
     usage.start_power_sampler()                   # live power samples of this machine for cost reports
@@ -1358,6 +1360,8 @@ def work_queue_view():
     from .workers import hub
     _scheduler()
     _probes()
+    from .admin_api import reports_runner
+    reports_runner()                  # registers queued reports with the shared queue
     items = work_queue.waiting()
     names = {sv["id"]: sv["name"] for sv in registry.list_servers()}
     from .. import db as _db
@@ -1383,7 +1387,7 @@ def work_queue_view():
 
 
 class PriorityBody(BaseModel):
-    """A new priority for a benchmark run, a probe run or a lab experiment. Higher goes first."""
+    """A new priority for a benchmark run, a probe run, a report or a lab experiment. Higher goes first."""
     kind: str
     id: str
     priority: int
@@ -1410,7 +1414,7 @@ def work_queue_priority(body: PriorityBody):
         tmp.write_text(_json.dumps(spec, indent=1), encoding="utf-8")
         tmp.replace(path)
         return {"kind": "lab", "id": body.id, "priority": spec["priority"]}
-    raise HTTPException(400, "kind is benchmark, probe or lab.")
+    raise HTTPException(400, "kind is benchmark, probe, report or lab.")
 
 
 @app.get("/api/lab/report/{name}", dependencies=[Depends(require_user)])

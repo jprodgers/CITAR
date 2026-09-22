@@ -54,7 +54,7 @@ function machineCard(m, refresh) {
     table.append(el("tr", { class: it.position === 1 ? "q-next" : "" },
       el("td", {}, it.position === 1 ? "next" : it.position),
       el("td", {}, it.label, it.kind === "benchmark" ? el("div", { class: "muted small" }, it.run) : null),
-      el("td", {}, it.kind === "benchmark" ? "benchmark job" : "probe run"),
+      el("td", {}, ({ benchmark: "benchmark job", probe: "probe run", report: "report (written analysis)" })[it.kind] || it.kind),
       el("td", {}, first ? priorityControl(it.kind, it.group, it.priority, refresh) : el("span", { class: "muted" }, it.priority)),
       el("td", { class: "muted small" }, (it.waiting || "").replace(/^waiting:? ?(for )?/, ""))));
   }
@@ -96,7 +96,7 @@ export async function renderQueue(root) {
   page.appendChild(pageHeader("queue"));
   const body = el("div");
   page.append(el("div", { class: "card" }, el("h2", { style: { margin: 0 } }, "Queue"),
-    el("p", { class: "muted" }, "Benchmark jobs and probe runs share one queue per model machine; the lab has its own on this server's CPU. ",
+    el("p", { class: "muted" }, "Benchmark jobs, probe runs and reports with a written analysis share one queue per model machine; the lab has its own on this server's CPU. ",
       "Higher priority starts first, then whatever has waited longest. Work never interrupts a game already using a machine: it starts when the machine is free.")), body);
   const refresh = async () => {
     try {

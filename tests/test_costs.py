@@ -205,5 +205,38 @@ class LedgerAndReportTests(unittest.TestCase):
         shutil.rmtree(runner.dir, ignore_errors=True)
 
 
+class ReportQueueTests(unittest.TestCase):
+    def test_a_report_waits_in_the_machine_queue(self):
+        """A report whose analysis is written by a model used to run at once, busy machine or not, and was not in
+        the queue at all."""
+        from unittest import mock
+        from citar import reports
+        from citar.pool import queue as work_queue
+        busy = {"on": True}
+        runner = reports.ReportRunner(Path(tempfile.mkdtemp(prefix="citar-reports-")))
+        runner.POLL_SECONDS = 0.2
+        with mock.patch("citar.pool.seats.occupied", lambda sid, exclude=frozenset(): ["game “x”"] if busy["on"] and sid == "sv_dryrun" else []):
+            plain = runner.start({"title": "No model", "sections": ["summary"]})
+            m = runner.start({"title": "Written", "sections": ["summary"],
+                              "narrative": {"enabled": True, "server_id": "sv_dryrun", "model_id": "m_dry"}})
+            deadline = time.time() + 60
+            while runner.meta(plain["id"])["status"] != "done" and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertEqual(runner.meta(plain["id"])["status"], "done", "a report without a model does not wait")
+            time.sleep(0.6)
+            meta = runner.meta(m["id"])
+            self.assertEqual(meta["status"], "queued")
+            self.assertIn("in use by", meta["waiting"])
+            queued = [it for it in work_queue.waiting("sv_dryrun") if it["kind"] == "report"]
+            self.assertEqual([it["id"] for it in queued], [m["id"]])
+            busy["on"] = False
+            while runner.meta(m["id"])["status"] in ("queued", "running") and time.time() < deadline:
+                time.sleep(0.1)
+        meta = runner.meta(m["id"])
+        self.assertEqual(meta["status"], "done", meta.get("error"))
+        self.assertIn("Dry run narrative", runner.html_path(m["id"]).read_text(encoding="utf-8"))
+        shutil.rmtree(runner.dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()
