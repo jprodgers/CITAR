@@ -149,7 +149,8 @@ jobs:
         run: cargo run --locked --package citar-refcheck --profile ci -- run --json refcheck-report.json
 
       - name: Ratchet
-        # No group's unexplained count may rise above refcheck/ratchet.json.
+        # No group's counts may rise above refcheck/ratchet.json, and the file must hold the current
+        # counts (a fall or a newly compared group is recorded with --update and committed).
         run: cargo run --locked --package citar-refcheck --profile ci -- ratchet
 
       - name: Keep the report

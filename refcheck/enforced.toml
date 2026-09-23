@@ -15,4 +15,7 @@
 #   group = "civs"                         # only these paths, in the path grammar of intended.toml,
 #   paths = ["civs[*].resource_supply.**", "civs[*].unit_supply"]   # matched against a difference's whole path
 #
+# A difference above an enforced path that hides it counts too: an answer module that failed, a missing or extra
+# civilization (or any value holding an enforced place), a `civs` list that could not be keyed by pid.
+#
 # No group has an answer module yet, so nothing is enforced.

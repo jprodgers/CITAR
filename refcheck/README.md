@@ -158,7 +158,7 @@ cargo refcheck run --fixtures refcheck/fixtures-mini --fixtures refcheck/fixture
 cargo refcheck explain tile_yields:owned[*].yields     # the differences at a place, and the Python functions
 cargo refcheck explain <intended-id>                   # what an entry explains, and what it just misses
 cargo refcheck suggest                                 # [[differences]] stubs for what is unexplained
-cargo refcheck ratchet [--update]                      # no group's unexplained count may rise
+cargo refcheck ratchet [--update]                      # no count may rise; --update records the rest
 cargo refcheck changelog                               # the entries as the CHANGELOG's rule fixes
 cargo refcheck list                                    # the fixtures, and each group's state
 ```
@@ -202,10 +202,15 @@ is ported as-is where it is fine and fixed where it is wrong (decision G), and e
 explains nothing in a run that covered it is stale: a warning, and an error with `--strict`.
 
 **Enforcement and the ratchet.** `enforced.toml` lists the groups, or paths within them, that are clean: an
-unexplained difference there fails the run. Each system package adds its group once its answer module is clean.
-Everywhere else, unexplained differences are reported and counted per group in `ratchet.json`, and
-`cargo refcheck ratchet` fails when a count rises; `--update` records falls and refuses rises. CI runs
-`cargo refcheck run` and `cargo refcheck ratchet` on the committed fixtures.
+unexplained difference there fails the run. So does a difference above an enforced path that hides it: an answer
+module that failed or panicked, a missing or extra element or subtree that holds an enforced place, or a keyed
+list that could not be keyed. Each system package adds its group once its answer module is clean. Everywhere
+else, unexplained differences are reported and counted per group in `ratchet.json`, with failed answer modules
+counted apart, since one failure replaces all of a fixture's differences. `cargo refcheck ratchet` fails when a
+count rises, and also when the file is out of date: a count fell, or a group is compared for the first time.
+`--update` records those (and refuses a rise), and the updated file is committed with the change, so the file
+always holds the current counts. CI runs `cargo refcheck run` and `cargo refcheck ratchet` on the committed
+fixtures.
 
 **Exit codes:** 0 clean; 1 unexplained differences where `enforced.toml` covers them (with `--strict`, any
 unexplained difference, or a selected group without an answer module); 2 a fixture or configuration file that
