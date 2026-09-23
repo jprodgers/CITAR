@@ -41,8 +41,8 @@ use crate::base::ids::{
     BaseUnitId, DifficultyId, EraId, Id, IdVec, NationId, PolicyId, SpeedId, UnitTypeId,
 };
 use crate::base::sets::{
-    BaseUnitSet, BeliefSet, BuildingSet, EraSet, ImprovementSet, NationSet, PlayerSet, PolicySet,
-    PromotionSet, ResourceSet, TechSet, TerrainSet,
+    BaseUnitSet, BeliefSet, BuildingSet, EraSet, ImprovementSet, MAX_SPECIALISTS, NationSet,
+    PlayerSet, PolicySet, PromotionSet, ResourceSet, TechSet, TerrainSet,
 };
 use crate::base::stats::StatMask;
 use crate::unique::compile::{self, SourceTexts};
@@ -348,7 +348,12 @@ fn check_sizes(raw: &RawRuleset, p: &mut Problems) {
         ("speeds", raw.speeds.len(), U8, "a SpeedId (u8)"),
         ("difficulties", raw.difficulties.len(), U8, "a DifficultyId (u8)"),
         ("victories", raw.victories.len(), U8, "a VictoryId (u8)"),
-        ("specialists", raw.specialists.len(), U8, "a SpecialistId (u8)"),
+        (
+            "specialists",
+            raw.specialists.len(),
+            MAX_SPECIALISTS,
+            "a city's specialist counts: raise sets::MAX_SPECIALISTS",
+        ),
         ("city_state_types", raw.city_state_types.len(), U8, "a CityStateTypeId (u8)"),
         ("religions", raw.religions.len(), U8, "a RulesReligionId (u8)"),
     ];

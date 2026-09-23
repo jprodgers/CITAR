@@ -284,6 +284,10 @@ pub const TAG_WORDS: usize = 4;
 /// Words in a [`NationSet`]: 128 nations, city-states and the barbarians included (83 shipped).
 pub const NATION_WORDS: usize = 2;
 
+/// Specialist kinds a city counts, one byte each (`City::specialists`): 8 (4 shipped). Not a
+/// set, but a table larger than it is refused the same way.
+pub const MAX_SPECIALISTS: usize = 8;
+
 /// Techs, such as a player's known techs.
 pub type TechSet = IdSet<TechId, TECH_WORDS>;
 /// Policy branches and policies.
