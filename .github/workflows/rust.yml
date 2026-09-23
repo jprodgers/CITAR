@@ -75,6 +75,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+      - name: Clippy, the engine alone in each feature set
+        # Cargo unifies features across the workspace, and testkit turns on legacy and test-ops,
+        # so the run above never compiles the engine the way it ships. `-p` builds it alone.
+        # Default is what citar-py wheels and the helper ship; + test-ops is citar-py's CI build;
+        # + legacy is refcheck and bench; no default features keeps embedded-ruleset optional.
+        run: |
+          set -eu
+          for features in "--no-default-features" "" "--features test-ops" "--features legacy" \
+                          "--features checks" "--features stats"; do
+            echo "::group::citar-engine ${features:-default features}"
+            cargo clippy -p citar-engine --all-targets --locked $features -- -D warnings
+            echo "::endgroup::"
+          done
+
       - name: xtask check
         # Dependency allow-list, version equality, layering, mutation access, generated files.
         run: cargo xtask check
@@ -112,5 +126,6 @@ jobs:
         run: cargo nextest run --workspace --all-features --locked --cargo-profile ci --profile ci
 
       - name: Doctests
-        # nextest does not run doctests.
-        run: cargo test --workspace --all-features --locked --doc
+        # nextest does not run doctests. The ci profile reuses the libraries the step above built,
+        # instead of compiling the workspace a second time in the dev profile.
+        run: cargo test --workspace --all-features --locked --doc --profile ci

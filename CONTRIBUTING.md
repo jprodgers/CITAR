@@ -114,7 +114,11 @@ cargo xtask check                                   # layering, dependencies, ve
 cargo fmt --all
 ```
 
-These are what CI runs, on Linux, Windows and macOS. The later tools join the loop as they land:
+These are what CI runs, on Linux, Windows and macOS. CI also lints the engine alone in each
+feature set, because the workspace build turns on features the shipped engine does not have
+(testkit enables `legacy` and `test-ops`). When you change what a feature gates, run
+`cargo clippy -p citar-engine --all-targets -- -D warnings` and again with
+`--no-default-features`. The later tools join the loop as they land:
 `cargo golden check` (determinism goldens), `cargo refcheck run --fixtures refcheck/fixtures-mini`
 (answers compared with the Python engine) and `cargo xtask perf` (benchmarks against their
 budgets).
