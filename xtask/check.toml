@@ -1,0 +1,12 @@
+# Switches for `cargo xtask check` that later packages turn on (DESIGN.md 3.4, rules 3 and 4).
+
+[pending]
+# Packages whose gates have passed. A stage still written as Pending("<package>") for one of
+# these fails the check: once a package is done, every stage it owns must be real.
+done = ["P1-00", "1a-01"]
+# From 1c-10 on, any Pending stage at all fails.
+forbid_all = false
+
+[not_ported]
+# From 1e-04 on, any NotPorted error fails.
+forbid = false

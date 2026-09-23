@@ -3,7 +3,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/citar-engine", "crates/citar-testkit", "crates/citar-refcheck", "crates/citar-bench"]
+members = ["crates/citar-engine", "crates/citar-testkit", "crates/citar-refcheck", "crates/citar-bench", "xtask"]
 exclude = ["crates/citar-engine/fuzz"]
 
 [workspace.package]

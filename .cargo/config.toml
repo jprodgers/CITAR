@@ -1,0 +1,9 @@
+# Aliases for the Rust dev loop (CONTRIBUTING.md, "Rust"). The tools build with the `ci` profile:
+# release speed without fat LTO, and with debug assertions on.
+#
+# The target directory is not set here: it must sit outside OneDrive on the laptop, one per
+# worktree, so it comes from CARGO_TARGET_DIR.
+[alias]
+xtask = "run --quiet --package xtask --"
+refcheck = "run --package citar-refcheck --profile ci --"
+golden = "run --package citar-testkit --bin golden --profile ci --"
