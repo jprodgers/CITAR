@@ -1,0 +1,21 @@
+# Deliberate differences between the Rust engine and the Python reference fixtures.
+#
+# The refcheck tool (crates/citar-refcheck) compares the Rust engine's answers with the answers recorded in
+# refcheck/fixtures-mini/ and refcheck/corpus/ (see refcheck/README.md). Any difference not listed here fails the
+# check; every entry here is a rule the Rust engine gets right on purpose where the Python engine did not, or a
+# redesign whose numbers legitimately differ. The list becomes the changelog's list of rule fixes, so the reason
+# is written for a reader of the changelog.
+#
+# One entry per line, as an inline table:
+#   group   the query group, as in a fixture's meta.query_order (tile_yields, city_stats, civs, buildable,
+#           movement, visible, combat_previews, deal_checks, tool_errors, views, briefing)
+#   path    where in that group's answer, with [*] for any list index and * for any object key,
+#           e.g. "cities[*].stats.final.Maintenance.gold"
+#   reason  one line: what Python did, and what Rust does instead
+#   cases   optional: fixture names it is limited to, as globs on "<case>/t<turn>" (default: every fixture)
+#
+# For example:
+#   { group = "city_stats", path = "cities[*].stats.total.gold", reason = "Python civ_stats_gold was never written" },
+
+differences = [
+]

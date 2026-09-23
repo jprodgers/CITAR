@@ -1,0 +1,212 @@
+# Reference checks for the Rust engine
+
+The Rust engine does not have to reproduce the Python engine's games bit for bit (plan §4): it has its own
+RNG, its own map generator and its own caches, and it fixes Python's bugs rather than porting them. Porting
+mistakes are caught in three ways instead:
+
+1. **Reference checks.** The same game states are loaded into both engines and asked the same deterministic
+   questions: tile yields, city stats, happiness, resources, costs, paths, visibility, combat odds, deal rules,
+   tool errors, views and briefings. None of these depends on the game's RNG, so a different answer is either a
+   porting mistake or a deliberate fix, and every deliberate fix is listed in `intended.toml` with its reason.
+2. **Statistical comparison.** Hundreds of all-bot games in each engine, compared on distributions (cities,
+   population, techs and score at turns 100/200/300, victory types, game length, wars and captures).
+3. **Rule tests**, rewritten against the scenario-ops API (Phase 1).
+
+This folder holds the data for the first two. The tools that make it are in `scripts/refcheck/`.
+
+| Path | What |
+|---|---|
+| `scripts/refcheck/record.py` | plays seeded all-bot games and writes the fixtures |
+| `scripts/refcheck/queries.py` | the questions, and the Python functions that answer them |
+| `scripts/refcheck/scenarios.py` | scenario setups for states ordinary games rarely reach |
+| `scripts/refcheck/baseline.py` | the statistical baseline: one JSON line per bot game |
+| `scripts/refcheck/summarize.py` | distribution tables, and the comparison of two baselines |
+| `scripts/refcheck/common.py` | the game loop, bots, hashing and file helpers they share |
+| `refcheck/fixtures-mini/` | the `--quick` fixtures (committed, under 1 MB) |
+| `refcheck/corpus/` | the `--full` fixtures (git-ignored, generated) |
+| `refcheck/baseline/` | baseline runs (git-ignored, generated) |
+| `refcheck/intended.toml` | the accepted differences, each with a reason |
+
+The tools use the Python engine directly and run their own game loop. They do not use `citar.sim`, `citar.lab`
+or `citar.balance`, so the fixtures don't change when those modules change.
+
+## Recording fixtures
+
+```
+python scripts/refcheck/record.py --quick            # 9 small states, about 15 s -> refcheck/fixtures-mini/
+python scripts/refcheck/record.py --quick --check    # re-record in a temporary folder and compare
+python scripts/refcheck/record.py --list --full      # the full corpus's cases and checkpoints
+python scripts/refcheck/record.py --full             # the corpus -> refcheck/corpus/ (hours; see below)
+python scripts/refcheck/record.py --full --only large --workers 4
+```
+
+The recorder re-runs itself with `PYTHONHASHSEED=0` and writes gzip files with no timestamps and no timings,
+so the same code produces the same bytes. `--check` therefore fails only when the Python engine's behaviour
+changes. If a change is deliberate, re-record with `--quick` and commit the new fixtures together with the
+change. Cases run in parallel processes (`--workers`, default: all cores but four).
+
+**The corpus (`--full`).** It covers:
+
+- every size from duel to large, on every map type (continents, pangaea, archipelago, inland_sea, fractal);
+- two seeds per combination (`--seeds`);
+- barbarians rotating through off, normal and raging, so every size meets all three;
+- checkpoints at turns 1, 25, 60, 120, 200 and 280 of a Quick game;
+- huge and gargantuan maps at turns 1 and 25 only;
+- two scenario cases, described below.
+
+That is 44 games and about 250 states. The large-map games take longest: about 15 to 20 minutes each on the
+laptop, so the whole corpus takes a few hours with several workers. A game that ends before a checkpoint
+simply has no file for it.
+
+**Scenario states.** `scenarios.world_war` edits a running game at its first checkpoint, using the scenario
+editor's operations and ordinary tool calls:
+
+- the player to move (A) and the next major civilization (B) are advanced to the Information era's threshold;
+- A founds a pantheon and a religion, and spreads the religion into B's capital;
+- each side has a spy in the other's capital;
+- A builds the United Nations, with a vote due next turn;
+- A declares war on B and captures a town B has just founded;
+- A drops an atomic bomb two tiles from B's capital and keeps a nuclear missile;
+- A and B each get armies in contact with the other.
+
+The bots then play on, and the case records the next checkpoints too. Each step's result or error is logged in
+the fixture's `meta.setup`. The quick fixtures include one such case (`scenario-duel-fractal`); the full corpus
+has two (small at turn 60, standard at turn 120).
+
+## The fixture format
+
+One file per checkpoint: `<case>/t<turn>.json.gz`.
+
+```
+{"meta":    {"case", "engine", "bot", "seed", "config", "turn", "current", "checkpoints",
+             "query_order", "side_effects", "query_crashes", "bot_errors", "setup", "python", "hash_seed"},
+ "state":   {...},
+ "queries": {"<group>": {"fn": {...}, ...answers...}, ...}}
+```
+
+**`state`** is `GameState.to_dict()`, the same format as the `state` of a save file. It is taken at the start
+of a round, when the first living major's turn has begun, after a load and a visibility refresh. Loading it and
+refreshing visibility again changes nothing. A few details of the format:
+
+- tiles are lists in `Tile._ORDER`;
+- a player's `explored` is base64;
+- units, cities and camps are keyed by their id as a string;
+- the RNG state is Python's Mersenne Twister state. It is not needed for any query.
+
+**`meta`** fields:
+
+- `engine` and `bot` are hashes of `citar/engine` plus the ruleset, and of `citar/bots/basic.py`, at recording
+  time. `engine` uses the same recipe as `citar.lab.engine_hash`.
+- `config` is the `Game.new` configuration: all seats are `bot`, the speed is Quick and the difficulty is
+  Prince. The bots are seeded with `seed * 101 + player id`.
+- `side_effects` names, for each query group, the top-level state fields that answering changed in Python.
+  Examples: `un`, which is created on first read, and a city's religious `pressures`, which are seeded on first
+  read. Rust need not copy these side effects; they are listed so that nobody is surprised by them.
+- `query_crashes` names the groups whose Python answer raised. Such a group's answer is
+  `{"crash", "trace"}` instead: the other groups are still recorded, and the crash is a Python bug worth
+  knowing about, not something to port.
+- `bot_errors` lists bot crashes so far in the game (the game goes on, as in the lab).
+
+**`queries`** hold one object per group, answered in the order of `meta.query_order`. Every group starts from
+its own fresh load of `state`, with cold caches, so an answer depends only on the state and on the order of
+calls within the group. Each group's `"fn"` names the Python functions (`module.function` in `citar.engine`)
+whose results are recorded. Wherever a sample was drawn, the chosen inputs are stored next to each answer, so
+the Rust side replays the inputs and never has to copy Python's sampling.
+
+| Group | Answers | Inputs recorded |
+|---|---|---|
+| `tile_yields` | `tiles.tile_stats` for every owned tile (as its city works it) and for 150 unowned tiles (seen by nobody, then by the first major) | `idx`, `pid`, `city` |
+| `city_stats` | the full `cities.city_stats` breakdown per city, plus food to grow, maintenance, health, strength, workable tiles, connection, current build, religion followers and incoming pressure | city `id` |
+| `civs` | per civilization: happiness, civ stats and their per-source map, gold per turn, resource supply (net and itemised), unique index (placeholder -> count), upkeep, supply, era, tech costs, policy cost, adoptable policies, score, military strength, victory progress; plus world era and UN numbers | `pid` |
+| `buildable` | per major's city: `cities.buildable_items`, production cost, turns, and `purchase_check` in gold and faith for each item | city |
+| `movement` | `reachable_this_turn` for up to 40 units with moves left; 40 seeded `find_path` calls with `path_turns` and step costs | `unit`, `from`, `to`, `moves` |
+| `visible` | `visibility.visible_tiles` per living major, sorted | `pid` |
+| `combat_previews` | every attacker (unit or city) with targets, up to 2 targets each and 300 fights: strengths, modifiers, damage at rolls 0, 0.5 and 1, and `combat.preview` or its refusal | attacker, `target` |
+| `deal_checks` | seeded proposals between majors who have met: the normalised proposal, whether each side's items pass `validate_items` (else the first refusal), `describe_items`, research-agreement cost, and a fresh default bot's valuation | `a`, `b`, `give`, `receive` |
+| `tool_errors` | the refusal text of about 30 invalid tool calls (a call that succeeds is recorded as `ok`) | `pid`, `tool`, `args` |
+| `views` | `views.client_view` for the first two living majors | `pid` |
+| `briefing` | `briefing.briefing` and `briefing.turn_progress` for the first two living majors | `pid` |
+
+## The workflow for the Rust port
+
+The refcheck crate (`crates/citar-refcheck`, Phase 1) does the following for each fixture:
+
+1. **Load the state.** Deserialise `state` into the Rust engine's state. The loader has to accept this format,
+   since it is also the format of old saves.
+2. **Answer the same questions.** For each group in `meta.query_order`, start from a fresh load. Take the inputs
+   from the recorded answers and ask the Rust engine the same thing, in the same order.
+3. **Diff.** Compare the Rust answer with the recorded one as JSON values:
+   - object key order is irrelevant;
+   - integers and strings must be equal;
+   - floats may differ by rounding. Python sums in its own order, so use a tolerance of about 1e-6, relative or
+     absolute;
+   - lists that are sets in meaning must be compared as multisets. These are `detailed_resources`, the lists
+     in `buildable.items`, `adoptable_policies` and `workable`. Every other list keeps its order.
+4. **Explain every difference.** A difference is one of two things:
+   - a porting mistake, which gets fixed;
+   - a deliberate fix or redesign. It goes in `intended.toml`, with the group, the path in the answer and a
+     one-line reason written for the changelog.
+
+   Text answers (tool errors, briefings) follow the same rule. Model-facing text is ported as-is where it is
+   fine and fixed where it is wrong (decision G), and each fix is listed.
+
+The refcheck is clean when every difference is either fixed or listed. That is Phase 1's exit condition.
+
+Start with `refcheck/fixtures-mini/` (quick, committed, and runnable in CI), then run the whole corpus. The
+`fn` names tell you which Python function to read when an answer is not obvious.
+
+## The statistical baseline
+
+```
+python scripts/refcheck/baseline.py --smoke                     # 2 short duel games, a few seconds
+python scripts/refcheck/baseline.py --games 300                 # small maps, the five map types in turn
+python scripts/refcheck/baseline.py --games 150 --sizes duel,standard --name python-mixed
+python scripts/refcheck/summarize.py refcheck/baseline/python-<hash>.jsonl
+python scripts/refcheck/summarize.py refcheck/baseline/python-<hash>.jsonl refcheck/baseline/rust-<hash>.jsonl
+```
+
+**How a run is made.** Game *i* uses seed `--seed + i` and the *i*-th combination of `--sizes`, `--maps` and
+`--barbarians`. A run is resumable: games already in the output file are skipped, and a crashed game is played
+again. The default output name carries the engine hash, so results from different code never mix.
+
+**What a line holds.**
+
+- The game: seed, size, map type, barbarians, speed, turns played, winner and victory type, bot errors, and
+  seconds and CPU seconds.
+- Per civilization: nation, aggression, whether it is alive, the turn it was eliminated, its final score, and
+  `at`. `at` holds its stats at turns 100, 200 and 300 and at the end: cities, population, techs, score,
+  military, era, policies and land, plus running totals of wars declared (all, on majors, on others), cities
+  captured and cities lost.
+
+The stats are the engine's own end-of-turn records (`GameState.stats`), so the Rust runner must write the same
+lines from its own records.
+
+**Comparing two baselines.** `summarize.py` prints, per file:
+
+- game length;
+- victory shares;
+- wars, captures and eliminations per game;
+- the distribution of each measure at each checkpoint: n, mean, sd and percentiles.
+
+Given two files, it also prints each row's means, their difference and `d`, the difference in pooled standard
+deviations:
+
+- |d| of 0.2 or more is marked `*`;
+- |d| of 0.5 or more is marked `**`.
+
+This is a sanity check, not a gate: a big gap is either explained (a deliberate change in behaviour) or fixed.
+Compare like with like: the same sizes, maps, barbarians and speed. With a few hundred games per side, `d` below
+0.2 is well within what a different map generator produces.
+
+## Caveats
+
+- **Answers depend on the Python engine at recording time.** Re-record when it changes on purpose;
+  `record.py --quick --check` says when that is needed. Once the Python engine is archived (Phase 2), the
+  fixtures are the frozen reference.
+- **Platforms.** Python's floats are IEEE doubles, but `**` and `math` call the platform's C library, which can
+  differ in the last bit between Windows, macOS and Linux. So `--check` on another platform could, in rare
+  cases, flag a rounding difference that is not a real change. The committed fixtures were recorded on
+  Windows.
+- **Deal valuations.** The `bot_value` in `deal_checks` comes from a fresh `BasicBot` with default parameters
+  and no memory of past turns, so its war-plan terms are always empty. It is a reference for the Phase 2 bot
+  port, not for the engine.

@@ -1,0 +1,4 @@
+# Made by scripts/refcheck (see README.md): the full fixture corpus and baseline runs are regenerated, never
+# committed. Only fixtures-mini/ is.
+corpus/
+baseline/
