@@ -97,12 +97,17 @@ impl Leaf for TileLeaf {
         }
     }
 
-    /// The viewer's techs for its resources, the diplomatic state for friend and enemy land.
+    /// The viewer's techs for its resources, and the war state for enemy land. Friendly and
+    /// foreign land read what [`FilterFacts::tile_friendly_to`] lists: met, open borders and the
+    /// turn they end, a city-state's influence, and the viewer's own uniques. No class stands for
+    /// influence or for a civilization's uniques yet, so they read every class, which is always
+    /// correct (DESIGN.md 5.8) until package 1a-07 gives those their classes.
     fn deps(&self) -> CondDeps {
         match self {
             Self::Owner(c) => c.deps(),
             Self::AnyResource | Self::Resource(_) => CondDeps::TECHS,
-            Self::ForeignLand | Self::FriendlyLand | Self::EnemyLand => CondDeps::WAR,
+            Self::EnemyLand => CondDeps::WAR,
+            Self::ForeignLand | Self::FriendlyLand => CondDeps::all(),
             _ => CondDeps::empty(),
         }
     }

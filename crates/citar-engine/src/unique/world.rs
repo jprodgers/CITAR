@@ -58,10 +58,13 @@ pub trait FilterFacts: TileFacts {
     /// Whether `a` has met `b`.
     fn has_met(&self, a: PlayerId, b: PlayerId) -> bool;
 
-    /// Whether `a` counts `b` a friend (`Game.is_friend`).
+    /// Whether `a` counts `b` a friend (`Game.is_friend`, `game.py:677-686`): a friendship
+    /// declared until a turn not yet past, or, with a city-state, its influence at the friend
+    /// level or above.
     fn is_friend(&self, a: PlayerId, b: PlayerId) -> bool;
 
-    /// Whether `a` has open borders with `b` (`Game.has_open_borders`).
+    /// Whether `a` lets `b`'s units through its territory (`Game.has_open_borders`,
+    /// `game.py:705-708`): an agreement until a turn not yet past.
     fn has_open_borders(&self, a: PlayerId, b: PlayerId) -> bool;
 
     // ---- Tiles --------------------------------------------------------------------------------
@@ -69,8 +72,12 @@ pub trait FilterFacts: TileFacts {
     /// The tile's owner.
     fn tile_owner(&self, t: TileIdx) -> Option<PlayerId>;
 
-    /// Whether the tile is friendly territory to `p`: its own, or a friend's it may enter
-    /// (`tiles.py:151-165`).
+    /// Whether the tile is friendly territory to `p` (`tiles.py:151-165`): its own, or the
+    /// territory of a civilization `p` has met that is either a city-state whose influence with
+    /// `p` is at the friend level or above (or any city-state, when `p` has the unique
+    /// `City-State territory always counts as friendly territory`), or one that gives `p` open
+    /// borders until a turn not yet past. Its answer changes with the tile's owner, met, open
+    /// borders, the turn, influence and `p`'s uniques.
     fn tile_friendly_to(&self, t: TileIdx, p: PlayerId) -> bool;
 
     /// The tile's resource, visible or not.
