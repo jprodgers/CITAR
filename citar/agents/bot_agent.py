@@ -39,12 +39,14 @@ class BotAgent:
             if g.s.current != pid:
                 return
             self.bot.play_turn(g, pid, end_turn=False)
-        # give counterparts a chance to answer negotiations we opened
+        # give counterparts a chance to answer negotiations we opened; what is still open after this the driver
+        # closes before it ends the turn
         deadline = time.time() + 90
         while time.time() < deadline:
             with session.lock:
                 g = session.game
-                mine = [n for n in g.s.negotiations if n["status"] == "open" and pid in (n["initiator"], n["responder"])]
+                mine = [n for n in g.s.negotiations if n["status"] == "open" and pid in (n["initiator"], n["responder"])
+                        and self._owns(n)]
                 if not mine:
                     break
                 for n in mine:
@@ -58,8 +60,15 @@ class BotAgent:
                                                "message": "We have nothing further to discuss."})
                 session.cond.wait(timeout=1.0)
 
+    def _owns(self, n: dict) -> bool:
+        """Whether the bot answers this negotiation itself, rather than the language model its seat hands it to."""
+        owns = getattr(self.bot, "owns_negotiation", None)       # the archived frozen bots predate the switch
+        return owns is None or owns(n)
+
     def respond_negotiation(self, session, pid: int, nid: int):
-        """Answer a negotiation as the bot."""
+        """Answer a negotiation as the bot, unless it belongs to the seat's language model."""
+        from ..engine.diplomacy import get_negotiation
         self._bind(session, pid)
         with session.lock:
-            self.bot.respond(session.game, pid, nid)
+            if self._owns(get_negotiation(session.game, nid)):
+                self.bot.respond(session.game, pid, nid)

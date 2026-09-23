@@ -31,10 +31,30 @@ ITEM_TYPES = {
 }
 MUTUAL = {"peace_treaty", "declaration_of_friendship", "research_agreement", "defensive_pact"}
 
+# The kinds of diplomatic decision a seat can hand to a language model while a bot plays the rest (hybrid seats). A
+# deal item belongs to exactly one; un and captured_cities are the engine's automatic decisions (Player.auto), and
+# denounce and chat have no bot logic behind them.
+CATEGORIES = ("trades", "agreements", "peace", "war", "denounce", "un", "city_states", "espionage", "captured_cities",
+              "chat")
+ITEM_CATEGORY = {"gold": "trades", "gold_per_turn": "trades", "resource": "trades", "tech": "trades",
+                 "share_map": "trades", "city": "trades", "embassy": "agreements", "open_borders": "agreements",
+                 "declaration_of_friendship": "agreements", "research_agreement": "agreements",
+                 "defensive_pact": "agreements", "peace_treaty": "peace", "declare_war": "war"}
+
 # What respond_negotiation accepts. The aliases are words people and models reach for; the history records the
 # canonical name, so everything that reads it has four actions to handle rather than seven.
 RESPONSE_ACTIONS = ("accept", "counter", "reject", "reply")
 ACTION_ALIASES = {"decline": "reject", "withdraw": "reject", "end": "reject"}
+
+
+def item_category(item: dict) -> str:
+    """The diplomacy category a deal item belongs to."""
+    return ITEM_CATEGORY[item["type"]]
+
+
+def proposal_categories(proposal: Optional[dict]) -> set:
+    """Every category the items of a proposal touch, on both sides."""
+    return {ITEM_CATEGORY[it["type"]] for items in (proposal or {}).values() for it in items}
 
 
 def new_relation() -> dict:
