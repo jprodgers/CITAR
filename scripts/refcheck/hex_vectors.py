@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from citar.engine.hexmap import HexGrid  # noqa: E402
+from citar.engine.hexmap import HexGrid
 
 OUT = ROOT / "crates" / "citar-testkit" / "data" / "hex_vectors.json"
 SIZES = (("duel", 44, 28), ("standard", 76, 48), ("gargantuan", 160, 100))
