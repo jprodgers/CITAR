@@ -17,6 +17,47 @@ CITY_STATE_COLORS = {"Cultured": "#a58cff", "Maritime": "#4fd68a", "Mercantile":
                      "Religious": "#f5f5f5"}
 BARBARIAN_COLOR = "#2b2b2b"
 
+# Player.controller is who drives a civilization's turns. People and models play as a human would; the rest are run
+# by the engine's bots, which is also who manages their cities.
+HUMANLIKE_CONTROLLERS = ("human", "llm", "mcp")
+BOT_MANAGED = ("bot", "hybrid", "minor", "barbarian")
+HANDICAPS = ("human", "ai")
+AUTO_DECISIONS = ("un_vote", "conquest", "free_picks")
+
+
+def default_handicap(controller: str) -> str:
+    """The difficulty numbers a controller gets unless its seat says otherwise.
+
+    A human's for people and models - giving a model the AI's bonuses would make a benchmark against the bot
+    meaningless - and the AI's for everything else, hybrid seats included.
+    """
+    return "human" if controller in HUMANLIKE_CONTROLLERS else "ai"
+
+
+def default_auto(controller: str) -> dict:
+    """The decisions the engine makes for a controller unless its seat says otherwise: none for people and models,
+    who decide for themselves, and all of them for the bots."""
+    on = controller not in HUMANLIKE_CONTROLLERS
+    return dict.fromkeys(AUTO_DECISIONS, on)
+
+
+def seat_overrides(handicap: Optional[str] = None, auto: Optional[dict] = None) -> dict:
+    """A seat's explicit handicap and auto-decision settings, checked, in the form Player.overrides keeps.
+
+    Raises ValueError naming the rule, because these arrive from lobby and scenario configurations.
+    """
+    out: dict = {}
+    if handicap not in (None, ""):
+        if handicap not in HANDICAPS:
+            raise ValueError(f"handicap must be 'human' or 'ai', not {handicap!r}.")
+        out["handicap"] = handicap
+    if auto:
+        if not isinstance(auto, dict) or any(k not in AUTO_DECISIONS for k in auto):
+            raise ValueError(f"auto must be an object whose keys are among {', '.join(AUTO_DECISIONS)}, e.g. "
+                             f"{{\"un_vote\": false}}.")
+        out["auto"] = {k: bool(v) for k, v in auto.items()}
+    return out
+
 
 @dataclass
 class Tile:
@@ -153,7 +194,12 @@ class Player:
     color: str
     nation: str = "BenchmarkCiv"        # ruleset nation (bonuses)
     kind: str = "major"                 # major | city_state | barbarian
-    controller: str = "human"           # human | llm | mcp | bot | minor | barbarian (for difficulty handicaps)
+    controller: str = "human"           # who drives the turns: human | llm | mcp | bot | hybrid | minor | barbarian
+    # "human" | "ai": which difficulty numbers apply and which of UnCiv's "Human player" / "AI player" filters match
+    handicap: str = ""
+    # decisions the engine takes for this civ: un_vote, conquest (annex/puppet/raze), free_picks (techs, great people)
+    auto: dict = field(default_factory=dict)
+    overrides: dict = field(default_factory=dict)   # handicap/auto set explicitly; they outlast a controller change
     difficulty: Optional[str] = None    # this seat's difficulty (None = the game difficulty)
     leader: str = ""
     alive: bool = True
@@ -220,6 +266,30 @@ class Player:
     tribute_turn: dict = field(default_factory=dict)     # major id (str) -> last turn bullied
     ruins_rewards: list = field(default_factory=list)
     flags: dict = field(default_factory=dict)            # misc countdowns
+
+    def __post_init__(self):
+        # A new player, or one from a save made before handicap and auto existed, takes them from its controller and
+        # any explicit setting; one loaded from a newer save keeps what it had.
+        if self.handicap not in HANDICAPS:
+            self.handicap = self.overrides.get("handicap") or default_handicap(self.controller)
+        self.auto = {**default_auto(self.controller), **self.overrides.get("auto", {}),
+                     **{k: bool(v) for k, v in self.auto.items() if k in AUTO_DECISIONS}}
+
+    def set_controller(self, controller: str, handicap: Optional[str] = None, auto: Optional[dict] = None):
+        """Hand the civilization to a different turn driver.
+
+        Handicap and auto-decisions follow the new controller, except the ones its seat set explicitly: those are
+        kept, and ``handicap``/``auto`` here set more of them (``auto`` may name only some decisions). Raises
+        ValueError for a setting that is not allowed.
+        """
+        new = seat_overrides(handicap, auto)
+        if "handicap" in new:
+            self.overrides["handicap"] = new["handicap"]
+        if "auto" in new:
+            self.overrides["auto"] = {**self.overrides.get("auto", {}), **new["auto"]}
+        self.controller = controller
+        self.handicap = self.overrides.get("handicap") or default_handicap(controller)
+        self.auto = {**default_auto(controller), **self.overrides.get("auto", {})}
 
     def to_dict(self) -> dict:
         """The form written to a save."""

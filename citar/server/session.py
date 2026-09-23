@@ -33,7 +33,7 @@ class Seat:
     agent join a game with no account at all.
     """
     player: int
-    type: str = "bot"                 # human | mcp | llm | bot
+    type: str = "bot"                 # human | mcp | llm | bot (see SEAT_TYPES)
     token: str = field(default_factory=lambda: secrets.token_urlsafe(12))
     name: str = ""
     llm: dict = field(default_factory=dict)   # provider, model, base_url, api_key_env, tool_mode, persona, ...
@@ -334,6 +334,31 @@ class GameSession:
         agent = self.agents.pop(pid, None)
         if agent is not None and hasattr(agent, "cancel"):
             agent.cancel()
+
+    def update_seat(self, pid: int, type: Optional[str] = None, llm: Optional[dict] = None,
+                    bot: Optional[dict] = None, name: Optional[str] = None):
+        """Change who controls a seat, or how, and abort a turn in progress so the new controller takes over.
+
+        A new seat type is also the civilization's new engine controller, so its difficulty numbers and the
+        decisions the engine takes for it follow the change (except any its seat set explicitly). Raises
+        ValueError for an unknown seat type.
+        """
+        with self.lock:
+            seat = self.seats[pid]
+            if type:
+                if type not in SEAT_TYPES:
+                    raise ValueError(f"Unknown seat type '{type}' (one of {', '.join(SEAT_TYPES)}).")
+                seat.type = type
+                self.game.player(pid).set_controller(type)
+                self.game.invalidate()          # cached yields and costs depend on the handicap
+            if llm is not None:
+                seat.llm = llm
+            if bot is not None:
+                seat.bot = bot
+            if name is not None:
+                seat.name = name
+            self.cancel_agent(pid)
+            self.cond.notify_all()
 
     def set_paused(self, paused: bool):
         """Pause or resume the AI players from the game screen.
@@ -812,6 +837,7 @@ class SessionManager:
                 raise ValueError(f"Unknown seat type '{stype}'")
             players.append({"name": sc.get("civ_name") or None, "color": sc.get("color"),
                             "leader": sc.get("leader"), "nation": sc.get("nation"), "controller": stype,
+                            "handicap": sc.get("handicap"), "auto": sc.get("auto"),
                             "difficulty": sc.get("difficulty") or None})
             seats.append(Seat(player=i, type=stype, name=sc.get("name") or "", llm=sc.get("llm") or {},
                               bot=_pin_best(sc.get("bot") or {})))
@@ -862,7 +888,7 @@ class SessionManager:
                 stype = "human"
             if stype not in SEAT_TYPES:
                 raise ValueError(f"Unknown seat type '{stype}'")
-            p.controller = stype
+            p.set_controller(stype, sc.get("handicap"), sc.get("auto"))
             if sc.get("difficulty"):
                 p.difficulty = g.rules.resolve("difficulty", sc["difficulty"]) or p.difficulty
             seats.append(Seat(player=p.id, type=stype, name=sc.get("name") or sc.get("label") or "",

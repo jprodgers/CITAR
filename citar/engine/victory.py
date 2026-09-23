@@ -172,7 +172,7 @@ def _ai_vote(g, p):
     from .diplomacy import opinion
     if p.kind == "city_state":
         return p.ally
-    if p.kind == "major" and p.controller in ("human", "llm", "mcp"):
+    if p.kind == "major" and not p.auto.get("un_vote"):
         return None
     known = [q.id for q in g.majors() if q.id != p.id and g.has_met(p.id, q.id)]
     if not known:
@@ -189,8 +189,8 @@ def hold_vote(g: "Game"):
     un = _un(g)
     for p in _voters(g):
         if str(p.id) not in un["votes"]:
-            if p.kind == "major" and p.controller in ("human", "llm", "mcp"):
-                un["votes"][str(p.id)] = None     # did not vote: abstain
+            if p.kind == "major" and not p.auto.get("un_vote"):
+                un["votes"][str(p.id)] = None     # decides for itself and did not vote: abstain
             else:
                 un["votes"][str(p.id)] = _ai_vote(g, p)
     owner = un_owner(g)

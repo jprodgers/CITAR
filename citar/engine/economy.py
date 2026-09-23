@@ -20,8 +20,9 @@ _TEMP_CACHE: dict[str, Unique] = {}
 # Unique sources
 # ---------------------------------------------------------------------------------------------------------------
 def is_humanlike(g: "Game", pid: int) -> bool:
-    """UnCiv's isHuman(): difficulty applies to these seats; scripted bots get the AI modifiers instead."""
-    return g.player(pid).controller in ("human", "llm", "mcp")
+    """UnCiv's isHuman() for difficulty: seats with a human handicap get its player values, the others the AI
+    modifiers. The seat's handicap decides, not who drives its turns (see Player.handicap)."""
+    return g.player(pid).handicap == "human"
 
 
 def seat_difficulty(g: "Game", pid: Optional[int] = None) -> dict:

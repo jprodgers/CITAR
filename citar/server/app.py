@@ -551,20 +551,11 @@ def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     if not 0 <= pid < len(s.seats):
         raise HTTPException(404, "No such seat.")
-    with s.lock:
-        seat = s.seats[pid]
-        if body.type:
-            if body.type not in ("human", "mcp", "llm", "bot"):
-                raise HTTPException(400, "Invalid seat type.")
-            seat.type = body.type
-        if body.llm is not None:
-            seat.llm = body.llm
-        if body.bot is not None:
-            seat.bot = body.bot
-        if body.name is not None:
-            seat.name = body.name
-        s.cancel_agent(pid)  # aborts a turn in progress so the new controller takes over
-        s.cond.notify_all()
+    try:
+        # the session keeps the civilization's engine controller in step with the seat type
+        s.update_seat(pid, type=body.type, llm=body.llm, bot=body.bot, name=body.name)
+    except ValueError:
+        raise HTTPException(400, "Invalid seat type.")
     s.autosave(force=True)
     return s.info(include_tokens=True)
 

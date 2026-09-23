@@ -11,7 +11,7 @@ from typing import Optional, TYPE_CHECKING
 
 from . import unique_types as U
 from .game import ActionError
-from .state import City
+from .state import City, BOT_MANAGED
 from .uniques import (Ctx, Unique, UniqueMap, applies, city_matches, building_matches, base_unit_matches,
                       tile_matches, tile_terrain_matches, STAT_KEY)
 from . import tiles as T
@@ -753,7 +753,7 @@ def rank_stats_for_work(g: "Game", city: City, stats: dict, specialist: bool, su
         ng = max(0.0, ng)
         if hap < -8:
             fmod = 0.0
-        elif g.player(city.owner).controller not in ("human", "llm", "mcp"):
+        elif g.player(city.owner).controller in BOT_MANAGED:        # the bots' citizen weighting
             fmod = 1.5
         elif city.focus == "balanced":
             fmod = 2.0 if city.pop < 5 else (0.75 if surplus_food > food_to_next_pop(g, city) / (10 * g.speed["modifier"]) else 1.0)
@@ -2230,7 +2230,7 @@ def start_turn(g: "Game", city: City):
         if picked and not city.puppet:
             g.emit("city_auto_production", f"{city.name} started {picked} (automatic production).", [city.owner],
                    idx=city.idx)
-        elif not picked and g.is_humanlike(city.owner):      # bots choose production during their own turn
+        elif not picked and g.player(city.owner).controller not in BOT_MANAGED:   # bots choose during their turn
             g.emit("city_idle", f"{city.name} has nothing to produce.", [city.owner], idx=city.idx)
     if not city.demanded_resource and city.demand_countdown <= 0 and city.wltkd <= 0:
         _set_demand_cooldown(g, city, True)
