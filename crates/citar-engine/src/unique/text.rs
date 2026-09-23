@@ -101,36 +101,6 @@ pub fn placeholder(text: &str) -> (String, Vec<&str>) {
     (out, params)
 }
 
-/// The placeholder, the parameters and the modifiers of a whole unique text: what Python's
-/// `Unique.__init__` computed first (`uniques.py:120-122`).
-#[must_use]
-pub fn parts(text: &str) -> Parts {
-    let (main, mods) = split_modifiers(text);
-    let (placeholder, params) = placeholder(&main);
-    let params = params.into_iter().map(str::to_owned).collect();
-    Parts { placeholder, params, modifiers: mods.into_iter().map(str::to_owned).collect() }
-}
-
-/// A unique text taken apart by [`parts`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Parts {
-    /// The main text with each top-level parameter written `[]`: the unique's type.
-    pub placeholder: String,
-    /// The parameters of the main text, in order.
-    pub params: Vec<String>,
-    /// The modifiers, the text inside each `<...>`, in order.
-    pub modifiers: Vec<String>,
-}
-
-impl Parts {
-    /// The first parameter that reads as stats, as Python's `Unique.stats` found it
-    /// (`uniques.py:133-137`).
-    #[must_use]
-    pub fn stats(&self) -> Option<Stats> {
-        self.params.iter().find_map(|p| parse_stats(p))
-    }
-}
-
 /// Reads `+1 Food, +2 Gold` as stats; `None` unless every comma-separated part is a number, one
 /// space, and a stat name as UnCiv writes it (`uniques.py:79-90`).
 ///
@@ -193,13 +163,18 @@ mod tests {
     }
 
     #[test]
-    fn parts_of_a_whole_unique() {
-        let p =
-            parts("[+1 Production] from [Hill] tiles [in this city] <after discovering [Mining]>");
-        assert_eq!(p.placeholder, "[] from [] tiles []");
-        assert_eq!(p.params, ["+1 Production", "Hill", "in this city"]);
-        assert_eq!(p.modifiers, ["after discovering [Mining]"]);
-        assert_eq!(p.stats(), Some(Stats::single(Stat::Production, 1.0)));
+    fn a_whole_unique_splits_then_takes_its_placeholder() {
+        // The compiler's order: modifiers off first, then the main text's placeholder.
+        let (main, mods) = split_modifiers(
+            "[+1 Production] from [Hill] tiles [in this city] <after discovering [Mining]>",
+        );
+        assert_eq!(mods, ["after discovering [Mining]"]);
+        let (ph, params) = placeholder(&main);
+        assert_eq!(ph, "[] from [] tiles []");
+        assert_eq!(params, ["+1 Production", "Hill", "in this city"]);
+        assert_eq!(parse_stats(params[0]), Some(Stats::single(Stat::Production, 1.0)));
+        // The main text is trimmed, so a stray space does not change the placeholder.
+        assert_eq!(split_modifiers("Aircraft ").0, "Aircraft");
     }
 
     #[test]
