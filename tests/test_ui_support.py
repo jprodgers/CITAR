@@ -273,6 +273,16 @@ class SaveListTests(unittest.TestCase):
 
 
 class PathPreviewTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # The app reads the accounts database on every request. Run on its own, this module would otherwise meet an
+        # empty one; the test package has already pointed CITAR_DB_URL at a temporary file, as the API modules do.
+        import os
+        from citar import db, settings
+        settings.reset()
+        db.configure(os.environ["CITAR_DB_URL"])
+        db.create_all()
+
     def test_path_endpoint_returns_route_and_turns(self):
         from fastapi.testclient import TestClient
         from citar.server import app as appmod
