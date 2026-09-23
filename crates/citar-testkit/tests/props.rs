@@ -7,7 +7,8 @@
 //!
 //! Package 1a-06 adds (its gate 3): folding a filter tree keeps its answer in every world, on
 //! random trees whose leaves merge (as a unit's base-unit sets do) or do not (as a tile's
-//! terrains do under `All`).
+//! terrains do under `All`). That checks folding itself; whether the engine's own leaves merge
+//! exactly is checked against mock worlds in `tests/engine/filters.rs`.
 //!
 //! The number of cases follows `PROPTEST_CASES` (proptest's default is 256).
 

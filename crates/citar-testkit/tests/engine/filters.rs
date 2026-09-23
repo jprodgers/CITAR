@@ -5,7 +5,9 @@
 //!   `scripts/refcheck/filters.py`), and every static filter the loaded ruleset holds equals its row;
 //! - gate 2: every dynamic leaf, and compiled filters of the ruleset, answer right against a mock
 //!   world;
-//! - gate 3 (constant folding keeps the meaning of random trees) is in `tests/props.rs`;
+//! - gate 3: constant folding keeps the meaning of random trees, on abstract leaves in
+//!   `tests/props.rs` and here on the engine's own: every merge a leaf allows is exact, and random
+//!   trees answer the same folded as not, on random mock worlds;
 //! - gate 4: a region conditional on an effect is refused;
 //! - gate 5: every map-generation unique lands in a table (the tables' snapshot is the golden
 //!   `gen.json`, checked in `tests/determinism.rs`);
@@ -16,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use citar_engine::base::ids::{
-    BaseUnitId, BuildingId, CityId, ImprovementId, NationId, PlayerId, PolicyId, PromotionId,
+    BaseUnitId, BuildingId, CityId, Id, ImprovementId, NationId, PlayerId, PolicyId, PromotionId,
     ReligionId, ResourceId, TerrainId, TileIdx, UnitId,
 };
 use citar_engine::base::sets::{BitSet, BuildingSet, PromotionSet, ResourceSet, TerrainSet};
@@ -30,6 +32,7 @@ use citar_engine::unique::filter::{
 use citar_engine::unique::{
     CondDeps, FilterFacts, Role, Source, StaticDomain, TileFacts, UniqueType,
 };
+use proptest::prelude::*;
 use serde_json::{Value, json};
 
 use super::rules::{load_edited, shipped};
@@ -212,7 +215,7 @@ struct City {
 }
 
 /// A world of plain facts: each question answered from a table.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Mock {
     tiles: Vec<Tile>,
     civs: Vec<Civ>,
@@ -846,6 +849,420 @@ fn the_ruleset_filters_are_compiled_and_reachable() {
         if let StartBias::Prefer(x) | StartBias::Avoid(x) = *b {
             assert!(f.tile(x.id()).terrain_level, "{}", t.tile_filter(x.id()));
         }
+    }
+}
+
+// ---- Gate 3 on the real leaves: folding keeps a compiled filter's meaning ----------------------
+//
+// `tests/props.rs` checks folding's algorithm on leaves that merge exactly by construction. Here
+// the leaves are the engine's own, whose `and` and `or` say which merges are exact (a tile's
+// terrains merge under `Any` only, a unit's base unit both ways, two kinds of civilization to
+// none): random trees over them, on random worlds, answer the same folded as not. Every set
+// draws on the first four objects of its domain, as do the worlds, so that sets overlap and hit.
+
+/// The objects of a four-bit mask: ids 0 to 3 of the domain.
+fn pick<I: Id, S: FromIterator<I>>(mask: u8) -> S {
+    (0..4).filter(|i| mask & (1 << i) != 0).filter_map(I::from_index).collect()
+}
+
+fn one<I: Id>(i: u8) -> I {
+    I::from_index(usize::from(i)).expect("an id")
+}
+
+const KINDS: [NationKind; 3] = [NationKind::Major, NationKind::CityState, NationKind::Barbarian];
+
+/// The pairs of players (0 to 3) a sixteen-bit mask names.
+fn pairs(mask: u16) -> BTreeSet<(u8, u8)> {
+    (0..16u8).filter(|i| mask & (1 << i) != 0).map(|i| (i / 4, i % 4)).collect()
+}
+
+fn arb_civ() -> impl Strategy<Value = Civ> {
+    (0..3usize, 0..4u8, any::<bool>(), proptest::option::of(0..3u8), 0..16u8).prop_map(
+        |(kind, nation, human, religion, sees)| Civ {
+            nation: one(nation),
+            kind: KINDS[kind],
+            human,
+            religion: religion.map(one),
+            sees: pick(sees),
+        },
+    )
+}
+
+fn arb_tile() -> impl Strategy<Value = Tile> {
+    let place = proptest::option::of(0..4u8);
+    (0..16u8, any::<[bool; 5]>(), place.clone(), 0..16u8, place.clone(), place.clone(), place)
+        .prop_map(
+            |(
+                terrains,
+                [river, fresh, coast, pillaged, worked],
+                owner,
+                friendly,
+                resource,
+                improvement,
+                route,
+            )| Tile {
+                terrains: pick(terrains),
+                river,
+                fresh,
+                coast,
+                owner: owner.map(PlayerId),
+                friendly_to: (0..4u8).filter(|i| friendly & (1 << i) != 0).collect(),
+                resource: resource.map(one),
+                improvement: improvement.map(one),
+                route: route.map(one),
+                pillaged,
+                worked,
+            },
+        )
+}
+
+fn arb_unit() -> impl Strategy<Value = Unit> {
+    (0..4u8, 0..4u8, 0..16u8, any::<[bool; 3]>()).prop_map(
+        |(owner, base, promotions, [wounded, embarked, set_up])| Unit {
+            owner: PlayerId(owner),
+            base: one(base),
+            promotions: pick(promotions),
+            wounded,
+            embarked,
+            set_up,
+        },
+    )
+}
+
+fn arb_city() -> impl Strategy<Value = City> {
+    (0..4u8, 0..4u8, 0..16u8, any::<[bool; 10]>(), proptest::option::of(0..3u8)).prop_map(
+        |(owner, founder, buildings, b, religion)| City {
+            owner: PlayerId(owner),
+            founder: PlayerId(founder),
+            buildings: pick(buildings),
+            capital: b[0],
+            coastal: b[1],
+            annex: b[2],
+            puppet: b[3],
+            connected: b[4],
+            garrisoned: b[5],
+            resisting: b[6],
+            razing: b[7],
+            holy: b[8],
+            religion: religion.map(one),
+        },
+    )
+}
+
+/// A world of four civilizations, eight tiles, and six units and six cities (ids 1 to 6).
+fn arb_world() -> impl Strategy<Value = Mock> {
+    (
+        proptest::collection::vec(arb_civ(), 4),
+        proptest::collection::vec(arb_tile(), 8),
+        proptest::collection::vec(arb_unit(), 6),
+        proptest::collection::vec(arb_city(), 6),
+        any::<[u16; 4]>(),
+        any::<[(bool, bool); 3]>(),
+    )
+        .prop_map(|(civs, tiles, units, cities, [war, met, friends, open], religions)| Mock {
+            tiles,
+            civs,
+            war: pairs(war),
+            met: pairs(met),
+            friends: pairs(friends),
+            open: pairs(open),
+            units: (1..).zip(units).collect(),
+            cities: (1..).zip(cities).collect(),
+            religions: religions.to_vec(),
+        })
+}
+
+// A leaf is drawn by its number, so that a pair can share its variant. The leaves that merge
+// (sets, owners, kinds) have several numbers each, so that lists often hold two of them for
+// `fold` to merge.
+
+const CIV_LEAVES: u8 = 12;
+
+fn civ_leaf(which: u8, kind: usize, mask: u8) -> CivLeaf {
+    match which {
+        0 => CivLeaf::Human,
+        1 => CivLeaf::Ai,
+        2 => CivLeaf::OpenBorders,
+        3 => CivLeaf::Friendly,
+        4 => CivLeaf::Hostile,
+        5 => CivLeaf::Known,
+        6..=8 => CivLeaf::Kind(KINDS[kind]),
+        _ => CivLeaf::Nation(pick(mask)),
+    }
+}
+
+fn arb_civ_leaf_from(which: u8) -> impl Strategy<Value = CivLeaf> {
+    (0..3usize, 0..16u8).prop_map(move |(kind, mask)| civ_leaf(which, kind, mask))
+}
+
+fn arb_civ_leaf() -> impl Strategy<Value = CivLeaf> {
+    (0..CIV_LEAVES).prop_flat_map(arb_civ_leaf_from)
+}
+
+const TILE_LEAVES: u8 = 26;
+
+fn tile_leaf(which: u8, mask: u8, civ: CivLeaf) -> TileLeaf {
+    match which {
+        0 => TileLeaf::River,
+        1 => TileLeaf::FreshWater,
+        2 => TileLeaf::NextToCoast,
+        3 => TileLeaf::Unowned,
+        4 => TileLeaf::Yours,
+        5 => TileLeaf::ForeignLand,
+        6 => TileLeaf::FriendlyLand,
+        7 => TileLeaf::EnemyLand,
+        8 => TileLeaf::AnyResource,
+        9 => TileLeaf::Unimproved,
+        10 => TileLeaf::Improved,
+        11 => TileLeaf::Pillaged,
+        12 => TileLeaf::Worked,
+        13..=16 => TileLeaf::Terrains(pick(mask)),
+        17..=19 => TileLeaf::Resource(pick(mask)),
+        20..=22 => TileLeaf::Improvement(pick(mask)),
+        _ => TileLeaf::Owner(civ),
+    }
+}
+
+fn arb_tile_leaf_from(which: u8) -> impl Strategy<Value = TileLeaf> {
+    (0..16u8, arb_civ_leaf()).prop_map(move |(mask, civ)| tile_leaf(which, mask, civ))
+}
+
+fn arb_tile_leaf() -> impl Strategy<Value = TileLeaf> {
+    (0..TILE_LEAVES).prop_flat_map(arb_tile_leaf_from)
+}
+
+const UNIT_LEAVES: u8 = 13;
+
+fn unit_leaf(which: u8, mask: u8, civ: CivLeaf) -> UnitLeaf {
+    match which {
+        0 => UnitLeaf::Other,
+        1 => UnitLeaf::Wounded,
+        2 => UnitLeaf::Embarked,
+        3 => UnitLeaf::SetUp,
+        4..=6 => UnitLeaf::Base(pick(mask)),
+        7..=9 => UnitLeaf::Promotion(pick(mask)),
+        _ => UnitLeaf::Owner(civ),
+    }
+}
+
+fn arb_unit_leaf_from(which: u8) -> impl Strategy<Value = UnitLeaf> {
+    (0..16u8, arb_civ_leaf()).prop_map(move |(mask, civ)| unit_leaf(which, mask, civ))
+}
+
+fn arb_unit_leaf() -> impl Strategy<Value = UnitLeaf> {
+    (0..UNIT_LEAVES).prop_flat_map(arb_unit_leaf_from)
+}
+
+const CITY_LEAVES: u8 = 25;
+
+fn city_leaf(which: u8, mask: u8, civ: CivLeaf) -> CityLeaf {
+    match which {
+        0 => CityLeaf::Yours,
+        1 => CityLeaf::Coastal,
+        2 => CityLeaf::Capital,
+        3 => CityLeaf::NonOccupied,
+        4 => CityLeaf::ConnectedToCapital,
+        5 => CityLeaf::Garrisoned,
+        6 => CityLeaf::MajorReligion,
+        7 => CityLeaf::EnhancedReligion,
+        8 => CityLeaf::NonEnemyForeign,
+        9 => CityLeaf::Enemy,
+        10 => CityLeaf::Foreign,
+        11 => CityLeaf::Annexed,
+        12 => CityLeaf::Puppeted,
+        13 => CityLeaf::Resisting,
+        14 => CityLeaf::Razing,
+        15 => CityLeaf::Holy,
+        16 => CityLeaf::FollowsViewersReligion,
+        17..=20 => CityLeaf::Has(pick(mask)),
+        _ => CityLeaf::Owner(civ),
+    }
+}
+
+fn arb_city_leaf_from(which: u8) -> impl Strategy<Value = CityLeaf> {
+    (0..16u8, arb_civ_leaf()).prop_map(move |(mask, civ)| city_leaf(which, mask, civ))
+}
+
+fn arb_city_leaf() -> impl Strategy<Value = CityLeaf> {
+    (0..CITY_LEAVES).prop_flat_map(arb_city_leaf_from)
+}
+
+/// Two leaves, of the same variant half the time: the pairs `Leaf::and` and `Leaf::or` merge.
+fn arb_pair<L: Clone + std::fmt::Debug, S: Strategy<Value = L>>(
+    n: u8,
+    from: impl Fn(u8) -> S + Copy,
+) -> impl Strategy<Value = (L, L)> {
+    (0..n, 0..n, any::<bool>())
+        .prop_flat_map(move |(a, b, same)| (from(a), from(if same { a } else { b })))
+}
+
+/// The leaf contract (`Leaf`): a constant holds everywhere, and a merged leaf answers as the
+/// conjunction or disjunction of the two, in every context `ask` evaluates.
+fn merges_exactly<L: citar_engine::unique::filter::Leaf + std::fmt::Debug>(
+    a: &L,
+    b: &L,
+    contexts: usize,
+    ask: impl Fn(&L, usize) -> bool,
+) -> Result<(), TestCaseError> {
+    let joined = a.and(b);
+    let either = a.or(b);
+    for i in 0..contexts {
+        let (x, y) = (ask(a, i), ask(b, i));
+        if let Some(k) = a.constant() {
+            prop_assert_eq!(x, k, "{:?} is constant {} but not in context {}", a, k, i);
+        }
+        if let Some(j) = &joined {
+            prop_assert_eq!(
+                ask(j, i),
+                x && y,
+                "{:?} and {:?} merged to {:?}, context {}",
+                a,
+                b,
+                j,
+                i
+            );
+        }
+        if let Some(e) = &either {
+            prop_assert_eq!(
+                ask(e, i),
+                x || y,
+                "{:?} or {:?} merged to {:?}, context {}",
+                a,
+                b,
+                e,
+                i
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Random trees over `leaf`, with constants, as the compiler builds them before folding.
+fn arb_tree<L: Clone + std::fmt::Debug + 'static>(
+    leaf: impl Strategy<Value = L> + 'static,
+) -> impl Strategy<Value = Expr<L>> {
+    let base =
+        prop_oneof![1 => any::<bool>().prop_map(Expr::Const), 6 => leaf.prop_map(Expr::Leaf)];
+    base.prop_recursive(5, 64, 5, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(|e| Expr::Not(Box::new(e))),
+            proptest::collection::vec(inner.clone(), 0..5).prop_map(|v| Expr::All(v.into())),
+            proptest::collection::vec(inner, 0..5).prop_map(|v| Expr::Any(v.into())),
+        ]
+    })
+}
+
+/// Who asks: nobody, or each of the four civilizations.
+const VIEWERS: [Option<PlayerId>; 5] = [None, Some(P0), Some(P1), Some(P2), Some(P3)];
+
+/// The folded tree is no deeper, and folding it again changes nothing.
+fn folds_cleanly<L: citar_engine::unique::filter::Leaf + std::fmt::Debug>(
+    e: &Expr<L>,
+    folded: &Expr<L>,
+) -> Result<(), TestCaseError> {
+    prop_assert!(folded.depth() <= e.depth(), "{:?} folded deeper: {:?}", e, folded);
+    prop_assert_eq!(&folded.clone().fold(), folded);
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn civilization_leaves_merge_exactly((a, b) in arb_pair(CIV_LEAVES, arb_civ_leaf_from), m in arb_world()) {
+        // Each civilization, seen by each viewer.
+        merges_exactly(&a, &b, 4 * VIEWERS.len(), |l, i| {
+            l.eval(&m, PlayerId(u8::try_from(i / VIEWERS.len()).expect("small")), VIEWERS[i % VIEWERS.len()])
+        })?;
+    }
+
+    #[test]
+    fn tile_leaves_merge_exactly((a, b) in arb_pair(TILE_LEAVES, arb_tile_leaf_from), m in arb_world()) {
+        // Each tile, seen by each viewer, then each tile from its terrain alone.
+        let seen = 8 * VIEWERS.len();
+        merges_exactly(&a, &b, seen + 8, |l, i| {
+            if i < seen {
+                let t = TileIdx(u32::try_from(i / VIEWERS.len()).expect("small"));
+                l.eval(&m, t, VIEWERS[i % VIEWERS.len()])
+            } else {
+                let t = TileIdx(u32::try_from(i - seen).expect("small"));
+                l.eval_terrain(&m, t).unwrap_or(false)
+            }
+        })?;
+    }
+
+    #[test]
+    fn unit_leaves_merge_exactly((a, b) in arb_pair(UNIT_LEAVES, arb_unit_leaf_from), m in arb_world()) {
+        // Each unit, with no unit or unit 1 in context, seen by each viewer.
+        let n = VIEWERS.len();
+        merges_exactly(&a, &b, 6 * 2 * n, |l, i| {
+            let u = uid(u32::try_from(1 + i / (2 * n)).expect("small"));
+            let this = (i / n % 2 == 1).then(|| uid(1));
+            l.eval(&m, u, UnitScope { this, viewer: VIEWERS[i % n] })
+        })?;
+    }
+
+    #[test]
+    fn city_leaves_merge_exactly((a, b) in arb_pair(CITY_LEAVES, arb_city_leaf_from), m in arb_world()) {
+        // Each city, seen by each viewer.
+        merges_exactly(&a, &b, 6 * VIEWERS.len(), |l, i| {
+            let c = cid(u32::try_from(1 + i / VIEWERS.len()).expect("small"));
+            l.eval(&m, c, VIEWERS[i % VIEWERS.len()])
+        })?;
+    }
+
+    #[test]
+    fn folding_keeps_a_civilization_filters_meaning(e in arb_tree(arb_civ_leaf()), m in arb_world()) {
+        let folded = e.clone().fold();
+        for p in [P0, P1, P2, P3] {
+            for v in VIEWERS {
+                let ask = |x: &Expr<CivLeaf>| x.eval(&mut |l| l.eval(&m, p, v));
+                prop_assert_eq!(ask(&folded), ask(&e), "civ {:?} seen by {:?}: {:?}", p, v, folded);
+            }
+        }
+        folds_cleanly(&e, &folded)?;
+    }
+
+    #[test]
+    fn folding_keeps_a_tile_filters_meaning(e in arb_tree(arb_tile_leaf()), m in arb_world()) {
+        let folded = e.clone().fold();
+        for t in 0..8 {
+            for v in VIEWERS {
+                let ask = |x: &Expr<TileLeaf>| x.eval(&mut |l| l.eval(&m, TileIdx(t), v));
+                prop_assert_eq!(ask(&folded), ask(&e), "tile {} seen by {:?}: {:?}", t, v, folded);
+            }
+            // Map generation's reading, from the terrain alone.
+            let terrain = |x: &Expr<TileLeaf>| {
+                x.eval(&mut |l| l.eval_terrain(&m, TileIdx(t)).unwrap_or(false))
+            };
+            prop_assert_eq!(terrain(&folded), terrain(&e), "tile {} from its terrain: {:?}", t, folded);
+        }
+        folds_cleanly(&e, &folded)?;
+    }
+
+    #[test]
+    fn folding_keeps_a_unit_filters_meaning(e in arb_tree(arb_unit_leaf()), m in arb_world()) {
+        let folded = e.clone().fold();
+        for u in 1..=6 {
+            for this in [None, Some(uid(1)), Some(uid(2))] {
+                for viewer in VIEWERS {
+                    let scope = UnitScope { this, viewer };
+                    let ask = |x: &Expr<UnitLeaf>| x.eval(&mut |l| l.eval(&m, uid(u), scope));
+                    prop_assert_eq!(ask(&folded), ask(&e), "unit {} in {:?}: {:?}", u, scope, folded);
+                }
+            }
+        }
+        folds_cleanly(&e, &folded)?;
+    }
+
+    #[test]
+    fn folding_keeps_a_city_filters_meaning(e in arb_tree(arb_city_leaf()), m in arb_world()) {
+        let folded = e.clone().fold();
+        for c in 1..=6 {
+            for v in VIEWERS {
+                let ask = |x: &Expr<CityLeaf>| x.eval(&mut |l| l.eval(&m, cid(c), v));
+                prop_assert_eq!(ask(&folded), ask(&e), "city {} seen by {:?}: {:?}", c, v, folded);
+            }
+        }
+        folds_cleanly(&e, &folded)?;
     }
 }
 
