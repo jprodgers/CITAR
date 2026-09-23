@@ -15,7 +15,8 @@
 //!
 //! [`Ctx`] ports `Ctx` (`uniques.py:215-293`): what a unique is asked about. It is `Copy`, holds
 //! ids only, and derives its civilization and tile from what it is given, as Python's constructor
-//! did ([`Ctx::resolve`]).
+//! did ([`Ctx::resolve`]). Its constructors (`civ`, `city`, `unit`, `fight`, `tile`) resolve; a
+//! context written field by field must call `resolve` itself, which debug builds check.
 //!
 //! Each method answers one question Python asked of `Game`; the Python lines are named where the
 //! answer is not simply a field. The traits are generic and monomorphised, deliberately not
@@ -465,6 +466,13 @@ impl Ctx {
         Self { unit: Some(u), ..Self::default() }.resolve(w)
     }
 
+    /// A question about a fight, asked by our side's owner on our side's tile, as the combat
+    /// modules built it (`combat.py:137, 460, 676, 732`).
+    #[must_use]
+    pub fn fight<W: EvalWorld>(w: &W, combat: CombatCtx) -> Self {
+        Self { combat: Some(combat), ..Self::default() }.resolve(w)
+    }
+
     /// A question about a tile, asked by `civ`.
     #[must_use]
     pub const fn tile(civ: Option<PlayerId>, t: TileIdx) -> Self {
@@ -504,6 +512,15 @@ impl Ctx {
         self
     }
 
+    /// Whether the civilization and the tile are derived already: [`resolve`](Self::resolve)
+    /// would change nothing. A context built field by field that forgot to resolve has a city,
+    /// unit or fight but no civilization, and every conditional about the civilization would
+    /// fail in it without a word; [`super::cond::applies`] checks this in debug builds.
+    #[must_use]
+    pub fn is_resolved<W: EvalWorld>(&self, w: &W) -> bool {
+        self.resolve(w) == *self
+    }
+
     /// The unit a rule means (`rel_unit`): our side's, in a fight with a unit on our side,
     /// otherwise the one in context.
     #[must_use]
@@ -523,6 +540,8 @@ impl Ctx {
 
     /// The city a rule means (`rel_city`): the one in context, else our side's in a fight, else
     /// the city whose territory the tile in context is, if the civilization in context owns it.
+    /// So in a tile's or a unit's context `in [Capital] cities` asks about the city whose
+    /// territory it is, which is why the city conditionals read `TILE` besides `CITY`.
     #[must_use]
     pub fn rel_city<W: EvalWorld>(&self, w: &W) -> Option<CityId> {
         if self.city.is_some() {

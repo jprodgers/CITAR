@@ -41,7 +41,7 @@ use citar_engine::unique::filter::{CityLeaf, Combatant, Leaf, UnitFacts, UnitSco
 use citar_engine::unique::index::{
     self, CityStateBonus, CivIndex, CivSources, Csr, placeholder_counts,
 };
-use citar_engine::unique::params::{PolicyOrBelief, PromotionOrStatus};
+use citar_engine::unique::params::{PolicyOrBelief, PromotionOrStatus, StatOrResource};
 use citar_engine::unique::trigger::{
     CityScope, OneTimeEffect, TriggerEvent, TriggerKind, TriggerSite, UnitEffect, fire,
 };
@@ -98,6 +98,9 @@ const CONDS: &[&str] = &[
     "if no Civilization has adopted [Aristocracy]",
     "after adopting [Aristocracy]",
     "before adopting [Aristocracy]",
+    "if no Civilization has adopted [Ancestor Worship]",
+    "after adopting [Ancestor Worship]",
+    "before adopting [Ancestor Worship]",
     "before founding a Pantheon",
     "after founding a Pantheon",
     "before founding a religion",
@@ -114,6 +117,8 @@ const CONDS: &[&str] = &[
     "with [Iron]",
     "without [Iron]",
     "when above [100] [Gold]",
+    "when above [2] [Iron]",
+    "when above [5] [Happiness]",
     "when below [100] [Gold]",
     "when between [10] and [20] [Happiness]",
     "in this city",
@@ -161,6 +166,13 @@ const CONDS: &[&str] = &[
     "when number of [Cities] is between [1] and [3]",
 ];
 
+/// The three stat comparisons scaled by game speed, each under `[+4 Gold]`.
+const SCALED: [&str; 3] = [
+    "[+4 Gold] <when above [100] [Gold]> <(modified by game speed)>",
+    "[+4 Gold] <when below [100] [Gold]> <(modified by game speed)>",
+    "[+4 Gold] <when between [10] and [20] [Gold]> <(modified by game speed)>",
+];
+
 /// Countables with filters, each compiled in `[+3 Gold] <when number of [..] is more than [0]>`.
 const COUNTED: &[&str] = &[
     "[Temple] Buildings",
@@ -180,6 +192,7 @@ fn rules() -> &'static Ruleset {
         uniques.extend(
             COUNTED.iter().map(|c| format!("[+3 Gold] <when number of [{c}] is more than [0]>")),
         );
+        uniques.extend(SCALED.iter().map(|&u| u.to_owned()));
         let patch = json!({ "Eval Test": {
             "name": "Eval Test", "kind": "major", "leaderName": "Eval Leader", "adjective": "Eval",
             "preferredVictoryType": "Scientific", "cities": ["Evalton", "Testburg"],
@@ -216,7 +229,11 @@ fn counted(r: &Ruleset, text: &str) -> Countable {
 
 /// The `Eval Test` unique with the conditional `cond`.
 fn eval_unique(r: &Ruleset, cond: &str) -> UniqueId {
-    let text = format!("[+1 Gold] <{cond}>");
+    eval_text(r, &format!("[+1 Gold] <{cond}>"))
+}
+
+/// The `Eval Test` unique written `text`.
+fn eval_text(r: &Ruleset, text: &str) -> UniqueId {
     let n: NationId = id(r, "Eval Test");
     r.nations()[n]
         .uniques
@@ -831,16 +848,49 @@ impl EvalWorld for World {
 
 /// A fight of the Eval Test's Warrior (unit 1) against `their`.
 fn fight(w: &World, their: Combatant, action: CombatAction, at: TileIdx) -> Ctx {
-    Ctx {
-        combat: Some(CombatCtx {
+    Ctx::fight(
+        w,
+        CombatCtx {
             our: Combatant::Unit(uid(1)),
             their: Some(their),
             attacked_tile: Some(at),
             action: Some(action),
-        }),
-        ..Ctx::default()
+        },
+    )
+}
+
+/// Sets the civilization's amount of a stat or resource, as a comparison reads it.
+fn set_amount(w: &mut World, p: PlayerId, what: StatOrResource, v: f64) {
+    #[allow(clippy::cast_possible_truncation, reason = "small whole test amounts")]
+    let whole = v as i32;
+    match what {
+        StatOrResource::Resource(res) => {
+            w.civ(p).resources.insert(res, whole);
+        }
+        StatOrResource::Stat(Stat::Happiness) => w.civ(p).happiness = whole,
+        StatOrResource::Stat(s) => w.civ(p).stocks[s.index()] = v,
     }
-    .resolve(w)
+}
+
+/// The step past a bound that a comparison of `what` tells apart: half a unit of a stock, one of
+/// a count.
+fn step(what: StatOrResource) -> f64 {
+    match what {
+        StatOrResource::Stat(Stat::Happiness) | StatOrResource::Resource(_) => 1.0,
+        StatOrResource::Stat(_) => 0.5,
+    }
+}
+
+/// Gives `p` the policy or the belief.
+fn adopt(w: &mut World, p: PlayerId, what: PolicyOrBelief) {
+    match what {
+        PolicyOrBelief::Policy(x) => {
+            w.civ(p).policies.insert(x);
+        }
+        PolicyOrBelief::Belief(x) => {
+            w.civ(p).beliefs.insert(x);
+        }
+    }
 }
 
 /// `a` for the true case, `b` for the false one.
@@ -1003,20 +1053,18 @@ fn case(w: &mut World, c: &CondData, yes: bool) -> Option<Ctx> {
             w.civ(P0).researching = Some(id(r, pick(yes, "Writing", "Pottery")));
             civ
         }
+        // A policy or a belief alike (Python's dead key read policies only).
         C::ConditionalNoCivAdopted(x) => {
-            let PolicyOrBelief::Policy(p) = x.adopted else { panic!("a policy") };
             // A city-state's adoption does not count; another major's does.
-            w.civ(pick(yes, P2, P1)).policies.insert(p);
+            adopt(w, pick(yes, P2, P1), x.adopted);
             civ
         }
         C::ConditionalAfterPolicyOrBelief(x) => {
-            let PolicyOrBelief::Policy(p) = x.adopted else { panic!("a policy") };
-            w.civ(pick(yes, P0, P1)).policies.insert(p);
+            adopt(w, pick(yes, P0, P1), x.adopted);
             civ
         }
         C::ConditionalBeforePolicyOrBelief(x) => {
-            let PolicyOrBelief::Policy(p) = x.adopted else { panic!("a policy") };
-            w.civ(pick(yes, P1, P0)).policies.insert(p);
+            adopt(w, pick(yes, P1, P0), x.adopted);
             civ
         }
         C::ConditionalBeforePantheon => {
@@ -1086,16 +1134,21 @@ fn case(w: &mut World, c: &CondData, yes: bool) -> Option<Ctx> {
             w.civ(P0).resources.insert(x.resource, pick(yes, 0, 2));
             civ
         }
-        C::ConditionalWhenAboveAmountStatResource(_) => {
-            w.civ(P0).stocks[Stat::Gold.index()] = pick(yes, 100.5, 100.0);
+        // Just past the bound, and on it: the comparisons are strict.
+        C::ConditionalWhenAboveAmountStatResource(x) => {
+            let at = f64::from(x.amount);
+            set_amount(w, P0, x.what, pick(yes, at + step(x.what), at));
             civ
         }
-        C::ConditionalWhenBelowAmountStatResource(_) => {
-            w.civ(P0).stocks[Stat::Gold.index()] = pick(yes, 99.5, 100.0);
+        C::ConditionalWhenBelowAmountStatResource(x) => {
+            let at = f64::from(x.amount);
+            set_amount(w, P0, x.what, pick(yes, at - step(x.what), at));
             civ
         }
-        C::ConditionalWhenBetweenStatResource(_) => {
-            w.civ(P0).happiness = pick(yes, 20, 21);
+        // On the upper bound, and just past it: the bounds are inclusive.
+        C::ConditionalWhenBetweenStatResource(x) => {
+            let at = f64::from(x.max);
+            set_amount(w, P0, x.what, pick(yes, at, at + step(x.what)));
             civ
         }
         C::ConditionalInThisCity => pick(yes, city1, civ),
@@ -1380,6 +1433,8 @@ fn what_each_conditional_reads() {
     let r = rules();
     let t = r.uniques();
     let all = D::all();
+    let city = D::CITY.union(D::TILE);
+    let around = D::TILE.union(D::MAP);
     let table: &[(&str, CondDeps)] = &[
         ("every [3] turns", D::TURN),
         ("before turn number [10]", D::TURN),
@@ -1419,6 +1474,12 @@ fn what_each_conditional_reads() {
         ("if no Civilization has adopted [Aristocracy]", D::GLOBAL_POLICIES.union(D::CITY_COUNT)),
         ("after adopting [Aristocracy]", D::POLICIES),
         ("before adopting [Aristocracy]", D::POLICIES),
+        (
+            "if no Civilization has adopted [Ancestor Worship]",
+            D::GLOBAL_POLICIES.union(D::CITY_COUNT),
+        ),
+        ("after adopting [Ancestor Worship]", D::RELIGION_STATE),
+        ("before adopting [Ancestor Worship]", D::RELIGION_STATE),
         ("before founding a Pantheon", D::RELIGION_STATE),
         ("after founding a Pantheon", D::RELIGION_STATE),
         ("before founding a religion", D::RELIGION_STATE),
@@ -1441,18 +1502,22 @@ fn what_each_conditional_reads() {
         ("with [Iron]", D::RESOURCES),
         ("without [Iron]", D::RESOURCES),
         ("when above [100] [Gold]", D::STOCKS),
+        ("when above [2] [Iron]", D::RESOURCES),
+        ("when above [5] [Happiness]", D::HAPPINESS_SEEN),
         ("when below [100] [Gold]", D::STOCKS),
         ("when between [10] and [20] [Happiness]", D::HAPPINESS_SEEN),
-        ("in this city", D::CITY),
-        ("in [Capital] cities", D::CITY.union(D::CITY_COUNT)),
+        // The city a rule means: in a tile's or a unit's context, the territory's city.
+        ("in this city", city),
+        ("in [Capital] cities", city.union(D::CITY_COUNT)),
+        // The trade network reads the civilization's own uniques, which no class names.
         ("in cities connected to the capital", all),
-        ("in cities with a [Temple]", D::CITY),
-        ("in cities without a [Temple]", D::CITY),
-        ("in cities with at least [3] [Population]", D::CITY),
-        ("in cities with [2] [Specialists]", D::CITY),
-        ("in cities with between [1] and [5] [Population]", D::CITY),
-        ("in cities with less than [3] [Unemployed]", D::CITY),
-        ("with a garrison", D::CITY.union(D::UNIT_SET)),
+        ("in cities with a [Temple]", city),
+        ("in cities without a [Temple]", city),
+        ("in cities with at least [3] [Population]", city),
+        ("in cities with [2] [Specialists]", city),
+        ("in cities with between [1] and [5] [Population]", city),
+        ("in cities with less than [3] [Unemployed]", city),
+        ("with a garrison", city.union(D::UNIT_SET)),
         ("for [Military] units", D::UNIT),
         ("when [Wounded]", D::UNIT),
         ("for units with [Drill I]", D::UNIT),
@@ -1476,13 +1541,14 @@ fn what_each_conditional_reads() {
         ("if it hasn't used other actions yet", D::UNIT),
         ("when stacked with a [Great General] unit", D::UNIT.union(D::UNIT_SET)),
         ("when not stacked with a [Great General] unit", D::UNIT.union(D::UNIT_SET)),
-        ("with [1] to [2] neighboring [Hill] tiles", all),
+        // The tiles around: where the tile is, and the map's tiles, not every class.
+        ("with [1] to [2] neighboring [Hill] tiles", around),
         ("in [Hill] tiles", D::TILE),
         ("in tiles without [Hill]", D::TILE),
-        ("within [2] tiles of a [Mountain]", all),
-        ("in tiles adjacent to [River] tiles", all),
-        ("in tiles adjacent to [Hill] tiles", all),
-        ("in tiles not adjacent to [Hill] tiles", all),
+        ("within [2] tiles of a [Mountain]", around),
+        ("in tiles adjacent to [River] tiles", around),
+        ("in tiles adjacent to [Hill] tiles", around),
+        ("in tiles not adjacent to [Hill] tiles", around),
         ("on water maps", D::CONFIG),
         ("when number of [Cities] is equal to [2]", D::CITY_COUNT),
         ("when number of [Cities] is different than [2]", D::CITY_COUNT),
@@ -1505,6 +1571,30 @@ fn what_each_conditional_reads() {
         assert_eq!(x.deps(), union, "{}", t.text_of(u));
         assert_eq!(x.deps().is_empty(), x.conds.is_empty(), "{}", t.text_of(u));
     }
+    // The shipped tile-neighbourhood uniques (the Celts' Faith, Polynesia's Moai) read neither the
+    // turn, nor chance, nor the units.
+    let busy = D::TURN | D::CHANCE | D::UNIT_SET | D::STOCKS;
+    for (_, c) in t.all_conds().iter() {
+        let ty = c.data.ty();
+        if matches!(
+            ty,
+            UniqueType::ConditionalNeighborTiles
+                | UniqueType::ConditionalNearTiles
+                | UniqueType::ConditionalAdjacentTo
+                | UniqueType::ConditionalNotAdjacentTo
+        ) && !c.deps.contains(D::all())
+        {
+            assert!(!c.deps.intersects(busy), "<{}> reads {:?}", t.text(c.text), c.deps);
+        }
+    }
+    let celts = shipped()
+        .uniques()
+        .all_conds()
+        .iter()
+        .find(|(_, c)| c.data.ty() == UniqueType::ConditionalNeighborTiles)
+        .map(|(_, c)| c.deps)
+        .expect("the Celts' neighbouring forests");
+    assert_eq!(celts, around, "`{{unimproved}} {{Forest}}` reads the tiles alone");
     // The city leaves that read beyond the city.
     assert_eq!(CityLeaf::Capital.deps(), D::CITY_COUNT);
     assert_eq!(CityLeaf::Garrisoned.deps(), D::UNIT_SET);
@@ -1565,6 +1655,8 @@ fn with_no_civilization_the_civilization_conditionals_fail_as_in_python() {
         "if starting in the [Ancient era]",
         "if no Civilization has adopted [Aristocracy]",
         "before adopting [Aristocracy]",
+        "if no Civilization has adopted [Ancestor Worship]",
+        "before adopting [Ancestor Worship]",
         "if [Temple] is not constructed by anybody",
         "without [Iron]",
         "when below [100] [Gold]",
@@ -2167,6 +2259,155 @@ fn a_context_derives_what_python_derived() {
     assert_eq!(f.rel_tile(), Some(TileIdx(5)));
     let explicit = Ctx { civ: Some(P2), ..Ctx::city(&w, cid(1)) };
     assert_eq!(explicit.resolve(&w).civ, Some(P2), "a civilization given is kept");
+    // Every constructor resolves.
+    let built =
+        [Ctx::civ(P0), Ctx::city(&w, cid(1)), Ctx::unit(&w, uid(1)), f, Ctx::tile(None, t1)];
+    for ctx in built {
+        assert!(ctx.is_resolved(&w), "{ctx:?}");
+    }
+    assert!(!Ctx { unit: Some(uid(1)), ..Ctx::default() }.is_resolved(&w));
+}
+
+/// A context written field by field that forgot to resolve would fail every civilization
+/// conditional without a word; debug builds refuse it.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "is not resolved")]
+fn an_unresolved_context_is_refused_in_debug_builds() {
+    let w = World::new();
+    let u = eval_unique(rules(), "when not in a Golden Age");
+    let _ = applies(u, &Ctx { unit: Some(uid(1)), ..Ctx::default() }, &w);
+}
+
+// ---- More forms of the conditionals -------------------------------------------------------------
+
+/// In a tile's or a unit's context, a city conditional asks about the city whose territory the
+/// tile is, when the civilization in context owns it (`rel_city`, `uniques.py:262-273`).
+#[test]
+fn a_city_conditional_means_the_territorys_city_in_a_tile_or_unit_context() {
+    let r = rules();
+    let t = r.uniques();
+    let mut w = World::new();
+    let capital = eval_unique(r, "in [Capital] cities");
+    let temple = eval_unique(r, "in cities with a [Temple]");
+    let no_temple = eval_unique(r, "in cities without a [Temple]");
+    let big = eval_unique(r, "in cities with at least [3] [Population]");
+    // A tile of city 1's territory (the capital's), a tile of city 2's, and one of no city.
+    let near1 = w.grid.neighbors(w.city(1).tile).next().expect("a neighbour");
+    let near2 = w.grid.neighbors(w.city(2).tile).next().expect("a neighbour");
+    let wild = w.grid.idx(0, 7).expect("on the map");
+    for (tile, c) in [(near1, 1), (near2, 2)] {
+        let x = w.tile_mut(tile);
+        x.owner = Some(P0);
+        x.city = Some(cid(c));
+    }
+    w.unit_mut(2).tile = near1;
+    w.reindex();
+    let ask = |w: &World, u: UniqueId, ctx: &Ctx| {
+        let c = t.conds(t.get(u))[0];
+        (holds(&c, u, ctx, w), applies(u, ctx, w))
+    };
+    let on_tile = Ctx::tile(Some(P0), near1);
+    let on_unit = Ctx::unit(&w, uid(2));
+    assert_eq!(on_unit.tile, Some(near1));
+    for ctx in [on_tile, on_unit] {
+        assert_eq!(ctx.rel_city(&w), Some(cid(1)));
+        assert_eq!(ask(&w, capital, &ctx), (true, true), "the capital's territory: {ctx:?}");
+        assert_eq!(ask(&w, temple, &ctx), (false, false));
+        assert_eq!(ask(&w, no_temple, &ctx), (true, true));
+    }
+    // The territory's city changes: its buildings and its citizens are what the tile reads.
+    w.give_building(1, "Temple");
+    w.city_mut(1).population = 3;
+    for ctx in [on_tile, Ctx::unit(&w, uid(2))] {
+        assert_eq!(ask(&w, temple, &ctx), (true, true));
+        assert_eq!(ask(&w, no_temple, &ctx), (false, false));
+        assert_eq!(ask(&w, big, &ctx), (true, true));
+    }
+    // Another city's territory, a city of someone else's, and no city's.
+    assert_eq!(ask(&w, capital, &Ctx::tile(Some(P0), near2)), (false, false));
+    assert_eq!(ask(&w, no_temple, &Ctx::tile(Some(P0), near2)), (true, true));
+    for ctx in [Ctx::tile(Some(P1), near1), Ctx::tile(Some(P0), wild), Ctx::tile(None, near1)] {
+        assert_eq!(ctx.rel_city(&w), None, "{ctx:?}");
+        for u in [capital, temple, no_temple, big] {
+            assert_eq!(ask(&w, u, &ctx), (false, false), "{} in {ctx:?}", t.text_of(u));
+        }
+    }
+    // So what they read names the tile: a memo keyed by the tile moves with its territory.
+    for u in [capital, temple, no_temple, big] {
+        assert!(t.get(u).deps().contains(CondDeps::CITY | CondDeps::TILE), "{}", t.text_of(u));
+    }
+}
+
+/// `when above [n] HP` in a city's fight reads the city's health (`_hp`, `uniques.py:1036-1043`),
+/// and the city conditionals read our side's city.
+#[test]
+fn a_citys_fight_reads_the_citys_health() {
+    let r = rules();
+    let mut w = World::new();
+    let above = eval_unique(r, "when above [50] HP");
+    let below = eval_unique(r, "when below [50] HP");
+    let capital = eval_unique(r, "in [Capital] cities");
+    let defending = |w: &World, c: u32| {
+        Ctx::fight(
+            w,
+            CombatCtx {
+                our: Combatant::City(cid(c)),
+                their: Some(Combatant::Unit(uid(3))),
+                attacked_tile: Some(w.city(c).tile),
+                action: Some(CombatAction::Defend),
+            },
+        )
+    };
+    let ctx = defending(&w, 1);
+    assert_eq!((ctx.civ, ctx.tile, ctx.rel_unit()), (Some(P0), Some(w.city(1).tile), None));
+    assert!(applies(above, &ctx, &w) && !applies(below, &ctx, &w), "200 HP");
+    assert!(applies(capital, &ctx, &w));
+    assert!(!applies(capital, &defending(&w, 2), &w), "city 2 is not the capital");
+    w.city_mut(1).health = 40;
+    assert!(!applies(above, &ctx, &w) && applies(below, &ctx, &w), "40 HP");
+    w.city_mut(1).health = 50;
+    assert!(!applies(above, &ctx, &w) && !applies(below, &ctx, &w), "50 HP is neither");
+}
+
+/// `(modified by game speed)` scales the bounds of all three stat comparisons, `when between`'s
+/// two as well (refcheck: between-stat-scales-by-speed): on Marathon (3x), 100 Gold is 300 and
+/// 10 to 20 is 30 to 60.
+#[test]
+fn the_stat_comparisons_scale_by_game_speed() {
+    let r = rules();
+    let mut w = World::new();
+    let [above, below, between] = SCALED.map(|u| eval_text(r, u));
+    let plain = eval_unique(r, "when above [100] [Gold]");
+    let ctx = Ctx::civ(P0);
+    let with_gold = |w: &mut World, g: f64| {
+        w.civ(P0).stocks[Stat::Gold.index()] = g;
+    };
+    let answers = |w: &World| [above, below, between, plain].map(|u| applies(u, &ctx, w));
+    // Standard speed: as written.
+    with_gold(&mut w, 150.0);
+    assert_eq!(answers(&w), [true, false, false, true]);
+    with_gold(&mut w, 15.0);
+    assert_eq!(answers(&w), [false, true, true, false]);
+    // Marathon: scaled, the unscaled unique unchanged.
+    w.speed = id(r, "Marathon");
+    assert!((r.speeds()[w.speed].modifier - 3.0).abs() < 1e-9);
+    with_gold(&mut w, 150.0);
+    assert_eq!(answers(&w), [false, true, false, true]);
+    with_gold(&mut w, 300.5);
+    assert_eq!(answers(&w), [true, false, false, true]);
+    with_gold(&mut w, 15.0);
+    assert_eq!(answers(&w), [false, true, false, false], "15 is below 30");
+    for (g, inside) in [(30.0, true), (45.0, true), (60.0, true), (29.5, false), (60.5, false)] {
+        with_gold(&mut w, g);
+        assert_eq!(applies(between, &ctx, &w), inside, "{g} Gold between 30 and 60");
+    }
+    // Quick (0.67): 10 to 20 is 6.7 to 13.4.
+    w.speed = id(r, "Quick");
+    with_gold(&mut w, 7.0);
+    assert!(applies(between, &ctx, &w));
+    with_gold(&mut w, 15.0);
+    assert!(!applies(between, &ctx, &w));
 }
 
 #[test]

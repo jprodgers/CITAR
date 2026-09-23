@@ -8,9 +8,9 @@
 //! civilization in context.
 
 use super::filter::{Filters, UnitScope};
-use super::table::{CondDeps, UniqueTable};
+use super::table::CondDeps;
 use super::world::{Ctx, EvalWorld};
-use crate::base::ids::{BuildingId, CityFilterId, CivFilterId, SetRef, UnitFilterId};
+use crate::base::ids::{CityFilterId, CivFilterId, SetRef, UnitFilterId};
 use crate::base::stats::Stat;
 
 /// A compiled countable.
@@ -72,9 +72,10 @@ impl Countable {
             Self::RemainingCivs(x) => {
                 count(w.civs().filter(|&p| f.civ_matches(x, w, p, civ)).count())
             }
-            Self::BuildingsMatching(s) => count(
-                w.civ_cities(civ?).map(|c| buildings_in(t, s, w.city_buildings(c).iter())).sum(),
-            ),
+            Self::BuildingsMatching(s) => {
+                let set = t.set(s);
+                count(w.civ_cities(civ?).map(|c| set.count_in(&w.city_buildings(c))).sum())
+            }
         })
     }
 
@@ -95,11 +96,6 @@ impl Countable {
             Self::BuildingsMatching(_) => CondDeps::CIV_BUILDINGS,
         }
     }
-}
-
-/// How many of `buildings` the static filter `s` selects.
-fn buildings_in(t: &UniqueTable, s: SetRef, buildings: impl Iterator<Item = BuildingId>) -> usize {
-    buildings.filter(|&b| t.in_set(s, b)).count()
 }
 
 /// Python's `int()` of a stock: toward zero, saturating.

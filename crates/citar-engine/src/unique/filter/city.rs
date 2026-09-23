@@ -83,8 +83,10 @@ impl Leaf for CityLeaf {
 
     /// Besides the city itself: the war state for enemy cities; the capital, which moves with
     /// the cities (`CITY_COUNT`); the units in the city for a garrison (`UNIT_SET`); religions'
-    /// state; and, for the connection to the capital, the roads, harbours and borders between
-    /// them, which no class names, so it reads every class (package 1a-07).
+    /// state; and, for the connection to the capital, the roads, harbours, borders and techs
+    /// between them and the owner's own `Forests and Jungles are roads` (`cities.py:1967-2067`).
+    /// A civilization's uniques have no class, so the connection reads every class (package
+    /// 1a-07).
     fn deps(&self) -> CondDeps {
         match self {
             Self::Owner(c) => c.deps(),

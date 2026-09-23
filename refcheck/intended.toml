@@ -41,4 +41,39 @@
 #   where = [{ group = "city_stats", path = "cities[*].stats.total.gold" }]
 #   python = 0
 #
-# There are no entries yet.
+# The entries below come before the answer modules of their groups (package 1a-07): their paths are the best
+# known places, to be tightened when those groups are compared.
+
+[[differences]]
+id = "building-conditionals-read-a-filter"
+reason = "Python's building conditionals (`if [x] is constructed`, `in cities with a [x]` and the rest) compared the text with building names, so `[Wonder]` or `[Culture]` never held; Rust reads the text as a building filter"
+where = [
+  { group = "buildable", path = "cities[*].items.*" },
+  { group = "city_stats", path = "cities[*].stats.**" },
+  { group = "civs", path = "civs[*].**" },
+]
+broad = true
+
+[[differences]]
+id = "between-stat-scales-by-speed"
+reason = "Python scaled `when above/below [n] [stat]` by game speed on `(modified by game speed)` uniques but not the two bounds of `when between [a] and [b] [stat]`; Rust scales all three alike"
+where = [
+  { group = "city_stats", path = "cities[*].stats.**" },
+  { group = "civs", path = "civs[*].**" },
+]
+broad = true
+
+[[differences]]
+id = "no-civ-adopted-counts-beliefs"
+reason = "Python's `if no Civilization has adopted [x]` read policies only, so a belief never counted as adopted; Rust counts beliefs too"
+where = [
+  { group = "buildable", path = "cities[*].items.*" },
+  { group = "civs", path = "civs[*].**" },
+]
+broad = true
+
+[[differences]]
+id = "vs-units-never-matches-a-city"
+reason = "Python's `vs [x] units` shared `vs [x]`'s test, so a city matched `[All]`, `[City]` or a city filter's word there; Rust asks it about units only"
+where = [{ group = "combat_previews", path = "fights[*].**" }]
+broad = true

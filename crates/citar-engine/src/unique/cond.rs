@@ -20,14 +20,18 @@
 //! `on water maps` are as Python had them: a keyed draw, never, never. A missing context and
 //! `ignore` make every conditional hold ([`Ctx::IGNORE`]).
 //!
-//! **Python behaviour fixed** (DESIGN.md 5.12), for the reference checks to list once a group
-//! compares them:
+//! **Python behaviour fixed** (DESIGN.md 5.12), each an entry of `refcheck/intended.toml` cited
+//! at its arm:
 //! - building conditionals read a building filter (`if [Wonder] is constructed`), where Python
 //!   compared the text with a building's name and its replacement (`uniques.py:853-860`);
 //! - `when between [a] and [b] [stat]` scales both bounds by game speed when the unique is
 //!   `(modified by game speed)`, as the other two stat comparisons did (`uniques.py:830-834`);
 //! - `if no Civilization has adopted []` counts beliefs too (Python's dead key read policies only);
 //! - a unit filter after `vs [] units` asks about units only: a city is never a unit.
+//!
+//! **What a city conditional means.** In a tile's or a unit's context, `in [Capital] cities` and
+//! the other city conditionals ask about the city whose territory the tile is, if the
+//! civilization in context owns it (`Ctx::rel_city`), so they read `TILE` besides `CITY`.
 
 use super::countable::Countable;
 use super::filter::{Combatant, Expr, Filters, TileLeaf, UnitScope};
@@ -40,6 +44,7 @@ use crate::base::ids::{
     UnitFilterId, UnitId,
 };
 use crate::base::rng::{KeyPart, Purpose, Rng};
+use crate::base::sets::BuildingSet;
 use crate::base::stats::Stat;
 use crate::rules::Ruleset;
 use crate::rules::defs::{NationKind, ReligionProgress};
@@ -110,17 +115,22 @@ pub fn deps_of(data: &CondData, filters: &Filters) -> CondDeps {
         C::ConditionalWhenAboveAmountStatResource(x) => stat_deps(x.what),
         C::ConditionalWhenBelowAmountStatResource(x) => stat_deps(x.what),
         C::ConditionalWhenBetweenStatResource(x) => stat_deps(x.what),
+        // The city a rule means, found through the tile in context when no city is in it
+        // (`Ctx::rel_city`): `TILE` for which city's territory the tile is.
         C::ConditionalInThisCity
         | C::ConditionalCityWithBuilding(_)
         | C::ConditionalCityWithoutBuilding(_)
         | C::ConditionalPopulationFilter(_)
         | C::ConditionalExactPopulationFilter(_)
         | C::ConditionalBetweenPopulationFilter(_)
-        | C::ConditionalBelowPopulationFilter(_) => D::CITY,
-        C::ConditionalCityFilter(x) => D::CITY | filters.city(x.cities).deps(),
-        // The road and harbour network to the capital: other tiles, other cities, open borders.
+        | C::ConditionalBelowPopulationFilter(_) => D::CITY | D::TILE,
+        C::ConditionalCityFilter(x) => D::CITY | D::TILE | filters.city(x.cities).deps(),
+        // The trade network to the capital (`cities.py:1967-2067`): roads, harbours, borders and
+        // techs, and the civilization's own `Forests and Jungles are roads` (`cities.py:1985`).
+        // A civilization's uniques have no class (city-state bonuses follow influence), so it
+        // reads every class.
         C::ConditionalCityConnected => D::all(),
-        C::ConditionalWhenGarrisoned => D::CITY | D::UNIT_SET,
+        C::ConditionalWhenGarrisoned => D::CITY | D::TILE | D::UNIT_SET,
         C::ConditionalOurUnit(x) => D::UNIT | units(x.units),
         C::ConditionalOurUnitOnUnit(x) => D::UNIT | units(x.units),
         C::ConditionalUnitWithPromotion(_)
@@ -141,11 +151,11 @@ pub fn deps_of(data: &CondData, filters: &Filters) -> CondDeps {
         C::ConditionalForeignContinent => D::TILE | D::CITY_COUNT,
         C::ConditionalInTiles(x) => D::TILE | tiles(x.tiles),
         C::ConditionalInTilesNot(x) => D::TILE | tiles(x.tiles),
-        // Tiles other than the one in context, which no class names.
-        C::ConditionalNearTiles(_)
-        | C::ConditionalAdjacentTo(_)
-        | C::ConditionalNotAdjacentTo(_)
-        | C::ConditionalNeighborTiles(_) => D::all(),
+        // The tiles around the one in context: where it stands, and every tile's state.
+        C::ConditionalNearTiles(x) => D::TILE | D::MAP | tiles(x.tiles),
+        C::ConditionalAdjacentTo(x) => D::TILE | D::MAP | tiles(x.tiles),
+        C::ConditionalNotAdjacentTo(x) => D::TILE | D::MAP | tiles(x.tiles),
+        C::ConditionalNeighborTiles(x) => D::TILE | D::MAP | tiles(x.tiles),
         C::ConditionalCountableEqualTo(x) => x.count.deps(filters) | x.to.deps(filters),
         C::ConditionalCountableDifferentThan(x) => x.count.deps(filters) | x.than.deps(filters),
         C::ConditionalCountableMoreThan(x) => x.count.deps(filters) | x.than.deps(filters),
@@ -196,12 +206,17 @@ pub(crate) fn assign_deps(t: &mut UniqueTable) {
 /// Whether every conditional of the unique `id` holds in `ctx` (`applies`, `uniques.py:778-799`).
 /// A unique without conditionals always applies, and so does every unique in a context that
 /// ignores them.
+///
+/// Debug builds check the context is resolved ([`Ctx::is_resolved`]): one built field by field
+/// with a city, unit or fight but no civilization would fail every civilization conditional
+/// silently.
 pub fn applies<W: EvalWorld>(id: UniqueId, ctx: &Ctx, w: &W) -> bool {
     let t = w.rules().uniques();
     let u = t.get(id);
     if u.conds.is_empty() || ctx.ignore_conditionals {
         return true;
     }
+    debug_assert!(ctx.is_resolved(w), "{ctx:?} is not resolved: call Ctx::resolve");
     t.conds(u).iter().all(|c| holds(c, id, ctx, w))
 }
 
@@ -217,6 +232,7 @@ pub fn applies_scoped<W: EvalWorld>(id: UniqueId, ctx: &Ctx, w: &W, mask: CondDe
     if u.conds.is_empty() || ctx.ignore_conditionals {
         return true;
     }
+    debug_assert!(ctx.is_resolved(w), "{ctx:?} is not resolved: call Ctx::resolve");
     t.conds(u).iter().filter(|c| in_scope(c.deps, mask)).all(|c| holds(c, id, ctx, w))
 }
 
@@ -238,7 +254,7 @@ pub fn holds<W: EvalWorld>(c: &Cond, id: UniqueId, ctx: &Ctx, w: &W) -> bool {
     let on_civ = |test: &dyn Fn(PlayerId) -> bool| civ.is_some_and(test);
     let progress =
         |test: fn(ReligionProgress) -> bool| civ.is_some_and(|p| test(w.civ_religion_progress(p)));
-    let has = |s: SetRef, city: CityId| has_building(t, s, w, city);
+    let has = |s: SetRef, city: CityId| has_building(t, s, w.city_buildings(city));
     let rel_city = || ctx.rel_city(w);
     let rel_unit = ctx.rel_unit();
     let rel_tile = ctx.rel_tile();
@@ -287,13 +303,12 @@ pub fn holds<W: EvalWorld>(c: &Cond, id: UniqueId, ctx: &Ctx, w: &W) -> bool {
         C::ConditionalBeforeEra(x) => on_civ(&|p| w.civ_era(p) < x.era),
         C::ConditionalStartingFromEra(x) => on_civ(&|p| w.civ_era(p) >= x.era),
         C::ConditionalIfStartingInEra(x) => w.starting_era() == x.era,
-        C::ConditionalTech(x) => on_civ(&|p| w.civ_techs(p).iter().any(|k| t.in_set(x.techs, k))),
-        C::ConditionalNoTech(x) => {
-            on_civ(&|p| !w.civ_techs(p).iter().any(|k| t.in_set(x.techs, k)))
-        }
+        C::ConditionalTech(x) => on_civ(&|p| t.set(x.techs).intersects(&w.civ_techs(p))),
+        C::ConditionalNoTech(x) => on_civ(&|p| !t.set(x.techs).intersects(&w.civ_techs(p))),
         C::ConditionalWhileResearching(x) => {
             civ.and_then(|p| w.civ_researching(p)).is_some_and(|k| t.in_set(x.techs, k))
         }
+        // refcheck: no-civ-adopted-counts-beliefs
         C::ConditionalNoCivAdopted(x) => {
             !w.civs().any(|p| w.civ_kind(p) == NationKind::Major && adopted(w, p, x.adopted))
         }
@@ -307,6 +322,7 @@ pub fn holds<W: EvalWorld>(c: &Cond, id: UniqueId, ctx: &Ctx, w: &W) -> bool {
         C::ConditionalBeforeEnhancingReligion => progress(|s| s != ReligionProgress::Enhanced),
         C::ConditionalAfterEnhancingReligion => progress(|s| s == ReligionProgress::Enhanced),
         C::ConditionalAfterGeneratingGreatProphet => on_civ(&|p| w.civ_prophets_earned(p) > 0),
+        // refcheck: building-conditionals-read-a-filter (every arm that reads `has`)
         C::ConditionalBuildingBuilt(x) => on_civ(&|p| w.civ_cities(p).any(|c| has(x.buildings, c))),
         C::ConditionalBuildingNotBuilt(x) => {
             on_civ(&|p| !w.civ_cities(p).any(|c| has(x.buildings, c)))
@@ -334,6 +350,7 @@ pub fn holds<W: EvalWorld>(c: &Cond, id: UniqueId, ctx: &Ctx, w: &W) -> bool {
         C::ConditionalWhenBelowAmountStatResource(x) => {
             stat_amount(w, civ, x.what) < f64::from(x.amount) * speed_factor(r, w, id)
         }
+        // refcheck: between-stat-scales-by-speed
         C::ConditionalWhenBetweenStatResource(x) => {
             let k = speed_factor(r, w, id);
             let a = stat_amount(w, civ, x.what);
@@ -367,6 +384,7 @@ pub fn holds<W: EvalWorld>(c: &Cond, id: UniqueId, ctx: &Ctx, w: &W) -> bool {
             rel_unit.is_some_and(|u| !carries(w, u, x.promotion))
         }
         C::ConditionalVsCity => matches!(their, Some(Combatant::City(_))),
+        // refcheck: vs-units-never-matches-a-city
         C::ConditionalVsUnits(x) => match their {
             Some(Combatant::Unit(u)) => other_matches(u, x.units),
             _ => false,
@@ -427,7 +445,7 @@ pub fn holds<W: EvalWorld>(c: &Cond, id: UniqueId, ctx: &Ctx, w: &W) -> bool {
         }
         C::ConditionalNearTiles(x) => rel_tile.is_some_and(|tile| {
             let radius = u32::try_from(x.radius).unwrap_or(0);
-            w.grid().within(tile, radius).into_iter().any(|i| f.tile_matches(x.tiles, w, i, civ))
+            w.grid().any_within(tile, radius, |i| f.tile_matches(x.tiles, w, i, civ))
         }),
         C::ConditionalAdjacentTo(x) => {
             rel_tile.is_some_and(|tile| adjacent_to(w, x.tiles, tile, civ))
@@ -472,10 +490,10 @@ fn adopted<W: EvalWorld>(w: &W, p: PlayerId, what: PolicyOrBelief) -> bool {
     }
 }
 
-/// Whether the city has a building of the filter, which names a building's replacements too
-/// (`_city_has`, `uniques.py:859-861`).
-fn has_building<W: EvalWorld>(t: &UniqueTable, s: SetRef, w: &W, c: CityId) -> bool {
-    w.city_buildings(c).iter().any(|b: BuildingId| t.in_set(s, b))
+/// Whether the city's buildings hold one of the filter, which names a building's replacements too
+/// (`_city_has`, `uniques.py:859-861`): one test per word of the set.
+fn has_building(t: &UniqueTable, s: SetRef, buildings: BuildingSet) -> bool {
+    t.set(s).intersects(&buildings)
 }
 
 /// Whether the unit has the promotion, or the status (`uniques.py:974-975`).

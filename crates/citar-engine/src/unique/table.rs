@@ -135,9 +135,9 @@ bitflags! {
     /// the city, unit, tile or fight in context, which a memo keyed by that entity holds. A
     /// conditional whose answer depends on the ids in its context alone (a civilization's nation)
     /// reads `CONFIG`, so that a unique's deps are empty exactly when it has no conditionals.
-    /// Where no class names what a conditional reads (the road network to the capital, the tiles
-    /// around the one in context, a civilization's own uniques), it reads [`CondDeps::all`],
-    /// which is always correct.
+    /// Where no class names what a conditional reads (a city-state's influence, a civilization's
+    /// own uniques, and so the trade network to the capital, which reads them), it reads
+    /// [`CondDeps::all`], which is always correct.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct CondDeps: u32 {
         /// The turn, and what runs out on a turn: open borders, declared friendships.
@@ -187,8 +187,13 @@ bitflags! {
         const CONFIG = 1 << 17;
         /// A random draw, keyed by the turn and the context: its answer changes every turn.
         const CHANCE = 1 << 18;
-        /// The city in context: its owner, founder, buildings, citizens, stored food, health,
-        /// religion, status (puppet, resisting, razing) and whether it is the capital.
+        /// The city a rule means (`Ctx::rel_city`): its owner, founder, buildings, citizens,
+        /// stored food, health, religion, status (puppet, resisting, razing) and whether it is
+        /// the capital. That is the city in context, else our side's city in a fight, else the
+        /// city whose territory the tile in context is, when the civilization in context owns
+        /// it: so a memo keyed by a tile or a unit that evaluates a conditional reading `CITY`
+        /// validates against the revisions of that territory's city too. Such a conditional
+        /// also reads `TILE`, for which city's territory the tile is.
         const CITY = 1 << 19;
         /// The unit in context: its base unit, owner, promotions, health, tile, embarked and
         /// set-up status, and the actions it has used.
@@ -199,6 +204,13 @@ bitflags! {
         /// The fight in context: both sides, as the unit and city classes describe each, who
         /// attacks, and the tile under attack.
         const COMBAT = 1 << 22;
+        /// Every tile of the map as `TILE` describes the one in context: its terrains, river,
+        /// owner, resource, improvement, route and pillage, whether a city works it and whose
+        /// city's territory it is. Read by the conditionals about the tiles around the one in
+        /// context (`with [a] to [b] neighboring`, `within [n] tiles of`, `in tiles adjacent
+        /// to`), which add `TILE` for where they stand. A civilization-level class: it names no
+        /// entity in context.
+        const MAP = 1 << 23;
     }
 }
 
@@ -826,6 +838,9 @@ mod tests {
         assert_eq!(v.flags(), UFlags::all());
         assert_eq!(u.conds.ids().map(|c| c.0).collect::<Vec<_>>(), [7, 8]);
         assert!(CondDeps::all().bits() < 1 << 24, "the classes fit 24 bits");
+        assert!(
+            CondDeps::all().contains(CondDeps::MAP) && !CondDeps::LOCAL.contains(CondDeps::MAP)
+        );
     }
 
     fn buildings(members: &[u32]) -> StaticFilter {
