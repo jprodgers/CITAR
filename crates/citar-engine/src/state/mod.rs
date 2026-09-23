@@ -580,7 +580,8 @@ impl State {
     /// has no capital, and its units leave the game. Closing its negotiations and deals, and its
     /// spies, is the rules' business.
     ///
-    /// The changes list its units' removals in id order, then [`Change::PlayerAlive`].
+    /// The changes list its units' removals in id order, each followed by the units that unit
+    /// carried leaving it (as [`Units::despawn`] reports them), then [`Change::PlayerAlive`].
     pub fn kill_player(&mut self, p: PlayerId, turn: Turn) -> Result<Changes, StateError> {
         if self.players.get(p).is_none() {
             return Err(StateError::NoSuchPlayer(p));
@@ -591,7 +592,7 @@ impl State {
         let mut out = Changes::new();
         for u in self.units.of(p).to_vec() {
             let (_, ch) = self.units.despawn(u)?;
-            out.push(ch);
+            out.append(ch);
         }
         let player = self.player_mut_of(p)?;
         player.set_alive(false, Some(turn));

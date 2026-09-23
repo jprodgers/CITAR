@@ -127,9 +127,20 @@ fn kill_and_revive() -> Result<(), StateError> {
     let _placed = st.units.spawn(Unit::new(uid(1), BaseUnitId(0), PlayerId(1), TileIdx(3), 1))?;
     let _placed = st.units.spawn(Unit::new(uid(2), BaseUnitId(0), PlayerId(0), TileIdx(3), 1))?;
     let _placed = st.units.spawn(Unit::new(uid(3), BaseUnitId(0), PlayerId(1), TileIdx(5), 1))?;
+    // Player 0's unit rides player 1's carrier, and is left behind uncarried.
+    let _boarded = st.units.board(uid(2), uid(1))?;
     let changes = st.kill_player(PlayerId(1), 40)?;
-    assert_eq!(changes.len(), 3);
-    assert_eq!(changes.as_slice().last(), Some(&Change::PlayerAlive(PlayerId(1))));
+    let (t3, t5) = (TileIdx(3), TileIdx(5));
+    assert_eq!(
+        changes.as_slice(),
+        &[
+            Change::UnitRemoved { u: uid(1), owner: PlayerId(1), at: t3 },
+            Change::UnitPlaced { u: uid(2), owner: PlayerId(0), from: Some(t3), to: t3 },
+            Change::UnitRemoved { u: uid(3), owner: PlayerId(1), at: t5 },
+            Change::PlayerAlive(PlayerId(1)),
+        ]
+    );
+    assert_eq!(st.units().get(uid(2)).and_then(Unit::carried_by), None);
     let p = st.player(PlayerId(1)).expect("player 1");
     assert!(!p.alive());
     assert_eq!(p.eliminated_turn(), Some(40));

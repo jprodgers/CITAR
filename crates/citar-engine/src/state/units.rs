@@ -448,6 +448,8 @@ impl Units {
 
     // ---- Occupancy lists ------------------------------------------------------------------------
 
+    /// The link after `id`, growing the links to it. Only ids the store holds get here, and the
+    /// store refuses any above `store::MAX_ENTITY_ID`, so a corrupt id cannot grow this far.
     fn next_slot(&mut self, id: UnitId) -> &mut u32 {
         let i = id.index();
         if i >= self.occ_next.len() {
@@ -544,19 +546,26 @@ impl Units {
 
     /// Takes a unit off the map and out of the game. The units it carried stay where they are,
     /// no longer carried (`game.py:751-764`).
-    pub fn despawn(&mut self, u: UnitId) -> Result<(Unit, Change), UnitsError> {
+    ///
+    /// The changes list the unit's removal, then each unit it carried leaving it, in id order, as
+    /// [`unboard`](Self::unboard) reports one: whether a unit is carried matters to healing,
+    /// city air capacity and carrier capacity.
+    pub fn despawn(&mut self, u: UnitId) -> Result<(Unit, Changes), UnitsError> {
         let (owner, tile) =
             self.get(u).map(|x| (x.owner, x.tile)).ok_or(UnitsError::NoSuchUnit(u))?;
         let carried: SmallVec<[UnitId; 4]> = self.carried_by(u).collect();
-        for c in carried {
-            if let Some(x) = self.store.get_mut(c) {
-                x.carried_by = None;
-            }
-        }
         self.occ_remove(tile, u);
         self.owner_remove(owner, u);
         let unit = self.store.remove(u).ok_or(UnitsError::NoSuchUnit(u))?;
-        Ok((unit, Change::UnitRemoved { u, owner, at: tile }))
+        let mut out = Changes::new();
+        out.push(Change::UnitRemoved { u, owner, at: tile });
+        for c in carried {
+            if let Some(x) = self.store.get_mut(c) {
+                x.carried_by = None;
+                out.push(Change::UnitPlaced { u: c, owner: x.owner, from: Some(tile), to: tile });
+            }
+        }
+        Ok((unit, out))
     }
 
     /// Moves a unit to `to` without movement rules, taking the units it carries along
@@ -755,9 +764,19 @@ mod tests {
         assert_eq!(changes.len(), 3);
         assert!(us.iter().all(|u| u.tile() == TileIdx(6)));
         us.verify()?;
+        let _changed = us.set_owner(uid(3), PlayerId(1))?;
         let (gone, ch) = us.despawn(uid(1))?;
         assert_eq!(gone.id(), uid(1));
-        assert_eq!(ch, Change::UnitRemoved { u: uid(1), owner: PlayerId(0), at: TileIdx(6) });
+        let at = TileIdx(6);
+        assert_eq!(
+            ch.as_slice(),
+            &[
+                Change::UnitRemoved { u: uid(1), owner: PlayerId(0), at },
+                Change::UnitPlaced { u: uid(2), owner: PlayerId(0), from: Some(at), to: at },
+                Change::UnitPlaced { u: uid(3), owner: PlayerId(1), from: Some(at), to: at },
+            ],
+            "the removal, then each unit it carried leaving it"
+        );
         assert!(us.iter().all(|u| u.carried_by().is_none()));
         us.verify()
     }

@@ -302,12 +302,20 @@ fn units_case(ops: Vec<UnitOp>) -> Result<(), TestCaseError> {
                 let (gone, ch) =
                     units.despawn(u).map_err(|e| TestCaseError::fail(e.to_string()))?;
                 prop_assert_eq!(gone.id(), u);
-                prop_assert_eq!(ch, Change::UnitRemoved { u, owner: m.owner, at: m.tile });
-                for x in model.values_mut() {
+                // The removal, then each unit it carried leaving it, in id order.
+                let mut want = vec![Change::UnitRemoved { u, owner: m.owner, at: m.tile }];
+                for (&c, x) in &mut model {
                     if x.carried_by == Some(u) {
                         x.carried_by = None;
+                        want.push(Change::UnitPlaced {
+                            u: c,
+                            owner: x.owner,
+                            from: Some(x.tile),
+                            to: x.tile,
+                        });
                     }
                 }
+                prop_assert_eq!(ch.as_slice(), want.as_slice());
                 prop_assert!(units.despawn(u).is_err());
             }
             UnitOp::Owner { pick: i, owner } => {
