@@ -10,6 +10,7 @@
 
 pub mod collections;
 pub mod fmt;
+pub mod hex;
 pub mod ids;
 pub mod num;
 pub mod order;
