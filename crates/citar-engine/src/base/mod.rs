@@ -17,3 +17,4 @@ pub mod order;
 pub mod rng;
 pub mod sets;
 pub mod stats;
+pub mod text;
