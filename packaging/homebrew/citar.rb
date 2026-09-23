@@ -11,8 +11,8 @@ class Citar < Formula
 
   desc "Civilization V-style 4X game for benchmarking language models"
   homepage "https://github.com/jprodgers/CITAR"
-  url "https://files.pythonhosted.org/packages/source/c/citar/citar-0.1.4.tar.gz"
-  sha256 "7c206c46a464b8fcb788ddfe28083c0948e7eed55951f1c9c08612412687cbe5"
+  url "https://files.pythonhosted.org/packages/source/c/citar/citar-0.1.5.tar.gz"
+  sha256 "7d81063c228e3987e3e8cdda77b984d1c57af0b91027402e73ab4ce8b0311b62"
   license "MPL-2.0"
 
   # 3.12 rather than the newest: Homebrew's `python@3.13` and later occasionally lack a wheel for
