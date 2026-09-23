@@ -114,5 +114,55 @@ class BotTests(unittest.TestCase):
         self.assertEqual((g.s.winner, g.s.victory), (0, "Domination"))
 
 
+# A seeded all-bot game, printed as one digest of every event, unit and city. Run in a fresh interpreter because
+# PYTHONHASHSEED only takes effect at startup.
+_HASH_SEED_GAME = """
+import hashlib, json, sys
+from citar.engine.game import Game
+from citar.bots.profiles import make_bot
+g = Game.new({"map_size": "small", "seed": 5, "barbarians": "raging", "speed": "Quick",
+              "players": [{"controller": "bot"}] * 4})
+bots = {p.id: make_bot("standard", seed=p.id) for p in g.s.players if p.kind == "major"}
+for _ in range(int(sys.argv[1])):
+    for pid, bot in bots.items():
+        bot.play_turn(g, pid, end_turn=True)
+state = [g.turn, g.s.events,
+         [(u.id, u.owner, u.type, u.idx, u.hp) for u in sorted(g.s.units.values(), key=lambda u: u.id)],
+         [(c.id, c.owner, c.idx, c.pop) for c in sorted(g.s.cities.values(), key=lambda c: c.id)]]
+print(hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).hexdigest())
+"""
+
+
+class DeterminismTests(unittest.TestCase):
+    def test_same_seed_same_game_under_any_hash_seed(self):
+        """Set and dict ordering of strings changes with PYTHONHASHSEED; nothing the engine or bot decides may."""
+        import os
+        import subprocess
+        import sys
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        procs = [subprocess.Popen([sys.executable, "-c", _HASH_SEED_GAME, "40"], cwd=root, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env={**os.environ, "PYTHONHASHSEED": h})
+                 for h in ("1", "2")]
+        out = []
+        for p in procs:
+            stdout, stderr = p.communicate(timeout=300)
+            self.assertEqual(p.returncode, 0, stderr)
+            out.append(stdout.strip())
+        self.assertEqual(out[0], out[1])
+
+    def test_live_bot_seats_are_seeded_from_the_game(self):
+        """A bot seat in a live session draws from the game's seed, not the clock, so a seed replays the same game."""
+        import random
+        from citar.server.session import SessionManager
+        rolls = []
+        for _ in range(2):
+            s = SessionManager().create({"map_size": "duel", "seed": 77},
+                                        [{"type": "human"}, {"type": "bot"}], track=False, start=False)
+            rolls.append(s.get_agent(1).bot.rng.random())
+        self.assertEqual(rolls[0], rolls[1])
+        self.assertEqual(rolls[0], random.Random(77 * 101 + 1).random())
+
+
 if __name__ == "__main__":
     unittest.main()

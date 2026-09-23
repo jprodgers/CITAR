@@ -28,6 +28,18 @@ export function renderUnitPanel(game, root, d) {
       d.religion ? `${d.religion}${d.religious_strength != null ? " (" + d.religious_strength + ")" : ""}` : null,
     ].filter(Boolean).join(" · ")),
   );
+  if (d.return_offer && my) {
+    const who = d.return_offer.name;
+    const decide = async (keep) => {
+      const r = await game.tool("return_civilian", { unit_id: d.id, keep });
+      if (r) toast(keep ? `You keep the ${d.type}.` : `The ${d.type} goes back to ${who}.`);
+    };
+    root.appendChild(el("div", { class: "card", style: { margin: "6px 0" } },
+      el("div", {}, `Recaptured from barbarians: this ${d.type} belonged to ${who}.`),
+      el("div", { class: "row", style: { marginTop: "6px" } },
+        el("button", { class: "small primary", onclick: () => decide(false) }, `Return to ${who}`),
+        el("button", { class: "small", onclick: () => decide(true) }, "Keep it"))));
+  }
   if (d.promotions && d.promotions.length) root.appendChild(el("div", { class: "muted" }, "Promotions: " + d.promotions.join(", ")));
   if (d.abilities && d.abilities.length) root.appendChild(el("details", { class: "muted", style: { fontSize: "12px" } },
     el("summary", {}, "Abilities"), el("div", {}, uniquesText(d.abilities))));
@@ -319,23 +331,67 @@ export async function chooseBeliefs(game, enhancing) {
 // ============================================================================
 // Tech tree
 // ============================================================================
+// Where the tree was scrolled to when it was last closed, per game (a tab-local convenience only).
+const techScrollKey = (gid) => `citar.techScroll.${gid}`;
+
+function loadTechScroll(gid) {
+  try { const v = localStorage.getItem(techScrollKey(gid)); return v == null ? null : +v; } catch { return null; }
+}
+
+function saveTechScroll(gid, x) {
+  try { localStorage.setItem(techScrollKey(gid), String(Math.round(x))); } catch { /* storage unavailable */ }
+}
+
 export async function openTechTree(game) {
   if (game.isSpectator) return;
   const R = game.rules;
   const content = el("div", { class: "tech-tree" });
+  let firstDraw = true;
   const m = modal({ title: "Technology", content });
-  content.parentElement.addEventListener("wheel", (e) => {
-    const sc = content.parentElement;
-    if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY) || sc.scrollHeight > sc.clientHeight + 4) return;
-    sc.scrollLeft += e.deltaY;
+  const scroller = content.parentElement;
+  // remembered as it changes: by the time a modal's onClose runs, it is already out of the page and reads 0
+  scroller.addEventListener("scroll", () => { if (!firstDraw) saveTechScroll(game.gid, scroller.scrollLeft); });
+  scroller.addEventListener("wheel", (e) => {
+    if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY) || scroller.scrollHeight > scroller.clientHeight + 4) return;
+    scroller.scrollLeft += e.deltaY;
     e.preventDefault();
   }, { passive: false });
+
+  async function pick(t, tree, e) {
+    if (t.status === "known") return;
+    // a granted free technology (Great Library, Liberty, ruins...) is spent before anything else:
+    // clicking an available tech takes it for free rather than changing what is being researched
+    if (tree.free_techs > 0 && t.status === "available" && !e.shiftKey) {
+      const res = await game.tool("choose_free_tech", { tech: t.name });
+      if (!res) return;
+      toast(`Learned ${res.learned || t.name} for free`);
+      if (res.free_techs_left > 0) draw(); else m.close();
+      return;
+    }
+    const queue = tree.queue || [];
+    if (e.shiftKey && queue.includes(t.name)) {
+      const res = await game.tool("dequeue_research", { tech: t.name });
+      if (!res) return;
+      toast(`Removed ${res.removed.join(", ")} from the queue`);
+      draw();
+      return;
+    }
+    const append = e.shiftKey && queue.length > 0;
+    const res = await game.tool("set_research", { tech: t.name, append });
+    if (!res) return;
+    toast(append ? `Queued ${t.name}` : `Researching ${res.researching || t.name}`);
+    if (!tree.researching && !e.shiftKey) m.close(); else draw();
+  }
+
   async function draw() {
     const r = await api.tool(game.gid, game.token, "get_tech_tree", { filter: "all" });
     if (!r.ok) { toast(r.error, "error"); return; }
     const tree = r.result;
+    const keepScroll = scroller.scrollLeft;
     clear(content);
     const byId = Object.fromEntries(tree.techs.map((t) => [t.name, t]));
+    const queue = tree.queue || [];
+    const qpos = Object.fromEntries(queue.map((t, i) => [t, i + 1]));
     const sci = game.view.empire ? (game.view.empire.per_turn || {}).science || 0 : 0;
     const remaining = (id) => {
       const seen = new Set();
@@ -346,76 +402,159 @@ export async function openTechTree(game) {
       };
       return walk(id);
     };
-    const W = 180, H = 58, GX = 30, GY = 8, TOP = tree.free_techs > 0 ? 64 : 26;
+    // turns until each queued tech is done, researching the queue in order at the current rate
+    const queueTurns = {};
+    let acc = 0;
+    for (const q of queue) { acc += Math.max(0, byId[q].cost - (byId[q].progress || 0)); queueTurns[q] = sci > 0 ? Math.max(1, Math.ceil(acc / sci)) : null; }
+
+    // --- header: the free-tech banner and the research queue, pinned while the tree scrolls sideways
+    const header = el("div", { class: "tech-header" });
+    if (tree.free_techs > 0) {
+      header.appendChild(el("div", { class: "free-tech-banner" },
+        `⚗ Choose ${tree.free_techs} free technolog${tree.free_techs === 1 ? "y" : "ies"}: click any highlighted technology to learn it now.`));
+    }
+    const qbar = el("div", { class: "tech-queue" }, el("b", {}, "Queue"));
+    if (!queue.length) qbar.appendChild(el("span", { class: "muted" }, "Nothing queued. Click a technology to research it; Shift+click to add it to the queue."));
+    queue.forEach((q, i) => {
+      qbar.appendChild(el("span", { class: `tq-item ${i === 0 ? "current" : ""}`, title: queueTurns[q] ? `done in ~${queueTurns[q]} turns` : "" },
+        el("span", { class: "tq-n" }, String(i + 1)), q, queueTurns[q] ? el("span", { class: "muted" }, ` ${queueTurns[q]}t`) : null,
+        el("button", { class: "tq-x", title: "Remove from the queue (and anything queued that needs it)",
+          onclick: async () => { const res = await game.tool("dequeue_research", { tech: q }); if (res) draw(); } }, "✕")));
+      if (i < queue.length - 1) qbar.appendChild(el("span", { class: "muted" }, "→"));
+    });
+    if (queue.length) qbar.appendChild(el("span", { class: "muted tq-hint" }, "Shift+click adds or removes"));
+    header.appendChild(qbar);
+    content.appendChild(header);
+
+    // --- layout
+    const W = 180, H = 58, GX = 70, GY = 18;
+    const HEAD = tree.free_techs > 0 ? 84 : 44;
+    const TOP = HEAD + 22;
     const pos = {};
     const cols = {};
     for (const t of tree.techs) { const col = R.techs[t.name].column; (cols[col] = cols[col] || []).push(t); }
     const colNums = Object.keys(cols).map(Number).sort((a, b) => a - b);
+    const colOf = {};
+    const eraX = {};
     let lastEra = null;
     colNums.forEach((cn, ci) => {
       const x = ci * (W + GX);
-      cols[cn].forEach((t, ri) => { pos[t.name] = [x, TOP + ri * (H + GY)]; });
+      cols[cn].forEach((t, ri) => { pos[t.name] = [x, TOP + ri * (H + GY)]; colOf[t.name] = ci; });
       const era = cols[cn][0].era;
-      if (era !== lastEra) { content.appendChild(el("div", { class: "era-label", style: { left: x + "px" } }, era)); lastEra = era; }
+      if (era !== lastEra) {
+        content.appendChild(el("div", { class: "era-label", style: { left: x + "px", top: HEAD + "px" } }, era));
+        eraX[era] = eraX[era] ?? x;
+        lastEra = era;
+      }
     });
     const width = colNums.length * (W + GX);
     const maxY = Math.max(...Object.values(pos).map((p) => p[1])) + H + 10;
     content.style.width = width + "px";
     content.style.height = maxY + "px";
+
+    // --- connections: right-angled, each target gets its own vertical lane in the gap before its column
+    // so lines into different techs never share a vertical segment
     const svgNS = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(svgNS, "svg");
     svg.setAttribute("width", width); svg.setAttribute("height", maxY);
     svg.style.position = "absolute"; svg.style.left = "0"; svg.style.top = "0";
-    for (const t of tree.techs) {
-      for (const p of t.prerequisites) {
-        if (!pos[p]) continue;
-        const [x1, y1] = pos[p], [x2, y2] = pos[t.name];
-        const path = document.createElementNS(svgNS, "path");
-        const sx = x1 + W, sy = y1 + H / 2, ex = x2, ey = y2 + H / 2;
-        path.setAttribute("d", `M${sx},${sy} C${sx + 20},${sy} ${ex - 20},${ey} ${ex},${ey}`);
-        path.setAttribute("stroke", byId[p].status === "known" ? "#2f7a45" : "#3a4254");
-        path.setAttribute("fill", "none"); path.setAttribute("stroke-width", "1.5");
-        svg.appendChild(path);
-      }
+    const lines = [];   // {from, to, path}
+    for (const cn of colNums) {
+      const targets = cols[cn].filter((t) => t.prerequisites.some((p) => pos[p]));
+      targets.forEach((t, ti) => {
+        const lane = pos[t.name][0] - GX + 12 + (targets.length > 1 ? ti * (GX - 24) / (targets.length - 1) : (GX - 24) / 2);
+        for (const p of t.prerequisites) {
+          if (!pos[p]) continue;
+          const [x1, y1] = pos[p], [x2, y2] = pos[t.name];
+          const sx = x1 + W, sy = y1 + H / 2, ex = x2, ey = y2 + H / 2;
+          const r = Math.min(6, Math.abs(ey - sy) / 2);
+          const dir = ey > sy ? 1 : -1;
+          const d = r < 1 ? `M${sx},${sy} H${ex}`
+            : `M${sx},${sy} H${lane - r} Q${lane},${sy} ${lane},${sy + dir * r} V${ey - dir * r} Q${lane},${ey} ${lane + r},${ey} H${ex}`;
+          const path = document.createElementNS(svgNS, "path");
+          path.setAttribute("d", d);
+          path.setAttribute("class", `tl ${byId[p].status === "known" ? "known" : ""}`);
+          svg.appendChild(path);
+          lines.push({ from: p, to: t.name, path });
+        }
+      });
     }
     content.appendChild(svg);
+
+    // --- hover: light up everything a tech needs and what it leads to directly; dim the rest
+    const dependents = {};
+    for (const t of tree.techs) for (const p of t.prerequisites) (dependents[p] = dependents[p] || []).push(t.name);
+    const boxes = {};
+    const ancestors = (id) => {
+      const out = new Set();
+      const walk = (tid) => { for (const p of byId[tid].prerequisites) if (!out.has(p) && byId[p]) { out.add(p); walk(p); } };
+      walk(id);
+      return out;
+    };
+    const highlight = (id) => {
+      const anc = ancestors(id);
+      const deps = new Set(dependents[id] || []);
+      content.classList.add("hovering");
+      for (const [n, b] of Object.entries(boxes)) {
+        b.classList.toggle("hl-self", n === id);
+        b.classList.toggle("hl-pre", anc.has(n));
+        b.classList.toggle("hl-next", deps.has(n));
+      }
+      for (const l of lines) {
+        const pre = (l.to === id || anc.has(l.to)) && anc.has(l.from);
+        const next = l.from === id && deps.has(l.to);
+        l.path.classList.toggle("hl-pre", pre);
+        l.path.classList.toggle("hl-next", next);
+        if (pre || next) svg.appendChild(l.path);   // draw on top of the dimmed lines
+      }
+    };
+    const unhighlight = () => {
+      content.classList.remove("hovering");
+      for (const b of Object.values(boxes)) b.classList.remove("hl-self", "hl-pre", "hl-next");
+      for (const l of lines) l.path.classList.remove("hl-pre", "hl-next");
+    };
+
     for (const t of tree.techs) {
       const [x, y] = pos[t.name];
       const un = t.unlocks || {};
       const unl = [...(un.units || []), ...(un.buildings || []), ...(un.improvements || []), ...(un.reveals || []).map((r2) => "reveals " + r2),
                    ...(t.effects || [])];
-      const cls = ["tech", t.status, tree.researching === t.name ? "researching" : "", (tree.queue || []).includes(t.name) && tree.researching !== t.name ? "goal" : ""].join(" ");
-      const box = el("div", { class: cls, style: { left: x + "px", top: y + "px", width: W + "px" }, title: unl.join(", "),
-        onclick: async () => {
-          if (t.status === "known") return;
-          // a granted free technology (Great Library, Liberty, ruins...) is spent before anything else:
-          // clicking an available tech takes it for free rather than changing what is being researched
-          if (tree.free_techs > 0 && t.status === "available") {
-            const res = await game.tool("choose_free_tech", { tech: t.name });
-            if (!res) return;
-            toast(`Learned ${res.learned || t.name} for free`);
-            if (res.free_techs_left > 0) draw(); else m.close();
-            return;
-          }
-          const res = await game.tool("set_research", { tech: t.name });
-          if (!res) return;
-          toast(`Researching ${res.researching || t.name}`);
-          if (!tree.researching) m.close(); else draw();
-        } },
-        el("div", { class: "n" }, t.name, el("span", { class: "muted", style: { float: "right", fontWeight: 400 }, title: `${t.cost} science` },
-          t.status === "known" ? "✓" : sci > 0 ? `${Math.max(1, Math.ceil(remaining(t.name) / sci))} turns` : `${t.cost}`)),
+      const cls = ["tech", t.status, tree.researching === t.name ? "researching" : "", qpos[t.name] && tree.researching !== t.name ? "goal" : ""].join(" ");
+      const needs = t.prerequisites.length ? `Requires: ${t.prerequisites.join(", ")}` : "";
+      const leads = (dependents[t.name] || []).length ? `Leads to: ${dependents[t.name].join(", ")}` : "";
+      const turnsTxt = t.status === "known" ? "✓" : queueTurns[t.name] ? `${queueTurns[t.name]} turns`
+        : sci > 0 ? `${Math.max(1, Math.ceil(remaining(t.name) / sci))} turns` : `${t.cost}`;
+      const box = el("div", { class: cls, style: { left: x + "px", top: y + "px", width: W + "px" },
+        title: [unl.join(", "), needs, leads, t.status !== "known" ? "Click: research · Shift+click: add to / remove from queue" : ""].filter(Boolean).join("\n"),
+        onclick: (e) => pick(t, tree, e),
+        onmouseenter: () => highlight(t.name), onmouseleave: unhighlight },
+        qpos[t.name] ? el("span", { class: "tq-badge", title: `#${qpos[t.name]} in the research queue` }, String(qpos[t.name])) : null,
+        el("div", { class: "n" }, t.name, el("span", { class: "muted", style: { float: "right", fontWeight: 400 }, title: `${t.cost} science` }, turnsTxt)),
         el("div", { class: "u" }, unl.join(", ") || "—"),
         t.progress ? el("div", { class: "bar" }, el("div", { style: { width: Math.min(100, t.progress / t.cost * 100) + "%" } })) : null);
+      boxes[t.name] = box;
       content.appendChild(box);
     }
-    if (tree.free_techs > 0) {
-      content.classList.add("free-pick");
-      content.appendChild(el("div", { class: "free-tech-banner" },
-        `⚗ Choose ${tree.free_techs} free technolog${tree.free_techs === 1 ? "y" : "ies"}: click any highlighted technology to learn it now.`));
-    } else content.classList.remove("free-pick");
-    const firstAvail = tree.free_techs > 0 ? tree.techs.find((t) => t.status === "available") : null;
-    const cur = firstAvail ? pos[firstAvail.name] : tree.researching ? pos[tree.researching] : null;
-    if (cur) setTimeout(() => { content.parentElement.scrollLeft = Math.max(0, cur[0] - 200); }, 10);
+    content.classList.toggle("free-pick", tree.free_techs > 0);
+
+    // --- scroll: keep the position across redraws; on opening, go back to where the tree was left, or
+    // else to the current era (a free pick jumps to the first technology it can take)
+    let target = null;
+    if (!firstDraw) target = keepScroll;
+    else {
+      const firstAvail = tree.free_techs > 0 ? tree.techs.find((t) => t.status === "available") : null;
+      const saved = loadTechScroll(game.gid);
+      if (firstAvail) target = pos[firstAvail.name][0] - 200;
+      else if (saved != null) target = saved;
+      else {
+        const eraName = game.view.empire && game.view.empire.era;
+        const anchor = tree.researching || (tree.techs.find((t) => t.status === "available") || {}).name;
+        target = eraName && eraX[eraName] != null ? eraX[eraName] - 20 : anchor ? pos[anchor][0] - 200 : 0;
+      }
+    }
+    firstDraw = false;
+    scroller.scrollLeft = Math.max(0, target);
+    setTimeout(() => { scroller.scrollLeft = Math.max(0, target); }, 10);
   }
   draw();
 }
@@ -637,7 +776,10 @@ export async function openDiplomacy(game, focusPid = null) {
       if (neg.your_move) {
         const respond = async (action, extra = {}) => {
           const res = await game.tool("respond_negotiation", { negotiation_id: neg.id, action, message: text.value || undefined, ...extra });
-          if (res) { text.value = ""; state.give = []; state.receive = []; setTimeout(draw, 300); }
+          if (!res) return;
+          // answering settles the matter: close the window rather than leave it open while play goes on
+          if (action === "accept" || action === "reject") { toast(action === "accept" ? "Deal accepted" : "Proposal rejected"); m.close(); return; }
+          text.value = ""; state.give = []; state.receive = []; setTimeout(draw, 300);
         };
         box.appendChild(el("div", { class: "btn-grid" },
           el("button", { class: "primary", disabled: !neg.current_proposal || neg.proposal_by_you, onclick: () => respond("accept") }, "Accept"),

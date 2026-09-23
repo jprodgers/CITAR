@@ -8,9 +8,62 @@ import { setupState, welcomeBanner } from "./setup.js";
 import { pageHeader } from "./nav.js";
 import { registry } from "./servers.js";
 
-const COLORS = ["#e04040", "#3c78d8", "#e8c547", "#8e44ad", "#27ae60", "#e67e22", "#17becf", "#f06292",
-  "#8d6e63", "#9ccc65", "#5c6bc0", "#ff7043", "#26a69a", "#d4e157", "#ab47bc", "#78909c",
-  "#b71c1c", "#0d47a1", "#f9a825", "#1b5e20", "#ff80ab", "#00e5ff", "#6d4c41", "#c0ca33"];
+// Civilization colours (the server sends the same palette as rules.player_colors), most distinct first.
+const COLORS = ["#aa0000", "#0000aa", "#00aa00", "#aaaa00", "#50006e", "#c85a00", "#ff00e6", "#299bcc",
+  "#00998a", "#cc298b", "#b2ff00", "#9900ff", "#00ffff", "#99741f", "#004c99", "#ff0000",
+  "#00ff33", "#ff0066", "#0066ff", "#99003d", "#9b29cc", "#00ff80", "#0099ff", "#ffff00"];
+
+const hexRgb = (c) => (/^#[0-9a-f]{6}$/i.test(c || "") ? [1, 3, 5].map((k) => parseInt(c.slice(k, k + 2), 16)) : null);
+
+// Too close to tell apart on the map (the same "redmean" test the server uses to keep colours unique)
+export function colorsClash(a, b) {
+  const x = hexRgb(a), y = hexRgb(b);
+  if (!x || !y) return false;
+  const rm = (x[0] + y[0]) / 2, dr = x[0] - y[0], dg = x[1] - y[1], db = x[2] - y[2];
+  return Math.sqrt((2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db) < 60;
+}
+
+// The first palette colour none of `taken` clashes with
+function freeColor(palette, taken) {
+  return palette.find((c) => !taken.some((t) => colorsClash(c, t))) || palette[taken.length % palette.length];
+}
+
+// A swatch button that opens a palette. Colours another seat holds are shown taken and can't be picked;
+// a custom hex value can be typed at the bottom, as long as nobody has it (or one too close to it).
+function colorPicker(palette, s, others, onPick) {
+  const takenBy = (c) => others.find((o) => colorsClash(c, o.color));
+  const btn = el("button", { class: "color-btn", type: "button", title: `Colour ${s.color}`, style: { background: s.color } });
+  const wrap = el("span", { class: "color-wrap" }, btn);
+  let pop = null;
+  const closePop = () => { if (pop) { pop.remove(); pop = null; document.removeEventListener("mousedown", outside); } };
+  const outside = (e) => { if (pop && !pop.contains(e.target) && e.target !== btn) closePop(); };
+  btn.onclick = () => {
+    if (pop) return closePop();
+    const grid = el("div", { class: "color-grid" }, ...palette.map((c) => {
+      const t = takenBy(c);
+      return el("button", { type: "button", class: `color-sw ${t ? "taken" : ""} ${c === s.color ? "current" : ""}`, disabled: !!t,
+        title: t ? `${c}: taken by ${t.label}` : c, style: { background: c },
+        onclick: () => { closePop(); onPick(c); } });
+    }));
+    const hex = el("input", { class: "color-hex", value: s.color, maxlength: 7, spellcheck: false, placeholder: "#rrggbb" });
+    const msg = el("span", { class: "muted small" });
+    const apply = () => {
+      let v = hex.value.trim().toLowerCase();
+      if (!v.startsWith("#")) v = "#" + v;
+      if (!hexRgb(v)) { msg.textContent = "Use the form #rrggbb."; return; }
+      const t = takenBy(v);
+      if (t) { msg.textContent = `Too close to ${t.label}'s colour.`; return; }
+      closePop(); onPick(v);
+    };
+    hex.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); apply(); } });
+    pop = el("div", { class: "color-pop" }, grid,
+      el("div", { class: "row color-custom" }, el("span", { class: "muted small" }, "Custom"), hex,
+        el("button", { type: "button", class: "small", onclick: apply }, "Use")), msg);
+    wrap.appendChild(pop);
+    setTimeout(() => document.addEventListener("mousedown", outside), 0);
+  };
+  return wrap;
+}
 
 export async function renderLobby(root, rules) {
   const meta = await api.meta().catch(() => ({}));
@@ -320,6 +373,21 @@ function renderNewGame(card, rules, meta, refresh) {
   f.barbDiff = sel([["", "Same as game"], ...rules.difficulty_list.map((k) => [k, k])], "");
   f.barbDiff.title = "Barbarian strength: the bonus civilizations get against barbarians, how soon camps spawn, and when barbarians may enter civilizations' land.";
   f.barbs = sel(Object.entries(rules.barbarian_levels).map(([k, v]) => [k, v]), "normal");
+  const barbAggrDefault = () => (rules.barbarian_aggression || {})[f.barbs.value] ?? 50;
+  f.barbAggr = el("input", { type: "range", min: 0, max: 100, step: 5, value: barbAggrDefault(),
+    title: "How hard barbarians hunt: search radius for targets, odds they accept, raids vs attacks, and how fast camps spawn. Resets to the level's default when the level changes." });
+  f.barbAggrVal = el("span", { class: "muted" }, String(f.barbAggr.value));
+  f.barbAggr.addEventListener("input", () => { f.barbAggrVal.textContent = f.barbAggr.value; });
+  f.barbAggrField = el("div", { class: "field" }, el("label", {}, "Barbarian aggression"), el("div", { class: "row" }, f.barbAggr, f.barbAggrVal));
+  const syncBarbAggr = () => {
+    const off = f.barbs.value === "off";
+    f.barbAggr.disabled = off;
+    f.barbAggrField.style.display = off ? "none" : "";
+    f.barbAggr.value = barbAggrDefault();
+    f.barbAggrVal.textContent = f.barbAggr.value;
+  };
+  f.barbs.addEventListener("change", syncBarbAggr);
+  syncBarbAggr();
   f.turns = el("input", { type: "number", value: 0, min: 0, max: 2000, title: "0 = the speed's normal game length" });
   f.cs = el("input", { type: "number", placeholder: "map default", min: 0, max: 40 });
   f.seed = el("input", { placeholder: "random" });
@@ -357,7 +425,7 @@ function renderNewGame(card, rules, meta, refresh) {
   }).catch(() => {});
   card.appendChild(el("div", { class: "grid2" },
     field("Game name", f.name), field("Map", f.map), field("Map size", f.size), field("Map type", f.type), field("Speed", f.speed),
-    field("Difficulty", f.difficulty), field("Barbarians", f.barbs), field("Barbarian difficulty", f.barbDiff),
+    field("Difficulty", f.difficulty), field("Barbarians", f.barbs), f.barbAggrField, field("Barbarian difficulty", f.barbDiff),
     field("Turn limit (0 = speed default)", f.turns),
     field("City-states", f.cs), field("Seed", f.seed),
     field("If an AI's model server disconnects", f.onDisconnect), field("Keep reconnecting for (seconds)", f.reconnect),
@@ -371,12 +439,14 @@ function renderNewGame(card, rules, meta, refresh) {
   card.appendChild(el("h3", { style: { marginTop: "14px" } }, "Seats"));
   const seatsBox = el("div");
   card.appendChild(seatsBox);
+  const palette = rules.player_colors && rules.player_colors.length ? rules.player_colors : COLORS;
   const seats = [
-    { type: "human", civ_name: "", nation: "random", color: COLORS[0] },
-    { type: "bot", civ_name: "", nation: "random", color: COLORS[1] },
-    { type: "bot", civ_name: "", nation: "random", color: COLORS[2] },
-    { type: "bot", civ_name: "", nation: "random", color: COLORS[3] },
+    { type: "human", civ_name: "", nation: "random", color: palette[0] },
+    { type: "bot", civ_name: "", nation: "random", color: palette[1] },
+    { type: "bot", civ_name: "", nation: "random", color: palette[2] },
+    { type: "bot", civ_name: "", nation: "random", color: palette[3] },
   ];
+  const nextColor = () => freeColor(palette, seats.map((x) => x.color));
   const nationOptions = [["random", "Random civilization"], ["BenchmarkCiv", "BenchmarkCiv (no special abilities)"],
     ...rules.major_nations.filter((n) => n !== "BenchmarkCiv").sort().map((n) => [n, `${n} (${(rules.nations[n] || {}).leaderName || ""})`])];
 
@@ -386,7 +456,7 @@ function renderNewGame(card, rules, meta, refresh) {
     while (seats.length > want && seats.length > 1) seats.pop();
     while (seats.length < want) {
       const i = seats.length;
-      seats.push({ type: "bot", civ_name: "", nation: "random", color: COLORS[i % COLORS.length], bot: { aggression: 0.4 } });
+      seats.push({ type: "bot", civ_name: "", nation: "random", color: nextColor(), bot: { aggression: 0.4 } });
     }
   }
   f.size.addEventListener("change", () => renderSeats());
@@ -405,7 +475,8 @@ function renderNewGame(card, rules, meta, refresh) {
       nation.onchange = () => { s.nation = nation.value; };
       nation.title = "The civilization whose special abilities this seat plays with";
       const name = el("input", { value: s.civ_name || "", placeholder: "Custom name (optional)", oninput: (e) => { s.civ_name = e.target.value; } });
-      const color = el("input", { type: "color", value: s.color, oninput: (e) => { s.color = e.target.value; } });
+      const others = seats.map((o, j) => ({ color: o.color, label: `P${j}` })).filter((_, j) => j !== i);
+      const color = colorPicker(palette, s, others, (c) => { s.color = c; renderSeats(); });
       const remove = el("button", { class: "small", disabled: seats.length <= 1, onclick: () => { seats.splice(i, 1); renderSeats(); } }, "✕");
       const diff = sel([["", "Game difficulty"], ...rules.difficulty_list.map((k) => [k, k])], s.difficulty || "");
       diff.onchange = () => { s.difficulty = diff.value; };
@@ -433,8 +504,7 @@ function renderNewGame(card, rules, meta, refresh) {
     });
     seatsBox.appendChild(el("div", { class: "row", style: { marginTop: "8px" } },
       el("button", { disabled: seats.length >= maxSeats, onclick: () => {
-        const i = seats.length;
-        seats.push({ type: "bot", civ_name: "", nation: "random", color: COLORS[i % COLORS.length], bot: { aggression: 0.4 } });
+        seats.push({ type: "bot", civ_name: "", nation: "random", color: nextColor(), bot: { aggression: 0.4 } });
         renderSeats();
       } }, "+ Add seat"),
       seats.length !== sizePlayers() ? el("button", { title: "Add or remove bot seats to match the map's usual player count", onclick: () => {
@@ -454,7 +524,8 @@ function renderNewGame(card, rules, meta, refresh) {
           map: f.map.value || null,
           map_size: f.size.value, map_type: f.type.value, speed: f.speed.value, difficulty: f.difficulty.value,
           barbarian_difficulty: f.barbDiff.value || null,
-          barbarians: f.barbs.value, turn_limit: +f.turns.value || null, seed: f.seed.value ? +f.seed.value : null,
+          barbarians: f.barbs.value, barbarian_aggression: f.barbs.value === "off" ? null : +f.barbAggr.value,
+          turn_limit: +f.turns.value || null, seed: f.seed.value ? +f.seed.value : null,
           city_states: f.cs.value === "" ? null : +f.cs.value,
           victories: Object.fromEntries(Object.entries(f.victories).map(([k, cb]) => [k, cb.checked])),
           tech_trading: f.tech.checked, ruins: f.ruins.checked, religion: f.religion.checked, espionage: f.espionage.checked,

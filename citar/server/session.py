@@ -124,7 +124,7 @@ class GameSession:
             "winner": g.s.winner, "victory": g.s.victory, "paused": self.paused, "ai_delay": self.ai_delay,
             "pause_reason": self.pause_reason if self.paused else None,
             "created": self.created, "config": {k: g.s.config.get(k) for k in (
-                "map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians", "turn_limit", "victories", "city_states", "religion",
+                "map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians", "barbarian_aggression", "turn_limit", "victories", "city_states", "religion",
                 "espionage", "tech_trading", "ruins", "seed", "map_edges", "wrap_x", "wrap_y", "river_density",
                 "resources", "on_disconnect", "reconnect_seconds")},
             "players": [{"id": p.id, "name": p.name, "color": p.color, "alive": p.alive, "kind": p.kind,
@@ -302,7 +302,9 @@ class GameSession:
         agent = None
         if seat.type == "bot":
             from ..agents.bot_agent import BotAgent
-            agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")})
+            # seeded from the game, as the lab seeds its bots, so the same map seed plays the same game
+            agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")},
+                             seed=int(self.game.s.config.get("seed") or 0) * 101 + pid)
         elif seat.type == "llm":
             from ..agents.llm_agent import LLMAgent
             from .. import servers

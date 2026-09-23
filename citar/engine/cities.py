@@ -1806,7 +1806,7 @@ def complete_construction(g: "Game", city: City, name: str, bought_with: Optiona
         add_building(g, city, name)
         if R.buildings[name].get("isWonder"):
             g.s.wonders_built[name] = city.id
-            g.emit("wonder_built", f"{name} has been built in {city.name} ({g.player(city.owner).name}).", None,
+            g.emit("wonder_built", f"{g.player(city.owner).name} has built {name} in {city.name}.", None,
                    idx=city.idx, item=name, player=city.owner)
         else:
             g.emit("building_built", f"{city.name} completed {name}.", [city.owner], idx=city.idx, item=name,
@@ -2371,7 +2371,8 @@ def destroy_city(g: "Game", city: City):
             add_building(g, newcap, capital_indicator(g, owner), try_free=False)
             p.capital = newcap.id
     g.invalidate()
-    g.emit("city_destroyed", f"{city.name} has been destroyed.", None, idx=city.idx)
+    g.emit("city_destroyed", f"{city.name} has been destroyed.", None, idx=city.idx,
+           mentions={city.name: (owner, "t")}, owner=owner)
     from . import victory
     victory.check_elimination(g, owner)
 

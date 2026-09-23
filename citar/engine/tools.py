@@ -797,6 +797,17 @@ def rename_city(g: Game, pid: int, city_id: int, name: str):
     return {"name": new}
 
 
+@tool("return_civilian", "A civilian you recaptured from barbarians that belonged to another civilization: "
+      "return it to them (goodwill; +45 influence with a city-state) or keep it. Unanswered by the end of your "
+      "turn, you keep it.", {"unit_id": INT, "keep": BOOL}, ["unit_id"], category="unit")
+def return_civilian(g: Game, pid: int, unit_id: int, keep: bool = False):
+    """Return a recaptured civilian to its original owner, or keep it."""
+    from . import units as unitmod
+    out = unitmod.return_civilian(g, pid, _own_unit(g, pid, unit_id), keep=bool(keep))
+    _refresh(g)
+    return out
+
+
 @tool("city_status", "Decide what to do with a conquered city: annex (full control; unhappiness until a Courthouse), "
       "puppet (keeps its own production, lower unhappiness), raze (burn it down 1 population per turn; not original "
       "capitals or holy cities), stop_razing, or liberate (return it to its original owner for their gratitude).",
@@ -820,15 +831,24 @@ def city_status(g: Game, pid: int, city_id: int, status: str):
 # EMPIRE
 # ============================================================================
 @tool("set_research", "Research a technology. If it is not available yet, it becomes your goal and prerequisites are "
-      "researched automatically in order.", {"tech": STR}, ["tech"], category="empire")
-def set_research(g: Game, pid: int, tech: str):
+      "researched automatically in order. append=true adds it to the end of your research queue instead of "
+      "replacing the queue.", {"tech": STR, "append": BOOL}, ["tech"], category="empire")
+def set_research(g: Game, pid: int, tech: str, append: bool = False):
     """Choose what to research, or set a distant technology as a goal.
 
     A technology that is not yet available becomes a goal and its prerequisites are researched in order,
     which means a caller can name what it wants rather than planning the path.
     """
     from . import research
-    return research.set_research(g, pid, tech)
+    return research.set_research(g, pid, tech, append=bool(append))
+
+
+@tool("dequeue_research", "Remove a technology from your research queue, together with any queued technology that "
+      "needs it.", {"tech": STR}, ["tech"], category="empire")
+def dequeue_research(g: Game, pid: int, tech: str):
+    """Take a technology (and whatever queued depends on it) off the research queue."""
+    from . import research
+    return research.dequeue_research(g, pid, tech)
 
 
 @tool("choose_free_tech", "Pick a free technology you have been granted (it must be researchable now).",
@@ -900,7 +920,8 @@ def set_civ_name(g: Game, pid: int, name: str, leader: Optional[str] = None):
     if leader:
         p.leader = clean_name(leader, 48)
     if old != name:
-        g.emit("civ_renamed", f"{old} is now known as {name}" + (f", led by {p.leader}" if p.leader else "") + ".", None)
+        g.emit("civ_renamed", f"{old} is now known as {name}" + (f", led by {p.leader}" if p.leader else "") + ".", None,
+               mentions={old: pid}, player=pid)
     return {"name": p.name, "leader": p.leader}
 
 

@@ -74,6 +74,8 @@ def end_player_turn(g: "Game", pid: int):
     p = g.player(pid)
     if p.kind == "major":
         diplomacy.expire_negotiations(g, pid)
+        for u in g.player_units(pid):
+            u.return_offer = None           # an unanswered offer to return a recaptured civilian: it is kept
     if not p.alive:
         return
     if p.kind == "barbarian":

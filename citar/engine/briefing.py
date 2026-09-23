@@ -278,6 +278,13 @@ def alert_items(g: Game, pid: int) -> list[dict]:
     if g.religion_enabled and religion.can_found_pantheon(g, pid) is None:
         add("pantheon", "You have enough faith to found a pantheon.",
             "Enough faith for a pantheon: found_pantheon belief=<name> (get_religion lists beliefs).")
+    for u in g.player_units(pid):
+        if u.return_offer is not None:
+            who = g.player(u.return_offer).name if g.has_met(pid, u.return_offer) else "its original owner"
+            add("return_civilian", f"Recaptured {u.type} #{u.id}: return it to {who}, or keep it?",
+                f"You recaptured {u.type} #{u.id} from barbarians; it belonged to {who}. Decide this turn: "
+                f"return_civilian unit_id={u.id} (goodwill), or keep=true. Unanswered, you keep it.",
+                idx=u.idx, unit=u.id)
     promos = [u for u in g.player_units(pid) if can_promote(g, u)]
     if promos:
         add("promotion", "Units ready for promotion: " + ", ".join(f"{u.type} #{u.id}" for u in promos[:6]),

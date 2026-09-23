@@ -62,6 +62,7 @@ export class GameScreen {
     this.renderer = new MapRenderer(this.canvas, this.rules);
     this.renderer.onViewChange = () => this.drawMinimap();
     this.bindMouse();
+    for (const node of [this.topbar, this.turnBox, this.sidePanel, this.unitPanel, this.cityPanel]) this.holdWhileHovered(node);
     this.minimap.addEventListener("click", (e) => {
       if (!this.view) return;
       const r = this.minimap.getBoundingClientRect();
@@ -69,6 +70,61 @@ export class GameScreen {
       const y = Math.floor((e.clientY - r.top) / r.height * this.view.height);
       this.renderer.centerOn(x, y);
     });
+  }
+
+  // Redrawing a bar or panel replaces its buttons and closes its dropdowns. In a fast AI game that happens several
+  // times a second, so a click that lands mid-redraw is lost and an open dropdown vanishes. While the pointer is over
+  // one, or one of its dropdowns has focus, its redraw waits (only the latest is kept) and runs when that ends.
+  // A click still shows its result: the first refresh fetched after it redraws the node (and, failing that, a timer).
+  holdWhileHovered(node) {
+    node._hover = false;
+    node._held = null;
+    const release = () => {
+      if (node._hover || this.focusedSelect(node)) return;
+      this.flushHeld(node);
+    };
+    node.addEventListener("mouseenter", () => { node._hover = true; });
+    node.addEventListener("mouseleave", () => { node._hover = false; release(); });
+    node.addEventListener("focusout", () => setTimeout(release, 0));
+    node.addEventListener("change", () => setTimeout(() => this.flushHeld(node), 400));
+    node.addEventListener("click", (e) => {
+      if (e.target.closest && e.target.closest("select")) return;   // opening a dropdown is not an action
+      // what the click's own handler redraws goes through at once (a tab switching, a panel opening) ...
+      node._force = true;
+      setTimeout(() => { node._force = false; }, 0);
+      // ... and whatever it asked the server for shows with the first view fetched after the click
+      node._clickAt = Date.now();
+      for (const ms of [1500, 3000]) setTimeout(() => { if (!this.focusedSelect(node)) this.flushHeld(node); }, ms);
+    }, true);
+  }
+
+  // run a node's held redraw now, whatever the pointer is doing
+  flushHeld(node) {
+    const run = node._held;
+    node._held = null;
+    if (!run) return;
+    const was = node._force;
+    node._force = true;
+    try { run(); } finally { node._force = was; }
+  }
+
+  // an open (focused) dropdown inside a node: redrawing would close it under the pointer
+  focusedSelect(node) {
+    const a = document.activeElement;
+    return !!a && a.tagName === "SELECT" && node.contains(a);
+  }
+
+  // true when a redraw of these nodes has to wait; it is kept, and runs when they are let go
+  heldRender(nodes, run) {
+    if (nodes.some((n) => n._force)) return false;
+    const holder = nodes.find((n) => this.focusedSelect(n)) || nodes.find((n) => n._hover);
+    if (!holder) return false;
+    if (holder._clickAt && !this.focusedSelect(holder) && (this._viewStartedAt || 0) - holder._clickAt >= 100) {
+      holder._clickAt = 0;               // this view was fetched after the click: it carries the click's result
+      return false;
+    }
+    holder._held = run;
+    return true;
   }
 
   bindMouse() {
@@ -126,7 +182,9 @@ export class GameScreen {
     if (this._inflight) { this._pending = true; return; }
     this._inflight = true;
     try {
+      const started = Date.now();
       const v = await api.view(this.gid, this.token, this.asPlayer);
+      this._viewStartedAt = started;
       this.view = v;
       if (!this.feed.length) this.feed = (v.events || []).slice(-150);
       if (v.thoughts && !this.thoughts.length) this.thoughts = v.thoughts.slice(-80);
@@ -156,6 +214,7 @@ export class GameScreen {
         }
       }
       this.checkNegotiations();
+      this.checkReturnOffers();
     } catch (e) {
       toast(e.message, "error");
     } finally {
@@ -214,10 +273,38 @@ export class GameScreen {
     if (ev.type === "agent_error" || ev.type === "game_paused") { toast(ev.text, "error", 12000); return; }
     if (ev.type === "game_resumed") { toast(ev.text, "info", 6000); return; }
     const mine = this.you != null && ev.players && ev.players.includes(this.you);
+    // the diplomacy window shows (or is about to show) these itself: a toast on top would only hide it
+    if (mine && (ev.type === "negotiation" || (ev.type === "message" && this._diploModal))) return;
     if (important.includes(ev.type) || (mine && ["unit_killed", "unit_captured", "negotiation", "message", "camp_cleared", "ruins", "tech",
         "wonder_built", "great_person_born", "golden_age", "natural_wonder", "spy", "un_vote"].includes(ev.type))) {
       toast(ev.text, ev.type === "war_declared" || ev.type === "unit_killed" ? "error" : "info", 5000);
     }
+  }
+
+  // a civilian just taken back from barbarians that belonged to someone else: ask once whether to return it
+  checkReturnOffers() {
+    if (!this.myTurn || document.getElementById("modal-root").children.length) return;
+    this._shownReturn = this._shownReturn || new Set();
+    const u = this.view.units.find((x) => x.owner === this.you && x.return_offer && !this._shownReturn.has(x.id));
+    if (!u) return;
+    this._shownReturn.add(u.id);
+    this.renderer.centerOn(u.x, u.y);
+    this.askReturnCivilian(u);
+  }
+
+  askReturnCivilian(u) {
+    const who = u.return_offer.name;
+    const decide = async (keep) => {
+      m.close();
+      const r = await this.tool("return_civilian", { unit_id: u.id, keep });
+      if (r) toast(keep ? `You keep the ${u.type}.` : `The ${u.type} goes back to ${who}.`);
+    };
+    const m = modal({
+      title: "Recaptured civilian", narrow: true,
+      content: el("p", {}, `You freed a ${u.type} that barbarians had taken from ${who}. Return it to them for their goodwill, or keep it?`),
+      footer: [el("button", { onclick: () => decide(true) }, "Keep it"),
+               el("button", { class: "primary", onclick: () => decide(false) }, `Return to ${who}`)],
+    });
   }
 
   checkNegotiations() {
@@ -415,7 +502,7 @@ export class GameScreen {
     const k = e.key.toLowerCase();
     if (k === "escape") this.deselect();
     else if (k === "n" || k === "tab") { e.preventDefault(); this.selectNextIdle(); }
-    else if (k === "enter" && e.shiftKey) this.endTurn();
+    else if (k === "enter" && e.shiftKey) this.endTurn(e.ctrlKey || e.metaKey);
     else if (k === "t") openTechTree(this);
     else if (k === "o") openPolicies(this);
     else if (k === "d") openDiplomacy(this);
@@ -448,30 +535,40 @@ export class GameScreen {
     if (r) { toast(`${a.name}: done`, "info", 2500); this.afterOrder(d.id); }
   }
 
-  async endTurn() {
+  // decisions still open this turn; any of them keeps End Turn greyed out (Ctrl+click ends the turn anyway)
+  turnBlockers() {
+    const v = this.view;
+    if (!v || this.you == null) return [];
+    const BLOCKING = ["research", "free_tech", "policy", "great_person", "pantheon", "promotion", "negotiation", "un_vote", "idle_city",
+                      "return_civilian"];
+    const out = (v.alerts || []).filter((a) => BLOCKING.includes(a.type));
+    const idle = v.units.filter((u) => u.owner === this.you && !u.activity && u.moves > 0);
+    if (idle.length) out.push({ type: "unit", text: `${idle.length} unit${idle.length === 1 ? " needs" : "s need"} orders.`, unit: idle[0].id });
+    return out;
+  }
+
+  // take the player to the first open decision
+  goToBlocker(a) {
+    if (a.type === "unit") return this.selectNextIdle();
+    if (a.type === "return_civilian") {
+      const u = this.view.units.find((x) => x.id === a.unit);
+      if (u) { this.renderer.centerOn(u.x, u.y); this.selectUnit(u.id); return this.askReturnCivilian(u); }
+    }
+    const open = { research: openTechTree, free_tech: openTechTree, policy: openPolicies, great_person: openGreatPeople,
+                   pantheon: openReligion, un_vote: openDiplomacy, negotiation: openDiplomacy }[a.type];
+    if (open) return open(this);
+    if (a.x != null) this.renderer.centerOn(a.x, a.y);
+    if (a.city != null) this.selectCity(a.city);
+    else if (a.unit != null) this.selectUnit(a.unit);
+  }
+
+  async endTurn(force = false) {
     if (!this.myTurn) return;
-    const idleCities = this.view.cities.filter((c) => c.owner === this.you && !c.puppet && (!c.queue || !c.queue.length));
-    const noResearch = this.view.empire && !this.view.empire.researching;
-    if (idleCities.length || noResearch) {
-      const choice = await new Promise((resolve) => {
-        let done = false;
-        const pick = (v) => { done = true; m.close(); resolve(v); };
-        const m = modal({
-          title: "End turn?", narrow: true,
-          content: el("p", {}, `${idleCities.length ? `${idleCities.map((c) => c.name).join(", ")} ${idleCities.length === 1 ? "has" : "have"} nothing to build. ` : ""}` +
-            `${noResearch ? "No research is selected. " : ""}`),
-          footer: [
-            el("button", { class: "primary", onclick: () => pick("fix") }, noResearch ? "Choose research" : `Open ${idleCities[0].name}`),
-            el("button", { onclick: () => pick("end") }, "End turn anyway")],
-          onClose: () => { if (!done) resolve(null); },
-        });
-      });
-      if (choice === "fix") {
-        if (noResearch) openTechTree(this);
-        else { this.renderer.centerOn(idleCities[0].x, idleCities[0].y); this.selectCity(idleCities[0].id); }
-        return;
-      }
-      if (choice !== "end") return;
+    const blockers = this.turnBlockers();
+    if (blockers.length && !force) {
+      toast(`Before ending the turn: ${blockers.map((a) => a.text).join(" ")} (Ctrl+click End Turn to end it anyway.)`, "info", 5000);
+      this.goToBlocker(blockers[0]);
+      return;
     }
     this.deselect();
     await this.tool("end_turn");
@@ -480,6 +577,7 @@ export class GameScreen {
   // hostile (at war or barbarian) military units a city can bombard
   bombardTargets(c) {
     const v = this.view;
+    if (c.owner === this.you && c.can_bombard === false) return [];   // already fired this turn, or in resistance
     return v.units.filter((u) => u.owner !== this.you && u.class !== "civilian" && this.isHostile(u.owner) && hexDistance(u.x, u.y, c.x, c.y, this.model) <= 2);
   }
 
@@ -623,6 +721,7 @@ export class GameScreen {
 
   // ------------------------------------------------------------------
   renderTopbar() {
+    if (this.heldRender([this.topbar, this.turnBox], () => this.renderTopbar())) return;
     const v = this.view;
     const tb = clear(this.topbar);
     if (!v) return;
@@ -681,7 +780,16 @@ export class GameScreen {
     }
     if (this.isSpectator || (v.session && v.session.seats.some((s) => s.type !== "human"))) {
       const sess = v.session;
-      tb.append(el("button", { class: "small", onclick: () => api.control(this.gid, { paused: !sess.paused }) }, sess.paused ? "▶ Resume AIs" : "⏸ Pause AIs"));
+      // toggles the state the game is in now (not the one a held button was drawn with), and shows it at once:
+      // while AIs are playing, the server can take a second or more to send a fresh view
+      const want = this._pauseWanted && Date.now() - this._pauseWanted.at < 5000 ? this._pauseWanted.paused : null;
+      if (want === sess.paused) this._pauseWanted = null;             // the server has caught up
+      const paused = want ?? sess.paused;
+      tb.append(el("button", { class: "small", onclick: () => {
+        this._pauseWanted = { paused: !paused, at: Date.now() };
+        this.renderTopbar();
+        api.control(this.gid, { paused: !paused });
+      } }, paused ? "▶ Resume AIs" : "⏸ Pause AIs"));
       if (this.isSpectator) {
         const delay = el("select", { onchange: (ev) => api.control(this.gid, { ai_delay: +ev.target.value }) },
           ...[0, 0.5, 1, 2, 5].map((d) => el("option", { value: d, selected: sess.ai_delay === d }, `delay ${d}s`)));
@@ -716,7 +824,7 @@ export class GameScreen {
           onclick: () => { this.renderer.centerOn(next.x, next.y); this.selectCity(next.id); } },
           idleCities.length === 1 ? `⚒ ${next.name} needs production` : `⚒ ${idleCities.length} cities need production`));
       }
-      // cities with an enemy in bombard range that haven't fired yet (view.cities has attacked_this_turn for own cities)
+      // cities with an enemy in bombard range that haven't fired yet (view.cities has can_bombard for own cities)
       const gunners = v.cities.filter((c) => c.owner === this.you && this.bombardTargets(c).length);
       if (gunners.length) {
         const c = gunners.find((x) => x.id !== this.selectedCity) || gunners[0];
@@ -735,7 +843,12 @@ export class GameScreen {
           promos.length === 1 ? `▲ Promote ${u.name}` : `▲ ${promos.length} promotions`));
       }
       box.append(el("button", { disabled: !needs, onclick: () => this.selectNextIdle() }, `Next unit (${needs})`),
-        el("button", { class: `end-turn ${needs === 0 ? "ready" : ""}`, onclick: () => this.endTurn() }, "End Turn"));
+        (() => {
+          const blockers = this.turnBlockers();
+          return el("button", { class: `end-turn ${blockers.length ? "blocked" : "ready"}`, "aria-disabled": blockers.length ? "true" : "false",
+            title: blockers.length ? `Still to do:\n${blockers.map((a) => "• " + a.text).join("\n")}\n\nClick to go to the first one; Ctrl+click to end the turn anyway.` : "End your turn (Shift+Enter)",
+            onclick: (e) => this.endTurn(e.ctrlKey || e.metaKey) }, "End Turn");
+        })());
     } else {
       const st = this.agentStatus[v.current_player];
       box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)" : st === "paused" ? " (paused mid-turn)" : ""}`));
@@ -759,6 +872,10 @@ export class GameScreen {
   }
 
   renderPanels() {
+    // a refresh of the same unit or city waits while the pointer is on its panel; a new selection shows at once
+    const sel = `${this.selectedUnit}|${this.selectedCity}|${this._cityTab}|${!!this.unitDetail}|${!!this.cityDetail}`;
+    if (sel === this._panelSel && this.heldRender([this.unitPanel, this.cityPanel], () => this.renderPanels())) return;
+    this._panelSel = sel;
     // re-rendering replaces the panel contents: keep the scroll position while the same unit/city stays selected
     const keepScroll = (panel, key, render) => {
       const top = panel._key === key ? panel.scrollTop : 0;
@@ -781,6 +898,7 @@ export class GameScreen {
   }
 
   renderSide() {
+    if (this.heldRender([this.sidePanel], () => this.renderSide())) return;
     const sp = clear(this.sidePanel);
     const alerts = (this.view && this.view.alerts) || [];
     const tabs = [["events", "Events"], ["messages", "Messages"], ["scores", "Civs"]];
@@ -800,7 +918,7 @@ export class GameScreen {
     if (this.sideTab === "alerts") {
       const icon = { gold: "●", happiness: "☹", threat: "⚔", bombard: "🎯", starving: "🍞", civilian_danger: "⚠", research: "⚗",
                      free_tech: "⚗", policy: "✦", great_person: "★", pantheon: "✝", promotion: "▲", spy: "🕵", un_vote: "🗳",
-                     negotiation: "⚖", conquest: "🏛", idle_city: "⚒", golden_age: "★" };
+                     negotiation: "⚖", conquest: "🏛", idle_city: "⚒", golden_age: "★", return_civilian: "⚐" };
       for (const a of alerts) {
         body.appendChild(el("div", { class: "event alert-item clickable", onclick: () => {
           if (a.x == null) {

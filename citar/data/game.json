@@ -66,8 +66,8 @@
   "barbarians": {
     "levels": {
       "off":    null,
-      "normal": {"name": "Normal"},
-      "raging": {"name": "Raging", "raging": true}
+      "normal": {"name": "Normal", "aggression": 50},
+      "raging": {"name": "Raging", "raging": true, "aggression": 85}
     }
   },
   "diplomacy": {

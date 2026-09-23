@@ -632,6 +632,45 @@ def capture_civilian(g: "Game", captor: Unit, victim: Unit):
     nu.original_owner = victim.original_owner
     g.emit("unit_captured", f"{g.player(captor.owner).name} captured {g.player(old).name}'s {victim.type}!",
            [old, captor.owner], idx=idx)
+    orig = victim.original_owner
+    if g.is_barbarian(old) and not g.is_barbarian(captor.owner) and orig is not None and orig != captor.owner             and 0 <= orig < len(g.s.players) and g.player(orig).alive and g.player(orig).kind in ("major", "city_state"):
+        # taken back from barbarians: the captor may return it to the civilization it was taken from (Civ V)
+        nu.return_offer = orig
+        g.emit("civilian_recaptured", f"You recaptured a {nu.type} that barbarians took from {g.player(orig).name}. "
+               f"Return it to them, or keep it?", [captor.owner], idx=idx, unit=nu.id, player=orig)
+
+
+def return_civilian(g: "Game", pid: int, u: Unit, keep: bool = False) -> dict:
+    """Give a recaptured civilian back to its original owner, or keep it (Battle.captureCivilianUnit's popup).
+
+    Returning it earns the original owner's goodwill: +45 influence with a city-state, a better opinion with a
+    major civilization.
+    """
+    orig = u.return_offer
+    if orig is None:
+        raise ActionError(f"{u.type} #{u.id} is not a recaptured civilian that can be returned.")
+    u.return_offer = None
+    if keep:
+        return {"kept": u.type, "unit_id": u.id}
+    op = g.player(orig)
+    if not op.alive:
+        return {"kept": u.type, "unit_id": u.id, "note": f"{op.name} no longer exists; the {u.type} stays with you."}
+    cities = g.player_cities(orig)
+    near = min(cities, key=lambda c: (g.grid.distance(c.idx, u.idx), c.id)).idx if cities else u.idx
+    utype, idx = u.type, u.idx
+    g.remove_unit(u)
+    nu = place_unit_near(g, orig, utype, near) or place_unit_near(g, orig, utype, idx)
+    if nu is not None:
+        nu.moves = 0
+    if op.kind == "city_state":
+        from . import city_states
+        city_states.add_influence(g, orig, pid, 45)
+    else:
+        from . import diplomacy
+        diplomacy.add_opinion(g, orig, pid, "returned_civilian", 20)
+    g.emit("civilian_returned", f"{g.player(pid).name} returned a captured {utype} to {op.name}.", [pid, orig],
+           idx=idx, player=orig)
+    return {"returned": utype, "to": op.name}
 
 
 # ---------------------------------------------------------------------------------------------------------------

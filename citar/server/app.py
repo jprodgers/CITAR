@@ -1815,6 +1815,9 @@ async def ws(websocket: WebSocket, gid: str, token: str = "", k: str = ""):
                 return
             if pid is None and not s.god_view_allowed() and ev.get("players") is not None:
                 return
+            if pid is not None:
+                # anonymise civilizations this seat has not met
+                msg = {**msg, "event": s.game.event_view(ev, pid)}
         if t == "thought" and not (spectator and s.god_view_allowed()):
             return
         try:

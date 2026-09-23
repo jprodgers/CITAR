@@ -86,6 +86,9 @@ def unit_info(g: Game, u, viewer: Optional[int], detail: bool = False) -> dict:
                   "embarked": movement.is_embarked(g, u)})
         if u.fortify:
             d["fortified_turns"] = u.fortify
+        if u.return_offer is not None and viewer is not None:
+            d["return_offer"] = {"player": u.return_offer, "name": g.player(u.return_offer).name
+                                 if g.has_met(viewer, u.return_offer) else "its original owner"}
         if u.status:
             d["status"] = list(u.status)
         t = g.s.tiles[u.idx]
@@ -165,6 +168,8 @@ def city_info(g: Game, c, viewer: Optional[int], detail: bool = False) -> dict:
          "capital": p.capital == c.id, "hp": c.health, "max_hp": cm.max_health(g, c),
          "strength": round(combat.city_strength(g, c) / 1, 1), "original_capital": c.original_capital,
          "puppet": c.puppet, "razing": c.razing, "resistance": c.resistance}
+    if viewer == c.owner:
+        d["can_bombard"] = combat.can_bombard(g, c) is None
     if g.religion_enabled:
         from .religion import majority_religion, display_name
         mr = majority_religion(g, c)
@@ -738,7 +743,7 @@ def client_view(g: Game, pid: Optional[int], event_limit: int = 150) -> dict:
         "winner": g.s.winner, "victory": g.s.victory, "you": pid, "width": g.s.width, "height": g.s.height,
         "wrap_x": g.grid.wrap_x, "wrap_y": g.grid.wrap_y, "tiles": tiles, "units": units, "cities": cities, "players": players_overview(g, pid),
         "turn_limit": g.total_turns(),
-        "config": {k: g.s.config.get(k) for k in ("map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians",
+        "config": {k: g.s.config.get(k) for k in ("map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians", "barbarian_aggression",
                                                   "turn_limit", "victories", "tech_trading", "religion", "espionage")},
         "events": g.events_for(pid)[-event_limit:],
     }

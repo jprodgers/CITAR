@@ -14,6 +14,12 @@ from .rules import Rules, get_rules
 from .state import GameState, Player, Tile, Unit, City, PLAYER_COLORS, BARBARIAN_COLOR, CITY_STATE_COLORS
 
 _POSSESSIVE_S = re.compile(r"(?<=\w)s's\b")
+_COORDS = re.compile(r"\(-?\d+,\s*-?\d+\)")
+# Event data keys whose value is a player id, and so would identify a civilization the viewer has not met.
+_EVENT_PID_KEYS = ("player", "a", "b", "attacker", "defender", "sender", "awaiting", "owner", "killer", "winner",
+                   "old_owner", "new_owner")
+UNKNOWN_CIV = "Unknown Civilization"
+UNKNOWN_CS = "Unknown City-State"
 
 
 class ActionError(Exception):
@@ -34,6 +40,7 @@ DEFAULT_CONFIG = {
     "ai_base_values": "unciv",      # "monotonic": easier AIs use Prince base values (see economy.difficulty)
     "starting_era": "Ancient era",
     "barbarians": "normal",         # off | normal | raging
+    "barbarian_aggression": None,   # 0-100; None -> the barbarian level's default (see game.json barbarians.levels)
     "turn_limit": None,             # None -> the speed's time-victory turn (Standard 500, Quick 330, ...)
     "victories": {"Scientific": True, "Cultural": True, "Domination": True, "Diplomatic": True, "Time": True},
     "city_states": None,            # number of city-states (None -> map size default)
@@ -49,6 +56,44 @@ DEFAULT_CONFIG = {
     "reconnect_seconds": 180,       # how long a seat keeps retrying an unreachable server before that applies
     "players": [],                  # [{"name", "color", "leader", "nation", "controller"}]
 }
+
+
+
+def _hex_rgb(c: str):
+    """An '#rrggbb' colour as an (r, g, b) tuple, or None if it isn't one."""
+    c = (c or "").strip().lower()
+    if not re.fullmatch(r"#[0-9a-f]{6}", c):
+        return None
+    return tuple(int(c[k:k + 2], 16) for k in (1, 3, 5))
+
+
+def colors_clash(a: str, b: str) -> bool:
+    """Whether two colours are too close to tell apart on the map (a "redmean" weighted RGB distance)."""
+    x, y = _hex_rgb(a), _hex_rgb(b)
+    if x is None or y is None:
+        return False
+    rm = (x[0] + y[0]) / 2
+    dr, dg, db = x[0] - y[0], x[1] - y[1], x[2] - y[2]
+    return ((2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db) ** 0.5 < 60
+
+
+def unique_colors(wanted: list) -> list[str]:
+    """One colour per civilization, first come first served.
+
+    Requested colours are granted in seat order unless an earlier civilization already has it (or one too close to
+    it); civilizations with no colour, or a clashing one, then get the first palette colours nobody has taken.
+    """
+    out: list = []
+    for c in wanted:
+        c = (c or "").strip().lower()
+        ok = _hex_rgb(c) is not None and not any(o and colors_clash(c, o) for o in out)
+        out.append(c if ok else None)
+    for i, c in enumerate(out):
+        if c is None:
+            taken = [o for o in out if o]
+            out[i] = next((p for p in PLAYER_COLORS if not any(colors_clash(p, o) for o in taken)),
+                          PLAYER_COLORS[i % len(PLAYER_COLORS)])
+    return out
 
 
 class Game:
@@ -87,6 +132,7 @@ class Game:
         self._last_hap: dict = {}    # pid -> last fully computed empire happiness
         self._ygen = 0               # bumped whenever _ycache is cleared (cache keys for derived per-unit data)
         self.listeners: list[Callable[[dict], None]] = []
+        self._names: Optional[tuple] = None  # (key, regex, lookup) for tagging civ/city names in event text
         self.frames: list[dict] = []
         self.action_log: list[dict] = []
         self._rebuild_occupancy()
@@ -112,6 +158,11 @@ class Game:
         cfg["difficulty"] = rules.resolve("difficulty", cfg.get("difficulty")) or rules.const["default_difficulty"]
         cfg["barbarian_difficulty"] = rules.resolve("difficulty", cfg.get("barbarian_difficulty")) or cfg["difficulty"]
         cfg["starting_era"] = rules.resolve("era", cfg.get("starting_era")) or "Ancient era"
+        if cfg.get("barbarian_aggression") is not None:
+            try:
+                cfg["barbarian_aggression"] = max(0, min(100, int(float(cfg["barbarian_aggression"]))))
+            except (TypeError, ValueError):
+                raise ValueError("barbarian_aggression must be a number from 0 to 100.")
         if not cfg.get("turn_limit"):
             cfg["turn_limit"] = rules.max_turns[cfg["speed"]]
         custom = None
@@ -181,12 +232,13 @@ class Game:
                 nations=chosen, options=cfg)
 
         players = []
+        colors = unique_colors([pc.get("color") for pc in players_cfg])
         for i, pc in enumerate(players_cfg):
             nd = rules.nations[chosen[i]]
             players.append(Player(
                 id=i, name=pc.get("name") or (nd["name"] if chosen[i] != "BenchmarkCiv" else f"Civilization {i + 1}"),
                 leader=pc.get("leader") or nd.get("leaderName", ""), nation=chosen[i],
-                color=pc.get("color") or PLAYER_COLORS[i % len(PLAYER_COLORS)],
+                color=colors[i],
                 controller=pc.get("controller") or "human", explored=bytearray(width * height),
                 difficulty=rules.resolve("difficulty", pc.get("difficulty")) or cfg["difficulty"]))
         for j, csn in enumerate(cs_nations[:len(cs_starts)]):
@@ -754,8 +806,61 @@ class Game:
                                 "borders", "wltkd", "wltkd_end", "city_demand", "resistance_end", "wonder_refund",
                                 "policy_available", "great_person_born", "faith", "spy"})
 
-    def emit(self, etype: str, text: str, players: Optional[list] = None, idx: Optional[int] = None, **data) -> dict:
-        """players=None means public. Tile-anchored events add anyone who can see the tile (except private events)."""
+    def _name_index(self):
+        """A regex matching every civilization, city-state, leader and city name, and what each one refers to.
+
+        Rebuilt only when some name changes (a city founded, captured or renamed, a civ renamed).
+        """
+        key = (tuple((p.name, p.leader, p.kind) for p in self.s.players),
+               tuple((c.name, c.owner) for c in self.s.cities.values()))
+        cached = getattr(self, "_names", None)
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        lookup: dict = {}
+        for c in self.s.cities.values():  # lowest priority: a city named like a civ is read as the civ
+            if c.name and not self.is_barbarian(c.owner):
+                lookup[c.name] = (c.owner, "t")
+        for p in self.s.players:
+            if p.kind == "barbarian":
+                continue
+            if p.leader and len(p.leader) >= 3:
+                lookup[p.leader] = (p.id, "l")
+            if p.name:
+                lookup[p.name] = (p.id, "c")
+        rx = None
+        if lookup:
+            alts = "|".join(re.escape(n) for n in sorted(lookup, key=len, reverse=True))
+            rx = re.compile(rf"(?<!\w)(?:{alts})(?!\w)")
+        self._names = (key, rx, lookup)
+        return rx, lookup
+
+    def _event_refs(self, text: str, mentions: Optional[dict]) -> list:
+        """Where the text names a civilization, leader or city: [start, end, player id, kind] spans."""
+        rx, lookup = self._name_index()
+        refs = []
+        if rx is not None:
+            for m in rx.finditer(text):
+                pid, kind = lookup[m.group(0)]
+                refs.append([m.start(), m.end(), pid, kind])
+        for name, who in (mentions or {}).items():  # names the index cannot know (a civ's old name, a lost city)
+            pid, kind = who if isinstance(who, tuple) else (who, "c")
+            if not name:
+                continue
+            for m in re.finditer(rf"(?<!\w){re.escape(name)}(?!\w)", text):
+                if not any(r[0] < m.end() and m.start() < r[1] for r in refs):
+                    refs.append([m.start(), m.end(), pid, kind])
+        refs.sort()
+        return refs
+
+    def emit(self, etype: str, text: str, players: Optional[list] = None, idx: Optional[int] = None,
+             mentions: Optional[dict] = None, **data) -> dict:
+        """players=None means public. Tile-anchored events add anyone who can see the tile (except private events).
+
+        Civilization, city-state, leader and city names in the text are recorded as ``refs`` so that each
+        viewer can be shown "Unknown Civilization" for civs they have not met (see event_view).
+        *mentions* maps extra names the game no longer knows (a civ's old name, a destroyed city) to the player
+        they denote, or to (player, "t") for a city.
+        """
         from . import visibility
         text = _POSSESSIVE_S.sub("s'", text)
         audience = None if players is None else sorted(set(players))
@@ -765,6 +870,9 @@ class Game:
                     audience.append(p.id)
         ev = {"id": len(self.s.events) + 1, "turn": self.s.turn, "type": etype, "text": text,
               "players": audience, "idx": idx, "data": data}
+        refs = self._event_refs(text, mentions)
+        if refs:
+            ev["refs"] = refs
         if idx is not None:
             ev["x"], ev["y"] = self.grid.xy(idx)
         self.s.events.append(ev)
@@ -776,16 +884,104 @@ class Game:
         return ev
 
     def events_for(self, pid: Optional[int], since_id: int = 0, limit: int = 200) -> list[dict]:
-        """Notifications visible to a player, newest first, since an event id."""
+        """Notifications visible to a player, oldest first, since an event id.
+
+        A player sees civilizations and city-states they have not met as "Unknown Civilization" /
+        "Unknown City-State" (see event_view); pid None (spectators, replays) sees everything as it happened.
+        """
         out = []
+        known = self._known_to(pid)
         for ev in reversed(self.s.events):
             if ev["id"] <= since_id:
                 break
             if pid is None or ev["players"] is None or pid in ev["players"]:
-                out.append(ev)
+                out.append(ev if known is None else self._scrub_event(ev, known))
                 if len(out) >= limit:
                     break
         out.reverse()
+        return out
+
+    def _known_to(self, pid: Optional[int]) -> Optional[set]:
+        """The players whose identity this viewer knows (itself, whoever it has met, the barbarians); None = all."""
+        if pid is None or not (0 <= pid < len(self.s.players)):
+            return None
+        known = set(self.s.players[pid].met)
+        known.add(pid)
+        known.update(p.id for p in self.s.players if p.kind == "barbarian")
+        return known
+
+    def event_view(self, ev: dict, pid: Optional[int]) -> dict:
+        """One event as this player may see it: unmet civilizations anonymised, their locations dropped."""
+        known = self._known_to(pid)
+        return ev if known is None else self._scrub_event(ev, known)
+
+    def _scrub_event(self, ev: dict, known: set) -> dict:
+        """A copy of the event with every player outside *known* made anonymous (or the event itself if none)."""
+        refs = ev.get("refs")
+        data = ev.get("data") or {}
+        hidden = {r[2] for r in refs if r[2] not in known} if refs else set()
+        n = len(self.s.players)
+        for k in _EVENT_PID_KEYS:
+            v = data.get(k)
+            if type(v) is int and v not in known and 0 <= v < n:
+                hidden.add(v)
+        res = data.get("results")
+        if isinstance(res, dict) and (res.get("tally") or res.get("winner") is not None):
+            names = {p.name: p.id for p in self.s.players}
+            if res.get("winner") not in (None, *known) or any(names.get(nm, -1) not in known and nm in names
+                                                              for nm in res.get("tally") or {}):
+                hidden.add(-1)
+        if not hidden:
+            return ev
+        out = dict(ev)
+        text = ev["text"]
+        if refs:
+            parts, pos = [], 0
+            for start, end, rp, kind in refs:
+                if rp not in hidden or start < pos:
+                    continue
+                if kind == "t":
+                    rep = "an unknown city"
+                elif kind == "l":
+                    rep = "an unknown leader"
+                else:
+                    rep = UNKNOWN_CS if self.is_city_state(rp) else UNKNOWN_CIV
+                before = text[:start].rstrip()
+                if rep[0].islower() and (not before or before[-1] in ".!?\""):
+                    rep = rep[0].upper() + rep[1:]
+                # "Aztecs' Warrior" -> "Unknown Civilization's Warrior"
+                if (text[end:end + 1] == "'" and not text[end + 1:end + 2].isalnum() and text[start:end].endswith("s")
+                        and not rep.endswith("s")):
+                    rep += "'s"
+                    end += 1
+                parts.append(text[pos:start])
+                parts.append(rep)
+                pos = end
+            parts.append(text[pos:])
+            text = "".join(parts)
+        text = _COORDS.sub("an unknown location", text)
+        out["text"] = text
+        out.pop("refs", None)
+        if ev.get("idx") is not None:
+            out["idx"] = None
+            out.pop("x", None)
+            out.pop("y", None)
+        new = dict(data)
+        for k in _EVENT_PID_KEYS:
+            if new.get(k) in hidden and type(new.get(k)) is int:
+                new[k] = None
+        if isinstance(res, dict):
+            names = {p.name: p.id for p in self.s.players}
+            tally, i = {}, 0
+            for nm, v in (res.get("tally") or {}).items():
+                if nm in names and names[nm] not in known:
+                    i += 1
+                    nm = UNKNOWN_CS if self.is_city_state(names[nm]) else UNKNOWN_CIV
+                    nm = nm if nm not in tally else f"{nm} ({i})"
+                tally[nm] = v
+            new["results"] = {**res, "tally": tally,
+                              "winner": res.get("winner") if res.get("winner") in known else None}
+        out["data"] = new
         return out
 
     # ------------------------------------------------------------------

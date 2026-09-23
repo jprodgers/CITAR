@@ -327,6 +327,7 @@ class Rules:
             "default_speed": self.const["default_speed"], "default_difficulty": self.const["default_difficulty"],
             "benchmark_speed": self.const["benchmark_speed"], "max_turns": self.max_turns,
             "barbarian_levels": {k: (v["name"] if v else "Off") for k, v in self.const["barbarians"]["levels"].items()},
+            "barbarian_aggression": {k: v.get("aggression", 50) for k, v in self.const["barbarians"]["levels"].items() if v},
         }
 
 

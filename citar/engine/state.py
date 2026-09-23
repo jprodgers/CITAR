@@ -8,9 +8,11 @@ import base64
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, Optional
 
-PLAYER_COLORS = ["#e04040", "#3c78d8", "#e8c547", "#8e44ad", "#27ae60", "#e67e22", "#17becf", "#f06292",
-                 "#8d6e63", "#9ccc65", "#5c6bc0", "#ff7043", "#26a69a", "#d4e157", "#ab47bc", "#78909c",
-                 "#b71c1c", "#0d47a1", "#f9a825", "#1b5e20", "#ff80ab", "#00e5ff", "#6d4c41", "#c0ca33"]
+# Civilization colours, most distinct first: chosen to stay far apart from each other (and from the city-state and
+# barbarian colours) in perceptual colour space, so no two empires can be mistaken for each other on the map.
+PLAYER_COLORS = ["#aa0000", "#0000aa", "#00aa00", "#aaaa00", "#50006e", "#c85a00", "#ff00e6", "#299bcc",
+                 "#00998a", "#cc298b", "#b2ff00", "#9900ff", "#00ffff", "#99741f", "#004c99", "#ff0000",
+                 "#00ff33", "#ff0066", "#0066ff", "#99003d", "#9b29cc", "#00ff80", "#0099ff", "#ffff00"]
 CITY_STATE_COLORS = {"Cultured": "#a58cff", "Maritime": "#4fd68a", "Mercantile": "#f2d43d", "Militaristic": "#e85f5f",
                      "Religious": "#f5f5f5"}
 BARBARIAN_COLOR = "#2b2b2b"
@@ -94,6 +96,7 @@ class Unit:
     promotion_count: int = 0            # promotions bought with XP (sets the next XP threshold)
     religious_strength_lost: int = 0
     original_owner: Optional[int] = None
+    return_offer: Optional[int] = None  # a civilian recaptured from barbarians: the civ it may be given back to
 
 
 @dataclass
@@ -124,6 +127,7 @@ class City:
     puppet: bool = False
     resistance: int = 0                 # turns of resistance left
     attacked: bool = False
+    sacked_turn: int = -1000            # last turn barbarians sacked it
     razing: bool = False
     tiles_bought: int = 0
     damaged_turn: int = -1

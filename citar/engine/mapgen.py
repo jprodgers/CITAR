@@ -8,6 +8,7 @@ The lobby can change what happens at the map's edges (ice caps, wrapping, boxed 
 and how much of each resource is generated - see :class:`MapOptions`."""
 from __future__ import annotations
 
+import contextlib
 import heapq
 import math
 import random
@@ -62,6 +63,10 @@ class MapOptions:
     A resource's mode is ``normal``, ``off`` (never generated), ``cap`` (at most ``value`` tiles of it)
     or ``share`` (``value`` percent of all the resources of its kind). Unknown names are ignored, so a
     configuration written for one ruleset does not break another.
+
+    Whatever the densities, a map carries at least one deposit of every strategic type and its size's
+    share of the luxury types (:data:`LUXURY_VARIETY`), unless the kind's density is 0 or the type is
+    off or capped at 0.
     """
 
     def __init__(self, cfg: Optional[dict] = None, rules: Optional[Rules] = None):
@@ -1394,6 +1399,136 @@ def _luxuries(m: _Map, starts: list[int], cs_starts: list[int]) -> dict[int, str
     return regional
 
 
+# The share of the ruleset's luxury types a map of each lobby size (game.json "map_sizes") should hold at
+# least. Sizes in between, and custom sizes, interpolate by tile count; anything smaller than the
+# smallest takes its share and anything bigger than the biggest takes its share.
+LUXURY_VARIETY = {"duel": 0.5, "small": 0.5, "standard": 0.75, "large": 0.9, "huge": 1.0, "gargantuan": 1.0}
+_VARIETY_AREAS = {"duel": 44 * 28, "small": 60 * 38, "standard": 76 * 48, "large": 92 * 58,
+                  "huge": 112 * 70, "gargantuan": 160 * 100}
+
+
+def luxury_variety(rules: Rules, tiles: int) -> float:
+    """The share of the luxury types a map of this many tiles should hold at least (see LUXURY_VARIETY)."""
+    sizes = rules.const.get("map_sizes") or {}
+    pts = sorted((sizes[k]["width"] * sizes[k]["height"] if k in sizes else _VARIETY_AREAS[k], v)
+                 for k, v in LUXURY_VARIETY.items())
+    if tiles <= pts[0][0]:
+        return pts[0][1]
+    for (a0, v0), (a1, v1) in zip(pts, pts[1:]):
+        if tiles <= a1:
+            return v0 + (v1 - v0) * (tiles - a0) / max(a1 - a0, 1)
+    return pts[-1][1]
+
+
+def _cluster_origin(m: _Map, res: str, cands: list[int], size: int) -> int:
+    """A tile among the (shuffled) candidates with room around it for a cluster of this resource."""
+    best, best_n = cands[0], -1
+    for i in cands[:200]:
+        n = sum(1 for x in m.grid.neighbors(i) if _can_hold(m, res, x))
+        if n >= size - 1:
+            return i
+        if n > best_n:
+            best, best_n = i, n
+    return best
+
+
+def _guarantee(m: _Map, res: str, avoid: list[int], size: int, major: Optional[bool] = None,
+               anywhere: bool = False) -> bool:
+    """Put a small cluster of a resource the map lacks somewhere it can naturally go.
+
+    Empty tiles away from the starts come first, then any empty tile it may go on, then a tile held by
+    another resource of its kind that has more than one deposit. With ``anywhere`` (strategic resources,
+    which the game must never lack), the last resort is any empty tile of a terrain it can be found on
+    even though a feature or rule would normally keep it off, then any passable land tile.
+    """
+    if not _allowed(m, res):
+        return False
+    kind = _kind(m, res)
+    empty = [i for i in range(m.grid.size) if _can_hold(m, res, i)]
+    m.rng.shuffle(empty)
+    far = [i for i in empty if not any(m.tiles[n].resource for n in m.grid.neighbors(i))
+           and all(m.grid.distance(i, s) > 3 for s in avoid)]
+    cands = far or empty
+    if cands:
+        origin = _cluster_origin(m, res, cands, size)
+    else:
+        spare = [i for i in range(m.grid.size) if m.tiles[i].resource and m.tiles[i].resource != res
+                 and _kind(m, m.tiles[i].resource) == kind and m.placed.get(m.tiles[i].resource, 0) > 1
+                 and _natural_on(m, res, i)]
+        if not spare and anywhere:
+            d = m.R.resources[res]
+            free = [i for i in range(m.grid.size) if not m.tiles[i].resource and not m.tiles[i].wonder
+                    and not m.impassable(i)]
+            spare = [i for i in free if m.last(i) in d.get("terrainsCanBeFoundOn", [])] \
+                or [i for i in free if m.tiles[i].terrain in d.get("terrainsCanBeFoundOn", [])] \
+                or [i for i in free if m.land(i)]
+        if not spare:
+            return False
+        origin = m.rng.choice(sorted(spare))
+    _set_resource(m, res, origin, major)
+    around = [n for n in m.grid.neighbors(origin) if _can_hold(m, res, n)]
+    m.rng.shuffle(around)
+    for n in around[:size - 1]:
+        if _can_hold(m, res, n):
+            _set_resource(m, res, n, major)
+    return True
+
+
+@contextlib.contextmanager
+def _side_rng(m: _Map):
+    """Run a step on its own random stream, seeded from the map's without drawing from it.
+
+    The game keeps using the map's stream after generation, so a top-up that only some maps need must
+    not shift it: a map that needed nothing comes out exactly as it did before, and so does its game.
+    """
+    main = m.rng
+    m.rng = random.Random(repr(main.getstate()))
+    try:
+        yield
+    finally:
+        m.rng = main
+
+
+def _luxury_variety(m: _Map, starts: list[int], cs_starts: list[int]):
+    """Top the map up to its size's share of the luxury types (LUXURY_VARIETY), in small clusters.
+
+    Only types that can go somewhere on this map count, and a type the lobby turned off does not come back.
+    """
+    R = m.R
+    if m.opts.density["Luxury"] <= 0:
+        return
+    lux = [r for r, d in R.resources.items() if d["resourceType"] == "Luxury"
+           and not _never_generates(d) and not d["_umap"].has_tag(U.CityStateOnlyResource)
+           and m.opts.rule.get(r, ("normal", 0))[0] != "off"]
+    lux = [r for r in lux if m.placed.get(r, 0) or any(_natural_on(m, r, i) for i in range(m.grid.size))]
+    want = min(len(lux), math.ceil(luxury_variety(R, m.grid.size) * len(lux) - 1e-9))
+    missing = [r for r in lux if not m.placed.get(r, 0)]
+    have = len(lux) - len(missing)
+    if have >= want:
+        return
+    with _side_rng(m):
+        m.rng.shuffle(missing)
+        for r in missing:
+            if have >= want:
+                break
+            size = max(1, _scaled(m, 2 + m.rng.randrange(2), "Luxury"))
+            if _guarantee(m, r, starts + cs_starts, size):
+                have += 1
+
+
+def _strategic_variety(m: _Map, starts: list[int], cs_starts: list[int]):
+    """Every strategic type the lobby has not turned off is on the map at least once."""
+    if m.opts.density["Strategic"] <= 0:
+        return
+    strat = [r for r, d in m.R.resources.items() if d["resourceType"] == "Strategic"
+             and not _never_generates(d) and not m.placed.get(r, 0)]
+    if not strat:
+        return
+    with _side_rng(m):
+        for r in strat:
+            _guarantee(m, r, starts + cs_starts, 1, major=True, anywhere=True)
+
+
 def _rebalance(m: _Map, kind: str, starts: list[int]):
     """Make each 'share' resource the lobby's percentage of all the resources of its kind.
 
@@ -1569,12 +1704,17 @@ def generate_map(rules: Rules, width: int, height: int, map_type: str, num_playe
     cs_starts = _choose_cs_starts(m, num_city_states, starts)
     _natural_wonders(m, radius, starts + cs_starts)
     _strategic(m)
+    _strategic_variety(m, starts, cs_starts)
     _luxuries(m, starts, cs_starts)
+    _luxury_variety(m, starts, cs_starts)
     _bonus(m)
     for s in starts + cs_starts:
         _normalize_start(m, s)
     for kind in ("Strategic", "Luxury"):
         _rebalance(m, kind, starts)
+    # a start's tile is cleared and shares move tiles around: put back any type that lost its last deposit
+    _strategic_variety(m, starts, cs_starts)
+    _luxury_variety(m, starts, cs_starts)
     if ruins:
         _ruins(m, starts, cs_starts)
     _assign_continents(m)
