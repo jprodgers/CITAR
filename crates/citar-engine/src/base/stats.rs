@@ -25,6 +25,9 @@ pub enum Stat {
     Faith = 6,
 }
 
+// A save writes a stat by its name, the digest by its index.
+super::codec::serde_by_name!(Stat);
+
 impl Stat {
     /// How many stats there are.
     pub const COUNT: usize = 7;

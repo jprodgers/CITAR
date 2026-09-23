@@ -10,10 +10,18 @@
 //! - [`FeatureSet`] is one `u16` over the terrain features, in layer order.
 //! - [`BitSet`] grows, for tile sets such as a player's explored tiles.
 //! - [`PlayerSet`] is one `u64`, which is why a game has at most 64 players.
+//!
+//! Serialisation (DESIGN.md 4.9, 4.10): the JSON save writes an [`IdSet`] as its members (rule
+//! ids, which `save::ctx` writes as names), a [`BitSet`] as base64 of its words, and a
+//! [`PlayerSet`] as its player ids. `CANON_V1` hashes the raw words: an `IdSet` as its `W` words,
+//! a `BitSet` as its trimmed words with their count, a `PlayerSet` as its `u64`.
 
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
+
+use serde::de::{self, Deserialize, Deserializer, SeqAccess, Visitor};
+use serde::ser::{Serialize, SerializeTuple, Serializer};
 
 use super::ids::{
     BaseUnitId, BeliefId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
@@ -251,6 +259,57 @@ impl<I: Id, const W: usize> BitAndAssign for IdSet<I, W> {
 impl<I: Id, const W: usize> SubAssign for IdSet<I, W> {
     fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs;
+    }
+}
+
+/// JSON: the members, ascending (a rule id's own form, a name in a save). `CANON_V1`: the `W`
+/// words, with no count.
+impl<I: Id + Serialize, const W: usize> Serialize for IdSet<I, W> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            s.collect_seq(self.iter())
+        } else {
+            let mut t = s.serialize_tuple(W)?;
+            for w in &self.words {
+                t.serialize_element(w)?;
+            }
+            t.end()
+        }
+    }
+}
+
+/// The members in any order, each within the set's capacity (JSON), or the `W` words.
+impl<'de, I: Id + Deserialize<'de>, const W: usize> Deserialize<'de> for IdSet<I, W> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Words<const W: usize>;
+
+        impl<'de, const W: usize> Visitor<'de> for Words<W> {
+            type Value = [u64; W];
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{W} words")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[u64; W], A::Error> {
+                let mut words = [0u64; W];
+                for (i, w) in words.iter_mut().enumerate() {
+                    *w = seq.next_element()?.ok_or_else(|| de::Error::invalid_length(i, &self))?;
+                }
+                Ok(words)
+            }
+        }
+
+        if !d.is_human_readable() {
+            return d.deserialize_tuple(W, Words::<W>).map(Self::from_words);
+        }
+        let members = Vec::<I>::deserialize(d)?;
+        if let Some(big) = members.iter().find(|m| m.index() >= Self::CAPACITY) {
+            return Err(de::Error::custom(format!(
+                "{big:?} does not fit a set of {} ids",
+                Self::CAPACITY
+            )));
+        }
+        Ok(members.into_iter().collect())
     }
 }
 
@@ -555,17 +614,36 @@ impl PartialEq for BitSet {
     }
 }
 
-/// [`words`](BitSet::words) as a sequence of `u64`, in both encodings.
-impl serde::Serialize for BitSet {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.words().serialize(serializer)
+/// [`words`](BitSet::words), the canonical form: in JSON as base64 of the words' little-endian
+/// bytes, in `CANON_V1` as a sequence of `u64`.
+impl Serialize for BitSet {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let words = self.words();
+        if s.is_human_readable() {
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            s.serialize_str(&super::codec::b64_encode(&bytes))
+        } else {
+            words.serialize(s)
+        }
     }
 }
 
-/// A sequence of `u64` words; trailing zero words are accepted and change nothing.
-impl<'de> serde::Deserialize<'de> for BitSet {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Vec::<u64>::deserialize(deserializer).map(Self::from_words)
+/// The words, as [`Serialize`] wrote them; trailing zero words are accepted and change nothing.
+impl<'de> Deserialize<'de> for BitSet {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if !d.is_human_readable() {
+            return Vec::<u64>::deserialize(d).map(Self::from_words);
+        }
+        let text = String::deserialize(d)?;
+        let bytes = super::codec::b64_decode(&text).map_err(de::Error::custom)?;
+        let (words, rest) = bytes.as_chunks::<8>();
+        if !rest.is_empty() {
+            return Err(de::Error::custom(format!(
+                "a bit set is whole 64-bit words, not {} bytes",
+                bytes.len()
+            )));
+        }
+        Ok(Self::from_words(words.iter().map(|w| u64::from_le_bytes(*w)).collect()))
     }
 }
 
@@ -760,6 +838,31 @@ impl SubAssign for PlayerSet {
     }
 }
 
+/// JSON: the player ids, ascending. `CANON_V1`: the `u64`.
+impl Serialize for PlayerSet {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            s.collect_seq(self.iter().map(|p| p.0))
+        } else {
+            s.serialize_u64(self.0)
+        }
+    }
+}
+
+/// The player ids, each below 64, in any order (JSON), or the `u64`.
+impl<'de> Deserialize<'de> for PlayerSet {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if !d.is_human_readable() {
+            return u64::deserialize(d).map(Self);
+        }
+        let ids = Vec::<u8>::deserialize(d)?;
+        if let Some(big) = ids.iter().find(|&&p| usize::from(p) >= Self::CAPACITY) {
+            return Err(de::Error::custom(format!("player {big} does not fit a set of 64")));
+        }
+        Ok(ids.into_iter().map(PlayerId).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,9 +934,12 @@ mod tests {
             [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0]
         );
         let json = serde_json::to_string(&sized)?;
-        assert_eq!(json, "[0,64]");
-        let back: BitSet = serde_json::from_str("[0,64,0,0]")?;
+        assert_eq!(json, r#""AAAAAAAAAABAAAAAAAAAAA==""#, "base64 of [0, 64] as u64 le");
+        let back: BitSet = serde_json::from_str(&json)?;
         assert_eq!(back, sized);
+        let padded: BitSet = serde_json::from_str(r#""AAAAAAAAAABAAAAAAAAAAAAAAAAAAAAA""#)?;
+        assert_eq!(padded, sized, "trailing zero words change nothing");
+        assert!(serde_json::from_str::<BitSet>(r#""AAAA""#).is_err(), "not whole words");
         assert_eq!(to_canon_vec(&back)?, to_canon_vec(&sized)?);
         assert_eq!(to_canon_vec(&BitSet::with_capacity(640))?, to_canon_vec(&BitSet::new())?);
         Ok(())
@@ -873,5 +979,54 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert!(!s.contains(PlayerId(64)));
         assert_eq!(PlayerSet::first(64).len(), 64);
+    }
+
+    #[test]
+    fn id_and_player_sets_serialise_as_members_and_words() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::base::digest::to_canon_vec;
+
+        let players: PlayerSet = [PlayerId(3), PlayerId(0)].into_iter().collect();
+        assert_eq!(serde_json::to_string(&players)?, "[0,3]");
+        assert_eq!(serde_json::from_str::<PlayerSet>("[3,0]")?, players);
+        assert!(serde_json::from_str::<PlayerSet>("[64]").is_err());
+        assert_eq!(to_canon_vec(&players)?, 9u64.to_le_bytes());
+
+        let techs: IdSet<RawTech, 2> = [RawTech(70), RawTech(1)].into_iter().collect();
+        assert_eq!(serde_json::to_string(&techs)?, "[1,70]");
+        assert_eq!(serde_json::from_str::<IdSet<RawTech, 2>>("[70,1]")?, techs);
+        assert!(serde_json::from_str::<IdSet<RawTech, 2>>("[128]").is_err());
+        let mut want = 2u64.to_le_bytes().to_vec();
+        want.extend((1u64 << 6).to_le_bytes());
+        assert_eq!(to_canon_vec(&techs)?, want, "the two words, no count");
+        Ok(())
+    }
+
+    /// A rule id with a plain integer form, standing in for the ones `save::ctx` names.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    struct RawTech(u16);
+
+    impl Id for RawTech {
+        const NAME: &'static str = "RawTech";
+        const FIRST_INDEX: usize = 0;
+
+        fn index(self) -> usize {
+            usize::from(self.0)
+        }
+
+        fn from_index(i: usize) -> Option<Self> {
+            u16::try_from(i).ok().map(Self)
+        }
     }
 }

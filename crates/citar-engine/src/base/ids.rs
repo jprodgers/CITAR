@@ -12,7 +12,8 @@
 //! in file order: `u16` in general, `u8` where tiles or other hot arrays store them.
 //!
 //! Serialisation: the entity ids serialise as their integer in both encodings. Rule ids have no
-//! serde impls here, because the save writes them as names (DESIGN.md 4.9); `save` adds those.
+//! serde impls here, because the save writes them as names (DESIGN.md 4.9); `save::ctx` adds
+//! those. An [`IdVec`] is a sequence of its entries in both encodings.
 
 use core::fmt;
 use core::hash::Hash;
@@ -652,6 +653,20 @@ impl<I: Id, T> IndexMut<I> for IdVec<I, T> {
     }
 }
 
+/// The entries in id order, as a sequence, in both encodings.
+impl<I, T: serde::Serialize> serde::Serialize for IdVec<I, T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.items.serialize(s)
+    }
+}
+
+/// A sequence of entries, the first being the id with index `I::FIRST_INDEX`.
+impl<'de, I: Id, T: serde::Deserialize<'de>> serde::Deserialize<'de> for IdVec<I, T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Vec::<T>::deserialize(d).map(Self::from_vec)
+    }
+}
+
 impl<I: Id, T> FromIterator<T> for IdVec<I, T> {
     fn from_iter<It: IntoIterator<Item = T>>(iter: It) -> Self {
         Self::from_vec(iter.into_iter().collect())
@@ -689,6 +704,14 @@ mod tests {
         assert_eq!(serde_json::from_str::<CityId>("42")?, id);
         assert!(serde_json::from_str::<CityId>("0").is_err());
         assert_eq!(serde_json::to_string(&TileIdx(9))?, "9");
+        Ok(())
+    }
+
+    #[test]
+    fn id_vecs_serialise_as_their_entries() -> Result<(), serde_json::Error> {
+        let v: IdVec<PlayerId, u8> = [3, 1].into_iter().collect();
+        assert_eq!(serde_json::to_string(&v)?, "[3,1]");
+        assert_eq!(serde_json::from_str::<IdVec<PlayerId, u8>>("[3,1]")?, v);
         Ok(())
     }
 
