@@ -31,7 +31,8 @@
 #            the kind unique_types.tsv gives: `amount16` is an amount stored in 16 bits so that a
 #            payload stays within 12 bytes (DESIGN.md 5.5), and `nonNegativeAmount` refuses a
 #            negative count UnCiv's `[amount]` would let through (the landmass counts, which
-#            map generation takes a slice of).
+#            map generation takes a slice of), and `promotionOrStatus` also takes the status
+#            `Set Up`, as `for units with []` read it (uniques.py:974-975).
 #   gain     Also happens once when its source is gained, besides standing (triggers.py
 #            TRIGGERABLE): free buildings, free promotions.
 #   stages   The engine systems that read it: the Python modules that did (`U.<name>` or the
@@ -538,8 +539,8 @@ ConditionalStartingFromEra = { role = "cond", fields = ["era"], stages = ["uniqu
 ConditionalTech = { role = "cond", fields = ["techs"], stages = ["unique"] }
 ConditionalTutorialCompleted = { role = "cond", fields = ["tutorial"], stages = ["unique"] }  # (extra)
 ConditionalTutorialsEnabled = { role = "cond", stages = ["unique"] }  # (extra)
-ConditionalUnitWithPromotion = { role = "cond", fields = ["promotion"], stages = ["unique"] }  # (extra)
-ConditionalUnitWithoutPromotion = { role = "cond", fields = ["promotion"], stages = ["unique"] }  # (extra)
+ConditionalUnitWithPromotion = { role = "cond", fields = ["promotion:promotionOrStatus"], stages = ["unique"] }  # (extra)
+ConditionalUnitWithoutPromotion = { role = "cond", fields = ["promotion:promotionOrStatus"], stages = ["unique"] }  # (extra)
 ConditionalVictoryDisabled = { role = "cond", fields = ["victory"], stages = ["unique"] }  # (extra)
 ConditionalVictoryEnabled = { role = "cond", fields = ["victory"], stages = ["unique"] }
 ConditionalVsCity = { role = "cond", stages = ["barbarians", "unique"] }

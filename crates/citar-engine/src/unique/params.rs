@@ -50,6 +50,15 @@ pub enum PolicyOrBelief {
     Belief(BeliefId),
 }
 
+/// `for units with [promotion]`: a promotion, or the one status a unit carries, `Set Up`, which
+/// Python found in `unit.status` (`uniques.py:974-975`, `combat.py:763-764`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PromotionOrStatus {
+    Promotion(PromotionId),
+    /// `Set Up`: the unit has set up to attack.
+    SetUp,
+}
+
 /// `[populationFilter]`: which of a city's citizens count (`uniques.py:720-732`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PopulationFilter {
@@ -146,6 +155,7 @@ pub enum Param {
     Building(BuildingId),
     BaseUnit(BaseUnitId),
     Promotion(PromotionId),
+    PromotionOrStatus(PromotionOrStatus),
     Resource(ResourceId),
     Tech(TechId),
     Era(EraId),
@@ -208,6 +218,7 @@ param_field! {
     BuildingId => Building,
     BaseUnitId => BaseUnit,
     PromotionId => Promotion,
+    PromotionOrStatus => PromotionOrStatus,
     ResourceId => Resource,
     TechId => Tech,
     EraId => Era,
@@ -279,6 +290,8 @@ impl Param {
             Self::Building(x) => name(rules.name(x)),
             Self::BaseUnit(x) => name(rules.name(x)),
             Self::Promotion(x) => name(rules.name(x)),
+            Self::PromotionOrStatus(PromotionOrStatus::Promotion(x)) => name(rules.name(x)),
+            Self::PromotionOrStatus(PromotionOrStatus::SetUp) => text("Set Up"),
             Self::Resource(x) => name(rules.name(x)),
             Self::Tech(x) => name(rules.name(x)),
             Self::Era(x) => name(rules.name(x)),
@@ -607,6 +620,12 @@ impl<'r> Lexicon<'r> {
             // which is this pass, so a great person is checked as a unit, as Python did.
             K::Unit | K::GreatPerson => Param::BaseUnit(named(r, text, "unit")?),
             K::Promotion => Param::Promotion(named(r, text, "promotion")?),
+            // A promotion of that name first, as Python's `in promotions` came first.
+            K::PromotionOrStatus => Param::PromotionOrStatus(match r.lookup::<PromotionId>(text) {
+                Some(p) => PromotionOrStatus::Promotion(p),
+                None if text == "Set Up" => PromotionOrStatus::SetUp,
+                None => return Err(format!("{text:?} is neither a promotion nor `Set Up`")),
+            }),
             K::Resource => Param::Resource(named(r, text, "resource")?),
             K::Tech => Param::Tech(named(r, text, "technology")?),
             K::Era => Param::Era(named(r, text, "era")?),

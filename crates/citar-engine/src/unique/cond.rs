@@ -32,7 +32,7 @@
 use super::countable::Countable;
 use super::filter::{Combatant, Expr, Filters, TileLeaf, UnitScope};
 use super::generated::{CondData, UniqueType};
-use super::params::{PolicyOrBelief, PopulationFilter, StatOrResource};
+use super::params::{PolicyOrBelief, PopulationFilter, PromotionOrStatus, StatOrResource};
 use super::table::{Cond, CondDeps, UFlags, UniqueTable};
 use super::world::{CombatAction, CombatCtx, Ctx, EvalWorld};
 use crate::base::ids::{
@@ -362,11 +362,9 @@ pub fn holds<W: EvalWorld>(c: &Cond, id: UniqueId, ctx: &Ctx, w: &W) -> bool {
         C::ConditionalWhenGarrisoned => rel_city().is_some_and(|c| w.city_garrisoned(c)),
         C::ConditionalOurUnit(x) => our_unit(x.units),
         C::ConditionalOurUnitOnUnit(x) => our_unit(x.units),
-        C::ConditionalUnitWithPromotion(x) => {
-            rel_unit.is_some_and(|u| w.unit_promotions(u).contains(x.promotion))
-        }
+        C::ConditionalUnitWithPromotion(x) => rel_unit.is_some_and(|u| carries(w, u, x.promotion)),
         C::ConditionalUnitWithoutPromotion(x) => {
-            rel_unit.is_some_and(|u| !w.unit_promotions(u).contains(x.promotion))
+            rel_unit.is_some_and(|u| !carries(w, u, x.promotion))
         }
         C::ConditionalVsCity => matches!(their, Some(Combatant::City(_))),
         C::ConditionalVsUnits(x) => match their {
@@ -478,6 +476,14 @@ fn adopted<W: EvalWorld>(w: &W, p: PlayerId, what: PolicyOrBelief) -> bool {
 /// (`_city_has`, `uniques.py:859-861`).
 fn has_building<W: EvalWorld>(t: &UniqueTable, s: SetRef, w: &W, c: CityId) -> bool {
     w.city_buildings(c).iter().any(|b: BuildingId| t.in_set(s, b))
+}
+
+/// Whether the unit has the promotion, or the status (`uniques.py:974-975`).
+fn carries<W: EvalWorld>(w: &W, u: UnitId, what: PromotionOrStatus) -> bool {
+    match what {
+        PromotionOrStatus::Promotion(p) => w.unit_promotions(u).contains(p),
+        PromotionOrStatus::SetUp => w.unit_set_up(u),
+    }
 }
 
 /// The amount of a stat or resource a comparison reads (`_stat_amount`, `uniques.py:811-824`):

@@ -41,7 +41,7 @@ use citar_engine::unique::filter::{CityLeaf, Combatant, Leaf, UnitFacts, UnitSco
 use citar_engine::unique::index::{
     self, CityStateBonus, CivIndex, CivSources, Csr, placeholder_counts,
 };
-use citar_engine::unique::params::PolicyOrBelief;
+use citar_engine::unique::params::{PolicyOrBelief, PromotionOrStatus};
 use citar_engine::unique::trigger::{
     CityScope, OneTimeEffect, TriggerEvent, TriggerKind, TriggerSite, UnitEffect, fire,
 };
@@ -130,6 +130,8 @@ const CONDS: &[&str] = &[
     "when [Wounded]",
     "for units with [Drill I]",
     "for units without [Drill I]",
+    "for units with [Set Up]",
+    "for units without [Set Up]",
     "vs cities",
     "vs [Mounted] units",
     "vs [City]",
@@ -302,6 +304,7 @@ struct Unit {
     tile: TileIdx,
     health: i32,
     used: bool,
+    set_up: bool,
 }
 
 /// A world of plain facts, answered from tables, with its unique indexes built by the engine's
@@ -451,6 +454,7 @@ impl World {
             tile,
             health: 100,
             used: false,
+            set_up: false,
         }
     }
 
@@ -618,8 +622,8 @@ impl FilterFacts for World {
     fn unit_embarked(&self, _: UnitId) -> bool {
         false
     }
-    fn unit_set_up(&self, _: UnitId) -> bool {
-        false
+    fn unit_set_up(&self, u: UnitId) -> bool {
+        self.units[&u].set_up
     }
     fn city_owner(&self, c: CityId) -> PlayerId {
         self.cities[&c].owner
@@ -1139,15 +1143,11 @@ fn case(w: &mut World, c: &CondData, yes: bool) -> Option<Ctx> {
             unit1
         }
         C::ConditionalUnitWithPromotion(x) => {
-            if yes {
-                w.unit_mut(1).promotions.insert(x.promotion);
-            }
+            carry(w, x.promotion, yes);
             unit1
         }
         C::ConditionalUnitWithoutPromotion(x) => {
-            if !yes {
-                w.unit_mut(1).promotions.insert(x.promotion);
-            }
+            carry(w, x.promotion, !yes);
             unit1
         }
         C::ConditionalVsCity => fight(
@@ -1314,6 +1314,18 @@ fn case(w: &mut World, c: &CondData, yes: bool) -> Option<Ctx> {
     })
 }
 
+/// Gives the Warrior (unit 1) the promotion or the status, or not.
+fn carry(w: &mut World, what: PromotionOrStatus, on: bool) {
+    let unit = w.unit_mut(1);
+    match what {
+        PromotionOrStatus::Promotion(p) if on => {
+            unit.promotions.insert(p);
+        }
+        PromotionOrStatus::Promotion(_) => {}
+        PromotionOrStatus::SetUp => unit.set_up = on,
+    }
+}
+
 /// Every conditional of the ruleset once, with a unique that carries it: the Eval Test's, and the
 /// map-generation ones from the shipped ruleset's uniques.
 fn every_cond() -> Vec<(UniqueId, usize)> {
@@ -1445,6 +1457,8 @@ fn what_each_conditional_reads() {
         ("when [Wounded]", D::UNIT),
         ("for units with [Drill I]", D::UNIT),
         ("for units without [Drill I]", D::UNIT),
+        ("for units with [Set Up]", D::UNIT),
+        ("for units without [Set Up]", D::UNIT),
         ("vs cities", D::COMBAT),
         ("vs [Mounted] units", D::COMBAT),
         ("vs [City]", D::COMBAT),

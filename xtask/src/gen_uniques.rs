@@ -61,8 +61,8 @@ const fn kind(
     Kind { sig, variant, ty, size, align, doc }
 }
 
-/// Every parameter kind the engine compiles. `amount16` is not UnCiv's: it is the override
-/// `unique_supported.toml` writes `name:amount16`.
+/// Every parameter kind the engine compiles. `amount16` and `promotionOrStatus` are not UnCiv's:
+/// they are overrides `unique_supported.toml` writes after a field's name (`name:amount16`).
 const KINDS: &[Kind] = &[
     kind("amount", "Amount", "i32", 4, 4, "a whole number"),
     kind("amount16", "Amount16", "i16", 2, 2, "a whole number stored in 16 bits"),
@@ -123,6 +123,14 @@ const KINDS: &[Kind] = &[
     kind("unit", "Unit", "BaseUnitId", 2, 2, "a unit of units.json, by name"),
     kind("greatPerson", "GreatPerson", "BaseUnitId", 2, 2, "a great person's unit, by name"),
     kind("promotion", "Promotion", "PromotionId", 2, 2, "a promotion, by name"),
+    kind(
+        "promotionOrStatus",
+        "PromotionOrStatus",
+        "PromotionOrStatus",
+        4,
+        2,
+        "a promotion by name, or the status `Set Up`",
+    ),
     kind("resource", "Resource", "ResourceId", 1, 1, "a resource, by name"),
     kind("tech", "Tech", "TechId", 2, 2, "a technology, by name"),
     kind("era", "Era", "EraId", 1, 1, "an era, by name"),
@@ -589,6 +597,7 @@ fn header(o: &mut String, used: &BTreeSet<&str>) {
         "FoundingOrEnhancing",
         "PolicyOrBelief",
         "PopulationFilter",
+        "PromotionOrStatus",
         "RegionType",
         "StatOrResource",
         "TerrainQuality",

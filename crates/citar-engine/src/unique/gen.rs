@@ -5,7 +5,7 @@
 #![allow(clippy::too_many_lines, reason = "one arm per unique type")]
 
 use super::countable::Countable;
-use super::params::{CostOrStrength, CountOrAll, FoundingOrEnhancing, Param, ParamCx, ParamError, PolicyOrBelief, PopulationFilter, RegionType, StatOrResource, TerrainQuality, UnitTriggerTarget};
+use super::params::{CostOrStrength, CountOrAll, FoundingOrEnhancing, Param, ParamCx, ParamError, PolicyOrBelief, PopulationFilter, PromotionOrStatus, RegionType, StatOrResource, TerrainQuality, UnitTriggerTarget};
 use super::table::Role;
 use crate::base::ids::{BaseUnitId, BuildingId, CityFilterId, CivFilterId, CombatantFilterId, DifficultyId, EraId, FeatureId, FracId, ObjectFilterId, PromotionId, ResourceId, SetRef, SpeedId, StatsId, TagId, TechId, TerrainId, TextId, TileFilterId, UnitFilterId, VictoryId};
 use crate::base::stats::Stat;
@@ -2436,8 +2436,8 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "ConditionalWhenGarrisoned", placeholder: "with a garrison", signature: "with a garrison", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalOurUnit", placeholder: "for [] units", signature: "for [mapUnitFilter] units", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::GreatPeople, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalOurUnitOnUnit", placeholder: "when []", signature: "when [mapUnitFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalUnitWithPromotion", placeholder: "for units with []", signature: "for units with [promotion]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Promotion], fields: &["promotion"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalUnitWithoutPromotion", placeholder: "for units without []", signature: "for units without [promotion]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Promotion], fields: &["promotion"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalUnitWithPromotion", placeholder: "for units with []", signature: "for units with [promotion]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PromotionOrStatus], fields: &["promotion"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalUnitWithoutPromotion", placeholder: "for units without []", signature: "for units without [promotion]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PromotionOrStatus], fields: &["promotion"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalVsCity", placeholder: "vs cities", signature: "vs cities", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Barbarians, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalVsUnits", placeholder: "vs [] units", signature: "vs [mapUnitFilter] units", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Barbarians, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalVsCombatant", placeholder: "vs []", signature: "vs [combatantFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::CombatantFilter], fields: &["combatants"], gain: false, stages: &[Stage::Unique], reason: None }) },
@@ -3314,6 +3314,8 @@ pub enum ParamKind {
     GreatPerson,
     /// `promotion`: a promotion, by name.
     Promotion,
+    /// `promotionOrStatus`: a promotion by name, or the status `Set Up`.
+    PromotionOrStatus,
     /// `resource`: a resource, by name.
     Resource,
     /// `tech`: a technology, by name.
@@ -3398,6 +3400,7 @@ impl ParamKind {
             Self::Unit => "unit",
             Self::GreatPerson => "greatPerson",
             Self::Promotion => "promotion",
+            Self::PromotionOrStatus => "promotionOrStatus",
             Self::Resource => "resource",
             Self::Tech => "tech",
             Self::Era => "era",
@@ -3528,7 +3531,7 @@ impl Stage {
 
 /// The payload of each supported type that has parameters, one field per parameter.
 pub mod p {
-    use super::{BaseUnitId, BeliefKind, BuildingId, CityFilterId, CivFilterId, CombatantFilterId, CostOrStrength, CountOrAll, Countable, DifficultyId, EraId, FeatureId, FoundingOrEnhancing, FracId, ObjectFilterId, PolicyOrBelief, PopulationFilter, PromotionId, RegionType, ResourceId, SetRef, SpeedId, SpyAction, Stat, StatOrResource, StatsId, TechId, TerrainId, TerrainQuality, TextId, TileFilterId, UnitFilterId, UnitTriggerTarget, VictoryId};
+    use super::{BaseUnitId, BeliefKind, BuildingId, CityFilterId, CivFilterId, CombatantFilterId, CostOrStrength, CountOrAll, Countable, DifficultyId, EraId, FeatureId, FoundingOrEnhancing, FracId, ObjectFilterId, PolicyOrBelief, PopulationFilter, PromotionId, PromotionOrStatus, RegionType, ResourceId, SetRef, SpeedId, SpyAction, Stat, StatOrResource, StatsId, TechId, TerrainId, TerrainQuality, TextId, TileFilterId, UnitFilterId, UnitTriggerTarget, VictoryId};
 
     /// `[stats]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -5305,13 +5308,13 @@ pub mod p {
     /// `for units with [promotion]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalUnitWithPromotion {
-        pub promotion: PromotionId,
+        pub promotion: PromotionOrStatus,
     }
 
     /// `for units without [promotion]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalUnitWithoutPromotion {
-        pub promotion: PromotionId,
+        pub promotion: PromotionOrStatus,
     }
 
     /// `vs [mapUnitFilter] units`
@@ -8513,8 +8516,8 @@ impl CondData {
             UniqueType::ConditionalWhenGarrisoned => Self::ConditionalWhenGarrisoned,
             UniqueType::ConditionalOurUnit => Self::ConditionalOurUnit(p::ConditionalOurUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
             UniqueType::ConditionalOurUnitOnUnit => Self::ConditionalOurUnitOnUnit(p::ConditionalOurUnitOnUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
-            UniqueType::ConditionalUnitWithPromotion => Self::ConditionalUnitWithPromotion(p::ConditionalUnitWithPromotion { promotion: cx.get(0, ParamKind::Promotion)? }),
-            UniqueType::ConditionalUnitWithoutPromotion => Self::ConditionalUnitWithoutPromotion(p::ConditionalUnitWithoutPromotion { promotion: cx.get(0, ParamKind::Promotion)? }),
+            UniqueType::ConditionalUnitWithPromotion => Self::ConditionalUnitWithPromotion(p::ConditionalUnitWithPromotion { promotion: cx.get(0, ParamKind::PromotionOrStatus)? }),
+            UniqueType::ConditionalUnitWithoutPromotion => Self::ConditionalUnitWithoutPromotion(p::ConditionalUnitWithoutPromotion { promotion: cx.get(0, ParamKind::PromotionOrStatus)? }),
             UniqueType::ConditionalVsCity => Self::ConditionalVsCity,
             UniqueType::ConditionalVsUnits => Self::ConditionalVsUnits(p::ConditionalVsUnits { units: cx.get(0, ParamKind::MapUnitFilter)? }),
             UniqueType::ConditionalVsCombatant => Self::ConditionalVsCombatant(p::ConditionalVsCombatant { combatants: cx.get(0, ParamKind::CombatantFilter)? }),

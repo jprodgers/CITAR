@@ -9,7 +9,8 @@
       "[+10]% Strength <when below [50] HP>",
       "[+15]% Strength <when not stacked with a [Great General] unit>",
       "[+5]% Strength <for units with [Drill I]>",
-      "[+5]% Strength <for units without [Drill I]>"
+      "[+5]% Strength <for units without [Drill I]>",
+      "[+5]% Strength <for units with [Set Up]>"
     ],
     "id": "kitchen_sink_veteran"
   }
