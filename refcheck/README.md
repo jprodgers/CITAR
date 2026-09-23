@@ -30,7 +30,7 @@ Rust tool that checks the engine against it is `crates/citar-refcheck` ([Checkin
 | `refcheck/baseline/` | baseline runs (git-ignored, generated) |
 | `refcheck/intended.toml` | the accepted differences, each with a reason |
 | `refcheck/enforced.toml` | the groups (or paths) whose unexplained differences fail CI |
-| `refcheck/ratchet.json` | unexplained differences per group, which may only fall |
+| `refcheck/ratchet.json` | unexplained differences and failed answer modules per group, which may only fall |
 
 The tools use the Python engine directly and run their own game loop. They do not use `citar.sim`, `citar.lab`
 or `citar.balance`, so the fixtures don't change when those modules change.
