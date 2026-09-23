@@ -1,0 +1,39 @@
+[package]
+name = "citar-engine"
+description = "The CITAR game engine: pure, deterministic, no I/O"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["embedded-ruleset"]
+# rules::embedded() pulls the ruleset files in through include_bytes!, and adds Ruleset::shared().
+embedded-ruleset = []
+# compat::python, the Python GameState.to_dict() converter. refcheck, testkit and bench only;
+# never citar-py or the helper.
+legacy = []
+# api::testops and api::inspect, for rule scripts. Never in shipped wheels or the helper.
+test-ops = []
+# Compiles invariants and the cache oracle into release builds (debug builds always have them).
+checks = []
+# Memo hit and miss counters, search node counts, settles per round.
+stats = []
+
+# cargo xtask check holds these to the allow-list in the root Cargo.toml.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+rustc-hash.workspace = true
+smallvec.workspace = true
+libm.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+aho-corasick.workspace = true
+bitflags.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "citar-bench"
+description = "Benchmarks of the CITAR engine: criterion wall clock and gungraun instruction counts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy"] }
+
+[lints]
+workspace = true
