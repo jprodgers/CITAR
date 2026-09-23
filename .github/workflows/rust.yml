@@ -1,8 +1,8 @@
-# The Rust workspace: lint, and tests on the three desktop platforms.
+# The Rust workspace: lint, tests on the three desktop platforms, and the reference checks.
 #
 # A separate workflow from test.yml, so a Python-only change skips it (the path filters below)
-# and the Rust results get their own summary. Later packages add the refcheck and perf jobs here,
-# the five-target determinism matrix as determinism.yml, and the long runs as nightly.yml
+# and the Rust results get their own summary. A later package adds the perf job here, the
+# five-target determinism matrix as determinism.yml, and the long runs as nightly.yml
 # (crates/citar-engine/DESIGN.md 2.6).
 name: rust
 
@@ -129,3 +129,33 @@ jobs:
         # nextest does not run doctests. The ci profile reuses the libraries the step above built,
         # instead of compiling the workspace a second time in the dev profile.
         run: cargo test --workspace --all-features --locked --doc --profile ci
+
+  refcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: refcheck
+
+      - name: Reference checks
+        # The committed fixtures (refcheck/fixtures-mini and fixtures-late) on every group. An
+        # unexplained difference fails the job where refcheck/enforced.toml covers it; elsewhere it
+        # is reported, and the ratchet below holds its count. The cargo refcheck alias, with --locked.
+        run: cargo run --locked --package citar-refcheck --profile ci -- run --json refcheck-report.json
+
+      - name: Ratchet
+        # No group's unexplained count may rise above refcheck/ratchet.json.
+        run: cargo run --locked --package citar-refcheck --profile ci -- ratchet
+
+      - name: Keep the report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: refcheck-report
+          path: refcheck-report.json
+          if-no-files-found: ignore
