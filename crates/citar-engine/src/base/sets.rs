@@ -1,0 +1,634 @@
+//! Sets over ids, as bits (DESIGN.md 4.2).
+//!
+//! Python kept these as lists and sets of names or ints (`Player.techs`, `Player.met`,
+//! `Player.explored`, ...). As bits they iterate in ascending id order without sorting, compare
+//! and combine a word at a time, and digest as raw words.
+//!
+//! - [`IdSet`] has a fixed width for a rule table: `TechSet = IdSet<TechId, 2>` holds 128 techs.
+//!   The ruleset loader refuses a table larger than its set, naming the constant to raise, so an
+//!   id never exceeds the capacity at runtime.
+//! - [`BitSet`] grows, for tile sets such as a player's explored tiles.
+//! - [`PlayerSet`] is one `u64`, which is why a game has at most 64 players.
+
+use core::fmt;
+use core::marker::PhantomData;
+use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
+
+use super::ids::{Id, IdVec, PlayerId};
+
+/// A vector with one entry per player, indexed by [`PlayerId`].
+pub type PlayerVec<T> = IdVec<PlayerId, T>;
+
+/// The indices of the set bits of `words`, ascending.
+#[derive(Clone, Debug)]
+pub struct Bits<'a> {
+    rest: &'a [u64],
+    word: u64,
+    base: usize,
+}
+
+impl<'a> Bits<'a> {
+    fn new(words: &'a [u64]) -> Self {
+        match words.split_first() {
+            Some((&first, rest)) => Self { rest, word: first, base: 0 },
+            None => Self { rest: &[], word: 0, base: 0 },
+        }
+    }
+}
+
+impl Iterator for Bits<'_> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        while self.word == 0 {
+            let (&next, rest) = self.rest.split_first()?;
+            self.word = next;
+            self.rest = rest;
+            self.base += 64;
+        }
+        let bit = self.word.trailing_zeros() as usize;
+        self.word &= self.word - 1;
+        Some(self.base + bit)
+    }
+}
+
+// ---- IdSet ------------------------------------------------------------------------------------
+
+/// A set of rule ids in `W` words: capacity `64 * W`.
+pub struct IdSet<I, const W: usize> {
+    words: [u64; W],
+    _id: PhantomData<fn(I)>,
+}
+
+impl<I: Id, const W: usize> IdSet<I, W> {
+    /// How many ids fit: the largest index is one less.
+    pub const CAPACITY: usize = 64 * W;
+
+    /// The empty set.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { words: [0; W], _id: PhantomData }
+    }
+
+    /// The set with these raw words, bit `i` of word `w` being index `64 * w + i`.
+    #[must_use]
+    pub const fn from_words(words: [u64; W]) -> Self {
+        Self { words, _id: PhantomData }
+    }
+
+    /// The raw words.
+    #[must_use]
+    pub const fn words(&self) -> &[u64; W] {
+        &self.words
+    }
+
+    #[inline]
+    fn slot(id: I) -> Option<(usize, u64)> {
+        let i = id.index();
+        (i < Self::CAPACITY).then(|| (i / 64, 1u64 << (i % 64)))
+    }
+
+    /// Adds `id`; true if it was not there already.
+    ///
+    /// An id past the capacity is not added (and fails a debug assertion): the ruleset loader
+    /// refuses tables larger than their sets, so it can only be a bug.
+    #[inline]
+    pub fn insert(&mut self, id: I) -> bool {
+        debug_assert!(id.index() < Self::CAPACITY, "{id:?} does not fit an IdSet of {W} words");
+        let Some((w, bit)) = Self::slot(id) else { return false };
+        let fresh = self.words[w] & bit == 0;
+        self.words[w] |= bit;
+        fresh
+    }
+
+    /// Removes `id`; true if it was there.
+    #[inline]
+    pub fn remove(&mut self, id: I) -> bool {
+        let Some((w, bit)) = Self::slot(id) else { return false };
+        let had = self.words[w] & bit != 0;
+        self.words[w] &= !bit;
+        had
+    }
+
+    /// Whether `id` is in the set.
+    #[must_use]
+    #[inline]
+    pub fn contains(&self, id: I) -> bool {
+        Self::slot(id).is_some_and(|(w, bit)| self.words[w] & bit != 0)
+    }
+
+    /// The number of ids in the set.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.words.iter().all(|&w| w == 0)
+    }
+
+    /// Removes every id.
+    pub fn clear(&mut self) {
+        self.words = [0; W];
+    }
+
+    /// The ids, ascending.
+    pub fn iter(&self) -> impl Iterator<Item = I> + '_ {
+        Bits::new(&self.words).filter_map(I::from_index)
+    }
+
+    /// Whether every id of `self` is in `other`.
+    #[must_use]
+    pub fn is_subset(&self, other: &Self) -> bool {
+        self.words.iter().zip(&other.words).all(|(a, b)| a & !b == 0)
+    }
+
+    /// Whether the two sets share no id.
+    #[must_use]
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        self.words.iter().zip(&other.words).all(|(a, b)| a & b == 0)
+    }
+
+    fn zip_with(&self, other: &Self, f: impl Fn(u64, u64) -> u64) -> Self {
+        let mut words = self.words;
+        for (w, o) in words.iter_mut().zip(&other.words) {
+            *w = f(*w, *o);
+        }
+        Self::from_words(words)
+    }
+}
+
+impl<I: Id, const W: usize> Default for IdSet<I, W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<I, const W: usize> Clone for IdSet<I, W> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<I, const W: usize> Copy for IdSet<I, W> {}
+
+impl<I, const W: usize> PartialEq for IdSet<I, W> {
+    fn eq(&self, other: &Self) -> bool {
+        self.words == other.words
+    }
+}
+
+impl<I, const W: usize> Eq for IdSet<I, W> {}
+
+impl<I, const W: usize> core::hash::Hash for IdSet<I, W> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.words.hash(state);
+    }
+}
+
+impl<I: Id, const W: usize> fmt::Debug for IdSet<I, W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
+    }
+}
+
+impl<I: Id, const W: usize> FromIterator<I> for IdSet<I, W> {
+    fn from_iter<It: IntoIterator<Item = I>>(iter: It) -> Self {
+        let mut set = Self::new();
+        set.extend(iter);
+        set
+    }
+}
+
+impl<I: Id, const W: usize> Extend<I> for IdSet<I, W> {
+    fn extend<It: IntoIterator<Item = I>>(&mut self, iter: It) {
+        for id in iter {
+            self.insert(id);
+        }
+    }
+}
+
+impl<I: Id, const W: usize> BitOr for IdSet<I, W> {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        self.zip_with(&rhs, |a, b| a | b)
+    }
+}
+
+impl<I: Id, const W: usize> BitAnd for IdSet<I, W> {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        self.zip_with(&rhs, |a, b| a & b)
+    }
+}
+
+impl<I: Id, const W: usize> Sub for IdSet<I, W> {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        self.zip_with(&rhs, |a, b| a & !b)
+    }
+}
+
+impl<I: Id, const W: usize> BitOrAssign for IdSet<I, W> {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = *self | rhs;
+    }
+}
+
+impl<I: Id, const W: usize> BitAndAssign for IdSet<I, W> {
+    fn bitand_assign(&mut self, rhs: Self) {
+        *self = *self & rhs;
+    }
+}
+
+impl<I: Id, const W: usize> SubAssign for IdSet<I, W> {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = *self - rhs;
+    }
+}
+
+// ---- BitSet -----------------------------------------------------------------------------------
+
+/// A growable set of `u32` indices, for tiles: explored tiles, visible tiles, visited nodes.
+///
+/// Two sets with the same members are equal however many trailing zero words either holds.
+#[derive(Clone, Default)]
+pub struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    /// The empty set.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { words: Vec::new() }
+    }
+
+    /// The empty set, with words already allocated for indices below `bits`.
+    #[must_use]
+    pub fn with_capacity(bits: u32) -> Self {
+        Self { words: vec![0; (bits as usize).div_ceil(64)] }
+    }
+
+    /// The set with these raw words, bit `i` of word `w` being index `64 * w + i`.
+    #[must_use]
+    pub const fn from_words(words: Vec<u64>) -> Self {
+        Self { words }
+    }
+
+    /// The raw words, including any trailing zero words.
+    #[must_use]
+    pub fn words(&self) -> &[u64] {
+        &self.words
+    }
+
+    /// The raw words up to the last one with a bit set.
+    #[must_use]
+    pub fn trimmed_words(&self) -> &[u64] {
+        let end = self.words.iter().rposition(|&w| w != 0).map_or(0, |i| i + 1);
+        &self.words[..end]
+    }
+
+    /// Adds `i`, growing the set if needed; true if it was not there already.
+    #[inline]
+    pub fn insert(&mut self, i: u32) -> bool {
+        let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
+        if w >= self.words.len() {
+            self.words.resize(w + 1, 0);
+        }
+        let fresh = self.words[w] & bit == 0;
+        self.words[w] |= bit;
+        fresh
+    }
+
+    /// Removes `i`; true if it was there.
+    #[inline]
+    pub fn remove(&mut self, i: u32) -> bool {
+        let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
+        match self.words.get_mut(w) {
+            Some(word) => {
+                let had = *word & bit != 0;
+                *word &= !bit;
+                had
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `i` is in the set.
+    #[must_use]
+    #[inline]
+    pub fn contains(&self, i: u32) -> bool {
+        self.words.get((i / 64) as usize).is_some_and(|w| w & (1u64 << (i % 64)) != 0)
+    }
+
+    /// The number of indices in the set.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.words.iter().all(|&w| w == 0)
+    }
+
+    /// Removes every index, keeping the allocation.
+    pub fn clear(&mut self) {
+        self.words.fill(0);
+    }
+
+    /// The indices, ascending.
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        // Every index came from a u32, so it converts back.
+        Bits::new(&self.words).map(|i| u32::try_from(i).unwrap_or(u32::MAX))
+    }
+
+    /// Adds every index of `other`.
+    pub fn union_with(&mut self, other: &Self) {
+        if other.words.len() > self.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        for (w, o) in self.words.iter_mut().zip(&other.words) {
+            *w |= o;
+        }
+    }
+
+    /// Keeps only the indices also in `other`.
+    pub fn intersect_with(&mut self, other: &Self) {
+        for (i, w) in self.words.iter_mut().enumerate() {
+            *w &= other.words.get(i).copied().unwrap_or(0);
+        }
+    }
+
+    /// Removes every index of `other`.
+    pub fn difference_with(&mut self, other: &Self) {
+        for (w, o) in self.words.iter_mut().zip(&other.words) {
+            *w &= !o;
+        }
+    }
+
+    /// Whether every index of `self` is in `other`.
+    #[must_use]
+    pub fn is_subset(&self, other: &Self) -> bool {
+        self.words
+            .iter()
+            .enumerate()
+            .all(|(i, w)| w & !other.words.get(i).copied().unwrap_or(0) == 0)
+    }
+}
+
+impl PartialEq for BitSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.trimmed_words() == other.trimmed_words()
+    }
+}
+
+impl Eq for BitSet {}
+
+impl fmt::Debug for BitSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
+    }
+}
+
+impl FromIterator<u32> for BitSet {
+    fn from_iter<It: IntoIterator<Item = u32>>(iter: It) -> Self {
+        let mut set = Self::new();
+        set.extend(iter);
+        set
+    }
+}
+
+impl Extend<u32> for BitSet {
+    fn extend<It: IntoIterator<Item = u32>>(&mut self, iter: It) {
+        for i in iter {
+            self.insert(i);
+        }
+    }
+}
+
+// ---- PlayerSet --------------------------------------------------------------------------------
+
+/// A set of players in one `u64`.
+///
+/// A player id of 64 or more cannot be a member: the game setup refuses more than 64 seats.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PlayerSet(u64);
+
+impl PlayerSet {
+    /// How many players fit.
+    pub const CAPACITY: usize = 64;
+
+    /// No players.
+    pub const EMPTY: Self = Self(0);
+
+    /// The set with these raw bits, bit `i` being `PlayerId(i)`.
+    #[must_use]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// The raw bits.
+    #[must_use]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// The first `n` players (all of them from 64 on).
+    #[must_use]
+    pub const fn first(n: u8) -> Self {
+        if n >= 64 { Self(u64::MAX) } else { Self((1u64 << n) - 1) }
+    }
+
+    /// Just `p`.
+    #[must_use]
+    pub fn single(p: PlayerId) -> Self {
+        let mut s = Self::EMPTY;
+        s.insert(p);
+        s
+    }
+
+    #[inline]
+    fn bit(p: PlayerId) -> Option<u64> {
+        (p.0 < 64).then(|| 1u64 << p.0)
+    }
+
+    /// Adds `p`; true if it was not there already. A player id of 64 or more is not added (and
+    /// fails a debug assertion).
+    #[inline]
+    pub fn insert(&mut self, p: PlayerId) -> bool {
+        debug_assert!(p.0 < 64, "{p:?} does not fit a PlayerSet");
+        let Some(bit) = Self::bit(p) else { return false };
+        let fresh = self.0 & bit == 0;
+        self.0 |= bit;
+        fresh
+    }
+
+    /// Removes `p`; true if it was there.
+    #[inline]
+    pub fn remove(&mut self, p: PlayerId) -> bool {
+        let Some(bit) = Self::bit(p) else { return false };
+        let had = self.0 & bit != 0;
+        self.0 &= !bit;
+        had
+    }
+
+    /// Whether `p` is in the set.
+    #[must_use]
+    #[inline]
+    pub fn contains(self, p: PlayerId) -> bool {
+        Self::bit(p).is_some_and(|bit| self.0 & bit != 0)
+    }
+
+    /// The number of players in the set.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The players, ascending.
+    pub fn iter(self) -> impl Iterator<Item = PlayerId> {
+        let mut bits = self.0;
+        core::iter::from_fn(move || {
+            if bits == 0 {
+                return None;
+            }
+            // trailing_zeros of a nonzero u64 is below 64, so it fits a u8.
+            let p = bits.trailing_zeros() as u8;
+            bits &= bits - 1;
+            Some(PlayerId(p))
+        })
+    }
+
+    /// Whether every player of `self` is in `other`.
+    #[must_use]
+    pub const fn is_subset(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+}
+
+impl fmt::Debug for PlayerSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.iter().map(|p| p.0)).finish()
+    }
+}
+
+impl FromIterator<PlayerId> for PlayerSet {
+    fn from_iter<It: IntoIterator<Item = PlayerId>>(iter: It) -> Self {
+        let mut set = Self::EMPTY;
+        set.extend(iter);
+        set
+    }
+}
+
+impl Extend<PlayerId> for PlayerSet {
+    fn extend<It: IntoIterator<Item = PlayerId>>(&mut self, iter: It) {
+        for p in iter {
+            self.insert(p);
+        }
+    }
+}
+
+impl BitOr for PlayerSet {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitAnd for PlayerSet {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl Sub for PlayerSet {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0 & !rhs.0)
+    }
+}
+
+impl BitOrAssign for PlayerSet {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl BitAndAssign for PlayerSet {
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.0 &= rhs.0;
+    }
+}
+
+impl SubAssign for PlayerSet {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 &= !rhs.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::ids::TechId;
+
+    type TechSet = IdSet<TechId, 2>;
+
+    #[test]
+    fn id_set_iterates_ascending_across_words() {
+        let set: TechSet = [TechId(127), TechId(3), TechId(64), TechId(0)].into_iter().collect();
+        assert_eq!(set.iter().collect::<Vec<_>>(), [TechId(0), TechId(3), TechId(64), TechId(127)]);
+        assert_eq!(set.len(), 4);
+        assert!(set.contains(TechId(64)));
+        assert!(!set.contains(TechId(65)));
+        assert!(!set.contains(TechId(500)));
+    }
+
+    #[test]
+    fn id_set_algebra() {
+        let a: TechSet = [TechId(1), TechId(70)].into_iter().collect();
+        let b: TechSet = [TechId(70), TechId(71)].into_iter().collect();
+        assert_eq!((a | b).len(), 3);
+        assert_eq!((a & b).iter().collect::<Vec<_>>(), [TechId(70)]);
+        assert_eq!((a - b).iter().collect::<Vec<_>>(), [TechId(1)]);
+        assert!((a & b).is_subset(&a));
+        assert!(!a.is_disjoint(&b));
+    }
+
+    #[test]
+    fn bit_set_equality_ignores_trailing_zero_words() {
+        let mut a = BitSet::with_capacity(1000);
+        let mut b = BitSet::new();
+        a.insert(5);
+        b.insert(5);
+        assert_eq!(a, b);
+        b.insert(900);
+        b.remove(900);
+        assert_eq!(a, b);
+        assert_eq!(b.trimmed_words(), &[1 << 5]);
+    }
+
+    #[test]
+    fn player_set_basics() {
+        let mut s = PlayerSet::first(3);
+        assert_eq!(s.iter().collect::<Vec<_>>(), [PlayerId(0), PlayerId(1), PlayerId(2)]);
+        assert!(s.insert(PlayerId(63)));
+        assert!(!s.insert(PlayerId(63)));
+        assert!(s.remove(PlayerId(1)));
+        assert_eq!(s.len(), 3);
+        assert!(!s.contains(PlayerId(64)));
+        assert_eq!(PlayerSet::first(64).len(), 64);
+    }
+}
