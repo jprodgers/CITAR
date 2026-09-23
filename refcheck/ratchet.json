@@ -1,0 +1,8 @@
+{
+  "fixtures": [
+    "refcheck/fixtures-mini",
+    "refcheck/fixtures-late"
+  ],
+  "unexplained": {},
+  "failed": {}
+}

@@ -1,21 +1,44 @@
-# Deliberate differences between the Rust engine and the Python reference fixtures.
+# Deliberate differences between the Rust engine and the Python reference fixtures (format v2).
 #
-# The refcheck tool (crates/citar-refcheck) compares the Rust engine's answers with the answers recorded in
-# refcheck/fixtures-mini/ and refcheck/corpus/ (see refcheck/README.md). Any difference not listed here fails the
-# check; every entry here is a rule the Rust engine gets right on purpose where the Python engine did not, or a
-# redesign whose numbers legitimately differ. The list becomes the changelog's list of rule fixes, so the reason
-# is written for a reader of the changelog.
+# `cargo refcheck` (crates/citar-refcheck) compares the Rust engine's answers with the answers recorded in
+# refcheck/fixtures-mini/, refcheck/fixtures-late/ and refcheck/corpus/ (see refcheck/README.md). A difference not
+# explained here is unexplained: it fails the run where refcheck/enforced.toml covers it, and counts against the
+# group in refcheck/ratchet.json everywhere else. Every entry is a rule the Rust engine gets right on purpose where
+# the Python engine did not, or a redesign whose numbers legitimately differ. `cargo refcheck changelog` prints the
+# entries as the changelog's list of rule fixes, so the reason is written for a reader of the changelog.
 #
-# One entry per line, as an inline table:
-#   group   the query group, as in a fixture's meta.query_order (tile_yields, city_stats, civs, buildable,
-#           movement, visible, combat_previews, deal_checks, tool_errors, views, briefing)
-#   path    where in that group's answer, with [*] for any list index and * for any object key,
-#           e.g. "cities[*].stats.final.Maintenance.gold"
+# One [[differences]] table per entry:
+#
+#   id      kebab-case and unique; the code that makes the fix cites it as `// refcheck: <id>`
 #   reason  one line: what Python did, and what Rust does instead
-#   cases   optional: fixture names it is limited to, as globs on "<case>/t<turn>" (default: every fixture)
+#   where   the places it covers: [{ group = "...", path = "..." }, ...]
+#           group: uniques, state_echo, fixed_point, tile_yields, city_stats, civs, buildable, movement, visible,
+#                  combat_previews, deal_checks, tool_errors, views, briefing
+#           path:  in the path grammar, matched against the whole path of a difference:
+#                  .key  ["any key"]  [3]  [pid=0] (a keyed list)  [#0=12] (keyed by tuple position)
+#                  [*] (any list element)  .* (any key)  .** (any depth, none included)
+#   cases   optional: globs on "<case>/t<turn>" that limit it to some fixtures (default: every fixture)
+#   python  optional constraints on the two values at the difference, so an entry never hides a later,
+#   rust    unrelated change at the same place:
+#             3, "text", [1, 2]         that value (numbers within refcheck's tolerance; 3 equals 3.0)
+#             "re:^Unknown tool"        a string matching the regex (unanchored)
+#             { min = 0, max = 50 }     a number within the bounds, inclusive; either may be left out
+#             { eq = "re:..." }         a value, spelled out
+#             { is = "null" }, { is = "absent" }
+#   rule    optional: "rust_le_python", both values numbers and Rust's not above Python's. A route with fewer
+#           turns than Python's (kind `better`) needs it.
+#   broad   required, as true, when a path uses .* or .**: say so when an entry reaches that far
+#
+# An entry that explains nothing in a run that covered it (compared one of its groups on a fixture its cases
+# match) is stale: a warning, and an error with --strict. `cargo refcheck suggest` prints stubs for the unexplained
+# differences of a run, and `cargo refcheck explain <id>` shows what an entry explains.
 #
 # For example:
-#   { group = "city_stats", path = "cities[*].stats.total.gold", reason = "Python civ_stats_gold was never written" },
-
-differences = [
-]
+#
+#   [[differences]]
+#   id = "civ-stats-gold"
+#   reason = "Python computed civ_stats_gold but never wrote it into the total; Rust does"
+#   where = [{ group = "city_stats", path = "cities[*].stats.total.gold" }]
+#   python = 0
+#
+# There are no entries yet.

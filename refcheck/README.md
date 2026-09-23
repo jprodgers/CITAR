@@ -12,7 +12,8 @@ mistakes are caught in three ways instead:
    population, techs and score at turns 100/200/300, victory types, game length, wars and captures).
 3. **Rule tests**, rewritten against the scenario-ops API (Phase 1).
 
-This folder holds the data for the first two. The tools that make it are in `scripts/refcheck/`.
+This folder holds the data for the first two. The Python tools that make it are in `scripts/refcheck/`, and the
+Rust tool that checks the engine against it is `crates/citar-refcheck` ([Checking the Rust engine](#checking-the-rust-engine)).
 
 | Path | What |
 |---|---|
@@ -22,10 +23,14 @@ This folder holds the data for the first two. The tools that make it are in `scr
 | `scripts/refcheck/baseline.py` | the statistical baseline: one JSON line per bot game |
 | `scripts/refcheck/summarize.py` | distribution tables, and the comparison of two baselines |
 | `scripts/refcheck/common.py` | the game loop, bots, hashing and file helpers they share |
+| `crates/citar-refcheck/` | `cargo refcheck`: loads the fixtures, compares the Rust answers, reports |
 | `refcheck/fixtures-mini/` | the `--quick` fixtures (committed, under 1 MB) |
+| `refcheck/fixtures-late/` | three late corpus states, copied (committed, about 0.7 MB) |
 | `refcheck/corpus/` | the `--full` fixtures (git-ignored, generated) |
 | `refcheck/baseline/` | baseline runs (git-ignored, generated) |
 | `refcheck/intended.toml` | the accepted differences, each with a reason |
+| `refcheck/enforced.toml` | the groups (or paths) whose unexplained differences fail CI |
+| `refcheck/ratchet.json` | unexplained differences and failed answer modules per group, which may only fall |
 
 The tools use the Python engine directly and run their own game loop. They do not use `citar.sim`, `citar.lab`
 or `citar.balance`, so the fixtures don't change when those modules change.
@@ -78,6 +83,12 @@ editor's operations and ordinary tool calls:
 The bots then play on, and the case records the next checkpoints too. Each step's result or error is logged in
 the fixture's `meta.setup`. The quick fixtures include one such case (`scenario-duel-fractal`); the full corpus
 has two (small at turn 60, standard at turn 120).
+
+**The late states.** The quick fixtures stop at turn 50, so CI would never see a late game. Three corpus states
+are therefore copied, byte for byte, into `refcheck/fixtures-late/`: `small-continents-normal-s1025/t280`,
+`standard-pangaea-normal-s1031/t120` and `scenario-small-continents-s3001/t61`. They live in their own folder
+because `record.py --quick` deletes every fixture under `fixtures-mini/` before it records. When the corpus is
+re-recorded on purpose, copy the three again. With the 9 quick states and the 250 of the corpus, that makes 262.
 
 ## The fixture format
 
@@ -134,33 +145,81 @@ the Rust side replays the inputs and never has to copy Python's sampling.
 | `views` | `views.client_view` for the first two living majors | `pid` |
 | `briefing` | `briefing.briefing` and `briefing.turn_progress` for the first two living majors | `pid` |
 
-## The workflow for the Rust port
+## Checking the Rust engine
 
-The refcheck crate (`crates/citar-refcheck`, Phase 1) does the following for each fixture:
+`crates/citar-refcheck` is the Rust side (design: `crates/citar-engine/DESIGN.md` section 9.2). For each fixture
+it loads the state, asks each group's answer module the recorded questions, and compares the two answers.
 
-1. **Load the state.** Deserialise `state` into the Rust engine's state. The loader has to accept this format,
-   since it is also the format of old saves.
-2. **Answer the same questions.** For each group in `meta.query_order`, start from a fresh load. Take the inputs
-   from the recorded answers and ask the Rust engine the same thing, in the same order.
-3. **Diff.** Compare the Rust answer with the recorded one as JSON values:
-   - object key order is irrelevant;
-   - integers and strings must be equal;
-   - floats may differ by rounding. Python sums in its own order, so use a tolerance of about 1e-6, relative or
-     absolute;
-   - lists that are sets in meaning must be compared as multisets. These are `detailed_resources`, the lists
-     in `buildable.items`, `adoptable_policies` and `workable`. Every other list keeps its order.
-4. **Explain every difference.** A difference is one of two things:
-   - a porting mistake, which gets fixed;
-   - a deliberate fix or redesign. It goes in `intended.toml`, with the group, the path in the answer and a
-     one-line reason written for the changelog.
+```
+cargo refcheck run                                   # fixtures-mini and fixtures-late, every group
+cargo refcheck run --fixtures refcheck/corpus --groups civs,city_stats --case 'large-*' --json report.json
+cargo refcheck run --fixtures refcheck/fixtures-mini --fixtures refcheck/fixtures-late \
+                   --fixtures refcheck/corpus --strict   # the Phase 1 exit: all 262 states
+cargo refcheck explain tile_yields:owned[*].yields     # the differences at a place, and the Python functions
+cargo refcheck explain <intended-id>                   # what an entry explains, and what it just misses
+cargo refcheck suggest                                 # [[differences]] stubs for what is unexplained
+cargo refcheck ratchet [--update]                      # no count may rise; --update records the rest
+cargo refcheck changelog                               # the entries as the CHANGELOG's rule fixes
+cargo refcheck list                                    # the fixtures, and each group's state
+```
 
-   Text answers (tool errors, briefings) follow the same rule. Model-facing text is ported as-is where it is
-   fine and fixed where it is wrong (decision G), and each fix is listed.
+**Answer modules.** Each group has one, `crates/citar-refcheck/src/answer/<group>.rs`, written by the package that
+ports what the group checks. It rebuilds the skeleton of Python's answer from the recorded inputs and fills it
+with Rust calls, so a difference is never about sampling. A group without a module is reported as `not ported`.
+Three groups are synthetic rather than recorded: `uniques` (every unique text compiles, checked once per run),
+`state_echo` (the state reads back as it was written) and `fixed_point` (the settle on load changes no explored
+tile and no contact). A group whose Python answer crashed while recording is `python-crashed`: information,
+never a difference. Groups are reported in dependency order: uniques, state_echo, fixed_point, tile_yields,
+city_stats, civs, buildable, movement, visible, combat_previews, deal_checks, tool_errors, views, briefing.
 
-The refcheck is clean when every difference is either fixed or listed. That is Phase 1's exit condition.
+**Comparison.** The two answers are compared as JSON values:
 
-Start with `refcheck/fixtures-mini/` (quick, committed, and runnable in CI), then run the whole corpus. The
-`fn` names tell you which Python function to read when an answer is not obvious.
+- integers exactly; any other pair of numbers within `|a-b| <= 1e-6 * max(1, |a|, |b|)`, so 3 and 3.0 are equal;
+- strings exactly, with a line diff for a text over 200 characters or with a line break;
+- object keys as a union: a key on one side only is `missing` (Python has it) or `extra` (Rust has it), and null
+  is not the same as absent;
+- lists in order, unless the group's compare spec (`compare/spec.rs`) says otherwise: keyed by a field or tuple
+  position (`cities[id=9]`, `reachable[#0=412]`), a multiset (lists that are sets in meaning, such as
+  `workable`, `detailed_resources`, `adoptable_policies` and the lists in `buildable.items`), or custom;
+- `fn`, which names the Python functions, is not compared, and `deal_checks`' `bot_value` only with `--with-bot`.
+
+The custom rule is for routes (`movement.paths`): a different route is `path_equivalent`, accepted without an
+entry, when it starts and ends on Python's tiles, steps between adjacent tiles, and has the same turns and summed
+step cost. A route with fewer turns is `better`, which needs an intended entry with `rule = "rust_le_python"`.
+Anything else is a `route` difference. Reachability (a route against none) must agree.
+
+**Paths.** Reports, `intended.toml` and `enforced.toml` share one grammar: `.key`, `["any key"]`, `[3]`,
+`[pid=0]` (keyed list), `[#0=12]` (keyed by tuple position), `[*]` (any element), `.*` (any key) and `.**` (any
+depth). A pattern matches a difference's whole path, so a subtree is `prefix.**`. Reports print concrete paths
+such as `civs[pid=0].happiness.breakdown.Religion`.
+
+**Explaining a difference.** Each difference is a porting mistake, which gets fixed, or a deliberate fix or
+redesign, which gets an entry in `intended.toml` (format v2, described in the file's header): an id cited at the
+fix site as `// refcheck: <id>`, a one-line reason written for the changelog, the places it covers, optional
+`cases` globs, and optional constraints on the Python and Rust values, so an entry never hides a later,
+unrelated change at the same place. Text answers (tool errors, briefings) follow the same rule: model-facing text
+is ported as-is where it is fine and fixed where it is wrong (decision G), and each fix is listed. An entry that
+explains nothing in a run that covered it is stale: a warning, and an error with `--strict`.
+
+**Enforcement and the ratchet.** `enforced.toml` lists the groups, or paths within them, that are clean: an
+unexplained difference there fails the run. So does a difference above an enforced path that hides it: an answer
+module that failed or panicked, a missing or extra element or subtree that holds an enforced place, or a keyed
+list that could not be keyed. Each system package adds its group once its answer module is clean. Everywhere
+else, unexplained differences are reported and counted per group in `ratchet.json`, with failed answer modules
+counted apart, since one failure replaces all of a fixture's differences. `cargo refcheck ratchet` fails when a
+count rises, and also when the file is out of date: a count fell, or a group is compared for the first time.
+`--update` records those (and refuses a rise), and the updated file is committed with the change, so the file
+always holds the current counts. CI runs `cargo refcheck run` and `cargo refcheck ratchet` on the committed
+fixtures.
+
+**Exit codes:** 0 clean; 1 unexplained differences where `enforced.toml` covers them (with `--strict`, any
+unexplained difference, or a selected group without an answer module); 2 a fixture or configuration file that
+could not be loaded, or a usage error; 3 stale entries under `--strict`. The JSON report (`--json`) is the same,
+byte for byte, on every run over the same inputs.
+
+The refcheck is clean when every difference is fixed or listed, over all 262 states and 14 groups. That is Phase
+1's exit condition. Start with the committed fixtures (quick, and run in CI), then run the whole corpus. The
+`fn` names, which `explain` prints, tell you which Python function to read when an answer is not obvious.
 
 ## The statistical baseline
 

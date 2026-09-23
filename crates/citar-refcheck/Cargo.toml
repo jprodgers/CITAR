@@ -9,6 +9,16 @@ publish.workspace = true
 
 [dependencies]
 citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy"] }
+serde.workspace = true
+# raw_value: a fixture's state stays unparsed text until the converter reads it (DESIGN.md 9.2).
+serde_json = { workspace = true, features = ["raw_value"] }
+clap.workspace = true
+flate2.workspace = true
+toml.workspace = true
+globset.workspace = true
+similar.workspace = true
+rayon.workspace = true
+regex.workspace = true
 
 [lints]
 workspace = true
