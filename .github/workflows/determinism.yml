@@ -10,7 +10,8 @@
 # linux-x64 also runs the check in the release profile, since the ci profile (debug assertions,
 # no LTO) must play the same game as what ships.
 #
-# The golden sets grow with the engine (DESIGN.md 9.6); package 1a-02 brought rng, libm and pyfmt.
+# The golden sets grow with the engine (DESIGN.md 9.6): package 1a-02 brought rng, libm and pyfmt,
+# and 1a-03 the RulesetId of the embedded ruleset (ruleset).
 name: determinism
 
 on:

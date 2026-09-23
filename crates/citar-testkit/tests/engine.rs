@@ -3,4 +3,5 @@
 
 mod engine {
     mod hex;
+    mod rules;
 }

@@ -11,6 +11,11 @@
 //!   `//` and `%`, recorded by `scripts/refcheck/pyfmt_vectors.py`. Never blessed: the engine
 //!   must reproduce Python, every string and every bit.
 //!
+//! Package 1a-03 adds:
+//! - **`ruleset.json`**: the `RulesetId` of the embedded ruleset, a blake3 over a canonical walk
+//!   of the parsed files, with the version string saves record and the table counts. Written by
+//!   `golden bless` when the ruleset data changes.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -21,6 +26,7 @@ use std::path::PathBuf;
 use citar_engine::base::fmt::{PyFloat, PyRound};
 use citar_engine::base::num::{self, FloorDiv};
 use citar_engine::base::rng::{Purpose, Rng};
+use citar_engine::rules::{Ruleset, embedded};
 use serde_json::{Value, json};
 
 /// Where the committed golden files live.
@@ -43,7 +49,7 @@ pub struct SetReport {
 /// Every golden set this package knows, checked against the committed files.
 #[must_use]
 pub fn check_all() -> Vec<SetReport> {
-    vec![check_rng(), check_libm(), check_pyfmt()]
+    vec![check_rng(), check_libm(), check_pyfmt(), check_ruleset()]
 }
 
 /// The report `golden check --out` writes: one entry per set.
@@ -71,6 +77,7 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
     vec![
         ("rng.json", render_rng(&rng_answers())),
         ("libm.json", render_libm(&libm_answers(&libm_inputs()))),
+        ("ruleset.json", render_rows(&ruleset_answers(), &[])),
     ]
 }
 
@@ -524,6 +531,47 @@ fn check_libm() -> SetReport {
     let got = libm_answers(&named);
     problems.extend(diff_rows("libm.json", "cases", committed.get("cases"), &got["cases"]));
     SetReport { name: "libm", computed: digest_of(&got["cases"]), problems: capped(problems) }
+}
+
+// ---- ruleset.json -----------------------------------------------------------------------------
+
+/// Everything `ruleset.json` holds, computed by this build: the embedded ruleset's identity, or
+/// why it does not load.
+#[must_use]
+pub fn ruleset_answers() -> Value {
+    match Ruleset::load(&embedded()) {
+        Ok(r) => json!({
+            "format": 1,
+            "walk": "blake3 over the canonical walk of the parsed files (DESIGN.md 5.2)",
+            "ruleset_id": r.id().to_hex(),
+            "version": r.version(),
+            "counts": r.counts(),
+        }),
+        Err(e) => json!({"format": 1, "error": e.to_string()}),
+    }
+}
+
+fn check_ruleset() -> SetReport {
+    let got = ruleset_answers();
+    let mut problems = Vec::new();
+    if let Some(e) = got.get("error") {
+        problems.push(format!("ruleset: the embedded ruleset does not load: {e}"));
+    }
+    match read_committed("ruleset.json") {
+        Err(e) => problems.push(e),
+        Ok(want) => {
+            for key in ["ruleset_id", "version", "counts"] {
+                if want.get(key) != got.get(key) {
+                    problems.push(format!(
+                        "ruleset.json: `{key}` is {} in the file, {} in this build",
+                        want.get(key).unwrap_or(&Value::Null),
+                        got.get(key).unwrap_or(&Value::Null)
+                    ));
+                }
+            }
+        }
+    }
+    SetReport { name: "ruleset", computed: digest_of(&got), problems: capped(problems) }
 }
 
 // ---- pyfmt.json -------------------------------------------------------------------------------

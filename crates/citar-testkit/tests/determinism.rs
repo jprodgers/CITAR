@@ -10,7 +10,7 @@ use citar_testkit::golden;
 fn golden_sets_match_the_committed_files() {
     let reports = golden::check_all();
     let names: Vec<&str> = reports.iter().map(|r| r.name).collect();
-    assert_eq!(names, ["rng", "libm", "pyfmt"]);
+    assert_eq!(names, ["rng", "libm", "pyfmt", "ruleset"]);
     let problems: Vec<String> = reports
         .iter()
         .flat_map(|r| r.problems.iter().map(move |p| format!("{}: {p}", r.name)))
@@ -23,7 +23,7 @@ fn golden_sets_match_the_committed_files() {
 }
 
 #[test]
-fn blessing_reproduces_the_committed_rng_and_libm_files() {
+fn blessing_reproduces_the_committed_files() {
     // The rendered text, not just the values: a bless on any target writes the same bytes.
     for (file, text) in golden::blessed_files() {
         let committed = golden::golden_dir().join(file);

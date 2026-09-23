@@ -3,7 +3,7 @@
 //! ```text
 //! cargo golden check [--out FILE]   compare this build's answers with the committed files;
 //!                                   --out writes a report for the cross-target comparison
-//! cargo golden bless                rewrite rng.json and libm.json from this build
+//! cargo golden bless                rewrite rng.json, libm.json and ruleset.json from this build
 //! cargo golden diff A B             compare two --out reports
 //! ```
 //!
@@ -11,7 +11,7 @@
 //!
 //! `pyfmt.json` holds Python's answers and is written only by `scripts/refcheck/pyfmt_vectors.py`;
 //! `bless` leaves it alone. Bless only after a deliberate change (a new `Purpose`, a `libm` or
-//! toolchain bump), and say why in the commit.
+//! toolchain bump, a change to the ruleset data), and say why in the commit.
 
 #![forbid(unsafe_code)]
 // A command-line tool: it reports on the console and reads and writes the golden files.
@@ -68,7 +68,8 @@ fn check(out: Option<&str>) -> ExitCode {
     if failed {
         println!(
             "golden: a set differs from its committed file. If this build is right, `cargo golden \
-             bless` (rng, libm) or scripts/refcheck/pyfmt_vectors.py (pyfmt), and say why."
+             bless` (rng, libm, ruleset) or scripts/refcheck/pyfmt_vectors.py (pyfmt), and \
+             say why."
         );
         ExitCode::from(1)
     } else {
