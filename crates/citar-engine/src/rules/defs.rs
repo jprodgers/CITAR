@@ -218,6 +218,64 @@ impl SpyAction {
     }
 }
 
+/// How far a civilization has come with religion (`religion.py:15`), in order: what the
+/// religion conditionals compare (`uniques.py:941-947`). Game state shares the vocabulary, as it
+/// shares [`SpyAction`] and [`BeliefKind`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReligionProgress {
+    /// No pantheon yet.
+    #[default]
+    None,
+    /// A pantheon, and no religion yet.
+    Pantheon,
+    /// A great prophet is founding a religion.
+    Founding,
+    /// A religion, not yet enhanced.
+    Religion,
+    /// A great prophet is enhancing it.
+    Enhancing,
+    /// An enhanced religion.
+    Enhanced,
+}
+
+impl ReligionProgress {
+    /// Every stage, in order.
+    pub const ALL: [Self; 6] = [
+        Self::None,
+        Self::Pantheon,
+        Self::Founding,
+        Self::Religion,
+        Self::Enhancing,
+        Self::Enhanced,
+    ];
+
+    /// The name Python saved: `enhancing`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pantheon => "pantheon",
+            Self::Founding => "founding",
+            Self::Religion => "religion",
+            Self::Enhancing => "enhancing",
+            Self::Enhanced => "enhanced",
+        }
+    }
+
+    /// The stage called `name`, exactly.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
+
+    /// Whether a religion has been founded: `religion`, `enhancing` or `enhanced`
+    /// (`uniques.py:944`). A religion being founded is not one yet.
+    #[must_use]
+    pub const fn has_religion(self) -> bool {
+        matches!(self, Self::Religion | Self::Enhancing | Self::Enhanced)
+    }
+}
+
 /// A nation's `kind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
