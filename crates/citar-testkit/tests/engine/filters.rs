@@ -27,7 +27,7 @@ use citar_engine::rules::gen_tables::Near;
 use citar_engine::rules::{Named, Ruleset, RulesetErrorKind};
 use citar_engine::unique::filter::statics::members;
 use citar_engine::unique::filter::{
-    self, CityLeaf, CivLeaf, Combatant, Expr, TileLeaf, UnitLeaf, UnitScope,
+    self, CityLeaf, CivLeaf, Combatant, Expr, TileLeaf, UnitFacts, UnitLeaf, UnitScope,
 };
 use citar_engine::unique::{
     CondDeps, FilterFacts, Role, Source, StaticDomain, TileFacts, UniqueType,
@@ -1252,6 +1252,20 @@ proptest! {
             }
         }
         folds_cleanly(&e, &folded)?;
+    }
+
+    /// A unit's facts, taken for a trigger about a unit that is gone, answer every filter as the
+    /// unit itself did with nothing in context.
+    #[test]
+    fn a_units_facts_answer_as_the_unit(e in arb_tree(arb_unit_leaf()), m in arb_world()) {
+        for u in 1..=6 {
+            let facts = UnitFacts::of(&m, uid(u));
+            for viewer in VIEWERS {
+                let live = e.eval(&mut |l| l.eval(&m, uid(u), UnitScope { this: None, viewer }));
+                let copy = e.eval(&mut |l| l.eval_facts(&m, &facts, viewer));
+                prop_assert_eq!(live, copy, "unit {} seen by {:?}: {:?}", u, viewer, e);
+            }
+        }
     }
 
     #[test]

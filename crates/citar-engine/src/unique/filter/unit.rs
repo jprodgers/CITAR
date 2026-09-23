@@ -10,7 +10,7 @@ use super::super::world::FilterFacts;
 use super::civ::{self, CivLeaf};
 use super::expr::{Expr, Leaf};
 use super::statics::{Statics, typed};
-use crate::base::ids::{PlayerId, UnitId};
+use crate::base::ids::{BaseUnitId, PlayerId, UnitId};
 use crate::base::sets::{BaseUnitSet, PromotionSet};
 use crate::rules::defs::NationKind;
 
@@ -80,6 +80,33 @@ pub struct UnitScope {
     pub viewer: Option<PlayerId>,
 }
 
+/// What a unit filter reads of a unit, taken while the unit still exists. A trigger about a unit
+/// that is going away (lost, defeated, expended) is matched after the unit is removed, as Python
+/// matched the removed object (`combat.py:602-608, 831`), and a removed unit's id answers nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UnitFacts {
+    pub owner: PlayerId,
+    pub base: BaseUnitId,
+    pub promotions: PromotionSet,
+    pub wounded: bool,
+    pub embarked: bool,
+    pub set_up: bool,
+}
+
+impl UnitFacts {
+    /// The facts of unit `u` as they stand.
+    pub fn of<W: FilterFacts>(w: &W, u: UnitId) -> Self {
+        Self {
+            owner: w.unit_owner(u),
+            base: w.unit_base(u),
+            promotions: w.unit_promotions(u),
+            wounded: w.unit_wounded(u),
+            embarked: w.unit_embarked(u),
+            set_up: w.unit_set_up(u),
+        }
+    }
+}
+
 impl UnitLeaf {
     /// Whether unit `u` passes.
     pub fn eval<W: FilterFacts>(&self, w: &W, u: UnitId, scope: UnitScope) -> bool {
@@ -91,6 +118,25 @@ impl UnitLeaf {
             Self::Base(s) => s.contains(w.unit_base(u)),
             Self::Promotion(s) => !s.is_disjoint(&w.unit_promotions(u)),
             Self::Owner(c) => c.eval(w, w.unit_owner(u), scope.viewer),
+        }
+    }
+
+    /// Whether a unit with these facts passes, matched with nothing in context (so it is always
+    /// `other`), its owner seen by `viewer`. The same tests as [`eval`](Self::eval), on a copy.
+    pub fn eval_facts<W: FilterFacts>(
+        &self,
+        w: &W,
+        u: &UnitFacts,
+        viewer: Option<PlayerId>,
+    ) -> bool {
+        match self {
+            Self::Other => true,
+            Self::Wounded => u.wounded,
+            Self::Embarked => u.embarked,
+            Self::SetUp => u.set_up,
+            Self::Base(s) => s.contains(u.base),
+            Self::Promotion(s) => !s.is_disjoint(&u.promotions),
+            Self::Owner(c) => c.eval(w, u.owner, viewer),
         }
     }
 }

@@ -37,7 +37,7 @@ use citar_engine::unique::cond::{
     self, Problem, ProblemKind, applies, applies_scoped, chance_keys, deps_of, holds, in_scope,
 };
 use citar_engine::unique::countable::Countable;
-use citar_engine::unique::filter::{CityLeaf, Combatant, Leaf};
+use citar_engine::unique::filter::{CityLeaf, Combatant, Leaf, UnitFacts, UnitScope};
 use citar_engine::unique::index::{
     self, CityStateBonus, CivIndex, CivSources, Csr, placeholder_counts,
 };
@@ -1870,10 +1870,28 @@ fn triggers_fire_when_their_event_passes_their_filter() {
         texts(&entering),
         ["Free [Warrior] appears <upon entering a war with [Major] Civilizations>"]
     );
-    // Filters on units and improvements.
-    let lost = |u| fire(&w, &site, &TriggerEvent::LosingUnit(u), true);
-    assert_eq!(lost(uid(3)).len(), 1, "a Horseman is military");
-    assert!(lost(uid(2)).is_empty(), "a Great General is not");
+    // Filters on units and improvements. A unit that is gone is matched by its facts, taken
+    // before it went: the site fires after the removal, as Python's did.
+    let facts = |u| UnitFacts::of(&w, uid(u));
+    let (horseman, general) = (facts(3), facts(2));
+    let mut gone = w.clone();
+    gone.units.remove(&uid(3));
+    gone.units.remove(&uid(2));
+    let lost = |u| fire(&gone, &site, &TriggerEvent::LosingUnit(u), true);
+    assert_eq!(lost(horseman).len(), 1, "a Horseman is military");
+    assert!(lost(general).is_empty(), "a Great General is not");
+    // The facts answer every unit filter of the ruleset as the unit did.
+    let f = t.filters();
+    for u in [1, 2, 3] {
+        let x = UnitFacts::of(&w, uid(u));
+        for (filter, _) in f.units().iter() {
+            for viewer in [None, Some(P0), Some(P1)] {
+                let live = f.unit_matches(filter, &w, uid(u), UnitScope { this: None, viewer });
+                let copy = f.unit_facts_match(filter, &w, &x, viewer);
+                assert_eq!(copy, live, "{}", t.unit_filter(filter));
+            }
+        }
+    }
     let gained = |b: &str| fire(&w, &site, &TriggerEvent::GainingUnit(id(r, b)), true);
     assert_eq!(gained("Great Prophet").len(), 1);
     assert!(gained("Warrior").is_empty(), "the filter holds wherever a unit is gained");
@@ -1894,7 +1912,8 @@ fn triggers_fire_when_their_event_passes_their_filter() {
     let promoted = fire(&w, &at_unit, &TriggerEvent::Promotion, true);
     assert_eq!(texts(&promoted), ["[This Unit] loses [1] movement <upon being promoted>"]);
     assert!(fire(&w, &at_unit, &TriggerEvent::Promotion, false).is_empty());
-    let defeated = fire(&w, &at_unit, &TriggerEvent::DefeatingUnit(uid(1)), true);
+    let warrior = UnitFacts::of(&w, uid(1));
+    let defeated = fire(&w, &at_unit, &TriggerEvent::DefeatingUnit(warrior), true);
     assert_eq!(defeated.len(), 1, "a Warrior is military");
     // The site's context: a building's copies fire once each.
     w.give_building(3, "Kitchen Sink Works");

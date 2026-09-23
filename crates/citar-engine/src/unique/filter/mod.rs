@@ -32,7 +32,7 @@ pub use self::expr::{Expr, Leaf};
 use self::statics::Statics;
 use self::tile::TerrainWords;
 pub use self::tile::TileLeaf;
-pub use self::unit::{UnitLeaf, UnitScope};
+pub use self::unit::{UnitFacts, UnitLeaf, UnitScope};
 use super::countable::Countable;
 use super::generated::{ParamKind, UniqueType};
 use super::params::Param;
@@ -177,6 +177,18 @@ impl Filters {
         scope: UnitScope,
     ) -> bool {
         self.units[id].eval(&mut |l| l.eval(w, u, scope))
+    }
+
+    /// Whether a unit with these facts passes the filter, matched with nothing in context and
+    /// its owner seen by `viewer`: a unit that is gone by the time its trigger is matched.
+    pub fn unit_facts_match<W: FilterFacts>(
+        &self,
+        id: UnitFilterId,
+        w: &W,
+        u: &UnitFacts,
+        viewer: Option<PlayerId>,
+    ) -> bool {
+        self.units[id].eval(&mut |l| l.eval_facts(w, u, viewer))
     }
 
     /// Whether tile `t` passes the filter, terrain and all that stands on it (`tile_matches`).

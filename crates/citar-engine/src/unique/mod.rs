@@ -46,7 +46,7 @@ pub use self::query as uq;
 pub use self::cond::{applies, applies_scoped};
 pub use self::filter::{
     CityLeaf, CivLeaf, Combatant, CombatantFilter, Expr, Filters, GenFilter, TileFilter, TileLeaf,
-    UnitLeaf, UnitScope,
+    UnitFacts, UnitLeaf, UnitScope,
 };
 pub use self::generated::{
     BY_PLACEHOLDER, CondData, ModifierData, ParamKind, Stage, Support, TYPE_INFO, TriggerCond,

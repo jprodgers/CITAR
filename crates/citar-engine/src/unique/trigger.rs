@@ -11,12 +11,16 @@
 //! one per site. Here what happened is a typed [`TriggerEvent`], and [`TriggerCond::matches`]
 //! compares it with the compiled parameter, the same at every site: so `upon gaining a [unit]`
 //! reads its filter wherever a unit is gained (`great_people.py:140` fired it for every great
-//! person, whatever the filter said).
+//! person, whatever the filter said). That fix, and `upon being defeated` firing at all, are rule
+//! differences no reference check can show: refcheck asks questions of a standing state, and
+//! triggers fire only while a turn is played (DESIGN.md 5.9). A unit that is going away (lost,
+//! defeated, expended) is in its event as [`UnitFacts`] taken before it was removed, so a site
+//! may fire after the removal, as Python's did (`combat.py:602-608, 831`).
 
 use smallvec::SmallVec;
 
 use super::cond::applies;
-use super::filter::UnitScope;
+use super::filter::UnitFacts;
 use super::generated::{TriggerCond, UniqueData, UniqueType};
 use super::params::{CountOrAll, PolicyOrBelief};
 use super::table::UFlags;
@@ -188,17 +192,17 @@ pub enum TriggerEvent {
     BuildingImprovement(ImprovementId),
     /// The civilization gained a unit of this row.
     GainingUnit(BaseUnitId),
-    /// The civilization lost the unit.
-    LosingUnit(UnitId),
+    /// The civilization lost a unit: its facts, taken before it was removed.
+    LosingUnit(UnitFacts),
     TurnEnd,
     TurnStart,
     FoundingPantheon,
     FoundingReligion,
     EnhancingReligion,
-    /// The civilization's unit defeated the unit.
-    DefeatingUnit(UnitId),
-    /// The civilization expended the unit.
-    ExpendingUnit(UnitId),
+    /// The civilization's unit defeated a unit: the victim's facts, taken before it was removed.
+    DefeatingUnit(UnitFacts),
+    /// The civilization expended a unit: its facts, taken before it was removed.
+    ExpendingUnit(UnitFacts),
     /// The unit in context was defeated.
     Defeat,
     /// The unit in context was promoted.
@@ -274,14 +278,15 @@ impl TriggerCond {
 
     /// Whether the trigger fires for `event`, which happened to civilization `civ`: the kinds
     /// agree, and the event passes the trigger's parameter. The other civilization of a war or a
-    /// peace is seen by `civ` (`diplomacy.py:234-237`), a unit is matched with nothing in context
-    /// (`combat.py:608`), and a tech, an improvement or a unit's row is in the trigger's set.
+    /// peace is seen by `civ` (`diplomacy.py:234-237`), a unit is matched by its facts with
+    /// nothing in context (`combat.py:608`), and a tech, an improvement or a unit's row is in the
+    /// trigger's set.
     pub fn matches<W: EvalWorld>(&self, event: &TriggerEvent, civ: PlayerId, w: &W) -> bool {
         use TriggerEvent as E;
         let t = w.rules().uniques();
         let f = t.filters();
         let civ_seen = |x, other| f.civ_matches(x, w, other, Some(civ));
-        let unit_seen = |x, u| f.unit_matches(x, w, u, UnitScope::default());
+        let unit_seen = |x, u: UnitFacts| f.unit_facts_match(x, w, &u, None);
         match (*self, *event) {
             (Self::TriggerUponResearch(x), E::Research(tech)) => t.in_set(x.techs, tech),
             (Self::TriggerUponEnteringEra(x), E::EnteringEra(era)) => x.era == era,
