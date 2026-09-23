@@ -7,10 +7,14 @@
 //! Replaces `citar/engine/state.py:13-405` and `game.py:32-60`.
 
 pub mod change;
+pub mod chronicle;
 pub mod cities;
+pub mod config;
+pub mod diplo;
 pub mod map;
 pub mod memory;
 pub mod store;
 pub mod units;
+pub mod world;
 
 pub use change::{Change, Changes, TileClaim};
