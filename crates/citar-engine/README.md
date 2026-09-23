@@ -13,11 +13,12 @@ and the dev loop.
 | Rule | Checked by |
 |---|---|
 | No hash-order iteration; no platform maths; no half-away-from-zero rounding (`f64::round`, `libm::round`) under a name that does not say so; no order-breaking removals from an `IndexMap`, `IndexSet` or `serde_json::Map`, their entry APIs included; no unstable sorts of slices, `IndexMap`s or `IndexSet`s; no file system, network, processes, environment, threads, or console (print macros and `std::io::{stdin, stdout, stderr}`) | clippy, with the strict [clippy.toml](../../clippy.toml) at the root |
-| No `unsafe`, no dropped `Change`, no `exit`, no `dbg!` | the workspace lints in the root [Cargo.toml](../../Cargo.toml) |
+| No `unsafe`, no `exit`, no `dbg!`; no `Change` dropped by a bare `g.set_x();` or by `let _ = g.set_x();` | the workspace lints in the root [Cargo.toml](../../Cargo.toml) |
 | Only allow-listed dependencies, with `libm` pinned and without its `arch` feature | `cargo xtask check` |
 | One version for the Rust workspace and `citar/__init__.py` | `cargo xtask check` |
 | Layering, and who may call `State`'s mutable accessors | `cargo xtask check` |
 | Generated files up to date; no `Pending` stage or `NotPorted` left once its time has come | `cargo xtask check` ([xtask/check.toml](../../xtask/check.toml) holds the switches) |
+| No `Change` discarded by `_ = g.set_x();`, `let _x = g.set_x();` or `drop(g.set_x())`, which no lint sees | review |
 | Everything below | review |
 
 ## Layers

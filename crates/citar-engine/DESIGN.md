@@ -276,7 +276,7 @@ debug = "line-tables-only"
 `[workspace.lints]` is the workspace area's curated list, and every crate uses it:
 - `unsafe_code = "deny"`, with the engine adding `#![forbid(unsafe_code)]`;
 - `clippy::all` as warn, with CI running `-D warnings`;
-- `unused_must_use = "deny"`;
+- `unused_must_use = "deny"`, and `clippy::let_underscore_must_use = "deny"`, which adds `let _ = change`;
 - `iter_over_hash_type = "deny"`;
 - `float_cmp`, `lossy_float_literal`, `mem_forget = "deny"`, `exit = "deny"`, `dbg_macro`, `todo`, `unimplemented`.
 
@@ -1333,7 +1333,7 @@ Mutable access to `State` is restricted to `game::mutate`. `State::{tiles_mut, u
   2. calls `dv.on(&st, rules, ch) -> Effects`, which reads `State` and never writes it;
   3. queues effects and pending work.
 
-  With `unused_must_use` denied, dropping a `Change` does not compile.
+  With `unused_must_use` and `clippy::let_underscore_must_use` denied, dropping a `Change` as a bare statement or through `let _ =` does not compile. `_ = ...`, `let _x = ...` and `drop(...)` get past both lints, so they are review items.
 - **Seat changes are `Change::Seat(p)`.** It bumps the civ's `seat` and `index` revisions and flags all its cities for a citizen recheck. Three things depend on the seat:
   - citizen weighting depends on the controller (`BOT_MANAGED`, cities.py:756);
   - the Human/AI player filters depend on the handicap;
