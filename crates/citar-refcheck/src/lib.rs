@@ -14,9 +14,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod answer;
 pub mod compare;
+pub mod enforced;
 mod error;
+pub mod fixture;
 pub mod group;
+pub mod intended;
+pub mod ratchet;
+pub mod run;
 
 pub use error::{Error, Result};
 pub use group::Group;
