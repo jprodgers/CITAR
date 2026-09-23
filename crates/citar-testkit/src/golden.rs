@@ -16,6 +16,12 @@
 //!   of the parsed files, with the version string saves record and the table counts. Written by
 //!   `golden bless` when the ruleset data changes.
 //!
+//! Package 1a-05 adds:
+//! - **`uniques.json`**: every compiled unique of the embedded ruleset, one row each (its source,
+//!   text, type, role, flags, parameters, modifiers and key), with the fractions, stats, static
+//!   filters, object filters, tags and abilities they refer to. Written by `golden bless` when the
+//!   ruleset data or the compiler changes; a diff shows exactly which uniques moved.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -24,9 +30,13 @@
 use std::path::PathBuf;
 
 use citar_engine::base::fmt::{PyFloat, PyRound};
+use citar_engine::base::ids::{AbilityKey, TagId};
 use citar_engine::base::num::{self, FloorDiv};
 use citar_engine::base::rng::{Purpose, Rng};
+use citar_engine::base::stats::Stats;
 use citar_engine::rules::{Ruleset, embedded};
+use citar_engine::unique::Source;
+use citar_engine::unique::params::{Param, ParamValue};
 use serde_json::{Value, json};
 
 /// Where the committed golden files live.
@@ -49,7 +59,7 @@ pub struct SetReport {
 /// Every golden set this package knows, checked against the committed files.
 #[must_use]
 pub fn check_all() -> Vec<SetReport> {
-    vec![check_rng(), check_libm(), check_pyfmt(), check_ruleset()]
+    vec![check_rng(), check_libm(), check_pyfmt(), check_ruleset(), check_uniques()]
 }
 
 /// The report `golden check --out` writes: one entry per set.
@@ -78,6 +88,7 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
         ("rng.json", render_rng(&rng_answers())),
         ("libm.json", render_libm(&libm_answers(&libm_inputs()))),
         ("ruleset.json", render_rows(&ruleset_answers(), &[])),
+        ("uniques.json", render_rows(&uniques_answers(), &UNIQUE_LISTS)),
     ]
 }
 
@@ -572,6 +583,180 @@ fn check_ruleset() -> SetReport {
         }
     }
     SetReport { name: "ruleset", computed: digest_of(&got), problems: capped(problems) }
+}
+
+// ---- uniques.json -----------------------------------------------------------------------------
+
+/// The lists of `uniques.json`, rendered one row a line.
+const UNIQUE_LISTS: [&str; 7] =
+    ["uniques", "fracs", "stats", "sets", "objects", "tags", "abilities"];
+
+/// The name of the object a unique came from, as `golden` rows write it: `Building:Temple`.
+fn source_name(r: &Ruleset, s: Source) -> String {
+    let name: &str = match s {
+        Source::Nation(id) => &r.nations()[id].name,
+        Source::Building(id) => &r.buildings()[id].name,
+        Source::Policy(id) => &r.policies()[id].name,
+        Source::Tech(id) => &r.techs()[id].name,
+        Source::Temporary(id) => return format!("Temporary:#{}", id.0),
+        Source::Era(id) => &r.eras()[id].name,
+        Source::CityStateFriend(id) | Source::CityStateAlly(id) | Source::CityStateType(id) => {
+            &r.city_state_types()[id].name
+        }
+        Source::Belief(id) => &r.beliefs()[id].name,
+        Source::Resource(id) => &r.resources()[id].name,
+        Source::Global => "",
+        Source::Terrain(id) => &r.terrains()[id].name,
+        Source::Improvement(id) => &r.improvements()[id].name,
+        Source::UnitType(id) => &r.unit_types()[id].name,
+        Source::Unit(id) => &r.base_units()[id].name,
+        Source::Promotion(id) => &r.promotions()[id].name,
+        Source::Ruins(id) => &r.ruins()[id].name,
+    };
+    format!("{}:{name}", s.kind_name())
+}
+
+fn stats_json(s: &Stats) -> Value {
+    let mut o = serde_json::Map::new();
+    for (stat, v) in s.nonzero() {
+        o.insert(stat.key().into(), json!(v));
+    }
+    Value::Object(o)
+}
+
+fn param_json(r: &Ruleset, p: Param) -> Value {
+    match p.value(r) {
+        ParamValue::Int(n) => json!(n),
+        ParamValue::Real(x) => json!(x),
+        ParamValue::Stats(s) => stats_json(&s),
+        ParamValue::Text(t) => json!(t),
+    }
+}
+
+/// Everything `uniques.json` holds, computed by this build: every compiled unique of the embedded
+/// ruleset, one row each (package 1a-05, gate 1), with the tables they refer to. Each row is the
+/// unique's id, source, occurrence and text; its type and role; its flags; its parameters as the
+/// ruleset meant them; its modifiers; its key; its temporary variant, ability and tag.
+#[must_use]
+pub fn uniques_answers() -> Value {
+    let r = match Ruleset::load(&embedded()) {
+        Ok(r) => r,
+        Err(e) => return json!({"format": 1, "error": e.to_string()}),
+    };
+    let t = r.uniques();
+    let rows: Vec<Value> = t
+        .iter()
+        .map(|(id, u)| {
+            let m = t.meta(id);
+            let params: Vec<Value> =
+                u.data.params().into_iter().map(|p| param_json(&r, p)).collect();
+            let mods: Vec<Value> = t
+                .modifiers(id)
+                .into_iter()
+                .map(|(ty, ps)| {
+                    let ps: Vec<Value> = ps.into_iter().map(|p| param_json(&r, p)).collect();
+                    json!([ty.name(), ps])
+                })
+                .collect();
+            let flags: Vec<&str> = u.flags().iter_names().map(|(n, _)| n).collect();
+            json!([
+                id.0,
+                source_name(&r, m.source),
+                m.occurrence,
+                t.text(m.text),
+                m.ty.map(|ty| ty.name()),
+                format!("{:?}", m.role),
+                flags,
+                params,
+                mods,
+                hex64(m.key),
+                m.temp_variant.map(|v| v.0),
+                m.ability.map(|a| t.ability(a)),
+                m.tag.map(|g| t.tag(g)),
+            ])
+        })
+        .collect();
+    let fracs: Vec<Value> = r.fracs().as_slice().iter().map(|&x| json!(x)).collect();
+    let stats: Vec<Value> = t.all_stats().as_slice().iter().map(stats_json).collect();
+    let sets: Vec<Value> = t
+        .sets()
+        .as_slice()
+        .iter()
+        .map(|s| {
+            json!([
+                format!("{:?}", s.domain),
+                t.text(s.text),
+                s.members.as_ref().map(|m| m.iter().collect::<Vec<u32>>())
+            ])
+        })
+        .collect();
+    let objects: Vec<Value> = t
+        .objects()
+        .as_slice()
+        .iter()
+        .map(|o| {
+            json!([
+                t.text(o.text),
+                o.tiles.map(|f| f.0),
+                o.buildings.map(|s| s.0),
+                o.improvements.map(|s| s.0),
+                o.specialist.map(|s| r.name(s))
+            ])
+        })
+        .collect();
+    let tags: Vec<Value> = (0..t.tag_count())
+        .filter_map(|i| u8::try_from(i).ok())
+        .map(|i| json!(t.tag(TagId(i))))
+        .collect();
+    let abilities: Vec<Value> = (0..t.ability_count())
+        .filter_map(|i| u16::try_from(i).ok())
+        .map(|i| json!(t.ability(AbilityKey(i))))
+        .collect();
+    json!({
+        "format": 1,
+        "about": "every compiled unique of the embedded ruleset (DESIGN.md 5.5): [id, source, occurrence, text, type, role, flags, params, modifiers, key, temp_variant, ability, tag]",
+        "counts": {
+            "uniques": t.len(),
+            "conds": t.all_conds().len(),
+            "fracs": fracs.len(),
+            "stats": stats.len(),
+            "sets": sets.len(),
+            "objects": objects.len(),
+            "tags": tags.len(),
+            "abilities": abilities.len(),
+        },
+        "uniques": rows,
+        "fracs": fracs,
+        "stats": stats,
+        "sets": sets,
+        "objects": objects,
+        "tags": tags,
+        "abilities": abilities,
+    })
+}
+
+fn check_uniques() -> SetReport {
+    let got = uniques_answers();
+    let mut problems = Vec::new();
+    if let Some(e) = got.get("error") {
+        problems.push(format!("uniques: the embedded ruleset does not load: {e}"));
+    }
+    match read_committed("uniques.json") {
+        Err(e) => problems.push(e),
+        Ok(want) => {
+            if want.get("counts") != got.get("counts") {
+                problems.push(format!(
+                    "uniques.json: the counts are {} in the file, {} in this build",
+                    want.get("counts").unwrap_or(&Value::Null),
+                    got.get("counts").unwrap_or(&Value::Null)
+                ));
+            }
+            for key in UNIQUE_LISTS {
+                problems.extend(diff_rows("uniques.json", key, want.get(key), &got[key]));
+            }
+        }
+    }
+    SetReport { name: "uniques", computed: digest_of(&got), problems: capped(problems) }
 }
 
 // ---- pyfmt.json -------------------------------------------------------------------------------
