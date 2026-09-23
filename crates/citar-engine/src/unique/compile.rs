@@ -713,13 +713,15 @@ mod tests {
         let mut s = staged();
         assert_eq!(fold(&mut s, ModifierData::UnitActionConsumeUnit), Ok(()));
         assert_eq!(fold(&mut s, ModifierData::UnitActionConsumeUnit), Err("is there twice"));
-        let times = |n| ModifierData::UnitActionLimitedTimes(p::UnitActionLimitedTimes { times: n });
+        let times =
+            |n| ModifierData::UnitActionLimitedTimes(p::UnitActionLimitedTimes { times: n });
         assert_eq!(fold(&mut s, times(3)), Ok(()));
         assert_eq!(s.actions.uses(), Some(3));
         assert_eq!(fold(&mut s, times(4)), Err("is there twice"));
         let mut s = staged();
         assert_eq!(fold(&mut s, times(70_000)), Err("counts more than 65535"));
-        let timer = |n| ModifierData::ConditionalTimedUnique(p::ConditionalTimedUnique { turns: n });
+        let timer =
+            |n| ModifierData::ConditionalTimedUnique(p::ConditionalTimedUnique { turns: n });
         assert_eq!(fold(&mut s, timer(10)), Ok(()));
         assert!(s.flags.contains(UFlags::TIMED));
         assert_eq!(s.timed, Some(10));
