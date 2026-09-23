@@ -2,33 +2,21 @@
 //! `Rules._prepare` and `Rules._index` (`rules.py:100-228`) or at each use.
 //!
 //! A few of them depend on a unique's type: whether a unit is a great person, whether a nation
-//! may be chosen for new games, what stats a building raises. The unique compiler comes later
-//! (package 1a-05), so these read the unique texts' placeholders with `unique::text`, exactly as
-//! Python's `has_tag` and `get` did. The compiler will answer the same questions from compiled
-//! uniques.
+//! may be chosen for new games, what stats a building raises. They read the compiled uniques by
+//! type, as Python's `has_tag` and `get` read placeholders (conditionals and all), so they are
+//! derived after the compiler has run. The terrain features' layers come first, before the
+//! compiler, which names features by them (`feature_layers`).
 
 use super::Ruleset;
 use super::defs::{BuilderClass, ImprovementKind, NationKind, Route, TerrainType};
 use super::errors::{Problems, RulesetErrorKind};
 use crate::base::ids::{
-    BaseUnitId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId, ResourceId,
-    TechId, TerrainId,
+    BaseUnitId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId, ObjectFilterId,
+    ResourceId, TechId, TerrainId,
 };
 use crate::base::sets::FeatureSet;
 use crate::base::stats::{Stat, StatMask};
-use crate::unique::text::{Parts, parts};
-
-// The placeholders these tables look for (`unique_types.py`).
-const STATS: &str = "[]";
-const STATS_FROM_TILES: &str = "[] from [] tiles []";
-const STATS_PER_POPULATION: &str = "[] per [] population []";
-const REMOVES_ANNEX_UNHAPPINESS: &str = "Removes extra unhappiness from annexed cities";
-const SPACESHIP_PART: &str = "Spaceship part";
-const GREAT_PERSON: &str = "Great Person - []";
-const ROUGH_TERRAIN: &str = "Rough terrain";
-const GREAT_IMPROVEMENT: &str = "Great Improvement";
-const NOT_FOR_NEW_GAMES: &str = "Will not be chosen for new games";
-const BUILD_IMPROVEMENTS: &str = "Can build [] improvements on tiles";
+use crate::unique::{SourceUniques, UniqueData, UniqueTable, UniqueType};
 
 // The objects the engine names (`workers.py:22-25`, `state.py:98`, `cities.py:2147, 2358`,
 // `barbarians.py:17`, `automation.py:197`).
@@ -105,8 +93,9 @@ pub struct Derived {
     /// The terrain features in layer order, Hill lowest and Fallout highest, the rest in file
     /// order: `FeatureId` is a position here, so a `FeatureSet`'s top bit is the top feature.
     pub features: IdVec<FeatureId, TerrainId>,
-    /// The improvement filters of each builder class (`BuilderClass` indexes this).
-    pub builder_classes: Vec<Box<[Box<str>]>>,
+    /// The improvement filters of each builder class (`BuilderClass` indexes this): the
+    /// parameters of its units' `Can build [...] improvements on tiles`, in order.
+    pub builder_classes: Vec<Box<[ObjectFilterId]>>,
     /// The `Remove ...` improvements that clear a feature or an improvement, in file order
     /// (`workers.py:55-57`).
     pub feature_removals: Vec<ImprovementId>,
@@ -147,24 +136,36 @@ impl Derived {
     }
 }
 
-/// The unique texts of an object, taken apart once.
-fn scan(uniques: &[Box<str>]) -> Vec<Parts> {
-    uniques.iter().map(|u| parts(u)).collect()
+/// Whether an object has a unique of type `ty`, whatever its conditionals: Python's `has_tag`
+/// (`uniques.py:182-188`).
+fn has(table: &UniqueTable, uniques: &SourceUniques, ty: UniqueType) -> bool {
+    uniques.ids().any(|id| table.meta(id).ty == Some(ty))
 }
 
-fn has(parts: &[Parts], placeholder: &str) -> bool {
-    parts.iter().any(|p| p.placeholder == placeholder)
+/// The terrain features in layer order, with Hill's and Fallout's places; see
+/// [`feature_layers`].
+pub(crate) struct Layers {
+    features: IdVec<FeatureId, TerrainId>,
+    hill: FeatureId,
+    fallout: FeatureId,
 }
 
-/// Fills in every derived field of `r`'s objects and returns the derived tables. The objects'
-/// references are already resolved.
-pub(crate) fn derive(r: &mut Ruleset, p: &mut Problems) -> Option<Derived> {
-    let (features, hill, fallout) = feature_layers(r, p)?;
+/// Numbers the terrain features by layer and records each feature's number on its terrain. Runs
+/// before the unique compiler, which names features by them.
+pub(crate) fn feature_layers(r: &mut Ruleset, p: &mut Problems) -> Option<Layers> {
+    let (features, hill, fallout) = layers(r, p)?;
     for (f, &t) in features.iter() {
         r.terrains[t].feature = Some(f);
     }
+    Some(Layers { features, hill, fallout })
+}
+
+/// Fills in every derived field of `r`'s objects and returns the derived tables. The objects'
+/// references are resolved and their uniques compiled.
+pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Option<Derived> {
+    let Layers { features, hill, fallout } = layers;
     for t in r.terrains.as_mut_slice() {
-        t.rough = has(&scan(&t.uniques), ROUGH_TERRAIN);
+        t.rough = has(&r.uniques, &t.uniques, UniqueType::RoughTerrain);
     }
 
     let improvement_names: Vec<Box<str>> =
@@ -208,7 +209,7 @@ pub(crate) fn derive(r: &mut Ruleset, p: &mut Problems) -> Option<Derived> {
     let mut removal_of = IdVec::from_elem(None, features.len());
     for ((id, imp), kind) in r.improvements.iter_mut().zip(kinds) {
         imp.kind = kind;
-        imp.great = has(&scan(&imp.uniques), GREAT_IMPROVEMENT);
+        imp.great = has(&r.uniques, &imp.uniques, UniqueType::GreatImprovement);
         match kind {
             ImprovementKind::RemoveFeature(f) => {
                 feature_removals.push(id);
@@ -294,7 +295,7 @@ pub(crate) fn derive(r: &mut Ruleset, p: &mut Problems) -> Option<Derived> {
     let mut major_nations = Vec::new();
     let mut city_state_nations = Vec::new();
     for (id, n) in r.nations.iter() {
-        if has(&scan(&n.uniques), NOT_FOR_NEW_GAMES) {
+        if has(&r.uniques, &n.uniques, UniqueType::WillNotBeChosenForNewGames) {
             continue;
         }
         match n.kind {
@@ -343,7 +344,7 @@ fn required<T>(found: Option<T>, name: &str, p: &mut Problems) -> Option<T> {
 }
 
 /// The features in layer order, with Hill's and Fallout's ids.
-fn feature_layers(
+fn layers(
     r: &Ruleset,
     p: &mut Problems,
 ) -> Option<(IdVec<FeatureId, TerrainId>, FeatureId, FeatureId)> {
@@ -394,47 +395,45 @@ fn feature_layers(
 struct UnitLists {
     great_person_units: Vec<BaseUnitId>,
     spaceship_parts: Vec<BaseUnitId>,
-    builder_classes: Vec<Box<[Box<str>]>>,
+    builder_classes: Vec<Box<[ObjectFilterId]>>,
 }
 
 /// Unit flags, great persons, spaceship parts and builder classes (`rules.py:115-129, 226-227`).
 fn derive_units(r: &mut Ruleset, p: &mut Problems) -> UnitLists {
-    let type_parts: Vec<Vec<Parts>> =
-        r.unit_types.as_slice().iter().map(|t| scan(&t.uniques)).collect();
+    let table = &r.uniques;
     let mut great = Vec::new();
     let mut parts_list = Vec::new();
-    let mut classes: Vec<Box<[Box<str>]>> = Vec::new();
+    let mut classes: Vec<Box<[ObjectFilterId]>> = Vec::new();
     for (id, u) in r.base_units.iter_mut() {
-        // A unit has its own uniques and its type's (`rules.py:116-118`).
-        let own = scan(&u.uniques);
-        let all: Vec<&Parts> = own.iter().chain(&type_parts[u.unit_type.index()]).collect();
-        let is = |ph: &str| all.iter().any(|x| x.placeholder == ph);
         let unit_type = &r.unit_types[u.unit_type];
+        // A unit has its own uniques and its type's (`rules.py:116-118`).
+        let all: Vec<_> = u.uniques.ids().chain(unit_type.uniques.ids()).collect();
+        let is = |ty: UniqueType| all.iter().any(|&x| table.meta(x).ty == Some(ty));
         u.domain = unit_type.domain;
         u.ranged = u.ranged_strength > 0;
         u.melee = !u.ranged && u.strength > 0;
         u.military = u.ranged || u.melee;
         u.era = u.required_tech.map_or(EraId(0), |t| r.techs[t].era);
-        u.great_person = is(GREAT_PERSON);
+        u.great_person = is(UniqueType::GreatPerson);
         if u.great_person {
             great.push(id);
         }
-        if is(SPACESHIP_PART) {
+        if is(UniqueType::SpaceshipPart) {
             parts_list.push(id);
         }
-        let mut filters: Vec<Box<str>> = Vec::new();
-        for x in &all {
-            if x.placeholder == BUILD_IMPROVEMENTS
-                && let Some(f) = x.params.first()
-                && !filters.iter().any(|g| **g == **f)
+        // The same filter text is one ObjectFilterId, so this dedups by text as Python did.
+        let mut filters: Vec<ObjectFilterId> = Vec::new();
+        for &x in &all {
+            if let UniqueData::BuildImprovements(b) = table.get(x).data
+                && !filters.contains(&b.object)
             {
-                filters.push(f.as_str().into());
+                filters.push(b.object);
             }
         }
         u.builder = if filters.is_empty() {
             None
         } else {
-            let filters: Box<[Box<str>]> = filters.into();
+            let filters: Box<[ObjectFilterId]> = filters.into();
             let pos = match classes.iter().position(|c| *c == filters) {
                 Some(pos) => pos,
                 None => {
@@ -461,6 +460,7 @@ fn derive_units(r: &mut Ruleset, p: &mut Problems) -> UnitLists {
 
 /// Wonder flags and the stats each building raises (`rules.py:144-149, 169-180`).
 fn derive_buildings(r: &mut Ruleset) {
+    let table = &r.uniques;
     for b in r.buildings.as_mut_slice() {
         b.any_wonder = b.is_wonder || b.is_national_wonder;
         let mut mask = StatMask::EMPTY;
@@ -469,19 +469,20 @@ fn derive_buildings(r: &mut Ruleset) {
                 mask.insert(s);
             }
         }
-        let uniques = scan(&b.uniques);
-        for u in &uniques {
-            if [STATS, STATS_FROM_TILES, STATS_PER_POPULATION].contains(&u.placeholder.as_str())
-                && let Some(stats) = u.stats()
-            {
-                for st in Stat::ALL {
-                    if stats[st] > 0.0 {
-                        mask.insert(st);
-                    }
+        for id in b.uniques.ids() {
+            let stats = match table.get(id).data {
+                UniqueData::Stats(x) => x.stats,
+                UniqueData::StatsFromTiles(x) => x.stats,
+                UniqueData::StatsPerPopulation(x) => x.stats,
+                _ => continue,
+            };
+            for (st, v) in table.stats(stats).iter() {
+                if v > 0.0 {
+                    mask.insert(st);
                 }
             }
         }
-        if has(&uniques, REMOVES_ANNEX_UNHAPPINESS) {
+        if has(table, &b.uniques, UniqueType::RemovesAnnexUnhappiness) {
             mask.insert(Stat::Happiness);
         }
         b.stat_related = mask;

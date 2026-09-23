@@ -38,7 +38,7 @@ pub use self::constants::{Constants, RULES_VERSION};
 use self::defs::{
     BaseUnitDef, BeliefDef, BuildingDef, CityStateTypeDef, DifficultyDef, EraDef, ImprovementDef,
     NationDef, PersonalityDef, PolicyDef, PromotionDef, QuestDef, ResourceDef, RuinDef,
-    SpecialistDef, SpeedDef, TechColumn, TechDef, TerrainDef, Uniques, UnitTypeDef, VictoryDef,
+    SpecialistDef, SpeedDef, TechColumn, TechDef, TerrainDef, UnitTypeDef, VictoryDef,
 };
 pub use self::derived::Derived;
 pub use self::errors::{RulesetError, RulesetErrorKind, RulesetErrors};
@@ -47,6 +47,7 @@ pub use self::names::{NameKind, Named};
 #[cfg(feature = "embedded-ruleset")]
 pub use self::source::embedded;
 pub use self::source::{BUILD_ID, RulesetFiles, RulesetId};
+use crate::unique::{SourceUniques, UniqueTable};
 
 /// The whole ruleset: every table typed, every reference an id, and the derived tables.
 ///
@@ -56,8 +57,7 @@ pub use self::source::{BUILD_ID, RulesetFiles, RulesetId};
 /// ([`Ruleset::leak`], [`Ruleset::shared`]), which is why it is `Sync`: it has no interior
 /// mutability except the client JSON, built once behind a `OnceLock`.
 ///
-/// Inside the crate the fields are open, for the loader and the unique compiler (package 1a-05)
-/// to fill in.
+/// Inside the crate the fields are open, for the loader and the unique compiler to fill in.
 pub struct Ruleset {
     id: RulesetId,
     pub(crate) techs: IdVec<TechId, TechDef>,
@@ -83,7 +83,9 @@ pub struct Ruleset {
     pub(crate) policies: IdVec<PolicyId, PolicyDef>,
     pub(crate) policy_branch_count: u16,
     pub(crate) nations: IdVec<NationId, NationDef>,
-    pub(crate) global_uniques: Uniques,
+    pub(crate) global_uniques: SourceUniques,
+    /// Every compiled unique, with what they refer to.
+    pub(crate) uniques: UniqueTable,
     pub(crate) constants: Constants,
     pub(crate) fracs: IdVec<FracId, f64>,
     pub(crate) derived: Derived,
@@ -255,11 +257,19 @@ impl Ruleset {
         &self.nations
     }
 
-    /// The uniques every civilization has.
+    /// The uniques every civilization has (`global_uniques.json`).
     #[must_use]
     #[inline]
-    pub fn global_uniques(&self) -> &Uniques {
+    pub fn global_uniques(&self) -> &SourceUniques {
         &self.global_uniques
+    }
+
+    /// Every compiled unique, and the conditionals, texts, stats and filter handles they refer
+    /// to (DESIGN.md 5.5). The objects' `uniques` fields say which are whose.
+    #[must_use]
+    #[inline]
+    pub fn uniques(&self) -> &UniqueTable {
+        &self.uniques
     }
 
     /// `game.json`, typed.
@@ -269,7 +279,7 @@ impl Ruleset {
         &self.constants
     }
 
-    /// The fractional unique parameters, interned by the unique compiler (package 1a-05).
+    /// The fractional unique parameters, interned by the unique compiler.
     #[must_use]
     #[inline]
     pub fn fracs(&self) -> &IdVec<FracId, f64> {

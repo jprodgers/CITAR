@@ -31,6 +31,16 @@ pub enum RulesetErrorKind {
     Invalid,
     /// An object the engine relies on by name, such as the Hill feature, is absent.
     Missing,
+    /// A unique text UnCiv has no type for, and that is no tag a filter names (DESIGN.md 5.6).
+    UnknownUnique,
+    /// A unique of an UnCiv type the engine does not support (`unique_supported.toml`).
+    UnsupportedUnique,
+    /// A unique's parameter that does not compile: not a number, out of range, an unknown stat
+    /// or name.
+    UniqueParameter,
+    /// A unique's modifiers out of place: two triggers, a `for every` multiplier, the same
+    /// action modifier twice, a modifier written as a unique or a unique as a modifier.
+    UniqueModifier,
 }
 
 /// One problem in a ruleset.

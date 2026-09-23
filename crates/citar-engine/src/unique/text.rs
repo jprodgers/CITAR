@@ -3,9 +3,9 @@
 //! A unique such as `[+20]% Strength <for [Mounted] units> <when attacking>` has a main text and
 //! modifiers (`<...>`), and the main text has a *placeholder* (`[]% Strength`), which names its
 //! type, and *parameters* (`+20`). These functions do the splitting and nothing else: they never
-//! fail, exactly like Python's, and leave judging the pieces to the compiler (package 1a-05). The
-//! ruleset loader uses them already, to derive the few tables that depend on a unique's type
-//! (`rules.py:128-129, 136, 143, 175-179, 223-227`).
+//! fail, exactly like Python's, and leave judging the pieces to the compiler (`unique::compile`),
+//! which calls them for every text and modifier, and `parse_stats` for every `[stats]`
+//! parameter.
 //!
 //! The brackets and angle brackets are ASCII, so scanning bytes finds the same places Python's
 //! scan of code points did, and every slice falls on a character boundary.

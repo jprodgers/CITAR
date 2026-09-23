@@ -1,8 +1,8 @@
 //! Generated files stay in step with their generators.
 //!
 //! Each committed generated file is listed in [`FILES`] with the function that produces it; the
-//! check regenerates it in memory and fails on any difference. Package 1a-05 adds
-//! `crates/citar-engine/src/unique/gen.rs` (`cargo xtask gen-uniques`).
+//! check regenerates it in memory and fails on any difference. So far there is one:
+//! `crates/citar-engine/src/unique/gen.rs`, from `cargo xtask gen-uniques` (package 1a-05).
 
 use super::Finding;
 use std::path::Path;
@@ -19,7 +19,11 @@ pub struct Generated {
 }
 
 /// Every generated file in the workspace.
-pub const FILES: &[Generated] = &[];
+pub const FILES: &[Generated] = &[Generated {
+    path: crate::gen_uniques::OUT,
+    command: "cargo xtask gen-uniques",
+    generate: crate::gen_uniques::generate,
+}];
 
 pub fn check(root: &Path, files: &[Generated]) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -84,7 +88,8 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_generated_yet() {
-        assert!(FILES.is_empty(), "1a-05 adds unique/gen.rs; update this test then");
+    fn the_unique_types_are_generated() {
+        let paths: Vec<&str> = FILES.iter().map(|g| g.path).collect();
+        assert_eq!(paths, ["crates/citar-engine/src/unique/gen.rs"]);
     }
 }

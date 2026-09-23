@@ -6,10 +6,11 @@
 //! are resolved once, when the ruleset loads, and the fields Python added (`_era`, `_domain`,
 //! `_ranged`, `_rough`, `_stat_related`, ...) are ordinary fields filled in by `derived`.
 //!
-//! Three kinds of text are carried as written, for later packages to compile:
-//! - unique texts ([`Uniques`]), compiled by the unique compiler (package 1a-05);
-//! - terrain filters in `terrainsCanBeBuiltOn` and start biases, and victory milestones, compiled
-//!   with the filters (package 1a-06).
+//! Each object's uniques are compiled when the ruleset loads (`unique::compile`): its `uniques`
+//! field says which of the ruleset's compiled uniques are its own, split by what the engine does
+//! with them ([`SourceUniques`]). Two kinds of text are still carried as written, for package
+//! 1a-06 to compile with the filters: the terrain filters in `terrainsCanBeBuiltOn` and start
+//! biases, and victory milestones.
 
 use serde::Deserialize;
 
@@ -19,10 +20,7 @@ use crate::base::ids::{
     TechId, TerrainId, UnitTypeId,
 };
 use crate::base::stats::{StatMask, Stats};
-
-/// A ruleset object's unique texts, as written; the unique compiler (package 1a-05) turns them
-/// into compiled uniques.
-pub type Uniques = Box<[Box<str>]>;
+pub use crate::unique::SourceUniques;
 
 // ---- Small vocabularies -----------------------------------------------------------------------
 
@@ -373,7 +371,7 @@ pub struct TechDef {
     pub column: u16,
     pub cost: i32,
     pub prerequisites: Box<[TechId]>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
 }
 
 /// A column of the tech tree, with the costs UnCiv attaches to it.
@@ -408,7 +406,7 @@ pub struct EraDef {
     pub base_unit_buy_cost: i32,
     pub embark_defense: i32,
     pub start_percent: i32,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
 }
 
 /// A building or wonder.
@@ -435,7 +433,7 @@ pub struct BuildingDef {
     /// Great person points per turn, by the great person unit.
     pub great_person_points: Box<[(BaseUnitId, i32)]>,
     pub specialist_slots: Box<[(SpecialistId, i32)]>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
     /// A wonder or a national wonder (`rules.py:146`).
     pub any_wonder: bool,
     /// The stats the building raises, for the AI's valuation (`rules.py:169-180`).
@@ -468,7 +466,7 @@ pub struct BaseUnitDef {
     pub required_resource: Option<ResourceId>,
     /// Promotions the unit starts with.
     pub promotions: Box<[PromotionId]>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
     /// Its unit type's domain (`rules.py:123`).
     pub domain: Domain,
     /// Has ranged strength (`rules.py:124`).
@@ -491,7 +489,7 @@ pub struct UnitTypeDef {
     pub name: Box<str>,
     pub key: Option<Box<str>>,
     pub domain: Domain,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
 }
 
 /// A promotion.
@@ -502,7 +500,7 @@ pub struct PromotionDef {
     /// The unit types that may take it.
     pub unit_types: Box<[UnitTypeId]>,
     pub prerequisites: Box<[PromotionId]>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
 }
 
 /// A terrain: a base terrain, a feature or a natural wonder.
@@ -524,7 +522,7 @@ pub struct TerrainDef {
     pub turns_into: Option<TerrainId>,
     /// The map generator's weight; Python's default is 10 (`mapgen.py:1114`).
     pub weight: Option<i32>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
     /// Carries `Rough terrain` (`rules.py:136`).
     pub rough: bool,
     /// Its place in the feature layers, if it is a feature.
@@ -548,7 +546,7 @@ pub struct ResourceDef {
     pub revealed_by: Option<TechId>,
     pub major_deposit_amount: Option<Deposit>,
     pub minor_deposit_amount: Option<Deposit>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
 }
 
 /// A tile improvement, including the pseudo-improvements that build routes, remove features,
@@ -563,7 +561,7 @@ pub struct ImprovementDef {
     pub turns_to_build: Option<i32>,
     pub tech_required: Option<TechId>,
     pub unique_to: Option<NationId>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
     /// What building it does (`workers.py:22-26`).
     pub kind: ImprovementKind,
     /// Carries `Great Improvement` (`rules.py:143`).
@@ -576,7 +574,7 @@ pub struct BeliefDef {
     pub name: Box<str>,
     pub key: Option<Box<str>>,
     pub kind: BeliefType,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
 }
 
 /// A specialist.
@@ -596,10 +594,10 @@ pub struct CityStateTypeDef {
     pub name: Box<str>,
     pub key: Option<Box<str>>,
     /// What a city-state of this type gives its friends.
-    pub friend: Uniques,
+    pub friend: SourceUniques,
     /// What it gives its ally.
-    pub ally: Uniques,
-    pub uniques: Uniques,
+    pub ally: SourceUniques,
+    pub uniques: SourceUniques,
 }
 
 /// A difficulty level. Its id orders them, easiest first, as Python's `difficulty_list` did.
@@ -710,7 +708,7 @@ pub struct RuinDef {
     pub name: Box<str>,
     pub key: Option<Box<str>>,
     pub excluded_difficulties: Box<[DifficultyId]>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
 }
 
 /// An AI leader personality: weights the bot gives each concern, 0 to 10.
@@ -742,7 +740,7 @@ pub struct PersonalityDef {
 pub struct PolicyDef {
     pub name: Box<str>,
     pub key: Option<Box<str>>,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
     pub kind: PolicyKind,
 }
 
@@ -791,7 +789,7 @@ pub struct NationDef {
     pub cities: Box<[Box<str>]>,
     /// CITAR's benchmark civilization, which has no unique ability.
     pub benchmark: bool,
-    pub uniques: Uniques,
+    pub uniques: SourceUniques,
 }
 
 #[cfg(test)]

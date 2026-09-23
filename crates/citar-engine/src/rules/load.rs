@@ -10,18 +10,20 @@
 //! 5. the rules the data must follow: names match keys, eras numbered in order, speed calendars
 //!    in order, branches and their policies in agreement, and the `game.json` values later code
 //!    divides by, loops over or seats players with in range;
-//! 6. the derived tables, which may need objects the engine names (Hill, Road).
+//! 6. the terrain features' layers, by which uniques name features;
+//! 7. the uniques, compiled (`unique::compile`): every text of every object;
+//! 8. the derived tables, which may need objects the engine names (Hill, Road) and read the
+//!    compiled uniques.
 //!
 //! Python checked only the references of stage 4 for techs, units and buildings
-//! (`rules.py:238-260`).
+//! (`rules.py:238-260`), and read unique texts at each use.
 
 use super::constants::{BarbarianLevel, Constants, MapSize, MapType, RawGame};
 use super::defs::{
     BaseUnitDef, BeliefDef, BuildingDef, CityStatePersonality, CityStateTypeDef, DifficultyDef,
     Domain, ERA_STARTING_UNIT, EraDef, ImprovementDef, ImprovementKind, NationDef, PersonalityDef,
     PolicyDef, PolicyKind, PromotionDef, QuestDef, QuestKind, ResourceDef, RuinDef, SpecialistDef,
-    SpeedDef, StartBias, StartingUnit, TechColumn, TechDef, TerrainDef, Uniques, UnitTypeDef,
-    VictoryDef,
+    SpeedDef, StartBias, StartingUnit, TechColumn, TechDef, TerrainDef, UnitTypeDef, VictoryDef,
 };
 use super::derived::{self, Derived};
 use super::errors::{Problems, RulesetErrorKind, RulesetErrors};
@@ -30,12 +32,16 @@ use super::raw::{self, RawRuleset, Table};
 use super::source::{self, GAME, RulesetFiles};
 use super::{Ruleset, client};
 use crate::base::hex::{MAX_SIDE, MIN_SIDE};
-use crate::base::ids::{BaseUnitId, DifficultyId, EraId, Id, IdVec, PolicyId, SpeedId, UnitTypeId};
+use crate::base::ids::{
+    BaseUnitId, DifficultyId, EraId, Id, IdVec, NationId, PolicyId, SpeedId, UnitTypeId,
+};
 use crate::base::sets::{
     BaseUnitSet, BeliefSet, BuildingSet, EraSet, ImprovementSet, PlayerSet, PolicySet,
     PromotionSet, ResourceSet, TechSet, TerrainSet,
 };
 use crate::base::stats::StatMask;
+use crate::unique::compile::{self, SourceTexts};
+use crate::unique::{Source, SourceUniques, UniqueTable};
 
 pub(super) fn load(files: &RulesetFiles<'_>) -> Result<Ruleset, RulesetErrors> {
     let mut p = Problems::default();
@@ -51,14 +57,116 @@ pub(super) fn load(files: &RulesetFiles<'_>) -> Result<Ruleset, RulesetErrors> {
     let Some(mut rules) = rules else { return Err(gave_up(&mut p, "the tables")) };
     check_rules(&raw, &rules, &mut p);
     p.check()?;
-    let derived = derived::derive(&mut rules, &mut p);
+    let layers = derived::feature_layers(&mut rules, &mut p);
+    p.check()?;
+    let Some(layers) = layers else { return Err(gave_up(&mut p, "the feature layers")) };
+    rules.names = name_indexes(&raw);
+    compile_uniques(&raw, &mut rules, &mut p);
+    p.check()?;
+    let derived = derived::derive(&mut rules, layers, &mut p);
     p.check()?;
     let Some(derived) = derived else { return Err(gave_up(&mut p, "the derived tables")) };
     rules.id = id;
     rules.derived = derived;
-    rules.names = name_indexes(&raw);
     rules.client = client::ClientSource { docs: docs.into_vec(), nations: raw.nations_json };
     Ok(rules)
+}
+
+// ---- Stage 7: uniques -------------------------------------------------------------------------
+
+/// Compiles every unique text into `r.uniques` and each object's [`SourceUniques`], in Python's
+/// `civ_umaps` order (DESIGN.md 5.5), which makes a `UniqueId` canonical.
+fn compile_uniques(raw: &RawRuleset, r: &mut Ruleset, p: &mut Problems) {
+    fn each<'a, T, I: Id>(
+        out: &mut Vec<SourceTexts<'a>>,
+        table: &'a Table<T>,
+        file: &'static str,
+        texts: impl Fn(&'a T) -> &'a [String],
+        source: impl Fn(I) -> Source,
+    ) {
+        for (i, (name, x)) in table.iter().enumerate() {
+            // check_sizes held every table to its id type.
+            let Some(id) = I::from_index(i) else { continue };
+            out.push(SourceTexts { source: source(id), file, name, texts: texts(x) });
+        }
+    }
+    let mut s: Vec<SourceTexts<'_>> = Vec::new();
+    for (i, (name, n)) in raw.nations.iter().enumerate() {
+        let Some(id) = NationId::from_index(i) else { continue };
+        let file = raw.nation_file(name);
+        s.push(SourceTexts { source: Source::Nation(id), file, name, texts: &n.uniques });
+    }
+    each(&mut s, &raw.buildings, "ruleset/buildings.json", |x| &x.uniques, Source::Building);
+    let branches = raw.policy_branches.len();
+    each(&mut s, &raw.policy_branches, "ruleset/policies.json", |x| &x.uniques, Source::Policy);
+    for (i, (name, x)) in raw.policies.iter().enumerate() {
+        let Some(id) = PolicyId::from_index(branches + i) else { continue };
+        let file = "ruleset/policies.json";
+        s.push(SourceTexts { source: Source::Policy(id), file, name, texts: &x.uniques });
+    }
+    each(&mut s, &raw.techs, "ruleset/techs.json", |x| &x.uniques, Source::Tech);
+    each(&mut s, &raw.eras, "ruleset/eras.json", |x| &x.uniques, Source::Era);
+    // Every type's friend bonuses, then every type's ally bonuses, then their own uniques: the
+    // order of `Source`, so that sorting by id stays canonical.
+    let file = "ruleset/city_state_types.json";
+    let cs = &raw.city_state_types;
+    each(&mut s, cs, file, |x| &x.friend_bonus_uniques, Source::CityStateFriend);
+    each(&mut s, cs, file, |x| &x.ally_bonus_uniques, Source::CityStateAlly);
+    each(&mut s, cs, file, |x| &x.uniques, Source::CityStateType);
+    each(&mut s, &raw.beliefs, "ruleset/beliefs.json", |x| &x.uniques, Source::Belief);
+    each(&mut s, &raw.resources, "ruleset/resources.json", |x| &x.uniques, Source::Resource);
+    s.push(SourceTexts {
+        source: Source::Global,
+        file: "ruleset/global_uniques.json",
+        name: "",
+        texts: &raw.global_uniques,
+    });
+    each(&mut s, &raw.terrains, "ruleset/terrains.json", |x| &x.uniques, Source::Terrain);
+    let file = "ruleset/improvements.json";
+    each(&mut s, &raw.improvements, file, |x| &x.uniques, Source::Improvement);
+    each(&mut s, &raw.unit_types, "ruleset/unit_types.json", |x| &x.uniques, Source::UnitType);
+    each(&mut s, &raw.units, "ruleset/units.json", |x| &x.uniques, Source::Unit);
+    each(&mut s, &raw.promotions, "ruleset/promotions.json", |x| &x.uniques, Source::Promotion);
+    each(&mut s, &raw.ruins, "ruleset/ruins.json", |x| &x.uniques, Source::Ruins);
+
+    // Filters outside uniques may name tags too.
+    let mut filters: Vec<&str> = Vec::new();
+    for i in raw.improvements.values() {
+        filters.extend(i.terrains_can_be_built_on.iter().map(String::as_str));
+    }
+    for n in r.nations.as_slice() {
+        for b in &n.start_bias {
+            if let StartBias::Prefer(f) | StartBias::Avoid(f) = b {
+                filters.push(f);
+            }
+        }
+    }
+
+    let Some(done) = compile::compile(r, &s, &filters, p) else { return };
+    for (src, part) in s.iter().zip(done.sources) {
+        match src.source {
+            Source::Nation(id) => r.nations[id].uniques = part,
+            Source::Building(id) => r.buildings[id].uniques = part,
+            Source::Policy(id) => r.policies[id].uniques = part,
+            Source::Tech(id) => r.techs[id].uniques = part,
+            Source::Era(id) => r.eras[id].uniques = part,
+            Source::CityStateFriend(id) => r.city_state_types[id].friend = part,
+            Source::CityStateAlly(id) => r.city_state_types[id].ally = part,
+            Source::CityStateType(id) => r.city_state_types[id].uniques = part,
+            Source::Belief(id) => r.beliefs[id].uniques = part,
+            Source::Resource(id) => r.resources[id].uniques = part,
+            Source::Global => r.global_uniques = part,
+            Source::Terrain(id) => r.terrains[id].uniques = part,
+            Source::Improvement(id) => r.improvements[id].uniques = part,
+            Source::UnitType(id) => r.unit_types[id].uniques = part,
+            Source::Unit(id) => r.base_units[id].uniques = part,
+            Source::Promotion(id) => r.promotions[id].uniques = part,
+            Source::Ruins(id) => r.ruins[id].uniques = part,
+            Source::Temporary(_) => {}
+        }
+    }
+    r.uniques = done.table;
+    r.fracs = done.fracs;
 }
 
 /// The report for a stage that gave up without saying why, which no stage does: every `None`
@@ -294,10 +402,6 @@ fn key(id: Option<&String>) -> Option<Box<str>> {
     id.map(|s| text(s))
 }
 
-fn uniques(list: &[String]) -> Uniques {
-    list.iter().map(|s| text(s)).collect()
-}
-
 fn texts(list: &[String]) -> Box<[Box<str>]> {
     list.iter().map(|s| text(s)).collect()
 }
@@ -324,7 +428,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 column: t.column,
                 cost: t.cost,
                 prerequisites: l.all("prerequisite", Tab::Techs, &t.prerequisites),
-                uniques: uniques(&t.uniques),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -368,7 +472,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 base_unit_buy_cost: e.base_unit_buy_cost,
                 embark_defense: e.embark_defense,
                 start_percent: e.start_percent,
-                uniques: uniques(&e.uniques),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -414,7 +518,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                     &b.great_person_points,
                 ),
                 specialist_slots: l.keyed("specialistSlots", Tab::Specialists, &b.specialist_slots),
-                uniques: uniques(&b.uniques),
+                uniques: SourceUniques::default(),
                 any_wonder: false,
                 stat_related: StatMask::EMPTY,
             },
@@ -429,7 +533,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 name: text(name),
                 key: key(t.id.as_ref()),
                 domain: t.movement_type,
-                uniques: uniques(&t.uniques),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -462,7 +566,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                     u.required_resource.as_ref(),
                 ),
                 promotions: l.all("promotions", Tab::Promotions, &u.promotions),
-                uniques: uniques(&u.uniques),
+                uniques: SourceUniques::default(),
                 domain: Domain::Land,
                 ranged: false,
                 melee: false,
@@ -484,7 +588,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 key: key(pr.id.as_ref()),
                 unit_types: l.all("unitTypes", Tab::UnitTypes, &pr.unit_types),
                 prerequisites: l.all("prerequisites", Tab::Promotions, &pr.prerequisites),
-                uniques: uniques(&pr.uniques),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -507,7 +611,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 occurs_on: l.all("occursOn", Tab::Terrains, &t.occurs_on),
                 turns_into: l.opt("turnsInto", Tab::Terrains, t.turns_into.as_ref()),
                 weight: t.weight,
-                uniques: uniques(&t.uniques),
+                uniques: SourceUniques::default(),
                 rough: false,
                 feature: None,
             },
@@ -535,7 +639,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 revealed_by: l.opt("revealedBy", Tab::Techs, r.revealed_by.as_ref()),
                 major_deposit_amount: r.major_deposit_amount,
                 minor_deposit_amount: r.minor_deposit_amount,
-                uniques: uniques(&r.uniques),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -553,7 +657,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 turns_to_build: i.turns_to_build,
                 tech_required: l.opt("techRequired", Tab::Techs, i.tech_required.as_ref()),
                 unique_to: l.opt("uniqueTo", Tab::Nations, i.unique_to.as_ref()),
-                uniques: uniques(&i.uniques),
+                uniques: SourceUniques::default(),
                 kind: ImprovementKind::Normal,
                 great: false,
             },
@@ -568,7 +672,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 name: text(name),
                 key: key(b.id.as_ref()),
                 kind: b.kind,
-                uniques: uniques(&b.uniques),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -600,9 +704,9 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
             CityStateTypeDef {
                 name: text(name),
                 key: key(c.id.as_ref()),
-                friend: uniques(&c.friend_bonus_uniques),
-                ally: uniques(&c.ally_bonus_uniques),
-                uniques: uniques(&c.uniques),
+                friend: SourceUniques::default(),
+                ally: SourceUniques::default(),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -756,7 +860,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                     Tab::Difficulties,
                     &r.excluded_difficulties,
                 ),
-                uniques: uniques(&r.uniques),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -797,7 +901,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
             PolicyDef {
                 name: text(name),
                 key: key(b.id.as_ref()),
-                uniques: uniques(&b.uniques),
+                uniques: SourceUniques::default(),
                 kind: PolicyKind::Branch {
                     era: l.one("era", Tab::Eras, &b.era).unwrap_or(EraId(0)),
                     priorities: b.priorities.iter().map(|(&k, &v)| (k, v)).collect(),
@@ -813,7 +917,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
             PolicyDef {
                 name: text(name),
                 key: key(x.id.as_ref()),
-                uniques: uniques(&x.uniques),
+                uniques: SourceUniques::default(),
                 kind: PolicyKind::Member {
                     branch: l.one("branch", Tab::Branches, &x.branch).unwrap_or(PolicyId(0)),
                     requires: l.all("requires", Tab::Policies, &x.requires),
@@ -849,7 +953,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 ),
                 cities: texts(&n.cities),
                 benchmark: n.benchmark,
-                uniques: uniques(&n.uniques),
+                uniques: SourceUniques::default(),
             },
         );
     }
@@ -882,7 +986,8 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
         // check_sizes held branches and policies to 128.
         policy_branch_count: u16::try_from(raw.policy_branches.len()).unwrap_or(u16::MAX),
         nations,
-        global_uniques: uniques(&raw.global_uniques),
+        global_uniques: SourceUniques::default(),
+        uniques: UniqueTable::default(),
         constants,
         fracs: IdVec::new(),
         derived: Derived::empty(),

@@ -31,7 +31,7 @@ fn dump() -> Value {
     serde_json::from_str(DUMP).expect("rules_dump.json is JSON")
 }
 
-fn shipped() -> &'static Ruleset {
+pub(super) fn shipped() -> &'static Ruleset {
     Ruleset::shared()
 }
 
@@ -47,7 +47,10 @@ fn load_owned(files: &[(String, Vec<u8>)]) -> Result<Ruleset, RulesetErrors> {
 }
 
 /// Loads the embedded ruleset with one file's JSON changed by `edit`.
-fn load_edited(file: &str, edit: impl FnOnce(&mut Value)) -> Result<Ruleset, RulesetErrors> {
+pub(super) fn load_edited(
+    file: &str,
+    edit: impl FnOnce(&mut Value),
+) -> Result<Ruleset, RulesetErrors> {
     let mut files = owned_files();
     let slot = files.iter_mut().find(|(n, _)| n == file).expect("a ruleset file");
     let mut v: Value = serde_json::from_slice(&slot.1).expect("JSON");
@@ -207,8 +210,8 @@ fn the_shipped_tables_have_the_census_sizes() {
     assert_eq!(r.speed_names().collect::<Vec<_>>(), ["Quick", "Standard", "Epic", "Marathon"]);
     assert_eq!(r.difficulty_names().next(), Some("Settler"));
     assert_eq!(r.map_sizes().len(), 6);
-    assert!(r.global_uniques().len() >= 8);
-    assert!(r.fracs().is_empty(), "the unique compiler fills the fracs (package 1a-05)");
+    assert!(r.global_uniques().all.len() >= 8);
+    assert_eq!(r.fracs().len(), 19, "the distinct fractions of the terrains' generation rules");
 }
 
 #[test]
@@ -229,7 +232,11 @@ fn references_resolve_to_ids() {
     assert!(r.base_units()[unit("Great Scientist")].great_person);
     let worker = &r.base_units()[unit("Worker")];
     let class = worker.builder.expect("workers build");
-    assert_eq!(&*r.derived().builder_classes[usize::from(class.0)], [Box::<str>::from("Land")]);
+    let filters: Vec<&str> = r.derived().builder_classes[usize::from(class.0)]
+        .iter()
+        .map(|&f| r.uniques().text(r.uniques().object(f).text))
+        .collect();
+    assert_eq!(filters, ["Land"]);
     assert!(r.base_units()[unit("Warrior")].builder.is_none());
     let babylon = r.lookup::<NationId>("Babylon").expect("a nation");
     assert_eq!(r.nations()[babylon].kind, NationKind::Major);
@@ -338,7 +345,7 @@ fn leaking_the_same_ruleset_twice_leaks_one_copy() {
 // ---- Gate 5: what is refused ------------------------------------------------------------------
 
 /// The one problem of `kind` the load reported, which must name `file` and `object`.
-fn refused(
+pub(super) fn refused(
     result: Result<Ruleset, RulesetErrors>,
     kind: RulesetErrorKind,
     file: &str,
