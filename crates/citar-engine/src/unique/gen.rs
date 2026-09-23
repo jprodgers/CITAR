@@ -5,10 +5,11 @@
 #![allow(clippy::too_many_lines, reason = "one arm per unique type")]
 
 use super::countable::Countable;
-use super::params::{BeliefKind, CostOrStrength, CountOrAll, FoundingOrEnhancing, Param, ParamCx, ParamError, PolicyOrBelief, PopulationFilter, RegionType, SpyAction, StatOrResource, TerrainQuality, UnitTriggerTarget};
+use super::params::{CostOrStrength, CountOrAll, FoundingOrEnhancing, Param, ParamCx, ParamError, PolicyOrBelief, PopulationFilter, RegionType, StatOrResource, TerrainQuality, UnitTriggerTarget};
 use super::table::Role;
 use crate::base::ids::{BaseUnitId, BuildingId, CityFilterId, CivFilterId, CombatantFilterId, DifficultyId, EraId, FeatureId, FracId, ObjectFilterId, PromotionId, ResourceId, SetRef, SpeedId, StatsId, TagId, TechId, TerrainId, TextId, TileFilterId, UnitFilterId, VictoryId};
 use crate::base::stats::Stat;
+use crate::rules::defs::{BeliefKind, SpyAction};
 
 /// UnCiv's unique types, in `unique_types.tsv`'s order (637). Most are never used by the
 /// shipped ruleset; [`TypeInfo::support`] says which the engine compiles.

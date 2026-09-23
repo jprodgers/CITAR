@@ -65,6 +65,159 @@ pub enum BeliefType {
     Enhancer,
 }
 
+impl BeliefType {
+    /// Every type, in the order `religion.py:545` listed them.
+    pub const ALL: [Self; 4] = [Self::Pantheon, Self::Founder, Self::Follower, Self::Enhancer];
+
+    /// The type's name in `beliefs.json`: `Pantheon`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Pantheon => "Pantheon",
+            Self::Founder => "Founder",
+            Self::Follower => "Follower",
+            Self::Enhancer => "Enhancer",
+        }
+    }
+}
+
+/// A belief type, or any type: what a civilization's choices of beliefs are counted by
+/// (`religion.py:544-575`), what `grant_free_belief` keyed its free beliefs by
+/// (`religion.py:701-706`), and a unique's `[beliefType]`. `Gain a free [Any] belief` gives a
+/// choice of any type, so state that counts beliefs by kind needs all five slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BeliefKind {
+    Type(BeliefType),
+    Any,
+}
+
+impl BeliefKind {
+    /// How many kinds there are: the slots of a table kept by kind.
+    pub const COUNT: usize = 5;
+
+    /// Every kind, in [`index`](Self::index) order: the four types, then `Any`.
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Type(BeliefType::Pantheon),
+        Self::Type(BeliefType::Founder),
+        Self::Type(BeliefType::Follower),
+        Self::Type(BeliefType::Enhancer),
+        Self::Any,
+    ];
+
+    /// The kind's slot in a table kept by kind, such as a civilization's free beliefs
+    /// (`[u8; BeliefKind::COUNT]`): a type's place in [`BeliefType::ALL`], and 4 for `Any`.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Type(BeliefType::Pantheon) => 0,
+            Self::Type(BeliefType::Founder) => 1,
+            Self::Type(BeliefType::Follower) => 2,
+            Self::Type(BeliefType::Enhancer) => 3,
+            Self::Any => 4,
+        }
+    }
+
+    /// The name a ruleset and Python's saves write: `Follower`, `Any`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Type(t) => t.name(),
+            Self::Any => "Any",
+        }
+    }
+
+    /// The kind called `name`, exactly.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.name() == name)
+    }
+}
+
+/// What a spy is doing (`espionage.py:17-21`): a spy's state, and a unique's `[spyAction]`
+/// (`CounterIntelligenceSpyRankBonus`, which `espionage.py:101` compared with a spy's action).
+/// One enum serves both, so the rule compares them directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SpyAction {
+    #[default]
+    None,
+    Moving,
+    EstablishingNetwork,
+    ObservingCity,
+    StealingTech,
+    RiggingElections,
+    Coup,
+    CounterIntelligence,
+    Dead,
+}
+
+impl SpyAction {
+    /// Every action, in Python's order (`espionage.py:17-19`).
+    pub const ALL: [Self; 9] = [
+        Self::None,
+        Self::Moving,
+        Self::EstablishingNetwork,
+        Self::ObservingCity,
+        Self::StealingTech,
+        Self::RiggingElections,
+        Self::Coup,
+        Self::CounterIntelligence,
+        Self::Dead,
+    ];
+
+    /// The name Python saved and showed: `Establishing Network`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Moving => "Moving",
+            Self::EstablishingNetwork => "Establishing Network",
+            Self::ObservingCity => "Observing City",
+            Self::StealingTech => "Stealing Tech",
+            Self::RiggingElections => "Rigging Elections",
+            Self::Coup => "Coup",
+            Self::CounterIntelligence => "Counter-intelligence",
+            Self::Dead => "Dead",
+        }
+    }
+
+    /// The action called `name`, exactly, as saves and the converter read it.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == name)
+    }
+
+    /// The action a ruleset's `[spyAction]` names: Python's name in any case, as
+    /// `espionage.py:101` compared them, or UnCiv's (`EstablishNetwork`, `Surveillance`,
+    /// `Conducting Counter-intelligence`).
+    #[must_use]
+    pub fn from_ruleset_text(text: &str) -> Option<Self> {
+        if let Some(a) = Self::ALL.into_iter().find(|a| a.name().eq_ignore_ascii_case(text)) {
+            return Some(a);
+        }
+        Some(match text {
+            "EstablishNetwork" => Self::EstablishingNetwork,
+            "Surveillance" => Self::ObservingCity,
+            "StealingTech" => Self::StealingTech,
+            "RiggingElections" => Self::RiggingElections,
+            "CounterIntelligence" | "Conducting Counter-intelligence" => Self::CounterIntelligence,
+            _ => return None,
+        })
+    }
+
+    /// Whether the spy is set up in its city, and so sees it (`SET_UP`, `espionage.py:20`).
+    #[must_use]
+    pub const fn is_set_up(self) -> bool {
+        matches!(
+            self,
+            Self::ObservingCity
+                | Self::StealingTech
+                | Self::RiggingElections
+                | Self::Coup
+                | Self::CounterIntelligence
+        )
+    }
+}
+
 /// A nation's `kind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -831,5 +984,59 @@ mod tests {
     fn personalities_by_name() {
         assert_eq!(CityStatePersonality::from_name("Hostile"), Some(CityStatePersonality::Hostile));
         assert_eq!(CityStatePersonality::from_name("hostile"), None);
+    }
+
+    #[test]
+    fn belief_kinds_have_one_slot_each_any_included() {
+        for (i, k) in BeliefKind::ALL.into_iter().enumerate() {
+            assert_eq!(k.index(), i, "{k:?}");
+            assert_eq!(BeliefKind::from_name(k.name()), Some(k));
+        }
+        for (i, t) in BeliefType::ALL.into_iter().enumerate() {
+            assert_eq!(BeliefKind::Type(t).index(), i, "a type's slot is its place in ALL");
+        }
+        // A free `Any` belief (`religion.py:701-706`, taken at 569-571) has a slot of its own.
+        let mut free = [0_u8; BeliefKind::COUNT];
+        free[BeliefKind::Any.index()] += 1;
+        assert_eq!(free, [0, 0, 0, 0, 1]);
+        assert_eq!(BeliefKind::from_name("any"), None, "exact names only");
+        assert_eq!(core::mem::size_of::<BeliefKind>(), 1);
+    }
+
+    #[test]
+    fn spy_actions_by_name_and_as_rulesets_write_them() {
+        for a in SpyAction::ALL {
+            assert_eq!(SpyAction::from_name(a.name()), Some(a));
+            assert_eq!(SpyAction::from_ruleset_text(a.name()), Some(a));
+            let upper = a.name().to_uppercase();
+            assert_eq!(SpyAction::from_ruleset_text(&upper), Some(a), "any case, as Python");
+            if upper != a.name() {
+                assert_eq!(SpyAction::from_name(&upper), None, "saves: exact names only");
+            }
+        }
+        assert_eq!(SpyAction::from_ruleset_text("Surveillance"), Some(SpyAction::ObservingCity));
+        assert_eq!(
+            SpyAction::from_ruleset_text("EstablishNetwork"),
+            Some(SpyAction::EstablishingNetwork)
+        );
+        assert_eq!(
+            SpyAction::from_ruleset_text("Conducting Counter-intelligence"),
+            Some(SpyAction::CounterIntelligence)
+        );
+        assert_eq!(SpyAction::from_ruleset_text("Spying"), None);
+        assert_eq!(SpyAction::from_name("Surveillance"), None);
+        let set_up: Vec<_> = SpyAction::ALL.into_iter().filter(|a| a.is_set_up()).collect();
+        assert_eq!(
+            set_up,
+            [
+                SpyAction::ObservingCity,
+                SpyAction::StealingTech,
+                SpyAction::RiggingElections,
+                SpyAction::Coup,
+                SpyAction::CounterIntelligence
+            ]
+        );
+        assert_eq!(SpyAction::default(), SpyAction::None);
+        assert_eq!(core::mem::size_of::<SpyAction>(), 1);
     }
 }

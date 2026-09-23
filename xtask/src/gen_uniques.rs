@@ -584,18 +584,18 @@ fn header(o: &mut String, used: &BTreeSet<&str>) {
         "VictoryId",
     ];
     let from_params = [
-        "BeliefKind",
         "CostOrStrength",
         "CountOrAll",
         "FoundingOrEnhancing",
         "PolicyOrBelief",
         "PopulationFilter",
         "RegionType",
-        "SpyAction",
         "StatOrResource",
         "TerrainQuality",
         "UnitTriggerTarget",
     ];
+    // Vocabularies that game state shares with uniques live with the ruleset's other types.
+    let from_defs = ["BeliefKind", "SpyAction"];
     if used.contains("Countable") {
         o.push_str("use super::countable::Countable;\n");
     }
@@ -610,6 +610,10 @@ fn header(o: &mut String, used: &BTreeSet<&str>) {
     wl!(o, "use crate::base::ids::{{{}}};", ids.join(", "));
     if used.contains("Stat") {
         o.push_str("use crate::base::stats::Stat;\n");
+    }
+    let defs: Vec<&str> = from_defs.iter().copied().filter(|t| used.contains(t)).collect();
+    if !defs.is_empty() {
+        wl!(o, "use crate::rules::defs::{{{}}};", defs.join(", "));
     }
     o.push('\n');
 }

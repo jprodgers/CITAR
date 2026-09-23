@@ -11,12 +11,12 @@ use std::collections::BTreeSet;
 
 use citar_engine::base::ids::{BaseUnitId, NationId, SpeedId, TerrainId};
 use citar_engine::rules::Ruleset;
-use citar_engine::rules::defs::BeliefType;
+use citar_engine::rules::defs::{BeliefKind, BeliefType, SpyAction};
 use citar_engine::unique::generated::p;
-use citar_engine::unique::params::{BeliefKind, FoundingOrEnhancing, SpyAction};
+use citar_engine::unique::params::FoundingOrEnhancing;
 use citar_engine::unique::text::{placeholder, split_modifiers};
 use citar_engine::unique::{CondData, Role, TriggerCond, UFlags, UniqueData, UniqueType};
-use citar_testkit::rulesets::{KITCHEN_SINK, kitchen_sink};
+use citar_testkit::rulesets::{KITCHEN_SINK, files_of, kitchen_sink, overlay};
 use serde_json::Value;
 
 use super::rules::shipped;
@@ -187,6 +187,49 @@ fn display_modifiers_change_nothing() {
     assert!(matches!(u.data, UniqueData::StatsPerCity(_)));
     assert!(u.conds.is_empty() && u.flags().is_empty() && t.modifiers(id).is_empty());
     assert!(nation.civ.contains(&id), "it stands like any other effect");
+}
+
+/// The kitchen sink with `uniques` in place of the uniques of `object` in `file`.
+fn sink_with(
+    file: &str,
+    object: &str,
+    uniques: &[&str],
+) -> Result<Ruleset, citar_engine::rules::RulesetErrors> {
+    let patch = serde_json::json!({ object: { "uniques": uniques } }).to_string();
+    let mut patches = KITCHEN_SINK.to_vec();
+    patches.push((file, &patch));
+    let files = overlay(&patches).expect("the patches apply");
+    Ruleset::load(&files_of(&files))
+}
+
+#[test]
+fn a_free_belief_of_any_type_has_a_slot_of_its_own() {
+    // `Gain a free [Any] belief` loads as Python read it: `grant_free_belief` kept free beliefs
+    // by type name, `Any` among them (religion.py:701-706), and founding took them from the
+    // `Any` slot (religion.py:569-572). State keeps them by BeliefKind, one slot each.
+    let text = "Gain a free [Any] belief <upon founding a Religion>";
+    let r = sink_with("ruleset/nations.json", "Kitchen Sink", &[text]).expect("it loads");
+    let t = r.uniques();
+    let nation = &r.nations()[r.lookup::<NationId>("Kitchen Sink").expect("a nation")].uniques;
+    let beliefs: Vec<BeliefKind> = nation
+        .ids()
+        .filter_map(|id| match t.get(id).data {
+            UniqueData::OneTimeFreeBelief(p) => Some(p.belief),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(beliefs, [BeliefKind::Any]);
+    assert_eq!(BeliefKind::Any.index(), BeliefKind::COUNT - 1);
+    // The kitchen sink's own grant is of one type, in that type's slot.
+    let r = kitchen_sink();
+    let t = r.uniques();
+    let nation = &r.nations()[r.lookup::<NationId>("Kitchen Sink").expect("a nation")].uniques;
+    let follower = nation.ids().find_map(|id| match t.get(id).data {
+        UniqueData::OneTimeFreeBelief(p) => Some(p.belief),
+        _ => None,
+    });
+    assert_eq!(follower, Some(BeliefKind::Type(BeliefType::Follower)));
+    assert_eq!(follower.map(BeliefKind::index), Some(2));
 }
 
 // ---- Gate b: coverage ---------------------------------------------------------------------------

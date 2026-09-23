@@ -28,7 +28,7 @@ use crate::base::ids::{
 use crate::base::sets::BitSet;
 use crate::base::stats::{Stat, Stats};
 use crate::rules::Ruleset;
-use crate::rules::defs::{BeliefType, TerrainType};
+use crate::rules::defs::{BeliefKind, SpyAction, TerrainType};
 
 /// The largest amount a parameter may give, either way. Nothing in the ruleset comes near it; it
 /// keeps sums of amounts far from `i32`'s edges.
@@ -79,65 +79,6 @@ pub enum CostOrStrength {
 pub enum FoundingOrEnhancing {
     Founding,
     Enhancing,
-}
-
-/// `[beliefType]`: the beliefs of one type, or of any type (`religion.py:544-575`, which counts
-/// the choices a civilization has by type, `Any` among them).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum BeliefKind {
-    Type(BeliefType),
-    Any,
-}
-
-/// `[spyAction]`: what a spy is doing (`espionage.py:17-19`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SpyAction {
-    None,
-    Moving,
-    EstablishingNetwork,
-    ObservingCity,
-    StealingTech,
-    RiggingElections,
-    Coup,
-    CounterIntelligence,
-    Dead,
-}
-
-impl SpyAction {
-    /// Every action, with the words Python named it by (`espionage.py:17-19`).
-    const NAMES: [(Self, &'static str); 9] = [
-        (Self::None, "None"),
-        (Self::Moving, "Moving"),
-        (Self::EstablishingNetwork, "Establishing Network"),
-        (Self::ObservingCity, "Observing City"),
-        (Self::StealingTech, "Stealing Tech"),
-        (Self::RiggingElections, "Rigging Elections"),
-        (Self::Coup, "Coup"),
-        (Self::CounterIntelligence, "Counter-intelligence"),
-        (Self::Dead, "Dead"),
-    ];
-
-    /// The action's name, as Python wrote it.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        Self::NAMES.iter().find(|(a, _)| *a == self).map_or("", |(_, n)| n)
-    }
-
-    /// The action a ruleset names: Python's words in any case, as `espionage.py:101` compared
-    /// them, or UnCiv's (`EstablishNetwork`, `Surveillance`, `Conducting Counter-intelligence`).
-    fn from_text(text: &str) -> Option<Self> {
-        if let Some((a, _)) = Self::NAMES.iter().find(|(_, n)| n.eq_ignore_ascii_case(text)) {
-            return Some(*a);
-        }
-        Some(match text {
-            "EstablishNetwork" => Self::EstablishingNetwork,
-            "Surveillance" => Self::ObservingCity,
-            "StealingTech" => Self::StealingTech,
-            "RiggingElections" => Self::RiggingElections,
-            "CounterIntelligence" | "Conducting Counter-intelligence" => Self::CounterIntelligence,
-            _ => return None,
-        })
-    }
 }
 
 /// `[terrainQuality]`: how start placement values a terrain, in UnCiv's words.
@@ -356,8 +297,7 @@ impl Param {
             Self::CostOrStrength(CostOrStrength::Strength) => text("Strength"),
             Self::FoundingOrEnhancing(FoundingOrEnhancing::Founding) => text("founding"),
             Self::FoundingOrEnhancing(FoundingOrEnhancing::Enhancing) => text("enhancing"),
-            Self::BeliefKind(BeliefKind::Type(t)) => text(belief_type_word(t)),
-            Self::BeliefKind(BeliefKind::Any) => text("Any"),
+            Self::BeliefKind(k) => text(k.name()),
             Self::SpyAction(a) => text(a.name()),
             Self::TerrainQuality(q) => text(match q {
                 TerrainQuality::Undesirable => "Undesirable",
@@ -375,15 +315,6 @@ impl Param {
             },
             Self::Text(t) => text(u.text(t)),
         }
-    }
-}
-
-fn belief_type_word(t: BeliefType) -> &'static str {
-    match t {
-        BeliefType::Pantheon => "Pantheon",
-        BeliefType::Founder => "Founder",
-        BeliefType::Follower => "Follower",
-        BeliefType::Enhancer => "Enhancer",
     }
 }
 
@@ -724,18 +655,16 @@ impl<'r> Lexicon<'r> {
                 "enhancing" => FoundingOrEnhancing::Enhancing,
                 _ => return Err("expected founding or enhancing".into()),
             }),
-            K::BeliefType => Param::BeliefKind(match text {
-                "Pantheon" => BeliefKind::Type(BeliefType::Pantheon),
-                "Founder" => BeliefKind::Type(BeliefType::Founder),
-                "Follower" => BeliefKind::Type(BeliefType::Follower),
-                "Enhancer" => BeliefKind::Type(BeliefType::Enhancer),
-                "Any" => BeliefKind::Any,
-                _ => return Err("expected Pantheon, Founder, Follower, Enhancer or Any".into()),
-            }),
-            K::SpyAction => Param::SpyAction(SpyAction::from_text(text).ok_or_else(|| {
-                let names: Vec<&str> = SpyAction::NAMES.iter().map(|(_, n)| *n).collect();
-                format!("not a spy action: expected one of {}", names.join(", "))
+            K::BeliefType => Param::BeliefKind(BeliefKind::from_name(text).ok_or_else(|| {
+                let names: Vec<&str> = BeliefKind::ALL.iter().map(|k| k.name()).collect();
+                format!("not a belief type: expected one of {}", names.join(", "))
             })?),
+            K::SpyAction => {
+                Param::SpyAction(SpyAction::from_ruleset_text(text).ok_or_else(|| {
+                    let names: Vec<&str> = SpyAction::ALL.iter().map(|a| a.name()).collect();
+                    format!("not a spy action: expected one of {}", names.join(", "))
+                })?)
+            }
             K::TerrainQuality => Param::TerrainQuality(match text {
                 "Undesirable" => TerrainQuality::Undesirable,
                 "Food" => TerrainQuality::Food,
@@ -936,23 +865,6 @@ mod tests {
         assert_eq!(stat("Gold"), Ok(Stat::Gold));
         assert!(stat("gold").is_err());
         assert!(stat("Gold ").is_err());
-    }
-
-    #[test]
-    fn spy_actions_read_as_python_and_unciv_name_them() {
-        for (a, name) in SpyAction::NAMES {
-            assert_eq!(SpyAction::from_text(name), Some(a));
-            assert_eq!(SpyAction::from_text(&name.to_uppercase()), Some(a), "any case, as Python");
-            assert_eq!(a.name(), name);
-        }
-        assert_eq!(SpyAction::from_text("Surveillance"), Some(SpyAction::ObservingCity));
-        assert_eq!(
-            SpyAction::from_text("Conducting Counter-intelligence"),
-            Some(SpyAction::CounterIntelligence)
-        );
-        assert_eq!(SpyAction::from_text("Spying"), None);
-        assert_eq!(core::mem::size_of::<SpyAction>(), 1);
-        assert_eq!(core::mem::size_of::<BeliefKind>(), 1);
     }
 
     #[test]
