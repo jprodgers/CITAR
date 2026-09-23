@@ -9,7 +9,9 @@
 //! name normalisation of `rules.py:26-30`; and the possessives of `game.py:17-23`.
 
 pub mod collections;
+pub mod fmt;
 pub mod ids;
+pub mod num;
 pub mod order;
 pub mod rng;
 pub mod sets;
