@@ -4,6 +4,7 @@
 mod engine {
     mod filters;
     mod hex;
+    mod kitchen_sink;
     mod rules;
     mod uniques;
 }

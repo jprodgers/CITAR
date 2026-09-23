@@ -29,7 +29,7 @@ const BUILDINGS: &str = "ruleset/buildings.json";
 const UNITS: &str = "ruleset/units.json";
 
 /// Every object's uniques, with the object's kind and name.
-fn named_sources(r: &Ruleset) -> Vec<(&'static str, &str, &SourceUniques)> {
+pub(super) fn named_sources(r: &Ruleset) -> Vec<(&'static str, &str, &SourceUniques)> {
     let mut out: Vec<(&'static str, &str, &SourceUniques)> = Vec::new();
     out.extend(r.nations().as_slice().iter().map(|x| ("Nation", &*x.name, &x.uniques)));
     out.extend(r.buildings().as_slice().iter().map(|x| ("Building", &*x.name, &x.uniques)));

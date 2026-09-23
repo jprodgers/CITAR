@@ -1,0 +1,18 @@
+{
+  "Kitchen Sink Spire": {
+    "name": "Kitchen Sink Spire",
+    "type": "NaturalWonder",
+    "production": 2,
+    "science": 2,
+    "occursOn": ["Plains", "Grassland"],
+    "uniques": [
+      "Must be adjacent to [0] [Coast] tiles",
+      "Must be on [1] largest landmasses"
+    ],
+    "turnsInto": "Mountain",
+    "impassable": true,
+    "unbuildable": true,
+    "weight": 10,
+    "id": "kitchen_sink_spire"
+  }
+}

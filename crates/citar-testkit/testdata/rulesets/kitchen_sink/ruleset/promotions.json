@@ -1,0 +1,16 @@
+{
+  "Kitchen Sink Veteran": {
+    "name": "Kitchen Sink Veteran",
+    "unitTypes": ["Sword", "Mounted", "Gunpowder"],
+    "uniques": [
+      "This Promotion is free",
+      "[+2] Strength",
+      "[+10]% Strength <when above [50] HP>",
+      "[+10]% Strength <when below [50] HP>",
+      "[+15]% Strength <when not stacked with a [Great General] unit>",
+      "[+5]% Strength <for units with [Drill I]>",
+      "[+5]% Strength <for units without [Drill I]>"
+    ],
+    "id": "kitchen_sink_veteran"
+  }
+}
