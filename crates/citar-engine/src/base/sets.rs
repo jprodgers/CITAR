@@ -16,8 +16,8 @@ use core::marker::PhantomData;
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 
 use super::ids::{
-    BaseUnitId, BeliefId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, PlayerId,
-    PolicyId, PromotionId, ResourceId, TagId, TechId, TerrainId,
+    BaseUnitId, BeliefId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
+    PlayerId, PolicyId, PromotionId, ResourceId, TagId, TechId, TerrainId,
 };
 
 /// A vector with one entry per player, indexed by [`PlayerId`].
@@ -281,6 +281,8 @@ pub const IMPROVEMENT_WORDS: usize = 1;
 pub const ERA_WORDS: usize = 1;
 /// Words in a [`TagSet`]: 256 tags, the texts that filters name as tags (a few dozen shipped).
 pub const TAG_WORDS: usize = 4;
+/// Words in a [`NationSet`]: 128 nations, city-states and the barbarians included (83 shipped).
+pub const NATION_WORDS: usize = 2;
 
 /// Techs, such as a player's known techs.
 pub type TechSet = IdSet<TechId, TECH_WORDS>;
@@ -304,6 +306,8 @@ pub type ImprovementSet = IdSet<ImprovementId, IMPROVEMENT_WORDS>;
 pub type EraSet = IdSet<EraId, ERA_WORDS>;
 /// Unique tags: the parameterless uniques a source carries that filters name (DESIGN.md 5.6).
 pub type TagSet = IdSet<TagId, TAG_WORDS>;
+/// Nations, such as the nations a civilization filter names (DESIGN.md 5.7).
+pub type NationSet = IdSet<NationId, NATION_WORDS>;
 
 // ---- FeatureSet -------------------------------------------------------------------------------
 
