@@ -254,7 +254,10 @@ impl<I: Id, const W: usize> SubAssign for IdSet<I, W> {
 
 /// A growable set of `u32` indices, for tiles: explored tiles, visible tiles, visited nodes.
 ///
-/// Two sets with the same members are equal however many trailing zero words either holds.
+/// Two sets with the same members are equal however many trailing zero words either holds, and
+/// [`words`](Self::words) and serde, the only ways the words leave the set, drop those zero words.
+/// So equal sets digest the same (DESIGN.md 4.10), whether one was sized for the map with
+/// [`with_capacity`](Self::with_capacity) and the other read back from a save.
 #[derive(Clone, Default)]
 pub struct BitSet {
     words: Vec<u64>,
@@ -279,15 +282,10 @@ impl BitSet {
         Self { words }
     }
 
-    /// The raw words, including any trailing zero words.
+    /// The raw words up to the last one with a bit set: the canonical form, the same for any two
+    /// equal sets. Bit `i` of word `w` is index `64 * w + i`.
     #[must_use]
     pub fn words(&self) -> &[u64] {
-        &self.words
-    }
-
-    /// The raw words up to the last one with a bit set.
-    #[must_use]
-    pub fn trimmed_words(&self) -> &[u64] {
         let end = self.words.iter().rposition(|&w| w != 0).map_or(0, |i| i + 1);
         &self.words[..end]
     }
@@ -384,7 +382,21 @@ impl BitSet {
 
 impl PartialEq for BitSet {
     fn eq(&self, other: &Self) -> bool {
-        self.trimmed_words() == other.trimmed_words()
+        self.words() == other.words()
+    }
+}
+
+/// [`words`](BitSet::words) as a sequence of `u64`, in both encodings.
+impl serde::Serialize for BitSet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.words().serialize(serializer)
+    }
+}
+
+/// A sequence of `u64` words; trailing zero words are accepted and change nothing.
+impl<'de> serde::Deserialize<'de> for BitSet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<u64>::deserialize(deserializer).map(Self::from_words)
     }
 }
 
@@ -617,7 +629,35 @@ mod tests {
         b.insert(900);
         b.remove(900);
         assert_eq!(a, b);
-        assert_eq!(b.trimmed_words(), &[1 << 5]);
+        assert_eq!(b.words(), &[1 << 5]);
+        a.clear();
+        assert_eq!(a.words(), &[] as &[u64]);
+    }
+
+    /// Equal sets write the same bytes, so a set sized for the map and the same set read back
+    /// from a save digest alike.
+    #[test]
+    fn equal_bit_sets_serialise_alike() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::base::digest::to_canon_vec;
+
+        let mut sized = BitSet::with_capacity(16_000);
+        sized.insert(70);
+        sized.insert(9_000);
+        sized.remove(9_000);
+        let loaded = BitSet::from_words(vec![0, 1 << 6]);
+        assert_eq!(sized, loaded);
+        assert_eq!(to_canon_vec(&sized)?, to_canon_vec(&loaded)?);
+        assert_eq!(
+            to_canon_vec(&loaded)?,
+            [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0]
+        );
+        let json = serde_json::to_string(&sized)?;
+        assert_eq!(json, "[0,64]");
+        let back: BitSet = serde_json::from_str("[0,64,0,0]")?;
+        assert_eq!(back, sized);
+        assert_eq!(to_canon_vec(&back)?, to_canon_vec(&sized)?);
+        assert_eq!(to_canon_vec(&BitSet::with_capacity(640))?, to_canon_vec(&BitSet::new())?);
+        Ok(())
     }
 
     #[test]
