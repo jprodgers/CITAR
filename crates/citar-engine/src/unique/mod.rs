@@ -5,3 +5,7 @@
 //!
 //! Replaces `citar/engine/unique_types.py`, `uniques.py:28-1083`, `economy.py:64-147`,
 //! `triggers.py:13-74` and `cities.py:1169-1193`.
+//!
+//! - [`text`]: taking a unique's text apart (package 1a-03, which the ruleset loader needs).
+
+pub mod text;
