@@ -265,5 +265,95 @@ class AccessModel(unittest.TestCase):
             self.assertIn(access.MANAGE, access.on(s, s.get(type(self.owner), self.owner_id), row))
 
 
+class GameRoutes(unittest.TestCase):
+    """The same rules at the HTTP layer, for routes that once skipped the gate.
+
+    Both of these answered anybody who knew the game id: the id is eight hex digits and appears in
+    share links and URLs, so "knowing the id" is no protection at all.
+    """
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from citar.auth import sessions
+        from citar.server import ownership
+        from citar.server.app import app, manager
+
+        _reset()
+        self.manager = manager
+        self.client = TestClient(app, base_url="https://citar.test")
+        self.cookies = {}
+        with db.session() as s:
+            for handle, role in (("owner", "user"), ("other", "user"), ("zara", "admin")):
+                user = accounts.create_user(s, handle=handle, email=f"{handle}@example.com",
+                                            password="a long enough phrase", role=role,
+                                            status="active", email_verified=True)
+                _row, raw = sessions.start(s, user)
+                self.cookies[handle] = {"cookie": f"{sessions.COOKIE_NAME}={raw}"}
+                if handle == "owner":
+                    owner = user
+            # Two bots and not started: nothing runs, and with no humans god view is allowed.
+            self.game = manager.create({"map_size": "duel", "seed": 3, "barbarians": "off"},
+                                       [{"type": "bot"}, {"type": "bot"}], "Private game",
+                                       track=False, start=False)
+            self.row = ownership.register(s, self.game, owner, visibility="private")
+
+    def tearDown(self):
+        self.manager.delete(self.game.id)
+        self.client.close()
+
+    def _get(self, path, who=None, **params):
+        return self.client.get(f"/api/games/{self.game.id}{path}", params=params,
+                               headers=self.cookies.get(who, {}))
+
+    def _set_visibility(self, visibility):
+        with db.session() as s:
+            s.get(GameRow, self.game.id).visibility = visibility
+
+    # ---------------------------------------------------------------- debug/errors
+    def test_stranger_gets_404_on_debug_errors(self):
+        for who in (None, "other"):
+            with self.subTest(who=who or "anonymous"):
+                self.assertEqual(self._get("/debug/errors", who).status_code, 404)
+
+    def test_seat_and_spectator_tokens_do_not_open_debug_errors(self):
+        """A token grants view, so this is a 403 rather than a 404 — but it is still a refusal."""
+        for token in (self.game.seats[0].token, self.game.spectator_token):
+            self.assertEqual(self._get("/debug/errors", token=token).status_code, 403)
+
+    def test_viewer_of_a_public_game_cannot_read_debug_errors(self):
+        """Viewing is not enough: the errors carry what each seat was trying to do."""
+        self._set_visibility("public")
+        self.assertEqual(self._get("/debug/errors", "other").status_code, 403)
+
+    def test_owner_and_admin_read_debug_errors(self):
+        for who in ("owner", "zara"):
+            with self.subTest(who=who):
+                response = self._get("/debug/errors", who)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertIn("errors", response.json())
+
+    # ---------------------------------------------------------------- replay
+    def test_stranger_gets_404_on_replay_of_a_finished_private_game(self):
+        self.game.game.s.phase = "over"
+        for who in (None, "other"):
+            with self.subTest(who=who or "anonymous"):
+                self.assertEqual(self._get("/replay", who).status_code, 404)
+
+    def test_viewers_read_the_replay_of_a_finished_game(self):
+        self.game.game.s.phase = "over"
+        for who in ("owner", "zara"):
+            with self.subTest(who=who):
+                self.assertEqual(self._get("/replay", who).status_code, 200)
+        self.assertEqual(self._get("/replay", token=self.game.seats[0].token).status_code, 200)
+        self._set_visibility("public")
+        self.assertEqual(self._get("/replay").status_code, 200)
+
+    def test_spectator_token_still_opens_the_replay_of_a_live_ai_only_game(self):
+        self.assertEqual(self.game.game.s.phase, "playing")
+        response = self._get("/replay", token=self.game.spectator_token)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self._get("/replay").status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()
