@@ -749,9 +749,15 @@ def compare_models():
 
 
 @app.get("/api/games/{gid}/debug/errors")
-def errors(gid: str):
-    """Recent errors from AI seats. The first place to look when a model does nothing."""
-    s = _session(gid)
+def errors(gid: str, request: Request, p: Principal = Depends(principal),
+           sdb: DbSession = Depends(get_db)):
+    """Recent errors from AI seats. The first place to look when a model does nothing.
+
+    Gated on managing the game, not just viewing it: these are server tracebacks and the tool
+    arguments each seat sent, which show what a player was trying to do and are nobody else's
+    business. It used to answer anyone who knew the game id.
+    """
+    s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     return {"errors": s.errors[-50:], "agents": {pid: {"usage": getattr(a, "usage_total", None),
                                                        "last_error": getattr(a, "last_error", None)}
                                                  for pid, a in s.agents.items()}}
@@ -1443,9 +1449,14 @@ def models_scores():
 # replay / recap
 # ----------------------------------------------------------------------------
 @app.get("/api/games/{gid}/replay")
-def replay(gid: str, request: Request, token: Optional[str] = None):
-    """The whole game, turn by turn, for the recap."""
-    s = _session(gid)
+def replay(gid: str, request: Request, token: Optional[str] = None,
+           p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The whole game, turn by turn, for the recap.
+
+    Gated on viewing the game, like everything else about it: a finished private game is still
+    private. The spectator token counts as view, so watching an AI-only game live still works.
+    """
+    s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request, token)
     tok = _token(request, token)
     if not (s.game.s.phase != "playing" or (s.is_spectator(tok) and s.god_view_allowed())):
         raise HTTPException(403, "The recap is available when the game is over (or to spectators of AI-only games).")
