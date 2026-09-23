@@ -18,9 +18,10 @@
 //!
 //! Package 1a-05 adds:
 //! - **`uniques.json`**: every compiled unique of the embedded ruleset, one row each (its source,
-//!   text, type, role, flags, parameters, modifiers and key), with the fractions, stats, static
-//!   filters, object filters, tags and abilities they refer to. Written by `golden bless` when the
-//!   ruleset data or the compiler changes; a diff shows exactly which uniques moved.
+//!   text, type, role, flags, parameters, modifiers and key); every source object's partitions
+//!   and tags, one row each; and the fractions, stats, static filters, object filters, tags and
+//!   abilities they refer to. Written by `golden bless` when the ruleset data or the compiler
+//!   changes; a diff shows exactly which uniques, or which partitions, moved.
 //!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
@@ -30,13 +31,14 @@
 use std::path::PathBuf;
 
 use citar_engine::base::fmt::{PyFloat, PyRound};
-use citar_engine::base::ids::{AbilityKey, TagId};
+use citar_engine::base::ids::{AbilityKey, TagId, UniqueId};
 use citar_engine::base::num::{self, FloorDiv};
 use citar_engine::base::rng::{Purpose, Rng};
+use citar_engine::base::sets::TagSet;
 use citar_engine::base::stats::Stats;
 use citar_engine::rules::{Ruleset, embedded};
-use citar_engine::unique::Source;
 use citar_engine::unique::params::{Param, ParamValue};
+use citar_engine::unique::{Source, SourceUniques};
 use serde_json::{Value, json};
 
 /// Where the committed golden files live.
@@ -588,8 +590,61 @@ fn check_ruleset() -> SetReport {
 // ---- uniques.json -----------------------------------------------------------------------------
 
 /// The lists of `uniques.json`, rendered one row a line.
-const UNIQUE_LISTS: [&str; 7] =
-    ["uniques", "fracs", "stats", "sets", "objects", "tags", "abilities"];
+const UNIQUE_LISTS: [&str; 8] =
+    ["uniques", "sources", "fracs", "stats", "sets", "objects", "tags", "abilities"];
+
+/// Every source object's uniques in [`Source`] order, each named as [`source_name`] names it.
+fn sources_of(r: &Ruleset) -> Vec<(String, &SourceUniques)> {
+    fn named<'r, T: 'r>(
+        out: &mut Vec<(String, &'r SourceUniques)>,
+        kind: &str,
+        rows: &'r [T],
+        name: impl Fn(&T) -> &str,
+        uniques: impl Fn(&'r T) -> &'r SourceUniques,
+    ) {
+        out.extend(rows.iter().map(|x| (format!("{kind}:{}", name(x)), uniques(x))));
+    }
+    let mut out = Vec::new();
+    named(&mut out, "Nation", r.nations().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Building", r.buildings().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Policy", r.policies().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Tech", r.techs().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Era", r.eras().as_slice(), |x| &x.name, |x| &x.uniques);
+    let cs = r.city_state_types().as_slice();
+    named(&mut out, "CityStateFriend", cs, |x| &x.name, |x| &x.friend);
+    named(&mut out, "CityStateAlly", cs, |x| &x.name, |x| &x.ally);
+    named(&mut out, "CityStateType", cs, |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Belief", r.beliefs().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Resource", r.resources().as_slice(), |x| &x.name, |x| &x.uniques);
+    out.push(("Global:".to_owned(), r.global_uniques()));
+    named(&mut out, "Terrain", r.terrains().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Improvement", r.improvements().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "UnitType", r.unit_types().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Unit", r.base_units().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Promotion", r.promotions().as_slice(), |x| &x.name, |x| &x.uniques);
+    named(&mut out, "Ruins", r.ruins().as_slice(), |x| &x.name, |x| &x.uniques);
+    out
+}
+
+/// One row of `uniques.json`'s `sources`: a source's `all` range, the ids in each partition, and
+/// its tags by name. The partitions are what the unique indexes are built from.
+fn source_row(r: &Ruleset, name: String, u: &SourceUniques) -> Value {
+    let t = r.uniques();
+    let ids = |list: &[UniqueId]| list.iter().map(|id| id.0).collect::<Vec<u16>>();
+    let tags = |set: &TagSet| set.iter().map(|g| t.tag(g)).collect::<Vec<&str>>();
+    json!([
+        name,
+        [u.all.start, u.all.end],
+        ids(&u.civ),
+        ids(&u.local),
+        ids(&u.on_gain),
+        ids(&u.triggered),
+        ids(&u.actions),
+        ids(&u.ai),
+        tags(&u.tags),
+        tags(&u.cond_tags),
+    ])
+}
 
 /// The name of the object a unique came from, as `golden` rows write it: `Building:Temple`.
 fn source_name(r: &Ruleset, s: Source) -> String {
@@ -676,6 +731,8 @@ pub fn uniques_answers() -> Value {
             ])
         })
         .collect();
+    let sources: Vec<Value> =
+        sources_of(&r).into_iter().map(|(name, u)| source_row(&r, name, u)).collect();
     let fracs: Vec<Value> = r.fracs().as_slice().iter().map(|&x| json!(x)).collect();
     let stats: Vec<Value> = t.all_stats().as_slice().iter().map(stats_json).collect();
     let sets: Vec<Value> = t
@@ -715,8 +772,10 @@ pub fn uniques_answers() -> Value {
     json!({
         "format": 1,
         "about": "every compiled unique of the embedded ruleset (DESIGN.md 5.5): [id, source, occurrence, text, type, role, flags, params, modifiers, key, temp_variant, ability, tag]",
+        "about_sources": "every source object's uniques (SourceUniques): [source, [all.start, all.end], civ, local, on_gain, triggered, actions, ai, tags, cond_tags]",
         "counts": {
             "uniques": t.len(),
+            "sources": sources.len(),
             "conds": t.all_conds().len(),
             "fracs": fracs.len(),
             "stats": stats.len(),
@@ -726,6 +785,7 @@ pub fn uniques_answers() -> Value {
             "abilities": abilities.len(),
         },
         "uniques": rows,
+        "sources": sources,
         "fracs": fracs,
         "stats": stats,
         "sets": sets,
