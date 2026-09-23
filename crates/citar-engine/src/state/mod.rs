@@ -5,3 +5,12 @@
 //! and `cargo xtask check` enforces that.
 //!
 //! Replaces `citar/engine/state.py:13-405` and `game.py:32-60`.
+
+pub mod change;
+pub mod cities;
+pub mod map;
+pub mod memory;
+pub mod store;
+pub mod units;
+
+pub use change::{Change, Changes, TileClaim};
