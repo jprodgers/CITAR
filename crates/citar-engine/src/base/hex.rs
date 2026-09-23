@@ -6,7 +6,9 @@
 //! `y * width + x`. Cube coordinates do the arithmetic. A map may wrap east-west, north-south or
 //! both; every method here accounts for it, so nothing that goes through [`HexGrid`] needs to.
 //! North-south wrapping needs an even height, because odd rows are shifted: an odd height turns
-//! it off, as in Python.
+//! it off, as in Python. Sides are 8 to 256 tiles, the bounds `maps.py:31` and `130-133` put on
+//! every map, so a corrupt save or map cannot ask for an enormous grid, and no wrapped step lands
+//! back on its own tile.
 //!
 //! Differences from Python:
 //! - **`within` order.** Python sorted `within(idx, r)` by distance and kept its dq/dr
@@ -16,10 +18,11 @@
 //!   distance; within one distance it differs. Rules that pick among ties use an explicit key
 //!   (DESIGN.md 7.4), and where a Python rule took "the first tile in `within` order" the new
 //!   order is a listed intended difference.
-//! - **Tiny maps.** On a map so small that a wrapped step lands back on the tile itself or on an
-//!   earlier neighbour, Python's `neighbor_in_dir` returned that tile anyway; here the direction
-//!   has no neighbour, as in the neighbour list. Maps are at least 8x8 (`maps.py:130-133`), where
-//!   this never happens.
+//! - **Tiles off the map.** Python indexed its lists with whatever it was given. Here every method
+//!   takes any `TileIdx` without panicking: a tile off the map has no neighbours, is `u32::MAX`
+//!   steps from everything, and has no line to anywhere.
+//! - **Sizes.** Python built a grid of any size, and only the map loader checked the bounds; a
+//!   game config could ask for a 3x3 map. Here the grid refuses sides outside 8 to 256.
 
 use super::ids::TileIdx;
 use super::num::round_half_even;
@@ -120,12 +123,18 @@ const fn double_length(dq: i32, dr: i32) -> u32 {
     dq.unsigned_abs() + dr.unsigned_abs() + (dq + dr).unsigned_abs()
 }
 
+/// The shortest side a map may have (`maps.py:132`).
+pub const MIN_SIDE: u16 = 8;
+
+/// The longest side a map may have (`maps.py:31`, `MAX_SIDE`).
+pub const MAX_SIDE: u16 = 256;
+
 /// Why a grid cannot be built.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HexError {
-    /// A side of zero.
-    #[error("a map needs a width and a height of at least 1, not {width}x{height}")]
-    Empty { width: u16, height: u16 },
+    /// A side outside `MIN_SIDE..=MAX_SIDE`.
+    #[error("a map needs sides of {MIN_SIDE} to {MAX_SIDE} tiles, not {width}x{height}")]
+    Size { width: u16, height: u16 },
 }
 
 /// A hex map's geometry: size, wrapping, neighbours, distance, areas, rings and lines.
@@ -150,10 +159,12 @@ pub struct HexGrid {
 }
 
 impl HexGrid {
-    /// The grid for a `width` by `height` map. `wrap_y` is ignored on an odd height.
+    /// The grid for a `width` by `height` map, each side from [`MIN_SIDE`] to [`MAX_SIDE`].
+    /// `wrap_y` is ignored on an odd height.
     pub fn new(width: u16, height: u16, wrap_x: bool, wrap_y: bool) -> Result<Self, HexError> {
-        if width == 0 || height == 0 {
-            return Err(HexError::Empty { width, height });
+        let sides = MIN_SIDE..=MAX_SIDE;
+        if !sides.contains(&width) || !sides.contains(&height) {
+            return Err(HexError::Size { width, height });
         }
         let wrap_y = wrap_y && height.is_multiple_of(2);
         let (w, h) = (i32::from(width), i32::from(height));
@@ -196,6 +207,8 @@ impl HexGrid {
         let dirs = if y & 1 == 1 { &DIRS_ODD } else { &DIRS_EVEN };
         let mut out = [NO_TILE; 6];
         for (d, (dx, dy)) in dirs.iter().enumerate() {
+            // With sides of at least 8 a step never wraps onto the tile or an earlier neighbour;
+            // the checks keep the table a set of distinct neighbours regardless.
             if let Some(n) = self.wrap(x + dx, y + dy)
                 && n.0 != i
                 && !out.contains(&n.0)
@@ -282,12 +295,13 @@ impl HexGrid {
         self.idx(x, y)
     }
 
-    /// The coordinates of a tile.
+    /// The coordinates of a tile. For an index off the map, the row is past the last one.
     #[must_use]
     #[inline]
     pub const fn xy(&self, idx: TileIdx) -> (i32, i32) {
         let w = self.width as u32;
-        // Both parts are below 2^16, since a tile index is below 2^32 and the width at least 1.
+        // x is below the width; y is below 2^32 / 8 = 2^29, since the width is at least 8, so
+        // both fit an i32 even for an index off the map.
         ((idx.0 % w) as i32, (idx.0 / w) as i32)
     }
 
@@ -341,9 +355,13 @@ impl HexGrid {
         best
     }
 
-    /// The number of steps between two tiles, the short way round on a wrapping map.
+    /// The number of steps between two tiles, the short way round on a wrapping map; `u32::MAX`
+    /// if either is off the map.
     #[must_use]
     pub fn distance(&self, a: TileIdx, b: TileIdx) -> u32 {
+        if !self.contains(a) || !self.contains(b) {
+            return u32::MAX;
+        }
         let (ca, cb) = (self.cube(a), self.cube(b));
         let (dq, dr) = (cb.q - ca.q, cb.r - ca.r);
         let mut best = u32::MAX;
@@ -362,7 +380,7 @@ impl HexGrid {
     /// order: from the east corner, counter-clockwise. On a wrapping map a tile can come more
     /// than once, or be nearer than `radius` the other way round.
     fn walk_ring(&self, c: Cube, radius: u32, mut f: impl FnMut(TileIdx)) {
-        // radius <= reach <= 2^17, so it fits an i32.
+        // radius <= reach <= 512, so it fits an i32.
         let k = radius as i32;
         let mut q = c.q + k;
         let mut r = c.r;
@@ -453,12 +471,15 @@ impl HexGrid {
     }
 
     /// The tiles on the straight line from `a` to `b`, both included, the short way round
-    /// (Python's `line`).
+    /// (Python's `line`). Empty if either is off the map.
     ///
     /// The same float steps as Python, with the same nudges off the exact midpoints, and
     /// Python's round-half-even, so the tiles are the same.
     #[must_use]
     pub fn line(&self, a: TileIdx, b: TileIdx) -> Vec<TileIdx> {
+        if !self.contains(a) || !self.contains(b) {
+            return Vec::new();
+        }
         let n = self.distance(a, b);
         if n == 0 {
             return vec![a];
@@ -496,10 +517,14 @@ impl HexGrid {
     }
 
     /// `b`'s offset coordinates as seen from `a`: the copy of `b` nearest to `a`, which may lie
-    /// off the map (Python's `unwrapped_xy`). On a map that does not wrap, just `b`'s.
+    /// off the map (Python's `unwrapped_xy`). On a map that does not wrap, or when either tile is
+    /// off the map, just `b`'s.
     #[must_use]
     pub fn unwrapped_xy(&self, a: TileIdx, b: TileIdx) -> (i32, i32) {
         let (bx, by) = self.xy(b);
+        if !self.contains(a) || !self.contains(b) {
+            return (bx, by);
+        }
         let (sq, sr) = self.nearest_shift(a, b);
         // A cube shift (sq, sr) is (sq + sr/2, sr) in offset terms; sr is a multiple of an even
         // height, so the halving is exact.
@@ -512,8 +537,9 @@ impl HexGrid {
     pub fn direction_name(&self, a: TileIdx, b: TileIdx) -> &'static str {
         let (ax, ay) = self.xy(a);
         let (bx, by) = self.unwrapped_xy(a, b);
+        let (ax, ay, bx, by) = (i64::from(ax), i64::from(ay), i64::from(bx), i64::from(by));
         // Python measures dx in half-hexes, with odd rows shifted by 0.5; doubling keeps it
-        // in integers.
+        // in integers. In i64, so a row off the map (up to 2^29) cannot overflow.
         let dx2 = (2 * bx + (by & 1)) - (2 * ax + (ay & 1));
         let dy = by - ay;
         if dx2 == 0 && dy == 0 {
@@ -601,6 +627,53 @@ mod tests {
     fn odd_height_cannot_wrap_north_south() {
         let g = grid(10, 9, false, true);
         assert!(!g.wrap_y());
-        assert!(HexGrid::new(0, 5, false, false).is_err());
+    }
+
+    #[test]
+    fn sides_are_eight_to_256() {
+        for (w, h) in [(0, 5), (7, 8), (8, 7), (257, 8), (8, 257), (u16::MAX, u16::MAX)] {
+            assert_eq!(
+                HexGrid::new(w, h, true, true),
+                Err(HexError::Size { width: w, height: h }),
+                "{w}x{h}"
+            );
+        }
+        assert_eq!(grid(8, 8, true, true).size(), 64);
+        assert_eq!(grid(256, 256, false, false).size(), 65_536);
+    }
+
+    /// The smallest wrapping map still has six distinct neighbours everywhere.
+    #[test]
+    fn smallest_wrapping_map_has_six_neighbours() {
+        let g = grid(8, 8, true, true);
+        for t in g.tiles() {
+            let mut n: Vec<TileIdx> = g.neighbors(t).collect();
+            n.sort();
+            n.dedup();
+            assert_eq!(n.len(), 6, "{:?}", g.xy(t));
+            assert!(!n.contains(&t));
+        }
+    }
+
+    /// Indices off the map, as a corrupt save could hold, never panic or allocate by their size.
+    #[test]
+    fn tiles_off_the_map_are_answered_without_panicking() {
+        for g in [grid(8, 8, true, true), grid(256, 256, true, false), grid(8, 256, false, true)] {
+            let on = TileIdx(3);
+            for off in [TileIdx(g.size()), TileIdx(u32::MAX), TileIdx(u32::MAX / 2)] {
+                assert_eq!(g.distance(on, off), u32::MAX);
+                assert_eq!(g.distance(off, off), u32::MAX);
+                assert!(g.line(on, off).is_empty());
+                assert!(g.line(off, on).is_empty());
+                assert!(g.within(off, 3).is_empty());
+                assert!(g.ring(off, 2).is_empty());
+                assert_eq!(g.neighbors(off).count(), 0);
+                assert_eq!(g.unwrapped_xy(on, off), g.xy(off));
+                assert_eq!(g.unwrapped_xy(off, on), g.xy(on));
+                assert!(!g.direction_name(on, off).is_empty());
+                assert!(!g.direction_name(off, on).is_empty());
+            }
+            assert_eq!(g.within(on, u32::MAX).len(), g.size() as usize);
+        }
     }
 }
