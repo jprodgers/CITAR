@@ -4,9 +4,10 @@
 //! `Player.explored`, ...). As bits they iterate in ascending id order without sorting, compare
 //! and combine a word at a time, and digest as raw words.
 //!
-//! - [`IdSet`] has a fixed width for a rule table: `TechSet = IdSet<TechId, 2>` holds 128 techs.
-//!   The ruleset loader refuses a table larger than its set, naming the constant to raise, so an
-//!   id never exceeds the capacity at runtime.
+//! - [`IdSet`] has a fixed width for a rule table: [`TechSet`] is `IdSet<TechId, TECH_WORDS>`
+//!   and holds 128 techs. The ruleset loader refuses a table larger than its set, naming the
+//!   constant to raise, so an id never exceeds the capacity at runtime.
+//! - [`FeatureSet`] is one `u16` over the terrain features, in layer order.
 //! - [`BitSet`] grows, for tile sets such as a player's explored tiles.
 //! - [`PlayerSet`] is one `u64`, which is why a game has at most 64 players.
 
@@ -14,7 +15,10 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 
-use super::ids::{Id, IdVec, PlayerId};
+use super::ids::{
+    BaseUnitId, BeliefId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, PlayerId,
+    PolicyId, PromotionId, ResourceId, TechId, TerrainId,
+};
 
 /// A vector with one entry per player, indexed by [`PlayerId`].
 pub type PlayerVec<T> = IdVec<PlayerId, T>;
@@ -247,6 +251,152 @@ impl<I: Id, const W: usize> BitAndAssign for IdSet<I, W> {
 impl<I: Id, const W: usize> SubAssign for IdSet<I, W> {
     fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs;
+    }
+}
+
+// ---- The rule sets and their widths (DESIGN.md 4.2) --------------------------------------------
+//
+// The ruleset loader refuses a table larger than its set and names the constant to raise, so an
+// id never exceeds its set at runtime. The widths leave mods room above the shipped counts.
+
+/// Words in a [`TechSet`]: 128 techs (80 shipped).
+pub const TECH_WORDS: usize = 2;
+/// Words in a [`PolicySet`]: 128 branches and policies (10 + 60 shipped).
+pub const POLICY_WORDS: usize = 2;
+/// Words in a [`BuildingSet`]: 256 buildings (124 shipped).
+pub const BUILDING_WORDS: usize = 4;
+/// Words in a [`BaseUnitSet`]: 256 units (127 shipped).
+pub const BASE_UNIT_WORDS: usize = 4;
+/// Words in a [`PromotionSet`]: 256 promotions (106 shipped).
+pub const PROMOTION_WORDS: usize = 4;
+/// Words in a [`BeliefSet`]: 128 beliefs (56 shipped).
+pub const BELIEF_WORDS: usize = 2;
+/// Words in a [`TerrainSet`]: 64 terrains, features and natural wonders included (33 shipped).
+pub const TERRAIN_WORDS: usize = 1;
+/// Words in a [`ResourceSet`]: 64 resources (35 shipped).
+pub const RESOURCE_WORDS: usize = 1;
+/// Words in an [`ImprovementSet`]: 64 improvements (35 shipped).
+pub const IMPROVEMENT_WORDS: usize = 1;
+/// Words in an [`EraSet`]: 64 eras (9 shipped).
+pub const ERA_WORDS: usize = 1;
+
+/// Techs, such as a player's known techs.
+pub type TechSet = IdSet<TechId, TECH_WORDS>;
+/// Policy branches and policies.
+pub type PolicySet = IdSet<PolicyId, POLICY_WORDS>;
+/// Buildings, such as a city's buildings.
+pub type BuildingSet = IdSet<BuildingId, BUILDING_WORDS>;
+/// Units of `units.json`.
+pub type BaseUnitSet = IdSet<BaseUnitId, BASE_UNIT_WORDS>;
+/// Promotions, such as a unit's promotions.
+pub type PromotionSet = IdSet<PromotionId, PROMOTION_WORDS>;
+/// Beliefs.
+pub type BeliefSet = IdSet<BeliefId, BELIEF_WORDS>;
+/// Terrains of `terrains.json`.
+pub type TerrainSet = IdSet<TerrainId, TERRAIN_WORDS>;
+/// Resources.
+pub type ResourceSet = IdSet<ResourceId, RESOURCE_WORDS>;
+/// Improvements.
+pub type ImprovementSet = IdSet<ImprovementId, IMPROVEMENT_WORDS>;
+/// Eras.
+pub type EraSet = IdSet<EraId, ERA_WORDS>;
+
+// ---- FeatureSet -------------------------------------------------------------------------------
+
+/// The terrain features on one tile, in one `u16`: bit `i` is `FeatureId(i)`.
+///
+/// The ruleset numbers its features in layer order, Hill lowest and Fallout highest, so the
+/// highest set bit is the feature on top ([`top`](Self::top)). Python kept a list in the order
+/// features were added and read its last non-Hill entry (`state.py:101-107`); for every
+/// combination the map generator and the rules can produce, the two agree.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct FeatureSet(u16);
+
+impl FeatureSet {
+    /// How many features fit (10 shipped, Hill included). The ruleset loader refuses more.
+    pub const CAPACITY: usize = 16;
+
+    /// No features.
+    pub const EMPTY: Self = Self(0);
+
+    /// The set with these raw bits.
+    #[must_use]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    /// The raw bits.
+    #[must_use]
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    #[inline]
+    fn bit(f: FeatureId) -> Option<u16> {
+        (usize::from(f.0) < Self::CAPACITY).then(|| 1u16 << f.0)
+    }
+
+    /// Adds `f`; true if it was not there already. A feature past the capacity is not added (and
+    /// fails a debug assertion): the loader refuses rulesets with more features than fit.
+    pub fn insert(&mut self, f: FeatureId) -> bool {
+        debug_assert!(usize::from(f.0) < Self::CAPACITY, "{f:?} does not fit a FeatureSet");
+        let Some(bit) = Self::bit(f) else { return false };
+        let fresh = self.0 & bit == 0;
+        self.0 |= bit;
+        fresh
+    }
+
+    /// Removes `f`; true if it was there.
+    pub fn remove(&mut self, f: FeatureId) -> bool {
+        let Some(bit) = Self::bit(f) else { return false };
+        let had = self.0 & bit != 0;
+        self.0 &= !bit;
+        had
+    }
+
+    /// Whether `f` is in the set.
+    #[must_use]
+    #[inline]
+    pub fn contains(self, f: FeatureId) -> bool {
+        Self::bit(f).is_some_and(|bit| self.0 & bit != 0)
+    }
+
+    /// The number of features.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// Whether there are none.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The feature in the highest layer, if any.
+    #[must_use]
+    pub const fn top(self) -> Option<FeatureId> {
+        if self.0 == 0 { None } else { Some(FeatureId((15 - self.0.leading_zeros()) as u8)) }
+    }
+
+    /// The features, lowest layer first.
+    pub fn iter(self) -> impl Iterator<Item = FeatureId> {
+        let mut rest = self.0;
+        core::iter::from_fn(move || {
+            if rest == 0 {
+                return None;
+            }
+            // Below 16, so it fits a u8.
+            let i = rest.trailing_zeros() as u8;
+            rest &= rest - 1;
+            Some(FeatureId(i))
+        })
+    }
+}
+
+impl fmt::Debug for FeatureSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
     }
 }
 
@@ -594,9 +744,6 @@ impl SubAssign for PlayerSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::ids::TechId;
-
-    type TechSet = IdSet<TechId, 2>;
 
     #[test]
     fn id_set_iterates_ascending_across_words() {
@@ -658,6 +805,30 @@ mod tests {
         assert_eq!(to_canon_vec(&back)?, to_canon_vec(&sized)?);
         assert_eq!(to_canon_vec(&BitSet::with_capacity(640))?, to_canon_vec(&BitSet::new())?);
         Ok(())
+    }
+
+    #[test]
+    fn feature_set_top_is_the_highest_layer() {
+        let mut s = FeatureSet::EMPTY;
+        assert_eq!(s.top(), None);
+        assert!(s.insert(FeatureId(0)));
+        assert!(s.insert(FeatureId(4)));
+        assert!(!s.insert(FeatureId(4)));
+        assert_eq!(s.top(), Some(FeatureId(4)));
+        assert!(s.insert(FeatureId(15)));
+        assert_eq!(s.top(), Some(FeatureId(15)));
+        assert_eq!(s.iter().collect::<Vec<_>>(), [FeatureId(0), FeatureId(4), FeatureId(15)]);
+        assert!(s.remove(FeatureId(15)));
+        assert!(!s.contains(FeatureId(15)));
+        assert_eq!(s.len(), 2);
+        assert!(!s.contains(FeatureId(16)));
+    }
+
+    #[test]
+    fn set_widths_hold_the_shipped_tables() {
+        assert_eq!(TechSet::CAPACITY, 128);
+        assert_eq!(PromotionSet::CAPACITY, 256);
+        assert_eq!(TerrainSet::CAPACITY, 64);
     }
 
     #[test]
