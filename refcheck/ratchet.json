@@ -3,6 +3,8 @@
     "refcheck/fixtures-mini",
     "refcheck/fixtures-late"
   ],
-  "unexplained": {},
+  "unexplained": {
+    "uniques": 0
+  },
   "failed": {}
 }

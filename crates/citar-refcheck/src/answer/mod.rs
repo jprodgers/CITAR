@@ -5,7 +5,9 @@
 //! recorded inputs (the tiles, units and pairs Python sampled are stored next to each answer)
 //! and fills it with Rust calls through `game::query`, so the two answers line up key for key.
 //!
-//! There are none yet: every group reports "not ported" until its module is added to `MODULES`.
+//! A group without a module reports "not ported" until its module is added to `MODULES`. So far:
+//! - [`uniques`] (package 1a-05), which compares the compiled ruleset once per run.
+//!
 //! Package 1a-10 adds the converted game to [`Ctx`], loaded once per fixture through
 //! `Game::from_python`; queries take `&self`, so one load serves every group.
 
@@ -17,6 +19,8 @@ use serde_json::Value;
 
 use crate::Group;
 use crate::fixture::Fixture;
+
+pub mod uniques;
 
 /// What an answer module is asked about.
 #[derive(Clone, Copy)]
@@ -74,7 +78,7 @@ pub trait Answers: Sync {
 }
 
 /// The engine's answer modules: one entry per ported group, in dependency order.
-static MODULES: &[&dyn AnswerModule] = &[];
+static MODULES: &[&dyn AnswerModule] = &[&uniques::Uniques];
 
 /// The answers of the Rust engine.
 #[derive(Debug, Clone, Copy, Default)]

@@ -212,7 +212,8 @@ struct StateConfig {
     wrap_y: bool,
 }
 
-fn read_gz(path: &Path) -> Result<Vec<u8>> {
+/// The bytes of a gzipped file.
+pub(crate) fn read_gz(path: &Path) -> Result<Vec<u8>> {
     let file = File::open(path).map_err(|e| Error::new(e.to_string()))?;
     let mut bytes = Vec::new();
     GzDecoder::new(BufReader::new(file))

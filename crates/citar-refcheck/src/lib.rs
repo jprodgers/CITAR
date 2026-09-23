@@ -10,7 +10,8 @@
 //! 5. reports in dependency order ([`report`]), while `refcheck/ratchet.json` ([`ratchet`])
 //!    keeps the counts of every group from rising.
 //!
-//! There are no answer modules yet: each system package adds its own (DESIGN.md 3.4, rule 1).
+//! Each system package adds its group's answer module (DESIGN.md 3.4, rule 1); the first is
+//! `uniques` (package 1a-05).
 
 #![forbid(unsafe_code)]
 

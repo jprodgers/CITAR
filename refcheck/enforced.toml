@@ -18,4 +18,6 @@
 # A difference above an enforced path that hides it counts too: an answer module that failed, a missing or extra
 # civilization (or any value holding an enforced place), a `civs` list that could not be keyed by pid.
 #
-# No group has an answer module yet, so nothing is enforced.
+# uniques (package 1a-05): every unique text of the ruleset compiles as Python read it.
+[[enforce]]
+group = "uniques"

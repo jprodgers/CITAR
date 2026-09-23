@@ -158,7 +158,9 @@ impl CompareSpec {
     pub fn for_group(group: Group) -> CompareSpec {
         let spec = CompareSpec::new(group).ignore("fn");
         match group {
-            Group::Uniques | Group::StateEcho | Group::FixedPoint => spec,
+            // The Rust answer folds action and meta modifiers, so their order is not kept.
+            Group::Uniques => spec.keyed("uniques", "id").multiset("uniques[*].modifiers"),
+            Group::StateEcho | Group::FixedPoint => spec,
             Group::TileYields => spec.keyed("owned", "idx"),
             Group::CityStats => spec.keyed("cities", "id").multiset("cities[*].workable"),
             Group::Civs => spec
