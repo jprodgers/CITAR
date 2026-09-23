@@ -10,15 +10,27 @@
 //! terrains do under `All`). That checks folding itself; whether the engine's own leaves merge
 //! exactly is checked against mock worlds in `tests/engine/filters.rs`.
 //!
+//! Package 1a-07 adds (its gate 4): a civilization's unique index is the same whatever order its
+//! sources come in, on random sources over the kitchen-sink ruleset; its entries are sorted by
+//! (type, id), each once, and count every copy.
+//!
 //! The number of cases follows `PROPTEST_CASES` (proptest's default is 256).
 
 use std::collections::BTreeSet;
 
+use std::collections::BTreeMap;
+
 use citar_engine::base::collections::MinHeap;
+use citar_engine::base::ids::{
+    BeliefId, BuildingId, CityStateTypeId, EraId, NationId, PolicyId, ResourceId, TechId, UniqueId,
+};
 use citar_engine::base::num::{floor_div, floor_mod};
 use citar_engine::base::rng::{KeyPart, Purpose, Rng};
 use citar_engine::base::sets::BitSet;
 use citar_engine::unique::filter::{Expr, Leaf};
+use citar_engine::unique::index::{CityStateBonus, CivIndex, CivSources, Csr};
+use citar_engine::unique::{UFlags, UniqueType};
+use citar_testkit::rulesets::kitchen_sink;
 use proptest::prelude::*;
 
 #[derive(Clone, Debug)]
@@ -97,6 +109,88 @@ fn tree() -> impl Strategy<Value = Expr<Worlds>> {
 
 fn holds(e: &Expr<Worlds>, world: u32) -> bool {
     e.eval(&mut |l| l.mask & (1 << world) != 0)
+}
+
+fn small<T: TryFrom<usize>>(i: usize) -> T {
+    T::try_from(i).unwrap_or_else(|_| panic!("{i} fits"))
+}
+
+/// Random sources of a civilization over the kitchen sink: every list of `CivSources` filled from
+/// its table, duplicates and all.
+fn civ_sources() -> impl Strategy<Value = CivSources> {
+    let r = kitchen_sink();
+    let temporary: Vec<UniqueId> = r
+        .uniques()
+        .iter()
+        .filter(|(_, u)| u.flags().contains(UFlags::TEMPORARY))
+        .map(|(id, _)| id)
+        .collect();
+    (
+        (0..r.nations().len(), 0..r.eras().len()),
+        prop::collection::vec((0..r.buildings().len(), 1u16..4), 0..16),
+        prop::collection::vec(0..r.policies().len(), 0..12),
+        prop::collection::vec(0..r.techs().len(), 0..24),
+        prop::collection::vec(prop::sample::select(temporary), 0..4),
+        prop::collection::vec((0..r.city_state_types().len(), any::<bool>()), 0..5),
+        prop::collection::vec(0..r.beliefs().len(), 0..5),
+        prop::collection::vec(0..r.resources().len(), 0..10),
+    )
+        .prop_map(
+            |((nation, era), buildings, policies, techs, temporary, cs, beliefs, resources)| {
+                CivSources {
+                    nation: NationId(small(nation)),
+                    buildings: buildings
+                        .into_iter()
+                        .map(|(b, n)| (BuildingId(small(b)), n))
+                        .collect(),
+                    policies: policies.into_iter().map(|p| PolicyId(small(p))).collect(),
+                    techs: techs.into_iter().map(|t| TechId(small(t))).collect(),
+                    temporary,
+                    era: EraId(small(era)),
+                    city_states: cs
+                        .into_iter()
+                        .map(|(c, ally)| {
+                            let bonus =
+                                if ally { CityStateBonus::Ally } else { CityStateBonus::Friend };
+                            (CityStateTypeId(small(c)), bonus)
+                        })
+                        .collect(),
+                    founder_beliefs: beliefs.into_iter().map(|b| BeliefId(small(b))).collect(),
+                    resources: resources.into_iter().map(|x| ResourceId(small(x))).collect(),
+                }
+            },
+        )
+}
+
+/// The sources with each list in another order.
+fn shuffled(src: &CivSources, seed: u64) -> CivSources {
+    let mut out = src.clone();
+    let rng = |k: u64| Rng::keyed(seed, Purpose::TestAgent, &[k]);
+    rng(0).shuffle(&mut out.buildings);
+    rng(1).shuffle(&mut out.temporary);
+    rng(2).shuffle(&mut out.city_states);
+    rng(3).shuffle(&mut out.founder_beliefs);
+    out
+}
+
+/// The index's own invariants: sorted by (type, id), each unique once, at least one copy.
+fn well_formed(c: &Csr) -> Result<(), TestCaseError> {
+    let r = kitchen_sink();
+    let t = r.uniques();
+    let slot = |id: UniqueId| {
+        let m = t.meta(id);
+        m.trigger.map_or(m.ty, |tr| Some(tr.ty())).map(|ty| ty as usize)
+    };
+    for e in c.entries() {
+        prop_assert!(e.n >= 1);
+        prop_assert!(slot(e.id).is_some(), "an untyped tag is not indexed");
+    }
+    for w in c.entries().windows(2) {
+        prop_assert!((slot(w[0].id), w[0].id) < (slot(w[1].id), w[1].id));
+    }
+    let total: usize = UniqueType::ALL.into_iter().map(|ty| c.get(ty).len()).sum();
+    prop_assert_eq!(total, c.len(), "every entry sits in its type's run");
+    Ok(())
 }
 
 proptest! {
@@ -211,6 +305,35 @@ proptest! {
         let a = Rng::keyed(seed, purpose, &words(&with_none)).next_u64();
         let b = Rng::keyed(seed, purpose, &words(&with_zero)).next_u64();
         prop_assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_civilizations_index_does_not_depend_on_the_order_of_its_sources(
+        src in civ_sources(),
+        seed in any::<u64>(),
+    ) {
+        let r = kitchen_sink();
+        let built = CivIndex::build(r, &src);
+        prop_assert_eq!(&CivIndex::build(r, &shuffled(&src, seed)), &built);
+        let mut reversed = src.clone();
+        reversed.buildings.reverse();
+        reversed.temporary.reverse();
+        reversed.city_states.reverse();
+        reversed.founder_beliefs.reverse();
+        prop_assert_eq!(&CivIndex::build(r, &reversed), &built);
+        well_formed(&built)?;
+        // A building's standing uniques count one copy per city that has it.
+        let mut copies: BTreeMap<BuildingId, u16> = BTreeMap::new();
+        for &(b, n) in &src.buildings {
+            *copies.entry(b).or_insert(0) += n;
+        }
+        for (&b, &n) in &copies {
+            for &u in r.buildings()[b].uniques.civ.iter() {
+                if let Some(e) = built.entries().iter().find(|e| e.id == u) {
+                    prop_assert!(e.n >= n, "{} copies of {}", e.n, r.uniques().text_of(u));
+                }
+            }
+        }
     }
 
     #[test]

@@ -445,7 +445,8 @@ fn civilization_leaves() {
     assert!(cs.eval(&mut |l| l.eval(&m, P2, None)) && !cs.eval(&mut |l| l.eval(&m, P0, None)));
     assert!(filter::civ_filter(r, "Nobody at all").is_err(), "a term that matches nothing");
     // The tests against the viewer read the diplomatic state, and open borders the turn they
-    // end. Friendship also reads a city-state's influence, which no class covers yet: every class.
+    // end. Friendship also reads a city-state's influence, another civilization's state that no
+    // class names (1a-07 decided): every class.
     let deps = |text| filter::civ_filter(r, text).expect("compiles").deps();
     assert_eq!(deps("Hostile"), CondDeps::WAR);
     assert_eq!(deps("Known"), CondDeps::WAR);
@@ -723,7 +724,7 @@ fn tile_leaves() {
     assert_eq!(TileLeaf::River.eval_terrain(&m, t(2)), Some(true));
     assert_eq!(TileLeaf::Worked.eval_terrain(&m, t(0)), None);
     // Friendly and foreign land read met, open borders, a city-state's influence and the
-    // viewer's uniques (`FilterFacts::tile_friendly_to`): every class, until 1a-07 names them.
+    // viewer's uniques (`FilterFacts::tile_friendly_to`): every class, as 1a-07 decided.
     let deps = |text| filter::tile_filter(r, text).expect("compiles").full.deps();
     assert_eq!(deps("Friendly Land"), CondDeps::all());
     assert_eq!(deps("Foreign Land"), CondDeps::all());
