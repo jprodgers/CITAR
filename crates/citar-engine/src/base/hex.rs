@@ -439,6 +439,35 @@ impl HexGrid {
         }
     }
 
+    /// Whether some tile within `radius` of `center`, including it, passes `f`: [`within`]
+    /// without the vector, stopping at the first tile that passes. The tiles come nearest ring
+    /// first; on a wrapping map a tile may be asked about twice, which cannot change the answer.
+    ///
+    /// [`within`]: Self::within
+    pub fn any_within(
+        &self,
+        center: TileIdx,
+        radius: u32,
+        mut f: impl FnMut(TileIdx) -> bool,
+    ) -> bool {
+        if !self.contains(center) {
+            return false;
+        }
+        if f(center) {
+            return true;
+        }
+        let c = self.cube(center);
+        let mut found = false;
+        for k in 1..=radius.min(self.reach()) {
+            // walk_ring visits a ring whole; the flag skips the tests after the first hit.
+            self.walk_ring(c, k, |t| found = found || f(t));
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Every tile at exactly `radius` from `center` (Python's `ring`), in ring order.
     #[must_use]
     pub fn ring(&self, center: TileIdx, radius: u32) -> Vec<TileIdx> {
@@ -621,6 +650,29 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), 200);
+    }
+
+    /// `any_within` answers as a search of `within` would, flat or wrapping, and stops early.
+    #[test]
+    fn any_within_agrees_with_within() {
+        for g in [grid(12, 10, false, false), grid(8, 8, true, true), grid(20, 10, true, false)] {
+            for center in [TileIdx(0), TileIdx(g.size() / 2 + 3)] {
+                for radius in [0, 1, 2, 5, 40] {
+                    let near = g.within(center, radius);
+                    for target in g.tiles() {
+                        let got = g.any_within(center, radius, |t| t == target);
+                        assert_eq!(got, near.contains(&target), "{radius} from {center:?}");
+                    }
+                }
+            }
+            let mut asked = 0;
+            assert!(g.any_within(TileIdx(0), 5, |_| {
+                asked += 1;
+                true
+            }));
+            assert_eq!(asked, 1, "the centre passes, and nothing else is asked");
+            assert!(!g.any_within(TileIdx(g.size()), 2, |_| true), "off the map");
+        }
     }
 
     #[test]

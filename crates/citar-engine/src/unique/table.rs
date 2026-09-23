@@ -21,7 +21,7 @@ use crate::base::ids::{
     PromotionId, ResourceId, RuinId, SetRef, SpecialistId, StatsId, TagId, TechId, TerrainId,
     TextId, TileFilterId, UniqueId, UnitFilterId, UnitTypeId,
 };
-use crate::base::sets::{BitSet, TagSet};
+use crate::base::sets::{BitSet, IdSet, TagSet};
 use crate::base::stats::Stats;
 
 /// What the engine does with a unique of some type (`unique_supported.toml`'s `role`).
@@ -480,6 +480,33 @@ impl StaticFilter {
     #[must_use]
     #[inline]
     pub fn contains<I: StaticId>(&self, id: I) -> bool {
+        self.check_domain::<I>();
+        u32::try_from(id.index()).is_ok_and(|i| self.members.contains(i))
+    }
+
+    /// Whether the filter selects any object of `set`, a set of the filter's domain: one test
+    /// per word, where asking about each member would cost one per member.
+    #[must_use]
+    #[inline]
+    pub fn intersects<I: StaticId, const W: usize>(&self, set: &IdSet<I, W>) -> bool {
+        self.check_domain::<I>();
+        self.members.words().iter().zip(set.words()).any(|(a, b)| a & b != 0)
+    }
+
+    /// How many objects of `set`, a set of the filter's domain, the filter selects.
+    #[must_use]
+    pub fn count_in<I: StaticId, const W: usize>(&self, set: &IdSet<I, W>) -> usize {
+        self.check_domain::<I>();
+        self.members
+            .words()
+            .iter()
+            .zip(set.words())
+            .map(|(a, b)| (a & b).count_ones() as usize)
+            .sum()
+    }
+
+    #[inline]
+    fn check_domain<I: StaticId>(&self) {
         debug_assert_eq!(
             self.domain,
             I::DOMAIN,
@@ -487,7 +514,6 @@ impl StaticFilter {
             self.domain,
             I::NAME
         );
-        u32::try_from(id.index()).is_ok_and(|i| self.members.contains(i))
     }
 }
 
@@ -783,6 +809,7 @@ pub fn unique_key(kind: &str, source_name: &str, occurrence: u16, text: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::sets::{BuildingSet, TechSet};
 
     #[test]
     fn flags_and_deps_share_a_word_without_touching() {
@@ -823,6 +850,25 @@ mod tests {
     fn a_static_filter_refuses_another_domains_id() {
         // Tech 3 has the index of building 3, which the set holds.
         assert!(buildings(&[3]).contains(TechId(3)));
+    }
+
+    #[test]
+    fn a_static_filter_meets_a_set_word_by_word() {
+        let s = buildings(&[1, 70, 130]);
+        let set = |ids: &[u16]| ids.iter().map(|&i| BuildingId(i)).collect::<BuildingSet>();
+        assert!(s.intersects(&set(&[5, 130])));
+        assert!(!s.intersects(&set(&[0, 2, 69, 71])));
+        assert!(!s.intersects(&BuildingSet::new()));
+        assert_eq!(s.count_in(&set(&[1, 2, 70, 130])), 3);
+        assert_eq!(s.count_in(&set(&[2])), 0);
+        assert!(!buildings(&[]).intersects(&set(&[1])), "a filter that selects nothing");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a Building filter asked about a TechId")]
+    fn a_static_filter_refuses_another_domains_set() {
+        assert!(buildings(&[3]).intersects(&[TechId(3)].into_iter().collect::<TechSet>()));
     }
 
     #[test]
