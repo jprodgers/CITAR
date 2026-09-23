@@ -1225,7 +1225,10 @@ The rule for unknown texts:
   - `Friendly` reads a declared friendship and the turn it ends, or a city-state's influence (`game.py:677-686`); friendly and foreign land read met, open borders and the turn they end, a city-state's influence, and the viewer's own `City-State territory always counts as friendly territory` (`tiles.py:151-165`). No class stands for influence or for a civilization's uniques, so these three read every class (`CondDeps::all()`), which is always correct;
   - `TECHS` for resource visibility; `RELIGION_STATE` for the religion city words.
 
-  The entity in context is the reader's class (`UNIT`, `CITY`, `TILE`, `COMBAT`), which 1a-07 adds where it evaluates the filter. 1a-07 also decides whether met, open borders, influence and a civilization's uniques get classes of their own, and narrows these tags.
+  The entity in context is the reader's class (`UNIT`, `CITY`, `TILE`, `COMBAT`), which 1a-07 adds where it evaluates the filter. As decided in 1a-07:
+  - met, open borders and declared friendship are part of `WAR`, which is the whole diplomatic state (one revision covers it);
+  - influence and a civilization's uniques get no class of their own. `Friendly`, friendly land and foreign land read another civilization's state, which no class of the civilization in context can name, so they keep `CondDeps::all()`;
+  - the city leaves that read beyond the city got classes: `Capital` reads `CITY_COUNT`, `Garrisoned` `UNIT_SET`, and `ConnectedToCapital` (roads, harbours and borders) every class.
 - **Checks.** `scripts/refcheck/filters.py` records Python's truth table of every filter text the ruleset writes (205) in each of the ten domains into `crates/citar-testkit/data/filters.json`, and the 2,050 Rust sets equal them, as does every static filter of the loaded ruleset. Mock worlds test every dynamic leaf. Proptests keep folding's meaning, on abstract leaves (`tests/props.rs`) and on the engine's own: random pairs of real unit, tile, city and civilization leaves merge exactly (`Leaf::and`, `Leaf::or` and `Leaf::constant` agree with evaluation on random mock worlds), and random trees over them answer the same folded as not (`tests/engine/filters.rs`). The golden `filters.json` snapshots every compiled tree.
 
 ### 5.8 Conditionals and `CondDeps`
@@ -1243,6 +1246,35 @@ The rule for unknown texts:
 - **Refusal texts.** `Cond::describe()` reproduces the refusal texts of `cities._not_met` (`cities.py:1169-1193`). This includes the two building-count texts that name the civilization's own equivalent building.
 - **Hoisting.** `applies_scoped(u, ctx, w, mask)` lets callers evaluate the civ-level parts once and only the context-local parts per tile.
 
+**As built in 1a-07** (§5.8):
+- **Files.** `unique/cond.rs`: `deps_of`, `assign_deps`, `applies`, `applies_scoped`, `in_scope`, `holds` (one arm per variant), `chance_keys`, `Cond::describe`, `equivalent_building`, `Problem` and `ProblemKind`. `applies` takes the unique's id, which holds the key a chance draw needs and the speed flag.
+- **Classes are assigned at load.** A conditional's classes depend on its filters' leaves, which compile after the uniques. So the loader assigns them at the end of the filter stage (`cond::assign_deps`) and then recomputes every `Unique.deps`. Each class is defined on `CondDeps`, for `Revs::cond` (1b-01) to map:
+  - a conditional that reads nothing but ids in its context reads `CONFIG`, such as `for [Major] Civilizations`, which reads a nation fixed at setup. So `Unique.deps` is empty exactly when a unique has no conditionals;
+  - the civilization conditionals read their one class (`TECHS`, `ERA`, `POLICIES` or `RELIGION_STATE` for a policy or a belief, and so on). The difficulty ones read `SEAT | CONFIG`, a chance `CHANCE | TURN | TILE | UNIT`, and `if no Civilization has adopted` `GLOBAL_POLICIES | CITY_COUNT`;
+  - a conditional over the civilization's cities or units adds `CITY_COUNT` or `UNIT_SET` to what its filter's leaves read, and a context-local one adds its entity's class;
+  - `in cities connected to the capital` reads every class, and so do the conditionals that read tiles other than the one in context (`with [a] to [b] neighboring`, `within [n] tiles of`, `in tiles [not] adjacent to`).
+
+  `CondDeps::LOCAL` and `CondDeps::CIV_LEVEL` name the two halves.
+- **Hoisting.** `applies_scoped(id, ctx, w, mask)` evaluates the conditionals that read a class of `mask` and no context-local class outside it. `CIV_LEVEL` and `LOCAL` split every unique's conditionals in two, and the two calls agree with `applies`: a test runs every unique of the kitchen sink in four contexts.
+- **Python's edge cases.**
+  - With no civilization in context, a conditional about the civilization fails. The exceptions are the ones Python wrote as negations, `before adopting []` and `without []`, and the stat comparisons, which read a stock of 0.
+  - Tutorials and water maps never hold.
+  - `Ctx::IGNORE`, Python's `ctx is None` and `ignore`, makes every unique apply.
+  - The region conditionals, which only map generation reads, answer as `GenCond` does.
+- **Python behaviour fixed**, for `intended.toml` once a group compares it:
+  - the building conditionals read a building filter (`if [Wonder] is constructed`), where Python compared the text with building names;
+  - `when between [a] and [b] [stat]` scales both bounds by game speed, as the other two comparisons did;
+  - `if no Civilization has adopted []` counts beliefs;
+  - `vs [] units` never matches a city.
+- **Refusal texts.** `Cond::describe(rules, nation)` gives the text, and `uq::requirement_problems` gives the whole text for `Can only be built`. `scripts/refcheck/not_met_dump.py` records Python's `_not_met` into `crates/citar-testkit/data/not_met.json`, and the Rust texts equal it:
+  - every requirement of the shipped buildings and units with every conditional forced to fail, for each nation whose text differs (54 rows);
+  - the distinct failing requirements of every city of the committed fixtures (24 rows).
+- **Checks** (`tests/engine/eval.rs`). The tests use a mock `EvalWorld` over tables, whose indexes `unique::index` builds, and a test nation `Eval Test` over the kitchen sink. It carries `[+1 Gold]` under each of the 92 conditionals an effect may carry; the two region conditionals come from the shipped start biases. The tests cover:
+  - one case per `CondData` variant, true and false, in a `match` without a wildcard;
+  - a table of each conditional's classes;
+  - no civilization in context, and `Ctx::IGNORE`;
+  - the chance key.
+
 ### 5.9 Countables, triggers and one-time effects
 
 - **Countables.** `Countable = Int | Turns | Cities | Units | CompletedBranches | Stat | UnitsMatching | CitiesMatching | RemainingCivs | BuildingsMatching` (`uniques.py:738-772`). `BuildingsMatching` sums the civ's per-building counts.
@@ -1252,6 +1284,20 @@ The rule for unknown texts:
 - **One-time effects.** Effects decode to a fully resolved `OneTimeEffect` enum, with a kind for each of the 39 one-time types (12 of them added by package 1a-05b) and for the standing effects that also happen on gain, such as `FreeUnits`, `FreeTechs`, `GainStat`, `RevealTiles`, `FreeBuilding` and `Timed`.
   - They are applied in a second phase by `game::triggers::apply_one_time(g: &mut Game, id, site)`, which ports `triggers.py:75-367`.
   - Each trigger's RNG is keyed `Purpose::Trigger, [meta.key, civ, tile.key(), turn]`.
+
+**As built in 1a-07** (§5.9):
+- **Countables.** `Countable::eval(w, ctx) -> Option<i64>` counts one. A count of a civilization's things with no civilization in context is `None`, Python's `None`, which fails the comparison. A stock is truncated as `int()` truncated it, and `Food` in a city is its stored food. `Countable::deps(filters)` gives what the count reads.
+- **Triggers** (`unique/trigger.rs`):
+  - `TriggerKind` has 25 kinds, and `ty()` gives each one's trigger type. `TriggerEvent` is what happened, holding what the trigger's parameter is compared with. `TriggerCond::kind` and `TriggerCond::matches(event, civ, w)` compare them. `TriggerSite` is where it happened.
+  - The indexes hold a triggered unique at its trigger's type (§5.12), so `fire` reads one run per index: the civilization's (with the resource layer), the city's local index and its majority religion's follower index (Python's `local_umaps` held both), and, with `include_unit`, the unit's profile. A unique fires once per copy.
+  - `upon gaining a [unit]` reads its filter wherever it fires; `great_people.py:140` fired it for every great person. `upon being defeated` is a kind like the others, for the combat port to fire.
+- **One-time effects.** `OneTimeEffect::decode(rules, id)` gives 31 kinds:
+  - one per one-time type, merged where two types differ only in a count or a placement: `FreeUnits` for the three free-unit types, and `FreePolicies`, `FreeTechs`, `GoldenAge`, `GainStat` (a fixed amount or a range) and `Adopt` (a policy or a belief) for two each;
+  - `Unit(UnitEffect)` for the nine `[This Unit]` types. Losing movement is a negative `Movement`;
+  - the five `gain` effects: `FreeBuilding`, `FreeStatBuildings`, `FreeSpecificBuildings`, `PromoteUnits` and `CityStateGreatPersonGift`;
+  - `Timed { variant, turns }` for any timed unique.
+
+  `[in this city]` on a one-time effect is `CityScope::ThisCity`, as Python's `_cities_for` read it, though as a city filter it selects every city. The table keeps its handle for this (`UniqueTable::is_this_city`). A test decodes every one-time, `gain` and timed unique of the kitchen sink, and meets every kind.
 
 ### 5.10 Tables for map generation, AI and milestones
 
@@ -1291,6 +1337,26 @@ pub mod uq { civ, civ_no_resources, city, unit, unit_and_civ, terrains, object, 
   - There is no `ensure_*` family and no debug-only freshness assert.
   - A stale read is impossible in every build profile.
 
+**As built in 1a-07** (§5.11, pinning risk 7):
+- **`Ctx`** is as drawn. `Ctx::{IGNORE, civ, city, unit, tile}` build one, and `resolve` derives the civilization and the tile as Python's constructor did. `rel_unit`, `rel_tile` and `rel_city` port the three properties. `CombatCtx` is `{ our, their, attacked_tile, action: Option<CombatAction> }`.
+- **`EvalWorld: FilterFacts`** has:
+  - `rules`, `seed` and `grid`;
+  - the settings: turn, speed, starting era, a seat's difficulty (or the game's), victories, religion, espionage and nuclear weapons;
+  - `civs` and `cities`, as iterators;
+  - civilization facts: at war with anyone, golden age, happiness as seen, stocks, resources, era, techs, what it researches, policies, completed branches, beliefs, `ReligionProgress`, prophets earned, capital, cities and units;
+  - city facts: tile, health, stored food, population, specialists, unemployed citizens and majority followers;
+  - tile facts: its city, its landmass and the units on it;
+  - unit facts: tile, health and used actions;
+  - the four index reads: `civ_index(p, IndexLayer)`, `city_local`, `follower` and `unit_index`.
+
+  Each group's doc names its class. The iterators are return-position `impl Iterator`. `ReligionProgress` lives in `rules::defs` beside `SpyAction`, for game state to share.
+- **`IndexRef<'a>`** is `Plain(&Csr)` or `Memo(Ref<Csr>)`, and derefs to a `Csr`.
+- **`uq`** (`unique::query`):
+  - `civ`, `civ_no_resources`, `city`, `unit`, `unit_and_civ`, `terrains`, `object` and `raw` give `Hits`, an iterator of `Hit { id, unique, n }`. It walks the indexes lazily and evaluates each candidate's conditionals;
+  - `any` and `sum_i32` consume one;
+  - `requirement_problems(w, ids, ctx, p)` reports why requirements are not met;
+  - a query of one object's uniques skips its timed and triggered ones, as `matching` skipped timed ones.
+
 ### 5.12 Unique indexes: memos, not hooks
 
 **Decision (index maintenance).** The rules area maintained the per-civ CSR indexes eagerly through about 12 mutation hooks. The pipeline area treated `CivIndex` as a memo, and the memo wins. `unique::index` keeps:
@@ -1320,6 +1386,14 @@ pub mod uq { civ, civ_no_resources, city, unit, unit_and_civ, terrains, object, 
 - there are no global caches;
 - conditionals read committed happiness and staged resource supply;
 - the Marble fix. The unique `[+15]% Production when constructing [All] wonders [in this city]` applies to every city in Python, because resource uniques ignore `in this city`. **Decision:** a resource unique marked LOCAL applies only in cities that own an improved tile with that resource.
+
+**As built in 1a-07** (§5.12):
+- **`Csr`** has one run per `UniqueType`: `start` holds `UniqueType::COUNT + 1` offsets. A standing unique (effect, flag or typed tag) sits at its own type, and a triggered one at its trigger's type. A tag with no UnCiv type is not indexed, because filters read tags from their sources. Copies merge into `n`, saturating.
+- **`CivSources`** is `{ nation, buildings: Vec<(BuildingId, u16)>, policies, techs, temporary: Vec<UniqueId>, era, city_states: Vec<(CityStateTypeId, CityStateBonus)>, founder_beliefs, resources: ResourceSet }`.
+  - `resources` is the resource layer: empty for `CivIndex` and filled for `CivIndexFull`, so one build function makes both. The city query's step 4 is therefore inside step 3's index.
+  - A building's or a resource's LOCAL uniques go to `index::city_local(rules, buildings, resources)` instead. Every other source's uniques go whole into the civilization's index.
+  - `index::follower(rules, beliefs)` and `index::unit_profile(rules, base, promotions)` build the other two indexes. `placeholder_counts` counts by each unique's own placeholder.
+- **Checks.** A proptest in `tests/props.rs` builds random sources over the kitchen sink. The index is the same with the lists shuffled or reversed, sorted by (type, id), with each unique once.
 
 ---
 
@@ -3093,7 +3167,7 @@ Port about 12 scripts from test_mechanics.
 - **Scope:** Ports:
 - religion.py, except the unit spread actions (1c-04): pantheons, founding, enhancing, beliefs, pressure with the CityNeighbours spatial grid, followers, prophets with Purpose::Prophet;
 - great_people.py: points, thresholds, births, the Maya long count, golden ages;
-- triggers.py:75-374: apply_one_time for all 29 OneTimeEffect kinds, including the timed path through temp variants;
+- triggers.py:75-374: apply_one_time for all 31 OneTimeEffect kinds, including the timed path through temp variants;
 - ruins.py: rewards with Purpose::Ruins.
 Wiring: stages S2 (great people, religion, Maya), E3 (religion, great people) and E6 (golden-age progress), and the setup stage for starting triggers.
 Additions: the actions found_pantheon and choose_great_person, and the religion and great-person paths of the refcheck city_stats and civs answer modules.

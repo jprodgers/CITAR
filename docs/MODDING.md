@@ -52,9 +52,17 @@ uniques:
 The error names the file, the object and what is wrong. Nothing is silently ignored.
 
 The 125 types the shipped ruleset does not use are marked `(extra)` in that file. They all
-compile now, and their rules arrive with the parts of the engine that read them: the conditionals
-first, then each game system as it is ported. `crates/citar-testkit/testdata/rulesets/kitchen_sink/`
-is a small mod that uses every one of them, so it has a worked example of each. Its files are JSON
+compile now, and every conditional is evaluated. The other rules arrive with the parts of the engine
+that read them, as each game system is ported. A few conditionals read a little more than the
+Python engine did:
+
+- the building conditionals take a building filter, so `<if [Wonder] is constructed>` works;
+- `<when between [a] and [b] [stat]>` scales both bounds by game speed on a unique
+  `<(modified by game speed)>`, as `<when above>` and `<when below>` do;
+- `<if no Civilization has adopted []>` counts beliefs as well as policies.
+
+`crates/citar-testkit/testdata/rulesets/kitchen_sink/` is a small mod that uses every one of the
+125, so it has a worked example of each. Its files are JSON
 merge patches over the shipped ruleset files: an object in a patch is added, or merged into the one
 of the same name.
 
