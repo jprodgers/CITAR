@@ -5,5 +5,6 @@ mod engine {
     mod filters;
     mod hex;
     mod rules;
+    mod state;
     mod uniques;
 }
