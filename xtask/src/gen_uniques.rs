@@ -442,6 +442,12 @@ fn check(rows: &[Row], supported: Supported) -> Result<Vec<Type>, String> {
                 bad("an inert type is read by no stage".into());
             }
             (_, Some(_)) if role != "inert" => bad("only an inert type has a reason".into()),
+            // Each package finds the types it must implement by its stage, so a type with none
+            // would be compiled and then read by nothing, silently.
+            (_, None) if role != "inert" && e.stages.is_empty() => bad(
+                "a type the engine reads names at least one stage (or make it inert with a reason)"
+                    .into(),
+            ),
             _ => {}
         }
         let mut stages = Vec::new();
@@ -934,6 +940,12 @@ mod tests {
         );
         let e = one(tsv, "[types]\nA = { role = \"effect\" }").expect_err("no field names");
         assert!(e.contains("0 field name(s) for 1 parameter(s)"), "{e}");
+        let e = one(tsv, "[types]\nB = { role = \"flag\" }").expect_err("no stage");
+        assert!(e.contains("names at least one stage"), "{e}");
+        assert!(
+            one(tsv, "[types]\nB = { role = \"inert\", reason = \"read by nothing\" }").is_ok(),
+            "an inert type needs no stage"
+        );
         let e = one(tsv, "[types]\nC = { role = \"flag\" }").expect_err("unknown type");
         assert!(e.contains("not a type"), "{e}");
         let e = one(tsv, "[types]\nB = { role = \"inert\" }").expect_err("no reason");
