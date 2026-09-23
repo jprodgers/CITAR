@@ -18,9 +18,11 @@
 //! - [`world`]: what the evaluator reads of a world ([`TileFacts`], [`FilterFacts`],
 //!   [`EvalWorld`]), and the context it reads it in ([`Ctx`]);
 //! - [`cond`]: the conditionals: what each reads, whether it holds, what a requirement says;
-//! - [`index`]: the unique indexes ([`Csr`]) of a civilization, a city, a religion and a unit.
+//! - [`index`]: the unique indexes ([`Csr`]) of a civilization, a city, a religion and a unit;
+//! - [`query`] (also `uq`): the uniques of a type that hold in a context;
+//! - [`trigger`]: when a triggered unique fires, and what a one-time unique does.
 //!
-//! Packages 1a-05 and 1a-06 compile; evaluation (1a-07) comes next.
+//! Packages 1a-05 and 1a-06 compile; 1a-07 evaluates.
 
 pub mod cond;
 pub mod countable;
@@ -30,11 +32,16 @@ pub mod filter;
 pub mod generated;
 pub mod index;
 pub mod params;
+pub mod query;
 pub mod table;
 pub mod text;
+pub mod trigger;
 pub mod world;
 
 pub(crate) mod compile;
+
+/// The queries by their short name: `uq::civ(w, p, ty, &ctx)` (DESIGN.md 5.11).
+pub use self::query as uq;
 
 pub use self::cond::{applies, applies_scoped};
 pub use self::filter::{
@@ -50,6 +57,7 @@ pub use self::table::{
     ActionMods, Cond, CondDeps, CondSpan, ObjectFilter, Role, Source, SourceUniques, StaticDomain,
     StaticFilter, StaticId, UFlags, Unique, UniqueMeta, UniqueTable,
 };
+pub use self::trigger::{OneTimeEffect, TriggerEvent, TriggerKind, TriggerSite};
 pub use self::world::{CombatCtx, Ctx, EvalWorld, FilterFacts, IndexLayer, IndexRef, TileFacts};
 
 impl UniqueType {
