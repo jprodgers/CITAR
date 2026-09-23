@@ -4,15 +4,29 @@
 //! `game::mutate` could change state behind the memos' backs. They are `pub(crate)`, and only
 //! `game/mutate.rs` (which bumps revisions first), `save/` (loading) and `compat/` (conversion)
 //! may call them. Defining one (`fn tiles_mut`) is not a call.
+//!
+//! The list is checked against `state/mod.rs` too: an accessor it names that `State` no longer
+//! defines is a finding, so a rename cannot quietly lift the restriction.
 
 use super::Finding;
 use super::source::SourceTree;
 
 const CHECK: &str = "mutation";
 
-/// The accessors, from `state/` (package 1a-08).
-pub const ACCESSORS: &[&str] =
-    &["tiles_mut", "units_mut", "cities_mut", "players_mut", "diplo_mut", "world_mut"];
+/// The accessors, from `state/mod.rs` (package 1a-08). The settings are here with the
+/// containers: nearly every cache reads them.
+pub const ACCESSORS: &[&str] = &[
+    "tiles_mut",
+    "units_mut",
+    "cities_mut",
+    "players_mut",
+    "diplo_mut",
+    "world_mut",
+    "config_mut",
+];
+
+/// The file that defines them.
+pub const DEFINED_IN: &str = "state/mod.rs";
 
 /// The files and directories (paths relative to `src/`) that may call them.
 pub const ALLOWED: &[&str] = &["game/mutate.rs", "save/", "compat/"];
@@ -41,6 +55,22 @@ pub fn check(tree: &SourceTree) -> Vec<Finding> {
             ));
         }
     }
+    if let Some(state) = tree.files.iter().find(|f| f.rel == DEFINED_IN) {
+        for name in ACCESSORS {
+            let defined =
+                state.tokens.windows(2).any(|w| w[0].is_ident("fn") && w[1].is_ident(name));
+            if !defined {
+                out.push(Finding::new(
+                    CHECK,
+                    format!(
+                        "{}/{DEFINED_IN} no longer defines State::{name}: update the list of \
+                         restricted accessors in xtask/src/check/access.rs",
+                        super::ENGINE_SRC
+                    ),
+                ));
+            }
+        }
+    }
     out
 }
 
@@ -62,6 +92,7 @@ mod tests {
         );
         assert_eq!(run("game/combat/resolve.rs", "let u = State::units_mut(&mut st);"), 1);
         assert_eq!(run("state/cities.rs", "fn g(&mut self) { self.cities_mut(); }"), 1);
+        assert_eq!(run("game/setup.rs", "fn g(st: &mut State) { st.config_mut().seed = 1; }"), 1);
     }
 
     #[test]
@@ -76,7 +107,35 @@ mod tests {
     fn definitions_comments_and_strings_are_not_calls() {
         let src = "pub(crate) fn tiles_mut(&mut self) -> &mut Tiles { &mut self.tiles }\n\
                    // st.units_mut()\nconst S: &str = \"players_mut\";";
-        assert_eq!(run("state/mod.rs", src), 0);
+        assert_eq!(run("state/map.rs", src), 0);
         assert_eq!(run("game/mutate_helpers.rs", "fn f() { st.diplo_mut(); }"), 1);
+    }
+
+    #[test]
+    fn an_accessor_missing_from_state_is_reported() {
+        let most: String = ACCESSORS
+            .iter()
+            .skip(1)
+            .map(|a| format!("pub(crate) fn {a}(&mut self) {{}}\n"))
+            .collect();
+        assert_eq!(run(DEFINED_IN, &most), 1, "tiles_mut is not defined");
+    }
+
+    /// Gate 7 of package 1a-08, on the engine as it is: the real tree passes, and the same tree
+    /// with one rule file calling an accessor fails, once per call.
+    #[test]
+    fn the_engine_passes_and_a_stray_call_fails() -> Result<(), String> {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(super::super::ENGINE_SRC);
+        let mut tree = SourceTree::load(&src)?;
+        assert!(tree.files.iter().any(|f| f.rel == DEFINED_IN), "the engine has state/mod.rs");
+        assert_eq!(check(&tree), Vec::new());
+        tree.files.push(SourceFile::new(
+            "game/cities/founding.rs",
+            "fn found(st: &mut State) { st.tiles_mut(); st.players_mut(); }",
+        ));
+        assert_eq!(check(&tree).len(), 2);
+        Ok(())
     }
 }
