@@ -15,7 +15,8 @@
 //! - `compile`: the compiler, run by the ruleset loader;
 //! - [`table`]: what it produces, [`UniqueTable`] and each source's [`SourceUniques`];
 //! - [`filter`]: the filters, compiled to sets and trees (package 1a-06);
-//! - [`world`]: the facts a filter reads of a world, [`TileFacts`] and [`FilterFacts`].
+//! - [`world`]: the facts a filter reads of a world, [`TileFacts`] and [`FilterFacts`];
+//! - [`index`]: the unique indexes ([`Csr`]) of a civilization, a city, a religion and a unit.
 //!
 //! Packages 1a-05 and 1a-06 compile; evaluation (1a-07) comes next.
 
@@ -24,6 +25,7 @@ pub mod filter;
 #[rustfmt::skip]
 #[path = "gen.rs"]
 pub mod generated;
+pub mod index;
 pub mod params;
 pub mod table;
 pub mod text;
@@ -39,6 +41,7 @@ pub use self::generated::{
     BY_PLACEHOLDER, CondData, ModifierData, ParamKind, Stage, Support, TYPE_INFO, TriggerCond,
     TypeInfo, UniqueData, UniqueType,
 };
+pub use self::index::{CivIndex, CivSources, Csr};
 pub use self::table::{
     ActionMods, Cond, CondDeps, CondSpan, ObjectFilter, Role, Source, SourceUniques, StaticDomain,
     StaticFilter, StaticId, UFlags, Unique, UniqueMeta, UniqueTable,

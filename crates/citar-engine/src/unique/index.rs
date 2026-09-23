@@ -1,0 +1,330 @@
+//! The unique indexes (DESIGN.md 5.12): which uniques hold for a civilization, in a city, for a
+//! religion's followers and for a unit, gathered once from their sources and looked up by type.
+//!
+//! Ports the composition of `economy.civ_umaps` and `civ_index` (`economy.py:77-147`),
+//! `cities.local_umaps` (`cities.py:48-66`), `religion.follower_umap` (`religion.py:72-82`) and
+//! `units.unit_umap` (`units.py:21-33`). Python rebuilt a placeholder dict of lists for each
+//! (`civ_index` 49,582 times in 100 turns) and dropped them through a dozen hooks; here each is a
+//! [`Csr`], built from plain inputs by a pure function, which the game keeps in a memo and rebuilds
+//! when an input's revision moves (DESIGN.md 6.5).
+//!
+//! A [`Csr`] holds a source's standing uniques (effects, flags and typed tags) at their own type,
+//! and its triggered uniques at their trigger's type, so that one lookup answers both a query for
+//! `[]% Strength` and a trigger firing `upon turn start`. Entries are sorted by (type, id), and a
+//! unique met more than once (five Monuments) is one entry that counts its copies, so its
+//! conditionals are evaluated once. Unique ids follow Python's `civ_umaps` order (DESIGN.md 5.5),
+//! so within a type the entries come in Python's order, and the build is the same whatever order
+//! its inputs are given in.
+
+use super::generated::UniqueType;
+use super::table::{SourceUniques, UFlags, UniqueTable};
+use crate::base::ids::{
+    BaseUnitId, BeliefId, BuildingId, CityStateTypeId, EraId, NationId, UniqueId,
+};
+use crate::base::sets::{BuildingSet, PolicySet, PromotionSet, ResourceSet, TechSet};
+use crate::rules::Ruleset;
+
+/// One unique in an index, with the number of its sources the index holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Entry {
+    pub id: UniqueId,
+    /// How many copies: the number of cities with the building that carries it, or of times a
+    /// timed unique was granted. At least 1.
+    pub n: u16,
+}
+
+/// A unique index in compressed sparse rows: the entries of each type are one run, sorted by id.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Csr {
+    /// The run of type `t` is `start[t]..start[t + 1]`; `UniqueType::COUNT + 1` offsets.
+    start: Box<[u16]>,
+    entries: Vec<Entry>,
+}
+
+impl Default for Csr {
+    fn default() -> Self {
+        Self { start: vec![0; UniqueType::COUNT + 1].into(), entries: Vec::new() }
+    }
+}
+
+impl Csr {
+    /// The entries of type `ty`: standing uniques of that type, or triggered uniques whose trigger
+    /// it is.
+    #[must_use]
+    #[inline]
+    pub fn get(&self, ty: UniqueType) -> &[Entry] {
+        let t = ty as usize;
+        &self.entries[usize::from(self.start[t])..usize::from(self.start[t + 1])]
+    }
+
+    /// Every entry, by type and then id.
+    #[must_use]
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// How many entries it holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether it holds none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether it holds a unique of type `ty`, conditionals not evaluated (`UniqueMap.has_tag`).
+    #[must_use]
+    pub fn has(&self, ty: UniqueType) -> bool {
+        !self.get(ty).is_empty()
+    }
+}
+
+/// The type a unique is indexed at: its trigger's, if it has one, otherwise its own. A tag of no
+/// UnCiv type is not indexed: filters read tags from their sources (DESIGN.md 5.6).
+fn slot(t: &UniqueTable, id: UniqueId) -> Option<UniqueType> {
+    let m = t.meta(id);
+    match m.trigger {
+        Some(tr) => Some(tr.ty()),
+        None => m.ty,
+    }
+}
+
+/// Collects entries in any order, then sorts and merges them into a [`Csr`].
+struct Builder<'r> {
+    table: &'r UniqueTable,
+    raw: Vec<(u16, UniqueId, u16)>,
+}
+
+impl<'r> Builder<'r> {
+    fn new(rules: &'r Ruleset) -> Self {
+        Self { table: rules.uniques(), raw: Vec::new() }
+    }
+
+    fn add(&mut self, id: UniqueId, n: u16) {
+        if n == 0 {
+            return;
+        }
+        if let Some(ty) = slot(self.table, id) {
+            self.raw.push((ty as u16, id, n));
+        }
+    }
+
+    /// A source's standing uniques and its triggered ones, `n` times. With `local`, only those
+    /// marked [`UFlags::LOCAL`] of the ones Python split (a building's, a resource's: its `local`
+    /// partition and its local triggered uniques); without, only the rest.
+    fn source(&mut self, s: &SourceUniques, n: u16, local: bool) {
+        let standing = if local { &s.local } else { &s.civ };
+        for &id in standing.iter() {
+            self.add(id, n);
+        }
+        for &id in s.triggered.iter() {
+            if self.table.get(id).flags().contains(UFlags::LOCAL) == local {
+                self.add(id, n);
+            }
+        }
+    }
+
+    /// A source's standing and triggered uniques, `n` times, whatever their LOCAL bit: every
+    /// source but a building or a resource, whose `in this city` means the city in context.
+    fn whole(&mut self, s: &SourceUniques, n: u16) {
+        for &id in s.civ.iter().chain(s.triggered.iter()) {
+            self.add(id, n);
+        }
+    }
+
+    fn finish(mut self) -> Csr {
+        self.raw.sort_by_key(|&(ty, id, _)| (ty, id));
+        let mut entries: Vec<Entry> = Vec::with_capacity(self.raw.len());
+        let mut types: Vec<u16> = Vec::with_capacity(self.raw.len());
+        for (ty, id, n) in self.raw {
+            match entries.last_mut() {
+                Some(last) if last.id == id => last.n = last.n.saturating_add(n),
+                _ => {
+                    entries.push(Entry { id, n });
+                    types.push(ty);
+                }
+            }
+        }
+        let mut start = vec![0u16; UniqueType::COUNT + 1];
+        for &ty in &types {
+            start[usize::from(ty) + 1] += 1;
+        }
+        for t in 1..start.len() {
+            start[t] += start[t - 1];
+        }
+        Csr { start: start.into(), entries }
+    }
+}
+
+/// A city-state's gift to a major civilization (`city_states.bonus_umaps`,
+/// `city_states.py:160-173`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CityStateBonus {
+    /// Its friend bonuses: influence at the friend level or above.
+    Friend,
+    /// Its ally bonuses.
+    Ally,
+}
+
+/// Everything that gives a civilization uniques (`economy.civ_umaps`, `economy.py:77-129`), as
+/// `game::derive::civ` gathers it from the state. Lists may come in any order: the index is the
+/// same.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CivSources {
+    pub nation: NationId,
+    /// Each building of the civilization's cities, with the number of its cities that have it.
+    /// Their uniques that hold in their own city alone go to the city's index instead.
+    pub buildings: Vec<(BuildingId, u16)>,
+    /// The branches and policies it has adopted.
+    pub policies: PolicySet,
+    pub techs: TechSet,
+    /// The variant of each timed unique it holds, once per grant still running.
+    pub temporary: Vec<UniqueId>,
+    pub era: EraId,
+    /// For a major civilization, each city-state it has met that counts it a friend or its ally,
+    /// by the city-state's type.
+    pub city_states: Vec<(CityStateTypeId, CityStateBonus)>,
+    /// The founder beliefs of the religion it founded.
+    pub founder_beliefs: Vec<BeliefId>,
+    /// The resources it has: the resource layer (DESIGN.md 6.6). Empty for the index the supply
+    /// itself is computed from.
+    pub resources: ResourceSet,
+}
+
+impl CivSources {
+    /// A civilization of `nation` in `era` with nothing else.
+    #[must_use]
+    pub fn new(nation: NationId, era: EraId) -> Self {
+        Self {
+            nation,
+            buildings: Vec::new(),
+            policies: PolicySet::new(),
+            techs: TechSet::new(),
+            temporary: Vec::new(),
+            era,
+            city_states: Vec::new(),
+            founder_beliefs: Vec::new(),
+            resources: ResourceSet::new(),
+        }
+    }
+}
+
+/// A civilization's unique index.
+pub struct CivIndex;
+
+impl CivIndex {
+    /// The index of every unique `src` gives the civilization, in `civ_umaps`'s order within each
+    /// type: nation, buildings, policies, techs, temporary uniques, era, city-state bonuses,
+    /// founder beliefs, resources and the global uniques.
+    #[must_use]
+    pub fn build(rules: &Ruleset, src: &CivSources) -> Csr {
+        let mut b = Builder::new(rules);
+        b.whole(&rules.nations()[src.nation].uniques, 1);
+        for &(building, n) in &src.buildings {
+            b.source(&rules.buildings()[building].uniques, n, false);
+        }
+        for p in src.policies.iter() {
+            b.whole(&rules.policies()[p].uniques, 1);
+        }
+        for t in src.techs.iter() {
+            b.whole(&rules.techs()[t].uniques, 1);
+        }
+        for &id in &src.temporary {
+            b.add(id, 1);
+        }
+        b.whole(&rules.eras()[src.era].uniques, 1);
+        for &(cs, bonus) in &src.city_states {
+            let def = &rules.city_state_types()[cs];
+            b.whole(
+                match bonus {
+                    CityStateBonus::Friend => &def.friend,
+                    CityStateBonus::Ally => &def.ally,
+                },
+                1,
+            );
+        }
+        for &belief in &src.founder_beliefs {
+            b.whole(&rules.beliefs()[belief].uniques, 1);
+        }
+        for r in src.resources.iter() {
+            b.source(&rules.resources()[r].uniques, 1, false);
+        }
+        b.whole(rules.global_uniques(), 1);
+        b.finish()
+    }
+}
+
+/// The index of what holds in one city alone (`cities.local_umaps` without the religion, which
+/// is [`follower`]'s): its buildings' local uniques, and those of the resources on the improved
+/// tiles it owns (the Marble decision, DESIGN.md 5.12).
+#[must_use]
+pub fn city_local(rules: &Ruleset, buildings: &BuildingSet, resources: &ResourceSet) -> Csr {
+    let mut b = Builder::new(rules);
+    for building in buildings.iter() {
+        b.source(&rules.buildings()[building].uniques, 1, true);
+    }
+    for r in resources.iter() {
+        b.source(&rules.resources()[r].uniques, 1, true);
+    }
+    b.finish()
+}
+
+/// The index of what a religion gives the cities that follow it: its follower beliefs'
+/// (`religion.follower_umap`). Beliefs may come in any order.
+#[must_use]
+pub fn follower(rules: &Ruleset, beliefs: &[BeliefId]) -> Csr {
+    let mut b = Builder::new(rules);
+    for &belief in beliefs {
+        b.whole(&rules.beliefs()[belief].uniques, 1);
+    }
+    b.finish()
+}
+
+/// The index of a unit's profile (`units.unit_umap`): its base unit's uniques, its unit type's
+/// (which Python copied onto each unit, `rules.py:116-118`) and its promotions'.
+#[must_use]
+pub fn unit_profile(rules: &Ruleset, base: BaseUnitId, promotions: &PromotionSet) -> Csr {
+    let mut b = Builder::new(rules);
+    let def = &rules.base_units()[base];
+    b.whole(&def.uniques, 1);
+    b.whole(&rules.unit_types()[def.unit_type].uniques, 1);
+    for p in promotions.iter() {
+        b.whole(&rules.promotions()[p].uniques, 1);
+    }
+    b.finish()
+}
+
+/// How many uniques an index holds of each placeholder, copies counted, for the reference checks'
+/// comparison with Python's `civ_index` (`economy.py:132-147`). A triggered unique counts under its
+/// own placeholder, as Python's lists held it; the uniques that happen once when their source is
+/// gained are not in an index, where Python's lists held them too. In type order.
+#[must_use]
+pub fn placeholder_counts(rules: &Ruleset, csr: &Csr) -> Vec<(&'static str, u32)> {
+    let t = rules.uniques();
+    let mut counts = vec![0u32; UniqueType::COUNT];
+    for e in csr.entries() {
+        if let Some(ty) = t.meta(e.id).ty {
+            counts[ty as usize] += u32::from(e.n);
+        }
+    }
+    UniqueType::ALL
+        .into_iter()
+        .filter(|&ty| counts[ty as usize] > 0)
+        .map(|ty| (ty.placeholder(), counts[ty as usize]))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_index_answers_every_type_with_nothing() {
+        let c = Csr::default();
+        assert!(UniqueType::ALL.into_iter().all(|t| c.get(t).is_empty()));
+        assert!(c.is_empty());
+    }
+}
