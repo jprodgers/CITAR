@@ -14,12 +14,25 @@
 //! subtree is `prefix.**`. Every system package adds its groups or paths here once its answer
 //! module is clean (DESIGN.md 3.4). A group listed here must have an answer module, or the run
 //! stops with a configuration error: enforcing what is never compared would pass silently.
+//!
+//! A difference above the enforced places counts too, because nothing below it was compared. So
+//! with `civs[*].unit_supply` enforced, the run also fails on
+//!
+//! - an answer module that failed or panicked (an `error`, at the root);
+//! - a civilization missing or extra (`civs[pid=0]`), or a value of the wrong type above
+//!   `unit_supply`, when that value holds an enforced place;
+//! - `civs` itself when it could not be keyed (a `key` difference), since its elements were then
+//!   compared in order and their paths no longer carry `[pid=...]`.
+//!
+//! A missing value that holds no enforced place, such as a missing `civs[pid=0].era`, stays
+//! outside.
 
 use std::path::Path as FsPath;
 
 use serde::Deserialize;
 
-use crate::compare::{Path, Pattern};
+use crate::compare::path::{accepted, matches_inside, walk};
+use crate::compare::{Diff, DiffKind, Pattern};
 use crate::{Error, Group, Result};
 
 #[derive(Deserialize)]
@@ -94,53 +107,108 @@ impl Enforced {
         self.entries.iter().any(|e| e.group == group)
     }
 
-    /// Whether an unexplained difference at this place fails the run.
-    pub fn covers(&self, group: Group, path: &Path) -> bool {
-        self.entries.iter().any(|e| {
-            e.group == group && e.paths.as_ref().is_none_or(|ps| ps.iter().any(|p| p.matches(path)))
-        })
+    /// Whether this difference, unexplained, fails the run: it lies at an enforced place, or
+    /// above one that it hides (see the module's documentation).
+    pub fn covers(&self, group: Group, diff: &Diff) -> bool {
+        // Entries are one per group (`parse` refuses a second), so their paths are one set.
+        let Some(entry) = self.entries.iter().find(|e| e.group == group) else { return false };
+        let Some(patterns) = &entry.paths else { return true };
+        if diff.kind == DiffKind::Error {
+            return true;
+        }
+        let cursor = walk(patterns, &diff.path);
+        if cursor.is_empty() {
+            return false;
+        }
+        if accepted(patterns, &cursor).next().is_some() {
+            return true;
+        }
+        match diff.kind {
+            DiffKind::Key => true,
+            _ => [&diff.python, &diff.rust]
+                .into_iter()
+                .flatten()
+                .any(|v| matches_inside(patterns, &cursor, v)),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compare::{Scalar, Seg};
+    use crate::compare::{Path, Scalar, Seg};
+    use serde_json::{Value, json};
 
-    fn path(segs: Vec<Seg>) -> Path {
-        Path(segs)
+    fn diff(segs: Vec<Seg>, kind: DiffKind, python: Option<Value>, rust: Option<Value>) -> Diff {
+        Diff { path: Path(segs), kind, python, rust, detail: None }
     }
 
-    #[test]
-    fn whole_groups_and_path_globs() {
-        let e = Enforced::parse(
-            r#"
+    fn number_at(segs: Vec<Seg>) -> Diff {
+        diff(segs, DiffKind::Number, Some(json!(1)), Some(json!(2)))
+    }
+
+    fn key(k: &str) -> Seg {
+        Seg::Key(k.into())
+    }
+
+    fn pid(n: i64) -> Seg {
+        Seg::Field("pid".into(), Scalar::Num(n.into()))
+    }
+
+    const FILE: &str = r#"
 [[enforce]]
 group = "tile_yields"
 
 [[enforce]]
 group = "civs"
 paths = ["civs[*].resource_supply.**", "civs[*].unit_supply"]
-"#,
-        )
-        .unwrap();
-        let anywhere = path(vec![Seg::Key("owned".into()), Seg::Index(3)]);
+"#;
+
+    #[test]
+    fn whole_groups_and_path_globs() {
+        let e = Enforced::parse(FILE).unwrap();
+        let anywhere = number_at(vec![key("owned"), Seg::Index(3)]);
         assert!(e.covers(Group::TileYields, &anywhere));
-        let pid = |k: &str| {
-            path(vec![
-                Seg::Key("civs".into()),
-                Seg::Field("pid".into(), Scalar::Num(0.into())),
-                Seg::Key(k.into()),
-            ])
-        };
-        assert!(e.covers(Group::Civs, &pid("resource_supply")));
-        assert!(e.covers(Group::Civs, &pid("unit_supply")));
-        assert!(!e.covers(Group::Civs, &pid("happiness")));
-        let mut deep = pid("resource_supply");
-        deep.0.push(Seg::Key("Iron".into()));
+        let at = |k: &str| number_at(vec![key("civs"), pid(0), key(k)]);
+        assert!(e.covers(Group::Civs, &at("resource_supply")));
+        assert!(e.covers(Group::Civs, &at("unit_supply")));
+        assert!(!e.covers(Group::Civs, &at("happiness")));
+        let deep = number_at(vec![key("civs"), pid(0), key("resource_supply"), key("Iron")]);
         assert!(e.covers(Group::Civs, &deep));
         assert!(!e.covers(Group::Views, &anywhere));
         assert!(e.has_group(Group::Civs) && !e.has_group(Group::Views));
+    }
+
+    #[test]
+    fn a_difference_above_an_enforced_place_is_enforced_when_it_hides_one() {
+        let e = Enforced::parse(FILE).unwrap();
+        let civ = json!({"pid": 0, "era": 2, "unit_supply": 5, "resource_supply": {"Iron": 1}});
+        let covers = |segs: Vec<Seg>, kind, python: Option<&Value>, rust: Option<&Value>| {
+            e.covers(Group::Civs, &diff(segs, kind, python.cloned(), rust.cloned()))
+        };
+        // An answer module that failed hides everything.
+        assert!(e.covers(Group::Civs, &Diff::error("the Rust answer panicked")));
+        // A whole civilization, missing or extra, holds enforced places.
+        let one = || vec![key("civs"), pid(0)];
+        assert!(covers(one(), DiffKind::Missing, Some(&civ), None));
+        assert!(covers(one(), DiffKind::Extra, None, Some(&civ)));
+        // So does an answer of the wrong type, or one without `civs`.
+        let answer = json!({"civs": [civ.clone()]});
+        assert!(covers(Vec::new(), DiffKind::Type, Some(&answer), Some(&json!(null))));
+        assert!(covers(vec![key("civs")], DiffKind::Missing, Some(&answer["civs"]), None));
+        // A list that could not be keyed was compared in order, so its `[pid=0]` paths are gone.
+        assert!(covers(vec![key("civs")], DiffKind::Key, None, None));
+        // A missing value that holds no enforced place is outside, and so is a subtree elsewhere.
+        let era = vec![key("civs"), pid(0), key("era")];
+        assert!(!covers(era, DiffKind::Missing, Some(&json!(2)), None));
+        let elsewhere = json!({"unit_supply": 1, "resource_supply": {"Iron": 1}});
+        assert!(!covers(vec![key("world")], DiffKind::Missing, Some(&elsewhere), None));
+        // A civilization without the enforced keys holds no enforced place either.
+        assert!(!covers(one(), DiffKind::Missing, Some(&json!({"pid": 0, "era": 2})), None));
+        // A number above an enforced place has nothing below it on either side.
+        assert!(!covers(one(), DiffKind::Number, Some(&json!(1)), Some(&json!(2))));
+        // Nothing of a group that is not enforced.
+        assert!(!e.covers(Group::Views, &Diff::error("x")));
     }
 
     #[test]

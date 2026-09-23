@@ -13,7 +13,7 @@ use citar_refcheck::compare::{DiffKind, Grid};
 use citar_refcheck::enforced::Enforced;
 use citar_refcheck::fixture::{self, Fixture, FixtureSet};
 use citar_refcheck::intended::Intended;
-use citar_refcheck::ratchet::{DEFAULT_FIXTURES, Ratchet};
+use citar_refcheck::ratchet::{Change, Count, DEFAULT_FIXTURES, Measure, Ratchet};
 use citar_refcheck::run::{self, Config, Outcome, Run, RunOptions, Verdict};
 use citar_refcheck::{Group, report, suggest};
 
@@ -310,6 +310,97 @@ broad = true
     );
 }
 
+// Edits that break more than one value.
+
+fn panics(_: &Ctx<'_>, _: &mut Value) {
+    panic!("a bug in the answer module")
+}
+
+fn drops_the_first_owned_tile(_: &Ctx<'_>, v: &mut Value) {
+    v["owned"].as_array_mut().expect("owned tiles").remove(0);
+}
+
+fn answers_null(_: &Ctx<'_>, v: &mut Value) {
+    *v = Value::Null;
+}
+
+fn answers_nothing(_: &Ctx<'_>, v: &mut Value) {
+    *v = Value::Object(serde_json::Map::new());
+}
+
+fn changes_an_owner(_: &Ctx<'_>, v: &mut Value) {
+    v["owned"][0]["pid"] = Value::from(99);
+}
+
+fn drops_an_owner(_: &Ctx<'_>, v: &mut Value) {
+    v["owned"][0].as_object_mut().expect("a tile").remove("pid");
+}
+
+fn drops_the_sample(_: &Ctx<'_>, v: &mut Value) {
+    v.as_object_mut().expect("an answer").remove("sample");
+}
+
+#[test]
+fn path_narrowed_enforcement_catches_what_hides_its_paths() {
+    let enforced = "[[enforce]]\ngroup = \"tile_yields\"\npaths = [\"owned[*].yields.**\"]\n";
+    // An entry at every place of the group: it still cannot explain a failed answer module.
+    let everywhere = r#"
+[[differences]]
+id = "anything-at-all"
+reason = "a broad entry, which must not hide a module that failed"
+where = [{ group = "tile_yields", path = "**" }]
+broad = true
+python = 12345
+"#;
+    let cfg = config(everywhere, enforced);
+    let exit = |edit: Edit| {
+        let run = run_with(one_case(MUTATED), &cfg, &stands(&[(Group::TileYields, edit)]));
+        let kinds: Vec<String> =
+            diffs_of(&run).into_iter().map(|(_, _, p, k)| format!("{p} {}", k.name())).collect();
+        (run.exit_code(), kinds)
+    };
+    // Above the enforced places: a module that fails, an element dropped from a keyed list, an
+    // answer of the wrong type, an answer with none of its keys.
+    for (what, edit) in [
+        ("a panic", panics as Edit),
+        ("a dropped keyed element", drops_the_first_owned_tile),
+        ("a null answer", answers_null),
+        ("an empty answer", answers_nothing),
+    ] {
+        let (code, kinds) = exit(edit);
+        assert_eq!(code, 1, "{what} hides enforced places: {kinds:?}");
+    }
+    // Beside them: a different value, or a scalar or subtree that holds no enforced place.
+    for (what, edit) in [
+        ("another owner", changes_an_owner as Edit),
+        ("a dropped owner", drops_an_owner),
+        ("a dropped sample", drops_the_sample),
+    ] {
+        let (code, kinds) = exit(edit);
+        assert!(!kinds.is_empty(), "{what}");
+        assert_eq!(code, 0, "{what} is outside the enforced paths: {kinds:?}");
+    }
+}
+
+#[test]
+fn a_failed_answer_module_covers_no_intended_entry() {
+    let intended = r#"
+[[differences]]
+id = "half-food"
+reason = "Rust adds half a food"
+where = [{ group = "tile_yields", path = "owned[*].yields.food" }]
+"#;
+    let cfg = config(intended, "");
+    let run = run_with(one_case(MUTATED), &cfg, &stands(&[(Group::TileYields, panics)]));
+    let s = run.summary(Group::TileYields);
+    assert_eq!((s.compared, s.failed, s.unexplained), (0, 1, 1));
+    assert!(!run.intended[0].covered, "nothing was compared, so nothing was covered");
+    assert_eq!(run.stale().count(), 0);
+    // Compared, the same entry explains the difference it was written for.
+    let run = run_with(one_case(MUTATED), &cfg, &mutated());
+    assert_eq!(run.intended[0].used, 1);
+}
+
 #[test]
 fn an_enforced_group_without_an_answer_module_is_a_configuration_error() {
     let only_civs = Stands(vec![Stand { group: Group::Civs, edit: None }]);
@@ -381,36 +472,76 @@ fn a_failing_answer_module_is_an_error_difference_and_the_run_goes_on() {
     ));
 }
 
-#[test]
-fn suggest_writes_stubs_that_load_and_explain_what_they_were_written_for() {
-    let run = run_with(one_case(MUTATED), &Config::default(), &mutated());
-    let stubs = suggest::suggest(&run);
-    assert!(stubs.contains("path = \"owned[*].yields.food\""), "{stubs}");
-    let list = Intended::parse(&stubs).unwrap_or_else(|e| panic!("{e}\n{stubs}"));
-    assert_eq!(list.entries().len(), 1, "path_equivalent needs no entry");
-    let rerun = run_with(
-        one_case(MUTATED),
-        &Config { intended: list, enforced: Enforced::default() },
-        &mutated(),
-    );
-    assert_eq!(rerun.unexplained(), 0);
+/// A refusal text that looks like an intended.toml regex constraint.
+fn error_text_like_a_regex(_: &Ctx<'_>, v: &mut Value) {
+    v["calls"][0]["error"] = Value::from("re:(unclosed");
 }
 
 #[test]
-fn the_ratchet_refuses_a_rise() {
+fn suggest_writes_stubs_that_load_and_explain_what_they_were_written_for() {
+    let answers = stands(&[
+        (Group::TileYields, yield_plus_half),
+        (Group::Movement, reroute_first_path),
+        (Group::ToolErrors, error_text_like_a_regex),
+        (Group::Civs, panics),
+    ]);
+    let run = run_with(one_case(MUTATED), &Config::default(), &answers);
+    let stubs = suggest::suggest(&run);
+    assert!(stubs.contains("path = \"owned[*].yields.food\""), "{stubs}");
+    assert!(stubs.contains("path = \"calls[*].error\""), "{stubs}");
+    assert!(stubs.contains("rust = { eq = "), "a `re:` text is spelled out: {stubs}");
+    assert!(
+        stubs.contains(&format!("#   civs {MUTATED}: error at (root): the Rust answer panicked")),
+        "a failed module gets a comment, not a stub: {stubs}"
+    );
+    let list = Intended::parse(&stubs).unwrap_or_else(|e| panic!("{e}\n{stubs}"));
+    assert_eq!(
+        list.entries().len(),
+        2,
+        "path_equivalent needs no entry, and an error cannot have one"
+    );
+    let rerun = run_with(
+        one_case(MUTATED),
+        &Config { intended: list, enforced: Enforced::default() },
+        &answers,
+    );
+    assert_eq!(rerun.unexplained(), 1, "only the failed module is left");
+    assert_eq!(rerun.summary(Group::Civs).failed, 1);
+    assert_eq!(rerun.stale().count(), 0);
+}
+
+fn rise(group: Group, measure: Measure, was: u64, now: u64) -> Change {
+    Change { group, measure, was, now }
+}
+
+#[test]
+fn the_ratchet_refuses_a_rise_and_wants_every_change_recorded() {
     let run = run_with(one_case(MUTATED), &Config::default(), &mutated());
     let counts = run.counts();
-    assert!(counts.contains(&(Group::TileYields, 1)));
-    let zero: Vec<(Group, u64)> = counts.iter().map(|(g, _)| (*g, 0)).collect();
+    assert!(counts.contains(&(Group::TileYields, Count { unexplained: 1, failed: 0 })));
+    let zero: Vec<(Group, Count)> = counts.iter().map(|(g, _)| (*g, Count::default())).collect();
     let ratchet = Ratchet::default().updated(&zero).unwrap();
     let verdict = ratchet.check(&counts);
-    assert!(verdict.fails());
-    assert_eq!(verdict.rises, [(Group::TileYields, 0, 1)]);
+    assert!(verdict.refused() && verdict.fails());
+    assert_eq!(verdict.rises, [rise(Group::TileYields, Measure::Unexplained, 0, 1)]);
     assert!(ratchet.updated(&counts).is_err(), "--update refuses it too");
-    // From the other side, the same counts are a fall, which --update records.
+    // From the other side, the same counts are a fall: out of date until --update records it.
     let high = Ratchet::default().updated(&counts).unwrap();
-    assert!(!high.check(&zero).fails());
+    let fall = high.check(&zero);
+    assert!(!fall.refused() && fall.fails());
     assert_eq!(high.updated(&zero).unwrap(), ratchet);
+    // Groups compared for the first time must be recorded too.
+    assert!(Ratchet::default().check(&counts).fails());
+    assert!(!high.check(&counts).fails(), "recorded, the file is up to date");
+
+    // A module that fails takes the fixture's differences with it, so the plain count falls, but
+    // the failure is counted apart and rises.
+    let failing = stands(&[(Group::TileYields, panics)]);
+    let failed = run_with(one_case(MUTATED), &Config::default(), &failing).counts();
+    assert!(failed.contains(&(Group::TileYields, Count { unexplained: 0, failed: 1 })));
+    let verdict = high.check(&failed);
+    assert!(verdict.refused());
+    assert_eq!(verdict.rises, [rise(Group::TileYields, Measure::Failed, 0, 1)]);
 }
 
 #[test]

@@ -61,6 +61,12 @@ impl Group {
     /// The case name a run-scope group reports under.
     pub const RUN_CASE: &'static str = "ruleset";
 
+    /// The group's position in [`Group::ALL`], for tables indexed by group.
+    pub fn ordinal(self) -> usize {
+        // A fieldless enum's discriminants count from 0 in declaration order, which ALL follows.
+        self as usize
+    }
+
     /// The name used in fixtures (`meta.query_order`), `intended.toml`, `enforced.toml`,
     /// `ratchet.json` and on the command line.
     pub fn name(self) -> &'static str {
@@ -127,6 +133,7 @@ mod tests {
     fn names_round_trip_and_follow_dependency_order() {
         for (i, g) in Group::ALL.into_iter().enumerate() {
             assert_eq!(Group::from_name(g.name()), Some(g));
+            assert_eq!(g.ordinal(), i);
             if i > 0 {
                 assert!(Group::ALL[i - 1] < g, "ALL is in declaration order");
             }

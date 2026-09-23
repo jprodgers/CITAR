@@ -31,6 +31,9 @@
 //! An entry is **stale** when a run covered it (compared one of its groups on a fixture its
 //! `cases` match) and it explained nothing: a warning, and an error with `--strict`.
 //!
+//! An `error` (an answer module that failed or panicked) is never explained: nothing was
+//! compared, so there is only a module to fix.
+//!
 //! The v1 form, one inline `differences = [...]` array, is refused: there were never any v1
 //! entries to carry over, so the file went straight to v2.
 
@@ -41,8 +44,9 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::compare::path::{accepted, walk};
 use crate::compare::value::{self, values_equal};
-use crate::compare::{Diff, DiffKind, Pattern};
+use crate::compare::{CompareSpec, Diff, DiffKind, Pattern};
 use crate::{Error, Group, Result};
 
 /// A constraint on one side's value at the difference.
@@ -208,12 +212,6 @@ impl Entry {
         self.case_set.as_ref().is_none_or(|s| s.is_match(case))
     }
 
-    /// Whether the entry points at this place.
-    pub fn located(&self, group: Group, case: &str, diff: &Diff) -> bool {
-        self.matches_case(case)
-            && self.wheres.iter().any(|w| w.group == group && w.path.matches(&diff.path))
-    }
-
     /// Whether its constraints and rule hold for the difference; if not, why not.
     pub fn check(&self, diff: &Diff) -> std::result::Result<(), String> {
         if let Some(c) = &self.python {
@@ -277,10 +275,93 @@ struct RawWhere {
     path: String,
 }
 
-/// The loaded list.
+/// One group's places: every `where` path given for the group, walked as one pattern set.
 #[derive(Debug, Clone, Default)]
+struct GroupIndex {
+    patterns: Vec<Pattern>,
+    /// The entry each pattern is from.
+    owner: Vec<usize>,
+    /// Whether only `--with-bot` compares what the pattern matches.
+    bot_only: Vec<bool>,
+    /// The entries with a place in the group, in file order, once each.
+    entries: Vec<usize>,
+}
+
+impl GroupIndex {
+    fn build(group: Group, entries: &[Entry]) -> GroupIndex {
+        let spec = CompareSpec::for_group(group);
+        let mut ix = GroupIndex::default();
+        for (i, e) in entries.iter().enumerate() {
+            for w in e.wheres.iter().filter(|w| w.group == group) {
+                ix.patterns.push(w.path.clone());
+                ix.owner.push(i);
+                ix.bot_only.push(spec.is_bot_only(&w.path));
+                if ix.entries.last() != Some(&i) {
+                    ix.entries.push(i);
+                }
+            }
+        }
+        ix
+    }
+}
+
+/// The loaded list.
+#[derive(Debug, Clone)]
 pub struct Intended {
     entries: Vec<Entry>,
+    /// One per group, in [`Group::ALL`] order.
+    index: Vec<GroupIndex>,
+}
+
+impl Default for Intended {
+    fn default() -> Self {
+        Intended::from_entries(Vec::new())
+    }
+}
+
+/// The entries as they apply to one group on one fixture: what the verdicts of that subject
+/// need. Each entry's `cases` are matched once here, not once per difference, and the group's
+/// places are one pattern set, so a difference costs one walk down its path.
+pub struct Scoped<'a> {
+    entries: &'a [Entry],
+    index: &'a GroupIndex,
+    /// Per entry of the file: whether it has a place in the group and its `cases` match.
+    applies: Vec<bool>,
+}
+
+impl Scoped<'_> {
+    /// Which entries explain a difference.
+    pub fn explain(&self, diff: &Diff) -> Explanation {
+        let mut out = Explanation::default();
+        if diff.kind == DiffKind::Error || self.index.patterns.is_empty() {
+            return out;
+        }
+        let cursor = walk(&self.index.patterns, &diff.path);
+        let mut hits: Vec<usize> = accepted(&self.index.patterns, &cursor)
+            .map(|k| self.index.owner[k])
+            .filter(|&i| self.applies[i])
+            .collect();
+        hits.sort_unstable();
+        hits.dedup();
+        for i in hits {
+            let e = &self.entries[i];
+            match e.check(diff) {
+                Ok(()) => out.by.push(i),
+                Err(why) => out.near.push(NearMiss { id: e.id.clone(), why }),
+            }
+        }
+        out
+    }
+
+    /// The entries that comparing this group on this fixture covers, for stale detection: those
+    /// with a place in the group and matching `cases`, leaving out places that only `--with-bot`
+    /// compares when it is off. An entry may come more than once.
+    pub fn covered(&self, with_bot: bool) -> impl Iterator<Item = usize> + '_ {
+        let ix = self.index;
+        (0..ix.patterns.len())
+            .filter(move |&k| self.applies[ix.owner[k]] && (with_bot || !ix.bot_only[k]))
+            .map(|k| ix.owner[k])
+    }
 }
 
 impl Intended {
@@ -303,7 +384,12 @@ impl Intended {
             }
             entries.push(entry);
         }
-        Ok(Intended { entries })
+        Ok(Intended::from_entries(entries))
+    }
+
+    fn from_entries(entries: Vec<Entry>) -> Intended {
+        let index = Group::ALL.iter().map(|&g| GroupIndex::build(g, &entries)).collect();
+        Intended { entries, index }
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -314,19 +400,20 @@ impl Intended {
         self.entries.iter().find(|e| e.id == id)
     }
 
-    /// Which entries explain a difference in this group and case.
-    pub fn explain(&self, group: Group, case: &str, diff: &Diff) -> Explanation {
-        let mut out = Explanation::default();
-        for (i, e) in self.entries.iter().enumerate() {
-            if !e.located(group, case, diff) {
-                continue;
-            }
-            match e.check(diff) {
-                Ok(()) => out.by.push(i),
-                Err(why) => out.near.push(NearMiss { id: e.id.clone(), why }),
-            }
+    /// The entries as they apply to one group on one fixture (or run-scope case).
+    pub fn scoped(&self, group: Group, case: &str) -> Scoped<'_> {
+        let index = &self.index[group.ordinal()];
+        let mut applies = vec![false; self.entries.len()];
+        for &i in &index.entries {
+            applies[i] = self.entries[i].matches_case(case);
         }
-        out
+        Scoped { entries: &self.entries, index, applies }
+    }
+
+    /// Which entries explain a difference in this group and case. A run explains many
+    /// differences per subject through [`Intended::scoped`] instead.
+    pub fn explain(&self, group: Group, case: &str, diff: &Diff) -> Explanation {
+        self.scoped(group, case).explain(diff)
     }
 
     /// The entries as the CHANGELOG's list of rule fixes, one Markdown bullet each.
@@ -570,6 +657,51 @@ where = [{ group = "movement", path = "turns" }]
             .replace("path = \"stats.gold\"", "path = \"stats.**\"")
             .replace("python = 0", "python = 0\nbroad = true");
         assert!(Intended::parse(&broad).is_ok());
+    }
+
+    #[test]
+    fn places_are_indexed_per_group_and_errors_are_never_explained() {
+        let text = r#"
+[[differences]]
+id = "two-places"
+reason = "r"
+where = [{ group = "civs", path = "a" }, { group = "views", path = "b.**" }, { group = "civs", path = "c[*]" }]
+broad = true
+
+[[differences]]
+id = "everywhere"
+reason = "r"
+where = [{ group = "civs", path = "**" }]
+broad = true
+cases = ["duel-*"]
+
+[[differences]]
+id = "bot"
+reason = "r"
+where = [{ group = "deal_checks", path = "deals[*].bot_value" }]
+"#;
+        let list = Intended::parse(text).unwrap();
+        let a = diff(&["a"], DiffKind::Number, Some(json!(1)), Some(json!(2)));
+        assert_eq!(list.explain(Group::Civs, "duel-x/t1", &a).by, [0, 1]);
+        assert_eq!(list.explain(Group::Civs, "small-x/t1", &a).by, [0]);
+        assert!(list.explain(Group::Views, "duel-x/t1", &a).by.is_empty());
+        let b = diff(&["b", "x", "y"], DiffKind::Number, Some(json!(1)), Some(json!(2)));
+        assert_eq!(list.explain(Group::Views, "duel-x/t1", &b).by, [0]);
+        let mut c = diff(&["c"], DiffKind::Text, Some(json!("x")), Some(json!("y")));
+        c.path.0.push(Seg::Index(4));
+        assert_eq!(list.explain(Group::Civs, "small-x/t1", &c).by, [0]);
+        // `**` matches the root too, yet a failed answer module is never explained.
+        assert!(list.explain(Group::Civs, "duel-x/t1", &Diff::error("panicked")).by.is_empty());
+        // Coverage: every entry with a place in the group and matching cases, bot-only aside.
+        let covered = |g, case, with_bot| {
+            let mut c: Vec<usize> = list.scoped(g, case).covered(with_bot).collect();
+            c.dedup();
+            c
+        };
+        assert_eq!(covered(Group::Civs, "duel-x/t1", false), [0, 1]);
+        assert_eq!(covered(Group::Civs, "small-x/t1", false), [0]);
+        assert!(covered(Group::DealChecks, "duel-x/t1", false).is_empty());
+        assert_eq!(covered(Group::DealChecks, "duel-x/t1", true), [2]);
     }
 
     #[test]

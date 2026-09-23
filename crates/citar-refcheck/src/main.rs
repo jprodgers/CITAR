@@ -9,8 +9,9 @@
 //! cargo refcheck list [--fixtures DIR]... [--case GLOB]...
 //! ```
 //!
-//! Exit codes: 0 clean; 1 unexplained differences (or a ratchet rise); 2 a load failure, a bad
-//! configuration file or a usage error; 3 stale intended entries under `--strict`.
+//! Exit codes: 0 clean; 1 unexplained differences (or a ratchet that rose or is out of date); 2 a
+//! load failure, a bad configuration file or a usage error; 3 stale intended entries under
+//! `--strict`.
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +23,7 @@ use rayon::prelude::*;
 
 use citar_refcheck::answer::{Answers, Engine};
 use citar_refcheck::fixture::{self, Fixture, FixtureSet};
-use citar_refcheck::ratchet::{DEFAULT_FIXTURES, Ratchet};
+use citar_refcheck::ratchet::{Count, DEFAULT_FIXTURES, Ratchet};
 use citar_refcheck::run::{self, Config, INTENDED, RATCHET, RunOptions};
 use citar_refcheck::{Error, Group, Result, report, suggest};
 
@@ -68,9 +69,9 @@ enum Command {
         #[command(flatten)]
         selection: Selection,
     },
-    /// Check that no group's unexplained count rose (refcheck/ratchet.json)
+    /// Check that no group's counts rose, and that refcheck/ratchet.json holds the current ones
     Ratchet {
-        /// Record falls and newly compared groups; a rise is refused
+        /// Record falls and newly compared groups (or write a new file); a rise is refused
         #[arg(long)]
         update: bool,
     },
@@ -210,7 +211,8 @@ fn options(root: &Path, s: &Selection) -> Result<RunOptions> {
 
 fn ratchet(root: &Path, update: bool, answers: &dyn Answers) -> Result<u8> {
     let path = root.join(RATCHET);
-    let ratchet = Ratchet::load(&path)?;
+    // The file is committed, so only --update may start a new one.
+    let ratchet = if update && !path.exists() { Ratchet::default() } else { Ratchet::load(&path)? };
     let dirs: Vec<PathBuf> = ratchet.fixtures.iter().map(|d| root.join(d)).collect();
     let config = Config::load(root)?;
     let run = run::run(RunOptions::new(root, fixture_sets(root, &dirs)), &config, answers)?;
@@ -222,45 +224,60 @@ fn ratchet(root: &Path, update: bool, answers: &dyn Answers) -> Result<u8> {
     }
     let counts = run.counts();
     let verdict = ratchet.check(&counts);
-    println!("ratchet: unexplained differences per group over {}", ratchet.fixtures.join(", "));
+    println!(
+        "ratchet: unexplained differences and failed answer modules per group over {}",
+        ratchet.fixtures.join(", ")
+    );
     for (g, now) in &counts {
-        let was = ratchet.unexplained.iter().find(|(h, _)| h == g).map(|(_, n)| *n);
-        let note = match was {
-            Some(w) if *now > w => format!("rose from {w}"),
-            Some(w) if *now < w => format!("fell from {w}"),
-            Some(_) => "unchanged".to_string(),
-            None => "not yet recorded".to_string(),
-        };
-        println!("  {:<16} {now:>6}  {note}", g.name());
+        println!("  {:<16} {}", g.name(), describe(ratchet.recorded(*g), *now));
     }
     for g in &verdict.missing {
-        println!("  {:<16} {:>6}  recorded, but not compared any more", g.name(), "-");
+        println!("  {:<16} recorded, but not compared any more", g.name());
     }
-    if counts.is_empty() && ratchet.unexplained.is_empty() {
+    if counts.is_empty() && ratchet.counts.is_empty() {
         println!("  (no group is compared yet)");
     }
-    if verdict.fails() {
+    if verdict.refused() {
         println!(
-            "ratchet: refused. A rise is fixed, or explained in {INTENDED}; it is never recorded."
+            "ratchet: refused. A rise is fixed, or explained in {INTENDED}; it is never recorded. \
+             A group that is recorded must still be compared."
         );
         return Ok(1);
     }
     if update {
-        match ratchet.updated(&counts) {
-            Ok(next) if next != ratchet || !path.exists() => {
-                std::fs::write(&path, next.to_text())
-                    .map_err(|e| Error::new(format!("cannot write {}: {e}", path.display())))?;
-                println!("ratchet: recorded in {RATCHET}");
-            }
-            Ok(_) => println!("ratchet: nothing to record"),
-            Err(_) => return Ok(1),
+        let Ok(next) = ratchet.updated(&counts) else { return Ok(1) };
+        if next != ratchet || !path.exists() {
+            std::fs::write(&path, next.to_text())
+                .map_err(|e| Error::new(format!("cannot write {}: {e}", path.display())))?;
+            println!("ratchet: recorded in {RATCHET}; commit it");
+        } else {
+            println!("ratchet: holds; nothing to record");
         }
-    } else if verdict.changes() {
-        println!("ratchet: holds; `cargo refcheck ratchet --update` records the changes");
-    } else {
-        println!("ratchet: holds");
+        return Ok(0);
     }
+    if verdict.out_of_date() {
+        println!(
+            "ratchet: {RATCHET} is out of date: run `cargo refcheck ratchet --update` and commit it"
+        );
+        return Ok(1);
+    }
+    println!("ratchet: holds");
     Ok(0)
+}
+
+/// One group's line: its counts now, and how they stand against the recorded ones.
+fn describe(was: Option<Count>, now: Count) -> String {
+    let one = |now: u64, was: Option<u64>| match was {
+        Some(w) if now > w => format!("{now} (rose from {w})"),
+        Some(w) if now < w => format!("{now} (fell from {w})"),
+        Some(_) => format!("{now}"),
+        None => format!("{now} (not yet recorded)"),
+    };
+    format!(
+        "unexplained {}, failed {}",
+        one(now.unexplained, was.map(|c| c.unexplained)),
+        one(now.failed, was.map(|c| c.failed))
+    )
 }
 
 fn list(root: &Path, dirs: &[PathBuf], cases: &[String], answers: &dyn Answers) -> Result<u8> {

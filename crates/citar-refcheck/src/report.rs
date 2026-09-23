@@ -91,6 +91,9 @@ pub fn human(run: &Run, limit: usize) -> String {
         if s.enforced {
             status.push("enforced".to_string());
         }
+        if s.failed > 0 {
+            status.push(format!("{} failed", s.failed));
+        }
         if s.python_crashed > 0 {
             status.push(format!("{} python-crashed", s.python_crashed));
         }
@@ -265,6 +268,7 @@ pub fn json(run: &Run) -> String {
                 "status": if s.ported { "compared" } else { "not_ported" },
                 "enforced": s.enforced,
                 "compared": s.compared,
+                "failed": s.failed,
                 "unexplained": s.unexplained,
                 "unexplained_enforced": s.unexplained_enforced,
                 "explained": s.explained,

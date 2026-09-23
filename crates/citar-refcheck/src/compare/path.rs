@@ -296,14 +296,7 @@ impl Pattern {
 
     pub fn matches(&self, path: &Path) -> bool {
         let set = std::slice::from_ref(self);
-        let mut cursor = start(set);
-        for seg in path.segs() {
-            if cursor.is_empty() {
-                return false;
-            }
-            cursor = step(set, &cursor, seg);
-        }
-        accepted(set, &cursor).next().is_some()
+        accepted(set, &walk(set, path)).next().is_some()
     }
 }
 
@@ -348,17 +341,63 @@ pub fn start(patterns: &[Pattern]) -> Cursor {
 
 /// The cursor one segment further down.
 pub fn step(patterns: &[Pattern], cursor: &Cursor, seg: &Seg) -> Cursor {
+    step_where(patterns, cursor, |want| want.matches(seg))
+}
+
+/// The cursor one list element further down, when the element's selector is not known (an
+/// index or a key): every element selector matches. It over-approximates, which is what
+/// [`matches_inside`] needs.
+pub fn step_element(patterns: &[Pattern], cursor: &Cursor) -> Cursor {
+    step_where(patterns, cursor, |want| {
+        matches!(want, PSeg::Index(_) | PSeg::AnyIndex | PSeg::Field(..) | PSeg::Pos(..))
+    })
+}
+
+fn step_where(patterns: &[Pattern], cursor: &Cursor, hit: impl Fn(&PSeg) -> bool) -> Cursor {
     let mut next = Cursor::new();
     for &(p, i) in cursor {
         let Some(want) = patterns[p as usize].segs.get(i as usize) else { continue };
         match want {
             PSeg::AnyDepth => next.push((p, i)),
-            other if other.matches(seg) => next.push((p, i + 1)),
+            other if hit(other) => next.push((p, i + 1)),
             _ => {}
         }
     }
     close(patterns, &mut next);
     next
+}
+
+/// The cursor at the end of a concrete path; empty as soon as no pattern can match any more.
+pub fn walk(patterns: &[Pattern], path: &Path) -> Cursor {
+    let mut cursor = start(patterns);
+    for seg in path.segs() {
+        if cursor.is_empty() {
+            break;
+        }
+        cursor = step(patterns, &cursor, seg);
+    }
+    cursor
+}
+
+/// Whether some place strictly inside `value`, which stands where the cursor stands, matches a
+/// pattern of the set. List elements are taken as any selector, so a pattern that names one
+/// keyed element (`units[id=5]`) matches inside every list of units: it may say yes for a place
+/// the value lacks, never no for one it has.
+pub fn matches_inside(patterns: &[Pattern], cursor: &Cursor, value: &Value) -> bool {
+    let below = |next: &Cursor, child: &Value| {
+        !next.is_empty()
+            && (accepted(patterns, next).next().is_some() || matches_inside(patterns, next, child))
+    };
+    match value {
+        Value::Object(map) => {
+            map.iter().any(|(k, child)| below(&step(patterns, cursor, &Seg::Key(k.clone())), child))
+        }
+        Value::Array(items) => {
+            let next = step_element(patterns, cursor);
+            items.iter().any(|child| below(&next, child))
+        }
+        _ => false,
+    }
 }
 
 /// Adds the states a `.**` reaches by matching nothing, then sorts and dedups.
@@ -657,5 +696,23 @@ mod tests {
         assert_eq!(accepted(&set, &x).collect::<Vec<_>>(), [2]);
         let dead = step(&set, &x, &key("y"));
         assert!(dead.is_empty());
+        assert!(walk(&set, &Path(vec![key("x"), key("y"), key("z")])).is_empty());
+        assert_eq!(accepted(&set, &walk(&set, &Path(vec![key("a"), key("q")]))).count(), 1);
+    }
+
+    #[test]
+    fn a_value_can_hold_a_place_below_where_it_stands() {
+        let set = [p("civs[*].units[id=5].hp"), p("world.**.gold")];
+        let civs = walk(&set, &Path(vec![key("civs")]));
+        let civ = serde_json::json!({"pid": 0, "units": [{"id": 7, "hp": 3}]});
+        // Any element selector matches inside a value, so `[id=5]` meets the unit with id 7.
+        assert!(matches_inside(&set, &step_element(&set, &civs), &civ));
+        let bare = serde_json::json!({"pid": 0, "units": []});
+        assert!(!matches_inside(&set, &step_element(&set, &civs), &bare), "no unit, no hp");
+        let world = walk(&set, &Path(vec![key("world")]));
+        let deep = serde_json::json!({"a": {"b": [{"gold": 1}]}});
+        assert!(matches_inside(&set, &world, &deep));
+        assert!(!matches_inside(&set, &world, &serde_json::json!({"a": {"b": [1, 2]}})));
+        assert!(!matches_inside(&set, &world, &serde_json::json!(3)), "a scalar holds nothing");
     }
 }

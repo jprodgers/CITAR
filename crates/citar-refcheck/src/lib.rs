@@ -8,7 +8,7 @@
 //! 4. explains each difference from `refcheck/intended.toml` ([`intended`]), and fails the run
 //!    for the unexplained ones that `refcheck/enforced.toml` covers ([`enforced`]);
 //! 5. reports in dependency order ([`report`]), while `refcheck/ratchet.json` ([`ratchet`])
-//!    keeps the unexplained count of every group from rising.
+//!    keeps the counts of every group from rising.
 //!
 //! There are no answer modules yet: each system package adds its own (DESIGN.md 3.4, rule 1).
 
