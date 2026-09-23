@@ -367,6 +367,29 @@ fn check_sizes(raw: &RawRuleset, p: &mut Problems) {
             );
         }
     }
+    // The lobby's lists in game.json, which a game's settings hold by id.
+    if let Some(g) = &raw.game {
+        let lists = [
+            ("map_sizes", g.map_sizes.len(), "map sizes", "a MapSizeId (u8)"),
+            ("map_types", g.map_types.len(), "map types", "a MapTypeId (u8)"),
+            (
+                "barbarians",
+                g.barbarians.levels.len(),
+                "barbarian levels",
+                "a BarbarianLevelId (u8)",
+            ),
+        ];
+        for (key, len, what, holder) in lists {
+            if len > U8 {
+                p.push(
+                    RulesetErrorKind::Capacity,
+                    GAME,
+                    key,
+                    format!("{len} {what}, more than {U8}, which is all {holder} holds"),
+                );
+            }
+        }
+    }
 }
 
 // ---- Stage 4: references ----------------------------------------------------------------------
@@ -1133,24 +1156,27 @@ fn link_game(l: &mut Linker<'_>, g: &RawGame) -> Constants {
     l.at(GAME, "");
     Constants {
         move_scale: g.move_scale,
-        map_sizes: g
-            .map_sizes
-            .iter()
-            .map(|(k, m)| MapSize {
-                key: text(k),
-                name: text(&m.name),
-                width: m.width,
-                height: m.height,
-                players: m.players,
-                city_states: m.city_states,
-            })
-            .collect(),
+        // check_sizes held the three lobby lists to their u8 ids.
+        map_sizes: IdVec::from_vec(
+            g.map_sizes
+                .iter()
+                .map(|(k, m)| MapSize {
+                    key: text(k),
+                    name: text(&m.name),
+                    width: m.width,
+                    height: m.height,
+                    players: m.players,
+                    city_states: m.city_states,
+                })
+                .collect(),
+        ),
         map_size_predefined: g.map_size_predefined.clone(),
-        map_types: g
-            .map_types
-            .iter()
-            .map(|(k, t)| MapType { key: text(k), name: text(&t.name) })
-            .collect(),
+        map_types: IdVec::from_vec(
+            g.map_types
+                .iter()
+                .map(|(k, t)| MapType { key: text(k), name: text(&t.name) })
+                .collect(),
+        ),
         default_speed: l.one("default_speed", Tab::Speeds, &g.default_speed).unwrap_or(SpeedId(0)),
         benchmark_speed: l
             .one("benchmark_speed", Tab::Speeds, &g.benchmark_speed)
@@ -1160,12 +1186,13 @@ fn link_game(l: &mut Linker<'_>, g: &RawGame) -> Constants {
             .unwrap_or(DifficultyId(0)),
         max_players: g.max_players,
         formulas: g.constants.clone(),
-        barbarian_levels: g
-            .barbarians
-            .levels
-            .iter()
-            .map(|(k, v)| BarbarianLevel { key: text(k), level: v.clone() })
-            .collect(),
+        barbarian_levels: IdVec::from_vec(
+            g.barbarians
+                .levels
+                .iter()
+                .map(|(k, v)| BarbarianLevel { key: text(k), level: v.clone() })
+                .collect(),
+        ),
         diplomacy: g.diplomacy.clone(),
     }
 }
@@ -1401,7 +1428,7 @@ fn check_game(k: &Constants, p: &mut Problems) {
             );
         }
     }
-    for m in &k.map_sizes {
+    for m in k.map_sizes.as_slice() {
         if !(MIN_SIDE..=MAX_SIDE).contains(&m.width) || !(MIN_SIDE..=MAX_SIDE).contains(&m.height) {
             invalid(
                 &m.key,
@@ -1417,7 +1444,7 @@ fn check_game(k: &Constants, p: &mut Problems) {
     let too_many = |what: &str, seats: usize| {
         format!("{what} {seats} seats, more than a PlayerSet holds ({})", PlayerSet::CAPACITY)
     };
-    for m in &k.map_sizes {
+    for m in k.map_sizes.as_slice() {
         let n = seats(m.players, m.city_states);
         if n > PlayerSet::CAPACITY {
             p.push(RulesetErrorKind::Capacity, GAME, &m.key, too_many("its players take", n));
