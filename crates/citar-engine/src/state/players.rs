@@ -390,24 +390,72 @@ fn py_repr(v: &Value) -> String {
 /// A seat driver's own memory, opaque to the engine: saved as base64, digested as its bytes,
 /// and handed back to the seat's driver each turn (DESIGN.md 4.5, 6.12). The Python bot kept its
 /// plans in the object and lost them on every save (`bots/basic.py:678-697`).
+///
+/// Its fields are private so that every memory is built by [`new`](Self::new), which holds it to
+/// [`MAX_LEN`](Self::MAX_LEN): the engine can never write a save it would refuse to load.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DriverMemory {
-    /// Which driver wrote it.
-    pub kind: u16,
-    /// The version of that driver's format.
-    pub version: u16,
-    pub bytes: Box<[u8]>,
+    kind: u16,
+    version: u16,
+    bytes: Box<[u8]>,
+}
+
+/// A driver's memory over [`DriverMemory::MAX_LEN`] bytes, refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a driver's memory of {len} bytes is over the limit of {max}", max = DriverMemory::MAX_LEN)]
+pub struct DriverTooLarge {
+    /// The bytes offered.
+    pub len: usize,
 }
 
 impl DriverMemory {
-    /// The most bytes a driver may keep, which loading enforces: enough for any plan, and small
-    /// enough that a corrupt length cannot ask for gigabytes.
+    /// The most bytes a driver may keep, which [`new`](Self::new) enforces on the way in and
+    /// loading on the way back: enough for any plan, and small enough that a corrupt length
+    /// cannot ask for gigabytes.
     pub const MAX_LEN: usize = 4 << 20;
+
+    /// A driver's memory: `bytes` in the format `version` of driver `kind`. Refused over
+    /// [`MAX_LEN`](Self::MAX_LEN) bytes.
+    pub fn new(
+        kind: u16,
+        version: u16,
+        bytes: impl Into<Box<[u8]>>,
+    ) -> Result<Self, DriverTooLarge> {
+        let bytes = bytes.into();
+        if bytes.len() > Self::MAX_LEN {
+            return Err(DriverTooLarge { len: bytes.len() });
+        }
+        Ok(Self { kind, version, bytes })
+    }
 
     /// An empty memory for a driver.
     #[must_use]
     pub fn empty(kind: u16, version: u16) -> Self {
         Self { kind, version, bytes: Box::default() }
+    }
+
+    /// Which driver wrote it.
+    #[must_use]
+    pub const fn kind(&self) -> u16 {
+        self.kind
+    }
+
+    /// The version of that driver's format.
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// The bytes, as the driver wrote them.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The bytes, taken out.
+    #[must_use]
+    pub fn into_bytes(self) -> Box<[u8]> {
+        self.bytes
     }
 }
 
@@ -1277,10 +1325,16 @@ mod tests {
             4,
         );
         assert!(p.take_driver().is_none());
-        p.put_driver(Some(DriverMemory { kind: 1, version: 2, bytes: vec![7, 8].into() }));
-        assert_eq!(p.seat().driver().map(|d| (d.kind, d.version, d.bytes.len())), Some((1, 2, 2)));
-        assert_eq!(p.take_driver().map(|d| d.bytes.to_vec()), Some(vec![7, 8]));
+        p.put_driver(DriverMemory::new(1, 2, vec![7, 8]).ok());
+        let held = p.seat().driver().map(|d| (d.kind(), d.version(), d.bytes().len()));
+        assert_eq!(held, Some((1, 2, 2)));
+        assert_eq!(p.take_driver().map(|d| d.into_bytes().to_vec()), Some(vec![7, 8]));
         assert!(p.seat().driver().is_none());
+        // A memory over the limit cannot be built, so no seat can hold one.
+        let most = DriverMemory::new(1, 2, vec![0; DriverMemory::MAX_LEN]);
+        assert!(most.is_ok_and(|d| d.bytes().len() == DriverMemory::MAX_LEN));
+        let over = DriverMemory::new(1, 2, vec![0; DriverMemory::MAX_LEN + 1]);
+        assert_eq!(over, Err(DriverTooLarge { len: DriverMemory::MAX_LEN + 1 }));
         assert_eq!(
             format!("{:?}", DriverMemory::empty(3, 1)),
             "DriverMemory(kind 3, version 1, 0 bytes)"
