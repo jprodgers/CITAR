@@ -39,8 +39,12 @@ pub enum RulesetErrorKind {
     /// or name.
     UniqueParameter,
     /// A unique's modifiers out of place: two triggers, a `for every` multiplier, the same
-    /// action modifier twice, a modifier written as a unique or a unique as a modifier.
+    /// action modifier twice, a modifier written as a unique or a unique as a modifier, a region
+    /// condition off map generation, or a condition map generation cannot read.
     UniqueModifier,
+    /// A filter that does not compile: a term that matches nothing, a filter nested too deep, or
+    /// a filter map generation reads that asks more than the terrain (DESIGN.md 5.7).
+    Filter,
 }
 
 /// One problem in a ruleset.

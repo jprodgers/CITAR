@@ -12,7 +12,8 @@ use core::ops::Range;
 
 use bitflags::bitflags;
 
-use super::generated::{CondData, TriggerCond, UniqueData, UniqueType};
+use super::filter::Filters;
+use super::generated::{CondData, ParamKind, TriggerCond, UniqueData, UniqueType};
 use super::params::Param;
 use crate::base::ids::{
     AbilityKey, BaseUnitId, BeliefId, BuildingId, CityFilterId, CityStateTypeId, CivFilterId,
@@ -357,34 +358,57 @@ impl SourceUniques {
     }
 }
 
-/// The kind of object a static filter selects.
+/// The kind of object a static filter selects (DESIGN.md 5.7). The unique parameters that are
+/// static filters select base units, buildings, improvements, resources, techs or eras; the
+/// other domains are the static parts of dynamic filters (a tile's terrains, a unit's promotions,
+/// a civilization's nation) and the policies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StaticDomain {
     BaseUnit,
     Building,
+    Terrain,
     Improvement,
     Resource,
     Tech,
     Era,
+    Policy,
+    Promotion,
+    Nation,
 }
 
-/// A static filter ([`SetRef`]).
+/// A static filter ([`SetRef`]): the objects of one domain it selects, decided at load.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaticFilter {
     pub domain: StaticDomain,
     /// The filter as written.
     pub text: TextId,
-    /// The objects it selects, by index, when the compiler decided them: the relevant-promotion
-    /// fixup (`units.py:153`). Package 1a-06 evaluates the rest.
-    pub members: Option<BitSet>,
+    /// The objects it selects, by index.
+    pub members: BitSet,
+    /// Whether the compiler decided the members rather than the text: the relevant-promotion
+    /// fixup (`units.py:153`).
+    pub fixed: bool,
+}
+
+impl StaticFilter {
+    /// Whether the filter selects the object with this index.
+    #[must_use]
+    #[inline]
+    pub fn contains(&self, index: u32) -> bool {
+        self.members.contains(index)
+    }
 }
 
 /// A parameter that may name objects of several kinds ([`ObjectFilterId`]), compiled once for
-/// each kind its parameter kind allows. Package 1a-06 drops the kinds a text cannot match.
+/// each kind its parameter kind allows, keeping only the kinds its text matches (DESIGN.md 5.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ObjectFilter {
+    /// The parameter kind it was compiled for: `TileOrBuildingFilter`,
+    /// `TileSpecialistOrBuildingFilter` or `ImprovementOrTerrainFilter`.
+    pub kind: ParamKind,
     /// The filter as written.
     pub text: TextId,
+    /// The tiles it names. For an `ImprovementOrTerrainFilter`, read as a tile-terrain filter,
+    /// as the workers read it (`workers.py:201-202`); for the others, as a full tile filter.
     pub tiles: Option<TileFilterId>,
     pub buildings: Option<SetRef>,
     pub improvements: Option<SetRef>,
@@ -392,9 +416,8 @@ pub struct ObjectFilter {
     pub specialist: Option<SpecialistId>,
 }
 
-/// Every compiled unique of a ruleset, with what they refer to.
-///
-/// Filters are handles to their text for now; package 1a-06 compiles them (DESIGN.md 5.7).
+/// Every compiled unique of a ruleset, with what they refer to: the conditionals, the interned
+/// texts and stats, the static filters, and the dynamic filters compiled ([`Filters`]).
 #[derive(Clone, Default, PartialEq)]
 pub struct UniqueTable {
     pub(crate) uniques: IdVec<UniqueId, Unique>,
@@ -411,6 +434,7 @@ pub struct UniqueTable {
     pub(crate) combatant_filters: IdVec<CombatantFilterId, TextId>,
     pub(crate) tags: IdVec<TagId, TextId>,
     pub(crate) abilities: IdVec<AbilityKey, TextId>,
+    pub(crate) filters: Filters,
 }
 
 impl UniqueTable {

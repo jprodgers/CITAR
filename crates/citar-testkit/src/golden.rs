@@ -743,7 +743,8 @@ pub fn uniques_answers() -> Value {
             json!([
                 format!("{:?}", s.domain),
                 t.text(s.text),
-                s.members.as_ref().map(|m| m.iter().collect::<Vec<u32>>())
+                s.members.iter().collect::<Vec<u32>>(),
+                s.fixed
             ])
         })
         .collect();
@@ -753,6 +754,7 @@ pub fn uniques_answers() -> Value {
         .iter()
         .map(|o| {
             json!([
+                o.kind.name(),
                 t.text(o.text),
                 o.tiles.map(|f| f.0),
                 o.buildings.map(|s| s.0),

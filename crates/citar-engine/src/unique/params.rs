@@ -9,7 +9,7 @@
 //! - fractions are read with `str::parse`, correctly rounded, and interned as a [`FracId`];
 //! - stats are interned as a [`StatsId`], and a stat name UnCiv does not have is an error;
 //! - names become ids, looked up exactly;
-//! - filters become handles to their text, interned per kind (package 1a-06 compiles them);
+//! - filters become handles to their text, interned per kind (`unique::filter` compiles them);
 //! - small vocabularies become enums, and countables a [`Countable`].
 
 use core::fmt;
@@ -502,7 +502,7 @@ impl<'r> Lexicon<'r> {
     ) -> Result<SetRef, String> {
         let t = self.text(text)?;
         let key = (domain, t, Some(members.words().to_vec()));
-        self.sets.get_or_insert(key, || StaticFilter { domain, text: t, members: Some(members) })
+        self.sets.get_or_insert(key, || StaticFilter { domain, text: t, members, fixed: true })
     }
 
     /// The texts of every filter interned so far, for finding the terms that name tags.
@@ -712,7 +712,8 @@ impl<'r> Lexicon<'r> {
         self.unit_filters.get_or_insert(t, || t)
     }
 
-    fn tile_filter(&mut self, text: &str) -> Result<TileFilterId, String> {
+    /// The tile filter `text`, interning it.
+    pub(crate) fn tile_filter(&mut self, text: &str) -> Result<TileFilterId, String> {
         let t = self.filter_text(text)?;
         self.tile_filters.get_or_insert(t, || t)
     }
@@ -729,10 +730,12 @@ impl<'r> Lexicon<'r> {
 
     fn set(&mut self, domain: StaticDomain, text: &str) -> Result<SetRef, String> {
         let t = self.filter_text(text)?;
+        // `unique::filter` evaluates the members once every object is known.
         self.sets.get_or_insert((domain, t, None), || StaticFilter {
             domain,
             text: t,
-            members: None,
+            members: BitSet::new(),
+            fixed: false,
         })
     }
 
@@ -742,6 +745,7 @@ impl<'r> Lexicon<'r> {
             return Ok(id);
         }
         let mut o = ObjectFilter {
+            kind,
             text: t,
             tiles: None,
             buildings: None,

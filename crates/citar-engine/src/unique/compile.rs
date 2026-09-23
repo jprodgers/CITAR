@@ -15,7 +15,7 @@
 //!    modifiers into [`ActionMods`], game speed into a flag, `for [n] turns` into a timer; a
 //!    `for every` multiplier, which Python read as 1 (`uniques.py:1081-1083`), is an error, and
 //!    so is a modifier the unique's role has no use for (a trigger on a standing effect, action
-//!    modifiers off an action, a timer on a requirement);
+//!    modifiers off an action, a timer on a requirement, a region condition off map generation);
 //! 5. mark it `LOCAL` when a parameter or a conditional says `in this city` (`uniques.py:130`);
 //! 6. key it (FNV-1a-64 of source kind, source name, occurrence and text, DESIGN.md 7.2);
 //! 7. give each timed unique a variant without the timer, in the `Temporary` block;
@@ -36,7 +36,7 @@ use super::table::{
 };
 use super::text::{placeholder, split_modifiers};
 use crate::base::collections::{DetMap, DetSet};
-use crate::base::ids::{AbilityKey, Id, IdVec, PromotionId, TagId, TextId, UniqueId};
+use crate::base::ids::{AbilityKey, Id, IdVec, PromotionId, TagId, TextId, TileFilterId, UniqueId};
 use crate::base::sets::{BitSet, TagSet};
 use crate::rules::Ruleset;
 use crate::rules::errors::{Problems, RulesetErrorKind};
@@ -57,6 +57,8 @@ pub(crate) struct Compiled {
     pub(crate) fracs: IdVec<crate::base::ids::FracId, f64>,
     /// Each source's uniques, in the order the sources were given.
     pub(crate) sources: Vec<SourceUniques>,
+    /// The handles of the tile filters given outside uniques, in the order given.
+    pub(crate) tile_filters: Vec<TileFilterId>,
 }
 
 /// A problem with one text.
@@ -97,15 +99,26 @@ struct Staged {
 }
 
 /// Compiles every source's texts. `filters` are the filter texts the ruleset holds outside
-/// uniques (improvement terrains, start biases), which may name tags too. Every problem is
-/// pushed to `p`; `None` means there was at least one.
+/// uniques that name terrains (improvements' `terrainsCanBeBuiltOn`), and `tile_filters` those
+/// that are tile filters (start biases); both may name tags too, and the second are interned as
+/// tile filters. Every problem is pushed to `p`; `None` means there was at least one.
 pub(crate) fn compile(
     rules: &Ruleset,
     sources: &[SourceTexts<'_>],
     filters: &[&str],
+    tile_filters: &[(&'static str, &str, &str)],
     p: &mut Problems,
 ) -> Option<Compiled> {
     let mut lx = Lexicon::new(rules);
+    let mut extra = Vec::with_capacity(tile_filters.len());
+    for &(file, object, text) in tile_filters {
+        match lx.tile_filter(text) {
+            Ok(id) => extra.push(id),
+            Err(e) => {
+                p.push(RulesetErrorKind::UniqueParameter, file, object, format!("[{text}]: {e}"))
+            }
+        }
+    }
     let mut conds: Vec<Cond> = Vec::new();
     let mut staged: Vec<Staged> = Vec::new();
     let mut failed = false;
@@ -142,7 +155,7 @@ pub(crate) fn compile(
         let text = lx.text_of(staged[*i].text);
         p.push(*kind, src.file, src.name, format!("{text:?}: {message}"));
     }
-    if failed || !tag_problems.is_empty() {
+    if failed || !tag_problems.is_empty() || extra.len() < tile_filters.len() {
         return None;
     }
     let variant_of = add_variants(&mut staged);
@@ -196,7 +209,7 @@ pub(crate) fn compile(
     };
     let parts = partitions(&table, sources, &order, &staged, &id_of);
     let fracs = lx.finish(&mut table);
-    Some(Compiled { table, fracs, sources: parts })
+    Some(Compiled { table, fracs, sources: parts, tile_filters: extra })
 }
 
 /// Refuses more uniques than a [`UniqueId`] numbers. The last id must leave room for one past
@@ -322,6 +335,13 @@ fn compile_text(
                 if mty == UniqueType::ConditionalInThisCity {
                     staged.flags |= UFlags::LOCAL;
                 }
+                if matches!(
+                    mty,
+                    UniqueType::ConditionalInRegionOfType
+                        | UniqueType::ConditionalInRegionExceptOfType
+                ) {
+                    used.region.get_or_insert(*m);
+                }
                 let text = mcx.lx.text(m).map_err(|e| Refusal::new(E::Capacity, e))?;
                 // Every conditional reads everything until package 1a-07 assigns its classes.
                 conds.push(Cond { data, deps: CondDeps::all(), text });
@@ -399,6 +419,8 @@ struct Placed<'t> {
     /// The first action modifier.
     action: Option<&'t str>,
     timer: Option<&'t str>,
+    /// The first region conditional.
+    region: Option<&'t str>,
 }
 
 impl Placed<'_> {
@@ -442,6 +464,19 @@ impl Placed<'_> {
             return refuse(
                 m,
                 format!("limits a unit action, and {name} is a {role:?}, not an action"),
+            );
+        }
+        // Only map generation knows regions, and it builds none: the uniques it reads keep the
+        // condition (`GenCond`), and inert ones are read by nothing (DESIGN.md 5.8).
+        if let Some(m) = self.region
+            && !matches!(role, Role::Mapgen | Role::Inert)
+        {
+            return refuse(
+                m,
+                format!(
+                    "is a map-generation condition, and {name} is a {role:?}: a region condition \
+                     goes only on a unique map generation reads"
+                ),
             );
         }
         Ok(())
@@ -523,49 +558,7 @@ fn relevant_fixup(
 /// The terms of a filter, split as Python's `multi_filter` splits it (`uniques.py:294-327`):
 /// `{a} {b}` is a conjunction, `non-[a]` a negation, and anything else one term.
 pub(crate) fn filter_terms(text: &str, out: &mut Vec<String>) {
-    // Filters come from the ruleset, but a pathological nesting must not overflow the stack.
-    fn walk(text: &str, depth: u32, out: &mut Vec<String>) {
-        if depth > 64 {
-            out.push(text.to_owned());
-            return;
-        }
-        if text.starts_with('{') && text.ends_with('}') && text.contains("} {") {
-            for part in and_parts(text) {
-                walk(&part, depth + 1, out);
-            }
-        } else if let Some(inner) = text.strip_prefix("non-[").and_then(|t| t.strip_suffix(']')) {
-            walk(inner, depth + 1, out);
-        } else {
-            out.push(text.to_owned());
-        }
-    }
-    walk(text, 0, out);
-}
-
-/// `{a} {b}` split at depth 0 (`uniques.py:308-327`).
-fn and_parts(text: &str) -> Vec<String> {
-    let inner = &text[1..text.len() - 1];
-    let bytes = inner.as_bytes();
-    let mut parts = Vec::new();
-    let mut depth: i64 = 0;
-    let mut cur = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        if depth == 0 && bytes[i..].starts_with(b"} {") {
-            parts.push(inner[cur..i].to_owned());
-            i += 3;
-            cur = i;
-            continue;
-        }
-        match bytes[i] {
-            b'[' | b'{' => depth += 1,
-            b']' | b'}' => depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    }
-    parts.push(inner[cur..].to_owned());
-    parts
+    out.extend(super::filter::parse::terms(text).into_iter().map(str::to_owned));
 }
 
 /// Every bracketed parameter of a text and of its modifiers, split into filter terms: what a text

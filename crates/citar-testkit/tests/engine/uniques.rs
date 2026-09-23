@@ -199,7 +199,8 @@ fn relevant_units_are_those_that_can_take_the_promotion() {
     let UniqueData::UnitStartingPromotions(p) = t.get(id).data else { panic!("the type") };
     let drill = r.lookup::<PromotionId>("Drill I").expect("a promotion");
     assert_eq!(p.promotion, drill);
-    let members = t.set(p.units).members.clone().expect("decided by the compiler");
+    assert!(t.set(p.units).fixed, "decided by the compiler");
+    let members = &t.set(p.units).members;
     let types = &r.promotions()[drill].unit_types;
     for (u, def) in r.base_units().iter() {
         let index = u32::from(u.0);

@@ -8,17 +8,19 @@
 //!
 //! Each object's uniques are compiled when the ruleset loads (`unique::compile`): its `uniques`
 //! field says which of the ruleset's compiled uniques are its own, split by what the engine does
-//! with them ([`SourceUniques`]). Two kinds of text are still carried as written, for package
-//! 1a-06 to compile with the filters: the terrain filters in `terrainsCanBeBuiltOn` and start
-//! biases, and victory milestones.
+//! with them ([`SourceUniques`]). The filters outside uniques are compiled with the rest
+//! (`unique::filter`): an improvement's `terrainsCanBeBuiltOn` is a set of terrains, and a start
+//! bias a tile filter; victory milestones are [`Milestone`]s.
 
 use serde::Deserialize;
 
+pub use super::gen_tables::{Milestone, MilestoneDef};
 use crate::base::ids::{
     BaseUnitId, BuildingId, CityStateTypeId, DifficultyId, EraId, FeatureId, ImprovementId,
     NationId, PersonalityId, PolicyId, PromotionId, ResourceId, RulesReligionId, SpecialistId,
-    TechId, TerrainId, UnitTypeId,
+    TechId, TerrainId, TileFilterId, UnitTypeId,
 };
+use crate::base::sets::TerrainSet;
 use crate::base::stats::{StatMask, Stats};
 pub use crate::unique::SourceUniques;
 
@@ -299,27 +301,34 @@ pub enum ImprovementKind {
 }
 
 /// One entry of a nation's start bias, as the map generator reads it (`mapgen.py:1000-1012`).
-/// The terrain text is a terrain filter, compiled with the filters (package 1a-06).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Its filter is one map generation reads, from the terrain alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum StartBias {
     /// `Coast`: a coastal start.
     Coast,
-    /// A terrain filter the start should have nearby.
-    Prefer(Box<str>),
-    /// `Avoid [filter]`: a terrain filter the start should not have nearby.
-    Avoid(Box<str>),
+    /// A tile filter the start should have nearby.
+    Prefer(TileFilterId),
+    /// `Avoid [filter]`: a tile filter the start should not have nearby.
+    Avoid(TileFilterId),
+}
+
+/// A start bias entry as written, before its filter is compiled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartBiasText<'a> {
+    Coast,
+    Prefer(&'a str),
+    Avoid(&'a str),
 }
 
 impl StartBias {
     /// Reads one entry as `_bias_score_raw` did.
-    #[must_use]
-    pub fn parse(text: &str) -> Self {
+    pub(crate) fn read(text: &str) -> StartBiasText<'_> {
         if text == "Coast" {
-            Self::Coast
+            StartBiasText::Coast
         } else if let Some(f) = text.strip_prefix("Avoid [").and_then(|t| t.strip_suffix(']')) {
-            Self::Avoid(f.into())
+            StartBiasText::Avoid(f)
         } else {
-            Self::Prefer(text.into())
+            StartBiasText::Prefer(text)
         }
     }
 }
@@ -556,8 +565,9 @@ pub struct ImprovementDef {
     pub name: Box<str>,
     pub key: Option<Box<str>>,
     pub stats: Stats,
-    /// Terrain filters, as written; compiled with the filters (package 1a-06).
-    pub terrains_can_be_built_on: Box<[Box<str>]>,
+    /// The terrains it can be built on: its `terrainsCanBeBuiltOn` filters, each read as
+    /// `terrain_matches` reads one (`workers.py:44-46`).
+    pub terrains_can_be_built_on: TerrainSet,
     pub turns_to_build: Option<i32>,
     pub tech_required: Option<TechId>,
     pub unique_to: Option<NationId>,
@@ -672,8 +682,8 @@ impl SpeedDef {
 pub struct VictoryDef {
     pub name: Box<str>,
     pub key: Option<Box<str>>,
-    /// Milestone texts, as written; compiled to milestones in package 1a-06.
-    pub milestones: Box<[Box<str>]>,
+    /// What winning it takes, in order.
+    pub milestones: Box<[MilestoneDef]>,
     /// The spaceship parts a scientific victory needs, one entry per part.
     pub required_spaceship_parts: Box<[BaseUnitId]>,
     pub hidden_in_victory_screen: bool,
@@ -798,10 +808,10 @@ mod tests {
 
     #[test]
     fn start_biases_read_as_the_map_generator_read_them() {
-        assert_eq!(StartBias::parse("Coast"), StartBias::Coast);
-        assert_eq!(StartBias::parse("Avoid [Tundra]"), StartBias::Avoid("Tundra".into()));
-        assert_eq!(StartBias::parse("Jungle"), StartBias::Prefer("Jungle".into()));
-        assert_eq!(StartBias::parse("Avoid [Tundra"), StartBias::Prefer("Avoid [Tundra".into()));
+        assert_eq!(StartBias::read("Coast"), StartBiasText::Coast);
+        assert_eq!(StartBias::read("Avoid [Tundra]"), StartBiasText::Avoid("Tundra"));
+        assert_eq!(StartBias::read("Jungle"), StartBiasText::Prefer("Jungle"));
+        assert_eq!(StartBias::read("Avoid [Tundra"), StartBiasText::Prefer("Avoid [Tundra"));
     }
 
     #[test]

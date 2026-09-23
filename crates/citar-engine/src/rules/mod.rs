@@ -10,6 +10,7 @@
 //! - `raw`: the files as written, read strictly;
 //! - [`defs`]: the typed tables, every name resolved to an id;
 //! - [`derived`]: the tables computed at load;
+//! - [`gen_tables`]: what map generation, the AI and victory read of the uniques;
 //! - [`constants`]: `game.json`, typed;
 //! - [`names`]: loose lookup by name or id, for tools, typed by the id it gives ([`Named`]);
 //! - `client`: the ruleset as the browser reads it;
@@ -19,6 +20,7 @@ pub mod constants;
 pub mod defs;
 pub mod derived;
 pub mod errors;
+pub mod gen_tables;
 pub mod names;
 pub mod source;
 
@@ -42,6 +44,7 @@ use self::defs::{
 };
 pub use self::derived::Derived;
 pub use self::errors::{RulesetError, RulesetErrorKind, RulesetErrors};
+pub use self::gen_tables::GenTables;
 use self::names::NameIndex;
 pub use self::names::{NameKind, Named};
 #[cfg(feature = "embedded-ruleset")]
@@ -89,6 +92,7 @@ pub struct Ruleset {
     pub(crate) constants: Constants,
     pub(crate) fracs: IdVec<FracId, f64>,
     pub(crate) derived: Derived,
+    pub(crate) gen_tables: GenTables,
     names: [NameIndex; 16],
     client: client::ClientSource,
     client_json: OnceLock<String>,
@@ -291,6 +295,13 @@ impl Ruleset {
     #[inline]
     pub fn derived(&self) -> &Derived {
         &self.derived
+    }
+
+    /// What map generation, the AI and victory read of the uniques (DESIGN.md 5.10).
+    #[must_use]
+    #[inline]
+    pub fn gen_tables(&self) -> &GenTables {
+        &self.gen_tables
     }
 }
 

@@ -13,20 +13,28 @@
 //! - [`params`]: compiling parameters by kind;
 //! - [`countable`]: the countables a unique compares;
 //! - `compile`: the compiler, run by the ruleset loader;
-//! - [`table`]: what it produces, [`UniqueTable`] and each source's [`SourceUniques`].
+//! - [`table`]: what it produces, [`UniqueTable`] and each source's [`SourceUniques`];
+//! - [`filter`]: the filters, compiled to sets and trees (package 1a-06);
+//! - [`world`]: the facts a filter reads of a world, [`TileFacts`] and [`FilterFacts`].
 //!
-//! Package 1a-05 compiles; filters (1a-06) and evaluation (1a-07) come next.
+//! Packages 1a-05 and 1a-06 compile; evaluation (1a-07) comes next.
 
 pub mod countable;
+pub mod filter;
 #[rustfmt::skip]
 #[path = "gen.rs"]
 pub mod generated;
 pub mod params;
 pub mod table;
 pub mod text;
+pub mod world;
 
 pub(crate) mod compile;
 
+pub use self::filter::{
+    CityLeaf, CivLeaf, Combatant, CombatantFilter, Expr, Filters, TileFilter, TileLeaf, UnitLeaf,
+    UnitScope,
+};
 pub use self::generated::{
     BY_PLACEHOLDER, CondData, ModifierData, ParamKind, Stage, Support, TYPE_INFO, TriggerCond,
     TypeInfo, UniqueData, UniqueType,
@@ -35,6 +43,7 @@ pub use self::table::{
     ActionMods, Cond, CondDeps, CondSpan, ObjectFilter, Role, Source, SourceUniques, StaticDomain,
     StaticFilter, UFlags, Unique, UniqueMeta, UniqueTable,
 };
+pub use self::world::{FilterFacts, TileFacts};
 
 impl UniqueType {
     /// The type whose placeholder is `placeholder`, exactly: `[]% Strength` gives `Strength`.

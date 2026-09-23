@@ -13,20 +13,25 @@
 //! 6. the terrain features' layers, by which uniques name features;
 //! 7. the uniques, compiled (`unique::compile`): every text of every object;
 //! 8. the derived tables, which may need objects the engine names (Hill, Road) and read the
-//!    compiled uniques.
+//!    compiled uniques;
+//! 9. the filters, compiled (`unique::filter`), which read the derived tables: every term must
+//!    match something;
+//! 10. the tables map generation, the AI and victory read (`gen_tables`).
 //!
 //! Python checked only the references of stage 4 for techs, units and buildings
-//! (`rules.py:238-260`), and read unique texts at each use.
+//! (`rules.py:238-260`), and read unique texts and filters at each use.
 
 use super::constants::{BarbarianLevel, Constants, MapSize, MapType, RawGame};
 use super::defs::{
     BaseUnitDef, BeliefDef, BuildingDef, CityStatePersonality, CityStateTypeDef, DifficultyDef,
-    Domain, ERA_STARTING_UNIT, EraDef, ImprovementDef, ImprovementKind, NationDef, PersonalityDef,
-    PolicyDef, PolicyKind, PromotionDef, QuestDef, QuestKind, ResourceDef, RuinDef, SpecialistDef,
-    SpeedDef, StartBias, StartingUnit, TechColumn, TechDef, TerrainDef, UnitTypeDef, VictoryDef,
+    Domain, ERA_STARTING_UNIT, EraDef, ImprovementDef, ImprovementKind, Milestone, MilestoneDef,
+    NationDef, PersonalityDef, PolicyDef, PolicyKind, PromotionDef, QuestDef, QuestKind,
+    ResourceDef, RuinDef, SpecialistDef, SpeedDef, StartBias, StartBiasText, StartingUnit,
+    TechColumn, TechDef, TerrainDef, UnitTypeDef, VictoryDef,
 };
 use super::derived::{self, Derived};
 use super::errors::{Problems, RulesetErrorKind, RulesetErrors};
+use super::gen_tables::{self, BadMilestone, GenTables};
 use super::names::{NameIndex, NameKind};
 use super::raw::{self, RawRuleset, Table};
 use super::source::{self, GAME, RulesetFiles};
@@ -36,11 +41,12 @@ use crate::base::ids::{
     BaseUnitId, DifficultyId, EraId, Id, IdVec, NationId, PolicyId, SpeedId, UnitTypeId,
 };
 use crate::base::sets::{
-    BaseUnitSet, BeliefSet, BuildingSet, EraSet, ImprovementSet, PlayerSet, PolicySet,
+    BaseUnitSet, BeliefSet, BuildingSet, EraSet, ImprovementSet, NationSet, PlayerSet, PolicySet,
     PromotionSet, ResourceSet, TechSet, TerrainSet,
 };
 use crate::base::stats::StatMask;
 use crate::unique::compile::{self, SourceTexts};
+use crate::unique::filter;
 use crate::unique::{Source, SourceUniques, UniqueTable};
 
 pub(super) fn load(files: &RulesetFiles<'_>) -> Result<Ruleset, RulesetErrors> {
@@ -66,10 +72,81 @@ pub(super) fn load(files: &RulesetFiles<'_>) -> Result<Ruleset, RulesetErrors> {
     let derived = derived::derive(&mut rules, layers, &mut p);
     p.check()?;
     let Some(derived) = derived else { return Err(gave_up(&mut p, "the derived tables")) };
-    rules.id = id;
     rules.derived = derived;
+    compile_filters(&raw, &mut rules, &mut p);
+    p.check()?;
+    let tables = gen_tables::build(&rules, &mut |at, kind, text| {
+        let (file, object) = source_place(&raw, &rules, at);
+        p.push(kind, file, &object, text);
+    });
+    p.check()?;
+    rules.gen_tables = tables;
+    rules.id = id;
     rules.client = client::ClientSource { docs: docs.into_vec(), nations: raw.nations_json };
     Ok(rules)
+}
+
+// ---- Stage 9: filters ---------------------------------------------------------------------------
+
+/// Compiles every filter (DESIGN.md 5.7): the dynamic filters to trees, the static ones to their
+/// members, the object filters to the kinds their texts match, and each improvement's
+/// `terrainsCanBeBuiltOn` to a set of terrains.
+fn compile_filters(raw: &RawRuleset, r: &mut Ruleset, p: &mut Problems) {
+    let done = filter::compile(r);
+    for problem in &done.problems {
+        let (file, object) = match problem.site {
+            Some(id) => source_place(raw, r, r.uniques.meta(id).source),
+            None => ("", String::new()),
+        };
+        p.push(RulesetErrorKind::Filter, file, &object, problem.message.as_str());
+    }
+    let mut built_on = Vec::with_capacity(raw.improvements.len());
+    for (name, i) in &raw.improvements {
+        match filter::terrain_list(r, &i.terrains_can_be_built_on) {
+            Ok(set) => built_on.push(set),
+            Err(e) => {
+                p.push(RulesetErrorKind::Filter, "ruleset/improvements.json", name, e);
+                built_on.push(TerrainSet::new());
+            }
+        }
+    }
+    for (imp, set) in r.improvements.as_mut_slice().iter_mut().zip(built_on) {
+        imp.terrains_can_be_built_on = set;
+    }
+    let t = &mut r.uniques;
+    for (id, members) in done.members {
+        t.sets[id].members = members;
+    }
+    t.objects = done.objects.into_iter().collect();
+    t.filters = done.filters;
+}
+
+/// The file and the object a unique of `source` came from, for a report.
+fn source_place(raw: &RawRuleset, r: &Ruleset, source: Source) -> (&'static str, String) {
+    let named = |file: &'static str, name: &str| (file, name.to_owned());
+    match source {
+        Source::Nation(id) => {
+            let name = &r.nations[id].name;
+            (raw.nation_file(name), name.to_string())
+        }
+        Source::Building(id) => named("ruleset/buildings.json", &r.buildings[id].name),
+        Source::Policy(id) => named("ruleset/policies.json", &r.policies[id].name),
+        Source::Tech(id) => named("ruleset/techs.json", &r.techs[id].name),
+        Source::Temporary(id) => source_place(raw, r, r.uniques.meta(id).source),
+        Source::Era(id) => named("ruleset/eras.json", &r.eras[id].name),
+        Source::CityStateFriend(id) | Source::CityStateAlly(id) | Source::CityStateType(id) => {
+            named("ruleset/city_state_types.json", &r.city_state_types[id].name)
+        }
+        Source::Belief(id) => named("ruleset/beliefs.json", &r.beliefs[id].name),
+        Source::Resource(id) => named("ruleset/resources.json", &r.resources[id].name),
+        Source::Global => named("ruleset/global_uniques.json", ""),
+        Source::Terrain(id) => named("ruleset/terrains.json", &r.terrains[id].name),
+        Source::Improvement(id) => named("ruleset/improvements.json", &r.improvements[id].name),
+        Source::UnitType(id) => named("ruleset/unit_types.json", &r.unit_types[id].name),
+        Source::Unit(id) => named("ruleset/units.json", &r.base_units[id].name),
+        Source::Promotion(id) => named("ruleset/promotions.json", &r.promotions[id].name),
+        Source::Ruins(id) => named("ruleset/ruins.json", &r.ruins[id].name),
+    }
 }
 
 // ---- Stage 7: uniques -------------------------------------------------------------------------
@@ -129,20 +206,33 @@ fn compile_uniques(raw: &RawRuleset, r: &mut Ruleset, p: &mut Problems) {
     each(&mut s, &raw.promotions, "ruleset/promotions.json", |x| &x.uniques, Source::Promotion);
     each(&mut s, &raw.ruins, "ruleset/ruins.json", |x| &x.uniques, Source::Ruins);
 
-    // Filters outside uniques may name tags too.
+    // Filters outside uniques may name tags too; start biases are tile filters.
     let mut filters: Vec<&str> = Vec::new();
     for i in raw.improvements.values() {
         filters.extend(i.terrains_can_be_built_on.iter().map(String::as_str));
     }
-    for n in r.nations.as_slice() {
+    let mut biases: Vec<(&'static str, &str, &str)> = Vec::new();
+    for (name, n) in &raw.nations {
         for b in &n.start_bias {
-            if let StartBias::Prefer(f) | StartBias::Avoid(f) = b {
-                filters.push(f);
+            if let StartBiasText::Prefer(f) | StartBiasText::Avoid(f) = StartBias::read(b) {
+                biases.push((raw.nation_file(name), name, f));
             }
         }
     }
 
-    let Some(done) = compile::compile(r, &s, &filters, p) else { return };
+    let Some(done) = compile::compile(r, &s, &filters, &biases, p) else { return };
+    let mut ids = done.tile_filters.iter().copied();
+    for (n, x) in r.nations.as_mut_slice().iter_mut().zip(raw.nations.values()) {
+        n.start_bias = x
+            .start_bias
+            .iter()
+            .filter_map(|b| match StartBias::read(b) {
+                StartBiasText::Coast => Some(StartBias::Coast),
+                StartBiasText::Prefer(_) => ids.next().map(StartBias::Prefer),
+                StartBiasText::Avoid(_) => ids.next().map(StartBias::Avoid),
+            })
+            .collect();
+    }
     for (src, part) in s.iter().zip(done.sources) {
         match src.source {
             Source::Nation(id) => r.nations[id].uniques = part,
@@ -243,7 +333,12 @@ fn check_sizes(raw: &RawRuleset, p: &mut Problems) {
         ),
         ("eras", raw.eras.len(), EraSet::CAPACITY, "an EraSet: raise sets::ERA_WORDS"),
         ("unit_types", raw.unit_types.len(), U16, "a UnitTypeId (u16)"),
-        ("nations", raw.nations.len(), U16, "a NationId (u16)"),
+        (
+            "nations",
+            raw.nations.len(),
+            NationSet::CAPACITY,
+            "a NationSet: raise sets::NATION_WORDS",
+        ),
         ("personalities", raw.personalities.len(), U16, "a PersonalityId (u16)"),
         ("quests", raw.quests.len(), U16, "a QuestKindId (u16)"),
         ("ruins", raw.ruins.len(), U16, "a RuinId (u16)"),
@@ -661,7 +756,8 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 name: text(name),
                 key: key(i.id.as_ref()),
                 stats: i.stats(),
-                terrains_can_be_built_on: texts(&i.terrains_can_be_built_on),
+                // Stage 9 reads the filters, which need the derived tables.
+                terrains_can_be_built_on: TerrainSet::new(),
                 turns_to_build: i.turns_to_build,
                 tech_required: l.opt("techRequired", Tab::Techs, i.tech_required.as_ref()),
                 unique_to: l.opt("uniqueTo", Tab::Nations, i.unique_to.as_ref()),
@@ -797,12 +893,23 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
     let mut victories = IdVec::with_capacity(raw.victories.len());
     for (name, v) in &raw.victories {
         l.at("ruleset/victories.json", name);
+        let mut milestones = Vec::with_capacity(v.milestones.len());
+        for m in &v.milestones {
+            match Milestone::parse(m, &mut |b| l.one("milestone", Tab::Buildings, b)) {
+                Ok(milestone) => milestones.push(MilestoneDef { milestone, text: text(m) }),
+                // `one` reported the building that is not there.
+                Err(BadMilestone::NoBuilding) => {}
+                Err(BadMilestone::Invalid(e)) => {
+                    l.p.push(RulesetErrorKind::Invalid, "ruleset/victories.json", name, e);
+                }
+            }
+        }
         push(
             &mut victories,
             VictoryDef {
                 name: text(name),
                 key: key(v.id.as_ref()),
-                milestones: texts(&v.milestones),
+                milestones: milestones.into(),
                 required_spaceship_parts: l.all(
                     "requiredSpaceshipParts",
                     Tab::Units,
@@ -946,7 +1053,8 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 kind: n.kind,
                 leader_name: n.leader_name.as_deref().map(text),
                 adjective: n.adjective.as_deref().map(text),
-                start_bias: n.start_bias.iter().map(|b| StartBias::parse(b)).collect(),
+                // The filters are compiled with the uniques, in stage 7.
+                start_bias: Box::default(),
                 preferred_victory_type: n.preferred_victory_type,
                 personality: l.opt("personality", Tab::Personalities, n.personality.as_ref()),
                 favored_religion: l.opt(
@@ -999,6 +1107,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
         constants,
         fracs: IdVec::new(),
         derived: Derived::empty(),
+        gen_tables: GenTables::default(),
         names: Default::default(),
         client: client::ClientSource::default(),
         client_json: std::sync::OnceLock::new(),
