@@ -421,9 +421,9 @@ class VisibilityTests(unittest.TestCase):
 class SimulationTests(unittest.TestCase):
     def test_bot_game_runs(self):
         from citar import sim
-        g = sim.run(players=3, turns=60, map_size="duel", seed=4, verbose=False)
-        self.assertEqual(g.s.phase, "over")
-        self.assertTrue(all(len(g.player_cities(p.id)) >= 1 for p in g.majors()))
+        r = sim.run(players=3, turns=60, map_size="duel", seed=4, verbose=False)
+        self.assertEqual(r["phase"], "over")
+        self.assertTrue(all(p["cities"] >= 1 for p in r["players"] if p["kind"] == "major" and p["alive"]))
 
 
 if __name__ == "__main__":

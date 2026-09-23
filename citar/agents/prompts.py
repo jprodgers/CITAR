@@ -1,7 +1,7 @@
 """System prompts for language-model players. Kept static so provider-side prompt caching works."""
 from __future__ import annotations
 
-from ..engine.views import RULES_OVERVIEW
+from ..engine_api import RULES_OVERVIEW, MAP_LEGEND
 
 SYSTEM_PROMPT = """You are the leader of a civilization in CITAR, a turn-based strategy game in the style of Civilization V,
 competing against other leaders who may be humans or other AI models. Play to win.
@@ -77,7 +77,6 @@ def system_prompt(persona: str | None = None) -> str:
     the only way to act, that the briefing is the state of the world, and that the turn ends when it
     says so. Everything else it might infer from the tools themselves.
     """
-    from ..engine.briefing import MAP_LEGEND
     text = SYSTEM_PROMPT.format(rules=RULES_OVERVIEW, legend=MAP_LEGEND)
     if persona:
         text += PERSONA_BLOCK.format(persona=persona.strip())

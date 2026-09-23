@@ -217,15 +217,9 @@ def _check_ruleset(r: Report) -> None:
     """That the packaged ruleset loads, and how much of it there is."""
     r.section("Ruleset")
     try:
-        from .engine.rules import get_rules
+        from . import engine_api
 
-        rules = get_rules()
-        counts = []
-        for attr, label in (("techs", "techs"), ("units", "units"), ("buildings", "buildings"),
-                            ("nations", "nations"), ("policies", "policies")):
-            value = getattr(rules, attr, None)
-            if value is not None:
-                counts.append(f"{len(value)} {label}")
+        counts = [f"{n} {kind}" for kind, n in engine_api.ruleset_counts().items()]
         r.line(OK, "loaded", ", ".join(counts) or "ok")
     except Exception as exc:
         r.line(FAIL, "ruleset", f"{type(exc).__name__}: {exc}",

@@ -100,8 +100,8 @@ class BotTests(unittest.TestCase):
         # Aggression 0.9, because since the v2 defaults a middling bot (0.5) out-expands its neighbour on this
         # map instead of attacking it: 19 cities by T200 and no war declared at all. See docs/research/BOT_TUNING.md.
         from citar.bots.basic import BasicBot
-        from citar.balance import IdleBot
-        from citar.sim import resolve_negotiations
+        from citar.bots.idle import IdleBot
+        from citar.bots.headless import resolve_negotiations
         g = Game.new({"map_type": "pangaea", "map_size": "duel", "seed": 1001, "barbarians": "normal",
                       "players": [{"controller": "bot"}, {"controller": "bot"}], "turn_limit": 200, "speed": "Quick"})
         bots = {0: BasicBot(aggression=0.9, seed=1), 1: IdleBot()}

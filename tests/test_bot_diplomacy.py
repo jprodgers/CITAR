@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest import mock
 
-from citar.balance import IdleBot
+from citar.bots.idle import IdleBot
 from citar.bots.basic import BasicBot
 from citar.engine import diplomacy as D, tools
 from citar.engine.game import Game
@@ -36,7 +36,7 @@ def offer(g, give, receive, message="A proposal."):
 def play(g, bots, until_turn, handle=None):
     """Play bot turns headlessly. ``handle`` answers negotiations after each turn (default: every bot answers
     everything, as the lab does)."""
-    from citar.sim import resolve_negotiations
+    from citar.bots.headless import resolve_negotiations
     while g.s.phase == "playing" and g.turn < until_turn:
         pid = g.s.current
         bots[pid].play_turn(g, pid, end_turn=False)
@@ -143,8 +143,7 @@ class BotAgentTests(unittest.TestCase):
         self.s = self.manager.create({"map_size": "duel", "seed": 3, "barbarians": "off"},
                                      [{"type": "human"}, {"type": "bot"}], track=False, start=False)
         with self.s.lock:
-            self.s.game.meet(0, 1)
-            self.s.game.player(0).gold = 300
+            self.s.game.apply_ops([{"op": "meet", "a": 0, "b": 1}, {"op": "set_player", "player": 0, "gold": 300}])
 
     def tearDown(self):
         import shutil
@@ -156,11 +155,7 @@ class BotAgentTests(unittest.TestCase):
     def _open(self, give, receive):
         """The human opens a negotiation with the bot, straight through the engine (no interrupt thread)."""
         with self.s.lock:
-            g = self.s.game
-            current, g.s.current = g.s.current, 0
-            nid = offer(g, give, receive)
-            g.s.current = current
-            return nid
+            return self.s.game.open_negotiation_as(0, 1, "A proposal.", give, receive)["negotiation_id"]
 
     def test_an_interrupt_skips_what_the_model_owns(self):
         from citar.agents.bot_agent import BotAgent
@@ -168,19 +163,19 @@ class BotAgentTests(unittest.TestCase):
         agent.bot.set_diplomacy({"trades": "llm"})
         trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
         agent.respond_negotiation(self.s, 1, trade)
-        self.assertEqual(len(D.get_negotiation(self.s.game, trade)["history"]), 1)
+        self.assertEqual(len(self.s.game.negotiation(trade)["history"]), 1)
         with self.s.lock:
-            tools.execute(self.s.game, 0, "respond_negotiation", {"negotiation_id": trade, "action": "reject",
-                                                                  "message": "Never mind."})
+            self.s.game.execute(0, "respond_negotiation", {"negotiation_id": trade, "action": "reject",
+                                                           "message": "Never mind."})
         talk = self._open(None, None)                   # no proposal, and the bot still owns chat
         agent.respond_negotiation(self.s, 1, talk)
-        self.assertGreater(len(D.get_negotiation(self.s.game, talk)["history"]), 1)
+        self.assertGreater(len(self.s.game.negotiation(talk)["history"]), 1)
 
     def test_the_end_of_turn_wait_skips_what_the_model_owns(self):
         from citar.agents.bot_agent import BotAgent
         trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
         with self.s.lock:
-            self.s.game.s.current = 1
+            self.s.game.python_game.s.current = 1          # the bot's turn, without the start-of-turn processing
         agent = BotAgent(seed=1)
         agent.bot.set_diplomacy({"trades": "llm"})
         t0 = time.time()
@@ -189,7 +184,7 @@ class BotAgentTests(unittest.TestCase):
         with mock.patch.object(self.s, "_dispatch_negotiation_interrupts"):
             agent.play_turn(self.s, 1)
         self.assertLess(time.time() - t0, 60)           # it did not sit out its 90-second wait on the model's chat
-        n = D.get_negotiation(self.s.game, trade)
+        n = self.s.game.negotiation(trade)
         self.assertEqual((n["status"], len(n["history"])), ("open", 1))
 
     def test_a_frozen_bot_answers_everything(self):
@@ -199,7 +194,7 @@ class BotAgentTests(unittest.TestCase):
         self.assertFalse(hasattr(agent.bot, "owns_negotiation"))
         trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
         agent.respond_negotiation(self.s, 1, trade)
-        self.assertGreater(len(D.get_negotiation(self.s.game, trade)["history"]), 1)
+        self.assertGreater(len(self.s.game.negotiation(trade)["history"]), 1)
 
 
 class WarSwitchTests(unittest.TestCase):

@@ -71,15 +71,15 @@ class SessionTests(unittest.TestCase):
                                      {"type": "bot"}])
             s.ai_delay = 0
             with s.lock:
-                s.game.meet(0, 1)
-                s.game.player(0).gold = 50       # UnCiv civs start with no gold
+                s.game.apply_ops([{"op": "meet", "a": 0, "b": 1},
+                                  {"op": "set_player", "player": 0, "gold": 50}])   # UnCiv civs start with no gold
             # Wait for what the assertions below actually need, not for a turn number. The turn
             # counter moves when the turn ends, which is not the same moment as the script for
             # that turn having run: on a fast machine this loop saw turn 3 and paused the game
             # before the negotiation script had been called at all, and the test failed with an
             # empty negotiation list.
             def ready():
-                negotiations = s.game.s.negotiations
+                negotiations = s.game.negotiations()
                 return (s.game.turn >= 3 and negotiations and negotiations[0]["status"] != "open"
                         and captured.get("results"))
 
@@ -88,13 +88,13 @@ class SessionTests(unittest.TestCase):
                 time.sleep(0.1)
             s.paused = True
         self.assertGreaterEqual(s.game.turn, 3, s.errors)
-        self.assertEqual(s.game.player(0).name, "Mockonia")
-        negs = s.game.s.negotiations
+        self.assertEqual(s.game.player_name(0), "Mockonia")
+        negs = s.game.negotiations()
         self.assertTrue(negs, "negotiation should have been opened")
         self.assertIn(negs[0]["status"], ("accepted", "rejected", "expired"))
         results_text = " ".join(r[1] for r in captured.get("results", []))
         self.assertIn("negotiation", results_text)
-        self.assertTrue(any(t["player"] == 0 for t in s.game.s.thoughts))
+        self.assertTrue(s.game.thoughts(0))
         self.assertEqual(s.errors, [])
 
     def test_loop_guard_and_metrics(self):
@@ -127,8 +127,8 @@ class SessionTests(unittest.TestCase):
         self.assertGreaterEqual(first["repeats"], 4)
         self.assertEqual(first["stall_nudges"], 1)
         self.assertGreater(seat["tools"]["get_briefing"]["count"], 3)
-        self.assertEqual(s.game.player(0).name, "Loopia")
-        self.assertEqual(len(s.game.player_cities(0)), 1)
+        self.assertEqual(s.game.player_name(0), "Loopia")
+        self.assertEqual(s.game.standing(0)["cities"], 1)
 
     def test_closing_game_aborts_ai_turn(self):
         import threading
@@ -215,7 +215,7 @@ class SessionTests(unittest.TestCase):
             self.manager.delete(s.id)     # inside the patch: turn 2 must not reach the real provider
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "end_turn")
-        self.assertFalse(any(e["type"] == "agent_error" for e in s.game.s.events))
+        self.assertFalse(any(e["type"] == "agent_error" for e in s.game.events()))
 
     def test_a_busy_machine_is_waited_for_not_treated_as_a_disconnect(self):
         """Two games sharing a machine take turns on its slot. 'Busy' must never pause a game or skip a turn,
@@ -256,7 +256,7 @@ class SessionTests(unittest.TestCase):
             self.manager.delete(s.id)
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "disconnected")
-        self.assertTrue(any(e["type"] == "agent_error" and "unreachable" in e["text"] for e in s.game.s.events))
+        self.assertTrue(any(e["type"] == "agent_error" and "unreachable" in e["text"] for e in s.game.events()))
 
     def test_disconnect_pause_policy_pauses_and_resumes(self):
         server_up = {"v": False}
@@ -282,7 +282,7 @@ class SessionTests(unittest.TestCase):
             self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the interrupted turn is replayed and finished")
             self.manager.delete(s.id)
         self.assertIsNone(s.info()["pause_reason"])
-        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
+        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.events()))
 
     def test_pausing_mid_turn_stops_the_turn_and_its_clock(self):
         """Pausing from the game screen used to let an AI's turn run on, and its duration kept counting."""
@@ -339,7 +339,7 @@ class SessionTests(unittest.TestCase):
             self.assertTrue(self._wait(lambda: not s.paused), "the game should resume when the hours end")
             self.assertTrue(self._wait(lambda: s.game.turn >= 2))
             self.manager.delete(s.id)
-        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.s.events))
+        self.assertTrue(any(e["type"] == "game_resumed" for e in s.game.events()))
 
     def test_a_lobby_game_makes_way_for_higher_priority_work(self):
         from citar.pool import queue as work_queue
@@ -400,7 +400,7 @@ class SessionTests(unittest.TestCase):
         playing = self.manager.create({"map_size": "duel", "seed": 11}, [{"type": "human"}, {"type": "bot"}], name="playing")
         for s in (done, watched):
             with s.lock:
-                s.game.s.phase = "over"
+                s.game.python_game.s.phase = "over"
         watched.subscribers.append(lambda msg: None)
         t0 = time.time()
         self.assertEqual(self.manager.close_finished(t0), [], "players get a few minutes to see the result")
@@ -418,7 +418,7 @@ class SessionTests(unittest.TestCase):
         r = s.call_tool(pid, "end_turn", {})
         self.assertTrue(r["ok"], r)
         deadline = time.time() + 20
-        while time.time() < deadline and s.game.s.current != 0:
+        while time.time() < deadline and s.game.current != 0:
             time.sleep(0.1)
         path = s.save("unit-test")
         data = load_save_file(path)

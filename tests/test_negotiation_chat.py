@@ -265,9 +265,9 @@ class SessionTests(unittest.TestCase):
         with s.lock:
             s.game.meet(0, 1)
         s.start()
-        self._wait(s, lambda: s.game.s.current == 1)
-        self.assertEqual(s.game.s.current, 1, s.errors)
-        n = s.game.s.negotiations[0]
+        self._wait(s, lambda: s.game.current == 1)
+        self.assertEqual(s.game.current, 1, s.errors)
+        n = s.game.negotiations()[0]
         self.assertEqual((n["status"], n["history"][-1]["note"]), ("expired", "(no reply in time)"))
         self.assertEqual(s.errors, [])
 
@@ -284,14 +284,13 @@ class SessionTests(unittest.TestCase):
                                      {"type": "human"}], track=False, start=False)
             s.ai_delay = 0
             with s.lock:
-                s.game.meet(0, 1)
-                s.game.player(0).gold = 50
+                s.game.apply_ops([{"op": "meet", "a": 0, "b": 1}, {"op": "set_player", "player": 0, "gold": 50}])
             t0 = time.time()
             s.start()
-            self._wait(s, lambda: s.game.s.current == 1)
-        self.assertEqual(s.game.s.current, 1, s.errors)
+            self._wait(s, lambda: s.game.current == 1)
+        self.assertEqual(s.game.current, 1, s.errors)
         self.assertGreaterEqual(time.time() - t0, 0.5)     # the open waited...
-        n = s.game.s.negotiations[0]
+        n = s.game.negotiations()[0]
         self.assertEqual((n["status"], n["history"][-1]["note"]), ("expired", "(no reply in time)"))
         first = next(r for r in s.metrics.data["turns"] if r["player"] == 0)
         self.assertEqual(first["end_reason"], "end_turn")
@@ -318,18 +317,16 @@ class SessionTests(unittest.TestCase):
                                      {"type": "human"}], track=False, start=False)
             s.ai_delay = 0
             with s.lock:
-                g = s.game
-                g.meet(0, 1)
-                g.s.current = 1                         # the human opens a chat on its own turn...
-                tools.execute(g, 1, "open_negotiation", {"to": 0, "message": "Peace and friendship?"})
-                g.s.current = 0                         # ...which is waiting on the model when its turn comes
+                s.game.meet(0, 1)
+                # the human opened a chat on its own turn, which is waiting on the model when its turn comes
+                s.game.open_negotiation_as(1, 0, "Peace and friendship?")
             s.start()
-            self._wait(s, lambda: s.game.s.current == 1)
-        self.assertEqual(s.game.s.current, 1, s.errors)
+            self._wait(s, lambda: s.game.current == 1)
+        self.assertEqual(s.game.current, 1, s.errors)
         _id, text, is_error = captured["refusal"]
         self.assertTrue(is_error)
-        self.assertIn(f"Answer {s.game.player(1).name} in negotiation #1 first", text)
-        self.assertEqual(s.game.s.negotiations[0]["status"], "rejected")
+        self.assertIn(f"Answer {s.game.player_name(1)} in negotiation #1 first", text)
+        self.assertEqual(s.game.negotiations()[0]["status"], "rejected")
 
 
 class LLMEndTurnTests(unittest.TestCase):
@@ -358,7 +355,7 @@ class LLMEndTurnTests(unittest.TestCase):
 
     def _open(self, s, to=1):
         with s.lock:
-            return tools.execute(s.game, 0, "open_negotiation", {"to": to, "message": "Shall we talk?"})["negotiation_id"]
+            return s.game.execute(0, "open_negotiation", {"to": to, "message": "Shall we talk?"})["negotiation_id"]
 
     def _later(self, seconds, pid, nid, action, message):
         """The other side answers from another thread, as a person on the game screen would."""
@@ -373,26 +370,26 @@ class LLMEndTurnTests(unittest.TestCase):
         res = agent._end_turn(s, 0)
         self.assertLess(time.time() - t0, 5)
         self.assertFalse(res["ok"])
-        self.assertIn(f"Answer {s.game.player(1).name} in negotiation #{nid} first", res["error"])
+        self.assertIn(f"Answer {s.game.player_name(1)} in negotiation #{nid} first", res["error"])
         self.assertIn("While you waited, they answered", res["error"])
         self.assertIn("Tell me more.", res["error"])
-        self.assertEqual(s.game.s.current, 0)
+        self.assertEqual(s.game.current, 0)
         rec = s.metrics.current(0)
         self.assertEqual((rec["errors"], rec["by_tool"]["end_turn"]["count"]), (0, 1))
 
     def test_an_answer_that_settles_the_chat_ends_the_turn(self):
         s, agent = self._session(wait=10)
         with s.lock:
-            s.game.player(0).gold = 50
-            nid = tools.execute(s.game, 0, "open_negotiation",
-                                {"to": 1, "message": "Your map for 5 gold?", "give": [{"type": "gold", "amount": 5}],
-                                 "receive": [{"type": "share_map"}]})["negotiation_id"]
+            s.game.apply_ops([{"op": "set_player", "player": 0, "gold": 50}])
+            nid = s.game.execute(0, "open_negotiation",
+                                 {"to": 1, "message": "Your map for 5 gold?", "give": [{"type": "gold", "amount": 5}],
+                                  "receive": [{"type": "share_map"}]})["negotiation_id"]
         self._later(0.3, 1, nid, "accept", "Deal.")
         t0 = time.time()
         res = agent._end_turn(s, 0)
         self.assertLess(time.time() - t0, 5)
         self.assertTrue(res["ok"], res)
-        self.assertEqual((s.game.s.current, D.get_negotiation(s.game, nid)["status"]), (1, "accepted"))
+        self.assertEqual((s.game.current, s.game.negotiation(nid)["status"]), (1, "accepted"))
 
     def test_each_chat_gets_what_is_left_of_its_own_wait(self):
         s, agent = self._session(wait=10, others=2)
@@ -404,7 +401,7 @@ class LLMEndTurnTests(unittest.TestCase):
         took = time.time() - t0
         self.assertTrue(res["ok"], res)
         self.assertTrue(0.7 <= took < 5, took)         # it waited for the answer, not for the rest of the ten seconds
-        a, b = D.get_negotiation(s.game, slow), D.get_negotiation(s.game, quick)
+        a, b = s.game.negotiation(slow), s.game.negotiation(quick)
         self.assertEqual((a["status"], a["history"][-1]["note"]), ("expired", "(no reply in time)"))
         self.assertEqual(b["status"], "rejected")
 
@@ -432,7 +429,7 @@ class LLMEndTurnTests(unittest.TestCase):
         self.assertFalse(t.is_alive())
         self.assertLess(time.time() - t0, 3)
         self.assertIsInstance(out.get("raised"), _Halted)
-        self.assertEqual(D.get_negotiation(s.game, nid)["status"], "open")   # the new controller's to settle
+        self.assertEqual(s.game.negotiation(nid)["status"], "open")   # the new controller's to settle
 
     def test_a_pause_stops_the_clock_on_the_wait(self):
         s, agent = self._session(wait=0.5)
@@ -441,13 +438,13 @@ class LLMEndTurnTests(unittest.TestCase):
         t, out = self._end_turn_in_thread(s, agent)
         time.sleep(1.5)
         self.assertTrue(t.is_alive())                   # well past the wait, but the game is paused
-        self.assertEqual((D.get_negotiation(s.game, nid)["status"], s.game.s.current), ("open", 0))
+        self.assertEqual((s.game.negotiation(nid)["status"], s.game.current), ("open", 0))
         s.set_paused(False)
         t.join(5)
         self.assertFalse(t.is_alive())
         self.assertTrue(out["result"]["ok"], out)
-        self.assertEqual(D.get_negotiation(s.game, nid)["status"], "expired")
-        self.assertEqual(s.game.s.current, 1)
+        self.assertEqual(s.game.negotiation(nid)["status"], "expired")
+        self.assertEqual(s.game.current, 1)
 
 
 class WaitForTurnTests(unittest.TestCase):

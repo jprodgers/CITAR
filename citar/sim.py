@@ -7,53 +7,46 @@ from __future__ import annotations
 import argparse
 import time
 
-from .bots.basic import BasicBot
-from .engine.game import Game
+from . import engine_api
 
-
-def resolve_negotiations(g: Game, bots: dict, max_rounds: int = 40):
-    """Answer every open negotiation, so a headless game cannot stall on one."""
-    for _ in range(max_rounds):
-        pending = [n for n in g.s.negotiations if n["status"] == "open" and n["awaiting"] in bots]
-        if not pending:
-            return
-        for n in pending:
-            bots[n["awaiting"]].respond(g, n["awaiting"], n["id"])
+# the events worth printing at the end of a game
+_HEADLINES = ("war_declared", "peace", "city_captured", "eliminated", "deal")
 
 
 def run(players: int = 4, turns: int = 0, map_type: str = "continents", map_size: str = "small", seed: int = 1,
-        barbarians: str = "normal", verbose: bool = True, speed: str = "Quick", nation: str = None) -> Game:
-    """Play one headless bot-vs-bot game, printing what happens."""
-    g = Game.new({"map_type": map_type, "map_size": map_size, "seed": seed, "barbarians": barbarians, "speed": speed,
-                  "players": [{"controller": "bot", "nation": nation} for _ in range(players)],
-                  "turn_limit": turns or None})
-    bots = {p.id: BasicBot(aggression=0.3 + 0.2 * p.id, seed=seed * 100 + p.id) for p in g.majors()}
+        barbarians: str = "normal", verbose: bool = True, speed: str = "Quick", nation: str = None) -> dict:
+    """Play one headless bot-vs-bot game, printing what happens. Returns engine_api.run_game's result."""
+    config = {"map_type": map_type, "map_size": map_size, "seed": seed, "barbarians": barbarians, "speed": speed,
+              "players": [{"controller": "bot", "nation": nation} for _ in range(players)], "turn_limit": turns or None}
+    # the majors are the first players of a new game
+    bots = {pid: engine_api.bot_instance("basic", aggression=0.3 + 0.2 * pid, seed=seed * 100 + pid)
+            for pid in range(players)}
+    headlines = []
     t0 = time.time()
-    last_turn = g.turn
-    turn_t = time.time()
-    while g.s.phase == "playing":
-        pid = g.s.current
-        bot = bots[pid]
-        bot.play_turn(g, pid, end_turn=False)
-        resolve_negotiations(g, bots)
-        if g.s.phase == "playing" and g.s.current == pid:
-            g.end_turn(pid)
-        if g.turn != last_turn:
-            if verbose and (g.turn % 10 == 0 or g.s.phase != "playing"):
-                st = g.s.stats[-1]["players"]
-                row = " | ".join(f"P{k}: sc{v.get('score', 0)} c{v.get('cities', 0)} pop{v.get('population', 0)} "
-                                 f"t{v.get('techs', 0)} e{v.get('era', 0)} m{v.get('military', 0)} g{v.get('gold', 0)} "
-                                 f"s{v.get('science', 0)} h{v.get('happiness', 0)}"
-                                 for k, v in st.items() if v.get("alive"))
-                print(f"T{g.turn - 1:>3} ({time.time() - turn_t:.1f}s) {row}", flush=True)
-                turn_t = time.time()
-            last_turn = g.turn
+    turn_t = [time.time()]
+
+    def on_turn(info):
+        """Print a line of standings every ten turns, and at the end."""
+        if verbose and info["turn"] > 1 and (info["turn"] % 10 == 0 or info["phase"] != "playing"):
+            st = info["last_stats"]["players"]
+            row = " | ".join(f"P{k}: sc{v.get('score', 0)} c{v.get('cities', 0)} pop{v.get('population', 0)} "
+                             f"t{v.get('techs', 0)} e{v.get('era', 0)} m{v.get('military', 0)} g{v.get('gold', 0)} "
+                             f"s{v.get('science', 0)} h{v.get('happiness', 0)}"
+                             for k, v in st.items() if v.get("alive"))
+            print(f"T{info['turn'] - 1:>3} ({time.time() - turn_t[0]:.1f}s) {row}", flush=True)
+            turn_t[0] = time.time()
+
+    def on_event(ev):
+        """Keep the headlines for the summary."""
+        if ev["type"] in _HEADLINES:
+            headlines.append(ev["text"])
+
+    r = engine_api.run_game({"config": config, "bots": bots}, on_turn=on_turn, on_event=on_event)
     if verbose:
-        print(f"Game over on turn {g.turn}: winner {g.s.winner} by {g.s.victory} in {time.time() - t0:.1f}s")
-        wars = [e["text"] for e in g.s.events if e["type"] in ("war_declared", "peace", "city_captured", "eliminated", "deal")]
-        for w in wars[-25:]:
+        print(f"Game over on turn {r['turn']}: winner {r['winner']} by {r['victory']} in {time.time() - t0:.1f}s")
+        for w in headlines[-25:]:
             print("  ", w)
-    return g
+    return r
 
 
 def main():

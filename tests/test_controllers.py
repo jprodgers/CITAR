@@ -136,12 +136,14 @@ class SeatTests(unittest.TestCase):
         s = m.create({"map_size": "duel", "seed": 3, "barbarians": "off"},
                      [{"type": "human"}, {"type": "bot", "handicap": "human"}], track=False, start=False)
         try:
-            p0, p1 = s.game.player(0), s.game.player(1)
-            self.assertEqual((p1.controller, p1.handicap, p1.auto), ("bot", "human", ALL_ON))
+            def seat(pid):
+                p = s.game.player(pid)
+                return p["controller"], p["handicap"], p["auto"]
+            self.assertEqual(seat(1), ("bot", "human", ALL_ON))
             s.update_seat(0, type="bot")
-            self.assertEqual((s.seats[0].type, p0.controller, p0.handicap, p0.auto), ("bot", "bot", "ai", ALL_ON))
+            self.assertEqual((s.seats[0].type, *seat(0)), ("bot", "bot", "ai", ALL_ON))
             s.update_seat(1, type="llm")
-            self.assertEqual((p1.controller, p1.handicap, p1.auto), ("llm", "human", ALL_OFF))   # handicap was set
+            self.assertEqual(seat(1), ("llm", "human", ALL_OFF))   # handicap was set
             with self.assertRaises(ValueError):
                 s.update_seat(0, type="hybrid")           # no hybrid agent until the hybrid seat exists
         finally:

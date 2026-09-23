@@ -279,17 +279,12 @@ def game_spec(exp: dict, i: int) -> dict:
 # ----------------------------------------------------------------------------
 def make_bot(seat: dict, seed: int, aggression: float):
     """Instantiate the bot a seat calls for, live or frozen."""
+    from . import engine_api
     kind = seat.get("bot", "basic")
     if kind == "idle":
-        from .balance import IdleBot
-        return IdleBot()
-    import importlib
-    mod = importlib.import_module(f"citar.bots.{kind}")
+        return engine_api.bot_instance("idle")
     agg = seat["aggression"] if seat.get("aggression") is not None else aggression
-    try:
-        return mod.BasicBot(aggression=agg, seed=seed, params=seat.get("params") or {})
-    except TypeError:                     # bots frozen before params existed
-        return mod.BasicBot(aggression=agg, seed=seed)
+    return engine_api.bot_instance(kind, seed=seed, aggression=agg, params=seat.get("params") or {})
 
 
 def _seat_fingerprint(seat: dict):
@@ -307,20 +302,18 @@ def _seat_fingerprint(seat: dict):
 
 def play(spec: dict) -> dict:
     """Play one lab game to the end and return its result."""
-    from .engine.game import Game
-    from .engine.victory import score
-    from .sim import resolve_negotiations
+    from . import engine_api
     t0 = time.time()
     cpu0 = time.process_time()
     seats = spec["seats"]
-    g = Game.new({"map_type": spec["map_type"], "map_size": spec["size"], "seed": spec["seed"],
-                  "barbarians": spec["barbarians"], "barbarian_difficulty": spec.get("barbarian_difficulty"),
-                  "difficulty": spec["difficulty"], "speed": spec["speed"], "city_states": spec.get("city_states"),
-                  "ai_base_values": spec.get("ai_base_values") or "unciv",
-                  "turn_limit": spec["turns"] or None,
-                  **{k: spec[k] for k in ("map_edges", "river_density", "resources") if spec.get(k) is not None},
-                  "players": [{"controller": "bot", "nation": seat.get("nation") or spec.get("nation"),
-                               "difficulty": seat.get("difficulty")} for seat in seats]})
+    config = {"map_type": spec["map_type"], "map_size": spec["size"], "seed": spec["seed"],
+              "barbarians": spec["barbarians"], "barbarian_difficulty": spec.get("barbarian_difficulty"),
+              "difficulty": spec["difficulty"], "speed": spec["speed"], "city_states": spec.get("city_states"),
+              "ai_base_values": spec.get("ai_base_values") or "unciv",
+              "turn_limit": spec["turns"] or None,
+              **{k: spec[k] for k in ("map_edges", "river_density", "resources") if spec.get(k) is not None},
+              "players": [{"controller": "bot", "nation": seat.get("nation") or spec.get("nation"),
+                           "difficulty": seat.get("difficulty")} for seat in seats]}
     bots = {}
     for pid, seat in enumerate(seats):
         # aggression depends on the start position and seed, not the label, so rotation evens it out
@@ -350,56 +343,47 @@ def play(spec: dict) -> dict:
                                           "religion_founded", "golden_age", "great_person_born", "pillaged"):
             events[ev["players"][0]][t] += 1
 
-    g.listeners.append(listen)
-    limit = g.s.config.get("turn_limit")
-    shown = -1
-    while g.s.phase == "playing":
-        if g.turn != shown:
-            shown = g.turn
-            print(f"PROGRESS {g.turn} {limit or 0} {time.time() - t0:.0f}", flush=True)
-        pid = g.s.current
-        if pid in bots:
-            try:
-                bots[pid].play_turn(g, pid, end_turn=False)
-            except Exception as e:
-                errors.append(f"T{g.turn} P{pid}: {type(e).__name__}: {e}\n{traceback.format_exc(limit=5)}")
-                if len(errors) > 20:
-                    break
-            resolve_negotiations(g, bots)
-        if g.s.phase == "playing" and g.s.current == pid:
-            g.end_turn(pid)
+    def progress(info):
+        """The runner reads these lines from the game's process to show how far it has got."""
+        if info["phase"] == "playing":
+            print(f"PROGRESS {info['turn']} {info['turn_limit'] or 0} {time.time() - t0:.0f}", flush=True)
 
-    stats = {e["turn"]: e["players"] for e in g.s.stats}
-    majors = g.majors(alive_only=False)      # eliminated civs too: a lost seat is a result, not a missing row
-    final = {p.id: (score(g, p.id)["total"] if p.alive else 0) for p in majors}
+    r = engine_api.run_game({"config": config, "bots": bots}, on_turn=progress, on_event=listen)
+    errors.extend(r["errors"])
+    stats = {e["turn"]: e["players"] for e in r["stats"]}
+    majors = [p for p in r["players"] if p["kind"] == "major"]   # eliminated civs too: a lost seat is a result
+    final = {p["id"]: p["score"] for p in majors}
     total = sum(final.values()) or 1
     ranking = sorted(final, key=lambda q: -final[q])
     players = {}
     for p in majors:
-        k = str(p.id)
+        pid = p["id"]
+        k = str(pid)
         cps = {}
         for cp in CHECKPOINTS:
             row = stats.get(cp, {}).get(k)
             if row and row.get("alive"):
                 cps[cp] = {key: row.get(key) for key in STAT_KEYS if row.get(key) is not None}
         unhappy = sum(1 for row in stats.values() if row.get(k, {}).get("alive") and row[k].get("happiness", 0) < 0)
-        seat = seats[p.id]
+        seat = seats[pid]
+        ship = p["spaceship"]
         players[k] = {
-            "label": seat.get("label"), "bot": seat.get("bot"), "difficulty": p.difficulty, "alive": p.alive,
+            "label": seat.get("label"), "bot": seat.get("bot"), "difficulty": p["difficulty"], "alive": p["alive"],
             "levels": seat.get("levels"), "profile": seat.get("profile"), "profile_rev": seat.get("profile_rev"),
-            "fingerprint": _seat_fingerprint(seat), "aggression": round(bots[p.id].aggression, 3)
-            if hasattr(bots[p.id], "aggression") else None,
-            "score": final[p.id], "score_share": round(final[p.id] / total, 4), "rank": ranking.index(p.id),
-            "techs": len(p.techs), "cities": len(g.player_cities(p.id)), "policies": len(p.policies),
-            "religion": p.religion_state, "great_people": p.great_people_earned,
-            "spaceship": sum((g.s.spaceship.get(p.id) or {}).values()) if isinstance(g.s.spaceship.get(p.id), dict) else 0,
+            "fingerprint": _seat_fingerprint(seat), "aggression": round(bots[pid].aggression, 3)
+            if hasattr(bots[pid], "aggression") else None,
+            "score": final[pid], "score_share": round(final[pid] / total, 4), "rank": ranking.index(pid),
+            "techs": p["techs"], "cities": p["cities"], "policies": p["policies"],
+            "religion": p["religion"], "great_people": p["great_people"],
+            "spaceship": sum((ship or {}).values()) if isinstance(ship, dict) else 0,
             "unhappy_share": round(unhappy / max(1, len(stats)), 3), "checkpoints": cps,
-            "era_turn": era_turn.get(p.id, {}), "events": dict(events.get(p.id, {})),
-            "built_top": dict(built.get(p.id, Counter()).most_common(25)),
+            "era_turn": era_turn.get(pid, {}), "events": dict(events.get(pid, {})),
+            "built_top": dict(built.get(pid, Counter()).most_common(25)),
         }
-    return {"exp": spec["exp"], "i": spec["i"], "seed": spec["seed"], "map": spec["map_type"], "turns": g.turn - 1,
-            "winner": g.s.winner, "winner_label": seats[g.s.winner]["label"] if g.s.winner is not None and
-            g.s.winner < len(seats) else None, "victory": g.s.victory, "players": players,
+    winner = r["winner"]
+    return {"exp": spec["exp"], "i": spec["i"], "seed": spec["seed"], "map": spec["map_type"], "turns": r["turns"],
+            "winner": winner, "winner_label": seats[winner]["label"] if winner is not None and
+            winner < len(seats) else None, "victory": r["victory"], "players": players,
             "seconds": round(time.time() - t0, 1), "started_ts": round(t0, 1),
             "cpu_s": round(time.process_time() - cpu0, 1), "errors": errors, "engine": engine_hash(),
             "finished": datetime.now().isoformat(timespec="seconds")}

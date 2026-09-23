@@ -117,10 +117,10 @@ class BenchmarkTests(unittest.TestCase):
         run = sch.create_run(suite)
         job = run["jobs"][0]
         self.assertTrue(wait_for(lambda: job.get("game_id") and self.manager.get(job["game_id"]), sch=sch))
-        g = self.manager.get(job["game_id"]).game
-        self.assertTrue(g.grid.wrap_x)
-        self.assertFalse(any(t.river for t in g.s.tiles))
-        self.assertFalse(any(t.resource == "Uranium" for t in g.s.tiles))
+        m = self.manager.get(job["game_id"]).game.export_map()      # tiles as [terrain, features, wonder, river, resource, ...]
+        self.assertTrue(m["wrap_x"])
+        self.assertFalse(any(t[3] for t in m["tiles"]))
+        self.assertFalse(any(t[4] == "Uranium" for t in m["tiles"]))
 
     def test_a_job_ends_when_its_model_is_eliminated(self):
         sch = self.scheduler()
@@ -129,7 +129,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: job["status"] == "running" and self.manager.get(job["game_id"]), sch=sch))
         s = self.manager.get(job["game_id"])
         with s.lock:
-            s.game.player(0).alive = False
+            s.game.python_game.player(0).alive = False
         self.assertTrue(wait_for(lambda: job["status"] == "done", sch=sch, timeout=30))
         self.assertEqual(job["result"]["outcome"], "eliminated")
         self.assertEqual(job["result"]["performance"], 0)

@@ -15,8 +15,7 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from ..engine.views import RULES_OVERVIEW
-from ..engine.briefing import MAP_LEGEND
+from ..engine_api import RULES_OVERVIEW, MAP_LEGEND
 
 NEGOTIATION_WAIT = 45.0
 

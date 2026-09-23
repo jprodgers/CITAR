@@ -10,7 +10,7 @@ import json
 import time
 import traceback
 
-from ..engine import tools as toolreg
+from .. import engine_api
 from ..server.metrics import call_signature, ACTION_REPEAT_EXEMPT
 from .prompts import system_prompt, TURN_START, FIRST_TURN_NOTE, NEGOTIATION_PROMPT
 from .providers import make_conversation
@@ -73,12 +73,8 @@ def reachable(cfg: dict, timeout: float = 5.0) -> bool:
 
 def _tool_defs(names: set | None = None) -> list[dict]:
     """The tool definitions sent to a model, from the one registry."""
-    out = []
-    for t in toolreg.REGISTRY.values():
-        if names is not None and t.name not in names:
-            continue
-        out.append({"name": t.name, "description": t.description, "input_schema": t.schema()})
-    return out
+    return [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]}
+            for t in engine_api.tool_list() if names is None or t["name"] in names]
 
 
 def _serialize(result) -> str:
@@ -148,7 +144,7 @@ class LLMAgent:
 
     def reconnect_seconds(self, session) -> float:
         """How long to keep trying an unreachable server: the seat's setting, else the game's, else the default."""
-        for v in (self.cfg.get("reconnect_seconds"), session.game.s.config.get("reconnect_seconds")):
+        for v in (self.cfg.get("reconnect_seconds"), session.game.config.get("reconnect_seconds")):
             try:
                 if v not in (None, ""):
                     return max(0.0, float(v))
@@ -158,7 +154,7 @@ class LLMAgent:
 
     def disconnect_policy(self, session) -> str:
         """What happens when the server stays unreachable: "pause" the game or "skip" this seat's turn."""
-        for v in (self.cfg.get("on_disconnect"), session.game.s.config.get("on_disconnect")):
+        for v in (self.cfg.get("on_disconnect"), session.game.config.get("on_disconnect")):
             if v in DISCONNECT_POLICIES:
                 return v
         return "pause"
@@ -296,7 +292,7 @@ class LLMAgent:
         self._thought(session, pid, f"(AI error: {self.last_error})", "system")
         with session.lock:
             g = session.game
-            g.emit("agent_error", f"{g.player(pid).name}'s AI could not play ({self.cfg.get('model') or '?'} at {where}): "
+            g.emit("agent_error", f"{g.player_name(pid)}'s AI could not play ({self.cfg.get('model') or '?'} at {where}): "
                                   f"{self.last_error[:300]}. Its turn was skipped — check the seat settings.", None, player=pid)
 
     def _conversation(self, names=None):
@@ -314,8 +310,7 @@ class LLMAgent:
         if not text:
             return
         with session.lock:
-            g = session.game
-            g.s.thoughts.append({"turn": g.turn, "player": pid, "text": text[:6000], "kind": kind})
+            session.game.add_thought(pid, text[:6000], kind)
         session._broadcast({"type": "thought", "player": pid, "turn": session.game.turn, "text": text[:6000], "kind": kind})
 
     def _end_reason(self, session, pid: int, reason: str):
@@ -331,14 +326,14 @@ class LLMAgent:
         for c in calls:
             if self._halted(session):
                 raise _Halted()
-            spec = toolreg.REGISTRY.get(c.name)
+            kind = engine_api.tool_kind(c.name)
             if "__invalid_json__" in c.args:
                 results.append((c.id, "Error: your tool arguments were not valid JSON.", True))
-                session.metrics.tool_call(pid, c.name, {}, spec.kind if spec else "unknown", False, 0.0, "invalid JSON arguments")
+                session.metrics.tool_call(pid, c.name, {}, kind or "unknown", False, 0.0, "invalid JSON arguments")
                 continue
             sig = call_signature(c.name, c.args)
             # --- repeated identical action: don't redo it ---------------------------------------
-            if spec and spec.kind == "action" and c.name not in ACTION_REPEAT_EXEMPT and state.done.get(sig):
+            if kind == "action" and c.name not in ACTION_REPEAT_EXEMPT and state.done.get(sig):
                 n = state.done[sig] = state.done[sig] + 1
                 msg = (f"Skipped: you already did exactly this earlier this turn (it succeeded; this is attempt {n}). "
                        f"Nothing needs redoing — check the TURN PROGRESS note and give different orders, or call end_turn.")
@@ -348,7 +343,7 @@ class LLMAgent:
                 self._thought(session, pid, f"{c.name} {json.dumps(c.args, ensure_ascii=False)[:200]} → blocked repeat #{n}", "action")
                 continue
             # --- repeated identical query with no state change: answer from cache, flag it ---------
-            if spec and spec.kind == "query" and sig in state.queries:
+            if kind == "query" and sig in state.queries:
                 version, times, text = state.queries[sig]
                 if version == session.version:
                     state.queries[sig] = (version, times + 1, text)
@@ -379,9 +374,9 @@ class LLMAgent:
                 results.append((c.id, text, False))
                 if c.name == "end_turn":
                     ended = True
-                if spec and spec.kind == "query":
+                if kind == "query":
                     state.queries[sig] = (session.version, 1, text)
-                elif spec and spec.kind == "action":
+                elif kind == "action":
                     state.done[sig] = state.done.get(sig, 0) + 1
                     r = res["result"]
                     no_op = c.name == "move_unit" and isinstance(r, dict) and r.get("from") == r.get("to") and "rebased_to" not in r
@@ -389,7 +384,7 @@ class LLMAgent:
                         progress += 1
             else:
                 results.append((c.id, "Error: " + res["error"], True))
-            if c.name != "log_thought" and (spec is None or spec.kind == "action"):
+            if c.name != "log_thought" and kind in (None, "action"):
                 args = json.dumps(c.args, ensure_ascii=False)[:200]
                 outcome = "ok" if res["ok"] else f"ERROR: {res['error'][:200]}"
                 self._thought(session, pid, f"{c.name} {args} → {outcome}", "action")
@@ -405,14 +400,13 @@ class LLMAgent:
 
     def _await_answer(self, session, pid: int, args: dict, result: dict) -> dict:
         """After the model spoke in a negotiation: wait for the other side's answer and add it to the result."""
-        from ..engine.diplomacy import get_negotiation
         nid = result.get("negotiation_id") if isinstance(result, dict) else None
         try:
             nid = int(nid or args.get("negotiation_id"))
         except (TypeError, ValueError):
             return result
         with session.lock:
-            n = get_negotiation(session.game, nid)
+            n = session.game.negotiation(nid)
             key, left = (nid, len(n["history"])), self._wait_left(n)
             if n["status"] == "open" and n["awaiting"] != pid:
                 self._chat_left[key] = left - session._await_reply(pid, nid, left, halted=lambda: self._halted(session),
@@ -432,43 +426,40 @@ class LLMAgent:
         one it left unanswered through the tool (a mistake the metrics count), one answered during the wait with
         what they said (news, which they do not).
         """
-        from ..engine.diplomacy import end_turn_refusal
-
-        def mark(n):
-            """Where a negotiation stands: what an answer changes."""
+        def mark(nid):
+            """Where a negotiation stands now: what an answer changes."""
+            n = g.negotiation(nid)
             return n["status"], n["awaiting"], len(n["history"])
 
         heard = []
+        g = session.game
         while True:
             with session.lock:
-                g = session.game
-                if g.s.current != pid or g.s.phase != "playing":
+                if g.current != pid or g.phase != "playing":
                     break
-                mine = [n for n in g.s.negotiations
-                        if n["status"] == "open" and pid in (n["initiator"], n["responder"])]
+                mine = g.open_negotiations(pid)
                 if not mine:
                     break
                 if any(n["awaiting"] == pid for n in mine):
                     if not heard:
                         break
-                    error = end_turn_refusal(g, pid) + f" While you waited, they answered: {_serialize(heard)}"
+                    error = g.end_turn_refusal(pid) + f" While you waited, they answered: {_serialize(heard)}"
                     session.metrics.tool_call(pid, "end_turn", {}, "action", False, 0.0, error, expected=True)
                     return {"ok": False, "error": error}
                 for n in mine:
                     if self._wait_left(n) <= 0:
                         session.close_negotiation(n["id"], "expired", "(no reply in time)")
-                mine = [n for n in mine if n["status"] == "open"]
+                mine = g.open_negotiations(pid)
                 if not mine:
                     continue
-                before = {n["id"]: (mark(n), self._wait_left(n)) for n in mine}
-                spent = session._await(lambda chats=mine, was=before: any(mark(n) != was[n["id"]][0] for n in chats),
+                before = {n["id"]: (mark(n["id"]), self._wait_left(n)) for n in mine}
+                spent = session._await(lambda was=before: any(mark(nid) != then for nid, (then, _) in was.items()),
                                        min(left for _, left in before.values()), lambda: self._halted(session),
                                        hold_paused=True)
-                for n in mine:
-                    was, left = before[n["id"]]
-                    self._chat_left[(n["id"], was[2])] = left - spent
-                    if mark(n) != was:
-                        news = session._reply_result(pid, n["id"], {}).get("negotiation")
+                for nid, (was, left) in before.items():
+                    self._chat_left[(nid, was[2])] = left - spent
+                    if mark(nid) != was:
+                        news = session._reply_result(pid, nid, {}).get("negotiation")
                         if news:
                             heard.append(news)
             if self._halted(session):
@@ -481,22 +472,20 @@ class LLMAgent:
         The single most effective guard rail: models forget what they have not done, and a short reminder
         of the remaining idle units and cities turns a wasted turn into a played one.
         """
-        from ..engine.briefing import turn_progress
         with session.lock:
-            return turn_progress(session.game, pid)
+            return session.game.turn_progress(pid)
 
     # ------------------------------------------------------------------
     def play_turn(self, session, pid: int):
         """Play one turn with the model, from briefing to end of turn."""
-        from ..engine.briefing import briefing
         self._ensure_loaded(session, pid)
         with session.lock:
             g = session.game
-            if g.s.current != pid or g.s.phase != "playing":
+            if g.current != pid or g.phase != "playing":
                 return
             turn = g.turn
-            text = TURN_START.format(briefing=briefing(g, pid), turn=turn,
-                                     first_turn_note=FIRST_TURN_NOTE if not g.player(pid).founded_city and turn <= 2 else "")
+            text = TURN_START.format(briefing=g.briefing(pid), turn=turn,
+                                     first_turn_note=FIRST_TURN_NOTE if not g.player(pid)["founded_city"] and turn <= 2 else "")
         conv = self._conversation()
         self._active.add(conv)
         conv.add_user_text(text)
@@ -512,7 +501,7 @@ class LLMAgent:
                     self._end_reason(session, pid, "cancelled")
                     return
                 with session.lock:
-                    if session.game.s.current != pid or session.game.s.phase != "playing" or session.game.turn != turn:
+                    if session.game.current != pid or session.game.phase != "playing" or session.game.turn != turn:
                         return
                 if session.paused:
                     # paused from the game screen mid-turn: hold before the next model call, and do not count the
@@ -605,7 +594,7 @@ class LLMAgent:
         where = self.cfg.get("base_url") or self.cfg.get("server_id") or self.cfg.get("provider") or "the model server"
         window = self.reconnect_seconds(session)
         with session.lock:
-            name = session.game.player(pid).name
+            name = session.game.player_name(pid)
         if self.disconnect_policy(session) == "pause":
             self._thought(session, pid, f"(server still unreachable after {window:.0f}s: pausing the game)", "system")
             session.pause_for_disconnect(pid, f"{name}'s model server ({where}) has been unreachable for "
@@ -634,7 +623,7 @@ class LLMAgent:
                    f"context length (max {info.get('max_context') or '?'}).")
             self._thought(session, pid, "(warning) " + msg, "system")
             with session.lock:
-                session.game.emit("agent_error", f"{session.game.player(pid).name}'s AI: {msg}", None, player=pid)
+                session.game.emit("agent_error", f"{session.game.player_name(pid)}'s AI: {msg}", None, player=pid)
 
     def _limit(self, session, pid: int, reason: str, detail: str):
         """End the turn because a limit was reached, recording which."""
@@ -644,20 +633,16 @@ class LLMAgent:
     # ------------------------------------------------------------------
     def respond_negotiation(self, session, pid: int, nid: int):
         """Answer a negotiation with the model, out of turn."""
-        from ..engine.diplomacy import get_negotiation, negotiation_view
-        from ..engine.views import empire_info
         with session.lock:
             g = session.game
-            n = get_negotiation(g, nid)
+            n = g.negotiation(nid)
             if n["status"] != "open" or n["awaiting"] != pid:
                 return
-            view = negotiation_view(g, n, pid)
-            emp = empire_info(g, pid)
+            view = g.negotiation_view(nid, pid)
+            emp = g.empire_summary(pid)
             summary = {k: emp[k] for k in ("gold", "per_turn", "era", "happiness", "score", "strategic_resources",
-                                           "luxuries", "policies")}
-            summary["cities"] = len(g.player_cities(pid))
-            summary["at_war_with"] = [g.player(q).name for q in g.player(pid).met if g.at_war(pid, q)]
-            summary["notebook"] = g.player(pid).notes[-2000:]
+                                           "luxuries", "policies", "cities", "at_war_with")}
+            summary["notebook"] = emp["notes"][-2000:]
             text = NEGOTIATION_PROMPT.format(other=view["with_name"], nid=nid, negotiation=json.dumps(view, indent=1),
                                              summary=json.dumps(summary, default=str))
             history_len = len(n["history"])
@@ -671,7 +656,7 @@ class LLMAgent:
                 if self._halted(session):
                     return
                 with session.lock:
-                    n = get_negotiation(session.game, nid)
+                    n = session.game.negotiation(nid)
                     if n["status"] != "open" or n["awaiting"] != pid or len(n["history"]) != history_len:
                         return
                 step = self._step(session, pid, conv)
