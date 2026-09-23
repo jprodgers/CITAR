@@ -38,7 +38,7 @@ use crate::base::sets::{
     BaseUnitSet, BitSet, EraSet, PlayerSet, PlayerVec, PolicySet, TechSet, TerrainSet,
 };
 use crate::base::stats::Stat;
-use crate::rules::defs::{BeliefType, CityStatePersonality, QuestScope, QuestTargetKind};
+use crate::rules::defs::{BeliefKind, CityStatePersonality, QuestScope, QuestTargetKind};
 
 use super::cities::Constructible;
 use super::memory::TileMemoryLayer;
@@ -46,6 +46,10 @@ use super::memory::TileMemoryLayer;
 /// What kind of player: a major civilization, a city-state or the barbarians. The same
 /// vocabulary as a nation's `kind`.
 pub use crate::rules::defs::NationKind as PlayerKind;
+
+/// How far a civilization has come with religion, and what a spy is doing: the vocabularies the
+/// uniques name too, so they live in `rules::defs` and the rules compare them directly.
+pub use crate::rules::defs::{ReligionProgress, SpyAction};
 
 // ---- Seats ------------------------------------------------------------------------------------
 
@@ -716,71 +720,29 @@ pub struct GreatPeople {
     pub long_count_pool: Vec<BaseUnitId>,
 }
 
-/// How far a civilization has come with religion (`religion.py:15`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ReligionProgress {
-    #[default]
-    None,
-    Pantheon,
-    Founding,
-    Religion,
-    Enhancing,
-    Enhanced,
-}
-
-impl ReligionProgress {
-    /// Every stage, in order.
-    pub const ALL: [Self; 6] = [
-        Self::None,
-        Self::Pantheon,
-        Self::Founding,
-        Self::Religion,
-        Self::Enhancing,
-        Self::Enhanced,
-    ];
-
-    /// The name Python saved: `enhancing`.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Pantheon => "pantheon",
-            Self::Founding => "founding",
-            Self::Religion => "religion",
-            Self::Enhancing => "enhancing",
-            Self::Enhanced => "enhanced",
-        }
-    }
-
-    /// The stage called `name`, exactly.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|s| s.name() == name)
-    }
-}
-
 /// A civilization's religion.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReligionState {
     pub progress: ReligionProgress,
     /// The religion (or pantheon) it founded.
     pub founded: Option<ReligionId>,
-    /// Free beliefs to choose, by belief type (Python's `flags["free_beliefs"]`).
-    pub free_beliefs: [u8; 4],
+    /// Free beliefs to choose, by kind, slot [`BeliefKind::index`] (Python's
+    /// `flags["free_beliefs"]`): `Gain a free [Any] belief` counts in the fifth slot.
+    pub free_beliefs: [u8; BeliefKind::COUNT],
     /// Whether founding a religion straight away still owes it a pantheon belief.
     pub choose_pantheon_belief: bool,
 }
 
 impl ReligionState {
-    /// The free beliefs of one type.
+    /// The free beliefs of one kind.
     #[must_use]
-    pub const fn free(&self, t: BeliefType) -> u8 {
-        self.free_beliefs[t as usize]
+    pub const fn free(&self, k: BeliefKind) -> u8 {
+        self.free_beliefs[k.index()]
     }
 
-    /// Sets the free beliefs of one type.
-    pub fn set_free(&mut self, t: BeliefType, n: u8) {
-        self.free_beliefs[t as usize] = n;
+    /// Sets the free beliefs of one kind.
+    pub fn set_free(&mut self, k: BeliefKind, n: u8) {
+        self.free_beliefs[k.index()] = n;
     }
 }
 
@@ -818,71 +780,6 @@ pub struct CivExtras {
 }
 
 // ---- Major civilizations ----------------------------------------------------------------------
-
-/// What a spy is doing (`espionage.py:17-22`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum SpyAction {
-    #[default]
-    None,
-    Moving,
-    EstablishingNetwork,
-    ObservingCity,
-    StealingTech,
-    RiggingElections,
-    Coup,
-    CounterIntelligence,
-    Dead,
-}
-
-impl SpyAction {
-    /// Every action.
-    pub const ALL: [Self; 9] = [
-        Self::None,
-        Self::Moving,
-        Self::EstablishingNetwork,
-        Self::ObservingCity,
-        Self::StealingTech,
-        Self::RiggingElections,
-        Self::Coup,
-        Self::CounterIntelligence,
-        Self::Dead,
-    ];
-
-    /// The name Python saved and shows: `Establishing Network`.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Moving => "Moving",
-            Self::EstablishingNetwork => "Establishing Network",
-            Self::ObservingCity => "Observing City",
-            Self::StealingTech => "Stealing Tech",
-            Self::RiggingElections => "Rigging Elections",
-            Self::Coup => "Coup",
-            Self::CounterIntelligence => "Counter-intelligence",
-            Self::Dead => "Dead",
-        }
-    }
-
-    /// The action called `name`, exactly.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|a| a.name() == name)
-    }
-
-    /// Whether the spy is set up in its city, and so sees it (`SET_UP`, `espionage.py:20`).
-    #[must_use]
-    pub const fn is_set_up(self) -> bool {
-        matches!(
-            self,
-            Self::ObservingCity
-                | Self::StealingTech
-                | Self::RiggingElections
-                | Self::Coup
-                | Self::CounterIntelligence
-        )
-    }
-}
 
 /// A spy (`espionage.py:4`). Spies are not map units.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1302,14 +1199,12 @@ mod tests {
     }
 
     #[test]
-    fn religion_stages_and_spy_actions_by_name() {
-        for s in ReligionProgress::ALL {
-            assert_eq!(ReligionProgress::from_name(s.name()), Some(s));
-        }
-        for a in SpyAction::ALL {
-            assert_eq!(SpyAction::from_name(a.name()), Some(a));
-        }
-        assert!(ReligionProgress::Religion > ReligionProgress::Founding);
+    fn free_beliefs_have_a_slot_for_any() {
+        let mut r = ReligionState::default();
+        r.set_free(BeliefKind::Any, 2);
+        r.set_free(BeliefKind::Type(crate::rules::defs::BeliefType::Follower), 1);
+        assert_eq!(r.free_beliefs, [0, 0, 1, 0, 2]);
+        assert_eq!(r.free(BeliefKind::Any), 2);
     }
 
     #[test]
