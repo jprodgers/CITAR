@@ -32,8 +32,9 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use crate::base::ids::{
     BaseUnitId, BeliefId, BuildingId, CityStateTypeId, DifficultyId, EraId, FracId, IdVec,
-    ImprovementId, NationId, PersonalityId, PolicyId, PromotionId, QuestKindId, ResourceId, RuinId,
-    RulesReligionId, SpecialistId, SpeedId, TechId, TerrainId, UnitTypeId, VictoryId,
+    ImprovementId, MapSizeId, NationId, PersonalityId, PolicyId, PromotionId, QuestKindId,
+    ResourceId, RuinId, RulesReligionId, SpecialistId, SpeedId, TechId, TerrainId, UnitTypeId,
+    VictoryId,
 };
 
 pub use self::constants::{Constants, RULES_VERSION};
@@ -392,9 +393,10 @@ impl Ruleset {
         self.constants.max_players
     }
 
-    /// The lobby's map sizes (`engine_api.map_sizes`).
+    /// The lobby's map sizes (`engine_api.map_sizes`), by id. A game's settings name one by
+    /// [`MapSizeId`], which `constants().map_size_id(key)` finds.
     #[must_use]
-    pub fn map_sizes(&self) -> &[constants::MapSize] {
+    pub fn map_sizes(&self) -> &IdVec<MapSizeId, constants::MapSize> {
         &self.constants.map_sizes
     }
 

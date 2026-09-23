@@ -8,7 +8,7 @@
 
 use serde::Deserialize;
 
-use crate::base::ids::{DifficultyId, SpeedId};
+use crate::base::ids::{BarbarianLevelId, DifficultyId, IdVec, MapSizeId, MapTypeId, SpeedId};
 
 /// The ruleset format version the client JSON carries (`rules.py:19`, `RULES_VERSION`).
 pub const RULES_VERSION: u32 = 2;
@@ -156,11 +156,11 @@ pub struct Constants {
     /// Movement points per tile of movement: moves are counted in sixtieths.
     pub move_scale: i32,
     /// The lobby's map sizes, in file order.
-    pub map_sizes: Vec<MapSize>,
+    pub map_sizes: IdVec<MapSizeId, MapSize>,
     /// UnCiv's predefined sizes, smallest first; never empty.
     pub map_size_predefined: Vec<MapSizePredefined>,
     /// The lobby's map types, in file order.
-    pub map_types: Vec<MapType>,
+    pub map_types: IdVec<MapTypeId, MapType>,
     pub default_speed: SpeedId,
     /// The speed benchmark games use.
     pub benchmark_speed: SpeedId,
@@ -170,7 +170,7 @@ pub struct Constants {
     /// The formula constants (`R.k` in Python).
     pub formulas: Formulas,
     /// The lobby's barbarian settings, in file order.
-    pub barbarian_levels: Vec<BarbarianLevel>,
+    pub barbarian_levels: IdVec<BarbarianLevelId, BarbarianLevel>,
     pub diplomacy: Diplomacy,
 }
 
@@ -196,7 +196,26 @@ impl Constants {
     /// The map size with this key.
     #[must_use]
     pub fn map_size(&self, key: &str) -> Option<&MapSize> {
-        self.map_sizes.iter().find(|m| &*m.key == key)
+        self.map_sizes.get(self.map_size_id(key)?)
+    }
+
+    /// The id of the map size with this key, exactly: `small`. A game's settings hold the id,
+    /// and a save writes the key.
+    #[must_use]
+    pub fn map_size_id(&self, key: &str) -> Option<MapSizeId> {
+        self.map_sizes.iter().find(|(_, m)| &*m.key == key).map(|(id, _)| id)
+    }
+
+    /// The id of the map type with this key, exactly: `continents`.
+    #[must_use]
+    pub fn map_type_id(&self, key: &str) -> Option<MapTypeId> {
+        self.map_types.iter().find(|(_, m)| &*m.key == key).map(|(id, _)| id)
+    }
+
+    /// The id of the barbarian setting with this key, exactly: `raging`.
+    #[must_use]
+    pub fn barbarian_level_id(&self, key: &str) -> Option<BarbarianLevelId> {
+        self.barbarian_levels.iter().find(|(_, b)| &*b.key == key).map(|(id, _)| id)
     }
 }
 
@@ -265,9 +284,9 @@ mod tests {
     fn predefined_sizes_follow_unciv() {
         let k = Constants {
             move_scale: 60,
-            map_sizes: vec![],
+            map_sizes: IdVec::new(),
             map_size_predefined: predefined(&[10, 15, 20, 30, 40]),
-            map_types: vec![],
+            map_types: IdVec::new(),
             default_speed: SpeedId(0),
             benchmark_speed: SpeedId(0),
             default_difficulty: DifficultyId(0),
@@ -277,7 +296,7 @@ mod tests {
             ))
             .expect("the shipped game.json")
             .constants,
-            barbarian_levels: vec![],
+            barbarian_levels: IdVec::new(),
             diplomacy: Diplomacy { max_chat_messages: 30, negotiations_per_pair_per_turn: 2 },
         };
         // Python: radius of 44x28 is (sqrt(12*1232-3)-3)/6 = 19.76..., so Small (15).

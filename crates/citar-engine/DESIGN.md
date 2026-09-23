@@ -387,7 +387,7 @@ api     (4)  host surface: tools, views, briefing, scenario, maps, debug, inspec
 
 - **One layer, two modules.** `rules` and `unique` depend on each other: tables hold compiled uniques, and the compiler resolves names against the tables. They are one layer in two modules for readability.
 - **Game systems may call each other.** The Python import graph is fully cyclic (for example combat → conquest → cities → combat), and that is fine inside one layer.
-- **Enforcement.** `xtask check` scans `use crate::…` paths per directory. It also restricts calls to `State::{tiles_mut, units_mut, cities_mut, players_mut, diplo_mut, world_mut}` to `game/mutate.rs`, `save/` and `compat/`.
+- **Enforcement.** `xtask check` scans `use crate::…` paths per directory. It also restricts calls to `State::{tiles_mut, units_mut, cities_mut, players_mut, diplo_mut, world_mut, config_mut}` to `game/mutate.rs`, `save/` and `compat/`.
 - **Decision (module names).** The base layer is `base`, not `core`, which would clash with the `core` crate. The pipeline area's modules are folded in as follows:
   - rng, math and order go into `base`;
   - derive, vis, path, turn and setup go under `game/`;
@@ -848,10 +848,27 @@ All the `pub` fields are readable through `&State`. `&mut` access to any of them
 **`GameConfig`** is typed:
 - `SpeedId`, `DifficultyId`, map type, edges, barbarian level, victory toggles, resource options and `diplomacy.max_chat_messages`;
 - `seed: u64`, always present: the host draws it when the lobby leaves it empty;
-- `map: MapSource`, either `Generated { size, type }` or `Document(Box<MapDoc>)`, an inline editor map. The host resolves a map id to its document; Python's `maps.load_map` call inside `Game.new` (game.py:165-170) stays in Python.
+- `map: MapSource`, either `Generated { size, type }` or `Editor { id, size }`, an editor map by id. The document itself is a setup argument: `Game::new` takes a `NewGame`, the settings plus the inline `MapDoc`, reads it into the tiles and drops it, as Python kept only the id (game.py:174). Kept in `GameConfig` it would be saved twice, walked by every round's digest, and digested in the key order the lobby sent. The host resolves a map id to its document; Python's `maps.load_map` call inside `Game.new` (game.py:165-170) stays in Python.
 - `host: HostOnly<BTreeMap<String, Value>>` keeps keys the engine does not know verbatim. It is saved but never digested.
 
 Seats live only in `Player.seat`.
+
+**As built in 1a-08** (§4.2-4.8, §6.4):
+- **Files.** `state/{mod, store, map, memory, units, cities, players, diplo, world, config, chronicle, change}.rs`, with unit tests in `state/tests.rs`; the gates' properties and Python checks are in `crates/citar-testkit/tests/engine/state.rs`.
+- **Private parts.** `State`'s parts are private fields read through getters (`st.tiles()`, `st.player(p)`, `st.clock()`, ...), not `pub` fields: a `pub` field would hand anyone holding `&mut State` a way round the accessors. The same goes for what a `Change` must report: a unit's owner, tile and carrier, a city's owner and tile, both ids, a player's seat and whether it is alive, and a city-state's ally. `State::from_parts(StateParts)` builds a state from its parts (save, converter) after checking they fit and rebuilding the indexes; `into_parts` takes it apart.
+- **Accessors.** `config_mut` joins the restricted list, since nearly every cache reads the settings, and `cargo xtask check` also fails if `state/mod.rs` stops defining one of them. `ids_mut`, `chronicle_mut` and `host_mut` are `pub(crate)` and unrestricted: counters and history heads feed no cache.
+- **Changes.** `TileOwner { t, old, new }` carries a `TileClaim` (owner and city: a scenario can give a tile an owner and no city). `CityRemoved { c, owner, at }` carries what the removed city no longer can. A write that moves several things returns `Changes`, `#[must_use]` too, in order: `Units::relocate` (the unit, then its cargo), `State::transfer_city` (the city, then its tiles), `State::kill_player` (its units' removals, then `PlayerAlive`), `Diplomacy::update` (`Met` if contact changed, `Diplo` if anything else did), `Units::despawn` (the removal, then each unit it carried leaving it). Boarding and leaving a carrier, including a carrier's removal leaving its cargo, report `UnitPlaced` with `from == to`: being carried matters to healing, city air capacity and carrier capacity. The setters beyond the tiles', units' and cities': `State::{set_clock, set_controller, set_auto_decision, set_seat_difficulty, set_ally}`.
+- **Units.** A carried unit moved off its carrier's tile leaves it. Carriers do not nest. `Units::verify` and `Cities::verify` check the indexes; `State::check_indexes` checks them all.
+- **Loading is safe by construction.** Whatever order `save` and `compat` call things in:
+  - `EntityStore` refuses an id above `store::MAX_ENTITY_ID` (2^24) with `StoreError::TooLarge` before anything grows, so a corrupt id cannot ask for gigabytes (the store's lookup table and the occupancy links grow to the largest id: 64 MB each at worst).
+  - `State::from_parts` refuses, as `StateError::Mismatch`: a tile, unit or city owner that is not a player; a tile claimed by a missing city; a city off the map; an explored set or a major's memory that does not fit the map; an id counter at or below a unit, city, camp, deal or negotiation id in use. Units off the map and broken carrier links were already refused.
+  - `Tiles::from_parts` refuses a build queue off the map or empty rather than dropping it, and `DriverMemory::new` refuses more than `MAX_LEN` bytes.
+- **Players.** The religion state is `Player.religion` (the design's `faith`, which read as the stock). The seat model is `Seat::new` (defaults, then overrides), `Seat::restore` (a save's fields, a missing handicap derived) and `SeatOverrides::parse`, which checks the lobby's `handicap` and `auto` with Python's messages. City-state quest timers keep Python's -1 for "not scheduled"; `QuestTimers.individual` is sparse. `DriverMemory`'s fields are private: `DriverMemory::new` holds it to `MAX_LEN` (4 MiB) on the way in, so the engine never writes a save it would refuse to load.
+- **Diplomacy.** A `PairMatrix<Relation>` covers every pair, barbarians included; `Diplomacy::new(n, barbarians)` puts the barbarians at war with everyone in the masks. Two-sided relation fields are indexed by `diplo::side(p, q)`, 0 for the lower id. The 16 opinion reasons are `OpinionKey`. `DealItem::{to_json, from_json}` and `Terms::{to_json, from_json}` read and write Python's dicts with a `&Ruleset`; `scripts/refcheck/deal_items.py` records the dicts the test compares.
+- **Config.** `MapSource::Generated { size, map_type, edges, dims }` and `Editor { id, size }`, where `size` is the lobby size nearest the map's area, which views show (game.py:177-179). `NewGame::{generated, editor}` pair the settings with the editor document so that they agree. Map sizes, map types and barbarian levels are the new ids `MapSizeId`, `MapTypeId` and `BarbarianLevelId`: `Constants` holds those lists as `IdVec`s, `Constants::{map_size_id, map_type_id, barbarian_level_id}` find one by its exact key (what a save writes), and the loader refuses a list longer than 256. They are not `Named`: `NameKind` is Python's `Rules.tables()`, resolved loosely by display name for tools. Victories switched off are listed (`disabled_victories`), so the default is all of them. `GameConfig::new` takes the essentials; `config_from_json` (1b-03) fills the rest.
+- **History.** `EngineEvent` is generated from a table of the 97 types with their `is_private`; `PRIVATE_EVENTS` has two more names that nothing emits (`build_cancelled`, `city_razing`). `Event` has no `origin`: `EventType` already tells engine events from host ones. `EventData` has the 32 keys `emit` is passed. A stats row is `StatsRow { turn, civs }` with every key `victory.record_stats` wrote, which includes `baseline.py`'s eight `STAT_KEYS`. `ChronicleHeads::absorb` folds an entry into the running hash; `HostHeads::take_event_id` hands out the shared event ids from 1. `FrameLog` holds the frames `save::journal` encodes.
+- **Serialisation is 1a-09's.** The state types derive no serde yet: the save writes rule ids as names, which needs `save::ctx`, so 1a-09 adds the derives and the custom encodings together. `Tile::canon_bytes` and `TileMemory::canon_bytes` are ready for `save::canon`.
+- **Specialists.** `City.specialists` is `[u8; MAX_SPECIALISTS]` with `sets::MAX_SPECIALISTS = 8`, and the loader refuses a larger table.
 
 ### 4.9 Save format v1 (JSON)
 
@@ -879,7 +896,7 @@ The top-level keys are written in this order:
 - **`Snapshot`** is a deep clone of `State` plus `&'static Ruleset`. It costs about 1-3 ms at gargantuan and is taken under the session lock, which fixes the torn saves. `Snapshot::to_json()` runs off the lock.
 - **Loading.**
   - `Game::load(rules, state_json, chunks)` deserialises, then calls `rebuild_indexes()` and `validate()`.
-  - `validate()` checks referential integrity, ranges, finite floats, `PlayerVec` lengths, palettes and `DriverMemory` sizes.
+  - `validate()` checks referential integrity, ranges, finite floats, `PlayerVec` lengths, palettes and `DriverMemory` sizes. `State::from_parts` already refuses entity ids above `MAX_ENTITY_ID`, owners that are not players, tiles claimed by missing cities, cities off the map, explored sets and memories that do not fit, and id counters behind ids in use (§4.8, as built), so `validate()` need not repeat those.
   - A corrupt save returns a `LoadError` and can never panic later.
 - **`save::summary(bytes)`** replaces `engine_api.state_summary`, reading `chronicle.last_stats` for the scores.
 
@@ -1513,7 +1530,7 @@ The one way to get a `BorrowMutError` is a dependency cycle between memos, which
 
 ### 6.4 Writes: `Change`, `Touch` and effects
 
-Mutable access to `State` is restricted to `game::mutate`. `State::{tiles_mut, units_mut, cities_mut, players_mut, diplo_mut, world_mut}` are `pub(crate)`, and `xtask check` allows calls to them only from `game/mutate.rs`, `save/` (loading) and `compat/` (conversion). Rule code writes through `Game` in exactly two ways.
+Mutable access to `State` is restricted to `game::mutate`. `State::{tiles_mut, units_mut, cities_mut, players_mut, diplo_mut, world_mut, config_mut}` are `pub(crate)`, and `xtask check` allows calls to them only from `game/mutate.rs`, `save/` (loading) and `compat/` (conversion). Rule code writes through `Game` in exactly two ways.
 
 **1. Setters returning `#[must_use] Change`.** These are for writes whose consequences need the new state: ownership, placement, a city appearing or disappearing, a tile changing.
 
@@ -1806,7 +1823,7 @@ The compute functions are already pure: `&State` and `&Derived` in, values out. 
 
 | Stage | What it does | Package |
 |---|---|---|
-| config | `config_from_json` normalisation (game.py:151-196); seed required; map inline | 1b-03 |
+| config | `config_from_json` normalisation (game.py:151-196) into a `NewGame`; seed required; map inline, kept as its id | 1b-03 |
 | nations | chosen nations, then a keyed shuffle of the rest (`Purpose::NationShuffle`) | 1b-03 |
 | map | an editor document: `validate`, `tiles_from_rows`, continents and explicit starts | 1b-03 |
 | | a generated map | 1b-04 |
@@ -1951,8 +1968,8 @@ Rust's `Display` prints `2.0` as `2` and never uses an exponent; its `Debug` wri
 
 ```rust
 // lifecycle
-pub fn new(rules: &'static Ruleset, cfg: &GameConfig) -> Result<(Game, EventBatch), EngineError>;
-pub fn config_from_json(rules: &'static Ruleset, json: &[u8]) -> Result<GameConfig, EngineError>; // requires seed; map inline
+pub fn new(rules: &'static Ruleset, setup: &NewGame) -> Result<(Game, EventBatch), EngineError>; // settings + editor document
+pub fn config_from_json(rules: &'static Ruleset, json: &[u8]) -> Result<NewGame, EngineError>; // requires seed; map inline
 pub fn load(rules: &'static Ruleset, state_json: &[u8], chunks: &mut dyn Iterator<Item = &[u8]>) -> Result<(Game, LoadReport), LoadError>;
 #[cfg(feature = "legacy")] pub fn from_python(rules: &'static Ruleset, json: &[u8]) -> Result<(Game, ConvertReport), ConvertError>;
 pub fn snapshot(&self) -> Snapshot;                      // under the lock; Snapshot::to_json() off it
@@ -2533,13 +2550,14 @@ Figures are for one P-core of the laptop (i5-13420H), release build, criterion, 
 | `FeatureSet`, `FeatureId` | u16 bitset of terrain features / index among the 10 features |
 | `FracId` | Interned fractional unique parameter (`Ruleset.fracs`) |
 | `Game` | One game: `rules`, `st`, `dv`, `chron`, pending work, effects, frames, debug options, poison flag |
-| `GameConfig`, `HostOnly`, `MapSource` | Typed configuration / values saved but never hashed / generated map or inline editor document |
+| `GameConfig`, `HostOnly`, `MapSource` | Typed configuration / values saved but never hashed / generated map, or an editor map by id |
 | `HexGrid` | Map geometry derived from `MapInfo` |
 | `IdCounters` | Persisted id counters, including `combat_seq` |
 | `IdSet<I, W>`, `IdVec<I, T>`, `PlayerSet`, `PlayerVec` | Typed bitsets and vectors |
 | `JournalChunk`, `FrameWriter`, `ReplayFormat` | Chronicle delta for the host to append / keyframe and delta encoder / Full or Delta replay output |
 | `KeyPart` | Encoding of RNG key parts; `None` is `u64::MAX` |
 | `MoveClass`, `MoveCosts`, `RouteLayer`, `Zoc`, `PathTree`, `PathCache`, `PathScratch` | Pathfinding structures: static per-class costs, per-civ routes, zone of control, searches |
+| `NewGame`, `MapDoc` | What `Game::new` sets a game up from: the settings and, for an editor map, its inline document, which is never saved |
 | `OneTimeEffect`, `TriggerKind`, `TriggerCond`, `TriggerEvent` | Triggered effects |
 | `OutcomeSpec`, `Outcome` | What an applied action reports / its rendering after the settle |
 | `PairMatrix<T>`, `Relation`, `OpinionBook` | Triangular relation storage and its cell / sparse opinions |

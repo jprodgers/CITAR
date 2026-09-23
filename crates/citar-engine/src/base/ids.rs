@@ -436,6 +436,25 @@ define_id! {
     TagId(pub u8);
 }
 
+define_id! {
+    /// A map size of `game.json` (`map_sizes`): `duel`, `small`, ... An index into
+    /// `Constants::map_sizes`; `Constants::map_size_id` finds one by its key.
+    MapSizeId(pub u8);
+}
+
+define_id! {
+    /// A map type of `game.json` (`map_types`): `continents`, `pangaea`, ... An index into
+    /// `Constants::map_types`; `Constants::map_type_id` finds one by its key.
+    MapTypeId(pub u8);
+}
+
+define_id! {
+    /// A barbarian setting of `game.json` (`barbarians.levels`): `off`, `normal`, `raging`. An
+    /// index into `Constants::barbarian_levels`; `Constants::barbarian_level_id` finds one by its
+    /// key.
+    BarbarianLevelId(pub u8);
+}
+
 // ---- IdVec ------------------------------------------------------------------------------------
 
 /// A vector indexed by an id type rather than by `usize`.

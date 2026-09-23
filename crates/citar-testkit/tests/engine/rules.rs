@@ -10,9 +10,9 @@
 //!   each refused, with the file and object named.
 
 use citar_engine::base::ids::{
-    BaseUnitId, BeliefId, BuildingId, DifficultyId, EraId, FeatureId, Id, ImprovementId, NationId,
-    PolicyId, PromotionId, ResourceId, SpecialistId, SpeedId, TechId, TerrainId, UnitTypeId,
-    VictoryId,
+    BarbarianLevelId, BaseUnitId, BeliefId, BuildingId, DifficultyId, EraId, FeatureId, Id,
+    ImprovementId, MapSizeId, MapTypeId, NationId, PolicyId, PromotionId, ResourceId, SpecialistId,
+    SpeedId, TechId, TerrainId, UnitTypeId, VictoryId,
 };
 use citar_engine::base::sets::{FeatureSet, TechSet};
 use citar_engine::base::stats::Stat;
@@ -210,6 +210,18 @@ fn the_shipped_tables_have_the_census_sizes() {
     assert_eq!(r.speed_names().collect::<Vec<_>>(), ["Quick", "Standard", "Epic", "Marathon"]);
     assert_eq!(r.difficulty_names().next(), Some("Settler"));
     assert_eq!(r.map_sizes().len(), 6);
+    // The lobby's lists are held by id, found by key.
+    let k = r.constants();
+    let small = k.map_size_id("small").expect("small");
+    assert_eq!((small, r.map_sizes().get(small).map(|m| m.width)), (MapSizeId(1), Some(60)));
+    assert_eq!(k.map_size("small").map(|m| &*m.name), Some("Small"));
+    assert_eq!(k.map_type_id("fractal"), Some(MapTypeId(4)));
+    let raging = k.barbarian_level_id("raging").expect("raging");
+    assert_eq!(raging, BarbarianLevelId(2));
+    let level = |b: BarbarianLevelId| k.barbarian_levels.get(b).and_then(|l| l.level.clone());
+    assert!(level(raging).is_some_and(|l| l.raging));
+    assert_eq!(k.barbarian_level_id("off").and_then(level), None);
+    assert_eq!(k.map_size_id("Small"), None, "keys are exact");
     assert!(r.global_uniques().all.len() >= 8);
     assert_eq!(r.fracs().len(), 19, "the distinct fractions of the terrains' generation rules");
 }
@@ -420,6 +432,15 @@ fn a_table_over_capacity_is_refused() {
     });
     let text = refused(r, RulesetErrorKind::Capacity, "ruleset/terrains.json", "");
     assert!(text.contains("17 terrain features"), "{text}");
+    // The lobby's lists in game.json are held by u8 ids too.
+    let r = load_edited("game.json", |v| {
+        let types = v["map_types"].as_object_mut().expect("map types");
+        for i in 0..(256 - 5 + 1) {
+            types.insert(format!("type_{i}"), json!({"name": format!("Type {i}")}));
+        }
+    });
+    let text = refused(r, RulesetErrorKind::Capacity, "game.json", "map_types");
+    assert!(text.contains("257 map types") && text.contains("MapTypeId"), "{text}");
 }
 
 #[test]
