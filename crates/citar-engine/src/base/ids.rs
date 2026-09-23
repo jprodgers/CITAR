@@ -30,8 +30,11 @@ pub trait Id: Copy + Eq + Ord + Hash + fmt::Debug + 'static {
     /// The type's name, for messages.
     const NAME: &'static str;
 
-    /// The id as a vector or bitset index. For a `NonZeroU32` id this is its raw value, so slot
-    /// 0 of an [`IdVec`] over entities is never used.
+    /// The smallest index an id of this type has: 0, or 1 for the entity ids, whose counters
+    /// start at 1. [`IdVec`] stores the id with this index in its first slot.
+    const FIRST_INDEX: usize;
+
+    /// The id as a bitset index: its raw value, so bit 0 of a set of entity ids is never used.
     fn index(self) -> usize;
 
     /// The id at this index, or `None` if the type cannot hold it.
@@ -58,6 +61,7 @@ macro_rules! define_id {
 
         impl Id for $name {
             const NAME: &'static str = stringify!($name);
+            const FIRST_INDEX: usize = 0;
 
             #[inline]
             fn index(self) -> usize {
@@ -135,6 +139,7 @@ macro_rules! define_id {
 
         impl Id for $name {
             const NAME: &'static str = stringify!($name);
+            const FIRST_INDEX: usize = 1;
 
             #[inline]
             fn index(self) -> usize {
@@ -423,9 +428,16 @@ define_id! {
 
 /// A vector indexed by an id type rather than by `usize`.
 ///
+/// Slot `i` holds the id with index `i + I::FIRST_INDEX`: the first slot is `TechId(0)` for a
+/// rule table and `CityId(1)` for an entity table, so neither wastes a slot and [`push`]
+/// hands out the first id of either kind.
+///
 /// Rule tables hold one entry per id, pushed in file order. Derived per-entity data is indexed
-/// by raw entity id and grown on demand with [`IdVec::ensure`]: ids are never reused, so the
-/// vector stays within a few tens of thousands of entries even for a converted Python game.
+/// by raw entity id and grown on demand with [`ensure`]: ids are never reused, so the vector
+/// stays within a few tens of thousands of entries even for a converted Python game.
+///
+/// [`push`]: IdVec::push
+/// [`ensure`]: IdVec::ensure
 pub struct IdVec<I, T> {
     items: Vec<T>,
     // fn(I) keeps IdVec Send and Sync whatever I is, and says nothing about owning an I.
@@ -445,7 +457,7 @@ impl<I: Id, T> IdVec<I, T> {
         Self { items: Vec::with_capacity(n), _id: PhantomData }
     }
 
-    /// Takes a vector whose position `i` belongs to the id with index `i`.
+    /// Takes a vector whose position `i` belongs to the id with index `i + I::FIRST_INDEX`.
     #[must_use]
     pub fn from_vec(items: Vec<T>) -> Self {
         Self { items, _id: PhantomData }
@@ -460,7 +472,7 @@ impl<I: Id, T> IdVec<I, T> {
         Self::from_vec(vec![value; n])
     }
 
-    /// The number of slots, used or not.
+    /// The number of slots, used or not: for entity ids, the largest id the vector reaches.
     #[must_use]
     pub fn len(&self) -> usize {
         self.items.len()
@@ -472,22 +484,35 @@ impl<I: Id, T> IdVec<I, T> {
         self.items.is_empty()
     }
 
+    /// The slot of `id`. Every id's index is at least `FIRST_INDEX`, so this never underflows.
+    #[inline]
+    fn slot(id: I) -> usize {
+        id.index() - I::FIRST_INDEX
+    }
+
+    /// The id of slot `slot`, if the id type reaches it.
+    #[inline]
+    fn id_at(slot: usize) -> Option<I> {
+        slot.checked_add(I::FIRST_INDEX).and_then(I::from_index)
+    }
+
     /// The entry for `id`, if the vector reaches that far.
     #[must_use]
     #[inline]
     pub fn get(&self, id: I) -> Option<&T> {
-        self.items.get(id.index())
+        self.items.get(Self::slot(id))
     }
 
     /// The entry for `id`, if the vector reaches that far.
     #[inline]
     pub fn get_mut(&mut self, id: I) -> Option<&mut T> {
-        self.items.get_mut(id.index())
+        self.items.get_mut(Self::slot(id))
     }
 
-    /// Appends an entry and returns its id, or gives the value back if the id type is full.
+    /// Appends an entry and returns its id (`TechId(0)`, `CityId(1)`, then onwards), or gives
+    /// the value back if the id type is full.
     pub fn push(&mut self, value: T) -> Result<I, T> {
-        match I::from_index(self.items.len()) {
+        match Self::id_at(self.items.len()) {
             Some(id) => {
                 self.items.push(value);
                 Ok(id)
@@ -497,11 +522,15 @@ impl<I: Id, T> IdVec<I, T> {
     }
 
     /// The entry for `id`, growing the vector with defaults to reach it.
+    ///
+    /// It allocates up to the id, so an id from outside (a save, a request) must be checked
+    /// against its counter first: a corrupt `CityId(4_000_000_000)` would otherwise ask for
+    /// billions of slots.
     pub fn ensure(&mut self, id: I) -> &mut T
     where
         T: Default,
     {
-        let i = id.index();
+        let i = Self::slot(id);
         if i >= self.items.len() {
             self.items.resize_with(i + 1, T::default);
         }
@@ -510,26 +539,27 @@ impl<I: Id, T> IdVec<I, T> {
 
     /// Every slot that has an id, with its id, in ascending order.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (I, &T)> {
-        self.items.iter().enumerate().filter_map(|(i, v)| I::from_index(i).map(|id| (id, v)))
+        self.items.iter().enumerate().filter_map(|(i, v)| Self::id_at(i).map(|id| (id, v)))
     }
 
     /// Every slot that has an id, with its id, in ascending order.
     pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = (I, &mut T)> {
-        self.items.iter_mut().enumerate().filter_map(|(i, v)| I::from_index(i).map(|id| (id, v)))
+        self.items.iter_mut().enumerate().filter_map(|(i, v)| Self::id_at(i).map(|id| (id, v)))
     }
 
     /// The ids of every slot, in ascending order.
     pub fn ids(&self) -> impl DoubleEndedIterator<Item = I> + use<I, T> {
-        (0..self.items.len()).filter_map(I::from_index)
+        (0..self.items.len()).filter_map(Self::id_at)
     }
 
-    /// The entries in index order, without their ids.
+    /// The entries in id order, without their ids: position `i` is the id with index
+    /// `i + I::FIRST_INDEX`.
     #[must_use]
     pub fn as_slice(&self) -> &[T] {
         &self.items
     }
 
-    /// The entries in index order, without their ids.
+    /// The entries in id order, without their ids, as [`as_slice`](Self::as_slice).
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.items
     }
@@ -579,7 +609,7 @@ impl<I: Id, T> Index<I> for IdVec<I, T> {
 
     #[inline]
     fn index(&self, id: I) -> &T {
-        &self.items[id.index()]
+        &self.items[Self::slot(id)]
     }
 }
 
@@ -587,7 +617,7 @@ impl<I: Id, T> Index<I> for IdVec<I, T> {
 impl<I: Id, T> IndexMut<I> for IdVec<I, T> {
     #[inline]
     fn index_mut(&mut self, id: I) -> &mut T {
-        &mut self.items[id.index()]
+        &mut self.items[Self::slot(id)]
     }
 }
 
@@ -632,14 +662,29 @@ mod tests {
     }
 
     #[test]
-    fn id_vec_skips_the_slot_no_entity_id_has() {
+    fn id_vec_over_entities_starts_at_the_first_id() {
         let mut v: IdVec<CityId, u8> = IdVec::new();
         let seven = CityId::new(7).expect("7 is an id");
         *v.ensure(seven) = 9;
-        assert_eq!(v.len(), 8);
+        assert_eq!(v.len(), 7);
         assert_eq!(v.get(seven), Some(&9));
+        assert_eq!(v[seven], 9);
+        assert_eq!(v.as_slice(), &[0, 0, 0, 0, 0, 0, 9]);
         assert_eq!(v.iter().count(), 7);
         assert_eq!(v.ids().next(), Some(CityId::FIRST));
+        assert_eq!(v.ids().last(), Some(seven));
+        assert_eq!(v.get(CityId::new(8).expect("8 is an id")), None);
+    }
+
+    #[test]
+    fn id_vec_push_hands_out_entity_ids_from_one() {
+        let mut v: IdVec<CityId, u8> = IdVec::new();
+        assert_eq!(v.push(1), Ok(CityId::FIRST));
+        assert_eq!(v.push(2), CityId::new(2).ok_or(0));
+        assert_eq!(v[CityId::FIRST], 1);
+        assert_eq!(v.iter().map(|(id, &x)| (id.get(), x)).collect::<Vec<_>>(), [(1, 1), (2, 2)]);
+        let collected: IdVec<UnitId, char> = ['a', 'b'].into_iter().collect();
+        assert_eq!(collected.get(UnitId::FIRST), Some(&'a'));
     }
 
     #[test]
