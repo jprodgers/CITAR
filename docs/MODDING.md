@@ -45,7 +45,8 @@ The engine compiles every unique when the ruleset loads. A mod does not load at 
 uniques:
 
 - is misspelt;
-- has a parameter that does not read, such as a stat that does not exist or a name nothing has;
+- has a parameter that does not read, such as a stat that does not exist, a name nothing has, or
+  a number out of range (`Must be on [-1] largest landmasses`);
 - uses one of UnCiv's other 110 types.
 
 The error names the file, the object and what is wrong. Nothing is silently ignored.

@@ -964,7 +964,14 @@ These are the rules area's census figures, taken with the Python parser.
 - 60 modifier types: 49 conditionals, 3 trigger conditions, 6 unit-action modifiers and 2 meta modifiers (game speed, timed);
 - one unknown text, `"Aircraft"`, used 3 times.
 
-**Python's coverage.** Python handles 509 types, of which 121 are never used. Six of its 95 `_COND` entries can never match (`uniques.py:896-1010`).
+**Python's coverage** (as counted for 1a-05b, §5.6). Python names 405 of UnCiv's 637 types as `U.<name>`. It reads 89 more as live `_COND` keys and 12 more in its `_META` set (`uniques.py:896-1019`), which makes 506. The other six of its 95 `_COND` keys are its own wordings, which no UnCiv type has, so they can never match.
+
+The engine supports 527 types, of which the shipped ruleset uses 402 and 125 are extra. The 527 are:
+- Python's 506;
+- the UnCiv wordings of five of the six dead keys (the sixth's wording was already among the 506);
+- 16 types the shipped ruleset uses that Python never named by type. Two of these Python read by their text (`game.py:30`, `bots/basic.py:1386`), and 14 nothing reads (the inert types).
+
+These figures replace the design-time census of 509 handled and 121 unused.
 
 **Files.** 22 files in `citar/data/ruleset/` (excluding `NOTICE.md`), plus `custom/nations.json` and `game.json`: 24 files in all (`rules.py:37-99`). `citar/data/collectors/` holds hardware scripts and is not ruleset data.
 
@@ -1125,7 +1132,7 @@ The rule for unknown texts:
 - **The supported list** had 423 entries at 1a-05 (1a-05b raised it to 527, below): the 402 types the ruleset uses, plus the 21 triggers Python fires that the ruleset does not use. Python fires 24 kinds in all; three of them are used. The roles break down as 164 effects, 92 flags, 10 requirements, 27 one-time effects, 11 actions, 1 AI weight, 23 map-generation types, 14 inert types (each with a reason), 49 conditionals, 24 triggers, 6 action modifiers and 2 meta modifiers.
   - `stages` lists the engine systems that read a type: the Python modules that read it, mapped to the game modules of §3.2. An inert type is one Python never reads. The generator refuses a type that is not inert and names no stage, since the packages find their work by stage.
   - `gain = true` marks the five standing effects that `triggers.py`'s TRIGGERABLE also fires once when their source is gained, such as free buildings and free promotions.
-  - `name:amount16` is the one field override. It keeps `BuyUnitsIncreasingCost`'s payload within 12 bytes.
+  - `name:kind` overrides a field's kind. `amount16` keeps `BuyUnitsIncreasingCost`'s payload within 12 bytes; from the 1a-05b fix round, `nonNegativeAmount` refuses a negative landmass count (below).
 - **Parameters** have 49 `ParamKind`s. Amounts are `i32` within ±1,000,000, with the positive and non-negative kinds checked; `+15` reads as 15, and a non-integer is an error. There are 44 distinct `StatsId`s and 19 `FracId`s.
   - Names become ids, looked up exactly. `[greatPerson]` is checked only as a unit, because whether a unit is a great person is known only after this pass.
   - Filters are handles to their text. `UnitFilterId`, `TileFilterId` (which also serves terrain filters and `simpleTerrain`), `CityFilterId`, `CivFilterId` and `CombatantFilterId` each index a table of texts. Static filters (base unit, building, improvement, resource, tech, era) are `SetRef`s into `StaticFilter { domain, text, members }`, and 1a-06 fills in the members. The union kinds (`tileFilter/buildingFilter` and the like) are an `ObjectFilterId`, compiled once per allowed kind.
@@ -1172,9 +1179,12 @@ The rule for unknown texts:
   - `beliefType` is a `BeliefKind`: a belief type, or `Any`, which is how `religion.py:544-575` counted a civilization's choices;
   - `spyAction` is a `SpyAction`, named as Python named it in any case (`espionage.py:101`) or as UnCiv does.
 
+  Game state shares these two vocabularies, so they live in `rules::defs` beside `BeliefType`, not in `unique::params`. A spy's current action is the same `SpyAction` a unique names (`from_name` reads saves exactly; `from_ruleset_text` reads rulesets leniently). `BeliefKind::index` gives each kind a slot, `Any` included, so a civilization's free beliefs are a `[u8; BeliefKind::COUNT]`: `Gain a free [Any] belief` has somewhere to go.
+
   `pediaLink` and `validationWarning` are kept as text.
 - **Display modifiers.** `<hidden from users>`, `<Civilopedia link []>` and `<Suppress warning []>` change how UnCiv shows a unique, and no rule. Python passed over them (`uniques.py:1013-1019`), and the compiler folds them into nothing.
-- **Map generation** reads `Must be on [n] largest landmasses` into `NaturalWonderGen::on_largest` (`mapgen.py:734-736`).
+- **Map generation** reads `Must be on [n] largest landmasses` into `NaturalWonderGen::on_largest` (`mapgen.py:734-736`). Both landmass counts are `nonNegativeAmount`s: Python's `continents_by_size[:n]` counted a negative n from the end, and a Rust slice of that many landmasses would panic. A count may still exceed the number of landmasses, so 1b-04 takes `min(n, len)` of them.
+- **Hurrying a wonder.** `actions.py:87` offered `hurry_construction` to a unit with `Can speed up the construction of a wonder`, and `great_people.py:313` then refused it, since it checked only `Can speed up construction of a building`. The wonder type's stages name `great_people` too, so 1b-08 ports the fix: either type may hurry, and the wonder type only when the city is building a wonder.
 - **The kitchen sink.** `crates/citar-testkit/testdata/rulesets/kitchen_sink/` is a small mod over the shipped files, written as JSON merge patches (RFC 7396). It adds:
   - a nation, two buildings, seven units, a promotion, an improvement and a natural wonder;
   - a belief, a city-state type and four ruins.
