@@ -1118,6 +1118,38 @@ The rule for unknown texts:
 
 `Aircraft` qualifies. `units.json:1451` and `promotions.json:675-701` filter on `[Aircraft]`, which is UnCiv's own convention. It cannot be replaced by `Air`, because `Air` also covers missiles.
 
+**As built in 1a-05** (§5.4-5.6):
+- **Files.** `unique_types.tsv` (637 rows: name, placeholder, signature) and `unique_supported.toml` sit beside `Cargo.toml` in `crates/citar-engine/`. `scripts/gen_unique_types.py --tsv` refreshes the TSV from UnCiv. `cargo xtask gen-uniques` writes `src/unique/gen.rs`, and `xtask check` regenerates it and fails on any difference. `gen` is a reserved word in edition 2024, so the module is `unique::generated`, loaded from `gen.rs` by `#[path]`. rustfmt skips it.
+- **The supported list** has 423 entries: the 402 types the ruleset uses, plus the 21 triggers Python fires that the ruleset does not use. Python fires 24 kinds in all; three of them are used. The roles break down as 164 effects, 92 flags, 10 requirements, 27 one-time effects, 11 actions, 1 AI weight, 23 map-generation types, 14 inert types (each with a reason), 49 conditionals, 24 triggers, 6 action modifiers and 2 meta modifiers.
+  - `stages` lists the engine systems that read a type: the Python modules that read it, mapped to the game modules of §3.2. An inert type is one Python never reads.
+  - `gain = true` marks the five standing effects that `triggers.py`'s TRIGGERABLE also fires once when their source is gained, such as free buildings and free promotions.
+  - `name:amount16` is the one field override. It keeps `BuyUnitsIncreasingCost`'s payload within 12 bytes.
+- **Parameters** have 49 `ParamKind`s. Amounts are `i32` within ±1,000,000, with the positive and non-negative kinds checked; `+15` reads as 15, and a non-integer is an error. There are 44 distinct `StatsId`s and 19 `FracId`s.
+  - Names become ids, looked up exactly. `[greatPerson]` is checked only as a unit, because whether a unit is a great person is known only after this pass.
+  - Filters are handles to their text. `UnitFilterId`, `TileFilterId` (which also serves terrain filters and `simpleTerrain`), `CityFilterId`, `CivFilterId` and `CombatantFilterId` each index a table of texts. Static filters (base unit, building, improvement, resource, tech, era) are `SetRef`s into `StaticFilter { domain, text, members }`, and 1a-06 fills in the members. The union kinds (`tileFilter/buildingFilter` and the like) are an `ObjectFilterId`, compiled once per allowed kind.
+  - Countables are parsed here (`unique::countable`); 1a-07 evaluates them.
+- **The record.** `Unique` is 24 bytes and `UniqueData` 16. The top byte of `Unique`'s `CondDeps` word holds `UFlags`: LOCAL, SPEED, TIMED, TRIGGERED, ACTION and TEMPORARY. Every conditional reads `CondDeps::all()` until 1a-07 assigns its classes.
+  - `UniqueMeta.ty` is `None` for a tag.
+  - `occurrence` counts the identical texts before this one on the same source.
+  - The key is FNV-1a-64 over the length-prefixed source kind name, source name, occurrence (as `u16`) and text. The same text on two sources, or twice on one, gets distinct keys, and adding a unique moves no other key. A temporary variant hashes the kind `Temporary`, the name `<kind>/<name>` of its original, and the original's occurrence and text.
+  - Limited actions carry an `AbilityKey` interned from Python's `ph|params` key (`units.py:417`).
+- **Temporary variants** share their original's data and conditionals, and drop both the timer and any trigger. They sit in one block after the techs' uniques. The city-state bonuses are laid out as every type's friend bonuses, then every type's ally bonuses, then the types' own uniques, so that `Source`'s order is id order.
+- **Partitions** (`SourceUniques`):
+  - a triggered unique goes to `triggered`;
+  - a timed one goes to `on_gain`;
+  - effects, flags and tags go to `civ`, or to `local` when LOCAL, and also to `on_gain` with `gain`;
+  - one-time effects go to `on_gain`, or to `actions` when they carry action modifiers;
+  - actions go to `actions`, and AI weights to `ai`.
+- **Tags.** A tag is any placeholder without parameters that a filter names as a term, whether known (`Rough terrain`, `Great Improvement`, `Spaceship part`, `Fresh water`) or unknown (`Aircraft`). It is split into terms as `multi_filter` splits it. The filters inside uniques count, and so do the ruleset's other filters (`terrainsCanBeBuiltOn`, start biases). A source's `tags` hold its unconditional tags and `cond_tags` those under conditionals. The shipped ruleset has 5 tags.
+- **Errors** are four new `RulesetErrorKind`s:
+  - `UnknownUnique`: no UnCiv type, or an unknown text no filter names;
+  - `UnsupportedUnique`: not in `unique_supported.toml`, and the message says what to add;
+  - `UniqueParameter`: a parameter that does not compile;
+  - `UniqueModifier`: two triggers, a `for every` multiplier, a modifier used twice, or a unique and a modifier in each other's place.
+- **The loader** numbers the feature layers first, because uniques name features by them. Then it compiles the uniques, then derives the tables. The derived tables (rough, great improvements, great people, spaceship parts, major nations, `stat_related`) read compiled uniques by type. `Derived::builder_classes` now holds `ObjectFilterId`s. Loading takes about 7 ms in release.
+- **Checks.** The golden `uniques.json` snapshots every compiled unique. The refcheck `uniques` group compares each text with `scripts/refcheck/uniques_dump.py`'s record of how Python read it, and runs enforced with 0 unexplained differences.
+- **Left for 1a-07.** The `OneTimeEffect` shapes; `UniqueData`'s one-time payloads are their input.
+
 ### 5.7 Filters
 
 - **The grammar** is Python's (`uniques.py:294-327`): `{a} {b}` is a conjunction split at depth 0, and `non-[x]` is a negation. Parsed filters become `Expr<L> = Const | Leaf | Not | All | Any`, deduplicated by (domain, text). Trees are depth-capped at load.
@@ -2130,6 +2162,7 @@ Golden sets live in `crates/citar-testkit/golden/` and are staged as the engine 
 |---|---|
 | 1a-02 | `rng.json` (the first 32 values of 8 streams), `libm.json`, `pyfmt.json` (Python `repr` and `round(x, n)` table) |
 | 1a-03 | the `RulesetId` of the embedded ruleset |
+| 1a-05 | `uniques.json`: every compiled unique of the embedded ruleset, one row each (source, text, type, role, flags, parameters, modifiers, key), with the interned fractions, stats, static and object filters, tags and abilities |
 | 1a-09 | 3 known-answer state digests |
 | 1a-10 | `convert-*`: the digests of the 12 committed fixtures right after conversion, before any settle |
 | 1b-04 | `map-*`: 10 generated maps (duel to huge, every map type), hashed tile arrays |
