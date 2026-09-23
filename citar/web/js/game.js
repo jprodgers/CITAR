@@ -62,6 +62,7 @@ export class GameScreen {
     this.renderer = new MapRenderer(this.canvas, this.rules);
     this.renderer.onViewChange = () => this.drawMinimap();
     this.bindMouse();
+    for (const node of [this.topbar, this.turnBox, this.sidePanel]) this.holdWhileHovered(node);
     this.minimap.addEventListener("click", (e) => {
       if (!this.view) return;
       const r = this.minimap.getBoundingClientRect();
@@ -69,6 +70,40 @@ export class GameScreen {
       const y = Math.floor((e.clientY - r.top) / r.height * this.view.height);
       this.renderer.centerOn(x, y);
     });
+  }
+
+  // Redrawing a bar replaces its buttons. In a fast AI game that happens several times a second, and a click that
+  // lands mid-redraw is lost; so while the pointer is over a bar its redraw waits until the pointer leaves. For a
+  // moment after a click redraws go through, so what was clicked (Pause becoming Resume) still shows straight away.
+  holdWhileHovered(node) {
+    node._hover = false;
+    node._held = null;
+    node.addEventListener("mouseenter", () => { node._hover = true; });
+    const release = () => {
+      if (node._hover || this.focusedSelect(node)) return;
+      const run = node._held;
+      node._held = null;
+      if (run) run();
+    };
+    node.addEventListener("mouseleave", () => { node._hover = false; release(); });
+    node.addEventListener("focusout", () => setTimeout(release, 0));
+    node.addEventListener("click", () => { node._clickedAt = Date.now(); }, true);
+    node.addEventListener("change", () => { node._clickedAt = Date.now(); }, true);
+  }
+
+  // an open (focused) dropdown in a bar: redrawing would close it under the pointer
+  focusedSelect(node) {
+    const a = document.activeElement;
+    return !!a && a.tagName === "SELECT" && node.contains(a);
+  }
+
+  // true when a redraw of these nodes has to wait (it is queued to run when the pointer leaves)
+  heldRender(nodes, run) {
+    const hovered = nodes.find((n) => n._hover || this.focusedSelect(n));
+    if (!hovered) return false;
+    if (nodes.some((n) => Date.now() - (n._clickedAt || 0) < 1500)) return false;
+    hovered._held = run;
+    return true;
   }
 
   bindMouse() {
@@ -663,6 +698,7 @@ export class GameScreen {
 
   // ------------------------------------------------------------------
   renderTopbar() {
+    if (this.heldRender([this.topbar, this.turnBox], () => this.renderTopbar())) return;
     const v = this.view;
     const tb = clear(this.topbar);
     if (!v) return;
@@ -826,6 +862,7 @@ export class GameScreen {
   }
 
   renderSide() {
+    if (this.heldRender([this.sidePanel], () => this.renderSide())) return;
     const sp = clear(this.sidePanel);
     const alerts = (this.view && this.view.alerts) || [];
     const tabs = [["events", "Events"], ["messages", "Messages"], ["scores", "Civs"]];

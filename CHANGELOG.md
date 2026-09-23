@@ -61,6 +61,10 @@ Single-player fixes and more dangerous barbarians.
 - The Bombard button stayed after a city had fired, because the city's own view never said whether it
   still could.
 - Accepting or rejecting a proposal left the diplomacy window open while play went on; it now closes.
+- Buttons in the top bar, the End Turn box and the side panel were hard to click while AIs played fast:
+  each update rebuilt them, so a click often landed on a button that had just been replaced (pausing a
+  fast bot game could take a dozen tries). A bar now waits to redraw while the pointer is over it, or
+  while one of its dropdowns is open, and redraws at once after a click.
 - Notifications covered the diplomacy window when a proposal arrived. Negotiation notices are no longer
   toasted while the window shows them, and any toast moves to the bottom of the screen while a window is
   open.
