@@ -1,0 +1,484 @@
+//! Tables derived from the ruleset at load (DESIGN.md 5.3), which Python computed in
+//! `Rules._prepare` and `Rules._index` (`rules.py:100-228`) or at each use.
+//!
+//! A few of them depend on a unique's type: whether a unit is a great person, whether a nation
+//! may be chosen for new games, what stats a building raises. The unique compiler comes later
+//! (package 1a-05), so these read the unique texts' placeholders with `unique::text`, exactly as
+//! Python's `has_tag` and `get` did. The compiler will answer the same questions from compiled
+//! uniques.
+
+use super::Ruleset;
+use super::defs::{BuilderClass, ImprovementKind, NationKind, Route, TerrainType};
+use super::errors::{Problems, RulesetErrorKind};
+use crate::base::ids::{
+    BaseUnitId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId, ResourceId,
+    TechId, TerrainId,
+};
+use crate::base::sets::FeatureSet;
+use crate::base::stats::{Stat, StatMask};
+use crate::unique::text::{Parts, parts};
+
+// The placeholders these tables look for (`unique_types.py`).
+const STATS: &str = "[]";
+const STATS_FROM_TILES: &str = "[] from [] tiles []";
+const STATS_PER_POPULATION: &str = "[] per [] population []";
+const REMOVES_ANNEX_UNHAPPINESS: &str = "Removes extra unhappiness from annexed cities";
+const SPACESHIP_PART: &str = "Spaceship part";
+const GREAT_PERSON: &str = "Great Person - []";
+const ROUGH_TERRAIN: &str = "Rough terrain";
+const GREAT_IMPROVEMENT: &str = "Great Improvement";
+const NOT_FOR_NEW_GAMES: &str = "Will not be chosen for new games";
+const BUILD_IMPROVEMENTS: &str = "Can build [] improvements on tiles";
+
+// The objects the engine names (`workers.py:22-25`, `state.py:98`, `cities.py:2147, 2358`,
+// `barbarians.py:17`, `automation.py:197`).
+const HILL: &str = "Hill";
+const FALLOUT: &str = "Fallout";
+const ROAD: &str = "Road";
+const RAILROAD: &str = "Railroad";
+const REMOVE: &str = "Remove ";
+const REPAIR: &str = "Repair";
+const CANCEL: &str = "Cancel improvement order";
+const CITY_CENTER: &str = "City center";
+const CITY_RUINS: &str = "City ruins";
+const ANCIENT_RUINS: &str = "Ancient ruins";
+const BARBARIAN_CAMP: &str = "Barbarian encampment";
+
+/// What a technology makes available (`rules.py:192-205`): the units, buildings and
+/// improvements it unlocks for everyone (not those unique to one nation), and the resources it
+/// reveals.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unlocks {
+    pub units: Vec<BaseUnitId>,
+    pub buildings: Vec<BuildingId>,
+    pub improvements: Vec<ImprovementId>,
+    pub reveals: Vec<ResourceId>,
+}
+
+/// What is unique to one nation (`rules.py:210-221`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NationUniques {
+    /// (the unit replaced, the nation's unit); a unit that replaces nothing replaces itself.
+    pub units: Vec<(BaseUnitId, BaseUnitId)>,
+    /// (the building replaced, the nation's building), likewise.
+    pub buildings: Vec<(BuildingId, BuildingId)>,
+    pub improvements: Vec<ImprovementId>,
+}
+
+/// The objects the engine refers to by name, resolved once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Known {
+    pub hill: FeatureId,
+    pub fallout: FeatureId,
+    pub road: ImprovementId,
+    pub railroad: ImprovementId,
+    pub repair: Option<ImprovementId>,
+    pub cancel: Option<ImprovementId>,
+    pub city_center: Option<ImprovementId>,
+    pub city_ruins: Option<ImprovementId>,
+    pub ancient_ruins: Option<ImprovementId>,
+    pub barbarian_camp: Option<ImprovementId>,
+}
+
+/// The tables derived at load that belong to no single object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Derived {
+    /// Techs by tree column, then by name as UTF-8 bytes, which is Python's code point order
+    /// (`rules.py:112`).
+    pub tech_order: Vec<TechId>,
+    pub unlocks: IdVec<TechId, Unlocks>,
+    /// The units that upgrade to each unit (`rules.py:206-209`).
+    pub upgrade_from: IdVec<BaseUnitId, Vec<BaseUnitId>>,
+    pub nation_uniques: IdVec<NationId, NationUniques>,
+    /// Major civilizations a new game may pick (`rules.py:222-223`).
+    pub major_nations: Vec<NationId>,
+    /// City-states a new game may pick (`rules.py:224-225`).
+    pub city_state_nations: Vec<NationId>,
+    pub great_person_units: Vec<BaseUnitId>,
+    /// One entry per unit that is a spaceship part.
+    pub spaceship_parts: Vec<BaseUnitId>,
+    /// The terrain features in layer order, Hill lowest and Fallout highest, the rest in file
+    /// order: `FeatureId` is a position here, so a `FeatureSet`'s top bit is the top feature.
+    pub features: IdVec<FeatureId, TerrainId>,
+    /// The improvement filters of each builder class (`BuilderClass` indexes this).
+    pub builder_classes: Vec<Box<[Box<str>]>>,
+    /// The `Remove ...` improvements that clear a feature or an improvement, in file order
+    /// (`workers.py:55-57`).
+    pub feature_removals: Vec<ImprovementId>,
+    /// The improvement that removes each feature, if one does.
+    pub removal_of: IdVec<FeatureId, Option<ImprovementId>>,
+    pub known: Known,
+}
+
+impl Derived {
+    /// Nothing derived yet: what the loader starts from before `derive` fills it in.
+    pub(crate) fn empty() -> Self {
+        Self {
+            tech_order: Vec::new(),
+            unlocks: IdVec::new(),
+            upgrade_from: IdVec::new(),
+            nation_uniques: IdVec::new(),
+            major_nations: Vec::new(),
+            city_state_nations: Vec::new(),
+            great_person_units: Vec::new(),
+            spaceship_parts: Vec::new(),
+            features: IdVec::new(),
+            builder_classes: Vec::new(),
+            feature_removals: Vec::new(),
+            removal_of: IdVec::new(),
+            known: Known {
+                hill: FeatureId(0),
+                fallout: FeatureId(0),
+                road: ImprovementId(0),
+                railroad: ImprovementId(0),
+                repair: None,
+                cancel: None,
+                city_center: None,
+                city_ruins: None,
+                ancient_ruins: None,
+                barbarian_camp: None,
+            },
+        }
+    }
+}
+
+/// The unique texts of an object, taken apart once.
+fn scan(uniques: &[Box<str>]) -> Vec<Parts> {
+    uniques.iter().map(|u| parts(u)).collect()
+}
+
+fn has(parts: &[Parts], placeholder: &str) -> bool {
+    parts.iter().any(|p| p.placeholder == placeholder)
+}
+
+/// Fills in every derived field of `r`'s objects and returns the derived tables. The objects'
+/// references are already resolved.
+pub(crate) fn derive(r: &mut Ruleset, p: &mut Problems) -> Option<Derived> {
+    let (features, hill, fallout) = feature_layers(r, p)?;
+    for (f, &t) in features.iter() {
+        r.terrains[t].feature = Some(f);
+    }
+    for t in r.terrains.as_mut_slice() {
+        t.rough = has(&scan(&t.uniques), ROUGH_TERRAIN);
+    }
+
+    let improvement_names: Vec<Box<str>> =
+        r.improvements.as_slice().iter().map(|i| i.name.clone()).collect();
+    let find_improvement = |name: &str| {
+        improvement_names.iter().position(|n| &**n == name).and_then(ImprovementId::from_index)
+    };
+    let feature_named =
+        |name: &str| features.iter().find(|&(_, &t)| &*r.terrains[t].name == name).map(|(f, _)| f);
+    let mut kinds = Vec::with_capacity(improvement_names.len());
+    for name in &improvement_names {
+        let kind = match &**name {
+            ROAD => ImprovementKind::Route(Route::Road),
+            RAILROAD => ImprovementKind::Route(Route::Railroad),
+            REPAIR => ImprovementKind::Repair,
+            CANCEL => ImprovementKind::Cancel,
+            n => match n.strip_prefix(REMOVE) {
+                None => ImprovementKind::Normal,
+                Some(ROAD) => ImprovementKind::RemoveRoute(Route::Road),
+                Some(RAILROAD) => ImprovementKind::RemoveRoute(Route::Railroad),
+                Some(what) => {
+                    if let Some(f) = feature_named(what) {
+                        ImprovementKind::RemoveFeature(f)
+                    } else if let Some(i) = find_improvement(what) {
+                        ImprovementKind::RemoveImprovement(i)
+                    } else {
+                        p.push(
+                            RulesetErrorKind::UnknownReference,
+                            "ruleset/improvements.json",
+                            n,
+                            format!("{what:?} is no feature, route or improvement to remove"),
+                        );
+                        ImprovementKind::Normal
+                    }
+                }
+            },
+        };
+        kinds.push(kind);
+    }
+    let mut feature_removals = Vec::new();
+    let mut removal_of = IdVec::from_elem(None, features.len());
+    for ((id, imp), kind) in r.improvements.iter_mut().zip(kinds) {
+        imp.kind = kind;
+        imp.great = has(&scan(&imp.uniques), GREAT_IMPROVEMENT);
+        match kind {
+            ImprovementKind::RemoveFeature(f) => {
+                feature_removals.push(id);
+                removal_of[f] = Some(id);
+            }
+            ImprovementKind::RemoveImprovement(_) => feature_removals.push(id),
+            _ => {}
+        }
+    }
+    let road = required(find_improvement(ROAD), ROAD, p);
+    let railroad = required(find_improvement(RAILROAD), RAILROAD, p);
+    let (Some(road), Some(railroad)) = (road, railroad) else { return None };
+    let known = Known {
+        hill,
+        fallout,
+        road,
+        railroad,
+        repair: find_improvement(REPAIR),
+        cancel: find_improvement(CANCEL),
+        city_center: find_improvement(CITY_CENTER),
+        city_ruins: find_improvement(CITY_RUINS),
+        ancient_ruins: find_improvement(ANCIENT_RUINS),
+        barbarian_camp: find_improvement(BARBARIAN_CAMP),
+    };
+
+    let UnitLists { great_person_units, spaceship_parts, builder_classes } = derive_units(r, p);
+    derive_buildings(r);
+
+    let mut tech_order: Vec<TechId> = r.techs.ids().collect();
+    tech_order.sort_by(|&a, &b| {
+        let (ta, tb) = (&r.techs[a], &r.techs[b]);
+        (ta.column, ta.name.as_bytes()).cmp(&(tb.column, tb.name.as_bytes()))
+    });
+
+    let mut unlocks: IdVec<TechId, Unlocks> = IdVec::from_elem(Unlocks::default(), r.techs.len());
+    for (id, u) in r.base_units.iter() {
+        if let (Some(t), None) = (u.required_tech, u.unique_to) {
+            unlocks[t].units.push(id);
+        }
+    }
+    for (id, b) in r.buildings.iter() {
+        if let (Some(t), None) = (b.required_tech, b.unique_to) {
+            unlocks[t].buildings.push(id);
+        }
+    }
+    for (id, i) in r.improvements.iter() {
+        if let (Some(t), None) = (i.tech_required, i.unique_to) {
+            unlocks[t].improvements.push(id);
+        }
+    }
+    for (id, res) in r.resources.iter() {
+        if let Some(t) = res.revealed_by {
+            unlocks[t].reveals.push(id);
+        }
+    }
+
+    let mut upgrade_from: IdVec<BaseUnitId, Vec<BaseUnitId>> =
+        IdVec::from_elem(Vec::new(), r.base_units.len());
+    for (id, u) in r.base_units.iter() {
+        if let Some(to) = u.upgrades_to {
+            upgrade_from[to].push(id);
+        }
+    }
+
+    let mut nation_uniques: IdVec<NationId, NationUniques> =
+        IdVec::from_elem(NationUniques::default(), r.nations.len());
+    for (id, u) in r.base_units.iter() {
+        if let Some(n) = u.unique_to {
+            put(&mut nation_uniques[n].units, u.replaces.unwrap_or(id), id);
+        }
+    }
+    for (id, b) in r.buildings.iter() {
+        if let Some(n) = b.unique_to {
+            put(&mut nation_uniques[n].buildings, b.replaces.unwrap_or(id), id);
+        }
+    }
+    for (id, i) in r.improvements.iter() {
+        if let Some(n) = i.unique_to {
+            nation_uniques[n].improvements.push(id);
+        }
+    }
+
+    let mut major_nations = Vec::new();
+    let mut city_state_nations = Vec::new();
+    for (id, n) in r.nations.iter() {
+        if has(&scan(&n.uniques), NOT_FOR_NEW_GAMES) {
+            continue;
+        }
+        match n.kind {
+            NationKind::Major => major_nations.push(id),
+            NationKind::CityState => city_state_nations.push(id),
+            NationKind::Barbarian => {}
+        }
+    }
+
+    Some(Derived {
+        tech_order,
+        unlocks,
+        upgrade_from,
+        nation_uniques,
+        major_nations,
+        city_state_nations,
+        great_person_units,
+        spaceship_parts,
+        features,
+        builder_classes,
+        feature_removals,
+        removal_of,
+        known,
+    })
+}
+
+/// Sets `replaced -> unique` as Python's dict assignment did: a later unique for the same
+/// replaced object wins, in the first one's place.
+fn put<K: PartialEq, V>(map: &mut Vec<(K, V)>, key: K, value: V) {
+    match map.iter_mut().find(|(k, _)| *k == key) {
+        Some(slot) => slot.1 = value,
+        None => map.push((key, value)),
+    }
+}
+
+fn required<T>(found: Option<T>, name: &str, p: &mut Problems) -> Option<T> {
+    if found.is_none() {
+        p.push(
+            RulesetErrorKind::Missing,
+            "ruleset/improvements.json",
+            name,
+            format!("the engine needs an improvement called {name:?}"),
+        );
+    }
+    found
+}
+
+/// The features in layer order, with Hill's and Fallout's ids.
+fn feature_layers(
+    r: &Ruleset,
+    p: &mut Problems,
+) -> Option<(IdVec<FeatureId, TerrainId>, FeatureId, FeatureId)> {
+    let file = "ruleset/terrains.json";
+    let features: Vec<TerrainId> = r
+        .terrains
+        .iter()
+        .filter(|(_, t)| t.kind == TerrainType::TerrainFeature)
+        .map(|(id, _)| id)
+        .collect();
+    let named = |name: &str| features.iter().copied().find(|&t| &*r.terrains[t].name == name);
+    let (Some(hill), Some(fallout)) = (named(HILL), named(FALLOUT)) else {
+        for name in [HILL, FALLOUT] {
+            if named(name).is_none() {
+                p.push(
+                    RulesetErrorKind::Missing,
+                    file,
+                    name,
+                    format!("the engine needs a terrain feature called {name:?}"),
+                );
+            }
+        }
+        return None;
+    };
+    if features.len() > FeatureSet::CAPACITY {
+        p.push(
+            RulesetErrorKind::Capacity,
+            file,
+            "",
+            format!(
+                "{} terrain features, more than a FeatureSet holds ({}); widen \
+                 base::sets::FeatureSet",
+                features.len(),
+                FeatureSet::CAPACITY
+            ),
+        );
+        return None;
+    }
+    let mut order = vec![hill];
+    order.extend(features.iter().copied().filter(|&t| t != hill && t != fallout));
+    order.push(fallout);
+    // Hill is first and Fallout last, and there are at most 16 features.
+    let top = FeatureId(u8::try_from(order.len() - 1).unwrap_or(u8::MAX));
+    Some((order.into_iter().collect(), FeatureId(0), top))
+}
+
+/// What `derive_units` finds besides the units' own fields.
+struct UnitLists {
+    great_person_units: Vec<BaseUnitId>,
+    spaceship_parts: Vec<BaseUnitId>,
+    builder_classes: Vec<Box<[Box<str>]>>,
+}
+
+/// Unit flags, great persons, spaceship parts and builder classes (`rules.py:115-129, 226-227`).
+fn derive_units(r: &mut Ruleset, p: &mut Problems) -> UnitLists {
+    let type_parts: Vec<Vec<Parts>> =
+        r.unit_types.as_slice().iter().map(|t| scan(&t.uniques)).collect();
+    let mut great = Vec::new();
+    let mut parts_list = Vec::new();
+    let mut classes: Vec<Box<[Box<str>]>> = Vec::new();
+    for (id, u) in r.base_units.iter_mut() {
+        // A unit has its own uniques and its type's (`rules.py:116-118`).
+        let own = scan(&u.uniques);
+        let all: Vec<&Parts> = own.iter().chain(&type_parts[u.unit_type.index()]).collect();
+        let is = |ph: &str| all.iter().any(|x| x.placeholder == ph);
+        let unit_type = &r.unit_types[u.unit_type];
+        u.domain = unit_type.domain;
+        u.ranged = u.ranged_strength > 0;
+        u.melee = !u.ranged && u.strength > 0;
+        u.military = u.ranged || u.melee;
+        u.era = u.required_tech.map_or(EraId(0), |t| r.techs[t].era);
+        u.great_person = is(GREAT_PERSON);
+        if u.great_person {
+            great.push(id);
+        }
+        if is(SPACESHIP_PART) {
+            parts_list.push(id);
+        }
+        let mut filters: Vec<Box<str>> = Vec::new();
+        for x in &all {
+            if x.placeholder == BUILD_IMPROVEMENTS
+                && let Some(f) = x.params.first()
+                && !filters.iter().any(|g| **g == **f)
+            {
+                filters.push(f.as_str().into());
+            }
+        }
+        u.builder = if filters.is_empty() {
+            None
+        } else {
+            let filters: Box<[Box<str>]> = filters.into();
+            let pos = match classes.iter().position(|c| *c == filters) {
+                Some(pos) => pos,
+                None => {
+                    classes.push(filters);
+                    classes.len() - 1
+                }
+            };
+            match u8::try_from(pos) {
+                Ok(c) => Some(BuilderClass(c)),
+                Err(_) => {
+                    p.push(
+                        RulesetErrorKind::Capacity,
+                        "ruleset/units.json",
+                        &u.name,
+                        "more than 256 builder classes; widen BuilderClass",
+                    );
+                    None
+                }
+            }
+        };
+    }
+    UnitLists { great_person_units: great, spaceship_parts: parts_list, builder_classes: classes }
+}
+
+/// Wonder flags and the stats each building raises (`rules.py:144-149, 169-180`).
+fn derive_buildings(r: &mut Ruleset) {
+    for b in r.buildings.as_mut_slice() {
+        b.any_wonder = b.is_wonder || b.is_national_wonder;
+        let mut mask = StatMask::EMPTY;
+        for s in Stat::ALL {
+            if b.stats[s] > 0.0 || b.percent_stat_bonus[s] > 0.0 {
+                mask.insert(s);
+            }
+        }
+        let uniques = scan(&b.uniques);
+        for u in &uniques {
+            if [STATS, STATS_FROM_TILES, STATS_PER_POPULATION].contains(&u.placeholder.as_str())
+                && let Some(stats) = u.stats()
+            {
+                for st in Stat::ALL {
+                    if stats[st] > 0.0 {
+                        mask.insert(st);
+                    }
+                }
+            }
+        }
+        if has(&uniques, REMOVES_ANNEX_UNHAPPINESS) {
+            mask.insert(Stat::Happiness);
+        }
+        b.stat_related = mask;
+    }
+}

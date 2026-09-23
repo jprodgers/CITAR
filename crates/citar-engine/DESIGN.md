@@ -1031,6 +1031,13 @@ pub const BUILD_ID: &str = match option_env!("CITAR_BUILD_ID") { Some(s) => s, N
 
 **Validation** replaces `rules.py:238-260`. It checks every cross-reference, duplicate names, the speed tables, set capacities, and every unique and filter error. All problems are collected into one `RulesetErrors` report, each with file, object and text.
 
+**As built in 1a-03:**
+- **Strict input.** A JSON object with the same key twice is an error; Python and serde's `Value` both kept the last one silently. Every object's name must equal its key.
+- **Ids that are data.** Eras must be listed by `number` from 0, so `EraId` is the era's number, which rules use as an index (`rules.py:108-111`). `FeatureId` is a feature's layer: Hill first, Fallout last, the rest in file order, so `FeatureSet::top()` is the highest bit. `Derived::features` maps a `FeatureId` to its `TerrainId`.
+- **Objects the engine names** are resolved once into `Derived::known`: Hill, Fallout, Road and Railroad are required; Repair, the order cancel, City center, City ruins, Ancient ruins and Barbarian encampment are optional, as Python treated them. Improvements Python told apart by name (`workers.py:22-26`) get an `ImprovementKind`.
+- **Before the compiler.** Until 1a-05, the derived tables that depend on a unique's type (great people, spaceship parts, rough terrain, great improvements, major nations, `stat_related`, builder classes) read placeholders through `unique::text`, which ports `split_modifiers`, `placeholder` and `parse_stats` (`uniques.py:28-90`). The compiler replaces these reads.
+- **The set widths** are constants in `base::sets` (`TECH_WORDS` and so on), and a table over its width names the constant to raise.
+
 **Facade reads:**
 - `client_json()` is built once from the preserved raw values plus the derived lists, in the shape of `to_client` (`rules.py:303-331`);
 - `resolve(kind, text)` uses sorted per-table slices after normalising the text (`rules.py:28-30, 263-270`);
