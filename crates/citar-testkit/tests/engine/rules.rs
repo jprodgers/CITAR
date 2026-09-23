@@ -9,7 +9,11 @@
 //! - gate 5: a dangling reference, an unknown field, a table over capacity and a missing file are
 //!   each refused, with the file and object named.
 
-use citar_engine::base::ids::{BaseUnitId, FeatureId, Id, NationId, TechId, TerrainId};
+use citar_engine::base::ids::{
+    BaseUnitId, BeliefId, BuildingId, DifficultyId, EraId, FeatureId, Id, ImprovementId, NationId,
+    PolicyId, PromotionId, ResourceId, SpecialistId, SpeedId, TechId, TerrainId, UnitTypeId,
+    VictoryId,
+};
 use citar_engine::base::sets::{FeatureSet, TechSet};
 use citar_engine::base::stats::Stat;
 use citar_engine::rules::defs::{
@@ -17,7 +21,7 @@ use citar_engine::rules::defs::{
 };
 use citar_engine::rules::source::all_file_names;
 use citar_engine::rules::{
-    NameKind, Ruleset, RulesetErrorKind, RulesetErrors, RulesetFiles, embedded,
+    NameKind, Named, Ruleset, RulesetErrorKind, RulesetErrors, RulesetFiles, embedded,
 };
 use serde_json::{Value, json};
 
@@ -122,23 +126,53 @@ fn resolve_matches_python_for_every_name_and_id() {
     assert!(wrong.is_empty(), "{} of {rows} differ:\n{}", wrong.len(), wrong.join("\n"));
 }
 
+/// Every name of `I`'s table resolves, exactly and loosely, to its own id, and back.
+fn resolves_to_itself<I: Named>(rules: &Ruleset) -> usize {
+    let mut n = 0;
+    for (pos, name) in rules.names(I::KIND).enumerate() {
+        let id = I::from_index(pos).expect("an id");
+        assert_eq!(rules.resolve::<I>(name), Some(id), "{:?} {name}", I::KIND);
+        assert_eq!(rules.lookup::<I>(name), Some(id));
+        assert_eq!(rules.name(id), Some(name));
+        assert_eq!(rules.resolve_name(I::KIND, name), Some(name));
+        n += 1;
+    }
+    n
+}
+
 #[test]
 fn every_table_resolves_its_own_names_and_ids_to_themselves() {
     let rules = shipped();
-    for kind in NameKind::ALL {
-        for (pos, name) in rules.names(kind).enumerate() {
-            assert_eq!(rules.resolve(kind, name), Some(pos), "{kind:?} {name}");
-            assert_eq!(rules.lookup(kind, name), Some(pos));
-        }
-    }
+    let counts = [
+        resolves_to_itself::<TechId>(rules),
+        resolves_to_itself::<BaseUnitId>(rules),
+        resolves_to_itself::<BuildingId>(rules),
+        resolves_to_itself::<PromotionId>(rules),
+        resolves_to_itself::<TerrainId>(rules),
+        resolves_to_itself::<ResourceId>(rules),
+        resolves_to_itself::<ImprovementId>(rules),
+        resolves_to_itself::<BeliefId>(rules),
+        resolves_to_itself::<PolicyId>(rules),
+        resolves_to_itself::<NationId>(rules),
+        resolves_to_itself::<EraId>(rules),
+        resolves_to_itself::<SpecialistId>(rules),
+        resolves_to_itself::<SpeedId>(rules),
+        resolves_to_itself::<DifficultyId>(rules),
+        resolves_to_itself::<UnitTypeId>(rules),
+        resolves_to_itself::<VictoryId>(rules),
+    ];
+    assert!(counts.iter().all(|&n| n > 0));
     assert_eq!(rules.resolve_name(NameKind::Speed, "quick"), Some("Quick"));
     assert_eq!(rules.resolve_name(NameKind::Tech, "bronze_working"), Some("Bronze Working"));
-    assert_eq!(rules.lookup(NameKind::Tech, "bronze_working"), None, "lookup is exact");
+    let bronze = rules.resolve::<TechId>("bronze_working").expect("a tech");
+    assert_eq!(&*rules.techs()[bronze].name, "Bronze Working");
+    assert_eq!(rules.lookup::<TechId>("bronze_working"), None, "lookup is exact");
+    assert_eq!(rules.resolve::<BaseUnitId>("bronze_working"), None, "a tech is no unit");
     // Policies share one id space, branches first.
-    let tradition = rules.resolve(NameKind::Policy, "tradition").expect("a branch");
-    assert!(rules.policies.as_slice()[tradition].is_branch());
-    let pos = rules.resolve(NameKind::Policy, "Aristocracy").expect("a policy");
-    assert!(pos >= usize::from(rules.policy_branch_count));
+    let tradition = rules.resolve::<PolicyId>("tradition").expect("a branch");
+    assert!(rules.policies()[tradition].is_branch());
+    let aristocracy = rules.resolve::<PolicyId>("Aristocracy").expect("a policy");
+    assert!(aristocracy.index() >= usize::from(rules.policy_branch_count()));
 }
 
 // ---- The tables -------------------------------------------------------------------------------
@@ -147,78 +181,72 @@ fn every_table_resolves_its_own_names_and_ids_to_themselves() {
 fn the_shipped_tables_have_the_census_sizes() {
     let r = shipped();
     // DESIGN.md 5.1.
-    assert_eq!(r.techs.len(), 80);
-    assert_eq!(r.base_units.len(), 127);
-    assert_eq!(r.unit_types.len(), 28);
-    assert_eq!(r.buildings.len(), 124);
-    assert_eq!(r.promotions.len(), 106);
-    assert_eq!(r.terrains.len(), 33);
-    assert_eq!(r.resources.len(), 35);
-    assert_eq!(r.improvements.len(), 35);
-    assert_eq!(r.beliefs.len(), 56);
-    assert_eq!(usize::from(r.policy_branch_count), 10);
-    assert_eq!(r.policies.len(), 70);
-    assert_eq!(r.nations.len(), 83, "82 and BenchmarkCiv");
-    assert_eq!(r.eras.len(), 9);
+    assert_eq!(r.techs().len(), 80);
+    assert_eq!(r.base_units().len(), 127);
+    assert_eq!(r.unit_types().len(), 28);
+    assert_eq!(r.buildings().len(), 124);
+    assert_eq!(r.promotions().len(), 106);
+    assert_eq!(r.terrains().len(), 33);
+    assert_eq!(r.resources().len(), 35);
+    assert_eq!(r.improvements().len(), 35);
+    assert_eq!(r.beliefs().len(), 56);
+    assert_eq!(usize::from(r.policy_branch_count()), 10);
+    assert_eq!(r.policies().len(), 70);
+    assert_eq!(r.nations().len(), 83, "82 and BenchmarkCiv");
+    assert_eq!(r.eras().len(), 9);
     let counts = serde_json::to_value(r.counts()).expect("counts");
     assert_eq!(
         counts,
         json!({"techs": 80, "units": 127, "buildings": 124, "nations": 83, "policies": 60})
     );
-    let kinds = |k: TerrainType| r.terrains.as_slice().iter().filter(|t| t.kind == k).count();
+    let kinds = |k: TerrainType| r.terrains().as_slice().iter().filter(|t| t.kind == k).count();
     assert_eq!(kinds(TerrainType::Land) + kinds(TerrainType::Water), 9);
     assert_eq!(kinds(TerrainType::TerrainFeature), 10);
     assert_eq!(kinds(TerrainType::NaturalWonder), 14);
     assert_eq!(r.max_players(), 24);
-    assert_eq!(r.speeds().collect::<Vec<_>>(), ["Quick", "Standard", "Epic", "Marathon"]);
-    assert_eq!(r.difficulties().next(), Some("Settler"));
+    assert_eq!(r.speed_names().collect::<Vec<_>>(), ["Quick", "Standard", "Epic", "Marathon"]);
+    assert_eq!(r.difficulty_names().next(), Some("Settler"));
     assert_eq!(r.map_sizes().len(), 6);
-    assert!(r.global_uniques.len() >= 8);
-    assert!(r.fracs.is_empty(), "the unique compiler fills the fracs (package 1a-05)");
+    assert!(r.global_uniques().len() >= 8);
+    assert!(r.fracs().is_empty(), "the unique compiler fills the fracs (package 1a-05)");
 }
 
 #[test]
 fn references_resolve_to_ids() {
     let r = shipped();
-    let unit = |name: &str| {
-        BaseUnitId::from_index(r.lookup(NameKind::Unit, name).expect("a unit")).expect("an id")
-    };
-    let warrior = &r.base_units[unit("Warrior")];
+    let unit = |name: &str| r.lookup::<BaseUnitId>(name).expect("a unit");
+    let warrior = &r.base_units()[unit("Warrior")];
     assert_eq!(warrior.strength, 8);
     assert_eq!(warrior.range, 2, "Python's default");
     assert!(warrior.melee && warrior.military && !warrior.ranged);
-    let archer = &r.base_units[unit("Archer")];
+    let archer = &r.base_units()[unit("Archer")];
     assert!(archer.ranged && !archer.melee);
-    assert_eq!(archer.required_tech.map(|t| &*r.techs[t].name), Some("Archery"));
+    assert_eq!(archer.required_tech.map(|t| &*r.techs()[t].name), Some("Archery"));
     assert_eq!(
-        r.base_units[unit("Swordsman")].upgrades_to.map(|u| &*r.base_units[u].name),
+        r.base_units()[unit("Swordsman")].upgrades_to.map(|u| &*r.base_units()[u].name),
         Some("Longswordsman")
     );
-    assert!(r.base_units[unit("Great Scientist")].great_person);
-    let worker = &r.base_units[unit("Worker")];
+    assert!(r.base_units()[unit("Great Scientist")].great_person);
+    let worker = &r.base_units()[unit("Worker")];
     let class = worker.builder.expect("workers build");
-    assert_eq!(&*r.derived.builder_classes[usize::from(class.0)], [Box::<str>::from("Land")]);
-    assert!(r.base_units[unit("Warrior")].builder.is_none());
-    let babylon = NationId::from_index(r.lookup(NameKind::Nation, "Babylon").expect("a nation"))
-        .expect("an id");
-    assert_eq!(r.nations[babylon].kind, NationKind::Major);
-    assert!(r.derived.major_nations.contains(&babylon));
-    let bench = r.nations.as_slice().last().expect("the custom nation");
+    assert_eq!(&*r.derived().builder_classes[usize::from(class.0)], [Box::<str>::from("Land")]);
+    assert!(r.base_units()[unit("Warrior")].builder.is_none());
+    let babylon = r.lookup::<NationId>("Babylon").expect("a nation");
+    assert_eq!(r.nations()[babylon].kind, NationKind::Major);
+    assert!(r.derived().major_nations.contains(&babylon));
+    let bench = r.nations().as_slice().last().expect("the custom nation");
     assert_eq!(&*bench.name, "BenchmarkCiv");
     assert_eq!(bench.key.as_deref(), Some("benchmarkciv"), "Python's id for a custom nation");
     assert!(bench.benchmark);
-    let aristocracy =
-        &r.policies.as_slice()[r.lookup(NameKind::Policy, "Aristocracy").expect("a policy")];
+    let aristocracy = &r.policies()[r.lookup::<PolicyId>("Aristocracy").expect("a policy")];
     let PolicyKind::Member { branch, requires, finisher } = &aristocracy.kind else {
         panic!("Aristocracy is a policy")
     };
-    assert_eq!(&*r.policies[*branch].name, "Tradition");
+    assert_eq!(&*r.policies()[*branch].name, "Tradition");
     assert_eq!(requires.len(), 1);
     assert!(!finisher);
     // The Monument raises culture; the Colosseum happiness.
-    let building = |name: &str| {
-        &r.buildings.as_slice()[r.lookup(NameKind::Building, name).expect("a building")]
-    };
+    let building = |name: &str| &r.buildings()[r.lookup::<BuildingId>(name).expect("a building")];
     assert!(building("Monument").stat_related.contains(Stat::Culture));
     assert!(building("Colosseum").stat_related.contains(Stat::Happiness));
     assert!(building("The Great Library").any_wonder);
@@ -227,52 +255,48 @@ fn references_resolve_to_ids() {
 #[test]
 fn derived_tables_follow_python() {
     let r = shipped();
-    let order: Vec<&str> = r.derived.tech_order.iter().map(|&t| &*r.techs[t].name).collect();
+    let order: Vec<&str> = r.derived().tech_order.iter().map(|&t| &*r.techs()[t].name).collect();
     assert_eq!(&order[..4], ["Agriculture", "Animal Husbandry", "Archery", "Mining"]);
     assert_eq!(order.len(), 80);
     let agriculture = TechId(0);
-    assert_eq!(&*r.techs[agriculture].name, "Agriculture");
+    assert_eq!(&*r.techs()[agriculture].name, "Agriculture");
     // Features: Hill lowest, Fallout highest.
     let features: Vec<&str> =
-        r.derived.features.iter().map(|(_, &t)| &*r.terrains[t].name).collect();
+        r.derived().features.iter().map(|(_, &t)| &*r.terrains()[t].name).collect();
     assert_eq!(features.first(), Some(&"Hill"));
     assert_eq!(features.last(), Some(&"Fallout"));
     assert_eq!(features.len(), 10);
     assert!(features.len() <= FeatureSet::CAPACITY);
-    let hill = r.derived.known.hill;
-    let fallout = r.derived.known.fallout;
+    let hill = r.derived().known.hill;
+    let fallout = r.derived().known.fallout;
     assert_eq!(hill, FeatureId(0));
     let mut tile = FeatureSet::EMPTY;
     tile.insert(hill);
     let forest =
-        r.terrains.as_slice().iter().find(|t| &*t.name == "Forest").and_then(|t| t.feature);
+        r.terrains().as_slice().iter().find(|t| &*t.name == "Forest").and_then(|t| t.feature);
     tile.insert(forest.expect("Forest is a feature"));
     assert_eq!(tile.top(), forest, "a forested hill shows the forest");
     tile.insert(fallout);
     assert_eq!(tile.top(), Some(fallout), "fallout lies on top");
     // Improvements Python told by name.
-    let imp = |name: &str| {
-        &r.improvements.as_slice()[r.lookup(NameKind::Improvement, name).expect("an improvement")]
-    };
+    let imp =
+        |name: &str| &r.improvements()[r.lookup::<ImprovementId>(name).expect("an improvement")];
     assert_eq!(imp("Road").kind, ImprovementKind::Route(Route::Road));
     assert_eq!(imp("Remove Railroad").kind, ImprovementKind::RemoveRoute(Route::Railroad));
     assert_eq!(imp("Remove Fallout").kind, ImprovementKind::RemoveFeature(fallout));
     assert!(imp("Academy").great);
-    assert_eq!(r.derived.feature_removals.len(), 4, "forest, jungle, fallout, marsh");
-    assert_eq!(
-        r.derived.removal_of[fallout],
-        r.lookup(NameKind::Improvement, "Remove Fallout").and_then(Id::from_index)
-    );
-    assert!(r.derived.known.barbarian_camp.is_some());
+    assert_eq!(r.derived().feature_removals.len(), 4, "forest, jungle, fallout, marsh");
+    assert_eq!(r.derived().removal_of[fallout], r.lookup::<ImprovementId>("Remove Fallout"));
+    assert!(r.derived().known.barbarian_camp.is_some());
     // Great people and spaceship parts, and the speeds' last turns.
-    assert!(r.derived.great_person_units.len() >= 5);
-    assert_eq!(r.derived.spaceship_parts.len(), 4);
-    let max: Vec<i32> = r.speeds.as_slice().iter().map(|s| s.max_turns()).collect();
+    assert!(r.derived().great_person_units.len() >= 5);
+    assert_eq!(r.derived().spaceship_parts.len(), 4);
+    let max: Vec<i32> = r.speeds().as_slice().iter().map(|s| s.max_turns()).collect();
     assert_eq!(max, [330, 500, 750, 1500]);
-    assert!(r.terrains.as_slice().iter().any(|t| t.rough));
-    let rough_hill = r.terrains[r.derived.features[hill]].rough;
+    assert!(r.terrains().as_slice().iter().any(|t| t.rough));
+    let rough_hill = r.terrains()[r.derived().features[hill]].rough;
     assert!(rough_hill, "hills are rough terrain");
-    let _: TerrainId = r.derived.features[hill];
+    let _: TerrainId = r.derived().features[hill];
 }
 
 // ---- Gate 4: the RulesetId --------------------------------------------------------------------
@@ -400,7 +424,7 @@ fn a_missing_file_is_refused() {
     let mut files = owned_files();
     files.retain(|(n, _)| n != "custom/nations.json");
     let r = load_owned(&files).expect("loads without custom nations");
-    assert_eq!(r.nations.len(), 82);
+    assert_eq!(r.nations().len(), 82);
     assert_ne!(r.id(), shipped().id());
 }
 
@@ -451,11 +475,11 @@ fn custom_nations_merge_as_python_merged_them() {
         v["Babylon"] = babylon;
     })
     .expect("loads");
-    assert_eq!(r.nations.len(), 83);
-    let pos = r.lookup(NameKind::Nation, "Babylon").expect("Babylon");
-    assert_eq!(pos, shipped().lookup(NameKind::Nation, "Babylon").expect("Babylon"));
-    assert_eq!(r.nations.as_slice()[pos].leader_name.as_deref(), Some("Hammurabi"));
-    assert_eq!(r.nations.as_slice()[pos].key.as_deref(), Some("babylon"), "made from its key");
+    assert_eq!(r.nations().len(), 83);
+    let babylon = r.lookup::<NationId>("Babylon").expect("Babylon");
+    assert_eq!(Some(babylon), shipped().lookup::<NationId>("Babylon"));
+    assert_eq!(r.nations()[babylon].leader_name.as_deref(), Some("Hammurabi"));
+    assert_eq!(r.nations()[babylon].key.as_deref(), Some("babylon"), "made from its key");
     // A problem in a custom nation names the custom file.
     let r =
         load_edited("custom/nations.json", |v| v["BenchmarkCiv"]["personality"] = json!("Nobody"));
@@ -476,16 +500,16 @@ fn custom_nations_merge_as_python_merged_them() {
 #[test]
 fn every_quest_has_its_kind() {
     let r = shipped();
-    let kinds: Vec<QuestKind> = r.quests.as_slice().iter().map(|q| q.kind).collect();
+    let kinds: Vec<QuestKind> = r.quests().as_slice().iter().map(|q| q.kind).collect();
     assert_eq!(kinds.len(), QuestKind::ALL.len(), "the 17 quests of quests.json");
     for k in QuestKind::ALL {
         assert_eq!(kinds.iter().filter(|&&q| q == k).count(), 1, "{k:?} once");
     }
-    for q in r.quests.as_slice() {
+    for q in r.quests().as_slice() {
         assert_eq!(q.kind.name(), &*q.name);
         assert_eq!(q.target, q.kind.target());
     }
-    let invest = r.quests.as_slice().iter().find(|q| q.kind == QuestKind::Invest);
+    let invest = r.quests().as_slice().iter().find(|q| q.kind == QuestKind::Invest);
     assert_eq!(invest.map(|q| q.target), Some(QuestTargetKind::Percent));
     // Python never gave a quest it had no code for; here it is an error.
     let r = load_edited("ruleset/quests.json", |v| {

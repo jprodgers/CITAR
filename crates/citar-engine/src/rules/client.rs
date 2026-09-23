@@ -165,7 +165,7 @@ pub(crate) fn build(r: &Ruleset) -> String {
     put("specialists", table(src.rows("ruleset/specialists.json", None), &[]));
     put("city_state_types", table(src.rows("ruleset/city_state_types.json", None), &[]));
     put("difficulties", table(src.rows("ruleset/difficulties.json", None), &[]));
-    put("difficulty_list", names(r.difficulties()));
+    put("difficulty_list", names(r.difficulty_names()));
     let speeds = src.rows("ruleset/speeds.json", None);
     put("speeds", table(speeds, &[]));
     put("victories", table(src.rows("ruleset/victories.json", None), &[]));

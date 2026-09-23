@@ -11,7 +11,7 @@
 //! - [`defs`]: the typed tables, every name resolved to an id;
 //! - [`derived`]: the tables computed at load;
 //! - [`constants`]: `game.json`, typed;
-//! - [`names`]: loose lookup by name or id, for tools;
+//! - [`names`]: loose lookup by name or id, for tools, typed by the id it gives ([`Named`]);
 //! - `client`: the ruleset as the browser reads it;
 //! - [`errors`]: what can be wrong with a ruleset.
 
@@ -43,56 +43,245 @@ use self::defs::{
 pub use self::derived::Derived;
 pub use self::errors::{RulesetError, RulesetErrorKind, RulesetErrors};
 use self::names::NameIndex;
-pub use self::names::NameKind;
+pub use self::names::{NameKind, Named};
 #[cfg(feature = "embedded-ruleset")]
 pub use self::source::embedded;
 pub use self::source::{BUILD_ID, RulesetFiles, RulesetId};
 
 /// The whole ruleset: every table typed, every reference an id, and the derived tables.
 ///
-/// Read-only once loaded. Games share one through `&'static Ruleset` ([`Ruleset::leak`],
-/// [`Ruleset::shared`]), which is why it is `Sync`: it has no interior mutability except the
-/// client JSON, built once behind a `OnceLock`.
+/// Read-only once loaded: the tables are reached through accessors, so a ruleset cannot be
+/// changed after its [`RulesetId`], name indexes and derived tables were computed from it. A
+/// variant is made by loading edited files. Games share one through `&'static Ruleset`
+/// ([`Ruleset::leak`], [`Ruleset::shared`]), which is why it is `Sync`: it has no interior
+/// mutability except the client JSON, built once behind a `OnceLock`.
+///
+/// Inside the crate the fields are open, for the loader and the unique compiler (package 1a-05)
+/// to fill in.
 pub struct Ruleset {
     id: RulesetId,
-    pub techs: IdVec<TechId, TechDef>,
-    pub tech_columns: Vec<TechColumn>,
-    /// In order of their number, which is their id.
-    pub eras: IdVec<EraId, EraDef>,
-    pub base_units: IdVec<BaseUnitId, BaseUnitDef>,
-    pub unit_types: IdVec<UnitTypeId, UnitTypeDef>,
-    pub buildings: IdVec<BuildingId, BuildingDef>,
-    pub promotions: IdVec<PromotionId, PromotionDef>,
-    pub terrains: IdVec<TerrainId, TerrainDef>,
-    pub resources: IdVec<ResourceId, ResourceDef>,
-    pub improvements: IdVec<ImprovementId, ImprovementDef>,
-    pub beliefs: IdVec<BeliefId, BeliefDef>,
-    /// The names of the religions players can found.
-    pub religions: IdVec<RulesReligionId, Box<str>>,
-    pub specialists: IdVec<SpecialistId, SpecialistDef>,
-    pub city_state_types: IdVec<CityStateTypeId, CityStateTypeDef>,
-    /// Easiest first.
-    pub difficulties: IdVec<DifficultyId, DifficultyDef>,
-    pub speeds: IdVec<SpeedId, SpeedDef>,
-    pub victories: IdVec<VictoryId, VictoryDef>,
-    pub quests: IdVec<QuestKindId, QuestDef>,
-    pub ruins: IdVec<RuinId, RuinDef>,
-    pub personalities: IdVec<PersonalityId, PersonalityDef>,
-    /// Branches first, then the policies, each in file order.
-    pub policies: IdVec<PolicyId, PolicyDef>,
-    /// How many of `policies` are branches.
-    pub policy_branch_count: u16,
-    /// `ruleset/nations.json` with `custom/nations.json` merged in.
-    pub nations: IdVec<NationId, NationDef>,
-    /// Uniques every civilization has.
-    pub global_uniques: Uniques,
-    pub constants: Constants,
-    /// The fractional unique parameters, interned by the unique compiler (package 1a-05).
-    pub fracs: IdVec<FracId, f64>,
-    pub derived: Derived,
+    pub(crate) techs: IdVec<TechId, TechDef>,
+    pub(crate) tech_columns: Vec<TechColumn>,
+    pub(crate) eras: IdVec<EraId, EraDef>,
+    pub(crate) base_units: IdVec<BaseUnitId, BaseUnitDef>,
+    pub(crate) unit_types: IdVec<UnitTypeId, UnitTypeDef>,
+    pub(crate) buildings: IdVec<BuildingId, BuildingDef>,
+    pub(crate) promotions: IdVec<PromotionId, PromotionDef>,
+    pub(crate) terrains: IdVec<TerrainId, TerrainDef>,
+    pub(crate) resources: IdVec<ResourceId, ResourceDef>,
+    pub(crate) improvements: IdVec<ImprovementId, ImprovementDef>,
+    pub(crate) beliefs: IdVec<BeliefId, BeliefDef>,
+    pub(crate) religions: IdVec<RulesReligionId, Box<str>>,
+    pub(crate) specialists: IdVec<SpecialistId, SpecialistDef>,
+    pub(crate) city_state_types: IdVec<CityStateTypeId, CityStateTypeDef>,
+    pub(crate) difficulties: IdVec<DifficultyId, DifficultyDef>,
+    pub(crate) speeds: IdVec<SpeedId, SpeedDef>,
+    pub(crate) victories: IdVec<VictoryId, VictoryDef>,
+    pub(crate) quests: IdVec<QuestKindId, QuestDef>,
+    pub(crate) ruins: IdVec<RuinId, RuinDef>,
+    pub(crate) personalities: IdVec<PersonalityId, PersonalityDef>,
+    pub(crate) policies: IdVec<PolicyId, PolicyDef>,
+    pub(crate) policy_branch_count: u16,
+    pub(crate) nations: IdVec<NationId, NationDef>,
+    pub(crate) global_uniques: Uniques,
+    pub(crate) constants: Constants,
+    pub(crate) fracs: IdVec<FracId, f64>,
+    pub(crate) derived: Derived,
     names: [NameIndex; 16],
     client: client::ClientSource,
     client_json: OnceLock<String>,
+}
+
+/// The read-only tables.
+impl Ruleset {
+    /// The technologies, in file order.
+    #[must_use]
+    #[inline]
+    pub fn techs(&self) -> &IdVec<TechId, TechDef> {
+        &self.techs
+    }
+
+    /// The columns of the tech tree, in file order.
+    #[must_use]
+    #[inline]
+    pub fn tech_columns(&self) -> &[TechColumn] {
+        &self.tech_columns
+    }
+
+    /// The eras, in order of their number, which is their id.
+    #[must_use]
+    #[inline]
+    pub fn eras(&self) -> &IdVec<EraId, EraDef> {
+        &self.eras
+    }
+
+    /// The units of `units.json`.
+    #[must_use]
+    #[inline]
+    pub fn base_units(&self) -> &IdVec<BaseUnitId, BaseUnitDef> {
+        &self.base_units
+    }
+
+    /// The unit types: Melee, Mounted, ...
+    #[must_use]
+    #[inline]
+    pub fn unit_types(&self) -> &IdVec<UnitTypeId, UnitTypeDef> {
+        &self.unit_types
+    }
+
+    /// The buildings and wonders.
+    #[must_use]
+    #[inline]
+    pub fn buildings(&self) -> &IdVec<BuildingId, BuildingDef> {
+        &self.buildings
+    }
+
+    /// The promotions.
+    #[must_use]
+    #[inline]
+    pub fn promotions(&self) -> &IdVec<PromotionId, PromotionDef> {
+        &self.promotions
+    }
+
+    /// The terrains: base terrains, features and natural wonders.
+    #[must_use]
+    #[inline]
+    pub fn terrains(&self) -> &IdVec<TerrainId, TerrainDef> {
+        &self.terrains
+    }
+
+    /// The resources.
+    #[must_use]
+    #[inline]
+    pub fn resources(&self) -> &IdVec<ResourceId, ResourceDef> {
+        &self.resources
+    }
+
+    /// The improvements, including the routes and the remove, repair and cancel orders.
+    #[must_use]
+    #[inline]
+    pub fn improvements(&self) -> &IdVec<ImprovementId, ImprovementDef> {
+        &self.improvements
+    }
+
+    /// The beliefs.
+    #[must_use]
+    #[inline]
+    pub fn beliefs(&self) -> &IdVec<BeliefId, BeliefDef> {
+        &self.beliefs
+    }
+
+    /// The names of the religions players can found.
+    #[must_use]
+    #[inline]
+    pub fn religions(&self) -> &IdVec<RulesReligionId, Box<str>> {
+        &self.religions
+    }
+
+    /// The specialists.
+    #[must_use]
+    #[inline]
+    pub fn specialists(&self) -> &IdVec<SpecialistId, SpecialistDef> {
+        &self.specialists
+    }
+
+    /// The city-state types: Cultured, Maritime, ...
+    #[must_use]
+    #[inline]
+    pub fn city_state_types(&self) -> &IdVec<CityStateTypeId, CityStateTypeDef> {
+        &self.city_state_types
+    }
+
+    /// The difficulties, easiest first.
+    #[must_use]
+    #[inline]
+    pub fn difficulties(&self) -> &IdVec<DifficultyId, DifficultyDef> {
+        &self.difficulties
+    }
+
+    /// The game speeds.
+    #[must_use]
+    #[inline]
+    pub fn speeds(&self) -> &IdVec<SpeedId, SpeedDef> {
+        &self.speeds
+    }
+
+    /// The victories.
+    #[must_use]
+    #[inline]
+    pub fn victories(&self) -> &IdVec<VictoryId, VictoryDef> {
+        &self.victories
+    }
+
+    /// The city-state quests.
+    #[must_use]
+    #[inline]
+    pub fn quests(&self) -> &IdVec<QuestKindId, QuestDef> {
+        &self.quests
+    }
+
+    /// The rewards of the ancient ruins.
+    #[must_use]
+    #[inline]
+    pub fn ruins(&self) -> &IdVec<RuinId, RuinDef> {
+        &self.ruins
+    }
+
+    /// The AI leader personalities.
+    #[must_use]
+    #[inline]
+    pub fn personalities(&self) -> &IdVec<PersonalityId, PersonalityDef> {
+        &self.personalities
+    }
+
+    /// The policy branches, then the policies, each in file order.
+    #[must_use]
+    #[inline]
+    pub fn policies(&self) -> &IdVec<PolicyId, PolicyDef> {
+        &self.policies
+    }
+
+    /// How many of [`policies`](Self::policies) are branches.
+    #[must_use]
+    #[inline]
+    pub fn policy_branch_count(&self) -> u16 {
+        self.policy_branch_count
+    }
+
+    /// `ruleset/nations.json` with `custom/nations.json` merged in.
+    #[must_use]
+    #[inline]
+    pub fn nations(&self) -> &IdVec<NationId, NationDef> {
+        &self.nations
+    }
+
+    /// The uniques every civilization has.
+    #[must_use]
+    #[inline]
+    pub fn global_uniques(&self) -> &Uniques {
+        &self.global_uniques
+    }
+
+    /// `game.json`, typed.
+    #[must_use]
+    #[inline]
+    pub fn constants(&self) -> &Constants {
+        &self.constants
+    }
+
+    /// The fractional unique parameters, interned by the unique compiler (package 1a-05).
+    #[must_use]
+    #[inline]
+    pub fn fracs(&self) -> &IdVec<FracId, f64> {
+        &self.fracs
+    }
+
+    /// The tables derived at load.
+    #[must_use]
+    #[inline]
+    pub fn derived(&self) -> &Derived {
+        &self.derived
+    }
 }
 
 /// How much a ruleset holds, by kind: Python's `ruleset_counts` (`engine_api.py:134-139`).
@@ -189,43 +378,44 @@ impl Ruleset {
     }
 
     /// The speeds' names, in file order (`engine_api.speeds`).
-    pub fn speeds(&self) -> impl ExactSizeIterator<Item = &str> {
+    pub fn speed_names(&self) -> impl ExactSizeIterator<Item = &str> {
         self.speeds.as_slice().iter().map(|s| &*s.name)
     }
 
     /// The difficulties' names, easiest first (`engine_api.difficulties`).
-    pub fn difficulties(&self) -> impl ExactSizeIterator<Item = &str> {
+    pub fn difficulty_names(&self) -> impl ExactSizeIterator<Item = &str> {
         self.difficulties.as_slice().iter().map(|d| &*d.name)
     }
 
-    /// The position in `kind`'s table of the object `text` names: exactly, or else by its
-    /// normalised name or id (`rules.py:263-270`). Positions are ids: `TechId(pos)` for techs,
-    /// and branches then policies for [`NameKind::Policy`].
+    /// The object `text` names: exactly, or else by its normalised name or id
+    /// (`rules.py:263-270`). The id type says which table: `r.resolve::<TechId>("bronze_working")`.
     #[must_use]
-    pub fn resolve(&self, kind: NameKind, text: &str) -> Option<usize> {
-        self.index(kind).resolve(text)
+    pub fn resolve<I: Named>(&self, text: &str) -> Option<I> {
+        self.index(I::KIND).resolve(text).and_then(I::from_index)
+    }
+
+    /// The object called exactly `name`.
+    #[must_use]
+    pub fn lookup<I: Named>(&self, name: &str) -> Option<I> {
+        self.index(I::KIND).lookup(name).and_then(I::from_index)
+    }
+
+    /// The name of the object `id`, or `None` for an id this ruleset does not have.
+    #[must_use]
+    pub fn name<I: Named>(&self, id: I) -> Option<&str> {
+        self.index(I::KIND).name(id.index())
     }
 
     /// The name of the object `text` names in `kind`'s table, as the ruleset spells it:
-    /// `"quick"` gives `"Quick"` for speeds (`engine_api.resolve_name`).
+    /// `"quick"` gives `"Quick"` for speeds (`engine_api.resolve_name`). The facade's
+    /// string-keyed form of [`resolve`](Self::resolve).
     #[must_use]
     pub fn resolve_name(&self, kind: NameKind, text: &str) -> Option<&str> {
-        self.name(kind, self.resolve(kind, text)?)
+        let index = self.index(kind);
+        index.name(index.resolve(text)?)
     }
 
-    /// The position of the object called exactly `name` in `kind`'s table.
-    #[must_use]
-    pub fn lookup(&self, kind: NameKind, name: &str) -> Option<usize> {
-        self.index(kind).lookup(name)
-    }
-
-    /// The name of the object at `pos` in `kind`'s table.
-    #[must_use]
-    pub fn name(&self, kind: NameKind, pos: usize) -> Option<&str> {
-        self.index(kind).name(pos)
-    }
-
-    /// Every name in `kind`'s table, in table order.
+    /// Every name in `kind`'s table, in table order, which is id order.
     pub fn names(&self, kind: NameKind) -> impl ExactSizeIterator<Item = &str> {
         self.index(kind).names()
     }

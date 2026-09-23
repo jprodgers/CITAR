@@ -10,6 +10,10 @@
 //! Only tools and the lobby resolve loosely. Rule code holds ids, and a save names objects
 //! exactly.
 
+use crate::base::ids::{
+    BaseUnitId, BeliefId, BuildingId, DifficultyId, EraId, Id, ImprovementId, NationId, PolicyId,
+    PromotionId, ResourceId, SpecialistId, SpeedId, TechId, TerrainId, UnitTypeId, VictoryId,
+};
 use crate::base::text::norm;
 
 /// A table that names can be resolved in: the keys of Python's `Rules.tables()`
@@ -84,6 +88,44 @@ impl NameKind {
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.as_str() == name)
     }
+}
+
+/// An id type whose table names can be resolved in, so that a lookup gives an id of the right
+/// table: `r.resolve::<TechId>(text)` cannot hand back a unit's position as a tech.
+pub trait Named: Id {
+    /// The table this id indexes.
+    const KIND: NameKind;
+}
+
+macro_rules! named {
+    ($($id:ty => $kind:ident,)*) => {
+        $(impl Named for $id {
+            const KIND: NameKind = NameKind::$kind;
+        })*
+
+        /// Every kind with its id type, in the order written above.
+        #[cfg(test)]
+        const NAMED_KINDS: &[NameKind] = &[$(NameKind::$kind),*];
+    };
+}
+
+named! {
+    TechId => Tech,
+    BaseUnitId => Unit,
+    BuildingId => Building,
+    PromotionId => Promotion,
+    TerrainId => Terrain,
+    ResourceId => Resource,
+    ImprovementId => Improvement,
+    BeliefId => Belief,
+    PolicyId => Policy,
+    NationId => Nation,
+    EraId => Era,
+    SpecialistId => Specialist,
+    SpeedId => Speed,
+    DifficultyId => Difficulty,
+    UnitTypeId => UnitType,
+    VictoryId => Victory,
 }
 
 /// One table's names, for exact and loose lookup.
@@ -179,6 +221,11 @@ mod tests {
         assert_eq!(idx.lookup("fighter"), None, "lookup is exact");
         assert_eq!(idx.name(2), Some("AtomicBomber"));
         assert_eq!(idx.names().count(), 3);
+    }
+
+    #[test]
+    fn every_kind_has_one_id_type() {
+        assert_eq!(NAMED_KINDS, NameKind::ALL);
     }
 
     #[test]
