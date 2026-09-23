@@ -28,6 +28,18 @@ export function renderUnitPanel(game, root, d) {
       d.religion ? `${d.religion}${d.religious_strength != null ? " (" + d.religious_strength + ")" : ""}` : null,
     ].filter(Boolean).join(" · ")),
   );
+  if (d.return_offer && my) {
+    const who = d.return_offer.name;
+    const decide = async (keep) => {
+      const r = await game.tool("return_civilian", { unit_id: d.id, keep });
+      if (r) toast(keep ? `You keep the ${d.type}.` : `The ${d.type} goes back to ${who}.`);
+    };
+    root.appendChild(el("div", { class: "card", style: { margin: "6px 0" } },
+      el("div", {}, `Recaptured from barbarians: this ${d.type} belonged to ${who}.`),
+      el("div", { class: "row", style: { marginTop: "6px" } },
+        el("button", { class: "small primary", onclick: () => decide(false) }, `Return to ${who}`),
+        el("button", { class: "small", onclick: () => decide(true) }, "Keep it"))));
+  }
   if (d.promotions && d.promotions.length) root.appendChild(el("div", { class: "muted" }, "Promotions: " + d.promotions.join(", ")));
   if (d.abilities && d.abilities.length) root.appendChild(el("details", { class: "muted", style: { fontSize: "12px" } },
     el("summary", {}, "Abilities"), el("div", {}, uniquesText(d.abilities))));

@@ -17,6 +17,10 @@ Single-player fixes and more dangerous barbarians.
   The tech tree numbers the queue on the technologies themselves and lists it along the top with the turn
   each will finish. A plain click still replaces the queue. The `set_research` tool takes `append`, and a
   new `dequeue_research` tool removes a queued technology.
+- **Returning recaptured civilians.** Freeing a worker or settler that barbarians took from another
+  civilization asks whether to return it (a better opinion with a major civilization, +45 influence with
+  a city-state) or keep it, as in Civilization V; left unanswered, you keep it at the end of the turn.
+  New `return_civilian` tool; a civilian that was yours simply comes back.
 - **Barbarian aggression**, a 0-100 slider next to the barbarian setting in the new-game form (Normal
   defaults to 50, Raging to 85; the `barbarian_aggression` config key). It sets how far barbarians look
   for targets, what odds they accept, how many gather before storming a city, how fast camps spawn, and
@@ -57,6 +61,9 @@ Single-player fixes and more dangerous barbarians.
 - The Bombard button stayed after a city had fired, because the city's own view never said whether it
   still could.
 - Accepting or rejecting a proposal left the diplomacy window open while play went on; it now closes.
+- Notifications covered the diplomacy window when a proposal arrived. Negotiation notices are no longer
+  toasted while the window shows them, and any toast moves to the bottom of the screen while a window is
+  open.
 - A rating test passed its message as `assertAlmostEqual`'s `places` argument, so it raised a `TypeError`
   on Python 3.11 whenever the weighted pair count was not exactly 2.0. Tests only; the shipped code is
   unaffected.

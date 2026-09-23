@@ -156,6 +156,7 @@ export class GameScreen {
         }
       }
       this.checkNegotiations();
+      this.checkReturnOffers();
     } catch (e) {
       toast(e.message, "error");
     } finally {
@@ -214,10 +215,38 @@ export class GameScreen {
     if (ev.type === "agent_error" || ev.type === "game_paused") { toast(ev.text, "error", 12000); return; }
     if (ev.type === "game_resumed") { toast(ev.text, "info", 6000); return; }
     const mine = this.you != null && ev.players && ev.players.includes(this.you);
+    // the diplomacy window shows (or is about to show) these itself: a toast on top would only hide it
+    if (mine && (ev.type === "negotiation" || (ev.type === "message" && this._diploModal))) return;
     if (important.includes(ev.type) || (mine && ["unit_killed", "unit_captured", "negotiation", "message", "camp_cleared", "ruins", "tech",
         "wonder_built", "great_person_born", "golden_age", "natural_wonder", "spy", "un_vote"].includes(ev.type))) {
       toast(ev.text, ev.type === "war_declared" || ev.type === "unit_killed" ? "error" : "info", 5000);
     }
+  }
+
+  // a civilian just taken back from barbarians that belonged to someone else: ask once whether to return it
+  checkReturnOffers() {
+    if (!this.myTurn || document.getElementById("modal-root").children.length) return;
+    this._shownReturn = this._shownReturn || new Set();
+    const u = this.view.units.find((x) => x.owner === this.you && x.return_offer && !this._shownReturn.has(x.id));
+    if (!u) return;
+    this._shownReturn.add(u.id);
+    this.renderer.centerOn(u.x, u.y);
+    this.askReturnCivilian(u);
+  }
+
+  askReturnCivilian(u) {
+    const who = u.return_offer.name;
+    const decide = async (keep) => {
+      m.close();
+      const r = await this.tool("return_civilian", { unit_id: u.id, keep });
+      if (r) toast(keep ? `You keep the ${u.type}.` : `The ${u.type} goes back to ${who}.`);
+    };
+    const m = modal({
+      title: "Recaptured civilian", narrow: true,
+      content: el("p", {}, `You freed a ${u.type} that barbarians had taken from ${who}. Return it to them for their goodwill, or keep it?`),
+      footer: [el("button", { onclick: () => decide(true) }, "Keep it"),
+               el("button", { class: "primary", onclick: () => decide(false) }, `Return to ${who}`)],
+    });
   }
 
   checkNegotiations() {
@@ -452,7 +481,8 @@ export class GameScreen {
   turnBlockers() {
     const v = this.view;
     if (!v || this.you == null) return [];
-    const BLOCKING = ["research", "free_tech", "policy", "great_person", "pantheon", "promotion", "negotiation", "un_vote", "idle_city"];
+    const BLOCKING = ["research", "free_tech", "policy", "great_person", "pantheon", "promotion", "negotiation", "un_vote", "idle_city",
+                      "return_civilian"];
     const out = (v.alerts || []).filter((a) => BLOCKING.includes(a.type));
     const idle = v.units.filter((u) => u.owner === this.you && !u.activity && u.moves > 0);
     if (idle.length) out.push({ type: "unit", text: `${idle.length} unit${idle.length === 1 ? " needs" : "s need"} orders.`, unit: idle[0].id });
@@ -462,6 +492,10 @@ export class GameScreen {
   // take the player to the first open decision
   goToBlocker(a) {
     if (a.type === "unit") return this.selectNextIdle();
+    if (a.type === "return_civilian") {
+      const u = this.view.units.find((x) => x.id === a.unit);
+      if (u) { this.renderer.centerOn(u.x, u.y); this.selectUnit(u.id); return this.askReturnCivilian(u); }
+    }
     const open = { research: openTechTree, free_tech: openTechTree, policy: openPolicies, great_person: openGreatPeople,
                    pantheon: openReligion, un_vote: openDiplomacy, negotiation: openDiplomacy }[a.type];
     if (open) return open(this);
@@ -811,7 +845,7 @@ export class GameScreen {
     if (this.sideTab === "alerts") {
       const icon = { gold: "●", happiness: "☹", threat: "⚔", bombard: "🎯", starving: "🍞", civilian_danger: "⚠", research: "⚗",
                      free_tech: "⚗", policy: "✦", great_person: "★", pantheon: "✝", promotion: "▲", spy: "🕵", un_vote: "🗳",
-                     negotiation: "⚖", conquest: "🏛", idle_city: "⚒", golden_age: "★" };
+                     negotiation: "⚖", conquest: "🏛", idle_city: "⚒", golden_age: "★", return_civilian: "⚐" };
       for (const a of alerts) {
         body.appendChild(el("div", { class: "event alert-item clickable", onclick: () => {
           if (a.x == null) {

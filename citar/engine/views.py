@@ -86,6 +86,9 @@ def unit_info(g: Game, u, viewer: Optional[int], detail: bool = False) -> dict:
                   "embarked": movement.is_embarked(g, u)})
         if u.fortify:
             d["fortified_turns"] = u.fortify
+        if u.return_offer is not None and viewer is not None:
+            d["return_offer"] = {"player": u.return_offer, "name": g.player(u.return_offer).name
+                                 if g.has_met(viewer, u.return_offer) else "its original owner"}
         if u.status:
             d["status"] = list(u.status)
         t = g.s.tiles[u.idx]

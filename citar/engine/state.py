@@ -96,6 +96,7 @@ class Unit:
     promotion_count: int = 0            # promotions bought with XP (sets the next XP threshold)
     religious_strength_lost: int = 0
     original_owner: Optional[int] = None
+    return_offer: Optional[int] = None  # a civilian recaptured from barbarians: the civ it may be given back to
 
 
 @dataclass

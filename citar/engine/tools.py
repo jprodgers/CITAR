@@ -797,6 +797,17 @@ def rename_city(g: Game, pid: int, city_id: int, name: str):
     return {"name": new}
 
 
+@tool("return_civilian", "A civilian you recaptured from barbarians that belonged to another civilization: "
+      "return it to them (goodwill; +45 influence with a city-state) or keep it. Unanswered by the end of your "
+      "turn, you keep it.", {"unit_id": INT, "keep": BOOL}, ["unit_id"], category="unit")
+def return_civilian(g: Game, pid: int, unit_id: int, keep: bool = False):
+    """Return a recaptured civilian to its original owner, or keep it."""
+    from . import units as unitmod
+    out = unitmod.return_civilian(g, pid, _own_unit(g, pid, unit_id), keep=bool(keep))
+    _refresh(g)
+    return out
+
+
 @tool("city_status", "Decide what to do with a conquered city: annex (full control; unhappiness until a Courthouse), "
       "puppet (keeps its own production, lower unhappiness), raze (burn it down 1 population per turn; not original "
       "capitals or holy cities), stop_razing, or liberate (return it to its original owner for their gratitude).",

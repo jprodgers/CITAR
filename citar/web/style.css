@@ -177,6 +177,8 @@ canvas.map { position: absolute; inset: 0; width: 100%; height: 100%; display: b
 
 /* toasts */
 #toasts { position: fixed; top: 96px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 100; pointer-events: none; align-items: center; }
+/* with a window open, toasts move out of its way to the bottom of the screen */
+body:has(#modal-root > *) #toasts { top: auto; bottom: 24px; }
 .toast { background: rgba(20,24,32,.97); border: 1px solid var(--border); padding: 7px 14px; border-radius: 8px; box-shadow: 0 4px 16px #0008; max-width: 70vw; }
 .toast.error { border-color: var(--bad); }
 
