@@ -360,6 +360,18 @@ define_id! {
     CombatantFilterId(pub u16);
 }
 
+define_id! {
+    /// A static filter: a set of rule objects of one kind (base units, buildings, improvements,
+    /// resources, techs or eras), evaluated once at load (DESIGN.md 5.7).
+    SetRef(pub u16);
+}
+
+define_id! {
+    /// A parameter UnCiv lets name objects of more than one kind (`[tileFilter/buildingFilter]`),
+    /// compiled once for each kind.
+    ObjectFilterId(pub u16);
+}
+
 // ---- Rule ids, u8: stored in tiles and other hot arrays ---------------------------------------
 
 define_id! {

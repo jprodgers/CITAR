@@ -17,7 +17,7 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 
 use super::ids::{
     BaseUnitId, BeliefId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, PlayerId,
-    PolicyId, PromotionId, ResourceId, TechId, TerrainId,
+    PolicyId, PromotionId, ResourceId, TagId, TechId, TerrainId,
 };
 
 /// A vector with one entry per player, indexed by [`PlayerId`].
@@ -279,6 +279,8 @@ pub const RESOURCE_WORDS: usize = 1;
 pub const IMPROVEMENT_WORDS: usize = 1;
 /// Words in an [`EraSet`]: 64 eras (9 shipped).
 pub const ERA_WORDS: usize = 1;
+/// Words in a [`TagSet`]: 256 tags, the texts that filters name as tags (a few dozen shipped).
+pub const TAG_WORDS: usize = 4;
 
 /// Techs, such as a player's known techs.
 pub type TechSet = IdSet<TechId, TECH_WORDS>;
@@ -300,6 +302,8 @@ pub type ResourceSet = IdSet<ResourceId, RESOURCE_WORDS>;
 pub type ImprovementSet = IdSet<ImprovementId, IMPROVEMENT_WORDS>;
 /// Eras.
 pub type EraSet = IdSet<EraId, ERA_WORDS>;
+/// Unique tags: the parameterless uniques a source carries that filters name (DESIGN.md 5.6).
+pub type TagSet = IdSet<TagId, TAG_WORDS>;
 
 // ---- FeatureSet -------------------------------------------------------------------------------
 
