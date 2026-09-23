@@ -5,6 +5,10 @@
 //! only then pastes the entry into `refcheck/intended.toml`. What `suggest` saves is the typing:
 //! one stub per group, place (every list element as `[*]`) and kind, with the narrowest
 //! constraints the differences share, so the entry cannot hide a later, unrelated change.
+//!
+//! A difference with no place an entry could name gets no stub: an `error` (the answer module
+//! failed), or anything else at the root of an answer. Those are listed in a comment instead,
+//! since only fixing the answer module removes them.
 
 use serde_json::Value;
 
@@ -28,7 +32,12 @@ struct Stub<'r> {
 /// The stubs, as TOML with a comment above each.
 pub fn suggest(run: &Run) -> String {
     let mut stubs: Vec<Stub<'_>> = Vec::new();
+    let mut to_fix: Vec<(&Subject, &Checked)> = Vec::new();
     for (sub, c) in run.findings().filter(|(_, c)| c.is_unexplained()) {
+        if c.diff.kind == DiffKind::Error || c.diff.path.is_root() {
+            to_fix.push((sub, c));
+            continue;
+        }
         let pattern = Pattern::generalize(&c.diff.path);
         match stubs
             .iter_mut()
@@ -43,13 +52,29 @@ pub fn suggest(run: &Run) -> String {
             }),
         }
     }
-    if stubs.is_empty() {
+    if stubs.is_empty() && to_fix.is_empty() {
         return "# No unexplained differences: nothing to suggest.\n".to_string();
     }
     let mut out = String::from(
         "# Stubs for refcheck/intended.toml, written by `cargo refcheck suggest`. None is accepted\n\
          # until a person has checked the difference, fixed it or written its reason, and pasted it in.\n",
     );
+    if !to_fix.is_empty() {
+        out.push_str(
+            "\n# No entry can explain these, at the root of an answer: fix the answer module.\n",
+        );
+        for (sub, c) in &to_fix {
+            let detail = c.diff.detail.as_deref().and_then(|d| d.lines().next());
+            out.push_str(&format!(
+                "#   {} {}: {} at {}{}\n",
+                sub.group,
+                sub.case,
+                c.diff.kind.name(),
+                c.diff.path,
+                detail.map(|d| format!(": {d}")).unwrap_or_default()
+            ));
+        }
+    }
     for (n, stub) in stubs.iter().enumerate() {
         out.push('\n');
         out.push_str(&stub_text(run, stub, n + 1));
@@ -117,8 +142,12 @@ fn constraint<'a>(values: impl Iterator<Item = Option<&'a Value>> + Clone) -> Op
         return match first {
             None => Some("{ is = \"absent\" }".into()),
             Some(Value::Null) => Some("{ is = \"null\" }".into()),
-            Some(v) if v.to_string().len() <= MAX_EXACT => to_toml(v).map(|t| t.to_string()),
-            Some(_) => None,
+            Some(v) if v.to_string().len() > MAX_EXACT => None,
+            // Written plainly, it would load as a regex.
+            Some(Value::String(s)) if s.starts_with("re:") => {
+                Some(format!("{{ eq = {} }}", toml::Value::String(s.clone())))
+            }
+            Some(v) => to_toml(v).map(|t| t.to_string()),
         };
     }
     let numbers: Option<Vec<f64>> = values.map(|v| v.and_then(Value::as_f64)).collect();
@@ -173,5 +202,10 @@ mod tests {
         );
         let with_null = [Some(json!([1, null]))];
         assert_eq!(constraint(with_null.iter().map(Option::as_ref)), None);
+        let regex_like = [Some(json!("re:(unclosed"))];
+        assert_eq!(
+            constraint(regex_like.iter().map(Option::as_ref)).as_deref(),
+            Some("{ eq = \"re:(unclosed\" }")
+        );
     }
 }
