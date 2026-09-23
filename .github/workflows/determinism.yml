@@ -11,7 +11,8 @@
 # no LTO) must play the same game as what ships.
 #
 # The golden sets grow with the engine (DESIGN.md 9.6): package 1a-02 brought rng, libm and pyfmt,
-# 1a-03 the RulesetId of the embedded ruleset (ruleset), and 1a-05 every compiled unique (uniques).
+# 1a-03 the RulesetId of the embedded ruleset (ruleset), 1a-05 every compiled unique (uniques), and
+# 1a-06 every compiled filter (filters) and the map-generation, AI and victory tables (gen).
 name: determinism
 
 on:

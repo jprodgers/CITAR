@@ -23,6 +23,11 @@
 //!   abilities they refer to. Written by `golden bless` when the ruleset data or the compiler
 //!   changes; a diff shows exactly which uniques, or which partitions, moved.
 //!
+//! Package 1a-06 adds, in [`filters`]:
+//! - **`filters.json`**: every dynamic filter of the embedded ruleset, compiled to its tree;
+//! - **`gen.json`**: the tables map generation, the AI and victory read, and every
+//!   map-generation unique they hold.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -58,10 +63,20 @@ pub struct SetReport {
     pub problems: Vec<String>,
 }
 
+pub mod filters;
+
 /// Every golden set this package knows, checked against the committed files.
 #[must_use]
 pub fn check_all() -> Vec<SetReport> {
-    vec![check_rng(), check_libm(), check_pyfmt(), check_ruleset(), check_uniques()]
+    vec![
+        check_rng(),
+        check_libm(),
+        check_pyfmt(),
+        check_ruleset(),
+        check_uniques(),
+        filters::check_filters(),
+        filters::check_gen(),
+    ]
 }
 
 /// The report `golden check --out` writes: one entry per set.
@@ -92,6 +107,9 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
         ("ruleset.json", render_rows(&ruleset_answers(), &[])),
         ("uniques.json", render_rows(&uniques_answers(), &UNIQUE_LISTS)),
     ]
+    .into_iter()
+    .chain(filters::blessed())
+    .collect()
 }
 
 #[allow(

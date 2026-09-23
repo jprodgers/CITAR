@@ -3,8 +3,8 @@
 //! ```text
 //! cargo golden check [--out FILE]   compare this build's answers with the committed files;
 //!                                   --out writes a report for the cross-target comparison
-//! cargo golden bless                rewrite rng.json, libm.json, ruleset.json and uniques.json
-//!                                   from this build
+//! cargo golden bless                rewrite rng.json, libm.json, ruleset.json, uniques.json,
+//!                                   filters.json and gen.json from this build
 //! cargo golden diff A B             compare two --out reports
 //! ```
 //!
@@ -69,9 +69,8 @@ fn check(out: Option<&str>) -> ExitCode {
     if failed {
         println!(
             "golden: a set differs from its committed file. If this build is right, `cargo golden \
-             bless` (rng, libm, ruleset, uniques) or scripts/refcheck/pyfmt_vectors.py (pyfmt), \
-             and \
-             say why."
+             bless` (rng, libm, ruleset, uniques, filters, gen) or \
+             scripts/refcheck/pyfmt_vectors.py (pyfmt), and say why."
         );
         ExitCode::from(1)
     } else {

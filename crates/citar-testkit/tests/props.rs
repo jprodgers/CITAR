@@ -5,6 +5,10 @@
 //!   from Python is checked in `determinism.rs`, through `pyfmt.json`);
 //! - an RNG key part of `None` never gives the stream of `Some(0)`.
 //!
+//! Package 1a-06 adds (its gate 3): folding a filter tree keeps its answer in every world, on
+//! random trees whose leaves merge (as a unit's base-unit sets do) or do not (as a tile's
+//! terrains do under `All`).
+//!
 //! The number of cases follows `PROPTEST_CASES` (proptest's default is 256).
 
 use std::collections::BTreeSet;
@@ -13,6 +17,7 @@ use citar_engine::base::collections::MinHeap;
 use citar_engine::base::num::{floor_div, floor_mod};
 use citar_engine::base::rng::{KeyPart, Purpose, Rng};
 use citar_engine::base::sets::BitSet;
+use citar_engine::unique::filter::{Expr, Leaf};
 use proptest::prelude::*;
 
 #[derive(Clone, Debug)]
@@ -43,6 +48,54 @@ fn build(ops: &[SetOp]) -> (BitSet, BTreeSet<u32>) {
 enum HeapOp {
     Push(u8),
     Pop,
+}
+
+/// A leaf true in the worlds (0 to 15) its mask names. Masks merge exactly, as one-valued facts
+/// do; a leaf that does not merge stands for a fact that cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Worlds {
+    mask: u16,
+    merges: bool,
+}
+
+impl Leaf for Worlds {
+    fn constant(&self) -> Option<bool> {
+        match self.mask {
+            0 if self.merges => Some(false),
+            u16::MAX if self.merges => Some(true),
+            _ => None,
+        }
+    }
+
+    fn and(&self, o: &Self) -> Option<Self> {
+        (self.merges && o.merges).then_some(Self { mask: self.mask & o.mask, merges: true })
+    }
+
+    fn or(&self, o: &Self) -> Option<Self> {
+        (self.merges && o.merges).then_some(Self { mask: self.mask | o.mask, merges: true })
+    }
+}
+
+fn leaf() -> impl Strategy<Value = Worlds> {
+    // Some empty and some full masks, so that constants arise from merges.
+    let mask = prop_oneof![1 => Just(0u16), 1 => Just(u16::MAX), 6 => any::<u16>()];
+    (mask, any::<bool>()).prop_map(|(mask, merges)| Worlds { mask, merges })
+}
+
+fn tree() -> impl Strategy<Value = Expr<Worlds>> {
+    let base =
+        prop_oneof![1 => any::<bool>().prop_map(Expr::Const), 4 => leaf().prop_map(Expr::Leaf)];
+    base.prop_recursive(6, 96, 5, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(|e| Expr::Not(Box::new(e))),
+            prop::collection::vec(inner.clone(), 0..5).prop_map(|v| Expr::All(v.into())),
+            prop::collection::vec(inner, 0..5).prop_map(|v| Expr::Any(v.into())),
+        ]
+    })
+}
+
+fn holds(e: &Expr<Worlds>, world: u32) -> bool {
+    e.eval(&mut |l| l.mask & (1 << world) != 0)
 }
 
 proptest! {
@@ -157,5 +210,17 @@ proptest! {
         let a = Rng::keyed(seed, purpose, &words(&with_none)).next_u64();
         let b = Rng::keyed(seed, purpose, &words(&with_zero)).next_u64();
         prop_assert_ne!(a, b);
+    }
+
+    #[test]
+    fn folding_keeps_a_filters_meaning(e in tree()) {
+        let folded = e.clone().fold();
+        for world in 0..16 {
+            prop_assert_eq!(holds(&folded, world), holds(&e, world), "world {}: {:?}", world, folded);
+        }
+        prop_assert!(folded.depth() <= e.depth());
+        prop_assert!(folded.leaves().len() <= e.leaves().len());
+        // Folding again changes nothing more.
+        prop_assert_eq!(folded.clone().fold(), folded);
     }
 }
