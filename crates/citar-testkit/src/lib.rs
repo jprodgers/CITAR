@@ -2,7 +2,13 @@
 //!
 //! All integration tests live here rather than in `citar-engine`, which keeps only `#[cfg(test)]`
 //! unit tests and doctests; that removes the dev-dependency cycle between the two (DESIGN.md 2.1).
-//! Later packages add the rule-script runner, fixture loading, `RandomAgent`, the golden files
-//! and the `golden`, `chaos` and `soak` binaries.
+//!
+//! - [`golden`]: the golden sets that must come out identical on all five targets, and the
+//!   `golden` binary's logic (DESIGN.md 9.6).
+//!
+//! Later packages add the rule-script runner, fixture loading, `RandomAgent`, and the `chaos` and
+//! `soak` binaries.
 
 #![forbid(unsafe_code)]
+
+pub mod golden;

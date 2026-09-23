@@ -9,6 +9,11 @@ publish.workspace = true
 
 [dependencies]
 citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
+serde_json.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true
