@@ -7,8 +7,9 @@
 //!   which must also stay under their critical values. Written by `golden bless`.
 //! - **`libm.json`**: about 2,000 inputs to the maths wrappers of `base::num`, with the output
 //!   bits. Written by `golden bless`; `check` recomputes the outputs for the committed inputs.
-//! - **`pyfmt.json`**: Python's `repr(x)`, `round(x)`, `round(x, n)`, `//` and `%`, recorded by
-//!   `scripts/refcheck/pyfmt_vectors.py`. Never blessed: the engine must reproduce Python.
+//! - **`pyfmt.json`**: Python's `repr(x)`, `round(x)`, `repr(round(x, n))`, `format(x, ".nf")`,
+//!   `//` and `%`, recorded by `scripts/refcheck/pyfmt_vectors.py`. Never blessed: the engine
+//!   must reproduce Python, every string and every bit.
 //!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
@@ -17,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use citar_engine::base::fmt::PyFloat;
+use citar_engine::base::fmt::{PyFloat, PyRound};
 use citar_engine::base::num::{self, FloorDiv};
 use citar_engine::base::rng::{Purpose, Rng};
 use serde_json::{Value, json};
@@ -574,15 +575,14 @@ fn check_pyfmt() -> SetReport {
         let mut ours = Vec::new();
         for (n, py) in ndigits.iter().zip(py_rounded) {
             let r = num::round_ndigits(x, *n);
-            ours.push(float_str(r));
-            match py.as_str().and_then(parse_py_float) {
-                Some(p) if same_float(p, r) => {}
-                _ => problems.push(format!(
-                    "pyfmt: round({}, {n}) is {py} in Python, {} here",
-                    row[1],
-                    PyFloat(r)
-                )),
+            // The value, then the text: PyRound is what model-facing text writes.
+            let text = PyRound(x, *n).to_string();
+            let value_ok = py.as_str().and_then(parse_py_float).is_some_and(|p| same_float(p, r));
+            if !value_ok || py.as_str() != Some(text.as_str()) {
+                problems
+                    .push(format!("pyfmt: round({}, {n}) is {py} in Python, {text} here", row[1]));
             }
+            ours.push(json!([float_str(r), text]));
         }
         computed_cases.push(json!([hex64(x.to_bits()), repr, float_str(whole), ours]));
     }
@@ -596,20 +596,41 @@ fn check_pyfmt() -> SetReport {
             continue;
         };
         let r = num::round_ndigits(x, n);
+        let text = PyRound(x, n).to_string();
         // null: Python raised OverflowError, where round_ndigits returns x unchanged.
-        let expected = match &row[2] {
-            Value::Null => Some(x),
-            v => v.as_str().and_then(parse_py_float),
+        let ok = match &row[2] {
+            Value::Null => same_float(x, r),
+            v => {
+                v.as_str().and_then(parse_py_float).is_some_and(|e| same_float(e, r))
+                    && v.as_str() == Some(text.as_str())
+            }
         };
-        if !expected.is_some_and(|e| same_float(e, r)) {
+        if !ok {
             problems.push(format!(
-                "pyfmt: round({}, {n}) is {} in Python, {} here",
+                "pyfmt: round({}, {n}) is {} in Python, {text} here",
                 PyFloat(x),
-                row[2],
-                PyFloat(r)
+                row[2]
             ));
         }
-        computed_extra.push(json!([hex64(x.to_bits()), n, float_str(r)]));
+        computed_extra.push(json!([hex64(x.to_bits()), n, float_str(r), text]));
+    }
+
+    let mut computed_fixed = Vec::new();
+    for (i, row) in rows("fixed").iter().enumerate() {
+        let x = row.get(0).and_then(parse_hex64).map(f64::from_bits);
+        let n = row.get(1).and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok());
+        let (Some(x), Some(n), Some(py)) = (x, n, row.get(2).and_then(Value::as_str)) else {
+            problems.push(format!("pyfmt.json: fixed[{i}] is malformed"));
+            continue;
+        };
+        let text = format!("{:.n$}", PyFloat(x));
+        if text != py {
+            problems.push(format!(
+                "pyfmt: format({}, '.{n}f') is {py} in Python, {text} here",
+                PyFloat(x)
+            ));
+        }
+        computed_fixed.push(json!([hex64(x.to_bits()), n, text]));
     }
 
     let mut computed_floor = Vec::new();
@@ -637,13 +658,17 @@ fn check_pyfmt() -> SetReport {
         computed_floor.push(json!([a, b, gq, gr]));
     }
 
-    for (key, min) in [("cases", 1_800), ("extra", 1_000), ("floor", 1_000)] {
+    for (key, min) in [("cases", 2_400), ("extra", 1_000), ("fixed", 1_500), ("floor", 1_000)] {
         if rows(key).len() < min {
             problems.push(format!("pyfmt.json: only {} rows of `{key}`", rows(key).len()));
         }
     }
-    let computed =
-        json!({"cases": computed_cases, "extra": computed_extra, "floor": computed_floor});
+    let computed = json!({
+        "cases": computed_cases,
+        "extra": computed_extra,
+        "fixed": computed_fixed,
+        "floor": computed_floor,
+    });
     SetReport { name: "pyfmt", computed: digest_of(&computed), problems: capped(problems) }
 }
 

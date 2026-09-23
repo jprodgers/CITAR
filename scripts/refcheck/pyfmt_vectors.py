@@ -4,12 +4,14 @@ package 1a-02).
     PYTHONHASHSEED=0 python scripts/refcheck/pyfmt_vectors.py            # writes crates/citar-testkit/golden/pyfmt.json
     PYTHONHASHSEED=0 python scripts/refcheck/pyfmt_vectors.py --check    # re-records and compares with the committed file
 
-About 2,000 floats: special values (zeros, the bounds, NaN and the infinities), exact ties at many digit counts
+About 2,500 floats: special values (zeros, the bounds, NaN and the infinities), exact ties at many digit counts
 (0.125, 2.5, 5.0 at the tens), near-ties that are not ties (2.675, 1.005), the values games produce (moves in sixtieths,
-small fractions, one- to three-decimal amounts), a log-uniform spread from 1e-12 to 1e22, and random bit patterns.
+small fractions, one- to three-decimal amounts), a log-uniform spread from 1e-12 to 1e22, random bit patterns, and
+repr ties: floats exactly halfway between two shortest digit strings, where repr takes the even one
+(1 + 2^-17 is 1.0000076293945312), and the powers of two, where the even one may not read back (2^-24).
 For each one it records the bits, repr(x), float(round(x)), and repr(round(x, n)) for n = -1..3; the ties and
-specials also get the digit counts in EXTRA_NDIGITS. It also records Python's a // b and a % b over signed 64-bit
-operands, the edges included.
+specials also get the digit counts in EXTRA_NDIGITS, and format(x, ".nf") for n in FIXED_NDIGITS. It also records
+Python's a // b and a % b over signed 64-bit operands, the edges included.
 
 The Rust side (citar-testkit's golden check) must reproduce every string and every bit. The file is also one of the
 determinism goldens, so it is compared on all five targets; only this script writes it.
@@ -27,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "crates" / "citar-testkit" / "golden" / "pyfmt.json"
 NDIGITS = (-1, 0, 1, 2, 3)
 EXTRA_NDIGITS = (-308, -22, -3, -2, 4, 5, 8, 12, 17, 20, 300, 323, 324, -309)
+FIXED_NDIGITS = (0, 1, 2, 3, 6, 17)
 
 
 def bits(x: float) -> str:
@@ -61,6 +64,21 @@ def ties() -> list[float]:
     for m in range(1, 60):  # multiples of 5 and 50: ties at the tens and hundreds
         out.append(5.0 * (2 * m - 1))
         out.append(50.0 * (2 * m - 1))
+    return out
+
+
+def repr_ties(rng: random.Random) -> list[float]:
+    """Floats whose exact value is one digit longer than repr(x) and ends in 5: halfway between two shortest
+    digit strings. dtoa takes the even one if it reads back, where a round-half-up formatter takes the upper."""
+    out = [1 + 2 ** -17, 845226504769007.25, -0.66370391845703125]
+    out += [2.0 ** e for e in range(-80, 81)]  # the gap below a power of two is half the gap above
+    for j in range(1, 26):  # m / 2^j with m * 5^j of 17 or 18 digits: its exact decimal expansion
+        lo, hi = -(-10 ** 16 // 5 ** j), min(10 ** 18 // 5 ** j, 2 ** 53 - 1)
+        for _ in range(12):
+            x = (rng.randint(lo, hi) | 1) / 2 ** j
+            out.append(x if rng.random() < 0.75 else -x)
+    out += [rng.randint(1, 2 ** 24) / 2 ** 17 for _ in range(40)]
+    out += [k / 2 ** j for j in range(14, 61, 2) for k in (1, 3, 7, 99, 12345, 999999)]
     return out
 
 
@@ -104,7 +122,9 @@ def floor_cases(rng: random.Random) -> list[list[int]]:
 
 def record() -> dict:
     rng = random.Random(20260923)
-    xs = specials() + ties() + game_values(rng) + spread(rng)
+    # Their own stream, so the rows recorded before them keep their values.
+    rt = repr_ties(random.Random(20260924))
+    xs = specials() + ties() + game_values(rng) + spread(rng) + rt
     seen, cases = set(), []
     for x in xs:
         key = bits(x)
@@ -120,13 +140,14 @@ def record() -> dict:
                 extra.append([bits(x), n, repr(round(x, n))])
             except OverflowError:
                 extra.append([bits(x), n, None])
+    fixed = [[bits(x), n, format(x, f".{n}f")] for x in specials() + ties()[:60] + rt[:120] for n in FIXED_NDIGITS]
     return {"format": 1, "recorder": "scripts/refcheck/pyfmt_vectors.py", "python": sys.version.split()[0],
-            "ndigits": list(NDIGITS), "cases": cases, "extra": extra, "floor": floor_cases(rng)}
+            "ndigits": list(NDIGITS), "cases": cases, "extra": extra, "fixed": fixed, "floor": floor_cases(rng)}
 
 
 def render(doc: dict) -> str:
     """One case per line."""
-    lists = ("cases", "extra", "floor")
+    lists = ("cases", "extra", "fixed", "floor")
     head = {k: v for k, v in doc.items() if k not in lists}
     parts = [json.dumps(head)[:-1]]
     for k in lists:
@@ -153,7 +174,7 @@ def main() -> int:
     OUT.write_text(text, encoding="utf-8", newline="\n")
     doc = json.loads(text)
     print(f"wrote {OUT.relative_to(ROOT)} ({len(text) // 1024} KB: {len(doc['cases'])} floats, "
-          f"{len(doc['extra'])} extra roundings, {len(doc['floor'])} divisions)")
+          f"{len(doc['extra'])} extra roundings, {len(doc['fixed'])} fixed-point, {len(doc['floor'])} divisions)")
     return 0
 
 
