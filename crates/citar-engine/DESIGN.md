@@ -281,13 +281,13 @@ debug = "line-tables-only"
 - `float_cmp`, `lossy_float_literal`, `mem_forget = "deny"`, `exit = "deny"`, `dbg_macro`, `todo`, `unimplemented`.
 
 **The root `clippy.toml` is strict,** and each I/O crate carries a relaxed file that replaces it:
-- **disallowed types:** `std::collections::{HashMap, HashSet, BinaryHeap}`, `std::hash::RandomState`, `std::time::{Instant, SystemTime}`, `std::fs::File`, `std::net::TcpStream`;
+- **disallowed types:** `std::collections::{HashMap, HashSet, BinaryHeap}`, `std::hash::RandomState`, `std::time::{Instant, SystemTime}`, `std::fs::{File, OpenOptions}`, `std::net::{TcpStream, TcpListener, UdpSocket}`, `std::process::Command`;
 - **disallowed methods:**
   - `f64`/`f32` `powf`, `powi`, `exp`, `exp2`, `exp_m1`, `ln`, `ln_1p`, `log`, `log2`, `log10`, `cbrt`, `hypot`, the trig and hyperbolic functions, `mul_add`;
-  - `f64::round` and `f32::round`, with the reason pointing to `num::round_half_even` (Python's `round()`) or `num::round_half_away`;
-  - `indexmap::IndexMap::{remove, swap_remove}` and `indexmap::IndexSet::{remove, swap_remove}`, because they reorder entries that were ordered by insertion. `shift_remove` is the sanctioned form;
-  - `slice::sort_unstable*` and `select_nth_unstable*`;
-  - `std::fs::*`, `std::env::*`, `std::thread::{spawn, sleep}`, `std::process::exit`;
+  - `f64::round`, `f32::round` and `libm::{round, roundf, Libm::round}`, with the reason pointing to `num::round_half_even` (Python's `round()`) or `num::round_half_away`;
+  - `indexmap::IndexMap::{remove, swap_remove}` and `indexmap::IndexSet::{remove, swap_remove}`, because they reorder entries that were ordered by insertion. `shift_remove` is the sanctioned form. The same goes for their other swap forms, for the `swap_remove` of the entry APIs, and for `serde_json::Map`, whose plain `remove` is `swap_remove` under `preserve_order`;
+  - `slice::sort_unstable*` and `select_nth_unstable*`, and the `sort_unstable*` and `sorted_unstable_by` of `IndexMap` and `IndexSet`;
+  - `std::fs::*`, `std::env::*`, `std::thread::{spawn, sleep}`, `std::process::exit`, `std::io::{stdin, stdout, stderr}`;
 - **disallowed macros:** `print`, `println`, `eprint`, `eprintln`, `dbg`.
 
 **What I verified on Rust 1.98.1**, with a scratch workspace mirroring this layout:
@@ -1734,8 +1734,8 @@ Rust's `Display` prints `2.0` as `2` and never uses an exponent; its `Debug` wri
 |---|---|
 | Hash-order iteration | The hash types are banned by clippy (verified). `LookupMap` has no iteration methods. `same_process_twice` runs two identical games in one process, where `RandomState` differs between maps. |
 | Platform libm | Clippy bans the std transcendental functions (verified). `libm =0.2.16` with default features off. `golden/libm.json` holds about 2,000 inputs as bit patterns, compared on all 5 targets. |
-| Rounding mode slips | `f64::round` banned; `round_half_even` and `round_half_away` named for what they do |
-| Insertion-order loss | `IndexMap::{remove, swap_remove}` banned |
+| Rounding mode slips | `f64::round` and `libm::round` banned; `round_half_even` and `round_half_away` named for what they do |
+| Insertion-order loss | `IndexMap::{remove, swap_remove}` banned, with every other swap form, the entry APIs' and `serde_json::Map`'s |
 | Optional key parts | `KeyPart` (None = `u64::MAX`) |
 | Toolchain tie order | Stable sorts only. `rust-toolchain.toml` pins exactly 1.98.1, and a toolchain bump is a pull request that re-blesses the goldens. |
 | Build profile | The digest refuses NaN; the `ci` and `release` profiles are compared in CI |

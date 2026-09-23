@@ -14,6 +14,7 @@ disallowed-types = [
     { path = "std::net::TcpStream", reason = "the engine does no I/O" },
     { path = "std::net::TcpListener", reason = "the engine does no I/O" },
     { path = "std::net::UdpSocket", reason = "the engine does no I/O" },
+    { path = "std::process::Command", reason = "the engine does no I/O and starts no processes" },
 ]
 
 disallowed-methods = [
@@ -78,6 +79,10 @@ disallowed-methods = [
     # rounds half to even.
     { path = "f64::round", reason = "Python's round() is half to even: use base::num::round_half_even, or round_half_away where Python wrote int(x + 0.5)" },
     { path = "f32::round", reason = "Python's round() is half to even: use base::num::round_half_even, or round_half_away where Python wrote int(x + 0.5)" },
+    # libm's round is f64::round under another name: half away from zero.
+    { path = "libm::round", reason = "Python's round() is half to even: use base::num::round_half_even, or round_half_away where Python wrote int(x + 0.5)" },
+    { path = "libm::roundf", reason = "Python's round() is half to even: use base::num::round_half_even, or round_half_away where Python wrote int(x + 0.5)" },
+    { path = "libm::Libm::round", reason = "Python's round() is half to even: use base::num::round_half_even, or round_half_away where Python wrote int(x + 0.5)" },
 
     # Insertion order is part of the state (tables, deals, queues): these move the last entry
     # into the hole, or are the hole-filling form under another name.
@@ -93,6 +98,23 @@ disallowed-methods = [
     { path = "indexmap::IndexSet::swap_take", reason = "reorders entries ordered by insertion: use shift_take" },
     { path = "indexmap::IndexSet::swap_remove_full", reason = "reorders entries ordered by insertion: use shift_remove_full" },
     { path = "indexmap::IndexSet::swap_remove_index", reason = "reorders entries ordered by insertion: use shift_remove_index" },
+    # The same removals through the entry APIs.
+    { path = "indexmap::map::OccupiedEntry::swap_remove", reason = "reorders entries ordered by insertion: use shift_remove" },
+    { path = "indexmap::map::OccupiedEntry::swap_remove_entry", reason = "reorders entries ordered by insertion: use shift_remove_entry" },
+    { path = "indexmap::map::IndexedEntry::swap_remove", reason = "reorders entries ordered by insertion: use shift_remove" },
+    { path = "indexmap::map::IndexedEntry::swap_remove_entry", reason = "reorders entries ordered by insertion: use shift_remove_entry" },
+    { path = "indexmap::map::raw_entry_v1::RawOccupiedEntryMut::swap_remove", reason = "reorders entries ordered by insertion: use shift_remove" },
+    { path = "indexmap::map::raw_entry_v1::RawOccupiedEntryMut::swap_remove_entry", reason = "reorders entries ordered by insertion: use shift_remove_entry" },
+    # serde_json's Map is an IndexMap under preserve_order, and its plain `remove` is swap_remove
+    # there. Document order is what rules_client() and the save format keep.
+    { path = "serde_json::Map::remove", reason = "under preserve_order this is swap_remove, which reorders the document: use shift_remove" },
+    { path = "serde_json::Map::remove_entry", reason = "under preserve_order this is swap_remove_entry, which reorders the document: use shift_remove_entry" },
+    { path = "serde_json::Map::swap_remove", reason = "reorders the document: use shift_remove" },
+    { path = "serde_json::Map::swap_remove_entry", reason = "reorders the document: use shift_remove_entry" },
+    { path = "serde_json::map::OccupiedEntry::remove", reason = "under preserve_order this is swap_remove, which reorders the document: use shift_remove" },
+    { path = "serde_json::map::OccupiedEntry::remove_entry", reason = "under preserve_order this is swap_remove_entry, which reorders the document: use shift_remove_entry" },
+    { path = "serde_json::map::OccupiedEntry::swap_remove", reason = "reorders the document: use shift_remove" },
+    { path = "serde_json::map::OccupiedEntry::swap_remove_entry", reason = "reorders the document: use shift_remove_entry" },
 
     # Unstable sorts order equal keys however the toolchain's algorithm leaves them.
     { path = "slice::sort_unstable", reason = "ties land in an unspecified order: use sort, with a key that ends in an id" },
@@ -101,6 +123,14 @@ disallowed-methods = [
     { path = "slice::select_nth_unstable", reason = "ties land in an unspecified order: sort stably instead" },
     { path = "slice::select_nth_unstable_by", reason = "ties land in an unspecified order: sort stably instead" },
     { path = "slice::select_nth_unstable_by_key", reason = "ties land in an unspecified order: sort stably instead" },
+    { path = "indexmap::IndexMap::sort_unstable_keys", reason = "stable sorts only (DESIGN.md 7.4): use sort_keys" },
+    { path = "indexmap::IndexMap::sort_unstable_by", reason = "ties land in an unspecified order: use sort_by, with a key that ends in an id" },
+    { path = "indexmap::IndexMap::sort_unstable_by_key", reason = "ties land in an unspecified order: use sort_by_key, with a key that ends in an id" },
+    { path = "indexmap::IndexMap::sorted_unstable_by", reason = "ties land in an unspecified order: use sorted_by, with a key that ends in an id" },
+    { path = "indexmap::IndexSet::sort_unstable", reason = "stable sorts only (DESIGN.md 7.4): use sort" },
+    { path = "indexmap::IndexSet::sort_unstable_by", reason = "ties land in an unspecified order: use sort_by, with a key that ends in an id" },
+    { path = "indexmap::IndexSet::sort_unstable_by_key", reason = "ties land in an unspecified order: use sort_by_key, with a key that ends in an id" },
+    { path = "indexmap::IndexSet::sorted_unstable_by", reason = "ties land in an unspecified order: use sorted_by, with a key that ends in an id" },
 
     # No I/O, no environment, no threads. `std::process::exit` is refused by the workspace lint
     # clippy::exit instead, so a call is reported once.
@@ -140,6 +170,9 @@ disallowed-methods = [
     { path = "std::thread::Builder::spawn", reason = "no threads in Phase 1 (DESIGN.md 6.13): run games side by side instead" },
     { path = "std::thread::sleep", reason = "the engine has no clock" },
     { path = "std::process::abort", reason = "hosts turn a panic into one poisoned game; aborting takes the process down" },
+    { path = "std::io::stdin", reason = "the engine has no console: hosts pass bytes in" },
+    { path = "std::io::stdout", reason = "the engine has no console: return the text, or emit an event" },
+    { path = "std::io::stderr", reason = "the engine has no console: return an error" },
 ]
 
 disallowed-macros = [
