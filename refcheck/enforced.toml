@@ -1,0 +1,18 @@
+# The refcheck groups whose unexplained differences fail a run (crates/citar-engine/DESIGN.md 9.2).
+#
+# CI runs `cargo refcheck run` on refcheck/fixtures-mini and refcheck/fixtures-late: an unexplained difference
+# (one refcheck/intended.toml does not explain) at a place listed here fails it. Elsewhere, unexplained
+# differences are reported and counted in refcheck/ratchet.json, where they may only fall.
+#
+# Every system package that brings an answer module adds its group here, or the paths it has made clean
+# (DESIGN.md 3.4, rule 1). A group listed here must have an answer module; enforcing a group that is never
+# compared would pass without checking anything, so the run stops with a configuration error instead.
+#
+#   [[enforce]]
+#   group = "tile_yields"                  # the whole group
+#
+#   [[enforce]]
+#   group = "civs"                         # only these paths, in the path grammar of intended.toml,
+#   paths = ["civs[*].resource_supply.**", "civs[*].unit_supply"]   # matched against a difference's whole path
+#
+# No group has an answer module yet, so nothing is enforced.
