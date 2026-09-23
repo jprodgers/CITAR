@@ -19,22 +19,36 @@ from collections import Counter
 from pathlib import Path
 
 METRICS = ("cities", "population", "techs", "score", "military", "wars_declared", "cities_captured")
+# what identifies one game in a file (baseline.IDENTITY)
+IDENTITY = ("i", "seed", "size", "map_type", "barbarians", "speed", "turn_limit")
 
 
 def load(path: Path, size: str = None, map_type: str = None) -> tuple[list[dict], int]:
-    """The finished games in a baseline file (optionally one size or map type), and how many crashed."""
-    games, crashed = [], 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    """The finished games in a baseline file (optionally one size or map type), and how many games only crashed.
+
+    A resumed run can hold one game on several lines (a crash, then the replay that finished it), so each game
+    counts once: its last finished line, or, if it never finished, as one crash. A line that is not JSON (a run
+    stopped mid-write) is skipped with a warning.
+    """
+    finished, crashed = {}, set()
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
-        r = json.loads(line)
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            r = None
+        if not isinstance(r, dict):
+            print(f"{path}:{n}: skipped a line that is not a game (a run stopped mid-write?)", file=sys.stderr)
+            continue
         if (size and r.get("size") != size) or (map_type and r.get("map_type") != map_type):
             continue
+        key = tuple(r.get(k) for k in IDENTITY)
         if r.get("crash"):
-            crashed += 1
+            crashed.add(key)
         else:
-            games.append(r)
-    return games, crashed
+            finished[key] = r
+    return list(finished.values()), len(crashed - finished.keys())
 
 
 def percentile(xs: list, q: float) -> float:

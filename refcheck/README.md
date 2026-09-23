@@ -41,9 +41,13 @@ python scripts/refcheck/record.py --full --only large --workers 4
 ```
 
 The recorder re-runs itself with `PYTHONHASHSEED=0` and writes gzip files with no timestamps and no timings,
-so the same code produces the same bytes. `--check` therefore fails only when the Python engine's behaviour
-changes. If a change is deliberate, re-record with `--quick` and commit the new fixtures together with the
-change. Cases run in parallel processes (`--workers`, default: all cores but four).
+so the same code produces the same bytes. Errors go into files as one line each (type, message and the
+innermost function of this repository, with no paths or line numbers), and their tracebacks go to the console.
+`--check` therefore fails only when the Python engine's behaviour changes. If a change is deliberate, re-record
+with `--quick` and commit the new fixtures together with the change.
+
+Cases run in parallel processes (`--workers`, default: all cores but four), and each has a time budget (see
+[Time budgets](#time-budgets)).
 
 **The corpus (`--full`).** It covers:
 
@@ -67,7 +71,9 @@ editor's operations and ordinary tool calls:
 - A builds the United Nations, with a vote due next turn;
 - A declares war on B and captures a town B has just founded;
 - A drops an atomic bomb two tiles from B's capital and keeps a nuclear missile;
-- A and B each get armies in contact with the other.
+- A and B each get armies in contact with the other;
+- A gets a bomber and a fighter, and B a fighter and an anti-aircraft gun, so there are air strikes and
+  interceptions to record.
 
 The bots then play on, and the case records the next checkpoints too. Each step's result or error is logged in
 the fixture's `meta.setup`. The quick fixtures include one such case (`scenario-duel-fractal`); the full corpus
@@ -102,10 +108,11 @@ refreshing visibility again changes nothing. A few details of the format:
 - `side_effects` names, for each query group, the top-level state fields that answering changed in Python.
   Examples: `un`, which is created on first read, and a city's religious `pressures`, which are seeded on first
   read. Rust need not copy these side effects; they are listed so that nobody is surprised by them.
-- `query_crashes` names the groups whose Python answer raised. Such a group's answer is
-  `{"crash", "trace"}` instead: the other groups are still recorded, and the crash is a Python bug worth
-  knowing about, not something to port.
-- `bot_errors` lists bot crashes so far in the game (the game goes on, as in the lab).
+- `query_crashes` names the groups whose Python answer raised. Such a group's answer is `{"crash"}`
+  instead, one line naming the error and where it happened (the traceback is printed on the console when
+  recording). The other groups are still recorded, and the crash is a Python bug worth knowing about, not
+  something to port.
+- `bot_errors` lists bot crashes so far in the game, one line each (the game goes on, as in the lab).
 
 **`queries`** hold one object per group, answered in the order of `meta.query_order`. Every group starts from
 its own fresh load of `state`, with cold caches, so an answer depends only on the state and on the order of
@@ -121,7 +128,7 @@ the Rust side replays the inputs and never has to copy Python's sampling.
 | `buildable` | per major's city: `cities.buildable_items`, production cost, turns, and `purchase_check` in gold and faith for each item | city |
 | `movement` | `reachable_this_turn` for up to 40 units with moves left; 40 seeded `find_path` calls with `path_turns` and step costs | `unit`, `from`, `to`, `moves` |
 | `visible` | `visibility.visible_tiles` per living major, sorted | `pid` |
-| `combat_previews` | every attacker (unit or city) with targets, up to 2 targets each and 300 fights: strengths, modifiers, damage at rolls 0, 0.5 and 1, and `combat.preview` or its refusal | attacker, `target` |
+| `combat_previews` | every attacker (unit, aircraft or city; not nuclear weapons) with targets, up to 2 targets each and 300 fights: strengths, modifiers, damage at rolls 0, 0.5 and 1, and `combat.preview` or its refusal. Aircraft get `can_attack_now` and their interception instead: every candidate interceptor with its chance, damage factor and damage at the same rolls | attacker, `target` |
 | `deal_checks` | seeded proposals between majors who have met: the normalised proposal, whether each side's items pass `validate_items` (else the first refusal), `describe_items`, research-agreement cost, and a fresh default bot's valuation | `a`, `b`, `give`, `receive` |
 | `tool_errors` | the refusal text of about 30 invalid tool calls (a call that succeeds is recorded as `ok`) | `pid`, `tool`, `args` |
 | `views` | `views.client_view` for the first two living majors | `pid` |
@@ -167,12 +174,20 @@ python scripts/refcheck/summarize.py refcheck/baseline/python-<hash>.jsonl refch
 
 **How a run is made.** Game *i* uses seed `--seed + i` and the *i*-th combination of `--sizes`, `--maps` and
 `--barbarians`. A run is resumable: games already in the output file are skipped, and a crashed game is played
-again. The default output name carries the engine hash, so results from different code never mix.
+again. One file is one sample:
+
+- the default output name carries the engine and bot hashes;
+- a run refuses to add to a file that holds games from other engine or bot code, or a game *i* with another
+  seed, size, map type, barbarian setting, speed or turn limit than this run's game *i*. Use another `--name`.
+
+A run stopped mid-write leaves a torn last line. The next run starts on a fresh line, and `summarize.py` skips
+the torn one with a warning.
 
 **What a line holds.**
 
-- The game: seed, size, map type, barbarians, speed, turns played, winner and victory type, bot errors, and
-  seconds and CPU seconds.
+- The game: index, seed, size, map type, barbarians, speed, turn limit, the engine and bot hashes, turns
+  played, winner and victory type, bot errors, and seconds and CPU seconds. A game that crashed or ran out of
+  time has `crash` and `trace` in place of the results.
 - Per civilization: nation, aggression, whether it is alive, the turn it was eliminated, its final score, and
   `at`. `at` holds its stats at turns 100, 200 and 300 and at the end: cities, population, techs, score,
   military, era, policies and land, plus running totals of wars declared (all, on majors, on others), cities
@@ -181,7 +196,8 @@ again. The default output name carries the engine hash, so results from differen
 The stats are the engine's own end-of-turn records (`GameState.stats`), so the Rust runner must write the same
 lines from its own records.
 
-**Comparing two baselines.** `summarize.py` prints, per file:
+**Comparing two baselines.** Each game counts once: its last finished line, or one crash if it never
+finished. `summarize.py` prints, per file:
 
 - game length;
 - victory shares;
@@ -197,6 +213,23 @@ deviations:
 This is a sanity check, not a gate: a big gap is either explained (a deliberate change in behaviour) or fixed.
 Compare like with like: the same sizes, maps, barbarians and speed. With a few hundred games per side, `d` below
 0.2 is well within what a different map generator produces.
+
+## Time budgets
+
+Both scripts run unattended for hours, so no game may hold a run up:
+
+- **The budget.** Each game (or recorded case) has one: `--max-minutes`, or by default 60 minutes on a small map,
+  scaled by map area (at least 20 minutes, about 140 on a large map). That is many times what a game takes; it
+  is there to catch a hang.
+- **Out of time.** A game past its budget stops at the start of its next round.
+- **Stuck inside a turn.** A game stuck in one turn is interrupted wherever it is, five minutes later. Its
+  traceback, printed with the crash, shows where it was stuck.
+- **Either way,** the game is recorded as a crash (`GameTimeout`) and the other workers carry on. A resumed
+  baseline plays it again.
+- **Stuck beyond that.** If no game finishes for longer than any game may take, a worker is stuck where it
+  cannot be interrupted (inside C code). The same happens if a worker process dies. The run then stops: the
+  games caught in it are reported as crashes (the baseline also writes them as crash lines), the workers are
+  terminated, and the script exits with 1. Run the same command again to resume.
 
 ## Caveats
 

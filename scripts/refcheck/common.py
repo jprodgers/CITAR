@@ -7,18 +7,26 @@ the same code however those modules change.
 Everything here is deterministic given a seed: games are seeded, the bots are seeded from the game's seed, and the
 scripts re-run themselves with PYTHONHASHSEED=0 so that anything iterating a set of strings comes out in the same
 order on every run (tests/test_bots.py checks that games themselves do not depend on it).
+
+Runs are long and unattended, so no single game may hold one up: every game has a time budget (Deadline), and the
+parallel runner (run_parallel) stops cleanly when a worker is stuck beyond that or dies.
 """
 from __future__ import annotations
 
 import base64
+import ctypes
+import functools
 import gzip
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +36,9 @@ if str(ROOT) not in sys.path:
 REFCHECK = ROOT / "refcheck"
 MAP_TYPES = ("continents", "pangaea", "archipelago", "inland_sea", "fractal")
 BARBARIANS = ("off", "normal", "raging")
+# a Quick game on a small map takes about four minutes; the budget is there to catch a game that hangs, not a slow one
+BUDGET_MINUTES_SMALL = 60
+HARD_GRACE = 300          # seconds past the budget before the watchdog interrupts a game stuck inside one turn
 
 
 def ensure_hash_seed():
@@ -57,8 +68,13 @@ def _hash_files(paths) -> str:
     return h.hexdigest()[:10]
 
 
+@functools.cache
 def engine_hash() -> str:
-    """A hash of the engine and ruleset (the same recipe as citar.lab.engine_hash, so the two agree)."""
+    """A hash of the engine and ruleset (the same recipe as citar.lab.engine_hash, so the two agree).
+
+    Taken once per process: a worker imports the engine once and plays every later game with that code, so its
+    first reading is the one that describes all its games, even if the files change on disk meanwhile.
+    """
     from citar import paths
     files = []
     for d in (paths.PACKAGE / "engine", paths.package_data()):
@@ -66,10 +82,180 @@ def engine_hash() -> str:
     return _hash_files(files)
 
 
+@functools.cache
 def bot_hash() -> str:
-    """A hash of the live bot, which decides what the recorded games look like."""
+    """A hash of the live bot, which decides what the recorded games look like (once per process, as above)."""
     from citar import paths
     return _hash_files([paths.PACKAGE / "bots" / "basic.py"])
+
+
+def error_text(e: BaseException) -> str:
+    """An exception as one line for a file: its type, its message, and the innermost function of this repository
+    it passed through, as module.function.
+
+    No file paths or line numbers: files are compared across machines and across edits that only move code, and
+    a path would also leak the recording machine's folders into committed fixtures. Callers print the full
+    traceback to the console instead.
+    """
+    where = None
+    for fr in reversed(traceback.extract_tb(e.__traceback__)):
+        path = Path(fr.filename)
+        if not path.is_absolute():            # "<string>", "<frozen ...>": no module of ours
+            continue
+        try:
+            rel = path.resolve().relative_to(ROOT)
+        except ValueError:
+            continue
+        where = ".".join(rel.with_suffix("").parts) + "." + fr.name
+        break
+    return f"{type(e).__name__}: {e}" + (f" (in {where})" if where else "")
+
+
+def print_trace(header: str):
+    """The traceback of the exception being handled, to the console (stderr), under a one-line header."""
+    print(f"{header}\n{traceback.format_exc()}", file=sys.stderr, flush=True)
+
+
+# ----------------------------------------------------------------------------
+# time budgets and the parallel runner
+# ----------------------------------------------------------------------------
+def time_budget(size: str, minutes: float = 0) -> float:
+    """Seconds one game on a *size* map may run: *minutes* if given, else BUDGET_MINUTES_SMALL scaled by the map's
+    area against a small map's, and never under 20 minutes."""
+    if minutes:
+        return minutes * 60
+    from citar.engine.rules import get_rules
+    sizes = get_rules().const["map_sizes"]
+
+    def area(s):
+        """Tiles on a map of size *s*."""
+        return sizes[s]["width"] * sizes[s]["height"]
+    return max(20.0, BUDGET_MINUTES_SMALL * area(size) / area("small")) * 60
+
+
+def stall_limit(budgets) -> float:
+    """Seconds the parallel runner waits for any job to finish before it calls the run stuck: the longest budget,
+    plus the watchdog's grace, plus five minutes. Every running job ends within its budget and grace of starting,
+    and one starts only when another finishes, so a longer silence means a worker is stuck beyond its watchdog."""
+    return max(budgets, default=0) + HARD_GRACE + 300
+
+
+class GameTimeout(BaseException):
+    """A game ran past its time budget. A BaseException, like KeyboardInterrupt, so that the engine's and the bot's
+    own ``except Exception`` handlers cannot swallow it on its way out."""
+
+
+def _async_raise(tid: int, exc):
+    """Raise the exception class *exc* in thread *tid* at its next bytecode, or withdraw one not yet delivered
+    (*exc* None)."""
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), ctypes.py_object(exc) if exc else None)
+
+
+class Deadline:
+    """One game's time budget, enforced twice. Use it as a context manager around the game.
+
+    ``check(g)``, which play() calls at the start of every round, raises GameTimeout at a clean point once the
+    budget is spent. A game stuck inside one turn (a bot or engine loop that never ends) never reaches that point,
+    so a watchdog thread also raises GameTimeout inside the game's own thread, wherever it is, HARD_GRACE seconds
+    later. Pure-Python code takes it at its next bytecode, so the worker is free for the next game and the
+    traceback shows where the game was stuck. Code blocked inside C is out of its reach: run_parallel's stall
+    limit covers that.
+    """
+
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+        self.at = time.monotonic() + seconds
+        self._lock = threading.Lock()
+        self._armed = self._fired = False
+        self._timer = self._tid = None
+
+    def check(self, g):
+        """Raise GameTimeout if the budget is spent."""
+        if time.monotonic() > self.at:
+            raise GameTimeout(f"still playing at turn {g.turn} after its {self.seconds / 60:.3g}-minute budget")
+
+    def _fire(self):
+        """The watchdog: interrupt the game's thread, unless the game has already finished."""
+        with self._lock:
+            if self._armed:
+                self._fired = True
+                _async_raise(self._tid, GameTimeout)
+
+    def __enter__(self):
+        self._tid = threading.get_ident()
+        self._armed = True
+        self._timer = threading.Timer(self.seconds + HARD_GRACE, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc):
+        with self._lock:
+            self._armed = False
+            if self._fired:
+                _async_raise(self._tid, None)      # it fired as the game finished: don't let it land after this
+        self._timer.cancel()
+        return False
+
+
+def _terminate(ex: ProcessPoolExecutor):
+    """Stop a pool now, without waiting for a worker that may never return."""
+    if hasattr(ex, "terminate_workers"):          # Python 3.14+
+        ex.terminate_workers()
+        return
+    procs = list((ex._processes or {}).values())
+    ex.shutdown(wait=False, cancel_futures=True)
+    for p in procs:
+        if p.is_alive():
+            p.terminate()
+
+
+def run_parallel(fn, jobs: list, workers: int, stall_seconds: float):
+    """Run ``fn(job)`` for every job in worker processes, yielding ``(job, result, None)`` as each finishes.
+
+    Two failures that the jobs' own deadlines cannot handle stop the run, and the jobs caught in them are yielded
+    as ``(job, None, why)``:
+
+    - no job finishing for *stall_seconds* (see stall_limit): a worker is stuck where its watchdog cannot reach;
+    - a worker process dying (killed, or out of memory), which takes every running job with it.
+
+    Jobs not yet started are not yielded; the caller's resume plays them. Either way, and if the caller stops
+    early, the worker processes are terminated, so a stuck one cannot keep the script alive.
+    """
+    ex = ProcessPoolExecutor(max_workers=max(1, min(workers, len(jobs))))
+    futs = {ex.submit(fn, j): j for j in jobs}
+    pending, finished = set(futs), False
+    try:
+        while pending:
+            running = {f for f in pending if f.running()}
+            done, pending = wait(pending, timeout=stall_seconds, return_when=FIRST_COMPLETED)
+            if not done:
+                why = (f"unfinished when the run stopped: no job finished for {stall_seconds / 60:.0f} minutes, so a "
+                       f"worker is stuck where its own deadline cannot stop it (blocked in C code?)")
+                for f in running | {f for f in pending if f.running()}:
+                    yield futs[f], None, why
+                return
+            broken = False
+            for f in done:
+                try:
+                    r = f.result()
+                except BrokenProcessPool:
+                    broken = True
+                    if f in running:
+                        yield futs[f], None, "its worker process died (killed, or out of memory?)"
+                    continue
+                except Exception as e:
+                    yield futs[f], None, f"the job raised {type(e).__name__}: {e}"
+                    continue
+                yield futs[f], r, None
+            if broken:
+                return
+        finished = True
+    finally:
+        if finished:
+            ex.shutdown()
+        else:
+            _terminate(ex)
 
 
 # ----------------------------------------------------------------------------
@@ -121,13 +307,14 @@ class BotErrors(Exception):
     """Too many bot crashes in one game: the game is no longer a fair sample."""
 
 
-def play(g, bots: dict, on_round=None, errors: list = None, max_errors: int = 20):
+def play(g, bots: dict, on_round=None, errors: list = None, max_errors: int = 20, deadline: Deadline = None):
     """Play an all-bot game until it ends or *on_round* returns False.
 
     ``on_round(g)`` is called once at the start of every round, when the first living major civilization's turn
     has begun and nothing else has happened yet: that is the moment checkpoints are taken, and the moment a
-    scenario may edit the game. A bot that raises is logged into *errors* and its turn ends, as in the lab; more
-    than *max_errors* crashes raise BotErrors.
+    scenario may edit the game. A bot that raises is logged into *errors* (one line each, see error_text; the
+    traceback goes to the console) and its turn ends, as in the lab; more than *max_errors* crashes raise
+    BotErrors. A *deadline* is checked at the start of every round.
     """
     errors = errors if errors is not None else []
     seen = None
@@ -135,6 +322,8 @@ def play(g, bots: dict, on_round=None, errors: list = None, max_errors: int = 20
         if g.turn != seen:
             seen = g.turn
             g.frames.clear()           # replay frames are not state, and a long game's would fill memory
+            if deadline is not None:
+                deadline.check(g)
             if on_round is not None and on_round(g) is False:
                 return
             if g.s.phase != "playing":
@@ -145,7 +334,8 @@ def play(g, bots: dict, on_round=None, errors: list = None, max_errors: int = 20
             try:
                 bot.play_turn(g, pid, end_turn=False)
             except Exception as e:
-                errors.append(f"T{g.turn} P{pid}: {type(e).__name__}: {e}\n{traceback.format_exc(limit=5)}")
+                errors.append(f"T{g.turn} P{pid}: {error_text(e)}")
+                print_trace(f"bot error, seed {g.s.config.get('seed')} turn {g.turn} player {pid}:")
                 if len(errors) > max_errors:
                     raise BotErrors(f"{len(errors)} bot errors; the last: {errors[-1]}")
             resolve_negotiations(g, bots)

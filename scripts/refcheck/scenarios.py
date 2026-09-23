@@ -10,18 +10,19 @@ map where, say, no tile next to the rival's town is free still yields a useful s
 """
 from __future__ import annotations
 
-import traceback
+import common
 
 
 def _log(steps: list, name: str, fn):
-    """Run one setup step, recording its result or its failure."""
+    """Run one setup step, recording its result or its failure (one line in the file, the traceback on the
+    console)."""
     try:
         res = fn()
         steps.append({"step": name, "ok": True, "result": res})
         return res
     except Exception as e:
-        steps.append({"step": name, "ok": False, "error": f"{type(e).__name__}: {e}",
-                      "trace": traceback.format_exc(limit=3)})
+        steps.append({"step": name, "ok": False, "error": common.error_text(e)})
+        common.print_trace(f"scenario step '{name}' failed:")
         return None
 
 
@@ -49,7 +50,8 @@ def world_war(g) -> list[dict]:
     shown the whole map. A founds a religion in its capital and spreads it into B's territory, sends a spy to B's
     capital, builds the United Nations with a vote due next turn, declares war on B, captures a town B has just
     founded, drops an atomic bomb near B's capital (fallout, a damaged city), keeps a nuclear missile in reserve,
-    and puts armies in contact on both fronts. B gets a spy in A's capital.
+    and puts armies in contact on both fronts. B gets a spy in A's capital. Both get aircraft: A a bomber and a
+    fighter, B a fighter and an anti-aircraft gun to intercept them.
     """
     from citar.engine import scenario as S, tools, religion, espionage, victory, cities as C, visibility
     steps: list[dict] = []
@@ -176,6 +178,22 @@ def world_war(g) -> list[dict]:
         visibility.refresh(g, force=True)
         return placed
     run("front line", front)
+
+    def air_war():
+        """Aircraft on both sides, so there are air strikes and interceptions to record: A's bomber and fighter
+        in the town it took (or its capital), within reach of B's capital and army; B's fighter in its capital
+        and an anti-aircraft gun beside it to intercept them."""
+        base = g.city(captured["town"]) if captured and g.city(captured["town"]) and \
+            g.city(captured["town"]).owner == a else cap_a
+        placed = S.apply_ops(g, [{"op": "add_unit", "player": a, "unit": kind, **_xy(g, base.idx)}
+                                 for kind in ("Bomber", "Fighter")])
+        placed += S.apply_ops(g, [{"op": "add_unit", "player": b, "unit": "Fighter", **_xy(g, cap_b.idx)}])
+        spot = _free_land_near(g, cap_b.idx, 1, 3, b, "Anti-Aircraft Gun")
+        if spot is not None:
+            placed += S.apply_ops(g, [{"op": "add_unit", "player": b, "unit": "Anti-Aircraft Gun", **_xy(g, spot)}])
+        visibility.refresh(g, force=True)
+        return placed
+    run("air war", air_war)
 
     def refresh():
         """Recompute what everyone sees after all the edits."""

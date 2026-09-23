@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import random
 import time
-import traceback
 
 import common
 
@@ -231,6 +230,9 @@ def visible(g, rng) -> dict:
             "civs": [{"pid": pid, "tiles": sorted(visibility.visible_tiles(g, pid))} for pid in _majors(g)]}
 
 
+ROLLS = (0.0, 0.5, 1.0)
+
+
 def _fight(g, a, d, frm: int) -> dict:
     """Strengths, modifiers and damage for one attacker against one defender, with the random roll fixed."""
     from citar.engine import combat as K
@@ -238,8 +240,8 @@ def _fight(g, a, d, frm: int) -> dict:
             "defender_strength": K.defending_strength(g, a, d, frm),
             "attack_modifiers": K.attack_modifiers(g, a, d, frm),
             "defense_modifiers": K.defense_modifiers(g, a, d, frm),
-            "damage_to_defender": [K.damage_to_defender(g, a, d, frm, r) for r in (0.0, 0.5, 1.0)],
-            "damage_to_attacker": [K.damage_to_attacker(g, a, d, frm, r) for r in (0.0, 0.5, 1.0)]}
+            "damage_to_defender": [K.damage_to_defender(g, a, d, frm, r) for r in ROLLS],
+            "damage_to_attacker": [K.damage_to_attacker(g, a, d, frm, r) for r in ROLLS]}
 
 
 def _defender(d) -> dict:
@@ -247,17 +249,41 @@ def _defender(d) -> dict:
     return {"city": d.city.id} if d.city is not None else {"unit": d.unit.id}
 
 
+def _interception(g, a, d, idx: int) -> dict:
+    """What an air strike on *idx* meets before its fight, as combat.try_intercept sees it but without its random
+    draws: every unit of the defender's that could intercept, with its chance and the damage it would deal at the
+    fixed rolls, and the factor applied to that damage. try_intercept picks the candidate with the highest chance
+    (the first in g.player_units order on a tie)."""
+    from citar.engine import combat as K, unique_types as U
+    from citar.engine.units import unit_has, unit_uniques
+    if unit_has(g, a.unit, U.CannotBeIntercepted):
+        return {"immune": True}
+    out = []
+    for u in g.player_units(d.owner):
+        if not K.can_intercept(g, u, idx) or (d.unit is not None and u.id == d.unit.id):
+            continue
+        ic = K.Combatant(unit=u)
+        factor = 1 + sum(x.n(0) for x in unit_uniques(g, u, U.DamageWhenIntercepting)) / 100
+        for x in unit_uniques(g, a.unit, U.DamageFromInterceptionReduced):
+            factor *= 1 - x.n(0) / 100
+        out.append({"unit": u.id, "type": u.type, "chance": K.intercept_chance(g, u), "factor": factor,
+                    "damage": [K.damage_to_defender(g, ic, a, u.idx, r) for r in ROLLS]})
+    return {"immune": False, "candidates": out}
+
+
 def combat_previews(g, rng) -> dict:
     """Every unit and city with something to attack (up to COMBAT_TARGETS targets each, COMBAT_PAIRS fights in
     all): the fight's numbers at rolls 0, 0.5 and 1, and the engine's own preview, which also checks that the
-    attack is allowed right now."""
-    from citar.engine import combat as K, visibility, movement as M
+    attack is allowed right now. Aircraft (not nuclear weapons, which do not fight) get their interception
+    instead of a preview, which the engine refuses them."""
+    from citar.engine import combat as K, visibility, movement as M, unique_types as U
     from citar.engine.units import attack_range
     pairs, attackers = [], 0
     for u in _units(g):
         ud = g.rules.units[u.type]
-        if not ud["_military"] or M.is_air(ud):
+        if not ud["_military"] or ud["_umap"].get(U.NuclearWeapon):
             continue
+        kind = "air" if M.is_air(ud) else "unit"
         a = K.Combatant(unit=u)
         targets = []
         for idx in g.grid.within(u.idx, attack_range(g, u)):
@@ -266,7 +292,7 @@ def combat_previews(g, rng) -> dict:
             if not g.is_barbarian(u.owner) and not visibility.is_visible(g, u.owner, idx):
                 continue
             if K.contains_attackable_enemy(g, idx, a) is None:
-                targets.append(("unit", u, idx))
+                targets.append((kind, u, idx))
         attackers += bool(targets)
         pairs += _sample(rng, targets, COMBAT_TARGETS)
     for c in _cities(g):
@@ -277,25 +303,35 @@ def combat_previews(g, rng) -> dict:
     out = []
     for kind, who, idx in _sample(rng, pairs, COMBAT_PAIRS):
         d = K.combatant_at(g, idx)
-        if kind == "unit":
-            a, frm = K.Combatant(unit=who), who.idx
-            e = {"attacker": {"unit": who.id, "type": who.type, "owner": who.owner, "from": frm}}
-        else:
+        if kind == "city":
             a, frm = K.Combatant(city=who), who.idx
             e = {"attacker": {"city": who.id, "owner": who.owner, "from": frm}}
+        else:
+            a, frm = K.Combatant(unit=who), who.idx
+            e = {"attacker": {"unit": who.id, "type": who.type, "owner": who.owner, "from": frm}}
         e.update({"target": idx, "defender": _defender(d), **_fight(g, a, d, frm)})
         if kind == "unit":
             e["preview"] = _error(K.preview, g, who, idx)
+        elif kind == "air":
+            e["can_attack_now"] = K.can_attack_now(g, who)
+            e["interception"] = _interception(g, a, d, idx)
         out.append(e)
-    return {"fn": {"pairs": "military non-air units: tiles within units.attack_range that the owner sees and "
-                            "combat.contains_attackable_enemy accepts; cities: combat.bombard_targets. At most "
-                            f"{COMBAT_TARGETS} targets per attacker and {COMBAT_PAIRS} fights, sampled",
+    return {"fn": {"pairs": "military units except nuclear weapons: tiles within units.attack_range that the owner "
+                            "sees and combat.contains_attackable_enemy accepts; cities: combat.bombard_targets. At "
+                            f"most {COMBAT_TARGETS} targets per attacker and {COMBAT_PAIRS} fights, sampled",
                    "attacker_strength": "combat.attacking_strength(g, a, d, from_tile)",
                    "defender_strength": "combat.defending_strength", "attack_modifiers": "combat.attack_modifiers",
                    "defense_modifiers": "combat.defense_modifiers",
                    "damage_to_defender": "combat.damage_to_defender at rnd 0.0, 0.5, 1.0",
                    "damage_to_attacker": "combat.damage_to_attacker at rnd 0.0, 0.5, 1.0",
-                   "preview": "combat.preview(g, unit, idx), or its refusal"},
+                   "preview": "ground and sea units: combat.preview(g, unit, idx), or its refusal",
+                   "can_attack_now": "aircraft: combat.can_attack_now (the one check of combat.air_strike that "
+                                     "the target list does not already make), refusal or null",
+                   "interception": "aircraft: immune if the attacker has 'Cannot be intercepted'; else each "
+                                   "candidate of combat.try_intercept (combat.can_intercept over the target, not "
+                                   "the defending unit itself) with combat.intercept_chance, try_intercept's damage "
+                                   "factor, and combat.damage_to_defender(g, interceptor, aircraft, its tile, rnd) "
+                                   "at rnd 0.0, 0.5, 1.0"},
             "attackers": attackers, "fights": out}
 
 
@@ -459,8 +495,9 @@ def answer_all(text: str, seed: int, turn: int) -> tuple[dict, dict, dict]:
     fields that answering changed (for example a city's religious pressures being seeded on first read); another
     engine has to know about those, since it will be asked the same questions in the same order.
 
-    A group that raises is recorded as {"crash": ..., "trace": ...} and the others still run: a Python engine bug
-    found by a question is worth keeping, and it must not cost the rest of a long recording.
+    A group that raises is recorded as {"crash": one line, see common.error_text} and the others still run: a
+    Python engine bug found by a question is worth keeping, and it must not cost the rest of a long recording. Its
+    traceback goes to the console.
     """
     base = json.loads(text)
     base_parts = {k: common.dumps(v) for k, v in base.items()}
@@ -472,7 +509,8 @@ def answer_all(text: str, seed: int, turn: int) -> tuple[dict, dict, dict]:
         try:
             answers[name] = json.loads(common.dumps(fn(g, rng)))
         except Exception as e:
-            answers[name] = {"crash": f"{type(e).__name__}: {e}", "trace": traceback.format_exc(limit=6)}
+            answers[name] = {"crash": common.error_text(e)}
+            common.print_trace(f"query group {name} raised (seed {seed}, turn {turn}):")
         after = g.s.to_dict()
         changed = sorted(k for k, v in after.items() if common.dumps(v) != base_parts.get(k))
         if changed:
