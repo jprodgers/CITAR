@@ -251,10 +251,49 @@ impl State {
         })
     }
 
-    /// A state from its parts, with the indexes rebuilt and the parts checked against each other:
-    /// the tiles fill the map, the grid is valid, ids are positions, the relations cover the
-    /// players, units stand on the map with sound carrier links.
+    /// A state from its parts, with the indexes rebuilt and the parts checked against each other,
+    /// so that no later read can panic on them:
+    /// - the grid is valid, the tiles and continents fill the map, and each major's memory and
+    ///   each explored set fit it;
+    /// - there are at most 64 players, each at its own id, and the relations cover them;
+    /// - every unit, city and tile owner is a player, and every city and unit stands on the map;
+    /// - a tile's city exists, and carrier links are sound;
+    /// - each id counter is past every unit, city, camp, deal and negotiation id in use, so the
+    ///   next spawn cannot collide with one.
+    ///
+    /// What these checks leave to `save::validate` is referential integrity beyond ownership
+    /// (capitals, goto tiles, worked tiles and the like), ranges and floats.
     pub fn from_parts(parts: StateParts) -> Result<Self, StateError> {
+        parts.map.grid()?;
+        let size = parts.map.size();
+        if parts.tiles.len() != size as usize {
+            return Err(StateError::Mismatch(format!(
+                "{} tiles for a {}x{} map",
+                parts.tiles.len(),
+                parts.map.width,
+                parts.map.height
+            )));
+        }
+        if !parts.map.continents.is_empty() && parts.map.continents.len() != size as usize {
+            return Err(StateError::Mismatch(format!(
+                "{} continent ids for {size} tiles",
+                parts.map.continents.len()
+            )));
+        }
+        let n = parts.players.len();
+        if n > PlayerSet::CAPACITY {
+            return Err(StateError::Mismatch(format!("{n} players; at most 64 fit")));
+        }
+        if let Some((pos, p)) = parts.players.iter().find(|(pos, p)| p.id() != *pos) {
+            return Err(StateError::Mismatch(format!("player {} is at position {pos}", p.id())));
+        }
+        if usize::from(parts.diplo.players()) != n {
+            return Err(StateError::Mismatch(format!(
+                "relations for {} players, {n} players",
+                parts.diplo.players()
+            )));
+        }
+        Self::check_refs(&parts, size)?;
         let StateParts {
             config,
             map,
@@ -269,35 +308,6 @@ impl State {
             chronicle,
             host,
         } = parts;
-        map.grid()?;
-        let size = map.size() as usize;
-        if tiles.len() != size {
-            return Err(StateError::Mismatch(format!(
-                "{} tiles for a {}x{} map",
-                tiles.len(),
-                map.width,
-                map.height
-            )));
-        }
-        if !map.continents.is_empty() && map.continents.len() != size {
-            return Err(StateError::Mismatch(format!(
-                "{} continent ids for {size} tiles",
-                map.continents.len()
-            )));
-        }
-        if players.len() > PlayerSet::CAPACITY {
-            return Err(StateError::Mismatch(format!("{} players; at most 64 fit", players.len())));
-        }
-        if let Some((pos, p)) = players.iter().find(|(pos, p)| p.id() != *pos) {
-            return Err(StateError::Mismatch(format!("player {} is at position {pos}", p.id())));
-        }
-        if usize::from(diplo.players()) != players.len() {
-            return Err(StateError::Mismatch(format!(
-                "relations for {} players, {} players",
-                diplo.players(),
-                players.len()
-            )));
-        }
         let mut st = Self {
             config,
             map,
@@ -314,6 +324,73 @@ impl State {
         };
         st.rebuild_indexes()?;
         Ok(st)
+    }
+
+    /// The checks of [`from_parts`](Self::from_parts) between parts, on a map of `size` tiles
+    /// whose shape is already checked.
+    fn check_refs(parts: &StateParts, size: u32) -> Result<(), StateError> {
+        let bad = |m: String| Err(StateError::Mismatch(m));
+        let n = parts.players.len();
+        let is_player = |p: PlayerId| usize::from(p.0) < n;
+        for (t, tile) in parts.tiles.iter() {
+            if let Some(o) = tile.owner()
+                && !is_player(o)
+            {
+                return bad(format!("tile {t} is owned by player {o}, of {n} players"));
+            }
+            if let Some(c) = tile.city()
+                && !parts.cities.contains(c)
+            {
+                return bad(format!("tile {t} belongs to city {c}, which does not exist"));
+            }
+        }
+        if let Some(u) = parts.units.iter().find(|u| !is_player(u.owner())) {
+            return bad(format!(
+                "unit {} is owned by player {}, of {n} players",
+                u.id(),
+                u.owner()
+            ));
+        }
+        for c in parts.cities.iter() {
+            if !is_player(c.owner()) {
+                return bad(format!(
+                    "city {} is owned by player {}, of {n} players",
+                    c.id(),
+                    c.owner()
+                ));
+            }
+            if c.tile().0 >= size {
+                return bad(format!("city {} stands on tile {}, off the map", c.id(), c.tile()));
+            }
+        }
+        for (p, player) in parts.players.iter() {
+            if let Some(i) = player.explored.last()
+                && i >= size
+            {
+                return bad(format!("player {p} has explored tile {i}, off the map"));
+            }
+            if let Some(major) = &player.major
+                && major.memory.len() != size as usize
+            {
+                return bad(format!("player {p} remembers {} tiles of {size}", major.memory.len()));
+            }
+        }
+        let past = |what: &str, next: u32, last: Option<u32>| match last {
+            Some(last) if last >= next => {
+                bad(format!("the next {what} id is {next}, but {what} {last} exists"))
+            }
+            _ => Ok(()),
+        };
+        let ids = &parts.ids;
+        past("unit", ids.unit, parts.units.store().last_id().map(UnitId::get))?;
+        past("city", ids.city, parts.cities.store().last_id().map(CityId::get))?;
+        past("camp", ids.camp, parts.world.camps.keys().next_back().map(|c| c.get()))?;
+        past("deal", ids.deal, parts.diplo.deals.iter().map(|d| d.id.get()).max())?;
+        past(
+            "negotiation",
+            ids.negotiation,
+            parts.diplo.negotiations.iter().map(|x| x.id.get()).max(),
+        )
     }
 
     /// Takes the state apart.

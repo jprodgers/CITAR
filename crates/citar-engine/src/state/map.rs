@@ -455,12 +455,16 @@ pub type BuildQueue = SmallVec<[BuildStep; 2]>;
 
 // ---- Tiles ------------------------------------------------------------------------------------
 
-/// Why a tile write was refused.
+/// Why a tile write, or tiles built from parts, were refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TileError {
     /// The tile is not on the map.
     #[error("tile {0} is not on the map")]
     OffMap(TileIdx),
+    /// A build queue with nothing in it: the setters remove a queue once it empties, so only a
+    /// corrupt save has one.
+    #[error("tile {0} has an empty build queue")]
+    EmptyQueue(TileIdx),
 }
 
 /// Every tile, and the build queues of the tiles that have one.
@@ -481,13 +485,22 @@ impl Tiles {
         Self { tiles, builds: BTreeMap::new() }
     }
 
-    /// These tiles and build queues. Empty queues and queues of tiles off the map are dropped.
-    #[must_use]
-    pub fn from_parts(tiles: Vec<Tile>, builds: BTreeMap<TileIdx, BuildQueue>) -> Self {
-        let n = tiles.len();
-        let builds =
-            builds.into_iter().filter(|(t, q)| !q.is_empty() && (t.0 as usize) < n).collect();
-        Self { tiles, builds }
+    /// These tiles and build queues, as a save or the converter has them. A queue off the map,
+    /// or an empty one, is refused rather than dropped, so a corrupt save is reported instead of
+    /// quietly repaired.
+    pub fn from_parts(
+        tiles: Vec<Tile>,
+        builds: BTreeMap<TileIdx, BuildQueue>,
+    ) -> Result<Self, TileError> {
+        for (&t, q) in &builds {
+            if t.0 as usize >= tiles.len() {
+                return Err(TileError::OffMap(t));
+            }
+            if q.is_empty() {
+                return Err(TileError::EmptyQueue(t));
+            }
+        }
+        Ok(Self { tiles, builds })
     }
 
     /// The number of tiles.
@@ -756,6 +769,24 @@ mod tests {
         assert_eq!(tiles.pop_build(t)?, (None, Change::TileInput(t)));
         assert_eq!(tiles.all_builds().count(), 0);
         assert!(tiles.push_build(TileIdx(8), farm).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tiles_from_parts_refuse_queues_they_cannot_hold() -> Result<(), TileError> {
+        let row = vec![Tile::new(TerrainId(1)); 4];
+        let farm = BuildStep { improvement: ImprovementId(3), turns_left: 5 };
+        let queue = |steps: &[BuildStep]| steps.iter().copied().collect::<BuildQueue>();
+        let tiles = Tiles::from_parts(row.clone(), [(TileIdx(3), queue(&[farm]))].into())?;
+        assert_eq!(tiles.builds(TileIdx(3)), &[farm]);
+        assert_eq!(
+            Tiles::from_parts(row.clone(), [(TileIdx(4), queue(&[farm]))].into()),
+            Err(TileError::OffMap(TileIdx(4)))
+        );
+        assert_eq!(
+            Tiles::from_parts(row, [(TileIdx(1), queue(&[]))].into()),
+            Err(TileError::EmptyQueue(TileIdx(1)))
+        );
         Ok(())
     }
 }

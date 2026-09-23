@@ -491,6 +491,13 @@ impl BitSet {
         self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
 
+    /// The largest index in the set.
+    #[must_use]
+    pub fn last(&self) -> Option<u32> {
+        let (w, word) = self.words.iter().enumerate().rev().find(|&(_, &w)| w != 0)?;
+        u32::try_from(w * 64 + (63 - word.leading_zeros() as usize)).ok()
+    }
+
     /// Whether the set is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -791,6 +798,19 @@ mod tests {
         assert_eq!(b.words(), &[1 << 5]);
         a.clear();
         assert_eq!(a.words(), &[] as &[u64]);
+    }
+
+    #[test]
+    fn bit_set_last_is_the_largest_index() {
+        let mut s = BitSet::with_capacity(1000);
+        assert_eq!(s.last(), None);
+        for i in [0, 63, 64, 5, 700] {
+            s.insert(i);
+        }
+        assert_eq!(s.last(), Some(700));
+        s.remove(700);
+        assert_eq!(s.last(), Some(64));
+        assert_eq!(BitSet::from_words(vec![1 << 63, 0]).last(), Some(63));
     }
 
     /// Equal sets write the same bytes, so a set sized for the map and the same set read back
