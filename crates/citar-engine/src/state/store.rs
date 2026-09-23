@@ -32,7 +32,24 @@ pub enum StoreError {
         /// The highest id the store has held.
         high: u64,
     },
+    /// The id is above [`MAX_ENTITY_ID`].
+    #[error("{kind} {id} is above the largest entity id, {MAX_ENTITY_ID}")]
+    TooLarge {
+        /// The id type.
+        kind: &'static str,
+        /// The id offered.
+        id: u64,
+    },
 }
+
+/// The largest entity id a store takes.
+///
+/// A store's lookup table, and the per-entity arrays indexed by raw id (the unit occupancy links,
+/// derived memos), grow to the largest id held. Without a bound, one corrupt id in a save
+/// (`4_000_000_000`) would ask for gigabytes and abort the process before any check ran. With it,
+/// the worst case is 64 MB per table. A game hands out a few thousand ids, and a converted Python
+/// game, whose units, cities and camps shared one counter, a few tens of thousands.
+pub const MAX_ENTITY_ID: u32 = 1 << 24;
 
 /// Slot number meaning "not in the store".
 const ABSENT: u32 = u32::MAX;
@@ -127,9 +144,13 @@ impl<I: Id, T: Entity<Id = I>> EntityStore<I, T> {
         self.pos.len() + I::FIRST_INDEX
     }
 
-    /// Adds a value. Its id must be above every id the store has held.
+    /// Adds a value. Its id must be above every id the store has held, and at most
+    /// [`MAX_ENTITY_ID`].
     pub fn insert(&mut self, value: T) -> Result<(), StoreError> {
         let id = value.id();
+        if id.index() > MAX_ENTITY_ID as usize {
+            return Err(StoreError::TooLarge { kind: I::NAME, id: id.index() as u64 });
+        }
         let key = Self::key(id);
         if key < self.pos.len() {
             return Err(StoreError::NotNew {
@@ -241,7 +262,8 @@ impl<I: Id, T: Entity<Id = I> + fmt::Debug> fmt::Debug for EntityStore<I, T> {
 
 impl<I: Id, T: Entity<Id = I>> EntityStore<I, T> {
     /// A store of these values, which must come in ascending id order with no id repeated, as a
-    /// save lists them.
+    /// save lists them. An id above [`MAX_ENTITY_ID`] is refused before anything is allocated
+    /// for it.
     pub fn try_from_values(values: impl IntoIterator<Item = T>) -> Result<Self, StoreError> {
         let mut store = Self::new();
         for v in values {
@@ -283,6 +305,24 @@ mod tests {
         assert_eq!(s.insert(Thing(uid(10), 100)), Ok(()));
         assert_eq!(s.ids(), [uid(3), uid(10)]);
         assert_eq!(s.last_id(), Some(uid(10)));
+    }
+
+    #[test]
+    fn ids_above_the_bound_are_refused_before_anything_grows() {
+        let mut s = EntityStore::new();
+        let huge = UnitId::new(4_000_000_000).unwrap_or(UnitId::FIRST);
+        assert_eq!(
+            s.insert(Thing(huge, 1)),
+            Err(StoreError::TooLarge { kind: "UnitId", id: 4_000_000_000 })
+        );
+        assert!(s.pos.capacity() == 0 && s.is_empty(), "nothing was allocated for it");
+        let over = UnitId::new(MAX_ENTITY_ID + 1).unwrap_or(UnitId::FIRST);
+        assert!(matches!(s.insert(Thing(over, 1)), Err(StoreError::TooLarge { .. })));
+        let top = UnitId::new(MAX_ENTITY_ID).unwrap_or(UnitId::FIRST);
+        assert_eq!(s.insert(Thing(top, 2)), Ok(()));
+        assert_eq!(s.get(top).map(|t| t.1), Some(2));
+        let loaded = EntityStore::try_from_values([Thing(uid(1), 1), Thing(huge, 2)]);
+        assert!(matches!(loaded, Err(StoreError::TooLarge { .. })));
     }
 
     #[test]
