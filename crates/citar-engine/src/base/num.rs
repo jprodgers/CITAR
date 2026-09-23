@@ -196,23 +196,26 @@ pub fn round_ndigits(x: f64, ndigits: i32) -> f64 {
     if x.is_sign_negative() { -r } else { r }
 }
 
-/// `a` as `m * 2^e` with `m` odd: returns `(m, e)`. `a` must be finite and nonzero.
-fn lowest_bit_exponent(a: f64) -> (u64, i32) {
+/// `|a|` as `m * 2^e` with `m` odd: returns `(m, e)`. `a` must be finite; a zero gives `(0, 0)`.
+pub(super) fn lowest_bit_exponent(a: f64) -> (u64, i32) {
     let bits = a.to_bits();
     let exp_field = ((bits >> 52) & 0x7ff) as i32;
     let frac = bits & ((1u64 << 52) - 1);
     let (mant, exp) =
         if exp_field == 0 { (frac, -1074) } else { (frac | (1u64 << 52), exp_field - 1075) };
+    if mant == 0 {
+        return (0, 0);
+    }
     let tz = mant.trailing_zeros();
     (mant >> tz, exp + tz as i32)
 }
 
-/// `a >= 0` rounded to `n >= 0` decimals, as a decimal string.
-fn round_to_decimals(a: f64, n: usize) -> String {
+/// `a >= 0` rounded to `n >= 0` decimals, as a decimal string: Python's `format(a, ".nf")`.
+pub(super) fn round_to_decimals(a: f64, n: usize) -> String {
     // a = m * 2^e with m odd, so a * 10^n = (m * 5^n) * 2^(e + n) with m * 5^n odd: that has a
     // fractional part of exactly one half when e + n == -1, and only then.
-    let (_, e) = lowest_bit_exponent(a);
-    let tie = i64::from(e) + n as i64 == -1;
+    let (m, e) = lowest_bit_exponent(a);
+    let tie = m != 0 && i64::from(e) + n as i64 == -1;
     if !tie {
         return format!("{a:.n$}");
     }
