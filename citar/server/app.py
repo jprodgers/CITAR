@@ -595,14 +595,17 @@ def view(gid: str, request: Request, token: Optional[str] = None, as_player: Opt
             v = s.game.view(seat.player)
             v["seat"] = seat.public()
         elif s.is_spectator(tok) or access.VIEW in perms:
+            # Looking through one civilization's eyes is as revealing as the god view while a human is
+            # playing: it shows that civ's private cities, units and diplomacy, and for the AI seats it
+            # is a map of everything they have scouted. Both follow the same rule.
+            if not s.god_view_allowed():
+                raise HTTPException(403, "Spectator views are disabled while humans are playing.")
             if as_player is not None:
                 if not 0 <= as_player < len(s.seats):
                     raise HTTPException(404, "No such player.")
                 v = s.game.view(as_player)
-            elif s.god_view_allowed():
-                v = s.game.view(None)
             else:
-                raise HTTPException(403, "God view is disabled while humans are playing.")
+                v = s.game.view(None)
             v["spectator"] = True
         else:
             raise HTTPException(403, "Invalid token.")  # unreachable: _gate already checked

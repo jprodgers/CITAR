@@ -354,6 +354,38 @@ class GameRoutes(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self._get("/replay").status_code, 404)
 
+    # ---------------------------------------------------------------- view as_player
+    def test_spectators_of_an_ai_only_game_may_look_as_any_player(self):
+        for as_player in (0, 1):
+            with self.subTest(as_player=as_player):
+                response = self._get("/view", token=self.game.spectator_token, as_player=as_player)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()["spectator"])
+
+    def test_nobody_looks_through_another_civs_eyes_while_a_human_plays(self):
+        """as_player used to skip the god-view rule: a spectator link, or the owner without a seat
+        token, could read a human's private view, or an AI's scouted map, mid-game."""
+        from citar.server import ownership
+        with db.session() as s:
+            owner = accounts.by_handle(s, "owner")
+            game = self.manager.create({"map_size": "duel", "seed": 5, "barbarians": "off"},
+                                       [{"type": "human"}, {"type": "bot"}], "Human game",
+                                       track=False, start=False)
+            ownership.register(s, game, owner, visibility="private")
+        try:
+            get = lambda who=None, **params: self.client.get(  # noqa: E731
+                f"/api/games/{game.id}/view", params=params, headers=self.cookies.get(who, {}))
+            for as_player in (0, 1):
+                with self.subTest(as_player=as_player):
+                    self.assertEqual(get(token=game.spectator_token, as_player=as_player).status_code, 403)
+                    self.assertEqual(get("owner", as_player=as_player).status_code, 403)
+            # The human's own seat still sees its own view, and as_player cannot widen it.
+            response = get(token=game.seats[0].token, as_player=1)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["seat"]["player"], 0)
+        finally:
+            self.manager.delete(game.id)
+
 
 if __name__ == "__main__":
     unittest.main()
