@@ -1,7 +1,7 @@
 //! Tables for map generation, the AI and victory (DESIGN.md 5.10), built at load from the compiled
 //! uniques.
 //!
-//! - **Map generation.** The 23 map-generation unique types compile into [`TerrainGen`],
+//! - **Map generation.** The 24 map-generation unique types compile into [`TerrainGen`],
 //!   [`ResourceGen`] and [`NaturalWonderGen`], with their conditions as [`GenCond`]. Python read
 //!   them from each object's unique map while it generated (`mapgen.py:398-526, 546-742, 883-903,
 //!   948-1012, 1106-1300`: `_Map.cond`, `occurs`, `_fits`, `_convert_terrains`, `_fertility`,
@@ -178,6 +178,8 @@ pub struct NaturalWonderGen {
     pub neighbours: Vec<NeighbourCount>,
     /// `Must not be on [n] largest landmasses`.
     pub not_on_largest: Vec<i32>,
+    /// `Must be on [n] largest landmasses`.
+    pub on_largest: Vec<i32>,
     /// `Occurs on latitudes from [min] to [max] percent of distance equator to pole`.
     pub latitudes: Vec<(i32, i32)>,
     /// `Occurs in groups of [min] to [max] tiles`; the last one counts.
@@ -588,6 +590,9 @@ fn place(
         }
         D::NaturalWonderSmallerLandmass(x) => {
             g.wonders[on!(wonder, "a natural wonder")].not_on_largest.push(x.count);
+        }
+        D::NaturalWonderLargerLandmass(x) => {
+            g.wonders[on!(wonder, "a natural wonder")].on_largest.push(x.count);
         }
         _ => {
             report(

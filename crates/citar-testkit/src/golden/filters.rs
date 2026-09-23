@@ -209,6 +209,7 @@ pub fn gen_answers() -> Value {
             json!([tname(id), {
                 "neighbours": x.neighbours.iter().map(|n| json!([n.min, n.max, t.tile_filter(n.tiles.id())])).collect::<Vec<_>>(),
                 "not_on_largest": x.not_on_largest,
+                "on_largest": x.on_largest,
                 "latitudes": x.latitudes,
                 "group": x.group,
                 "converts": x.converts.iter().map(|(to, c)| json!([tname(*to), cond(&r, c)])).collect::<Vec<_>>(),

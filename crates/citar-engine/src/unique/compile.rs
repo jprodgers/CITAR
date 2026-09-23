@@ -523,6 +523,11 @@ fn fold(s: &mut Staged, m: ModifierData) -> Result<(), &'static str> {
             s.flags |= UFlags::TIMED;
             set(&mut s.timed, count(x.turns)?)
         }
+        // How UnCiv shows a unique, which changes no rule: Python passed them over when it
+        // evaluated (`uniques.py:1013-1019`), and the text keeps them for views.
+        ModifierData::ModifierHiddenFromUsers
+        | ModifierData::CivilopediaLink(_)
+        | ModifierData::SuppressWarnings(_) => Ok(()),
     }
 }
 

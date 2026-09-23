@@ -5,9 +5,9 @@
 #![allow(clippy::too_many_lines, reason = "one arm per unique type")]
 
 use super::countable::Countable;
-use super::params::{CostOrStrength, CountOrAll, FoundingOrEnhancing, Param, ParamCx, ParamError, PolicyOrBelief, PopulationFilter, RegionType, StatOrResource, TerrainQuality, UnitTriggerTarget};
+use super::params::{BeliefKind, CostOrStrength, CountOrAll, FoundingOrEnhancing, Param, ParamCx, ParamError, PolicyOrBelief, PopulationFilter, RegionType, SpyAction, StatOrResource, TerrainQuality, UnitTriggerTarget};
 use super::table::Role;
-use crate::base::ids::{BaseUnitId, BuildingId, CityFilterId, CivFilterId, CombatantFilterId, DifficultyId, EraId, FeatureId, FracId, ObjectFilterId, PromotionId, ResourceId, SetRef, StatsId, TagId, TechId, TerrainId, TextId, TileFilterId, UnitFilterId, VictoryId};
+use crate::base::ids::{BaseUnitId, BuildingId, CityFilterId, CivFilterId, CombatantFilterId, DifficultyId, EraId, FeatureId, FracId, ObjectFilterId, PromotionId, ResourceId, SetRef, SpeedId, StatsId, TagId, TechId, TerrainId, TextId, TileFilterId, UnitFilterId, VictoryId};
 use crate::base::stats::Stat;
 
 /// UnCiv's unique types, in `unique_types.tsv`'s order (637). Most are never used by the
@@ -1996,8 +1996,8 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "PercentProductionUnits", placeholder: "[]% Production when constructing [] units []", signature: "[relativeAmount]% Production when constructing [baseUnitFilter] units [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::BaseUnitFilter, ParamKind::CityFilter], fields: &["percent", "units", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "PercentProductionWonders", placeholder: "[]% Production when constructing [] wonders []", signature: "[relativeAmount]% Production when constructing [buildingFilter] wonders [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::BuildingFilter, ParamKind::CityFilter], fields: &["percent", "buildings", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "PercentProductionBuildingsInCapital", placeholder: "[]% Production towards any buildings that already exist in the Capital", signature: "[relativeAmount]% Production towards any buildings that already exist in the Capital", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Cities], reason: None }) },
-    TypeInfo { name: "PercentYieldFromPillaging", placeholder: "[]% Yield from pillaging tiles", signature: "[relativeAmount]% Yield from pillaging tiles", support: None },
-    TypeInfo { name: "PercentHealthFromPillaging", placeholder: "[]% Health from pillaging tiles", signature: "[relativeAmount]% Health from pillaging tiles", support: None },
+    TypeInfo { name: "PercentYieldFromPillaging", placeholder: "[]% Yield from pillaging tiles", signature: "[relativeAmount]% Yield from pillaging tiles", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Workers], reason: None }) },
+    TypeInfo { name: "PercentHealthFromPillaging", placeholder: "[]% Health from pillaging tiles", signature: "[relativeAmount]% Health from pillaging tiles", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Workers], reason: None }) },
     TypeInfo { name: "CityStateMilitaryUnits", placeholder: "Provides military units every ≈[] turns", signature: "Provides military units every ≈[positiveAmount] turns", support: Some(&Support { role: Role::Effect, params: &[ParamKind::PositiveAmount], fields: &["turns"], gain: false, stages: &[Stage::CityStates], reason: None }) },
     TypeInfo { name: "CityStateUniqueLuxury", placeholder: "Provides a unique luxury", signature: "Provides a unique luxury", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::CityStates], reason: None }) },
     TypeInfo { name: "CityStateGiftedUnitsStartWithXp", placeholder: "Military Units gifted from City-States start with [] XP", signature: "Military Units gifted from City-States start with [positiveAmount] XP", support: Some(&Support { role: Role::Effect, params: &[ParamKind::PositiveAmount], fields: &["xp"], gain: false, stages: &[Stage::CityStates], reason: None }) },
@@ -2015,7 +2015,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "GrowthPercentBonus", placeholder: "[]% growth []", signature: "[relativeAmount]% growth [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::CityFilter], fields: &["percent", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "CarryOverFood", placeholder: "[]% Food is carried over after population increases []", signature: "[amount]% Food is carried over after population increases [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::CityFilter], fields: &["percent", "cities"], gain: false, stages: &[Stage::Ai, Stage::Cities], reason: None }) },
     TypeInfo { name: "FoodConsumptionByPopulation", placeholder: "[]% Food consumption by [] []", signature: "[relativeAmount]% Food consumption by [populationFilter] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::PopulationFilter, ParamKind::CityFilter], fields: &["percent", "population", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
-    TypeInfo { name: "FoodConsumptionBySpecialists", placeholder: "[]% Food consumption by specialists []", signature: "[relativeAmount]% Food consumption by specialists [cityFilter]", support: None },
+    TypeInfo { name: "FoodConsumptionBySpecialists", placeholder: "[]% Food consumption by specialists []", signature: "[relativeAmount]% Food consumption by specialists [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::CityFilter], fields: &["percent", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "UnhappinessFromCitiesPercentage", placeholder: "[]% unhappiness from the number of cities", signature: "[relativeAmount]% unhappiness from the number of cities", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "UnhappinessFromPopulationTypePercentageChange", placeholder: "[]% Unhappiness from [] []", signature: "[relativeAmount]% Unhappiness from [populationFilter] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::PopulationFilter, ParamKind::CityFilter], fields: &["percent", "population", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "BonusHappinessFromLuxury", placeholder: "[] Happiness from each type of luxury resource", signature: "[amount] Happiness from each type of luxury resource", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["happiness"], gain: false, stages: &[Stage::Economy], reason: None }) },
@@ -2024,15 +2024,15 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "CannotBuildUnits", placeholder: "Cannot build [] units", signature: "Cannot build [baseUnitFilter] units", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BaseUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "EnablesConstructionOfSpaceshipParts", placeholder: "Enables construction of Spaceship parts", signature: "Enables construction of Spaceship parts", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Ai, Stage::Cities, Stage::Victory], reason: None }) },
     TypeInfo { name: "BuyUnitsIncreasingCost", placeholder: "May buy [] units for [] [] [] at an increasing price ([])", signature: "May buy [baseUnitFilter] units for [nonNegativeAmount] [stat] [cityFilter] at an increasing price ([amount])", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BaseUnitFilter, ParamKind::NonNegativeAmount, ParamKind::Stat, ParamKind::CityFilter, ParamKind::Amount16], fields: &["units", "cost", "stat", "cities", "increase"], gain: false, stages: &[Stage::Cities], reason: None }) },
-    TypeInfo { name: "BuyBuildingsIncreasingCost", placeholder: "May buy [] buildings for [] [] [] at an increasing price ([])", signature: "May buy [buildingFilter] buildings for [nonNegativeAmount] [stat] [cityFilter] at an increasing price ([amount])", support: None },
-    TypeInfo { name: "BuyUnitsForAmountStat", placeholder: "May buy [] units for [] [] []", signature: "May buy [baseUnitFilter] units for [nonNegativeAmount] [stat] [cityFilter]", support: None },
+    TypeInfo { name: "BuyBuildingsIncreasingCost", placeholder: "May buy [] buildings for [] [] [] at an increasing price ([])", signature: "May buy [buildingFilter] buildings for [nonNegativeAmount] [stat] [cityFilter] at an increasing price ([amount])", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BuildingFilter, ParamKind::NonNegativeAmount, ParamKind::Stat, ParamKind::CityFilter, ParamKind::Amount16], fields: &["buildings", "cost", "stat", "cities", "increase"], gain: false, stages: &[Stage::Cities], reason: None }) },
+    TypeInfo { name: "BuyUnitsForAmountStat", placeholder: "May buy [] units for [] [] []", signature: "May buy [baseUnitFilter] units for [nonNegativeAmount] [stat] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BaseUnitFilter, ParamKind::NonNegativeAmount, ParamKind::Stat, ParamKind::CityFilter], fields: &["units", "cost", "stat", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "BuyBuildingsForAmountStat", placeholder: "May buy [] buildings for [] [] []", signature: "May buy [buildingFilter] buildings for [nonNegativeAmount] [stat] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BuildingFilter, ParamKind::NonNegativeAmount, ParamKind::Stat, ParamKind::CityFilter], fields: &["buildings", "cost", "stat", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
-    TypeInfo { name: "BuyUnitsWithStat", placeholder: "May buy [] units with [] []", signature: "May buy [baseUnitFilter] units with [stat] [cityFilter]", support: None },
+    TypeInfo { name: "BuyUnitsWithStat", placeholder: "May buy [] units with [] []", signature: "May buy [baseUnitFilter] units with [stat] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BaseUnitFilter, ParamKind::Stat, ParamKind::CityFilter], fields: &["units", "stat", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "BuyBuildingsWithStat", placeholder: "May buy [] buildings with [] []", signature: "May buy [buildingFilter] buildings with [stat] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BuildingFilter, ParamKind::Stat, ParamKind::CityFilter], fields: &["buildings", "stat", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "BuyUnitsByProductionCost", placeholder: "May buy [] units with [] for [] times their normal Production cost", signature: "May buy [baseUnitFilter] units with [stat] for [nonNegativeAmount] times their normal Production cost", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BaseUnitFilter, ParamKind::Stat, ParamKind::NonNegativeAmount], fields: &["units", "stat", "times"], gain: false, stages: &[Stage::Cities], reason: None }) },
-    TypeInfo { name: "BuyBuildingsByProductionCost", placeholder: "May buy [] buildings with [] for [] times their normal Production cost", signature: "May buy [buildingFilter] buildings with [stat] for [nonNegativeAmount] times their normal Production cost", support: None },
+    TypeInfo { name: "BuyBuildingsByProductionCost", placeholder: "May buy [] buildings with [] for [] times their normal Production cost", signature: "May buy [buildingFilter] buildings with [stat] for [nonNegativeAmount] times their normal Production cost", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BuildingFilter, ParamKind::Stat, ParamKind::NonNegativeAmount], fields: &["buildings", "stat", "times"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "BuyItemsDiscount", placeholder: "[] cost of purchasing items in cities []%", signature: "[stat] cost of purchasing items in cities [relativeAmount]%", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stat, ParamKind::RelativeAmount], fields: &["stat", "percent"], gain: false, stages: &[Stage::Cities], reason: None }) },
-    TypeInfo { name: "BuyBuildingsDiscount", placeholder: "[] cost of purchasing [] buildings []%", signature: "[stat] cost of purchasing [buildingFilter] buildings [relativeAmount]%", support: None },
+    TypeInfo { name: "BuyBuildingsDiscount", placeholder: "[] cost of purchasing [] buildings []%", signature: "[stat] cost of purchasing [buildingFilter] buildings [relativeAmount]%", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stat, ParamKind::BuildingFilter, ParamKind::RelativeAmount], fields: &["stat", "buildings", "percent"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "BuyUnitsDiscount", placeholder: "[] cost of purchasing [] units []%", signature: "[stat] cost of purchasing [baseUnitFilter] units [relativeAmount]%", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stat, ParamKind::BaseUnitFilter, ParamKind::RelativeAmount], fields: &["stat", "units", "percent"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "EnablesStatProduction", placeholder: "Enables conversion of city production to []", signature: "Enables conversion of city production to [stat]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stat], fields: &["stat"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "ProductionToStatConversionBonus", placeholder: "Production to [] conversion in cities changed by []%", signature: "Production to [stat] conversion in cities changed by [relativeAmount]%", support: None },
@@ -2040,7 +2040,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "RoadsConnectAcrossRivers", placeholder: "Roads connect tiles across rivers", signature: "Roads connect tiles across rivers", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat, Stage::Movement], reason: None }) },
     TypeInfo { name: "RoadMaintenance", placeholder: "[]% maintenance on road & railroads", signature: "[relativeAmount]% maintenance on road & railroads", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Economy], reason: None }) },
     TypeInfo { name: "NoImprovementMaintenanceInSpecificTiles", placeholder: "No Maintenance costs for improvements in [] tiles", signature: "No Maintenance costs for improvements in [tileFilter] tiles", support: Some(&Support { role: Role::Effect, params: &[ParamKind::TileFilter], fields: &["tiles"], gain: false, stages: &[Stage::Economy], reason: None }) },
-    TypeInfo { name: "SpecificImprovementTime", placeholder: "[]% construction time for [] improvements", signature: "[relativeAmount]% construction time for [improvementFilter] improvements", support: None },
+    TypeInfo { name: "SpecificImprovementTime", placeholder: "[]% construction time for [] improvements", signature: "[relativeAmount]% construction time for [improvementFilter] improvements", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::ImprovementFilter], fields: &["percent", "improvements"], gain: false, stages: &[Stage::Workers], reason: None }) },
     TypeInfo { name: "ImprovementTimeIncrease", placeholder: "Can build [] improvements at a []% rate", signature: "Can build [improvementFilter] improvements at a [relativeAmount]% rate", support: Some(&Support { role: Role::Effect, params: &[ParamKind::ImprovementFilter, ParamKind::RelativeAmount], fields: &["improvements", "percent"], gain: false, stages: &[Stage::Workers], reason: None }) },
     TypeInfo { name: "GainFreeBuildings", placeholder: "Gain a free [] []", signature: "Gain a free [buildingName] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BuildingName, ParamKind::CityFilter], fields: &["building", "cities"], gain: true, stages: &[Stage::Cities, Stage::Triggers], reason: None }) },
     TypeInfo { name: "BuildingMaintenance", placeholder: "[]% maintenance cost for [] buildings []", signature: "[relativeAmount]% maintenance cost for [buildingFilter] buildings [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::BuildingFilter, ParamKind::CityFilter], fields: &["percent", "buildings", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
@@ -2050,8 +2050,8 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "TileCostPercentage", placeholder: "[]% Gold cost of acquiring tiles []", signature: "[relativeAmount]% Gold cost of acquiring tiles [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::CityFilter], fields: &["percent", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "LessPolicyCostFromCities", placeholder: "Each city founded increases culture cost of policies []% less than normal", signature: "Each city founded increases culture cost of policies [relativeAmount]% less than normal", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Policies], reason: None }) },
     TypeInfo { name: "LessPolicyCost", placeholder: "[]% Culture cost of adopting new Policies", signature: "[relativeAmount]% Culture cost of adopting new Policies", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Policies], reason: None }) },
-    TypeInfo { name: "LessTechCostFromCities", placeholder: "Each city founded increases Science cost of Technologies []% less than normal", signature: "Each city founded increases Science cost of Technologies [relativeAmount]% less than normal", support: None },
-    TypeInfo { name: "LessTechCost", placeholder: "[]% Science cost of researching new Technologies", signature: "[relativeAmount]% Science cost of researching new Technologies", support: None },
+    TypeInfo { name: "LessTechCostFromCities", placeholder: "Each city founded increases Science cost of Technologies []% less than normal", signature: "Each city founded increases Science cost of Technologies [relativeAmount]% less than normal", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Research], reason: None }) },
+    TypeInfo { name: "LessTechCost", placeholder: "[]% Science cost of researching new Technologies", signature: "[relativeAmount]% Science cost of researching new Technologies", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Research], reason: None }) },
     TypeInfo { name: "StatsFromNaturalWonders", placeholder: "[] for every known Natural Wonder", signature: "[stats] for every known Natural Wonder", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stats], fields: &["stats"], gain: false, stages: &[Stage::Economy], reason: None }) },
     TypeInfo { name: "StatBonusWhenDiscoveringNaturalWonder", placeholder: "[] for discovering a Natural Wonder (bonus enhanced to [] if first to discover it)", signature: "[stats] for discovering a Natural Wonder (bonus enhanced to [stats] if first to discover it)", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stats, ParamKind::Stats], fields: &["stats", "first"], gain: false, stages: &[Stage::Vis], reason: None }) },
     TypeInfo { name: "GreatPersonPointPercentage", placeholder: "[]% Great Person generation []", signature: "[relativeAmount]% Great Person generation [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::CityFilter], fields: &["percent", "cities"], gain: false, stages: &[Stage::GreatPeople], reason: None }) },
@@ -2059,9 +2059,9 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "GreatGeneralProvidesDoubleCombatBonus", placeholder: "Great General provides double combat bonus", signature: "Great General provides double combat bonus", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "MayanGainGreatPerson", placeholder: "Receive a free Great Person at the end of every [] (every 394 years), after researching []. Each bonus person can only be chosen once.", signature: "Receive a free Great Person at the end of every [comment] (every 394 years), after researching [tech]. Each bonus person can only be chosen once.", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Comment, ParamKind::Tech], fields: &["cycle", "tech"], gain: false, stages: &[Stage::GreatPeople], reason: None }) },
     TypeInfo { name: "MayanCalendarDisplay", placeholder: "Once The Long Count activates, the year on the world screen displays as the traditional Mayan Long Count.", signature: "Once The Long Count activates, the year on the world screen displays as the traditional Mayan Long Count.", support: None },
-    TypeInfo { name: "BaseUnitSupply", placeholder: "[] Unit Supply", signature: "[amount] Unit Supply", support: None },
-    TypeInfo { name: "UnitSupplyPerPop", placeholder: "[] Unit Supply per [] population []", signature: "[amount] Unit Supply per [positiveAmount] population [cityFilter]", support: None },
-    TypeInfo { name: "UnitSupplyPerCity", placeholder: "[] Unit Supply per city", signature: "[amount] Unit Supply per city", support: None },
+    TypeInfo { name: "BaseUnitSupply", placeholder: "[] Unit Supply", signature: "[amount] Unit Supply", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["supply"], gain: false, stages: &[Stage::Economy], reason: None }) },
+    TypeInfo { name: "UnitSupplyPerPop", placeholder: "[] Unit Supply per [] population []", signature: "[amount] Unit Supply per [positiveAmount] population [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::PositiveAmount, ParamKind::CityFilter], fields: &["supply", "per", "cities"], gain: false, stages: &[Stage::Economy], reason: None }) },
+    TypeInfo { name: "UnitSupplyPerCity", placeholder: "[] Unit Supply per city", signature: "[amount] Unit Supply per city", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["supply"], gain: false, stages: &[Stage::Economy], reason: None }) },
     TypeInfo { name: "FreeUnits", placeholder: "[] units cost no maintenance", signature: "[amount] units cost no maintenance", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["count"], gain: false, stages: &[Stage::Economy], reason: None }) },
     TypeInfo { name: "UnitsInCitiesNoMaintenance", placeholder: "Units in cities cost no Maintenance", signature: "Units in cities cost no Maintenance", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Economy], reason: None }) },
     TypeInfo { name: "LandUnitEmbarkation", placeholder: "Enables embarkation for land units", signature: "Enables embarkation for land units", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
@@ -2071,7 +2071,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "UnitStartingExperience", placeholder: "New [] units start with [] XP []", signature: "New [baseUnitFilter] units start with [amount] XP [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BaseUnitFilter, ParamKind::Amount, ParamKind::CityFilter], fields: &["units", "xp", "cities"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "UnitStartingPromotions", placeholder: "All newly-trained [] units [] receive the [] promotion", signature: "All newly-trained [baseUnitFilter] units [cityFilter] receive the [promotion] promotion", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BaseUnitFilter, ParamKind::CityFilter, ParamKind::Promotion], fields: &["units", "cities", "promotion"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "CityHealingUnits", placeholder: "[] Units adjacent to this city heal [] HP per turn when healing", signature: "[mapUnitFilter] Units adjacent to this city heal [amount] HP per turn when healing", support: Some(&Support { role: Role::Effect, params: &[ParamKind::MapUnitFilter, ParamKind::Amount], fields: &["units", "hp"], gain: false, stages: &[Stage::Units], reason: None }) },
-    TypeInfo { name: "XPForPromotionModifier", placeholder: "[]% XP required for promotions", signature: "[relativeAmount]% XP required for promotions", support: None },
+    TypeInfo { name: "XPForPromotionModifier", placeholder: "[]% XP required for promotions", signature: "[relativeAmount]% XP required for promotions", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "BetterDefensiveBuildings", placeholder: "[]% City Strength from defensive buildings", signature: "[relativeAmount]% City Strength from defensive buildings", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "StrengthForCities", placeholder: "[]% Strength for cities", signature: "[relativeAmount]% Strength for cities", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "ConsumesResources", placeholder: "Consumes [] []", signature: "Consumes [amount] [resource]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::Resource], fields: &["amount", "resource"], gain: false, stages: &[Stage::Cities, Stage::Economy, Stage::Workers], reason: None }) },
@@ -2093,25 +2093,25 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "GainFromEncampment", placeholder: "When conquering an encampment, earn [] Gold and recruit a Barbarian unit", signature: "When conquering an encampment, earn [amount] Gold and recruit a Barbarian unit", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["gold"], gain: false, stages: &[Stage::Barbarians], reason: None }) },
     TypeInfo { name: "GainFromDefeatingUnit", placeholder: "When defeating a [] unit, earn [] Gold and recruit it", signature: "When defeating a [mapUnitFilter] unit, earn [amount] Gold and recruit it", support: Some(&Support { role: Role::Effect, params: &[ParamKind::MapUnitFilter, ParamKind::Amount], fields: &["units", "gold"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "DisablesReligion", placeholder: "Starting in this era disables religion", signature: "Starting in this era disables religion", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Setup], reason: None }) },
-    TypeInfo { name: "FreeExtraBeliefs", placeholder: "May choose [] additional [] beliefs when [] a religion", signature: "May choose [amount] additional [beliefType] beliefs when [foundingOrEnhancing] a religion", support: None },
+    TypeInfo { name: "FreeExtraBeliefs", placeholder: "May choose [] additional [] beliefs when [] a religion", signature: "May choose [amount] additional [beliefType] beliefs when [foundingOrEnhancing] a religion", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::BeliefType, ParamKind::FoundingOrEnhancing], fields: &["count", "belief", "when"], gain: false, stages: &[Stage::Religion], reason: None }) },
     TypeInfo { name: "FreeExtraAnyBeliefs", placeholder: "May choose [] additional belief(s) of any type when [] a religion", signature: "May choose [amount] additional belief(s) of any type when [foundingOrEnhancing] a religion", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::FoundingOrEnhancing], fields: &["count", "when"], gain: false, stages: &[Stage::Religion], reason: None }) },
     TypeInfo { name: "StatsWhenAdoptingReligion", placeholder: "[] when a city adopts this religion for the first time", signature: "[stats] when a city adopts this religion for the first time", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stats], fields: &["stats"], gain: false, stages: &[Stage::Religion], reason: None }) },
     TypeInfo { name: "NaturalReligionSpreadStrength", placeholder: "[]% Natural religion spread []", signature: "[relativeAmount]% Natural religion spread [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::CityFilter], fields: &["percent", "cities"], gain: false, stages: &[Stage::Religion], reason: None }) },
     TypeInfo { name: "ReligionSpreadDistance", placeholder: "Religion naturally spreads to cities [] tiles away", signature: "Religion naturally spreads to cities [amount] tiles away", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["distance"], gain: false, stages: &[Stage::Religion], reason: None }) },
     TypeInfo { name: "MayNotGenerateGreatProphet", placeholder: "May not generate great prophet equivalents naturally", signature: "May not generate great prophet equivalents naturally", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Religion], reason: None }) },
     TypeInfo { name: "FaithCostOfGreatProphetChange", placeholder: "[]% Faith cost of generating Great Prophet equivalents", signature: "[relativeAmount]% Faith cost of generating Great Prophet equivalents", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Religion], reason: None }) },
-    TypeInfo { name: "SpyEffectiveness", placeholder: "[]% spy effectiveness []", signature: "[relativeAmount]% spy effectiveness [cityFilter]", support: None },
+    TypeInfo { name: "SpyEffectiveness", placeholder: "[]% spy effectiveness []", signature: "[relativeAmount]% spy effectiveness [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::CityFilter], fields: &["percent", "cities"], gain: false, stages: &[Stage::Espionage], reason: None }) },
     TypeInfo { name: "EnemySpyEffectiveness", placeholder: "[]% enemy spy effectiveness []", signature: "[relativeAmount]% enemy spy effectiveness [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::CityFilter], fields: &["percent", "cities"], gain: false, stages: &[Stage::Espionage], reason: None }) },
     TypeInfo { name: "SpyStartingLevel", placeholder: "New spies start with [] level(s)", signature: "New spies start with [amount] level(s)", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["levels"], gain: false, stages: &[Stage::Espionage], reason: None }) },
-    TypeInfo { name: "CounterIntelligenceSpyRankBonus", placeholder: "Spies in [] cities act as though they have [] levels for []", signature: "Spies in [cityFilter] cities act as though they have [relativeAmount] levels for [spyAction]", support: None },
+    TypeInfo { name: "CounterIntelligenceSpyRankBonus", placeholder: "Spies in [] cities act as though they have [] levels for []", signature: "Spies in [cityFilter] cities act as though they have [relativeAmount] levels for [spyAction]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::CityFilter, ParamKind::RelativeAmount, ParamKind::SpyAction], fields: &["cities", "levels", "action"], gain: false, stages: &[Stage::Espionage], reason: None }) },
     TypeInfo { name: "StartingTech", placeholder: "Starting tech", signature: "Starting tech", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Setup], reason: None }) },
     TypeInfo { name: "StartsWithTech", placeholder: "Starts with []", signature: "Starts with [tech]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Tech], fields: &["tech"], gain: false, stages: &[Stage::Setup], reason: None }) },
     TypeInfo { name: "StartsWithPolicy", placeholder: "Starts with [] adopted", signature: "Starts with [policy] adopted", support: None },
     TypeInfo { name: "StartBias", placeholder: "Start bias []", signature: "Start bias [terrainFilter]", support: Some(&Support { role: Role::Inert, params: &[ParamKind::TerrainFilter], fields: &["terrain"], gain: false, stages: &[], reason: Some("city-states are placed without a start bias") }) },
-    TypeInfo { name: "TriggersVictory", placeholder: "Triggers victory", signature: "Triggers victory", support: None },
+    TypeInfo { name: "TriggersVictory", placeholder: "Triggers victory", signature: "Triggers victory", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Ai, Stage::Victory], reason: None }) },
     TypeInfo { name: "TriggersCulturalVictory", placeholder: "Triggers a Cultural Victory upon completion", signature: "Triggers a Cultural Victory upon completion", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Ai], reason: None }) },
     TypeInfo { name: "MayBuyConstructionsInPuppets", placeholder: "May buy items in puppet cities", signature: "May buy items in puppet cities", support: None },
-    TypeInfo { name: "MayNotAnnexCities", placeholder: "May not annex cities", signature: "May not annex cities", support: None },
+    TypeInfo { name: "MayNotAnnexCities", placeholder: "May not annex cities", signature: "May not annex cities", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Conquest], reason: None }) },
     TypeInfo { name: "BorrowsCityNames", placeholder: "\"Borrows\" city names from other civilizations in the game", signature: "\"Borrows\" city names from other civilizations in the game", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "CitiesAreRazedXTimesFaster", placeholder: "Cities are razed [] times as fast", signature: "Cities are razed [amount] times as fast", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["times"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "TechBoostWhenScientificBuildingsBuiltInCapital", placeholder: "Receive a tech boost when scientific buildings/wonders are built in capital", signature: "Receive a tech boost when scientific buildings/wonders are built in capital", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities], reason: None }) },
@@ -2123,18 +2123,18 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "Unbuildable", placeholder: "Unbuildable", signature: "Unbuildable", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Barbarians, Stage::Cities, Stage::Workers], reason: None }) },
     TypeInfo { name: "CannotBePurchased", placeholder: "Cannot be purchased", signature: "Cannot be purchased", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "CanBePurchasedWithStat", placeholder: "Can be purchased with [] []", signature: "Can be purchased with [stat] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stat, ParamKind::CityFilter], fields: &["stat", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
-    TypeInfo { name: "CanBePurchasedForAmountStat", placeholder: "Can be purchased for [] [] []", signature: "Can be purchased for [amount] [stat] [cityFilter]", support: None },
+    TypeInfo { name: "CanBePurchasedForAmountStat", placeholder: "Can be purchased for [] [] []", signature: "Can be purchased for [amount] [stat] [cityFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::Stat, ParamKind::CityFilter], fields: &["cost", "stat", "cities"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "MaxNumberBuildable", placeholder: "Limited to [] per Civilization", signature: "Limited to [amount] per Civilization", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["limit"], gain: false, stages: &[Stage::Cities, Stage::Conquest, Stage::Triggers], reason: None }) },
     TypeInfo { name: "OnlyAvailable", placeholder: "Only available", signature: "Only available", support: Some(&Support { role: Role::Requirement, params: &[], fields: &[], gain: false, stages: &[Stage::Barbarians, Stage::Cities, Stage::Policies, Stage::Research, Stage::Ruins, Stage::Units, Stage::Workers], reason: None }) },
     TypeInfo { name: "Unavailable", placeholder: "Unavailable", signature: "Unavailable", support: Some(&Support { role: Role::Requirement, params: &[], fields: &[], gain: false, stages: &[Stage::Cities, Stage::Policies, Stage::Research, Stage::Ruins, Stage::Units, Stage::Workers], reason: None }) },
-    TypeInfo { name: "CannotBuildBuildings", placeholder: "Cannot build [] buildings", signature: "Cannot build [buildingFilter] buildings", support: None },
+    TypeInfo { name: "CannotBuildBuildings", placeholder: "Cannot build [] buildings", signature: "Cannot build [buildingFilter] buildings", support: Some(&Support { role: Role::Effect, params: &[ParamKind::BuildingFilter], fields: &["buildings"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "ConvertFoodToProductionWhenConstructed", placeholder: "Excess Food converted to Production when under construction", signature: "Excess Food converted to Production when under construction", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "RequiresPopulation", placeholder: "Requires at least [] population", signature: "Requires at least [amount] population", support: Some(&Support { role: Role::Requirement, params: &[ParamKind::Amount], fields: &["population"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "TriggersAlertOnStart", placeholder: "Triggers a global alert upon build start", signature: "Triggers a global alert upon build start", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "TriggersAlertOnCompletion", placeholder: "Triggers a global alert upon completion", signature: "Triggers a global alert upon completion", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "CostIncreasesPerCity", placeholder: "Cost increases by [] per owned city", signature: "Cost increases by [amount] per owned city", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["cost"], gain: false, stages: &[Stage::Cities], reason: None }) },
-    TypeInfo { name: "CostIncreasesWhenBuilt", placeholder: "Cost increases by [] when built", signature: "Cost increases by [amount] when built", support: None },
-    TypeInfo { name: "CostPercentageChange", placeholder: "[]% production cost", signature: "[amount]% production cost", support: None },
+    TypeInfo { name: "CostIncreasesWhenBuilt", placeholder: "Cost increases by [] when built", signature: "Cost increases by [amount] when built", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["cost"], gain: false, stages: &[Stage::Cities], reason: None }) },
+    TypeInfo { name: "CostPercentageChange", placeholder: "[]% production cost", signature: "[amount]% production cost", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["percent"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "CanOnlyBeBuiltWhen", placeholder: "Can only be built", signature: "Can only be built", support: Some(&Support { role: Role::Requirement, params: &[], fields: &[], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "MustHaveOwnedWithinTiles", placeholder: "Must have an owned [] within [] tiles", signature: "Must have an owned [tileFilter] within [amount] tiles", support: Some(&Support { role: Role::Requirement, params: &[ParamKind::TileFilter, ParamKind::Amount], fields: &["tiles", "radius"], gain: false, stages: &[Stage::Cities], reason: None }) },
     TypeInfo { name: "EnablesNuclearWeapons", placeholder: "Enables nuclear weapon", signature: "Enables nuclear weapon", support: Some(&Support { role: Role::Inert, params: &[], fields: &[], gain: false, stages: &[], reason: Some("nuclear weapons are switched on by the game settings (game.py nukes_enabled), not by a building") }) },
@@ -2143,12 +2143,12 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "MustBeNextTo", placeholder: "Must be next to []", signature: "Must be next to [tileFilter]", support: Some(&Support { role: Role::Requirement, params: &[ParamKind::TileFilter], fields: &["tiles"], gain: false, stages: &[Stage::Cities, Stage::Workers], reason: None }) },
     TypeInfo { name: "MustNotBeNextTo", placeholder: "Must not be next to []", signature: "Must not be next to [tileFilter]", support: None },
     TypeInfo { name: "Unsellable", placeholder: "Unsellable", signature: "Unsellable", support: None },
-    TypeInfo { name: "ObsoleteWith", placeholder: "Obsolete with []", signature: "Obsolete with [tech]", support: None },
+    TypeInfo { name: "ObsoleteWith", placeholder: "Obsolete with []", signature: "Obsolete with [tech]", support: Some(&Support { role: Role::Requirement, params: &[ParamKind::Tech], fields: &["tech"], gain: false, stages: &[Stage::Cities, Stage::Workers], reason: None }) },
     TypeInfo { name: "IndicatesCapital", placeholder: "Indicates the capital city", signature: "Indicates the capital city", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Barbarians, Stage::Cities, Stage::Conquest], reason: None }) },
     TypeInfo { name: "MovesToNewCapital", placeholder: "Moves to new capital when capital changes", signature: "Moves to new capital when capital changes", support: None },
     TypeInfo { name: "ProvidesExtraLuxuryFromCityResources", placeholder: "Provides 1 extra copy of each improved luxury resource near this City", signature: "Provides 1 extra copy of each improved luxury resource near this City", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Economy], reason: None }) },
     TypeInfo { name: "DestroyedWhenCityCaptured", placeholder: "Destroyed when the city is captured", signature: "Destroyed when the city is captured", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Conquest], reason: None }) },
-    TypeInfo { name: "NotDestroyedWhenCityCaptured", placeholder: "Never destroyed when the city is captured", signature: "Never destroyed when the city is captured", support: None },
+    TypeInfo { name: "NotDestroyedWhenCityCaptured", placeholder: "Never destroyed when the city is captured", signature: "Never destroyed when the city is captured", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Conquest], reason: None }) },
     TypeInfo { name: "GoldFromCapturingCity", placeholder: "[]% Gold given to enemy if city is captured", signature: "[relativeAmount]% Gold given to enemy if city is captured", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Conquest], reason: None }) },
     TypeInfo { name: "RemovesAnnexUnhappiness", placeholder: "Removes extra unhappiness from annexed cities", signature: "Removes extra unhappiness from annexed cities", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities, Stage::Rules], reason: None }) },
     TypeInfo { name: "ConnectTradeRoutes", placeholder: "Connects trade routes over water", signature: "Connects trade routes over water", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities], reason: None }) },
@@ -2169,14 +2169,14 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "MayParadrop", placeholder: "May Paradrop to [] tiles up to [] tiles away", signature: "May Paradrop to [tileFilter] tiles up to [positiveAmount] tiles away", support: Some(&Support { role: Role::Action, params: &[ParamKind::TileFilter, ParamKind::PositiveAmount], fields: &["tiles", "range"], gain: false, stages: &[Stage::Actions], reason: None }) },
     TypeInfo { name: "CanAirsweep", placeholder: "Can perform Air Sweep", signature: "Can perform Air Sweep", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "CanSpeedupConstruction", placeholder: "Can speed up construction of a building", signature: "Can speed up construction of a building", support: Some(&Support { role: Role::Action, params: &[], fields: &[], gain: false, stages: &[Stage::Actions, Stage::GreatPeople], reason: None }) },
-    TypeInfo { name: "CanSpeedupWonderConstruction", placeholder: "Can speed up the construction of a wonder", signature: "Can speed up the construction of a wonder", support: None },
+    TypeInfo { name: "CanSpeedupWonderConstruction", placeholder: "Can speed up the construction of a wonder", signature: "Can speed up the construction of a wonder", support: Some(&Support { role: Role::Action, params: &[], fields: &[], gain: false, stages: &[Stage::Actions], reason: None }) },
     TypeInfo { name: "CanHurryResearch", placeholder: "Can hurry technology research", signature: "Can hurry technology research", support: Some(&Support { role: Role::Action, params: &[], fields: &[], gain: false, stages: &[Stage::Actions, Stage::GreatPeople], reason: None }) },
-    TypeInfo { name: "CanHurryPolicy", placeholder: "Can generate a large amount of culture", signature: "Can generate a large amount of culture", support: None },
+    TypeInfo { name: "CanHurryPolicy", placeholder: "Can generate a large amount of culture", signature: "Can generate a large amount of culture", support: Some(&Support { role: Role::Action, params: &[], fields: &[], gain: false, stages: &[Stage::Actions], reason: None }) },
     TypeInfo { name: "CanTradeWithCityStateForGoldAndInfluence", placeholder: "Can undertake a trade mission with City-State, giving a large sum of gold and [] Influence", signature: "Can undertake a trade mission with City-State, giving a large sum of gold and [amount] Influence", support: Some(&Support { role: Role::Action, params: &[ParamKind::Amount], fields: &["influence"], gain: false, stages: &[Stage::Actions, Stage::GreatPeople, Stage::Movement], reason: None }) },
     TypeInfo { name: "CanTransform", placeholder: "Can transform to []", signature: "Can transform to [unit]", support: None },
     TypeInfo { name: "AutomationPrimaryAction", placeholder: "Automation is a primary action", signature: "Automation is a primary action", support: Some(&Support { role: Role::Inert, params: &[], fields: &[], gain: false, stages: &[], reason: Some("unit automation (automation.py) does not rank actions") }) },
     TypeInfo { name: "Strength", placeholder: "[]% Strength", signature: "[relativeAmount]% Strength", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Barbarians, Stage::Combat, Stage::Unique], reason: None }) },
-    TypeInfo { name: "StrengthAmount", placeholder: "[] Strength", signature: "[relativeAmount] Strength", support: None },
+    TypeInfo { name: "StrengthAmount", placeholder: "[] Strength", signature: "[relativeAmount] Strength", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["strength"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "StrengthNearCapital", placeholder: "[]% Strength decreasing with distance from the capital", signature: "[relativeAmount]% Strength decreasing with distance from the capital", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "FlankAttackBonus", placeholder: "[]% to Flank Attack bonuses", signature: "[relativeAmount]% to Flank Attack bonuses", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "StrengthForAdjacentEnemies", placeholder: "[]% Strength for enemy [] units in adjacent [] tiles", signature: "[relativeAmount]% Strength for enemy [mapUnitFilter] units in adjacent [tileFilter] tiles", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount, ParamKind::MapUnitFilter, ParamKind::TileFilter], fields: &["percent", "units", "tiles"], gain: false, stages: &[Stage::Combat], reason: None }) },
@@ -2185,7 +2185,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "Movement", placeholder: "[] Movement", signature: "[amount] Movement", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["movement"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "Sight", placeholder: "[] Sight", signature: "[amount] Sight", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["sight"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "Range", placeholder: "[] Range", signature: "[amount] Range", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["range"], gain: false, stages: &[Stage::Units], reason: None }) },
-    TypeInfo { name: "AirInterceptionRange", placeholder: "[] Air Interception Range", signature: "[relativeAmount] Air Interception Range", support: None },
+    TypeInfo { name: "AirInterceptionRange", placeholder: "[] Air Interception Range", signature: "[relativeAmount] Air Interception Range", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["range"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "Heal", placeholder: "[] HP when healing", signature: "[amount] HP when healing", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["hp"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "ExtraRangedAttack", placeholder: "Before engaging in combat performs an extra ranged attack with []% of melee combat strength", signature: "Before engaging in combat performs an extra ranged attack with [amount]% of melee combat strength", support: None },
     TypeInfo { name: "SpreadReligionStrength", placeholder: "[]% Spread Religion Strength", signature: "[relativeAmount]% Spread Religion Strength", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Religion], reason: None }) },
@@ -2196,13 +2196,13 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "MustSetUp", placeholder: "Must set up to ranged attack", signature: "Must set up to ranged attack", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Api, Stage::Combat], reason: None }) },
     TypeInfo { name: "SelfDestructs", placeholder: "Self-destructs when attacking", signature: "Self-destructs when attacking", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Ai, Stage::Barbarians, Stage::Combat], reason: None }) },
     TypeInfo { name: "AttackAcrossCoast", placeholder: "Eliminates combat penalty for attacking across a coast", signature: "Eliminates combat penalty for attacking across a coast", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
-    TypeInfo { name: "AttackOnSea", placeholder: "May attack when embarked", signature: "May attack when embarked", support: None },
+    TypeInfo { name: "AttackOnSea", placeholder: "May attack when embarked", signature: "May attack when embarked", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "AttackAcrossRiver", placeholder: "Eliminates combat penalty for attacking over a river", signature: "Eliminates combat penalty for attacking over a river", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "BlastRadius", placeholder: "Blast radius []", signature: "Blast radius [amount]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["radius"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "IndirectFire", placeholder: "Ranged attacks may be performed over obstacles", signature: "Ranged attacks may be performed over obstacles", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Ai, Stage::Combat], reason: None }) },
     TypeInfo { name: "NuclearWeapon", placeholder: "Nuclear weapon of Strength []", signature: "Nuclear weapon of Strength [amount]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["strength"], gain: false, stages: &[Stage::Ai, Stage::Api, Stage::Barbarians, Stage::Cities, Stage::Combat, Stage::Unique, Stage::Units], reason: None }) },
     TypeInfo { name: "NoDefensiveTerrainBonus", placeholder: "No defensive terrain bonus", signature: "No defensive terrain bonus", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
-    TypeInfo { name: "NoDefensiveTerrainPenalty", placeholder: "No defensive terrain penalty", signature: "No defensive terrain penalty", support: None },
+    TypeInfo { name: "NoDefensiveTerrainPenalty", placeholder: "No defensive terrain penalty", signature: "No defensive terrain penalty", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "NoDamagePenaltyWoundedUnits", placeholder: "No damage penalty for wounded units", signature: "No damage penalty for wounded units", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "Uncapturable", placeholder: "Uncapturable", signature: "Uncapturable", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat, Stage::Units], reason: None }) },
     TypeInfo { name: "WithdrawsBeforeMeleeCombat", placeholder: "Withdraws before melee combat", signature: "Withdraws before melee combat", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
@@ -2219,7 +2219,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "HealOnlyByPillaging", placeholder: "Can only heal by pillaging", signature: "Can only heal by pillaging", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "HealsEvenAfterAction", placeholder: "Unit will heal every turn, even if it performs an action", signature: "Unit will heal every turn, even if it performs an action", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "HealAdjacentUnits", placeholder: "All adjacent units heal [] HP when healing", signature: "All adjacent units heal [amount] HP when healing", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["hp"], gain: false, stages: &[Stage::Units], reason: None }) },
-    TypeInfo { name: "NoSight", placeholder: "No Sight", signature: "No Sight", support: None },
+    TypeInfo { name: "NoSight", placeholder: "No Sight", signature: "No Sight", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Vis], reason: None }) },
     TypeInfo { name: "CanSeeOverObstacles", placeholder: "Can see over obstacles", signature: "Can see over obstacles", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Vis], reason: None }) },
     TypeInfo { name: "CarryAirUnits", placeholder: "Can carry [] [] units", signature: "Can carry [amount] [mapUnitFilter] units", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::MapUnitFilter], fields: &["count", "units"], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "CarryExtraAirUnits", placeholder: "Can carry [] extra [] units", signature: "Can carry [amount] extra [mapUnitFilter] units", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::MapUnitFilter], fields: &["count", "units"], gain: false, stages: &[Stage::Movement, Stage::Units], reason: None }) },
@@ -2242,27 +2242,27 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "PercentageXPGain", placeholder: "[]% XP gained from combat", signature: "[relativeAmount]% XP gained from combat", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "GreatPersonFromCombat", placeholder: "Can be earned through combat", signature: "Can be earned through combat", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::GreatPeople], reason: None }) },
     TypeInfo { name: "GreatPersonEarnedFaster", placeholder: "[] is earned []% faster", signature: "[greatPerson] is earned [relativeAmount]% faster", support: Some(&Support { role: Role::Effect, params: &[ParamKind::GreatPerson, ParamKind::RelativeAmount], fields: &["great_person", "percent"], gain: false, stages: &[Stage::GreatPeople], reason: None }) },
-    TypeInfo { name: "Invisible", placeholder: "Invisible to others", signature: "Invisible to others", support: None },
+    TypeInfo { name: "Invisible", placeholder: "Invisible to others", signature: "Invisible to others", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Vis], reason: None }) },
     TypeInfo { name: "InvisibleToNonAdjacent", placeholder: "Invisible to non-adjacent units", signature: "Invisible to non-adjacent units", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Vis], reason: None }) },
     TypeInfo { name: "CanSeeInvisibleUnits", placeholder: "Can see invisible [] units", signature: "Can see invisible [mapUnitFilter] units", support: Some(&Support { role: Role::Effect, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Vis], reason: None }) },
     TypeInfo { name: "RuinsUpgrade", placeholder: "May upgrade to [] through ruins-like effects", signature: "May upgrade to [unit] through ruins-like effects", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Unit], fields: &["unit"], gain: false, stages: &[Stage::Units], reason: None }) },
-    TypeInfo { name: "CanUpgrade", placeholder: "Can upgrade to []", signature: "Can upgrade to [unit]", support: None },
+    TypeInfo { name: "CanUpgrade", placeholder: "Can upgrade to []", signature: "Can upgrade to [unit]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Unit], fields: &["unit"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "DestroysImprovementUponAttack", placeholder: "Destroys tile improvements when attacking", signature: "Destroys tile improvements when attacking", support: None },
     TypeInfo { name: "CannotMove", placeholder: "Cannot move", signature: "Cannot move", support: None },
     TypeInfo { name: "DoubleMovementOnTerrain", placeholder: "Double movement in []", signature: "Double movement in [terrainFilter]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::TerrainFilter], fields: &["terrain"], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "AllTilesCost1Move", placeholder: "All tiles cost 1 movement", signature: "All tiles cost 1 movement", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
-    TypeInfo { name: "CanMoveOnWater", placeholder: "May travel on Water tiles without embarking", signature: "May travel on Water tiles without embarking", support: None },
+    TypeInfo { name: "CanMoveOnWater", placeholder: "May travel on Water tiles without embarking", signature: "May travel on Water tiles without embarking", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "CanPassImpassable", placeholder: "Can pass through impassable tiles", signature: "Can pass through impassable tiles", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement, Stage::Units], reason: None }) },
     TypeInfo { name: "IgnoresTerrainCost", placeholder: "Ignores terrain cost", signature: "Ignores terrain cost", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "IgnoresZOC", placeholder: "Ignores Zone of Control", signature: "Ignores Zone of Control", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "RoughTerrainPenalty", placeholder: "Rough terrain penalty", signature: "Rough terrain penalty", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "CanEnterIceTiles", placeholder: "Can enter ice tiles", signature: "Can enter ice tiles", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
-    TypeInfo { name: "CannotEmbark", placeholder: "Cannot embark", signature: "Cannot embark", support: None },
+    TypeInfo { name: "CannotEmbark", placeholder: "Cannot embark", signature: "Cannot embark", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "CannotEnterOcean", placeholder: "Cannot enter ocean tiles", signature: "Cannot enter ocean tiles", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "CanEnterForeignTiles", placeholder: "May enter foreign tiles without open borders", signature: "May enter foreign tiles without open borders", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement, Stage::Units], reason: None }) },
     TypeInfo { name: "CanEnterForeignTilesButLosesReligiousStrength", placeholder: "May enter foreign tiles without open borders, but loses [] religious strength each turn it ends there", signature: "May enter foreign tiles without open borders, but loses [amount] religious strength each turn it ends there", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["loss"], gain: false, stages: &[Stage::Movement, Stage::Units], reason: None }) },
     TypeInfo { name: "ReducedDisembarkCost", placeholder: "[] Movement point cost to disembark", signature: "[nonNegativeAmount] Movement point cost to disembark", support: Some(&Support { role: Role::Effect, params: &[ParamKind::NonNegativeAmount], fields: &["movement"], gain: false, stages: &[Stage::Movement], reason: None }) },
-    TypeInfo { name: "ReducedEmbarkCost", placeholder: "[] Movement point cost to embark", signature: "[nonNegativeAmount] Movement point cost to embark", support: None },
+    TypeInfo { name: "ReducedEmbarkCost", placeholder: "[] Movement point cost to embark", signature: "[nonNegativeAmount] Movement point cost to embark", support: Some(&Support { role: Role::Effect, params: &[ParamKind::NonNegativeAmount], fields: &["movement"], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "ForestsAndJunglesAreRoads", placeholder: "All units move through Forest and Jungle Tiles in friendly territory as if they have roads. These tiles can be used to establish City Connections upon researching the Wheel.", signature: "All units move through Forest and Jungle Tiles in friendly territory as if they have roads. These tiles can be used to establish City Connections upon researching the Wheel.", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Cities, Stage::Movement], reason: None }) },
     TypeInfo { name: "IgnoreHillMovementCost", placeholder: "Units ignore terrain costs when moving into any tile with Hills", signature: "Units ignore terrain costs when moving into any tile with Hills", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Movement], reason: None }) },
     TypeInfo { name: "CannotBeBarbarian", placeholder: "Never appears as a Barbarian unit", signature: "Never appears as a Barbarian unit", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Barbarians], reason: None }) },
@@ -2286,7 +2286,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "NaturalWonderNeighborCount", placeholder: "Must be adjacent to [] [] tiles", signature: "Must be adjacent to [amount] [simpleTerrain] tiles", support: Some(&Support { role: Role::Mapgen, params: &[ParamKind::Amount, ParamKind::SimpleTerrain], fields: &["count", "terrain"], gain: false, stages: &[Stage::Mapgen], reason: None }) },
     TypeInfo { name: "NaturalWonderNeighborsRange", placeholder: "Must be adjacent to [] to [] [] tiles", signature: "Must be adjacent to [amount] to [amount] [simpleTerrain] tiles", support: Some(&Support { role: Role::Mapgen, params: &[ParamKind::Amount, ParamKind::Amount, ParamKind::SimpleTerrain], fields: &["min", "max", "terrain"], gain: false, stages: &[Stage::Mapgen], reason: None }) },
     TypeInfo { name: "NaturalWonderSmallerLandmass", placeholder: "Must not be on [] largest landmasses", signature: "Must not be on [amount] largest landmasses", support: Some(&Support { role: Role::Mapgen, params: &[ParamKind::Amount], fields: &["count"], gain: false, stages: &[Stage::Mapgen], reason: None }) },
-    TypeInfo { name: "NaturalWonderLargerLandmass", placeholder: "Must be on [] largest landmasses", signature: "Must be on [amount] largest landmasses", support: None },
+    TypeInfo { name: "NaturalWonderLargerLandmass", placeholder: "Must be on [] largest landmasses", signature: "Must be on [amount] largest landmasses", support: Some(&Support { role: Role::Mapgen, params: &[ParamKind::Amount], fields: &["count"], gain: false, stages: &[Stage::Mapgen], reason: None }) },
     TypeInfo { name: "NaturalWonderLatitude", placeholder: "Occurs on latitudes from [] to [] percent of distance equator to pole", signature: "Occurs on latitudes from [amount] to [amount] percent of distance equator to pole", support: Some(&Support { role: Role::Mapgen, params: &[ParamKind::Amount, ParamKind::Amount], fields: &["min", "max"], gain: false, stages: &[Stage::Mapgen], reason: None }) },
     TypeInfo { name: "NaturalWonderGroups", placeholder: "Occurs in groups of [] to [] tiles", signature: "Occurs in groups of [amount] to [amount] tiles", support: Some(&Support { role: Role::Mapgen, params: &[ParamKind::Amount, ParamKind::Amount], fields: &["min", "max"], gain: false, stages: &[Stage::Mapgen], reason: None }) },
     TypeInfo { name: "NaturalWonderConvertNeighbors", placeholder: "Neighboring tiles will convert to []", signature: "Neighboring tiles will convert to [baseTerrain/terrainFeature]", support: Some(&Support { role: Role::Mapgen, params: &[ParamKind::BaseTerrainOrFeature], fields: &["terrain"], gain: false, stages: &[Stage::Mapgen], reason: None }) },
@@ -2348,7 +2348,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "NoFeatureRemovalNeeded", placeholder: "Does not need removal of []", signature: "Does not need removal of [terrainFeature]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::TerrainFeature], fields: &["feature"], gain: false, stages: &[Stage::Workers], reason: None }) },
     TypeInfo { name: "RemovesFeaturesIfBuilt", placeholder: "Removes removable features when built", signature: "Removes removable features when built", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Workers], reason: None }) },
     TypeInfo { name: "DefensiveBonus", placeholder: "Gives a defensive bonus of []%", signature: "Gives a defensive bonus of [relativeAmount]%", support: Some(&Support { role: Role::Effect, params: &[ParamKind::RelativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Combat], reason: None }) },
-    TypeInfo { name: "ImprovementMaintenance", placeholder: "Costs [] [] per turn when in your territory", signature: "Costs [amount] [stat] per turn when in your territory", support: None },
+    TypeInfo { name: "ImprovementMaintenance", placeholder: "Costs [] [] per turn when in your territory", signature: "Costs [amount] [stat] per turn when in your territory", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::Stat], fields: &["amount", "stat"], gain: false, stages: &[Stage::Economy], reason: None }) },
     TypeInfo { name: "ImprovementAllMaintenance", placeholder: "Costs [] [] per turn", signature: "Costs [amount] [stat] per turn", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount, ParamKind::Stat], fields: &["amount", "stat"], gain: false, stages: &[Stage::Economy], reason: None }) },
     TypeInfo { name: "DamagesAdjacentEnemyUnits", placeholder: "Adjacent enemy units ending their turn take [] damage", signature: "Adjacent enemy units ending their turn take [amount] damage", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Amount], fields: &["damage"], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "GreatImprovement", placeholder: "Great Improvement", signature: "Great Improvement", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Actions, Stage::Automation, Stage::Rules, Stage::Unique], reason: None }) },
@@ -2356,87 +2356,87 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "IsBarbarianCampEquivalent", placeholder: "Marks a barbarian camp", signature: "Marks a barbarian camp", support: Some(&Support { role: Role::Inert, params: &[], fields: &[], gain: false, stages: &[], reason: Some("the barbarian camp is found by name (rules::derived::Known)") }) },
     TypeInfo { name: "Unpillagable", placeholder: "Unpillagable", signature: "Unpillagable", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat, Stage::Workers], reason: None }) },
     TypeInfo { name: "PillageYieldRandom", placeholder: "Pillaging this improvement yields approximately []", signature: "Pillaging this improvement yields approximately [stats]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stats], fields: &["stats"], gain: false, stages: &[Stage::Workers], reason: None }) },
-    TypeInfo { name: "PillageYieldFixed", placeholder: "Pillaging this improvement yields []", signature: "Pillaging this improvement yields [stats]", support: None },
-    TypeInfo { name: "DestroyedWhenPillaged", placeholder: "Destroyed when pillaged", signature: "Destroyed when pillaged", support: None },
+    TypeInfo { name: "PillageYieldFixed", placeholder: "Pillaging this improvement yields []", signature: "Pillaging this improvement yields [stats]", support: Some(&Support { role: Role::Effect, params: &[ParamKind::Stats], fields: &["stats"], gain: false, stages: &[Stage::Workers], reason: None }) },
+    TypeInfo { name: "DestroyedWhenPillaged", placeholder: "Destroyed when pillaged", signature: "Destroyed when pillaged", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Workers], reason: None }) },
     TypeInfo { name: "Irremovable", placeholder: "Irremovable", signature: "Irremovable", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Combat, Stage::Workers], reason: None }) },
     TypeInfo { name: "AutomatedUnitsWillNotReplace", placeholder: "Will not be replaced by automated units", signature: "Will not be replaced by automated units", support: Some(&Support { role: Role::Inert, params: &[], fields: &[], gain: false, stages: &[], reason: Some("worker automation (automation.py) does not look at it") }) },
     TypeInfo { name: "ImprovesResources", placeholder: "Improves [] resource in this tile", signature: "Improves [resourceFilter] resource in this tile", support: None },
     TypeInfo { name: "WillNotBuild", placeholder: "Will not build []", signature: "Will not build [baseUnitFilter/buildingFilter]", support: None },
     TypeInfo { name: "PersonalityAiWeight", placeholder: "[]% weight to [] for AI decisions", signature: "[relativeAmount]% weight to [baseUnitFilter/buildingFilter] for AI decisions", support: None },
-    TypeInfo { name: "ConditionalEveryTurns", placeholder: "every [] turns", signature: "every [positiveAmount] turns", support: None },
-    TypeInfo { name: "ConditionalBeforeTurns", placeholder: "before turn number []", signature: "before turn number [nonNegativeAmount]", support: None },
+    TypeInfo { name: "ConditionalEveryTurns", placeholder: "every [] turns", signature: "every [positiveAmount] turns", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PositiveAmount], fields: &["turns"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalBeforeTurns", placeholder: "before turn number []", signature: "before turn number [nonNegativeAmount]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::NonNegativeAmount], fields: &["turn"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalAfterTurns", placeholder: "after turn number []", signature: "after turn number [nonNegativeAmount]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::NonNegativeAmount], fields: &["turn"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalSpeed", placeholder: "on [] game speed", signature: "on [speed] game speed", support: None },
-    TypeInfo { name: "ConditionalDifficulty", placeholder: "on [] difficulty", signature: "on [difficulty] difficulty", support: None },
+    TypeInfo { name: "ConditionalSpeed", placeholder: "on [] game speed", signature: "on [speed] game speed", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Speed], fields: &["speed"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalDifficulty", placeholder: "on [] difficulty", signature: "on [difficulty] difficulty", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Difficulty], fields: &["difficulty"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalDifficultyOrHigher", placeholder: "on [] difficulty or higher", signature: "on [difficulty] difficulty or higher", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Difficulty], fields: &["difficulty"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalDifficultyOrLower", placeholder: "on [] difficulty or lower", signature: "on [difficulty] difficulty or lower", support: None },
+    TypeInfo { name: "ConditionalDifficultyOrLower", placeholder: "on [] difficulty or lower", signature: "on [difficulty] difficulty or lower", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Difficulty], fields: &["difficulty"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalVictoryEnabled", placeholder: "when [] Victory is enabled", signature: "when [victoryType] Victory is enabled", support: Some(&Support { role: Role::Cond, params: &[ParamKind::VictoryType], fields: &["victory"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalVictoryDisabled", placeholder: "when [] Victory is disabled", signature: "when [victoryType] Victory is disabled", support: None },
+    TypeInfo { name: "ConditionalVictoryDisabled", placeholder: "when [] Victory is disabled", signature: "when [victoryType] Victory is disabled", support: Some(&Support { role: Role::Cond, params: &[ParamKind::VictoryType], fields: &["victory"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalReligionEnabled", placeholder: "when religion is enabled", signature: "when religion is enabled", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalReligionDisabled", placeholder: "when religion is disabled", signature: "when religion is disabled", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalEspionageEnabled", placeholder: "when espionage is enabled", signature: "when espionage is enabled", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalEspionageDisabled", placeholder: "when espionage is disabled", signature: "when espionage is disabled", support: None },
+    TypeInfo { name: "ConditionalEspionageDisabled", placeholder: "when espionage is disabled", signature: "when espionage is disabled", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalNuclearWeaponsEnabled", placeholder: "when nuclear weapons are enabled", signature: "when nuclear weapons are enabled", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalNuclearWeaponsDisabled", placeholder: "when nuclear weapons are disabled", signature: "when nuclear weapons are disabled", support: None },
+    TypeInfo { name: "ConditionalNuclearWeaponsDisabled", placeholder: "when nuclear weapons are disabled", signature: "when nuclear weapons are disabled", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalChance", placeholder: "with []% chance", signature: "with [nonNegativeAmount]% chance", support: Some(&Support { role: Role::Cond, params: &[ParamKind::NonNegativeAmount], fields: &["percent"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalTutorialsEnabled", placeholder: "if tutorials are enabled", signature: "if tutorials are enabled", support: None },
-    TypeInfo { name: "ConditionalTutorialCompleted", placeholder: "if tutorial [] is completed", signature: "if tutorial [comment] is completed", support: None },
-    TypeInfo { name: "ConditionalCivFilter", placeholder: "for [] Civilizations", signature: "for [civFilter] Civilizations", support: None },
-    TypeInfo { name: "ConditionalWar", placeholder: "when at war", signature: "when at war", support: None },
+    TypeInfo { name: "ConditionalTutorialsEnabled", placeholder: "if tutorials are enabled", signature: "if tutorials are enabled", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalTutorialCompleted", placeholder: "if tutorial [] is completed", signature: "if tutorial [comment] is completed", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Comment], fields: &["tutorial"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalCivFilter", placeholder: "for [] Civilizations", signature: "for [civFilter] Civilizations", support: Some(&Support { role: Role::Cond, params: &[ParamKind::CivFilter], fields: &["civs"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalWar", placeholder: "when at war", signature: "when at war", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalNotWar", placeholder: "when not at war", signature: "when not at war", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalGoldenAge", placeholder: "during a Golden Age", signature: "during a Golden Age", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalNotGoldenAge", placeholder: "when not in a Golden Age", signature: "when not in a Golden Age", support: None },
+    TypeInfo { name: "ConditionalNotGoldenAge", placeholder: "when not in a Golden Age", signature: "when not in a Golden Age", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalWLTKD", placeholder: "during We Love The King Day", signature: "during We Love The King Day", support: None },
     TypeInfo { name: "ConditionalHappy", placeholder: "while the empire is happy", signature: "while the empire is happy", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Economy, Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalDuringEra", placeholder: "during the []", signature: "during the [era]", support: None },
+    TypeInfo { name: "ConditionalDuringEra", placeholder: "during the []", signature: "during the [era]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Era], fields: &["era"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalBeforeEra", placeholder: "before the []", signature: "before the [era]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Era], fields: &["era"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalStartingFromEra", placeholder: "starting from the []", signature: "starting from the [era]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Era], fields: &["era"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalIfStartingInEra", placeholder: "if starting in the []", signature: "if starting in the [era]", support: None },
+    TypeInfo { name: "ConditionalIfStartingInEra", placeholder: "if starting in the []", signature: "if starting in the [era]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Era], fields: &["era"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalFirstCivToResearch", placeholder: "if no other Civilization has researched this", signature: "if no other Civilization has researched this", support: None },
     TypeInfo { name: "ConditionalTech", placeholder: "after discovering []", signature: "after discovering [techFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::TechFilter], fields: &["techs"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalNoTech", placeholder: "before discovering []", signature: "before discovering [techFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::TechFilter], fields: &["techs"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalWhileResearching", placeholder: "while researching []", signature: "while researching [techFilter]", support: None },
+    TypeInfo { name: "ConditionalWhileResearching", placeholder: "while researching []", signature: "while researching [techFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::TechFilter], fields: &["techs"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalFirstCivToAdopt", placeholder: "if no other Civilization has adopted this", signature: "if no other Civilization has adopted this", support: None },
-    TypeInfo { name: "ConditionalNoCivAdopted", placeholder: "if no Civilization has adopted []", signature: "if no Civilization has adopted [policy/belief]", support: None },
-    TypeInfo { name: "ConditionalAfterPolicyOrBelief", placeholder: "after adopting []", signature: "after adopting [policy/belief]", support: None },
+    TypeInfo { name: "ConditionalNoCivAdopted", placeholder: "if no Civilization has adopted []", signature: "if no Civilization has adopted [policy/belief]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PolicyOrBelief], fields: &["adopted"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalAfterPolicyOrBelief", placeholder: "after adopting []", signature: "after adopting [policy/belief]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PolicyOrBelief], fields: &["adopted"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalBeforePolicyOrBelief", placeholder: "before adopting []", signature: "before adopting [policy/belief]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PolicyOrBelief], fields: &["adopted"], gain: false, stages: &[Stage::Policies, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalBeforePantheon", placeholder: "before founding a Pantheon", signature: "before founding a Pantheon", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalAfterPantheon", placeholder: "after founding a Pantheon", signature: "after founding a Pantheon", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalBeforeReligion", placeholder: "before founding a religion", signature: "before founding a religion", support: None },
-    TypeInfo { name: "ConditionalAfterReligion", placeholder: "after founding a religion", signature: "after founding a religion", support: None },
-    TypeInfo { name: "ConditionalBeforeEnhancingReligion", placeholder: "before enhancing a religion", signature: "before enhancing a religion", support: None },
-    TypeInfo { name: "ConditionalAfterEnhancingReligion", placeholder: "after enhancing a religion", signature: "after enhancing a religion", support: None },
+    TypeInfo { name: "ConditionalBeforeReligion", placeholder: "before founding a religion", signature: "before founding a religion", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalAfterReligion", placeholder: "after founding a religion", signature: "after founding a religion", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalBeforeEnhancingReligion", placeholder: "before enhancing a religion", signature: "before enhancing a religion", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalAfterEnhancingReligion", placeholder: "after enhancing a religion", signature: "after enhancing a religion", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalAfterGeneratingGreatProphet", placeholder: "after generating a Great Prophet", signature: "after generating a Great Prophet", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalBuildingBuilt", placeholder: "if [] is constructed", signature: "if [buildingFilter] is constructed", support: Some(&Support { role: Role::Cond, params: &[ParamKind::BuildingFilter], fields: &["buildings"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalBuildingNotBuilt", placeholder: "if [] is not constructed", signature: "if [buildingFilter] is not constructed", support: None },
+    TypeInfo { name: "ConditionalBuildingNotBuilt", placeholder: "if [] is not constructed", signature: "if [buildingFilter] is not constructed", support: Some(&Support { role: Role::Cond, params: &[ParamKind::BuildingFilter], fields: &["buildings"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalBuildingBuiltAll", placeholder: "if [] is constructed in all [] cities", signature: "if [buildingFilter] is constructed in all [cityFilter] cities", support: Some(&Support { role: Role::Cond, params: &[ParamKind::BuildingFilter, ParamKind::CityFilter], fields: &["buildings", "cities"], gain: false, stages: &[Stage::Cities, Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalBuildingBuiltAmount", placeholder: "if [] is constructed in at least [] of [] cities", signature: "if [buildingFilter] is constructed in at least [positiveAmount] of [cityFilter] cities", support: None },
-    TypeInfo { name: "ConditionalBuildingBuiltByAnybody", placeholder: "if [] is constructed by anybody", signature: "if [buildingFilter] is constructed by anybody", support: None },
-    TypeInfo { name: "ConditionalBuildingNotBuiltByAnybody", placeholder: "if [] is not constructed by anybody", signature: "if [buildingFilter] is not constructed by anybody", support: None },
-    TypeInfo { name: "ConditionalWithResource", placeholder: "with []", signature: "with [resource]", support: None },
-    TypeInfo { name: "ConditionalWithoutResource", placeholder: "without []", signature: "without [resource]", support: None },
-    TypeInfo { name: "ConditionalWhenAboveAmountStatResource", placeholder: "when above [] []", signature: "when above [amount] [stat/resource]", support: None },
+    TypeInfo { name: "ConditionalBuildingBuiltAmount", placeholder: "if [] is constructed in at least [] of [] cities", signature: "if [buildingFilter] is constructed in at least [positiveAmount] of [cityFilter] cities", support: Some(&Support { role: Role::Cond, params: &[ParamKind::BuildingFilter, ParamKind::PositiveAmount, ParamKind::CityFilter], fields: &["buildings", "count", "cities"], gain: false, stages: &[Stage::Cities, Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalBuildingBuiltByAnybody", placeholder: "if [] is constructed by anybody", signature: "if [buildingFilter] is constructed by anybody", support: Some(&Support { role: Role::Cond, params: &[ParamKind::BuildingFilter], fields: &["buildings"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalBuildingNotBuiltByAnybody", placeholder: "if [] is not constructed by anybody", signature: "if [buildingFilter] is not constructed by anybody", support: Some(&Support { role: Role::Cond, params: &[ParamKind::BuildingFilter], fields: &["buildings"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalWithResource", placeholder: "with []", signature: "with [resource]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Resource], fields: &["resource"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalWithoutResource", placeholder: "without []", signature: "without [resource]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Resource], fields: &["resource"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalWhenAboveAmountStatResource", placeholder: "when above [] []", signature: "when above [amount] [stat/resource]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Amount, ParamKind::StatOrResource], fields: &["amount", "what"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalWhenBelowAmountStatResource", placeholder: "when below [] []", signature: "when below [amount] [stat/resource]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Amount, ParamKind::StatOrResource], fields: &["amount", "what"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalWhenBetweenStatResource", placeholder: "when between [] and [] []", signature: "when between [amount] and [amount] [stat/resource]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Amount, ParamKind::Amount, ParamKind::StatOrResource], fields: &["min", "max", "what"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalInThisCity", placeholder: "in this city", signature: "in this city", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Triggers, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalCityFilter", placeholder: "in [] cities", signature: "in [cityFilter] cities", support: Some(&Support { role: Role::Cond, params: &[ParamKind::CityFilter], fields: &["cities"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalCityConnected", placeholder: "in cities connected to the capital", signature: "in cities connected to the capital", support: None },
+    TypeInfo { name: "ConditionalCityConnected", placeholder: "in cities connected to the capital", signature: "in cities connected to the capital", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalCityReligion", placeholder: "in cities with a [] religion", signature: "in cities with a [religionFilter] religion", support: None },
     TypeInfo { name: "ConditionalCityNotReligion", placeholder: "in cities not following a [] religion", signature: "in cities not following a [religionFilter] religion", support: None },
     TypeInfo { name: "ConditionalCityMajorReligion", placeholder: "in cities with a major religion", signature: "in cities with a major religion", support: None },
     TypeInfo { name: "ConditionalCityEnhancedReligion", placeholder: "in cities with an enhanced religion", signature: "in cities with an enhanced religion", support: None },
     TypeInfo { name: "ConditionalCityThisReligion", placeholder: "in cities following our religion", signature: "in cities following our religion", support: None },
-    TypeInfo { name: "ConditionalCityWithBuilding", placeholder: "in cities with a []", signature: "in cities with a [buildingFilter]", support: None },
+    TypeInfo { name: "ConditionalCityWithBuilding", placeholder: "in cities with a []", signature: "in cities with a [buildingFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::BuildingFilter], fields: &["buildings"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalCityWithoutBuilding", placeholder: "in cities without a []", signature: "in cities without a [buildingFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::BuildingFilter], fields: &["buildings"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalPopulationFilter", placeholder: "in cities with at least [] []", signature: "in cities with at least [positiveAmount] [populationFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PositiveAmount, ParamKind::PopulationFilter], fields: &["count", "population"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalExactPopulationFilter", placeholder: "in cities with [] []", signature: "in cities with [nonNegativeAmount] [populationFilter]", support: None },
-    TypeInfo { name: "ConditionalBetweenPopulationFilter", placeholder: "in cities with between [] and [] []", signature: "in cities with between [amount] and [amount] [populationFilter]", support: None },
-    TypeInfo { name: "ConditionalBelowPopulationFilter", placeholder: "in cities with less than [] []", signature: "in cities with less than [amount] [populationFilter]", support: None },
+    TypeInfo { name: "ConditionalExactPopulationFilter", placeholder: "in cities with [] []", signature: "in cities with [nonNegativeAmount] [populationFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::NonNegativeAmount, ParamKind::PopulationFilter], fields: &["count", "population"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalBetweenPopulationFilter", placeholder: "in cities with between [] and [] []", signature: "in cities with between [amount] and [amount] [populationFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Amount, ParamKind::Amount, ParamKind::PopulationFilter], fields: &["min", "max", "population"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalBelowPopulationFilter", placeholder: "in cities with less than [] []", signature: "in cities with less than [amount] [populationFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Amount, ParamKind::PopulationFilter], fields: &["count", "population"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalWhenGarrisoned", placeholder: "with a garrison", signature: "with a garrison", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalOurUnit", placeholder: "for [] units", signature: "for [mapUnitFilter] units", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::GreatPeople, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalOurUnitOnUnit", placeholder: "when []", signature: "when [mapUnitFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalUnitWithPromotion", placeholder: "for units with []", signature: "for units with [promotion]", support: None },
-    TypeInfo { name: "ConditionalUnitWithoutPromotion", placeholder: "for units without []", signature: "for units without [promotion]", support: None },
+    TypeInfo { name: "ConditionalUnitWithPromotion", placeholder: "for units with []", signature: "for units with [promotion]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Promotion], fields: &["promotion"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalUnitWithoutPromotion", placeholder: "for units without []", signature: "for units without [promotion]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Promotion], fields: &["promotion"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalVsCity", placeholder: "vs cities", signature: "vs cities", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Barbarians, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalVsUnits", placeholder: "vs [] units", signature: "vs [mapUnitFilter] units", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Barbarians, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalVsCombatant", placeholder: "vs []", signature: "vs [combatantFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::CombatantFilter], fields: &["combatants"], gain: false, stages: &[Stage::Unique], reason: None }) },
@@ -2446,27 +2446,27 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "ConditionalFightingInTiles", placeholder: "when fighting in [] tiles", signature: "when fighting in [tileFilter] tiles", support: Some(&Support { role: Role::Cond, params: &[ParamKind::TileFilter], fields: &["tiles"], gain: false, stages: &[Stage::Barbarians, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalForeignContinent", placeholder: "on foreign continents", signature: "on foreign continents", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalAdjacentUnit", placeholder: "when adjacent to a [] unit", signature: "when adjacent to a [mapUnitFilter] unit", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalAboveHP", placeholder: "when above [] HP", signature: "when above [positiveAmount] HP", support: None },
-    TypeInfo { name: "ConditionalBelowHP", placeholder: "when below [] HP", signature: "when below [positiveAmount] HP", support: None },
+    TypeInfo { name: "ConditionalAboveHP", placeholder: "when above [] HP", signature: "when above [positiveAmount] HP", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PositiveAmount], fields: &["hp"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalBelowHP", placeholder: "when below [] HP", signature: "when below [positiveAmount] HP", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PositiveAmount], fields: &["hp"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalBelowMovement", placeholder: "when below [] movement", signature: "when below [positiveAmount] movement", support: None },
     TypeInfo { name: "ConditionalAboveMovement", placeholder: "when above [] movement", signature: "when above [nonNegativeAmount] movement", support: None },
     TypeInfo { name: "ConditionalHasNotUsedOtherActions", placeholder: "if it hasn't used other actions yet", signature: "if it hasn't used other actions yet", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalStackedWithUnit", placeholder: "when stacked with a [] unit", signature: "when stacked with a [mapUnitFilter] unit", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalNotStackedWithUnit", placeholder: "when not stacked with a [] unit", signature: "when not stacked with a [mapUnitFilter] unit", support: None },
+    TypeInfo { name: "ConditionalNotStackedWithUnit", placeholder: "when not stacked with a [] unit", signature: "when not stacked with a [mapUnitFilter] unit", support: Some(&Support { role: Role::Cond, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalNeighborTiles", placeholder: "with [] to [] neighboring [] tiles", signature: "with [nonNegativeAmount] to [nonNegativeAmount] neighboring [tileFilter] tiles", support: Some(&Support { role: Role::Cond, params: &[ParamKind::NonNegativeAmount, ParamKind::NonNegativeAmount, ParamKind::TileFilter], fields: &["min", "max", "tiles"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalInTiles", placeholder: "in [] tiles", signature: "in [tileFilter] tiles", support: Some(&Support { role: Role::Cond, params: &[ParamKind::TileFilter], fields: &["tiles"], gain: false, stages: &[Stage::Mapgen, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalInTilesNot", placeholder: "in tiles without []", signature: "in tiles without [tileFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::TileFilter], fields: &["tiles"], gain: false, stages: &[Stage::Mapgen, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalNearTiles", placeholder: "within [] tiles of a []", signature: "within [positiveAmount] tiles of a [tileFilter]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::PositiveAmount, ParamKind::TileFilter], fields: &["radius", "tiles"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalAdjacentTo", placeholder: "in tiles adjacent to [] tiles", signature: "in tiles adjacent to [tileFilter] tiles", support: None },
-    TypeInfo { name: "ConditionalNotAdjacentTo", placeholder: "in tiles not adjacent to [] tiles", signature: "in tiles not adjacent to [tileFilter] tiles", support: None },
+    TypeInfo { name: "ConditionalAdjacentTo", placeholder: "in tiles adjacent to [] tiles", signature: "in tiles adjacent to [tileFilter] tiles", support: Some(&Support { role: Role::Cond, params: &[ParamKind::TileFilter], fields: &["tiles"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalNotAdjacentTo", placeholder: "in tiles not adjacent to [] tiles", signature: "in tiles not adjacent to [tileFilter] tiles", support: Some(&Support { role: Role::Cond, params: &[ParamKind::TileFilter], fields: &["tiles"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalOnWaterMaps", placeholder: "on water maps", signature: "on water maps", support: Some(&Support { role: Role::Cond, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalInRegionOfType", placeholder: "in [] Regions", signature: "in [regionType] Regions", support: Some(&Support { role: Role::Cond, params: &[ParamKind::RegionType], fields: &["region"], gain: false, stages: &[Stage::Mapgen, Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalInRegionExceptOfType", placeholder: "in all except [] Regions", signature: "in all except [regionType] Regions", support: Some(&Support { role: Role::Cond, params: &[ParamKind::RegionType], fields: &["region"], gain: false, stages: &[Stage::Mapgen, Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalCountableEqualTo", placeholder: "when number of [] is equal to []", signature: "when number of [countable] is equal to [countable]", support: None },
-    TypeInfo { name: "ConditionalCountableDifferentThan", placeholder: "when number of [] is different than []", signature: "when number of [countable] is different than [countable]", support: None },
-    TypeInfo { name: "ConditionalCountableMoreThan", placeholder: "when number of [] is more than []", signature: "when number of [countable] is more than [countable]", support: None },
+    TypeInfo { name: "ConditionalCountableEqualTo", placeholder: "when number of [] is equal to []", signature: "when number of [countable] is equal to [countable]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Countable, ParamKind::Countable], fields: &["count", "to"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalCountableDifferentThan", placeholder: "when number of [] is different than []", signature: "when number of [countable] is different than [countable]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Countable, ParamKind::Countable], fields: &["count", "than"], gain: false, stages: &[Stage::Unique], reason: None }) },
+    TypeInfo { name: "ConditionalCountableMoreThan", placeholder: "when number of [] is more than []", signature: "when number of [countable] is more than [countable]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Countable, ParamKind::Countable], fields: &["count", "than"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalCountableLessThan", placeholder: "when number of [] is less than []", signature: "when number of [countable] is less than [countable]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Countable, ParamKind::Countable], fields: &["count", "than"], gain: false, stages: &[Stage::Unique], reason: None }) },
-    TypeInfo { name: "ConditionalCountableBetween", placeholder: "when number of [] is between [] and []", signature: "when number of [countable] is between [countable] and [countable]", support: None },
+    TypeInfo { name: "ConditionalCountableBetween", placeholder: "when number of [] is between [] and []", signature: "when number of [countable] is between [countable] and [countable]", support: Some(&Support { role: Role::Cond, params: &[ParamKind::Countable, ParamKind::Countable, ParamKind::Countable], fields: &["count", "min", "max"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ConditionalWhenCarriedBy", placeholder: "when carried by [] units", signature: "when carried by [mapUnitFilter] units", support: None },
     TypeInfo { name: "OneTimeFreeUnit", placeholder: "Free [] appears", signature: "Free [unit] appears", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::Unit], fields: &["unit"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeAmountFreeUnits", placeholder: "[] free [] units appear", signature: "[positiveAmount] free [unit] units appear", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount, ParamKind::Unit], fields: &["count", "unit"], gain: false, stages: &[Stage::Triggers], reason: None }) },
@@ -2474,21 +2474,21 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "OneTimeAmountRebels", placeholder: "[] []s rebel", signature: "[positiveAmount] [unit]s rebel", support: None },
     TypeInfo { name: "OneTimeFreeUnitRuins", placeholder: "Free [] found in the ruins", signature: "Free [unit] found in the ruins", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::Unit], fields: &["unit"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeFreePolicy", placeholder: "Free Social Policy", signature: "Free Social Policy", support: Some(&Support { role: Role::OneTime, params: &[], fields: &[], gain: false, stages: &[Stage::Triggers], reason: None }) },
-    TypeInfo { name: "OneTimeAmountFreePolicies", placeholder: "[] Free Social Policies", signature: "[positiveAmount] Free Social Policies", support: None },
+    TypeInfo { name: "OneTimeAmountFreePolicies", placeholder: "[] Free Social Policies", signature: "[positiveAmount] Free Social Policies", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount], fields: &["count"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeEnterGoldenAge", placeholder: "Empire enters golden age", signature: "Empire enters golden age", support: Some(&Support { role: Role::OneTime, params: &[], fields: &[], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeEnterGoldenAgeTurns", placeholder: "Empire enters a []-turn Golden Age", signature: "Empire enters a [positiveAmount]-turn Golden Age", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount], fields: &["turns"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeFreeGreatPerson", placeholder: "Free Great Person", signature: "Free Great Person", support: Some(&Support { role: Role::OneTime, params: &[], fields: &[], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeGainPopulation", placeholder: "[] population []", signature: "[amount] population [cityFilter]", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::Amount, ParamKind::CityFilter], fields: &["count", "cities"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeGainPopulationRandomCity", placeholder: "[] population in a random city", signature: "[amount] population in a random city", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::Amount], fields: &["count"], gain: false, stages: &[Stage::Triggers], reason: None }) },
-    TypeInfo { name: "OneTimeDiscoverTech", placeholder: "Discover []", signature: "Discover [tech]", support: None },
-    TypeInfo { name: "OneTimeAdoptPolicyOrBelief", placeholder: "Adopt []", signature: "Adopt [policy/belief]", support: None },
+    TypeInfo { name: "OneTimeDiscoverTech", placeholder: "Discover []", signature: "Discover [tech]", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::Tech], fields: &["tech"], gain: false, stages: &[Stage::Triggers], reason: None }) },
+    TypeInfo { name: "OneTimeAdoptPolicyOrBelief", placeholder: "Adopt []", signature: "Adopt [policy/belief]", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PolicyOrBelief], fields: &["adopted"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeRemovePolicy", placeholder: "Remove []", signature: "Remove [policyFilter]", support: None },
     TypeInfo { name: "OneTimeRemovePolicyRefund", placeholder: "Remove [] and refund []% of its cost", signature: "Remove [policyFilter] and refund [amount]% of its cost", support: None },
     TypeInfo { name: "OneTimeFreeTech", placeholder: "Free Technology", signature: "Free Technology", support: Some(&Support { role: Role::OneTime, params: &[], fields: &[], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeAmountFreeTechs", placeholder: "[] Free Technologies", signature: "[positiveAmount] Free Technologies", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount], fields: &["count"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeFreeTechRuins", placeholder: "[] free random researchable Tech(s) from the []", signature: "[positiveAmount] free random researchable Tech(s) from the [eraFilter]", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount, ParamKind::EraFilter], fields: &["count", "eras"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeRevealEntireMap", placeholder: "Reveals the entire map", signature: "Reveals the entire map", support: Some(&Support { role: Role::OneTime, params: &[], fields: &[], gain: false, stages: &[Stage::Triggers], reason: None }) },
-    TypeInfo { name: "OneTimeFreeBelief", placeholder: "Gain a free [] belief", signature: "Gain a free [beliefType] belief", support: None },
+    TypeInfo { name: "OneTimeFreeBelief", placeholder: "Gain a free [] belief", signature: "Gain a free [beliefType] belief", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::BeliefType], fields: &["belief"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeTriggerVoting", placeholder: "Triggers voting for the Diplomatic Victory", signature: "Triggers voting for the Diplomatic Victory", support: Some(&Support { role: Role::OneTime, params: &[], fields: &[], gain: false, stages: &[Stage::Triggers, Stage::Victory], reason: None }) },
     TypeInfo { name: "OneTimeConsumeResources", placeholder: "Instantly consumes [] []", signature: "Instantly consumes [positiveAmount] [stockpiledResource]", support: None },
     TypeInfo { name: "OneTimeProvideResources", placeholder: "Instantly provides [] []", signature: "Instantly provides [positiveAmount] [stockpiledResource]", support: None },
@@ -2498,9 +2498,9 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "OneTimeGainStatRange", placeholder: "Gain []-[] []", signature: "Gain [amount]-[amount] [civWideStat]", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::Amount, ParamKind::Amount, ParamKind::CivWideStat], fields: &["min", "max", "stat"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeGainPantheon", placeholder: "Gain enough Faith for a Pantheon", signature: "Gain enough Faith for a Pantheon", support: Some(&Support { role: Role::OneTime, params: &[], fields: &[], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeGainProphet", placeholder: "Gain enough Faith for []% of a Great Prophet", signature: "Gain enough Faith for [positiveAmount]% of a Great Prophet", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount], fields: &["percent"], gain: false, stages: &[Stage::Triggers], reason: None }) },
-    TypeInfo { name: "OneTimeGainTechPercent", placeholder: "Research []% of []", signature: "Research [relativeAmount]% of [tech]", support: None },
+    TypeInfo { name: "OneTimeGainTechPercent", placeholder: "Research []% of []", signature: "Research [relativeAmount]% of [tech]", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::RelativeAmount, ParamKind::Tech], fields: &["percent", "tech"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeTakeOverTilesInRadius", placeholder: "Gain control over [] tiles in a []-tile radius", signature: "Gain control over [tileFilter] tiles in a [nonNegativeAmount]-tile radius", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::TileFilter, ParamKind::NonNegativeAmount], fields: &["tiles", "radius"], gain: false, stages: &[Stage::Triggers], reason: None }) },
-    TypeInfo { name: "OneTimeTakeOverTilesInCity", placeholder: "Gain control over [] tiles []", signature: "Gain control over [positiveAmount] tiles [cityFilter]", support: None },
+    TypeInfo { name: "OneTimeTakeOverTilesInCity", placeholder: "Gain control over [] tiles []", signature: "Gain control over [positiveAmount] tiles [cityFilter]", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount, ParamKind::CityFilter], fields: &["count", "cities"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeRevealSpecificMapTiles", placeholder: "Reveal up to [] [] within a [] tile radius", signature: "Reveal up to [positiveAmount/'all'] [tileFilter] within a [positiveAmount] tile radius", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::CountOrAll, ParamKind::TileFilter, ParamKind::PositiveAmount], fields: &["count", "tiles", "radius"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeRevealCrudeMap", placeholder: "From a randomly chosen tile [] tiles away from the ruins, reveal tiles up to [] tiles away with []% chance", signature: "From a randomly chosen tile [positiveAmount] tiles away from the ruins, reveal tiles up to [positiveAmount] tiles away with [positiveAmount]% chance", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount, ParamKind::PositiveAmount, ParamKind::PositiveAmount], fields: &["distance", "radius", "percent"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeGlobalAlert", placeholder: "Triggers the following global alert: []", signature: "Triggers the following global alert: [comment]", support: None },
@@ -2508,7 +2508,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "OneTimeSpiesLevelUp", placeholder: "Promotes all spies [] time(s)", signature: "Promotes all spies [positiveAmount] time(s)", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::PositiveAmount], fields: &["times"], gain: false, stages: &[Stage::Espionage, Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeGainSpy", placeholder: "Gain an extra spy", signature: "Gain an extra spy", support: Some(&Support { role: Role::OneTime, params: &[], fields: &[], gain: false, stages: &[Stage::Espionage, Stage::Triggers], reason: None }) },
     TypeInfo { name: "SkipPromotion", placeholder: "Doing so will consume this opportunity to choose a Promotion", signature: "Doing so will consume this opportunity to choose a Promotion", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Units], reason: None }) },
-    TypeInfo { name: "FreePromotion", placeholder: "This Promotion is free", signature: "This Promotion is free", support: None },
+    TypeInfo { name: "FreePromotion", placeholder: "This Promotion is free", signature: "This Promotion is free", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "OneTimeChangeTerrain", placeholder: "Turn this tile into a [] tile", signature: "Turn this tile into a [terrainName] tile", support: None },
     TypeInfo { name: "OneTimeAddResource", placeholder: "Add [] to this tile", signature: "Add [resource] to this tile", support: None },
     TypeInfo { name: "OneTimeRemoveResourcesFromTile", placeholder: "Remove [] resources from this tile", signature: "Remove [resourceFilter] resources from this tile", support: None },
@@ -2522,17 +2522,17 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "GetLeaderTitle", placeholder: "Get the leader title of []", signature: "Get the leader title of [leaderTitle]", support: None },
     TypeInfo { name: "ChooseMusic", placeholder: "Choose a music track for [], [], []", signature: "Choose a music track for [param], [param], [param]", support: None },
     TypeInfo { name: "OneTimeUnitHeal", placeholder: "[] heals [] HP", signature: "[unitTriggerTarget] heals [positiveAmount] HP", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget, ParamKind::PositiveAmount], fields: &["target", "hp"], gain: false, stages: &[Stage::Triggers], reason: None }) },
-    TypeInfo { name: "OneTimeUnitDamage", placeholder: "[] takes [] damage", signature: "[unitTriggerTarget] takes [positiveAmount] damage", support: None },
+    TypeInfo { name: "OneTimeUnitDamage", placeholder: "[] takes [] damage", signature: "[unitTriggerTarget] takes [positiveAmount] damage", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget, ParamKind::PositiveAmount], fields: &["target", "damage"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeUnitGainXP", placeholder: "[] gains [] XP", signature: "[unitTriggerTarget] gains [amount] XP", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget, ParamKind::Amount], fields: &["target", "xp"], gain: false, stages: &[Stage::Triggers], reason: None }) },
-    TypeInfo { name: "OneTimeUnitUpgrade", placeholder: "[] upgrades for free", signature: "[unitTriggerTarget] upgrades for free", support: None },
+    TypeInfo { name: "OneTimeUnitUpgrade", placeholder: "[] upgrades for free", signature: "[unitTriggerTarget] upgrades for free", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget], fields: &["target"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeUnitSpecialUpgrade", placeholder: "[] upgrades for free including special upgrades", signature: "[unitTriggerTarget] upgrades for free including special upgrades", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget], fields: &["target"], gain: false, stages: &[Stage::Triggers], reason: None }) },
-    TypeInfo { name: "OneTimeUnitGainPromotion", placeholder: "[] gains the [] promotion", signature: "[unitTriggerTarget] gains the [promotion] promotion", support: None },
+    TypeInfo { name: "OneTimeUnitGainPromotion", placeholder: "[] gains the [] promotion", signature: "[unitTriggerTarget] gains the [promotion] promotion", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget, ParamKind::Promotion], fields: &["target", "promotion"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeUnitRemovePromotion", placeholder: "[] loses the [] promotion", signature: "[unitTriggerTarget] loses the [promotion] promotion", support: None },
-    TypeInfo { name: "OneTimeUnitGainMovement", placeholder: "[] gains [] movement", signature: "[unitTriggerTarget] gains [positiveAmount] movement", support: None },
-    TypeInfo { name: "OneTimeUnitLoseMovement", placeholder: "[] loses [] movement", signature: "[unitTriggerTarget] loses [positiveAmount] movement", support: None },
+    TypeInfo { name: "OneTimeUnitGainMovement", placeholder: "[] gains [] movement", signature: "[unitTriggerTarget] gains [positiveAmount] movement", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget, ParamKind::PositiveAmount], fields: &["target", "movement"], gain: false, stages: &[Stage::Triggers], reason: None }) },
+    TypeInfo { name: "OneTimeUnitLoseMovement", placeholder: "[] loses [] movement", signature: "[unitTriggerTarget] loses [positiveAmount] movement", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget, ParamKind::PositiveAmount], fields: &["target", "movement"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeUnitGainStatus", placeholder: "[] gains the [] status for [] turn(s)", signature: "[unitTriggerTarget] gains the [promotion] status for [positiveAmount] turn(s)", support: None },
     TypeInfo { name: "OneTimeUnitLoseStatus", placeholder: "[] loses the [] status", signature: "[unitTriggerTarget] loses the [promotion] status", support: None },
-    TypeInfo { name: "OneTimeUnitDestroyed", placeholder: "[] is destroyed", signature: "[unitTriggerTarget] is destroyed", support: None },
+    TypeInfo { name: "OneTimeUnitDestroyed", placeholder: "[] is destroyed", signature: "[unitTriggerTarget] is destroyed", support: Some(&Support { role: Role::OneTime, params: &[ParamKind::UnitTriggerTarget], fields: &["target"], gain: false, stages: &[Stage::Triggers], reason: None }) },
     TypeInfo { name: "OneTimeUnitGetsName", placeholder: "[] gets a name from the [] group", signature: "[unitTriggerTarget] gets a name from the [unitNameGroup] group", support: None },
     TypeInfo { name: "TriggerUponResearch", placeholder: "upon discovering [] technology", signature: "upon discovering [techFilter] technology", support: Some(&Support { role: Role::Trigger, params: &[ParamKind::TechFilter], fields: &["techs"], gain: false, stages: &[Stage::Research, Stage::Unique], reason: None }) },
     TypeInfo { name: "TriggerUponEnteringEra", placeholder: "upon entering the []", signature: "upon entering the [era]", support: Some(&Support { role: Role::Trigger, params: &[ParamKind::Era], fields: &["era"], gain: false, stages: &[Stage::Research, Stage::Unique], reason: None }) },
@@ -2564,7 +2564,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "TriggerUponDamagingUnit", placeholder: "upon damaging a [] unit", signature: "upon damaging a [mapUnitFilter] unit", support: None },
     TypeInfo { name: "TriggerUponDefeatingUnit", placeholder: "upon defeating a [] unit", signature: "upon defeating a [mapUnitFilter] unit", support: Some(&Support { role: Role::Trigger, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "TriggerUponExpendingUnit", placeholder: "upon expending a [] unit", signature: "upon expending a [mapUnitFilter] unit", support: Some(&Support { role: Role::Trigger, params: &[ParamKind::MapUnitFilter], fields: &["units"], gain: false, stages: &[Stage::GreatPeople, Stage::Unique, Stage::Units], reason: None }) },
-    TypeInfo { name: "TriggerUponDefeat", placeholder: "upon being defeated", signature: "upon being defeated", support: None },
+    TypeInfo { name: "TriggerUponDefeat", placeholder: "upon being defeated", signature: "upon being defeated", support: Some(&Support { role: Role::Trigger, params: &[], fields: &[], gain: false, stages: &[Stage::Combat], reason: None }) },
     TypeInfo { name: "TriggerUponPromotion", placeholder: "upon being promoted", signature: "upon being promoted", support: Some(&Support { role: Role::Trigger, params: &[], fields: &[], gain: false, stages: &[Stage::Units], reason: None }) },
     TypeInfo { name: "TriggerUponPromotionGain", placeholder: "upon gaining the [] promotion", signature: "upon gaining the [promotion] promotion", support: None },
     TypeInfo { name: "TriggerUponPromotionLoss", placeholder: "upon losing the [] promotion", signature: "upon losing the [promotion] promotion", support: None },
@@ -2579,7 +2579,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "UnitActionPriority", placeholder: "with [] priority", signature: "with [amount] priority", support: None },
     TypeInfo { name: "HiddenFromCivilopedia", placeholder: "Will not be displayed in Civilopedia", signature: "Will not be displayed in Civilopedia", support: None },
     TypeInfo { name: "ShowsWhenUnbuilable", placeholder: "Shown while unbuilable", signature: "Shown while unbuilable", support: None },
-    TypeInfo { name: "ModifierHiddenFromUsers", placeholder: "hidden from users", signature: "hidden from users", support: None },
+    TypeInfo { name: "ModifierHiddenFromUsers", placeholder: "hidden from users", signature: "hidden from users", support: Some(&Support { role: Role::Meta, params: &[], fields: &[], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "WillNotBeChosenForNewGames", placeholder: "Will not be chosen for new games", signature: "Will not be chosen for new games", support: Some(&Support { role: Role::Flag, params: &[], fields: &[], gain: false, stages: &[Stage::Rules], reason: None }) },
     TypeInfo { name: "ForEveryCountable", placeholder: "for every []", signature: "for every [countable]", support: None },
     TypeInfo { name: "ForEveryAdjacentTile", placeholder: "for every adjacent []", signature: "for every adjacent [tileFilter]", support: None },
@@ -2587,7 +2587,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "ModifiedByGameSpeed", placeholder: "(modified by game speed)", signature: "(modified by game speed)", support: Some(&Support { role: Role::Meta, params: &[], fields: &[], gain: false, stages: &[Stage::Religion, Stage::Triggers, Stage::Unique, Stage::Workers], reason: None }) },
     TypeInfo { name: "ModifiedByGameProgress", placeholder: "(modified by game progress up to []%)", signature: "(modified by game progress up to [relativeAmount]%)", support: None },
     TypeInfo { name: "Comment", placeholder: "Comment []", signature: "Comment [comment]", support: None },
-    TypeInfo { name: "CivilopediaLink", placeholder: "Civilopedia link []", signature: "Civilopedia link [pediaLink]", support: None },
+    TypeInfo { name: "CivilopediaLink", placeholder: "Civilopedia link []", signature: "Civilopedia link [pediaLink]", support: Some(&Support { role: Role::Meta, params: &[ParamKind::PediaLink], fields: &["link"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "DiplomaticRelationshipsCannotChange", placeholder: "Diplomatic relationships cannot change", signature: "Diplomatic relationships cannot change", support: None },
     TypeInfo { name: "ConvertGoldToScience", placeholder: "Can convert gold to science with sliders", signature: "Can convert gold to science with sliders", support: None },
     TypeInfo { name: "AllowCityStatesSpawnUnits", placeholder: "Allow City States to spawn with additional units", signature: "Allow City States to spawn with additional units", support: None },
@@ -2596,7 +2596,7 @@ pub static TYPE_INFO: [TypeInfo; 637] = [
     TypeInfo { name: "CanOnlyStartFromStartingEra", placeholder: "Can only start games from the starting era", signature: "Can only start games from the starting era", support: None },
     TypeInfo { name: "AllowRazeCapital", placeholder: "Allow raze capital", signature: "Allow raze capital", support: None },
     TypeInfo { name: "AllowRazeHolyCity", placeholder: "Allow raze holy city", signature: "Allow raze holy city", support: None },
-    TypeInfo { name: "SuppressWarnings", placeholder: "Suppress warning []", signature: "Suppress warning [validationWarning]", support: None },
+    TypeInfo { name: "SuppressWarnings", placeholder: "Suppress warning []", signature: "Suppress warning [validationWarning]", support: Some(&Support { role: Role::Meta, params: &[ParamKind::ValidationWarning], fields: &["warning"], gain: false, stages: &[Stage::Unique], reason: None }) },
     TypeInfo { name: "ModIncompatibleWith", placeholder: "Mod is incompatible with []", signature: "Mod is incompatible with [modFilter]", support: None },
     TypeInfo { name: "ModRequires", placeholder: "Mod requires []", signature: "Mod requires [modFilter]", support: None },
     TypeInfo { name: "ModIsAudioVisualOnly", placeholder: "Should only be used as permanent audiovisual mod", signature: "Should only be used as permanent audiovisual mod", support: None },
@@ -3321,6 +3321,8 @@ pub enum ParamKind {
     Era,
     /// `difficulty`: a difficulty, by name.
     Difficulty,
+    /// `speed`: a game speed, by name.
+    Speed,
     /// `victoryType`: a victory, by name.
     VictoryType,
     /// `terrainName`: a terrain, by name.
@@ -3337,6 +3339,10 @@ pub enum ParamKind {
     CostOrStrength,
     /// `foundingOrEnhancing`: `founding` or `enhancing`.
     FoundingOrEnhancing,
+    /// `beliefType`: a belief type, or `Any`.
+    BeliefType,
+    /// `spyAction`: what a spy is doing: `Stealing Tech`.
+    SpyAction,
     /// `terrainQuality`: how a start values a terrain.
     TerrainQuality,
     /// `regionType`: a kind of start region.
@@ -3349,6 +3355,10 @@ pub enum ParamKind {
     CountOrAll,
     /// `comment`: free text, interned.
     Comment,
+    /// `pediaLink`: a Civilopedia link, as text.
+    PediaLink,
+    /// `validationWarning`: a ruleset checker's warning, as text.
+    ValidationWarning,
 }
 
 impl ParamKind {
@@ -3391,6 +3401,7 @@ impl ParamKind {
             Self::Tech => "tech",
             Self::Era => "era",
             Self::Difficulty => "difficulty",
+            Self::Speed => "speed",
             Self::VictoryType => "victoryType",
             Self::TerrainName => "terrainName",
             Self::TerrainFeature => "terrainFeature",
@@ -3399,12 +3410,16 @@ impl ParamKind {
             Self::PopulationFilter => "populationFilter",
             Self::CostOrStrength => "costOrStrength",
             Self::FoundingOrEnhancing => "foundingOrEnhancing",
+            Self::BeliefType => "beliefType",
+            Self::SpyAction => "spyAction",
             Self::TerrainQuality => "terrainQuality",
             Self::RegionType => "regionType",
             Self::UnitTriggerTarget => "unitTriggerTarget",
             Self::Countable => "countable",
             Self::CountOrAll => "positiveAmount/'all'",
             Self::Comment => "comment",
+            Self::PediaLink => "pediaLink",
+            Self::ValidationWarning => "validationWarning",
         }
     }
 }
@@ -3512,7 +3527,7 @@ impl Stage {
 
 /// The payload of each supported type that has parameters, one field per parameter.
 pub mod p {
-    use super::{BaseUnitId, BuildingId, CityFilterId, CivFilterId, CombatantFilterId, CostOrStrength, CountOrAll, Countable, DifficultyId, EraId, FeatureId, FoundingOrEnhancing, FracId, ObjectFilterId, PolicyOrBelief, PopulationFilter, PromotionId, RegionType, ResourceId, SetRef, Stat, StatOrResource, StatsId, TechId, TerrainId, TerrainQuality, TextId, TileFilterId, UnitFilterId, UnitTriggerTarget, VictoryId};
+    use super::{BaseUnitId, BeliefKind, BuildingId, CityFilterId, CivFilterId, CombatantFilterId, CostOrStrength, CountOrAll, Countable, DifficultyId, EraId, FeatureId, FoundingOrEnhancing, FracId, ObjectFilterId, PolicyOrBelief, PopulationFilter, PromotionId, RegionType, ResourceId, SetRef, SpeedId, SpyAction, Stat, StatOrResource, StatsId, TechId, TerrainId, TerrainQuality, TextId, TileFilterId, UnitFilterId, UnitTriggerTarget, VictoryId};
 
     /// `[stats]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -3695,6 +3710,18 @@ pub mod p {
         pub percent: i32,
     }
 
+    /// `[relativeAmount]% Yield from pillaging tiles`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct PercentYieldFromPillaging {
+        pub percent: i32,
+    }
+
+    /// `[relativeAmount]% Health from pillaging tiles`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct PercentHealthFromPillaging {
+        pub percent: i32,
+    }
+
     /// `Provides military units every ≈[positiveAmount] turns`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct CityStateMilitaryUnits {
@@ -3778,6 +3805,13 @@ pub mod p {
         pub cities: CityFilterId,
     }
 
+    /// `[relativeAmount]% Food consumption by specialists [cityFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct FoodConsumptionBySpecialists {
+        pub percent: i32,
+        pub cities: CityFilterId,
+    }
+
     /// `[relativeAmount]% unhappiness from the number of cities`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct UnhappinessFromCitiesPercentage {
@@ -3827,11 +3861,38 @@ pub mod p {
         pub increase: i16,
     }
 
+    /// `May buy [buildingFilter] buildings for [nonNegativeAmount] [stat] [cityFilter] at an increasing price ([amount])`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct BuyBuildingsIncreasingCost {
+        pub buildings: SetRef,
+        pub cost: i32,
+        pub stat: Stat,
+        pub cities: CityFilterId,
+        pub increase: i16,
+    }
+
+    /// `May buy [baseUnitFilter] units for [nonNegativeAmount] [stat] [cityFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct BuyUnitsForAmountStat {
+        pub units: SetRef,
+        pub cost: i32,
+        pub stat: Stat,
+        pub cities: CityFilterId,
+    }
+
     /// `May buy [buildingFilter] buildings for [nonNegativeAmount] [stat] [cityFilter]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct BuyBuildingsForAmountStat {
         pub buildings: SetRef,
         pub cost: i32,
+        pub stat: Stat,
+        pub cities: CityFilterId,
+    }
+
+    /// `May buy [baseUnitFilter] units with [stat] [cityFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct BuyUnitsWithStat {
+        pub units: SetRef,
         pub stat: Stat,
         pub cities: CityFilterId,
     }
@@ -3852,10 +3913,26 @@ pub mod p {
         pub times: i32,
     }
 
+    /// `May buy [buildingFilter] buildings with [stat] for [nonNegativeAmount] times their normal Production cost`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct BuyBuildingsByProductionCost {
+        pub buildings: SetRef,
+        pub stat: Stat,
+        pub times: i32,
+    }
+
     /// `[stat] cost of purchasing items in cities [relativeAmount]%`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct BuyItemsDiscount {
         pub stat: Stat,
+        pub percent: i32,
+    }
+
+    /// `[stat] cost of purchasing [buildingFilter] buildings [relativeAmount]%`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct BuyBuildingsDiscount {
+        pub stat: Stat,
+        pub buildings: SetRef,
         pub percent: i32,
     }
 
@@ -3883,6 +3960,13 @@ pub mod p {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct NoImprovementMaintenanceInSpecificTiles {
         pub tiles: TileFilterId,
+    }
+
+    /// `[relativeAmount]% construction time for [improvementFilter] improvements`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct SpecificImprovementTime {
+        pub percent: i32,
+        pub improvements: SetRef,
     }
 
     /// `Can build [improvementFilter] improvements at a [relativeAmount]% rate`
@@ -3933,6 +4017,18 @@ pub mod p {
         pub percent: i32,
     }
 
+    /// `Each city founded increases Science cost of Technologies [relativeAmount]% less than normal`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct LessTechCostFromCities {
+        pub percent: i32,
+    }
+
+    /// `[relativeAmount]% Science cost of researching new Technologies`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct LessTechCost {
+        pub percent: i32,
+    }
+
     /// `[stats] for every known Natural Wonder`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct StatsFromNaturalWonders {
@@ -3964,6 +4060,26 @@ pub mod p {
     pub struct MayanGainGreatPerson {
         pub cycle: TextId,
         pub tech: TechId,
+    }
+
+    /// `[amount] Unit Supply`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct BaseUnitSupply {
+        pub supply: i32,
+    }
+
+    /// `[amount] Unit Supply per [positiveAmount] population [cityFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct UnitSupplyPerPop {
+        pub supply: i32,
+        pub per: i32,
+        pub cities: CityFilterId,
+    }
+
+    /// `[amount] Unit Supply per city`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct UnitSupplyPerCity {
+        pub supply: i32,
     }
 
     /// `[amount] units cost no maintenance`
@@ -4013,6 +4129,12 @@ pub mod p {
     pub struct CityHealingUnits {
         pub units: UnitFilterId,
         pub hp: i32,
+    }
+
+    /// `[relativeAmount]% XP required for promotions`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct XPForPromotionModifier {
+        pub percent: i32,
     }
 
     /// `[relativeAmount]% City Strength from defensive buildings`
@@ -4098,6 +4220,14 @@ pub mod p {
         pub gold: i32,
     }
 
+    /// `May choose [amount] additional [beliefType] beliefs when [foundingOrEnhancing] a religion`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct FreeExtraBeliefs {
+        pub count: i32,
+        pub belief: BeliefKind,
+        pub when: FoundingOrEnhancing,
+    }
+
     /// `May choose [amount] additional belief(s) of any type when [foundingOrEnhancing] a religion`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct FreeExtraAnyBeliefs {
@@ -4130,6 +4260,13 @@ pub mod p {
         pub percent: i32,
     }
 
+    /// `[relativeAmount]% spy effectiveness [cityFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct SpyEffectiveness {
+        pub percent: i32,
+        pub cities: CityFilterId,
+    }
+
     /// `[relativeAmount]% enemy spy effectiveness [cityFilter]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct EnemySpyEffectiveness {
@@ -4141,6 +4278,14 @@ pub mod p {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct SpyStartingLevel {
         pub levels: i32,
+    }
+
+    /// `Spies in [cityFilter] cities act as though they have [relativeAmount] levels for [spyAction]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CounterIntelligenceSpyRankBonus {
+        pub cities: CityFilterId,
+        pub levels: i32,
+        pub action: SpyAction,
     }
 
     /// `Starts with [tech]`
@@ -4188,10 +4333,24 @@ pub mod p {
         pub cities: CityFilterId,
     }
 
+    /// `Can be purchased for [amount] [stat] [cityFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CanBePurchasedForAmountStat {
+        pub cost: i32,
+        pub stat: Stat,
+        pub cities: CityFilterId,
+    }
+
     /// `Limited to [amount] per Civilization`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct MaxNumberBuildable {
         pub limit: i32,
+    }
+
+    /// `Cannot build [buildingFilter] buildings`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CannotBuildBuildings {
+        pub buildings: SetRef,
     }
 
     /// `Requires at least [amount] population`
@@ -4204,6 +4363,18 @@ pub mod p {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct CostIncreasesPerCity {
         pub cost: i32,
+    }
+
+    /// `Cost increases by [amount] when built`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CostIncreasesWhenBuilt {
+        pub cost: i32,
+    }
+
+    /// `[amount]% production cost`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CostPercentageChange {
+        pub percent: i32,
     }
 
     /// `Must have an owned [tileFilter] within [amount] tiles`
@@ -4229,6 +4400,12 @@ pub mod p {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct MustBeNextTo {
         pub tiles: TileFilterId,
+    }
+
+    /// `Obsolete with [tech]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ObsoleteWith {
+        pub tech: TechId,
     }
 
     /// `[relativeAmount]% Gold given to enemy if city is captured`
@@ -4272,6 +4449,12 @@ pub mod p {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct Strength {
         pub percent: i32,
+    }
+
+    /// `[relativeAmount] Strength`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct StrengthAmount {
+        pub strength: i32,
     }
 
     /// `[relativeAmount]% Strength decreasing with distance from the capital`
@@ -4323,6 +4506,12 @@ pub mod p {
     /// `[amount] Range`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct Range {
+        pub range: i32,
+    }
+
+    /// `[relativeAmount] Air Interception Range`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct AirInterceptionRange {
         pub range: i32,
     }
 
@@ -4514,6 +4703,12 @@ pub mod p {
         pub unit: BaseUnitId,
     }
 
+    /// `Can upgrade to [unit]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CanUpgrade {
+        pub unit: BaseUnitId,
+    }
+
     /// `Double movement in [terrainFilter]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct DoubleMovementOnTerrain {
@@ -4529,6 +4724,12 @@ pub mod p {
     /// `[nonNegativeAmount] Movement point cost to disembark`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ReducedDisembarkCost {
+        pub movement: i32,
+    }
+
+    /// `[nonNegativeAmount] Movement point cost to embark`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ReducedEmbarkCost {
         pub movement: i32,
     }
 
@@ -4580,6 +4781,12 @@ pub mod p {
     /// `Must not be on [amount] largest landmasses`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct NaturalWonderSmallerLandmass {
+        pub count: i32,
+    }
+
+    /// `Must be on [amount] largest landmasses`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct NaturalWonderLargerLandmass {
         pub count: i32,
     }
 
@@ -4798,6 +5005,13 @@ pub mod p {
         pub percent: i32,
     }
 
+    /// `Costs [amount] [stat] per turn when in your territory`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ImprovementMaintenance {
+        pub amount: i32,
+        pub stat: Stat,
+    }
+
     /// `Costs [amount] [stat] per turn`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ImprovementAllMaintenance {
@@ -4817,15 +5031,51 @@ pub mod p {
         pub stats: StatsId,
     }
 
+    /// `Pillaging this improvement yields [stats]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct PillageYieldFixed {
+        pub stats: StatsId,
+    }
+
+    /// `every [positiveAmount] turns`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalEveryTurns {
+        pub turns: i32,
+    }
+
+    /// `before turn number [nonNegativeAmount]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalBeforeTurns {
+        pub turn: i32,
+    }
+
     /// `after turn number [nonNegativeAmount]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalAfterTurns {
         pub turn: i32,
     }
 
+    /// `on [speed] game speed`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalSpeed {
+        pub speed: SpeedId,
+    }
+
+    /// `on [difficulty] difficulty`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalDifficulty {
+        pub difficulty: DifficultyId,
+    }
+
     /// `on [difficulty] difficulty or higher`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalDifficultyOrHigher {
+        pub difficulty: DifficultyId,
+    }
+
+    /// `on [difficulty] difficulty or lower`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalDifficultyOrLower {
         pub difficulty: DifficultyId,
     }
 
@@ -4835,10 +5085,34 @@ pub mod p {
         pub victory: VictoryId,
     }
 
+    /// `when [victoryType] Victory is disabled`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalVictoryDisabled {
+        pub victory: VictoryId,
+    }
+
     /// `with [nonNegativeAmount]% chance`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalChance {
         pub percent: i32,
+    }
+
+    /// `if tutorial [comment] is completed`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalTutorialCompleted {
+        pub tutorial: TextId,
+    }
+
+    /// `for [civFilter] Civilizations`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalCivFilter {
+        pub civs: CivFilterId,
+    }
+
+    /// `during the [era]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalDuringEra {
+        pub era: EraId,
     }
 
     /// `before the [era]`
@@ -4850,6 +5124,12 @@ pub mod p {
     /// `starting from the [era]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalStartingFromEra {
+        pub era: EraId,
+    }
+
+    /// `if starting in the [era]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalIfStartingInEra {
         pub era: EraId,
     }
 
@@ -4865,6 +5145,24 @@ pub mod p {
         pub techs: SetRef,
     }
 
+    /// `while researching [techFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalWhileResearching {
+        pub techs: SetRef,
+    }
+
+    /// `if no Civilization has adopted [policy/belief]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalNoCivAdopted {
+        pub adopted: PolicyOrBelief,
+    }
+
+    /// `after adopting [policy/belief]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalAfterPolicyOrBelief {
+        pub adopted: PolicyOrBelief,
+    }
+
     /// `before adopting [policy/belief]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalBeforePolicyOrBelief {
@@ -4877,11 +5175,56 @@ pub mod p {
         pub buildings: SetRef,
     }
 
+    /// `if [buildingFilter] is not constructed`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalBuildingNotBuilt {
+        pub buildings: SetRef,
+    }
+
     /// `if [buildingFilter] is constructed in all [cityFilter] cities`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalBuildingBuiltAll {
         pub buildings: SetRef,
         pub cities: CityFilterId,
+    }
+
+    /// `if [buildingFilter] is constructed in at least [positiveAmount] of [cityFilter] cities`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalBuildingBuiltAmount {
+        pub buildings: SetRef,
+        pub count: i32,
+        pub cities: CityFilterId,
+    }
+
+    /// `if [buildingFilter] is constructed by anybody`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalBuildingBuiltByAnybody {
+        pub buildings: SetRef,
+    }
+
+    /// `if [buildingFilter] is not constructed by anybody`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalBuildingNotBuiltByAnybody {
+        pub buildings: SetRef,
+    }
+
+    /// `with [resource]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalWithResource {
+        pub resource: ResourceId,
+    }
+
+    /// `without [resource]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalWithoutResource {
+        pub resource: ResourceId,
+    }
+
+    /// `when above [amount] [stat/resource]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalWhenAboveAmountStatResource {
+        pub amount: i32,
+        pub what: StatOrResource,
     }
 
     /// `when below [amount] [stat/resource]`
@@ -4905,6 +5248,12 @@ pub mod p {
         pub cities: CityFilterId,
     }
 
+    /// `in cities with a [buildingFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalCityWithBuilding {
+        pub buildings: SetRef,
+    }
+
     /// `in cities without a [buildingFilter]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalCityWithoutBuilding {
@@ -4914,6 +5263,28 @@ pub mod p {
     /// `in cities with at least [positiveAmount] [populationFilter]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalPopulationFilter {
+        pub count: i32,
+        pub population: PopulationFilter,
+    }
+
+    /// `in cities with [nonNegativeAmount] [populationFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalExactPopulationFilter {
+        pub count: i32,
+        pub population: PopulationFilter,
+    }
+
+    /// `in cities with between [amount] and [amount] [populationFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalBetweenPopulationFilter {
+        pub min: i32,
+        pub max: i32,
+        pub population: PopulationFilter,
+    }
+
+    /// `in cities with less than [amount] [populationFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalBelowPopulationFilter {
         pub count: i32,
         pub population: PopulationFilter,
     }
@@ -4928,6 +5299,18 @@ pub mod p {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalOurUnitOnUnit {
         pub units: UnitFilterId,
+    }
+
+    /// `for units with [promotion]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalUnitWithPromotion {
+        pub promotion: PromotionId,
+    }
+
+    /// `for units without [promotion]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalUnitWithoutPromotion {
+        pub promotion: PromotionId,
     }
 
     /// `vs [mapUnitFilter] units`
@@ -4954,9 +5337,27 @@ pub mod p {
         pub units: UnitFilterId,
     }
 
+    /// `when above [positiveAmount] HP`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalAboveHP {
+        pub hp: i32,
+    }
+
+    /// `when below [positiveAmount] HP`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalBelowHP {
+        pub hp: i32,
+    }
+
     /// `when stacked with a [mapUnitFilter] unit`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalStackedWithUnit {
+        pub units: UnitFilterId,
+    }
+
+    /// `when not stacked with a [mapUnitFilter] unit`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalNotStackedWithUnit {
         pub units: UnitFilterId,
     }
 
@@ -4987,6 +5388,18 @@ pub mod p {
         pub tiles: TileFilterId,
     }
 
+    /// `in tiles adjacent to [tileFilter] tiles`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalAdjacentTo {
+        pub tiles: TileFilterId,
+    }
+
+    /// `in tiles not adjacent to [tileFilter] tiles`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalNotAdjacentTo {
+        pub tiles: TileFilterId,
+    }
+
     /// `in [regionType] Regions`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalInRegionOfType {
@@ -4999,11 +5412,40 @@ pub mod p {
         pub region: RegionType,
     }
 
+    /// `when number of [countable] is equal to [countable]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalCountableEqualTo {
+        pub count: Countable,
+        pub to: Countable,
+    }
+
+    /// `when number of [countable] is different than [countable]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalCountableDifferentThan {
+        pub count: Countable,
+        pub than: Countable,
+    }
+
+    /// `when number of [countable] is more than [countable]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalCountableMoreThan {
+        pub count: Countable,
+        pub than: Countable,
+    }
+
     /// `when number of [countable] is less than [countable]`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ConditionalCountableLessThan {
         pub count: Countable,
         pub than: Countable,
+    }
+
+    /// `when number of [countable] is between [countable] and [countable]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ConditionalCountableBetween {
+        pub count: Countable,
+        pub min: Countable,
+        pub max: Countable,
     }
 
     /// `Free [unit] appears`
@@ -5025,6 +5467,12 @@ pub mod p {
         pub unit: BaseUnitId,
     }
 
+    /// `[positiveAmount] Free Social Policies`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeAmountFreePolicies {
+        pub count: i32,
+    }
+
     /// `Empire enters a [positiveAmount]-turn Golden Age`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct OneTimeEnterGoldenAgeTurns {
@@ -5044,6 +5492,18 @@ pub mod p {
         pub count: i32,
     }
 
+    /// `Discover [tech]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeDiscoverTech {
+        pub tech: TechId,
+    }
+
+    /// `Adopt [policy/belief]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeAdoptPolicyOrBelief {
+        pub adopted: PolicyOrBelief,
+    }
+
     /// `[positiveAmount] Free Technologies`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct OneTimeAmountFreeTechs {
@@ -5055,6 +5515,12 @@ pub mod p {
     pub struct OneTimeFreeTechRuins {
         pub count: i32,
         pub eras: SetRef,
+    }
+
+    /// `Gain a free [beliefType] belief`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeFreeBelief {
+        pub belief: BeliefKind,
     }
 
     /// `Gain [amount] [civWideStat]`
@@ -5078,11 +5544,25 @@ pub mod p {
         pub percent: i32,
     }
 
+    /// `Research [relativeAmount]% of [tech]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeGainTechPercent {
+        pub percent: i32,
+        pub tech: TechId,
+    }
+
     /// `Gain control over [tileFilter] tiles in a [nonNegativeAmount]-tile radius`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct OneTimeTakeOverTilesInRadius {
         pub tiles: TileFilterId,
         pub radius: i32,
+    }
+
+    /// `Gain control over [positiveAmount] tiles [cityFilter]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeTakeOverTilesInCity {
+        pub count: i32,
+        pub cities: CityFilterId,
     }
 
     /// `Reveal up to [positiveAmount/'all'] [tileFilter] within a [positiveAmount] tile radius`
@@ -5135,6 +5615,13 @@ pub mod p {
         pub hp: i32,
     }
 
+    /// `[unitTriggerTarget] takes [positiveAmount] damage`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeUnitDamage {
+        pub target: UnitTriggerTarget,
+        pub damage: i32,
+    }
+
     /// `[unitTriggerTarget] gains [amount] XP`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct OneTimeUnitGainXP {
@@ -5142,9 +5629,42 @@ pub mod p {
         pub xp: i32,
     }
 
+    /// `[unitTriggerTarget] upgrades for free`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeUnitUpgrade {
+        pub target: UnitTriggerTarget,
+    }
+
     /// `[unitTriggerTarget] upgrades for free including special upgrades`
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct OneTimeUnitSpecialUpgrade {
+        pub target: UnitTriggerTarget,
+    }
+
+    /// `[unitTriggerTarget] gains the [promotion] promotion`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeUnitGainPromotion {
+        pub target: UnitTriggerTarget,
+        pub promotion: PromotionId,
+    }
+
+    /// `[unitTriggerTarget] gains [positiveAmount] movement`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeUnitGainMovement {
+        pub target: UnitTriggerTarget,
+        pub movement: i32,
+    }
+
+    /// `[unitTriggerTarget] loses [positiveAmount] movement`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeUnitLoseMovement {
+        pub target: UnitTriggerTarget,
+        pub movement: i32,
+    }
+
+    /// `[unitTriggerTarget] is destroyed`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct OneTimeUnitDestroyed {
         pub target: UnitTriggerTarget,
     }
 
@@ -5232,6 +5752,18 @@ pub mod p {
         pub percent: i32,
     }
 
+    /// `Civilopedia link [pediaLink]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct CivilopediaLink {
+        pub link: TextId,
+    }
+
+    /// `Suppress warning [validationWarning]`
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct SuppressWarnings {
+        pub warning: TextId,
+    }
+
 }
 
 const _: () = assert!(core::mem::size_of::<p::Stats>() <= 12 && core::mem::align_of::<p::Stats>() <= 4);
@@ -5259,6 +5791,8 @@ const _: () = assert!(core::mem::size_of::<p::PercentProductionBuildings>() <= 1
 const _: () = assert!(core::mem::size_of::<p::PercentProductionUnits>() <= 12 && core::mem::align_of::<p::PercentProductionUnits>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::PercentProductionWonders>() <= 12 && core::mem::align_of::<p::PercentProductionWonders>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::PercentProductionBuildingsInCapital>() <= 12 && core::mem::align_of::<p::PercentProductionBuildingsInCapital>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::PercentYieldFromPillaging>() <= 12 && core::mem::align_of::<p::PercentYieldFromPillaging>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::PercentHealthFromPillaging>() <= 12 && core::mem::align_of::<p::PercentHealthFromPillaging>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CityStateMilitaryUnits>() <= 12 && core::mem::align_of::<p::CityStateMilitaryUnits>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CityStateGiftedUnitsStartWithXp>() <= 12 && core::mem::align_of::<p::CityStateGiftedUnitsStartWithXp>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CityStateMoreGiftedUnits>() <= 12 && core::mem::align_of::<p::CityStateMoreGiftedUnits>() <= 4);
@@ -5272,6 +5806,7 @@ const _: () = assert!(core::mem::size_of::<p::CityStateLuxuryHappiness>() <= 12 
 const _: () = assert!(core::mem::size_of::<p::GrowthPercentBonus>() <= 12 && core::mem::align_of::<p::GrowthPercentBonus>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CarryOverFood>() <= 12 && core::mem::align_of::<p::CarryOverFood>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::FoodConsumptionByPopulation>() <= 12 && core::mem::align_of::<p::FoodConsumptionByPopulation>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::FoodConsumptionBySpecialists>() <= 12 && core::mem::align_of::<p::FoodConsumptionBySpecialists>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::UnhappinessFromCitiesPercentage>() <= 12 && core::mem::align_of::<p::UnhappinessFromCitiesPercentage>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::UnhappinessFromPopulationTypePercentageChange>() <= 12 && core::mem::align_of::<p::UnhappinessFromPopulationTypePercentageChange>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BonusHappinessFromLuxury>() <= 12 && core::mem::align_of::<p::BonusHappinessFromLuxury>() <= 4);
@@ -5279,14 +5814,20 @@ const _: () = assert!(core::mem::size_of::<p::RetainHappinessFromLuxury>() <= 12
 const _: () = assert!(core::mem::size_of::<p::ExcessHappinessToGlobalStat>() <= 12 && core::mem::align_of::<p::ExcessHappinessToGlobalStat>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CannotBuildUnits>() <= 12 && core::mem::align_of::<p::CannotBuildUnits>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BuyUnitsIncreasingCost>() <= 12 && core::mem::align_of::<p::BuyUnitsIncreasingCost>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::BuyBuildingsIncreasingCost>() <= 12 && core::mem::align_of::<p::BuyBuildingsIncreasingCost>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::BuyUnitsForAmountStat>() <= 12 && core::mem::align_of::<p::BuyUnitsForAmountStat>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BuyBuildingsForAmountStat>() <= 12 && core::mem::align_of::<p::BuyBuildingsForAmountStat>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::BuyUnitsWithStat>() <= 12 && core::mem::align_of::<p::BuyUnitsWithStat>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BuyBuildingsWithStat>() <= 12 && core::mem::align_of::<p::BuyBuildingsWithStat>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BuyUnitsByProductionCost>() <= 12 && core::mem::align_of::<p::BuyUnitsByProductionCost>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::BuyBuildingsByProductionCost>() <= 12 && core::mem::align_of::<p::BuyBuildingsByProductionCost>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BuyItemsDiscount>() <= 12 && core::mem::align_of::<p::BuyItemsDiscount>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::BuyBuildingsDiscount>() <= 12 && core::mem::align_of::<p::BuyBuildingsDiscount>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BuyUnitsDiscount>() <= 12 && core::mem::align_of::<p::BuyUnitsDiscount>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::EnablesStatProduction>() <= 12 && core::mem::align_of::<p::EnablesStatProduction>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::RoadMaintenance>() <= 12 && core::mem::align_of::<p::RoadMaintenance>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NoImprovementMaintenanceInSpecificTiles>() <= 12 && core::mem::align_of::<p::NoImprovementMaintenanceInSpecificTiles>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::SpecificImprovementTime>() <= 12 && core::mem::align_of::<p::SpecificImprovementTime>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::ImprovementTimeIncrease>() <= 12 && core::mem::align_of::<p::ImprovementTimeIncrease>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::GainFreeBuildings>() <= 12 && core::mem::align_of::<p::GainFreeBuildings>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BuildingMaintenance>() <= 12 && core::mem::align_of::<p::BuildingMaintenance>() <= 4);
@@ -5294,11 +5835,16 @@ const _: () = assert!(core::mem::size_of::<p::BorderGrowthPercentage>() <= 12 &&
 const _: () = assert!(core::mem::size_of::<p::TileCostPercentage>() <= 12 && core::mem::align_of::<p::TileCostPercentage>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::LessPolicyCostFromCities>() <= 12 && core::mem::align_of::<p::LessPolicyCostFromCities>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::LessPolicyCost>() <= 12 && core::mem::align_of::<p::LessPolicyCost>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::LessTechCostFromCities>() <= 12 && core::mem::align_of::<p::LessTechCostFromCities>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::LessTechCost>() <= 12 && core::mem::align_of::<p::LessTechCost>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StatsFromNaturalWonders>() <= 12 && core::mem::align_of::<p::StatsFromNaturalWonders>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StatBonusWhenDiscoveringNaturalWonder>() <= 12 && core::mem::align_of::<p::StatBonusWhenDiscoveringNaturalWonder>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::GreatPersonPointPercentage>() <= 12 && core::mem::align_of::<p::GreatPersonPointPercentage>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::PercentGoldFromTradeMissions>() <= 12 && core::mem::align_of::<p::PercentGoldFromTradeMissions>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::MayanGainGreatPerson>() <= 12 && core::mem::align_of::<p::MayanGainGreatPerson>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::BaseUnitSupply>() <= 12 && core::mem::align_of::<p::BaseUnitSupply>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::UnitSupplyPerPop>() <= 12 && core::mem::align_of::<p::UnitSupplyPerPop>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::UnitSupplyPerCity>() <= 12 && core::mem::align_of::<p::UnitSupplyPerCity>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::FreeUnits>() <= 12 && core::mem::align_of::<p::FreeUnits>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::UnitsMayEnterOcean>() <= 12 && core::mem::align_of::<p::UnitsMayEnterOcean>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::LandUnitsCrossTerrainAfterUnitGained>() <= 12 && core::mem::align_of::<p::LandUnitsCrossTerrainAfterUnitGained>() <= 4);
@@ -5306,6 +5852,7 @@ const _: () = assert!(core::mem::size_of::<p::EnemyUnitsSpendExtraMovement>() <=
 const _: () = assert!(core::mem::size_of::<p::UnitStartingExperience>() <= 12 && core::mem::align_of::<p::UnitStartingExperience>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::UnitStartingPromotions>() <= 12 && core::mem::align_of::<p::UnitStartingPromotions>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CityHealingUnits>() <= 12 && core::mem::align_of::<p::CityHealingUnits>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::XPForPromotionModifier>() <= 12 && core::mem::align_of::<p::XPForPromotionModifier>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BetterDefensiveBuildings>() <= 12 && core::mem::align_of::<p::BetterDefensiveBuildings>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StrengthForCities>() <= 12 && core::mem::align_of::<p::StrengthForCities>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::ConsumesResources>() <= 12 && core::mem::align_of::<p::ConsumesResources>() <= 4);
@@ -5319,13 +5866,16 @@ const _: () = assert!(core::mem::size_of::<p::RestingPointOfCityStatesFollowingR
 const _: () = assert!(core::mem::size_of::<p::GoldFromEncampmentsAndCities>() <= 12 && core::mem::align_of::<p::GoldFromEncampmentsAndCities>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::GainFromEncampment>() <= 12 && core::mem::align_of::<p::GainFromEncampment>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::GainFromDefeatingUnit>() <= 12 && core::mem::align_of::<p::GainFromDefeatingUnit>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::FreeExtraBeliefs>() <= 12 && core::mem::align_of::<p::FreeExtraBeliefs>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::FreeExtraAnyBeliefs>() <= 12 && core::mem::align_of::<p::FreeExtraAnyBeliefs>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StatsWhenAdoptingReligion>() <= 12 && core::mem::align_of::<p::StatsWhenAdoptingReligion>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NaturalReligionSpreadStrength>() <= 12 && core::mem::align_of::<p::NaturalReligionSpreadStrength>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::ReligionSpreadDistance>() <= 12 && core::mem::align_of::<p::ReligionSpreadDistance>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::FaithCostOfGreatProphetChange>() <= 12 && core::mem::align_of::<p::FaithCostOfGreatProphetChange>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::SpyEffectiveness>() <= 12 && core::mem::align_of::<p::SpyEffectiveness>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::EnemySpyEffectiveness>() <= 12 && core::mem::align_of::<p::EnemySpyEffectiveness>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::SpyStartingLevel>() <= 12 && core::mem::align_of::<p::SpyStartingLevel>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::CounterIntelligenceSpyRankBonus>() <= 12 && core::mem::align_of::<p::CounterIntelligenceSpyRankBonus>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StartsWithTech>() <= 12 && core::mem::align_of::<p::StartsWithTech>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StartBias>() <= 12 && core::mem::align_of::<p::StartBias>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CitiesAreRazedXTimesFaster>() <= 12 && core::mem::align_of::<p::CitiesAreRazedXTimesFaster>() <= 4);
@@ -5333,13 +5883,18 @@ const _: () = assert!(core::mem::size_of::<p::GoldenAgeLength>() <= 12 && core::
 const _: () = assert!(core::mem::size_of::<p::PopulationLossFromNukes>() <= 12 && core::mem::align_of::<p::PopulationLossFromNukes>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::GarrisonDamageFromNukes>() <= 12 && core::mem::align_of::<p::GarrisonDamageFromNukes>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CanBePurchasedWithStat>() <= 12 && core::mem::align_of::<p::CanBePurchasedWithStat>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::CanBePurchasedForAmountStat>() <= 12 && core::mem::align_of::<p::CanBePurchasedForAmountStat>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::MaxNumberBuildable>() <= 12 && core::mem::align_of::<p::MaxNumberBuildable>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::CannotBuildBuildings>() <= 12 && core::mem::align_of::<p::CannotBuildBuildings>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::RequiresPopulation>() <= 12 && core::mem::align_of::<p::RequiresPopulation>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CostIncreasesPerCity>() <= 12 && core::mem::align_of::<p::CostIncreasesPerCity>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::CostIncreasesWhenBuilt>() <= 12 && core::mem::align_of::<p::CostIncreasesWhenBuilt>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::CostPercentageChange>() <= 12 && core::mem::align_of::<p::CostPercentageChange>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::MustHaveOwnedWithinTiles>() <= 12 && core::mem::align_of::<p::MustHaveOwnedWithinTiles>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::MustBeOn>() <= 12 && core::mem::align_of::<p::MustBeOn>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::MustNotBeOn>() <= 12 && core::mem::align_of::<p::MustNotBeOn>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::MustBeNextTo>() <= 12 && core::mem::align_of::<p::MustBeNextTo>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::ObsoleteWith>() <= 12 && core::mem::align_of::<p::ObsoleteWith>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::GoldFromCapturingCity>() <= 12 && core::mem::align_of::<p::GoldFromCapturingCity>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::ConstructImprovementInstantly>() <= 12 && core::mem::align_of::<p::ConstructImprovementInstantly>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::BuildImprovements>() <= 12 && core::mem::align_of::<p::BuildImprovements>() <= 4);
@@ -5347,6 +5902,7 @@ const _: () = assert!(core::mem::size_of::<p::AddInCapital>() <= 12 && core::mem
 const _: () = assert!(core::mem::size_of::<p::MayParadrop>() <= 12 && core::mem::align_of::<p::MayParadrop>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CanTradeWithCityStateForGoldAndInfluence>() <= 12 && core::mem::align_of::<p::CanTradeWithCityStateForGoldAndInfluence>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::Strength>() <= 12 && core::mem::align_of::<p::Strength>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::StrengthAmount>() <= 12 && core::mem::align_of::<p::StrengthAmount>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StrengthNearCapital>() <= 12 && core::mem::align_of::<p::StrengthNearCapital>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::FlankAttackBonus>() <= 12 && core::mem::align_of::<p::FlankAttackBonus>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StrengthForAdjacentEnemies>() <= 12 && core::mem::align_of::<p::StrengthForAdjacentEnemies>() <= 4);
@@ -5355,6 +5911,7 @@ const _: () = assert!(core::mem::size_of::<p::AdditionalAttacks>() <= 12 && core
 const _: () = assert!(core::mem::size_of::<p::Movement>() <= 12 && core::mem::align_of::<p::Movement>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::Sight>() <= 12 && core::mem::align_of::<p::Sight>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::Range>() <= 12 && core::mem::align_of::<p::Range>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::AirInterceptionRange>() <= 12 && core::mem::align_of::<p::AirInterceptionRange>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::Heal>() <= 12 && core::mem::align_of::<p::Heal>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::SpreadReligionStrength>() <= 12 && core::mem::align_of::<p::SpreadReligionStrength>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::StatsWhenSpreading>() <= 12 && core::mem::align_of::<p::StatsWhenSpreading>() <= 4);
@@ -5384,14 +5941,17 @@ const _: () = assert!(core::mem::size_of::<p::PercentageXPGain>() <= 12 && core:
 const _: () = assert!(core::mem::size_of::<p::GreatPersonEarnedFaster>() <= 12 && core::mem::align_of::<p::GreatPersonEarnedFaster>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CanSeeInvisibleUnits>() <= 12 && core::mem::align_of::<p::CanSeeInvisibleUnits>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::RuinsUpgrade>() <= 12 && core::mem::align_of::<p::RuinsUpgrade>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::CanUpgrade>() <= 12 && core::mem::align_of::<p::CanUpgrade>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::DoubleMovementOnTerrain>() <= 12 && core::mem::align_of::<p::DoubleMovementOnTerrain>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::CanEnterForeignTilesButLosesReligiousStrength>() <= 12 && core::mem::align_of::<p::CanEnterForeignTilesButLosesReligiousStrength>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::ReducedDisembarkCost>() <= 12 && core::mem::align_of::<p::ReducedDisembarkCost>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::ReducedEmbarkCost>() <= 12 && core::mem::align_of::<p::ReducedEmbarkCost>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::GreatPerson>() <= 12 && core::mem::align_of::<p::GreatPerson>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::GPPointPool>() <= 12 && core::mem::align_of::<p::GPPointPool>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NaturalWonderNeighborCount>() <= 12 && core::mem::align_of::<p::NaturalWonderNeighborCount>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NaturalWonderNeighborsRange>() <= 12 && core::mem::align_of::<p::NaturalWonderNeighborsRange>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NaturalWonderSmallerLandmass>() <= 12 && core::mem::align_of::<p::NaturalWonderSmallerLandmass>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::NaturalWonderLargerLandmass>() <= 12 && core::mem::align_of::<p::NaturalWonderLargerLandmass>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NaturalWonderLatitude>() <= 12 && core::mem::align_of::<p::NaturalWonderLatitude>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NaturalWonderGroups>() <= 12 && core::mem::align_of::<p::NaturalWonderGroups>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NaturalWonderConvertNeighbors>() <= 12 && core::mem::align_of::<p::NaturalWonderConvertNeighbors>() <= 4);
@@ -5425,21 +5985,29 @@ const _: () = assert!(core::mem::size_of::<p::CanOnlyBeBuiltOnTile>() <= 12 && c
 const _: () = assert!(core::mem::size_of::<p::CannotBuildOnTile>() <= 12 && core::mem::align_of::<p::CannotBuildOnTile>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::NoFeatureRemovalNeeded>() <= 12 && core::mem::align_of::<p::NoFeatureRemovalNeeded>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::DefensiveBonus>() <= 12 && core::mem::align_of::<p::DefensiveBonus>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::ImprovementMaintenance>() <= 12 && core::mem::align_of::<p::ImprovementMaintenance>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::ImprovementAllMaintenance>() <= 12 && core::mem::align_of::<p::ImprovementAllMaintenance>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::DamagesAdjacentEnemyUnits>() <= 12 && core::mem::align_of::<p::DamagesAdjacentEnemyUnits>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::PillageYieldRandom>() <= 12 && core::mem::align_of::<p::PillageYieldRandom>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::PillageYieldFixed>() <= 12 && core::mem::align_of::<p::PillageYieldFixed>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeFreeUnit>() <= 12 && core::mem::align_of::<p::OneTimeFreeUnit>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeAmountFreeUnits>() <= 12 && core::mem::align_of::<p::OneTimeAmountFreeUnits>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeFreeUnitRuins>() <= 12 && core::mem::align_of::<p::OneTimeFreeUnitRuins>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeAmountFreePolicies>() <= 12 && core::mem::align_of::<p::OneTimeAmountFreePolicies>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeEnterGoldenAgeTurns>() <= 12 && core::mem::align_of::<p::OneTimeEnterGoldenAgeTurns>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeGainPopulation>() <= 12 && core::mem::align_of::<p::OneTimeGainPopulation>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeGainPopulationRandomCity>() <= 12 && core::mem::align_of::<p::OneTimeGainPopulationRandomCity>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeDiscoverTech>() <= 12 && core::mem::align_of::<p::OneTimeDiscoverTech>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeAdoptPolicyOrBelief>() <= 12 && core::mem::align_of::<p::OneTimeAdoptPolicyOrBelief>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeAmountFreeTechs>() <= 12 && core::mem::align_of::<p::OneTimeAmountFreeTechs>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeFreeTechRuins>() <= 12 && core::mem::align_of::<p::OneTimeFreeTechRuins>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeFreeBelief>() <= 12 && core::mem::align_of::<p::OneTimeFreeBelief>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeGainStat>() <= 12 && core::mem::align_of::<p::OneTimeGainStat>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeGainStatRange>() <= 12 && core::mem::align_of::<p::OneTimeGainStatRange>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeGainProphet>() <= 12 && core::mem::align_of::<p::OneTimeGainProphet>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeGainTechPercent>() <= 12 && core::mem::align_of::<p::OneTimeGainTechPercent>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeTakeOverTilesInRadius>() <= 12 && core::mem::align_of::<p::OneTimeTakeOverTilesInRadius>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeTakeOverTilesInCity>() <= 12 && core::mem::align_of::<p::OneTimeTakeOverTilesInCity>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeRevealSpecificMapTiles>() <= 12 && core::mem::align_of::<p::OneTimeRevealSpecificMapTiles>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeRevealCrudeMap>() <= 12 && core::mem::align_of::<p::OneTimeRevealCrudeMap>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeSpiesLevelUp>() <= 12 && core::mem::align_of::<p::OneTimeSpiesLevelUp>() <= 4);
@@ -5447,8 +6015,14 @@ const _: () = assert!(core::mem::size_of::<p::UnitsGainPromotion>() <= 12 && cor
 const _: () = assert!(core::mem::size_of::<p::FreeStatBuildings>() <= 12 && core::mem::align_of::<p::FreeStatBuildings>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::FreeSpecificBuildings>() <= 12 && core::mem::align_of::<p::FreeSpecificBuildings>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeUnitHeal>() <= 12 && core::mem::align_of::<p::OneTimeUnitHeal>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeUnitDamage>() <= 12 && core::mem::align_of::<p::OneTimeUnitDamage>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeUnitGainXP>() <= 12 && core::mem::align_of::<p::OneTimeUnitGainXP>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeUnitUpgrade>() <= 12 && core::mem::align_of::<p::OneTimeUnitUpgrade>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::OneTimeUnitSpecialUpgrade>() <= 12 && core::mem::align_of::<p::OneTimeUnitSpecialUpgrade>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeUnitGainPromotion>() <= 12 && core::mem::align_of::<p::OneTimeUnitGainPromotion>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeUnitGainMovement>() <= 12 && core::mem::align_of::<p::OneTimeUnitGainMovement>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeUnitLoseMovement>() <= 12 && core::mem::align_of::<p::OneTimeUnitLoseMovement>() <= 4);
+const _: () = assert!(core::mem::size_of::<p::OneTimeUnitDestroyed>() <= 12 && core::mem::align_of::<p::OneTimeUnitDestroyed>() <= 4);
 const _: () = assert!(core::mem::size_of::<p::AiChoiceWeight>() <= 12 && core::mem::align_of::<p::AiChoiceWeight>() <= 4);
 
 /// The payload of a main unique: one variant per supported type that is not a modifier, plus [`UniqueData::Tag`]. At most 16 bytes: a `u16` tag and a payload of at most 12.
@@ -5504,6 +6078,10 @@ pub enum UniqueData {
     PercentProductionWonders(p::PercentProductionWonders),
     /// `[relativeAmount]% Production towards any buildings that already exist in the Capital`
     PercentProductionBuildingsInCapital(p::PercentProductionBuildingsInCapital),
+    /// `[relativeAmount]% Yield from pillaging tiles`
+    PercentYieldFromPillaging(p::PercentYieldFromPillaging),
+    /// `[relativeAmount]% Health from pillaging tiles`
+    PercentHealthFromPillaging(p::PercentHealthFromPillaging),
     /// `Provides military units every ≈[positiveAmount] turns`
     CityStateMilitaryUnits(p::CityStateMilitaryUnits),
     /// `Provides a unique luxury`
@@ -5538,6 +6116,8 @@ pub enum UniqueData {
     CarryOverFood(p::CarryOverFood),
     /// `[relativeAmount]% Food consumption by [populationFilter] [cityFilter]`
     FoodConsumptionByPopulation(p::FoodConsumptionByPopulation),
+    /// `[relativeAmount]% Food consumption by specialists [cityFilter]`
+    FoodConsumptionBySpecialists(p::FoodConsumptionBySpecialists),
     /// `[relativeAmount]% unhappiness from the number of cities`
     UnhappinessFromCitiesPercentage(p::UnhappinessFromCitiesPercentage),
     /// `[relativeAmount]% Unhappiness from [populationFilter] [cityFilter]`
@@ -5554,14 +6134,24 @@ pub enum UniqueData {
     EnablesConstructionOfSpaceshipParts,
     /// `May buy [baseUnitFilter] units for [nonNegativeAmount] [stat] [cityFilter] at an increasing price ([amount])`
     BuyUnitsIncreasingCost(p::BuyUnitsIncreasingCost),
+    /// `May buy [buildingFilter] buildings for [nonNegativeAmount] [stat] [cityFilter] at an increasing price ([amount])`
+    BuyBuildingsIncreasingCost(p::BuyBuildingsIncreasingCost),
+    /// `May buy [baseUnitFilter] units for [nonNegativeAmount] [stat] [cityFilter]`
+    BuyUnitsForAmountStat(p::BuyUnitsForAmountStat),
     /// `May buy [buildingFilter] buildings for [nonNegativeAmount] [stat] [cityFilter]`
     BuyBuildingsForAmountStat(p::BuyBuildingsForAmountStat),
+    /// `May buy [baseUnitFilter] units with [stat] [cityFilter]`
+    BuyUnitsWithStat(p::BuyUnitsWithStat),
     /// `May buy [buildingFilter] buildings with [stat] [cityFilter]`
     BuyBuildingsWithStat(p::BuyBuildingsWithStat),
     /// `May buy [baseUnitFilter] units with [stat] for [nonNegativeAmount] times their normal Production cost`
     BuyUnitsByProductionCost(p::BuyUnitsByProductionCost),
+    /// `May buy [buildingFilter] buildings with [stat] for [nonNegativeAmount] times their normal Production cost`
+    BuyBuildingsByProductionCost(p::BuyBuildingsByProductionCost),
     /// `[stat] cost of purchasing items in cities [relativeAmount]%`
     BuyItemsDiscount(p::BuyItemsDiscount),
+    /// `[stat] cost of purchasing [buildingFilter] buildings [relativeAmount]%`
+    BuyBuildingsDiscount(p::BuyBuildingsDiscount),
     /// `[stat] cost of purchasing [baseUnitFilter] units [relativeAmount]%`
     BuyUnitsDiscount(p::BuyUnitsDiscount),
     /// `Enables conversion of city production to [stat]`
@@ -5574,6 +6164,8 @@ pub enum UniqueData {
     RoadMaintenance(p::RoadMaintenance),
     /// `No Maintenance costs for improvements in [tileFilter] tiles`
     NoImprovementMaintenanceInSpecificTiles(p::NoImprovementMaintenanceInSpecificTiles),
+    /// `[relativeAmount]% construction time for [improvementFilter] improvements`
+    SpecificImprovementTime(p::SpecificImprovementTime),
     /// `Can build [improvementFilter] improvements at a [relativeAmount]% rate`
     ImprovementTimeIncrease(p::ImprovementTimeIncrease),
     /// `Gain a free [buildingName] [cityFilter]`
@@ -5588,6 +6180,10 @@ pub enum UniqueData {
     LessPolicyCostFromCities(p::LessPolicyCostFromCities),
     /// `[relativeAmount]% Culture cost of adopting new Policies`
     LessPolicyCost(p::LessPolicyCost),
+    /// `Each city founded increases Science cost of Technologies [relativeAmount]% less than normal`
+    LessTechCostFromCities(p::LessTechCostFromCities),
+    /// `[relativeAmount]% Science cost of researching new Technologies`
+    LessTechCost(p::LessTechCost),
     /// `[stats] for every known Natural Wonder`
     StatsFromNaturalWonders(p::StatsFromNaturalWonders),
     /// `[stats] for discovering a Natural Wonder (bonus enhanced to [stats] if first to discover it)`
@@ -5600,6 +6196,12 @@ pub enum UniqueData {
     GreatGeneralProvidesDoubleCombatBonus,
     /// `Receive a free Great Person at the end of every [comment] (every 394 years), after researching [tech]. Each bonus person can only be chosen once.`
     MayanGainGreatPerson(p::MayanGainGreatPerson),
+    /// `[amount] Unit Supply`
+    BaseUnitSupply(p::BaseUnitSupply),
+    /// `[amount] Unit Supply per [positiveAmount] population [cityFilter]`
+    UnitSupplyPerPop(p::UnitSupplyPerPop),
+    /// `[amount] Unit Supply per city`
+    UnitSupplyPerCity(p::UnitSupplyPerCity),
     /// `[amount] units cost no maintenance`
     FreeUnits(p::FreeUnits),
     /// `Units in cities cost no Maintenance`
@@ -5618,6 +6220,8 @@ pub enum UniqueData {
     UnitStartingPromotions(p::UnitStartingPromotions),
     /// `[mapUnitFilter] Units adjacent to this city heal [amount] HP per turn when healing`
     CityHealingUnits(p::CityHealingUnits),
+    /// `[relativeAmount]% XP required for promotions`
+    XPForPromotionModifier(p::XPForPromotionModifier),
     /// `[relativeAmount]% City Strength from defensive buildings`
     BetterDefensiveBuildings(p::BetterDefensiveBuildings),
     /// `[relativeAmount]% Strength for cities`
@@ -5658,6 +6262,8 @@ pub enum UniqueData {
     GainFromDefeatingUnit(p::GainFromDefeatingUnit),
     /// `Starting in this era disables religion`
     DisablesReligion,
+    /// `May choose [amount] additional [beliefType] beliefs when [foundingOrEnhancing] a religion`
+    FreeExtraBeliefs(p::FreeExtraBeliefs),
     /// `May choose [amount] additional belief(s) of any type when [foundingOrEnhancing] a religion`
     FreeExtraAnyBeliefs(p::FreeExtraAnyBeliefs),
     /// `[stats] when a city adopts this religion for the first time`
@@ -5670,18 +6276,26 @@ pub enum UniqueData {
     MayNotGenerateGreatProphet,
     /// `[relativeAmount]% Faith cost of generating Great Prophet equivalents`
     FaithCostOfGreatProphetChange(p::FaithCostOfGreatProphetChange),
+    /// `[relativeAmount]% spy effectiveness [cityFilter]`
+    SpyEffectiveness(p::SpyEffectiveness),
     /// `[relativeAmount]% enemy spy effectiveness [cityFilter]`
     EnemySpyEffectiveness(p::EnemySpyEffectiveness),
     /// `New spies start with [amount] level(s)`
     SpyStartingLevel(p::SpyStartingLevel),
+    /// `Spies in [cityFilter] cities act as though they have [relativeAmount] levels for [spyAction]`
+    CounterIntelligenceSpyRankBonus(p::CounterIntelligenceSpyRankBonus),
     /// `Starting tech`
     StartingTech,
     /// `Starts with [tech]`
     StartsWithTech(p::StartsWithTech),
     /// `Start bias [terrainFilter]`
     StartBias(p::StartBias),
+    /// `Triggers victory`
+    TriggersVictory,
     /// `Triggers a Cultural Victory upon completion`
     TriggersCulturalVictory,
+    /// `May not annex cities`
+    MayNotAnnexCities,
     /// `"Borrows" city names from other civilizations in the game`
     BorrowsCityNames,
     /// `Cities are razed [amount] times as fast`
@@ -5704,12 +6318,16 @@ pub enum UniqueData {
     CannotBePurchased,
     /// `Can be purchased with [stat] [cityFilter]`
     CanBePurchasedWithStat(p::CanBePurchasedWithStat),
+    /// `Can be purchased for [amount] [stat] [cityFilter]`
+    CanBePurchasedForAmountStat(p::CanBePurchasedForAmountStat),
     /// `Limited to [amount] per Civilization`
     MaxNumberBuildable(p::MaxNumberBuildable),
     /// `Only available`
     OnlyAvailable,
     /// `Unavailable`
     Unavailable,
+    /// `Cannot build [buildingFilter] buildings`
+    CannotBuildBuildings(p::CannotBuildBuildings),
     /// `Excess Food converted to Production when under construction`
     ConvertFoodToProductionWhenConstructed,
     /// `Requires at least [amount] population`
@@ -5720,6 +6338,10 @@ pub enum UniqueData {
     TriggersAlertOnCompletion,
     /// `Cost increases by [amount] per owned city`
     CostIncreasesPerCity(p::CostIncreasesPerCity),
+    /// `Cost increases by [amount] when built`
+    CostIncreasesWhenBuilt(p::CostIncreasesWhenBuilt),
+    /// `[amount]% production cost`
+    CostPercentageChange(p::CostPercentageChange),
     /// `Can only be built`
     CanOnlyBeBuiltWhen,
     /// `Must have an owned [tileFilter] within [amount] tiles`
@@ -5732,12 +6354,16 @@ pub enum UniqueData {
     MustNotBeOn(p::MustNotBeOn),
     /// `Must be next to [tileFilter]`
     MustBeNextTo(p::MustBeNextTo),
+    /// `Obsolete with [tech]`
+    ObsoleteWith(p::ObsoleteWith),
     /// `Indicates the capital city`
     IndicatesCapital,
     /// `Provides 1 extra copy of each improved luxury resource near this City`
     ProvidesExtraLuxuryFromCityResources,
     /// `Destroyed when the city is captured`
     DestroyedWhenCityCaptured,
+    /// `Never destroyed when the city is captured`
+    NotDestroyedWhenCityCaptured,
     /// `[relativeAmount]% Gold given to enemy if city is captured`
     GoldFromCapturingCity(p::GoldFromCapturingCity),
     /// `Removes extra unhappiness from annexed cities`
@@ -5772,14 +6398,20 @@ pub enum UniqueData {
     CanAirsweep,
     /// `Can speed up construction of a building`
     CanSpeedupConstruction,
+    /// `Can speed up the construction of a wonder`
+    CanSpeedupWonderConstruction,
     /// `Can hurry technology research`
     CanHurryResearch,
+    /// `Can generate a large amount of culture`
+    CanHurryPolicy,
     /// `Can undertake a trade mission with City-State, giving a large sum of gold and [amount] Influence`
     CanTradeWithCityStateForGoldAndInfluence(p::CanTradeWithCityStateForGoldAndInfluence),
     /// `Automation is a primary action`
     AutomationPrimaryAction,
     /// `[relativeAmount]% Strength`
     Strength(p::Strength),
+    /// `[relativeAmount] Strength`
+    StrengthAmount(p::StrengthAmount),
     /// `[relativeAmount]% Strength decreasing with distance from the capital`
     StrengthNearCapital(p::StrengthNearCapital),
     /// `[relativeAmount]% to Flank Attack bonuses`
@@ -5796,6 +6428,8 @@ pub enum UniqueData {
     Sight(p::Sight),
     /// `[amount] Range`
     Range(p::Range),
+    /// `[relativeAmount] Air Interception Range`
+    AirInterceptionRange(p::AirInterceptionRange),
     /// `[amount] HP when healing`
     Heal(p::Heal),
     /// `[relativeAmount]% Spread Religion Strength`
@@ -5814,6 +6448,8 @@ pub enum UniqueData {
     SelfDestructs,
     /// `Eliminates combat penalty for attacking across a coast`
     AttackAcrossCoast,
+    /// `May attack when embarked`
+    AttackOnSea,
     /// `Eliminates combat penalty for attacking over a river`
     AttackAcrossRiver,
     /// `Blast radius [amount]`
@@ -5824,6 +6460,8 @@ pub enum UniqueData {
     NuclearWeapon(p::NuclearWeapon),
     /// `No defensive terrain bonus`
     NoDefensiveTerrainBonus,
+    /// `No defensive terrain penalty`
+    NoDefensiveTerrainPenalty,
     /// `No damage penalty for wounded units`
     NoDamagePenaltyWoundedUnits,
     /// `Uncapturable`
@@ -5854,6 +6492,8 @@ pub enum UniqueData {
     HealsEvenAfterAction,
     /// `All adjacent units heal [amount] HP when healing`
     HealAdjacentUnits(p::HealAdjacentUnits),
+    /// `No Sight`
+    NoSight,
     /// `Can see over obstacles`
     CanSeeOverObstacles,
     /// `Can carry [amount] [mapUnitFilter] units`
@@ -5894,16 +6534,22 @@ pub enum UniqueData {
     GreatPersonFromCombat,
     /// `[greatPerson] is earned [relativeAmount]% faster`
     GreatPersonEarnedFaster(p::GreatPersonEarnedFaster),
+    /// `Invisible to others`
+    Invisible,
     /// `Invisible to non-adjacent units`
     InvisibleToNonAdjacent,
     /// `Can see invisible [mapUnitFilter] units`
     CanSeeInvisibleUnits(p::CanSeeInvisibleUnits),
     /// `May upgrade to [unit] through ruins-like effects`
     RuinsUpgrade(p::RuinsUpgrade),
+    /// `Can upgrade to [unit]`
+    CanUpgrade(p::CanUpgrade),
     /// `Double movement in [terrainFilter]`
     DoubleMovementOnTerrain(p::DoubleMovementOnTerrain),
     /// `All tiles cost 1 movement`
     AllTilesCost1Move,
+    /// `May travel on Water tiles without embarking`
+    CanMoveOnWater,
     /// `Can pass through impassable tiles`
     CanPassImpassable,
     /// `Ignores terrain cost`
@@ -5914,6 +6560,8 @@ pub enum UniqueData {
     RoughTerrainPenalty,
     /// `Can enter ice tiles`
     CanEnterIceTiles,
+    /// `Cannot embark`
+    CannotEmbark,
     /// `Cannot enter ocean tiles`
     CannotEnterOcean,
     /// `May enter foreign tiles without open borders`
@@ -5922,6 +6570,8 @@ pub enum UniqueData {
     CanEnterForeignTilesButLosesReligiousStrength(p::CanEnterForeignTilesButLosesReligiousStrength),
     /// `[nonNegativeAmount] Movement point cost to disembark`
     ReducedDisembarkCost(p::ReducedDisembarkCost),
+    /// `[nonNegativeAmount] Movement point cost to embark`
+    ReducedEmbarkCost(p::ReducedEmbarkCost),
     /// `All units move through Forest and Jungle Tiles in friendly territory as if they have roads. These tiles can be used to establish City Connections upon researching the Wheel.`
     ForestsAndJunglesAreRoads,
     /// `Units ignore terrain costs when moving into any tile with Hills`
@@ -5946,6 +6596,8 @@ pub enum UniqueData {
     NaturalWonderNeighborsRange(p::NaturalWonderNeighborsRange),
     /// `Must not be on [amount] largest landmasses`
     NaturalWonderSmallerLandmass(p::NaturalWonderSmallerLandmass),
+    /// `Must be on [amount] largest landmasses`
+    NaturalWonderLargerLandmass(p::NaturalWonderLargerLandmass),
     /// `Occurs on latitudes from [amount] to [amount] percent of distance equator to pole`
     NaturalWonderLatitude(p::NaturalWonderLatitude),
     /// `Occurs in groups of [amount] to [amount] tiles`
@@ -6054,6 +6706,8 @@ pub enum UniqueData {
     RemovesFeaturesIfBuilt,
     /// `Gives a defensive bonus of [relativeAmount]%`
     DefensiveBonus(p::DefensiveBonus),
+    /// `Costs [amount] [stat] per turn when in your territory`
+    ImprovementMaintenance(p::ImprovementMaintenance),
     /// `Costs [amount] [stat] per turn`
     ImprovementAllMaintenance(p::ImprovementAllMaintenance),
     /// `Adjacent enemy units ending their turn take [amount] damage`
@@ -6068,6 +6722,10 @@ pub enum UniqueData {
     Unpillagable,
     /// `Pillaging this improvement yields approximately [stats]`
     PillageYieldRandom(p::PillageYieldRandom),
+    /// `Pillaging this improvement yields [stats]`
+    PillageYieldFixed(p::PillageYieldFixed),
+    /// `Destroyed when pillaged`
+    DestroyedWhenPillaged,
     /// `Irremovable`
     Irremovable,
     /// `Will not be replaced by automated units`
@@ -6080,6 +6738,8 @@ pub enum UniqueData {
     OneTimeFreeUnitRuins(p::OneTimeFreeUnitRuins),
     /// `Free Social Policy`
     OneTimeFreePolicy,
+    /// `[positiveAmount] Free Social Policies`
+    OneTimeAmountFreePolicies(p::OneTimeAmountFreePolicies),
     /// `Empire enters golden age`
     OneTimeEnterGoldenAge,
     /// `Empire enters a [positiveAmount]-turn Golden Age`
@@ -6090,6 +6750,10 @@ pub enum UniqueData {
     OneTimeGainPopulation(p::OneTimeGainPopulation),
     /// `[amount] population in a random city`
     OneTimeGainPopulationRandomCity(p::OneTimeGainPopulationRandomCity),
+    /// `Discover [tech]`
+    OneTimeDiscoverTech(p::OneTimeDiscoverTech),
+    /// `Adopt [policy/belief]`
+    OneTimeAdoptPolicyOrBelief(p::OneTimeAdoptPolicyOrBelief),
     /// `Free Technology`
     OneTimeFreeTech,
     /// `[positiveAmount] Free Technologies`
@@ -6098,6 +6762,8 @@ pub enum UniqueData {
     OneTimeFreeTechRuins(p::OneTimeFreeTechRuins),
     /// `Reveals the entire map`
     OneTimeRevealEntireMap,
+    /// `Gain a free [beliefType] belief`
+    OneTimeFreeBelief(p::OneTimeFreeBelief),
     /// `Triggers voting for the Diplomatic Victory`
     OneTimeTriggerVoting,
     /// `Gain [amount] [civWideStat]`
@@ -6108,8 +6774,12 @@ pub enum UniqueData {
     OneTimeGainPantheon,
     /// `Gain enough Faith for [positiveAmount]% of a Great Prophet`
     OneTimeGainProphet(p::OneTimeGainProphet),
+    /// `Research [relativeAmount]% of [tech]`
+    OneTimeGainTechPercent(p::OneTimeGainTechPercent),
     /// `Gain control over [tileFilter] tiles in a [nonNegativeAmount]-tile radius`
     OneTimeTakeOverTilesInRadius(p::OneTimeTakeOverTilesInRadius),
+    /// `Gain control over [positiveAmount] tiles [cityFilter]`
+    OneTimeTakeOverTilesInCity(p::OneTimeTakeOverTilesInCity),
     /// `Reveal up to [positiveAmount/'all'] [tileFilter] within a [positiveAmount] tile radius`
     OneTimeRevealSpecificMapTiles(p::OneTimeRevealSpecificMapTiles),
     /// `From a randomly chosen tile [positiveAmount] tiles away from the ruins, reveal tiles up to [positiveAmount] tiles away with [positiveAmount]% chance`
@@ -6122,6 +6792,8 @@ pub enum UniqueData {
     OneTimeGainSpy,
     /// `Doing so will consume this opportunity to choose a Promotion`
     SkipPromotion,
+    /// `This Promotion is free`
+    FreePromotion,
     /// `[mapUnitFilter] units gain the [promotion] promotion`
     UnitsGainPromotion(p::UnitsGainPromotion),
     /// `Provides the cheapest [stat] building in your first [positiveAmount] cities for free`
@@ -6130,10 +6802,22 @@ pub enum UniqueData {
     FreeSpecificBuildings(p::FreeSpecificBuildings),
     /// `[unitTriggerTarget] heals [positiveAmount] HP`
     OneTimeUnitHeal(p::OneTimeUnitHeal),
+    /// `[unitTriggerTarget] takes [positiveAmount] damage`
+    OneTimeUnitDamage(p::OneTimeUnitDamage),
     /// `[unitTriggerTarget] gains [amount] XP`
     OneTimeUnitGainXP(p::OneTimeUnitGainXP),
+    /// `[unitTriggerTarget] upgrades for free`
+    OneTimeUnitUpgrade(p::OneTimeUnitUpgrade),
     /// `[unitTriggerTarget] upgrades for free including special upgrades`
     OneTimeUnitSpecialUpgrade(p::OneTimeUnitSpecialUpgrade),
+    /// `[unitTriggerTarget] gains the [promotion] promotion`
+    OneTimeUnitGainPromotion(p::OneTimeUnitGainPromotion),
+    /// `[unitTriggerTarget] gains [positiveAmount] movement`
+    OneTimeUnitGainMovement(p::OneTimeUnitGainMovement),
+    /// `[unitTriggerTarget] loses [positiveAmount] movement`
+    OneTimeUnitLoseMovement(p::OneTimeUnitLoseMovement),
+    /// `[unitTriggerTarget] is destroyed`
+    OneTimeUnitDestroyed(p::OneTimeUnitDestroyed),
     /// `[relativeAmount]% weight to this choice for AI decisions`
     AiChoiceWeight(p::AiChoiceWeight),
     /// `Will not be chosen for new games`
@@ -6173,6 +6857,8 @@ impl UniqueData {
             Self::PercentProductionUnits(_) => Some(UniqueType::PercentProductionUnits),
             Self::PercentProductionWonders(_) => Some(UniqueType::PercentProductionWonders),
             Self::PercentProductionBuildingsInCapital(_) => Some(UniqueType::PercentProductionBuildingsInCapital),
+            Self::PercentYieldFromPillaging(_) => Some(UniqueType::PercentYieldFromPillaging),
+            Self::PercentHealthFromPillaging(_) => Some(UniqueType::PercentHealthFromPillaging),
             Self::CityStateMilitaryUnits(_) => Some(UniqueType::CityStateMilitaryUnits),
             Self::CityStateUniqueLuxury => Some(UniqueType::CityStateUniqueLuxury),
             Self::CityStateGiftedUnitsStartWithXp(_) => Some(UniqueType::CityStateGiftedUnitsStartWithXp),
@@ -6190,6 +6876,7 @@ impl UniqueData {
             Self::GrowthPercentBonus(_) => Some(UniqueType::GrowthPercentBonus),
             Self::CarryOverFood(_) => Some(UniqueType::CarryOverFood),
             Self::FoodConsumptionByPopulation(_) => Some(UniqueType::FoodConsumptionByPopulation),
+            Self::FoodConsumptionBySpecialists(_) => Some(UniqueType::FoodConsumptionBySpecialists),
             Self::UnhappinessFromCitiesPercentage(_) => Some(UniqueType::UnhappinessFromCitiesPercentage),
             Self::UnhappinessFromPopulationTypePercentageChange(_) => Some(UniqueType::UnhappinessFromPopulationTypePercentageChange),
             Self::BonusHappinessFromLuxury(_) => Some(UniqueType::BonusHappinessFromLuxury),
@@ -6198,16 +6885,22 @@ impl UniqueData {
             Self::CannotBuildUnits(_) => Some(UniqueType::CannotBuildUnits),
             Self::EnablesConstructionOfSpaceshipParts => Some(UniqueType::EnablesConstructionOfSpaceshipParts),
             Self::BuyUnitsIncreasingCost(_) => Some(UniqueType::BuyUnitsIncreasingCost),
+            Self::BuyBuildingsIncreasingCost(_) => Some(UniqueType::BuyBuildingsIncreasingCost),
+            Self::BuyUnitsForAmountStat(_) => Some(UniqueType::BuyUnitsForAmountStat),
             Self::BuyBuildingsForAmountStat(_) => Some(UniqueType::BuyBuildingsForAmountStat),
+            Self::BuyUnitsWithStat(_) => Some(UniqueType::BuyUnitsWithStat),
             Self::BuyBuildingsWithStat(_) => Some(UniqueType::BuyBuildingsWithStat),
             Self::BuyUnitsByProductionCost(_) => Some(UniqueType::BuyUnitsByProductionCost),
+            Self::BuyBuildingsByProductionCost(_) => Some(UniqueType::BuyBuildingsByProductionCost),
             Self::BuyItemsDiscount(_) => Some(UniqueType::BuyItemsDiscount),
+            Self::BuyBuildingsDiscount(_) => Some(UniqueType::BuyBuildingsDiscount),
             Self::BuyUnitsDiscount(_) => Some(UniqueType::BuyUnitsDiscount),
             Self::EnablesStatProduction(_) => Some(UniqueType::EnablesStatProduction),
             Self::RoadMovementSpeed => Some(UniqueType::RoadMovementSpeed),
             Self::RoadsConnectAcrossRivers => Some(UniqueType::RoadsConnectAcrossRivers),
             Self::RoadMaintenance(_) => Some(UniqueType::RoadMaintenance),
             Self::NoImprovementMaintenanceInSpecificTiles(_) => Some(UniqueType::NoImprovementMaintenanceInSpecificTiles),
+            Self::SpecificImprovementTime(_) => Some(UniqueType::SpecificImprovementTime),
             Self::ImprovementTimeIncrease(_) => Some(UniqueType::ImprovementTimeIncrease),
             Self::GainFreeBuildings(_) => Some(UniqueType::GainFreeBuildings),
             Self::BuildingMaintenance(_) => Some(UniqueType::BuildingMaintenance),
@@ -6215,12 +6908,17 @@ impl UniqueData {
             Self::TileCostPercentage(_) => Some(UniqueType::TileCostPercentage),
             Self::LessPolicyCostFromCities(_) => Some(UniqueType::LessPolicyCostFromCities),
             Self::LessPolicyCost(_) => Some(UniqueType::LessPolicyCost),
+            Self::LessTechCostFromCities(_) => Some(UniqueType::LessTechCostFromCities),
+            Self::LessTechCost(_) => Some(UniqueType::LessTechCost),
             Self::StatsFromNaturalWonders(_) => Some(UniqueType::StatsFromNaturalWonders),
             Self::StatBonusWhenDiscoveringNaturalWonder(_) => Some(UniqueType::StatBonusWhenDiscoveringNaturalWonder),
             Self::GreatPersonPointPercentage(_) => Some(UniqueType::GreatPersonPointPercentage),
             Self::PercentGoldFromTradeMissions(_) => Some(UniqueType::PercentGoldFromTradeMissions),
             Self::GreatGeneralProvidesDoubleCombatBonus => Some(UniqueType::GreatGeneralProvidesDoubleCombatBonus),
             Self::MayanGainGreatPerson(_) => Some(UniqueType::MayanGainGreatPerson),
+            Self::BaseUnitSupply(_) => Some(UniqueType::BaseUnitSupply),
+            Self::UnitSupplyPerPop(_) => Some(UniqueType::UnitSupplyPerPop),
+            Self::UnitSupplyPerCity(_) => Some(UniqueType::UnitSupplyPerCity),
             Self::FreeUnits(_) => Some(UniqueType::FreeUnits),
             Self::UnitsInCitiesNoMaintenance => Some(UniqueType::UnitsInCitiesNoMaintenance),
             Self::LandUnitEmbarkation => Some(UniqueType::LandUnitEmbarkation),
@@ -6230,6 +6928,7 @@ impl UniqueData {
             Self::UnitStartingExperience(_) => Some(UniqueType::UnitStartingExperience),
             Self::UnitStartingPromotions(_) => Some(UniqueType::UnitStartingPromotions),
             Self::CityHealingUnits(_) => Some(UniqueType::CityHealingUnits),
+            Self::XPForPromotionModifier(_) => Some(UniqueType::XPForPromotionModifier),
             Self::BetterDefensiveBuildings(_) => Some(UniqueType::BetterDefensiveBuildings),
             Self::StrengthForCities(_) => Some(UniqueType::StrengthForCities),
             Self::ConsumesResources(_) => Some(UniqueType::ConsumesResources),
@@ -6250,18 +6949,23 @@ impl UniqueData {
             Self::GainFromEncampment(_) => Some(UniqueType::GainFromEncampment),
             Self::GainFromDefeatingUnit(_) => Some(UniqueType::GainFromDefeatingUnit),
             Self::DisablesReligion => Some(UniqueType::DisablesReligion),
+            Self::FreeExtraBeliefs(_) => Some(UniqueType::FreeExtraBeliefs),
             Self::FreeExtraAnyBeliefs(_) => Some(UniqueType::FreeExtraAnyBeliefs),
             Self::StatsWhenAdoptingReligion(_) => Some(UniqueType::StatsWhenAdoptingReligion),
             Self::NaturalReligionSpreadStrength(_) => Some(UniqueType::NaturalReligionSpreadStrength),
             Self::ReligionSpreadDistance(_) => Some(UniqueType::ReligionSpreadDistance),
             Self::MayNotGenerateGreatProphet => Some(UniqueType::MayNotGenerateGreatProphet),
             Self::FaithCostOfGreatProphetChange(_) => Some(UniqueType::FaithCostOfGreatProphetChange),
+            Self::SpyEffectiveness(_) => Some(UniqueType::SpyEffectiveness),
             Self::EnemySpyEffectiveness(_) => Some(UniqueType::EnemySpyEffectiveness),
             Self::SpyStartingLevel(_) => Some(UniqueType::SpyStartingLevel),
+            Self::CounterIntelligenceSpyRankBonus(_) => Some(UniqueType::CounterIntelligenceSpyRankBonus),
             Self::StartingTech => Some(UniqueType::StartingTech),
             Self::StartsWithTech(_) => Some(UniqueType::StartsWithTech),
             Self::StartBias(_) => Some(UniqueType::StartBias),
+            Self::TriggersVictory => Some(UniqueType::TriggersVictory),
             Self::TriggersCulturalVictory => Some(UniqueType::TriggersCulturalVictory),
+            Self::MayNotAnnexCities => Some(UniqueType::MayNotAnnexCities),
             Self::BorrowsCityNames => Some(UniqueType::BorrowsCityNames),
             Self::CitiesAreRazedXTimesFaster(_) => Some(UniqueType::CitiesAreRazedXTimesFaster),
             Self::TechBoostWhenScientificBuildingsBuiltInCapital => Some(UniqueType::TechBoostWhenScientificBuildingsBuiltInCapital),
@@ -6273,23 +6977,29 @@ impl UniqueData {
             Self::Unbuildable => Some(UniqueType::Unbuildable),
             Self::CannotBePurchased => Some(UniqueType::CannotBePurchased),
             Self::CanBePurchasedWithStat(_) => Some(UniqueType::CanBePurchasedWithStat),
+            Self::CanBePurchasedForAmountStat(_) => Some(UniqueType::CanBePurchasedForAmountStat),
             Self::MaxNumberBuildable(_) => Some(UniqueType::MaxNumberBuildable),
             Self::OnlyAvailable => Some(UniqueType::OnlyAvailable),
             Self::Unavailable => Some(UniqueType::Unavailable),
+            Self::CannotBuildBuildings(_) => Some(UniqueType::CannotBuildBuildings),
             Self::ConvertFoodToProductionWhenConstructed => Some(UniqueType::ConvertFoodToProductionWhenConstructed),
             Self::RequiresPopulation(_) => Some(UniqueType::RequiresPopulation),
             Self::TriggersAlertOnStart => Some(UniqueType::TriggersAlertOnStart),
             Self::TriggersAlertOnCompletion => Some(UniqueType::TriggersAlertOnCompletion),
             Self::CostIncreasesPerCity(_) => Some(UniqueType::CostIncreasesPerCity),
+            Self::CostIncreasesWhenBuilt(_) => Some(UniqueType::CostIncreasesWhenBuilt),
+            Self::CostPercentageChange(_) => Some(UniqueType::CostPercentageChange),
             Self::CanOnlyBeBuiltWhen => Some(UniqueType::CanOnlyBeBuiltWhen),
             Self::MustHaveOwnedWithinTiles(_) => Some(UniqueType::MustHaveOwnedWithinTiles),
             Self::EnablesNuclearWeapons => Some(UniqueType::EnablesNuclearWeapons),
             Self::MustBeOn(_) => Some(UniqueType::MustBeOn),
             Self::MustNotBeOn(_) => Some(UniqueType::MustNotBeOn),
             Self::MustBeNextTo(_) => Some(UniqueType::MustBeNextTo),
+            Self::ObsoleteWith(_) => Some(UniqueType::ObsoleteWith),
             Self::IndicatesCapital => Some(UniqueType::IndicatesCapital),
             Self::ProvidesExtraLuxuryFromCityResources => Some(UniqueType::ProvidesExtraLuxuryFromCityResources),
             Self::DestroyedWhenCityCaptured => Some(UniqueType::DestroyedWhenCityCaptured),
+            Self::NotDestroyedWhenCityCaptured => Some(UniqueType::NotDestroyedWhenCityCaptured),
             Self::GoldFromCapturingCity(_) => Some(UniqueType::GoldFromCapturingCity),
             Self::RemovesAnnexUnhappiness => Some(UniqueType::RemovesAnnexUnhappiness),
             Self::ConnectTradeRoutes => Some(UniqueType::ConnectTradeRoutes),
@@ -6307,10 +7017,13 @@ impl UniqueData {
             Self::MayParadrop(_) => Some(UniqueType::MayParadrop),
             Self::CanAirsweep => Some(UniqueType::CanAirsweep),
             Self::CanSpeedupConstruction => Some(UniqueType::CanSpeedupConstruction),
+            Self::CanSpeedupWonderConstruction => Some(UniqueType::CanSpeedupWonderConstruction),
             Self::CanHurryResearch => Some(UniqueType::CanHurryResearch),
+            Self::CanHurryPolicy => Some(UniqueType::CanHurryPolicy),
             Self::CanTradeWithCityStateForGoldAndInfluence(_) => Some(UniqueType::CanTradeWithCityStateForGoldAndInfluence),
             Self::AutomationPrimaryAction => Some(UniqueType::AutomationPrimaryAction),
             Self::Strength(_) => Some(UniqueType::Strength),
+            Self::StrengthAmount(_) => Some(UniqueType::StrengthAmount),
             Self::StrengthNearCapital(_) => Some(UniqueType::StrengthNearCapital),
             Self::FlankAttackBonus(_) => Some(UniqueType::FlankAttackBonus),
             Self::StrengthForAdjacentEnemies(_) => Some(UniqueType::StrengthForAdjacentEnemies),
@@ -6319,6 +7032,7 @@ impl UniqueData {
             Self::Movement(_) => Some(UniqueType::Movement),
             Self::Sight(_) => Some(UniqueType::Sight),
             Self::Range(_) => Some(UniqueType::Range),
+            Self::AirInterceptionRange(_) => Some(UniqueType::AirInterceptionRange),
             Self::Heal(_) => Some(UniqueType::Heal),
             Self::SpreadReligionStrength(_) => Some(UniqueType::SpreadReligionStrength),
             Self::StatsWhenSpreading(_) => Some(UniqueType::StatsWhenSpreading),
@@ -6328,11 +7042,13 @@ impl UniqueData {
             Self::MustSetUp => Some(UniqueType::MustSetUp),
             Self::SelfDestructs => Some(UniqueType::SelfDestructs),
             Self::AttackAcrossCoast => Some(UniqueType::AttackAcrossCoast),
+            Self::AttackOnSea => Some(UniqueType::AttackOnSea),
             Self::AttackAcrossRiver => Some(UniqueType::AttackAcrossRiver),
             Self::BlastRadius(_) => Some(UniqueType::BlastRadius),
             Self::IndirectFire => Some(UniqueType::IndirectFire),
             Self::NuclearWeapon(_) => Some(UniqueType::NuclearWeapon),
             Self::NoDefensiveTerrainBonus => Some(UniqueType::NoDefensiveTerrainBonus),
+            Self::NoDefensiveTerrainPenalty => Some(UniqueType::NoDefensiveTerrainPenalty),
             Self::NoDamagePenaltyWoundedUnits => Some(UniqueType::NoDamagePenaltyWoundedUnits),
             Self::Uncapturable => Some(UniqueType::Uncapturable),
             Self::WithdrawsBeforeMeleeCombat => Some(UniqueType::WithdrawsBeforeMeleeCombat),
@@ -6348,6 +7064,7 @@ impl UniqueData {
             Self::HealOnlyByPillaging => Some(UniqueType::HealOnlyByPillaging),
             Self::HealsEvenAfterAction => Some(UniqueType::HealsEvenAfterAction),
             Self::HealAdjacentUnits(_) => Some(UniqueType::HealAdjacentUnits),
+            Self::NoSight => Some(UniqueType::NoSight),
             Self::CanSeeOverObstacles => Some(UniqueType::CanSeeOverObstacles),
             Self::CarryAirUnits(_) => Some(UniqueType::CarryAirUnits),
             Self::CarryExtraAirUnits(_) => Some(UniqueType::CarryExtraAirUnits),
@@ -6368,20 +7085,25 @@ impl UniqueData {
             Self::PercentageXPGain(_) => Some(UniqueType::PercentageXPGain),
             Self::GreatPersonFromCombat => Some(UniqueType::GreatPersonFromCombat),
             Self::GreatPersonEarnedFaster(_) => Some(UniqueType::GreatPersonEarnedFaster),
+            Self::Invisible => Some(UniqueType::Invisible),
             Self::InvisibleToNonAdjacent => Some(UniqueType::InvisibleToNonAdjacent),
             Self::CanSeeInvisibleUnits(_) => Some(UniqueType::CanSeeInvisibleUnits),
             Self::RuinsUpgrade(_) => Some(UniqueType::RuinsUpgrade),
+            Self::CanUpgrade(_) => Some(UniqueType::CanUpgrade),
             Self::DoubleMovementOnTerrain(_) => Some(UniqueType::DoubleMovementOnTerrain),
             Self::AllTilesCost1Move => Some(UniqueType::AllTilesCost1Move),
+            Self::CanMoveOnWater => Some(UniqueType::CanMoveOnWater),
             Self::CanPassImpassable => Some(UniqueType::CanPassImpassable),
             Self::IgnoresTerrainCost => Some(UniqueType::IgnoresTerrainCost),
             Self::IgnoresZOC => Some(UniqueType::IgnoresZOC),
             Self::RoughTerrainPenalty => Some(UniqueType::RoughTerrainPenalty),
             Self::CanEnterIceTiles => Some(UniqueType::CanEnterIceTiles),
+            Self::CannotEmbark => Some(UniqueType::CannotEmbark),
             Self::CannotEnterOcean => Some(UniqueType::CannotEnterOcean),
             Self::CanEnterForeignTiles => Some(UniqueType::CanEnterForeignTiles),
             Self::CanEnterForeignTilesButLosesReligiousStrength(_) => Some(UniqueType::CanEnterForeignTilesButLosesReligiousStrength),
             Self::ReducedDisembarkCost(_) => Some(UniqueType::ReducedDisembarkCost),
+            Self::ReducedEmbarkCost(_) => Some(UniqueType::ReducedEmbarkCost),
             Self::ForestsAndJunglesAreRoads => Some(UniqueType::ForestsAndJunglesAreRoads),
             Self::IgnoreHillMovementCost => Some(UniqueType::IgnoreHillMovementCost),
             Self::CannotBeBarbarian => Some(UniqueType::CannotBeBarbarian),
@@ -6394,6 +7116,7 @@ impl UniqueData {
             Self::NaturalWonderNeighborCount(_) => Some(UniqueType::NaturalWonderNeighborCount),
             Self::NaturalWonderNeighborsRange(_) => Some(UniqueType::NaturalWonderNeighborsRange),
             Self::NaturalWonderSmallerLandmass(_) => Some(UniqueType::NaturalWonderSmallerLandmass),
+            Self::NaturalWonderLargerLandmass(_) => Some(UniqueType::NaturalWonderLargerLandmass),
             Self::NaturalWonderLatitude(_) => Some(UniqueType::NaturalWonderLatitude),
             Self::NaturalWonderGroups(_) => Some(UniqueType::NaturalWonderGroups),
             Self::NaturalWonderConvertNeighbors(_) => Some(UniqueType::NaturalWonderConvertNeighbors),
@@ -6448,6 +7171,7 @@ impl UniqueData {
             Self::NoFeatureRemovalNeeded(_) => Some(UniqueType::NoFeatureRemovalNeeded),
             Self::RemovesFeaturesIfBuilt => Some(UniqueType::RemovesFeaturesIfBuilt),
             Self::DefensiveBonus(_) => Some(UniqueType::DefensiveBonus),
+            Self::ImprovementMaintenance(_) => Some(UniqueType::ImprovementMaintenance),
             Self::ImprovementAllMaintenance(_) => Some(UniqueType::ImprovementAllMaintenance),
             Self::DamagesAdjacentEnemyUnits(_) => Some(UniqueType::DamagesAdjacentEnemyUnits),
             Self::GreatImprovement => Some(UniqueType::GreatImprovement),
@@ -6455,39 +7179,54 @@ impl UniqueData {
             Self::IsBarbarianCampEquivalent => Some(UniqueType::IsBarbarianCampEquivalent),
             Self::Unpillagable => Some(UniqueType::Unpillagable),
             Self::PillageYieldRandom(_) => Some(UniqueType::PillageYieldRandom),
+            Self::PillageYieldFixed(_) => Some(UniqueType::PillageYieldFixed),
+            Self::DestroyedWhenPillaged => Some(UniqueType::DestroyedWhenPillaged),
             Self::Irremovable => Some(UniqueType::Irremovable),
             Self::AutomatedUnitsWillNotReplace => Some(UniqueType::AutomatedUnitsWillNotReplace),
             Self::OneTimeFreeUnit(_) => Some(UniqueType::OneTimeFreeUnit),
             Self::OneTimeAmountFreeUnits(_) => Some(UniqueType::OneTimeAmountFreeUnits),
             Self::OneTimeFreeUnitRuins(_) => Some(UniqueType::OneTimeFreeUnitRuins),
             Self::OneTimeFreePolicy => Some(UniqueType::OneTimeFreePolicy),
+            Self::OneTimeAmountFreePolicies(_) => Some(UniqueType::OneTimeAmountFreePolicies),
             Self::OneTimeEnterGoldenAge => Some(UniqueType::OneTimeEnterGoldenAge),
             Self::OneTimeEnterGoldenAgeTurns(_) => Some(UniqueType::OneTimeEnterGoldenAgeTurns),
             Self::OneTimeFreeGreatPerson => Some(UniqueType::OneTimeFreeGreatPerson),
             Self::OneTimeGainPopulation(_) => Some(UniqueType::OneTimeGainPopulation),
             Self::OneTimeGainPopulationRandomCity(_) => Some(UniqueType::OneTimeGainPopulationRandomCity),
+            Self::OneTimeDiscoverTech(_) => Some(UniqueType::OneTimeDiscoverTech),
+            Self::OneTimeAdoptPolicyOrBelief(_) => Some(UniqueType::OneTimeAdoptPolicyOrBelief),
             Self::OneTimeFreeTech => Some(UniqueType::OneTimeFreeTech),
             Self::OneTimeAmountFreeTechs(_) => Some(UniqueType::OneTimeAmountFreeTechs),
             Self::OneTimeFreeTechRuins(_) => Some(UniqueType::OneTimeFreeTechRuins),
             Self::OneTimeRevealEntireMap => Some(UniqueType::OneTimeRevealEntireMap),
+            Self::OneTimeFreeBelief(_) => Some(UniqueType::OneTimeFreeBelief),
             Self::OneTimeTriggerVoting => Some(UniqueType::OneTimeTriggerVoting),
             Self::OneTimeGainStat(_) => Some(UniqueType::OneTimeGainStat),
             Self::OneTimeGainStatRange(_) => Some(UniqueType::OneTimeGainStatRange),
             Self::OneTimeGainPantheon => Some(UniqueType::OneTimeGainPantheon),
             Self::OneTimeGainProphet(_) => Some(UniqueType::OneTimeGainProphet),
+            Self::OneTimeGainTechPercent(_) => Some(UniqueType::OneTimeGainTechPercent),
             Self::OneTimeTakeOverTilesInRadius(_) => Some(UniqueType::OneTimeTakeOverTilesInRadius),
+            Self::OneTimeTakeOverTilesInCity(_) => Some(UniqueType::OneTimeTakeOverTilesInCity),
             Self::OneTimeRevealSpecificMapTiles(_) => Some(UniqueType::OneTimeRevealSpecificMapTiles),
             Self::OneTimeRevealCrudeMap(_) => Some(UniqueType::OneTimeRevealCrudeMap),
             Self::OneTimeGlobalSpiesWhenEnteringEra => Some(UniqueType::OneTimeGlobalSpiesWhenEnteringEra),
             Self::OneTimeSpiesLevelUp(_) => Some(UniqueType::OneTimeSpiesLevelUp),
             Self::OneTimeGainSpy => Some(UniqueType::OneTimeGainSpy),
             Self::SkipPromotion => Some(UniqueType::SkipPromotion),
+            Self::FreePromotion => Some(UniqueType::FreePromotion),
             Self::UnitsGainPromotion(_) => Some(UniqueType::UnitsGainPromotion),
             Self::FreeStatBuildings(_) => Some(UniqueType::FreeStatBuildings),
             Self::FreeSpecificBuildings(_) => Some(UniqueType::FreeSpecificBuildings),
             Self::OneTimeUnitHeal(_) => Some(UniqueType::OneTimeUnitHeal),
+            Self::OneTimeUnitDamage(_) => Some(UniqueType::OneTimeUnitDamage),
             Self::OneTimeUnitGainXP(_) => Some(UniqueType::OneTimeUnitGainXP),
+            Self::OneTimeUnitUpgrade(_) => Some(UniqueType::OneTimeUnitUpgrade),
             Self::OneTimeUnitSpecialUpgrade(_) => Some(UniqueType::OneTimeUnitSpecialUpgrade),
+            Self::OneTimeUnitGainPromotion(_) => Some(UniqueType::OneTimeUnitGainPromotion),
+            Self::OneTimeUnitGainMovement(_) => Some(UniqueType::OneTimeUnitGainMovement),
+            Self::OneTimeUnitLoseMovement(_) => Some(UniqueType::OneTimeUnitLoseMovement),
+            Self::OneTimeUnitDestroyed(_) => Some(UniqueType::OneTimeUnitDestroyed),
             Self::AiChoiceWeight(_) => Some(UniqueType::AiChoiceWeight),
             Self::WillNotBeChosenForNewGames => Some(UniqueType::WillNotBeChosenForNewGames),
             Self::Tag(_) => None,
@@ -6523,6 +7262,8 @@ impl UniqueData {
             Self::PercentProductionUnits(x) => vec![x.percent.into(), x.units.into(), x.cities.into()],
             Self::PercentProductionWonders(x) => vec![x.percent.into(), x.buildings.into(), x.cities.into()],
             Self::PercentProductionBuildingsInCapital(x) => vec![x.percent.into()],
+            Self::PercentYieldFromPillaging(x) => vec![x.percent.into()],
+            Self::PercentHealthFromPillaging(x) => vec![x.percent.into()],
             Self::CityStateMilitaryUnits(x) => vec![x.turns.into()],
             Self::CityStateUniqueLuxury => Vec::new(),
             Self::CityStateGiftedUnitsStartWithXp(x) => vec![x.xp.into()],
@@ -6540,6 +7281,7 @@ impl UniqueData {
             Self::GrowthPercentBonus(x) => vec![x.percent.into(), x.cities.into()],
             Self::CarryOverFood(x) => vec![x.percent.into(), x.cities.into()],
             Self::FoodConsumptionByPopulation(x) => vec![x.percent.into(), x.population.into(), x.cities.into()],
+            Self::FoodConsumptionBySpecialists(x) => vec![x.percent.into(), x.cities.into()],
             Self::UnhappinessFromCitiesPercentage(x) => vec![x.percent.into()],
             Self::UnhappinessFromPopulationTypePercentageChange(x) => vec![x.percent.into(), x.population.into(), x.cities.into()],
             Self::BonusHappinessFromLuxury(x) => vec![x.happiness.into()],
@@ -6548,16 +7290,22 @@ impl UniqueData {
             Self::CannotBuildUnits(x) => vec![x.units.into()],
             Self::EnablesConstructionOfSpaceshipParts => Vec::new(),
             Self::BuyUnitsIncreasingCost(x) => vec![x.units.into(), x.cost.into(), x.stat.into(), x.cities.into(), x.increase.into()],
+            Self::BuyBuildingsIncreasingCost(x) => vec![x.buildings.into(), x.cost.into(), x.stat.into(), x.cities.into(), x.increase.into()],
+            Self::BuyUnitsForAmountStat(x) => vec![x.units.into(), x.cost.into(), x.stat.into(), x.cities.into()],
             Self::BuyBuildingsForAmountStat(x) => vec![x.buildings.into(), x.cost.into(), x.stat.into(), x.cities.into()],
+            Self::BuyUnitsWithStat(x) => vec![x.units.into(), x.stat.into(), x.cities.into()],
             Self::BuyBuildingsWithStat(x) => vec![x.buildings.into(), x.stat.into(), x.cities.into()],
             Self::BuyUnitsByProductionCost(x) => vec![x.units.into(), x.stat.into(), x.times.into()],
+            Self::BuyBuildingsByProductionCost(x) => vec![x.buildings.into(), x.stat.into(), x.times.into()],
             Self::BuyItemsDiscount(x) => vec![x.stat.into(), x.percent.into()],
+            Self::BuyBuildingsDiscount(x) => vec![x.stat.into(), x.buildings.into(), x.percent.into()],
             Self::BuyUnitsDiscount(x) => vec![x.stat.into(), x.units.into(), x.percent.into()],
             Self::EnablesStatProduction(x) => vec![x.stat.into()],
             Self::RoadMovementSpeed => Vec::new(),
             Self::RoadsConnectAcrossRivers => Vec::new(),
             Self::RoadMaintenance(x) => vec![x.percent.into()],
             Self::NoImprovementMaintenanceInSpecificTiles(x) => vec![x.tiles.into()],
+            Self::SpecificImprovementTime(x) => vec![x.percent.into(), x.improvements.into()],
             Self::ImprovementTimeIncrease(x) => vec![x.improvements.into(), x.percent.into()],
             Self::GainFreeBuildings(x) => vec![x.building.into(), x.cities.into()],
             Self::BuildingMaintenance(x) => vec![x.percent.into(), x.buildings.into(), x.cities.into()],
@@ -6565,12 +7313,17 @@ impl UniqueData {
             Self::TileCostPercentage(x) => vec![x.percent.into(), x.cities.into()],
             Self::LessPolicyCostFromCities(x) => vec![x.percent.into()],
             Self::LessPolicyCost(x) => vec![x.percent.into()],
+            Self::LessTechCostFromCities(x) => vec![x.percent.into()],
+            Self::LessTechCost(x) => vec![x.percent.into()],
             Self::StatsFromNaturalWonders(x) => vec![x.stats.into()],
             Self::StatBonusWhenDiscoveringNaturalWonder(x) => vec![x.stats.into(), x.first.into()],
             Self::GreatPersonPointPercentage(x) => vec![x.percent.into(), x.cities.into()],
             Self::PercentGoldFromTradeMissions(x) => vec![x.percent.into()],
             Self::GreatGeneralProvidesDoubleCombatBonus => Vec::new(),
             Self::MayanGainGreatPerson(x) => vec![x.cycle.into(), x.tech.into()],
+            Self::BaseUnitSupply(x) => vec![x.supply.into()],
+            Self::UnitSupplyPerPop(x) => vec![x.supply.into(), x.per.into(), x.cities.into()],
+            Self::UnitSupplyPerCity(x) => vec![x.supply.into()],
             Self::FreeUnits(x) => vec![x.count.into()],
             Self::UnitsInCitiesNoMaintenance => Vec::new(),
             Self::LandUnitEmbarkation => Vec::new(),
@@ -6580,6 +7333,7 @@ impl UniqueData {
             Self::UnitStartingExperience(x) => vec![x.units.into(), x.xp.into(), x.cities.into()],
             Self::UnitStartingPromotions(x) => vec![x.units.into(), x.cities.into(), x.promotion.into()],
             Self::CityHealingUnits(x) => vec![x.units.into(), x.hp.into()],
+            Self::XPForPromotionModifier(x) => vec![x.percent.into()],
             Self::BetterDefensiveBuildings(x) => vec![x.percent.into()],
             Self::StrengthForCities(x) => vec![x.percent.into()],
             Self::ConsumesResources(x) => vec![x.amount.into(), x.resource.into()],
@@ -6600,18 +7354,23 @@ impl UniqueData {
             Self::GainFromEncampment(x) => vec![x.gold.into()],
             Self::GainFromDefeatingUnit(x) => vec![x.units.into(), x.gold.into()],
             Self::DisablesReligion => Vec::new(),
+            Self::FreeExtraBeliefs(x) => vec![x.count.into(), x.belief.into(), x.when.into()],
             Self::FreeExtraAnyBeliefs(x) => vec![x.count.into(), x.when.into()],
             Self::StatsWhenAdoptingReligion(x) => vec![x.stats.into()],
             Self::NaturalReligionSpreadStrength(x) => vec![x.percent.into(), x.cities.into()],
             Self::ReligionSpreadDistance(x) => vec![x.distance.into()],
             Self::MayNotGenerateGreatProphet => Vec::new(),
             Self::FaithCostOfGreatProphetChange(x) => vec![x.percent.into()],
+            Self::SpyEffectiveness(x) => vec![x.percent.into(), x.cities.into()],
             Self::EnemySpyEffectiveness(x) => vec![x.percent.into(), x.cities.into()],
             Self::SpyStartingLevel(x) => vec![x.levels.into()],
+            Self::CounterIntelligenceSpyRankBonus(x) => vec![x.cities.into(), x.levels.into(), x.action.into()],
             Self::StartingTech => Vec::new(),
             Self::StartsWithTech(x) => vec![x.tech.into()],
             Self::StartBias(x) => vec![x.terrain.into()],
+            Self::TriggersVictory => Vec::new(),
             Self::TriggersCulturalVictory => Vec::new(),
+            Self::MayNotAnnexCities => Vec::new(),
             Self::BorrowsCityNames => Vec::new(),
             Self::CitiesAreRazedXTimesFaster(x) => vec![x.times.into()],
             Self::TechBoostWhenScientificBuildingsBuiltInCapital => Vec::new(),
@@ -6623,23 +7382,29 @@ impl UniqueData {
             Self::Unbuildable => Vec::new(),
             Self::CannotBePurchased => Vec::new(),
             Self::CanBePurchasedWithStat(x) => vec![x.stat.into(), x.cities.into()],
+            Self::CanBePurchasedForAmountStat(x) => vec![x.cost.into(), x.stat.into(), x.cities.into()],
             Self::MaxNumberBuildable(x) => vec![x.limit.into()],
             Self::OnlyAvailable => Vec::new(),
             Self::Unavailable => Vec::new(),
+            Self::CannotBuildBuildings(x) => vec![x.buildings.into()],
             Self::ConvertFoodToProductionWhenConstructed => Vec::new(),
             Self::RequiresPopulation(x) => vec![x.population.into()],
             Self::TriggersAlertOnStart => Vec::new(),
             Self::TriggersAlertOnCompletion => Vec::new(),
             Self::CostIncreasesPerCity(x) => vec![x.cost.into()],
+            Self::CostIncreasesWhenBuilt(x) => vec![x.cost.into()],
+            Self::CostPercentageChange(x) => vec![x.percent.into()],
             Self::CanOnlyBeBuiltWhen => Vec::new(),
             Self::MustHaveOwnedWithinTiles(x) => vec![x.tiles.into(), x.radius.into()],
             Self::EnablesNuclearWeapons => Vec::new(),
             Self::MustBeOn(x) => vec![x.tiles.into()],
             Self::MustNotBeOn(x) => vec![x.tiles.into()],
             Self::MustBeNextTo(x) => vec![x.tiles.into()],
+            Self::ObsoleteWith(x) => vec![x.tech.into()],
             Self::IndicatesCapital => Vec::new(),
             Self::ProvidesExtraLuxuryFromCityResources => Vec::new(),
             Self::DestroyedWhenCityCaptured => Vec::new(),
+            Self::NotDestroyedWhenCityCaptured => Vec::new(),
             Self::GoldFromCapturingCity(x) => vec![x.percent.into()],
             Self::RemovesAnnexUnhappiness => Vec::new(),
             Self::ConnectTradeRoutes => Vec::new(),
@@ -6657,10 +7422,13 @@ impl UniqueData {
             Self::MayParadrop(x) => vec![x.tiles.into(), x.range.into()],
             Self::CanAirsweep => Vec::new(),
             Self::CanSpeedupConstruction => Vec::new(),
+            Self::CanSpeedupWonderConstruction => Vec::new(),
             Self::CanHurryResearch => Vec::new(),
+            Self::CanHurryPolicy => Vec::new(),
             Self::CanTradeWithCityStateForGoldAndInfluence(x) => vec![x.influence.into()],
             Self::AutomationPrimaryAction => Vec::new(),
             Self::Strength(x) => vec![x.percent.into()],
+            Self::StrengthAmount(x) => vec![x.strength.into()],
             Self::StrengthNearCapital(x) => vec![x.percent.into()],
             Self::FlankAttackBonus(x) => vec![x.percent.into()],
             Self::StrengthForAdjacentEnemies(x) => vec![x.percent.into(), x.units.into(), x.tiles.into()],
@@ -6669,6 +7437,7 @@ impl UniqueData {
             Self::Movement(x) => vec![x.movement.into()],
             Self::Sight(x) => vec![x.sight.into()],
             Self::Range(x) => vec![x.range.into()],
+            Self::AirInterceptionRange(x) => vec![x.range.into()],
             Self::Heal(x) => vec![x.hp.into()],
             Self::SpreadReligionStrength(x) => vec![x.percent.into()],
             Self::StatsWhenSpreading(x) => vec![x.percent.into(), x.stat.into()],
@@ -6678,11 +7447,13 @@ impl UniqueData {
             Self::MustSetUp => Vec::new(),
             Self::SelfDestructs => Vec::new(),
             Self::AttackAcrossCoast => Vec::new(),
+            Self::AttackOnSea => Vec::new(),
             Self::AttackAcrossRiver => Vec::new(),
             Self::BlastRadius(x) => vec![x.radius.into()],
             Self::IndirectFire => Vec::new(),
             Self::NuclearWeapon(x) => vec![x.strength.into()],
             Self::NoDefensiveTerrainBonus => Vec::new(),
+            Self::NoDefensiveTerrainPenalty => Vec::new(),
             Self::NoDamagePenaltyWoundedUnits => Vec::new(),
             Self::Uncapturable => Vec::new(),
             Self::WithdrawsBeforeMeleeCombat => Vec::new(),
@@ -6698,6 +7469,7 @@ impl UniqueData {
             Self::HealOnlyByPillaging => Vec::new(),
             Self::HealsEvenAfterAction => Vec::new(),
             Self::HealAdjacentUnits(x) => vec![x.hp.into()],
+            Self::NoSight => Vec::new(),
             Self::CanSeeOverObstacles => Vec::new(),
             Self::CarryAirUnits(x) => vec![x.count.into(), x.units.into()],
             Self::CarryExtraAirUnits(x) => vec![x.count.into(), x.units.into()],
@@ -6718,20 +7490,25 @@ impl UniqueData {
             Self::PercentageXPGain(x) => vec![x.percent.into()],
             Self::GreatPersonFromCombat => Vec::new(),
             Self::GreatPersonEarnedFaster(x) => vec![x.great_person.into(), x.percent.into()],
+            Self::Invisible => Vec::new(),
             Self::InvisibleToNonAdjacent => Vec::new(),
             Self::CanSeeInvisibleUnits(x) => vec![x.units.into()],
             Self::RuinsUpgrade(x) => vec![x.unit.into()],
+            Self::CanUpgrade(x) => vec![x.unit.into()],
             Self::DoubleMovementOnTerrain(x) => vec![x.terrain.into()],
             Self::AllTilesCost1Move => Vec::new(),
+            Self::CanMoveOnWater => Vec::new(),
             Self::CanPassImpassable => Vec::new(),
             Self::IgnoresTerrainCost => Vec::new(),
             Self::IgnoresZOC => Vec::new(),
             Self::RoughTerrainPenalty => Vec::new(),
             Self::CanEnterIceTiles => Vec::new(),
+            Self::CannotEmbark => Vec::new(),
             Self::CannotEnterOcean => Vec::new(),
             Self::CanEnterForeignTiles => Vec::new(),
             Self::CanEnterForeignTilesButLosesReligiousStrength(x) => vec![x.loss.into()],
             Self::ReducedDisembarkCost(x) => vec![x.movement.into()],
+            Self::ReducedEmbarkCost(x) => vec![x.movement.into()],
             Self::ForestsAndJunglesAreRoads => Vec::new(),
             Self::IgnoreHillMovementCost => Vec::new(),
             Self::CannotBeBarbarian => Vec::new(),
@@ -6744,6 +7521,7 @@ impl UniqueData {
             Self::NaturalWonderNeighborCount(x) => vec![x.count.into(), x.terrain.into()],
             Self::NaturalWonderNeighborsRange(x) => vec![x.min.into(), x.max.into(), x.terrain.into()],
             Self::NaturalWonderSmallerLandmass(x) => vec![x.count.into()],
+            Self::NaturalWonderLargerLandmass(x) => vec![x.count.into()],
             Self::NaturalWonderLatitude(x) => vec![x.min.into(), x.max.into()],
             Self::NaturalWonderGroups(x) => vec![x.min.into(), x.max.into()],
             Self::NaturalWonderConvertNeighbors(x) => vec![x.terrain.into()],
@@ -6798,6 +7576,7 @@ impl UniqueData {
             Self::NoFeatureRemovalNeeded(x) => vec![x.feature.into()],
             Self::RemovesFeaturesIfBuilt => Vec::new(),
             Self::DefensiveBonus(x) => vec![x.percent.into()],
+            Self::ImprovementMaintenance(x) => vec![x.amount.into(), x.stat.into()],
             Self::ImprovementAllMaintenance(x) => vec![x.amount.into(), x.stat.into()],
             Self::DamagesAdjacentEnemyUnits(x) => vec![x.damage.into()],
             Self::GreatImprovement => Vec::new(),
@@ -6805,39 +7584,54 @@ impl UniqueData {
             Self::IsBarbarianCampEquivalent => Vec::new(),
             Self::Unpillagable => Vec::new(),
             Self::PillageYieldRandom(x) => vec![x.stats.into()],
+            Self::PillageYieldFixed(x) => vec![x.stats.into()],
+            Self::DestroyedWhenPillaged => Vec::new(),
             Self::Irremovable => Vec::new(),
             Self::AutomatedUnitsWillNotReplace => Vec::new(),
             Self::OneTimeFreeUnit(x) => vec![x.unit.into()],
             Self::OneTimeAmountFreeUnits(x) => vec![x.count.into(), x.unit.into()],
             Self::OneTimeFreeUnitRuins(x) => vec![x.unit.into()],
             Self::OneTimeFreePolicy => Vec::new(),
+            Self::OneTimeAmountFreePolicies(x) => vec![x.count.into()],
             Self::OneTimeEnterGoldenAge => Vec::new(),
             Self::OneTimeEnterGoldenAgeTurns(x) => vec![x.turns.into()],
             Self::OneTimeFreeGreatPerson => Vec::new(),
             Self::OneTimeGainPopulation(x) => vec![x.count.into(), x.cities.into()],
             Self::OneTimeGainPopulationRandomCity(x) => vec![x.count.into()],
+            Self::OneTimeDiscoverTech(x) => vec![x.tech.into()],
+            Self::OneTimeAdoptPolicyOrBelief(x) => vec![x.adopted.into()],
             Self::OneTimeFreeTech => Vec::new(),
             Self::OneTimeAmountFreeTechs(x) => vec![x.count.into()],
             Self::OneTimeFreeTechRuins(x) => vec![x.count.into(), x.eras.into()],
             Self::OneTimeRevealEntireMap => Vec::new(),
+            Self::OneTimeFreeBelief(x) => vec![x.belief.into()],
             Self::OneTimeTriggerVoting => Vec::new(),
             Self::OneTimeGainStat(x) => vec![x.amount.into(), x.stat.into()],
             Self::OneTimeGainStatRange(x) => vec![x.min.into(), x.max.into(), x.stat.into()],
             Self::OneTimeGainPantheon => Vec::new(),
             Self::OneTimeGainProphet(x) => vec![x.percent.into()],
+            Self::OneTimeGainTechPercent(x) => vec![x.percent.into(), x.tech.into()],
             Self::OneTimeTakeOverTilesInRadius(x) => vec![x.tiles.into(), x.radius.into()],
+            Self::OneTimeTakeOverTilesInCity(x) => vec![x.count.into(), x.cities.into()],
             Self::OneTimeRevealSpecificMapTiles(x) => vec![x.count.into(), x.tiles.into(), x.radius.into()],
             Self::OneTimeRevealCrudeMap(x) => vec![x.distance.into(), x.radius.into(), x.percent.into()],
             Self::OneTimeGlobalSpiesWhenEnteringEra => Vec::new(),
             Self::OneTimeSpiesLevelUp(x) => vec![x.times.into()],
             Self::OneTimeGainSpy => Vec::new(),
             Self::SkipPromotion => Vec::new(),
+            Self::FreePromotion => Vec::new(),
             Self::UnitsGainPromotion(x) => vec![x.units.into(), x.promotion.into()],
             Self::FreeStatBuildings(x) => vec![x.stat.into(), x.cities.into()],
             Self::FreeSpecificBuildings(x) => vec![x.building.into(), x.cities.into()],
             Self::OneTimeUnitHeal(x) => vec![x.target.into(), x.hp.into()],
+            Self::OneTimeUnitDamage(x) => vec![x.target.into(), x.damage.into()],
             Self::OneTimeUnitGainXP(x) => vec![x.target.into(), x.xp.into()],
+            Self::OneTimeUnitUpgrade(x) => vec![x.target.into()],
             Self::OneTimeUnitSpecialUpgrade(x) => vec![x.target.into()],
+            Self::OneTimeUnitGainPromotion(x) => vec![x.target.into(), x.promotion.into()],
+            Self::OneTimeUnitGainMovement(x) => vec![x.target.into(), x.movement.into()],
+            Self::OneTimeUnitLoseMovement(x) => vec![x.target.into(), x.movement.into()],
+            Self::OneTimeUnitDestroyed(x) => vec![x.target.into()],
             Self::AiChoiceWeight(x) => vec![x.percent.into()],
             Self::WillNotBeChosenForNewGames => Vec::new(),
             Self::Tag(_) => Vec::new(),
@@ -6875,6 +7669,8 @@ impl UniqueData {
             UniqueType::PercentProductionUnits => Self::PercentProductionUnits(p::PercentProductionUnits { percent: cx.get(0, ParamKind::RelativeAmount)?, units: cx.get(1, ParamKind::BaseUnitFilter)?, cities: cx.get(2, ParamKind::CityFilter)? }),
             UniqueType::PercentProductionWonders => Self::PercentProductionWonders(p::PercentProductionWonders { percent: cx.get(0, ParamKind::RelativeAmount)?, buildings: cx.get(1, ParamKind::BuildingFilter)?, cities: cx.get(2, ParamKind::CityFilter)? }),
             UniqueType::PercentProductionBuildingsInCapital => Self::PercentProductionBuildingsInCapital(p::PercentProductionBuildingsInCapital { percent: cx.get(0, ParamKind::RelativeAmount)? }),
+            UniqueType::PercentYieldFromPillaging => Self::PercentYieldFromPillaging(p::PercentYieldFromPillaging { percent: cx.get(0, ParamKind::RelativeAmount)? }),
+            UniqueType::PercentHealthFromPillaging => Self::PercentHealthFromPillaging(p::PercentHealthFromPillaging { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::CityStateMilitaryUnits => Self::CityStateMilitaryUnits(p::CityStateMilitaryUnits { turns: cx.get(0, ParamKind::PositiveAmount)? }),
             UniqueType::CityStateUniqueLuxury => Self::CityStateUniqueLuxury,
             UniqueType::CityStateGiftedUnitsStartWithXp => Self::CityStateGiftedUnitsStartWithXp(p::CityStateGiftedUnitsStartWithXp { xp: cx.get(0, ParamKind::PositiveAmount)? }),
@@ -6892,6 +7688,7 @@ impl UniqueData {
             UniqueType::GrowthPercentBonus => Self::GrowthPercentBonus(p::GrowthPercentBonus { percent: cx.get(0, ParamKind::RelativeAmount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::CarryOverFood => Self::CarryOverFood(p::CarryOverFood { percent: cx.get(0, ParamKind::Amount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::FoodConsumptionByPopulation => Self::FoodConsumptionByPopulation(p::FoodConsumptionByPopulation { percent: cx.get(0, ParamKind::RelativeAmount)?, population: cx.get(1, ParamKind::PopulationFilter)?, cities: cx.get(2, ParamKind::CityFilter)? }),
+            UniqueType::FoodConsumptionBySpecialists => Self::FoodConsumptionBySpecialists(p::FoodConsumptionBySpecialists { percent: cx.get(0, ParamKind::RelativeAmount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::UnhappinessFromCitiesPercentage => Self::UnhappinessFromCitiesPercentage(p::UnhappinessFromCitiesPercentage { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::UnhappinessFromPopulationTypePercentageChange => Self::UnhappinessFromPopulationTypePercentageChange(p::UnhappinessFromPopulationTypePercentageChange { percent: cx.get(0, ParamKind::RelativeAmount)?, population: cx.get(1, ParamKind::PopulationFilter)?, cities: cx.get(2, ParamKind::CityFilter)? }),
             UniqueType::BonusHappinessFromLuxury => Self::BonusHappinessFromLuxury(p::BonusHappinessFromLuxury { happiness: cx.get(0, ParamKind::Amount)? }),
@@ -6900,16 +7697,22 @@ impl UniqueData {
             UniqueType::CannotBuildUnits => Self::CannotBuildUnits(p::CannotBuildUnits { units: cx.get(0, ParamKind::BaseUnitFilter)? }),
             UniqueType::EnablesConstructionOfSpaceshipParts => Self::EnablesConstructionOfSpaceshipParts,
             UniqueType::BuyUnitsIncreasingCost => Self::BuyUnitsIncreasingCost(p::BuyUnitsIncreasingCost { units: cx.get(0, ParamKind::BaseUnitFilter)?, cost: cx.get(1, ParamKind::NonNegativeAmount)?, stat: cx.get(2, ParamKind::Stat)?, cities: cx.get(3, ParamKind::CityFilter)?, increase: cx.get(4, ParamKind::Amount16)? }),
+            UniqueType::BuyBuildingsIncreasingCost => Self::BuyBuildingsIncreasingCost(p::BuyBuildingsIncreasingCost { buildings: cx.get(0, ParamKind::BuildingFilter)?, cost: cx.get(1, ParamKind::NonNegativeAmount)?, stat: cx.get(2, ParamKind::Stat)?, cities: cx.get(3, ParamKind::CityFilter)?, increase: cx.get(4, ParamKind::Amount16)? }),
+            UniqueType::BuyUnitsForAmountStat => Self::BuyUnitsForAmountStat(p::BuyUnitsForAmountStat { units: cx.get(0, ParamKind::BaseUnitFilter)?, cost: cx.get(1, ParamKind::NonNegativeAmount)?, stat: cx.get(2, ParamKind::Stat)?, cities: cx.get(3, ParamKind::CityFilter)? }),
             UniqueType::BuyBuildingsForAmountStat => Self::BuyBuildingsForAmountStat(p::BuyBuildingsForAmountStat { buildings: cx.get(0, ParamKind::BuildingFilter)?, cost: cx.get(1, ParamKind::NonNegativeAmount)?, stat: cx.get(2, ParamKind::Stat)?, cities: cx.get(3, ParamKind::CityFilter)? }),
+            UniqueType::BuyUnitsWithStat => Self::BuyUnitsWithStat(p::BuyUnitsWithStat { units: cx.get(0, ParamKind::BaseUnitFilter)?, stat: cx.get(1, ParamKind::Stat)?, cities: cx.get(2, ParamKind::CityFilter)? }),
             UniqueType::BuyBuildingsWithStat => Self::BuyBuildingsWithStat(p::BuyBuildingsWithStat { buildings: cx.get(0, ParamKind::BuildingFilter)?, stat: cx.get(1, ParamKind::Stat)?, cities: cx.get(2, ParamKind::CityFilter)? }),
             UniqueType::BuyUnitsByProductionCost => Self::BuyUnitsByProductionCost(p::BuyUnitsByProductionCost { units: cx.get(0, ParamKind::BaseUnitFilter)?, stat: cx.get(1, ParamKind::Stat)?, times: cx.get(2, ParamKind::NonNegativeAmount)? }),
+            UniqueType::BuyBuildingsByProductionCost => Self::BuyBuildingsByProductionCost(p::BuyBuildingsByProductionCost { buildings: cx.get(0, ParamKind::BuildingFilter)?, stat: cx.get(1, ParamKind::Stat)?, times: cx.get(2, ParamKind::NonNegativeAmount)? }),
             UniqueType::BuyItemsDiscount => Self::BuyItemsDiscount(p::BuyItemsDiscount { stat: cx.get(0, ParamKind::Stat)?, percent: cx.get(1, ParamKind::RelativeAmount)? }),
+            UniqueType::BuyBuildingsDiscount => Self::BuyBuildingsDiscount(p::BuyBuildingsDiscount { stat: cx.get(0, ParamKind::Stat)?, buildings: cx.get(1, ParamKind::BuildingFilter)?, percent: cx.get(2, ParamKind::RelativeAmount)? }),
             UniqueType::BuyUnitsDiscount => Self::BuyUnitsDiscount(p::BuyUnitsDiscount { stat: cx.get(0, ParamKind::Stat)?, units: cx.get(1, ParamKind::BaseUnitFilter)?, percent: cx.get(2, ParamKind::RelativeAmount)? }),
             UniqueType::EnablesStatProduction => Self::EnablesStatProduction(p::EnablesStatProduction { stat: cx.get(0, ParamKind::Stat)? }),
             UniqueType::RoadMovementSpeed => Self::RoadMovementSpeed,
             UniqueType::RoadsConnectAcrossRivers => Self::RoadsConnectAcrossRivers,
             UniqueType::RoadMaintenance => Self::RoadMaintenance(p::RoadMaintenance { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::NoImprovementMaintenanceInSpecificTiles => Self::NoImprovementMaintenanceInSpecificTiles(p::NoImprovementMaintenanceInSpecificTiles { tiles: cx.get(0, ParamKind::TileFilter)? }),
+            UniqueType::SpecificImprovementTime => Self::SpecificImprovementTime(p::SpecificImprovementTime { percent: cx.get(0, ParamKind::RelativeAmount)?, improvements: cx.get(1, ParamKind::ImprovementFilter)? }),
             UniqueType::ImprovementTimeIncrease => Self::ImprovementTimeIncrease(p::ImprovementTimeIncrease { improvements: cx.get(0, ParamKind::ImprovementFilter)?, percent: cx.get(1, ParamKind::RelativeAmount)? }),
             UniqueType::GainFreeBuildings => Self::GainFreeBuildings(p::GainFreeBuildings { building: cx.get(0, ParamKind::BuildingName)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::BuildingMaintenance => Self::BuildingMaintenance(p::BuildingMaintenance { percent: cx.get(0, ParamKind::RelativeAmount)?, buildings: cx.get(1, ParamKind::BuildingFilter)?, cities: cx.get(2, ParamKind::CityFilter)? }),
@@ -6917,12 +7720,17 @@ impl UniqueData {
             UniqueType::TileCostPercentage => Self::TileCostPercentage(p::TileCostPercentage { percent: cx.get(0, ParamKind::RelativeAmount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::LessPolicyCostFromCities => Self::LessPolicyCostFromCities(p::LessPolicyCostFromCities { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::LessPolicyCost => Self::LessPolicyCost(p::LessPolicyCost { percent: cx.get(0, ParamKind::RelativeAmount)? }),
+            UniqueType::LessTechCostFromCities => Self::LessTechCostFromCities(p::LessTechCostFromCities { percent: cx.get(0, ParamKind::RelativeAmount)? }),
+            UniqueType::LessTechCost => Self::LessTechCost(p::LessTechCost { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::StatsFromNaturalWonders => Self::StatsFromNaturalWonders(p::StatsFromNaturalWonders { stats: cx.get(0, ParamKind::Stats)? }),
             UniqueType::StatBonusWhenDiscoveringNaturalWonder => Self::StatBonusWhenDiscoveringNaturalWonder(p::StatBonusWhenDiscoveringNaturalWonder { stats: cx.get(0, ParamKind::Stats)?, first: cx.get(1, ParamKind::Stats)? }),
             UniqueType::GreatPersonPointPercentage => Self::GreatPersonPointPercentage(p::GreatPersonPointPercentage { percent: cx.get(0, ParamKind::RelativeAmount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::PercentGoldFromTradeMissions => Self::PercentGoldFromTradeMissions(p::PercentGoldFromTradeMissions { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::GreatGeneralProvidesDoubleCombatBonus => Self::GreatGeneralProvidesDoubleCombatBonus,
             UniqueType::MayanGainGreatPerson => Self::MayanGainGreatPerson(p::MayanGainGreatPerson { cycle: cx.get(0, ParamKind::Comment)?, tech: cx.get(1, ParamKind::Tech)? }),
+            UniqueType::BaseUnitSupply => Self::BaseUnitSupply(p::BaseUnitSupply { supply: cx.get(0, ParamKind::Amount)? }),
+            UniqueType::UnitSupplyPerPop => Self::UnitSupplyPerPop(p::UnitSupplyPerPop { supply: cx.get(0, ParamKind::Amount)?, per: cx.get(1, ParamKind::PositiveAmount)?, cities: cx.get(2, ParamKind::CityFilter)? }),
+            UniqueType::UnitSupplyPerCity => Self::UnitSupplyPerCity(p::UnitSupplyPerCity { supply: cx.get(0, ParamKind::Amount)? }),
             UniqueType::FreeUnits => Self::FreeUnits(p::FreeUnits { count: cx.get(0, ParamKind::Amount)? }),
             UniqueType::UnitsInCitiesNoMaintenance => Self::UnitsInCitiesNoMaintenance,
             UniqueType::LandUnitEmbarkation => Self::LandUnitEmbarkation,
@@ -6932,6 +7740,7 @@ impl UniqueData {
             UniqueType::UnitStartingExperience => Self::UnitStartingExperience(p::UnitStartingExperience { units: cx.get(0, ParamKind::BaseUnitFilter)?, xp: cx.get(1, ParamKind::Amount)?, cities: cx.get(2, ParamKind::CityFilter)? }),
             UniqueType::UnitStartingPromotions => Self::UnitStartingPromotions(p::UnitStartingPromotions { units: cx.get(0, ParamKind::BaseUnitFilter)?, cities: cx.get(1, ParamKind::CityFilter)?, promotion: cx.get(2, ParamKind::Promotion)? }),
             UniqueType::CityHealingUnits => Self::CityHealingUnits(p::CityHealingUnits { units: cx.get(0, ParamKind::MapUnitFilter)?, hp: cx.get(1, ParamKind::Amount)? }),
+            UniqueType::XPForPromotionModifier => Self::XPForPromotionModifier(p::XPForPromotionModifier { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::BetterDefensiveBuildings => Self::BetterDefensiveBuildings(p::BetterDefensiveBuildings { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::StrengthForCities => Self::StrengthForCities(p::StrengthForCities { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::ConsumesResources => Self::ConsumesResources(p::ConsumesResources { amount: cx.get(0, ParamKind::Amount)?, resource: cx.get(1, ParamKind::Resource)? }),
@@ -6952,18 +7761,23 @@ impl UniqueData {
             UniqueType::GainFromEncampment => Self::GainFromEncampment(p::GainFromEncampment { gold: cx.get(0, ParamKind::Amount)? }),
             UniqueType::GainFromDefeatingUnit => Self::GainFromDefeatingUnit(p::GainFromDefeatingUnit { units: cx.get(0, ParamKind::MapUnitFilter)?, gold: cx.get(1, ParamKind::Amount)? }),
             UniqueType::DisablesReligion => Self::DisablesReligion,
+            UniqueType::FreeExtraBeliefs => Self::FreeExtraBeliefs(p::FreeExtraBeliefs { count: cx.get(0, ParamKind::Amount)?, belief: cx.get(1, ParamKind::BeliefType)?, when: cx.get(2, ParamKind::FoundingOrEnhancing)? }),
             UniqueType::FreeExtraAnyBeliefs => Self::FreeExtraAnyBeliefs(p::FreeExtraAnyBeliefs { count: cx.get(0, ParamKind::Amount)?, when: cx.get(1, ParamKind::FoundingOrEnhancing)? }),
             UniqueType::StatsWhenAdoptingReligion => Self::StatsWhenAdoptingReligion(p::StatsWhenAdoptingReligion { stats: cx.get(0, ParamKind::Stats)? }),
             UniqueType::NaturalReligionSpreadStrength => Self::NaturalReligionSpreadStrength(p::NaturalReligionSpreadStrength { percent: cx.get(0, ParamKind::RelativeAmount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::ReligionSpreadDistance => Self::ReligionSpreadDistance(p::ReligionSpreadDistance { distance: cx.get(0, ParamKind::Amount)? }),
             UniqueType::MayNotGenerateGreatProphet => Self::MayNotGenerateGreatProphet,
             UniqueType::FaithCostOfGreatProphetChange => Self::FaithCostOfGreatProphetChange(p::FaithCostOfGreatProphetChange { percent: cx.get(0, ParamKind::RelativeAmount)? }),
+            UniqueType::SpyEffectiveness => Self::SpyEffectiveness(p::SpyEffectiveness { percent: cx.get(0, ParamKind::RelativeAmount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::EnemySpyEffectiveness => Self::EnemySpyEffectiveness(p::EnemySpyEffectiveness { percent: cx.get(0, ParamKind::RelativeAmount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::SpyStartingLevel => Self::SpyStartingLevel(p::SpyStartingLevel { levels: cx.get(0, ParamKind::Amount)? }),
+            UniqueType::CounterIntelligenceSpyRankBonus => Self::CounterIntelligenceSpyRankBonus(p::CounterIntelligenceSpyRankBonus { cities: cx.get(0, ParamKind::CityFilter)?, levels: cx.get(1, ParamKind::RelativeAmount)?, action: cx.get(2, ParamKind::SpyAction)? }),
             UniqueType::StartingTech => Self::StartingTech,
             UniqueType::StartsWithTech => Self::StartsWithTech(p::StartsWithTech { tech: cx.get(0, ParamKind::Tech)? }),
             UniqueType::StartBias => Self::StartBias(p::StartBias { terrain: cx.get(0, ParamKind::TerrainFilter)? }),
+            UniqueType::TriggersVictory => Self::TriggersVictory,
             UniqueType::TriggersCulturalVictory => Self::TriggersCulturalVictory,
+            UniqueType::MayNotAnnexCities => Self::MayNotAnnexCities,
             UniqueType::BorrowsCityNames => Self::BorrowsCityNames,
             UniqueType::CitiesAreRazedXTimesFaster => Self::CitiesAreRazedXTimesFaster(p::CitiesAreRazedXTimesFaster { times: cx.get(0, ParamKind::Amount)? }),
             UniqueType::TechBoostWhenScientificBuildingsBuiltInCapital => Self::TechBoostWhenScientificBuildingsBuiltInCapital,
@@ -6975,23 +7789,29 @@ impl UniqueData {
             UniqueType::Unbuildable => Self::Unbuildable,
             UniqueType::CannotBePurchased => Self::CannotBePurchased,
             UniqueType::CanBePurchasedWithStat => Self::CanBePurchasedWithStat(p::CanBePurchasedWithStat { stat: cx.get(0, ParamKind::Stat)?, cities: cx.get(1, ParamKind::CityFilter)? }),
+            UniqueType::CanBePurchasedForAmountStat => Self::CanBePurchasedForAmountStat(p::CanBePurchasedForAmountStat { cost: cx.get(0, ParamKind::Amount)?, stat: cx.get(1, ParamKind::Stat)?, cities: cx.get(2, ParamKind::CityFilter)? }),
             UniqueType::MaxNumberBuildable => Self::MaxNumberBuildable(p::MaxNumberBuildable { limit: cx.get(0, ParamKind::Amount)? }),
             UniqueType::OnlyAvailable => Self::OnlyAvailable,
             UniqueType::Unavailable => Self::Unavailable,
+            UniqueType::CannotBuildBuildings => Self::CannotBuildBuildings(p::CannotBuildBuildings { buildings: cx.get(0, ParamKind::BuildingFilter)? }),
             UniqueType::ConvertFoodToProductionWhenConstructed => Self::ConvertFoodToProductionWhenConstructed,
             UniqueType::RequiresPopulation => Self::RequiresPopulation(p::RequiresPopulation { population: cx.get(0, ParamKind::Amount)? }),
             UniqueType::TriggersAlertOnStart => Self::TriggersAlertOnStart,
             UniqueType::TriggersAlertOnCompletion => Self::TriggersAlertOnCompletion,
             UniqueType::CostIncreasesPerCity => Self::CostIncreasesPerCity(p::CostIncreasesPerCity { cost: cx.get(0, ParamKind::Amount)? }),
+            UniqueType::CostIncreasesWhenBuilt => Self::CostIncreasesWhenBuilt(p::CostIncreasesWhenBuilt { cost: cx.get(0, ParamKind::Amount)? }),
+            UniqueType::CostPercentageChange => Self::CostPercentageChange(p::CostPercentageChange { percent: cx.get(0, ParamKind::Amount)? }),
             UniqueType::CanOnlyBeBuiltWhen => Self::CanOnlyBeBuiltWhen,
             UniqueType::MustHaveOwnedWithinTiles => Self::MustHaveOwnedWithinTiles(p::MustHaveOwnedWithinTiles { tiles: cx.get(0, ParamKind::TileFilter)?, radius: cx.get(1, ParamKind::Amount)? }),
             UniqueType::EnablesNuclearWeapons => Self::EnablesNuclearWeapons,
             UniqueType::MustBeOn => Self::MustBeOn(p::MustBeOn { tiles: cx.get(0, ParamKind::TileFilter)? }),
             UniqueType::MustNotBeOn => Self::MustNotBeOn(p::MustNotBeOn { tiles: cx.get(0, ParamKind::TileFilter)? }),
             UniqueType::MustBeNextTo => Self::MustBeNextTo(p::MustBeNextTo { tiles: cx.get(0, ParamKind::TileFilter)? }),
+            UniqueType::ObsoleteWith => Self::ObsoleteWith(p::ObsoleteWith { tech: cx.get(0, ParamKind::Tech)? }),
             UniqueType::IndicatesCapital => Self::IndicatesCapital,
             UniqueType::ProvidesExtraLuxuryFromCityResources => Self::ProvidesExtraLuxuryFromCityResources,
             UniqueType::DestroyedWhenCityCaptured => Self::DestroyedWhenCityCaptured,
+            UniqueType::NotDestroyedWhenCityCaptured => Self::NotDestroyedWhenCityCaptured,
             UniqueType::GoldFromCapturingCity => Self::GoldFromCapturingCity(p::GoldFromCapturingCity { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::RemovesAnnexUnhappiness => Self::RemovesAnnexUnhappiness,
             UniqueType::ConnectTradeRoutes => Self::ConnectTradeRoutes,
@@ -7009,10 +7829,13 @@ impl UniqueData {
             UniqueType::MayParadrop => Self::MayParadrop(p::MayParadrop { tiles: cx.get(0, ParamKind::TileFilter)?, range: cx.get(1, ParamKind::PositiveAmount)? }),
             UniqueType::CanAirsweep => Self::CanAirsweep,
             UniqueType::CanSpeedupConstruction => Self::CanSpeedupConstruction,
+            UniqueType::CanSpeedupWonderConstruction => Self::CanSpeedupWonderConstruction,
             UniqueType::CanHurryResearch => Self::CanHurryResearch,
+            UniqueType::CanHurryPolicy => Self::CanHurryPolicy,
             UniqueType::CanTradeWithCityStateForGoldAndInfluence => Self::CanTradeWithCityStateForGoldAndInfluence(p::CanTradeWithCityStateForGoldAndInfluence { influence: cx.get(0, ParamKind::Amount)? }),
             UniqueType::AutomationPrimaryAction => Self::AutomationPrimaryAction,
             UniqueType::Strength => Self::Strength(p::Strength { percent: cx.get(0, ParamKind::RelativeAmount)? }),
+            UniqueType::StrengthAmount => Self::StrengthAmount(p::StrengthAmount { strength: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::StrengthNearCapital => Self::StrengthNearCapital(p::StrengthNearCapital { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::FlankAttackBonus => Self::FlankAttackBonus(p::FlankAttackBonus { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::StrengthForAdjacentEnemies => Self::StrengthForAdjacentEnemies(p::StrengthForAdjacentEnemies { percent: cx.get(0, ParamKind::RelativeAmount)?, units: cx.get(1, ParamKind::MapUnitFilter)?, tiles: cx.get(2, ParamKind::TileFilter)? }),
@@ -7021,6 +7844,7 @@ impl UniqueData {
             UniqueType::Movement => Self::Movement(p::Movement { movement: cx.get(0, ParamKind::Amount)? }),
             UniqueType::Sight => Self::Sight(p::Sight { sight: cx.get(0, ParamKind::Amount)? }),
             UniqueType::Range => Self::Range(p::Range { range: cx.get(0, ParamKind::Amount)? }),
+            UniqueType::AirInterceptionRange => Self::AirInterceptionRange(p::AirInterceptionRange { range: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::Heal => Self::Heal(p::Heal { hp: cx.get(0, ParamKind::Amount)? }),
             UniqueType::SpreadReligionStrength => Self::SpreadReligionStrength(p::SpreadReligionStrength { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::StatsWhenSpreading => Self::StatsWhenSpreading(p::StatsWhenSpreading { percent: cx.get(0, ParamKind::Amount)?, stat: cx.get(1, ParamKind::Stat)? }),
@@ -7030,11 +7854,13 @@ impl UniqueData {
             UniqueType::MustSetUp => Self::MustSetUp,
             UniqueType::SelfDestructs => Self::SelfDestructs,
             UniqueType::AttackAcrossCoast => Self::AttackAcrossCoast,
+            UniqueType::AttackOnSea => Self::AttackOnSea,
             UniqueType::AttackAcrossRiver => Self::AttackAcrossRiver,
             UniqueType::BlastRadius => Self::BlastRadius(p::BlastRadius { radius: cx.get(0, ParamKind::Amount)? }),
             UniqueType::IndirectFire => Self::IndirectFire,
             UniqueType::NuclearWeapon => Self::NuclearWeapon(p::NuclearWeapon { strength: cx.get(0, ParamKind::Amount)? }),
             UniqueType::NoDefensiveTerrainBonus => Self::NoDefensiveTerrainBonus,
+            UniqueType::NoDefensiveTerrainPenalty => Self::NoDefensiveTerrainPenalty,
             UniqueType::NoDamagePenaltyWoundedUnits => Self::NoDamagePenaltyWoundedUnits,
             UniqueType::Uncapturable => Self::Uncapturable,
             UniqueType::WithdrawsBeforeMeleeCombat => Self::WithdrawsBeforeMeleeCombat,
@@ -7050,6 +7876,7 @@ impl UniqueData {
             UniqueType::HealOnlyByPillaging => Self::HealOnlyByPillaging,
             UniqueType::HealsEvenAfterAction => Self::HealsEvenAfterAction,
             UniqueType::HealAdjacentUnits => Self::HealAdjacentUnits(p::HealAdjacentUnits { hp: cx.get(0, ParamKind::Amount)? }),
+            UniqueType::NoSight => Self::NoSight,
             UniqueType::CanSeeOverObstacles => Self::CanSeeOverObstacles,
             UniqueType::CarryAirUnits => Self::CarryAirUnits(p::CarryAirUnits { count: cx.get(0, ParamKind::Amount)?, units: cx.get(1, ParamKind::MapUnitFilter)? }),
             UniqueType::CarryExtraAirUnits => Self::CarryExtraAirUnits(p::CarryExtraAirUnits { count: cx.get(0, ParamKind::Amount)?, units: cx.get(1, ParamKind::MapUnitFilter)? }),
@@ -7070,20 +7897,25 @@ impl UniqueData {
             UniqueType::PercentageXPGain => Self::PercentageXPGain(p::PercentageXPGain { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::GreatPersonFromCombat => Self::GreatPersonFromCombat,
             UniqueType::GreatPersonEarnedFaster => Self::GreatPersonEarnedFaster(p::GreatPersonEarnedFaster { great_person: cx.get(0, ParamKind::GreatPerson)?, percent: cx.get(1, ParamKind::RelativeAmount)? }),
+            UniqueType::Invisible => Self::Invisible,
             UniqueType::InvisibleToNonAdjacent => Self::InvisibleToNonAdjacent,
             UniqueType::CanSeeInvisibleUnits => Self::CanSeeInvisibleUnits(p::CanSeeInvisibleUnits { units: cx.get(0, ParamKind::MapUnitFilter)? }),
             UniqueType::RuinsUpgrade => Self::RuinsUpgrade(p::RuinsUpgrade { unit: cx.get(0, ParamKind::Unit)? }),
+            UniqueType::CanUpgrade => Self::CanUpgrade(p::CanUpgrade { unit: cx.get(0, ParamKind::Unit)? }),
             UniqueType::DoubleMovementOnTerrain => Self::DoubleMovementOnTerrain(p::DoubleMovementOnTerrain { terrain: cx.get(0, ParamKind::TerrainFilter)? }),
             UniqueType::AllTilesCost1Move => Self::AllTilesCost1Move,
+            UniqueType::CanMoveOnWater => Self::CanMoveOnWater,
             UniqueType::CanPassImpassable => Self::CanPassImpassable,
             UniqueType::IgnoresTerrainCost => Self::IgnoresTerrainCost,
             UniqueType::IgnoresZOC => Self::IgnoresZOC,
             UniqueType::RoughTerrainPenalty => Self::RoughTerrainPenalty,
             UniqueType::CanEnterIceTiles => Self::CanEnterIceTiles,
+            UniqueType::CannotEmbark => Self::CannotEmbark,
             UniqueType::CannotEnterOcean => Self::CannotEnterOcean,
             UniqueType::CanEnterForeignTiles => Self::CanEnterForeignTiles,
             UniqueType::CanEnterForeignTilesButLosesReligiousStrength => Self::CanEnterForeignTilesButLosesReligiousStrength(p::CanEnterForeignTilesButLosesReligiousStrength { loss: cx.get(0, ParamKind::Amount)? }),
             UniqueType::ReducedDisembarkCost => Self::ReducedDisembarkCost(p::ReducedDisembarkCost { movement: cx.get(0, ParamKind::NonNegativeAmount)? }),
+            UniqueType::ReducedEmbarkCost => Self::ReducedEmbarkCost(p::ReducedEmbarkCost { movement: cx.get(0, ParamKind::NonNegativeAmount)? }),
             UniqueType::ForestsAndJunglesAreRoads => Self::ForestsAndJunglesAreRoads,
             UniqueType::IgnoreHillMovementCost => Self::IgnoreHillMovementCost,
             UniqueType::CannotBeBarbarian => Self::CannotBeBarbarian,
@@ -7096,6 +7928,7 @@ impl UniqueData {
             UniqueType::NaturalWonderNeighborCount => Self::NaturalWonderNeighborCount(p::NaturalWonderNeighborCount { count: cx.get(0, ParamKind::Amount)?, terrain: cx.get(1, ParamKind::SimpleTerrain)? }),
             UniqueType::NaturalWonderNeighborsRange => Self::NaturalWonderNeighborsRange(p::NaturalWonderNeighborsRange { min: cx.get(0, ParamKind::Amount)?, max: cx.get(1, ParamKind::Amount)?, terrain: cx.get(2, ParamKind::SimpleTerrain)? }),
             UniqueType::NaturalWonderSmallerLandmass => Self::NaturalWonderSmallerLandmass(p::NaturalWonderSmallerLandmass { count: cx.get(0, ParamKind::Amount)? }),
+            UniqueType::NaturalWonderLargerLandmass => Self::NaturalWonderLargerLandmass(p::NaturalWonderLargerLandmass { count: cx.get(0, ParamKind::Amount)? }),
             UniqueType::NaturalWonderLatitude => Self::NaturalWonderLatitude(p::NaturalWonderLatitude { min: cx.get(0, ParamKind::Amount)?, max: cx.get(1, ParamKind::Amount)? }),
             UniqueType::NaturalWonderGroups => Self::NaturalWonderGroups(p::NaturalWonderGroups { min: cx.get(0, ParamKind::Amount)?, max: cx.get(1, ParamKind::Amount)? }),
             UniqueType::NaturalWonderConvertNeighbors => Self::NaturalWonderConvertNeighbors(p::NaturalWonderConvertNeighbors { terrain: cx.get(0, ParamKind::BaseTerrainOrFeature)? }),
@@ -7150,6 +7983,7 @@ impl UniqueData {
             UniqueType::NoFeatureRemovalNeeded => Self::NoFeatureRemovalNeeded(p::NoFeatureRemovalNeeded { feature: cx.get(0, ParamKind::TerrainFeature)? }),
             UniqueType::RemovesFeaturesIfBuilt => Self::RemovesFeaturesIfBuilt,
             UniqueType::DefensiveBonus => Self::DefensiveBonus(p::DefensiveBonus { percent: cx.get(0, ParamKind::RelativeAmount)? }),
+            UniqueType::ImprovementMaintenance => Self::ImprovementMaintenance(p::ImprovementMaintenance { amount: cx.get(0, ParamKind::Amount)?, stat: cx.get(1, ParamKind::Stat)? }),
             UniqueType::ImprovementAllMaintenance => Self::ImprovementAllMaintenance(p::ImprovementAllMaintenance { amount: cx.get(0, ParamKind::Amount)?, stat: cx.get(1, ParamKind::Stat)? }),
             UniqueType::DamagesAdjacentEnemyUnits => Self::DamagesAdjacentEnemyUnits(p::DamagesAdjacentEnemyUnits { damage: cx.get(0, ParamKind::Amount)? }),
             UniqueType::GreatImprovement => Self::GreatImprovement,
@@ -7157,39 +7991,54 @@ impl UniqueData {
             UniqueType::IsBarbarianCampEquivalent => Self::IsBarbarianCampEquivalent,
             UniqueType::Unpillagable => Self::Unpillagable,
             UniqueType::PillageYieldRandom => Self::PillageYieldRandom(p::PillageYieldRandom { stats: cx.get(0, ParamKind::Stats)? }),
+            UniqueType::PillageYieldFixed => Self::PillageYieldFixed(p::PillageYieldFixed { stats: cx.get(0, ParamKind::Stats)? }),
+            UniqueType::DestroyedWhenPillaged => Self::DestroyedWhenPillaged,
             UniqueType::Irremovable => Self::Irremovable,
             UniqueType::AutomatedUnitsWillNotReplace => Self::AutomatedUnitsWillNotReplace,
             UniqueType::OneTimeFreeUnit => Self::OneTimeFreeUnit(p::OneTimeFreeUnit { unit: cx.get(0, ParamKind::Unit)? }),
             UniqueType::OneTimeAmountFreeUnits => Self::OneTimeAmountFreeUnits(p::OneTimeAmountFreeUnits { count: cx.get(0, ParamKind::PositiveAmount)?, unit: cx.get(1, ParamKind::Unit)? }),
             UniqueType::OneTimeFreeUnitRuins => Self::OneTimeFreeUnitRuins(p::OneTimeFreeUnitRuins { unit: cx.get(0, ParamKind::Unit)? }),
             UniqueType::OneTimeFreePolicy => Self::OneTimeFreePolicy,
+            UniqueType::OneTimeAmountFreePolicies => Self::OneTimeAmountFreePolicies(p::OneTimeAmountFreePolicies { count: cx.get(0, ParamKind::PositiveAmount)? }),
             UniqueType::OneTimeEnterGoldenAge => Self::OneTimeEnterGoldenAge,
             UniqueType::OneTimeEnterGoldenAgeTurns => Self::OneTimeEnterGoldenAgeTurns(p::OneTimeEnterGoldenAgeTurns { turns: cx.get(0, ParamKind::PositiveAmount)? }),
             UniqueType::OneTimeFreeGreatPerson => Self::OneTimeFreeGreatPerson,
             UniqueType::OneTimeGainPopulation => Self::OneTimeGainPopulation(p::OneTimeGainPopulation { count: cx.get(0, ParamKind::Amount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::OneTimeGainPopulationRandomCity => Self::OneTimeGainPopulationRandomCity(p::OneTimeGainPopulationRandomCity { count: cx.get(0, ParamKind::Amount)? }),
+            UniqueType::OneTimeDiscoverTech => Self::OneTimeDiscoverTech(p::OneTimeDiscoverTech { tech: cx.get(0, ParamKind::Tech)? }),
+            UniqueType::OneTimeAdoptPolicyOrBelief => Self::OneTimeAdoptPolicyOrBelief(p::OneTimeAdoptPolicyOrBelief { adopted: cx.get(0, ParamKind::PolicyOrBelief)? }),
             UniqueType::OneTimeFreeTech => Self::OneTimeFreeTech,
             UniqueType::OneTimeAmountFreeTechs => Self::OneTimeAmountFreeTechs(p::OneTimeAmountFreeTechs { count: cx.get(0, ParamKind::PositiveAmount)? }),
             UniqueType::OneTimeFreeTechRuins => Self::OneTimeFreeTechRuins(p::OneTimeFreeTechRuins { count: cx.get(0, ParamKind::PositiveAmount)?, eras: cx.get(1, ParamKind::EraFilter)? }),
             UniqueType::OneTimeRevealEntireMap => Self::OneTimeRevealEntireMap,
+            UniqueType::OneTimeFreeBelief => Self::OneTimeFreeBelief(p::OneTimeFreeBelief { belief: cx.get(0, ParamKind::BeliefType)? }),
             UniqueType::OneTimeTriggerVoting => Self::OneTimeTriggerVoting,
             UniqueType::OneTimeGainStat => Self::OneTimeGainStat(p::OneTimeGainStat { amount: cx.get(0, ParamKind::Amount)?, stat: cx.get(1, ParamKind::CivWideStat)? }),
             UniqueType::OneTimeGainStatRange => Self::OneTimeGainStatRange(p::OneTimeGainStatRange { min: cx.get(0, ParamKind::Amount)?, max: cx.get(1, ParamKind::Amount)?, stat: cx.get(2, ParamKind::CivWideStat)? }),
             UniqueType::OneTimeGainPantheon => Self::OneTimeGainPantheon,
             UniqueType::OneTimeGainProphet => Self::OneTimeGainProphet(p::OneTimeGainProphet { percent: cx.get(0, ParamKind::PositiveAmount)? }),
+            UniqueType::OneTimeGainTechPercent => Self::OneTimeGainTechPercent(p::OneTimeGainTechPercent { percent: cx.get(0, ParamKind::RelativeAmount)?, tech: cx.get(1, ParamKind::Tech)? }),
             UniqueType::OneTimeTakeOverTilesInRadius => Self::OneTimeTakeOverTilesInRadius(p::OneTimeTakeOverTilesInRadius { tiles: cx.get(0, ParamKind::TileFilter)?, radius: cx.get(1, ParamKind::NonNegativeAmount)? }),
+            UniqueType::OneTimeTakeOverTilesInCity => Self::OneTimeTakeOverTilesInCity(p::OneTimeTakeOverTilesInCity { count: cx.get(0, ParamKind::PositiveAmount)?, cities: cx.get(1, ParamKind::CityFilter)? }),
             UniqueType::OneTimeRevealSpecificMapTiles => Self::OneTimeRevealSpecificMapTiles(p::OneTimeRevealSpecificMapTiles { count: cx.get(0, ParamKind::CountOrAll)?, tiles: cx.get(1, ParamKind::TileFilter)?, radius: cx.get(2, ParamKind::PositiveAmount)? }),
             UniqueType::OneTimeRevealCrudeMap => Self::OneTimeRevealCrudeMap(p::OneTimeRevealCrudeMap { distance: cx.get(0, ParamKind::PositiveAmount)?, radius: cx.get(1, ParamKind::PositiveAmount)?, percent: cx.get(2, ParamKind::PositiveAmount)? }),
             UniqueType::OneTimeGlobalSpiesWhenEnteringEra => Self::OneTimeGlobalSpiesWhenEnteringEra,
             UniqueType::OneTimeSpiesLevelUp => Self::OneTimeSpiesLevelUp(p::OneTimeSpiesLevelUp { times: cx.get(0, ParamKind::PositiveAmount)? }),
             UniqueType::OneTimeGainSpy => Self::OneTimeGainSpy,
             UniqueType::SkipPromotion => Self::SkipPromotion,
+            UniqueType::FreePromotion => Self::FreePromotion,
             UniqueType::UnitsGainPromotion => Self::UnitsGainPromotion(p::UnitsGainPromotion { units: cx.get(0, ParamKind::MapUnitFilter)?, promotion: cx.get(1, ParamKind::Promotion)? }),
             UniqueType::FreeStatBuildings => Self::FreeStatBuildings(p::FreeStatBuildings { stat: cx.get(0, ParamKind::Stat)?, cities: cx.get(1, ParamKind::PositiveAmount)? }),
             UniqueType::FreeSpecificBuildings => Self::FreeSpecificBuildings(p::FreeSpecificBuildings { building: cx.get(0, ParamKind::BuildingName)?, cities: cx.get(1, ParamKind::PositiveAmount)? }),
             UniqueType::OneTimeUnitHeal => Self::OneTimeUnitHeal(p::OneTimeUnitHeal { target: cx.get(0, ParamKind::UnitTriggerTarget)?, hp: cx.get(1, ParamKind::PositiveAmount)? }),
+            UniqueType::OneTimeUnitDamage => Self::OneTimeUnitDamage(p::OneTimeUnitDamage { target: cx.get(0, ParamKind::UnitTriggerTarget)?, damage: cx.get(1, ParamKind::PositiveAmount)? }),
             UniqueType::OneTimeUnitGainXP => Self::OneTimeUnitGainXP(p::OneTimeUnitGainXP { target: cx.get(0, ParamKind::UnitTriggerTarget)?, xp: cx.get(1, ParamKind::Amount)? }),
+            UniqueType::OneTimeUnitUpgrade => Self::OneTimeUnitUpgrade(p::OneTimeUnitUpgrade { target: cx.get(0, ParamKind::UnitTriggerTarget)? }),
             UniqueType::OneTimeUnitSpecialUpgrade => Self::OneTimeUnitSpecialUpgrade(p::OneTimeUnitSpecialUpgrade { target: cx.get(0, ParamKind::UnitTriggerTarget)? }),
+            UniqueType::OneTimeUnitGainPromotion => Self::OneTimeUnitGainPromotion(p::OneTimeUnitGainPromotion { target: cx.get(0, ParamKind::UnitTriggerTarget)?, promotion: cx.get(1, ParamKind::Promotion)? }),
+            UniqueType::OneTimeUnitGainMovement => Self::OneTimeUnitGainMovement(p::OneTimeUnitGainMovement { target: cx.get(0, ParamKind::UnitTriggerTarget)?, movement: cx.get(1, ParamKind::PositiveAmount)? }),
+            UniqueType::OneTimeUnitLoseMovement => Self::OneTimeUnitLoseMovement(p::OneTimeUnitLoseMovement { target: cx.get(0, ParamKind::UnitTriggerTarget)?, movement: cx.get(1, ParamKind::PositiveAmount)? }),
+            UniqueType::OneTimeUnitDestroyed => Self::OneTimeUnitDestroyed(p::OneTimeUnitDestroyed { target: cx.get(0, ParamKind::UnitTriggerTarget)? }),
             UniqueType::AiChoiceWeight => Self::AiChoiceWeight(p::AiChoiceWeight { percent: cx.get(0, ParamKind::RelativeAmount)? }),
             UniqueType::WillNotBeChosenForNewGames => Self::WillNotBeChosenForNewGames,
             _ => return Err(ParamError::role(ty, "UniqueData")),
@@ -7200,48 +8049,106 @@ impl UniqueData {
 /// A compiled conditional: one variant per supported conditional.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CondData {
+    /// `every [positiveAmount] turns`
+    ConditionalEveryTurns(p::ConditionalEveryTurns),
+    /// `before turn number [nonNegativeAmount]`
+    ConditionalBeforeTurns(p::ConditionalBeforeTurns),
     /// `after turn number [nonNegativeAmount]`
     ConditionalAfterTurns(p::ConditionalAfterTurns),
+    /// `on [speed] game speed`
+    ConditionalSpeed(p::ConditionalSpeed),
+    /// `on [difficulty] difficulty`
+    ConditionalDifficulty(p::ConditionalDifficulty),
     /// `on [difficulty] difficulty or higher`
     ConditionalDifficultyOrHigher(p::ConditionalDifficultyOrHigher),
+    /// `on [difficulty] difficulty or lower`
+    ConditionalDifficultyOrLower(p::ConditionalDifficultyOrLower),
     /// `when [victoryType] Victory is enabled`
     ConditionalVictoryEnabled(p::ConditionalVictoryEnabled),
+    /// `when [victoryType] Victory is disabled`
+    ConditionalVictoryDisabled(p::ConditionalVictoryDisabled),
     /// `when religion is enabled`
     ConditionalReligionEnabled,
     /// `when religion is disabled`
     ConditionalReligionDisabled,
     /// `when espionage is enabled`
     ConditionalEspionageEnabled,
+    /// `when espionage is disabled`
+    ConditionalEspionageDisabled,
     /// `when nuclear weapons are enabled`
     ConditionalNuclearWeaponsEnabled,
+    /// `when nuclear weapons are disabled`
+    ConditionalNuclearWeaponsDisabled,
     /// `with [nonNegativeAmount]% chance`
     ConditionalChance(p::ConditionalChance),
+    /// `if tutorials are enabled`
+    ConditionalTutorialsEnabled,
+    /// `if tutorial [comment] is completed`
+    ConditionalTutorialCompleted(p::ConditionalTutorialCompleted),
+    /// `for [civFilter] Civilizations`
+    ConditionalCivFilter(p::ConditionalCivFilter),
+    /// `when at war`
+    ConditionalWar,
     /// `when not at war`
     ConditionalNotWar,
     /// `during a Golden Age`
     ConditionalGoldenAge,
+    /// `when not in a Golden Age`
+    ConditionalNotGoldenAge,
     /// `while the empire is happy`
     ConditionalHappy,
+    /// `during the [era]`
+    ConditionalDuringEra(p::ConditionalDuringEra),
     /// `before the [era]`
     ConditionalBeforeEra(p::ConditionalBeforeEra),
     /// `starting from the [era]`
     ConditionalStartingFromEra(p::ConditionalStartingFromEra),
+    /// `if starting in the [era]`
+    ConditionalIfStartingInEra(p::ConditionalIfStartingInEra),
     /// `after discovering [techFilter]`
     ConditionalTech(p::ConditionalTech),
     /// `before discovering [techFilter]`
     ConditionalNoTech(p::ConditionalNoTech),
+    /// `while researching [techFilter]`
+    ConditionalWhileResearching(p::ConditionalWhileResearching),
+    /// `if no Civilization has adopted [policy/belief]`
+    ConditionalNoCivAdopted(p::ConditionalNoCivAdopted),
+    /// `after adopting [policy/belief]`
+    ConditionalAfterPolicyOrBelief(p::ConditionalAfterPolicyOrBelief),
     /// `before adopting [policy/belief]`
     ConditionalBeforePolicyOrBelief(p::ConditionalBeforePolicyOrBelief),
     /// `before founding a Pantheon`
     ConditionalBeforePantheon,
     /// `after founding a Pantheon`
     ConditionalAfterPantheon,
+    /// `before founding a religion`
+    ConditionalBeforeReligion,
+    /// `after founding a religion`
+    ConditionalAfterReligion,
+    /// `before enhancing a religion`
+    ConditionalBeforeEnhancingReligion,
+    /// `after enhancing a religion`
+    ConditionalAfterEnhancingReligion,
     /// `after generating a Great Prophet`
     ConditionalAfterGeneratingGreatProphet,
     /// `if [buildingFilter] is constructed`
     ConditionalBuildingBuilt(p::ConditionalBuildingBuilt),
+    /// `if [buildingFilter] is not constructed`
+    ConditionalBuildingNotBuilt(p::ConditionalBuildingNotBuilt),
     /// `if [buildingFilter] is constructed in all [cityFilter] cities`
     ConditionalBuildingBuiltAll(p::ConditionalBuildingBuiltAll),
+    /// `if [buildingFilter] is constructed in at least [positiveAmount] of [cityFilter] cities`
+    ConditionalBuildingBuiltAmount(p::ConditionalBuildingBuiltAmount),
+    /// `if [buildingFilter] is constructed by anybody`
+    ConditionalBuildingBuiltByAnybody(p::ConditionalBuildingBuiltByAnybody),
+    /// `if [buildingFilter] is not constructed by anybody`
+    ConditionalBuildingNotBuiltByAnybody(p::ConditionalBuildingNotBuiltByAnybody),
+    /// `with [resource]`
+    ConditionalWithResource(p::ConditionalWithResource),
+    /// `without [resource]`
+    ConditionalWithoutResource(p::ConditionalWithoutResource),
+    /// `when above [amount] [stat/resource]`
+    ConditionalWhenAboveAmountStatResource(p::ConditionalWhenAboveAmountStatResource),
     /// `when below [amount] [stat/resource]`
     ConditionalWhenBelowAmountStatResource(p::ConditionalWhenBelowAmountStatResource),
     /// `when between [amount] and [amount] [stat/resource]`
@@ -7250,16 +8157,30 @@ pub enum CondData {
     ConditionalInThisCity,
     /// `in [cityFilter] cities`
     ConditionalCityFilter(p::ConditionalCityFilter),
+    /// `in cities connected to the capital`
+    ConditionalCityConnected,
+    /// `in cities with a [buildingFilter]`
+    ConditionalCityWithBuilding(p::ConditionalCityWithBuilding),
     /// `in cities without a [buildingFilter]`
     ConditionalCityWithoutBuilding(p::ConditionalCityWithoutBuilding),
     /// `in cities with at least [positiveAmount] [populationFilter]`
     ConditionalPopulationFilter(p::ConditionalPopulationFilter),
+    /// `in cities with [nonNegativeAmount] [populationFilter]`
+    ConditionalExactPopulationFilter(p::ConditionalExactPopulationFilter),
+    /// `in cities with between [amount] and [amount] [populationFilter]`
+    ConditionalBetweenPopulationFilter(p::ConditionalBetweenPopulationFilter),
+    /// `in cities with less than [amount] [populationFilter]`
+    ConditionalBelowPopulationFilter(p::ConditionalBelowPopulationFilter),
     /// `with a garrison`
     ConditionalWhenGarrisoned,
     /// `for [mapUnitFilter] units`
     ConditionalOurUnit(p::ConditionalOurUnit),
     /// `when [mapUnitFilter]`
     ConditionalOurUnitOnUnit(p::ConditionalOurUnitOnUnit),
+    /// `for units with [promotion]`
+    ConditionalUnitWithPromotion(p::ConditionalUnitWithPromotion),
+    /// `for units without [promotion]`
+    ConditionalUnitWithoutPromotion(p::ConditionalUnitWithoutPromotion),
     /// `vs cities`
     ConditionalVsCity,
     /// `vs [mapUnitFilter] units`
@@ -7278,10 +8199,16 @@ pub enum CondData {
     ConditionalForeignContinent,
     /// `when adjacent to a [mapUnitFilter] unit`
     ConditionalAdjacentUnit(p::ConditionalAdjacentUnit),
+    /// `when above [positiveAmount] HP`
+    ConditionalAboveHP(p::ConditionalAboveHP),
+    /// `when below [positiveAmount] HP`
+    ConditionalBelowHP(p::ConditionalBelowHP),
     /// `if it hasn't used other actions yet`
     ConditionalHasNotUsedOtherActions,
     /// `when stacked with a [mapUnitFilter] unit`
     ConditionalStackedWithUnit(p::ConditionalStackedWithUnit),
+    /// `when not stacked with a [mapUnitFilter] unit`
+    ConditionalNotStackedWithUnit(p::ConditionalNotStackedWithUnit),
     /// `with [nonNegativeAmount] to [nonNegativeAmount] neighboring [tileFilter] tiles`
     ConditionalNeighborTiles(p::ConditionalNeighborTiles),
     /// `in [tileFilter] tiles`
@@ -7290,14 +8217,26 @@ pub enum CondData {
     ConditionalInTilesNot(p::ConditionalInTilesNot),
     /// `within [positiveAmount] tiles of a [tileFilter]`
     ConditionalNearTiles(p::ConditionalNearTiles),
+    /// `in tiles adjacent to [tileFilter] tiles`
+    ConditionalAdjacentTo(p::ConditionalAdjacentTo),
+    /// `in tiles not adjacent to [tileFilter] tiles`
+    ConditionalNotAdjacentTo(p::ConditionalNotAdjacentTo),
     /// `on water maps`
     ConditionalOnWaterMaps,
     /// `in [regionType] Regions`
     ConditionalInRegionOfType(p::ConditionalInRegionOfType),
     /// `in all except [regionType] Regions`
     ConditionalInRegionExceptOfType(p::ConditionalInRegionExceptOfType),
+    /// `when number of [countable] is equal to [countable]`
+    ConditionalCountableEqualTo(p::ConditionalCountableEqualTo),
+    /// `when number of [countable] is different than [countable]`
+    ConditionalCountableDifferentThan(p::ConditionalCountableDifferentThan),
+    /// `when number of [countable] is more than [countable]`
+    ConditionalCountableMoreThan(p::ConditionalCountableMoreThan),
     /// `when number of [countable] is less than [countable]`
     ConditionalCountableLessThan(p::ConditionalCountableLessThan),
+    /// `when number of [countable] is between [countable] and [countable]`
+    ConditionalCountableBetween(p::ConditionalCountableBetween),
 }
 
 impl CondData {
@@ -7305,36 +8244,72 @@ impl CondData {
     #[must_use]
     pub const fn ty(&self) -> UniqueType {
         match self {
+            Self::ConditionalEveryTurns(_) => UniqueType::ConditionalEveryTurns,
+            Self::ConditionalBeforeTurns(_) => UniqueType::ConditionalBeforeTurns,
             Self::ConditionalAfterTurns(_) => UniqueType::ConditionalAfterTurns,
+            Self::ConditionalSpeed(_) => UniqueType::ConditionalSpeed,
+            Self::ConditionalDifficulty(_) => UniqueType::ConditionalDifficulty,
             Self::ConditionalDifficultyOrHigher(_) => UniqueType::ConditionalDifficultyOrHigher,
+            Self::ConditionalDifficultyOrLower(_) => UniqueType::ConditionalDifficultyOrLower,
             Self::ConditionalVictoryEnabled(_) => UniqueType::ConditionalVictoryEnabled,
+            Self::ConditionalVictoryDisabled(_) => UniqueType::ConditionalVictoryDisabled,
             Self::ConditionalReligionEnabled => UniqueType::ConditionalReligionEnabled,
             Self::ConditionalReligionDisabled => UniqueType::ConditionalReligionDisabled,
             Self::ConditionalEspionageEnabled => UniqueType::ConditionalEspionageEnabled,
+            Self::ConditionalEspionageDisabled => UniqueType::ConditionalEspionageDisabled,
             Self::ConditionalNuclearWeaponsEnabled => UniqueType::ConditionalNuclearWeaponsEnabled,
+            Self::ConditionalNuclearWeaponsDisabled => UniqueType::ConditionalNuclearWeaponsDisabled,
             Self::ConditionalChance(_) => UniqueType::ConditionalChance,
+            Self::ConditionalTutorialsEnabled => UniqueType::ConditionalTutorialsEnabled,
+            Self::ConditionalTutorialCompleted(_) => UniqueType::ConditionalTutorialCompleted,
+            Self::ConditionalCivFilter(_) => UniqueType::ConditionalCivFilter,
+            Self::ConditionalWar => UniqueType::ConditionalWar,
             Self::ConditionalNotWar => UniqueType::ConditionalNotWar,
             Self::ConditionalGoldenAge => UniqueType::ConditionalGoldenAge,
+            Self::ConditionalNotGoldenAge => UniqueType::ConditionalNotGoldenAge,
             Self::ConditionalHappy => UniqueType::ConditionalHappy,
+            Self::ConditionalDuringEra(_) => UniqueType::ConditionalDuringEra,
             Self::ConditionalBeforeEra(_) => UniqueType::ConditionalBeforeEra,
             Self::ConditionalStartingFromEra(_) => UniqueType::ConditionalStartingFromEra,
+            Self::ConditionalIfStartingInEra(_) => UniqueType::ConditionalIfStartingInEra,
             Self::ConditionalTech(_) => UniqueType::ConditionalTech,
             Self::ConditionalNoTech(_) => UniqueType::ConditionalNoTech,
+            Self::ConditionalWhileResearching(_) => UniqueType::ConditionalWhileResearching,
+            Self::ConditionalNoCivAdopted(_) => UniqueType::ConditionalNoCivAdopted,
+            Self::ConditionalAfterPolicyOrBelief(_) => UniqueType::ConditionalAfterPolicyOrBelief,
             Self::ConditionalBeforePolicyOrBelief(_) => UniqueType::ConditionalBeforePolicyOrBelief,
             Self::ConditionalBeforePantheon => UniqueType::ConditionalBeforePantheon,
             Self::ConditionalAfterPantheon => UniqueType::ConditionalAfterPantheon,
+            Self::ConditionalBeforeReligion => UniqueType::ConditionalBeforeReligion,
+            Self::ConditionalAfterReligion => UniqueType::ConditionalAfterReligion,
+            Self::ConditionalBeforeEnhancingReligion => UniqueType::ConditionalBeforeEnhancingReligion,
+            Self::ConditionalAfterEnhancingReligion => UniqueType::ConditionalAfterEnhancingReligion,
             Self::ConditionalAfterGeneratingGreatProphet => UniqueType::ConditionalAfterGeneratingGreatProphet,
             Self::ConditionalBuildingBuilt(_) => UniqueType::ConditionalBuildingBuilt,
+            Self::ConditionalBuildingNotBuilt(_) => UniqueType::ConditionalBuildingNotBuilt,
             Self::ConditionalBuildingBuiltAll(_) => UniqueType::ConditionalBuildingBuiltAll,
+            Self::ConditionalBuildingBuiltAmount(_) => UniqueType::ConditionalBuildingBuiltAmount,
+            Self::ConditionalBuildingBuiltByAnybody(_) => UniqueType::ConditionalBuildingBuiltByAnybody,
+            Self::ConditionalBuildingNotBuiltByAnybody(_) => UniqueType::ConditionalBuildingNotBuiltByAnybody,
+            Self::ConditionalWithResource(_) => UniqueType::ConditionalWithResource,
+            Self::ConditionalWithoutResource(_) => UniqueType::ConditionalWithoutResource,
+            Self::ConditionalWhenAboveAmountStatResource(_) => UniqueType::ConditionalWhenAboveAmountStatResource,
             Self::ConditionalWhenBelowAmountStatResource(_) => UniqueType::ConditionalWhenBelowAmountStatResource,
             Self::ConditionalWhenBetweenStatResource(_) => UniqueType::ConditionalWhenBetweenStatResource,
             Self::ConditionalInThisCity => UniqueType::ConditionalInThisCity,
             Self::ConditionalCityFilter(_) => UniqueType::ConditionalCityFilter,
+            Self::ConditionalCityConnected => UniqueType::ConditionalCityConnected,
+            Self::ConditionalCityWithBuilding(_) => UniqueType::ConditionalCityWithBuilding,
             Self::ConditionalCityWithoutBuilding(_) => UniqueType::ConditionalCityWithoutBuilding,
             Self::ConditionalPopulationFilter(_) => UniqueType::ConditionalPopulationFilter,
+            Self::ConditionalExactPopulationFilter(_) => UniqueType::ConditionalExactPopulationFilter,
+            Self::ConditionalBetweenPopulationFilter(_) => UniqueType::ConditionalBetweenPopulationFilter,
+            Self::ConditionalBelowPopulationFilter(_) => UniqueType::ConditionalBelowPopulationFilter,
             Self::ConditionalWhenGarrisoned => UniqueType::ConditionalWhenGarrisoned,
             Self::ConditionalOurUnit(_) => UniqueType::ConditionalOurUnit,
             Self::ConditionalOurUnitOnUnit(_) => UniqueType::ConditionalOurUnitOnUnit,
+            Self::ConditionalUnitWithPromotion(_) => UniqueType::ConditionalUnitWithPromotion,
+            Self::ConditionalUnitWithoutPromotion(_) => UniqueType::ConditionalUnitWithoutPromotion,
             Self::ConditionalVsCity => UniqueType::ConditionalVsCity,
             Self::ConditionalVsUnits(_) => UniqueType::ConditionalVsUnits,
             Self::ConditionalVsCombatant(_) => UniqueType::ConditionalVsCombatant,
@@ -7344,16 +8319,25 @@ impl CondData {
             Self::ConditionalFightingInTiles(_) => UniqueType::ConditionalFightingInTiles,
             Self::ConditionalForeignContinent => UniqueType::ConditionalForeignContinent,
             Self::ConditionalAdjacentUnit(_) => UniqueType::ConditionalAdjacentUnit,
+            Self::ConditionalAboveHP(_) => UniqueType::ConditionalAboveHP,
+            Self::ConditionalBelowHP(_) => UniqueType::ConditionalBelowHP,
             Self::ConditionalHasNotUsedOtherActions => UniqueType::ConditionalHasNotUsedOtherActions,
             Self::ConditionalStackedWithUnit(_) => UniqueType::ConditionalStackedWithUnit,
+            Self::ConditionalNotStackedWithUnit(_) => UniqueType::ConditionalNotStackedWithUnit,
             Self::ConditionalNeighborTiles(_) => UniqueType::ConditionalNeighborTiles,
             Self::ConditionalInTiles(_) => UniqueType::ConditionalInTiles,
             Self::ConditionalInTilesNot(_) => UniqueType::ConditionalInTilesNot,
             Self::ConditionalNearTiles(_) => UniqueType::ConditionalNearTiles,
+            Self::ConditionalAdjacentTo(_) => UniqueType::ConditionalAdjacentTo,
+            Self::ConditionalNotAdjacentTo(_) => UniqueType::ConditionalNotAdjacentTo,
             Self::ConditionalOnWaterMaps => UniqueType::ConditionalOnWaterMaps,
             Self::ConditionalInRegionOfType(_) => UniqueType::ConditionalInRegionOfType,
             Self::ConditionalInRegionExceptOfType(_) => UniqueType::ConditionalInRegionExceptOfType,
+            Self::ConditionalCountableEqualTo(_) => UniqueType::ConditionalCountableEqualTo,
+            Self::ConditionalCountableDifferentThan(_) => UniqueType::ConditionalCountableDifferentThan,
+            Self::ConditionalCountableMoreThan(_) => UniqueType::ConditionalCountableMoreThan,
             Self::ConditionalCountableLessThan(_) => UniqueType::ConditionalCountableLessThan,
+            Self::ConditionalCountableBetween(_) => UniqueType::ConditionalCountableBetween,
         }
     }
 
@@ -7361,36 +8345,72 @@ impl CondData {
     #[must_use]
     pub fn params(&self) -> Vec<Param> {
         match self {
+            Self::ConditionalEveryTurns(x) => vec![x.turns.into()],
+            Self::ConditionalBeforeTurns(x) => vec![x.turn.into()],
             Self::ConditionalAfterTurns(x) => vec![x.turn.into()],
+            Self::ConditionalSpeed(x) => vec![x.speed.into()],
+            Self::ConditionalDifficulty(x) => vec![x.difficulty.into()],
             Self::ConditionalDifficultyOrHigher(x) => vec![x.difficulty.into()],
+            Self::ConditionalDifficultyOrLower(x) => vec![x.difficulty.into()],
             Self::ConditionalVictoryEnabled(x) => vec![x.victory.into()],
+            Self::ConditionalVictoryDisabled(x) => vec![x.victory.into()],
             Self::ConditionalReligionEnabled => Vec::new(),
             Self::ConditionalReligionDisabled => Vec::new(),
             Self::ConditionalEspionageEnabled => Vec::new(),
+            Self::ConditionalEspionageDisabled => Vec::new(),
             Self::ConditionalNuclearWeaponsEnabled => Vec::new(),
+            Self::ConditionalNuclearWeaponsDisabled => Vec::new(),
             Self::ConditionalChance(x) => vec![x.percent.into()],
+            Self::ConditionalTutorialsEnabled => Vec::new(),
+            Self::ConditionalTutorialCompleted(x) => vec![x.tutorial.into()],
+            Self::ConditionalCivFilter(x) => vec![x.civs.into()],
+            Self::ConditionalWar => Vec::new(),
             Self::ConditionalNotWar => Vec::new(),
             Self::ConditionalGoldenAge => Vec::new(),
+            Self::ConditionalNotGoldenAge => Vec::new(),
             Self::ConditionalHappy => Vec::new(),
+            Self::ConditionalDuringEra(x) => vec![x.era.into()],
             Self::ConditionalBeforeEra(x) => vec![x.era.into()],
             Self::ConditionalStartingFromEra(x) => vec![x.era.into()],
+            Self::ConditionalIfStartingInEra(x) => vec![x.era.into()],
             Self::ConditionalTech(x) => vec![x.techs.into()],
             Self::ConditionalNoTech(x) => vec![x.techs.into()],
+            Self::ConditionalWhileResearching(x) => vec![x.techs.into()],
+            Self::ConditionalNoCivAdopted(x) => vec![x.adopted.into()],
+            Self::ConditionalAfterPolicyOrBelief(x) => vec![x.adopted.into()],
             Self::ConditionalBeforePolicyOrBelief(x) => vec![x.adopted.into()],
             Self::ConditionalBeforePantheon => Vec::new(),
             Self::ConditionalAfterPantheon => Vec::new(),
+            Self::ConditionalBeforeReligion => Vec::new(),
+            Self::ConditionalAfterReligion => Vec::new(),
+            Self::ConditionalBeforeEnhancingReligion => Vec::new(),
+            Self::ConditionalAfterEnhancingReligion => Vec::new(),
             Self::ConditionalAfterGeneratingGreatProphet => Vec::new(),
             Self::ConditionalBuildingBuilt(x) => vec![x.buildings.into()],
+            Self::ConditionalBuildingNotBuilt(x) => vec![x.buildings.into()],
             Self::ConditionalBuildingBuiltAll(x) => vec![x.buildings.into(), x.cities.into()],
+            Self::ConditionalBuildingBuiltAmount(x) => vec![x.buildings.into(), x.count.into(), x.cities.into()],
+            Self::ConditionalBuildingBuiltByAnybody(x) => vec![x.buildings.into()],
+            Self::ConditionalBuildingNotBuiltByAnybody(x) => vec![x.buildings.into()],
+            Self::ConditionalWithResource(x) => vec![x.resource.into()],
+            Self::ConditionalWithoutResource(x) => vec![x.resource.into()],
+            Self::ConditionalWhenAboveAmountStatResource(x) => vec![x.amount.into(), x.what.into()],
             Self::ConditionalWhenBelowAmountStatResource(x) => vec![x.amount.into(), x.what.into()],
             Self::ConditionalWhenBetweenStatResource(x) => vec![x.min.into(), x.max.into(), x.what.into()],
             Self::ConditionalInThisCity => Vec::new(),
             Self::ConditionalCityFilter(x) => vec![x.cities.into()],
+            Self::ConditionalCityConnected => Vec::new(),
+            Self::ConditionalCityWithBuilding(x) => vec![x.buildings.into()],
             Self::ConditionalCityWithoutBuilding(x) => vec![x.buildings.into()],
             Self::ConditionalPopulationFilter(x) => vec![x.count.into(), x.population.into()],
+            Self::ConditionalExactPopulationFilter(x) => vec![x.count.into(), x.population.into()],
+            Self::ConditionalBetweenPopulationFilter(x) => vec![x.min.into(), x.max.into(), x.population.into()],
+            Self::ConditionalBelowPopulationFilter(x) => vec![x.count.into(), x.population.into()],
             Self::ConditionalWhenGarrisoned => Vec::new(),
             Self::ConditionalOurUnit(x) => vec![x.units.into()],
             Self::ConditionalOurUnitOnUnit(x) => vec![x.units.into()],
+            Self::ConditionalUnitWithPromotion(x) => vec![x.promotion.into()],
+            Self::ConditionalUnitWithoutPromotion(x) => vec![x.promotion.into()],
             Self::ConditionalVsCity => Vec::new(),
             Self::ConditionalVsUnits(x) => vec![x.units.into()],
             Self::ConditionalVsCombatant(x) => vec![x.combatants.into()],
@@ -7400,16 +8420,25 @@ impl CondData {
             Self::ConditionalFightingInTiles(x) => vec![x.tiles.into()],
             Self::ConditionalForeignContinent => Vec::new(),
             Self::ConditionalAdjacentUnit(x) => vec![x.units.into()],
+            Self::ConditionalAboveHP(x) => vec![x.hp.into()],
+            Self::ConditionalBelowHP(x) => vec![x.hp.into()],
             Self::ConditionalHasNotUsedOtherActions => Vec::new(),
             Self::ConditionalStackedWithUnit(x) => vec![x.units.into()],
+            Self::ConditionalNotStackedWithUnit(x) => vec![x.units.into()],
             Self::ConditionalNeighborTiles(x) => vec![x.min.into(), x.max.into(), x.tiles.into()],
             Self::ConditionalInTiles(x) => vec![x.tiles.into()],
             Self::ConditionalInTilesNot(x) => vec![x.tiles.into()],
             Self::ConditionalNearTiles(x) => vec![x.radius.into(), x.tiles.into()],
+            Self::ConditionalAdjacentTo(x) => vec![x.tiles.into()],
+            Self::ConditionalNotAdjacentTo(x) => vec![x.tiles.into()],
             Self::ConditionalOnWaterMaps => Vec::new(),
             Self::ConditionalInRegionOfType(x) => vec![x.region.into()],
             Self::ConditionalInRegionExceptOfType(x) => vec![x.region.into()],
+            Self::ConditionalCountableEqualTo(x) => vec![x.count.into(), x.to.into()],
+            Self::ConditionalCountableDifferentThan(x) => vec![x.count.into(), x.than.into()],
+            Self::ConditionalCountableMoreThan(x) => vec![x.count.into(), x.than.into()],
             Self::ConditionalCountableLessThan(x) => vec![x.count.into(), x.than.into()],
+            Self::ConditionalCountableBetween(x) => vec![x.count.into(), x.min.into(), x.max.into()],
         }
     }
 
@@ -7419,36 +8448,72 @@ impl CondData {
     /// A parameter that does not compile, or a type whose role is not this enum's.
     pub(crate) fn build(ty: UniqueType, cx: &mut ParamCx<'_, '_>) -> Result<Self, ParamError> {
         Ok(match ty {
+            UniqueType::ConditionalEveryTurns => Self::ConditionalEveryTurns(p::ConditionalEveryTurns { turns: cx.get(0, ParamKind::PositiveAmount)? }),
+            UniqueType::ConditionalBeforeTurns => Self::ConditionalBeforeTurns(p::ConditionalBeforeTurns { turn: cx.get(0, ParamKind::NonNegativeAmount)? }),
             UniqueType::ConditionalAfterTurns => Self::ConditionalAfterTurns(p::ConditionalAfterTurns { turn: cx.get(0, ParamKind::NonNegativeAmount)? }),
+            UniqueType::ConditionalSpeed => Self::ConditionalSpeed(p::ConditionalSpeed { speed: cx.get(0, ParamKind::Speed)? }),
+            UniqueType::ConditionalDifficulty => Self::ConditionalDifficulty(p::ConditionalDifficulty { difficulty: cx.get(0, ParamKind::Difficulty)? }),
             UniqueType::ConditionalDifficultyOrHigher => Self::ConditionalDifficultyOrHigher(p::ConditionalDifficultyOrHigher { difficulty: cx.get(0, ParamKind::Difficulty)? }),
+            UniqueType::ConditionalDifficultyOrLower => Self::ConditionalDifficultyOrLower(p::ConditionalDifficultyOrLower { difficulty: cx.get(0, ParamKind::Difficulty)? }),
             UniqueType::ConditionalVictoryEnabled => Self::ConditionalVictoryEnabled(p::ConditionalVictoryEnabled { victory: cx.get(0, ParamKind::VictoryType)? }),
+            UniqueType::ConditionalVictoryDisabled => Self::ConditionalVictoryDisabled(p::ConditionalVictoryDisabled { victory: cx.get(0, ParamKind::VictoryType)? }),
             UniqueType::ConditionalReligionEnabled => Self::ConditionalReligionEnabled,
             UniqueType::ConditionalReligionDisabled => Self::ConditionalReligionDisabled,
             UniqueType::ConditionalEspionageEnabled => Self::ConditionalEspionageEnabled,
+            UniqueType::ConditionalEspionageDisabled => Self::ConditionalEspionageDisabled,
             UniqueType::ConditionalNuclearWeaponsEnabled => Self::ConditionalNuclearWeaponsEnabled,
+            UniqueType::ConditionalNuclearWeaponsDisabled => Self::ConditionalNuclearWeaponsDisabled,
             UniqueType::ConditionalChance => Self::ConditionalChance(p::ConditionalChance { percent: cx.get(0, ParamKind::NonNegativeAmount)? }),
+            UniqueType::ConditionalTutorialsEnabled => Self::ConditionalTutorialsEnabled,
+            UniqueType::ConditionalTutorialCompleted => Self::ConditionalTutorialCompleted(p::ConditionalTutorialCompleted { tutorial: cx.get(0, ParamKind::Comment)? }),
+            UniqueType::ConditionalCivFilter => Self::ConditionalCivFilter(p::ConditionalCivFilter { civs: cx.get(0, ParamKind::CivFilter)? }),
+            UniqueType::ConditionalWar => Self::ConditionalWar,
             UniqueType::ConditionalNotWar => Self::ConditionalNotWar,
             UniqueType::ConditionalGoldenAge => Self::ConditionalGoldenAge,
+            UniqueType::ConditionalNotGoldenAge => Self::ConditionalNotGoldenAge,
             UniqueType::ConditionalHappy => Self::ConditionalHappy,
+            UniqueType::ConditionalDuringEra => Self::ConditionalDuringEra(p::ConditionalDuringEra { era: cx.get(0, ParamKind::Era)? }),
             UniqueType::ConditionalBeforeEra => Self::ConditionalBeforeEra(p::ConditionalBeforeEra { era: cx.get(0, ParamKind::Era)? }),
             UniqueType::ConditionalStartingFromEra => Self::ConditionalStartingFromEra(p::ConditionalStartingFromEra { era: cx.get(0, ParamKind::Era)? }),
+            UniqueType::ConditionalIfStartingInEra => Self::ConditionalIfStartingInEra(p::ConditionalIfStartingInEra { era: cx.get(0, ParamKind::Era)? }),
             UniqueType::ConditionalTech => Self::ConditionalTech(p::ConditionalTech { techs: cx.get(0, ParamKind::TechFilter)? }),
             UniqueType::ConditionalNoTech => Self::ConditionalNoTech(p::ConditionalNoTech { techs: cx.get(0, ParamKind::TechFilter)? }),
+            UniqueType::ConditionalWhileResearching => Self::ConditionalWhileResearching(p::ConditionalWhileResearching { techs: cx.get(0, ParamKind::TechFilter)? }),
+            UniqueType::ConditionalNoCivAdopted => Self::ConditionalNoCivAdopted(p::ConditionalNoCivAdopted { adopted: cx.get(0, ParamKind::PolicyOrBelief)? }),
+            UniqueType::ConditionalAfterPolicyOrBelief => Self::ConditionalAfterPolicyOrBelief(p::ConditionalAfterPolicyOrBelief { adopted: cx.get(0, ParamKind::PolicyOrBelief)? }),
             UniqueType::ConditionalBeforePolicyOrBelief => Self::ConditionalBeforePolicyOrBelief(p::ConditionalBeforePolicyOrBelief { adopted: cx.get(0, ParamKind::PolicyOrBelief)? }),
             UniqueType::ConditionalBeforePantheon => Self::ConditionalBeforePantheon,
             UniqueType::ConditionalAfterPantheon => Self::ConditionalAfterPantheon,
+            UniqueType::ConditionalBeforeReligion => Self::ConditionalBeforeReligion,
+            UniqueType::ConditionalAfterReligion => Self::ConditionalAfterReligion,
+            UniqueType::ConditionalBeforeEnhancingReligion => Self::ConditionalBeforeEnhancingReligion,
+            UniqueType::ConditionalAfterEnhancingReligion => Self::ConditionalAfterEnhancingReligion,
             UniqueType::ConditionalAfterGeneratingGreatProphet => Self::ConditionalAfterGeneratingGreatProphet,
             UniqueType::ConditionalBuildingBuilt => Self::ConditionalBuildingBuilt(p::ConditionalBuildingBuilt { buildings: cx.get(0, ParamKind::BuildingFilter)? }),
+            UniqueType::ConditionalBuildingNotBuilt => Self::ConditionalBuildingNotBuilt(p::ConditionalBuildingNotBuilt { buildings: cx.get(0, ParamKind::BuildingFilter)? }),
             UniqueType::ConditionalBuildingBuiltAll => Self::ConditionalBuildingBuiltAll(p::ConditionalBuildingBuiltAll { buildings: cx.get(0, ParamKind::BuildingFilter)?, cities: cx.get(1, ParamKind::CityFilter)? }),
+            UniqueType::ConditionalBuildingBuiltAmount => Self::ConditionalBuildingBuiltAmount(p::ConditionalBuildingBuiltAmount { buildings: cx.get(0, ParamKind::BuildingFilter)?, count: cx.get(1, ParamKind::PositiveAmount)?, cities: cx.get(2, ParamKind::CityFilter)? }),
+            UniqueType::ConditionalBuildingBuiltByAnybody => Self::ConditionalBuildingBuiltByAnybody(p::ConditionalBuildingBuiltByAnybody { buildings: cx.get(0, ParamKind::BuildingFilter)? }),
+            UniqueType::ConditionalBuildingNotBuiltByAnybody => Self::ConditionalBuildingNotBuiltByAnybody(p::ConditionalBuildingNotBuiltByAnybody { buildings: cx.get(0, ParamKind::BuildingFilter)? }),
+            UniqueType::ConditionalWithResource => Self::ConditionalWithResource(p::ConditionalWithResource { resource: cx.get(0, ParamKind::Resource)? }),
+            UniqueType::ConditionalWithoutResource => Self::ConditionalWithoutResource(p::ConditionalWithoutResource { resource: cx.get(0, ParamKind::Resource)? }),
+            UniqueType::ConditionalWhenAboveAmountStatResource => Self::ConditionalWhenAboveAmountStatResource(p::ConditionalWhenAboveAmountStatResource { amount: cx.get(0, ParamKind::Amount)?, what: cx.get(1, ParamKind::StatOrResource)? }),
             UniqueType::ConditionalWhenBelowAmountStatResource => Self::ConditionalWhenBelowAmountStatResource(p::ConditionalWhenBelowAmountStatResource { amount: cx.get(0, ParamKind::Amount)?, what: cx.get(1, ParamKind::StatOrResource)? }),
             UniqueType::ConditionalWhenBetweenStatResource => Self::ConditionalWhenBetweenStatResource(p::ConditionalWhenBetweenStatResource { min: cx.get(0, ParamKind::Amount)?, max: cx.get(1, ParamKind::Amount)?, what: cx.get(2, ParamKind::StatOrResource)? }),
             UniqueType::ConditionalInThisCity => Self::ConditionalInThisCity,
             UniqueType::ConditionalCityFilter => Self::ConditionalCityFilter(p::ConditionalCityFilter { cities: cx.get(0, ParamKind::CityFilter)? }),
+            UniqueType::ConditionalCityConnected => Self::ConditionalCityConnected,
+            UniqueType::ConditionalCityWithBuilding => Self::ConditionalCityWithBuilding(p::ConditionalCityWithBuilding { buildings: cx.get(0, ParamKind::BuildingFilter)? }),
             UniqueType::ConditionalCityWithoutBuilding => Self::ConditionalCityWithoutBuilding(p::ConditionalCityWithoutBuilding { buildings: cx.get(0, ParamKind::BuildingFilter)? }),
             UniqueType::ConditionalPopulationFilter => Self::ConditionalPopulationFilter(p::ConditionalPopulationFilter { count: cx.get(0, ParamKind::PositiveAmount)?, population: cx.get(1, ParamKind::PopulationFilter)? }),
+            UniqueType::ConditionalExactPopulationFilter => Self::ConditionalExactPopulationFilter(p::ConditionalExactPopulationFilter { count: cx.get(0, ParamKind::NonNegativeAmount)?, population: cx.get(1, ParamKind::PopulationFilter)? }),
+            UniqueType::ConditionalBetweenPopulationFilter => Self::ConditionalBetweenPopulationFilter(p::ConditionalBetweenPopulationFilter { min: cx.get(0, ParamKind::Amount)?, max: cx.get(1, ParamKind::Amount)?, population: cx.get(2, ParamKind::PopulationFilter)? }),
+            UniqueType::ConditionalBelowPopulationFilter => Self::ConditionalBelowPopulationFilter(p::ConditionalBelowPopulationFilter { count: cx.get(0, ParamKind::Amount)?, population: cx.get(1, ParamKind::PopulationFilter)? }),
             UniqueType::ConditionalWhenGarrisoned => Self::ConditionalWhenGarrisoned,
             UniqueType::ConditionalOurUnit => Self::ConditionalOurUnit(p::ConditionalOurUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
             UniqueType::ConditionalOurUnitOnUnit => Self::ConditionalOurUnitOnUnit(p::ConditionalOurUnitOnUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
+            UniqueType::ConditionalUnitWithPromotion => Self::ConditionalUnitWithPromotion(p::ConditionalUnitWithPromotion { promotion: cx.get(0, ParamKind::Promotion)? }),
+            UniqueType::ConditionalUnitWithoutPromotion => Self::ConditionalUnitWithoutPromotion(p::ConditionalUnitWithoutPromotion { promotion: cx.get(0, ParamKind::Promotion)? }),
             UniqueType::ConditionalVsCity => Self::ConditionalVsCity,
             UniqueType::ConditionalVsUnits => Self::ConditionalVsUnits(p::ConditionalVsUnits { units: cx.get(0, ParamKind::MapUnitFilter)? }),
             UniqueType::ConditionalVsCombatant => Self::ConditionalVsCombatant(p::ConditionalVsCombatant { combatants: cx.get(0, ParamKind::CombatantFilter)? }),
@@ -7458,16 +8523,25 @@ impl CondData {
             UniqueType::ConditionalFightingInTiles => Self::ConditionalFightingInTiles(p::ConditionalFightingInTiles { tiles: cx.get(0, ParamKind::TileFilter)? }),
             UniqueType::ConditionalForeignContinent => Self::ConditionalForeignContinent,
             UniqueType::ConditionalAdjacentUnit => Self::ConditionalAdjacentUnit(p::ConditionalAdjacentUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
+            UniqueType::ConditionalAboveHP => Self::ConditionalAboveHP(p::ConditionalAboveHP { hp: cx.get(0, ParamKind::PositiveAmount)? }),
+            UniqueType::ConditionalBelowHP => Self::ConditionalBelowHP(p::ConditionalBelowHP { hp: cx.get(0, ParamKind::PositiveAmount)? }),
             UniqueType::ConditionalHasNotUsedOtherActions => Self::ConditionalHasNotUsedOtherActions,
             UniqueType::ConditionalStackedWithUnit => Self::ConditionalStackedWithUnit(p::ConditionalStackedWithUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
+            UniqueType::ConditionalNotStackedWithUnit => Self::ConditionalNotStackedWithUnit(p::ConditionalNotStackedWithUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
             UniqueType::ConditionalNeighborTiles => Self::ConditionalNeighborTiles(p::ConditionalNeighborTiles { min: cx.get(0, ParamKind::NonNegativeAmount)?, max: cx.get(1, ParamKind::NonNegativeAmount)?, tiles: cx.get(2, ParamKind::TileFilter)? }),
             UniqueType::ConditionalInTiles => Self::ConditionalInTiles(p::ConditionalInTiles { tiles: cx.get(0, ParamKind::TileFilter)? }),
             UniqueType::ConditionalInTilesNot => Self::ConditionalInTilesNot(p::ConditionalInTilesNot { tiles: cx.get(0, ParamKind::TileFilter)? }),
             UniqueType::ConditionalNearTiles => Self::ConditionalNearTiles(p::ConditionalNearTiles { radius: cx.get(0, ParamKind::PositiveAmount)?, tiles: cx.get(1, ParamKind::TileFilter)? }),
+            UniqueType::ConditionalAdjacentTo => Self::ConditionalAdjacentTo(p::ConditionalAdjacentTo { tiles: cx.get(0, ParamKind::TileFilter)? }),
+            UniqueType::ConditionalNotAdjacentTo => Self::ConditionalNotAdjacentTo(p::ConditionalNotAdjacentTo { tiles: cx.get(0, ParamKind::TileFilter)? }),
             UniqueType::ConditionalOnWaterMaps => Self::ConditionalOnWaterMaps,
             UniqueType::ConditionalInRegionOfType => Self::ConditionalInRegionOfType(p::ConditionalInRegionOfType { region: cx.get(0, ParamKind::RegionType)? }),
             UniqueType::ConditionalInRegionExceptOfType => Self::ConditionalInRegionExceptOfType(p::ConditionalInRegionExceptOfType { region: cx.get(0, ParamKind::RegionType)? }),
+            UniqueType::ConditionalCountableEqualTo => Self::ConditionalCountableEqualTo(p::ConditionalCountableEqualTo { count: cx.get(0, ParamKind::Countable)?, to: cx.get(1, ParamKind::Countable)? }),
+            UniqueType::ConditionalCountableDifferentThan => Self::ConditionalCountableDifferentThan(p::ConditionalCountableDifferentThan { count: cx.get(0, ParamKind::Countable)?, than: cx.get(1, ParamKind::Countable)? }),
+            UniqueType::ConditionalCountableMoreThan => Self::ConditionalCountableMoreThan(p::ConditionalCountableMoreThan { count: cx.get(0, ParamKind::Countable)?, than: cx.get(1, ParamKind::Countable)? }),
             UniqueType::ConditionalCountableLessThan => Self::ConditionalCountableLessThan(p::ConditionalCountableLessThan { count: cx.get(0, ParamKind::Countable)?, than: cx.get(1, ParamKind::Countable)? }),
+            UniqueType::ConditionalCountableBetween => Self::ConditionalCountableBetween(p::ConditionalCountableBetween { count: cx.get(0, ParamKind::Countable)?, min: cx.get(1, ParamKind::Countable)?, max: cx.get(2, ParamKind::Countable)? }),
             _ => return Err(ParamError::role(ty, "CondData")),
         })
     }
@@ -7522,6 +8596,8 @@ pub enum TriggerCond {
     TriggerUponDefeatingUnit(p::TriggerUponDefeatingUnit),
     /// `upon expending a [mapUnitFilter] unit`
     TriggerUponExpendingUnit(p::TriggerUponExpendingUnit),
+    /// `upon being defeated`
+    TriggerUponDefeat,
     /// `upon being promoted`
     TriggerUponPromotion,
 }
@@ -7554,6 +8630,7 @@ impl TriggerCond {
             Self::TriggerUponEnhancingReligion => UniqueType::TriggerUponEnhancingReligion,
             Self::TriggerUponDefeatingUnit(_) => UniqueType::TriggerUponDefeatingUnit,
             Self::TriggerUponExpendingUnit(_) => UniqueType::TriggerUponExpendingUnit,
+            Self::TriggerUponDefeat => UniqueType::TriggerUponDefeat,
             Self::TriggerUponPromotion => UniqueType::TriggerUponPromotion,
         }
     }
@@ -7585,6 +8662,7 @@ impl TriggerCond {
             Self::TriggerUponEnhancingReligion => Vec::new(),
             Self::TriggerUponDefeatingUnit(x) => vec![x.units.into()],
             Self::TriggerUponExpendingUnit(x) => vec![x.units.into()],
+            Self::TriggerUponDefeat => Vec::new(),
             Self::TriggerUponPromotion => Vec::new(),
         }
     }
@@ -7618,6 +8696,7 @@ impl TriggerCond {
             UniqueType::TriggerUponEnhancingReligion => Self::TriggerUponEnhancingReligion,
             UniqueType::TriggerUponDefeatingUnit => Self::TriggerUponDefeatingUnit(p::TriggerUponDefeatingUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
             UniqueType::TriggerUponExpendingUnit => Self::TriggerUponExpendingUnit(p::TriggerUponExpendingUnit { units: cx.get(0, ParamKind::MapUnitFilter)? }),
+            UniqueType::TriggerUponDefeat => Self::TriggerUponDefeat,
             UniqueType::TriggerUponPromotion => Self::TriggerUponPromotion,
             _ => return Err(ParamError::role(ty, "TriggerCond")),
         })
@@ -7641,8 +8720,14 @@ pub enum ModifierData {
     UnitActionAfterWhichConsumed,
     /// `for [nonNegativeAmount] turns`
     ConditionalTimedUnique(p::ConditionalTimedUnique),
+    /// `hidden from users`
+    ModifierHiddenFromUsers,
     /// `(modified by game speed)`
     ModifiedByGameSpeed,
+    /// `Civilopedia link [pediaLink]`
+    CivilopediaLink(p::CivilopediaLink),
+    /// `Suppress warning [validationWarning]`
+    SuppressWarnings(p::SuppressWarnings),
 }
 
 impl ModifierData {
@@ -7657,7 +8742,10 @@ impl ModifierData {
             Self::UnitActionExtraLimitedTimes(_) => UniqueType::UnitActionExtraLimitedTimes,
             Self::UnitActionAfterWhichConsumed => UniqueType::UnitActionAfterWhichConsumed,
             Self::ConditionalTimedUnique(_) => UniqueType::ConditionalTimedUnique,
+            Self::ModifierHiddenFromUsers => UniqueType::ModifierHiddenFromUsers,
             Self::ModifiedByGameSpeed => UniqueType::ModifiedByGameSpeed,
+            Self::CivilopediaLink(_) => UniqueType::CivilopediaLink,
+            Self::SuppressWarnings(_) => UniqueType::SuppressWarnings,
         }
     }
 
@@ -7672,7 +8760,10 @@ impl ModifierData {
             Self::UnitActionExtraLimitedTimes(x) => vec![x.times.into()],
             Self::UnitActionAfterWhichConsumed => Vec::new(),
             Self::ConditionalTimedUnique(x) => vec![x.turns.into()],
+            Self::ModifierHiddenFromUsers => Vec::new(),
             Self::ModifiedByGameSpeed => Vec::new(),
+            Self::CivilopediaLink(x) => vec![x.link.into()],
+            Self::SuppressWarnings(x) => vec![x.warning.into()],
         }
     }
 
@@ -7689,7 +8780,10 @@ impl ModifierData {
             UniqueType::UnitActionExtraLimitedTimes => Self::UnitActionExtraLimitedTimes(p::UnitActionExtraLimitedTimes { times: cx.get(0, ParamKind::NonNegativeAmount)? }),
             UniqueType::UnitActionAfterWhichConsumed => Self::UnitActionAfterWhichConsumed,
             UniqueType::ConditionalTimedUnique => Self::ConditionalTimedUnique(p::ConditionalTimedUnique { turns: cx.get(0, ParamKind::NonNegativeAmount)? }),
+            UniqueType::ModifierHiddenFromUsers => Self::ModifierHiddenFromUsers,
             UniqueType::ModifiedByGameSpeed => Self::ModifiedByGameSpeed,
+            UniqueType::CivilopediaLink => Self::CivilopediaLink(p::CivilopediaLink { link: cx.get(0, ParamKind::PediaLink)? }),
+            UniqueType::SuppressWarnings => Self::SuppressWarnings(p::SuppressWarnings { warning: cx.get(0, ParamKind::ValidationWarning)? }),
             _ => return Err(ParamError::role(ty, "ModifierData")),
         })
     }

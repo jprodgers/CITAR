@@ -1,10 +1,14 @@
-# The unique types the engine supports: every type the shipped ruleset uses, plus every trigger the
-# engine fires (crates/citar-engine/DESIGN.md 5.4). `cargo xtask gen-uniques` reads this file with
-# unique_types.tsv and writes src/unique/gen.rs, and `cargo xtask check` fails while gen.rs is stale.
+# The unique types the engine supports: every type the Python engine handled, which is every type
+# the shipped ruleset uses and more (crates/citar-engine/DESIGN.md 5.4, "support scope").
+# `cargo xtask gen-uniques` reads this file with unique_types.tsv and writes src/unique/gen.rs, and
+# `cargo xtask check` fails while gen.rs is stale.
+#
+# `# (extra)` marks the 125 types the shipped ruleset does not use. The kitchen-sink test ruleset
+# (crates/citar-testkit/testdata/rulesets/kitchen_sink/) uses each of them, and a test holds the two
+# rulesets together to every type listed here, so a test can reach any of them.
 #
 # A ruleset unique of a type not listed here does not load: the error names the type and says to
-# add it here, then an arm where its stages read it, then a test. Python supported more types than
-# the ruleset uses (DESIGN.md 5.4, "support scope").
+# add it here, then an arm where its stages read it, then a test.
 #
 # One entry per type, keyed by its name in unique_types.tsv:
 #
@@ -21,7 +25,8 @@
 #              cond         a conditional modifier: <when attacking>
 #              trigger      says when a one-time effect fires: <upon discovering [Writing] technology>
 #              action_mod   limits a unit action: <by consuming this unit>, <[2] times>
-#              meta         changes the unique itself: <(modified by game speed)>, <for [10] turns>
+#              meta         changes the unique itself: <(modified by game speed)>, <for [10] turns>;
+#                           or only how it is shown, which the engine ignores: <hidden from users>
 #   fields   One name per parameter, in order: the payload's field names. `name:kind` overrides
 #            the kind unique_types.tsv gives; the one override is `amount16`, an amount stored in
 #            16 bits so that a payload stays within 12 bytes (DESIGN.md 5.5).
@@ -39,9 +44,11 @@
 
 [types]
 
-# ---- Effects: standing modifiers, read through the unique indexes (164).
+# ---- Effects: standing modifiers, read through the unique indexes (192).
 AdditionalAttacks = { role = "effect", fields = ["count"], stages = ["units"] }
+AirInterceptionRange = { role = "effect", fields = ["range"], stages = ["combat"] }  # (extra)
 AllStatsPercentFromObject = { role = "effect", fields = ["percent", "object"], stages = ["cities", "tiles"] }
+BaseUnitSupply = { role = "effect", fields = ["supply"], stages = ["economy"] }  # (extra)
 BetterDefensiveBuildings = { role = "effect", fields = ["percent"], stages = ["combat"] }
 BlastRadius = { role = "effect", fields = ["radius"], stages = ["combat"] }
 BonusHappinessFromLuxury = { role = "effect", fields = ["happiness"], stages = ["economy"] }
@@ -49,18 +56,26 @@ BonusStatsFromCityStates = { role = "effect", fields = ["percent", "stat"], stag
 BorderGrowthPercentage = { role = "effect", fields = ["percent", "cities"], stages = ["cities"] }
 BuildImprovements = { role = "effect", fields = ["object"], stages = ["ai", "api", "workers"] }
 BuildingMaintenance = { role = "effect", fields = ["percent", "buildings", "cities"], stages = ["cities"] }
+BuyBuildingsByProductionCost = { role = "effect", fields = ["buildings", "stat", "times"], stages = ["cities"] }  # (extra)
+BuyBuildingsDiscount = { role = "effect", fields = ["stat", "buildings", "percent"], stages = ["cities"] }  # (extra)
 BuyBuildingsForAmountStat = { role = "effect", fields = ["buildings", "cost", "stat", "cities"], stages = ["cities"] }
+BuyBuildingsIncreasingCost = { role = "effect", fields = ["buildings", "cost", "stat", "cities", "increase:amount16"], stages = ["cities"] }  # (extra)
 BuyBuildingsWithStat = { role = "effect", fields = ["buildings", "stat", "cities"], stages = ["cities"] }
 BuyItemsDiscount = { role = "effect", fields = ["stat", "percent"], stages = ["cities"] }
 BuyUnitsByProductionCost = { role = "effect", fields = ["units", "stat", "times"], stages = ["cities"] }
 BuyUnitsDiscount = { role = "effect", fields = ["stat", "units", "percent"], stages = ["cities"] }
+BuyUnitsForAmountStat = { role = "effect", fields = ["units", "cost", "stat", "cities"], stages = ["cities"] }  # (extra)
 BuyUnitsIncreasingCost = { role = "effect", fields = ["units", "cost", "stat", "cities", "increase:amount16"], stages = ["cities"] }
+BuyUnitsWithStat = { role = "effect", fields = ["units", "stat", "cities"], stages = ["cities"] }  # (extra)
+CanBePurchasedForAmountStat = { role = "effect", fields = ["cost", "stat", "cities"], stages = ["cities"] }  # (extra)
 CanBePurchasedWithStat = { role = "effect", fields = ["stat", "cities"], stages = ["cities"] }
 CanEnterForeignTilesButLosesReligiousStrength = { role = "effect", fields = ["loss"], stages = ["movement", "units"] }
 CanOnlyAttackTiles = { role = "effect", fields = ["tiles"], stages = ["combat"] }
 CanOnlyAttackUnits = { role = "effect", fields = ["combatants"], stages = ["combat"] }
 CanSeeInvisibleUnits = { role = "effect", fields = ["units"], stages = ["vis"] }
+CanUpgrade = { role = "effect", fields = ["unit"], stages = ["units"] }  # (extra)
 CannotBeCarriedBy = { role = "effect", fields = ["units"], stages = ["movement"] }
+CannotBuildBuildings = { role = "effect", fields = ["buildings"], stages = ["cities"] }  # (extra)
 CannotBuildUnits = { role = "effect", fields = ["units"], stages = ["cities"] }
 CaptureCityPlunder = { role = "effect", fields = ["times", "stat", "into"], stages = ["conquest"] }
 CarryAirUnits = { role = "effect", fields = ["count", "units"], stages = ["movement"] }
@@ -81,6 +96,9 @@ CityStateRestingPoint = { role = "effect", fields = ["influence"], stages = ["ci
 CityStateStatPercent = { role = "effect", fields = ["stat", "percent"], stages = ["economy"] }
 ConsumesResources = { role = "effect", fields = ["amount", "resource"], stages = ["cities", "economy", "workers"] }
 CostIncreasesPerCity = { role = "effect", fields = ["cost"], stages = ["cities"] }
+CostIncreasesWhenBuilt = { role = "effect", fields = ["cost"], stages = ["cities"] }  # (extra)
+CostPercentageChange = { role = "effect", fields = ["percent"], stages = ["cities"] }  # (extra)
+CounterIntelligenceSpyRankBonus = { role = "effect", fields = ["cities", "levels", "action"], stages = ["espionage"] }  # (extra)
 DamageFromInterceptionReduced = { role = "effect", fields = ["percent"], stages = ["combat"] }
 DamageUnitsPlunder = { role = "effect", fields = ["percent", "combatants", "into"], stages = ["combat"] }
 DamageWhenIntercepting = { role = "effect", fields = ["percent"], stages = ["combat"] }
@@ -98,7 +116,9 @@ ExtraInterceptionsPerTurn = { role = "effect", fields = ["count"], stages = ["co
 FaithCostOfGreatProphetChange = { role = "effect", fields = ["percent"], stages = ["religion"] }
 FlankAttackBonus = { role = "effect", fields = ["percent"], stages = ["combat"] }
 FoodConsumptionByPopulation = { role = "effect", fields = ["percent", "population", "cities"], stages = ["cities"] }
+FoodConsumptionBySpecialists = { role = "effect", fields = ["percent", "cities"], stages = ["cities"] }  # (extra)
 FreeExtraAnyBeliefs = { role = "effect", fields = ["count", "when"], stages = ["religion"] }
+FreeExtraBeliefs = { role = "effect", fields = ["count", "belief", "when"], stages = ["religion"] }  # (extra)
 FreeSpecificBuildings = { role = "effect", fields = ["building", "cities"], gain = true, stages = ["cities", "triggers"] }
 FreeStatBuildings = { role = "effect", fields = ["stat", "cities"], gain = true, stages = ["cities", "triggers"] }
 FreeUnits = { role = "effect", fields = ["count"], stages = ["economy"] }
@@ -122,6 +142,7 @@ Heal = { role = "effect", fields = ["hp"], stages = ["units"] }
 HealAdjacentUnits = { role = "effect", fields = ["hp"], stages = ["units"] }
 HealsAfterKilling = { role = "effect", fields = ["hp"], stages = ["combat"] }
 ImprovementAllMaintenance = { role = "effect", fields = ["amount", "stat"], stages = ["economy"] }
+ImprovementMaintenance = { role = "effect", fields = ["amount", "stat"], stages = ["economy"] }  # (extra)
 ImprovementStatsForAdjacencies = { role = "effect", fields = ["stats", "tiles"], stages = ["tiles"] }
 ImprovementStatsOnTile = { role = "effect", fields = ["stats", "tiles"], stages = ["tiles"] }
 ImprovementTimeIncrease = { role = "effect", fields = ["improvements", "percent"], stages = ["workers"] }
@@ -131,6 +152,8 @@ KillUnitPlunderNearCity = { role = "effect", fields = ["percent", "units", "of",
 LandUnitsCrossTerrainAfterUnitGained = { role = "effect", fields = ["terrain", "units"], stages = ["movement"] }
 LessPolicyCost = { role = "effect", fields = ["percent"], stages = ["policies"] }
 LessPolicyCostFromCities = { role = "effect", fields = ["percent"], stages = ["policies"] }
+LessTechCost = { role = "effect", fields = ["percent"], stages = ["research"] }  # (extra)
+LessTechCostFromCities = { role = "effect", fields = ["percent"], stages = ["research"] }  # (extra)
 MaxNumberBuildable = { role = "effect", fields = ["limit"], stages = ["cities", "conquest", "triggers"] }
 MayanGainGreatPerson = { role = "effect", fields = ["cycle", "tech"], stages = ["great_people"] }
 Movement = { role = "effect", fields = ["movement"], stages = ["units"] }
@@ -141,18 +164,22 @@ NuclearWeapon = { role = "effect", fields = ["strength"], stages = ["ai", "api",
 NullifiesGrowth = { role = "effect", fields = ["cities"], stages = ["cities"] }
 OtherCivsCityStateRelationsDegradeFaster = { role = "effect", fields = ["percent"], stages = ["city_states"] }
 PercentGoldFromTradeMissions = { role = "effect", fields = ["percent"], stages = ["great_people"] }
+PercentHealthFromPillaging = { role = "effect", fields = ["percent"], stages = ["workers"] }  # (extra)
 PercentProductionBuildings = { role = "effect", fields = ["percent", "buildings", "cities"], stages = ["cities"] }
 PercentProductionBuildingsInCapital = { role = "effect", fields = ["percent"], stages = ["cities"] }
 PercentProductionUnits = { role = "effect", fields = ["percent", "units", "cities"], stages = ["cities"] }
 PercentProductionWonders = { role = "effect", fields = ["percent", "buildings", "cities"], stages = ["cities"] }
 PercentResourceProduction = { role = "effect", fields = ["percent", "resources"], stages = ["economy"] }
+PercentYieldFromPillaging = { role = "effect", fields = ["percent"], stages = ["workers"] }  # (extra)
 PercentageXPGain = { role = "effect", fields = ["percent"], stages = ["units"] }
+PillageYieldFixed = { role = "effect", fields = ["stats"], stages = ["workers"] }  # (extra)
 PillageYieldRandom = { role = "effect", fields = ["stats"], stages = ["workers"] }
 PopulationLossFromNukes = { role = "effect", fields = ["percent", "cities"], stages = ["combat"] }
 ProductionBonusWhenRemoved = { role = "effect", fields = ["stats"], stages = ["workers"] }
 ProvidesResources = { role = "effect", fields = ["amount", "resource"], stages = ["economy"] }
 Range = { role = "effect", fields = ["range"], stages = ["units"] }
 ReducedDisembarkCost = { role = "effect", fields = ["movement"], stages = ["movement"] }
+ReducedEmbarkCost = { role = "effect", fields = ["movement"], stages = ["movement"] }  # (extra)
 ReligionSpreadDistance = { role = "effect", fields = ["distance"], stages = ["religion"] }
 RestingPointOfCityStatesFollowingReligionChange = { role = "effect", fields = ["influence"], stages = ["city_states"] }
 RestrictedBuildableImprovements = { role = "effect", fields = ["improvements"], stages = ["barbarians", "workers"] }
@@ -161,7 +188,9 @@ RoadMaintenance = { role = "effect", fields = ["percent"], stages = ["economy"] 
 RuinsUpgrade = { role = "effect", fields = ["unit"], stages = ["units"] }
 ScienceFromResearchAgreements = { role = "effect", fields = ["percent"], stages = ["research"] }
 Sight = { role = "effect", fields = ["sight"], stages = ["units"] }
+SpecificImprovementTime = { role = "effect", fields = ["percent", "improvements"], stages = ["workers"] }  # (extra)
 SpreadReligionStrength = { role = "effect", fields = ["percent"], stages = ["religion"] }
+SpyEffectiveness = { role = "effect", fields = ["percent", "cities"], stages = ["espionage"] }  # (extra)
 SpyStartingLevel = { role = "effect", fields = ["levels"], stages = ["espionage"] }
 StartsWithTech = { role = "effect", fields = ["tech"], stages = ["setup"] }
 StatBonusWhenDiscoveringNaturalWonder = { role = "effect", fields = ["stats", "first"], stages = ["vis"] }
@@ -187,6 +216,7 @@ StatsPerPopulation = { role = "effect", fields = ["stats", "per", "cities"], sta
 StatsWhenAdoptingReligion = { role = "effect", fields = ["stats"], stages = ["religion"] }
 StatsWhenSpreading = { role = "effect", fields = ["percent", "stat"], stages = ["religion"] }
 Strength = { role = "effect", fields = ["percent"], stages = ["barbarians", "combat", "unique"] }
+StrengthAmount = { role = "effect", fields = ["strength"], stages = ["combat"] }  # (extra)
 StrengthBonusInRadius = { role = "effect", fields = ["percent", "units", "radius"], stages = ["combat"] }
 StrengthForAdjacentEnemies = { role = "effect", fields = ["percent", "units", "tiles"], stages = ["combat"] }
 StrengthForCities = { role = "effect", fields = ["percent"], stages = ["combat"] }
@@ -200,15 +230,19 @@ UnhappinessFromPopulationTypePercentageChange = { role = "effect", fields = ["pe
 UnitMaintenanceDiscount = { role = "effect", fields = ["percent"], stages = ["economy"] }
 UnitStartingExperience = { role = "effect", fields = ["units", "xp", "cities"], stages = ["units"] }
 UnitStartingPromotions = { role = "effect", fields = ["units", "cities", "promotion"], stages = ["units"] }
+UnitSupplyPerCity = { role = "effect", fields = ["supply"], stages = ["economy"] }  # (extra)
+UnitSupplyPerPop = { role = "effect", fields = ["supply", "per", "cities"], stages = ["economy"] }  # (extra)
 UnitUpgradeCost = { role = "effect", fields = ["percent"], stages = ["units"] }
 UnitsGainPromotion = { role = "effect", fields = ["units", "promotion"], gain = true, stages = ["triggers", "units"] }
 UnitsMayEnterOcean = { role = "effect", fields = ["units"], stages = ["movement"] }
 VisibilityElevation = { role = "effect", fields = ["elevation"], stages = ["vis"] }
+XPForPromotionModifier = { role = "effect", fields = ["percent"], stages = ["units"] }  # (extra)
 
-# ---- Flags: a standing yes or no, by presence (92).
+# ---- Flags: a standing yes or no, by presence (103).
 AllTilesCost1Move = { role = "flag", stages = ["movement"] }
 AttackAcrossCoast = { role = "flag", stages = ["combat"] }
 AttackAcrossRiver = { role = "flag", stages = ["combat"] }
+AttackOnSea = { role = "flag", stages = ["combat"] }  # (extra)
 BlocksLineOfSightAtSameElevation = { role = "flag", stages = ["vis"] }
 BorrowsCityNames = { role = "flag", stages = ["cities"] }
 CanAirsweep = { role = "flag", stages = ["combat"] }
@@ -218,6 +252,7 @@ CanEnterForeignTiles = { role = "flag", stages = ["movement", "units"] }
 CanEnterIceTiles = { role = "flag", stages = ["movement"] }
 CanMoveAfterAttacking = { role = "flag", stages = ["combat"] }
 CanMoveImmediatelyOnceBought = { role = "flag", stages = ["cities"] }
+CanMoveOnWater = { role = "flag", stages = ["movement"] }  # (extra)
 CanOnlyImproveResource = { role = "flag", stages = ["workers"] }
 CanPassImpassable = { role = "flag", stages = ["movement", "units"] }
 CanSeeOverObstacles = { role = "flag", stages = ["vis"] }
@@ -227,6 +262,7 @@ CannotBeHurried = { role = "flag", stages = ["great_people"] }
 CannotBeIntercepted = { role = "flag", stages = ["combat"] }
 CannotBePurchased = { role = "flag", stages = ["cities"] }
 CannotCaptureCities = { role = "flag", stages = ["combat"] }
+CannotEmbark = { role = "flag", stages = ["movement"] }  # (extra)
 CannotEnterOcean = { role = "flag", stages = ["movement"] }
 CannotPillage = { role = "flag", stages = ["barbarians", "workers"] }
 CityStateCanGiftGreatPeople = { role = "flag", gain = true, stages = ["triggers"] }
@@ -238,6 +274,7 @@ ConnectTradeRoutes = { role = "flag", stages = ["cities"] }
 ConvertFoodToProductionWhenConstructed = { role = "flag", stages = ["cities"] }
 CreateWaterImprovements = { role = "flag", stages = ["actions", "ai", "api", "workers"] }
 DestroyedWhenCityCaptured = { role = "flag", stages = ["conquest"] }
+DestroyedWhenPillaged = { role = "flag", stages = ["workers"] }  # (extra)
 DisablesReligion = { role = "flag", stages = ["setup"] }
 EnablesConstructionOfSpaceshipParts = { role = "flag", stages = ["ai", "cities", "victory"] }
 EnablesDefensivePacts = { role = "flag", stages = ["diplomacy"] }
@@ -245,6 +282,7 @@ EnablesEmbassies = { role = "flag", stages = ["ai", "diplomacy"] }
 EnablesOpenBorders = { role = "flag", stages = ["diplomacy"] }
 EnablesResearchAgreements = { role = "flag", stages = ["ai", "diplomacy"] }
 ForestsAndJunglesAreRoads = { role = "flag", stages = ["cities", "movement"] }
+FreePromotion = { role = "flag", stages = ["units"] }  # (extra)
 FreshWater = { role = "flag", stages = ["cities", "mapgen", "tiles", "unique"] }
 GreatGeneralProvidesDoubleCombatBonus = { role = "flag", stages = ["combat"] }
 GreatImprovement = { role = "flag", stages = ["actions", "automation", "rules", "unique"] }
@@ -259,14 +297,19 @@ IgnoresZOC = { role = "flag", stages = ["movement"] }
 ImprovementBuildableByFreshWater = { role = "flag", stages = ["workers"] }
 IndicatesCapital = { role = "flag", stages = ["barbarians", "cities", "conquest"] }
 IndirectFire = { role = "flag", stages = ["ai", "combat"] }
+Invisible = { role = "flag", stages = ["vis"] }  # (extra)
 InvisibleToNonAdjacent = { role = "flag", stages = ["vis"] }
 Irremovable = { role = "flag", stages = ["combat", "workers"] }
 LandUnitEmbarkation = { role = "flag", stages = ["movement"] }
+MayNotAnnexCities = { role = "flag", stages = ["conquest"] }  # (extra)
 MayNotGenerateGreatProphet = { role = "flag", stages = ["religion"] }
 MustSetUp = { role = "flag", stages = ["api", "combat"] }
 NoDamagePenaltyWoundedUnits = { role = "flag", stages = ["combat"] }
 NoDefensiveTerrainBonus = { role = "flag", stages = ["combat"] }
+NoDefensiveTerrainPenalty = { role = "flag", stages = ["combat"] }  # (extra)
 NoMovementToPillage = { role = "flag", stages = ["workers"] }
+NoSight = { role = "flag", stages = ["vis"] }  # (extra)
+NotDestroyedWhenCityCaptured = { role = "flag", stages = ["conquest"] }  # (extra)
 NotifiedOfBarbarianEncampments = { role = "flag", stages = ["barbarians"] }
 NullifyYields = { role = "flag", stages = ["tiles"] }
 PreventSpreadingReligion = { role = "flag", stages = ["religion"] }
@@ -292,6 +335,7 @@ TileProvidesYieldWithoutPopulation = { role = "flag", stages = ["cities"] }
 TriggersAlertOnCompletion = { role = "flag", stages = ["cities"] }
 TriggersAlertOnStart = { role = "flag", stages = ["cities"] }
 TriggersCulturalVictory = { role = "flag", stages = ["ai"] }
+TriggersVictory = { role = "flag", stages = ["ai", "victory"] }  # (extra)
 Unbuildable = { role = "flag", stages = ["barbarians", "cities", "workers"] }
 Uncapturable = { role = "flag", stages = ["combat", "units"] }
 UnitsInCitiesNoMaintenance = { role = "flag", stages = ["economy"] }
@@ -299,7 +343,7 @@ Unpillagable = { role = "flag", stages = ["combat", "workers"] }
 WillNotBeChosenForNewGames = { role = "flag", stages = ["rules"] }
 WithdrawsBeforeMeleeCombat = { role = "flag", stages = ["combat"] }
 
-# ---- Requirements: gate the object that carries them (10).
+# ---- Requirements: gate the object that carries them (11).
 CanOnlyBeBuiltOnTile = { role = "requirement", fields = ["tiles"], stages = ["workers"] }
 CanOnlyBeBuiltWhen = { role = "requirement", stages = ["cities"] }
 CannotBuildOnTile = { role = "requirement", fields = ["tiles"], stages = ["workers"] }
@@ -307,15 +351,20 @@ MustBeNextTo = { role = "requirement", fields = ["tiles"], stages = ["cities", "
 MustBeOn = { role = "requirement", fields = ["tiles"], stages = ["cities"] }
 MustHaveOwnedWithinTiles = { role = "requirement", fields = ["tiles", "radius"], stages = ["cities"] }
 MustNotBeOn = { role = "requirement", fields = ["tiles"], stages = ["cities"] }
+ObsoleteWith = { role = "requirement", fields = ["tech"], stages = ["cities", "workers"] }  # (extra)
 OnlyAvailable = { role = "requirement", stages = ["barbarians", "cities", "policies", "research", "ruins", "units", "workers"] }
 RequiresPopulation = { role = "requirement", fields = ["population"], stages = ["cities"] }
 Unavailable = { role = "requirement", stages = ["cities", "policies", "research", "ruins", "units", "workers"] }
 
-# ---- One-time effects (27).
+# ---- One-time effects (39).
+OneTimeAdoptPolicyOrBelief = { role = "one_time", fields = ["adopted"], stages = ["triggers"] }  # (extra)
+OneTimeAmountFreePolicies = { role = "one_time", fields = ["count"], stages = ["triggers"] }  # (extra)
 OneTimeAmountFreeTechs = { role = "one_time", fields = ["count"], stages = ["triggers"] }
 OneTimeAmountFreeUnits = { role = "one_time", fields = ["count", "unit"], stages = ["triggers"] }
+OneTimeDiscoverTech = { role = "one_time", fields = ["tech"], stages = ["triggers"] }  # (extra)
 OneTimeEnterGoldenAge = { role = "one_time", stages = ["triggers"] }
 OneTimeEnterGoldenAgeTurns = { role = "one_time", fields = ["turns"], stages = ["triggers"] }
+OneTimeFreeBelief = { role = "one_time", fields = ["belief"], stages = ["triggers"] }  # (extra)
 OneTimeFreeGreatPerson = { role = "one_time", stages = ["triggers"] }
 OneTimeFreePolicy = { role = "one_time", stages = ["triggers"] }
 OneTimeFreeTech = { role = "one_time", stages = ["triggers"] }
@@ -329,22 +378,32 @@ OneTimeGainProphet = { role = "one_time", fields = ["percent"], stages = ["trigg
 OneTimeGainSpy = { role = "one_time", stages = ["espionage", "triggers"] }
 OneTimeGainStat = { role = "one_time", fields = ["amount", "stat"], stages = ["triggers"] }
 OneTimeGainStatRange = { role = "one_time", fields = ["min", "max", "stat"], stages = ["triggers"] }
+OneTimeGainTechPercent = { role = "one_time", fields = ["percent", "tech"], stages = ["triggers"] }  # (extra)
 OneTimeGlobalSpiesWhenEnteringEra = { role = "one_time", stages = ["espionage", "triggers"] }
 OneTimeRevealCrudeMap = { role = "one_time", fields = ["distance", "radius", "percent"], stages = ["triggers"] }
 OneTimeRevealEntireMap = { role = "one_time", stages = ["triggers"] }
 OneTimeRevealSpecificMapTiles = { role = "one_time", fields = ["count", "tiles", "radius"], stages = ["triggers"] }
 OneTimeSpiesLevelUp = { role = "one_time", fields = ["times"], stages = ["espionage", "triggers"] }
+OneTimeTakeOverTilesInCity = { role = "one_time", fields = ["count", "cities"], stages = ["triggers"] }  # (extra)
 OneTimeTakeOverTilesInRadius = { role = "one_time", fields = ["tiles", "radius"], stages = ["triggers"] }
 OneTimeTriggerVoting = { role = "one_time", stages = ["triggers", "victory"] }
+OneTimeUnitDamage = { role = "one_time", fields = ["target", "damage"], stages = ["triggers"] }  # (extra)
+OneTimeUnitDestroyed = { role = "one_time", fields = ["target"], stages = ["triggers"] }  # (extra)
+OneTimeUnitGainMovement = { role = "one_time", fields = ["target", "movement"], stages = ["triggers"] }  # (extra)
+OneTimeUnitGainPromotion = { role = "one_time", fields = ["target", "promotion"], stages = ["triggers"] }  # (extra)
 OneTimeUnitGainXP = { role = "one_time", fields = ["target", "xp"], stages = ["triggers"] }
 OneTimeUnitHeal = { role = "one_time", fields = ["target", "hp"], stages = ["triggers"] }
+OneTimeUnitLoseMovement = { role = "one_time", fields = ["target", "movement"], stages = ["triggers"] }  # (extra)
 OneTimeUnitSpecialUpgrade = { role = "one_time", fields = ["target"], stages = ["triggers"] }
+OneTimeUnitUpgrade = { role = "one_time", fields = ["target"], stages = ["triggers"] }  # (extra)
 
-# ---- Unit actions (11).
+# ---- Unit actions (13).
 AddInCapital = { role = "action", fields = ["project"], stages = ["actions", "ai", "victory"] }
+CanHurryPolicy = { role = "action", stages = ["actions"] }  # (extra)
 CanHurryResearch = { role = "action", stages = ["actions", "great_people"] }
 CanRemoveHeresy = { role = "action", stages = ["actions", "ai", "religion"] }
 CanSpeedupConstruction = { role = "action", stages = ["actions", "great_people"] }
+CanSpeedupWonderConstruction = { role = "action", stages = ["actions"] }  # (extra)
 CanSpreadReligion = { role = "action", stages = ["actions", "ai", "religion"] }
 CanTradeWithCityStateForGoldAndInfluence = { role = "action", fields = ["influence"], stages = ["actions", "great_people", "movement"] }
 ConstructImprovementInstantly = { role = "action", fields = ["improvements"], stages = ["actions", "workers"] }
@@ -356,7 +415,7 @@ MayParadrop = { role = "action", fields = ["tiles", "range"], stages = ["actions
 # ---- AI weights (1).
 AiChoiceWeight = { role = "ai", fields = ["percent"], stages = ["religion"] }
 
-# ---- Map generation (23).
+# ---- Map generation (24).
 AddFertility = { role = "mapgen", fields = ["fertility"], stages = ["mapgen"] }
 BlocksResources = { role = "mapgen", stages = ["mapgen"] }
 ChangesTerrain = { role = "mapgen", fields = ["into", "next_to"], stages = ["mapgen"] }
@@ -366,6 +425,7 @@ MajorStrategicFrequency = { role = "mapgen", fields = ["frequency"], stages = ["
 MinorDepositWeighting = { role = "mapgen", fields = ["weight"], stages = ["mapgen"] }
 NaturalWonderConvertNeighbors = { role = "mapgen", fields = ["terrain"], stages = ["mapgen"] }
 NaturalWonderGroups = { role = "mapgen", fields = ["min", "max"], stages = ["mapgen"] }
+NaturalWonderLargerLandmass = { role = "mapgen", fields = ["count"], stages = ["mapgen"] }  # (extra)
 NaturalWonderLatitude = { role = "mapgen", fields = ["min", "max"], stages = ["mapgen"] }
 NaturalWonderNeighborCount = { role = "mapgen", fields = ["count", "terrain"], stages = ["mapgen"] }
 NaturalWonderNeighborsRange = { role = "mapgen", fields = ["min", "max", "terrain"], stages = ["mapgen"] }
@@ -397,29 +457,58 @@ RegionRequirePercentTwoTypes = { role = "inert", fields = ["percent", "terrain",
 StartBias = { role = "inert", fields = ["terrain"], reason = "city-states are placed without a start bias" }
 StrategicBalanceResource = { role = "inert", reason = "strategic resources are placed without UnCiv's strategic balance" }
 
-# ---- Conditionals (49).
+# ---- Conditionals (94).
+ConditionalAboveHP = { role = "cond", fields = ["hp"], stages = ["unique"] }  # (extra)
+ConditionalAdjacentTo = { role = "cond", fields = ["tiles"], stages = ["unique"] }  # (extra)
 ConditionalAdjacentUnit = { role = "cond", fields = ["units"], stages = ["unique"] }
+ConditionalAfterEnhancingReligion = { role = "cond", stages = ["unique"] }  # (extra)
 ConditionalAfterGeneratingGreatProphet = { role = "cond", stages = ["unique"] }
 ConditionalAfterPantheon = { role = "cond", stages = ["unique"] }
+ConditionalAfterPolicyOrBelief = { role = "cond", fields = ["adopted"], stages = ["unique"] }  # (extra)
+ConditionalAfterReligion = { role = "cond", stages = ["unique"] }  # (extra)
 ConditionalAfterTurns = { role = "cond", fields = ["turn"], stages = ["unique"] }
 ConditionalAttacking = { role = "cond", stages = ["barbarians", "unique"] }
+ConditionalBeforeEnhancingReligion = { role = "cond", stages = ["unique"] }  # (extra)
 ConditionalBeforeEra = { role = "cond", fields = ["era"], stages = ["unique"] }
 ConditionalBeforePantheon = { role = "cond", stages = ["unique"] }
 ConditionalBeforePolicyOrBelief = { role = "cond", fields = ["adopted"], stages = ["policies", "unique"] }
+ConditionalBeforeReligion = { role = "cond", stages = ["unique"] }  # (extra)
+ConditionalBeforeTurns = { role = "cond", fields = ["turn"], stages = ["unique"] }  # (extra)
+ConditionalBelowHP = { role = "cond", fields = ["hp"], stages = ["unique"] }  # (extra)
+ConditionalBelowPopulationFilter = { role = "cond", fields = ["count", "population"], stages = ["unique"] }  # (extra)
+ConditionalBetweenPopulationFilter = { role = "cond", fields = ["min", "max", "population"], stages = ["unique"] }  # (extra)
 ConditionalBuildingBuilt = { role = "cond", fields = ["buildings"], stages = ["unique"] }
 ConditionalBuildingBuiltAll = { role = "cond", fields = ["buildings", "cities"], stages = ["cities", "unique"] }
+ConditionalBuildingBuiltAmount = { role = "cond", fields = ["buildings", "count", "cities"], stages = ["cities", "unique"] }  # (extra)
+ConditionalBuildingBuiltByAnybody = { role = "cond", fields = ["buildings"], stages = ["unique"] }  # (extra)
+ConditionalBuildingNotBuilt = { role = "cond", fields = ["buildings"], stages = ["unique"] }  # (extra)
+ConditionalBuildingNotBuiltByAnybody = { role = "cond", fields = ["buildings"], stages = ["unique"] }  # (extra)
 ConditionalChance = { role = "cond", fields = ["percent"], stages = ["unique"] }
+ConditionalCityConnected = { role = "cond", stages = ["unique"] }  # (extra)
 ConditionalCityFilter = { role = "cond", fields = ["cities"], stages = ["unique"] }
+ConditionalCityWithBuilding = { role = "cond", fields = ["buildings"], stages = ["unique"] }  # (extra)
 ConditionalCityWithoutBuilding = { role = "cond", fields = ["buildings"], stages = ["unique"] }
+ConditionalCivFilter = { role = "cond", fields = ["civs"], stages = ["unique"] }  # (extra)
+ConditionalCountableBetween = { role = "cond", fields = ["count", "min", "max"], stages = ["unique"] }  # (extra)
+ConditionalCountableDifferentThan = { role = "cond", fields = ["count", "than"], stages = ["unique"] }  # (extra)
+ConditionalCountableEqualTo = { role = "cond", fields = ["count", "to"], stages = ["unique"] }  # (extra)
 ConditionalCountableLessThan = { role = "cond", fields = ["count", "than"], stages = ["unique"] }
+ConditionalCountableMoreThan = { role = "cond", fields = ["count", "than"], stages = ["unique"] }  # (extra)
 ConditionalDefending = { role = "cond", stages = ["barbarians", "unique"] }
+ConditionalDifficulty = { role = "cond", fields = ["difficulty"], stages = ["unique"] }  # (extra)
 ConditionalDifficultyOrHigher = { role = "cond", fields = ["difficulty"], stages = ["unique"] }
+ConditionalDifficultyOrLower = { role = "cond", fields = ["difficulty"], stages = ["unique"] }  # (extra)
+ConditionalDuringEra = { role = "cond", fields = ["era"], stages = ["unique"] }  # (extra)
+ConditionalEspionageDisabled = { role = "cond", stages = ["unique"] }  # (extra)
 ConditionalEspionageEnabled = { role = "cond", stages = ["unique"] }
+ConditionalEveryTurns = { role = "cond", fields = ["turns"], stages = ["unique"] }  # (extra)
+ConditionalExactPopulationFilter = { role = "cond", fields = ["count", "population"], stages = ["unique"] }  # (extra)
 ConditionalFightingInTiles = { role = "cond", fields = ["tiles"], stages = ["barbarians", "unique"] }
 ConditionalForeignContinent = { role = "cond", stages = ["unique"] }
 ConditionalGoldenAge = { role = "cond", stages = ["unique"] }
 ConditionalHappy = { role = "cond", stages = ["economy", "unique"] }
 ConditionalHasNotUsedOtherActions = { role = "cond", stages = ["unique"] }
+ConditionalIfStartingInEra = { role = "cond", fields = ["era"], stages = ["unique"] }  # (extra)
 ConditionalInRegionExceptOfType = { role = "cond", fields = ["region"], stages = ["mapgen", "unique"] }
 ConditionalInRegionOfType = { role = "cond", fields = ["region"], stages = ["mapgen", "unique"] }
 ConditionalInThisCity = { role = "cond", stages = ["triggers", "unique"] }
@@ -427,8 +516,13 @@ ConditionalInTiles = { role = "cond", fields = ["tiles"], stages = ["mapgen", "u
 ConditionalInTilesNot = { role = "cond", fields = ["tiles"], stages = ["mapgen", "unique"] }
 ConditionalNearTiles = { role = "cond", fields = ["radius", "tiles"], stages = ["unique"] }
 ConditionalNeighborTiles = { role = "cond", fields = ["min", "max", "tiles"], stages = ["unique"] }
+ConditionalNoCivAdopted = { role = "cond", fields = ["adopted"], stages = ["unique"] }  # (extra)
 ConditionalNoTech = { role = "cond", fields = ["techs"], stages = ["unique"] }
+ConditionalNotAdjacentTo = { role = "cond", fields = ["tiles"], stages = ["unique"] }  # (extra)
+ConditionalNotGoldenAge = { role = "cond", stages = ["unique"] }  # (extra)
+ConditionalNotStackedWithUnit = { role = "cond", fields = ["units"], stages = ["unique"] }  # (extra)
 ConditionalNotWar = { role = "cond", stages = ["unique"] }
+ConditionalNuclearWeaponsDisabled = { role = "cond", stages = ["unique"] }  # (extra)
 ConditionalNuclearWeaponsEnabled = { role = "cond", stages = ["unique"] }
 ConditionalOnWaterMaps = { role = "cond", stages = ["unique"] }
 ConditionalOurUnit = { role = "cond", fields = ["units"], stages = ["great_people", "unique"] }
@@ -436,43 +530,55 @@ ConditionalOurUnitOnUnit = { role = "cond", fields = ["units"], stages = ["uniqu
 ConditionalPopulationFilter = { role = "cond", fields = ["count", "population"], stages = ["unique"] }
 ConditionalReligionDisabled = { role = "cond", stages = ["unique"] }
 ConditionalReligionEnabled = { role = "cond", stages = ["unique"] }
+ConditionalSpeed = { role = "cond", fields = ["speed"], stages = ["unique"] }  # (extra)
 ConditionalStackedWithUnit = { role = "cond", fields = ["units"], stages = ["unique"] }
 ConditionalStartingFromEra = { role = "cond", fields = ["era"], stages = ["unique"] }
 ConditionalTech = { role = "cond", fields = ["techs"], stages = ["unique"] }
+ConditionalTutorialCompleted = { role = "cond", fields = ["tutorial"], stages = ["unique"] }  # (extra)
+ConditionalTutorialsEnabled = { role = "cond", stages = ["unique"] }  # (extra)
+ConditionalUnitWithPromotion = { role = "cond", fields = ["promotion"], stages = ["unique"] }  # (extra)
+ConditionalUnitWithoutPromotion = { role = "cond", fields = ["promotion"], stages = ["unique"] }  # (extra)
+ConditionalVictoryDisabled = { role = "cond", fields = ["victory"], stages = ["unique"] }  # (extra)
 ConditionalVictoryEnabled = { role = "cond", fields = ["victory"], stages = ["unique"] }
 ConditionalVsCity = { role = "cond", stages = ["barbarians", "unique"] }
 ConditionalVsCombatant = { role = "cond", fields = ["combatants"], stages = ["unique"] }
 ConditionalVsLargerCiv = { role = "cond", stages = ["unique"] }
 ConditionalVsUnits = { role = "cond", fields = ["units"], stages = ["barbarians", "unique"] }
+ConditionalWar = { role = "cond", stages = ["unique"] }  # (extra)
+ConditionalWhenAboveAmountStatResource = { role = "cond", fields = ["amount", "what"], stages = ["unique"] }  # (extra)
 ConditionalWhenBelowAmountStatResource = { role = "cond", fields = ["amount", "what"], stages = ["unique"] }
 ConditionalWhenBetweenStatResource = { role = "cond", fields = ["min", "max", "what"], stages = ["unique"] }
 ConditionalWhenGarrisoned = { role = "cond", stages = ["unique"] }
+ConditionalWhileResearching = { role = "cond", fields = ["techs"], stages = ["unique"] }  # (extra)
+ConditionalWithResource = { role = "cond", fields = ["resource"], stages = ["unique"] }  # (extra)
+ConditionalWithoutResource = { role = "cond", fields = ["resource"], stages = ["unique"] }  # (extra)
 
-# ---- Triggers. The ones marked (fired) are not used by the shipped ruleset, but the engine fires them.
-TriggerUponAdoptingPolicyOrBelief = { role = "trigger", fields = ["adopted"], stages = ["policies", "religion"] }  # (fired)
-TriggerUponBeingDeclaredWarUpon = { role = "trigger", fields = ["civs"], stages = ["diplomacy"] }  # (fired)
-TriggerUponBuildingImprovement = { role = "trigger", fields = ["improvements"], stages = ["workers"] }  # (fired)
-TriggerUponConqueringCity = { role = "trigger", stages = ["conquest"] }  # (fired)
-TriggerUponDeclaringFriendship = { role = "trigger", stages = ["diplomacy"] }  # (fired)
-TriggerUponDeclaringWarFiltered = { role = "trigger", fields = ["civs"], stages = ["diplomacy"] }  # (fired)
-TriggerUponDefeatingUnit = { role = "trigger", fields = ["units"], stages = ["combat"] }  # (fired)
-TriggerUponEnhancingReligion = { role = "trigger", stages = ["religion"] }  # (fired)
+# ---- Triggers (25): each fires at one site in the engine.
+TriggerUponAdoptingPolicyOrBelief = { role = "trigger", fields = ["adopted"], stages = ["policies", "religion"] }  # (extra)
+TriggerUponBeingDeclaredWarUpon = { role = "trigger", fields = ["civs"], stages = ["diplomacy"] }  # (extra)
+TriggerUponBuildingImprovement = { role = "trigger", fields = ["improvements"], stages = ["workers"] }  # (extra)
+TriggerUponConqueringCity = { role = "trigger", stages = ["conquest"] }  # (extra)
+TriggerUponDeclaringFriendship = { role = "trigger", stages = ["diplomacy"] }  # (extra)
+TriggerUponDeclaringWarFiltered = { role = "trigger", fields = ["civs"], stages = ["diplomacy"] }  # (extra)
+TriggerUponDefeat = { role = "trigger", stages = ["combat"] }  # (extra) Python let it through and never fired it; UnCiv fires it when the unit is defeated
+TriggerUponDefeatingUnit = { role = "trigger", fields = ["units"], stages = ["combat"] }  # (extra)
+TriggerUponEnhancingReligion = { role = "trigger", stages = ["religion"] }  # (extra)
 TriggerUponEnteringEra = { role = "trigger", fields = ["era"], stages = ["research", "unique"] }
-TriggerUponEnteringGoldenAge = { role = "trigger", stages = ["great_people"] }  # (fired)
-TriggerUponEnteringWar = { role = "trigger", fields = ["civs"], stages = ["diplomacy"] }  # (fired)
+TriggerUponEnteringGoldenAge = { role = "trigger", stages = ["great_people"] }  # (extra)
+TriggerUponEnteringWar = { role = "trigger", fields = ["civs"], stages = ["diplomacy"] }  # (extra)
 TriggerUponExpendingUnit = { role = "trigger", fields = ["units"], stages = ["great_people", "unique", "units"] }
-TriggerUponFoundingCity = { role = "trigger", stages = ["cities"] }  # (fired)
-TriggerUponFoundingPantheon = { role = "trigger", stages = ["religion"] }  # (fired)
-TriggerUponFoundingReligion = { role = "trigger", stages = ["religion"] }  # (fired)
-TriggerUponGainingUnit = { role = "trigger", fields = ["units"], stages = ["great_people", "units"] }  # (fired)
-TriggerUponLosingCity = { role = "trigger", stages = ["conquest"] }  # (fired)
-TriggerUponLosingUnit = { role = "trigger", fields = ["units"], stages = ["combat"] }  # (fired)
-TriggerUponPromotion = { role = "trigger", stages = ["units"] }  # (fired)
+TriggerUponFoundingCity = { role = "trigger", stages = ["cities"] }  # (extra)
+TriggerUponFoundingPantheon = { role = "trigger", stages = ["religion"] }  # (extra)
+TriggerUponFoundingReligion = { role = "trigger", stages = ["religion"] }  # (extra)
+TriggerUponGainingUnit = { role = "trigger", fields = ["units"], stages = ["great_people", "units"] }  # (extra)
+TriggerUponLosingCity = { role = "trigger", stages = ["conquest"] }  # (extra)
+TriggerUponLosingUnit = { role = "trigger", fields = ["units"], stages = ["combat"] }  # (extra)
+TriggerUponPromotion = { role = "trigger", stages = ["units"] }  # (extra)
 TriggerUponResearch = { role = "trigger", fields = ["techs"], stages = ["research", "unique"] }
-TriggerUponSigningDefensivePact = { role = "trigger", stages = ["diplomacy"] }  # (fired)
-TriggerUponSigningPeace = { role = "trigger", fields = ["civs"], stages = ["diplomacy"] }  # (fired)
-TriggerUponTurnEnd = { role = "trigger", stages = ["turn"] }  # (fired)
-TriggerUponTurnStart = { role = "trigger", stages = ["turn"] }  # (fired)
+TriggerUponSigningDefensivePact = { role = "trigger", stages = ["diplomacy"] }  # (extra)
+TriggerUponSigningPeace = { role = "trigger", fields = ["civs"], stages = ["diplomacy"] }  # (extra)
+TriggerUponTurnEnd = { role = "trigger", stages = ["turn"] }  # (extra)
+TriggerUponTurnStart = { role = "trigger", stages = ["turn"] }  # (extra)
 
 # ---- Unit action modifiers (6).
 UnitActionAfterWhichConsumed = { role = "action_mod", stages = ["unique", "units"] }
@@ -482,6 +588,9 @@ UnitActionLimitedTimes = { role = "action_mod", fields = ["times"], stages = ["a
 UnitActionMovementCost = { role = "action_mod", fields = ["movement"], stages = ["actions", "unique", "units"] }
 UnitActionOnce = { role = "action_mod", stages = ["actions", "unique", "units"] }
 
-# ---- Modifiers that change the unique itself (2).
+# ---- Modifiers that change the unique itself, or only how it is shown (5).
+CivilopediaLink = { role = "meta", fields = ["link"], stages = ["unique"] }  # (extra)
 ConditionalTimedUnique = { role = "meta", fields = ["turns"], stages = ["economy", "triggers", "unique"] }
 ModifiedByGameSpeed = { role = "meta", stages = ["religion", "triggers", "unique", "workers"] }
+ModifierHiddenFromUsers = { role = "meta", stages = ["unique"] }  # (extra)
+SuppressWarnings = { role = "meta", fields = ["warning"], stages = ["unique"] }  # (extra)

@@ -127,6 +127,7 @@ const KINDS: &[Kind] = &[
     kind("tech", "Tech", "TechId", 2, 2, "a technology, by name"),
     kind("era", "Era", "EraId", 1, 1, "an era, by name"),
     kind("difficulty", "Difficulty", "DifficultyId", 1, 1, "a difficulty, by name"),
+    kind("speed", "Speed", "SpeedId", 1, 1, "a game speed, by name"),
     kind("victoryType", "VictoryType", "VictoryId", 1, 1, "a victory, by name"),
     kind("terrainName", "TerrainName", "TerrainId", 1, 1, "a terrain, by name"),
     kind("terrainFeature", "TerrainFeature", "FeatureId", 1, 1, "a terrain feature, by name"),
@@ -156,6 +157,8 @@ const KINDS: &[Kind] = &[
         1,
         "`founding` or `enhancing`",
     ),
+    kind("beliefType", "BeliefType", "BeliefKind", 1, 1, "a belief type, or `Any`"),
+    kind("spyAction", "SpyAction", "SpyAction", 1, 1, "what a spy is doing: `Stealing Tech`"),
     kind(
         "terrainQuality",
         "TerrainQuality",
@@ -176,6 +179,15 @@ const KINDS: &[Kind] = &[
     kind("countable", "Countable", "Countable", 8, 4, "something counted: a number, `Cities`, ..."),
     kind("positiveAmount/'all'", "CountOrAll", "CountOrAll", 4, 4, "a count, or `All`"),
     kind("comment", "Comment", "TextId", 4, 4, "free text, interned"),
+    kind("pediaLink", "PediaLink", "TextId", 4, 4, "a Civilopedia link, as text"),
+    kind(
+        "validationWarning",
+        "ValidationWarning",
+        "TextId",
+        4,
+        4,
+        "a ruleset checker's warning, as text",
+    ),
 ];
 
 /// The roles of `unique_supported.toml`, and which generated enum holds each.
@@ -562,6 +574,7 @@ fn header(o: &mut String, used: &BTreeSet<&str>) {
         "PromotionId",
         "ResourceId",
         "SetRef",
+        "SpeedId",
         "StatsId",
         "TechId",
         "TerrainId",
@@ -571,12 +584,14 @@ fn header(o: &mut String, used: &BTreeSet<&str>) {
         "VictoryId",
     ];
     let from_params = [
+        "BeliefKind",
         "CostOrStrength",
         "CountOrAll",
         "FoundingOrEnhancing",
         "PolicyOrBelief",
         "PopulationFilter",
         "RegionType",
+        "SpyAction",
         "StatOrResource",
         "TerrainQuality",
         "UnitTriggerTarget",

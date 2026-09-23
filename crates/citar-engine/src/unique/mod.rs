@@ -102,19 +102,24 @@ mod tests {
 
     #[test]
     fn the_supported_types_match_the_census() {
-        // DESIGN.md 5.1 and unique_supported.toml: the 402 types the ruleset uses (342 as
-        // uniques, 60 as modifiers), and the 21 triggers the engine fires that it does not use.
+        // DESIGN.md 5.1 and 5.4, and unique_supported.toml: every type the Python engine handled.
+        // That is the 402 types the ruleset uses (342 as uniques, 60 as modifiers) and 125 more
+        // (55 as uniques, 70 as modifiers: 45 conditionals, 22 triggers and 3 display modifiers).
         let supported: Vec<UniqueType> =
             UniqueType::ALL.into_iter().filter(|t| t.role().is_some()).collect();
         assert_eq!(UniqueType::COUNT, 637);
-        assert_eq!(supported.len(), 423);
+        assert_eq!(supported.len(), 402 + 125);
         let modifiers = supported
             .iter()
             .filter(|t| {
                 matches!(t.role(), Some(Role::Cond | Role::Trigger | Role::ActionMod | Role::Meta))
             })
             .count();
-        assert_eq!(modifiers, 60 + 21);
+        assert_eq!(modifiers, 60 + 70);
+        let count = |role| supported.iter().filter(|t| t.role() == Some(role)).count();
+        assert_eq!(count(Role::Cond), 94);
+        assert_eq!(count(Role::Trigger), 25);
+        assert_eq!(count(Role::OneTime), 39);
         for t in supported {
             let s = t.info().support.expect("supported");
             assert_eq!(s.params.len(), s.fields.len(), "{}", t.name());
