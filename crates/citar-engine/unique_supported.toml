@@ -28,8 +28,10 @@
 #              meta         changes the unique itself: <(modified by game speed)>, <for [10] turns>;
 #                           or only how it is shown, which the engine ignores: <hidden from users>
 #   fields   One name per parameter, in order: the payload's field names. `name:kind` overrides
-#            the kind unique_types.tsv gives; the one override is `amount16`, an amount stored in
-#            16 bits so that a payload stays within 12 bytes (DESIGN.md 5.5).
+#            the kind unique_types.tsv gives: `amount16` is an amount stored in 16 bits so that a
+#            payload stays within 12 bytes (DESIGN.md 5.5), and `nonNegativeAmount` refuses a
+#            negative count UnCiv's `[amount]` would let through (the landmass counts, which
+#            map generation takes a slice of).
 #   gain     Also happens once when its source is gained, besides standing (triggers.py
 #            TRIGGERABLE): free buildings, free promotions.
 #   stages   The engine systems that read it: the Python modules that did (`U.<name>` or the
@@ -403,7 +405,7 @@ CanHurryPolicy = { role = "action", stages = ["actions"] }  # (extra)
 CanHurryResearch = { role = "action", stages = ["actions", "great_people"] }
 CanRemoveHeresy = { role = "action", stages = ["actions", "ai", "religion"] }
 CanSpeedupConstruction = { role = "action", stages = ["actions", "great_people"] }
-CanSpeedupWonderConstruction = { role = "action", stages = ["actions"] }  # (extra)
+CanSpeedupWonderConstruction = { role = "action", stages = ["actions", "great_people"] }  # (extra)
 CanSpreadReligion = { role = "action", stages = ["actions", "ai", "religion"] }
 CanTradeWithCityStateForGoldAndInfluence = { role = "action", fields = ["influence"], stages = ["actions", "great_people", "movement"] }
 ConstructImprovementInstantly = { role = "action", fields = ["improvements"], stages = ["actions", "workers"] }
@@ -425,11 +427,11 @@ MajorStrategicFrequency = { role = "mapgen", fields = ["frequency"], stages = ["
 MinorDepositWeighting = { role = "mapgen", fields = ["weight"], stages = ["mapgen"] }
 NaturalWonderConvertNeighbors = { role = "mapgen", fields = ["terrain"], stages = ["mapgen"] }
 NaturalWonderGroups = { role = "mapgen", fields = ["min", "max"], stages = ["mapgen"] }
-NaturalWonderLargerLandmass = { role = "mapgen", fields = ["count"], stages = ["mapgen"] }  # (extra)
+NaturalWonderLargerLandmass = { role = "mapgen", fields = ["count:nonNegativeAmount"], stages = ["mapgen"] }  # (extra)
 NaturalWonderLatitude = { role = "mapgen", fields = ["min", "max"], stages = ["mapgen"] }
 NaturalWonderNeighborCount = { role = "mapgen", fields = ["count", "terrain"], stages = ["mapgen"] }
 NaturalWonderNeighborsRange = { role = "mapgen", fields = ["min", "max", "terrain"], stages = ["mapgen"] }
-NaturalWonderSmallerLandmass = { role = "mapgen", fields = ["count"], stages = ["mapgen"] }
+NaturalWonderSmallerLandmass = { role = "mapgen", fields = ["count:nonNegativeAmount"], stages = ["mapgen"] }
 NoNaturalGeneration = { role = "mapgen", stages = ["mapgen"] }
 OccursInChains = { role = "mapgen", stages = ["mapgen"] }
 OccursInGroups = { role = "mapgen", stages = ["mapgen"] }

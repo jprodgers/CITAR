@@ -10,9 +10,9 @@
 use std::collections::BTreeSet;
 
 use citar_engine::base::ids::{BaseUnitId, NationId, SpeedId, TerrainId};
-use citar_engine::rules::Ruleset;
 use citar_engine::rules::defs::{BeliefKind, BeliefType, SpyAction};
-use citar_engine::unique::generated::p;
+use citar_engine::rules::{Ruleset, RulesetErrorKind};
+use citar_engine::unique::generated::{Stage, p};
 use citar_engine::unique::params::FoundingOrEnhancing;
 use citar_engine::unique::text::{placeholder, split_modifiers};
 use citar_engine::unique::{CondData, Role, TriggerCond, UFlags, UniqueData, UniqueType};
@@ -202,6 +202,11 @@ fn sink_with(
     Ruleset::load(&files_of(&files))
 }
 
+/// The kitchen sink with `uniques` in place of the Kitchen Sink Spire's.
+fn spire_with(uniques: &[&str]) -> Result<Ruleset, citar_engine::rules::RulesetErrors> {
+    sink_with("ruleset/terrains.json", "Kitchen Sink Spire", uniques)
+}
+
 #[test]
 fn a_free_belief_of_any_type_has_a_slot_of_its_own() {
     // `Gain a free [Any] belief` loads as Python read it: `grant_free_belief` kept free beliefs
@@ -230,6 +235,42 @@ fn a_free_belief_of_any_type_has_a_slot_of_its_own() {
     });
     assert_eq!(follower, Some(BeliefKind::Type(BeliefType::Follower)));
     assert_eq!(follower.map(BeliefKind::index), Some(2));
+}
+
+#[test]
+fn a_landmass_count_is_never_negative() {
+    // Python took `continents_by_size[:n]` (mapgen.py:731-736), and a negative n counted from
+    // the end of the list. Map generation takes a slice of that many landmasses, so a negative
+    // count would panic there: the loader refuses it instead.
+    for text in ["Must be on [-1] largest landmasses", "Must not be on [-1] largest landmasses"] {
+        let errs = spire_with(&[text]).expect_err(text);
+        let e = errs
+            .0
+            .iter()
+            .find(|e| e.kind == RulesetErrorKind::UniqueParameter)
+            .unwrap_or_else(|| panic!("{text}: {errs}"));
+        assert_eq!((&*e.file, &*e.object), ("ruleset/terrains.json", "Kitchen Sink Spire"));
+        assert!(e.text.contains("out of range (0 to"), "{e}");
+    }
+    // Zero is a count: on none of them, or not on none of them.
+    let r =
+        spire_with(&["Must be on [0] largest landmasses", "Must not be on [0] largest landmasses"])
+            .expect("a count of 0 loads");
+    let spire = r.lookup::<TerrainId>("Kitchen Sink Spire").expect("a wonder");
+    let wonder = &r.gen_tables().wonders[spire];
+    assert_eq!((&*wonder.on_largest, &*wonder.not_on_largest), (&[0][..], &[0][..]));
+}
+
+#[test]
+fn a_wonder_engineer_is_found_where_great_people_hurry_construction() {
+    // actions.py:87 offered `hurry_construction` to a unit that can speed up a wonder, but
+    // great_people.py:313 refused any unit without `Can speed up construction of a building`.
+    // The package that ports great_people finds its types by stage, so this one names it.
+    for ty in [UniqueType::CanSpeedupConstruction, UniqueType::CanSpeedupWonderConstruction] {
+        let stages = ty.info().support.expect("supported").stages;
+        assert!(stages.contains(&Stage::GreatPeople), "{}: {stages:?}", ty.name());
+        assert!(stages.contains(&Stage::Actions), "{}: {stages:?}", ty.name());
+    }
 }
 
 // ---- Gate b: coverage ---------------------------------------------------------------------------

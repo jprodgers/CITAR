@@ -176,9 +176,11 @@ pub struct NeighbourCount {
 pub struct NaturalWonderGen {
     /// How many neighbours must pass each filter.
     pub neighbours: Vec<NeighbourCount>,
-    /// `Must not be on [n] largest landmasses`.
+    /// `Must not be on [n] largest landmasses`. Each n is at least 0 (the loader refuses a
+    /// negative one, which Python's `continents_by_size[:n]` counted from the end), but may
+    /// exceed the number of landmasses: take `min(n, len)` of them, as the slice did.
     pub not_on_largest: Vec<i32>,
-    /// `Must be on [n] largest landmasses`.
+    /// `Must be on [n] largest landmasses`, read as `not_on_largest` is.
     pub on_largest: Vec<i32>,
     /// `Occurs on latitudes from [min] to [max] percent of distance equator to pole`.
     pub latitudes: Vec<(i32, i32)>,
