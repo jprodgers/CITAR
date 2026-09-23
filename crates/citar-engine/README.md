@@ -18,6 +18,7 @@ and the dev loop.
 | One version for the Rust workspace and `citar/__init__.py` | `cargo xtask check` |
 | Layering, and who may call `State`'s mutable accessors | `cargo xtask check` |
 | Generated files up to date; no `Pending` stage or `NotPorted` left once its time has come | `cargo xtask check` ([xtask/check.toml](../../xtask/check.toml) holds the switches) |
+| The same RNG streams, maths bits and Python number formatting on all five targets, equal to the committed golden sets | `cargo golden check`, in the tests on three platforms and in [determinism.yml](../../.github/workflows/determinism.yml) on all five |
 | No `Change` discarded by `_ = g.set_x();`, `let _x = g.set_x();` or `drop(g.set_x())`, which no lint sees | review |
 | Everything below | review |
 

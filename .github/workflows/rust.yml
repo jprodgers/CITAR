@@ -1,9 +1,9 @@
 # The Rust workspace: lint, and tests on the three desktop platforms.
 #
 # A separate workflow from test.yml, so a Python-only change skips it (the path filters below)
-# and the Rust results get their own summary. Later packages add the refcheck and perf jobs here,
-# the five-target determinism matrix as determinism.yml, and the long runs as nightly.yml
-# (crates/citar-engine/DESIGN.md 2.6).
+# and the Rust results get their own summary. The five-target determinism matrix is
+# determinism.yml. Later packages add the refcheck and perf jobs here, and the long runs as
+# nightly.yml (crates/citar-engine/DESIGN.md 2.6).
 name: rust
 
 on:
@@ -123,6 +123,9 @@ jobs:
       - name: Tests
         # The ci profile: release optimisation with debug assertions, so whole-game tests run
         # fast and invariants still fire. No retries: a second-try pass is a determinism bug.
+        # Property tests run 64 cases here; the nightly run takes them to 10,000.
+        env:
+          PROPTEST_CASES: 64
         run: cargo nextest run --workspace --all-features --locked --cargo-profile ci --profile ci
 
       - name: Doctests

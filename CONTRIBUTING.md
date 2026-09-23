@@ -111,6 +111,7 @@ follows, and [crates/citar-engine/DESIGN.md](crates/citar-engine/DESIGN.md) the 
 cargo nextest run                                   # tests (cargo install cargo-nextest)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo xtask check                                   # layering, dependencies, version, and more
+cargo golden check                                  # determinism goldens
 cargo fmt --all
 ```
 
@@ -119,9 +120,14 @@ feature set, because the workspace build turns on features the shipped engine do
 (testkit enables `legacy` and `test-ops`). When you change what a feature gates, run
 `cargo clippy -p citar-engine --all-targets -- -D warnings` and again with
 `--no-default-features`. The later tools join the loop as they land:
-`cargo golden check` (determinism goldens), `cargo refcheck run --fixtures refcheck/fixtures-mini`
-(answers compared with the Python engine) and `cargo xtask perf` (benchmarks against their
-budgets).
+`cargo refcheck run --fixtures refcheck/fixtures-mini` (answers compared with the Python engine)
+and `cargo xtask perf` (benchmarks against their budgets).
+
+**Goldens.** `crates/citar-testkit/golden/` holds answers that must come out identical on all five
+targets; the determinism workflow checks them on each. When a change is meant to move them (a new
+RNG `Purpose`, a `libm` or toolchain bump), run `cargo golden bless` and say why in the commit.
+`pyfmt.json` is Python's own answers, so only `scripts/refcheck/pyfmt_vectors.py` writes it;
+`scripts/refcheck/hex_vectors.py` records the hex-grid answers the same way.
 
 **Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
 fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of
