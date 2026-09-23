@@ -62,7 +62,7 @@ export class GameScreen {
     this.renderer = new MapRenderer(this.canvas, this.rules);
     this.renderer.onViewChange = () => this.drawMinimap();
     this.bindMouse();
-    for (const node of [this.topbar, this.turnBox, this.sidePanel]) this.holdWhileHovered(node);
+    for (const node of [this.topbar, this.turnBox, this.sidePanel, this.unitPanel, this.cityPanel]) this.holdWhileHovered(node);
     this.minimap.addEventListener("click", (e) => {
       if (!this.view) return;
       const r = this.minimap.getBoundingClientRect();
@@ -72,37 +72,58 @@ export class GameScreen {
     });
   }
 
-  // Redrawing a bar replaces its buttons. In a fast AI game that happens several times a second, and a click that
-  // lands mid-redraw is lost; so while the pointer is over a bar its redraw waits until the pointer leaves. For a
-  // moment after a click redraws go through, so what was clicked (Pause becoming Resume) still shows straight away.
+  // Redrawing a bar or panel replaces its buttons and closes its dropdowns. In a fast AI game that happens several
+  // times a second, so a click that lands mid-redraw is lost and an open dropdown vanishes. While the pointer is over
+  // one, or one of its dropdowns has focus, its redraw waits (only the latest is kept) and runs when that ends.
+  // A click still shows its result: the first refresh fetched after it redraws the node (and, failing that, a timer).
   holdWhileHovered(node) {
     node._hover = false;
     node._held = null;
-    node.addEventListener("mouseenter", () => { node._hover = true; });
     const release = () => {
       if (node._hover || this.focusedSelect(node)) return;
-      const run = node._held;
-      node._held = null;
-      if (run) run();
+      this.flushHeld(node);
     };
+    node.addEventListener("mouseenter", () => { node._hover = true; });
     node.addEventListener("mouseleave", () => { node._hover = false; release(); });
     node.addEventListener("focusout", () => setTimeout(release, 0));
-    node.addEventListener("click", () => { node._clickedAt = Date.now(); }, true);
-    node.addEventListener("change", () => { node._clickedAt = Date.now(); }, true);
+    node.addEventListener("change", () => setTimeout(() => this.flushHeld(node), 400));
+    node.addEventListener("click", (e) => {
+      if (e.target.closest && e.target.closest("select")) return;   // opening a dropdown is not an action
+      // what the click's own handler redraws goes through at once (a tab switching, a panel opening) ...
+      node._force = true;
+      setTimeout(() => { node._force = false; }, 0);
+      // ... and whatever it asked the server for shows with the first view fetched after the click
+      node._clickAt = Date.now();
+      for (const ms of [1500, 3000]) setTimeout(() => { if (!this.focusedSelect(node)) this.flushHeld(node); }, ms);
+    }, true);
   }
 
-  // an open (focused) dropdown in a bar: redrawing would close it under the pointer
+  // run a node's held redraw now, whatever the pointer is doing
+  flushHeld(node) {
+    const run = node._held;
+    node._held = null;
+    if (!run) return;
+    const was = node._force;
+    node._force = true;
+    try { run(); } finally { node._force = was; }
+  }
+
+  // an open (focused) dropdown inside a node: redrawing would close it under the pointer
   focusedSelect(node) {
     const a = document.activeElement;
     return !!a && a.tagName === "SELECT" && node.contains(a);
   }
 
-  // true when a redraw of these nodes has to wait (it is queued to run when the pointer leaves)
+  // true when a redraw of these nodes has to wait; it is kept, and runs when they are let go
   heldRender(nodes, run) {
-    const hovered = nodes.find((n) => n._hover || this.focusedSelect(n));
-    if (!hovered) return false;
-    if (nodes.some((n) => Date.now() - (n._clickedAt || 0) < 1500)) return false;
-    hovered._held = run;
+    if (nodes.some((n) => n._force)) return false;
+    const holder = nodes.find((n) => this.focusedSelect(n)) || nodes.find((n) => n._hover);
+    if (!holder) return false;
+    if (holder._clickAt && !this.focusedSelect(holder) && (this._viewStartedAt || 0) - holder._clickAt >= 100) {
+      holder._clickAt = 0;               // this view was fetched after the click: it carries the click's result
+      return false;
+    }
+    holder._held = run;
     return true;
   }
 
@@ -161,7 +182,9 @@ export class GameScreen {
     if (this._inflight) { this._pending = true; return; }
     this._inflight = true;
     try {
+      const started = Date.now();
       const v = await api.view(this.gid, this.token, this.asPlayer);
+      this._viewStartedAt = started;
       this.view = v;
       if (!this.feed.length) this.feed = (v.events || []).slice(-150);
       if (v.thoughts && !this.thoughts.length) this.thoughts = v.thoughts.slice(-80);
@@ -757,7 +780,16 @@ export class GameScreen {
     }
     if (this.isSpectator || (v.session && v.session.seats.some((s) => s.type !== "human"))) {
       const sess = v.session;
-      tb.append(el("button", { class: "small", onclick: () => api.control(this.gid, { paused: !sess.paused }) }, sess.paused ? "▶ Resume AIs" : "⏸ Pause AIs"));
+      // toggles the state the game is in now (not the one a held button was drawn with), and shows it at once:
+      // while AIs are playing, the server can take a second or more to send a fresh view
+      const want = this._pauseWanted && Date.now() - this._pauseWanted.at < 5000 ? this._pauseWanted.paused : null;
+      if (want === sess.paused) this._pauseWanted = null;             // the server has caught up
+      const paused = want ?? sess.paused;
+      tb.append(el("button", { class: "small", onclick: () => {
+        this._pauseWanted = { paused: !paused, at: Date.now() };
+        this.renderTopbar();
+        api.control(this.gid, { paused: !paused });
+      } }, paused ? "▶ Resume AIs" : "⏸ Pause AIs"));
       if (this.isSpectator) {
         const delay = el("select", { onchange: (ev) => api.control(this.gid, { ai_delay: +ev.target.value }) },
           ...[0, 0.5, 1, 2, 5].map((d) => el("option", { value: d, selected: sess.ai_delay === d }, `delay ${d}s`)));
@@ -840,6 +872,10 @@ export class GameScreen {
   }
 
   renderPanels() {
+    // a refresh of the same unit or city waits while the pointer is on its panel; a new selection shows at once
+    const sel = `${this.selectedUnit}|${this.selectedCity}|${this._cityTab}|${!!this.unitDetail}|${!!this.cityDetail}`;
+    if (sel === this._panelSel && this.heldRender([this.unitPanel, this.cityPanel], () => this.renderPanels())) return;
+    this._panelSel = sel;
     // re-rendering replaces the panel contents: keep the scroll position while the same unit/city stays selected
     const keepScroll = (panel, key, render) => {
       const top = panel._key === key ? panel.scrollTop : 0;
