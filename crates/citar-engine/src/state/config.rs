@@ -2,8 +2,14 @@
 //!
 //! Replaces the config dict of `game.py:32-60` (`DEFAULT_CONFIG`) as `Game.new` left it after
 //! normalising (`game.py:151-196`). Rule objects are ids, the seed is required (the host draws
-//! one when the lobby leaves it empty), and an editor map travels inline as a document instead of
-//! an id the engine would read from disk. Seats are not here: they live on the players.
+//! one when the lobby leaves it empty), and an editor map reaches setup inline, as a [`MapDoc`] in
+//! a [`NewGame`], instead of an id the engine would read from disk. Seats are not here: they live
+//! on the players.
+//!
+//! The document is a setup argument, never part of the settings: once the tiles hold the map,
+//! [`GameConfig::map`] keeps only its id and lobby size, as Python kept only the id
+//! (`game.py:174`). Kept in the settings it would be saved beside the tiles it became, walked by
+//! every round's digest, and digested in whatever key order the lobby sent it.
 //!
 //! Keys the engine does not use (the server's `on_disconnect` and `reconnect_seconds`, the
 //! lobby's player list, anything newer) are kept verbatim in [`GameConfig::host`], saved and
@@ -149,17 +155,17 @@ impl Default for ResourceOptions {
 
 /// An editor map, sent inline by the host, which resolves a map id to its document; Python read
 /// it from disk inside `Game.new` (`game.py:165-170`). `api::maps` validates the document when
-/// the game is set up.
+/// the game is set up. It is a setup argument ([`NewGame`]) and is never saved or digested.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapDoc {
-    /// The map's id or name, for display.
+    /// The map's id, or else its name, or `custom` (`game.py:174`).
     pub id: Box<str>,
     /// The editor document (`maps.py`'s format).
     pub body: Value,
 }
 
-/// Where the map comes from.
-#[derive(Clone, Debug, PartialEq)]
+/// Where the map came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MapSource {
     /// The generator (`mapgen.generate_map`).
     Generated {
@@ -169,8 +175,60 @@ pub enum MapSource {
         /// Width and height set explicitly, instead of the size's.
         dims: Option<(u16, u16)>,
     },
-    /// An editor map.
-    Document(Box<MapDoc>),
+    /// An editor map, by id: its document was a setup argument, and the tiles hold the map. Its
+    /// wraps are the map's own ([`MapInfo`](super::map::MapInfo)).
+    Editor {
+        /// The document's [`MapDoc::id`].
+        id: Box<str>,
+        /// The lobby size whose area is nearest the map's, which the views show
+        /// (`game.py:177-179`).
+        size: MapSizeId,
+    },
+}
+
+/// What `Game::new` sets a game up from: the settings, and the editor document when the map
+/// comes from one. Setup reads the document into the tiles and drops it.
+///
+/// The two agree by construction: the settings name an editor map exactly when a document comes
+/// with them, and by the document's id.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewGame {
+    config: GameConfig,
+    map: Option<Box<MapDoc>>,
+}
+
+impl NewGame {
+    /// A game on a generated map; `None` if the settings name an editor map.
+    #[must_use]
+    pub fn generated(config: GameConfig) -> Option<Self> {
+        matches!(config.map, MapSource::Generated { .. }).then_some(Self { config, map: None })
+    }
+
+    /// A game on this editor map; `None` unless the settings name it
+    /// ([`MapSource::Editor`] with the document's id).
+    #[must_use]
+    pub fn editor(config: GameConfig, doc: MapDoc) -> Option<Self> {
+        let named = matches!(&config.map, MapSource::Editor { id, .. } if *id == doc.id);
+        named.then(|| Self { config, map: Some(Box::new(doc)) })
+    }
+
+    /// The settings.
+    #[must_use]
+    pub const fn config(&self) -> &GameConfig {
+        &self.config
+    }
+
+    /// The editor document, for an editor map.
+    #[must_use]
+    pub fn map_doc(&self) -> Option<&MapDoc> {
+        self.map.as_deref()
+    }
+
+    /// The settings and the document, apart.
+    #[must_use]
+    pub fn into_parts(self) -> (GameConfig, Option<MapDoc>) {
+        (self.config, self.map.map(|d| *d))
+    }
 }
 
 /// The game's own diplomacy settings (`diplomacy.py:686-691`).
@@ -295,5 +353,33 @@ mod tests {
         assert_eq!(cfg.barbarian_difficulty, DifficultyId(3));
         cfg.host.insert("on_disconnect".to_owned(), Value::from("pause"));
         assert_eq!(cfg.host.len(), 1);
+    }
+
+    #[test]
+    fn a_new_game_carries_the_editor_document_its_settings_name() {
+        let generated = MapSource::Generated {
+            size: MapSizeId(1),
+            map_type: MapTypeId(0),
+            edges: MapEdges::WrapX,
+            dims: None,
+        };
+        let settings = |map: MapSource| {
+            GameConfig::new(7, map, SpeedId(0), DifficultyId(3), EraId(0), BarbarianLevelId(1), 500)
+        };
+        let doc = || MapDoc { id: "islands".into(), body: serde_json::json!({"width": 20}) };
+        let editor = |id: &str| MapSource::Editor { id: id.into(), size: MapSizeId(0) };
+
+        let g = NewGame::generated(settings(generated.clone())).expect("a generated map");
+        assert!(g.map_doc().is_none());
+        assert!(NewGame::generated(settings(editor("islands"))).is_none(), "a document is due");
+        assert!(NewGame::editor(settings(generated), doc()).is_none(), "no document is due");
+        assert!(NewGame::editor(settings(editor("atoll")), doc()).is_none(), "another map");
+
+        let e = NewGame::editor(settings(editor("islands")), doc()).expect("the named map");
+        assert_eq!(e.map_doc().map(|d| &*d.id), Some("islands"));
+        let (cfg, back) = e.into_parts();
+        assert_eq!(back, Some(doc()));
+        // What stays in the settings, and so in the state, is the id and size alone.
+        assert_eq!(cfg.map, editor("islands"));
     }
 }
