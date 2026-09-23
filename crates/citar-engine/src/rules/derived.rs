@@ -66,6 +66,11 @@ pub struct NationUniques {
 }
 
 /// The objects the engine refers to by name, resolved once.
+///
+/// So far only the terrain features and improvements that this module's own tables need. Python
+/// names more (Worker, Palace, The Wheel, Prince, Ancient era, the victories, ...; DESIGN.md 5.3
+/// lists them with their lines): the package that ports such code adds the object here, required
+/// or optional as Python treated it, rather than comparing names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Known {
     pub hill: FeatureId,
