@@ -96,6 +96,152 @@ pub enum QuestScope {
     Global,
 }
 
+/// What a city-state quest asks for. Python told each quest's behaviour, and what its `data1`
+/// held, by comparing the quest's name (`city_states.py:815-910, 1095-1191`); here the loader
+/// resolves the name once, and a quest it does not know is an error rather than a quest that is
+/// never given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum QuestKind {
+    /// Connect a city to the city-state's capital by road.
+    Route,
+    /// Clear a barbarian camp near the city-state.
+    ClearBarbarianCamp,
+    /// Connect a luxury or strategic resource neither has.
+    ConnectResource,
+    /// Build a wonder.
+    ConstructWonder,
+    /// Acquire a kind of great person.
+    AcquireGreatPerson,
+    /// Conquer a nearby city-state.
+    ConquerCityState,
+    /// Bully a nearby city-state.
+    BullyCityState,
+    /// Find a civilization's city.
+    FindPlayer,
+    /// Find a natural wonder.
+    FindNaturalWonder,
+    /// Give gold, after the city-state was bullied.
+    GiveGold,
+    /// Pledge to protect the city-state, after it was bullied.
+    PledgeToProtect,
+    /// Denounce the civilization that bullied the city-state.
+    DenounceCivilization,
+    /// Make one's religion the majority in the city-state's capital.
+    SpreadReligion,
+    /// A contest: gain the most culture.
+    ContestCulture,
+    /// A contest: gain the most faith.
+    ContestFaith,
+    /// A contest: research the most technologies.
+    ContestTechnologies,
+    /// Gifts of gold are worth more for a while.
+    Invest,
+}
+
+impl QuestKind {
+    /// Every kind, in the order Python tested them (`city_states.py:823-908`).
+    pub const ALL: [Self; 17] = [
+        Self::Route,
+        Self::ClearBarbarianCamp,
+        Self::ConnectResource,
+        Self::ConstructWonder,
+        Self::AcquireGreatPerson,
+        Self::ConquerCityState,
+        Self::BullyCityState,
+        Self::FindPlayer,
+        Self::FindNaturalWonder,
+        Self::GiveGold,
+        Self::PledgeToProtect,
+        Self::DenounceCivilization,
+        Self::SpreadReligion,
+        Self::ContestCulture,
+        Self::ContestFaith,
+        Self::ContestTechnologies,
+        Self::Invest,
+    ];
+
+    /// The quest's name in `quests.json`: `Clear Barbarian Camp`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Route => "Route",
+            Self::ClearBarbarianCamp => "Clear Barbarian Camp",
+            Self::ConnectResource => "Connect Resource",
+            Self::ConstructWonder => "Construct Wonder",
+            Self::AcquireGreatPerson => "Acquire Great Person",
+            Self::ConquerCityState => "Conquer City State",
+            Self::BullyCityState => "Bully City State",
+            Self::FindPlayer => "Find Player",
+            Self::FindNaturalWonder => "Find Natural Wonder",
+            Self::GiveGold => "Give Gold",
+            Self::PledgeToProtect => "Pledge to Protect",
+            Self::DenounceCivilization => "Denounce Civilization",
+            Self::SpreadReligion => "Spread Religion",
+            Self::ContestCulture => "Contest Culture",
+            Self::ContestFaith => "Contest Faith",
+            Self::ContestTechnologies => "Contest Technologies",
+            Self::Invest => "Invest",
+        }
+    }
+
+    /// The kind whose quest is called `name`, exactly.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.name() == name)
+    }
+
+    /// What a quest of this kind is about, which Python stored in `data1`
+    /// (`city_states.py:823-908`).
+    #[must_use]
+    pub const fn target(self) -> QuestTargetKind {
+        match self {
+            Self::Route => QuestTargetKind::None,
+            Self::ClearBarbarianCamp => QuestTargetKind::Tile,
+            Self::ConnectResource => QuestTargetKind::Resource,
+            Self::ConstructWonder => QuestTargetKind::Building,
+            Self::AcquireGreatPerson => QuestTargetKind::UnitType,
+            Self::ConquerCityState
+            | Self::BullyCityState
+            | Self::FindPlayer
+            | Self::GiveGold
+            | Self::PledgeToProtect
+            | Self::DenounceCivilization => QuestTargetKind::Player,
+            Self::FindNaturalWonder => QuestTargetKind::NaturalWonder,
+            Self::SpreadReligion => QuestTargetKind::Religion,
+            Self::ContestCulture | Self::ContestFaith | Self::ContestTechnologies => {
+                QuestTargetKind::Baseline
+            }
+            Self::Invest => QuestTargetKind::Percent,
+        }
+    }
+}
+
+/// Which kind of `QuestTarget` a quest holds (DESIGN.md 4.5): Python's `data1`, typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum QuestTargetKind {
+    /// Nothing: the route quest.
+    None,
+    /// A tile: the barbarian camp to clear.
+    Tile,
+    /// A resource to connect.
+    Resource,
+    /// A wonder to build.
+    Building,
+    /// A great person to acquire, as its base unit (Python's unit `type`).
+    UnitType,
+    /// A player: the city-state to conquer or bully, the civilization to find, or the bully to
+    /// pay off, protect against or denounce.
+    Player,
+    /// A natural wonder to find.
+    NaturalWonder,
+    /// The religion to spread.
+    Religion,
+    /// A contest's starting score: culture, faith or technologies when the quest was given.
+    Baseline,
+    /// The investment bonus in percent, from the quest's `params` (`city_states.py:907-908`).
+    Percent,
+}
+
 /// A city-state's personality (`city_states.py:17`), one of the two things a quest's weights are
 /// keyed by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -540,6 +686,10 @@ pub struct VictoryDef {
 pub struct QuestDef {
     pub name: Box<str>,
     pub key: Option<Box<str>>,
+    /// What the quest asks for, from its name.
+    pub kind: QuestKind,
+    /// What its target is: `kind.target()`.
+    pub target: QuestTargetKind,
     pub scope: QuestScope,
     /// Python's default is 40 (`city_states.py:1059`).
     pub influence: Option<i32>,
@@ -654,6 +804,18 @@ mod tests {
         assert_eq!(StartBias::parse("Avoid [Tundra]"), StartBias::Avoid("Tundra".into()));
         assert_eq!(StartBias::parse("Jungle"), StartBias::Prefer("Jungle".into()));
         assert_eq!(StartBias::parse("Avoid [Tundra"), StartBias::Prefer("Avoid [Tundra".into()));
+    }
+
+    #[test]
+    fn quest_kinds_by_name() {
+        for k in QuestKind::ALL {
+            assert_eq!(QuestKind::from_name(k.name()), Some(k));
+        }
+        assert_eq!(QuestKind::from_name("route"), None, "exact names only");
+        assert_eq!(QuestKind::ClearBarbarianCamp.target(), QuestTargetKind::Tile);
+        assert_eq!(QuestKind::GiveGold.target(), QuestTargetKind::Player);
+        assert_eq!(QuestKind::ContestFaith.target(), QuestTargetKind::Baseline);
+        assert_eq!(QuestKind::Invest.target(), QuestTargetKind::Percent);
     }
 
     #[test]

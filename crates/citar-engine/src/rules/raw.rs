@@ -175,10 +175,20 @@ impl Reader<'_> {
 
     /// The merged nations, each problem reported against the file its row came from.
     fn nations(&mut self, merged: &Map<String, Value>, custom: &[String]) -> Table<RawNation> {
-        self.rows_in(merged, |key| {
-            if custom.iter().any(|c| c == key) { CUSTOM_NATIONS } else { "ruleset/nations.json" }
-        })
+        self.rows_in(merged, |key| nation_file(custom, key))
     }
+}
+
+impl RawRuleset {
+    /// The file the nation `key` came from, for reports about it.
+    pub fn nation_file(&self, key: &str) -> &'static str {
+        nation_file(&self.custom_nations, key)
+    }
+}
+
+/// The file the nation `key` came from, given the keys `custom/nations.json` added or replaced.
+fn nation_file(custom: &[String], key: &str) -> &'static str {
+    if custom.iter().any(|c| c == key) { CUSTOM_NATIONS } else { "ruleset/nations.json" }
 }
 
 /// `ruleset/nations.json` with `custom/nations.json` merged in, as Python merged it

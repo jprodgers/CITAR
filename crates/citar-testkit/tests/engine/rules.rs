@@ -12,7 +12,9 @@
 use citar_engine::base::ids::{BaseUnitId, FeatureId, Id, NationId, TechId, TerrainId};
 use citar_engine::base::sets::{FeatureSet, TechSet};
 use citar_engine::base::stats::Stat;
-use citar_engine::rules::defs::{ImprovementKind, NationKind, PolicyKind, Route, TerrainType};
+use citar_engine::rules::defs::{
+    ImprovementKind, NationKind, PolicyKind, QuestKind, QuestTargetKind, Route, TerrainType,
+};
 use citar_engine::rules::source::all_file_names;
 use citar_engine::rules::{
     NameKind, Ruleset, RulesetErrorKind, RulesetErrors, RulesetFiles, embedded,
@@ -460,6 +462,98 @@ fn custom_nations_merge_as_python_merged_them() {
     refused(r, RulesetErrorKind::UnknownReference, "custom/nations.json", "BenchmarkCiv");
     let r = load_edited("custom/nations.json", |v| v["BenchmarkCiv"]["leader"] = json!("Nobody"));
     refused(r, RulesetErrorKind::Schema, "custom/nations.json", "BenchmarkCiv");
+    let r = load_edited("custom/nations.json", |v| v["BenchmarkCiv"]["name"] = json!("Other"));
+    refused(r, RulesetErrorKind::Name, "custom/nations.json", "BenchmarkCiv");
+    // A custom nation that replaces a shipped one is the custom file's too.
+    let r = load_edited("custom/nations.json", |v| {
+        let mut babylon = v["BenchmarkCiv"].clone();
+        babylon["name"] = json!("Hammurabi's");
+        v["Babylon"] = babylon;
+    });
+    refused(r, RulesetErrorKind::Name, "custom/nations.json", "Babylon");
+}
+
+#[test]
+fn every_quest_has_its_kind() {
+    let r = shipped();
+    let kinds: Vec<QuestKind> = r.quests.as_slice().iter().map(|q| q.kind).collect();
+    assert_eq!(kinds.len(), QuestKind::ALL.len(), "the 17 quests of quests.json");
+    for k in QuestKind::ALL {
+        assert_eq!(kinds.iter().filter(|&&q| q == k).count(), 1, "{k:?} once");
+    }
+    for q in r.quests.as_slice() {
+        assert_eq!(q.kind.name(), &*q.name);
+        assert_eq!(q.target, q.kind.target());
+    }
+    let invest = r.quests.as_slice().iter().find(|q| q.kind == QuestKind::Invest);
+    assert_eq!(invest.map(|q| q.target), Some(QuestTargetKind::Percent));
+    // Python never gave a quest it had no code for; here it is an error.
+    let r = load_edited("ruleset/quests.json", |v| {
+        let mut q = v["Route"].clone();
+        q["name"] = json!("Build Canal");
+        q["id"] = json!("build_canal");
+        v["Build Canal"] = q;
+    });
+    let text = refused(r, RulesetErrorKind::Invalid, "ruleset/quests.json", "Build Canal");
+    assert!(text.contains("Clear Barbarian Camp"), "{text}");
+}
+
+#[test]
+fn a_branch_and_its_policies_agree() {
+    // A branch as a member of another branch.
+    let r = load_edited("ruleset/policies.json", |v| {
+        v["branches"]["Tradition"]["members"]
+            .as_array_mut()
+            .expect("members")
+            .push(json!("Liberty"));
+    });
+    let text = refused(r, RulesetErrorKind::UnknownReference, "ruleset/policies.json", "Tradition");
+    assert!(text.contains("members \"Liberty\""), "{text}");
+    // Another branch's policy listed as a member: both sides disagree.
+    let r = load_edited("ruleset/policies.json", |v| {
+        let members = v["branches"]["Tradition"]["members"].as_array_mut().expect("members");
+        members.retain(|m| m != "Aristocracy");
+        v["branches"]["Liberty"]["members"]
+            .as_array_mut()
+            .expect("members")
+            .push(json!("Aristocracy"));
+    });
+    let errs = r.expect_err("refused");
+    let text = errs.to_string();
+    assert!(
+        text.contains("Liberty: its member \"Aristocracy\" belongs to another branch"),
+        "{text}"
+    );
+    assert!(text.contains("Aristocracy: its branch \"Tradition\" does not list it"), "{text}");
+    // The finisher is adopted once the members are, so it is never one of them.
+    let r = load_edited("ruleset/policies.json", |v| {
+        v["branches"]["Tradition"]["members"]
+            .as_array_mut()
+            .expect("members")
+            .push(json!("Tradition Complete"));
+    });
+    refused(r, RulesetErrorKind::Invalid, "ruleset/policies.json", "Tradition");
+}
+
+#[test]
+fn game_constants_later_code_relies_on_are_checked() {
+    let r = load_edited("game.json", |v| v["move_scale"] = json!(0));
+    let text = refused(r, RulesetErrorKind::Invalid, "game.json", "move_scale");
+    assert!(text.contains("at least 1"), "{text}");
+    let r =
+        load_edited("game.json", |v| v["constants"]["unit_upgrade_cost"]["round_to"] = json!(0));
+    refused(r, RulesetErrorKind::Invalid, "game.json", "constants");
+    let r = load_edited("game.json", |v| v["constants"]["city_state_election_turns"] = json!(-1));
+    let text = refused(r, RulesetErrorKind::Invalid, "game.json", "constants");
+    assert!(text.contains("city_state_election_turns is -1"), "{text}");
+    let r = load_edited("game.json", |v| {
+        v["map_size_predefined"].as_array_mut().expect("sizes").reverse();
+    });
+    refused(r, RulesetErrorKind::Invalid, "game.json", "map_size_predefined");
+    // 63 majors and the barbarians fill a PlayerSet; one more does not fit.
+    assert!(load_edited("game.json", |v| v["max_players"] = json!(63)).is_ok());
+    let r = load_edited("game.json", |v| v["max_players"] = json!(64));
+    refused(r, RulesetErrorKind::Capacity, "game.json", "max_players");
 }
 
 #[test]

@@ -8,7 +8,8 @@
 //! 3. the sizes: every table fits its id type and its set;
 //! 4. the references: every name resolves, in the table it must;
 //! 5. the rules the data must follow: names match keys, eras numbered in order, speed calendars
-//!    in order, map sizes within the grid's and the seats' limits;
+//!    in order, branches and their policies in agreement, and the `game.json` values later code
+//!    divides by, loops over or seats players with in range;
 //! 6. the derived tables, which may need objects the engine names (Hill, Road).
 //!
 //! Python checked only the references of stage 4 for techs, units and buildings
@@ -18,8 +19,9 @@ use super::constants::{BarbarianLevel, Constants, MapSize, MapType, RawGame};
 use super::defs::{
     BaseUnitDef, BeliefDef, BuildingDef, CityStatePersonality, CityStateTypeDef, DifficultyDef,
     Domain, ERA_STARTING_UNIT, EraDef, ImprovementDef, ImprovementKind, NationDef, PersonalityDef,
-    PolicyDef, PolicyKind, PromotionDef, QuestDef, ResourceDef, RuinDef, SpecialistDef, SpeedDef,
-    StartBias, StartingUnit, TechColumn, TechDef, TerrainDef, Uniques, UnitTypeDef, VictoryDef,
+    PolicyDef, PolicyKind, PromotionDef, QuestDef, QuestKind, ResourceDef, RuinDef, SpecialistDef,
+    SpeedDef, StartBias, StartingUnit, TechColumn, TechDef, TerrainDef, Uniques, UnitTypeDef,
+    VictoryDef,
 };
 use super::derived::{self, Derived};
 use super::errors::{Problems, RulesetErrorKind, RulesetErrors};
@@ -170,6 +172,8 @@ enum Tab {
     /// Branches and policies, one id space, branches first.
     Policies,
     Branches,
+    /// The policies alone, in the same id space: what a branch may list as its members.
+    Members,
     Religions,
     Speeds,
 }
@@ -193,6 +197,7 @@ impl Tab {
             Self::Personalities => "ruleset/personalities.json",
             Self::Policies => "ruleset/policies.json",
             Self::Branches => "ruleset/policies.json (branches)",
+            Self::Members => "ruleset/policies.json (policies)",
             Self::Religions => "ruleset/religions.json",
             Self::Speeds => "ruleset/speeds.json",
         }
@@ -219,6 +224,7 @@ impl Tab {
                 .get_index_of(name)
                 .or_else(|| raw.policies.get_index_of(name).map(|i| i + raw.policy_branches.len())),
             Self::Branches => raw.policy_branches.get_index_of(name),
+            Self::Members => raw.policies.get_index_of(name).map(|i| i + raw.policy_branches.len()),
             Self::Religions => raw.religions.iter().position(|r| r == name),
             Self::Speeds => raw.speeds.get_index_of(name),
         }
@@ -708,11 +714,24 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 by_type.push((t, w));
             }
         }
+        // Python gave a quest it had no code for silently never (`city_states.py:909`).
+        let kind = QuestKind::from_name(name).unwrap_or_else(|| {
+            let known: Vec<&str> = QuestKind::ALL.iter().map(|k| k.name()).collect();
+            l.p.push(
+                RulesetErrorKind::Invalid,
+                "ruleset/quests.json",
+                name,
+                format!("the engine has no quest of this name; it knows {}", known.join(", ")),
+            );
+            QuestKind::Route
+        });
         push(
             &mut quests,
             QuestDef {
                 name: text(name),
                 key: key(q.id.as_ref()),
+                kind,
+                target: kind.target(),
                 scope: q.scope.unwrap_or_default(),
                 influence: q.influence,
                 duration: q.duration,
@@ -782,7 +801,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 kind: PolicyKind::Branch {
                     era: l.one("era", Tab::Eras, &b.era).unwrap_or(EraId(0)),
                     priorities: b.priorities.iter().map(|(&k, &v)| (k, v)).collect(),
-                    members: l.all("members", Tab::Policies, &b.members),
+                    members: l.all("members", Tab::Members, &b.members),
                 },
             },
         );
@@ -806,8 +825,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
 
     let mut nations = IdVec::with_capacity(raw.nations.len());
     for (name, n) in &raw.nations {
-        let custom = raw.custom_nations.contains(name);
-        l.at(if custom { source::CUSTOM_NATIONS } else { "ruleset/nations.json" }, name);
+        l.at(raw.nation_file(name), name);
         push(
             &mut nations,
             NationDef {
@@ -926,39 +944,45 @@ fn link_game(l: &mut Linker<'_>, g: &RawGame) -> Constants {
 
 fn check_rules(raw: &RawRuleset, r: &Ruleset, p: &mut Problems) {
     // An object's name is its key: uniques and saves name objects by name, tables key them.
-    fn names_match<T>(p: &mut Problems, file: &str, table: &Table<T>, name: impl Fn(&T) -> &str) {
+    fn names_match<T>(
+        p: &mut Problems,
+        file_of: impl Fn(&str) -> &'static str,
+        table: &Table<T>,
+        name: impl Fn(&T) -> &str,
+    ) {
         for (k, v) in table {
             if name(v) != k {
                 p.push(
                     RulesetErrorKind::Name,
-                    file,
+                    file_of(k),
                     k,
                     format!("its name {:?} differs from its key", name(v)),
                 );
             }
         }
     }
-    names_match(p, "ruleset/techs.json", &raw.techs, |x| &x.name);
-    names_match(p, "ruleset/eras.json", &raw.eras, |x| &x.name);
-    names_match(p, "ruleset/buildings.json", &raw.buildings, |x| &x.name);
-    names_match(p, "ruleset/units.json", &raw.units, |x| &x.name);
-    names_match(p, "ruleset/unit_types.json", &raw.unit_types, |x| &x.name);
-    names_match(p, "ruleset/promotions.json", &raw.promotions, |x| &x.name);
-    names_match(p, "ruleset/terrains.json", &raw.terrains, |x| &x.name);
-    names_match(p, "ruleset/resources.json", &raw.resources, |x| &x.name);
-    names_match(p, "ruleset/improvements.json", &raw.improvements, |x| &x.name);
-    names_match(p, "ruleset/beliefs.json", &raw.beliefs, |x| &x.name);
-    names_match(p, "ruleset/specialists.json", &raw.specialists, |x| &x.name);
-    names_match(p, "ruleset/city_state_types.json", &raw.city_state_types, |x| &x.name);
-    names_match(p, "ruleset/difficulties.json", &raw.difficulties, |x| &x.name);
-    names_match(p, "ruleset/speeds.json", &raw.speeds, |x| &x.name);
-    names_match(p, "ruleset/victories.json", &raw.victories, |x| &x.name);
-    names_match(p, "ruleset/quests.json", &raw.quests, |x| &x.name);
-    names_match(p, "ruleset/ruins.json", &raw.ruins, |x| &x.name);
-    names_match(p, "ruleset/personalities.json", &raw.personalities, |x| &x.name);
-    names_match(p, "ruleset/policies.json", &raw.policy_branches, |x| &x.name);
-    names_match(p, "ruleset/policies.json", &raw.policies, |x| &x.name);
-    names_match(p, "ruleset/nations.json", &raw.nations, |x| &x.name);
+    let file = |f: &'static str| move |_: &str| f;
+    names_match(p, file("ruleset/techs.json"), &raw.techs, |x| &x.name);
+    names_match(p, file("ruleset/eras.json"), &raw.eras, |x| &x.name);
+    names_match(p, file("ruleset/buildings.json"), &raw.buildings, |x| &x.name);
+    names_match(p, file("ruleset/units.json"), &raw.units, |x| &x.name);
+    names_match(p, file("ruleset/unit_types.json"), &raw.unit_types, |x| &x.name);
+    names_match(p, file("ruleset/promotions.json"), &raw.promotions, |x| &x.name);
+    names_match(p, file("ruleset/terrains.json"), &raw.terrains, |x| &x.name);
+    names_match(p, file("ruleset/resources.json"), &raw.resources, |x| &x.name);
+    names_match(p, file("ruleset/improvements.json"), &raw.improvements, |x| &x.name);
+    names_match(p, file("ruleset/beliefs.json"), &raw.beliefs, |x| &x.name);
+    names_match(p, file("ruleset/specialists.json"), &raw.specialists, |x| &x.name);
+    names_match(p, file("ruleset/city_state_types.json"), &raw.city_state_types, |x| &x.name);
+    names_match(p, file("ruleset/difficulties.json"), &raw.difficulties, |x| &x.name);
+    names_match(p, file("ruleset/speeds.json"), &raw.speeds, |x| &x.name);
+    names_match(p, file("ruleset/victories.json"), &raw.victories, |x| &x.name);
+    names_match(p, file("ruleset/quests.json"), &raw.quests, |x| &x.name);
+    names_match(p, file("ruleset/ruins.json"), &raw.ruins, |x| &x.name);
+    names_match(p, file("ruleset/personalities.json"), &raw.personalities, |x| &x.name);
+    names_match(p, file("ruleset/policies.json"), &raw.policy_branches, |x| &x.name);
+    names_match(p, file("ruleset/policies.json"), &raw.policies, |x| &x.name);
+    names_match(p, |k| raw.nation_file(k), &raw.nations, |x| &x.name);
 
     // Branches and policies share an id space and a name space.
     for name in raw.policies.keys() {
@@ -976,6 +1000,7 @@ fn check_rules(raw: &RawRuleset, r: &Ruleset, p: &mut Problems) {
             p.push(RulesetErrorKind::Name, "ruleset/religions.json", name, "named twice");
         }
     }
+    check_branches(r, p);
 
     // Rules read an era's number as its index (`rules.py:108, 111`), so the id is the number.
     for (i, (name, e)) in raw.eras.iter().enumerate() {
@@ -1021,39 +1046,161 @@ fn check_rules(raw: &RawRuleset, r: &Ruleset, p: &mut Problems) {
         }
     }
 
-    let k = &r.constants;
     if raw.game.is_some() {
-        if k.map_size_predefined.is_empty() {
-            p.push(RulesetErrorKind::Invalid, GAME, "map_size_predefined", "the list is empty");
-        }
-        if k.max_players == 0 {
-            p.push(RulesetErrorKind::Invalid, GAME, "max_players", "a game needs a player");
-        }
-        for m in &k.map_sizes {
-            if !(MIN_SIDE..=MAX_SIDE).contains(&m.width)
-                || !(MIN_SIDE..=MAX_SIDE).contains(&m.height)
-            {
-                p.push(
-                    RulesetErrorKind::Invalid,
-                    GAME,
-                    &m.key,
-                    format!(
-                        "{}x{} is outside the map sides of {MIN_SIDE} to {MAX_SIDE}",
-                        m.width, m.height
-                    ),
-                );
+        check_game(&r.constants, p);
+    }
+}
+
+/// A branch and its policies agree: a branch's members are exactly its policies that are not
+/// its finisher. Adoption reads a policy's branch, and completion the branch's members
+/// (`policies.py:32, 136-138`), so where they disagreed a branch could never complete or a
+/// policy would count towards another branch.
+fn check_branches(r: &Ruleset, p: &mut Problems) {
+    let file = "ruleset/policies.json";
+    for (id, def) in r.policies.iter() {
+        match &def.kind {
+            PolicyKind::Branch { members, .. } => {
+                for (i, &m) in members.iter().enumerate() {
+                    let member = &r.policies[m];
+                    let why = match member.kind {
+                        _ if members[..i].contains(&m) => Some("is listed twice"),
+                        PolicyKind::Member { finisher: true, .. } => {
+                            Some("is the branch's finisher, which is adopted once the members are")
+                        }
+                        PolicyKind::Member { branch, .. } if branch != id => {
+                            Some("belongs to another branch")
+                        }
+                        _ => None,
+                    };
+                    if let Some(why) = why {
+                        p.push(
+                            RulesetErrorKind::Invalid,
+                            file,
+                            &def.name,
+                            format!("its member {:?} {why}", member.name),
+                        );
+                    }
+                }
             }
-            // Majors, city-states and the barbarians each take a seat.
-            let seats = usize::from(m.players) + usize::from(m.city_states) + 1;
-            if seats > PlayerSet::CAPACITY {
-                p.push(
-                    RulesetErrorKind::Capacity,
-                    GAME,
-                    &m.key,
-                    format!("{seats} seats, more than a PlayerSet holds ({})", PlayerSet::CAPACITY),
-                );
+            PolicyKind::Member { branch, finisher: false, .. } => {
+                let listed = match &r.policies[*branch].kind {
+                    PolicyKind::Branch { members, .. } => members.contains(&id),
+                    // Never: `branch` was resolved among the branches alone.
+                    PolicyKind::Member { .. } => true,
+                };
+                if !listed {
+                    p.push(
+                        RulesetErrorKind::Invalid,
+                        file,
+                        &def.name,
+                        format!(
+                            "its branch {:?} does not list it among its members",
+                            r.policies[*branch].name
+                        ),
+                    );
+                }
             }
+            PolicyKind::Member { finisher: true, .. } => {}
         }
+    }
+}
+
+/// The constants later code divides by, loops over, counts seats with or searches in order.
+fn check_game(k: &Constants, p: &mut Problems) {
+    let mut invalid = |object: &str, text: String| {
+        p.push(RulesetErrorKind::Invalid, GAME, object, text);
+    };
+    if k.map_size_predefined.is_empty() {
+        invalid("map_size_predefined", "the list is empty".to_owned());
+    }
+    // `map_size_predefined()` keeps the last size that fits, which is the largest only in order.
+    for pair in k.map_size_predefined.windows(2) {
+        if pair[1].radius <= pair[0].radius {
+            invalid(
+                "map_size_predefined",
+                format!(
+                    "{} (radius {}) follows {} (radius {}); list the sizes smallest first",
+                    pair[1].name, pair[1].radius, pair[0].name, pair[0].radius
+                ),
+            );
+        }
+    }
+    if k.max_players == 0 {
+        invalid("max_players", "a game needs a player".to_owned());
+    }
+    // Moves are counted in parts of a tile (`automation.py:68`, `movement.py:356`).
+    if k.move_scale < 1 {
+        invalid("move_scale", format!("{} parts to a tile; it must be at least 1", k.move_scale));
+    }
+    let f = &k.formulas;
+    // An upgrade's cost is rounded down to a multiple of it (`units.py:515`).
+    if f.unit_upgrade_cost.round_to < 1 {
+        invalid(
+            "constants",
+            format!(
+                "unit_upgrade_cost.round_to is {}; it must be at least 1",
+                f.unit_upgrade_cost.round_to
+            ),
+        );
+    }
+    // Counts, distances and numbers of turns.
+    let counts = [
+        ("max_xp_from_barbarians", f.max_xp_from_barbarians),
+        ("minimal_city_distance", f.minimal_city_distance),
+        ("minimal_city_distance_other_continents", f.minimal_city_distance_other_continents),
+        ("base_city_bombard_range", f.base_city_bombard_range),
+        ("city_work_range", f.city_work_range),
+        ("city_expand_range", f.city_expand_range),
+        ("city_air_unit_capacity", f.city_air_unit_capacity),
+        ("religion_limit_base", f.religion_limit_base),
+        ("pantheon_base", f.pantheon_base),
+        ("pantheon_growth", f.pantheon_growth),
+        ("minimum_war_duration", f.minimum_war_duration),
+        ("base_turns_until_revolt", f.base_turns_until_revolt),
+        ("city_state_election_turns", f.city_state_election_turns),
+        ("max_gold_trade_offer", f.max_gold_trade_offer),
+        ("max_spy_rank", f.max_spy_rank),
+    ];
+    for (name, value) in counts {
+        if value < 0 {
+            invalid(
+                "constants",
+                format!(
+                    "{name} is {value}; a count, a distance or a number of turns is never negative"
+                ),
+            );
+        }
+    }
+    for m in &k.map_sizes {
+        if !(MIN_SIDE..=MAX_SIDE).contains(&m.width) || !(MIN_SIDE..=MAX_SIDE).contains(&m.height) {
+            invalid(
+                &m.key,
+                format!(
+                    "{}x{} is outside the map sides of {MIN_SIDE} to {MAX_SIDE}",
+                    m.width, m.height
+                ),
+            );
+        }
+    }
+    // Majors, city-states and the barbarians each take a seat.
+    let seats = |majors: u8, city_states: u8| usize::from(majors) + usize::from(city_states) + 1;
+    let too_many = |what: &str, seats: usize| {
+        format!("{what} {seats} seats, more than a PlayerSet holds ({})", PlayerSet::CAPACITY)
+    };
+    for m in &k.map_sizes {
+        let n = seats(m.players, m.city_states);
+        if n > PlayerSet::CAPACITY {
+            p.push(RulesetErrorKind::Capacity, GAME, &m.key, too_many("its players take", n));
+        }
+    }
+    let n = seats(k.max_players, 0);
+    if n > PlayerSet::CAPACITY {
+        p.push(
+            RulesetErrorKind::Capacity,
+            GAME,
+            "max_players",
+            too_many("the most major civilizations and the barbarians take", n),
+        );
     }
 }
 
