@@ -45,6 +45,8 @@ from . import paths
 BASE = paths.saves_path("probes")
 RUNS = BASE / "runs"
 CASE_KINDS = ("offer", "message", "turn")
+# What the scripted counterparty says with each answer: every negotiation entry carries a message
+SCRIPT_LINES = {"accept": "Agreed.", "reject": "No deal.", "counter": "How about this instead?", "reply": "Noted."}
 
 
 class ProbeError(ValueError):
@@ -267,7 +269,7 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                         rec["error"] = f"The subject cannot give what the case asks: {e}"
                         raise _CaseInvalid()
             followups = list(case.get("followups") or [])
-            for _round in range(g.rules.const["diplomacy"]["max_negotiation_exchanges"] + 1):
+            for _round in range(D.max_chat_messages(g) + 1):
                 if should_stop():
                     rec["outcome"] = "stopped"
                     break
@@ -298,16 +300,21 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                     rec["outcome"] = last.get("action") or "reply"
                     if followups:
                         f = followups.pop(0)
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, **f})
+                        # every negotiation entry carries a message; a case written without one gets a plain line
+                        tools.execute(g, cp, "respond_negotiation",
+                                      {"negotiation_id": nid, "message": SCRIPT_LINES.get(f.get("action"), "Noted."),
+                                       **f})
                         continue
                     policy = case.get("on_counter", "leave" if case["kind"] == "message" else "reject")
                     if policy == "leave":
                         break
                     action = "accept" if policy == "accept" and n["proposal"] and n["proposal_by"] == subject else "reject"
                     try:
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, "action": action})
+                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, "action": action,
+                                                                     "message": SCRIPT_LINES[action]})
                     except ActionError:
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, "action": "reject"})
+                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, "action": "reject",
+                                                                     "message": SCRIPT_LINES["reject"]})
                     if action == "accept":
                         rec["outcome"] = "counter_accepted_by_script"
                     break

@@ -54,7 +54,8 @@ class BotAgent:
                         if n["status"] == "open" and n["awaiting"] == pid and len(n["history"]) == before:
                             # the bot's answer was refused and nothing moved: end it rather than stall the game
                             session.call_tool(pid, "respond_negotiation",
-                                              {"negotiation_id": n["id"], "action": "reject"})
+                                              {"negotiation_id": n["id"], "action": "reject",
+                                               "message": "We have nothing further to discuss."})
                 session.cond.wait(timeout=1.0)
 
     def respond_negotiation(self, session, pid: int, nid: int):

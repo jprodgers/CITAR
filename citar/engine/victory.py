@@ -381,6 +381,7 @@ def is_defeated(g: "Game", pid: int) -> bool:
 def check_elimination(g: "Game", pid: int, by: Optional[int] = None):
     """Check whether any civilization has been eliminated, and record it."""
     from . import espionage, city_states
+    from .diplomacy import close_negotiation
     p = g.player(pid)
     if not p.alive or not is_defeated(g, pid):
         return
@@ -390,7 +391,7 @@ def check_elimination(g: "Game", pid: int, by: Optional[int] = None):
         g.remove_unit(u)
     for n in g.s.negotiations:
         if n["status"] == "open" and pid in (n["initiator"], n["responder"]):
-            n["status"] = "cancelled"
+            close_negotiation(g, n["id"], "cancelled", f"{p.name} has been eliminated.")
     for d in g.s.deals:
         if d.get("active") and pid in d["parties"]:
             d["active"] = False

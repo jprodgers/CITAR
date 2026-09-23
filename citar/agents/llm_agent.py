@@ -369,6 +369,8 @@ class LLMAgent:
                     continue
             wait = self.negotiation_wait if c.name in ("open_negotiation", "respond_negotiation") else 0
             res = session.call_tool(pid, c.name, c.args, wait_negotiation=wait)
+            if c.name == "end_turn" and not res["ok"]:
+                res = self._end_turn_after_chats(session, pid, res)
             if res["ok"]:
                 text = _serialize(res["result"])
                 results.append((c.id, text, False))
@@ -390,6 +392,45 @@ class LLMAgent:
                 self._thought(session, pid, f"{c.name} {args} → {outcome}", "action")
         conv.add_tool_results(results)
         return ended, len(calls), progress
+
+    def _end_turn_after_chats(self, session, pid: int, refused: dict) -> dict:
+        """end_turn was refused. When that is only because negotiations wait on the other side, wait for them.
+
+        Up to negotiation_wait_seconds in all, through the same wait the negotiation tools use. Whatever is still
+        unanswered then is closed "(no reply in time)" and the turn ends. A negotiation waiting on this seat - one
+        from the start, or a reply that arrives during the wait - goes back to the model as the refusal: it has to
+        answer that itself.
+        """
+        from ..engine.diplomacy import end_turn_refusal
+        deadline = time.time() + self.negotiation_wait
+        replies = []
+        waited = False
+        with session.lock:
+            while True:
+                g = session.game
+                if g.s.current != pid or g.s.phase != "playing":
+                    return refused
+                mine = [n for n in g.s.negotiations
+                        if n["status"] == "open" and pid in (n["initiator"], n["responder"])]
+                if not mine:
+                    if not waited:
+                        return refused              # refused for some other reason
+                    break
+                if any(n["awaiting"] == pid for n in mine):
+                    heard = f" While you waited, they answered: {_serialize(replies)}" if replies else ""
+                    return {"ok": False, "error": end_turn_refusal(g, pid) + heard}
+                waited = True
+                res = session._wait_negotiation_reply(pid, mine[0]["id"], max(0.0, deadline - time.time()), {})
+                if self._halted(session):
+                    raise _Halted()
+                if "negotiation" in res:
+                    replies.append(res["negotiation"])
+                    continue
+                # no reply in time: give up on every chat still waiting on the other side
+                for n in mine:
+                    if n["status"] == "open" and n["awaiting"] != pid:
+                        session.close_negotiation(n["id"], "expired", "(no reply in time)")
+        return session.call_tool(pid, "end_turn", {})
 
     def _progress_note(self, session, pid: int) -> str:
         """What is still unhandled this turn, told to the model after each batch of actions.
@@ -594,7 +635,8 @@ class LLMAgent:
                 self._thought(session, pid, step.thinking, "thinking")
                 self._thought(session, pid, step.text, "diplomacy")
                 if not step.tool_calls:
-                    conv.add_user_text("Respond with respond_negotiation (accept, reject, counter, or reply).")
+                    conv.add_user_text("Respond with respond_negotiation (accept, reject, counter, or reply), "
+                                       "with a message.")
                     continue
                 # never block waiting for replies inside an interrupt
                 results = []

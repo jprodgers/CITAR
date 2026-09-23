@@ -357,7 +357,8 @@ class DiplomacyTests(unittest.TestCase):
         research.add_tech_silently(g, 0, "Calendar")
         research.add_tech_silently(g, 1, "Pottery")
         r = tools.execute(g, 0, "open_negotiation", {"to": 1, "message": "tech", "give": [{"type": "tech", "tech": "Calendar"}]})
-        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept"})
+        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept",
+                                                    "message": "Agreed."})
         self.assertIn("Calendar", g.player(1).techs)
 
     def test_embassies_and_friendship(self):
@@ -374,7 +375,8 @@ class DiplomacyTests(unittest.TestCase):
         tools.execute(g, 1, "end_turn", {})
         r = tools.execute(g, 0, "open_negotiation", {"to": 1, "message": "Embassies?", "give": [{"type": "embassy"}],
                                                      "receive": [{"type": "embassy"}, {"type": "declaration_of_friendship"}]})
-        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept"})
+        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept",
+                                                    "message": "Agreed."})
         from citar.engine import diplomacy
         self.assertTrue(diplomacy.shared_embassies(g, 0, 1))
         self.assertTrue(diplomacy.is_friends(g, 0, 1))
@@ -385,7 +387,8 @@ class DiplomacyTests(unittest.TestCase):
         tools.execute(g, 0, "declare_war", {"player_id": 1, "message": "For glory!"})
         self.assertTrue(g.at_war(0, 1))
         r = tools.execute(g, 0, "open_negotiation", {"to": 1, "message": "peace?", "give": [{"type": "peace_treaty"}]})
-        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept"})
+        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept",
+                                                    "message": "Agreed."})
         self.assertFalse(g.at_war(0, 1))
         with self.assertRaises(ActionError):
             tools.execute(g, 0, "declare_war", {"player_id": 1})

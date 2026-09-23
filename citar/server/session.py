@@ -220,7 +220,7 @@ class GameSession:
         deadline = time.time() + timeout
         while True:
             n = get_negotiation(self.game, nid)
-            if n["status"] != "open" or n["awaiting"] == pid:
+            if n["status"] != "open" or n["awaiting"] == pid or self._stop:
                 break
             left = deadline - time.time()
             if left <= 0:
@@ -290,6 +290,26 @@ class GameSession:
                     self._after_action(self.game.turn, self.game.s.current)
             except ActionError:
                 pass
+
+    def close_negotiation(self, nid: int, status: str, note: str, by: Optional[int] = None) -> bool:
+        """Time a chat out or force it closed (diplomacy.close_negotiation), and tell everyone watching.
+
+        Returns False when there was nothing to close: the negotiation had been settled in the meantime.
+        """
+        from ..engine.diplomacy import close_negotiation
+        with self.lock:
+            try:
+                close_negotiation(self.game, nid, status, note, by)
+            except ActionError:
+                return False
+            self._after_action(self.game.turn, self.game.s.current)
+            return True
+
+    def _close_open_chats(self, pid: int, note: str):
+        """Close, as expired, every open negotiation a seat is in. Called with the lock held."""
+        for n in list(self.game.s.negotiations):
+            if n["status"] == "open" and pid in (n["initiator"], n["responder"]):
+                self.close_negotiation(n["id"], "expired", note)
 
     # ------------------------------------------------------------------
     # Agents
@@ -604,6 +624,9 @@ class GameSession:
                         rec["end_reason"] = "end_turn" if seat.type == "bot" else "ended_by_server"
                     try:
                         before = (g.turn, g.s.current)
+                        # the end_turn tool refuses while a chat the seat is in is open, which would stall the
+                        # driver on this turn for good
+                        self._close_open_chats(pid, "(no reply in time)")
                         tools.execute(g, pid, "end_turn", {})
                         self._after_action(*before)
                     except ActionError:

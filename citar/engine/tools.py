@@ -937,31 +937,40 @@ def send_message(g: Game, pid: int, to, text: str):
     return diplomacy.send_message(g, pid, to, text)
 
 
-@tool("open_negotiation", "Start a negotiation (on your turn) with a met civilization: a message plus an optional "
-      "concrete proposal (give = what you give, receive = what you want). Mutual agreements (peace, friendship, "
-      "research agreement, defensive pact) go on both sides automatically. They reply (accept, reject, counter, or "
-      "reply) and you go back and forth until a deal or rejection.",
+@tool("open_negotiation", "Start a negotiation (on your turn) with a met civilization: a message (required) plus an "
+      "optional concrete proposal (give = what you give, receive = what you want). Mutual agreements (peace, "
+      "friendship, research agreement, defensive pact) go on both sides automatically. The other side answers in its "
+      "own time (accept, reject, counter or reply) and you go back and forth, each with a message, until a deal or a "
+      "rejection. You cannot end your turn while the negotiation is open: wait for the answer, or withdraw it with "
+      "respond_negotiation action 'reject'. A negotiation closes by itself at its message limit (get_diplomacy shows "
+      "it).",
       {"to": INT, "message": STR, "give": ITEMS, "receive": ITEMS}, ["to", "message"], category="diplomacy")
 def open_negotiation(g: Game, pid: int, to: int, message: str, give=None, receive=None):
     """Start a negotiation: a message plus an optional concrete proposal.
 
-    The other side answers before play continues, which is what makes diplomacy in CITAR worth probing -
-    it is a real exchange rather than a pair of one-way announcements.
+    The other side answers in its own time, and neither side may end its turn until the negotiation is settled
+    or withdrawn. That is what makes diplomacy in CITAR worth probing - it is a real exchange rather than a pair
+    of one-way announcements.
     """
     from . import diplomacy
     return diplomacy.open_negotiation(g, pid, to, message, give, receive)
 
 
-@tool("respond_negotiation", "Respond when it is your move in a negotiation. action: accept (the other side's current "
-      "proposal), reject (end it), counter (new proposal via give/receive from your perspective, plus message), or reply "
-      "(message only).", {"negotiation_id": INT, "action": STR, "message": STR, "give": ITEMS, "receive": ITEMS},
+@tool("respond_negotiation", "Respond in a negotiation, with a message every time. action: accept (the other side's "
+      "current proposal), counter (a new proposal via give/receive from your perspective, at least one item), reply "
+      "(message only), or reject (end it). Accept, counter and reply need it to be your move; reject works any time, "
+      "which is how you withdraw a negotiation the other side has not answered.",
+      {"negotiation_id": INT, "action": STR, "message": STR, "give": ITEMS, "receive": ITEMS},
       ["negotiation_id", "action"], any_time=True, category="diplomacy")
 def respond_negotiation(g: Game, pid: int, negotiation_id: int, action: str, message: Optional[str] = None,
                         give=None, receive=None):
-    """Accept, reject, counter or reply in a negotiation that is waiting on the caller.
+    """Accept, counter or reply in a negotiation that is waiting on the caller, or reject one at any time.
 
     Usable out of turn, because a negotiation opened on somebody else's turn blocks their turn until it
     is answered. An agent that only checks its own turn would deadlock the game.
+
+    ``message`` is not in the schema's required list on purpose: the engine's refusal names the negotiation,
+    which the generic missing-parameter error cannot.
     """
     from . import diplomacy
     return diplomacy.respond_negotiation(g, pid, negotiation_id, action, message, give, receive)
@@ -1082,8 +1091,19 @@ def log_thought(g: Game, pid: int, text: str):
     return {"ok": True}
 
 
-@tool("end_turn", "End your turn. Units with standing orders keep executing them.", category="turn")
+@tool("end_turn", "End your turn. Units with standing orders keep executing them. Refused while a negotiation you are "
+      "in is open: answer it, wait for the other side's reply, or withdraw it (respond_negotiation action 'reject').",
+      category="turn")
 def end_turn(g: Game, pid: int):
-    """End the caller's turn and report whose it is now."""
+    """End the caller's turn and report whose it is now.
+
+    Refused while the caller is in an open negotiation, whichever side it waits on (see
+    :func:`citar.engine.diplomacy.end_turn_refusal`). The rule lives here rather than in ``Game.end_turn``, which
+    headless runners call directly and which keeps its old safety net of expiring the caller's negotiations.
+    """
+    from .diplomacy import end_turn_refusal
+    why = end_turn_refusal(g, pid)
+    if why:
+        raise ActionError(why)
     g.end_turn(pid)
     return {"ended": True, "next_player": g.player(g.s.current).name, "turn": g.turn, "phase": g.s.phase}

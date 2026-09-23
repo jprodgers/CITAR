@@ -43,7 +43,8 @@ class IdleBot:
         from .engine import tools
         from .engine.game import ActionError
         try:
-            tools.execute(g, pid, "respond_negotiation", {"negotiation_id": nid, "action": "reject"})
+            tools.execute(g, pid, "respond_negotiation", {"negotiation_id": nid, "action": "reject",
+                                                          "message": "We are not interested."})
         except ActionError:
             pass
 

@@ -714,7 +714,23 @@ class BasicBot:
         self.manage_gold(g, pid, ctx)
         self.consider_diplomacy(g, pid, ctx)
         if end_turn and g.s.current == pid and g.s.phase == "playing":
+            self._settle_chats(g, pid)
             tools.execute(g, pid, "end_turn", {})
+
+    def _settle_chats(self, g: Game, pid: int):
+        """Before ending the turn on its own: answer what waits on us, withdraw what waits on the other side.
+
+        The end_turn tool refuses while a negotiation we are in is open, and a bot ending its own turn has nobody
+        to wait for.
+        """
+        for n in list(g.s.negotiations):
+            if n["status"] != "open" or pid not in (n["initiator"], n["responder"]):
+                continue
+            if n["awaiting"] == pid:
+                self.respond(g, pid, n["id"])
+            if n["status"] == "open":
+                self.ex(g, pid, "respond_negotiation", negotiation_id=n["id"], action="reject",
+                        message="We will speak again another time.")
 
     # ------------------------------------------------------------------
     # situation

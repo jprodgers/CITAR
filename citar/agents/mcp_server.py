@@ -30,7 +30,8 @@ HOW TO PLAY THROUGH THESE TOOLS
 2. On your turn: get_briefing, then act (set_research, set_production, move_unit, unit_order, found_city, ...), then
    end_turn. Name your civilization with set_civ_name on your first turn.
 3. If a negotiation needs you (even outside your turn), inspect it with get_diplomacy and answer with
-   respond_negotiation.
+   respond_negotiation, always with a message. end_turn is refused while a negotiation you are in is open: answer
+   it, wait for the other side's reply (get_diplomacy shows it), or withdraw it with action reject.
 4. Keep long-term plans in your notebook (write_notes); it is shown in every briefing. Use log_thought to record your
    reasoning for the replay.
 5. Repeat until the game is over.
