@@ -99,6 +99,43 @@ What is worth testing:
 Reserved handles (`admin`, `root`, `mod`, `guest`, …) are rejected, so fixtures must use other
 names.
 
+## Rust
+
+The Rust engine is being built in `crates/` to replace `citar/engine/` in 0.1.6.
+[crates/citar-engine/README.md](crates/citar-engine/README.md) has the rules every change to it
+follows, and [crates/citar-engine/DESIGN.md](crates/citar-engine/DESIGN.md) the design.
+
+`rust-toolchain.toml` pins the exact toolchain, and rustup installs it on first use. Then:
+
+```bash
+cargo nextest run                                   # tests (cargo install cargo-nextest)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo xtask check                                   # layering, dependencies, version, and more
+cargo fmt --all
+```
+
+These are what CI runs, on Linux, Windows and macOS. The later tools join the loop as they land:
+`cargo golden check` (determinism goldens), `cargo refcheck run --fixtures refcheck/fixtures-mini`
+(answers compared with the Python engine) and `cargo xtask perf` (benchmarks against their
+budgets).
+
+**Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
+fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of
+build output. Point `CARGO_TARGET_DIR` somewhere else, one directory per checkout or worktree so
+parallel builds of different branches do not thrash each other:
+
+```bash
+export CARGO_TARGET_DIR=C:/dev/target/citar-main          # Git Bash; a Dev Drive is faster still
+$env:CARGO_TARGET_DIR = "C:\dev\target\citar-main"        # PowerShell
+```
+
+**Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
+`/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
+benchmarks need valgrind, so they run there too.
+
+**On a busy machine**, `CARGO_BUILD_JOBS=4` keeps a build from starving everything else, and
+wall-clock benchmark numbers are only indicative.
+
 ## Pull requests
 
 - One change per pull request.
@@ -127,10 +164,11 @@ write to a wiki, and fine-grained tokens have no wiki permission to grant.
 
 ## Releasing
 
-For maintainers: bump `citar/__init__.py`, add the section to `CHANGELOG.md`, tag `vX.Y.Z` and
-push. CI checks that the tag, the source version and the changelog agree, then builds and publishes
-everything. [packaging/README.md](packaging/README.md) covers the manifests that need updating
-afterwards.
+For maintainers: bump `citar/__init__.py` and `[workspace.package] version` in `Cargo.toml`
+together (`cargo xtask check` fails if they differ), add the section to `CHANGELOG.md`, tag
+`vX.Y.Z` and push. CI checks that the tag, the source version and the changelog agree, then
+builds and publishes everything. [packaging/README.md](packaging/README.md) covers the manifests
+that need updating afterwards.
 
 ## Code of conduct
 
