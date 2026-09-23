@@ -67,3 +67,12 @@ wiki/.git/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --------------------------------------------------------------------------- Rust
+# The laptop builds outside OneDrive through CARGO_TARGET_DIR (CONTRIBUTING.md, "Rust"); these
+# catch a build that did not.
+/target/
+**/*.rs.bk
+crates/citar-engine/fuzz/target/
+crates/citar-engine/fuzz/corpus/
+crates/citar-engine/fuzz/artifacts/

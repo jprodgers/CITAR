@@ -35,6 +35,9 @@ Dockerfile  text eol=lf
 *.mjs       text eol=lf
 *.css       text eol=lf
 *.html      text eol=lf
+*.rs        text eol=lf
+*.tsv       text eol=lf
+Cargo.lock  text eol=lf
 env.example text eol=lf
 .env.docker.example text eol=lf
 
@@ -59,3 +62,5 @@ citar/data/ruleset/*.json linguist-generated=true
 citar/engine/unique_types.py linguist-generated=true
 citar/bots/frozen_*.py linguist-generated=true
 wiki/* linguist-generated=true
+Cargo.lock linguist-generated=true
+crates/citar-engine/src/unique/gen.rs linguist-generated=true
