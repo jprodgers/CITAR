@@ -97,9 +97,13 @@ pub struct CondSpan {
 }
 
 impl CondSpan {
-    /// The conditionals' ids.
+    /// The conditionals' ids: the same run as [`UniqueTable::conds`] reads.
+    ///
+    /// # Panics
+    /// If the span ends past `u16::MAX`, which no compiled span does: the compiler refuses more
+    /// conditionals than that.
     pub fn ids(self) -> impl Iterator<Item = CondId> {
-        (self.start..self.start.saturating_add(self.len)).map(CondId)
+        (self.start..self.start + self.len).map(CondId)
     }
 
     /// Whether the unique has no conditionals.
@@ -243,7 +247,8 @@ pub enum Source {
     Terrain(TerrainId),
     Improvement(ImprovementId),
     UnitType(UnitTypeId),
-    /// A unit of `units.json`, its own uniques only: its unit type's stay on the unit type.
+    /// A unit of `units.json`, its own uniques only: its unit type's stay on the unit type, whose
+    /// tags the unit's [`SourceUniques`] also carry.
     Unit(BaseUnitId),
     Promotion(PromotionId),
     Ruins(RuinId),
@@ -311,10 +316,16 @@ pub struct UniqueMeta {
 pub struct SourceUniques {
     /// Every unique of the source, in the order the ruleset lists them.
     pub all: Range<u16>,
-    /// Standing effects and flags that hold wherever the source counts: what a civilization's
-    /// (or a unit's) unique index holds.
+    /// Standing effects, flags and tags that hold wherever the source counts: what a
+    /// civilization's (or a unit's, or a religion's followers') unique index holds. A `LOCAL`
+    /// unique of any source but a building or a resource is here too, with its
+    /// [`UFlags::LOCAL`] bit: there `in this city` means the city in context, as it did in
+    /// Python (`uniques.py:668`), not the source's own city.
     pub civ: Box<[UniqueId]>,
-    /// Standing effects and flags that hold only in the source's own city.
+    /// A building's or a resource's standing effects, flags and tags that hold only in the
+    /// source's own city: the ones marked [`UFlags::LOCAL`]. Python split buildings' uniques so
+    /// (`economy.py:108`, `cities.py:59`); a resource's is the Marble decision (DESIGN.md 5.12).
+    /// Empty for every other source.
     pub local: Box<[UniqueId]>,
     /// What happens once when the source is gained: one-time effects without a trigger, timed
     /// uniques, and standing effects that also happen on gain.
@@ -325,9 +336,11 @@ pub struct SourceUniques {
     pub actions: Box<[UniqueId]>,
     /// Weights for the AI.
     pub ai: Box<[UniqueId]>,
-    /// The tags the source carries unconditionally.
+    /// The tags the source carries unconditionally. A base unit's include its unit type's, as
+    /// Python's unit map held its type's uniques (`rules.py:116-118`); the uniques themselves stay
+    /// on the unit type.
     pub tags: TagSet,
-    /// The tags the source carries under conditionals.
+    /// The tags the source carries under conditionals; a base unit's include its unit type's.
     pub cond_tags: TagSet,
 }
 

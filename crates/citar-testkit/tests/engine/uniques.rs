@@ -12,8 +12,8 @@
 use std::collections::BTreeSet;
 
 use citar_engine::base::ids::{
-    BaseUnitId, BuildingId, NationId, PolicyId, PromotionId, ResourceId, TechId, UniqueId,
-    UnitTypeId,
+    BaseUnitId, BeliefId, BuildingId, NationId, PolicyId, PromotionId, ResourceId, TechId,
+    UniqueId, UnitTypeId,
 };
 use citar_engine::base::stats::Stat;
 use citar_engine::rules::{Ruleset, RulesetErrorKind};
@@ -28,27 +28,36 @@ use super::rules::{load_edited, refused, shipped};
 const BUILDINGS: &str = "ruleset/buildings.json";
 const UNITS: &str = "ruleset/units.json";
 
+/// Every object's uniques, with the object's kind and name.
+fn named_sources(r: &Ruleset) -> Vec<(&'static str, &str, &SourceUniques)> {
+    let mut out: Vec<(&'static str, &str, &SourceUniques)> = Vec::new();
+    out.extend(r.nations().as_slice().iter().map(|x| ("Nation", &*x.name, &x.uniques)));
+    out.extend(r.buildings().as_slice().iter().map(|x| ("Building", &*x.name, &x.uniques)));
+    out.extend(r.policies().as_slice().iter().map(|x| ("Policy", &*x.name, &x.uniques)));
+    out.extend(r.techs().as_slice().iter().map(|x| ("Tech", &*x.name, &x.uniques)));
+    out.extend(r.eras().as_slice().iter().map(|x| ("Era", &*x.name, &x.uniques)));
+    for c in r.city_state_types().as_slice() {
+        out.extend([
+            ("CityStateFriend", &*c.name, &c.friend),
+            ("CityStateAlly", &*c.name, &c.ally),
+            ("CityStateType", &*c.name, &c.uniques),
+        ]);
+    }
+    out.extend(r.beliefs().as_slice().iter().map(|x| ("Belief", &*x.name, &x.uniques)));
+    out.extend(r.resources().as_slice().iter().map(|x| ("Resource", &*x.name, &x.uniques)));
+    out.push(("Global", "", r.global_uniques()));
+    out.extend(r.terrains().as_slice().iter().map(|x| ("Terrain", &*x.name, &x.uniques)));
+    out.extend(r.improvements().as_slice().iter().map(|x| ("Improvement", &*x.name, &x.uniques)));
+    out.extend(r.unit_types().as_slice().iter().map(|x| ("UnitType", &*x.name, &x.uniques)));
+    out.extend(r.base_units().as_slice().iter().map(|x| ("Unit", &*x.name, &x.uniques)));
+    out.extend(r.promotions().as_slice().iter().map(|x| ("Promotion", &*x.name, &x.uniques)));
+    out.extend(r.ruins().as_slice().iter().map(|x| ("Ruins", &*x.name, &x.uniques)));
+    out
+}
+
 /// Every object's uniques.
 fn all_sources(r: &Ruleset) -> Vec<&SourceUniques> {
-    let mut out: Vec<&SourceUniques> = Vec::new();
-    out.extend(r.nations().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.buildings().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.policies().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.techs().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.eras().as_slice().iter().map(|x| &x.uniques));
-    for c in r.city_state_types().as_slice() {
-        out.extend([&c.friend, &c.ally, &c.uniques]);
-    }
-    out.extend(r.beliefs().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.resources().as_slice().iter().map(|x| &x.uniques));
-    out.push(r.global_uniques());
-    out.extend(r.terrains().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.improvements().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.unit_types().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.base_units().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.promotions().as_slice().iter().map(|x| &x.uniques));
-    out.extend(r.ruins().as_slice().iter().map(|x| &x.uniques));
-    out
+    named_sources(r).into_iter().map(|(_, _, u)| u).collect()
 }
 
 /// The first unique of `u` whose text is `text`.
@@ -157,6 +166,19 @@ fn aircraft_is_a_tag_that_filters_name() {
         assert_eq!(t.get(id).data, UniqueData::Tag(tag));
         assert_eq!(t.meta(id).role, Role::Tag);
     }
+    // A unit carries its type's tags, as Python's unit map held its type's uniques
+    // (rules.py:116-118), and the uniques stay on the type.
+    let unit = |name: &str| &r.base_units()[r.lookup::<BaseUnitId>(name).expect("a unit")];
+    for name in ["Fighter", "Jet Fighter", "Bomber", "Atomic Bomb", "Guided Missile", "Warrior"] {
+        let u = unit(name);
+        let of_type = &r.unit_types()[u.unit_type].uniques;
+        assert_eq!(u.uniques.tags.contains(tag), of_type.tags.contains(tag), "{name}");
+        assert!(u.uniques.ids().all(|id| t.text_of(id) != "Aircraft"), "{name}");
+    }
+    assert!(unit("Fighter").uniques.tags.contains(tag), "the Fighter unit is Aircraft");
+    assert!(unit("Atomic Bomb").uniques.tags.contains(tag));
+    assert!(!unit("Guided Missile").uniques.tags.contains(tag), "a missile is Air, not Aircraft");
+    assert!(!unit("Warrior").uniques.tags.contains(tag));
     // Known texts without parameters that filters name are tags of their sources too.
     let hill = &r.terrains()[r.derived().features[r.derived().known.hill]];
     let rough = t.tag_named("Rough terrain").expect("filters name rough terrain");
@@ -212,6 +234,24 @@ fn uniques_are_split_by_what_they_do() {
     // The Marble fix: a resource's unique in this city is local (DESIGN.md 5.12).
     let marble = &r.resources()[r.lookup::<ResourceId>("Marble").expect("a resource")].uniques;
     assert_eq!(marble.local.len(), 1);
+    // Only buildings and resources split: a belief's `in this city` is the city in context, so
+    // its unique stands in the follower's or founder's index, keeping its LOCAL bit
+    // (religion.py:59-81 read beliefs whole; uniques.py:668).
+    for (belief, text) in [
+        ("Fertility Rites", "[+10]% growth [in this city]"),
+        ("Dance of the Aurora", "[+1 Faith] from [Tundra] tiles without [Forest] [in this city]"),
+        ("Swords into Ploughshares", "[+15]% growth [in this city] <when not at war>"),
+    ] {
+        let b = &r.beliefs()[r.lookup::<BeliefId>(belief).expect("a belief")].uniques;
+        let id = by_text(r, b, text);
+        assert!(t.get(id).flags().contains(UFlags::LOCAL), "{belief}");
+        assert!(b.civ.contains(&id) && b.local.is_empty(), "{belief}");
+    }
+    for (kind, name, u) in named_sources(r) {
+        if !matches!(kind, "Building" | "Resource") {
+            assert!(u.local.is_empty(), "{kind} {name} has local uniques");
+        }
+    }
     // A unit action and its limits.
     let prophet = &r.base_units()[r.lookup::<BaseUnitId>("Great Prophet").expect("a unit")].uniques;
     let spread = by_text(
@@ -361,6 +401,32 @@ fn an_unknown_tag_nothing_names_is_refused() {
 }
 
 #[test]
+fn a_tag_is_named_by_its_trimmed_text() {
+    // Python matched a tag by the unique's placeholder, trimmed (has_tag, uniques.py:182-188).
+    let r = with_unique(UNITS, "Warrior", "Aircraft ").expect("a stray space is still Aircraft");
+    let t = r.uniques();
+    let tag = t.tag_named("Aircraft").expect("a tag");
+    assert_eq!(t.tag_count(), shipped().uniques().tag_count(), "no new tag");
+    let warrior = &r.base_units()[r.lookup::<BaseUnitId>("Warrior").expect("a unit")].uniques;
+    assert!(warrior.tags.contains(tag));
+    let id = by_text(&r, warrior, "Aircraft ");
+    assert_eq!(t.get(id).data, UniqueData::Tag(tag));
+}
+
+#[test]
+fn a_failed_text_still_names_its_tags() {
+    // The text that names the tag fails; the tag is not also reported as a typo.
+    let errs = load_edited(UNITS, |v| {
+        let list = v["Warrior"]["uniques"].as_array_mut().expect("uniques");
+        list.push(json!("Stealthy"));
+        list.push(json!("[+10]% Strength <vs [Stealthy] units> <for every [Cities]>"));
+    })
+    .expect_err("refused");
+    assert_eq!(errs.0.len(), 1, "{errs}");
+    assert!(errs.has(RulesetErrorKind::UniqueModifier), "{errs}");
+}
+
+#[test]
 fn a_bad_stat_is_refused() {
     let file = BUILDINGS;
     let text = refused(
@@ -476,16 +542,79 @@ fn other_misplaced_uniques_are_refused() {
 }
 
 #[test]
+fn a_modifier_the_role_has_no_use_for_is_refused() {
+    // A trigger on a standing effect: Python stood it from the start, since a trigger does not
+    // filter (uniques.py:790-791), and nothing could apply it once.
+    let text = refused(
+        with_unique(UNITS, "Warrior", "[+10]% Strength <upon discovering [Writing] technology>"),
+        RulesetErrorKind::UniqueModifier,
+        UNITS,
+        "Warrior",
+    );
+    assert!(text.contains("fires once") && text.contains("Strength"), "{text}");
+    // Action modifiers on what is no unit action, which nothing read.
+    let text = refused(
+        with_unique(UNITS, "Warrior", "[+10]% Strength <[2] times>"),
+        RulesetErrorKind::UniqueModifier,
+        UNITS,
+        "Warrior",
+    );
+    assert!(text.contains("<[2] times> limits a unit action"), "{text}");
+    // A timer on a requirement, and on a one-time effect, which Python stored for its turns
+    // instead of applying (triggers.py:88-92) and then never read.
+    let text = refused(
+        with_unique(BUILDINGS, "Monument", "Only available <for [10] turns>"),
+        RulesetErrorKind::UniqueModifier,
+        BUILDINGS,
+        "Monument",
+    );
+    assert!(text.contains("a timer goes on an effect or a flag"), "{text}");
+    let nations = "ruleset/nations.json";
+    let text = refused(
+        load_edited(nations, |v| {
+            let list = v["Babylon"]["uniques"].as_array_mut().expect("uniques");
+            list.push(json!("Free [Great Scientist] appears <for [10] turns>"));
+        }),
+        RulesetErrorKind::UniqueModifier,
+        nations,
+        "Babylon",
+    );
+    assert!(text.contains("OneTime"), "{text}");
+}
+
+#[test]
+fn a_timed_effect_may_fire_on_a_trigger() {
+    // Granted for its turns when the trigger fires (triggers.py:88-92), and never standing.
+    let text = "[+10]% Strength <upon discovering [Writing] technology> <for [10] turns>";
+    let r = load_edited("ruleset/nations.json", |v| {
+        v["Babylon"]["uniques"].as_array_mut().expect("uniques").push(json!(text));
+    })
+    .expect("loads");
+    let babylon = &r.nations()[r.lookup::<NationId>("Babylon").expect("a nation")].uniques;
+    let id = by_text(&r, babylon, text);
+    let m = r.uniques().meta(id);
+    assert_eq!(m.timed, Some(10));
+    assert!(m.trigger.is_some());
+    assert!(babylon.triggered.contains(&id) && !babylon.civ.contains(&id));
+    let v = m.temp_variant.expect("a variant");
+    assert!(r.uniques().meta(v).trigger.is_none(), "the variant holds; it does not fire");
+}
+
+#[test]
 fn every_problem_is_reported_at_once() {
     let errs = load_edited(BUILDINGS, |v| {
-        v["Monument"]["uniques"].as_array_mut().expect("uniques").push(json!("[+1 Culturre]"));
+        let monument = v["Monument"]["uniques"].as_array_mut().expect("uniques");
+        monument.push(json!("[+1 Culturre]"));
+        // A typo'd tag is reported with the rest, not only once they are fixed.
+        monument.push(json!("Stealthy"));
         let temple = v["Temple"]["uniques"].as_array_mut().expect("uniques");
         temple.push(json!("[+1 Gold] [in this city] <for every [Cities]>"));
     })
     .expect_err("refused");
-    assert_eq!(errs.0.len(), 2, "{errs}");
+    assert_eq!(errs.0.len(), 3, "{errs}");
     assert!(errs.has(RulesetErrorKind::UniqueParameter), "{errs}");
     assert!(errs.has(RulesetErrorKind::UniqueModifier), "{errs}");
+    assert!(errs.has(RulesetErrorKind::UnknownUnique), "{errs}");
 }
 
 // ---- Gate 3: size -------------------------------------------------------------------------------

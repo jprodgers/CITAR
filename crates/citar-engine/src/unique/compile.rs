@@ -13,15 +13,22 @@
 //!    `units.py:153`;
 //! 4. fold the modifiers by role: conditionals in order, one trigger at most, the action
 //!    modifiers into [`ActionMods`], game speed into a flag, `for [n] turns` into a timer; a
-//!    `for every` multiplier, which Python read as 1 (`uniques.py:1081-1083`), is an error;
+//!    `for every` multiplier, which Python read as 1 (`uniques.py:1081-1083`), is an error, and
+//!    so is a modifier the unique's role has no use for (a trigger on a standing effect, action
+//!    modifiers off an action, a timer on a requirement);
 //! 5. mark it `LOCAL` when a parameter or a conditional says `in this city` (`uniques.py:130`);
 //! 6. key it (FNV-1a-64 of source kind, source name, occurrence and text, DESIGN.md 7.2);
 //! 7. give each timed unique a variant without the timer, in the `Temporary` block;
 //! 8. make each text a filter names a tag: an unknown text becomes a [`UniqueData::Tag`], a
 //!    known one without parameters gives its source the tag;
-//! 9. split each source's uniques by what the engine does with them ([`SourceUniques`]).
+//! 9. split each source's uniques by what the engine does with them ([`SourceUniques`]). Only a
+//!    building's and a resource's `LOCAL` uniques hold in one city alone.
+//!
+//! Every problem of every text is reported, the unknown tags included, before the load stops.
 
-use super::generated::{CondData, ModifierData, TYPE_INFO, TriggerCond, UniqueData, UniqueType};
+use super::generated::{
+    CondData, ModifierData, Support, TYPE_INFO, TriggerCond, UniqueData, UniqueType,
+};
 use super::params::{Lexicon, Param, ParamCx};
 use super::table::{
     ActionMods, Cond, CondDeps, CondSpan, Role, Source, SourceUniques, StaticDomain, UFlags,
@@ -29,7 +36,7 @@ use super::table::{
 };
 use super::text::{placeholder, split_modifiers};
 use crate::base::collections::{DetMap, DetSet};
-use crate::base::ids::{AbilityKey, CondId, Id, IdVec, PromotionId, TagId, TextId, UniqueId};
+use crate::base::ids::{AbilityKey, Id, IdVec, PromotionId, TagId, TextId, UniqueId};
 use crate::base::sets::{BitSet, TagSet};
 use crate::rules::Ruleset;
 use crate::rules::errors::{Problems, RulesetErrorKind};
@@ -80,8 +87,10 @@ struct Staged {
     trigger: Option<TriggerCond>,
     actions: ActionMods,
     ability: Option<AbilityKey>,
-    /// The placeholder, when the unique has no parameters: the term a filter names it by.
-    bare: Option<&'static str>,
+    /// The placeholder, when the unique has no parameters: the term a filter names it by. For an
+    /// unknown text that is its trimmed main text, as Python's `has_tag` read `u.ph`
+    /// (`uniques.py:182-188`).
+    bare: Option<String>,
     tag: Option<TagId>,
     /// Stands for the timed unique at this position in `staged` (step 7).
     temporary_of: Option<usize>,
@@ -100,6 +109,9 @@ pub(crate) fn compile(
     let mut conds: Vec<Cond> = Vec::new();
     let mut staged: Vec<Staged> = Vec::new();
     let mut failed = false;
+    // Every bracketed term of the texts that failed: one of them may be the filter that names a
+    // tag, which must not then be reported as a typo alongside the real problem.
+    let mut failed_terms: Vec<String> = Vec::new();
     for (si, src) in sources.iter().enumerate() {
         let mut seen: DetMap<&str, u16> = DetMap::default();
         for text in src.texts {
@@ -118,27 +130,22 @@ pub(crate) fn compile(
                 Err(r) => {
                     failed = true;
                     p.push(r.kind, src.file, src.name, format!("{text:?}: {}", r.message));
+                    bracketed_terms(text, &mut failed_terms);
                 }
             }
         }
     }
-    if failed {
+    // The tags are judged even when a text failed, so that one report holds every problem.
+    let tag_problems = give_tags(&mut lx, &mut staged, filters, &failed_terms);
+    for (i, kind, message) in &tag_problems {
+        let src = &sources[staged[*i].source];
+        let text = lx.text_of(staged[*i].text);
+        p.push(*kind, src.file, src.name, format!("{text:?}: {message}"));
+    }
+    if failed || !tag_problems.is_empty() {
         return None;
     }
-    if let Err(r) = give_tags(&mut lx, &mut staged, filters) {
-        for (i, message) in r {
-            let src = &sources[staged[i].source];
-            let text = lx.text_of(staged[i].text).to_owned();
-            p.push(
-                RulesetErrorKind::UnknownUnique,
-                src.file,
-                src.name,
-                format!("{text:?}: {message}"),
-            );
-        }
-        return None;
-    }
-    add_variants(&mut staged);
+    let variant_of = add_variants(&mut staged);
     let order = lay_out(&staged, sources);
     check_count(order.len(), p)?;
     let mut id_of = vec![UniqueId(0); staged.len()];
@@ -162,11 +169,7 @@ pub(crate) fn compile(
             }
             None => unique_key(source.kind_name(), sources[s.source].name, s.occurrence, text),
         };
-        let temp_variant = if s.temporary_of.is_none() && s.timed.is_some() {
-            order.iter().find(|&&j| staged[j].temporary_of == Some(i)).map(|&j| id_of[j])
-        } else {
-            None
-        };
+        let temp_variant = variant_of[i].map(|j| id_of[j]);
         let deps = if s.conds.is_empty() { CondDeps::empty() } else { deps_of(&conds, s.conds) };
         let data = s.data.unwrap_or(UniqueData::Tag(s.tag.unwrap_or(TagId(0))));
         uniques.push(Unique::new(data, s.conds, deps, s.flags));
@@ -196,9 +199,10 @@ pub(crate) fn compile(
     Some(Compiled { table, fracs, sources: parts })
 }
 
-/// Refuses more uniques than a [`UniqueId`] numbers.
+/// Refuses more uniques than a [`UniqueId`] numbers. The last id must leave room for one past
+/// it, which ends a [`SourceUniques::all`] range: so at most `u16::MAX` uniques, not 65,536.
 fn check_count(n: usize, p: &mut Problems) -> Option<()> {
-    if UniqueId::from_index(n.saturating_sub(1)).is_none() {
+    if n > usize::from(u16::MAX) {
         p.push(
             RulesetErrorKind::Capacity,
             "",
@@ -208,6 +212,14 @@ fn check_count(n: usize, p: &mut Problems) -> Option<()> {
         return None;
     }
     Some(())
+}
+
+/// The span of the conditionals `start..end`, if its end fits a `u16`: then every id in it
+/// does too, and [`CondSpan::ids`] cannot overflow.
+fn cond_span(start: usize, end: usize) -> Option<CondSpan> {
+    let start = u16::try_from(start).ok()?;
+    let end = u16::try_from(end).ok()?;
+    Some(CondSpan { start, len: end.checked_sub(start)? })
 }
 
 /// What the conditionals of a span read, together.
@@ -245,6 +257,7 @@ fn compile_text(
     let Some(ty) = UniqueType::from_placeholder(&ph) else {
         if params.is_empty() && mods.is_empty() {
             // Perhaps a tag; step 8 decides.
+            staged.bare = Some(ph);
             return Ok(staged);
         }
         return Err(Refusal::new(E::UnknownUnique, unknown(&ph)));
@@ -265,14 +278,16 @@ fn compile_text(
     staged.ty = Some(ty);
     staged.role = role;
     if params.is_empty() {
-        staged.bare = Some(ty.placeholder());
+        staged.bare = Some(ty.placeholder().to_owned());
     }
     if params.contains(&"in this city") {
         staged.flags |= UFlags::LOCAL;
     }
 
-    // Step 4: the modifiers.
+    // Step 4: the modifiers. The trigger, the first action modifier and the timer are kept, to
+    // name them if the unique's role has no use for them.
     let start = conds.len();
+    let mut used = Placed::default();
     for m in &mods {
         let (mph, mparams) = placeholder(m);
         let Some(mty) = UniqueType::from_placeholder(&mph) else {
@@ -320,9 +335,15 @@ fn compile_text(
                 }
                 staged.trigger = Some(TriggerCond::build(mty, &mut mcx).map_err(bad_param)?);
                 staged.flags |= UFlags::TRIGGERED;
+                used.trigger = Some(*m);
             }
             Role::ActionMod | Role::Meta => {
                 let data = ModifierData::build(mty, &mut mcx).map_err(bad_param)?;
+                if msupport.role == Role::ActionMod {
+                    used.action.get_or_insert(*m);
+                } else if mty == UniqueType::ConditionalTimedUnique {
+                    used.timer = Some(*m);
+                }
                 fold(&mut staged, data)
                     .map_err(|why| Refusal::new(E::UniqueModifier, format!("<{m}> {why}")))?;
             }
@@ -334,14 +355,11 @@ fn compile_text(
             }
         }
     }
-    let n = conds.len() - start;
-    let (Ok(start), Ok(len)) = (u16::try_from(start), u16::try_from(n)) else {
+    used.fit(ty, support)?;
+    let Some(span) = cond_span(start, conds.len()) else {
         return Err(Refusal::new(E::Capacity, "more conditionals than a CondId (u16) numbers"));
     };
-    if CondId::from_index(conds.len().saturating_sub(1)).is_none() {
-        return Err(Refusal::new(E::Capacity, "more conditionals than a CondId (u16) numbers"));
-    }
-    staged.conds = CondSpan { start, len };
+    staged.conds = span;
     if !staged.actions.is_empty() {
         staged.flags |= UFlags::ACTION;
     }
@@ -372,6 +390,62 @@ fn supported(ty: UniqueType) -> Result<&'static super::generated::Support, Refus
 
 fn unknown(placeholder: &str) -> String {
     format!("{placeholder:?} is no unique type UnCiv has (crates/citar-engine/unique_types.tsv)")
+}
+
+/// The modifiers of a unique that only some roles can use, as its text wrote them.
+#[derive(Default)]
+struct Placed<'t> {
+    trigger: Option<&'t str>,
+    /// The first action modifier.
+    action: Option<&'t str>,
+    timer: Option<&'t str>,
+}
+
+impl Placed<'_> {
+    /// Refuses a modifier the unique's role has no use for. Python let each through and quietly
+    /// did something else: a trigger does not filter (`uniques.py:790-791`), so a standing effect
+    /// with one stood from the start; action modifiers were read on unit actions only
+    /// (`units.py:401-473`); and a timed unique was stored for its turns instead of applied
+    /// (`triggers.py:88-92`), which only an effect or a flag, read while it is held, turns into
+    /// anything.
+    fn fit(&self, ty: UniqueType, support: &Support) -> Result<(), Refusal> {
+        let role = support.role;
+        let name = ty.name();
+        let refuse = |m: &str, why: String| {
+            Err(Refusal::new(RulesetErrorKind::UniqueModifier, format!("<{m}> {why}")))
+        };
+        if let Some(m) = self.timer
+            && !matches!(role, Role::Effect | Role::Flag)
+        {
+            return refuse(
+                m,
+                format!(
+                    "grants a standing unique for a while, and {name} is a {role:?}: a timer \
+                     goes on an effect or a flag"
+                ),
+            );
+        }
+        if let Some(m) = self.trigger
+            && !(role == Role::OneTime || support.gain || self.timer.is_some())
+        {
+            return refuse(
+                m,
+                format!(
+                    "fires once, and {name} is a standing {role:?}: a trigger goes on a one-time \
+                     effect, or on an effect with <for [n] turns>"
+                ),
+            );
+        }
+        if let Some(m) = self.action
+            && !matches!(role, Role::Action | Role::OneTime)
+        {
+            return refuse(
+                m,
+                format!("limits a unit action, and {name} is a {role:?}, not an action"),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Folds an action or meta modifier into the unique. `Err` says what is wrong: the modifier is
@@ -494,12 +568,27 @@ fn and_parts(text: &str) -> Vec<String> {
     parts
 }
 
-/// Step 8. `Err` lists the texts that are unknown and that no filter names.
+/// Every bracketed parameter of a text and of its modifiers, split into filter terms: what a text
+/// that failed to compile might have named as a filter.
+fn bracketed_terms(text: &str, out: &mut Vec<String>) {
+    let (main, mods) = split_modifiers(text);
+    for part in std::iter::once(main.as_str()).chain(mods) {
+        for param in placeholder(part).1 {
+            filter_terms(param, out);
+        }
+    }
+}
+
+/// Step 8. Returns a problem for each text that is unknown and that no filter names, and for each
+/// tag past what a [`TagSet`] holds, by position in `staged`. `failed_terms` are the terms of the
+/// texts that did not compile ([`bracketed_terms`]), counted as named so that a text's failure
+/// does not also make its tag look like a typo.
 fn give_tags(
     lx: &mut Lexicon<'_>,
     staged: &mut [Staged],
     filters: &[&str],
-) -> Result<(), Vec<(usize, String)>> {
+    failed_terms: &[String],
+) -> Vec<(usize, RulesetErrorKind, String)> {
     let mut terms: DetSet<String> = DetSet::default();
     let mut buf = Vec::new();
     let texts: Vec<String> =
@@ -509,26 +598,24 @@ fn give_tags(
         filter_terms(f, &mut buf);
         terms.extend(buf.drain(..));
     }
+    terms.extend(failed_terms.iter().cloned());
     let mut bad = Vec::new();
     for (i, s) in staged.iter_mut().enumerate() {
-        let name = match (s.data, s.bare) {
-            (None, _) => lx.text_of(s.text).to_owned(),
-            (Some(_), Some(bare)) => bare.to_owned(),
-            (Some(_), None) => continue,
-        };
-        if !terms.contains(&name) {
+        let Some(name) = &s.bare else { continue };
+        if !terms.contains(name) {
             if s.data.is_none() {
                 bad.push((
                     i,
+                    RulesetErrorKind::UnknownUnique,
                     format!(
                         "{} and no filter names it as a tag, so it is probably a typo",
-                        unknown(&name)
+                        unknown(name)
                     ),
                 ));
             }
             continue;
         }
-        match lx.tag(&name) {
+        match lx.tag(name) {
             Ok(t) if t.index() < TagSet::CAPACITY => {
                 s.tag = Some(t);
                 if s.data.is_none() {
@@ -537,6 +624,7 @@ fn give_tags(
             }
             _ => bad.push((
                 i,
+                RulesetErrorKind::Capacity,
                 format!(
                     "more tags than a TagSet holds ({}); widen sets::TAG_WORDS",
                     TagSet::CAPACITY
@@ -544,7 +632,7 @@ fn give_tags(
             )),
         }
     }
-    if bad.is_empty() { Ok(()) } else { Err(bad) }
+    bad
 }
 
 // ---- Steps 7 and 9: layout and partitions -----------------------------------------------------
@@ -567,10 +655,13 @@ fn lay_out(staged: &[Staged], sources: &[SourceTexts<'_>]) -> Vec<usize> {
     order
 }
 
-/// Adds a variant without the timer for each timed unique (step 7), after the others.
-fn add_variants(staged: &mut Vec<Staged>) {
+/// Adds a variant without the timer for each timed unique (step 7), after the others. Returns,
+/// for each position of `staged` after the additions, the position of its variant.
+fn add_variants(staged: &mut Vec<Staged>) -> Vec<Option<usize>> {
     let timed: Vec<usize> = (0..staged.len()).filter(|&i| staged[i].timed.is_some()).collect();
+    let mut variant_of = vec![None; staged.len() + timed.len()];
     for i in timed {
+        variant_of[i] = Some(staged.len());
         let o = &staged[i];
         staged.push(Staged {
             source: o.source,
@@ -586,11 +677,12 @@ fn add_variants(staged: &mut Vec<Staged>) {
             trigger: None,
             actions: o.actions,
             ability: o.ability,
-            bare: o.bare,
+            bare: o.bare.clone(),
             tag: o.tag,
             temporary_of: Some(i),
         });
     }
+    variant_of
 }
 
 /// Step 9: each source's uniques by what the engine does with them.
@@ -617,6 +709,12 @@ fn partitions(
         };
         part.all = first.0..last.0 + 1;
         next = last.0 + 1;
+        // Only a building's uniques hold in its own city alone: Python split them and no one
+        // else's (`economy.py:108`, `cities.py:59`), and a resource's is the Marble decision
+        // (DESIGN.md 5.12). On any other source `in this city` is the city in context, like
+        // `in all cities` (`uniques.py:668`), so such a unique stands with the rest and keeps
+        // its LOCAL bit for evaluation to read.
+        let splits = matches!(sources[si].source, Source::Building(_) | Source::Resource(_));
         let (mut civ, mut local, mut on_gain, mut triggered, mut actions, mut ai) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for &id in list {
@@ -631,7 +729,7 @@ fn partitions(
             } else {
                 match meta.role {
                     Role::Effect | Role::Flag | Role::Tag => {
-                        if f.contains(UFlags::LOCAL) {
+                        if splits && f.contains(UFlags::LOCAL) {
                             local.push(id);
                         } else {
                             civ.push(id);
@@ -705,6 +803,50 @@ mod tests {
             tag: None,
             temporary_of: None,
         }
+    }
+
+    #[test]
+    fn a_failed_text_names_its_bracketed_terms() {
+        let mut out = Vec::new();
+        bracketed_terms(
+            "[+1 Gold] [in this city] <vs [{Stealthy} {Wounded}] units> <bad>",
+            &mut out,
+        );
+        assert_eq!(out, ["+1 Gold", "in this city", "Stealthy", "Wounded"]);
+    }
+
+    #[test]
+    fn capacities_stop_short_of_overflow() {
+        let mut p = Problems::default();
+        // The last id needs one past it to end a range: 65,535 uniques at most.
+        assert!(check_count(usize::from(u16::MAX), &mut p).is_some());
+        assert!(p.check().is_ok());
+        assert!(check_count(usize::from(u16::MAX) + 1, &mut p).is_none());
+        let errs = p.check().expect_err("refused");
+        assert!(errs.has(RulesetErrorKind::Capacity), "{errs}");
+        // A span of conditionals must end within a u16, so that its ids never overflow.
+        let top = usize::from(u16::MAX);
+        let span = cond_span(top - 3, top).expect("fits");
+        assert_eq!(span, CondSpan { start: u16::MAX - 3, len: 3 });
+        assert_eq!(
+            span.ids().map(|c| usize::from(c.0)).collect::<Vec<_>>(),
+            [top - 3, top - 2, top - 1]
+        );
+        assert_eq!(cond_span(top - 3, top + 1), None);
+        assert_eq!(cond_span(5, 5), Some(CondSpan { start: 5, len: 0 }));
+    }
+
+    #[test]
+    fn a_variant_is_found_from_its_original() {
+        let mut list = vec![staged(), staged(), staged()];
+        list[1].timed = Some(10);
+        list[2].timed = Some(5);
+        let variant_of = add_variants(&mut list);
+        assert_eq!(list.len(), 5);
+        assert_eq!(variant_of, [None, Some(3), Some(4), None, None]);
+        assert_eq!(list[3].temporary_of, Some(1));
+        assert_eq!(list[4].temporary_of, Some(2));
+        assert!(list[3].flags.contains(UFlags::TEMPORARY) && list[3].timed.is_none());
     }
 
     #[test]

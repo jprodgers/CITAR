@@ -165,6 +165,14 @@ fn compile_uniques(raw: &RawRuleset, r: &mut Ruleset, p: &mut Problems) {
             Source::Temporary(_) => {}
         }
     }
+    // A unit has its type's tags, as Python's unit map held its type's uniques
+    // (`rules.py:116-118`): `[Aircraft]` sits on the Fighter unit type and names the Fighter.
+    // The uniques themselves are not copied; readers chain the unit's and its type's.
+    for u in r.base_units.as_mut_slice() {
+        let of_type = &r.unit_types[u.unit_type].uniques;
+        u.uniques.tags |= of_type.tags;
+        u.uniques.cond_tags |= of_type.cond_tags;
+    }
     r.uniques = done.table;
     r.fracs = done.fracs;
 }
