@@ -93,7 +93,9 @@ Smaller changes cover the unique record size, Python number formatting, seeds an
 - **Loading Python-format states outside tests.** The Python-state converter (feature `legacy`) serves refcheck, testkit and bench, and never ships.
   - Saves and scenarios from 0.1.5 are archived (plan G).
   - No scenario ships in `citar/data`, which holds only `ruleset/`, `custom/`, `collectors/` and `game.json`.
-- **Unique types the shipped ruleset never uses.** The engine supports the 342 main types and 60 modifier types the data uses, plus 20 structural trigger kinds. This departs from a sentence in plan §3, so it is open question 2.
+- **Unique types the Python engine never handled.** The engine supports every unique type and conditional the Python engine handled: the 402 the shipped ruleset uses and 125 more (§5.4, the owner's decision of 2026-09-23 on open question 2). UnCiv's other 110 types do not load, and the error says what to add.
+  - The 125 extras compile from package 1a-05b on, and the kitchen-sink test ruleset uses each of them.
+  - 1a-07 evaluates the extra conditionals with the others. Each 1b and 1c package implements the extra effects and triggers of its own systems, and tests them with the kitchen sink.
 
 ### 1.3 Phase 1 exit criteria
 
@@ -1060,7 +1062,7 @@ pub const BUILD_ID: &str = match option_env!("CITAR_BUILD_ID") { Some(s) => s, N
 
   The output is committed, and `xtask check` regenerates it and fails on any diff.
 - **Decision (generator in Rust).** The generator lives in `xtask`, so the Rust build does not depend on Python once the Python engine is archived.
-- **Decision (support scope).** Only the types the shipped ruleset uses get payloads. Any other placeholder is a load error saying what to add: one TOML line, one evaluation arm, one test. This departs from plan §3 and from `docs/MODDING.md`'s "a unique the engine already knows needs no code", so it is open question 2. We proceed this way unless the owner objects.
+- **Decision (support scope).** Every unique type and conditional the Python engine handled gets a payload, not only those the shipped ruleset uses. The owner settled open question 2 this way on 2026-09-23: the goal is every Civilization ruleset from 1 to 7, and custom ones. The first draft supported only the used types, which departed from plan §3 and from `docs/MODDING.md`'s "a unique the engine already knows needs no code". A placeholder of any other UnCiv type is a load error saying what to add: one TOML line, one evaluation arm, one test.
 
 ### 5.5 The compiler
 
@@ -1120,7 +1122,7 @@ The rule for unknown texts:
 
 **As built in 1a-05** (§5.4-5.6):
 - **Files.** `unique_types.tsv` (637 rows: name, placeholder, signature) and `unique_supported.toml` sit beside `Cargo.toml` in `crates/citar-engine/`. `scripts/gen_unique_types.py --tsv` refreshes the TSV from UnCiv. `cargo xtask gen-uniques` writes `src/unique/gen.rs`, and `xtask check` regenerates it and fails on any difference. `gen` is a reserved word in edition 2024, so the module is `unique::generated`, loaded from `gen.rs` by `#[path]`. rustfmt skips it.
-- **The supported list** has 423 entries: the 402 types the ruleset uses, plus the 21 triggers Python fires that the ruleset does not use. Python fires 24 kinds in all; three of them are used. The roles break down as 164 effects, 92 flags, 10 requirements, 27 one-time effects, 11 actions, 1 AI weight, 23 map-generation types, 14 inert types (each with a reason), 49 conditionals, 24 triggers, 6 action modifiers and 2 meta modifiers.
+- **The supported list** had 423 entries at 1a-05 (1a-05b raised it to 527, below): the 402 types the ruleset uses, plus the 21 triggers Python fires that the ruleset does not use. Python fires 24 kinds in all; three of them are used. The roles break down as 164 effects, 92 flags, 10 requirements, 27 one-time effects, 11 actions, 1 AI weight, 23 map-generation types, 14 inert types (each with a reason), 49 conditionals, 24 triggers, 6 action modifiers and 2 meta modifiers.
   - `stages` lists the engine systems that read a type: the Python modules that read it, mapped to the game modules of §3.2. An inert type is one Python never reads. The generator refuses a type that is not inert and names no stage, since the packages find their work by stage.
   - `gain = true` marks the five standing effects that `triggers.py`'s TRIGGERABLE also fires once when their source is gained, such as free buildings and free promotions.
   - `name:amount16` is the one field override. It keeps `BuyUnitsIncreasingCost`'s payload within 12 bytes.
@@ -1150,6 +1152,38 @@ The rule for unknown texts:
 - **The loader** numbers the feature layers first, because uniques name features by them. Then it compiles the uniques, then derives the tables. The derived tables (rough, great improvements, great people, spaceship parts, major nations, `stat_related`) read compiled uniques by type. `Derived::builder_classes` now holds `ObjectFilterId`s. Loading takes about 7 ms in release.
 - **Checks.** The golden `uniques.json` snapshots every compiled unique, and every source's `all` range, partitions and tags. The refcheck `uniques` group compares each text with `scripts/refcheck/uniques_dump.py`'s record of how Python read it, and runs enforced with 0 unexplained differences.
 - **Left for 1a-07.** The `OneTimeEffect` shapes; `UniqueData`'s one-time payloads are their input.
+
+**As built in 1a-05b** (§5.4, full support; the owner's decision of 2026-09-23):
+- **The supported list** has 527 entries: the 402 types the shipped ruleset uses, and 125 more. Each of the 125 is marked `# (extra)` in `unique_supported.toml`:
+  - 55 main types: 28 effects, 11 flags, 1 requirement, 12 one-time effects, 2 actions and 1 map-generation type;
+  - 45 conditionals;
+  - 22 triggers: the 21 Python fired, and `upon being defeated`, which Python let through and never fired;
+  - 3 display modifiers.
+
+  The roles now break down as 192 effects, 103 flags, 11 requirements, 39 one-time effects, 13 actions, 1 AI weight, 24 map-generation types, 14 inert types, 94 conditionals, 25 triggers, 6 action modifiers and 5 meta modifiers. UnCiv's other 110 types still do not load.
+- **Python's six dead `_COND` keys** (§5.12) are its own wordings of UnCiv conditionals, and no UnCiv ruleset writes them. Their UnCiv wordings are supported instead:
+  - `outside a Golden Age` is `when not in a Golden Age`;
+  - `in tiles adjacent to []` and `in tiles not adjacent to []` are `in tiles adjacent to [] tiles` and `in tiles not adjacent to [] tiles`;
+  - `for [] players` is `for [] Civilizations`;
+  - `if no other Civilization has adopted []` is `if no Civilization has adopted []`;
+  - `when [] units` is `for [] units`, which the shipped ruleset already uses.
+- **Parameters** have 54 `ParamKind`s. Three are new:
+  - `speed` is a `SpeedId`;
+  - `beliefType` is a `BeliefKind`: a belief type, or `Any`, which is how `religion.py:544-575` counted a civilization's choices;
+  - `spyAction` is a `SpyAction`, named as Python named it in any case (`espionage.py:101`) or as UnCiv does.
+
+  `pediaLink` and `validationWarning` are kept as text.
+- **Display modifiers.** `<hidden from users>`, `<Civilopedia link []>` and `<Suppress warning []>` change how UnCiv shows a unique, and no rule. Python passed over them (`uniques.py:1013-1019`), and the compiler folds them into nothing.
+- **Map generation** reads `Must be on [n] largest landmasses` into `NaturalWonderGen::on_largest` (`mapgen.py:734-736`).
+- **The kitchen sink.** `crates/citar-testkit/testdata/rulesets/kitchen_sink/` is a small mod over the shipped files, written as JSON merge patches (RFC 7396). It adds:
+  - a nation, two buildings, seven units, a promotion, an improvement and a natural wonder;
+  - a belief, a city-state type and four ruins.
+
+  Between them these objects use every extra type, each where a ruleset would put it. `citar_testkit::rulesets::kitchen_sink()` loads the result. Its tests check three things:
+  - every text compiles on its object;
+  - the shipped ruleset and the kitchen sink together use every supported type;
+  - the `(extra)` marks name exactly the types the shipped ruleset does not use.
+- **Who implements them.** The extras compile, and nothing reads them yet. 1a-07 evaluates every conditional. Each 1b and 1c package implements the extra effects and triggers whose `stages` name its systems, and tests them with the kitchen sink.
 
 ### 5.7 Filters
 
@@ -1186,7 +1220,7 @@ The rule for unknown texts:
 
 ### 5.8 Conditionals and `CondDeps`
 
-- **The variants.** `Cond { data: CondData, deps: CondDeps, text: TextId }` has one variant per conditional in use (49), grouped as game, civ, city, unit, combat and tile.
+- **The variants.** `Cond { data: CondData, deps: CondDeps, text: TextId }` has one variant per supported conditional (94: the 49 the shipped ruleset uses and the 45 package 1a-05b added), grouped as game, civ, city, unit, combat and tile.
 - **Map-generation only.** `InRegionOfType` and `InRegionExceptOfType` exist only in `GenCond`; on an effect they are a load error. As built in 1a-06, they compile as conditionals and the compiler refuses them (`UniqueModifier`) on any unique but a map-generation or an inert one (the start-quality uniques carry them).
 - **Decision (condition scopes).** One `bitflags` `CondDeps` (24 bits, leaving the top 8 bits of the `u32` for `UFlags`):
   - civ-level classes: TURN, HAPPINESS_SEEN, STOCKS, RESOURCES, GOLDEN_AGE, WAR, ERA, TECHS, POLICIES, RESEARCH_QUEUE, RELIGION_STATE, CIV_BUILDINGS, GLOBAL_BUILDINGS, GLOBAL_POLICIES, CITY_COUNT, UNIT_SET, SEAT, CONFIG, CHANCE;
@@ -1202,10 +1236,10 @@ The rule for unknown texts:
 ### 5.9 Countables, triggers and one-time effects
 
 - **Countables.** `Countable = Int | Turns | Cities | Units | CompletedBranches | Stat | UnitsMatching | CitiesMatching | RemainingCivs | BuildingsMatching` (`uniques.py:738-772`). `BuildingsMatching` sums the civ's per-building counts.
-- **Triggers.** `TriggerKind` has 23 kinds, one per fire site in the engine (turn start and end, research, entering an era, declaring war, expending a unit, and so on).
+- **Triggers.** `TriggerKind` has one kind per supported trigger (25 from package 1a-05b on), each fired at one site in the engine (turn start and end, research, entering an era, declaring war, expending a unit, and so on).
   - `TriggerCond` is matched against a typed `TriggerEvent`.
   - `fire(w, site, &event, include_unit) -> SmallVec<[UniqueId; 4]>` reads the civ index, then the city's local index, then the unit's profile, which is Python's order (`triggers.py:38-65`). A kind with nothing registered is an empty slice.
-- **One-time effects.** Effects decode to a fully resolved `OneTimeEffect` enum with 29 kinds, such as `FreeUnits`, `FreeTechs`, `GainStat`, `RevealTiles`, `FreeBuilding` and `Timed`.
+- **One-time effects.** Effects decode to a fully resolved `OneTimeEffect` enum, with a kind for each of the 39 one-time types (12 of them added by package 1a-05b) and for the standing effects that also happen on gain, such as `FreeUnits`, `FreeTechs`, `GainStat`, `RevealTiles`, `FreeBuilding` and `Timed`.
   - They are applied in a second phase by `game::triggers::apply_one_time(g: &mut Game, id, site)`, which ports `triggers.py:75-367`.
   - Each trigger's RNG is keyed `Purpose::Trigger, [meta.key, civ, tile.key(), turn]`.
 
@@ -1272,7 +1306,7 @@ pub mod uq { civ, civ_no_resources, city, unit, unit_and_civ, terrains, object, 
 
 **Python behaviour fixed** here, each with an entry in `intended.toml` once refcheck shows it:
 - unknown conditionals and unparseable parameters are load errors;
-- the six dead `_COND` keys are gone;
+- the six dead `_COND` keys are gone, and their UnCiv wordings are supported instead (§5.6);
 - there are no global caches;
 - conditionals read committed happiness and staged resource supply;
 - the Marble fix. The unique `[+15]% Production when constructing [All] wonders [in this city]` applies to every city in Python, because resource uniques ignore `in this city`. **Decision:** a resource unique marked LOCAL applies only in cities that own an improved tile with that resource.
@@ -2324,7 +2358,7 @@ Figures are for one P-core of the laptop (i5-13420H), release build, criterion, 
 
 ## 11. Risks
 
-1. **A cache could go stale:** a touch with the wrong flag, or a wrongly classified `CondDeps` on one of the 49 conditionals.
+1. **A cache could go stale:** a touch with the wrong flag, or a wrongly classified `CondDeps` on one of the 94 conditionals.
    - Mitigation: `&mut` access only through `game::mutate`, enforced by `xtask check`; `#[must_use] Change` with `unused_must_use` denied.
    - Mitigation: memos that validate themselves on every read.
    - Mitigation: `verify_caches` at every settle in scripts, properties and chaos; the citizen oracle; the `stats` redundancy counters.
@@ -2346,7 +2380,8 @@ Figures are for one P-core of the laptop (i5-13420H), release build, criterion, 
 
    Each needs an intended entry. If an entry is written too broadly, it hides bugs.
 5. **The performance budget assumes compiled filters** (bitset tests). An interpreted filter would put tiles 5-10x over budget. The 3x backstop in 1b-06 catches it early.
-6. **Narrowing unique support** departs from plan §3 and `docs/MODDING.md` (open question 2).
+6. **Full unique support** (the owner's decision on open question 2): 125 types the shipped ruleset never uses must still be right, and only the kitchen-sink ruleset exercises them.
+   Mitigation: each type names the stages that read it, each 1b and 1c package tests its own with the kitchen sink, and refcheck states from rulesets that use them can be recorded later.
 7. **The `EvalWorld` trait churns** while `State` settles. Pin it in 1a-07; `EvalView` is its only production implementation.
 8. **Porting a large piece of the bot for the advisor** in Phase 1 (1c-07) may drag bot concepts into the engine. It is kept to production valuation, and the rest of the bot stays out of the engine.
 9. **The corpus (44 MB) is git-ignored.** Without the prerelease asset (open question 1), the full refcheck runs only on the laptop, and CI covers 12 states.
@@ -2477,7 +2512,7 @@ Each line is: the conflict, then the choice. The reasons are given where each de
 32. **The citizen oracle against converted states** → `City.citizens_settled`.
 33. **Unknown tool arguments** → dropped, as today.
 34. **Crate versions** → the crates.io versions current on 2026-09-23 (§2.3).
-35. **Supported uniques:** all 509 against the 402 used → the used set (open question 2).
+35. **Supported uniques:** all 509 against the 402 used → the used set, until the owner chose every type Python handled on 2026-09-23 (package 1a-05b).
 36. **The Marble unique** → LOCAL resource uniques apply only in cities with the improved resource.
 37. **The `fixtures-late` pick** → small t280, standard t120, scenario-small t61.
 
@@ -2689,6 +2724,26 @@ Filters are carried as unresolved text handles here; 1a-06 resolves them.
 (5) gen-uniques is idempotent, and CI fails on a stale gen.rs.
 (6) The refcheck uniques group is enforced with 0 unexplained.
 
+### 1a-05b (1a): Full unique support: every type the Python engine handled compiles, and the kitchen-sink ruleset
+
+Added by the owner's decision of 2026-09-23.
+- **Depends on:** 1a-05, 1a-06
+- **Scope:**
+(1) Every unique type and conditional Python handled compiles:
+- `unique_supported.toml` gets a role, fields and stages for each, marked `(extra)`;
+- `gen.rs` is regenerated, and the new `ParamKind`s get compilers;
+- the triggers and one-time effects join the tables of §5.9, for 1a-07 to decode.
+(2) The kitchen-sink test ruleset in `crates/citar-testkit/testdata/rulesets/kitchen_sink/`:
+- it uses every extra type and conditional at least once, each in a plausible place;
+- an overlay path in testkit loads it over the shipped ruleset.
+(3) DESIGN.md and `docs/MODDING.md` say what is supported and who implements it.
+The extra effects are implemented with their systems in 1b and 1c, and the conditionals in 1a-07. A type that needs more than a few minutes' work is deferred, with its reason, in `ops/unused-uniques.md`.
+- **Gates:** (a) All shipped and kitchen-sink uniques compile.
+(b) A test shows the shipped ruleset and the kitchen sink together cover every type in `unique_supported.toml`.
+(c) gen-uniques is idempotent, and `cargo xtask check` passes.
+(d) Clippy passes with `-D warnings`, and nextest is green.
+(e) The refcheck uniques group is still enforced with 0 unexplained.
+
 ### 1a-06 (1a): Filters, and the tables for map generation, AI and milestones
 
 - **Depends on:** 1a-05
@@ -2719,7 +2774,7 @@ A one-off script, scripts/refcheck/filters.py, records Python truth tables.
 - the matching part of triggers.py:13-74;
 - the requirement texts of cities.py:1169-1193.
 (1) Conditionals, in unique::cond:
-- the 49 used conditionals, with CondDeps tagging including SEAT;
+- every supported conditional (94: the 49 used and the 45 package 1a-05b added), with CondDeps tagging including SEAT;
 - applies and applies_scoped;
 - describe, with the cities._not_met texts;
 - Chance via Rng::keyed with meta.key and KeyPart-encoded civ, tile and unit.
@@ -2727,7 +2782,7 @@ A one-off script, scripts/refcheck/filters.py, records Python truth tables.
 (3) unique::world: Ctx, CombatCtx, and the EvalWorld and TileFacts traits. EvalWorld exposes index reads (IndexRef) that a production world validates lazily.
 (4) unique::query: uq::civ, civ_no_resources, city, unit, unit_and_civ, terrains, object, raw, any, sum_i32, requirement_problems.
 (5) unique::index: Csr, CivSources, CivIndex::build, placeholder_counts.
-(6) unique::trigger: TriggerKind, TriggerCond, TriggerEvent matching, fire, and OneTimeEffect decoding for 29 kinds. Applying them is 1b-08.
+(6) unique::trigger: TriggerKind, TriggerCond, TriggerEvent matching, fire, and OneTimeEffect decoding for every one-time type (39) and the gain effects. Applying them is 1b-08.
 (7) A one-off script, scripts/refcheck/not_met_dump.py, records Python _not_met strings for sample uniques and contexts on the fixtures.
 - **Gates:** (1) There is a mock-world unit test for every Cond variant, plus a table test that CondDeps are assigned right.
 (2) Python edge cases pass: civ None, ignore_conditionals.

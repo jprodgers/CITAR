@@ -35,6 +35,32 @@ Conditionals work the same way:
 
 `citar/engine/unique_types.py` lists every unique type CITAR knows, generated from UnCiv's own enum.
 
+### In the Rust engine (0.1.6)
+
+The Rust engine in `crates/citar-engine` supports every unique type and conditional the Python
+engine handled. That is the 402 types the shipped ruleset uses and 125 more that other UnCiv
+rulesets use: 527 of UnCiv's 637 types. `crates/citar-engine/unique_supported.toml` lists them.
+
+The engine compiles every unique when the ruleset loads. A mod does not load at all if one of its
+uniques:
+
+- is misspelt;
+- has a parameter that does not read, such as a stat that does not exist or a name nothing has;
+- uses one of UnCiv's other 110 types.
+
+The error names the file, the object and what is wrong. Nothing is silently ignored.
+
+The 125 types the shipped ruleset does not use are marked `(extra)` in that file. They all
+compile now, and their rules arrive with the parts of the engine that read them: the conditionals
+first, then each game system as it is ported. `crates/citar-testkit/testdata/rulesets/kitchen_sink/`
+is a small mod that uses every one of them, so it has a worked example of each. Its files are JSON
+merge patches over the shipped ruleset files: an object in a patch is added, or merged into the one
+of the same name.
+
+To support another UnCiv type, add its line to `unique_supported.toml`: its role, a name for each
+parameter, and the systems that read it. Then run `cargo xtask gen-uniques`, handle it where those
+systems read it, and test it.
+
 ---
 
 ## Where content lives
@@ -93,7 +119,8 @@ are played.
 
 ## Adding a new kind of rule
 
-When a unique type does not exist, code is needed:
+When a unique type does not exist, code is needed. These steps are for the Python engine; for the
+Rust engine, see [In the Rust engine (0.1.6)](#in-the-rust-engine-016).
 
 1. Add the unique type to `citar/engine/unique_types.py`.
 2. Handle it in the engine module that owns the system — `cities.py` for a city yield,
