@@ -35,16 +35,33 @@ const fn mix(x: u64) -> u64 {
     finalize(x.wrapping_add(GAMMA))
 }
 
-/// What a random draw is for. Each purpose is its own family of streams.
-///
-/// **The discriminants are frozen.** Changing one rerolls every draw of that purpose in every
-/// game, so a new purpose takes a new number and an old one is never reused. The groups leave
-/// room to grow; `crates/citar-testkit/golden/rng.json` lists them all, so a change fails the
-/// golden check. `BotBase` and above are reserved for the Phase 2 bot, one per decision type.
-#[repr(u32)]
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Purpose {
+/// Defines [`Purpose`] and [`Purpose::ALL`] from one list, so a purpose cannot be added without
+/// being listed, and so pinned in `rng.json`.
+macro_rules! purposes {
+    ($($(#[$group:meta])* $name:ident = $code:literal,)*) => {
+        /// What a random draw is for. Each purpose is its own family of streams.
+        ///
+        /// **The discriminants are frozen.** Changing one rerolls every draw of that purpose in
+        /// every game, so a new purpose takes a new number and an old one is never reused. The
+        /// groups leave room to grow; `crates/citar-testkit/golden/rng.json` lists them all, so a
+        /// change fails the golden check. `BotBase` and above are reserved for the Phase 2 bot,
+        /// one per decision type.
+        #[repr(u32)]
+        #[non_exhaustive]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum Purpose {
+            $($(#[$group])* $name = $code,)*
+        }
+
+        impl Purpose {
+            /// Every purpose, in discriminant order. The macro that defines the enum writes this
+            /// list too, so it cannot miss one.
+            pub const ALL: &'static [Purpose] = &[$(Self::$name,)*];
+        }
+    };
+}
+
+purposes! {
     // Combat
     Combat = 0x0100,
     Intercept = 0x0101,
@@ -111,59 +128,6 @@ pub enum Purpose {
 }
 
 impl Purpose {
-    /// Every purpose, in discriminant order.
-    pub const ALL: &'static [Purpose] = &[
-        Self::Combat,
-        Self::Intercept,
-        Self::InterceptOrder,
-        Self::Nuke,
-        Self::BarbPlace,
-        Self::BarbUnit,
-        Self::BarbSpawn,
-        Self::BarbCountdown,
-        Self::BarbSack,
-        Self::Wander,
-        Self::Demand,
-        Self::DemandNew,
-        Self::CaptureGold,
-        Self::CaptureBuildings,
-        Self::CsInit,
-        Self::CsUnit,
-        Self::CsGiftUnit,
-        Self::CsGp,
-        Self::CsGpGiver,
-        Self::CsAttacked,
-        Self::Quest,
-        Self::Quests,
-        Self::Spy,
-        Self::Election,
-        Self::ElectionDelay,
-        Self::Prophet,
-        Self::Ruins,
-        Self::Trigger,
-        Self::Chance,
-        Self::Revolt,
-        Self::RevoltDelay,
-        Self::UnVote,
-        Self::Pillage,
-        Self::NationShuffle,
-        Self::MapPrepare,
-        Self::Advisor,
-        Self::MapIce,
-        Self::MapLand,
-        Self::MapClimate,
-        Self::MapRelief,
-        Self::MapLakes,
-        Self::MapVegetation,
-        Self::MapRivers,
-        Self::MapStarts,
-        Self::MapWonders,
-        Self::MapResources,
-        Self::MapRuins,
-        Self::TestAgent,
-        Self::BotBase,
-    ];
-
     /// The frozen discriminant.
     #[must_use]
     #[inline]
@@ -390,6 +354,8 @@ mod tests {
         for pair in Purpose::ALL.windows(2) {
             assert!(pair[0].code() < pair[1].code(), "{:?} and {:?}", pair[0], pair[1]);
         }
+        assert_eq!(Purpose::ALL.first(), Some(&Purpose::Combat));
+        assert_eq!(Purpose::ALL.last(), Some(&Purpose::BotBase));
         assert_eq!(Purpose::BotBase.code(), 0x1000_0000);
     }
 
