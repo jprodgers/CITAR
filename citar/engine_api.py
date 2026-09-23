@@ -14,7 +14,7 @@ Rust (``citar._engine``)                    here
 ``execute(pid, tool, args_json)``           EngineGame.execute
 ``view(pid|None)``                          EngineGame.view
 ``summary()``                               EngineGame.summary and its narrower reads (turn, phase, player,
-                                            standings, stats, events, thoughts, ...)
+                                            standings, stats, events, thoughts, negotiation heads, ...)
 ``briefing(pid)``, ``turn_progress(pid)``   EngineGame.briefing, EngineGame.turn_progress
 ``negotiation_view(nid, pid)``              EngineGame.negotiation_view, negotiation, open_negotiations, ...
 ``empire_summary(pid)``                     EngineGame.empire_summary
@@ -51,8 +51,23 @@ from .engine.rules import RULES_VERSION, get_rules
 from .engine.state import GameState
 from .engine.views import RULES_OVERVIEW, client_view as _client_view, empire_info as _empire_info
 
-__all__ = ["ActionError", "MapError", "EngineGame", "RULES_OVERVIEW", "MAP_LEGEND", "run_game", "bot_instance",
-           "tool_list", "tool_kind", "rules_client", "rules_version", "map_types"]
+# The whole public surface. Anything else this module holds (Game, GameState, get_rules, the engine modules imported
+# under private names) is backend, and tests/test_engine_boundary.py fails a caller that reaches for it.
+__all__ = [
+    # errors, and text the prompts quote
+    "ActionError", "MapError", "RULES_OVERVIEW", "MAP_LEGEND",
+    # the ruleset and the tools
+    "rules_version", "rules_client", "max_players", "map_sizes", "map_types", "speeds", "difficulties",
+    "resolve_name", "ruleset_counts", "tool_list", "tool_kind", "state_summary",
+    # maps and scenarios on disk
+    "list_maps", "load_map", "save_map", "delete_map", "validate_map", "map_summary", "blank_map", "generate_map",
+    "scenario_ops_help", "list_scenarios", "load_scenario", "scenario_summary", "delete_scenario",
+    # bots and headless games
+    "bot_instance", "DIPLOMACY_CATEGORIES", "item_category", "proposal_categories", "bot_set_diplomacy",
+    "bot_owns_negotiation", "run_game",
+    # one game
+    "DEBUG_ACTIONS", "EngineGame",
+]
 
 
 def _plain(v):
@@ -63,6 +78,12 @@ def _plain(v):
     if isinstance(v, (list, tuple)):
         return [_plain(x) for x in v]
     return v
+
+
+def _head(n: dict) -> dict:
+    """Where a negotiation stands, without the history and proposals that make a copy of it cost."""
+    return {"id": n["id"], "initiator": n["initiator"], "responder": n["responder"], "status": n["status"],
+            "awaiting": n["awaiting"], "entries": len(n["history"])}
 
 
 # ----------------------------------------------------------------------------
@@ -135,17 +156,26 @@ def tool_kind(name: str) -> Optional[str]:
 
 
 def state_summary(state: dict) -> dict:
-    """The headline facts of a saved game state (a save's or a scenario's "state"), without loading it: turn, phase,
-    turn limit, winner (as a name) and the major civilizations.
-    Rust: none; it reads the saved JSON (the new save format will need its own)."""
-    majors = [p for p in state.get("players", []) if p.get("kind") == "major"]
-    winner = state.get("winner")
+    """The headline facts of a saved game state (a save's or a scenario's "state"), without loading it:
+    {"turn", "phase", "turn_limit" (the configured one, or None), "map_size", "map_type", "winner" (a name),
+    "winner_id", "names" ({player id: name}, every civilization), "majors" ([{"id", "name", "nation", "alive"}]),
+    "scores" ({major id: score in the last per-turn stats row}; empty before the first row is recorded)}.
+    This is all a caller may know of the saved layout. Rust: none; it reads the saved JSON (the new save format will
+    need its own)."""
     players = state.get("players", [])
-    return {"turn": state.get("turn"), "phase": state.get("phase"),
-            "turn_limit": (state.get("config") or {}).get("turn_limit"),
+    majors = [p for p in players if p.get("kind") == "major"]
+    config = state.get("config") or {}
+    winner = state.get("winner")
+    stats = state.get("stats") or []
+    last = stats[-1].get("players", {}) if stats else None
+    return {"turn": state.get("turn"), "phase": state.get("phase"), "turn_limit": config.get("turn_limit"),
+            "map_size": config.get("map_size"), "map_type": config.get("map_type"),
             "winner": players[winner].get("name") if winner is not None and 0 <= winner < len(players) else None,
+            "winner_id": winner, "names": {p.get("id"): p.get("name") for p in players},
             "majors": [{"id": p.get("id"), "name": p.get("name"), "nation": p.get("nation"),
-                        "alive": p.get("alive", True)} for p in majors]}
+                        "alive": p.get("alive", True)} for p in majors],
+            "scores": {} if last is None else {p.get("id"): (last.get(str(p.get("id"))) or {}).get("score", 0)
+                                               for p in majors}}
 
 
 # ----------------------------------------------------------------------------
@@ -309,19 +339,21 @@ def run_game(spec: dict, on_turn: Optional[Callable[[dict], None]] = None,
       - ``config``: the game configuration, as for :meth:`EngineGame.new`;
       - ``bots``: {player id: a bot from bot_instance or citar.bots.profiles.make_bot};
       - ``max_errors`` (20): stop after more bot crashes than this; ``traceback_limit`` (5) frames per crash;
-      - ``labels``: {player id: text} added to each crash line after the player.
+      - ``labels``: {player id: text} added to each crash line after the player;
+      - ``raise_errors`` (False): let the first bot crash propagate instead of recording it, for runs whose point
+        is that the bot does not crash (``citar sim`` and its test).
 
     ``on_turn(info)`` is called when a turn begins and once more if the game ended on a new turn, with {"turn",
     "phase", "turn_limit", "last_stats"}. ``on_event(event)`` gets every event after the game is created.
 
     Returns {"turn", "turns" (played), "phase", "winner", "victory", "turn_limit", "stats" (a row per turn),
     "players" (every civ; majors add techs, future_techs, policies, religion, great_people, cities, spaceship,
-    difficulty and score, 0 once eliminated), "errors"}.
+    difficulty and score, 0 once eliminated), "errors" (a line and a traceback per crash)}.
     """
     from .bots import headless
     return headless.play(spec["config"], spec["bots"], on_turn=on_turn, on_event=on_event,
                          max_errors=spec.get("max_errors", 20), traceback_limit=spec.get("traceback_limit", 5),
-                         labels=spec.get("labels"))
+                         labels=spec.get("labels"), raise_errors=bool(spec.get("raise_errors")))
 
 
 # ----------------------------------------------------------------------------
@@ -473,12 +505,14 @@ class EngineGame:
     # ------------------------------------------------------------------ tools and views
     def execute(self, pid: int, tool: str, args: Optional[dict] = None) -> Any:
         """Run a player tool, with every rule the tool registry enforces. Raises ActionError. The result is the
-        tool's own return value: fresh data, to be treated as read-only. Rust: execute()."""
+        tool's own return value, built for the call but live in places (get_empire's happiness is the engine's
+        cached figure): serialise it, don't edit it. Rust: execute()."""
         return _tools.execute(self._g, pid, tool, args or {})
 
     def view(self, pid: Optional[int], event_limit: int = 150) -> dict:
         """The game as one player sees it (None: everything), which is what the browser renders from. Built fresh
-        on each call, but its event, thought, message and negotiation entries are live. Rust: view()."""
+        on each call, but its event, thought, message and negotiation entries and each empire's happiness are live.
+        Rust: view()."""
         return _client_view(self._g, pid, event_limit)
 
     def briefing(self, pid: int) -> str:
@@ -491,14 +525,16 @@ class EngineGame:
 
     def empire_summary(self, pid: int) -> dict:
         """The empire at a glance (get_empire's data), plus "cities" (how many), "at_war_with" (names) and "notes"
-        (the civilization's notebook). Rust: empire_summary()."""
+        (the civilization's notebook). A copy: read once per negotiation answer, not per frame.
+        Rust: empire_summary()."""
         g = self._g
         p = g.player(pid)
         d = _empire_info(g, pid)
         d["cities"] = len(g.player_cities(pid))
         d["at_war_with"] = [g.player(q).name for q in p.met if g.at_war(pid, q)]
         d["notes"] = p.notes
-        return d
+        # empire_info hands out the engine's cached happiness, and the notebook is the player's own
+        return _plain(d)
 
     # ------------------------------------------------------------------ negotiations
     def negotiation(self, nid: int) -> dict:
@@ -508,9 +544,23 @@ class EngineGame:
         return _plain(_diplomacy.get_negotiation(self._g, nid))
 
     def open_negotiations(self, pid: Optional[int] = None) -> list[dict]:
-        """Copies of the negotiations still open, oldest first; only those ``pid`` is a party to, if given.
+        """Copies of the negotiations still open, oldest first; only those ``pid`` is a party to, if given. Code that
+        only needs to know who owes an answer wants open_negotiation_heads, which copies no history.
         Rust: negotiation_view() in the engine's own terms."""
         return [_plain(n) for n in self._g.s.negotiations
+                if n["status"] == "open" and (pid is None or pid in (n["initiator"], n["responder"]))]
+
+    def negotiation_head(self, nid: int) -> dict:
+        """Where one negotiation stands: {"id", "initiator", "responder", "status", "awaiting", "entries" (how many
+        history entries; a new one means somebody spoke)}. Cheap enough to poll in a wait. Raises ActionError for an
+        unknown id. Rust: summary() (negotiation heads)."""
+        return _head(_diplomacy.get_negotiation(self._g, nid))
+
+    def open_negotiation_heads(self, pid: Optional[int] = None) -> list[dict]:
+        """negotiation_head for each negotiation still open, oldest first; only those ``pid`` is a party to, if
+        given. For the session's after-every-action checks, which a copy of each chat's history would slow down.
+        Rust: summary() (negotiation heads)."""
+        return [_head(n) for n in self._g.s.negotiations
                 if n["status"] == "open" and (pid is None or pid in (n["initiator"], n["responder"]))]
 
     def negotiations(self, pid: Optional[int] = None) -> list[dict]:
@@ -519,9 +569,10 @@ class EngineGame:
         return [_plain(n) for n in self._g.s.negotiations if pid is None or pid in (n["initiator"], n["responder"])]
 
     def negotiation_view(self, nid: int, pid: int) -> dict:
-        """A negotiation as one side sees it, in its own terms. Raises ActionError. Rust: negotiation_view()."""
+        """A negotiation as one side sees it, in its own terms. Raises ActionError. A copy (the engine's view shares
+        the proposal's item lists). Rust: negotiation_view()."""
         g = self._g
-        return _diplomacy.negotiation_view(g, _diplomacy.get_negotiation(g, nid), pid)
+        return _plain(_diplomacy.negotiation_view(g, _diplomacy.get_negotiation(g, nid), pid))
 
     def end_turn_refusal(self, pid: int) -> Optional[str]:
         """Why the end_turn tool would refuse this player because of an open negotiation, or None.

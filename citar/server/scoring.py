@@ -14,6 +14,7 @@ import math
 from pathlib import Path
 from typing import Optional
 
+from .. import engine_api
 from .metrics import Metrics
 from .session import SAVE_DIR, SessionManager, load_save_file
 
@@ -36,12 +37,12 @@ def _digest_save(path: Path) -> Optional[dict]:
         return None
     sess = data.get("session", {})
     seats = sess.get("seats", [])
-    state = data["state"]
-    players = {p["id"]: p for p in state["players"]}
+    # the save's engine part is read through the facade, which is all that knows its layout
+    state = engine_api.state_summary(data["state"])
     summary = {}
     if data.get("metrics"):
         m = Metrics(data["metrics"])
-        summary = m.summary({st["player"]: {"name": players[st["player"]]["name"], "controller": st["type"],
+        summary = m.summary({st["player"]: {"name": state["names"][st["player"]], "controller": st["type"],
                                             "model": (st.get("llm") or {}).get("model") if st["type"] == "llm" else None}
                              for st in seats})
     dry = {st["player"] for st in seats if (st.get("llm") or {}).get("provider") == "dryrun"}
@@ -56,7 +57,7 @@ def _digest_save(path: Path) -> Optional[dict]:
 
 
 def _benchmark_from_state(sess: dict, seats: list, state: dict) -> Optional[dict]:
-    """Extract a benchmark result from a finished game's state."""
+    """Extract a benchmark result from a saved game: ``state`` is engine_api.state_summary of its state."""
     from .benchmarks import performance
     bench = sess.get("benchmark")
     name = sess.get("name", "")
@@ -67,20 +68,17 @@ def _benchmark_from_state(sess: dict, seats: list, state: dict) -> Optional[dict
         llm = next((st["player"] for st in seats if st["type"] == "llm"), None)
     if llm is None:
         return None
-    stats = state.get("stats") or []
-    if not stats:
-        return None
-    last = stats[-1]["players"]
-    majors = [p for p in state["players"] if p.get("kind") == "major"]
-    scores = {p["id"]: (last.get(str(p["id"])) or {}).get("score", 0) for p in majors}
-    alive = {p["id"]: p.get("alive", True) for p in majors}
+    scores = state["scores"]
+    if not scores:
+        return None             # no turn has been scored yet
+    alive = {p["id"]: p["alive"] for p in state["majors"]}
     model = (bench or {}).get("model") or (seats[llm].get("llm") or {}).get("model")
-    limit = (state.get("config") or {}).get("turn_limit") or 0
+    limit = state["turn_limit"] or 0
     return {"llm_player": llm, "model": model, "server": (bench or {}).get("server") or (seats[llm].get("llm") or {}).get("base_url"),
-            "scenario": (bench or {}).get("scenario") or f"{state['config'].get('map_size')} / {state['config'].get('map_type')} (legacy bench)",
+            "scenario": (bench or {}).get("scenario") or f"{state['map_size']} / {state['map_type']} (legacy bench)",
             "run_id": (bench or {}).get("run_id"), "job_id": (bench or {}).get("job_id"),
-            "turns": max(0, state["turn"] - 1), "turn_limit": limit, "phase": state.get("phase"),
-            "performance": performance(scores, llm, state.get("phase", "playing"), state.get("winner"), alive),
+            "turns": max(0, state["turn"] - 1), "turn_limit": limit, "phase": state["phase"],
+            "performance": performance(scores, llm, state["phase"] or "playing", state["winner_id"], alive),
             "score": scores.get(llm), "best_bot_score": max([v for k, v in scores.items() if k != llm] or [0])}
 
 

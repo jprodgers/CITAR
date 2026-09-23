@@ -341,6 +341,18 @@ class BenchmarkTests(unittest.TestCase):
         self.assertGreaterEqual(row["benchmark_turns"], 3)
         self.assertIsNotNone(row["overall"])
         self.assertTrue(0 <= row["overall"] <= 100)
+        # once the game is only a save on disk, it scores the same (read through engine_api.state_summary)
+        from citar.server.scoring import _digest_save, _reports
+        live = _reports(self.manager)[game.id]
+        saved = _digest_save(game.save("scored"))
+        self.assertEqual((saved["turn"], set(saved["summary"])), (live["turn"], set(live["summary"])))
+        for k in ("model", "turns", "phase"):
+            self.assertEqual(saved["benchmark"][k], live["benchmark"][k], k)
+        # a save is scored from its last per-turn stats row (a running game from the score as it stands)
+        last = game.game.stats(1)[0]["players"]
+        self.assertEqual(saved["benchmark"]["score"], last["0"]["score"])
+        self.assertEqual(saved["benchmark"]["best_bot_score"], max(v["score"] for k, v in last.items() if k != "0"))
+        self.assertTrue(0 <= saved["benchmark"]["performance"] <= 100)
 
     def test_normalize_fills_defaults(self):
         s = normalize_suite({"servers": [{"server_id": "sv_x", "models": ["m_a", {"model_id": "m_b", "enabled": False}]},

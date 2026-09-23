@@ -395,8 +395,8 @@ class LLMAgent:
     # answer, spent across every wait for it - the one inside open/respond_negotiation and the one at end_turn - so a
     # counterpart who never answers costs the turn one wait, not two. Time the game spends paused does not count.
     def _wait_left(self, n: dict) -> float:
-        """Seconds still allowed for the answer to this seat's latest message in a negotiation."""
-        return self._chat_left.get((n["id"], len(n["history"])), self.negotiation_wait)
+        """Seconds still allowed for the answer to this seat's latest message in a negotiation (``n`` its head)."""
+        return self._chat_left.get((n["id"], n["entries"]), self.negotiation_wait)
 
     def _await_answer(self, session, pid: int, args: dict, result: dict) -> dict:
         """After the model spoke in a negotiation: wait for the other side's answer and add it to the result."""
@@ -406,8 +406,8 @@ class LLMAgent:
         except (TypeError, ValueError):
             return result
         with session.lock:
-            n = session.game.negotiation(nid)
-            key, left = (nid, len(n["history"])), self._wait_left(n)
+            n = session.game.negotiation_head(nid)
+            key, left = (nid, n["entries"]), self._wait_left(n)
             if n["status"] == "open" and n["awaiting"] != pid:
                 self._chat_left[key] = left - session._await_reply(pid, nid, left, halted=lambda: self._halted(session),
                                                                    hold_paused=True)
@@ -428,8 +428,8 @@ class LLMAgent:
         """
         def mark(nid):
             """Where a negotiation stands now: what an answer changes."""
-            n = g.negotiation(nid)
-            return n["status"], n["awaiting"], len(n["history"])
+            n = g.negotiation_head(nid)
+            return n["status"], n["awaiting"], n["entries"]
 
         heard = []
         g = session.game
@@ -437,7 +437,7 @@ class LLMAgent:
             with session.lock:
                 if g.current != pid or g.phase != "playing":
                     break
-                mine = g.open_negotiations(pid)
+                mine = g.open_negotiation_heads(pid)
                 if not mine:
                     break
                 if any(n["awaiting"] == pid for n in mine):
@@ -449,7 +449,7 @@ class LLMAgent:
                 for n in mine:
                     if self._wait_left(n) <= 0:
                         session.close_negotiation(n["id"], "expired", "(no reply in time)")
-                mine = g.open_negotiations(pid)
+                mine = g.open_negotiation_heads(pid)
                 if not mine:
                     continue
                 before = {n["id"]: (mark(n["id"]), self._wait_left(n)) for n in mine}
@@ -635,7 +635,7 @@ class LLMAgent:
         """Answer a negotiation with the model, out of turn."""
         with session.lock:
             g = session.game
-            n = g.negotiation(nid)
+            n = g.negotiation_head(nid)
             if n["status"] != "open" or n["awaiting"] != pid:
                 return
             view = g.negotiation_view(nid, pid)
@@ -645,7 +645,7 @@ class LLMAgent:
             summary["notebook"] = emp["notes"][-2000:]
             text = NEGOTIATION_PROMPT.format(other=view["with_name"], nid=nid, negotiation=json.dumps(view, indent=1),
                                              summary=json.dumps(summary, default=str))
-            history_len = len(n["history"])
+            history_len = n["entries"]
         conv = self._conversation(NEGOTIATION_TOOLS)
         self._active.add(conv)
         conv.add_user_text(text)
@@ -656,8 +656,8 @@ class LLMAgent:
                 if self._halted(session):
                     return
                 with session.lock:
-                    n = session.game.negotiation(nid)
-                    if n["status"] != "open" or n["awaiting"] != pid or len(n["history"]) != history_len:
+                    n = session.game.negotiation_head(nid)
+                    if n["status"] != "open" or n["awaiting"] != pid or n["entries"] != history_len:
                         return
                 step = self._step(session, pid, conv)
                 steps += 1

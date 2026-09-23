@@ -50,12 +50,11 @@ class BotAgent:
                 if not mine:
                     break
                 for nid in [n["id"] for n in mine]:
-                    n = g.negotiation(nid)          # as it stands now: an earlier answer may have settled it
-                    if n["awaiting"] == pid:
-                        before = len(n["history"])
-                        g.bot_respond(pid, n["id"], self.bot, execute=ex)
-                        now = g.negotiation(n["id"])
-                        if now["status"] == "open" and now["awaiting"] == pid and len(now["history"]) == before:
+                    n = g.negotiation_head(nid)     # as it stands now: an earlier answer may have settled it
+                    if n["status"] == "open" and n["awaiting"] == pid:
+                        g.bot_respond(pid, nid, self.bot, execute=ex)
+                        now = g.negotiation_head(nid)
+                        if now["status"] == "open" and now["awaiting"] == pid and now["entries"] == n["entries"]:
                             # the bot's answer was refused and nothing moved: end it rather than stall the game
                             session.call_tool(pid, "respond_negotiation",
                                               {"negotiation_id": n["id"], "action": "reject",

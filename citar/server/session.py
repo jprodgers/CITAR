@@ -238,7 +238,7 @@ class GameSession:
         """Wait, with the lock held, for the other side's answer in a negotiation (see _await, which it returns)."""
         def answered():
             """Whether the negotiation is settled or back with pid."""
-            n = self.game.negotiation(nid)
+            n = self.game.negotiation_head(nid)
             return n["status"] != "open" or n["awaiting"] == pid
         return self._await(answered, timeout, halted, hold_paused)
 
@@ -250,7 +250,7 @@ class GameSession:
     def _reply_result(self, pid: int, nid: int, result: dict) -> dict:
         """A negotiation tool's result with where the negotiation now stands: the other side's answer if one came,
         else a note that none has yet."""
-        n = self.game.negotiation(nid)
+        n = self.game.negotiation_head(nid)
         if n["status"] == "open" and n["awaiting"] != pid:
             result = dict(result)
             result["note"] = "No reply yet. Continue your turn; the reply will show up in get_diplomacy/get_briefing."
@@ -270,15 +270,16 @@ class GameSession:
         """Wake the seats that owe an answer to an open negotiation.
 
         This is why an agent should wait on ``wait_for_turn`` rather than polling for its own turn: a
-        negotiation opened on somebody else's turn blocks that turn until it is answered.
+        negotiation opened on somebody else's turn blocks that turn until it is answered. It runs after every
+        action, so it reads the negotiations' heads, not copies of their histories.
         """
         current = self.game.current
-        for n in self.game.open_negotiations():
+        for n in self.game.open_negotiation_heads():
             if n["awaiting"] is None:
                 continue
             pid = n["awaiting"]
             seat = self.seats[pid] if pid < len(self.seats) else None
-            key = (n["id"], len(n["history"]))
+            key = (n["id"], n["entries"])
             if seat is None or key in self._responding:
                 continue
             if seat.type in ("bot", "llm") and current != pid:
@@ -308,8 +309,8 @@ class GameSession:
         """Reject a negotiation nobody answered, so the game cannot stall on it."""
         with self.lock:
             try:
-                n = self.game.negotiation(nid)
-                if n["status"] == "open" and n["awaiting"] == pid and len(n["history"]) == key[1]:
+                n = self.game.negotiation_head(nid)
+                if n["status"] == "open" and n["awaiting"] == pid and n["entries"] == key[1]:
                     # agent failed to respond: reject so the other side isn't stuck
                     self.game.execute(pid, "respond_negotiation",
                                       {"negotiation_id": nid, "action": "reject", "message": "(no response)"})
@@ -332,7 +333,7 @@ class GameSession:
 
     def _close_open_chats(self, pid: int, note: str):
         """Close, as expired, every open negotiation a seat is in. Called with the lock held."""
-        for n in self.game.open_negotiations(pid):
+        for n in self.game.open_negotiation_heads(pid):
             self.close_negotiation(n["id"], "expired", note)
 
     # ------------------------------------------------------------------
@@ -670,7 +671,7 @@ class GameSession:
         with self.lock:
             while True:
                 g = self.game
-                pending = [n["id"] for n in g.open_negotiations(pid) if n["awaiting"] == pid]
+                pending = [n["id"] for n in g.open_negotiation_heads(pid) if n["awaiting"] == pid]
                 if g.phase != "playing":
                     return {"status": "game_over", "winner": g.winner, "victory": g.victory}
                 if not g.is_alive(pid):
@@ -701,7 +702,7 @@ class GameSession:
 
     def _chat_marks(self, pid: int) -> dict:
         """The open negotiations pid is in, each as (awaiting, entries): what an answer changes."""
-        return {n["id"]: (n["awaiting"], len(n["history"])) for n in self.game.open_negotiations(pid)}
+        return {n["id"]: (n["awaiting"], n["entries"]) for n in self.game.open_negotiation_heads(pid)}
 
     # ------------------------------------------------------------------
     # Push

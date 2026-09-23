@@ -15,7 +15,11 @@ _HEADLINES = ("war_declared", "peace", "city_captured", "eliminated", "deal")
 
 def run(players: int = 4, turns: int = 0, map_type: str = "continents", map_size: str = "small", seed: int = 1,
         barbarians: str = "normal", verbose: bool = True, speed: str = "Quick", nation: str = None) -> dict:
-    """Play one headless bot-vs-bot game, printing what happens. Returns engine_api.run_game's result."""
+    """Play one headless bot-vs-bot game, printing what happens. Returns engine_api.run_game's result.
+
+    A bot that crashes stops the run with its traceback: this is the crash check for the bot, so a crash must not
+    pass as a quiet game (the lab and balance runs record crashes and play on instead).
+    """
     config = {"map_type": map_type, "map_size": map_size, "seed": seed, "barbarians": barbarians, "speed": speed,
               "players": [{"controller": "bot", "nation": nation} for _ in range(players)], "turn_limit": turns or None}
     # the majors are the first players of a new game
@@ -41,7 +45,7 @@ def run(players: int = 4, turns: int = 0, map_type: str = "continents", map_size
         if ev["type"] in _HEADLINES:
             headlines.append(ev["text"])
 
-    r = engine_api.run_game({"config": config, "bots": bots}, on_turn=on_turn, on_event=on_event)
+    r = engine_api.run_game({"config": config, "bots": bots, "raise_errors": True}, on_turn=on_turn, on_event=on_event)
     if verbose:
         print(f"Game over on turn {r['turn']}: winner {r['winner']} by {r['victory']} in {time.time() - t0:.1f}s")
         for w in headlines[-25:]:

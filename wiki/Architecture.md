@@ -34,7 +34,7 @@ Everything else follows from that:
   them.
 - The bot, the LLM adapter and the HTTP API are all *callers*, none of them privileged. A model
   cannot do anything a human could not, because there is only one set of actions.
-- Tests are fast and deterministic. 451 of them run in about four minutes with no fixtures.
+- Tests are fast and deterministic. 456 of them run in about four minutes with no fixtures.
 
 The ruleset is loaded once at import, which is the one exception, and it is read-only.
 
@@ -43,7 +43,9 @@ The ruleset is loaded once at import, which is the one exception, and it is read
 **Outside `citar/engine/` and `citar/bots/`, nothing imports the engine except
 `citar/engine_api.py`.** The server, the agents, probes, benchmarks, the lab, balance runs and
 `citar sim` hold an `EngineGame` and call its methods; they never touch `Game`, the state or a bot's
-internals. `tests/test_engine_boundary.py` reads every module and fails on a way round it.
+internals, and they read a saved game's state only through `engine_api.state_summary`. The facade's
+`__all__` is its whole public surface. `tests/test_engine_boundary.py` reads every module and fails on
+a way round it, including a name taken from the facade that is not in `__all__`.
 
 The reason is the Rust engine that replaces this one: with a single door, the swap is a new backend
 behind `engine_api.py` rather than a change to two hundred call sites. So the facade is shaped like

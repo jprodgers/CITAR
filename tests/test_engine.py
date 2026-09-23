@@ -422,6 +422,7 @@ class SimulationTests(unittest.TestCase):
     def test_bot_game_runs(self):
         from citar import sim
         r = sim.run(players=3, turns=60, map_size="duel", seed=4, verbose=False)
+        self.assertEqual(r["errors"], [])
         self.assertEqual(r["phase"], "over")
         self.assertTrue(all(p["cities"] >= 1 for p in r["players"] if p["kind"] == "major" and p["alive"]))
 

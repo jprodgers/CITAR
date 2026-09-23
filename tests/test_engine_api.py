@@ -55,6 +55,34 @@ class PlainDataTests(unittest.TestCase):
         g.config["seed"] = 999
         self.assertEqual(g.config["seed"], 21)
 
+    def test_negotiation_views_and_the_empire_are_copies(self):
+        g = duel()
+        g.meet(0, 1)
+        g.apply_ops([{"op": "set_player", "player": 0, "gold": 100}])
+        nid = g.execute(0, "open_negotiation", {"to": 1, "message": "Gold for you.",
+                                                "give": [{"type": "gold", "amount": 30}]})["negotiation_id"]
+        view = g.negotiation_view(nid, 0)
+        view["current_proposal"]["you_give"][0]["amount"] = 1
+        self.assertEqual(g.negotiation(nid)["proposal"]["0"][0]["amount"], 30)
+        emp = g.empire_summary(0)
+        total = emp["happiness"]["total"]
+        emp["happiness"]["total"] = -99
+        self.assertEqual(g.empire_summary(0)["happiness"]["total"], total)
+
+    def test_negotiation_heads(self):
+        g = duel()
+        g.meet(0, 1)
+        nid = g.execute(0, "open_negotiation", {"to": 1, "message": "Hello."})["negotiation_id"]
+        head = {"id": nid, "initiator": 0, "responder": 1, "status": "open", "awaiting": 1, "entries": 1}
+        self.assertEqual(g.negotiation_head(nid), head)
+        self.assertEqual(g.open_negotiation_heads(), [head])
+        self.assertEqual(g.open_negotiation_heads(1), [head])
+        g.close_negotiation(nid, "expired", "(no reply in time)")
+        self.assertEqual(g.open_negotiation_heads(), [])
+        self.assertEqual((g.negotiation_head(nid)["status"], g.negotiation_head(nid)["entries"]), ("expired", 2))
+        with self.assertRaises(ActionError):
+            g.negotiation_head(99)
+
 
 class SaveTests(unittest.TestCase):
     def test_a_save_round_trips(self):
@@ -64,6 +92,19 @@ class SaveTests(unittest.TestCase):
         back = EngineGame.from_save(data)
         self.assertEqual(back.summary(), g.summary())
         self.assertEqual(back.view(0)["tiles"], g.view(0)["tiles"])
+
+    def test_state_summary_reads_a_save(self):
+        g = duel()
+        for _ in range(4):
+            g.execute(g.current, "end_turn")
+        summ = engine_api.state_summary(g.to_save()["state"])
+        self.assertEqual((summ["turn"], summ["phase"], summ["map_size"]), (g.turn, "playing", "duel"))
+        self.assertEqual((summ["winner"], summ["winner_id"]), (None, None))
+        self.assertEqual(summ["names"][1], g.player_name(1))
+        self.assertEqual([m["id"] for m in summ["majors"]], [0, 1])
+        last = g.stats(1)[0]["players"]
+        self.assertEqual(summ["scores"], {pid: last[str(pid)]["score"] for pid in (0, 1)})
+        self.assertEqual(engine_api.state_summary(duel().to_save()["state"])["scores"], {}, "no stats row yet")
 
     def test_state_dict_is_independent(self):
         g = duel()
@@ -136,6 +177,25 @@ class BotTests(unittest.TestCase):
         self.assertEqual(len(majors), 2)
         self.assertTrue(all(p["cities"] >= 1 and p["score"] > 0 for p in majors))
         self.assertEqual(len(r["stats"]), r["turns"])
+
+    def test_a_crashing_bot_is_recorded_or_raised(self):
+        class Crasher:
+            def play_turn(self, g, pid, end_turn=False):
+                raise RuntimeError("simulated bot bug")
+
+            def respond(self, g, pid, nid):
+                raise RuntimeError("simulated bot bug")
+
+        def spec(**kw):
+            return {"config": {"map_size": "duel", "seed": 4, "barbarians": "off", "turn_limit": 4,
+                               "players": [{"controller": "bot"}, {"controller": "bot"}]},
+                    "bots": {0: Crasher(), 1: engine_api.bot_instance("idle")}, **kw}
+
+        r = engine_api.run_game(spec())
+        self.assertEqual(r["phase"], "over", "a crash costs the bot its turn, not the game")
+        self.assertTrue(r["errors"] and all("simulated bot bug" in e for e in r["errors"]), r["errors"])
+        with self.assertRaisesRegex(RuntimeError, "simulated bot bug"):
+            engine_api.run_game(spec(raise_errors=True))
 
 
 if __name__ == "__main__":

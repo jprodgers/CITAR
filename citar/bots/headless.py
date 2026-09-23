@@ -23,11 +23,12 @@ def resolve_negotiations(g: Game, bots: dict, max_rounds: int = 40):
 
 def play(config: dict, bots: dict, on_turn: Optional[Callable[[dict], None]] = None,
          on_event: Optional[Callable[[dict], None]] = None, max_errors: int = 20, traceback_limit: int = 5,
-         labels: Optional[dict] = None) -> dict:
+         labels: Optional[dict] = None, raise_errors: bool = False) -> dict:
     """Play a new game to its end with a bot in each seat; see citar.engine_api.run_game for the arguments.
 
     A bot that raises loses the rest of its turn, not the game: the error is recorded and play goes on, until more
-    than ``max_errors`` have piled up, which means something is broken rather than unlucky.
+    than ``max_errors`` have piled up, which means something is broken rather than unlucky. With ``raise_errors``
+    the first one propagates instead, for a run that exists to show the bot does not crash.
     """
     g = Game.new(config)
     if on_event is not None:
@@ -50,6 +51,8 @@ def play(config: dict, bots: dict, on_turn: Optional[Callable[[dict], None]] = N
             try:
                 bots[pid].play_turn(g, pid, end_turn=False)
             except Exception as e:
+                if raise_errors:
+                    raise
                 label = f" {labels.get(pid)}" if labels is not None else ""
                 errors.append(f"T{g.turn} P{pid}{label}: {type(e).__name__}: {e}\n"
                               f"{traceback.format_exc(limit=traceback_limit)}")
