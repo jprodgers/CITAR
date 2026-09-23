@@ -113,7 +113,7 @@ pub struct Options<'a> {
 
 /// Compares one group's answers.
 pub fn compare(spec: &CompareSpec, python: &Value, rust: &Value, opts: &Options<'_>) -> Vec<Diff> {
-    let mut cmp = Comparer { spec, opts, path: Vec::new(), out: Vec::new() };
+    let mut cmp = Comparer::new(spec, opts, false);
     let root = spec.start();
     if let Treatment::Compare(rule) = spec.treatment(&root, opts.with_bot) {
         cmp.node(&root, rule, python, rust);
@@ -126,9 +126,18 @@ struct Comparer<'s> {
     opts: &'s Options<'s>,
     path: Vec<Seg>,
     out: Vec<Diff>,
+    /// A probe only asks whether two values are equal: it records no difference, and stops at
+    /// the first one that is not accepted. Multisets pair their elements with probes.
+    probe: bool,
+    /// A probe met a difference that is not accepted.
+    failed: bool,
 }
 
-impl Comparer<'_> {
+impl<'s> Comparer<'s> {
+    fn new(spec: &'s CompareSpec, opts: &'s Options<'s>, probe: bool) -> Comparer<'s> {
+        Comparer { spec, opts, path: Vec::new(), out: Vec::new(), probe, failed: false }
+    }
+
     fn emit(
         &mut self,
         kind: DiffKind,
@@ -136,6 +145,10 @@ impl Comparer<'_> {
         rust: Option<&Value>,
         detail: Option<String>,
     ) {
+        if self.probe {
+            self.failed |= !kind.is_accepted();
+            return;
+        }
         self.out.push(Diff {
             path: Path(self.path.clone()),
             kind,
@@ -147,6 +160,9 @@ impl Comparer<'_> {
 
     /// Compares one pair of values at the current path, whose cursor and rule are given.
     fn node(&mut self, cursor: &Cursor, rule: Option<&Rule>, py: &Value, rs: &Value) {
+        if self.failed {
+            return;
+        }
         match (py, rs) {
             (Value::Null, Value::Null) => {}
             (Value::Bool(a), Value::Bool(b)) => {
@@ -161,7 +177,8 @@ impl Comparer<'_> {
             }
             (Value::String(a), Value::String(b)) => {
                 if a != b {
-                    let detail = text::wants_line_diff(a, b).then(|| text::line_diff(a, b));
+                    let detail =
+                        (!self.probe && text::wants_line_diff(a, b)).then(|| text::line_diff(a, b));
                     self.emit(DiffKind::Text, Some(py), Some(rs), detail);
                 }
             }
@@ -180,6 +197,9 @@ impl Comparer<'_> {
 
     /// Compares one child, which may be absent on either side.
     fn child(&mut self, cursor: &Cursor, seg: Seg, py: Option<&Value>, rs: Option<&Value>) {
+        if self.failed {
+            return;
+        }
         let next = self.spec.step(cursor, &seg);
         let Treatment::Compare(rule) = self.spec.treatment(&next, self.opts.with_bot) else {
             return;
@@ -202,11 +222,17 @@ impl Comparer<'_> {
         except: &[&str],
     ) {
         for (k, p) in a {
+            if self.failed {
+                return;
+            }
             if !except.contains(&k.as_str()) {
                 self.child(cursor, Seg::Key(k.clone()), Some(p), b.get(k));
             }
         }
         for (k, r) in b {
+            if self.failed {
+                return;
+            }
             if !except.contains(&k.as_str()) && !a.contains_key(k) {
                 self.child(cursor, Seg::Key(k.clone()), None, Some(r));
             }
@@ -215,6 +241,9 @@ impl Comparer<'_> {
 
     fn in_order(&mut self, cursor: &Cursor, a: &[Value], b: &[Value]) {
         for i in 0..a.len().max(b.len()) {
+            if self.failed {
+                return;
+            }
             self.child(cursor, Seg::Index(i), a.get(i), b.get(i));
         }
     }
@@ -237,10 +266,16 @@ impl Comparer<'_> {
         let python_has: BTreeMap<&str, usize> =
             ka.iter().enumerate().map(|(i, (_, c))| (c.as_str(), i)).collect();
         for (i, (scalar, canon)) in ka.iter().enumerate() {
+            if self.failed {
+                return;
+            }
             let other = rust_at.get(canon.as_str()).map(|&j| &b[j]);
             self.child(cursor, key.seg(scalar), Some(&a[i]), other);
         }
         for (j, (scalar, canon)) in kb.iter().enumerate() {
+            if self.failed {
+                return;
+            }
             if !python_has.contains_key(canon.as_str()) {
                 self.child(cursor, key.seg(scalar), None, Some(&b[j]));
             }
@@ -249,6 +284,10 @@ impl Comparer<'_> {
 
     /// Elements matched as a multiset: first exactly, by canonical text, then within the number
     /// tolerance. What is left over is Missing (at Python's index) or Extra (at Rust's).
+    ///
+    /// The second pass tries each of Python's leftovers against Rust's leftovers of the same
+    /// [shape](Comparer::shape) only, in Rust's order, so a long list with many near misses costs
+    /// about one probe per element rather than one per pair.
     fn multiset(&mut self, cursor: &Cursor, a: &[Value], b: &[Value]) {
         let mut unmatched: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (j, r) in b.iter().enumerate().rev() {
@@ -263,38 +302,119 @@ impl Comparer<'_> {
         }
         let mut left_b: Vec<usize> = unmatched.into_values().flatten().collect();
         left_b.sort_unstable();
+        if left_a.is_empty() || left_b.is_empty() {
+            for i in left_a {
+                self.child(cursor, Seg::Index(i), Some(&a[i]), None);
+            }
+            for j in left_b {
+                self.child(cursor, Seg::Index(j), None, Some(&b[j]));
+            }
+            return;
+        }
+
+        let mut by_shape: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for &j in &left_b {
+            by_shape.entry(self.shape_below(cursor, &Seg::Index(j), &b[j])).or_default().push(j);
+        }
         for i in left_a {
-            // Only a float, or something holding one, can be equal without the same canonical text.
-            let tolerant = match &a[i] {
-                Value::Number(n) => n.is_f64(),
-                Value::Array(_) | Value::Object(_) => true,
-                _ => false,
-            };
-            let found = tolerant
-                .then(|| {
-                    left_b
-                        .iter()
-                        .position(|&j| self.equal_below(cursor, Seg::Index(i), &a[i], &b[j]))
-                })
-                .flatten();
-            match found {
-                Some(k) => {
-                    left_b.remove(k);
-                }
-                None => self.child(cursor, Seg::Index(i), Some(&a[i]), None),
+            let shape = self.shape_below(cursor, &Seg::Index(i), &a[i]);
+            let found = by_shape.get_mut(&shape).and_then(|js| {
+                let k = js
+                    .iter()
+                    .position(|&j| self.equal_below(cursor, Seg::Index(i), &a[i], &b[j]))?;
+                Some(js.remove(k))
+            });
+            if found.is_none() {
+                self.child(cursor, Seg::Index(i), Some(&a[i]), None);
             }
         }
-        for j in left_b {
+        let mut rest: Vec<usize> = by_shape.into_values().flatten().collect();
+        rest.sort_unstable();
+        for j in rest {
             self.child(cursor, Seg::Index(j), None, Some(&b[j]));
         }
     }
 
     /// Whether two values compare equal as a child of the current node, under the same spec.
     fn equal_below(&self, cursor: &Cursor, seg: Seg, py: &Value, rs: &Value) -> bool {
-        let mut trial =
-            Comparer { spec: self.spec, opts: self.opts, path: self.path.clone(), out: Vec::new() };
-        trial.child(cursor, seg, Some(py), Some(rs));
-        trial.out.iter().all(|d| d.kind.is_accepted())
+        let mut probe = Comparer::new(self.spec, self.opts, true);
+        probe.child(cursor, seg, Some(py), Some(rs));
+        !probe.failed
+    }
+
+    /// The [shape](Comparer::shape) of a value that is a child of the current node.
+    fn shape_below(&self, cursor: &Cursor, seg: &Seg, v: &Value) -> String {
+        let next = self.spec.step(cursor, seg);
+        let mut out = String::new();
+        if let Treatment::Compare(rule) = self.spec.treatment(&next, self.opts.with_bot) {
+            self.shape(&next, rule, v, &mut out);
+        }
+        out
+    }
+
+    /// A text that two values equal under the spec always share: the canonical text with every
+    /// number and every route replaced by a placeholder, what the spec skips left out, and the
+    /// elements of keyed lists and multisets sorted. Values of different shapes are never equal,
+    /// so the tolerant pass of a multiset only pairs values of one shape.
+    ///
+    /// It relies on a spec treating every element of a multiset alike, which holds as long as no
+    /// spec pattern names one element of a multiset by its index.
+    fn shape(&self, cursor: &Cursor, rule: Option<&Rule>, v: &Value, out: &mut String) {
+        match v {
+            // Numbers are equal within the tolerance, and an integer can equal a float.
+            Value::Number(_) => out.push('#'),
+            Value::Null | Value::Bool(_) | Value::String(_) => out.push_str(&value::canonical(v)),
+            Value::Array(items) => {
+                let mut parts: Vec<String> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| {
+                        let seg = match rule {
+                            Some(Rule::Keyed(key)) => {
+                                key_of(key, x).map_or(Seg::Index(i), |s| key.seg(&s))
+                            }
+                            _ => Seg::Index(i),
+                        };
+                        self.shape_below(cursor, &seg, x)
+                    })
+                    .collect();
+                if matches!(rule, Some(Rule::Keyed(_) | Rule::Multiset)) {
+                    parts.sort_unstable();
+                }
+                out.push('[');
+                out.push_str(&parts.join(","));
+                out.push(']');
+            }
+            Value::Object(map) => {
+                // A different route can be accepted, so a route's tiles and step costs have no
+                // shape (see `route`).
+                let route = match rule {
+                    Some(Rule::Route(f)) if map.get(&f.path).is_some_and(Value::is_array) => {
+                        Some(f)
+                    }
+                    _ => None,
+                };
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort_unstable();
+                out.push('{');
+                for k in keys {
+                    let next = self.spec.step(cursor, &Seg::Key(k.clone()));
+                    let Treatment::Compare(r) = self.spec.treatment(&next, self.opts.with_bot)
+                    else {
+                        continue;
+                    };
+                    value::write_json_string(k, out);
+                    out.push(':');
+                    if route.is_some_and(|f| *k == f.path || *k == f.costs) {
+                        out.push('~');
+                    } else {
+                        self.shape(&next, r, &map[k.as_str()], out);
+                    }
+                    out.push(',');
+                }
+                out.push('}');
+            }
+        }
     }
 
     /// A route entry (DESIGN.md 9.2, `PathEquivalent`). The same tiles compare as any object; a
@@ -321,58 +441,62 @@ impl Comparer<'_> {
         let python_route = &a[path_key];
 
         if let Some(why) = route::invalid_route(self.opts.grid, pa, pb, b.get(costs_key)) {
-            self.at_key(path_key, DiffKind::Route, python_route, rust_route, why);
+            self.at_key(path_key, DiffKind::Route, python_route, rust_route, || why);
             return self.object(cursor, a, b, &[path_key, costs_key]);
         }
         let turns =
             (a.get(turns_key).and_then(Value::as_f64), b.get(turns_key).and_then(Value::as_f64));
         let costs = (route::summed_cost(a.get(costs_key)), route::summed_cost(b.get(costs_key)));
         let (Some(pt), Some(rt)) = turns else {
-            self.at_key(
-                path_key,
-                DiffKind::Route,
-                python_route,
-                rust_route,
-                "a route without turns".into(),
-            );
+            self.at_key(path_key, DiffKind::Route, python_route, rust_route, || {
+                "a route without turns".into()
+            });
             return self.object(cursor, a, b, &[path_key, costs_key]);
         };
         let (Some(pc), Some(rc)) = costs else {
-            self.at_key(
-                path_key,
-                DiffKind::Route,
-                python_route,
-                rust_route,
-                "a route without step costs".into(),
-            );
+            self.at_key(path_key, DiffKind::Route, python_route, rust_route, || {
+                "a route without step costs".into()
+            });
             return self.object(cursor, a, b, &[path_key, costs_key]);
         };
         if rt < pt && !value::floats_equal(rt, pt) {
-            let detail = format!(
-                "Rust's route takes {rt} turns where Python's takes {pt}: {} against {}",
-                value::short(rust_route, 120),
-                value::short(python_route, 120)
-            );
             let (py_turns, rs_turns) = (&a[turns_key], &b[turns_key]);
-            self.at_key(turns_key, DiffKind::Better, py_turns, rs_turns, detail);
+            self.at_key(turns_key, DiffKind::Better, py_turns, rs_turns, || {
+                format!(
+                    "Rust's route takes {rt} turns where Python's takes {pt}: {} against {}",
+                    value::short(rust_route, 120),
+                    value::short(python_route, 120)
+                )
+            });
             return self.object(cursor, a, b, &[path_key, costs_key, turns_key]);
         }
         if value::floats_equal(rt, pt) && value::floats_equal(rc, pc) {
-            let detail =
-                format!("same ends, adjacent steps, {rt} turns and summed cost {rc} on both sides");
-            self.at_key(path_key, DiffKind::PathEquivalent, python_route, rust_route, detail);
+            self.at_key(path_key, DiffKind::PathEquivalent, python_route, rust_route, || {
+                format!("same ends, adjacent steps, {rt} turns and summed cost {rc} on both sides")
+            });
             return self.object(cursor, a, b, &[path_key, costs_key]);
         }
-        let detail = format!(
-            "a valid route, but {rt} turns and summed cost {rc} against Python's {pt} and {pc}"
-        );
-        self.at_key(path_key, DiffKind::Route, python_route, rust_route, detail);
+        self.at_key(path_key, DiffKind::Route, python_route, rust_route, || {
+            format!(
+                "a valid route, but {rt} turns and summed cost {rc} against Python's {pt} and {pc}"
+            )
+        });
         self.object(cursor, a, b, &[path_key, costs_key, turns_key]);
     }
 
-    fn at_key(&mut self, key: &str, kind: DiffKind, py: &Value, rs: &Value, detail: String) {
+    /// A difference at one key of the current object. The detail is only written when the
+    /// difference is recorded, not by a probe.
+    fn at_key(
+        &mut self,
+        key: &str,
+        kind: DiffKind,
+        py: &Value,
+        rs: &Value,
+        detail: impl FnOnce() -> String,
+    ) {
+        let detail = (!self.probe).then(detail);
         self.path.push(Seg::Key(key.to_string()));
-        self.emit(kind, Some(py), Some(rs), Some(detail));
+        self.emit(kind, Some(py), Some(rs), detail);
         self.path.pop();
     }
 }
@@ -393,16 +517,21 @@ impl ListKey {
     }
 }
 
+/// One element's key, if it has a scalar one.
+fn key_of(key: &ListKey, element: &Value) -> Option<Scalar> {
+    let raw = match key {
+        ListKey::Field(name) => element.as_object().and_then(|o| o.get(name)),
+        ListKey::Pos(n) => element.as_array().and_then(|a| a.get(*n)),
+    };
+    raw.and_then(Scalar::from_value)
+}
+
 /// Each element's key, with its canonical text, or why the list cannot be keyed.
 fn keys_of(key: &ListKey, list: &[Value]) -> std::result::Result<Vec<(Scalar, String)>, String> {
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut out = Vec::with_capacity(list.len());
     for (i, element) in list.iter().enumerate() {
-        let raw = match key {
-            ListKey::Field(name) => element.as_object().and_then(|o| o.get(name)),
-            ListKey::Pos(n) => element.as_array().and_then(|a| a.get(*n)),
-        };
-        let Some(scalar) = raw.and_then(Scalar::from_value) else {
+        let Some(scalar) = key_of(key, element) else {
             return Err(format!("element [{i}] has no scalar {} to key by", key.describe()));
         };
         let canon = scalar.canonical();
@@ -519,6 +648,58 @@ mod tests {
         let py = json!({"civs": [{"pid": 0, "tags": [[1.0, "x"], [2.0, "y"]]}]});
         let rs = json!({"civs": [{"pid": 0, "tags": [[2.000_000_000_1, "y"], [1, "x"]]}]});
         assert!(diffs(&spec(), py, rs).is_empty());
+    }
+
+    #[test]
+    fn multiset_elements_pair_under_the_spec_not_just_by_text() {
+        let spec = CompareSpec::new(Group::Civs)
+            .multiset("l")
+            .multiset("l[*].tags")
+            .ignore("l[*].fn")
+            .keyed("l[*].units", "id");
+        // An integer equals a float within the tolerance, whichever side it is on.
+        assert!(
+            diffs(&spec, json!({"l": [2, 1.5]}), json!({"l": [1.500_000_1, 2.000_000_1]}))
+                .is_empty()
+        );
+        // Inner multisets and keyed lists in another order, and a skipped key, still pair.
+        let py = json!({"l": [
+            {"tags": ["a", "b"], "v": 1.0, "fn": "x", "units": [{"id": 1, "hp": 3}, {"id": 2, "hp": 4}]},
+            {"tags": ["c"], "v": 2.0, "units": []},
+        ]});
+        let rs = json!({"l": [
+            {"tags": ["c"], "v": 2.000_000_1, "units": []},
+            {"tags": ["b", "a"], "v": 1.000_000_1, "units": [{"id": 2, "hp": 4}, {"id": 1, "hp": 3}]},
+        ]});
+        assert!(diffs(&spec, py.clone(), rs).is_empty());
+        // What is left over is still reported, at Python's and at Rust's index.
+        let rs = json!({"l": [
+            {"tags": ["c"], "v": 2.5, "units": []},
+            {"tags": ["b", "a"], "v": 1.0, "units": [{"id": 2, "hp": 4}, {"id": 1, "hp": 3}]},
+        ]});
+        assert_eq!(
+            diffs(&spec, py, rs),
+            [("l[1]".into(), DiffKind::Missing), ("l[0]".into(), DiffKind::Extra)]
+        );
+    }
+
+    #[test]
+    fn a_long_multiset_of_near_misses_is_not_quadratic() {
+        // Every element differs in its text, so none pairs: each is probed against the leftovers
+        // of its own shape only, of which there are none.
+        let n = 4000;
+        let list = |side: &str| {
+            Value::Array(
+                (0..n).map(|i| json!([f64::from(i) + 0.5, format!("{side}{i}")])).collect(),
+            )
+        };
+        let spec = CompareSpec::new(Group::Civs).multiset("l");
+        let started = std::time::Instant::now();
+        let got = diffs(&spec, json!({"l": list("p")}), json!({"l": list("r")}));
+        assert_eq!(got.len(), 2 * n as usize);
+        assert!(got[..n as usize].iter().all(|(_, k)| *k == DiffKind::Missing));
+        // Generous: the pairwise version took seconds for this; this takes milliseconds.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[test]
