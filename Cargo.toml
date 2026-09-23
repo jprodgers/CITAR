@@ -38,6 +38,8 @@ toml = "1.1"
 globset = "0.4"
 similar = "3.2"
 rayon = "1"
+# The `re:` value constraints of refcheck/intended.toml. globset already builds its engine.
+regex = "1.13"
 libtest-mimic = "0.8"
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 arbitrary = "1.4"
