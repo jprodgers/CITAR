@@ -44,10 +44,14 @@ Each top-level module is a layer, and a layer may use only the layers listed for
   did.
 - **Reach another layer by its layer path**, `crate::base::ids::CityId` or enough `super::`s.
   `cargo xtask check` follows every path that reaches the crate root, including those inside
-  macro bodies, so it refuses what would hide the layer a path lands in: a glob of the crate
-  root (`use crate::*`, or `use super::*` from a layer's `mod.rs`), an alias of it
-  (`use crate as root`), and a crate-root re-export used from inside a layer. Macros exported at
-  the root (`crate::define_id!`) are fine.
+  macro bodies and those that climb through `self::` and use groups (`use super::{super::x}`),
+  so it refuses what would hide the layer a path lands in: a glob of the crate root
+  (`use crate::*`, or `use super::*` from a layer's `mod.rs`), an alias of it
+  (`use crate as root`, `use super as root`), and a crate-root re-export used from inside a
+  layer.
+- **A `#[macro_export]` macro belongs to the layer that defines it**, although it lives at the
+  crate root: `crate::from_game!()` counts as a use of `game`, so `base` may not call it.
+  Macros defined in `lib.rs` (`crate::assert_send!`) may be used everywhere.
 - A new top-level module fails the check until it is added to the table in
   `xtask/src/check/layers.rs`.
 - **Only `game/mutate.rs`, `save/` and `compat/` may call** `State::{tiles_mut, units_mut,
