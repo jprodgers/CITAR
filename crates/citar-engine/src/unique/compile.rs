@@ -343,7 +343,8 @@ fn compile_text(
                     used.region.get_or_insert(*m);
                 }
                 let text = mcx.lx.text(m).map_err(|e| Refusal::new(E::Capacity, e))?;
-                // Every conditional reads everything until package 1a-07 assigns its classes.
+                // What it reads depends on its filters' leaves, compiled later: the loader gives
+                // it its classes then (`cond::assign_deps`), and until then it reads everything.
                 conds.push(Cond { data, deps: CondDeps::all(), text });
             }
             Role::Trigger => {

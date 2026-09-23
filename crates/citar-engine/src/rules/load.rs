@@ -15,7 +15,8 @@
 //! 8. the derived tables, which may need objects the engine names (Hill, Road) and read the
 //!    compiled uniques;
 //! 9. the filters, compiled (`unique::filter`), which read the derived tables: every term must
-//!    match something;
+//!    match something; then each conditional is told what it reads, which depends on its filters
+//!    (`unique::cond::assign_deps`);
 //! 10. the tables map generation, the AI and victory read (`gen_tables`).
 //!
 //! Python checked only the references of stage 4 for techs, units and buildings
@@ -46,8 +47,8 @@ use crate::base::sets::{
 };
 use crate::base::stats::StatMask;
 use crate::unique::compile::{self, SourceTexts};
-use crate::unique::filter;
 use crate::unique::{GenFilter, Source, SourceUniques, UniqueTable};
+use crate::unique::{cond, filter};
 
 pub(super) fn load(files: &RulesetFiles<'_>) -> Result<Ruleset, RulesetErrors> {
     let mut p = Problems::default();
@@ -119,6 +120,7 @@ fn compile_filters(raw: &RawRuleset, r: &mut Ruleset, p: &mut Problems) {
     }
     t.objects = done.objects.into_iter().collect();
     t.filters = done.filters;
+    cond::assign_deps(t);
 }
 
 /// The file and the object a unique of `source` came from, for a report.

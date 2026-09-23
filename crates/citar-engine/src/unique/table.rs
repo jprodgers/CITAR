@@ -75,11 +75,18 @@ impl Unique {
         Self { data, conds, packed: deps.bits() | (u32::from(flags.bits()) << 24) }
     }
 
-    /// What its conditionals read: empty when it has none, so evaluation can be skipped.
+    /// What its conditionals read: empty exactly when it has none, so that it always applies
+    /// and no memo that reads it needs to validate against a revision for its sake.
     #[must_use]
     #[inline]
     pub const fn deps(&self) -> CondDeps {
         CondDeps::from_bits_truncate(self.packed & 0x00ff_ffff)
+    }
+
+    /// Replaces what its conditionals read, keeping its flags: the loader's, once the filters the
+    /// conditionals read are compiled (`unique::cond::assign_deps`).
+    pub(crate) fn set_deps(&mut self, deps: CondDeps) {
+        self.packed = (self.packed & 0xff00_0000) | deps.bits();
     }
 
     /// The unique's own flags.
@@ -120,43 +127,88 @@ impl CondSpan {
 
 bitflags! {
     /// What a conditional reads, by class (DESIGN.md 5.8): a memo that evaluates it validates
-    /// against the revisions these map to, and a unique whose conditionals read nothing skips
-    /// evaluation. 24 bits, so a [`Unique`] keeps its [`UFlags`] in the top byte of the same
-    /// word.
+    /// against the revisions these map to (`Revs::cond`, DESIGN.md 6.3). 24 bits, so a
+    /// [`Unique`] keeps its [`UFlags`] in the top byte of the same word.
     ///
-    /// Package 1a-07 assigns each conditional its classes. Until then every conditional is
-    /// compiled as reading [`CondDeps::all`]: always correct, never fast.
+    /// The civilization-level classes are about the civilization in context, or about every
+    /// civilization where they say so. The context-local classes ([`CondDeps::LOCAL`]) are about
+    /// the city, unit, tile or fight in context, which a memo keyed by that entity holds. A
+    /// conditional whose answer depends on the ids in its context alone (a civilization's nation)
+    /// reads `CONFIG`, so that a unique's deps are empty exactly when it has no conditionals.
+    /// Where no class names what a conditional reads (the road network to the capital, the tiles
+    /// around the one in context, a civilization's own uniques), it reads [`CondDeps::all`],
+    /// which is always correct.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct CondDeps: u32 {
+        /// The turn, and what runs out on a turn: open borders, declared friendships.
         const TURN = 1 << 0;
+        /// The civilization's happiness as conditionals see it, committed at fixed stages
+        /// (DESIGN.md 6.6).
         const HAPPINESS_SEEN = 1 << 1;
+        /// The civilization's stocks: gold, culture, faith and golden age points.
         const STOCKS = 1 << 2;
+        /// The civilization's resource supply.
         const RESOURCES = 1 << 3;
+        /// Whether the civilization is in a golden age.
         const GOLDEN_AGE = 1 << 4;
+        /// The diplomatic state between every two civilizations: war and peace, who has met whom,
+        /// open borders and declared friendships (one revision covers them all). A city-state's
+        /// influence is not in it: the leaves that read influence read [`CondDeps::all`].
         const WAR = 1 << 5;
+        /// The civilization's era.
         const ERA = 1 << 6;
+        /// The civilization's techs.
         const TECHS = 1 << 7;
+        /// The civilization's adopted branches and policies.
         const POLICIES = 1 << 8;
+        /// What the civilization researches now.
         const RESEARCH_QUEUE = 1 << 9;
+        /// Religion: each civilization's progress, its religion's beliefs and the great prophets
+        /// it has earned, and each religion's state (major, enhanced).
         const RELIGION_STATE = 1 << 10;
+        /// The buildings in the civilization's cities.
         const CIV_BUILDINGS = 1 << 11;
+        /// The buildings in every city.
         const GLOBAL_BUILDINGS = 1 << 12;
+        /// The policies and beliefs every civilization has adopted.
         const GLOBAL_POLICIES = 1 << 13;
+        /// The cities and the civilizations: which exist and are alive, who owns each city, each
+        /// civilization's capital, and what a city filter reads of a city other than the one in
+        /// context.
         const CITY_COUNT = 1 << 14;
+        /// The units: which exist, who owns each, where each stands, and what a unit filter reads
+        /// of a unit other than the one in context.
         const UNIT_SET = 1 << 15;
-        /// The seat's controller and handicap: the Human and AI player filters.
+        /// The seat's controller, handicap and difficulty: the Human and AI player filters, and
+        /// the difficulty conditionals.
         const SEAT = 1 << 16;
+        /// The game's settings, fixed at setup: speed, starting era, victories, religion,
+        /// espionage and nuclear weapons, and each civilization's nation.
         const CONFIG = 1 << 17;
+        /// A random draw, keyed by the turn and the context: its answer changes every turn.
         const CHANCE = 1 << 18;
-        /// The city in context.
+        /// The city in context: its owner, founder, buildings, citizens, stored food, health,
+        /// religion, status (puppet, resisting, razing) and whether it is the capital.
         const CITY = 1 << 19;
-        /// The unit in context.
+        /// The unit in context: its base unit, owner, promotions, health, tile, embarked and
+        /// set-up status, and the actions it has used.
         const UNIT = 1 << 20;
-        /// The tile in context.
+        /// The tile in context: its terrains, owner, resource, improvement, route, whether a city
+        /// works it and whose city's territory it is.
         const TILE = 1 << 21;
-        /// The fight in context.
+        /// The fight in context: both sides, as the unit and city classes describe each, who
+        /// attacks, and the tile under attack.
         const COMBAT = 1 << 22;
     }
+}
+
+impl CondDeps {
+    /// The context-local classes: a conditional reading one of them is evaluated per city, unit,
+    /// tile or fight (DESIGN.md 5.8, hoisting).
+    pub const LOCAL: Self = Self::CITY.union(Self::UNIT).union(Self::TILE).union(Self::COMBAT);
+
+    /// Every class but the context-local ones.
+    pub const CIV_LEVEL: Self = Self::all().difference(Self::LOCAL);
 }
 
 bitflags! {
@@ -476,6 +528,9 @@ pub struct UniqueTable {
     pub(crate) tags: IdVec<TagId, TextId>,
     pub(crate) abilities: IdVec<AbilityKey, TextId>,
     pub(crate) filters: Filters,
+    /// The city filter `in this city`, if a unique names it: a one-time effect reads it as the
+    /// city in context (`triggers.py:58-61`), though as a filter it selects every city.
+    pub(crate) this_city: Option<CityFilterId>,
 }
 
 impl UniqueTable {
@@ -594,6 +649,13 @@ impl UniqueTable {
     #[must_use]
     pub fn city_filter(&self, id: CityFilterId) -> &str {
         self.text(self.city_filters[id])
+    }
+
+    /// Whether a city filter is `in this city`: the city in context, where a one-time effect
+    /// reads it (`triggers.py:58-61`).
+    #[must_use]
+    pub fn is_this_city(&self, id: CityFilterId) -> bool {
+        self.this_city == Some(id)
     }
 
     /// The text of a civilization filter.

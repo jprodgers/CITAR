@@ -57,12 +57,12 @@ impl Leaf for CivLeaf {
     }
 
     /// The seat for the human and AI tests (DESIGN.md 5.7). The tests against the viewer read
-    /// the diplomatic state, which `CondDeps::WAR` stands for until package 1a-07 decides whether
-    /// met and open borders need classes of their own: `Hostile` the war state, `Known` who has
-    /// met whom, `Open Borders` the agreement and the turn it ends (`game.py:705-708`).
-    /// `Friendly` reads a declared friendship and the turn it ends, or a city-state's influence
-    /// (`game.py:677-686`); no class stands for influence yet, so it reads every class, which is
-    /// always correct (DESIGN.md 5.8).
+    /// the diplomatic state, which `CondDeps::WAR` covers whole (package 1a-07): `Hostile` the
+    /// war state, `Known` who has met whom, `Open Borders` the agreement and the turn it ends
+    /// (`game.py:705-708`). `Friendly` reads a declared friendship and the turn it ends, or a
+    /// city-state's influence with the viewer (`game.py:677-686`); influence is another
+    /// civilization's state, which no class of the civilization in context names, so it reads
+    /// every class, which is always correct (DESIGN.md 5.8).
     fn deps(&self) -> CondDeps {
         match self {
             Self::Human | Self::Ai => CondDeps::SEAT,

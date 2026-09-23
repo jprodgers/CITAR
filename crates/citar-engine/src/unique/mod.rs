@@ -11,15 +11,18 @@
 //!   and [`UniqueData`], [`CondData`], [`TriggerCond`] and [`ModifierData`];
 //! - [`text`]: taking a unique's text apart;
 //! - [`params`]: compiling parameters by kind;
-//! - [`countable`]: the countables a unique compares;
+//! - [`countable`]: the countables a unique compares, and counting them;
 //! - `compile`: the compiler, run by the ruleset loader;
 //! - [`table`]: what it produces, [`UniqueTable`] and each source's [`SourceUniques`];
 //! - [`filter`]: the filters, compiled to sets and trees (package 1a-06);
-//! - [`world`]: the facts a filter reads of a world, [`TileFacts`] and [`FilterFacts`];
+//! - [`world`]: what the evaluator reads of a world ([`TileFacts`], [`FilterFacts`],
+//!   [`EvalWorld`]), and the context it reads it in ([`Ctx`]);
+//! - [`cond`]: the conditionals: what each reads, whether it holds, what a requirement says;
 //! - [`index`]: the unique indexes ([`Csr`]) of a civilization, a city, a religion and a unit.
 //!
 //! Packages 1a-05 and 1a-06 compile; evaluation (1a-07) comes next.
 
+pub mod cond;
 pub mod countable;
 pub mod filter;
 #[rustfmt::skip]
@@ -33,6 +36,7 @@ pub mod world;
 
 pub(crate) mod compile;
 
+pub use self::cond::{applies, applies_scoped};
 pub use self::filter::{
     CityLeaf, CivLeaf, Combatant, CombatantFilter, Expr, Filters, GenFilter, TileFilter, TileLeaf,
     UnitLeaf, UnitScope,
@@ -46,7 +50,7 @@ pub use self::table::{
     ActionMods, Cond, CondDeps, CondSpan, ObjectFilter, Role, Source, SourceUniques, StaticDomain,
     StaticFilter, StaticId, UFlags, Unique, UniqueMeta, UniqueTable,
 };
-pub use self::world::{FilterFacts, TileFacts};
+pub use self::world::{CombatCtx, Ctx, EvalWorld, FilterFacts, IndexLayer, IndexRef, TileFacts};
 
 impl UniqueType {
     /// The type whose placeholder is `placeholder`, exactly: `[]% Strength` gives `Strength`.
