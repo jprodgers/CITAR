@@ -810,6 +810,16 @@ fn the_ruleset_filters_are_compiled_and_reachable() {
     assert!(fort.improvements.is_some() && fort.tiles.is_none(), "a fort is no terrain");
     let land = object("Land");
     assert!(land.tiles.is_some() && land.improvements.is_none());
+    // A static filter's bit test takes an id of its own domain.
+    let (s, sf) = t
+        .sets()
+        .iter()
+        .find(|(_, s)| s.domain == StaticDomain::Building && !s.members.is_empty())
+        .expect("a building filter");
+    for (b, _) in r.buildings().iter() {
+        let b: BuildingId = b;
+        assert_eq!(t.in_set(s, b), sf.members.contains(u32::from(b.0)));
+    }
     // Improvements know their terrains, and start biases are filters map generation reads.
     let farm = &r.improvements()[id::<ImprovementId>(r, "Farm")];
     assert!(farm.terrains_can_be_built_on.contains(id(r, "Grassland")));
@@ -819,7 +829,7 @@ fn the_ruleset_filters_are_compiled_and_reachable() {
     assert!(biased.iter().any(|b| matches!(b, StartBias::Avoid(_))));
     for b in biased {
         if let StartBias::Prefer(x) | StartBias::Avoid(x) = *b {
-            assert!(f.tile(x).terrain_level, "{}", t.tile_filter(x));
+            assert!(f.tile(x.id()).terrain_level, "{}", t.tile_filter(x.id()));
         }
     }
 }

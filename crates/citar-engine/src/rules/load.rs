@@ -47,7 +47,7 @@ use crate::base::sets::{
 use crate::base::stats::StatMask;
 use crate::unique::compile::{self, SourceTexts};
 use crate::unique::filter;
-use crate::unique::{Source, SourceUniques, UniqueTable};
+use crate::unique::{GenFilter, Source, SourceUniques, UniqueTable};
 
 pub(super) fn load(files: &RulesetFiles<'_>) -> Result<Ruleset, RulesetErrors> {
     let mut p = Problems::default();
@@ -228,8 +228,11 @@ fn compile_uniques(raw: &RawRuleset, r: &mut Ruleset, p: &mut Problems) {
             .iter()
             .filter_map(|b| match StartBias::read(b) {
                 StartBiasText::Coast => Some(StartBias::Coast),
-                StartBiasText::Prefer(_) => ids.next().map(StartBias::Prefer),
-                StartBiasText::Avoid(_) => ids.next().map(StartBias::Avoid),
+                // `gen_tables::build` refuses the ruleset unless each is terrain-level.
+                StartBiasText::Prefer(_) => {
+                    ids.next().map(|f| StartBias::Prefer(GenFilter::new(f)))
+                }
+                StartBiasText::Avoid(_) => ids.next().map(|f| StartBias::Avoid(GenFilter::new(f))),
             })
             .collect();
     }

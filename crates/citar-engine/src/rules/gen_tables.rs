@@ -28,7 +28,9 @@ use crate::base::ids::{
 };
 use crate::unique::params::RegionType;
 use crate::unique::world::TileFacts;
-use crate::unique::{CondData, Expr, Filters, Role, Source, TileLeaf, Unique, UniqueData};
+use crate::unique::{
+    CondData, Expr, Filters, GenFilter, Role, Source, TileLeaf, Unique, UniqueData,
+};
 
 // ---- Map generation -----------------------------------------------------------------------------
 
@@ -36,9 +38,9 @@ use crate::unique::{CondData, Expr, Filters, Role, Source, TileLeaf, Unique, Uni
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GenCond {
     /// `<in [filter] tiles>`: the tile passes every one.
-    pub tiles: Vec<TileFilterId>,
+    pub tiles: Vec<GenFilter>,
     /// `<in tiles without [filter]>`: the tile passes none.
-    pub without: Vec<TileFilterId>,
+    pub without: Vec<GenFilter>,
     /// `<in [region] Regions>`.
     pub regions: Vec<RegionType>,
     /// `<in all except [region] Regions>`.
@@ -89,7 +91,7 @@ pub enum Near {
     /// `[River]`: a river runs along the tile itself.
     River,
     /// A neighbour passes the filter.
-    Tiles(TileFilterId),
+    Tiles(GenFilter),
 }
 
 /// `Becomes [terrain] when adjacent to [filter]`.
@@ -137,7 +139,7 @@ pub struct GenValue {
 /// `Deposits in [filter] tiles always provide [n] resources`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DepositAmount {
-    pub tiles: TileFilterId,
+    pub tiles: GenFilter,
     pub amount: i32,
 }
 
@@ -165,7 +167,7 @@ pub struct ResourceGen {
 pub struct NeighbourCount {
     pub min: i32,
     pub max: i32,
-    pub tiles: TileFilterId,
+    pub tiles: GenFilter,
 }
 
 /// What map generation reads of a natural wonder (`_fits`, `_try_wonder`, `_place_wonder`,
@@ -354,18 +356,24 @@ pub(crate) fn build(r: &Ruleset, report: &mut Report<'_>) -> GenTables {
     for (id, n) in r.nations().iter() {
         for b in &n.start_bias {
             if let StartBias::Prefer(f) | StartBias::Avoid(f) = *b {
-                gen_filter(r, f, Source::Nation(id), report);
+                gen_filter(r, f.id(), Source::Nation(id), report);
             }
         }
     }
     g
 }
 
-/// Reports a filter map generation cannot read.
-fn gen_filter(r: &Ruleset, f: TileFilterId, at: Source, report: &mut Report<'_>) -> bool {
+/// The filter as map generation reads it, or a report that it cannot: it asks more of a tile than
+/// its terrain.
+fn gen_filter(
+    r: &Ruleset,
+    f: TileFilterId,
+    at: Source,
+    report: &mut Report<'_>,
+) -> Option<GenFilter> {
     let t = r.uniques();
     if t.filters().tile(f).terrain_level {
-        return true;
+        return Some(GenFilter::new(f));
     }
     report(
         at,
@@ -376,7 +384,7 @@ fn gen_filter(r: &Ruleset, f: TileFilterId, at: Source, report: &mut Report<'_>)
             t.tile_filter(f)
         ),
     );
-    false
+    None
 }
 
 /// The conditions of a map-generation unique, or why map generation cannot read them.
@@ -386,14 +394,14 @@ fn gen_cond(r: &Ruleset, u: &Unique, at: Source, report: &mut Report<'_>) -> Opt
     let mut ok = true;
     for x in t.conds(u) {
         match x.data {
-            CondData::ConditionalInTiles(p) => {
-                ok &= gen_filter(r, p.tiles, at, report);
-                c.tiles.push(p.tiles);
-            }
-            CondData::ConditionalInTilesNot(p) => {
-                ok &= gen_filter(r, p.tiles, at, report);
-                c.without.push(p.tiles);
-            }
+            CondData::ConditionalInTiles(p) => match gen_filter(r, p.tiles, at, report) {
+                Some(f) => c.tiles.push(f),
+                None => ok = false,
+            },
+            CondData::ConditionalInTilesNot(p) => match gen_filter(r, p.tiles, at, report) {
+                Some(f) => c.without.push(f),
+                None => ok = false,
+            },
             CondData::ConditionalInRegionOfType(p) => c.regions.push(p.region),
             CondData::ConditionalInRegionExceptOfType(p) => c.except_regions.push(p.region),
             _ => {
@@ -489,10 +497,8 @@ fn place(
             let near = if t.filters().tile(x.next_to).terrain == Expr::Leaf(TileLeaf::River) {
                 Near::River
             } else {
-                if !gen_filter(r, x.next_to, at, report) {
-                    return false;
-                }
-                Near::Tiles(x.next_to)
+                let Some(f) = gen_filter(r, x.next_to, at, report) else { return false };
+                Near::Tiles(f)
             };
             g.terrains[tr].changes.push(TerrainChange { into: x.into, near });
         }
@@ -548,10 +554,8 @@ fn place(
         }
         D::ResourceAmountOnTiles(x) => {
             let res = on!(resource, "a resource");
-            if !gen_filter(r, x.tiles, at, report) {
-                return false;
-            }
-            g.resources[res].amounts.push(DepositAmount { tiles: x.tiles, amount: x.amount });
+            let Some(tiles) = gen_filter(r, x.tiles, at, report) else { return false };
+            g.resources[res].amounts.push(DepositAmount { tiles, amount: x.amount });
         }
         D::ResourceFrequency(x) => {
             let value = GenValue { value: x.frequency, cond };
@@ -572,18 +576,14 @@ fn place(
         }
         D::NaturalWonderNeighborCount(x) => {
             let w = on!(wonder, "a natural wonder");
-            if !gen_filter(r, x.terrain, at, report) {
-                return false;
-            }
-            let n = NeighbourCount { min: x.count, max: x.count, tiles: x.terrain };
+            let Some(tiles) = gen_filter(r, x.terrain, at, report) else { return false };
+            let n = NeighbourCount { min: x.count, max: x.count, tiles };
             g.wonders[w].neighbours.push(n);
         }
         D::NaturalWonderNeighborsRange(x) => {
             let w = on!(wonder, "a natural wonder");
-            if !gen_filter(r, x.terrain, at, report) {
-                return false;
-            }
-            let n = NeighbourCount { min: x.min, max: x.max, tiles: x.terrain };
+            let Some(tiles) = gen_filter(r, x.terrain, at, report) else { return false };
+            let n = NeighbourCount { min: x.min, max: x.max, tiles };
             g.wonders[w].neighbours.push(n);
         }
         D::NaturalWonderSmallerLandmass(x) => {

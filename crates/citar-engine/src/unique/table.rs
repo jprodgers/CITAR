@@ -17,7 +17,7 @@ use super::generated::{CondData, ParamKind, TriggerCond, UniqueData, UniqueType}
 use super::params::Param;
 use crate::base::ids::{
     AbilityKey, BaseUnitId, BeliefId, BuildingId, CityFilterId, CityStateTypeId, CivFilterId,
-    CombatantFilterId, CondId, EraId, IdVec, ImprovementId, NationId, ObjectFilterId, PolicyId,
+    CombatantFilterId, CondId, EraId, Id, IdVec, ImprovementId, NationId, ObjectFilterId, PolicyId,
     PromotionId, ResourceId, RuinId, SetRef, SpecialistId, StatsId, TagId, TechId, TerrainId,
     TextId, TileFilterId, UniqueId, UnitFilterId, UnitTypeId,
 };
@@ -376,6 +376,40 @@ pub enum StaticDomain {
     Nation,
 }
 
+mod sealed {
+    /// Only the ids of this crate's static domains are [`super::StaticId`]s.
+    pub trait Sealed {}
+}
+
+/// The id of a static domain's objects: what a static filter's bit test takes, so that a set of
+/// buildings cannot be asked about a tech, whose index would name an unrelated building.
+pub trait StaticId: Id + sealed::Sealed {
+    /// The domain these ids name objects of.
+    const DOMAIN: StaticDomain;
+}
+
+macro_rules! static_ids {
+    ($($id:ident => $domain:ident),* $(,)?) => {$(
+        impl sealed::Sealed for $id {}
+        impl StaticId for $id {
+            const DOMAIN: StaticDomain = StaticDomain::$domain;
+        }
+    )*};
+}
+
+static_ids! {
+    BaseUnitId => BaseUnit,
+    BuildingId => Building,
+    TerrainId => Terrain,
+    ImprovementId => Improvement,
+    ResourceId => Resource,
+    TechId => Tech,
+    EraId => Era,
+    PolicyId => Policy,
+    PromotionId => Promotion,
+    NationId => Nation,
+}
+
 /// A static filter ([`SetRef`]): the objects of one domain it selects, decided at load.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaticFilter {
@@ -390,11 +424,18 @@ pub struct StaticFilter {
 }
 
 impl StaticFilter {
-    /// Whether the filter selects the object with this index.
+    /// Whether the filter selects object `id`, an object of the filter's domain.
     #[must_use]
     #[inline]
-    pub fn contains(&self, index: u32) -> bool {
-        self.members.contains(index)
+    pub fn contains<I: StaticId>(&self, id: I) -> bool {
+        debug_assert_eq!(
+            self.domain,
+            I::DOMAIN,
+            "a {:?} filter asked about a {}",
+            self.domain,
+            I::NAME
+        );
+        u32::try_from(id.index()).is_ok_and(|i| self.members.contains(i))
     }
 }
 
@@ -696,6 +737,30 @@ mod tests {
         assert_eq!(v.flags(), UFlags::all());
         assert_eq!(u.conds.ids().map(|c| c.0).collect::<Vec<_>>(), [7, 8]);
         assert!(CondDeps::all().bits() < 1 << 24, "the classes fit 24 bits");
+    }
+
+    fn buildings(members: &[u32]) -> StaticFilter {
+        StaticFilter {
+            domain: StaticDomain::Building,
+            text: TextId(0),
+            members: members.iter().copied().collect(),
+            fixed: false,
+        }
+    }
+
+    #[test]
+    fn a_static_filter_answers_for_its_own_domain() {
+        let s = buildings(&[1, 3]);
+        assert!(s.contains(BuildingId(3)) && !s.contains(BuildingId(2)));
+        assert_eq!(<NationId as StaticId>::DOMAIN, StaticDomain::Nation);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a Building filter asked about a TechId")]
+    fn a_static_filter_refuses_another_domains_id() {
+        // Tech 3 has the index of building 3, which the set holds.
+        assert!(buildings(&[3]).contains(TechId(3)));
     }
 
     #[test]

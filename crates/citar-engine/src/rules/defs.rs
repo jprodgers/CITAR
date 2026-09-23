@@ -18,11 +18,12 @@ pub use super::gen_tables::{Milestone, MilestoneDef};
 use crate::base::ids::{
     BaseUnitId, BuildingId, CityStateTypeId, DifficultyId, EraId, FeatureId, ImprovementId,
     NationId, PersonalityId, PolicyId, PromotionId, ResourceId, RulesReligionId, SpecialistId,
-    TechId, TerrainId, TileFilterId, UnitTypeId,
+    TechId, TerrainId, UnitTypeId,
 };
 use crate::base::sets::TerrainSet;
 use crate::base::stats::{StatMask, Stats};
 pub use crate::unique::SourceUniques;
+use crate::unique::filter::GenFilter;
 
 // ---- Small vocabularies -----------------------------------------------------------------------
 
@@ -307,9 +308,9 @@ pub enum StartBias {
     /// `Coast`: a coastal start.
     Coast,
     /// A tile filter the start should have nearby.
-    Prefer(TileFilterId),
+    Prefer(GenFilter),
     /// `Avoid [filter]`: a tile filter the start should not have nearby.
-    Avoid(TileFilterId),
+    Avoid(GenFilter),
 }
 
 /// A start bias entry as written, before its filter is compiled.

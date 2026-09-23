@@ -9,11 +9,11 @@
 //! Written by `golden bless` when the ruleset data, the filters or the tables change; a diff shows
 //! which filter, or which table entry, moved.
 
-use citar_engine::base::ids::{Id, IdVec, TileFilterId};
+use citar_engine::base::ids::{Id, IdVec};
 use citar_engine::rules::gen_tables::{GenCond, GenValue, Milestone, Near};
 use citar_engine::rules::{Named, Ruleset, embedded};
 use citar_engine::unique::params::RegionType;
-use citar_engine::unique::{CityLeaf, CivLeaf, Expr, TileLeaf, UnitLeaf};
+use citar_engine::unique::{CityLeaf, CivLeaf, Expr, GenFilter, TileLeaf, UnitLeaf};
 use serde_json::{Value, json};
 
 use super::{SetReport, capped, diff_rows, digest_of, read_committed, render_rows};
@@ -134,7 +134,7 @@ pub fn filters_answers() -> Value {
 fn cond(r: &Ruleset, c: &GenCond) -> Value {
     let t = r.uniques();
     let texts =
-        |fs: &[TileFilterId]| fs.iter().map(|&f| t.tile_filter(f).to_owned()).collect::<Vec<_>>();
+        |fs: &[GenFilter]| fs.iter().map(|&f| t.tile_filter(f.id()).to_owned()).collect::<Vec<_>>();
     let regions = |rs: &[RegionType]| {
         rs.iter()
             .map(|x| match *x {
@@ -178,7 +178,7 @@ pub fn gen_answers() -> Value {
                 "fertility": [x.fertility.add, x.fertility.fixed],
                 "changes": x.changes.iter().map(|c| json!([tname(c.into), match c.near {
                     Near::River => json!("River"),
-                    Near::Tiles(f) => json!(t.tile_filter(f)),
+                    Near::Tiles(f) => json!(t.tile_filter(f.id())),
                 }])).collect::<Vec<_>>(),
                 "major_deposits": x.major_deposits,
                 "blocks_resources": x.blocks_resources.iter().map(|c| cond(&r, c)).collect::<Vec<_>>(),
@@ -197,7 +197,7 @@ pub fn gen_answers() -> Value {
                 "weights": values(&r, &x.weights),
                 "minor_weights": values(&r, &x.minor_weights),
                 "city_state_weight": x.city_state_weight,
-                "amounts": x.amounts.iter().map(|a| json!([t.tile_filter(a.tiles), a.amount])).collect::<Vec<_>>(),
+                "amounts": x.amounts.iter().map(|a| json!([t.tile_filter(a.tiles.id()), a.amount])).collect::<Vec<_>>(),
             }])
         })
         .collect();
@@ -207,7 +207,7 @@ pub fn gen_answers() -> Value {
         .filter(|(_, x)| **x != Default::default())
         .map(|(id, x)| {
             json!([tname(id), {
-                "neighbours": x.neighbours.iter().map(|n| json!([n.min, n.max, t.tile_filter(n.tiles)])).collect::<Vec<_>>(),
+                "neighbours": x.neighbours.iter().map(|n| json!([n.min, n.max, t.tile_filter(n.tiles.id())])).collect::<Vec<_>>(),
                 "not_on_largest": x.not_on_largest,
                 "latitudes": x.latitudes,
                 "group": x.group,

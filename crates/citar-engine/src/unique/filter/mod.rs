@@ -35,7 +35,7 @@ pub use self::unit::{UnitLeaf, UnitScope};
 use super::countable::Countable;
 use super::generated::ParamKind;
 use super::params::Param;
-use super::table::{ObjectFilter, Source, StaticDomain, UniqueTable};
+use super::table::{ObjectFilter, Source, StaticDomain, StaticId, UniqueTable};
 use super::world::{FilterFacts, TileFacts};
 use crate::base::collections::DetSet;
 use crate::base::ids::{
@@ -73,6 +73,26 @@ pub struct CombatantFilter {
 pub enum Combatant {
     Unit(UnitId),
     City(CityId),
+}
+
+/// A tile filter map generation reads (DESIGN.md 5.10): the map-generation tables' and the start
+/// biases'. Only the loader makes one, and a ruleset loads only if every one is
+/// [`TileFilter::terrain_level`] (`rules::gen_tables` checks them all), so that
+/// [`Filters::gen_matches`] answers it from the tile's terrain alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GenFilter(TileFilterId);
+
+impl GenFilter {
+    /// The loader's: a handle whose ruleset the table builder refuses unless it is terrain-level.
+    pub(crate) const fn new(id: TileFilterId) -> Self {
+        Self(id)
+    }
+
+    /// The filter's handle, for its text and its trees.
+    #[must_use]
+    pub const fn id(self) -> TileFilterId {
+        self.0
+    }
 }
 
 /// Every dynamic filter of a ruleset, compiled, indexed by the handles the unique compiler gave
@@ -180,11 +200,12 @@ impl Filters {
         self.tiles[id].terrain.eval(&mut |l| l.eval(w, t, viewer))
     }
 
-    /// Whether tile `t` passes the filter as map generation reads it: from the terrain alone.
-    /// Only for a filter the loader checked is [`TileFilter::terrain_level`], as it checks every
-    /// filter map generation reads; any other leaf answers no.
-    pub fn gen_matches<W: TileFacts + ?Sized>(&self, id: TileFilterId, w: &W, t: TileIdx) -> bool {
-        self.tiles[id].terrain.eval(&mut |l| l.eval_terrain(w, t).unwrap_or(false))
+    /// Whether tile `t` passes the filter as map generation reads it: from the terrain alone,
+    /// through [`TileFacts`]. A [`GenFilter`] is terrain-level, which debug builds check.
+    pub fn gen_matches<W: TileFacts + ?Sized>(&self, f: GenFilter, w: &W, t: TileIdx) -> bool {
+        let tf = &self.tiles[f.0];
+        debug_assert!(tf.terrain_level, "map generation reads only terrain-level filters");
+        tf.terrain.eval(&mut |l| l.eval_terrain(w, t).unwrap_or(false))
     }
 
     /// Whether city `c` passes the filter, seen by `viewer`, or by its owner when `None`
@@ -650,10 +671,59 @@ impl UniqueTable {
         &self.filters
     }
 
-    /// Whether the static filter `s` selects the object `id` of its domain.
+    /// Whether the static filter `s` selects object `id`. The id's type must be the filter's
+    /// domain's, which debug builds check.
     #[must_use]
     #[inline]
-    pub fn in_set<I: crate::base::ids::Id>(&self, s: SetRef, id: I) -> bool {
-        self.sets[s].members.contains(statics::bit(id))
+    pub fn in_set<I: StaticId>(&self, s: SetRef, id: I) -> bool {
+        self.sets[s].contains(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A map whose every tile has a river, and nothing else.
+    struct Rivers;
+
+    impl TileFacts for Rivers {
+        fn tile_terrains(&self, _: TileIdx) -> TerrainSet {
+            TerrainSet::new()
+        }
+        fn tile_river(&self, _: TileIdx) -> bool {
+            true
+        }
+        fn tile_fresh_water(&self, _: TileIdx) -> bool {
+            false
+        }
+        fn tile_next_to_coast(&self, _: TileIdx) -> bool {
+            false
+        }
+    }
+
+    /// Filters holding one tile filter, a single leaf.
+    fn one(leaf: TileLeaf, terrain_level: bool) -> Filters {
+        let e = Expr::Leaf(leaf);
+        let f =
+            TileFilter { full: e.clone(), terrain: e, terrains: TerrainSet::new(), terrain_level };
+        Filters { tiles: IdVec::from_vec(vec![f]), ..Filters::default() }
+    }
+
+    #[test]
+    fn map_generation_reads_a_filter_from_the_terrain() {
+        let f = one(TileLeaf::River, true);
+        assert!(f.gen_matches(GenFilter::new(TileFilterId(0)), &Rivers, TileIdx(0)));
+        let f = one(TileLeaf::FreshWater, true);
+        assert!(!f.gen_matches(GenFilter::new(TileFilterId(0)), &Rivers, TileIdx(0)));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "terrain-level")]
+    fn map_generation_never_reads_a_filter_that_asks_more() {
+        // `Worked` has no answer from the terrain: map generation would read it as no.
+        let f = one(TileLeaf::Worked, false);
+        assert!(!f.gen_matches(GenFilter::new(TileFilterId(0)), &Rivers, TileIdx(0)));
     }
 }

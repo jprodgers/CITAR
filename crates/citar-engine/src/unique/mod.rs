@@ -32,8 +32,8 @@ pub mod world;
 pub(crate) mod compile;
 
 pub use self::filter::{
-    CityLeaf, CivLeaf, Combatant, CombatantFilter, Expr, Filters, TileFilter, TileLeaf, UnitLeaf,
-    UnitScope,
+    CityLeaf, CivLeaf, Combatant, CombatantFilter, Expr, Filters, GenFilter, TileFilter, TileLeaf,
+    UnitLeaf, UnitScope,
 };
 pub use self::generated::{
     BY_PLACEHOLDER, CondData, ModifierData, ParamKind, Stage, Support, TYPE_INFO, TriggerCond,
@@ -41,7 +41,7 @@ pub use self::generated::{
 };
 pub use self::table::{
     ActionMods, Cond, CondDeps, CondSpan, ObjectFilter, Role, Source, SourceUniques, StaticDomain,
-    StaticFilter, UFlags, Unique, UniqueMeta, UniqueTable,
+    StaticFilter, StaticId, UFlags, Unique, UniqueMeta, UniqueTable,
 };
 pub use self::world::{FilterFacts, TileFacts};
 
