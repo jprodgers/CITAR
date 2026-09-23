@@ -12,7 +12,8 @@
 //! - a term that matches nothing does not load, where Python quietly answered no; a filter nested
 //!   deeper than [`parse::MAX_DEPTH`] does not load either;
 //! - a parameter that may name objects of several kinds ([`ObjectFilter`]) keeps only the kinds its
-//!   text matches.
+//!   text can select, and does not load if a kind it still selects has a term that matches nothing
+//!   of that kind (`non-[Temple]` as tiles is every tile).
 //!
 //! The world a dynamic filter reads is [`FilterFacts`]; map generation, which has no game, reads
 //! tile filters through [`TileFacts`] alone ([`Filters::gen_matches`]).
@@ -33,7 +34,7 @@ use self::tile::TerrainWords;
 pub use self::tile::TileLeaf;
 pub use self::unit::{UnitLeaf, UnitScope};
 use super::countable::Countable;
-use super::generated::ParamKind;
+use super::generated::{ParamKind, UniqueType};
 use super::params::Param;
 use super::table::{ObjectFilter, Source, StaticDomain, StaticId, UniqueTable};
 use super::world::{FilterFacts, TileFacts};
@@ -466,43 +467,90 @@ pub(crate) fn compile(rules: &Ruleset) -> Compiled {
 
     let mut members = Vec::new();
     let mut dead_sets = Vec::new();
+    // Whether each static filter selects nothing.
+    let mut empty_sets = Vec::new();
     for (id, s) in table.sets.iter() {
         if s.fixed {
             dead_sets.push(Dead::default());
+            empty_sets.push(s.members.is_empty());
             continue;
         }
         let (set, dead) = cx.set(s.domain, table.text(s.text));
+        empty_sets.push(set.is_empty());
         members.push((id, set));
         dead_sets.push(dead);
     }
 
-    // An object filter keeps the kinds whose every term matches something. Its tiles are read as
-    // `tile_terrain_matches` beside improvements (`workers.py:201-202`), as `tile_matches` beside
-    // buildings.
+    // An object filter drops the kinds its text never selects: a tile tree that folds to `false`,
+    // an empty set. A kind it still selects despite a term that matches nothing of that kind
+    // (`non-[Temple]` as tiles is every tile) reads the text as meaning something of that kind it
+    // does not name, and does not load. Its tiles are read as `tile_terrain_matches` beside
+    // improvements (`workers.py:201-202`), as `tile_matches` beside buildings.
     let mut objects = Vec::new();
-    let mut dead_objects = Vec::new();
+    let mut object_problems = Vec::new();
     for (_, o) in table.objects.iter() {
         let mut o = *o;
-        let terrain_only = o.kind == ParamKind::ImprovementOrTerrainFilter;
+        let text = table.text(o.text);
+        let mut unclear = Vec::new();
+        let mut too_deep = None;
         if let Some(t) = o.tiles {
             let i = usize::from(t.0);
-            let dead = if terrain_only { &dead_terrains[i] } else { &dead_tiles[i] };
-            if !dead.is_empty() {
+            let (tree, dead) = if o.kind == ParamKind::ImprovementOrTerrainFilter {
+                (&tiles[i].terrain, &dead_terrains[i])
+            } else {
+                (&tiles[i].full, &dead_tiles[i])
+            };
+            if dead.too_deep {
+                too_deep = Some(dead.describe(text, "tile"));
+            }
+            if tree.constant() == Some(false) {
                 o.tiles = None;
+            } else if !dead.is_empty() {
+                unclear.push((dead, "tile"));
             }
         }
-        if o.buildings.is_some_and(|s| !dead_sets[usize::from(s.0)].is_empty()) {
-            o.buildings = None;
+        for (slot, what) in [(&mut o.buildings, "building"), (&mut o.improvements, "improvement")] {
+            if let Some(s) = *slot {
+                let i = usize::from(s.0);
+                if dead_sets[i].too_deep && too_deep.is_none() {
+                    too_deep = Some(dead_sets[i].describe(text, what));
+                }
+                if empty_sets[i] {
+                    *slot = None;
+                } else if !dead_sets[i].is_empty() {
+                    unclear.push((&dead_sets[i], what));
+                }
+            }
         }
-        if o.improvements.is_some_and(|s| !dead_sets[usize::from(s.0)].is_empty()) {
-            o.improvements = None;
-        }
-        let dead = o.tiles.is_none()
+        let none_left = o.tiles.is_none()
             && o.buildings.is_none()
             && o.improvements.is_none()
             && o.specialist.is_none();
+        let problem = if let Some(deep) = too_deep {
+            Some(deep)
+        } else if !unclear.is_empty() {
+            let parts: Vec<String> = unclear
+                .iter()
+                .map(|(dead, what)| {
+                    let terms: Vec<String> = dead.terms.iter().map(|t| format!("{t:?}")).collect();
+                    format!(
+                        "{} {} no {what}, yet the filter still selects {what}s",
+                        terms.join(" and "),
+                        if terms.len() == 1 { "matches" } else { "match" }
+                    )
+                })
+                .collect();
+            Some(format!(
+                "the filter [{text}] is unclear: {}; name the objects of each kind it means",
+                parts.join(", and ")
+            ))
+        } else if none_left {
+            Some(format!("the filter [{text}] matches nothing of any kind its parameter allows"))
+        } else {
+            None
+        };
         objects.push(o);
-        dead_objects.push(dead);
+        object_problems.push(problem);
     }
 
     // Every filter a unique reads directly must match something, reported once, at its first use.
@@ -513,16 +561,20 @@ pub(crate) fn compile(rules: &Ruleset) -> Compiled {
             // A variant shares its original's parameters.
             continue;
         }
-        let mut params = u.data.params();
+        let mut found = Vec::new();
+        let terrain_form = meta.ty.is_some_and(reads_tile_terrain);
+        for p in u.data.params() {
+            uses(p, terrain_form, &mut found);
+        }
         for c in table.conds(u) {
-            params.extend(c.data.params());
+            for p in c.data.params() {
+                uses(p, false, &mut found);
+            }
         }
         if let Some(t) = meta.trigger {
-            params.extend(t.params());
-        }
-        let mut found = Vec::new();
-        for p in params {
-            uses(p, &mut found);
+            for p in t.params() {
+                uses(p, false, &mut found);
+            }
         }
         for x in found {
             if reported.contains(&x) {
@@ -535,6 +587,11 @@ pub(crate) fn compile(rules: &Ruleset) -> Compiled {
                 Use::Tile(f) => {
                     dead_or_none(&dead_tiles[usize::from(f.0)], table.tile_filter(f), "tile")
                 }
+                Use::TileTerrain(f) => dead_or_none(
+                    &dead_terrains[usize::from(f.0)],
+                    table.tile_filter(f),
+                    "tile by its terrain alone, as this unique reads it",
+                ),
                 Use::City(f) => {
                     dead_or_none(&dead_cities[usize::from(f.0)], table.city_filter(f), "city")
                 }
@@ -554,12 +611,7 @@ pub(crate) fn compile(rules: &Ruleset) -> Compiled {
                         domain_words(sf.domain),
                     )
                 }
-                Use::Object(o) => dead_objects[usize::from(o.0)].then(|| {
-                    format!(
-                        "the filter [{}] matches nothing of any kind its parameter allows",
-                        table.text(table.object(o).text)
-                    )
-                }),
+                Use::Object(o) => object_problems[usize::from(o.0)].clone(),
             };
             if let Some(message) = message {
                 reported.insert(x);
@@ -606,7 +658,10 @@ const fn domain_words(d: StaticDomain) -> &'static str {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Use {
     Unit(UnitFilterId),
+    /// A tile filter read in full, `tile_matches`.
     Tile(TileFilterId),
+    /// A tile filter read from the tile's terrain alone, `tile_terrain_matches`.
+    TileTerrain(TileFilterId),
     City(CityFilterId),
     Civ(CivFilterId),
     Combatant(CombatantFilterId),
@@ -614,10 +669,24 @@ enum Use {
     Object(ObjectFilterId),
 }
 
-/// The filters a parameter reads, a countable's included.
-fn uses(p: Param, out: &mut Vec<Use>) {
+/// Whether a unique of this type reads its tile filter from the tile's terrain alone
+/// (`tile_terrain_matches`), so that its terms must match in that form: a building's `Must be on`
+/// and `Must not be on` (`cities.py:1231-1233`) and `[stats] in cities on [terrainFilter] tiles`
+/// (`cities.py:386`). Every other tile filter a unique reads is read in full, but map
+/// generation's, which `rules::gen_tables` holds to the terrain.
+const fn reads_tile_terrain(ty: UniqueType) -> bool {
+    matches!(
+        ty,
+        UniqueType::MustBeOn | UniqueType::MustNotBeOn | UniqueType::StatsFromCitiesOnSpecificTiles
+    )
+}
+
+/// The filters a parameter reads, a countable's included; its tile filter read from the terrain
+/// alone when `terrain_form`.
+fn uses(p: Param, terrain_form: bool, out: &mut Vec<Use>) {
     out.push(match p {
         Param::UnitFilter(f) => Use::Unit(f),
+        Param::TileFilter(f) if terrain_form => Use::TileTerrain(f),
         Param::TileFilter(f) => Use::Tile(f),
         Param::CityFilter(f) => Use::City(f),
         Param::CivFilter(f) => Use::Civ(f),

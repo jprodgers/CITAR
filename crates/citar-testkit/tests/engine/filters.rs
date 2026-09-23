@@ -9,8 +9,9 @@
 //! - gate 4: a region conditional on an effect is refused;
 //! - gate 5: every map-generation unique lands in a table (the tables' snapshot is the golden
 //!   `gen.json`, checked in `tests/determinism.rs`);
-//! - a term that matches nothing, a filter nested too deep, a map-generation filter that asks more
-//!   than the terrain and an unknown milestone are refused, naming the file and object.
+//! - a term that matches nothing (in the form its reader reads it), a filter nested too deep, an
+//!   object filter that would select a kind its terms do not name, a map-generation filter that
+//!   asks more than the terrain and an unknown milestone are refused, naming the file and object.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -975,6 +976,64 @@ fn filters_that_match_nothing_are_refused() {
     })
     .expect_err("refused");
     assert!(errs.to_string().contains("\"Cloud\" matches no terrain"), "{errs}");
+}
+
+/// The ruleset with `text` added to the Temple's uniques.
+fn temple_with(text: &str) -> Result<Ruleset, citar_engine::rules::RulesetErrors> {
+    load_edited("ruleset/buildings.json", |v| {
+        v["Temple"]["uniques"].as_array_mut().expect("uniques").push(json!(text));
+    })
+}
+
+#[test]
+fn a_filter_read_from_the_terrain_alone_must_match_there() {
+    // A building's `Must be on` and `Must not be on`, and `in cities on [..] tiles`, read the
+    // city's tile by its terrain alone (`cities.py:386, 1231-1233`): a farm there never counts,
+    // so the building could never be built, or never be barred.
+    for text in [
+        "Must be on [Farm]",
+        "Must not be on [Farm]",
+        "[+1 Gold] in cities on [{Farm} {Land}] tiles",
+    ] {
+        let errs = temple_with(text).expect_err(text);
+        assert!(errs.has(RulesetErrorKind::Filter), "{text}: {errs}");
+        let e = errs.0.iter().find(|e| e.kind == RulesetErrorKind::Filter).expect("one");
+        assert_eq!((&*e.file, &*e.object), ("ruleset/buildings.json", "Temple"));
+        assert!(e.text.contains("\"Farm\" matches no tile by its terrain alone"), "{e}");
+    }
+    // Read in full, the same filter matches: a farm may stand next to the city.
+    temple_with("Must be next to [Farm]").expect("a full tile filter");
+    // The shipped `Must be on [River]` reads the terrain, and loads.
+    assert!(
+        shipped()
+            .uniques()
+            .iter()
+            .any(|(id, _)| { shipped().uniques().meta(id).ty == Some(UniqueType::MustBeOn) })
+    );
+}
+
+#[test]
+fn an_object_filter_that_means_another_kind_is_refused() {
+    // `non-[Temple]` as tiles is every tile, though `Temple` names no tile: Python applied such a
+    // unique to every tile and every other building. The text is unclear, and does not load.
+    for text in ["[+10]% [Gold] from every [non-[Temple]]", "[+1 Gold] from every [non-[Temple]]"] {
+        let errs = temple_with(text).expect_err(text);
+        assert!(errs.has(RulesetErrorKind::Filter), "{text}: {errs}");
+        let msg = errs.to_string();
+        assert!(msg.contains("unclear") && msg.contains("\"Temple\" matches no tile"), "{msg}");
+    }
+    // A worker's `non-[Farm]` is every terrain but builds only the improvements it names.
+    let errs = load_edited("ruleset/units.json", |v| {
+        let worker = v["Worker"]["uniques"].as_array_mut().expect("uniques");
+        worker.push(json!("Can build [non-[Farm]] improvements on tiles"));
+    })
+    .expect_err("refused");
+    assert!(errs.to_string().contains("\"Farm\" matches no tile"), "{errs}");
+    // A kind the text never selects is dropped, as before; with none left, it does not load.
+    let errs = temple_with("[+10]% [Gold] from every [{Temple} {Desert}]").expect_err("refused");
+    assert!(errs.to_string().contains("matches nothing of any kind"), "{errs}");
+    temple_with("[+10]% [Gold] from every [Desert]").expect("tiles only");
+    temple_with("[+10]% [Gold] from every [{Wonder} {Culture}]").expect("loads");
 }
 
 #[test]
