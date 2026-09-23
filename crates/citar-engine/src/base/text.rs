@@ -154,10 +154,12 @@ impl NameScanner {
     #[must_use]
     pub fn find_all(&self, text: &str) -> Vec<WordMatch> {
         let Some(ac) = &self.ac else { return Vec::new() };
+        // The non-panicking form: overlapping search needs MatchKind::Standard, which `new`
+        // always builds, so the error arm is never taken.
+        let Ok(matches) = ac.try_find_overlapping_iter(text) else { return Vec::new() };
         // A match of a whole UTF-8 pattern in UTF-8 text starts and ends on character boundaries,
         // so slicing at its offsets is safe.
-        let mut found: Vec<WordMatch> = ac
-            .find_overlapping_iter(text)
+        let mut found: Vec<WordMatch> = matches
             .filter(|m| is_whole_word(text, m.start(), m.end()))
             .filter_map(|m| {
                 let name = *self.ids.get(m.pattern().as_usize())?;
