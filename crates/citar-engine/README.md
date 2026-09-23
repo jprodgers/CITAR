@@ -56,10 +56,11 @@ Each top-level module is a layer, and a layer may use only the layers listed for
 - A new top-level module fails the check until it is added to the table in
   `xtask/src/check/layers.rs`.
 - **Only `game/mutate.rs`, `save/` and `compat/` may call** `State::{tiles_mut, units_mut,
-  cities_mut, players_mut, diplo_mut, world_mut}`. Everything else writes through `Game`'s
-  setters, which return a `#[must_use] Change`, or through a `Touch` that bumps revisions before
-  it hands out `&mut` (DESIGN.md 6.4). A write that skips the revision bump leaves a memo
-  serving a stale answer.
+  cities_mut, players_mut, diplo_mut, world_mut, config_mut}`. Everything else writes through
+  `Game`'s setters, which return a `#[must_use] Change` (or `Changes`), or through a `Touch` that
+  bumps revisions before it hands out `&mut` (DESIGN.md 6.4). A write that skips the revision
+  bump leaves a memo serving a stale answer. `state/mod.rs` must keep defining every accessor
+  on the list, so a rename cannot lift the restriction.
 
 ## The rules no lint can see
 

@@ -385,7 +385,7 @@ api     (4)  host surface: tools, views, briefing, scenario, maps, debug, inspec
 
 - **One layer, two modules.** `rules` and `unique` depend on each other: tables hold compiled uniques, and the compiler resolves names against the tables. They are one layer in two modules for readability.
 - **Game systems may call each other.** The Python import graph is fully cyclic (for example combat → conquest → cities → combat), and that is fine inside one layer.
-- **Enforcement.** `xtask check` scans `use crate::…` paths per directory. It also restricts calls to `State::{tiles_mut, units_mut, cities_mut, players_mut, diplo_mut, world_mut}` to `game/mutate.rs`, `save/` and `compat/`.
+- **Enforcement.** `xtask check` scans `use crate::…` paths per directory. It also restricts calls to `State::{tiles_mut, units_mut, cities_mut, players_mut, diplo_mut, world_mut, config_mut}` to `game/mutate.rs`, `save/` and `compat/`.
 - **Decision (module names).** The base layer is `base`, not `core`, which would clash with the `core` crate. The pipeline area's modules are folded in as follows:
   - rng, math and order go into `base`;
   - derive, vis, path, turn and setup go under `game/`;
@@ -850,6 +850,19 @@ All the `pub` fields are readable through `&State`. `&mut` access to any of them
 - `host: HostOnly<BTreeMap<String, Value>>` keeps keys the engine does not know verbatim. It is saved but never digested.
 
 Seats live only in `Player.seat`.
+
+**As built in 1a-08** (§4.2-4.8, §6.4):
+- **Files.** `state/{mod, store, map, memory, units, cities, players, diplo, world, config, chronicle, change}.rs`, with unit tests in `state/tests.rs`; the gates' properties and Python checks are in `crates/citar-testkit/tests/engine/state.rs`.
+- **Private parts.** `State`'s parts are private fields read through getters (`st.tiles()`, `st.player(p)`, `st.clock()`, ...), not `pub` fields: a `pub` field would hand anyone holding `&mut State` a way round the accessors. The same goes for what a `Change` must report: a unit's owner, tile and carrier, a city's owner and tile, both ids, a player's seat and whether it is alive, and a city-state's ally. `State::from_parts(StateParts)` builds a state from its parts (save, converter) after checking they fit and rebuilding the indexes; `into_parts` takes it apart.
+- **Accessors.** `config_mut` joins the restricted list, since nearly every cache reads the settings, and `cargo xtask check` also fails if `state/mod.rs` stops defining one of them. `ids_mut`, `chronicle_mut` and `host_mut` are `pub(crate)` and unrestricted: counters and history heads feed no cache.
+- **Changes.** `TileOwner { t, old, new }` carries a `TileClaim` (owner and city: a scenario can give a tile an owner and no city). `CityRemoved { c, owner, at }` carries what the removed city no longer can. A write that moves several things returns `Changes`, `#[must_use]` too, in order: `Units::relocate` (the unit, then its cargo), `State::transfer_city` (the city, then its tiles), `State::kill_player` (its units' removals, then `PlayerAlive`), `Diplomacy::update` (`Met` if contact changed, `Diplo` if anything else did). Boarding and leaving a carrier report `UnitPlaced` with `from == to`. The setters beyond the tiles', units' and cities': `State::{set_clock, set_controller, set_auto_decision, set_seat_difficulty, set_ally}`.
+- **Units.** A carried unit moved off its carrier's tile leaves it. Carriers do not nest. `Units::verify` and `Cities::verify` check the indexes; `State::check_indexes` checks them all.
+- **Players.** The religion state is `Player.religion` (the design's `faith`, which read as the stock). The seat model is `Seat::new` (defaults, then overrides), `Seat::restore` (a save's fields, a missing handicap derived) and `SeatOverrides::parse`, which checks the lobby's `handicap` and `auto` with Python's messages. City-state quest timers keep Python's -1 for "not scheduled"; `QuestTimers.individual` is sparse. `DriverMemory::MAX_LEN` (4 MiB) is the size loading enforces.
+- **Diplomacy.** A `PairMatrix<Relation>` covers every pair, barbarians included; `Diplomacy::new(n, barbarians)` puts the barbarians at war with everyone in the masks. Two-sided relation fields are indexed by `diplo::side(p, q)`, 0 for the lower id. The 16 opinion reasons are `OpinionKey`. `DealItem::{to_json, from_json}` and `Terms::{to_json, from_json}` read and write Python's dicts with a `&Ruleset`; `scripts/refcheck/deal_items.py` records the dicts the test compares.
+- **Config.** `MapSource::Generated { size, map_type, edges, dims }` and `Document(MapDoc { id, body })`; map sizes, map types and barbarian levels are the new ids `MapSizeId`, `MapTypeId` and `BarbarianLevelId` into `game.json`'s lists. Victories switched off are listed (`disabled_victories`), so the default is all of them. `GameConfig::new` takes the essentials; `config_from_json` (1b-03) fills the rest.
+- **History.** `EngineEvent` is generated from a table of the 97 types with their `is_private`; `PRIVATE_EVENTS` has two more names that nothing emits (`build_cancelled`, `city_razing`). `Event` has no `origin`: `EventType` already tells engine events from host ones. `EventData` has the 32 keys `emit` is passed. A stats row is `StatsRow { turn, civs }` with every key `victory.record_stats` wrote, which includes `baseline.py`'s eight `STAT_KEYS`. `ChronicleHeads::absorb` folds an entry into the running hash; `HostHeads::take_event_id` hands out the shared event ids from 1. `FrameLog` holds the frames `save::journal` encodes.
+- **Serialisation is 1a-09's.** The state types derive no serde yet: the save writes rule ids as names, which needs `save::ctx`, so 1a-09 adds the derives and the custom encodings together. `Tile::canon_bytes` and `TileMemory::canon_bytes` are ready for `save::canon`.
+- **Specialists.** `City.specialists` is `[u8; MAX_SPECIALISTS]` with `sets::MAX_SPECIALISTS = 8`, and the loader refuses a larger table.
 
 ### 4.9 Save format v1 (JSON)
 
@@ -1389,7 +1402,7 @@ The one way to get a `BorrowMutError` is a dependency cycle between memos, which
 
 ### 6.4 Writes: `Change`, `Touch` and effects
 
-Mutable access to `State` is restricted to `game::mutate`. `State::{tiles_mut, units_mut, cities_mut, players_mut, diplo_mut, world_mut}` are `pub(crate)`, and `xtask check` allows calls to them only from `game/mutate.rs`, `save/` (loading) and `compat/` (conversion). Rule code writes through `Game` in exactly two ways.
+Mutable access to `State` is restricted to `game::mutate`. `State::{tiles_mut, units_mut, cities_mut, players_mut, diplo_mut, world_mut, config_mut}` are `pub(crate)`, and `xtask check` allows calls to them only from `game/mutate.rs`, `save/` (loading) and `compat/` (conversion). Rule code writes through `Game` in exactly two ways.
 
 **1. Setters returning `#[must_use] Change`.** These are for writes whose consequences need the new state: ownership, placement, a city appearing or disappearing, a tile changing.
 
