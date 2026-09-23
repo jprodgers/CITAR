@@ -87,8 +87,8 @@ fn run_all(root: &Path) -> Result<(Vec<Finding>, String), String> {
     let summary = format!(
         "engine: {} source files; {} NotPorted, {} Pending stages",
         tree.files.len(),
-        markers.iter().filter(|m| m.kind == pending::Kind::NotPorted).count(),
-        markers.iter().filter(|m| m.kind == pending::Kind::Pending).count(),
+        markers.count(pending::Kind::NotPorted),
+        markers.count(pending::Kind::Pending),
     );
     Ok((findings, summary))
 }

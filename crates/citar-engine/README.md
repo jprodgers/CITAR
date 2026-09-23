@@ -92,6 +92,11 @@ Each top-level module is a layer, and a layer may use only the layers listed for
 - Comments say why, not what.
 - A rule effect whose dependency is not ported yet returns `Err(NotPorted("combat::nuke"))`,
   never `todo!()`. A turn or setup stage whose system is not ported yet is `Pending("<package>")`.
+- **Write a marker's argument as a string literal at the marker**, because `cargo xtask check`
+  counts markers by it: `NotPorted("combat::nuke")`, a helper named `not_ported("combat::nuke")`
+  (or `not_ported!`), `Porting::Pending("1b-05")`. A constant or a parameter passed through
+  fails the check; a helper under any other name would hide the marker, so it is a review item.
+  From 1e-04 any path to the variant, such as `ErrCode::NotPorted`, fails too.
 - Integration tests live in `crates/citar-testkit`; this crate has only `#[cfg(test)]` unit tests
   and doctests.
 
