@@ -1163,10 +1163,24 @@ The rule for unknown texts:
 - **Dynamic domains become pruned trees** over `UnitLeaf`, `TileLeaf`, `CityLeaf` and `CivLeaf` enums. Each term becomes the disjunction of the branches of Python's if-chain that could ever match, and is then constant-folded. A term that matches nothing is a load error. `CivLeaf::{HumanPlayer, AiPlayer}` read the seat's handicap and are tagged `CondDeps::SEAT`.
 - **Map-generation filters** may use only terrain-level leaves, and are evaluated through `TileFacts`.
 
+**As built in 1a-06** (§5.7):
+- **Files.** `unique/filter/{mod, parse, expr, statics, unit, tile, city, civ}.rs`, and `unique/world.rs` with `TileFacts` and `FilterFacts`. The loader compiles the filters in a stage of their own after the derived tables, which the predicates read (`rough`, `any_wonder`, `stat_related`, a unit's role and domain). Loading takes about 8 ms in release.
+- **Static domains.** Ten: the nine above, and the nations a civilization filter names. `StaticFilter` is `{ domain, text, members: BitSet, fixed }`, `fixed` marking the relevant-promotion sets the compiler decided; `UniqueTable::in_set(s, id)` is the bit test. `statics::members(rules, domain, text)` evaluates any text, for tools and tests. Eras take the grammar like every other domain (Python's `era_matches` read one term). A resource's `improvementStats` names are its non-zero stats.
+- **Dynamic filters.** `UniqueTable::filters()` holds a tree per handle: unit, tile, city, civilization and combatant filters. Leaves hold their static parts as typed sets inline (`BaseUnitSet`, `TerrainSet`, `NationSet`, ...), so a leaf is one bit test without an indirection. `NationSet` is new, and the loader refuses more than 128 nations (`sets::NATION_WORDS`).
+  - A `TileFilter` holds the full form (`tile_matches`), the terrain form (`tile_terrain_matches`), the terrains the text names read as `terrain_matches` reads one terrain, and whether map generation can read it (`terrain_level`).
+  - A `CombatantFilter` holds a unit tree and a city tree in which `City` holds (`combat.py:91-96`).
+  - Several words are sets of terrains, so that they need nothing but a tile's terrains: `Water`, `Land`, `Featureless`, `Open terrain`, and `Elevated`, which is a terrain map generation raises (`Occurs in chains` or `in groups`: Mountain and Hill). Python compared the names Mountain and Hill there, and map generation the uniques. `Coastal` is land next to the coast.
+  - The aliases: the long and short city words (`in capital`, `Capital`), `Wounded` and `wounded units`, `Barbarian(s)`, `City-State(s)`, `Fresh water` and `Fresh Water`, `non-fresh water` as the opposite of fresh water (`tiles.py:259`, not the `non-[x]` form), and map generation's `Rough` for `Rough terrain`.
+- **Folding.** `Leaf` says what is exact for a leaf: its constant, and which leaves merge under `All` and `Any`. A unit's base unit, a civilization's nation and a tile's resource are one value, so their sets merge both ways; a tile's terrains, a unit's promotions, a tile's improvement and route, and a city's buildings are several, so they merge under `Any` only. `{Military} {Land}` is one set test.
+- **Errors** are the new `RulesetErrorKind::Filter`. A filter a unique reads directly (a parameter, a conditional's, a trigger's, a countable's) must have every term match something; it is reported once, at its first use. So must an improvement's `terrainsCanBeBuiltOn` and a start bias. A filter nested deeper than 16 does not load. An object filter keeps the kinds whose every term matches, and it is an error only when no kind is left. It now records its parameter kind (`ObjectFilter.kind`): its tiles are read as tile-terrain filters for `[improvementFilter/terrainFilter]` (`workers.py:201-202`) and as full tile filters otherwise. A handle interned only for an object filter's other kinds (`[Factory]` as tiles) is not an error.
+- **Evaluation** reads `FilterFacts: TileFacts`, answered by the world; 1a-07's `EvalWorld` builds on it. `Filters::{unit_matches, tile_matches, tile_terrain_matches, gen_matches, city_matches, civ_matches, combatant_matches}` take the viewer as Python did: a unit's `UnitScope { this, viewer }`, a city's viewer defaulting to its owner, a combatant unit with nothing in context. `filter::{unit, tile, city, civ, combatant}_filter(rules, text)` compile any text the same way.
+- **What a leaf reads** (`Leaf::deps`): the seat for `Human player` and `AI player`; `WAR`, the diplomatic state, for the tests against the viewer (`Hostile`, `Known`, `Friendly`, `Open Borders`, enemy and friendly land, enemy cities); `TECHS` for resource visibility; `RELIGION_STATE` for the religion city words. The entity in context is the reader's class (`UNIT`, `CITY`, `TILE`, `COMBAT`), which 1a-07 adds where it evaluates the filter.
+- **Checks.** `scripts/refcheck/filters.py` records Python's truth table of every filter text the ruleset writes (205) in each of the ten domains into `crates/citar-testkit/data/filters.json`, and the 2,050 Rust sets equal them, as does every static filter of the loaded ruleset. Mock worlds test every dynamic leaf, a proptest keeps folding's meaning, and the golden `filters.json` snapshots every compiled tree.
+
 ### 5.8 Conditionals and `CondDeps`
 
 - **The variants.** `Cond { data: CondData, deps: CondDeps, text: TextId }` has one variant per conditional in use (49), grouped as game, civ, city, unit, combat and tile.
-- **Map-generation only.** `InRegionOfType` and `InRegionExceptOfType` exist only in `GenCond`; on an effect they are a load error.
+- **Map-generation only.** `InRegionOfType` and `InRegionExceptOfType` exist only in `GenCond`; on an effect they are a load error. As built in 1a-06, they compile as conditionals and the compiler refuses them (`UniqueModifier`) on any unique but a map-generation or an inert one (the start-quality uniques carry them).
 - **Decision (condition scopes).** One `bitflags` `CondDeps` (24 bits, leaving the top 8 bits of the `u32` for `UFlags`):
   - civ-level classes: TURN, HAPPINESS_SEEN, STOCKS, RESOURCES, GOLDEN_AGE, WAR, ERA, TECHS, POLICIES, RESEARCH_QUEUE, RELIGION_STATE, CIV_BUILDINGS, GLOBAL_BUILDINGS, GLOBAL_POLICIES, CITY_COUNT, UNIT_SET, SEAT, CONFIG, CHANCE;
   - context-local classes: CITY, UNIT, TILE, COMBAT.
@@ -1193,6 +1207,16 @@ The rule for unknown texts:
 - **Map generation.** The 24 map-generation types compile into `TerrainGen`, `ResourceGen` and `NaturalWonderGen`, with `GenCond { tiles, without, regions, except_regions }`. They never reach a unique index.
 - **AI.** `AiChoiceWeight` (76 uses) becomes a per-object `ai` list for the advisor and the bot.
 - **Victory.** Victory milestones compile to `Milestone`.
+
+**As built in 1a-06** (§5.10):
+- **`Ruleset::gen_tables()`** (`rules::gen_tables::GenTables`) holds `terrains` (`TerrainGen` per terrain), `resources` (`ResourceGen`), `wonders` (`NaturalWonderGen` per natural wonder), `ai`, `inert` and `placed`. The shipped ruleset has 23 map-generation types in use, not 24, and 322 map-generation uniques, every one in `placed`.
+- **Conditions.** `GenCond::holds(filters, w, tile)` reads the tiles through `TileFacts`. Map generation builds no start regions, so `in [region] Regions` never holds and `in all except [region] Regions` always does, as Python skipped the one and ignored the other. Only `Doesn't generate naturally`, `Never receives any resources`, the frequency and the two weightings, and `Neighboring tiles will convert to` take conditions; a condition on another map-generation unique, or any conditional but tiles and regions, does not load.
+- **Where each type goes.** Terrain types go on terrains, resource types on resources, natural-wonder types on natural wonders; anywhere else is an error. `Becomes [x] when adjacent to [River]` is the tile's own river (`Near::River`, `mapgen.py:888-891`); any other filter is a neighbour's. The filters map generation reads, start biases included, must be terrain-level (`TileFilter::terrain_level`).
+- **AI weights** are per tech, policy, belief, promotion, building and unit (76 in the shipped ruleset), each an `AiWeight { percent, unique }` whose unique's conditionals decide whether it holds. A weight on anything else does not load.
+- **Milestones.** `VictoryDef.milestones` is a list of `MilestoneDef { milestone, text }`, read at link time: `Build`, `AnyoneBuilds`, `SpaceshipComplete`, `CompletePolicyBranches(n)`, `CaptureAllCapitals`, `DestroyAllPlayers`, `WinDiplomaticVote`, `HighestScoreAfterMaxTurns` (`victory.py:249-270`). A milestone the engine does not know is an error, where Python answered no forever.
+- **Inert uniques** are listed as `Inert { unique, reason }`, 64 in the shipped ruleset.
+- **Outside uniques.** An improvement's `terrainsCanBeBuiltOn` is a `TerrainSet`, and a nation's `start_bias` holds tile filters.
+- **Checks.** The golden `gen.json` snapshots every table; a test holds `placed` to every map-generation unique.
 
 ### 5.11 The evaluation API
 
@@ -2164,6 +2188,7 @@ Golden sets live in `crates/citar-testkit/golden/` and are staged as the engine 
 | 1a-02 | `rng.json` (the first 32 values of 8 streams), `libm.json`, `pyfmt.json` (Python `repr` and `round(x, n)` table) |
 | 1a-03 | the `RulesetId` of the embedded ruleset |
 | 1a-05 | `uniques.json`: every compiled unique of the embedded ruleset, one row each (source, text, type, role, flags, parameters, modifiers, key); every source object's `all` range, partitions and tags, one row each; and the interned fractions, stats, static and object filters, tags and abilities |
+| 1a-06 | `filters.json`: every dynamic filter of the embedded ruleset, compiled, one row each; `gen.json`: the tables map generation, the AI and victory read, and every map-generation unique they hold |
 | 1a-09 | 3 known-answer state digests |
 | 1a-10 | `convert-*`: the digests of the 12 committed fixtures right after conversion, before any settle |
 | 1b-04 | `map-*`: 10 generated maps (duel to huge, every map type), hashed tile arrays |
