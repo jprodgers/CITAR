@@ -375,6 +375,9 @@ class GameRoutes(unittest.TestCase):
         try:
             get = lambda who=None, **params: self.client.get(  # noqa: E731
                 f"/api/games/{game.id}/view", params=params, headers=self.cookies.get(who, {}))
+            # The god view itself is closed mid-game, and as_player follows the same rule.
+            self.assertEqual(get("owner").status_code, 403)
+            self.assertEqual(get(token=game.spectator_token).status_code, 403)
             for as_player in (0, 1):
                 with self.subTest(as_player=as_player):
                     self.assertEqual(get(token=game.spectator_token, as_player=as_player).status_code, 403)
