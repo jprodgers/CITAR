@@ -22,7 +22,9 @@ pub mod fixture;
 pub mod group;
 pub mod intended;
 pub mod ratchet;
+pub mod report;
 pub mod run;
+pub mod suggest;
 
 pub use error::{Error, Result};
 pub use group::Group;
