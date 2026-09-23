@@ -6,7 +6,7 @@ from unittest import mock
 
 from citar.engine import cities, conquest, research, triggers, victory
 from citar.engine.game import Game
-from citar.engine.state import GameState, Player
+from citar.engine.state import GameState, Player, seat_overrides
 from citar.engine.uniques import Unique, civ_matches
 
 ALL_ON = {"un_vote": True, "conquest": True, "free_picks": True}
@@ -41,9 +41,18 @@ class DefaultTests(unittest.TestCase):
         a, b = g.player(0), g.player(1)
         self.assertEqual((a.handicap, a.auto), ("human", {"un_vote": False, "conquest": False, "free_picks": True}))
         self.assertEqual((b.handicap, b.auto), ("human", {"un_vote": False, "conquest": False, "free_picks": True}))
-        for bad in ({"controller": "bot", "handicap": "deity"}, {"controller": "bot", "auto": {"trades": True}}):
+        for bad in ({"controller": "bot", "handicap": "deity"}, {"controller": "bot", "auto": {"trades": True}},
+                    {"controller": "bot", "auto": {"un_vote": "false"}}, {"controller": "bot", "auto": {"conquest": 0}}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 game(bad, {"controller": "bot"})
+
+    def test_auto_values_must_be_true_or_false(self):
+        """The string "false" is truthy: coercing it would hand the seat the very decision it declined."""
+        self.assertEqual(seat_overrides(None, {"un_vote": False}), {"auto": {"un_vote": False}})
+        with self.assertRaises(ValueError) as cm:
+            seat_overrides(None, {"un_vote": "false", "conquest": True})
+        self.assertIn("un_vote", str(cm.exception))
+        self.assertNotIn("conquest", str(cm.exception))
 
     def test_a_new_controller_rederives_what_was_not_set_explicitly(self):
         p = Player(id=0, name="A", color="#aa0000", controller="bot", overrides={"auto": {"un_vote": False}})
@@ -105,6 +114,18 @@ class AutoDecisionTests(unittest.TestCase):
                 p.free_techs = 0
                 triggers.trigger(g, Unique("Free Technology"), 0)
                 self.assertEqual(p.free_techs, left)
+
+    def test_free_great_people_are_chosen_only_when_picks_are_automatic(self):
+        from citar.engine import great_people
+        for auto in (True, False):
+            with self.subTest(auto=auto):
+                g = game({"controller": "bot", "auto": {"free_picks": auto}}, {"controller": "bot"})
+                p = g.player(0)
+                p.free_great_people = 0
+                with mock.patch.object(great_people, "ai_choose_free") as choose:
+                    triggers.trigger(g, Unique("Free Great Person"), 0)
+                self.assertEqual(p.free_great_people, 1)          # the pick is owed either way...
+                self.assertEqual(choose.call_count, int(auto))    # ...and made for the civ only when it is automatic
 
 
 class SeatTests(unittest.TestCase):

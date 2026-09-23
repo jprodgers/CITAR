@@ -732,9 +732,10 @@ class BasicBot:
         Not when the proposal on the table touches a category the language model owns - a deal is answered whole,
         so one LLM-owned item makes it the model's - nor, with no proposal on the table, when the model owns chat.
         """
-        if not n.get("proposal"):
+        touched = proposal_categories(n.get("proposal"))
+        if not touched:
             return not self._llm("chat")
-        return not any(self._llm(c) for c in proposal_categories(n["proposal"]))
+        return not any(self._llm(c) for c in touched)
 
     def play_turn(self, g: Game, pid: int, end_turn: bool = True):
         """Play one complete turn."""
@@ -2686,19 +2687,22 @@ class BasicBot:
         if value >= 0:
             if answer("accept", "Agreed.") is None:
                 answer("reject", "We cannot fulfil those terms.")
-        elif countered < P["counter_rounds"] and value > -P["counter_max_gap"] and g.player(other).gold >= -value \
+            return
+        # ask for more of the gold already on the table rather than adding a second gold line, and never for more
+        # than they hold in all: the rules check only our side of a counter, so an ask they cannot pay would fail
+        # only when they accepted it
+        asked = [dict(it) for it in receive]
+        lump = next((it for it in asked if it["type"] == "gold"), None)
+        on_table = lump["amount"] if lump is not None else 0
+        ask = min(int(-value) + P["counter_margin"], int(g.player(other).gold) - on_table)
+        if countered < P["counter_rounds"] and value > -P["counter_max_gap"] and ask >= -value \
                 and not self._llm("trades"):                 # asking for gold is a trade: the model's call then
-            ask = int(-value) + P["counter_margin"]
-            # ask for more of the gold already on the table rather than adding a second gold line
-            asked = [dict(it) for it in receive]
-            lump = next((it for it in asked if it["type"] == "gold"), None)
             if lump is not None:
                 lump["amount"] += ask
             else:
                 asked.append({"type": "gold", "amount": ask})
             if answer("counter", f"Add {ask} gold and we have a deal.", give=give, receive=asked) is None:
-                # a counter the rules refuse (they cannot pay that much, say) must still end our move, or the
-                # negotiation stays open waiting on us
+                # a counter the rules refuse must still end our move, or the negotiation stays open waiting on us
                 answer("reject", "That does not interest us.")
         else:
             answer("reject", "That does not interest us." if not countered else "That is our last word, then. No deal.")

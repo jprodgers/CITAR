@@ -55,7 +55,11 @@ def seat_overrides(handicap: Optional[str] = None, auto: Optional[dict] = None) 
         if not isinstance(auto, dict) or any(k not in AUTO_DECISIONS for k in auto):
             raise ValueError(f"auto must be an object whose keys are among {', '.join(AUTO_DECISIONS)}, e.g. "
                              f"{{\"un_vote\": false}}.")
-        out["auto"] = {k: bool(v) for k, v in auto.items()}
+        # true or false only: bool() would read the string "false" as True and hand the seat decisions it declined
+        bad = [k for k, v in auto.items() if not isinstance(v, bool)]
+        if bad:
+            raise ValueError(f"auto values must be true or false ({', '.join(bad)} is not).")
+        out["auto"] = dict(auto)
     return out
 
 

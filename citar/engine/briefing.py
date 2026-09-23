@@ -299,16 +299,20 @@ def alert_items(g: Game, pid: int) -> list[dict]:
     for n in g.s.negotiations:
         if n["status"] != "open" or pid not in (n["initiator"], n["responder"]):
             continue
-        other = g.player(n["initiator"] if n["responder"] == pid else n["responder"]).name
+        oid = n["initiator"] if n["responder"] == pid else n["responder"]
+        other = g.player(oid).name
+        # the counterparty's id lets the game screen open Diplomacy on this chat rather than the first civ
         if n.get("awaiting") == pid:
             add("negotiation", f"{other} awaits your reply in negotiation #{n['id']}.",
-                f"Negotiation #{n['id']} with {other} awaits your response: respond_negotiation, with a message.")
+                f"Negotiation #{n['id']} with {other} awaits your response: respond_negotiation, with a message.",
+                player=oid, negotiation=n["id"])
         else:
             # the end_turn tool refuses while this is open, so it is as much a to-do as one waiting on us
             add("negotiation", f"Waiting for {other} to answer negotiation #{n['id']}: you can end your turn once "
                                f"they reply, or withdraw it.",
                 f"Negotiation #{n['id']} is waiting for {other}'s answer. end_turn is refused until it is settled; "
-                f"to give up on it, respond_negotiation action=reject with a message.")
+                f"to give up on it, respond_negotiation action=reject with a message.",
+                player=oid, negotiation=n["id"])
     return out
 
 

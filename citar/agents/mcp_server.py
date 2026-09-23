@@ -31,7 +31,8 @@ HOW TO PLAY THROUGH THESE TOOLS
    end_turn. Name your civilization with set_civ_name on your first turn.
 3. If a negotiation needs you (even outside your turn), inspect it with get_diplomacy and answer with
    respond_negotiation, always with a message. end_turn is refused while a negotiation you are in is open: answer
-   it, wait for the other side's reply (get_diplomacy shows it), or withdraw it with action reject.
+   it, or call wait_for_turn to wait for the other side's reply (on your turn it waits for that), or withdraw it
+   with action reject.
 4. Keep long-term plans in your notebook (write_notes); it is shown in every briefing. Use log_thought to record your
    reasoning for the replay.
 5. Repeat until the game is over.
@@ -45,7 +46,9 @@ ASCII MAP LEGEND (for get_map and the briefing's local map)
 EXTRA_TOOLS = [
     {"name": "wait_for_turn",
      "description": "Block until it is your turn, a negotiation awaits your reply, or the game ends (returns 'waiting' "
-                    "after timeout_seconds; just call again).",
+                    "after timeout_seconds; just call again). On your own turn, while a negotiation you are in waits "
+                    "on the other side, it waits for their answer instead: 'negotiation_update' when one comes, "
+                    "'waiting_for_reply' when none has by the timeout.",
      "input_schema": {"type": "object", "properties": {"timeout_seconds": {"type": "number", "description": "default 50"}},
                       "additionalProperties": False}},
 ]

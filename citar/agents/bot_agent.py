@@ -42,7 +42,7 @@ class BotAgent:
         # give counterparts a chance to answer negotiations we opened; what is still open after this the driver
         # closes before it ends the turn
         deadline = time.time() + 90
-        while time.time() < deadline:
+        while time.time() < deadline and not session.stopped:
             with session.lock:
                 g = session.game
                 mine = [n for n in g.s.negotiations if n["status"] == "open" and pid in (n["initiator"], n["responder"])

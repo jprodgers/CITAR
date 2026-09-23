@@ -214,21 +214,50 @@ class GameSession:
         self._broadcast({"type": "update", "version": self.version, "turn": g.turn, "current_player": g.s.current,
                          "phase": g.s.phase})
 
+    def _await(self, done, timeout: float, halted=None, hold_paused: bool = False) -> float:
+        """Wait, with the lock held, until done() holds, the timeout passes, the session stops or halted() is true.
+
+        Returns the seconds of waiting that counted against the timeout. ``halted`` is how an agent that has been
+        cancelled (a seat change, quiet hours) stops waiting at once, rather than keeping the driver thread in a turn
+        that is no longer its own. With ``hold_paused``, time the game spends paused does not count: an agent's wait
+        is part of its turn, whose clock stops in a pause, and a person who pauses to think over an offer should not
+        lose the chat to the clock.
+        """
+        counted = 0.0
+        while not done() and not self._stop and not (halted is not None and halted()):
+            left = timeout - counted
+            if left <= 0:
+                break
+            t = time.time()
+            self.cond.wait(timeout=min(left, 1.0))
+            if not (hold_paused and self.paused):
+                counted += time.time() - t
+        return counted
+
+    def _await_reply(self, pid: int, nid: int, timeout: float, halted=None, hold_paused: bool = False) -> float:
+        """Wait, with the lock held, for the other side's answer in a negotiation (see _await, which it returns)."""
+        from ..engine.diplomacy import get_negotiation
+
+        def answered():
+            """Whether the negotiation is settled or back with pid."""
+            n = get_negotiation(self.game, nid)
+            return n["status"] != "open" or n["awaiting"] == pid
+        return self._await(answered, timeout, halted, hold_paused)
+
     def _wait_negotiation_reply(self, pid: int, nid: int, timeout: float, result: dict) -> dict:
         """Block until the other side answers a negotiation, or the wait runs out."""
+        self._await_reply(pid, nid, timeout)
+        return self._reply_result(pid, nid, result)
+
+    def _reply_result(self, pid: int, nid: int, result: dict) -> dict:
+        """A negotiation tool's result with where the negotiation now stands: the other side's answer if one came,
+        else a note that none has yet."""
         from ..engine.diplomacy import get_negotiation, negotiation_view
-        deadline = time.time() + timeout
-        while True:
-            n = get_negotiation(self.game, nid)
-            if n["status"] != "open" or n["awaiting"] == pid or self._stop:
-                break
-            left = deadline - time.time()
-            if left <= 0:
-                result = dict(result)
-                result["note"] = "No reply yet. Continue your turn; the reply will show up in get_diplomacy/get_briefing."
-                return result
-            self.cond.wait(timeout=min(left, 1.0))
         n = get_negotiation(self.game, nid)
+        if n["status"] == "open" and n["awaiting"] != pid:
+            result = dict(result)
+            result["note"] = "No reply yet. Continue your turn; the reply will show up in get_diplomacy/get_briefing."
+            return result
         view = negotiation_view(self.game, n, pid)
         last = view["history"][-1] if view["history"] else None
         result = dict(result)
@@ -635,8 +664,15 @@ class GameSession:
                 time.sleep(self.ai_delay)
 
     def wait_for_turn(self, pid: int, timeout: float) -> dict:
-        """Long-poll: returns when it's pid's turn, a negotiation awaits pid, or the game ends."""
+        """Long-poll: returns when it's pid's turn, a negotiation awaits pid, or the game ends.
+
+        On pid's own turn with negotiations it is in still waiting on the other side, it waits for their answers
+        instead ("negotiation_update" when one comes, "waiting_for_reply" when none has by the timeout): the end_turn
+        tool refuses until they are settled, and this is how an agent playing over HTTP or MCP waits for a reply
+        without polling.
+        """
         deadline = time.time() + timeout
+        chats = None            # on pid's turn: the open negotiations it is in, as they stood when the wait began
         with self.lock:
             while True:
                 g = self.game
@@ -649,12 +685,30 @@ class GameSession:
                     return {"status": "negotiation", "negotiation_ids": pending,
                             "your_turn": g.s.current == pid}
                 if g.s.current == pid:
-                    return {"status": "your_turn", "turn": g.turn}
+                    now = self._chat_marks(pid)
+                    if chats is None:
+                        chats = now
+                    changed = sorted(nid for nid, mark in chats.items() if now.get(nid) != mark)
+                    if changed:
+                        return {"status": "negotiation_update", "negotiation_ids": changed, "your_turn": True,
+                                "turn": g.turn}
+                    if not chats:
+                        return {"status": "your_turn", "turn": g.turn}
                 left = deadline - time.time()
                 if left <= 0:
+                    if chats and g.s.current == pid:
+                        return {"status": "waiting_for_reply", "negotiation_ids": sorted(chats), "your_turn": True,
+                                "turn": g.turn,
+                                "note": "No answer yet. Call wait_for_turn again to keep waiting, or withdraw with "
+                                        "respond_negotiation(action='reject', message=...) and end your turn."}
                     return {"status": "waiting", "turn": g.turn, "current_player": g.s.current,
                             "current_player_name": g.player(g.s.current).name}
                 self.cond.wait(timeout=min(left, 1.0))
+
+    def _chat_marks(self, pid: int) -> dict:
+        """The open negotiations pid is in, each as (awaiting, entries): what an answer changes."""
+        return {n["id"]: (n["awaiting"], len(n["history"])) for n in self.game.s.negotiations
+                if n["status"] == "open" and pid in (n["initiator"], n["responder"])}
 
     # ------------------------------------------------------------------
     # Push

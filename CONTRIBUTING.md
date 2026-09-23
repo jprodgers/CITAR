@@ -18,7 +18,7 @@ Thanks for looking. CITAR is a game and an instrument, and it needs help with bo
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
 pip install -e ".[dev]"
-python -m unittest discover -s tests     # 421 tests, about four minutes
+python -m unittest discover -s tests     # 436 tests, about four minutes
 citar serve --debug                      # http://127.0.0.1:8765
 ```
 

@@ -730,10 +730,16 @@ def _add_entry(g: "Game", n: dict, by: Optional[int], action: str, message: str 
 
 
 def _make_proposal(g: "Game", speaker: int, other: int, give, receive) -> Optional[dict]:
-    """Build a proposal from what each side would give, or None if there is nothing concrete."""
+    """Build a proposal from what each side would give, or None if there is nothing concrete.
+
+    Empty lists on both sides are nothing concrete too (models often send them with a plain message): a proposal in
+    which neither side gives anything could be "accepted" into a deal of nothing.
+    """
     if give is None and receive is None:
         return None
     prop = {str(speaker): _normalize_items(g, give), str(other): _normalize_items(g, receive)}
+    if not prop[str(speaker)] and not prop[str(other)]:
+        return None
     # mutual agreements go on both sides
     for t in MUTUAL:
         if _has(prop, t):
@@ -840,29 +846,29 @@ def respond_negotiation(g: "Game", pid: int, nid: int, action: str, message: Opt
     proposal = None
     if act == "counter":
         proposal = _make_proposal(g, pid, other, give or [], receive or [])
-        if not proposal[str(pid)] and not proposal[str(other)]:
+        if proposal is None:
             raise ActionError("A counter-offer needs at least one item; use reply to send only a message.")
         validate_items(g, pid, other, proposal[str(pid)], proposal)
+    cap = max_chat_messages(g)
+    if len(n["history"]) >= cap:
+        # the safety cap: a chat that has run this long without a deal is not converging. The message that would pass
+        # the cap closes it instead of joining it, so an open chat never holds more than the cap
+        close_negotiation(g, nid, "expired", f"The negotiation reached its limit of {cap} messages and closed.")
+        return {"status": "expired", "awaiting": None,
+                "note": f"Negotiation #{nid} already held {cap} messages, its limit, so it has closed and your {act} "
+                        f"was not delivered."}
+    if proposal is not None:
         n["proposal"] = proposal
         n["proposal_by"] = pid
-    entry = _add_entry(g, n, pid, act, text, proposal)
+    _add_entry(g, n, pid, act, text, proposal)
     n["awaiting"] = other
     add_message(g, pid, [other], text)
     out = f"{me} {'countered' if act == 'counter' else 'replied'}: \"{text[:500]}\""
     if act == "counter":
         out += f" New proposal: {me} gives {describe_items(g, proposal[str(pid)])}; " \
                f"{g.player(other).name} gives {describe_items(g, proposal[str(other)])}."
-    cap = max_chat_messages(g)
-    closed = {}
-    if len(n["history"]) > cap:
-        # the safety cap: a chat that has run this long without a deal is not converging
-        n["status"] = "expired"
-        n["awaiting"] = None
-        entry["note"] = f"The negotiation reached its limit of {cap} messages and closed."
-        out += f" ({entry['note']})"
-        closed = {"status": "expired"}
-    g.emit("negotiation", out, [pid, other], negotiation=nid, awaiting=n["awaiting"], **closed)
-    return {"status": n["status"], "awaiting": g.player(other).name if n["awaiting"] is not None else None}
+    g.emit("negotiation", out, [pid, other], negotiation=nid, awaiting=other)
+    return {"status": "open", "awaiting": g.player(other).name}
 
 
 def close_negotiation(g: "Game", nid: int, status: str, note: str, by: Optional[int] = None) -> dict:
@@ -949,7 +955,8 @@ def negotiation_view(g: "Game", n: dict, pid: int) -> dict:
     return {
         "id": n["id"], "with": other, "with_name": g.player(other).name, "status": n["status"],
         "you_initiated": n["initiator"] == pid, "your_move": n["awaiting"] == pid, "turn": n["turn"],
-        "messages": len(n["history"]), "max_messages": max_chat_messages(g),
+        # entries the game added to close the chat are not messages, so an open chat never shows more than the cap
+        "messages": sum(1 for h in n["history"] if h["action"] != "close"), "max_messages": max_chat_messages(g),
         "current_proposal": persp(n["proposal"]),
         "proposal_by_you": n["proposal_by"] == pid if n["proposal"] else None,
         "history": [entry(i, h) for i, h in enumerate(n["history"], 1)],

@@ -165,7 +165,7 @@ short version:
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
 pip install -e ".[dev]"
-python -m unittest discover -s tests     # 421 tests, about four minutes
+python -m unittest discover -s tests     # 436 tests, about four minutes
 citar serve --debug
 ```
 

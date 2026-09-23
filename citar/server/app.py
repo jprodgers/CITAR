@@ -657,7 +657,8 @@ def path_preview(gid: str, request: Request, unit_id: int, x: int, y: int,
 @app.get("/api/games/{gid}/wait")
 def wait_for_turn(gid: str, request: Request, token: Optional[str] = None, timeout: float = 50.0,
                   p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """Long-poll until it is this seat's turn, or a negotiation needs an answer.
+    """Long-poll until it is this seat's turn, or a negotiation needs an answer; on its own turn, until
+    the other side answers a negotiation it is in (see GameSession.wait_for_turn).
 
     Why an agent should use this rather than polling: it returns for a negotiation too, and an agent
     that only watched for its own turn would leave the other side of a deal waiting forever.

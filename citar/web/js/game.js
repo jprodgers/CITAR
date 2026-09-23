@@ -554,8 +554,10 @@ export class GameScreen {
       const u = this.view.units.find((x) => x.id === a.unit);
       if (u) { this.renderer.centerOn(u.x, u.y); this.selectUnit(u.id); return this.askReturnCivilian(u); }
     }
+    // a negotiation alert names the other side, so Diplomacy opens on that chat
+    if (a.type === "negotiation") return openDiplomacy(this, a.player ?? null);
     const open = { research: openTechTree, free_tech: openTechTree, policy: openPolicies, great_person: openGreatPeople,
-                   pantheon: openReligion, un_vote: openDiplomacy, negotiation: openDiplomacy }[a.type];
+                   pantheon: openReligion, un_vote: openDiplomacy }[a.type];
     if (open) return open(this);
     if (a.x != null) this.renderer.centerOn(a.x, a.y);
     if (a.city != null) this.selectCity(a.city);
@@ -922,9 +924,9 @@ export class GameScreen {
       for (const a of alerts) {
         body.appendChild(el("div", { class: "event alert-item clickable", onclick: () => {
           if (a.x == null) {
+            if (a.type === "negotiation") { openDiplomacy(this, a.player ?? null); return; }
             const open = { gold: openEmpire, happiness: openEmpire, research: openTechTree, free_tech: openTechTree, policy: openPolicies,
-                           great_person: openGreatPeople, pantheon: openReligion, spy: openGreatPeople, un_vote: openDiplomacy,
-                           negotiation: openDiplomacy }[a.type];
+                           great_person: openGreatPeople, pantheon: openReligion, spy: openGreatPeople, un_vote: openDiplomacy }[a.type];
             if (open) open(this);
             return;
           }

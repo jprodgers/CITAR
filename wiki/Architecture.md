@@ -33,7 +33,7 @@ Everything else follows from that:
   them.
 - The bot, the LLM adapter and the HTTP API are all *callers*, none of them privileged. A model
   cannot do anything a human could not, because there is only one set of actions.
-- Tests are fast and deterministic. 421 of them run in about four minutes with no fixtures.
+- Tests are fast and deterministic. 436 of them run in about four minutes with no fixtures.
 
 The ruleset is loaded once at import, which is the one exception, and it is read-only.
 

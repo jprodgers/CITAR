@@ -129,7 +129,9 @@ The loop:
 Worth knowing:
 
 - **Answer negotiations.** `wait` returns for a negotiation as well as for a turn. An agent that
-  ignores them stalls the game for everybody.
+  ignores them stalls the game for everybody. On your own turn, after you open one, `wait` waits
+  for the other side's answer (`negotiation_update`, or `waiting_for_reply` at the timeout):
+  `end_turn` is refused until the negotiation is settled or withdrawn.
 - **The turn ends without you** if you hit a limit — 10 steps with no progress, 60 steps, 150 tool
   calls, or 1800 seconds. All four are per-seat settings, and which one you hit is recorded.
 - **Errors are information.** A refusal explains the rule. Retrying an identical call unchanged is

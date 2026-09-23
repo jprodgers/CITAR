@@ -3,6 +3,7 @@ stream, its counter-offers and the advice it can give a language model."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import json
 import random
+import time
 import unittest
 from unittest import mock
 
@@ -70,6 +71,8 @@ class CategoryTests(unittest.TestCase):
         self.assertTrue(bot.owns_negotiation(embassy))
         self.assertTrue(bot.owns_negotiation({"proposal": None}))
         self.assertFalse(BasicBot(diplomacy={"chat": "llm"}).owns_negotiation({"proposal": None}))
+        # a proposal of nothing on either side is talk, which the model owns with chat
+        self.assertFalse(BasicBot(diplomacy={"chat": "llm"}).owns_negotiation({"proposal": {"0": [], "1": []}}))
 
 
 class TradeSwitchTests(unittest.TestCase):
@@ -131,6 +134,74 @@ class TradeSwitchTests(unittest.TestCase):
                 self.assertFalse(any(h["by"] == 0 and h["action"] == "accept" for h in n["history"]), n)
 
 
+class BotAgentTests(unittest.TestCase):
+    """BotAgent is how a bot answers in a live game, and a hybrid seat's model relies on it leaving the model's chats
+    alone, both when a negotiation interrupts and in the wait at the end of the bot's turn."""
+    def setUp(self):
+        from citar.server.session import SessionManager
+        self.manager = SessionManager()
+        self.s = self.manager.create({"map_size": "duel", "seed": 3, "barbarians": "off"},
+                                     [{"type": "human"}, {"type": "bot"}], track=False, start=False)
+        with self.s.lock:
+            self.s.game.meet(0, 1)
+            self.s.game.player(0).gold = 300
+
+    def tearDown(self):
+        import shutil
+        from citar.server.session import SAVE_DIR
+        for sid in list(self.manager.sessions):
+            self.manager.delete(sid)
+            shutil.rmtree(SAVE_DIR / sid, ignore_errors=True)
+
+    def _open(self, give, receive):
+        """The human opens a negotiation with the bot, straight through the engine (no interrupt thread)."""
+        with self.s.lock:
+            g = self.s.game
+            current, g.s.current = g.s.current, 0
+            nid = offer(g, give, receive)
+            g.s.current = current
+            return nid
+
+    def test_an_interrupt_skips_what_the_model_owns(self):
+        from citar.agents.bot_agent import BotAgent
+        agent = BotAgent(seed=1)
+        agent.bot.set_diplomacy({"trades": "llm"})
+        trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
+        agent.respond_negotiation(self.s, 1, trade)
+        self.assertEqual(len(D.get_negotiation(self.s.game, trade)["history"]), 1)
+        with self.s.lock:
+            tools.execute(self.s.game, 0, "respond_negotiation", {"negotiation_id": trade, "action": "reject",
+                                                                  "message": "Never mind."})
+        talk = self._open(None, None)                   # no proposal, and the bot still owns chat
+        agent.respond_negotiation(self.s, 1, talk)
+        self.assertGreater(len(D.get_negotiation(self.s.game, talk)["history"]), 1)
+
+    def test_the_end_of_turn_wait_skips_what_the_model_owns(self):
+        from citar.agents.bot_agent import BotAgent
+        trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
+        with self.s.lock:
+            self.s.game.s.current = 1
+        agent = BotAgent(seed=1)
+        agent.bot.set_diplomacy({"trades": "llm"})
+        t0 = time.time()
+        # only the turn's own wait loop is under test: the session's interrupt would answer (and, for a bot seat, reject
+        # what nobody answered) on its own thread
+        with mock.patch.object(self.s, "_dispatch_negotiation_interrupts"):
+            agent.play_turn(self.s, 1)
+        self.assertLess(time.time() - t0, 60)           # it did not sit out its 90-second wait on the model's chat
+        n = D.get_negotiation(self.s.game, trade)
+        self.assertEqual((n["status"], len(n["history"])), ("open", 1))
+
+    def test_a_frozen_bot_answers_everything(self):
+        """The archived bots predate the switch: BotAgent falls back to answering every negotiation."""
+        from citar.agents.bot_agent import BotAgent
+        agent = BotAgent(profile="snapshot-0922", seed=1)
+        self.assertFalse(hasattr(agent.bot, "owns_negotiation"))
+        trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
+        agent.respond_negotiation(self.s, 1, trade)
+        self.assertGreater(len(D.get_negotiation(self.s.game, trade)["history"]), 1)
+
+
 class WarSwitchTests(unittest.TestCase):
     def test_the_bot_never_declares_war_but_fights_the_war_it_is_given(self):
         def game():
@@ -185,6 +256,26 @@ class CounterTests(unittest.TestCase):
         gold = [it for it in n["proposal"]["0"] if it["type"] == "gold"]
         self.assertEqual(gold, [{"type": "gold", "amount": 30}])        # 10 + (shortfall 10 + margin 10)
         self.assertTrue(n["history"][-1]["message"])
+
+    def test_a_counter_never_asks_for_more_gold_than_they_hold(self):
+        """The rules check only the counterer's side of a counter, so an ask the other side cannot pay would fail only
+        when they accepted it. The bot asks for what closes the gap within their treasury, or rejects."""
+        for treasury, asked in ((200, 130), (125, 125), (100, None)):
+            with self.subTest(treasury=treasury):
+                g = two_civs()
+                g.player(0).gold = treasury
+                nid = offer(g, [{"type": "gold", "amount": 80}], [{"type": "share_map"}])
+                bot = BasicBot(seed=1)
+                with mock.patch.object(bot, "evaluate", return_value=-40):     # 40 short; the margin makes it 50
+                    bot.respond(g, 1, nid)
+                n = D.get_negotiation(g, nid)
+                if asked is None:
+                    self.assertEqual((n["status"], n["history"][-1]["action"]), ("rejected", "reject"))
+                    continue
+                self.assertEqual(n["history"][-1]["action"], "counter")
+                self.assertEqual(n["proposal"]["0"], [{"type": "gold", "amount": asked}])
+                tools.execute(g, 0, "respond_negotiation", {"negotiation_id": nid, "action": "accept", "message": "Done."})
+                self.assertEqual(n["status"], "accepted")
 
     def test_the_bot_stops_countering_after_counter_rounds(self):
         g = two_civs()
