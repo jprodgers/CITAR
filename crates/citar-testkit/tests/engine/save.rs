@@ -3,8 +3,9 @@
 //!   save written again is the same bytes (gate 1);
 //! - without a ruleset context a name is an error, not a panic (gate 2);
 //! - a save made under a ruleset with one number changed loads with `rules_changed`; one naming
-//!   a building the ruleset no longer has fails with `UnknownName` (gate 3);
-//! - no state type uses `skip_serializing_if`, `flatten` or `untagged` (gate 4);
+//!   a building the ruleset no longer has fails with `UnknownName` (gate 3); a save and its
+//!   history load under a reordered ruleset too, and come back to the same bytes;
+//! - no persisted type uses `skip_serializing_if`, `flatten` or `untagged` (gate 4);
 //! - the three checked-in states digest as the golden set `states` says (gate 5, which the
 //!   determinism workflow compares across the five targets);
 //! - the digest ignores map insertion order and the host's heads (gate 6);
@@ -244,31 +245,57 @@ fn a_save_naming_a_removed_building_fails_with_unknown_name() {
 
 // ---- Gate 4: banned attributes ------------------------------------------------------------------
 
+/// The sources that define types `State` holds: all of `src/state`, at any depth, and the files
+/// outside it whose types a state persists (rule enums a player keeps, the sets, the ids, the
+/// codec's forms, the stats).
+const PERSISTED_OUTSIDE_STATE: [&str; 6] = [
+    "rules/defs.rs",
+    "rules/mod.rs",
+    "base/sets.rs",
+    "base/ids.rs",
+    "base/codec.rs",
+    "base/stats.rs",
+];
+
+#[allow(clippy::disallowed_methods, reason = "the test reads the engine's sources")]
+fn rust_files_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("a source directory") {
+        let path = entry.expect("an entry").path();
+        if path.is_dir() {
+            rust_files_under(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
 #[test]
 #[allow(clippy::disallowed_methods, reason = "the test reads the engine's sources")]
 fn no_state_type_uses_an_attribute_that_makes_the_encoding_ambiguous() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../citar-engine/src/state");
-    let mut files = 0;
-    for entry in std::fs::read_dir(&dir).expect("the state sources") {
-        let path = entry.expect("an entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        files += 1;
-        let text = std::fs::read_to_string(&path).expect("readable");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../citar-engine/src");
+    let mut files = Vec::new();
+    rust_files_under(&src.join("state"), &mut files);
+    let in_state = files.len();
+    assert!(in_state >= 12, "found {in_state} state files");
+    files.extend(PERSISTED_OUTSIDE_STATE.iter().map(|f| src.join(f)));
+    for path in &files {
+        let text = std::fs::read_to_string(path).expect("readable");
         for args in serde_attributes(&text) {
             for banned in ["skip_serializing_if", "flatten", "untagged"] {
                 assert!(
                     !args.contains(banned),
-                    "{} uses serde({banned}), which state types may not: serde({args})",
+                    "{} uses serde({banned}), which persisted types may not: serde({args})",
                     path.display()
                 );
             }
         }
     }
-    assert!(files >= 12, "found {files} state files");
     let found = serde_attributes("#[serde(\n    untagged,\n)]\nx.flatten()");
     assert_eq!(found, ["\n    untagged,\n"], "an attribute over several lines is read whole");
+    // The walk goes into subdirectories, so a future `state/x/` is read too.
+    let mut all = Vec::new();
+    rust_files_under(&src, &mut all);
+    assert!(all.iter().any(|p| p.ends_with("state/mod.rs")), "the walk reaches src/state");
 }
 
 /// The arguments of every `serde(...)` in `text`, to the matching parenthesis.
