@@ -1,6 +1,7 @@
 about = """
 Only the player whose turn it is can end it, and nobody can once the game is over: a game ends
-when its turn limit has passed, with no winner when the Time victory is off.
+when its turn limit has passed, with no winner when the Time victory is off. Nor can a turn be
+forced then.
 """
 from = "tests/test_engine.py::TurnTests::test_not_your_turn"
 
@@ -61,3 +62,13 @@ error = "The game is over."
 op = "end_turn"
 args = { player = 0 }
 error = "The game is over."
+
+[[step]]
+note = "A turn cannot be forced in a game that is over either, and the refusal changes nothing."
+op = "force_turn"
+args = { player = 0 }
+error = "Test operation 1 (force_turn): The game is over."
+
+[[step]]
+check = { what = "game" }
+subset = { turn = 2, current = 1, phase = "over" }

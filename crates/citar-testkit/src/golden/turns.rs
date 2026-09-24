@@ -50,15 +50,18 @@ fn answers() -> (Value, Vec<String>) {
     g.set_chain(Some(DigestChain::new(b"golden:turns")));
     let mut rows = Vec::new();
     let mut problems = Vec::new();
-    let mut turn = g.turn();
+    let mut last = g.last_round();
     while g.phase() == Phase::Playing && rows.len() < 100 {
         if let Err(e) = g.end_turn(g.current()) {
             problems.push(format!("turn {}: {}", g.turn(), e.message));
             break;
         }
-        if g.turn() != turn || g.phase() != Phase::Playing {
-            turn = g.turn();
-            rows.push(json!([turn - 1, g.last_round_digest().map(|d| d.to_hex())]));
+        // A row for each round the chain took, under the round's own turn number.
+        if g.last_round() != last {
+            last = g.last_round();
+            if let Some((round, d)) = last {
+                rows.push(json!([round, d.to_hex()]));
+            }
         }
     }
     let head = g.chain().map(|c| c.head().to_hex());

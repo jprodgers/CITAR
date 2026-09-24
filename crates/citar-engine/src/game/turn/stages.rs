@@ -11,9 +11,11 @@
 //!
 //! The control flow of Python's functions is in the rows too: a row runs for the kinds of player
 //! it names, when its condition holds (`if g.player_cities(pid)`, `if g.religion_enabled`), and
-//! the `Stop` rows end a table early, for a dead civilization, for the barbarians, and for a game
-//! that is over. The `Settle` rows are the ◆ settle points, which replace Python's
-//! `g.invalidate()` and `visibility.refresh` (`turns.py:36-61, 87, 108, 115`).
+//! the `Stop` rows end a table early, for a dead civilization and for the barbarians. A round
+//! that ends the game at its eliminations skips to its close (`SkipIfOver`, then the rows
+//! `EvenIfOver`), so that the round is still settled and its digest taken. The `Settle` rows are
+//! the ◆ settle points, which replace Python's `g.invalidate()` and `visibility.refresh`
+//! (`turns.py:36-61, 87, 108, 115`).
 //!
 //! What differs from Python, on purpose:
 //! - happiness is committed at S1 and E1 and read as committed (DESIGN.md 6.6), and the gold
@@ -67,13 +69,15 @@ pub enum When {
     Religion,
     /// Both.
     HasCitiesAndReligion,
+    /// The round's close: runs even in a round a game over cut short (`Step::SkipIfOver`).
+    EvenIfOver,
 }
 
 impl When {
     fn holds(self, g: &Game, p: PlayerId) -> bool {
         let cities = || g.player_cities(p).next().is_some();
         match self {
-            Self::Always => true,
+            Self::Always | Self::EvenIfOver => true,
             Self::HasCities => cities(),
             Self::Religion => g.religion_enabled(),
             Self::HasCitiesAndReligion => cities() && g.religion_enabled(),
@@ -94,8 +98,9 @@ pub enum Step {
     StopIfDead,
     /// The barbarians' turn ends here.
     StopIfBarbarian,
-    /// Nothing more happens in a game that is over.
-    StopIfOver,
+    /// Nothing more of the round happens in a game that is over, but its close: the rows
+    /// [`When::EvenIfOver`].
+    SkipIfOver,
     /// A system not ported yet: nothing happens.
     Pending,
 }
@@ -139,7 +144,7 @@ impl Stage {
     }
 }
 
-use When::{Always, HasCities, HasCitiesAndReligion, Religion};
+use When::{Always, EvenIfOver, HasCities, HasCitiesAndReligion, Religion};
 
 /// A player's turn begins (`turns.start_player_turn`, `turns.py:20-67`).
 pub static PLAYER_START: [Stage; 23] = [
@@ -260,7 +265,7 @@ pub static PLAYER_END: [Stage; 25] = [
 /// Every player has moved: the round ends (`turns.end_round`, `turns.py:190-202`).
 pub static ROUND_END: [Stage; 11] = [
     Stage::later("R0", "eliminations", Who::ALL, Always, Porting::Pending("1c-08")),
-    Stage::run("R0", "a game that is over ends here", Who::ALL, Always, Step::StopIfOver),
+    Stage::run("R0", "a game that is over skips to the close", Who::ALL, Always, Step::SkipIfOver),
     Stage::later("R1", "diplomacy's round", Who::ALL, Always, Porting::Pending("1c-05")),
     Stage::later("R2", "the round's statistics", Who::ALL, Always, Porting::Pending("1c-08")),
     Stage::later("R3", "the replay frame", Who::ALL, Always, Porting::Pending("1c-08")),
@@ -268,12 +273,12 @@ pub static ROUND_END: [Stage; 11] = [
     Stage::later("R5", "the world leader vote", Who::ALL, Always, Porting::Pending("1c-08")),
     Stage::later("R5", "victory", Who::ALL, Always, Porting::Pending("1c-08")),
     Stage::run("R5", "the turn limit", Who::ALL, Always, Step::Round(turn_limit)),
-    Stage::settle("R6", Who::ALL),
+    Stage::run("R6", "settle", Who::ALL, EvenIfOver, Step::Settle),
     Stage::run(
         "R6",
         "the round's digest, if the game chains",
         Who::ALL,
-        Always,
+        EvenIfOver,
         Step::Round(chain),
     ),
 ];
@@ -302,8 +307,10 @@ pub(super) fn run_player(g: &mut Game, table: &[Stage], p: PlayerId) {
         match s.step {
             Step::StopIfDead if !g.player(p).is_some_and(Player::alive) => return,
             Step::StopIfBarbarian if who == Who::BARBARIAN => return,
-            Step::StopIfOver if g.phase() != Phase::Playing => return,
-            Step::StopIfDead | Step::StopIfBarbarian | Step::StopIfOver | Step::Pending => {}
+            Step::StopIfDead | Step::StopIfBarbarian | Step::Pending => {}
+            Step::SkipIfOver => {
+                debug_assert!(false, "a round's skip in a player's table: {}", s.name);
+            }
             _ if !s.when.holds(g, p) => {}
             Step::Player(f) => f(g, p),
             Step::Settle => g.settle(),
@@ -314,12 +321,16 @@ pub(super) fn run_player(g: &mut Game, table: &[Stage], p: PlayerId) {
     }
 }
 
-/// Runs the round's table.
+/// Runs the round's table: after a [`Step::SkipIfOver`] in a game that is over, only its close.
 pub(super) fn run_round(g: &mut Game, table: &[Stage]) {
+    let mut over = false;
     for s in table {
+        if over && s.when != When::EvenIfOver {
+            continue;
+        }
         match s.step {
-            Step::StopIfOver if g.phase() != Phase::Playing => return,
-            Step::StopIfDead | Step::StopIfBarbarian | Step::StopIfOver | Step::Pending => {}
+            Step::SkipIfOver => over = g.phase() != Phase::Playing,
+            Step::StopIfDead | Step::StopIfBarbarian | Step::Pending => {}
             Step::Round(f) => f(g),
             Step::Settle => g.settle(),
             Step::Player(_) => {
@@ -431,8 +442,21 @@ mod tests {
 
     #[test]
     fn only_the_round_table_takes_round_steps() {
-        let round = |s: &Stage| matches!(s.step, Step::Round(_));
+        let round = |s: &Stage| {
+            matches!(s.step, Step::Round(_) | Step::SkipIfOver) || s.when == When::EvenIfOver
+        };
         assert!(PLAYER_START.iter().chain(&PLAYER_END).all(|s| !round(s)));
         assert!(ROUND_END.iter().all(|s| !matches!(s.step, Step::Player(_))));
+    }
+
+    #[test]
+    fn a_round_that_ends_the_game_keeps_its_close() {
+        // The close is the last rows, R6: a settle, then the digest.
+        let close: Vec<&str> =
+            ROUND_END.iter().filter(|s| s.when == When::EvenIfOver).map(|s| s.id).collect();
+        assert_eq!(close, ["R6", "R6"]);
+        let first = ROUND_END.iter().position(|s| s.when == When::EvenIfOver);
+        assert!(first.is_some_and(|i| ROUND_END[i..].iter().all(|s| s.when == When::EvenIfOver)));
+        assert!(matches!(ROUND_END[ROUND_END.len() - 2].step, Step::Settle));
     }
 }

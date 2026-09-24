@@ -63,4 +63,8 @@ reason = "Ending another player's turn was refused with 'It is not your turn.'; 
 
 [[differences]]
 id = "end-turn-stops-without-majors"
-reason = "With no major civilization alive, ending a turn played round after round and never returned; Rust plays at most one more round and returns"
+reason = "With no major civilization alive, ending a turn played round after round and never returned; Rust ends the round and returns before anyone plays in the next one"
+
+[[differences]]
+id = "force-turn-only-for-the-living"
+reason = "Forcing a turn (EngineGame.force_turn) made an eliminated player's turn current, and moved the turn of a game that was over; Rust refuses both"

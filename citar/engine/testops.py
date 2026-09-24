@@ -140,9 +140,17 @@ def _end_round(g: Game, o: dict):
 
 @op("force_turn", "player: it is that player's turn now, started")
 def _force_turn(g: Game, o: dict):
-    """Make it a player's turn now and start it (EngineGame.force_turn)."""
+    """Make it a player's turn now and start it (EngineGame.force_turn).
+
+    Refused, as the Rust engine refuses it, for a player who has been eliminated and in a game that is over, which
+    EngineGame.force_turn allowed (tests/rules/intended.toml: force-turn-only-for-the-living).
+    """
     from .scenario import _pid
     pid = _pid(g, o.get("player"), majors_only=False)
+    if not g.player(pid).alive:
+        raise ActionError(f"{g.player(pid).name} has been eliminated and plays no turns.")
+    if g.s.phase != "playing":
+        raise ActionError("The game is over.")
     if g.s.current != pid:
         g.s.current = pid
         g.s.turn_started = False

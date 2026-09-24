@@ -327,6 +327,12 @@ fn the_game_ends_at_its_turn_limit() {
     assert_eq!(over, ["turn_end", "game_over"]);
     let e = g.end_turn(g.current()).expect_err("over");
     assert_eq!((e.code, e.message.as_str()), (ErrCode::GameOver, "The game is over."));
+    // Nor is a turn forced, which Python allowed (refcheck: force-turn-only-for-the-living).
+    let before = (g.digest().ok(), g.rev(), g.current(), g.state().clock().turn_started);
+    let e = g.force_turn(PlayerId(0)).expect_err("over");
+    assert_eq!((e.code, e.message.as_str()), (ErrCode::GameOver, "The game is over."));
+    assert_eq!((g.digest().ok(), g.rev(), g.current(), g.state().clock().turn_started), before);
+    clean(&mut g);
 }
 
 #[test]
@@ -420,6 +426,7 @@ fn a_chained_game_folds_in_every_rounds_digest_and_resumes_across_a_save() {
     let head = whole.chain().copied().expect("a chain");
     assert_eq!(head.rounds(), 6);
     assert!(whole.last_round_digest().is_some());
+    assert_eq!(whole.last_round().map(|(round, _)| round), Some(6), "under its own turn");
 
     let mut first = game(&json!({"players": [{}, {}]}));
     first.set_chain(Some(DigestChain::new(b"test")));

@@ -357,10 +357,11 @@ fn end_round(g: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Ok(clock(g))
 }
 
-/// Makes it a player's turn now and starts it (`EngineGame.force_turn`).
+/// Makes it a player's turn now and starts it (`EngineGame.force_turn`): refused, as the host's
+/// is, for a player who has been eliminated and in a game that is over.
 fn force_turn(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let p = pid(g, o.get("player"), false)?;
-    g.force_turn_now(p);
+    g.force_turn_now(p)?;
     Ok(clock(g))
 }
 
