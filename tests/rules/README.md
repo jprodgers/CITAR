@@ -248,7 +248,7 @@ same from both engines, and every set in it is sorted.
 | `player` | `player` | `id`, `kind` (`major`, `city_state`, `barbarian`), `name`, `leader`, `nation`, `alive`, `controller`, `handicap`, `auto` (`un_vote`, `conquest`, `free_picks`), `overrides` (the `handicap` and `auto` keys the seat set explicitly), `difficulty` (the seat's, or a major's the game's), `gold`, `culture`, `faith`, `golden_age_turns`, `free_policies`, `free_techs`, `future_techs`, `techs` (names), `research` (`queue`, `goal`), `policies`, `met` (ids), `capital`, `cities`, `units` (ids), `explored` (how many tiles), `natural_wonders` (the names it has discovered), `notes`, `city_state` (null, or `type`, `ally` and `influence` by major id) |
 | `tile` | `x`, `y` (or `at`) | `x`, `y`, `terrain`, `features`, `wonder`, `resource`, `resource_amount`, `improvement`, `pillaged`, `route` (`Road`, `Railroad` or null), `route_pillaged`, `river` (the edge mask), `owner`, `city`, `units` (ids), `visible` (the ids of the players who see it now) |
 | `relation` | `a`, `b` | `a`, `b`, `met`, `war`, `war_declared_by`, `since`, `treaty_until`, `friendship_until`, `pact_until`, `ra_until`, `embassy` (`[a's with b, b's with a]`), `open_borders_until` (`[a lets b in, b lets a in]`), `opinion` (`[a's of b, b's of a]`), `friends`, `pact` |
-| `unit` | `unit` | `id`, `owner`, `type`, `x`, `y`, `hp`, `xp`, `promotions` |
+| `unit` | `unit` | `id`, `owner`, `type`, `x`, `y`, `hp`, `xp`, `promotions`, `moves` and `max_moves` (move-scale units), `activity` (`fortify`, `fortify_heal`, `sleep`, `sleep_heal`, `heal`, `build`, `goto`, `explore`, `automate`, `air_sweep`, or null), `goto` (`{ x, y }` or null), `fortify` (turns fortified), `embarked`, `carried_by` (an id or null), `set_up` |
 | `units` | optionally `player`, `x`, `y` | the units, by id, as `unit` gives them |
 | `city` | `city` | `id`, `name`, `owner`, `x`, `y`, `pop`, `buildings` |
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
@@ -278,8 +278,10 @@ What a script does that no player or editor may. `{ what = "ops" }` lists them.
 | `end_turn` | optionally `player` (the current one by default) | ends that player's turn, as the host's `end_turn` does: city-states and the barbarians play inside the call, a round ends after the last player, and play stops at the next major civilization, whose turn begins. Gives `turn` and `current` |
 | `end_round` | | ends every turn left in the round, and the round. Gives `turn` and `current` |
 | `force_turn` | `player` | makes it that player's turn now and begins it (nothing if it already is). Gives `turn` and `current` |
+| `set_unit` | `unit`; optionally `hp` (1 to 100), `moves` (move-scale units), `xp`, `x` and `y` (moved there without movement rules, with what it carries), `promotions` (names: the list it then has), `carrier` (an id, or null to leave it) | sets a unit's fields, as a test poked them |
+| `ready_unit` | `unit` | gives a unit its full movement, and no orders, attacks or action this turn. Gives `moves` |
 
-The rest land with their systems: `complete_construction` (1b-07), `set_unit` and `ready_unit` (1c-02), `capture_civilian` and
+The rest land with their systems: `complete_construction` (1b-07), `capture_civilian` and
 `attack_as` (1c-03), `automate` and `progress_builds` (1c-04), `add_spy`, `close_negotiation` and
 `open_negotiation_as` (1c-05), `barbarian_act` and `sack_city` (1c-06).
 

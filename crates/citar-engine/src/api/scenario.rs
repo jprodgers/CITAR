@@ -312,7 +312,7 @@ fn number(v: &Value, key: &str) -> Result<f64, ActionError> {
 }
 
 /// A whole-number parameter (Python's `int()`) that must fit `T`.
-fn whole<T: TryFrom<i64>>(v: &Value, key: &str) -> Result<T, ActionError> {
+pub(crate) fn whole<T: TryFrom<i64>>(v: &Value, key: &str) -> Result<T, ActionError> {
     // refcheck: scenario-numbers-finite-and-in-range
     // refcheck: scenario-errors-are-sentences
     py::int_of(v)
@@ -321,7 +321,7 @@ fn whole<T: TryFrom<i64>>(v: &Value, key: &str) -> Result<T, ActionError> {
 }
 
 /// The value of `key`, if present and not `null`.
-fn given<'a>(o: &'a Params, key: &str) -> Option<&'a Value> {
+pub(crate) fn given<'a>(o: &'a Params, key: &str) -> Option<&'a Value> {
     o.get(key).filter(|v| !v.is_null())
 }
 
@@ -706,8 +706,8 @@ fn adopt_policy(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
 }
 
 /// Adds units, optionally with promotions, experience and damage (`scenario.py:313-330`): 1 to
-/// 50 of them, all on the tile. What a unit gets when it is made (its base promotions, its
-/// moves) is `Game::create_unit`'s, which package 1c-02 completes.
+/// 50 of them, all on the tile, stacked as an editor may stack them. What a unit gets when it is
+/// made (its base promotions, its moves on its owner's turn) is `Game::create_unit`'s.
 fn add_unit(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let p = pid(g, o.get("player"), false)?;
     let base: BaseUnitId = resolve(g, o.get("unit"))?;
