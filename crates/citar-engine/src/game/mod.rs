@@ -27,15 +27,21 @@
 //! - [`query`]: the reads refcheck and the views share;
 //! - [`error`]: what a refused call says.
 //!
+//! The first rules of the systems, from package 1b-02, as far as the scenario operations need
+//! them: [`research`] (granting, removing and setting research), [`diplomacy`] (war, peace,
+//! pacts and opinions) and [`city_states`] (influence and allies). Their packages port the rest.
+//!
 //! **Porting markers.** A step whose system a later package ports is written as
 //! `pending(Porting::Pending("<package>"))`, or `pending_or` where it must answer
 //! something meanwhile. `cargo xtask check` counts these by their literal argument and fails
 //! once that package is done (DESIGN.md 3.4, rule 3).
 
 pub mod action;
+pub mod city_states;
 pub mod core;
 pub mod debug;
 pub mod derive;
+pub mod diplomacy;
 pub mod error;
 pub mod eval;
 pub mod events;
@@ -43,6 +49,7 @@ pub mod invariants;
 pub mod mutate;
 pub mod pending;
 pub mod query;
+pub mod research;
 pub mod turn;
 pub mod vis;
 
