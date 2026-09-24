@@ -26,6 +26,7 @@ use crate::base::ids::{CityId, PlayerId, TileIdx};
 use crate::rules::Ruleset;
 use crate::state::State;
 use crate::state::change::Change;
+use crate::state::map::Tile;
 use crate::unique::Csr;
 
 /// What a write means beyond the revisions it moves: which cities must look at their citizens
@@ -105,53 +106,77 @@ impl Derived {
     /// What a change means for the caches beyond its revisions: the cities that must recheck
     /// their citizens (DESIGN.md 6.7) and the vision sources to update (DESIGN.md 6.9). It reads
     /// `st`, the state after the write, and never writes.
+    ///
+    /// A city may work a tile of its owner within its work range that no city stands on, that
+    /// the city it belongs to does not work, and that no enemy military unit blocks
+    /// (`cities.workable_tiles`, `cities.py:170-193`). So a change to a tile concerns the cities
+    /// of the tile's owner, before and after, in range of it: its yield, its owner, a city on it,
+    /// or an enemy unit on it. A seat concerns all its player's cities, and war or peace all the
+    /// cities of both sides.
     #[must_use]
     pub fn on(&self, st: &State, rules: &Ruleset, ch: &Change) -> Reactions {
         let mut out = Reactions::default();
-        let tile_city = |t: TileIdx| st.tiles().get(t).and_then(|x| x.city());
+        let range = u32::try_from(rules.constants().formulas.city_work_range).unwrap_or(0);
+        let owner = |t: TileIdx| st.tiles().get(t).and_then(Tile::owner);
         match *ch {
-            Change::TileInput(t) => out.recheck.extend(tile_city(t)),
+            Change::TileInput(t) => self.flag_near(st, range, t, &[owner(t)], &mut out),
             Change::TileHeight(t) => {
-                out.recheck.extend(tile_city(t));
+                self.flag_near(st, range, t, &[owner(t)], &mut out);
                 out.sight.push(SightSource::Area(t));
             }
             Change::TileOwner { t, old, new } => {
                 out.recheck.extend(old.city);
                 out.recheck.extend(new.city);
+                self.flag_near(st, range, t, &[old.owner, new.owner], &mut out);
                 out.sight.push(SightSource::Tile(t));
             }
-            Change::UnitPlaced { u, owner, from, to } => {
+            Change::UnitPlaced { u, owner: by, from, to } => {
                 out.sight.push(SightSource::Unit(u));
-                // An enemy military unit blocks the tile for its city (cities.py:170-193).
                 let military = st
                     .units()
                     .get(u)
                     .is_some_and(|x| rules.base_units().get(x.base).is_some_and(|b| b.military));
                 if military {
                     for t in [from, Some(to)].into_iter().flatten() {
-                        self.flag_blockade(st, owner, t, &mut out);
+                        self.flag_blockade(st, range, by, t, &mut out);
                     }
                 }
             }
             Change::UnitOwner { u, old, new } => {
                 out.sight.push(SightSource::Unit(u));
                 if let Some(t) = st.units().get(u).map(crate::state::units::Unit::tile) {
-                    for p in [old, new] {
-                        self.flag_blockade(st, p, t, &mut out);
+                    for by in [old, new] {
+                        self.flag_blockade(st, range, by, t, &mut out);
                     }
                 }
             }
-            Change::UnitRemoved { u, owner, at } => {
+            Change::UnitRemoved { u, owner: by, at } => {
                 out.sight.push(SightSource::Unit(u));
-                self.flag_blockade(st, owner, at, &mut out);
+                self.flag_blockade(st, range, by, at, &mut out);
             }
             Change::CityAdded(c) => {
                 out.recheck.push(c);
+                if let Some(x) = st.cities().get(c) {
+                    self.flag_near(st, range, x.tile(), &[Some(x.owner())], &mut out);
+                }
                 out.sight.push(SightSource::City(c));
             }
-            Change::CityRemoved { c, .. } => out.sight.push(SightSource::City(c)),
-            Change::CityTiles(c) | Change::CityOwner { c, .. } => {
+            Change::CityRemoved { c, owner: was, at } => {
+                self.flag_near(st, range, at, &[Some(was), owner(at)], &mut out);
+                out.sight.push(SightSource::City(c));
+            }
+            Change::CityOwner { c, old, new } => {
                 out.recheck.push(c);
+                if let Some(x) = st.cities().get(c) {
+                    self.flag_near(st, range, x.tile(), &[Some(old), Some(new)], &mut out);
+                }
+                out.sight.push(SightSource::City(c));
+            }
+            Change::CityTiles(c) => {
+                out.recheck.push(c);
+                if let Some(x) = st.cities().get(c) {
+                    self.flag_near(st, range, x.tile(), &[Some(x.owner())], &mut out);
+                }
                 out.sight.push(SightSource::City(c));
             }
             Change::Diplo { a, b } => {
@@ -169,15 +194,34 @@ impl Derived {
         out
     }
 
-    /// Flags the city whose territory `t` is, if a military unit of `unit_owner` there is its
-    /// enemy's (the blockade, `cities.py:170-193`).
-    fn flag_blockade(&self, st: &State, unit_owner: PlayerId, t: TileIdx, out: &mut Reactions) {
-        let Some(c) = st.tiles().get(t).and_then(|x| x.city()) else { return };
-        let Some(owner) = st.cities().get(c).map(crate::state::cities::City::owner) else {
+    /// Flags every city of one of `owners` whose work range reaches tile `t`.
+    fn flag_near(
+        &self,
+        st: &State,
+        range: u32,
+        t: TileIdx,
+        owners: &[Option<PlayerId>],
+        out: &mut Reactions,
+    ) {
+        if owners.iter().all(Option::is_none) || !self.grid.contains(t) {
             return;
-        };
-        if owner != unit_owner && st.diplo().at_war(owner, unit_owner) {
-            out.recheck.push(c);
+        }
+        for n in self.grid.within(t, range) {
+            if let Some(c) = st.city_at(n)
+                && st.cities().get(c).is_some_and(|x| owners.contains(&Some(x.owner())))
+                && !out.recheck.contains(&c)
+            {
+                out.recheck.push(c);
+            }
+        }
+    }
+
+    /// Flags the cities that may work tile `t` if a military unit of `by` there blocks it: the
+    /// tile's owner's, when at war with `by` (the blockade, `cities.py:185-190`).
+    fn flag_blockade(&self, st: &State, range: u32, by: PlayerId, t: TileIdx, out: &mut Reactions) {
+        let Some(owner) = st.tiles().get(t).and_then(Tile::owner) else { return };
+        if owner != by && st.diplo().at_war(owner, by) {
+            self.flag_near(st, range, t, &[Some(owner)], out);
         }
     }
 
@@ -214,5 +258,32 @@ mod tests {
         assert_eq!(g.dv.names.stamp().changed(), verified, "no name moved");
         assert!(g.dv.names.stamp().verified() > verified);
         assert_eq!(first, 5, "two civilizations, their leaders and a city-state");
+    }
+
+    #[test]
+    fn a_tile_change_flags_the_cities_of_its_owner_in_range() {
+        use crate::state::TileClaim;
+        let mut g = testing::duel();
+        let (rome, greece) = (PlayerId(0), PlayerId(1));
+        // On the 10-wide map, tile 22 is (2, 2), 25 is (5, 2) and 28 is (8, 2).
+        let roma = testing::city(&mut g, rome, TileIdx(22), "Roma");
+        let antium = testing::city(&mut g, rome, TileIdx(25), "Antium");
+        let athens = testing::city(&mut g, greece, TileIdx(28), "Athens");
+        g.settle();
+        let t = TileIdx(24);
+        g.set_tile_owner(t, TileClaim::city(rome, roma)).expect("a tile");
+        let r = g.dv.on(&g.st, g.rules, &Change::TileInput(t));
+        let mut flagged = r.recheck.to_vec();
+        flagged.sort();
+        assert_eq!(flagged, [roma, antium], "Rome's cities in range, not Athens");
+        // An enemy's military unit there blocks it for Rome's cities; a friend's does not.
+        let warrior = testing::unit(&mut g, greece, "Warrior", t);
+        let placed = Change::UnitPlaced { u: warrior, owner: greece, from: None, to: t };
+        assert!(g.dv.on(&g.st, g.rules, &placed).recheck.is_empty());
+        g.update_relation(rome, greece, |x| x.war = true).expect("a pair");
+        let mut flagged = g.dv.on(&g.st, g.rules, &placed).recheck.to_vec();
+        flagged.sort();
+        assert_eq!(flagged, [roma, antium]);
+        assert!(!flagged.contains(&athens));
     }
 }
