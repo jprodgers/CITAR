@@ -226,6 +226,11 @@ impl Game {
         data: EventData,
         mentions: &[Mention<'_>],
     ) -> Option<EventId> {
+        // Python's `visible_tiles` brought sight up to date before it widened an audience
+        // (`game.py:872-875`).
+        if tile.is_some() && audience.is_some() && !kind.is_private() && self.pending.any_sight() {
+            self.sync_sight();
+        }
         let audience = self.widen(audience, tile, kind.is_private());
         self.record(EventType::Engine(kind), text, audience, tile, data, mentions)
     }

@@ -68,6 +68,12 @@ impl Game {
     pub(crate) fn changed(&mut self, ch: Change) {
         self.dv.revs.on_change(&self.st, &ch);
         self.dv.civ.track(&ch);
+        // Line of sight follows the terrain at once, so that an attack between a terrain change
+        // and the next settle sees what stands there now (DESIGN.md 6.5); the units near it are
+        // looked at again at the sync.
+        if let Change::TileHeight(t) = ch {
+            self.dv.height_changed(self.rules, &self.st, t);
+        }
         let react = self.dv.on(&self.st, self.rules, &ch);
         for c in react.recheck {
             self.pending.flag_city(c);
@@ -396,20 +402,24 @@ impl Game {
         self.st.cities_mut().get_mut(c)
     }
 
-    /// A player's fields, after moving the revisions `t` names. A seat, and whether the player
-    /// is alive, change through setters instead.
+    /// A player's fields, after moving the revisions `t` names; `SPIES` marks its spies' sight
+    /// dirty. A seat, and whether the player is alive, change through setters instead.
     pub(crate) fn player_mut(&mut self, p: PlayerId, t: PlayerTouch) -> Option<&mut Player> {
         self.st.player(p)?;
         self.dv.revs.touch_player(p, t);
+        if t.contains(PlayerTouch::SPIES) {
+            self.pending.flag_sight(SightSource::Spies(p));
+        }
         self.st.players_mut().get_mut(p)
     }
 
-    /// A unit's fields, after moving the revisions `t` names; `SIGHT` marks it a dirty vision
-    /// source. Its owner, tile and carrier change through setters instead.
+    /// A unit's fields, after moving the revisions `t` names; `SIGHT`, `CORE` and `BASE` mark it
+    /// a dirty vision source (its promotions, health and status are what its sight uniques and
+    /// their conditionals read). Its owner, tile and carrier change through setters instead.
     pub(crate) fn unit_mut(&mut self, u: UnitId, t: UnitTouch) -> Option<&mut Unit> {
         let owner = self.st.units().get(u)?.owner();
         self.dv.revs.touch_unit(u, owner, t);
-        if t.contains(UnitTouch::SIGHT) {
+        if t.intersects(UnitTouch::SIGHT | UnitTouch::CORE | UnitTouch::BASE) {
             self.pending.flag_sight(SightSource::Unit(u));
         }
         self.st.units_mut().get_mut(u)
@@ -438,7 +448,11 @@ impl Game {
     pub(crate) fn edit_config(&mut self, f: impl FnOnce(&mut GameConfig)) {
         f(self.st.config_mut());
         let now = self.dv.revs.now();
+        // What each civilization sees is kept, so that the settle compares the sight the new
+        // settings give with the old: a tile that goes out of sight is remembered.
+        let vis = core::mem::take(&mut self.dv.vis);
         self.dv = Derived::new(self.rules, &self.st);
+        self.dv.vis = vis;
         // Revisions never go back: a host's ETag, and anything keyed on a revision, must see
         // every input move on.
         self.dv.revs = super::derive::rev::Revs::after(&self.st, now);

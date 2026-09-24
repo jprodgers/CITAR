@@ -27,6 +27,11 @@ group = "uniques"
 [[enforce]]
 group = "state_echo"
 
+# fixed_point (package 1c-01): the settle on load, which builds every civilization's sight from nothing,
+# explores no new tile and makes no new meeting.
+[[enforce]]
+group = "fixed_point"
+
 # civs (package 1b-05): the civilization-level data it ports. Its resources, line by line and net; the unique
 # index by placeholder; unit upkeep and unit supply; and the era the index is built with. The group's other
 # paths wait for their packages (happiness and stats 1b-06; costs and policies 1b-07; score and victory 1c-08).
@@ -40,3 +45,7 @@ paths = [
   "civs[*].unit_supply",
   "civs[*].era",
 ]
+
+# visible (package 1c-01): the tiles each living major sees.
+[[enforce]]
+group = "visible"

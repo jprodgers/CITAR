@@ -2,8 +2,8 @@
 //! - `Game::from_python` loads every committed fixture (9 mini and 3 late), and the corpus when
 //!   `CITAR_REFCHECK_CORPUS` names its folder, with every invariant of DESIGN.md 9.4 holding and
 //!   the caches equal to a cold rebuild (gate 6);
-//! - the settle on load changes nothing the state holds while no system reacts yet, and a game
-//!   saves and loads back to the same digest;
+//! - the settle on load changes nothing the state holds (sight is at Python's fixed point, and
+//!   citizens do not react yet), and a game saves and loads back to the same digest;
 //! - reads are free: views, scrubbed feeds, queries and refused calls leave the digest and the
 //!   revision alone (a first taste of property P8).
 
@@ -48,8 +48,10 @@ fn the_settle_on_load_changes_nothing_yet_and_a_save_round_trips() {
         let mut g = load(&f);
         let r = Ruleset::shared();
         let digest = g.digest().unwrap_or_else(|e| panic!("{}: {e}", f.name));
-        // No system reacts to a settle yet (sight 1c-01, citizens 1b-06), so the loaded state is
-        // the converted one, but for the civilians Python left at 0 health, which keep 1.
+        // Sight is built from nothing in the settle, and a state Python saved after its refresh
+        // is its fixed point (package 1c-01): nothing new is explored, met or discovered.
+        // Citizens do not react yet (1b-06). So the loaded state is the converted one, but for
+        // the civilians Python left at 0 health, which keep 1.
         let zero: Vec<_> =
             converted.state.units().iter().filter(|u| u.hp <= 0).map(|u| u.id()).collect();
         if zero.is_empty() {

@@ -241,6 +241,7 @@ fn player(g: &Game, p: PlayerId) -> Value {
         "cities": st.cities().of(p).iter().map(|c| c.get()).collect::<Vec<_>>(),
         "units": st.units().of(p).iter().map(|u| u.get()).collect::<Vec<_>>(),
         "explored": pl.explored.len(),
+        "natural_wonders": sorted_names(g, pl.civ.natural_wonders.iter()),
         "notes": pl.major.as_deref().map_or("", |m| &*m.notes),
         "city_state": city_state,
     })
@@ -270,6 +271,7 @@ fn tile(g: &Game, t: TileIdx) -> Value {
         "owner": x.owner().map(|p| p.0),
         "city": x.city().map(CityId::get),
         "units": units,
+        "visible": g.derived().vis().seers(t).map(|p| p.0).collect::<Vec<_>>(),
     })
 }
 

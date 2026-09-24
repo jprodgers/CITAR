@@ -670,7 +670,7 @@ pub static SETUP: [SetupStage; 15] = [
     SetupStage::game("relations", relations),
     SetupStage::later("camps", Porting::Pending("1c-06")),
     SetupStage::later("happiness", Porting::Pending("1b-06")),
-    SetupStage::later("visibility", Porting::Pending("1c-01")),
+    SetupStage::game("visibility", visibility),
     SetupStage::game("begin", begin),
 ];
 
@@ -1021,6 +1021,13 @@ fn relations(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
             .ids()
             .all(|b| a == b || g.is_barbarian(a) || g.is_barbarian(b) || !g.at_war(a, b))
     }));
+    Ok(())
+}
+
+/// visibility (`game.py:312`): every source registered, and what it shows explored, met and
+/// discovered, before the world is told it begins (DESIGN.md 6.9).
+fn visibility(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
+    g.settle_sight();
     Ok(())
 }
 

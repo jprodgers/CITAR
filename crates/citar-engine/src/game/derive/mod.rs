@@ -3,7 +3,7 @@
 //! ([`Derived::verify`]) checks.
 //!
 //! Package 1b-01 lands the skeleton: the revisions ([`rev::Revs`]), the grid, the name index
-//! events read, the visibility counts (filled by package 1c-01), and what a write means for the
+//! events read, the visibility counts (`game::vis`, package 1c-01), and what a write means for the
 //! caches ([`Derived::on`]). The memos of DESIGN.md 6.5 join it package by package: the unique
 //! index memos, resource supply and unit profiles ([`civ`], 1b-05), tile yields, city and
 //! civilization stats and connectivity (1b-06), the buildable lists (1b-07), and the rest with
@@ -69,7 +69,7 @@ impl Derived {
             revs: Revs::new(st),
             grid,
             names: Memo::new(),
-            vis: Visibility::new(st),
+            vis: Visibility::new(rules, st),
             civ: civ::CivCaches::new(rules, st),
         }
     }
@@ -90,6 +90,14 @@ impl Derived {
     #[must_use]
     pub const fn vis(&self) -> &Visibility {
         &self.vis
+    }
+
+    /// Reads tile `t`'s heights for sight again after its terrains changed, and forgets the
+    /// line-of-sight answers that read them.
+    pub(crate) fn height_changed(&mut self, rules: &Ruleset, st: &State, t: TileIdx) {
+        if let Some(tile) = st.tiles().get(t) {
+            self.vis.height_changed(rules, &self.grid, t, tile);
+        }
     }
 
     /// The name index of `st` (`Game._name_index`, `game.py:814-840`), rebuilt only when a name
@@ -122,7 +130,13 @@ impl Derived {
         let range = u32::try_from(rules.constants().formulas.city_work_range).unwrap_or(0);
         let owner = |t: TileIdx| st.tiles().get(t).and_then(Tile::owner);
         match *ch {
-            Change::TileInput(t) => self.flag_near(st, range, t, &[owner(t)], &mut out),
+            Change::TileInput(t) => {
+                self.flag_near(st, range, t, &[owner(t)], &mut out);
+                // What units on it see, when the ruleset's sight uniques read the tile.
+                if self.vis.tile_sensitive() {
+                    out.sight.push(SightSource::Tile(t));
+                }
+            }
             Change::TileHeight(t) => {
                 self.flag_near(st, range, t, &[owner(t)], &mut out);
                 out.sight.push(SightSource::Area(t));
@@ -131,6 +145,13 @@ impl Derived {
                 out.recheck.extend(old.city);
                 out.recheck.extend(new.city);
                 self.flag_near(st, range, t, &[old.owner, new.owner], &mut out);
+                // The cities that see it through their tiles, and those who see it meeting its
+                // new owner.
+                for c in [old.city, new.city].into_iter().flatten() {
+                    if !out.sight.contains(&SightSource::City(c)) {
+                        out.sight.push(SightSource::City(c));
+                    }
+                }
                 out.sight.push(SightSource::Tile(t));
             }
             Change::UnitPlaced { u, owner: by, from, to } => {
@@ -159,14 +180,17 @@ impl Derived {
             }
             Change::CityAdded(c) => {
                 out.recheck.push(c);
+                out.sight.push(SightSource::City(c));
                 if let Some(x) = st.cities().get(c) {
                     self.flag_near(st, range, x.tile(), &[Some(x.owner())], &mut out);
+                    // A unit on its tile is no longer embarked.
+                    out.sight.push(SightSource::Tile(x.tile()));
                 }
-                out.sight.push(SightSource::City(c));
             }
             Change::CityRemoved { c, owner: was, at } => {
                 self.flag_near(st, range, at, &[Some(was), owner(at)], &mut out);
                 out.sight.push(SightSource::City(c));
+                out.sight.push(SightSource::Tile(at));
             }
             Change::CityOwner { c, old, new } => {
                 out.recheck.push(c);
@@ -188,9 +212,16 @@ impl Derived {
                 self.flag_blockades_of(st, rules, range, a, b, &mut out);
                 self.flag_blockades_of(st, rules, range, b, a, &mut out);
             }
+            // Two who forget they met meet again if they see each other, as Python's next
+            // refresh met them. A meeting makes no other pair meet, so it needs no look.
+            Change::Met { a, b } => {
+                if !st.diplo().has_met(a, b) {
+                    out.sight.push(SightSource::Contact(a));
+                    out.sight.push(SightSource::Contact(b));
+                }
+            }
             Change::Diplo { .. }
             | Change::Talks { .. }
-            | Change::Met { .. }
             | Change::Turn
             | Change::Clock
             | Change::Names => {}
@@ -264,7 +295,8 @@ impl Derived {
 
     /// The cache oracle (DESIGN.md 9.4) for the caches that read the state alone: validated,
     /// against a cold recompute from the same state. Returns what disagrees, one line each. The
-    /// memos that evaluate uniques need the whole game: [`civ::verify`] checks them.
+    /// memos that evaluate uniques need the whole game: [`civ::verify`] checks them, and
+    /// `vis::verify` what each civilization sees.
     #[must_use]
     pub fn verify(&self, rules: &Ruleset, st: &State) -> Vec<String> {
         let cold = Self::new(rules, st);
@@ -275,7 +307,6 @@ impl Derived {
         if self.grid != cold.grid {
             out.push("the grid differs from the map's".to_owned());
         }
-        out.extend(self.vis.verify(st));
         out
     }
 }
