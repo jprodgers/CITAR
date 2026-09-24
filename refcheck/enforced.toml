@@ -49,3 +49,8 @@ paths = [
 # visible (package 1c-01): the tiles each living major sees.
 [[enforce]]
 group = "visible"
+
+# movement (package 1c-02): where units can get this turn, with the movement they would have left,
+# and the sampled paths with their turns and step costs.
+[[enforce]]
+group = "movement"

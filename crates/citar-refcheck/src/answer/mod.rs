@@ -11,7 +11,9 @@
 //! - [`civs`] (package 1b-05), the civilization-level data: resources, the unique index, unit
 //!   upkeep and supply, and the era;
 //! - [`fixed_point`] and [`visible`] (package 1c-01): the settle on load changes no explored tile
-//!   and no meeting, and what each major sees.
+//!   and no meeting, and what each major sees;
+//! - [`movement`] (package 1c-02): where units can get this turn, and paths with their turns and
+//!   step costs.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -29,6 +31,7 @@ use crate::fixture::Fixture;
 
 pub mod civs;
 pub mod fixed_point;
+pub mod movement;
 pub mod state_echo;
 pub mod uniques;
 pub mod visible;
@@ -96,6 +99,7 @@ static MODULES: &[&dyn AnswerModule] = &[
     &state_echo::StateEcho,
     &fixed_point::FixedPoint,
     &civs::Civs,
+    &movement::Movement,
     &visible::Visible,
 ];
 
