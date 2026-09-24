@@ -7,7 +7,9 @@
 //!   (`LUXURY_VARIETY`), with the areas of the shipped lobby sizes, where Python read the
 //!   areas of the ruleset's sizes by their keys (for the shipped sizes the two are the same);
 //! - the variety top-ups draw from streams of their own, keyed apart from the rest, where
-//!   Python seeded a side stream from the main one's state (`_side_rng`).
+//!   Python seeded a side stream from the main one's state (`_side_rng`);
+//! - the lobby's shares take no type's last deposit, which the top-ups after them put back as a
+//!   fresh cluster, off the share (`mapgen-shares-keep-every-type`).
 
 use super::map::{GenMap, only};
 use super::spread::spread_out;
@@ -511,8 +513,9 @@ pub(crate) fn strategic_variety(
 /// share first takes over tiles of normal resources of its kind where its terrain allows, then
 /// goes on fresh tiles, each paid for by removing a normal one elsewhere. One over its share
 /// hands the surplus back to normal resources, or clears it if none fit. Tiles near a start
-/// change last, so the starts stay as balanced as they were. Shares above 100% in all, or with
-/// no normal resource left to make up the rest, are scaled to exactly 100%.
+/// change last, so the starts stay as balanced as they were, and no normal resource loses its
+/// last deposit, which Python took. Shares above 100% in all, or with no normal resource left
+/// to make up the rest, are scaled to exactly 100%.
 pub(crate) fn rebalance(m: &mut GenMap<'_>, rng: &mut Rng, k: ResourceType, starts: &[TileIdx]) {
     let shares: Vec<(ResourceId, f64)> = m
         .opts
@@ -574,15 +577,23 @@ pub(crate) fn rebalance(m: &mut GenMap<'_>, rng: &mut Rng, k: ResourceType, star
             }
         }
     }
+    // A normal resource keeps its last deposit: taking it would lose the type, which the
+    // variety top-ups after this put back as a fresh cluster, so the shares came out diluted.
+    // refcheck: mapgen-shares-keep-every-type
+    let spare = |m: &GenMap<'_>, t: TileIdx| m.tile(t).resource().is_some_and(|x| m.placed[x] > 1);
     for &(r, n) in &want {
-        let need = n.saturating_sub(m.placed[r]) as usize;
-        if need == 0 {
+        if m.placed[r] >= n {
             continue;
         }
         let swap: Vec<TileIdx> =
             holding(m, &is_normal).into_iter().filter(|&t| natural_on(m, r, t)).collect();
-        for t in swap.into_iter().take(need) {
-            set_resource(m, rng, r, t, None);
+        for t in swap {
+            if m.placed[r] >= n {
+                break;
+            }
+            if spare(m, t) {
+                set_resource(m, rng, r, t, None);
+            }
         }
         let need = n.saturating_sub(m.placed[r]) as usize;
         if need == 0 {
@@ -593,7 +604,7 @@ pub(crate) fn rebalance(m: &mut GenMap<'_>, rng: &mut Rng, k: ResourceType, star
         let mut victims = holding(m, &is_normal).into_iter();
         for t in spread_out(m, rng, need, &empty) {
             set_resource(m, rng, r, t, None);
-            if let Some(v) = victims.next() {
+            if let Some(v) = victims.by_ref().find(|&v| spare(m, v)) {
                 clear_resource(m, v);
             }
         }
