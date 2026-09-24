@@ -2,7 +2,7 @@
 //! it reads (`movement.py:277-327`).
 //!
 //! Costs are in move-scale units (`game.json` `move_scale`, 60 to a movement point): a road
-//! costs a half or a third, a railroad a tenth, and [`ALL`](super::ALL) is "whatever is left".
+//! costs a half or a third, a railroad a tenth, and [`ALL`] is "whatever is left".
 //! The order of the rules is Python's, which decides what wins: embarking, then a zone of
 //! control, then a unit that pays one point everywhere, then railroads, roads (not across a
 //! river without the right unique), a unit that ignores terrain, a river crossing, and last the
