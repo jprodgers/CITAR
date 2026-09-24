@@ -9,7 +9,9 @@
 //! - [`uniques`] (package 1a-05), which compares the compiled ruleset once per run;
 //! - [`state_echo`] (package 1a-10), the fixture's own state read back from its conversion;
 //! - [`civs`] (package 1b-05), the civilization-level data: resources, the unique index, unit
-//!   upkeep and supply, and the era.
+//!   upkeep and supply, and the era;
+//! - [`fixed_point`] and [`visible`] (package 1c-01): the settle on load changes no explored tile
+//!   and no meeting, and what each major sees.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -26,8 +28,10 @@ use crate::Group;
 use crate::fixture::Fixture;
 
 pub mod civs;
+pub mod fixed_point;
 pub mod state_echo;
 pub mod uniques;
+pub mod visible;
 
 /// What an answer module is asked about.
 #[derive(Clone, Copy)]
@@ -87,7 +91,13 @@ pub trait Answers: Sync {
 }
 
 /// The engine's answer modules: one entry per ported group, in dependency order.
-static MODULES: &[&dyn AnswerModule] = &[&uniques::Uniques, &state_echo::StateEcho, &civs::Civs];
+static MODULES: &[&dyn AnswerModule] = &[
+    &uniques::Uniques,
+    &state_echo::StateEcho,
+    &fixed_point::FixedPoint,
+    &civs::Civs,
+    &visible::Visible,
+];
 
 /// The answers of the Rust engine.
 #[derive(Debug, Clone, Copy, Default)]

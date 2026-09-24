@@ -198,7 +198,9 @@ impl CompareSpec {
                 .multiset("history.events[*].players")
                 .keyed("history.messages", "id")
                 .multiset("history.messages[*].to"),
-            Group::FixedPoint => spec,
+            Group::FixedPoint => {
+                spec.keyed("civs", "pid").multiset("civs[*].explored").multiset("civs[*].met")
+            }
             Group::TileYields => spec.keyed("owned", "idx"),
             Group::CityStats => spec.keyed("cities", "id").multiset("cities[*].workable"),
             Group::Civs => spec
