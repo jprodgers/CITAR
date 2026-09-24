@@ -353,7 +353,7 @@ pub fn stack_reason(
 #[must_use]
 pub fn air_capacity_ok(g: &Game, c: CityId, ignore: Option<UnitId>) -> bool {
     let Some(city) = g.city(c) else { return false };
-    let rules = g.derived().move_rules();
+    let rules = &g.rules().derived().moves;
     let v = g.view();
     let ctx = Ctx::city(&v, c);
     let extra = uq::sum_i32(uq::city(&v, c, UniqueType::CarryExtraAirUnits, &ctx), |d| match d {

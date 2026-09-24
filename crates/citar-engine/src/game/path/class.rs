@@ -1,158 +1,24 @@
 //! What decides how a unit moves: its movement profile ([`Profile`], `movement.profile`,
-//! `movement.py:41-80`), its civilization's movement rules ([`CivMove`], `movement.py:83-96` and
-//! the `civ_has` reads of `movement.py:122-377`), and the ruleset's names they read
-//! ([`MoveRules`]), resolved once per game.
+//! `movement.py:41-80`) and its civilization's movement rules ([`CivMove`], `movement.py:83-96`
+//! and the `civ_has` reads of `movement.py:122-377`), with the ruleset's names they read
+//! ([`MoveRules`], resolved at load).
 //!
 //! A search takes these once, into a [`Mover`], and then reads tiles alone. Python cached the
 //! profile per unit, tile, promotion count, tech count and policy count and cleared it on every
 //! write (`g._cache`); a mover lives for one search, or one step, so it is never stale.
 
 use core::cell::{OnceCell, RefCell};
+use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::base::collections::DetMap;
-use crate::base::ids::{
-    BaseUnitId, FeatureId, PlayerId, TechId, TerrainId, TileFilterId, UniqueId, UnitFilterId,
-    UnitId,
-};
+use crate::base::ids::{BaseUnitId, PlayerId, UniqueId, UnitFilterId, UnitId};
 use crate::base::sets::{BitSet, PlayerSet};
 use crate::game::Game;
-use crate::rules::Ruleset;
-use crate::rules::defs::{BaseUnitDef, Domain, TerrainType};
+use crate::rules::defs::{BaseUnitDef, Domain};
+pub use crate::rules::moves::{DoubleOn, MoveRules, OceanFor};
 use crate::unique::filter::UnitScope;
 use crate::unique::{Ctx, FilterFacts, UniqueData, UniqueType, uq};
-
-// ---- The ruleset's names ------------------------------------------------------------------------
-
-/// Where a `Double movement in [terrainFilter]` unique counts (`movement.py:364-376`). Python
-/// compared the filter's text with the tile's feature and terrain names in three passes around
-/// the rough-terrain and hill rules; the text is read once here, at the start of the game.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DoubleOn {
-    /// The name of a feature: counts on a tile that has it, before the rough-terrain penalty.
-    Feature(FeatureId),
-    /// The name of a base terrain: counts on a tile of it, after the hill rule.
-    Base(TerrainId),
-    /// Anything else, read as a tile filter, last (a natural wonder's name among them).
-    Filter(TileFilterId),
-}
-
-/// Who `Units may enter ocean` lets onto the ocean (`movement.ocean_permissions`,
-/// `movement.py:90-96`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OceanFor {
-    /// `[All]`: every unit.
-    All,
-    /// `[Embarked]`: embarked land units.
-    Embarked,
-    /// Units the filter matches.
-    Units(UnitFilterId),
-}
-
-/// The ruleset's objects and texts movement reads, resolved once per game.
-#[derive(Clone, Debug)]
-pub struct MoveRules {
-    /// Movement points per tile of movement (`game.json` `move_scale`).
-    pub scale: i32,
-    pub ocean: Option<TerrainId>,
-    pub mountain: Option<TerrainId>,
-    pub ice: Option<FeatureId>,
-    pub hill: FeatureId,
-    pub forest: Option<FeatureId>,
-    pub jungle: Option<FeatureId>,
-    /// The techs that make a city centre a road and a railroad (`movement.route_at`,
-    /// `movement.py:288-299`). A route that needs no tech is had by everyone.
-    pub road_tech: Option<TechId>,
-    pub rail_tech: Option<TechId>,
-    double: DetMap<TileFilterId, DoubleOn>,
-    ocean_for: DetMap<UnitFilterId, OceanFor>,
-    /// The `Can carry [n] extra [Air] units` filters a city's air capacity counts: Python
-    /// compared the parameter with `Air` (`units.py:758`).
-    air: SmallVec<[UnitFilterId; 1]>,
-}
-
-impl MoveRules {
-    /// The ruleset's movement names.
-    #[must_use]
-    pub fn new(r: &Ruleset) -> Self {
-        let known = &r.derived().known;
-        let feature = |t: Option<TerrainId>| t.and_then(|t| r.terrains().get(t)?.feature);
-        let t = r.uniques();
-        let mut double = DetMap::default();
-        let mut ocean_for = DetMap::default();
-        let mut air = SmallVec::new();
-        for (_, u) in t.iter() {
-            match u.data {
-                UniqueData::DoubleMovementOnTerrain(x) => {
-                    double.entry(x.terrain).or_insert_with(|| double_on(r, x.terrain));
-                }
-                UniqueData::UnitsMayEnterOcean(x) => {
-                    // Python compared the parameter's text (`movement.py:93-95`).
-                    let on = match t.unit_filter(x.units) {
-                        "All" | "all" => OceanFor::All,
-                        "Embarked" => OceanFor::Embarked,
-                        _ => OceanFor::Units(x.units),
-                    };
-                    ocean_for.insert(x.units, on);
-                }
-                UniqueData::CarryExtraAirUnits(x)
-                    if t.unit_filter(x.units) == "Air" && !air.contains(&x.units) =>
-                {
-                    air.push(x.units);
-                }
-                _ => {}
-            }
-        }
-        let tech = |i| r.improvements().get(i).and_then(|d| d.tech_required);
-        Self {
-            scale: r.constants().move_scale,
-            ocean: known.map.ocean,
-            mountain: known.map.mountain,
-            ice: feature(known.map.ice),
-            hill: known.hill,
-            forest: feature(known.map.forest),
-            jungle: feature(known.map.jungle),
-            road_tech: tech(known.road),
-            rail_tech: tech(known.railroad),
-            double,
-            ocean_for,
-            air,
-        }
-    }
-
-    /// Where a double-movement filter counts.
-    #[must_use]
-    pub fn double_on(&self, f: TileFilterId) -> DoubleOn {
-        self.double.get(&f).copied().unwrap_or(DoubleOn::Filter(f))
-    }
-
-    /// Whether a city's `Can carry [n] extra [...] units` counts toward its air capacity.
-    #[must_use]
-    pub fn is_air_filter(&self, f: UnitFilterId) -> bool {
-        self.air.contains(&f)
-    }
-
-    /// Whom an ocean permission lets in.
-    #[must_use]
-    pub fn ocean_for(&self, f: UnitFilterId) -> OceanFor {
-        self.ocean_for.get(&f).copied().unwrap_or(OceanFor::Units(f))
-    }
-}
-
-/// How the text of a double-movement filter reads a tile: a feature's name, a base terrain's, or
-/// a filter (`movement.py:364-376`).
-fn double_on(r: &Ruleset, f: TileFilterId) -> DoubleOn {
-    let text = r.uniques().tile_filter(f);
-    match r.lookup::<TerrainId>(text) {
-        Some(id) => match (&r.terrains()[id].kind, r.terrains()[id].feature) {
-            (TerrainType::TerrainFeature, Some(feat)) => DoubleOn::Feature(feat),
-            (TerrainType::Land | TerrainType::Water, _) => DoubleOn::Base(id),
-            _ => DoubleOn::Filter(f),
-        },
-        None => DoubleOn::Filter(f),
-    }
-}
 
 // ---- A unit's profile ---------------------------------------------------------------------------
 
@@ -289,6 +155,7 @@ impl CivMove {
             }
         }
         // Carthage (`movement.py:131-135`), with the units gained Python never recorded.
+        // refcheck: units-gained-recorded
         let gained = g.player(p).map(|pl| pl.civ.units_gained).unwrap_or_default();
         let t = g.rules().uniques();
         out.cross_mountains =
@@ -312,10 +179,45 @@ impl CivMove {
 /// counts every enemy, seen or not.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Zoc {
-    pub tiles: BitSet,
+    /// Shared, so that a mover takes the game's at the cost of a count.
+    pub tiles: Arc<BitSet>,
     /// No tile exerts one: most searches, which then skip the look (a bit set's emptiness walks
     /// its words).
     pub none: bool,
+}
+
+impl Zoc {
+    /// The tiles from which player `p`'s enemies exert a zone of control on its units, its land
+    /// units when `land`: a land unit's is not exerted by an embarked unit.
+    pub(crate) fn build(g: &Game, p: PlayerId, land: bool) -> Self {
+        let war = g.state().diplo().war_mask(p);
+        if war.is_empty() {
+            return Self { tiles: Arc::default(), none: true };
+        }
+        let mut tiles = BitSet::with_capacity(g.state().map().size());
+        let r = g.rules();
+        let v = g.view();
+        for q in war.iter() {
+            for c in g.player_cities(q) {
+                tiles.insert(c.tile().0);
+            }
+            for m in g.player_units(q) {
+                let Some(d) = r.base_units().get(m.base) else { continue };
+                if !d.military || d.domain == Domain::Air {
+                    continue;
+                }
+                let t = m.tile();
+                if g.city_at(t).is_some() || g.military_at(t).map(|x| x.id()) != Some(m.id()) {
+                    continue;
+                }
+                if d.domain == Domain::Water || (land && !v.unit_embarked(m.id())) {
+                    tiles.insert(t.0);
+                }
+            }
+        }
+        let none = tiles.is_empty();
+        Self { tiles: Arc::new(tiles), none }
+    }
 }
 
 /// One unit's movement, or one unit type's, for one search: everything that does not change while
@@ -347,7 +249,8 @@ pub struct Mover<'g> {
     /// What its owner has explored, and sees now.
     pub(crate) explored: Option<&'g BitSet>,
     pub(crate) visible: Option<&'g BitSet>,
-    zoc: OnceCell<Zoc>,
+    /// The game's zones of control for its owner's units of its kind, taken on first need.
+    zoc: OnceCell<Option<Zoc>>,
     /// `Enemy units must spend extra movement` of each enemy owner, in move-scale units, asked on
     /// first need.
     extra: RefCell<SmallVec<[(PlayerId, i32); 4]>>,
@@ -358,9 +261,8 @@ impl<'g> Mover<'g> {
     #[must_use]
     pub fn unit(g: &'g Game, u: UnitId) -> Option<Self> {
         let x = g.unit(u)?;
-        let rules = g.derived().move_rules();
-        let prof = Profile::of(g, rules, u);
-        let mut m = Self::new(g, rules, x.owner(), x.base, Some(u), prof)?;
+        let rules = &g.rules().derived().moves;
+        let mut m = Self::new(g, rules, x.owner(), x.base, Some(u), super::memo::profile(g, u))?;
         if !m.civ.ocean_units.is_empty() {
             let v = g.view();
             let f = g.rules().uniques().filters();
@@ -374,7 +276,7 @@ impl<'g> Mover<'g> {
     /// unit asks (`movement.can_stand` with no unit). `None` for a base unit the ruleset lacks.
     #[must_use]
     pub fn of_type(g: &'g Game, p: PlayerId, base: BaseUnitId) -> Option<Self> {
-        let rules = g.derived().move_rules();
+        let rules = &g.rules().derived().moves;
         let mut m = Self::new(g, rules, p, base, None, Profile::default())?;
         let t = g.rules().uniques();
         m.no_ocean_uniques = m
@@ -396,10 +298,7 @@ impl<'g> Mover<'g> {
         prof: Profile,
     ) -> Option<Self> {
         let def = g.rules().base_units().get(base)?;
-        let players = g.state().players();
-        let enter = players.ids().filter(|&q| g.can_enter_owner(p, q)).collect();
-        let city_states =
-            players.iter().filter(|(_, x)| x.is_city_state()).map(|(q, _)| q).collect();
+        let parts = super::memo::civ_parts(g, p)?;
         Some(Self {
             g,
             rules,
@@ -409,11 +308,11 @@ impl<'g> Mover<'g> {
             base,
             def,
             prof,
-            civ: CivMove::of(g, rules, p),
+            civ: parts.civ.clone(),
             barbarian: g.is_barbarian(p),
-            enter,
+            enter: parts.enter,
             war: g.state().diplo().war_mask(p),
-            city_states,
+            city_states: parts.city_states,
             ocean_unit_ok: false,
             no_ocean_uniques: SmallVec::new(),
             explored: g.player(p).map(|x| &x.explored),
@@ -459,37 +358,17 @@ impl<'g> Mover<'g> {
         self.war.contains(q)
     }
 
-    /// The tiles exerting a zone of control on it.
-    pub(crate) fn zoc(&self) -> &Zoc {
-        self.zoc.get_or_init(|| self.build_zoc())
-    }
-
-    fn build_zoc(&self) -> Zoc {
-        let g = self.g;
-        let mut tiles = BitSet::with_capacity(g.state().map().size());
+    /// The tiles exerting a zone of control on it; `None` when none does.
+    pub(crate) fn zoc(&self) -> Option<&Zoc> {
         let land = self.def.domain == Domain::Land;
-        let r = g.rules();
-        let v = g.view();
-        for q in self.war.iter() {
-            for c in g.player_cities(q) {
-                tiles.insert(c.tile().0);
-            }
-            for m in g.player_units(q) {
-                let Some(d) = r.base_units().get(m.base) else { continue };
-                if !d.military || d.domain == Domain::Air {
-                    continue;
+        self.zoc
+            .get_or_init(|| {
+                if self.war.is_empty() {
+                    return None;
                 }
-                let t = m.tile();
-                if g.city_at(t).is_some() || g.military_at(t).map(|x| x.id()) != Some(m.id()) {
-                    continue;
-                }
-                if d.domain == Domain::Water || (land && !v.unit_embarked(m.id())) {
-                    tiles.insert(t.0);
-                }
-            }
-        }
-        let none = tiles.is_empty();
-        Zoc { tiles, none }
+                super::memo::zoc(self.g, self.pid, land).filter(|z| !z.none).map(|z| z.clone())
+            })
+            .as_ref()
     }
 
     /// What entering a tile of `owner` costs it on top, at war (`movement.py:345-349`): the

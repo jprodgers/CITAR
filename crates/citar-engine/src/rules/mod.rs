@@ -10,6 +10,7 @@
 //! - `raw`: the files as written, read strictly;
 //! - [`defs`]: the typed tables, every name resolved to an id;
 //! - [`derived`]: the tables computed at load;
+//! - [`moves`]: the names movement reads, resolved at load;
 //! - [`gen_tables`]: what map generation, the AI and victory read of the uniques;
 //! - [`constants`]: `game.json`, typed;
 //! - [`names`]: loose lookup by name or id, for tools, typed by the id it gives ([`Named`]);
@@ -21,6 +22,7 @@ pub mod defs;
 pub mod derived;
 pub mod errors;
 pub mod gen_tables;
+pub mod moves;
 pub mod names;
 pub mod source;
 

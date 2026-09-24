@@ -228,10 +228,7 @@ impl Mover<'_> {
     /// tiles next to both ends are `a`'s neighbours on either side of that direction.
     #[inline]
     pub(crate) fn zoc_toward(&self, a: TileIdx, d: usize) -> bool {
-        let zoc = self.zoc();
-        if zoc.none {
-            return false;
-        }
+        let Some(zoc) = self.zoc() else { return false };
         let zoc = &zoc.tiles;
         let nb = self.g.grid().neighbor_table(a);
         [nb[(d + 5) % 6], nb[(d + 1) % 6]]

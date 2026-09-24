@@ -266,9 +266,7 @@ impl Game {
         let mut out = self.dv.verify(self.rules, &self.st);
         out.extend(super::derive::civ::verify(self));
         out.extend(super::vis::verify(self));
-        if self.dv.terrain_floor(self) != super::path::terrain_floor(self) {
-            out.push("the cheapest terrain differs from a cold look at the map".to_owned());
-        }
+        out.extend(super::path::memo::verify(self));
         if *self.dv.route_net(self) != super::path::route_net(self) {
             out.push("where routes run differs from a cold look at the map".to_owned());
         }

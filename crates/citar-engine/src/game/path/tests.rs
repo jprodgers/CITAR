@@ -10,12 +10,13 @@ use super::astar::Label;
 use super::{ALL, Mover, Start, stack_reason};
 use crate::base::collections::MinHeap;
 use crate::base::ids::{
-    BaseUnitId, CityId, FeatureId, PlayerId, PromotionId, TechId, TerrainId, TileIdx, UnitId,
+    BaseUnitId, BuildingId, CityId, FeatureId, NationId, PlayerId, PromotionId, TechId, TerrainId,
+    TileIdx, UnitId,
 };
 use crate::base::sets::FeatureSet;
 use crate::game::Game;
 use crate::game::core::testing;
-use crate::game::derive::rev::{PlayerTouch, UnitTouch};
+use crate::game::derive::rev::{CityTouch, PlayerTouch, UnitTouch};
 use crate::rules::Ruleset;
 use crate::rules::defs::{Domain, Route};
 use crate::state::TileClaim;
@@ -53,6 +54,17 @@ const UNITS: [&str; 12] = [
     "Work Boats",
 ];
 
+/// The techs a world's majors may know: embarking, the ocean, roads, railroads, faster roads and
+/// roads across rivers.
+const TECHS: [&str; 6] =
+    ["Optics", "Astronomy", "The Wheel", "Railroads", "Machinery", "Engineering"];
+
+/// The nations a world's majors may be, beside the duel's own: those whose uniques move units
+/// (forests and jungles as roads, free hills, mountains after a Great General, cheap landings,
+/// embarking from the start).
+const NATIONS: [Option<&str>; 6] =
+    [None, Some("Iroquois"), Some("Inca"), Some("Carthage"), Some("Denmark"), Some("Polynesia")];
+
 /// A random world on the 10x8 test map, as the generator's numbers describe it.
 #[derive(Clone, Debug)]
 struct World {
@@ -66,35 +78,51 @@ struct World {
     explored: Vec<bool>,
     techs: Vec<bool>,
     woodsmen: Vec<bool>,
+    /// Each major's nation (an index of [`NATIONS`]), whether it has gained a Great General,
+    /// and which of the cities, if any, has the Great Wall.
+    nations: (u8, u8),
+    generals: (bool, bool),
+    great_wall: Option<u8>,
 }
 
 fn world() -> impl Strategy<Value = World> {
     (
-        proptest::collection::vec((0u8..7, 0u8..5), 80),
-        proptest::collection::vec((0u16..80, 0u8..64), 0..10),
-        proptest::collection::vec((0u16..80, 0u8..4), 0..24),
-        proptest::collection::vec((0u8..3, 0u16..80), 0..4),
-        proptest::collection::vec((0u16..80, 0u8..4), 0..20),
-        proptest::collection::vec((0u8..4, 0u8..12, 0u16..80, 0u8..8), 2..14),
-        proptest::collection::vec((0u8..3, 0u8..3), 0..3),
-        proptest::collection::vec(any::<bool>(), 80),
-        proptest::collection::vec(any::<bool>(), 4),
-        proptest::collection::vec(any::<bool>(), 14),
+        (
+            proptest::collection::vec((0u8..7, 0u8..5), 80),
+            proptest::collection::vec((0u16..80, 0u8..64), 0..10),
+            proptest::collection::vec((0u16..80, 0u8..4), 0..24),
+            proptest::collection::vec((0u8..3, 0u16..80), 0..4),
+            proptest::collection::vec((0u16..80, 0u8..4), 0..20),
+            proptest::collection::vec((0u8..4, 0u8..12, 0u16..80, 0u8..8), 2..14),
+            proptest::collection::vec((0u8..3, 0u8..3), 0..3),
+        ),
+        (
+            proptest::collection::vec(any::<bool>(), 80),
+            proptest::collection::vec(any::<bool>(), TECHS.len()),
+            proptest::collection::vec(any::<bool>(), 14),
+            (0u8..6, 0u8..6),
+            (any::<bool>(), any::<bool>()),
+            proptest::option::of(0u8..4),
+        ),
     )
         .prop_map(
-            |(ground, rivers, routes, cities, claims, units, wars, explored, techs, woodsmen)| {
-                World {
-                    ground,
-                    rivers,
-                    routes,
-                    cities,
-                    claims,
-                    units,
-                    wars,
-                    explored,
-                    techs,
-                    woodsmen,
-                }
+            |(
+                (ground, rivers, routes, cities, claims, units, wars),
+                (explored, techs, woodsmen, nations, generals, great_wall),
+            )| World {
+                ground,
+                rivers,
+                routes,
+                cities,
+                claims,
+                units,
+                wars,
+                explored,
+                techs,
+                woodsmen,
+                nations,
+                generals,
+                great_wall,
             },
         )
 }
@@ -102,6 +130,20 @@ fn world() -> impl Strategy<Value = World> {
 /// The game a world describes, settled: its sight, and so its fog, built.
 fn build(w: &World) -> Game {
     let mut g = testing::duel();
+    let general = base("Great General");
+    for (p, n, gained) in
+        [(PlayerId(0), w.nations.0, w.generals.0), (PlayerId(1), w.nations.1, w.generals.1)]
+    {
+        let nation = NATIONS[usize::from(n)].map(|x| r().lookup::<NationId>(x).expect("a nation"));
+        if let Some(pl) = g.player_mut(p, PlayerTouch::INDEX) {
+            if let Some(nation) = nation {
+                pl.nation = nation;
+            }
+            if gained {
+                pl.civ.units_gained.insert(general);
+            }
+        }
+    }
     for (i, &(b, f)) in w.ground.iter().enumerate() {
         let t = TileIdx(u32::try_from(i).unwrap_or(0));
         g.set_terrain(t, terrain(BASES[usize::from(b)])).expect("a tile");
@@ -146,10 +188,15 @@ fn build(w: &World) -> Game {
             g.update_relation(PlayerId(a), PlayerId(b), |x| x.war = true).expect("a pair");
         }
     }
-    let techs = ["Optics", "Astronomy", "The Wheel", "Railroads"];
+    if let Some(&c) = w.great_wall.and_then(|i| cities.get(usize::from(i))) {
+        let wall = r().lookup::<BuildingId>("Great Wall").expect("a building");
+        if let Some(x) = g.city_mut(c, CityTouch::BUILDINGS) {
+            x.buildings.insert(wall);
+        }
+    }
     for (i, &on) in w.techs.iter().enumerate() {
         if on {
-            let t = r().lookup::<TechId>(techs[i]).expect("a tech");
+            let t = r().lookup::<TechId>(TECHS[i]).expect("a tech");
             for p in [PlayerId(0), PlayerId(1)] {
                 crate::game::research::add_tech_silently(&mut g, p, &[t]);
             }
@@ -314,11 +361,14 @@ fn enter_cost_direct(g: &Game, u: UnitId, a: TileIdx, b: TileIdx) -> i32 {
     if let Some(owner) = tb.owner()
         && g.at_war(pid, owner)
     {
+        // Python's list held a unique once for each copy.
         for h in uq::civ(&v, owner, UniqueType::EnemyUnitsSpendExtraMovement, &Ctx::civ(owner)) {
             if let UniqueData::EnemyUnitsSpendExtraMovement(y) = h.data()
                 && rr.uniques().filters().unit_matches(y.units, &v, u, UnitScope::default())
             {
-                extra += y.movement * sc;
+                for _ in 0..h.n {
+                    extra += y.movement * sc;
+                }
             }
         }
     }
@@ -581,4 +631,101 @@ fn embarking_needs_optics_and_takes_every_move() {
     assert_eq!(m.pass_reason(TileIdx(0)), None);
     assert_eq!(m.edge_cost(TileIdx(1), TileIdx(0)), ALL);
     assert!(Mover::of_type(&g, PlayerId(0), base("Trireme")).is_some());
+}
+
+// ---- The route net -----------------------------------------------------------------------------
+
+/// A step of a route net's life: a route set or removed on a tile, a tile pillaged or repaired, a
+/// city founded, or a tech learned.
+#[derive(Clone, Copy, Debug)]
+enum RouteStep {
+    Route(u16, Option<Route>),
+    Pillage(u16, bool),
+    City(u8, u16),
+    Tech(u8, u8),
+}
+
+fn route_step() -> impl Strategy<Value = RouteStep> {
+    prop_oneof![
+        4 => (0u16..80, 0u8..3).prop_map(|(t, k)| RouteStep::Route(
+            t,
+            [None, Some(Route::Road), Some(Route::Railroad)][usize::from(k)]
+        )),
+        1 => (0u16..80, any::<bool>()).prop_map(|(t, on)| RouteStep::Pillage(t, on)),
+        1 => (0u8..2, 0u16..80).prop_map(|(p, t)| RouteStep::City(p, t)),
+        1 => (0u8..3, 0u8..3).prop_map(|(p, k)| RouteStep::Tech(p, k)),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    /// However the routes, cities and techs change, the game's route net, brought up to date
+    /// between the changes, is what a cold look at the map finds.
+    #[test]
+    fn the_route_net_is_a_cold_look_after_any_changes(
+        steps in proptest::collection::vec(route_step(), 1..40),
+    ) {
+        let mut g = testing::duel();
+        let techs = ["The Wheel", "Railroads", "Pottery"];
+        for (i, step) in steps.into_iter().enumerate() {
+            match step {
+                RouteStep::Route(t, r) => {
+                    g.set_route(TileIdx(u32::from(t)), r).expect("a tile");
+                }
+                RouteStep::Pillage(t, on) => {
+                    g.set_pillaged(TileIdx(u32::from(t)), on, false).expect("a tile");
+                }
+                RouteStep::City(p, t) => {
+                    let t = TileIdx(u32::from(t));
+                    if g.city_at(t).is_none() && g.tile(t).and_then(Tile::owner).is_none() {
+                        testing::city(&mut g, PlayerId(p), t, &format!("Town {i}"));
+                    }
+                }
+                RouteStep::Tech(p, k) => {
+                    let t = r().lookup::<TechId>(techs[usize::from(k)]).expect("a tech");
+                    crate::game::research::add_tech_silently(&mut g, PlayerId(p), &[t]);
+                }
+            }
+            prop_assert_eq!(&*g.derived().route_net(&g), &super::route_net(&g), "after {:?}", step);
+        }
+    }
+}
+
+/// The route net is built afresh only when a route is lost, a city changes or a civilization
+/// learns a route's tech: a road built is taken in where it is, and nothing else a civilization
+/// learns touches it.
+#[test]
+fn the_route_net_is_built_afresh_only_for_what_it_reads() {
+    let mut g = testing::duel();
+    let tech = |name: &str| r().lookup::<TechId>(name).expect("a tech");
+    let wheel = tech("The Wheel");
+    for p in [PlayerId(0), PlayerId(1)] {
+        crate::game::research::add_tech_silently(&mut g, p, &[wheel]);
+    }
+    testing::city(&mut g, PlayerId(0), TileIdx(22), "Roma");
+    g.settle();
+    let read = |g: &Game| {
+        assert_eq!(*g.derived().route_net(g), super::route_net(g));
+        g.derived().route_net_builds()
+    };
+    let first = read(&g);
+    // Roads from the city eastward, one at a time.
+    for t in 23..27 {
+        g.set_route(TileIdx(t), Some(Route::Road)).expect("a tile");
+        assert_eq!(read(&g), first, "a road built is taken in");
+    }
+    g.set_route(TileIdx(25), Some(Route::Railroad)).expect("a tile");
+    assert_eq!(read(&g), first, "a road made a railroad is taken in");
+    // Another civilization learning something the net does not read.
+    crate::game::research::add_tech_silently(&mut g, PlayerId(1), &[tech("Pottery")]);
+    assert_eq!(read(&g), first, "a tech no route needs");
+    // A route lost builds it afresh.
+    g.set_pillaged(TileIdx(24), true, false).expect("a tile");
+    assert_eq!(read(&g), first + 1, "a road pillaged");
+    // Learning the railroad's tech makes Roma's tile a railroad.
+    crate::game::research::add_tech_silently(&mut g, PlayerId(0), &[tech("Railroads")]);
+    assert_eq!(read(&g), first + 2, "a route's tech");
+    let _ = testing::city(&mut g, PlayerId(1), TileIdx(58), "Athens");
+    assert_eq!(read(&g), first + 3, "a city founded");
 }

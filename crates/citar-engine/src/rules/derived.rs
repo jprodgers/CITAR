@@ -10,6 +10,7 @@
 use super::Ruleset;
 use super::defs::{BuilderClass, ImprovementKind, NationKind, Route, TerrainType};
 use super::errors::{Problems, RulesetErrorKind};
+use super::moves::MoveRules;
 use crate::base::ids::{
     BaseUnitId, BuildingId, DifficultyId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
     ObjectFilterId, ResourceId, TechId, TerrainId,
@@ -177,6 +178,8 @@ pub struct Derived {
     /// conditionals. Python compared the names at each ask.
     pub building_equivalents: IdVec<BuildingId, Box<[BuildingId]>>,
     pub known: Known,
+    /// The names movement reads (package 1c-02).
+    pub moves: MoveRules,
 }
 
 impl Derived {
@@ -213,6 +216,7 @@ impl Derived {
                 settler: None,
                 map: KnownMap::default(),
             },
+            moves: MoveRules::default(),
         }
     }
 }
@@ -384,6 +388,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         }
     }
 
+    let moves = MoveRules::new(r, &known);
+
     let mut major_nations = Vec::new();
     let mut city_state_nations = Vec::new();
     for (id, n) in r.nations.iter() {
@@ -413,6 +419,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         fresh_water,
         building_equivalents,
         known,
+        moves,
     })
 }
 

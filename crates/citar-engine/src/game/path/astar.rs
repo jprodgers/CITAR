@@ -321,6 +321,9 @@ pub struct PathScratch {
     cells: Vec<Cell>,
     heap: Open,
     target: Option<TileIdx>,
+    /// The tiles closed so far, in the order they were: what a tree reads back, without a walk
+    /// over the map.
+    closed: Vec<TileIdx>,
 }
 
 impl Clone for PathScratch {
@@ -343,6 +346,7 @@ impl PathScratch {
             self.generation = 1;
         }
         self.heap.clear();
+        self.closed.clear();
     }
 
     /// The cell of tile `t`, emptied first if an earlier search wrote it.
@@ -383,6 +387,7 @@ impl PathScratch {
     #[inline]
     fn close(&mut self, t: TileIdx) {
         self.cell(t).flags |= CLOSED;
+        self.closed.push(t);
     }
 
     /// Whether mover `m` may route through tile `t` on its way elsewhere, and the facts of `t`
@@ -506,7 +511,7 @@ impl Mover<'_> {
         let mut off = if self.prof.all_1 || self.prof.ignores_terrain {
             sc
         } else {
-            let t = sc.min(self.g.derived().terrain_floor(self.g).terrain.saturating_mul(sc));
+            let t = self.rules.terrain_floor.saturating_mul(sc);
             if self.prof.doubles.is_empty() { t } else { t / 2 }
         };
         // Embarking or disembarking comes before everything else a step checks.
@@ -791,16 +796,7 @@ impl Mover<'_> {
         let g = self.g;
         with_scratch(g.derived().path_scratch(), |sc| {
             let _found = self.search(sc, s, None, max_turns, &Heur::none(s.full));
-            let mut out = Vec::new();
-            for i in 0..g.state().map().size() {
-                let t = TileIdx(i);
-                if sc.is_closed(t)
-                    && let Some(k) = sc.label(t)
-                {
-                    out.push((t, k));
-                }
-            }
-            out
+            sc.closed.iter().filter_map(|&t| Some((t, sc.label(t)?))).collect()
         })
     }
 }

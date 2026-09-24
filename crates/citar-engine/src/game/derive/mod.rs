@@ -16,13 +16,12 @@ pub mod civ;
 pub mod rev;
 
 use core::cell::{Ref, RefCell};
-use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use self::rev::{CopyMemo, Memo, Rev, Revs};
+use self::rev::{Memo, Revs};
 use super::events::NameIndex;
-use super::path::{MoveRules, PathCache, PathScratch, RouteNet, TerrainFloor};
+use super::path::{PathCache, PathScratch, RouteNet, RouteNetMemo};
 use super::pending::SightSource;
 use super::vis::Visibility;
 use crate::base::hex::HexGrid;
@@ -52,12 +51,10 @@ pub struct Derived {
     pub(crate) vis: Visibility,
     /// The unique index memos, the resource supply and the unit profiles.
     pub(crate) civ: civ::CivCaches,
-    /// The ruleset's names movement reads (package 1c-02).
-    moves: Arc<MoveRules>,
-    /// The cheapest terrain on the map, for the path search's bound.
-    terrain_floor: CopyMemo<TerrainFloor>,
+    /// The memos a path search's mover is built from.
+    pub(crate) moves: super::path::memo::MoveCaches,
     /// How far each tile is from the routes, for the path search's bound.
-    route_net: Memo<RouteNet>,
+    route_net: RefCell<RouteNetMemo>,
     /// The path searches' arrays, reused.
     path_scratch: RefCell<PathScratch>,
     /// The paths found at the current revision.
@@ -83,9 +80,8 @@ impl Derived {
             names: Memo::new(),
             vis: Visibility::new(rules, st),
             civ: civ::CivCaches::new(rules, st),
-            moves: Arc::new(MoveRules::new(rules)),
-            terrain_floor: CopyMemo::new(),
-            route_net: Memo::new(),
+            moves: super::path::memo::MoveCaches::new(st),
+            route_net: RefCell::new(RouteNetMemo::default()),
             path_scratch: RefCell::new(PathScratch::default()),
             path_cache: RefCell::new(PathCache::default()),
         }
@@ -130,12 +126,6 @@ impl Derived {
         &self.civ
     }
 
-    /// The ruleset's names movement reads.
-    #[must_use]
-    pub fn move_rules(&self) -> &MoveRules {
-        &self.moves
-    }
-
     /// The path searches' scratch arrays.
     pub(crate) const fn path_scratch(&self) -> &RefCell<PathScratch> {
         &self.path_scratch
@@ -151,24 +141,26 @@ impl Derived {
         *self.path_cache.get_mut() = PathCache::default();
     }
 
-    /// The cheapest terrain on the map (`super::path::terrain_floor`), valid while no tile or
-    /// city moved; `g` is the game these caches are its.
-    #[must_use]
-    pub fn terrain_floor(&self, g: &super::Game) -> TerrainFloor {
-        let revs = &self.revs;
-        let inputs = || revs.cities.max(revs.tile_log.rev());
-        self.terrain_floor.get(revs.now(), inputs, || super::path::terrain_floor(g))
+    /// How far each tile is from the routes (`super::path::route_net`), brought up to date with
+    /// the routes, the cities and who knows the routes' techs (`RouteNetMemo`); `g` is the game
+    /// these caches are its.
+    ///
+    /// # Panics
+    ///
+    /// Never: the net is written only at a revision no borrow of it was taken at, and a borrow
+    /// lives under `&Game`, at one revision.
+    pub fn route_net<'a>(&'a self, g: &super::Game) -> Ref<'a, RouteNet> {
+        let now = self.revs.now();
+        if !self.route_net.borrow().current(now) {
+            self.route_net.borrow_mut().update(g, now);
+        }
+        Ref::map(self.route_net.borrow(), RouteNetMemo::net)
     }
 
-    /// How far each tile is from the routes (`super::path::route_net`), valid while no route,
-    /// city or civilization's techs moved; `g` is the game these caches are its.
-    pub fn route_net<'a>(&'a self, g: &super::Game) -> Ref<'a, RouteNet> {
-        let revs = &self.revs;
-        let inputs = || {
-            let techs = g.st.players().ids().map(|p| revs.civ(p).index).max().unwrap_or(Rev::START);
-            revs.routes.max(revs.cities).max(techs)
-        };
-        self.route_net.get(revs.now(), inputs, || super::path::route_net(g))
+    /// How many times the route net was built afresh rather than brought up to date.
+    #[cfg(test)]
+    pub(crate) fn route_net_builds(&self) -> u32 {
+        self.route_net.borrow().builds()
     }
 
     /// What a change means for the caches beyond its revisions: the cities that must recheck
