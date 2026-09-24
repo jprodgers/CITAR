@@ -172,7 +172,7 @@ ports what the group checks. It rebuilds the skeleton of Python's answer from th
 with Rust calls, so a difference is never about sampling. A group without a module is reported as `not ported`.
 Three groups are synthetic rather than recorded: `uniques` (every unique text compiles, checked once per run),
 `state_echo` (the state reads back as it was written: a projection of the fixture's state, in Python's names, against
-the same projection built from the converted state's public reads) and `fixed_point` (the settle on load changes
+the same projection built from the loaded game's public reads) and `fixed_point` (the settle on load changes
 no explored tile and no contact). The `uniques` group reads `refcheck/uniques.json.gz`, how the Python engine read each unique
 text (`PYTHONHASHSEED=0 python scripts/refcheck/uniques_dump.py`; record it again after any change to `citar/data`),
 and compares it with what the Rust compiler made of the same text: type, parameters, locality, timer and modifiers.

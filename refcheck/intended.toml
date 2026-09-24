@@ -77,3 +77,10 @@ id = "vs-units-never-matches-a-city"
 reason = "Python's `vs [x] units` shared `vs [x]`'s test, so a city matched `[All]`, `[City]` or a city filter's word there; Rust asks it about units only"
 where = [{ group = "combat_previews", path = "fights[*].**" }]
 broad = true
+
+[[differences]]
+id = "civilians-at-zero-health"
+reason = "Python left a civilian that a ranged attack brought to 0 health on the map at 0, neither dead nor captured (combat.py:109, 806); no Rust unit is ever at 0, and one loaded at 0 keeps 1"
+where = [{ group = "state_echo", path = "units[*].hp" }]
+python = 0
+rust = 1

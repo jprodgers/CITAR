@@ -178,7 +178,7 @@ mod tests {
         use crate::compare::spec::CompareSpec;
         use crate::compare::{Options, compare};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let cx = Ctx { root: &root, fixture: None, converted: None };
+        let cx = Ctx { root: &root, fixture: None, game: None };
         let expected = Uniques.expected(&cx).expect("the recording").into_owned();
         let actual = Uniques.answer(&cx, &expected).expect("the answer");
         let spec = CompareSpec::for_group(Group::Uniques);

@@ -106,12 +106,13 @@ macro_rules! assert_not_sync {
 }
 
 // The premise of DESIGN.md 6.1: memos are built from `Cell` and `RefCell`, which are `Send` and
-// not `Sync`, so a `Game` built from them can move between threads but never be shared. `Game`
-// itself (1b-01) gets its own asserts here when it exists.
+// not `Sync`, so a `Game` built from them can move between threads but never be shared.
 assert_send!(core::cell::Cell<u64>);
 assert_not_sync!(core::cell::Cell<u64>);
 assert_send!(core::cell::RefCell<Vec<u64>>);
 assert_not_sync!(core::cell::RefCell<Vec<u64>>);
+assert_send!(game::Game);
+assert_not_sync!(game::Game);
 
 // A `State` is plain data: a snapshot of one moves to another thread to be saved off the lock
 // (DESIGN.md 4.9), and so does the `Game` that holds it.

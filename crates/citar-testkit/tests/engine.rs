@@ -5,6 +5,8 @@ mod engine {
     mod convert;
     mod eval;
     mod filters;
+    mod game;
+    mod game_eval;
     mod hex;
     mod kitchen_sink;
     mod rules;

@@ -1,12 +1,12 @@
 //! The `state_echo` group (DESIGN.md 9.2, package 1a-10): the fixture's own state, read back
-//! from the converted game.
+//! from the loaded game (`Game::from_python`, package 1b-01).
 //!
 //! The Python side is a projection of the recorded `GameState.to_dict()`: its settings, tiles,
 //! players, units, cities, diplomacy, world and history, in Python's vocabulary (names, tile
-//! indices, player ids). The Rust side builds the same projection from the converted [`State`]
-//! and [`Chronicle`] through their public reads and the ruleset's names, never through the
-//! converter's code, so a field the converter misreads, misplaces or misnames shows as a
-//! difference at its place.
+//! indices, player ids). The Rust side builds the same projection from the loaded game's
+//! [`State`] and [`Chronicle`] through their public reads and the ruleset's names, never through
+//! the converter's code, so a field the converter misreads, misplaces or misnames, or the settle
+//! on load changes, shows as a difference at its place.
 //!
 //! The projection is of everything the Rust state keeps from Python, in the form the design gives
 //! it (DESIGN.md 4.4-4.7): the settings (host keys included), the map and each tile's continent,
@@ -28,7 +28,7 @@ use citar_engine::base::ids::{
     CityStateTypeId, FeatureId, Id, PlayerId, QuestKindId, ReligionId, RuinId, TextId, TileIdx,
 };
 use citar_engine::base::sets::IdSet;
-use citar_engine::compat::python::Converted;
+use citar_engine::game::Game;
 use citar_engine::rules::defs::Route;
 use citar_engine::rules::{Named, Ruleset};
 use citar_engine::state::State;
@@ -62,8 +62,8 @@ impl AnswerModule for StateEcho {
     }
 
     fn answer(&self, cx: &Ctx<'_>, _expected: &Value) -> Result<Value, AnswerError> {
-        let c = cx.converted.ok_or_else(|| AnswerError::new("no converted state"))?;
-        Ok(rust(Ruleset::shared(), c))
+        let g = cx.game.ok_or_else(|| AnswerError::new("no loaded game"))?;
+        Ok(rust(Ruleset::shared(), g))
     }
 }
 
@@ -804,9 +804,9 @@ fn py_history(s: &Value) -> Value {
 
 // ---- The Rust side ------------------------------------------------------------------------------
 
-/// The projection of the converted game.
-pub fn rust(r: &Ruleset, c: &Converted) -> Value {
-    let st = &c.state;
+/// The projection of the loaded game.
+pub fn rust(r: &Ruleset, g: &Game) -> Value {
+    let st = g.state();
     let n = Names { r, st };
     let clock = st.clock();
     // Python's one counter for units, cities and camps; three counters that part show apart.
@@ -829,7 +829,7 @@ pub fn rust(r: &Ruleset, c: &Converted) -> Value {
         "cities": rs_cities(&n),
         "diplomacy": rs_diplomacy(&n),
         "world": rs_world(&n),
-        "history": rs_history(&n, &c.chronicle),
+        "history": rs_history(&n, g.chronicle()),
     })
 }
 
@@ -1602,7 +1602,6 @@ mod tests {
     use super::*;
     use crate::compare::spec::CompareSpec;
     use crate::compare::{Diff, Options, compare};
-    use citar_engine::compat::python::state_from_python;
 
     fn fixture_state(name: &str) -> Value {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -1612,14 +1611,14 @@ mod tests {
         doc["state"].take()
     }
 
-    /// The differences between the projection of `original` and the conversion of `changed`.
+    /// The differences between the projection of `original` and the loaded game of `changed`.
     fn echo(original: &Value, changed: &Value) -> Vec<Diff> {
         let r = Ruleset::shared();
-        let converted =
-            state_from_python(changed.to_string().as_bytes(), r).expect("the state converts");
+        let (game, _) =
+            Game::from_python(r, changed.to_string().as_bytes()).expect("the state loads");
         let spec = CompareSpec::for_group(Group::StateEcho);
         let opts = Options { with_bot: false, grid: None };
-        compare(&spec, &python(original), &rust(r, &converted), &opts)
+        compare(&spec, &python(original), &rust(r, &game), &opts)
     }
 
     fn paths(diffs: &[Diff]) -> Vec<String> {

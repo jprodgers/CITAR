@@ -9,15 +9,15 @@
 //! - [`uniques`] (package 1a-05), which compares the compiled ruleset once per run;
 //! - [`state_echo`] (package 1a-10), the fixture's own state read back from its conversion.
 //!
-//! Each fixture's state is converted once (`compat::python`, package 1a-10) and handed to every
-//! group in [`Ctx::converted`]; from 1b-01 the game loads through `Game::from_python`, whose
-//! queries take `&self`, so one load still serves every group.
+//! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
+//! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
+//! `&self`, so one load serves every group.
 
 use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
 
-use citar_engine::compat::python::Converted;
+use citar_engine::game::Game;
 use serde_json::Value;
 
 use crate::Group;
@@ -33,9 +33,8 @@ pub struct Ctx<'a> {
     pub root: &'a Path,
     /// The fixture, for a fixture-scope group; `None` for a run-scope group.
     pub fixture: Option<&'a Fixture>,
-    /// The fixture's state, converted: the state, its history and what the conversion dropped.
-    /// `None` for a run-scope group.
-    pub converted: Option<&'a Converted>,
+    /// The fixture's game, loaded: its state, history and caches. `None` for a run-scope group.
+    pub game: Option<&'a Game>,
 }
 
 /// Why an answer module produced no answer. Reported as an `error` difference at the root of the
