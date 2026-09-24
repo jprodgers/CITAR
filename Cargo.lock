@@ -185,6 +185,7 @@ dependencies = [
  "citar-engine",
  "citar-testkit",
  "criterion",
+ "serde_json",
 ]
 
 [[package]]
