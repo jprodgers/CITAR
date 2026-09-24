@@ -25,6 +25,7 @@
 
 use core::cell::{Cell, Ref, RefCell, RefMut};
 
+use crate::base::collections::LookupMap;
 use crate::base::ids::{CityId, Id, PlayerId, TileIdx, UnitId};
 use crate::base::sets::PlayerVec;
 use crate::base::stats::Stats;
@@ -57,8 +58,10 @@ impl Rev {
 /// The revisions of one civilization's inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CivRevs {
-    /// What its unique index is built from: techs, policies, era, temporary uniques, founder
-    /// beliefs, city-state bonuses, its seat, and the buildings of its cities (DESIGN.md 6.5).
+    /// What its unique index is built from (DESIGN.md 6.5, `economy.py:91-128`): techs,
+    /// policies, era, temporary uniques, its religion's founder beliefs, its seat, the buildings
+    /// of its cities, and its city-state bonuses: which city-states it has met, which are alive,
+    /// which it is allied with, and with which it stands at the friend level.
     pub index: Rev,
     /// Gold, culture, faith, golden age points and golden age turns.
     pub stocks: Rev,
@@ -76,9 +79,11 @@ pub struct CivRevs {
     pub cities: Rev,
     /// The buildings in its cities.
     pub buildings: Rev,
-    /// How far it has come with religion, and its religion's beliefs.
+    /// How far it has come with religion, its religion's beliefs, and the great prophets it has
+    /// earned.
     pub religion: Rev,
-    /// A city-state's own data: influence, ally, protectors, quests.
+    /// A city-state's own data: influence, ally, protectors, quests. No major's index moves
+    /// with it, only with a friend level that flips (`Game::set_influence`).
     pub city_state: Rev,
     /// Where its spies are and what they do.
     pub spies: Rev,
@@ -137,23 +142,25 @@ pub struct CityRevs {
     /// Its buildings, population, status (puppet, razing, resistance, health), queue, owner and
     /// tile.
     pub core: Rev,
+    /// Its buildings alone: what its local unique index is built from.
+    pub buildings: Rev,
     /// The tiles it owns and works, its specialists and focus.
     pub work: Rev,
     /// Stored food, culture and production.
     pub stocks: Rev,
-    /// Religious pressure and followers.
+    /// Religious pressure and followers, and whose holy city it is.
     pub religion: Rev,
 }
 
 impl CityRevs {
     const fn at(r: Rev) -> Self {
-        Self { core: r, work: r, stocks: r, religion: r }
+        Self { core: r, buildings: r, work: r, stocks: r, religion: r }
     }
 
     /// The latest of them all.
     #[must_use]
     pub fn max(&self) -> Rev {
-        self.core.max(self.work).max(self.stocks).max(self.religion)
+        self.core.max(self.buildings).max(self.work).max(self.stocks).max(self.religion)
     }
 }
 
@@ -247,7 +254,7 @@ impl TileChangeLog {
 
 /// Every revision a cache can read (DESIGN.md 6.3). Only `game::mutate` moves them, under
 /// `&mut Game`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Revs {
     now: Rev,
     /// What a tile yields or costs: terrain, features, resource, improvement, route, river,
@@ -269,19 +276,28 @@ pub struct Revs {
     pub cities: Rev,
     /// Any city's buildings, population or status.
     pub city_core: Rev,
+    /// Any city's buildings.
+    pub city_buildings: Rev,
+    /// Any city's religious pressure and followers, and which cities are holy.
+    pub city_religion: Rev,
     /// Where any unit stands, who owns it, and which exist.
     pub unit_pos: Rev,
     /// Any unit's promotions, health or status.
     pub units_core: Rev,
-    /// Relations: war, contact, treaties, open borders, friendships, deals.
+    /// The relations the diplomatic conditionals read: war, contact, declared friendships,
+    /// pacts, open borders; and deals, which trade resources. Who is alive, since the dead are
+    /// at war with no one (`game.py:673-675`).
     pub diplo: Rev,
-    /// Negotiations and opinions, which no rule cache reads.
+    /// A city-state's influence with any major, which decides who counts it a friend.
+    pub influence: Rev,
+    /// Negotiations, opinions, and the bookkeeping of relations (treaty terms, research
+    /// agreements, embassies, denouncements), which no rule cache reads.
     pub talks: Rev,
     /// Which city-state is allied with whom.
     pub alliances: Rev,
-    /// Any civilization's policies (and the rest of its index).
+    /// The policies any civilization has adopted.
     pub policies: Rev,
-    /// The founded religions and their beliefs.
+    /// The founded religions, their beliefs, and who founded which.
     pub religions: Rev,
     /// The world wonders built.
     pub wonders: Rev,
@@ -289,13 +305,20 @@ pub struct Revs {
     pub world: Rev,
     /// A civilization's, leader's or city's name.
     pub names: Rev,
-    /// The turn, and whose turn it is.
+    /// The turn number.
     pub turn: Rev,
+    /// The rest of the clock: whose turn it is, whether it began, the phase and the winner.
+    /// Nothing derived reads it.
+    pub clock: Rev,
     /// The settings.
     pub config: Rev,
     civ: PlayerVec<CivRevs>,
-    city: crate::base::ids::IdVec<CityId, CityRevs>,
-    unit: crate::base::ids::IdVec<UnitId, UnitRevs>,
+    /// Cities and units by id, sparse: an id may be as large as `store::MAX_ENTITY_ID`, and one
+    /// such id in a save must not grow a table to hundreds of megabytes (DESIGN.md 4.8). An id
+    /// never written reads as `floor`. A removed entity keeps its entry, so a memo still keyed
+    /// by it validates against its removal.
+    city: LookupMap<CityId, CityRevs>,
+    unit: LookupMap<UnitId, UnitRevs>,
     /// Where every input started: what a city or unit never written since reads as.
     floor: Rev,
 }
@@ -328,9 +351,12 @@ impl Revs {
             worked: s,
             cities: s,
             city_core: s,
+            city_buildings: s,
+            city_religion: s,
             unit_pos: s,
             units_core: s,
             diplo: s,
+            influence: s,
             talks: s,
             alliances: s,
             policies: s,
@@ -339,10 +365,11 @@ impl Revs {
             world: s,
             names: s,
             turn: s,
+            clock: s,
             config: s,
             civ: st.players().ids().map(|_| CivRevs::at(s)).collect(),
-            city: crate::base::ids::IdVec::new(),
-            unit: crate::base::ids::IdVec::new(),
+            city: LookupMap::new(),
+            unit: LookupMap::new(),
             floor: s,
         }
     }
@@ -389,10 +416,11 @@ impl Revs {
     /// A city's revisions; a city never written since the game was built reads as untouched.
     #[must_use]
     pub fn city(&self, c: CityId) -> CityRevs {
-        let r = self.city.get(c).copied().unwrap_or_default();
+        let r = self.city.get(&c).copied().unwrap_or_default();
         let f = self.floor;
         CityRevs {
             core: r.core.max(f),
+            buildings: r.buildings.max(f),
             work: r.work.max(f),
             stocks: r.stocks.max(f),
             religion: r.religion.max(f),
@@ -402,7 +430,7 @@ impl Revs {
     /// A unit's revisions; a unit never written since the game was built reads as untouched.
     #[must_use]
     pub fn unit(&self, u: UnitId) -> UnitRevs {
-        let r = self.unit.get(u).copied().unwrap_or_default();
+        let r = self.unit.get(&u).copied().unwrap_or_default();
         let f = self.floor;
         UnitRevs { core: r.core.max(f), moves: r.moves.max(f), place: r.place.max(f) }
     }
@@ -424,20 +452,27 @@ impl Revs {
                 CondDeps::HAPPINESS_SEEN => civ.map_or(Rev::START, |c| c.happiness_seen),
                 CondDeps::STOCKS | CondDeps::GOLDEN_AGE => civ.map_or(Rev::START, |c| c.stocks),
                 CondDeps::RESOURCES => civ.map_or(Rev::START, |c| self.resource_inputs(&c)),
-                CondDeps::WAR => self.diplo,
+                // The leaves that read a city-state's influence (friendly civilizations and
+                // land) read every class, WAR among them.
+                CondDeps::WAR => self.diplo.max(self.influence),
                 CondDeps::ERA | CondDeps::TECHS | CondDeps::POLICIES => {
                     civ.map_or(Rev::START, |c| c.index)
                 }
                 CondDeps::RESEARCH_QUEUE => civ.map_or(Rev::START, |c| c.research),
-                CondDeps::RELIGION_STATE => {
-                    self.religions.max(civ.map_or(Rev::START, |c| c.religion.max(c.index)))
-                }
+                // A city filter over the civilization's cities reads their majority religion.
+                CondDeps::RELIGION_STATE => self
+                    .religions
+                    .max(self.city_religion)
+                    .max(civ.map_or(Rev::START, |c| c.religion.max(c.index))),
                 CondDeps::CIV_BUILDINGS => {
                     civ.map_or(Rev::START, |c| c.buildings.max(c.cities)).max(self.cities)
                 }
-                CondDeps::GLOBAL_BUILDINGS => self.city_core.max(self.cities),
-                CondDeps::GLOBAL_POLICIES => self.policies,
-                CondDeps::CITY_COUNT => self.cities.max(self.city_core),
+                CondDeps::GLOBAL_BUILDINGS => self.city_buildings.max(self.cities),
+                // Beliefs count as adopted (`no-civ-adopted-counts-beliefs`): a civilization's
+                // are its religion's.
+                CondDeps::GLOBAL_POLICIES => self.policies.max(self.religions),
+                // What a city filter reads of the cities counted, their religion included.
+                CondDeps::CITY_COUNT => self.cities.max(self.city_core).max(self.city_religion),
                 CondDeps::UNIT_SET => self.unit_pos.max(self.units_core),
                 CondDeps::SEAT => civ.map_or(Rev::START, |c| c.seat),
                 CondDeps::CONFIG => self.config,
@@ -529,11 +564,31 @@ impl Revs {
     }
 
     fn city_mut(&mut self, c: CityId) -> &mut CityRevs {
-        self.city.ensure(c)
+        self.city.get_or_insert_with(c, CityRevs::default)
     }
 
     fn unit_mut(&mut self, u: UnitId) -> &mut UnitRevs {
-        self.unit.ensure(u)
+        self.unit.get_or_insert_with(u, UnitRevs::default)
+    }
+
+    /// Moves the unique index of every civilization.
+    fn every_index(&mut self, r: Rev) {
+        for (_, c) in self.civ.iter_mut() {
+            c.index = r;
+        }
+    }
+
+    /// Moves the unique indexes of `a` and `b` if either is a city-state: its bonuses in the
+    /// other's index depend on contact, war and whether it lives (`city_states.py:160-173`).
+    fn city_state_bonus(&mut self, st: &State, a: PlayerId, b: PlayerId, r: Rev) {
+        let cs = |p| st.player(p).is_some_and(crate::state::players::Player::is_city_state);
+        if cs(a) || cs(b) {
+            for p in [a, b] {
+                if let Some(c) = self.civ_mut(p) {
+                    c.index = r;
+                }
+            }
+        }
     }
 
     fn at_tile(v: &mut [Rev], t: TileIdx, r: Rev) {
@@ -605,7 +660,16 @@ impl Revs {
                 self.owners = r;
                 self.worked = r;
             }
-            Change::Diplo { .. } | Change::Met { .. } => self.diplo = r,
+            Change::War { a, b } => {
+                self.diplo = r;
+                self.city_state_bonus(st, a, b, r);
+            }
+            Change::Met { a, b } => {
+                self.diplo = r;
+                self.city_state_bonus(st, a, b, r);
+            }
+            Change::Diplo { .. } => self.diplo = r,
+            Change::Talks { .. } => self.talks = r,
             Change::Alliance { cs, old, new } => {
                 self.alliances = r;
                 if let Some(c) = self.civ_mut(cs) {
@@ -616,7 +680,6 @@ impl Revs {
                         c.index = r;
                     }
                 }
-                self.policies = r;
             }
             Change::Spy(p) => {
                 if let Some(c) = self.civ_mut(p) {
@@ -628,7 +691,6 @@ impl Revs {
                     c.seat = r;
                     c.index = r;
                 }
-                self.policies = r;
             }
             Change::PlayerAlive(p) => {
                 if let Some(c) = self.civ_mut(p) {
@@ -637,8 +699,16 @@ impl Revs {
                 self.cities = r;
                 self.policies = r;
                 self.names = r;
+                // The dead are at war with no one (`game.py:673-675`), though their relations
+                // keep the flag (`victory.py:381-400`).
+                self.diplo = r;
+                // A living city-state's bonuses are in the indexes of the majors that met it.
+                if st.player(p).is_some_and(crate::state::players::Player::is_city_state) {
+                    self.every_index(r);
+                }
             }
             Change::Turn => self.turn = r,
+            Change::Clock => self.clock = r,
             Change::Names => self.names = r,
         }
     }
@@ -649,9 +719,10 @@ impl Revs {
         *self.city_mut(c) = CityRevs::at(r);
         self.cities = r;
         self.city_core = r;
+        self.city_buildings = r;
+        self.city_religion = r;
         self.worked = r;
         self.names = r;
-        self.policies = r;
         for p in owners {
             if let Some(x) = self.civ_mut(p) {
                 x.cities = r;
@@ -664,10 +735,14 @@ impl Revs {
     /// A touch of a city's fields (DESIGN.md 6.4).
     pub(crate) fn touch_city(&mut self, c: CityId, owner: PlayerId, t: CityTouch) {
         let r = self.next();
-        if t.contains(CityTouch::CORE) {
+        if t.intersects(CityTouch::CORE | CityTouch::BUILDINGS) {
             self.city_mut(c).core = r;
             self.city_core = r;
-            self.policies = r;
+        }
+        if t.contains(CityTouch::BUILDINGS) {
+            // Its non-local buildings are in its owner's index (`economy.py:103-108`).
+            self.city_mut(c).buildings = r;
+            self.city_buildings = r;
             if let Some(x) = self.civ_mut(owner) {
                 x.buildings = r;
                 x.index = r;
@@ -682,6 +757,7 @@ impl Revs {
         }
         if t.contains(CityTouch::RELIGION) {
             self.city_mut(c).religion = r;
+            self.city_religion = r;
         }
         if t.contains(CityTouch::NAME) {
             self.names = r;
@@ -692,19 +768,15 @@ impl Revs {
     pub(crate) fn touch_player(&mut self, p: PlayerId, t: PlayerTouch) {
         let r = self.next();
         if t.contains(PlayerTouch::CITY_STATE) {
-            // A city-state's influence decides which majors get its friend and ally bonuses,
-            // which are in their unique indexes.
-            for (_, c) in self.civ.iter_mut() {
-                c.index = r;
-            }
-            self.alliances = r;
+            // Influence moves every turn; a major's index moves only when its friend level
+            // flips, which `Game::set_influence` sees.
+            self.influence = r;
+        }
+        if t.contains(PlayerTouch::POLICIES) {
             self.policies = r;
         }
         if t.contains(PlayerTouch::RELIGION) {
             self.religions = r;
-        }
-        if t.intersects(PlayerTouch::INDEX) {
-            self.policies = r;
         }
         if t.contains(PlayerTouch::NAME) {
             self.names = r;
@@ -713,8 +785,9 @@ impl Revs {
             self.cities = r;
         }
         let Some(c) = self.civ_mut(p) else { return };
+        // Its religion's founder beliefs are in its index (`economy.py:124-128`).
         let fields: [(PlayerTouch, &mut Rev); 9] = [
-            (PlayerTouch::INDEX, &mut c.index),
+            (PlayerTouch::INDEX | PlayerTouch::POLICIES | PlayerTouch::RELIGION, &mut c.index),
             (PlayerTouch::STOCKS, &mut c.stocks),
             (PlayerTouch::RESEARCH, &mut c.research),
             (PlayerTouch::HAPPINESS_SEEN, &mut c.happiness_seen),
@@ -724,8 +797,8 @@ impl Revs {
             (PlayerTouch::RELIGION, &mut c.religion),
             (PlayerTouch::CAPITAL, &mut c.cities),
         ];
-        for (flag, rev) in fields {
-            if t.contains(flag) {
+        for (flags, rev) in fields {
+            if t.intersects(flags) {
                 *rev = r;
             }
         }
@@ -747,13 +820,13 @@ impl Revs {
     pub(crate) fn touch_world(&mut self, t: WorldTouch) {
         let r = self.next();
         if t.contains(WorldTouch::RELIGIONS) {
-            // Founder beliefs are in their founder's index.
+            // Founder beliefs are in their founder's index, and the touch does not say whose
+            // religion changed; religions are founded and enhanced a handful of times a game.
             self.religions = r;
             for (_, c) in self.civ.iter_mut() {
                 c.index = r;
                 c.religion = r;
             }
-            self.policies = r;
         }
         if t.contains(WorldTouch::WONDERS) {
             self.wonders = r;
@@ -797,17 +870,21 @@ fn rel_city(st: &State, ctx: &Ctx) -> Option<CityId> {
 // ---- Touches ----------------------------------------------------------------------------------
 
 bitflags::bitflags! {
-    /// What a touch of a city's fields changes (DESIGN.md 6.4). `CORE` and `WORK` flag the city
-    /// for a citizen recheck.
+    /// What a touch of a city's fields changes (DESIGN.md 6.4). `CORE`, `BUILDINGS` and `WORK`
+    /// flag the city for a citizen recheck.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct CityTouch: u8 {
-        /// Buildings, population, status, queue, health.
+        /// Population, status (puppet, razing, resistance), queue, health: what a city filter
+        /// reads of it. Its owner's index does not move.
         const CORE = 1 << 0;
+        /// Its buildings: what its local index and its owner's index are built from. Implies
+        /// `CORE`.
+        const BUILDINGS = 1 << 5;
         /// Worked and locked tiles, specialists, focus.
         const WORK = 1 << 1;
         /// Stored food, culture, production progress.
         const STOCKS = 1 << 2;
-        /// Religious pressure and followers.
+        /// Religious pressure and followers, and whose holy city it is (`holy_city_of`).
         const RELIGION = 1 << 3;
         /// Its name, which the event name index reads.
         const NAME = 1 << 4;
@@ -818,8 +895,11 @@ bitflags::bitflags! {
     /// What a touch of a player's fields changes (DESIGN.md 6.4).
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct PlayerTouch: u16 {
-        /// What its unique index is built from: techs, policies, era, temporary uniques.
+        /// What its unique index is built from besides policies: techs, era, temporary uniques.
         const INDEX = 1 << 0;
+        /// Its adopted branches and policies: its index, and what every civilization has
+        /// adopted.
+        const POLICIES = 1 << 11;
         /// Gold, culture, faith, golden age points and turns.
         const STOCKS = 1 << 1;
         /// The research queue, goal and progress.
@@ -830,15 +910,21 @@ bitflags::bitflags! {
         const GOLD_RATE = 1 << 4;
         /// Its name or its leader's, which the event name index reads.
         const NAME = 1 << 5;
-        /// A city-state's influence, quests and the rest of its data.
+        /// A city-state's influence, protectors, quests and the rest of its data. It moves no
+        /// major's index: influence that may flip a major's friend level changes through
+        /// `Game::set_influence`, which moves that major's index when it does, and the ally
+        /// through `Game::set_ally`.
         const CITY_STATE = 1 << 6;
         /// Its spies.
         const SPIES = 1 << 7;
-        /// How far it has come with religion.
+        /// How far it has come with religion (progress, the religion it founded, its pantheon)
+        /// and the great prophets it has earned: its index (founder beliefs) too.
         const RELIGION = 1 << 8;
         /// Its capital.
         const CAPITAL = 1 << 9;
-        /// Anything else: notes, history, great people, counters, which no cache reads.
+        /// Anything else: notes, history, great person points and counts, counters, which no
+        /// cache reads. Not the great prophets earned, which religion conditionals read: those
+        /// are `RELIGION`.
         const OTHER = 1 << 10;
     }
 }

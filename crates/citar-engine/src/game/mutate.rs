@@ -327,10 +327,37 @@ impl Game {
         Ok(())
     }
 
-    /// Sets the clock.
+    /// Sets the clock: a [`Change::Turn`] only when the turn number moves.
     pub(crate) fn set_clock(&mut self, clock: TurnClock) {
         let ch = self.st.set_clock(clock);
         self.changed(ch);
+    }
+
+    /// Sets a major's influence with a city-state. Influence moves every turn, so it moves no
+    /// major's unique index, except the one whose friend level it flips: the friend bonuses are
+    /// in the index (`city_states.bonus_umaps`, `city_states.py:160-173`). Every write of
+    /// influence goes through here; a `CITY_STATE` touch that wrote it would leave that index
+    /// stale, which the cache oracle reports.
+    pub(crate) fn set_influence(
+        &mut self,
+        cs: PlayerId,
+        major: PlayerId,
+        value: f64,
+    ) -> Result<(), StateError> {
+        let was = self.is_friend_level(cs, major);
+        let slot = self
+            .st
+            .players_mut()
+            .get_mut(cs)
+            .and_then(|p| p.city_state.as_deref_mut())
+            .and_then(|d| d.influence.get_mut(major))
+            .ok_or(StateError::NoSuchPlayer(cs))?;
+        *slot = value;
+        self.dv.revs.touch_player(cs, PlayerTouch::CITY_STATE);
+        if self.is_friend_level(cs, major) != was {
+            self.dv.revs.touch_player(major, PlayerTouch::INDEX);
+        }
+        Ok(())
     }
 
     // ---- Relations --------------------------------------------------------------------------
@@ -356,12 +383,13 @@ impl Game {
 
     // ---- Touches ----------------------------------------------------------------------------
 
-    /// A city's fields, after moving the revisions `t` names (DESIGN.md 6.4). `CORE` and `WORK`
-    /// flag the city for a citizen recheck. `None` if there is no such city.
+    /// A city's fields, after moving the revisions `t` names (DESIGN.md 6.4). `CORE`,
+    /// `BUILDINGS` and `WORK` flag the city for a citizen recheck. `None` if there is no such
+    /// city.
     pub(crate) fn city_mut(&mut self, c: CityId, t: CityTouch) -> Option<&mut City> {
         let owner = self.st.cities().get(c)?.owner();
         self.dv.revs.touch_city(c, owner, t);
-        if t.intersects(CityTouch::CORE | CityTouch::WORK) {
+        if t.intersects(CityTouch::CORE | CityTouch::BUILDINGS | CityTouch::WORK) {
             self.pending.flag_city(c);
         }
         self.st.cities_mut().get_mut(c)
@@ -402,7 +430,10 @@ impl Game {
     }
 
     /// Edits the settings. Nearly every cache reads them, so every cache starts cold again: a
-    /// settings edit is a scenario's, never a turn's.
+    /// settings edit is a scenario's, never a turn's. What follows from them does too: yields
+    /// and citizen weights read the difficulty, the speed and the rules switched on, so every
+    /// city rechecks its citizens and every player's sight is brought up to date at the next
+    /// settle, as a seat change does for one player.
     pub(crate) fn edit_config(&mut self, f: impl FnOnce(&mut GameConfig)) {
         f(self.st.config_mut());
         let now = self.dv.revs.now();
@@ -410,6 +441,12 @@ impl Game {
         // Revisions never go back: a host's ETag, and anything keyed on a revision, must see
         // every input move on.
         self.dv.revs = super::derive::rev::Revs::after(&self.st, now);
+        for c in self.st.cities().ids() {
+            self.pending.flag_city(c);
+        }
+        for p in self.st.players().ids() {
+            self.pending.flag_sight(SightSource::Civ(p));
+        }
     }
 }
 
@@ -458,15 +495,21 @@ mod tests {
     }
 
     #[test]
-    fn a_touch_flags_the_city_and_moves_its_owners_index() -> Result<(), StateError> {
+    fn a_touch_flags_the_city_and_only_buildings_move_its_owners_index() -> Result<(), StateError> {
         let mut g = testing::duel();
         g.add_city(City::new(cid(1), "Roma".into(), PlayerId(0), TileIdx(22), 1))?;
         g.pending = super::super::pending::PendingWork::new();
-        let before = g.dv.revs.civ(PlayerId(0)).index;
+        let before = g.dv.revs.civ(PlayerId(0));
         if let Some(c) = g.city_mut(cid(1), CityTouch::CORE) {
             c.pop = 3;
         }
-        assert!(g.dv.revs.civ(PlayerId(0)).index > before);
+        assert_eq!(g.dv.revs.civ(PlayerId(0)), before, "growth is not in the index");
+        assert_eq!(g.pending.take_recheck(), [cid(1)]);
+        let core = g.dv.revs.city(cid(1)).core;
+        g.city_mut(cid(1), CityTouch::BUILDINGS);
+        let after = g.dv.revs.civ(PlayerId(0));
+        assert!(after.index > before.index && after.buildings > before.buildings);
+        assert!(g.dv.revs.city(cid(1)).core > core, "buildings imply core");
         assert_eq!(g.pending.take_recheck(), [cid(1)]);
         assert!(g.city_mut(cid(9), CityTouch::CORE).is_none());
         Ok(())
@@ -499,11 +542,15 @@ mod tests {
             tile: Some(TileIdx(22)),
             ..Ctx::default()
         };
+        fn next_turn(g: &mut Game) {
+            let clock = *g.st.clock();
+            g.set_clock(TurnClock { turn: clock.turn + 1, ..clock });
+        }
         // Each class, with a write that must move it.
         type Write = Box<dyn Fn(&mut Game)>;
         let cases: Vec<(CondDeps, Ctx, Write)> = vec![
-            (CondDeps::TURN, Ctx::civ(p), Box::new(|g| g.set_clock(*g.st.clock()))),
-            (CondDeps::CHANCE, Ctx::civ(p), Box::new(|g| g.set_clock(*g.st.clock()))),
+            (CondDeps::TURN, Ctx::civ(p), Box::new(next_turn)),
+            (CondDeps::CHANCE, Ctx::civ(p), Box::new(next_turn)),
             (
                 CondDeps::HAPPINESS_SEEN,
                 Ctx::civ(p),
@@ -575,24 +622,38 @@ mod tests {
                 }),
             ),
             (
+                CondDeps::RELIGION_STATE,
+                Ctx::civ(p),
+                Box::new(|g| {
+                    g.city_mut(CityId::FIRST, CityTouch::RELIGION);
+                }),
+            ),
+            (
                 CondDeps::CIV_BUILDINGS,
                 Ctx::civ(p),
                 Box::new(|g| {
-                    g.city_mut(CityId::FIRST, CityTouch::CORE);
+                    g.city_mut(CityId::FIRST, CityTouch::BUILDINGS);
                 }),
             ),
             (
                 CondDeps::GLOBAL_BUILDINGS,
                 Ctx::civ(p),
                 Box::new(|g| {
-                    g.city_mut(CityId::FIRST, CityTouch::CORE);
+                    g.city_mut(CityId::FIRST, CityTouch::BUILDINGS);
                 }),
             ),
             (
                 CondDeps::GLOBAL_POLICIES,
                 Ctx::civ(p),
                 Box::new(|g| {
-                    g.player_mut(PlayerId(1), PlayerTouch::INDEX);
+                    g.player_mut(PlayerId(1), PlayerTouch::POLICIES);
+                }),
+            ),
+            (
+                CondDeps::GLOBAL_POLICIES,
+                Ctx::civ(p),
+                Box::new(|g| {
+                    g.player_mut(PlayerId(1), PlayerTouch::RELIGION);
                 }),
             ),
             (
@@ -600,6 +661,20 @@ mod tests {
                 Ctx::civ(p),
                 Box::new(|g| {
                     g.player_mut(PlayerId(1), PlayerTouch::CAPITAL);
+                }),
+            ),
+            (
+                CondDeps::CITY_COUNT,
+                Ctx::civ(p),
+                Box::new(|g| {
+                    g.city_mut(CityId::FIRST, CityTouch::RELIGION);
+                }),
+            ),
+            (
+                CondDeps::CITY_COUNT,
+                Ctx::civ(p),
+                Box::new(|g| {
+                    g.city_mut(CityId::FIRST, CityTouch::CORE);
                 }),
             ),
             (
@@ -659,12 +734,31 @@ mod tests {
                     g.city_mut(CityId::FIRST, CityTouch::WORK);
                 }),
             ),
+            // Influence, which the friendly civilization and land leaves read (with every
+            // class), even another major's and below the friend level.
+            (
+                CondDeps::WAR,
+                Ctx::civ(p),
+                Box::new(|g| {
+                    let _ok = g.set_influence(PlayerId(2), PlayerId(1), 5.0);
+                }),
+            ),
+            // Last: Greece, at war with Rome since the WAR case, dies, and the dead are at war
+            // with no one (`game.py:673-675`).
+            (
+                CondDeps::WAR,
+                Ctx::civ(p),
+                Box::new(|g| {
+                    let _ok = g.kill_player(PlayerId(1));
+                    assert!(!g.is_at_war_any(PlayerId(0)));
+                }),
+            ),
         ];
-        for (class, ctx, write) in &cases {
+        for (i, (class, ctx, write)) in cases.iter().enumerate() {
             let before = g.dv.revs.cond(&g.st, *class, ctx);
             write(&mut g);
             let after = g.dv.revs.cond(&g.st, *class, ctx);
-            assert!(after > before, "{class:?} did not move");
+            assert!(after > before, "case {i}: {class:?} did not move");
         }
         // Every class is covered, and the two halves partition them.
         let covered = cases.iter().fold(CondDeps::COMBAT, |d, (c, _, _)| d | *c);
@@ -688,6 +782,103 @@ mod tests {
         // No civilization in context: the classes about it cannot move.
         assert_eq!(g.dv.revs.cond(&g.st, CondDeps::STOCKS, &Ctx::default()), Rev::START);
         Ok(())
+    }
+
+    #[test]
+    fn what_moves_every_turn_leaves_the_indexes_alone() -> Result<(), StateError> {
+        let mut g = testing::duel();
+        let (rome, greece, geneva) = (PlayerId(0), PlayerId(1), PlayerId(2));
+        let roma = testing::city(&mut g, rome, TileIdx(22), "Roma");
+        g.update_relation(rome, geneva, |r| r.met = true)?;
+        let indexes = CondDeps::TECHS
+            | CondDeps::POLICIES
+            | CondDeps::ERA
+            | CondDeps::GLOBAL_POLICIES
+            | CondDeps::CIV_BUILDINGS
+            | CondDeps::GLOBAL_BUILDINGS;
+        let read = |g: &Game, d: CondDeps, p: PlayerId| g.dv.revs.cond(&g.st, d, &Ctx::civ(p));
+        let before = (read(&g, indexes, rome), read(&g, indexes, greece));
+        let war = read(&g, CondDeps::WAR, rome);
+        let turn = read(&g, CondDeps::TURN, rome);
+        // Growth, a queue edit, a heal: not the buildings.
+        if let Some(c) = g.city_mut(roma, CityTouch::CORE) {
+            c.pop += 1;
+        }
+        // Whose turn it is, and a research agreement's science.
+        let clock = *g.st.clock();
+        g.set_clock(TurnClock { current: greece, turn_started: true, ..clock });
+        g.update_relation(rome, greece, |r| r.ra_science[0] += 3)?;
+        assert_eq!(read(&g, CondDeps::TURN, rome), turn);
+        assert_eq!(read(&g, CondDeps::WAR, rome), war);
+        // Influence below the friend level, whoever's.
+        g.set_influence(geneva, rome, 10.0)?;
+        g.set_influence(geneva, greece, 20.0)?;
+        assert!(read(&g, CondDeps::WAR, rome) > war, "the friendly leaves read influence");
+        assert_eq!((read(&g, indexes, rome), read(&g, indexes, greece)), before);
+        // A tech is Rome's alone; a policy is what every civilization has adopted too.
+        g.player_mut(rome, PlayerTouch::INDEX);
+        assert!(read(&g, CondDeps::TECHS, rome) > before.0);
+        assert_eq!(read(&g, indexes, greece), before.1);
+        g.player_mut(rome, PlayerTouch::POLICIES);
+        assert!(read(&g, CondDeps::GLOBAL_POLICIES, greece) > before.1);
+        // Crossing the friend level moves that major's index, and no other's.
+        let (techs, greek) = (read(&g, CondDeps::TECHS, rome), read(&g, CondDeps::TECHS, greece));
+        g.set_influence(geneva, rome, 35.0)?;
+        assert!(g.is_friend_level(geneva, rome));
+        assert!(read(&g, CondDeps::TECHS, rome) > techs);
+        assert_eq!(read(&g, CondDeps::TECHS, greece), greek);
+        // So does war with the city-state, which puts influence at its floor.
+        let techs = read(&g, CondDeps::TECHS, rome);
+        g.update_relation(rome, geneva, |r| r.war = true)?;
+        assert!(!g.is_friend_level(geneva, rome));
+        assert!(read(&g, CondDeps::TECHS, rome) > techs);
+        assert!(g.set_influence(rome, greece, 1.0).is_err(), "Rome is no city-state");
+        Ok(())
+    }
+
+    #[test]
+    fn a_city_state_met_or_dead_moves_the_indexes_its_bonuses_are_in() -> Result<(), StateError> {
+        let mut g = testing::duel();
+        let (rome, greece, geneva) = (PlayerId(0), PlayerId(1), PlayerId(2));
+        let techs = |g: &Game, p: PlayerId| g.dv.revs.cond(&g.st, CondDeps::TECHS, &Ctx::civ(p));
+        let before = techs(&g, greece);
+        g.set_met(rome, greece)?;
+        assert_eq!(techs(&g, greece), before, "two majors meeting moves no index");
+        let before = techs(&g, rome);
+        g.set_met(rome, geneva)?;
+        assert!(techs(&g, rome) > before);
+        let before = (techs(&g, rome), techs(&g, greece));
+        g.kill_player(geneva)?;
+        assert!(techs(&g, rome) > before.0 && techs(&g, greece) > before.1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_settings_edit_rechecks_every_city_and_all_sight() {
+        let mut g = testing::duel();
+        let roma = testing::city(&mut g, PlayerId(0), TileIdx(22), "Roma");
+        let athens = testing::city(&mut g, PlayerId(1), TileIdx(28), "Athens");
+        g.settle();
+        g.edit_config(|c| c.religion = !c.religion);
+        assert_eq!(g.pending.take_recheck(), [roma, athens]);
+        let sight = g.pending.take_sight();
+        let civs: Vec<_> = g.st.players().ids().map(SightSource::Civ).collect();
+        assert_eq!(sight, civs);
+        g.settle();
+        assert_eq!(g.take_violations(), []);
+    }
+
+    #[test]
+    fn revisions_of_a_huge_id_take_one_entry() {
+        let mut g = testing::duel();
+        let far = UnitId::new(crate::state::store::MAX_ENTITY_ID).unwrap_or(UnitId::FIRST);
+        let before = g.dv.revs.unit(far).max();
+        g.dv.revs.touch_unit(far, UnitTouch::CORE);
+        assert!(g.dv.revs.unit(far).max() > before);
+        assert_eq!(g.dv.revs.unit(UnitId::FIRST).max(), before, "an untouched id reads the floor");
+        let far = CityId::new(crate::state::store::MAX_ENTITY_ID).unwrap_or(CityId::FIRST);
+        g.dv.revs.touch_city(far, PlayerId(0), CityTouch::STOCKS);
+        assert!(g.dv.revs.city(far).stocks > before);
     }
 
     #[test]

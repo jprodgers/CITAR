@@ -913,8 +913,9 @@ impl Diplomacy {
     }
 
     /// Edits the relation of `a` and `b`, then brings the masks in line. The changes say what
-    /// moved: [`Change::Met`] if contact changed, [`Change::Diplo`] if anything else did, nothing
-    /// if nothing did.
+    /// moved: [`Change::Met`] if contact changed; then, for the rest, [`Change::War`] if war
+    /// broke out or ended, else [`Change::Diplo`] if a friendship, a pact or open borders
+    /// changed, else [`Change::Talks`] if anything else did; nothing if nothing did.
     pub fn update(
         &mut self,
         a: PlayerId,
@@ -930,9 +931,14 @@ impl Diplomacy {
         if before.met != after.met {
             out.push(Change::Met { a, b });
         }
+        let terms = |r: &Relation| (r.friendship_until, r.pact_until, r.open_borders_until);
         let rest_before = Relation { met: after.met, ..before };
-        if rest_before != after {
+        if before.war != after.war {
+            out.push(Change::War { a, b });
+        } else if terms(&before) != terms(&after) {
             out.push(Change::Diplo { a, b });
+        } else if rest_before != after {
+            out.push(Change::Talks { a, b });
         }
         Ok(out)
     }
@@ -1012,8 +1018,25 @@ mod tests {
         assert!(!d.at_war(a, a) && d.has_met(a, a));
         assert_eq!(d.meet(a, b)?.as_slice(), &[Change::Met { a, b }]);
         assert!(d.meet(a, b)?.is_empty());
-        assert_eq!(d.update(b, a, |r| r.war = true)?.as_slice(), &[Change::Diplo { a: b, b: a }]);
+        assert_eq!(d.update(b, a, |r| r.war = true)?.as_slice(), &[Change::War { a: b, b: a }]);
         assert!(d.at_war(a, b) && d.at_war(b, a) && d.has_met(b, a));
+        // A friendship is a term the conditionals read; a research agreement is bookkeeping.
+        assert_eq!(
+            d.update(a, b, |r| r.friendship_until = 30)?.as_slice(),
+            &[Change::Diplo { a, b }]
+        );
+        assert_eq!(d.update(a, b, |r| r.ra_science[0] += 5)?.as_slice(), &[Change::Talks { a, b }]);
+        assert!(d.update(a, b, |_| {})?.is_empty());
+        // War with everything else that came with it is one War.
+        assert_eq!(
+            d.update(a, b, |r| {
+                r.war = false;
+                r.treaty_until = 40;
+                r.open_borders_until = [0, 0];
+            })?
+            .as_slice(),
+            &[Change::War { a, b }]
+        );
         assert_eq!(d.update(a, a, |_| {}), Err(PairError::NotAPair(a, a)));
         assert_eq!(d.update(a, PlayerId(4), |_| {}), Err(PairError::NotAPair(a, PlayerId(4))));
         assert_eq!(d.verify(), Ok(()));

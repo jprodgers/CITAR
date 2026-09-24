@@ -637,11 +637,13 @@ impl State {
         self.players.get_mut(p).ok_or(StateError::NoSuchPlayer(p))
     }
 
-    /// Sets the clock. The turn and whose turn it is feed the conditionals, so it always reports
-    /// [`Change::Turn`].
+    /// Sets the clock. It reports [`Change::Turn`] when the turn number moved, which the
+    /// conditionals read, and [`Change::Clock`] otherwise: whose turn it is changes about twice
+    /// per player per round, and nothing derived reads it.
     pub fn set_clock(&mut self, clock: TurnClock) -> Change {
+        let turn = self.clock.turn != clock.turn;
         self.clock = clock;
-        Change::Turn
+        if turn { Change::Turn } else { Change::Clock }
     }
 
     /// Hands a city, and the tiles it owns, to another player (`conquest.py:60-80`). If it was

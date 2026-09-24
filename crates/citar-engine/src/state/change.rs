@@ -110,8 +110,25 @@ pub enum Change {
         /// Its owner now.
         new: PlayerId,
     },
-    /// A relation between two players changed: war, a treaty, an embassy, open borders.
+    /// War broke out between two players, or ended, with whatever else changed in their relation
+    /// at the same time. It decides which units blockade whose tiles (`cities.py:185-190`).
+    War {
+        /// One side.
+        a: PlayerId,
+        /// The other side.
+        b: PlayerId,
+    },
+    /// A term of a relation the diplomatic conditionals read changed, and war did not: a
+    /// declared friendship, a defensive pact, open borders.
     Diplo {
+        /// One side.
+        a: PlayerId,
+        /// The other side.
+        b: PlayerId,
+    },
+    /// Only the bookkeeping of a relation changed, which no cache reads: a peace treaty's term,
+    /// a research agreement and the science put into it, embassies, denouncements.
+    Talks {
         /// One side.
         a: PlayerId,
         /// The other side.
@@ -139,8 +156,11 @@ pub enum Change {
     Seat(PlayerId),
     /// A player was eliminated or came back.
     PlayerAlive(PlayerId),
-    /// The turn, or whose turn it is, changed.
+    /// The turn number changed.
     Turn,
+    /// The clock changed and the turn number did not: whose turn it is, whether it began, the
+    /// phase or the winner.
+    Clock,
     /// A civilization, leader or city name changed, which the event name index reads.
     Names,
 }

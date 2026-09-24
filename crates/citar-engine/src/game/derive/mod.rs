@@ -111,8 +111,9 @@ impl Derived {
     /// the city it belongs to does not work, and that no enemy military unit blocks
     /// (`cities.workable_tiles`, `cities.py:170-193`). So a change to a tile concerns the cities
     /// of the tile's owner, before and after, in range of it: its yield, its owner, a city on it,
-    /// or an enemy unit on it. A seat concerns all its player's cities, and war or peace all the
-    /// cities of both sides.
+    /// or an enemy unit on it. A seat concerns all its player's cities, and war or peace the
+    /// cities of each side in range of the other side's military units in its land; a change
+    /// to any other term of a relation concerns no city.
     #[must_use]
     pub fn on(&self, st: &State, rules: &Ruleset, ch: &Change) -> Reactions {
         let mut out = Reactions::default();
@@ -179,13 +180,18 @@ impl Derived {
                 }
                 out.sight.push(SightSource::City(c));
             }
-            Change::Diplo { a, b } => {
-                // War and peace decide which units blockade whose tiles.
-                for p in [a, b] {
-                    out.recheck.extend(st.cities().of(p).iter().copied());
-                }
+            Change::War { a, b } => {
+                // War and peace decide which units blockade whose tiles: each side's military
+                // units standing in the other's land.
+                self.flag_blockades_of(st, rules, range, a, b, &mut out);
+                self.flag_blockades_of(st, rules, range, b, a, &mut out);
             }
-            Change::Met { .. } | Change::Turn | Change::Names => {}
+            Change::Diplo { .. }
+            | Change::Talks { .. }
+            | Change::Met { .. }
+            | Change::Turn
+            | Change::Clock
+            | Change::Names => {}
             Change::Alliance { cs, .. } => out.sight.push(SightSource::Allies(cs)),
             Change::Spy(p) => out.sight.push(SightSource::Spies(p)),
             Change::Seat(p) => out.recheck.extend(st.cities().of(p).iter().copied()),
@@ -194,7 +200,9 @@ impl Derived {
         out
     }
 
-    /// Flags every city of one of `owners` whose work range reaches tile `t`.
+    /// Flags every city of one of `owners` whose work range reaches tile `t`. It walks the
+    /// owners' cities rather than the tiles in range: no allocation on the write path, and a
+    /// civilization has fewer cities than a work range has tiles, or not many more.
     fn flag_near(
         &self,
         st: &State,
@@ -203,15 +211,42 @@ impl Derived {
         owners: &[Option<PlayerId>],
         out: &mut Reactions,
     ) {
-        if owners.iter().all(Option::is_none) || !self.grid.contains(t) {
+        if !self.grid.contains(t) {
             return;
         }
-        for n in self.grid.within(t, range) {
-            if let Some(c) = st.city_at(n)
-                && st.cities().get(c).is_some_and(|x| owners.contains(&Some(x.owner())))
-                && !out.recheck.contains(&c)
+        for (i, &p) in owners.iter().enumerate() {
+            let Some(p) = p else { continue };
+            if owners[..i].contains(&Some(p)) {
+                continue;
+            }
+            for &c in st.cities().of(p) {
+                if !out.recheck.contains(&c)
+                    && st.cities().get(c).is_some_and(|x| self.grid.distance(x.tile(), t) <= range)
+                {
+                    out.recheck.push(c);
+                }
+            }
+        }
+    }
+
+    /// Flags the cities of `owner` that a military unit of `by` standing in `owner`'s land
+    /// blocks, or would block at war: what war or peace between them changes.
+    fn flag_blockades_of(
+        &self,
+        st: &State,
+        rules: &Ruleset,
+        range: u32,
+        owner: PlayerId,
+        by: PlayerId,
+        out: &mut Reactions,
+    ) {
+        for &u in st.units().of(by) {
+            let Some(unit) = st.units().get(u) else { continue };
+            let t = unit.tile();
+            if st.tiles().get(t).and_then(Tile::owner) == Some(owner)
+                && rules.base_units().get(unit.base).is_some_and(|b| b.military)
             {
-                out.recheck.push(c);
+                self.flag_near(st, range, t, &[Some(owner)], out);
             }
         }
     }
@@ -285,5 +320,39 @@ mod tests {
         flagged.sort();
         assert_eq!(flagged, [roma, antium]);
         assert!(!flagged.contains(&athens));
+    }
+
+    #[test]
+    fn war_flags_the_cities_an_enemy_unit_blocks_and_other_terms_none() {
+        use crate::state::TileClaim;
+        let mut g = testing::duel();
+        let (rome, greece) = (PlayerId(0), PlayerId(1));
+        let roma = testing::city(&mut g, rome, TileIdx(22), "Roma");
+        let athens = testing::city(&mut g, greece, TileIdx(28), "Athens");
+        g.settle();
+        let (war, peace_terms, talks) = (
+            Change::War { a: rome, b: greece },
+            Change::Diplo { a: rome, b: greece },
+            Change::Talks { a: rome, b: greece },
+        );
+        for ch in [war, peace_terms, talks] {
+            assert!(g.dv.on(&g.st, g.rules, &ch).recheck.is_empty(), "{ch:?}: no unit to block");
+        }
+        // A Greek warrior in Rome's land, and a Roman worker in Greece's, which blocks nothing.
+        let t = TileIdx(23);
+        g.set_tile_owner(t, TileClaim::city(rome, roma)).expect("a tile");
+        g.set_tile_owner(TileIdx(27), TileClaim::city(greece, athens)).expect("a tile");
+        testing::unit(&mut g, greece, "Warrior", t);
+        testing::unit(&mut g, rome, "Worker", TileIdx(27));
+        assert_eq!(g.dv.on(&g.st, g.rules, &war).recheck.to_vec(), [roma]);
+        for ch in [peace_terms, talks] {
+            assert!(g.dv.on(&g.st, g.rules, &ch).recheck.is_empty(), "{ch:?}");
+        }
+        // Through the setter: a war flags Roma; a research agreement's science flags nothing.
+        g.settle();
+        g.update_relation(rome, greece, |r| r.ra_science = [5, 5]).expect("a pair");
+        assert!(g.pending.is_empty());
+        g.update_relation(rome, greece, |r| r.war = true).expect("a pair");
+        assert_eq!(g.pending.take_recheck(), [roma]);
     }
 }

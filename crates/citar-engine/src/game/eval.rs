@@ -602,12 +602,7 @@ mod tests {
         assert!(v.has_open_borders(b, a) && !v.has_open_borders(a, b));
         // A city-state counts a major a friend by influence, never while at war.
         assert!(!v.is_friend(PlayerId(2), a));
-        if let Some(cs) =
-            g.player_mut(PlayerId(2), crate::game::derive::rev::PlayerTouch::CITY_STATE)
-            && let Some(d) = cs.city_state.as_deref_mut()
-        {
-            d.influence[a] = 30.0;
-        }
+        g.set_influence(PlayerId(2), a, 30.0)?;
         assert!(g.view().is_friend(a, PlayerId(2)));
         g.update_relation(a, PlayerId(2), |r| r.war = true)?;
         assert!(!g.view().is_friend(a, PlayerId(2)));
