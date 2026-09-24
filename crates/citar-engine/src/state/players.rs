@@ -1004,12 +1004,14 @@ pub struct CityStateData {
     pub resource: Option<ResourceId>,
     /// The unit it gifts (Militaristic).
     pub unique_unit: Option<BaseUnitId>,
-    /// Influence of each major.
+    /// Influence of each major. In a state, one entry per player (`State::new` sizes it, and
+    /// `save::validate` checks it), so indexing by any player is sound.
     pub influence: PlayerVec<f64>,
     ally: Option<PlayerId>,
     pub protectors: PlayerSet,
     pub quests: Vec<Quest>,
     pub timers: QuestTimers,
+    /// The standing with each major; one entry per player, as `influence`.
     pub pairs: PlayerVec<CsPair>,
     /// War pseudo-quests, by attacker.
     pub war_quests: BTreeMap<PlayerId, WarQuest>,
@@ -1033,6 +1035,15 @@ impl CityStateData {
     pub fn with_ally(mut self, ally: Option<PlayerId>) -> Self {
         self.ally = ally;
         self
+    }
+
+    /// Grows the lists by player to one entry for each of `n` players, the new entries at zero:
+    /// for a new game's city-states, which `Player::new` builds before the players are counted.
+    pub(crate) fn fit_players(&mut self, n: usize) {
+        if let Some(last) = n.checked_sub(1).and_then(|i| u8::try_from(i).ok()).map(PlayerId) {
+            self.influence.ensure(last);
+            self.pairs.ensure(last);
+        }
     }
 
     /// Its ally, if any. It changes only through `State::set_ally`, which reports the change.

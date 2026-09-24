@@ -461,7 +461,7 @@ fn city_state_fields(cx: &mut Cx<'_>, o: &Obj<'_>, pl: &mut Player) -> Res<()> {
     };
     let resource = cx.opt_named(o.get("cs_resource"), &o.at("cs_resource"))?;
     let unique_unit = cx.opt_named(o.get("cs_unique_unit"), &o.at("cs_unique_unit"))?;
-    let mut influence: Vec<(PlayerId, f64)> =
+    let influence: Vec<(PlayerId, f64)> =
         o.entries("influence", |k, v, p| Ok((cx.player_key(k, p)?, real(v, p)?)))?;
     let ally = cx.opt_player(o.get("ally"), &o.at("ally"))?;
     let protectors = match o.get("protectors") {
@@ -489,15 +489,17 @@ fn city_state_fields(cx: &mut Cx<'_>, o: &Obj<'_>, pl: &mut Player) -> Res<()> {
     cs.resource = resource;
     cs.unique_unit = unique_unit;
     let mut cs = cs.with_ally(ally);
-    influence.sort_by_key(|&(p, _)| p);
-    let len = influence.last().map_or(0, |&(p, _)| usize::from(p.0) + 1);
-    let mut by = PlayerVec::from_elem(0.0, len);
+    // One entry per player, as every city-state keeps them (`CityStateData::influence`), however
+    // many keys Python happened to hold.
+    let mut by = PlayerVec::from_elem(0.0, cx.n);
     for (p, x) in influence {
         if let Some(slot) = by.get_mut(p) {
             *slot = x;
         }
     }
     cs.influence = by;
+    // Until `flags["pairs"]` says more.
+    cs.pairs = PlayerVec::from_elem(CsPair::default(), cx.n);
     cs.protectors = protectors;
     cs.quests = quests;
     pl.city_state = Some(Box::new(cs));
@@ -775,9 +777,9 @@ fn explorers(cx: &mut Cx<'_>, f: &Obj<'_>, id: PlayerId, units: &mut [PendingUni
     Ok(())
 }
 
-/// A city-state's standing with each major (`city_states.py:25-31`).
+/// A city-state's standing with each major (`city_states.py:25-31`), one entry per player.
 fn pairs(cx: &Cx<'_>, v: &Value, p: &Path<'_>) -> Res<PlayerVec<CsPair>> {
-    let mut entries = dict(v, p, |k, x, pp| {
+    let entries = dict(v, p, |k, x, pp| {
         let major = cx.player_key(k, pp)?;
         let o = Obj::new(x, *pp)?;
         let pair = CsPair {
@@ -794,9 +796,7 @@ fn pairs(cx: &Cx<'_>, v: &Value, p: &Path<'_>) -> Res<PlayerVec<CsPair>> {
         o.finish()?;
         Ok((major, pair))
     })?;
-    entries.sort_by_key(|&(m, _)| m);
-    let len = entries.last().map_or(0, |&(m, _)| usize::from(m.0) + 1);
-    let mut out = PlayerVec::from_elem(CsPair::default(), len);
+    let mut out = PlayerVec::from_elem(CsPair::default(), cx.n);
     for (m, pair) in entries {
         if let Some(slot) = out.get_mut(m) {
             *slot = pair;

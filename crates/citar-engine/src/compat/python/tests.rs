@@ -293,6 +293,9 @@ fn the_rarer_shapes_convert() {
     assert_eq!(cs.war_quests.get(&PlayerId(1)).map(|w| w.needed), Some(2));
     assert_eq!(cs.quests[0].target, QuestTarget::Percent(50));
     assert_eq!(cs.election_in, Some(3));
+    // One entry per player, though Python held keys for player 0 only.
+    assert_eq!((cs.influence.len(), cs.pairs.len()), (3, 3));
+    assert_eq!(cs.influence[PlayerId(1)].to_bits(), 0f64.to_bits());
     let rel = st.diplo().relation(PlayerId(0), PlayerId(1)).expect("the pair");
     assert!(rel.war && st.diplo().at_war(PlayerId(0), PlayerId(1)));
     assert!(rel.embassy[side(PlayerId(0), PlayerId(1))]);

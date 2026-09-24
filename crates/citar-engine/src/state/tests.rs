@@ -74,6 +74,10 @@ fn a_new_state_is_consistent_and_barbarians_are_at_war() -> Result<(), StateErro
     assert!(!st.diplo().at_war(PlayerId(0), PlayerId(1)));
     assert_eq!(st.clock().turn, 1);
     assert_eq!(st.seed(), 1);
+    // A city-state keeps one entry per player, so indexing by any player is sound.
+    let cs = st.player(PlayerId(2)).and_then(|p| p.city_state.as_deref()).expect("a city-state");
+    assert_eq!((cs.influence.len(), cs.pairs.len()), (4, 4));
+    assert_eq!(cs.influence[PlayerId(3)].to_bits(), 0f64.to_bits());
     Ok(())
 }
 

@@ -13,7 +13,7 @@
 //!   owners and opinions' holders and subjects are players (an opinion never of oneself);
 //! - **rule ids** within the ruleset's tables, remembered improvements and features included, for
 //!   states built other than from a save (the converter), where no name was resolved;
-//! - **ranges:** player-indexed lists no longer than the players, sorted lists sorted, the id
+//! - **ranges:** player-indexed lists one entry per player, sorted lists sorted, the id
 //!   counters from 1 and within `MAX_ENTITY_ID`, the barbarian aggression a percentage, map
 //!   dimensions the grid takes, at most 256 founded religions;
 //! - **shape:** majors and only majors have major data, city-states and only city-states theirs;
@@ -388,8 +388,10 @@ impl Check<'_> {
             }
             self.rules(&cp, cs.resource, r.resources().len());
             self.rules(&cp, cs.unique_unit, units);
-            if cs.influence.len() > self.n || cs.pairs.len() > self.n {
-                self.err(&cp, "a list by player is longer than the players");
+            // One entry per player, so that indexing by a player cannot panic, and a state means
+            // one thing in one form (a missing slot and a slot at zero would digest apart).
+            if cs.influence.len() != self.n || cs.pairs.len() != self.n {
+                self.err(&cp, "a list by player does not have one entry per player");
             }
             self.players(&format!("{cp}.protectors"), cs.protectors);
             if let Some(a) = cs.ally() {

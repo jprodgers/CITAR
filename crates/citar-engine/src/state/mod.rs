@@ -224,7 +224,8 @@ pub struct State {
 
 impl State {
     /// A new game's state: these settings, this map and these players, with no units, cities,
-    /// relations or history yet, at turn 1.
+    /// relations or history yet, at turn 1. Each city-state's lists by player are grown to one
+    /// entry per player.
     ///
     /// Refused if the tiles do not fill the map, the map's shape is not a valid grid, there are
     /// more than 64 players, or a player's id is not its position.
@@ -232,7 +233,7 @@ impl State {
         config: GameConfig,
         map: MapInfo,
         tiles: Tiles,
-        players: PlayerVec<Player>,
+        mut players: PlayerVec<Player>,
     ) -> Result<Self, StateError> {
         let n = u8::try_from(players.len())
             .ok()
@@ -240,6 +241,11 @@ impl State {
             .ok_or_else(|| {
                 StateError::Mismatch(format!("{} players; at most 64 fit", players.len()))
             })?;
+        for (_, p) in players.iter_mut() {
+            if let Some(cs) = p.city_state.as_deref_mut() {
+                cs.fit_players(usize::from(n));
+            }
+        }
         let barbarians =
             players.iter().filter(|(_, p)| p.is_barbarian()).map(|(id, _)| id).collect();
         let size = map.size();

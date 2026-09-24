@@ -698,6 +698,12 @@ pub fn build(r: &'static Ruleset, seed: u64, shape: &Shape) -> State {
                     wary: g.chance(10),
                 })
                 .collect();
+            // One entry per player, as a state keeps them (`save::validate`): those drawn, then
+            // zeros. Padded rather than drawn, so that every later draw stays where it was.
+            if let Some(&last) = players.last() {
+                cs.influence.ensure(last);
+                cs.pairs.ensure(last);
+            }
             for _ in 0..g.below(2) {
                 let mut kills = BTreeMap::new();
                 kills.insert(g.pick(&players), g.below(4) as u16);
