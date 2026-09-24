@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+use citar_engine::base::codec::{b64_decode, b64_encode};
 use citar_engine::base::digest::{CanonError, to_canon_vec};
 use citar_engine::base::ids::{BuildingId, PlayerId};
 use citar_engine::base::sets::BitSet;
@@ -27,8 +28,9 @@ use citar_engine::save::journal::{
     self, FrameDecoder, FramePalette, FrameWriter, FullFrame, JournalCursor,
 };
 use citar_engine::save::{self, LoadError, canon, ctx, json};
-use citar_engine::state::State;
 use citar_engine::state::chronicle::{Chronicle, ChronicleHeads, HostHeads};
+use citar_engine::state::memory::{TileMemory, TileMemoryLayer};
+use citar_engine::state::{State, StateParts};
 use citar_testkit::rulesets::{files_of, overlay};
 use citar_testkit::states::{self, Gen, Shape};
 use proptest::prelude::*;
@@ -161,6 +163,58 @@ fn without_building(name: &str) -> Vec<(String, Vec<u8>)> {
     }
     slot.1 = serde_json::to_vec(&v).expect("JSON");
     out
+}
+
+/// The embedded files with the objects of each `(file, table)` in reverse order: the whole file,
+/// or the table under that key.
+fn reversed(tables: &[(&str, Option<&str>)]) -> Vec<(String, Vec<u8>)> {
+    fn reverse(v: &mut Value) {
+        match v {
+            Value::Array(list) => list.reverse(),
+            Value::Object(map) => {
+                let pairs: Vec<(String, Value)> = std::mem::take(map).into_iter().rev().collect();
+                *map = pairs.into_iter().collect();
+            }
+            _ => panic!("not a table"),
+        }
+    }
+    let mut out = overlay(&[]).expect("the files");
+    for &(file, inner) in tables {
+        let name = format!("ruleset/{file}.json");
+        let slot = out.iter_mut().find(|(n, _)| *n == name).expect("a ruleset file");
+        let mut v: Value = serde_json::from_slice(&slot.1).expect("JSON");
+        match inner {
+            Some(key) => reverse(&mut v[key]),
+            None => reverse(&mut v),
+        }
+        slot.1 = serde_json::to_vec(&v).expect("JSON");
+    }
+    out
+}
+
+#[test]
+fn a_save_loads_under_a_reordered_ruleset_and_back() {
+    // The four lists kept sorted by rule id, each with its objects renumbered.
+    let files =
+        reversed(&[("buildings", None), ("units", None), ("resources", None), ("victories", None)]);
+    let other = Ruleset::leak(&files_of(&files)).expect("the reordered ruleset loads");
+    let mut reached = [false; 4];
+    for seed in [11, 43, 47, 53] {
+        let st = states::build(rules(), seed, &Shape::DUEL);
+        let cfg = st.config();
+        reached[0] |= cfg.disabled_victories.len() > 1;
+        reached[1] |= cfg.resources.luxury.each.len() > 1;
+        reached[2] |= st.players().iter().any(|(_, p)| p.civ.free_specific_buildings.len() > 1);
+        reached[3] |= st.units().iter().any(|u| u.abilities_used.len() > 1);
+        let (moved, report) = json::read_state(other, &saved(&st))
+            .unwrap_or_else(|e| panic!("seed {seed} loads under the reordered ruleset: {e}"));
+        assert_eq!(report.rules_changed.map(|(id, _)| id), Some(rules().id()));
+        let again = save::to_json(other, &moved).expect("it saves under the reordered ruleset");
+        let (back, _) = json::read_state(rules(), &again).expect("and loads back");
+        assert!(back == st, "seed {seed}: the same game after the round trip");
+        assert_eq!(canon::state_bytes(&back), canon::state_bytes(&st));
+    }
+    assert_eq!(reached, [true; 4], "every sorted list held two items or more");
 }
 
 #[test]
@@ -396,6 +450,80 @@ fn inconsistent_saves_are_refused_with_their_place() {
     let fresh =
         serde_json::to_value(citar_engine::state::diplo::Relation::default()).expect("JSON");
     invalid(&|v| v["diplomacy"]["relations"] = serde_json::json!([[2, 1, fresh]]), "relation");
+    // More players than a player set holds, one of them met: refused before the relations are
+    // built, whose contact masks are player sets.
+    let mut met = fresh.clone();
+    met["met"] = Value::from(true);
+    invalid(
+        &|v| {
+            let players = v["players"].as_array_mut().expect("players");
+            let last = players.last().cloned().expect("a player");
+            while players.len() < 65 {
+                let mut p = last.clone();
+                p["id"] = Value::from(players.len());
+                players.push(p);
+            }
+            v["diplomacy"]["relations"] = serde_json::json!([[0, 64, met]]);
+        },
+        "at most 64",
+    );
+    // A major remembering an owner that is not a player.
+    invalid(
+        &|v| {
+            let players = v["players"].as_array_mut().expect("players");
+            let major = players.iter_mut().find(|p| !p["major"].is_null()).expect("a major");
+            let column = &mut major["major"]["memory"]["owner"];
+            let n = b64_decode(column.as_str().expect("a column")).expect("base64").len();
+            *column = Value::from(b64_encode(&vec![0x40; n]));
+        },
+        "major.memory",
+    );
+}
+
+/// `validate` holds a state built other than from a save (the converter's) to what a save's
+/// names would have: remembered tiles and opinions included.
+#[test]
+fn validation_reaches_memories_opinions_and_counters() {
+    let st = states::build(rules(), 53, &Shape::TINY);
+    let refused = |edit: &dyn Fn(&mut StateParts), wants: &str| {
+        let mut parts = st.clone().into_parts();
+        edit(&mut parts);
+        let bad = State::from_parts(parts).expect("from_parts leaves this to validate");
+        let errs = save::validate(&bad, rules()).expect_err(wants);
+        assert!(errs.iter().any(|e| e.to_string().contains(wants)), "wanted {wants:?}: {errs:?}");
+    };
+    let major = st.players().iter().find(|(_, p)| p.is_major()).map(|(p, _)| p).expect("a major");
+    let remembers = |bytes: [u8; 8]| {
+        move |parts: &mut StateParts| {
+            let m = parts.players[major].major.as_mut().expect("major data");
+            let mut tiles = m.memory.tiles().to_vec();
+            tiles[3] = TileMemory::from_canon_bytes(bytes);
+            let cities = m.memory.cities().map(|(t, c)| (t, c.clone())).collect();
+            m.memory = TileMemoryLayer::from_parts(tiles, cities).expect("the same size");
+        }
+    };
+    let features = rules().derived().features.len();
+    assert!(features < 16, "a feature bit past the ruleset's {features} exists");
+    let past = (1u16 << 15).to_le_bytes();
+    refused(&remembers([0, 0, 0, 0, 40, 1, 0, 0]), "major.memory");
+    refused(&remembers([0, 0, 250, 0, 0xFF, 1, 0, 0]), "major.memory");
+    refused(&remembers([past[0], past[1], 0, 0, 0xFF, 1, 0, 0]), "major.memory");
+    refused(&|p| p.diplo.opinions.insert(PlayerId(0), PlayerId(0), [1.0; 16]), "opinions");
+    refused(&|p| p.diplo.opinions.insert(PlayerId(1), PlayerId(60), [1.0; 16]), "opinions");
+    // A counter at 0 would never hand out an id: ids start at 1.
+    for what in ["deal", "negotiation"] {
+        refused(
+            &|p| {
+                p.diplo.deals.clear();
+                p.diplo.negotiations.clear();
+                match what {
+                    "deal" => p.ids.deal = 0,
+                    _ => p.ids.negotiation = 0,
+                }
+            },
+            &format!("ids.{what}"),
+        );
+    }
 }
 
 proptest! {

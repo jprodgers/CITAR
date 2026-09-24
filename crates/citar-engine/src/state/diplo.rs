@@ -847,8 +847,11 @@ impl Diplomacy {
         self.barbarians = barbarians;
         self.war_mask = PlayerVec::from_elem(PlayerSet::EMPTY, usize::from(n));
         self.met_mask = PlayerVec::from_elem(PlayerSet::EMPTY, usize::from(n));
-        for a in 0..n {
-            for b in (a + 1)..n {
+        // A mask holds 64 players. `State::from_parts` refuses a larger game; until then its
+        // players past 64 get no bits rather than a failed assertion.
+        let fits = n.min(PlayerSet::CAPACITY as u8);
+        for a in 0..fits {
+            for b in (a + 1)..fits {
                 self.sync(PlayerId(a), PlayerId(b));
             }
         }

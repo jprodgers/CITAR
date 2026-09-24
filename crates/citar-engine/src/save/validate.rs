@@ -9,12 +9,13 @@
 //! - **references:** capitals are cities their player holds; every other player, tile, religion
 //!   and city a field names exists, or for a city that may since have been razed (an original
 //!   capital, a unit's home), was handed out by the counter; goto and path tiles, worked and
-//!   locked tiles, start tiles, spies' cities and remembered cities lie on the map;
-//! - **rule ids** within the ruleset's tables, for states built other than from a save (the
-//!   converter), where no name was resolved;
+//!   locked tiles, start tiles, spies' cities and remembered cities lie on the map; remembered
+//!   owners and opinions' holders and subjects are players (an opinion never of oneself);
+//! - **rule ids** within the ruleset's tables, remembered improvements and features included, for
+//!   states built other than from a save (the converter), where no name was resolved;
 //! - **ranges:** player-indexed lists no longer than the players, sorted lists sorted, the id
-//!   counters within `MAX_ENTITY_ID`, the barbarian aggression a percentage, map dimensions the
-//!   grid takes, at most 256 founded religions;
+//!   counters from 1 and within `MAX_ENTITY_ID`, the barbarian aggression a percentage, map
+//!   dimensions the grid takes, at most 256 founded religions;
 //! - **shape:** majors and only majors have major data, city-states and only city-states theirs;
 //! - **floats:** every one finite, by the canonical walk (`save::canon::check_finite`);
 //! - a driver's memory within `DriverMemory::MAX_LEN`.
@@ -31,6 +32,7 @@ use crate::state::State;
 use crate::state::cities::Constructible;
 use crate::state::config::{MapSource, ResourceRule};
 use crate::state::diplo::DealItem;
+use crate::state::memory::TileMemoryLayer;
 use crate::state::players::{DriverMemory, Player, QuestTarget};
 use crate::state::store::MAX_ENTITY_ID;
 use crate::state::world::ReligionName;
@@ -238,6 +240,17 @@ impl Check<'_> {
                 self.err(format!("ids.{what}"), format!("{next} is past the largest entity id"));
             }
         }
+        // Ids start at 1, so a counter at 0 would never hand one out again.
+        let counters = [
+            ("unit", ids.unit),
+            ("city", ids.city),
+            ("camp", ids.camp),
+            ("deal", ids.deal),
+            ("negotiation", ids.negotiation),
+        ];
+        for (what, _) in counters.into_iter().filter(|&(_, next)| next == 0) {
+            self.err(format!("ids.{what}"), "is 0, and the first id is 1");
+        }
     }
 
     fn tiles(&mut self) {
@@ -362,6 +375,7 @@ impl Check<'_> {
             }
             self.set(&format!("{path}.major.spy_eras_earned"), &m.spy_eras_earned, r.eras().len());
             self.rules(&format!("{path}.major.spaceship"), m.spaceship.keys().copied(), units);
+            self.memory(&format!("{path}.major.memory"), &m.memory);
             for (t, c) in m.memory.cities() {
                 self.tile(&format!("{path}.major.memory"), t);
                 self.player(&format!("{path}.major.memory[{t}].owner"), c.owner);
@@ -404,6 +418,39 @@ impl Check<'_> {
                 for &k in w.kills.keys() {
                     self.player(&format!("{cp}.war_quests[{x}]"), k);
                 }
+            }
+        }
+    }
+
+    /// A major's remembered tiles: owners among the players, improvements and features in the
+    /// ruleset. A save's columns resolve improvements and features by name, but copy the owner
+    /// byte, and the converter's layers may hold anything. Only a tile found wrong costs a path.
+    fn memory(&mut self, path: &str, layer: &TileMemoryLayer) {
+        let improvements = self.r.improvements().len();
+        let features = self.r.derived().features.len();
+        // The feature bits no feature of the ruleset has.
+        let beyond: u16 = if features >= 16 { 0 } else { u16::MAX << features };
+        for (t, m) in layer.tiles().iter().enumerate() {
+            let owner = m.owner().filter(|p| usize::from(p.0) >= self.n);
+            let improvement = m.improvement().filter(|i| i.index() >= improvements);
+            let feature = (m.features().bits() & beyond != 0)
+                .then(|| m.features().iter().find(|f| f.index() >= features))
+                .flatten();
+            if owner.is_none() && improvement.is_none() && feature.is_none() {
+                continue;
+            }
+            let at = format!("{path}[{t}]");
+            if let Some(p) = owner {
+                self.player(&at, p);
+            }
+            if let Some(i) = improvement {
+                self.rule(&at, i, improvements);
+            }
+            if let Some(f) = feature {
+                self.rule(&at, f, features);
+            }
+            if self.errs.len() >= MAX_ERRORS {
+                return;
             }
         }
     }
@@ -496,6 +543,16 @@ impl Check<'_> {
         for (lo, hi, rel) in d.relations().pairs() {
             if let Some(p) = rel.war_declared_by {
                 self.player(&format!("diplomacy.relations[{lo},{hi}]"), p);
+            }
+        }
+        // A save's opinions were checked as they were read; the converter's were not.
+        for ((holder, about), _) in d.opinions.iter() {
+            let n = self.n;
+            if holder == about || usize::from(holder.0) >= n || usize::from(about.0) >= n {
+                self.err(
+                    "diplomacy.opinions",
+                    format!("an opinion of {holder} about {about} among {n} players"),
+                );
             }
         }
         for (i, deal) in d.deals.iter().enumerate() {

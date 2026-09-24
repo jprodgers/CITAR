@@ -26,9 +26,10 @@
 //!
 //! Loading reads the document into a JSON value, upgrades an older version (`save::migrate`),
 //! refuses an unknown top-level key in every build, reads each part with the ruleset in context
-//! (a name that no longer resolves is `LoadError::UnknownName`, with its place), builds the state
-//! with `State::from_parts`, which checks the parts fit, and then `save::validate`s it. A save made
-//! under another ruleset loads, with `LoadReport::rules_changed` set.
+//! (a name that no longer resolves is `LoadError::UnknownName`, with its place), puts the lists
+//! kept sorted by rule id back in order (the names may have other ids now), builds the state with
+//! `State::from_parts`, which checks the parts fit, and then `save::validate`s it. A save made
+//! under another ruleset, reordered or retuned, loads, with `LoadReport::rules_changed` set.
 //!
 //! Replaces the save path of `citar/session.py` (`GameState.to_dict` and `from_dict`,
 //! `state.py:13-405`); Python saved `rng_state` too, which keyed draws make needless.
@@ -45,7 +46,7 @@ use super::validate::validate;
 use super::{LoadError, LoadReport, Loaded, SaveError, canon};
 use crate::base::codec::{b64_decode, b64_encode};
 use crate::base::ids::PlayerId;
-use crate::base::sets::PlayerVec;
+use crate::base::sets::{PlayerSet, PlayerVec};
 use crate::rules::{BUILD_ID, Ruleset, RulesetId};
 use crate::state::chronicle::{ChronicleHeads, HostHeads};
 use crate::state::cities::{Cities, City};
@@ -418,24 +419,50 @@ pub fn read_state(rules: &'static Ruleset, bytes: &[u8]) -> Result<(State, LoadR
     Ok((st, report))
 }
 
+/// Puts back in order the lists kept sorted by rule id. A save made under a reordered ruleset
+/// names the same objects, which now have other ids, so its lists read out of order
+/// (DESIGN.md 4.9). The sort is stable: an object named twice stays twice, for `validate` to
+/// refuse.
+fn sort_by_rule_id(config: &mut GameConfig, players: &mut [Player], units: &mut [Unit]) {
+    config.disabled_victories.sort();
+    let res = &mut config.resources;
+    for kind in [&mut res.strategic, &mut res.luxury, &mut res.bonus] {
+        kind.each.sort_by_key(|&(id, _)| id);
+    }
+    for p in players {
+        p.civ.free_specific_buildings.sort();
+    }
+    for u in units {
+        u.abilities_used.sort_by_key(|&(key, _)| key);
+    }
+}
+
 /// The state the document's parts make.
 fn build<'a>(key: impl Fn(&str) -> &'a Value) -> Result<State, LoadError> {
     let map: MapInfo = read(key("map"), "map")?;
     // The unit indexes are sized by the map, so its shape is checked before anything else.
     map.grid().map_err(|e| LoadError::invalid("map", e.to_string()))?;
     let tiles: Tiles = read(key("tiles"), "tiles")?;
-    let players: Vec<Player> = read_list(key("players"), "players")?;
+    let mut players: Vec<Player> = read_list(key("players"), "players")?;
+    // The relations' contact and war masks are player sets, so the count is checked before
+    // they are built from it.
     let n = u8::try_from(players.len())
-        .map_err(|_| LoadError::invalid("players", format!("{} players", players.len())))?;
-    let units: Vec<Unit> = read_list(key("units"), "units")?;
+        .ok()
+        .filter(|&n| usize::from(n) <= PlayerSet::CAPACITY)
+        .ok_or_else(|| {
+            LoadError::invalid("players", format!("{} players; at most 64 fit", players.len()))
+        })?;
+    let mut units: Vec<Unit> = read_list(key("units"), "units")?;
     let cities: Vec<City> = read_list(key("cities"), "cities")?;
     let diplo: DiploDoc = read(key("diplomacy"), "diplomacy")?;
+    let mut config: GameConfig = read(key("config"), "config")?;
+    sort_by_rule_id(&mut config, &mut players, &mut units);
     let units = Units::from_units(units, map.size())
         .map_err(|e| LoadError::invalid("units", e.to_string()))?;
     let cities =
         Cities::from_cities(cities).map_err(|e| LoadError::invalid("cities", e.to_string()))?;
     let parts = StateParts {
-        config: read(key("config"), "config")?,
+        config,
         map,
         tiles,
         players: PlayerVec::from_vec(players),
