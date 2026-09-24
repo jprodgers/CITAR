@@ -48,3 +48,19 @@ reason = "A scenario parameter of the wrong type was refused with Python's own e
 [[differences]]
 id = "normalize-refuses-big-ints-and-non-objects"
 reason = "Tool arguments took integers of any size, and arguments sent as a list of pairs; Rust refuses an integer beyond 64 bits and arguments that are not an object"
+
+[[differences]]
+id = "config-refuses-unknown-names"
+reason = "A new game's settings fell back to a default for a speed, difficulty, era, map size, map type, edges, barbarian level, victory or AI base values Python did not know, drew a random nation for an unknown one or a city-state, and took any controller; Rust refuses the settings, naming what is valid"
+
+[[differences]]
+id = "map-documents-read-by-rule"
+reason = "A map document kept the improvements of a list of 19 names (a Citadel among them) and removed four named ones on water; Rust keeps any improvement proper that is neither a city centre nor a great improvement, and on water removes every improvement built only on land"
+
+[[differences]]
+id = "end-turn-names-whose-turn-it-is"
+reason = "Ending another player's turn was refused with 'It is not your turn.'; Rust names whose turn it is, as the tools' refusal does"
+
+[[differences]]
+id = "end-turn-stops-without-majors"
+reason = "With no major civilization alive, ending a turn played round after round and never returned; Rust plays at most one more round and returns"

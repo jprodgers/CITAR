@@ -1,0 +1,65 @@
+about = """
+City-states play their own turns inside the call that ends the turn before theirs: when the last
+major civilization ends its turn, the city-state's turn is played and the round ends in the same
+call, and the next turn goes to the first major civilization. City-states announce no turn.
+"""
+from = "citar/engine/game.py: Game.end_turn"
+
+[config]
+players = [{}, {}]
+city_states = 1
+
+[[step]]
+check = { what = "game" }
+subset = { majors = [0, 1], city_states = [2], barbarians = "=null" }
+
+[[step]]
+note = "A civilization or city-state with no unit and no city is eliminated when a round ends: each keeps a warrior."
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "add_unit", player = 2, unit = "Warrior", at = "CS" },
+]
+
+[[step]]
+op = "end_turn"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 1, current = 1 }
+
+[[step]]
+note = "The city-state's turn and the round's end happen inside this call."
+op = "end_turn"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 2, current = 0 }
+
+[[step]]
+note = "Two turns started by the majors in the first round, and the first major's in the second: none by the city-state."
+check = { what = "events", type = "turn_start" }
+len = 3
+
+[[step]]
+check = { what = "events", type = "turn_end" }
+len = 2
+
+[[step]]
+check = { what = "player", player = 2 }
+subset = { kind = "city_state", alive = true, controller = "minor" }
+
+[[step]]
+note = "Another round, all in two calls."
+op = "end_round"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 3, current = 0 }
+
+[[step]]
+check = { what = "events", type = "turn_start" }
+len = 5
