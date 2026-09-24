@@ -77,6 +77,8 @@ pub struct Game {
     pub(crate) poisoned: Option<Box<str>>,
     /// What the checks found, for tests to collect; never saved.
     pub(crate) violations: Vec<Violation>,
+    /// The chain of round digests, for a game that keeps one (DESIGN.md 4.10); never saved.
+    pub(crate) chain: Option<Box<super::turn::driver::RoundChain>>,
 }
 
 impl Game {
@@ -109,6 +111,7 @@ impl Game {
             debug: DebugOptions::default(),
             poisoned: None,
             violations: Vec::new(),
+            chain: None,
         }
     }
 

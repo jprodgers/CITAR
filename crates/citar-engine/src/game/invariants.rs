@@ -48,7 +48,7 @@ pub enum Code {
     Neg1,
     /// What a civilization sees, it has explored.
     Vis1,
-    /// The current player is alive unless the game is over, and a winner is set exactly when it
+    /// The current player is alive unless the game is over, and a winner is set only when it
     /// is.
     Turn1,
     /// Nothing is pending at a settle point.
@@ -492,8 +492,10 @@ fn clock(g: &Game, out: &mut Out) {
     if !over && !g.st.player(c.current).is_some_and(crate::state::players::Player::alive) {
         out.push(Code::Turn1, format!("it is player {}'s turn, who is not alive", c.current));
     }
-    if over != c.winner.is_some() {
-        out.push(Code::Turn1, format!("the game is {:?} with winner {:?}", c.phase, c.winner));
+    // A game may end with no winner: at its turn limit with the Time victory off
+    // (`victory.py:363-365`). A winner in a game that goes on is a bug.
+    if !over && c.winner.is_some() {
+        out.push(Code::Turn1, format!("the game goes on with winner {:?}", c.winner));
     }
 }
 

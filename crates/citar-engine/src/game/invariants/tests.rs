@@ -202,16 +202,26 @@ fn vis_1_a_tile_seen_but_not_explored() {
 }
 
 #[test]
-fn turn_1_a_game_over_without_a_winner() {
+fn turn_1_a_winner_in_a_game_that_goes_on() {
     assert_eq!(
         codes_after(|g| {
-            let clock = TurnClock { phase: Phase::Over, ..*g.st.clock() };
+            let clock = TurnClock { winner: Some(ROME), ..*g.st.clock() };
             g.set_clock(clock);
             // A clock change raises no work, but settle points are where the checks run.
             assert!(g.pending.is_empty());
         }),
         [Code::Turn1]
     );
+}
+
+#[test]
+fn turn_1_allows_a_game_over_without_a_winner() {
+    // The turn limit with the Time victory off ends a game so (victory.py:363-365).
+    let found = codes_after(|g| {
+        let clock = TurnClock { phase: Phase::Over, ..*g.st.clock() };
+        g.set_clock(clock);
+    });
+    assert_eq!(found, []);
 }
 
 #[test]

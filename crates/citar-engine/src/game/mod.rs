@@ -19,7 +19,8 @@
 //! - [`eval`]: [`eval::EvalView`], the unique evaluator's view of a game;
 //! - [`mutate`]: every write to the state, and what each one tells the caches;
 //! - [`pending`]: work raised by a write and done by the next settle, and the effect queue;
-//! - [`turn`]: settle (package 1b-03 adds the turn stages);
+//! - [`turn`]: settle, the stage tables of a turn, ending turns and rounds, and the seat drivers
+//!   (package 1b-03);
 //! - [`events`]: emitting events, their name references, and scrubbing them for a viewer
 //!   (`game.py:806-990`);
 //! - [`action`]: the typed actions and the pipeline every one runs through;
@@ -60,6 +61,7 @@ pub use self::error::{ActionError, EngineError, ErrCode};
 pub use self::eval::EvalView;
 pub use self::events::{EventBatch, Mention};
 pub use self::invariants::{Code, Violation};
+pub use self::turn::{DriveOptions, DriverOutcome, Drivers, SeatDriver, Stop};
 
 /// Whether a stage, or a step of one, is ported yet (DESIGN.md 3.4, rule 3; 6.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

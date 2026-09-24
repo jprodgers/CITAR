@@ -3,7 +3,10 @@
 //!
 //! Package 1b-02 lands the scenario and seat commands: `apply_ops` (`scenario.apply_ops`,
 //! `scenario.py:471-487`), `meet` (`engine_api.meet`), `set_controller` and `set_difficulty`
-//! (`engine_api.py:648-667`). The rest land with the packages that port what they do.
+//! (`engine_api.py:648-667`). Package 1b-03 adds `end_turn` (`Game.end_turn`,
+//! `game.py:1012-1037`) and `force_turn` (`engine_api.force_turn`); `Game::new`,
+//! `Game::config_from_json` and `Game::drive` are in `game::setup` and `game::turn::drive`. The
+//! rest land with the packages that port what they do.
 
 use serde_json::Value;
 
@@ -35,6 +38,33 @@ impl Game {
                 Err(e)
             }
         }
+    }
+
+    /// Ends `pid`'s turn and plays on to the next major civilization's (`Game.end_turn`,
+    /// `game.py:1012-1037`): the city-states and the barbarians play their turns inside the
+    /// call, a round ends after the last player, and the next major civilization's turn begins.
+    /// Refused when the game is over or it is not `pid`'s turn. The chat rule that may refuse a
+    /// player's `end_turn` tool is the action's, not this (phase0-spec A1.5).
+    pub fn end_turn(&mut self, pid: PlayerId) -> Result<EventBatch, ActionError> {
+        self.ensure_live()?;
+        self.begin_call();
+        self.end_turn_now(pid)?;
+        self.settle();
+        Ok(self.take_batch())
+    }
+
+    /// Makes it `pid`'s turn now and starts it, a probe's single-turn case
+    /// (`EngineGame.force_turn`, `engine_api.py:754-762`); nothing if it is already `pid`'s turn
+    /// or the game is over. Refused for a player the game does not have.
+    pub fn force_turn(&mut self, pid: PlayerId) -> Result<EventBatch, ActionError> {
+        self.ensure_live()?;
+        if self.player(pid).is_none() {
+            return Err(ActionError::new(ErrCode::InvalidPlayer, format!("No player {}.", pid.0)));
+        }
+        self.begin_call();
+        self.force_turn_now(pid);
+        self.settle();
+        Ok(self.take_batch())
     }
 
     /// Makes two players meet, with everything a first contact brings (`engine_api.meet`,
