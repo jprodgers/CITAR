@@ -8,18 +8,20 @@
 //! - `This Promotion is free` (the Kitchen Sink Veteran costs no experience);
 //! - `upon being promoted` (the Raider loses a movement point when promoted);
 //! - `upon gaining a [unit]` (the nation's gift for a Great Prophet is found where a city gains
-//!   one; what it gives is a one-time effect, package 1b-08's).
+//!   one; what it gives is a one-time effect, package 1b-08's);
+//! - the one-time effects on a unit (damage, a promotion, a free upgrade, movement, experience,
+//!   being destroyed), which ruins and combat's triggers apply.
 //!
 //! Every check, the cache oracle among them, is clean after each step.
 
 use citar_engine::base::ids::{
     BarbarianLevelId, BaseUnitId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId,
-    PlayerId, PromotionId, SpeedId, TechId, TerrainId, TileIdx, UnitId,
+    PlayerId, PromotionId, SpeedId, TechId, TerrainId, TileIdx, UniqueId, UnitId,
 };
 use citar_engine::base::sets::PlayerVec;
 use citar_engine::game::path::{ALL, Blocked, Mover};
 use citar_engine::game::units::{self, health, promotions, upgrades};
-use citar_engine::game::{DebugOptions, Game, movement};
+use citar_engine::game::{DebugOptions, Game, movement, triggers};
 use citar_engine::rules::{Named, Ruleset};
 use citar_engine::state::chronicle::Chronicle;
 use citar_engine::state::cities::{Cities, City};
@@ -27,6 +29,7 @@ use citar_engine::state::config::{GameConfig, MapEdges, MapSource};
 use citar_engine::state::map::{MapInfo, Tile, Tiles};
 use citar_engine::state::players::{Controller, Player, PlayerKind, Rgb, Seat, SeatOverrides};
 use citar_engine::state::{State, TileClaim};
+use citar_engine::unique::UniqueType;
 use citar_engine::unique::trigger::{TriggerEvent, TriggerSite};
 use citar_testkit::rulesets::kitchen_sink;
 use serde_json::json;
@@ -284,4 +287,72 @@ fn gaining_a_unit_in_a_city_finds_its_trigger() {
         true,
     );
     assert!(other.is_empty(), "the filter reads the unit gained");
+}
+
+/// The first unique of type `ty` among the ruins' and the units' of the ruleset.
+fn one_time(r: &Ruleset, ty: UniqueType) -> UniqueId {
+    let t = r.uniques();
+    r.ruins()
+        .iter()
+        .flat_map(|(_, d)| d.uniques.ids())
+        .chain(r.base_units().iter().flat_map(|(_, d)| d.uniques.ids()))
+        .find(|&id| t.meta(id).ty == Some(ty))
+        .unwrap_or_else(|| panic!("a unique of type {ty:?}"))
+}
+
+/// What a one-time unique does to the unit in context, each kind once, as ruins (package 1b-08)
+/// and combat's triggers (1c-03) will apply them: the kitchen sink's trap (damage), old master
+/// (a promotion), better equipment (a free upgrade) and lost unit (destroyed), the Raider's
+/// `gains [1] movement`, and the shipped ruins' experience, announced with its cause.
+#[test]
+fn a_one_time_unique_does_its_part_to_the_unit() {
+    let r = kitchen_sink();
+    let mut g = game(r);
+    let raider = add(&mut g, ME, "Kitchen Sink Raider", at(6, 4));
+    clean(&mut g);
+    let site = |u| TriggerSite { civ: ME, city: None, unit: Some(u), tile: None };
+    let apply = |g: &mut Game, ty, u, note| {
+        let done = triggers::apply(g, one_time(r, ty), &site(u), note);
+        g.settle_for_test();
+        clean(g);
+        done
+    };
+    assert!(apply(&mut g, UniqueType::OneTimeUnitDamage, raider, None));
+    assert_eq!(g.unit(raider).map(|x| x.hp), Some(80), "[This Unit] takes [20] damage");
+
+    let veteran = id::<PromotionId>(r, "Kitchen Sink Veteran");
+    assert!(apply(&mut g, UniqueType::OneTimeUnitGainPromotion, raider, None));
+    let x = g.unit(raider).expect("the unit");
+    assert!(x.promotions.contains(veteran));
+    assert_eq!((x.xp, x.promotion_count), (0, 0), "a promotion given costs nothing");
+
+    let before = g.unit(raider).map_or(0, |x| x.moves);
+    assert!(apply(&mut g, UniqueType::OneTimeUnitGainMovement, raider, None));
+    let sc = r.constants().move_scale;
+    assert_eq!(
+        g.unit(raider).map(|x| x.moves),
+        Some(before + sc),
+        "[This Unit] gains [1] movement"
+    );
+
+    let since = g.events(0, usize::MAX).last().map_or(0, |e| e.id.get());
+    assert!(apply(&mut g, UniqueType::OneTimeUnitGainXP, raider, Some("from the ruins")));
+    assert_eq!(g.unit(raider).map(|x| x.xp), Some(10));
+    let told: Vec<&str> = g.events(since, usize::MAX).iter().map(|e| e.text.as_ref()).collect();
+    assert_eq!(told, ["Civ 0's Kitchen Sink Raider gained 10 XP (from the ruins)."]);
+
+    // A free upgrade: the Swordsman keeps the Raider's health, experience and promotions.
+    assert!(apply(&mut g, UniqueType::OneTimeUnitUpgrade, raider, None));
+    assert!(g.unit(raider).is_none(), "the Raider is replaced");
+    let swords: Vec<_> =
+        g.player_units(ME).filter(|u| r.name(u.base) == Some("Swordsman")).collect();
+    assert_eq!(swords.len(), 1);
+    let s = swords[0];
+    assert_eq!((s.hp, s.xp, s.tile(), s.moves), (80, 10, at(6, 4), 0));
+    assert!(s.promotions.contains(veteran));
+    let sword = s.id();
+
+    assert!(apply(&mut g, UniqueType::OneTimeUnitDestroyed, sword, None));
+    assert!(g.unit(sword).is_none(), "[This Unit] is destroyed");
+    assert_eq!(g.player_units(ME).count(), 0);
 }
