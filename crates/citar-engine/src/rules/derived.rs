@@ -11,8 +11,8 @@ use super::Ruleset;
 use super::defs::{BuilderClass, ImprovementKind, NationKind, Route, TerrainType};
 use super::errors::{Problems, RulesetErrorKind};
 use crate::base::ids::{
-    BaseUnitId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId, ObjectFilterId,
-    ResourceId, TechId, TerrainId,
+    BaseUnitId, BuildingId, DifficultyId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
+    ObjectFilterId, ResourceId, TechId, TerrainId,
 };
 use crate::base::sets::{FeatureSet, TerrainSet};
 use crate::base::stats::{Stat, StatMask};
@@ -28,6 +28,9 @@ const REMOVE: &str = "Remove ";
 const REPAIR: &str = "Repair";
 const CANCEL: &str = "Cancel improvement order";
 const CITY_CENTER: &str = "City center";
+/// The difficulty whose base values the easier AIs play on with `ai_base_values = monotonic`
+/// (`economy.py:44-49`).
+const PRINCE: &str = "Prince";
 const CITY_RUINS: &str = "City ruins";
 const ANCIENT_RUINS: &str = "Ancient ruins";
 const BARBARIAN_CAMP: &str = "Barbarian encampment";
@@ -74,10 +77,10 @@ pub struct NationUniques {
 
 /// The objects the engine refers to by name, resolved once.
 ///
-/// So far only the terrain features and improvements that this module's own tables need. Python
-/// names more (Worker, Palace, The Wheel, Prince, Ancient era, the victories, ...; DESIGN.md 5.3
-/// lists them with their lines): the package that ports such code adds the object here, required
-/// or optional as Python treated it, rather than comparing names.
+/// So far the terrain features and improvements that this module's own tables need, and Prince
+/// (package 1b-05). Python names more (Worker, Palace, The Wheel, Ancient era, the victories,
+/// ...; DESIGN.md 5.3 lists them with their lines): the package that ports such code adds the
+/// object here, required or optional as Python treated it, rather than comparing names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Known {
     pub hill: FeatureId,
@@ -90,6 +93,10 @@ pub struct Known {
     pub city_ruins: Option<ImprovementId>,
     pub ancient_ruins: Option<ImprovementId>,
     pub barbarian_camp: Option<ImprovementId>,
+    /// Prince, the difficulty the easier AIs take their base values from under
+    /// `ai_base_values = monotonic` (`economy.py:44-49`); a ruleset without it has no such
+    /// floor, as Python's `difficulty_index` read a missing name as the first.
+    pub prince: Option<DifficultyId>,
     /// The terrains and resources map generation names.
     pub map: KnownMap,
 }
@@ -156,6 +163,11 @@ pub struct Derived {
     /// `Fresh water` (`tiles._is_fresh_source`, `tiles.py:120-124`), which Python looked up per
     /// tile and cached.
     pub fresh_water: TerrainSet,
+    /// For each building, the other buildings that count as it in a city
+    /// (`cities.contains_building`, `cities.py:107-111`, UnCiv's `containsBuildingOrEquivalent`):
+    /// those that replace it, and those that carry its name as a tag, with or without
+    /// conditionals. Python compared the names at each ask.
+    pub building_equivalents: IdVec<BuildingId, Box<[BuildingId]>>,
     pub known: Known,
 }
 
@@ -176,6 +188,7 @@ impl Derived {
             feature_removals: Vec::new(),
             removal_of: IdVec::new(),
             fresh_water: TerrainSet::new(),
+            building_equivalents: IdVec::new(),
             known: Known {
                 hill: FeatureId(0),
                 fallout: FeatureId(0),
@@ -187,6 +200,7 @@ impl Derived {
                 city_ruins: None,
                 ancient_ruins: None,
                 barbarian_camp: None,
+                prince: None,
                 map: KnownMap::default(),
             },
         }
@@ -296,11 +310,13 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         city_ruins: find_improvement(CITY_RUINS),
         ancient_ruins: find_improvement(ANCIENT_RUINS),
         barbarian_camp: find_improvement(BARBARIAN_CAMP),
+        prince: r.difficulties.iter().find(|(_, d)| &*d.name == PRINCE).map(|(id, _)| id),
         map: known_map(r),
     };
 
     let UnitLists { great_person_units, spaceship_parts, builder_classes } = derive_units(r, p);
     derive_buildings(r);
+    let building_equivalents = building_equivalents(r);
 
     let mut tech_order: Vec<TechId> = r.techs.ids().collect();
     tech_order.sort_by(|&a, &b| {
@@ -383,6 +399,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         feature_removals,
         removal_of,
         fresh_water,
+        building_equivalents,
         known,
     })
 }
@@ -551,6 +568,29 @@ fn derive_units(r: &mut Ruleset, p: &mut Problems) -> UnitLists {
         };
     }
     UnitLists { great_person_units: great, spaceship_parts: parts_list, builder_classes: classes }
+}
+
+/// For each building, the others that count as it in a city: see
+/// [`Derived::building_equivalents`].
+fn building_equivalents(r: &Ruleset) -> IdVec<BuildingId, Box<[BuildingId]>> {
+    let table = &r.uniques;
+    r.buildings
+        .iter()
+        .map(|(b, def)| {
+            let tag = table.tag_named(&def.name);
+            r.buildings
+                .iter()
+                .filter(|&(x, d)| {
+                    x != b
+                        && (d.replaces == Some(b)
+                            || tag.is_some_and(|t| {
+                                d.uniques.tags.contains(t) || d.uniques.cond_tags.contains(t)
+                            }))
+                })
+                .map(|(x, _)| x)
+                .collect()
+        })
+        .collect()
 }
 
 /// Wonder flags and the stats each building raises (`rules.py:144-149, 169-180`).

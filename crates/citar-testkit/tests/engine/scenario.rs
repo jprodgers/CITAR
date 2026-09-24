@@ -119,14 +119,13 @@ fn inspect_reads_and_lists_what_is_pending() {
         .collect();
     for (name, pkg) in [
         ("found_city", "1b-07"),
-        ("remove_units", "1c-02"),
         ("ready_unit", "1c-02"),
         ("attack_as", "1c-03"),
         ("negotiation", "1c-05"),
         ("view", "1d-02"),
         ("briefing", "1d-03"),
         ("player_start S2: research progress", "1b-07"),
-        ("player_end E3: gold and bankruptcy", "1b-05"),
+        ("player_end E3: science", "1b-07"),
         ("round_end R0: eliminations", "1c-08"),
         ("starting units", "1c-02"),
         ("map: starts and ruins a document lacks", "1c-09"),
@@ -138,14 +137,17 @@ fn inspect_reads_and_lists_what_is_pending() {
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [3, 5, 12],
-        "three queries, five scenario ops and twelve test ops wait"
+        [3, 4, 12],
+        "three queries, four scenario ops and twelve test ops wait"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [40, 7], "the stages that wait");
+    assert_eq!([count("turn_stage"), count("setup_stage")], [38, 7], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(
-            !["end_turn", "end_round", "force_turn", "add_unit"].contains(&name.as_str()),
+            !["end_turn", "end_round", "force_turn", "add_unit", "remove_units"]
+                .contains(&name.as_str())
+                && !name.contains("gold and bankruptcy")
+                && !name.contains("temporary uniques"),
             "{name} is ported"
         );
     }

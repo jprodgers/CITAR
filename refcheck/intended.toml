@@ -50,7 +50,6 @@ reason = "Python's building conditionals (`if [x] is constructed`, `in cities wi
 where = [
   { group = "buildable", path = "cities[*].items.*" },
   { group = "city_stats", path = "cities[*].stats.**" },
-  { group = "civs", path = "civs[*].**" },
 ]
 broad = true
 
@@ -59,7 +58,6 @@ id = "between-stat-scales-by-speed"
 reason = "Python scaled `when above/below [n] [stat]` by game speed on `(modified by game speed)` uniques but not the two bounds of `when between [a] and [b] [stat]`; Rust scales all three alike"
 where = [
   { group = "city_stats", path = "cities[*].stats.**" },
-  { group = "civs", path = "civs[*].**" },
 ]
 broad = true
 
@@ -68,7 +66,6 @@ id = "no-civ-adopted-counts-beliefs"
 reason = "Python's `if no Civilization has adopted [x]` read policies only, so a belief never counted as adopted; Rust counts beliefs too"
 where = [
   { group = "buildable", path = "cities[*].items.*" },
-  { group = "civs", path = "civs[*].**" },
 ]
 broad = true
 

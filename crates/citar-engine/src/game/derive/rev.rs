@@ -15,8 +15,10 @@
 //!   recomputed only if one of them moved since it was verified; a recomputed value equal to the
 //!   stored one (floats compared as bits, [`BitEq`]) keeps its old `changed` stamp, so the memos
 //!   downstream of it stay valid (early cutoff);
-//! - [`Revs::cond`] maps what a unique's conditionals read ([`CondDeps`]) to the revisions of
+//! - `Revs::cond` maps what a unique's conditionals read ([`CondDeps`]) to the revisions of
 //!   those inputs, so a memo that evaluates uniques validates against exactly what they read.
+//!   All but `RESOURCES`, which is the supply memo's to answer: a memo validates with
+//!   `game::derive::civ::cond`, which maps that class to the memo's stamp and the rest here.
 //!
 //! The one way to get a borrow error out of a memo is a cycle between memos, which is a bug: the
 //! memo being validated holds its value mutably borrowed until it is done, so reading it again
@@ -75,7 +77,16 @@ pub struct CivRevs {
     pub seat: Rev,
     /// Which units it has, and where they stand.
     pub units: Rev,
-    /// Which cities it has.
+    /// Which units it has and of which base unit each is, and nothing else about them: what its
+    /// resource supply reads of its units (their required and consumed resources, DESIGN.md
+    /// 6.5). A unit made, lost or given away moves it, and so does an upgrade
+    /// ([`UnitTouch::BASE`]); a move, a heal, a promotion or an order does not.
+    ///
+    /// Unit upkeep reads more than this (whether a unit stands in a city, its promotions, the
+    /// conditionals of its unit-level uniques), so a memo of it validates against `units`, the
+    /// global `units_core` and `cities`, and the conditionals of the types it evaluates instead.
+    pub roster: Rev,
+    /// Which cities it has, and which tiles: a tile changing hands moves it for both sides.
     pub cities: Rev,
     /// The buildings in its cities.
     pub buildings: Rev,
@@ -99,6 +110,7 @@ impl CivRevs {
             gold_rate: r,
             seat: r,
             units: r,
+            roster: r,
             cities: r,
             buildings: r,
             religion: r,
@@ -118,6 +130,7 @@ impl CivRevs {
             self.gold_rate,
             self.seat,
             self.units,
+            self.roster,
             self.cities,
             self.buildings,
             self.religion,
@@ -442,8 +455,16 @@ impl Revs {
     /// hoisting the civilization-level half of its uniques validates against. With no
     /// civilization in context the classes about the civilization read nothing that can move,
     /// since the conditionals about it then fail whatever happens.
+    ///
+    /// Not for `RESOURCES` with a civilization in context: that class is the supply memo's
+    /// (`game::derive::civ::cond`), and here it would read as moved on every write, so a memo
+    /// validated with it would recompute on every read. Debug builds refuse it.
     #[must_use]
-    pub fn cond_civ(&self, p: Option<PlayerId>, deps: CondDeps) -> Rev {
+    pub(crate) fn cond_civ(&self, p: Option<PlayerId>, deps: CondDeps) -> Rev {
+        debug_assert!(
+            !deps.contains(CondDeps::RESOURCES) || p.is_none(),
+            "RESOURCES is validated through game::derive::civ::cond"
+        );
         let mut r = Rev::START;
         let civ = p.map(|p| self.civ(p));
         for class in deps.difference(CondDeps::LOCAL).iter() {
@@ -451,7 +472,11 @@ impl Revs {
                 CondDeps::TURN | CondDeps::CHANCE => self.turn,
                 CondDeps::HAPPINESS_SEEN => civ.map_or(Rev::START, |c| c.happiness_seen),
                 CondDeps::STOCKS | CondDeps::GOLDEN_AGE => civ.map_or(Rev::START, |c| c.stocks),
-                CondDeps::RESOURCES => civ.map_or(Rev::START, |c| self.resource_inputs(&c)),
+                // The resource supply is a memo (`ResourceSupply`, package 1b-05), which the
+                // revisions alone cannot validate: `game::derive::civ::cond` maps this class to
+                // the memo's own stamp. Should a release build get here, it reads as moved on
+                // every write, which is always correct.
+                CondDeps::RESOURCES => civ.map_or(Rev::START, |_| self.now),
                 // The leaves that read a city-state's influence (friendly civilizations and
                 // land) read every class, WAR among them.
                 CondDeps::WAR => self.diplo.max(self.influence),
@@ -488,29 +513,16 @@ impl Revs {
         r
     }
 
-    /// What a civilization's resource supply is computed from (DESIGN.md 6.5, `ResourceSupply`):
-    /// its unique index, the tiles and their owners, its units and cities and their buildings,
-    /// deals, and the city-states allied with it. Until the supply is a memo of its own (package
-    /// 1b-05), conditionals about resources validate against all of these.
-    fn resource_inputs(&self, c: &CivRevs) -> Rev {
-        c.index
-            .max(c.units)
-            .max(c.cities)
-            .max(c.buildings)
-            .max(self.tile_log.rev())
-            .max(self.owners)
-            .max(self.diplo)
-            .max(self.alliances)
-            .max(self.turn)
-    }
-
     /// The latest revision of everything the conditionals of `deps` read in `ctx`, the
     /// context-local classes included: the city a rule means (`Ctx::rel_city`: the city in
     /// context, our side's in a fight, or the city whose territory the tile is), the unit, the
     /// tile and the fight. A memo keyed by a tile or a unit that evaluates a city conditional so
     /// validates against its territory city's revisions too.
+    ///
+    /// Not for `RESOURCES` with a civilization in context ([`cond_civ`](Self::cond_civ)): a memo
+    /// validates with `game::derive::civ::cond`, which calls this for the other classes.
     #[must_use]
-    pub fn cond(&self, st: &State, deps: CondDeps, ctx: &Ctx) -> Rev {
+    pub(crate) fn cond(&self, st: &State, deps: CondDeps, ctx: &Ctx) -> Rev {
         let mut r = self.cond_civ(ctx.civ, deps);
         if deps.contains(CondDeps::CITY) {
             if let Some(c) = rel_city(st, ctx) {
@@ -624,11 +636,15 @@ impl Revs {
                     }
                 }
             }
-            Change::UnitPlaced { u, owner, .. } => {
+            Change::UnitPlaced { u, owner, from, .. } => {
                 self.unit_mut(u).place = r;
                 self.unit_pos = r;
                 if let Some(c) = self.civ_mut(owner) {
                     c.units = r;
+                    // A unit placed from nowhere is a new one.
+                    if from.is_none() {
+                        c.roster = r;
+                    }
                 }
             }
             Change::UnitOwner { u, old, new } => {
@@ -638,6 +654,7 @@ impl Revs {
                 for p in [old, new] {
                     if let Some(c) = self.civ_mut(p) {
                         c.units = r;
+                        c.roster = r;
                     }
                 }
             }
@@ -647,6 +664,7 @@ impl Revs {
                 self.units_core = r;
                 if let Some(c) = self.civ_mut(owner) {
                     c.units = r;
+                    c.roster = r;
                 }
             }
             Change::CityAdded(c) => {
@@ -804,12 +822,19 @@ impl Revs {
         }
     }
 
-    /// A touch of a unit's fields.
-    pub(crate) fn touch_unit(&mut self, u: UnitId, t: UnitTouch) {
+    /// A touch of a unit's fields; `owner` is the unit's.
+    pub(crate) fn touch_unit(&mut self, u: UnitId, owner: PlayerId, t: UnitTouch) {
         let r = self.next();
-        if t.contains(UnitTouch::CORE) {
+        if t.intersects(UnitTouch::CORE | UnitTouch::BASE) {
             self.unit_mut(u).core = r;
             self.units_core = r;
+        }
+        // Only a new base unit changes what its owner's resource supply reads: every heal,
+        // promotion or order of a unit would otherwise recompute the supply.
+        if t.contains(UnitTouch::BASE)
+            && let Some(c) = self.civ_mut(owner)
+        {
+            c.roster = r;
         }
         if t.contains(UnitTouch::MOVES) {
             self.unit_mut(u).moves = r;
@@ -935,6 +960,9 @@ bitflags::bitflags! {
     pub struct UnitTouch: u8 {
         /// Promotions, health, experience, status, orders, used actions.
         const CORE = 1 << 0;
+        /// Its base unit (an upgrade): what its owner's resource supply reads of it
+        /// ([`CivRevs::roster`]). Implies `CORE`.
+        const BASE = 1 << 3;
         /// Movement points.
         const MOVES = 1 << 1;
         /// What it sees: marks it as a dirty vision source.
@@ -1008,6 +1036,7 @@ bit_eq_by_eq!(
     CityId,
     UnitId,
     TileIdx,
+    crate::base::ids::EraId,
     Csr,
     crate::base::sets::BitSet,
     crate::base::sets::PlayerSet,

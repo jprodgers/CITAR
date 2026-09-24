@@ -9,8 +9,9 @@
 //! Package 1b-02 ports the framework and the operations whose rules exist: `grant_era`,
 //! `grant_tech`, `remove_tech`, `set_player`, `set_tile`, `meet`, `set_relation`,
 //! `set_influence`, `reveal` and `set_research`; package 1b-03 adds `add_unit`, which the turn
-//! scripts need to keep a civilization in the game across a round. The others are listed with
-//! the package that ports their system, and are refused as not ported until then.
+//! scripts need to keep a civilization in the game across a round, and package 1b-05
+//! `remove_units`. The others are listed with the package that ports their system, and are
+//! refused as not ported until then.
 //!
 //! What differs from Python, on purpose, each listed in `tests/rules/intended.toml` under its id
 //! and cited where the fix is made:
@@ -38,7 +39,7 @@ use serde_json::{Map, Value, json};
 
 use crate::base::ids::{
     BaseUnitId, DifficultyId, EraId, ImprovementId, PlayerId, PromotionId, ResourceId, TechId,
-    TerrainId, TileIdx,
+    TerrainId, TileIdx, UnitId,
 };
 use crate::base::py;
 use crate::base::sets::{BitSet, FeatureSet};
@@ -126,7 +127,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec {
         name: "remove_units",
         params: "x, y (every unit there), or unit (one id); optional player (only theirs)",
-        porting: Porting::Pending("1c-02"),
+        porting: Porting::Ported,
         run: remove_units,
     },
     OpSpec {
@@ -754,6 +755,27 @@ fn add_unit(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(json!({"unit_ids": ids}))
 }
 
-fn remove_units(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::units"))
+/// Removes units without a word (`scenario.py:333-350`): one by id, or every unit on a tile;
+/// with a player, only theirs. What a unit carried stays, no longer carried, as
+/// `Game.remove_unit` left it (`game.py:751-764`).
+fn remove_units(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let mut targets: Vec<UnitId> = match given(o, "unit") {
+        Some(v) => {
+            let n: u32 = whole(v, "unit")?;
+            let u = UnitId::new(n).filter(|&u| g.unit(u).is_some());
+            vec![u.ok_or_else(|| ActionError::new(ErrCode::NoSuchUnit, "No such unit."))?]
+        }
+        None => {
+            let at = tile(g, o)?;
+            g.units_at(at).map(crate::state::units::Unit::id).collect()
+        }
+    };
+    if let Some(v) = given(o, "player") {
+        let p = pid(g, Some(v), false)?;
+        targets.retain(|&u| g.unit(u).is_some_and(|x| x.owner() == p));
+    }
+    for &u in &targets {
+        g.despawn_unit(u).map_err(|e| refused(&e))?;
+    }
+    Ok(json!({"removed": targets.iter().map(|u| u.get()).collect::<Vec<_>>()}))
 }

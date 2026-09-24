@@ -33,17 +33,24 @@
 //! them: [`research`] (granting, removing and setting research), [`diplomacy`] (war, peace,
 //! pacts and opinions) and [`city_states`] (influence and allies). Their packages port the rest.
 //!
+//! The civilization-level economy (package 1b-05): the unique index memos, unit profiles and the
+//! resource supply in `derive::civ`; [`economy`] (resources, unit and route upkeep, unit supply,
+//! gold at the end of a turn, temporary uniques); and the uniques of a city
+//! ([`cities::uniques`]) and of a unit ([`units`]).
+//!
 //! **Porting markers.** A step whose system a later package ports is written as
 //! `pending(Porting::Pending("<package>"))`, or `pending_or` where it must answer
 //! something meanwhile. `cargo xtask check` counts these by their literal argument and fails
 //! once that package is done (DESIGN.md 3.4, rule 3).
 
 pub mod action;
+pub mod cities;
 pub mod city_states;
 pub mod core;
 pub mod debug;
 pub mod derive;
 pub mod diplomacy;
+pub mod economy;
 pub mod error;
 pub mod eval;
 pub mod events;
@@ -54,6 +61,7 @@ pub mod query;
 pub mod research;
 pub mod setup;
 pub mod turn;
+pub mod units;
 pub mod vis;
 
 pub use self::action::{Action, Outcome, OutcomeSpec};
@@ -80,7 +88,7 @@ pub enum Porting {
 pub(crate) const fn pending(_: Porting) {}
 
 /// Marks a value whose system a later package ports, and gives `meanwhile` until then. Write the
-/// marker as a literal, `pending_or(Porting::Pending("1b-05"), 0)`.
+/// marker as a literal, `pending_or(Porting::Pending("1b-06"), 0)`.
 #[inline]
 pub(crate) fn pending_or<T>(_: Porting, meanwhile: T) -> T {
     meanwhile

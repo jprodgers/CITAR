@@ -197,6 +197,7 @@ dependencies = [
  "blake3",
  "indexmap",
  "libm",
+ "proptest",
  "rustc-hash",
  "serde",
  "serde_json",

@@ -67,6 +67,7 @@ impl Game {
     /// that work for the next settle.
     pub(crate) fn changed(&mut self, ch: Change) {
         self.dv.revs.on_change(&self.st, &ch);
+        self.dv.civ.track(&ch);
         let react = self.dv.on(&self.st, self.rules, &ch);
         for c in react.recheck {
             self.pending.flag_city(c);
@@ -406,8 +407,8 @@ impl Game {
     /// A unit's fields, after moving the revisions `t` names; `SIGHT` marks it a dirty vision
     /// source. Its owner, tile and carrier change through setters instead.
     pub(crate) fn unit_mut(&mut self, u: UnitId, t: UnitTouch) -> Option<&mut Unit> {
-        self.st.units().get(u)?;
-        self.dv.revs.touch_unit(u, t);
+        let owner = self.st.units().get(u)?.owner();
+        self.dv.revs.touch_unit(u, owner, t);
         if t.contains(UnitTouch::SIGHT) {
             self.pending.flag_sight(SightSource::Unit(u));
         }
@@ -437,7 +438,7 @@ impl Game {
     pub(crate) fn edit_config(&mut self, f: impl FnOnce(&mut GameConfig)) {
         f(self.st.config_mut());
         let now = self.dv.revs.now();
-        self.dv = Derived::new(&self.st);
+        self.dv = Derived::new(self.rules, &self.st);
         // Revisions never go back: a host's ETag, and anything keyed on a revision, must see
         // every input move on.
         self.dv.revs = super::derive::rev::Revs::after(&self.st, now);
@@ -572,11 +573,12 @@ mod tests {
                     g.player_mut(PlayerId(0), PlayerTouch::STOCKS);
                 }),
             ),
+            // The supply memo's stamp: a Swordsman needs Iron, a line of Rome's supply.
             (
                 CondDeps::RESOURCES,
                 Ctx::civ(p),
                 Box::new(|g| {
-                    let _ok = g.set_resource(TileIdx(3), None, 0);
+                    testing::unit(g, PlayerId(0), "Swordsman", TileIdx(30));
                 }),
             ),
             (
@@ -755,9 +757,9 @@ mod tests {
             ),
         ];
         for (i, (class, ctx, write)) in cases.iter().enumerate() {
-            let before = g.dv.revs.cond(&g.st, *class, ctx);
+            let before = super::super::derive::civ::cond(&g, *class, ctx);
             write(&mut g);
-            let after = g.dv.revs.cond(&g.st, *class, ctx);
+            let after = super::super::derive::civ::cond(&g, *class, ctx);
             assert!(after > before, "case {i}: {class:?} did not move");
         }
         // Every class is covered, and the two halves partition them.
@@ -873,7 +875,7 @@ mod tests {
         let mut g = testing::duel();
         let far = UnitId::new(crate::state::store::MAX_ENTITY_ID).unwrap_or(UnitId::FIRST);
         let before = g.dv.revs.unit(far).max();
-        g.dv.revs.touch_unit(far, UnitTouch::CORE);
+        g.dv.revs.touch_unit(far, PlayerId(0), UnitTouch::CORE);
         assert!(g.dv.revs.unit(far).max() > before);
         assert_eq!(g.dv.revs.unit(UnitId::FIRST).max(), before, "an untouched id reads the floor");
         let far = CityId::new(crate::state::store::MAX_ENTITY_ID).unwrap_or(CityId::FIRST);

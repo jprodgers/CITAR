@@ -35,5 +35,10 @@ base64.workspace = true
 aho-corasick.workspace = true
 bitflags.workspace = true
 
+# Dev-dependencies never reach a game (xtask check allows any). The memo properties of
+# game::derive::civ drive the game's own writes, which only the crate's tests can reach.
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true
