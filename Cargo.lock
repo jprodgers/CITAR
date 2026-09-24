@@ -226,7 +226,9 @@ version = "0.1.5"
 dependencies = [
  "blake3",
  "citar-engine",
+ "flate2",
  "proptest",
+ "serde",
  "serde_json",
 ]
 

@@ -9,8 +9,12 @@ publish.workspace = true
 
 [dependencies]
 citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
-serde_json.workspace = true
+serde.workspace = true
+# raw_value: a fixture's state is handed to the converter as the text Python wrote.
+serde_json = { workspace = true, features = ["raw_value"] }
 blake3.workspace = true
+# The refcheck fixtures are gzipped.
+flate2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
