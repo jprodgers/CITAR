@@ -2,6 +2,7 @@
 //! and against their own contracts. One file per module under `tests/engine/`.
 
 mod engine {
+    mod cities;
     mod convert;
     mod economy;
     mod eval;
