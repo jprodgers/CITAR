@@ -5,7 +5,9 @@ city cannot work is refused, and a lock survives the citizens' next placement.
 
 The Rust engine keeps a city's locks as a set, one citizen each, and refuses another lock while
 every citizen is locked, where Python dropped the oldest lock
-(intended: work-tile-refuses-a-lock-past-the-citizens).
+(intended: work-tile-refuses-a-lock-past-the-citizens). It lists a city's tiles by column and
+then row, as the city shows them, where Python listed them in the order they were taken
+(intended: citizen-tools-list-tiles-sorted).
 """
 from = "citar/engine/tools.py: work_tile"
 
@@ -100,6 +102,25 @@ as = "three"
 check = "three"
 path = "locked_tiles"
 len = 3
+
+[[step]]
+note = "the call lists the tiles as the city shows them, by column and then row"
+check = { what = "city", city = "=city" }
+path = "locked"
+eq = "=three.locked_tiles"
+intended = "citizen-tools-list-tiles-sorted"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+eq = "=three.worked_tiles"
+intended = "citizen-tools-list-tiles-sorted"
+
+[[step]]
+check = "three"
+path = "worked_tiles"
+eq = [[3, 5], [6, 6], [7, 5]]
+intended = "citizen-tools-list-tiles-sorted"
 
 [[step]]
 check = { what = "city", city = "=city" }

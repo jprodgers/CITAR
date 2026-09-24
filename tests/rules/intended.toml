@@ -117,3 +117,7 @@ reason = "Python took a citizen off a blockaded tile, and its lock, at the end o
 [[differences]]
 id = "citizens-follow-a-neighbour-at-once"
 reason = "Python placed a city's citizens again at the end of its turn when a tile next to one it could work changed, as a Moai beside a Moai does; Rust places them at once, as after any change to what its tiles yield"
+
+[[differences]]
+id = "citizen-tools-list-tiles-sorted"
+reason = "work_tile, set_city_focus and set_specialists listed a city's worked and locked tiles in the order its citizens took them; Rust lists them by column and then row, as the city's own view does"

@@ -20,7 +20,9 @@
 //! - a city's food with the citizens placed so far reads We Love The King Day's food by the
 //!   happiness committed too;
 //! - a city's worked and locked tiles are sets, so a city whose citizens are all locked refuses
-//!   another lock (`work-tile-refuses-a-lock-past-the-citizens`), where Python dropped its oldest.
+//!   another lock (`work-tile-refuses-a-lock-past-the-citizens`), where Python dropped its oldest;
+//! - the tools list a city's tiles by column and then row, as `inspect` does
+//!   (`citizen-tools-list-tiles-sorted`), where Python listed them in the order they were taken.
 
 use smallvec::SmallVec;
 
@@ -600,17 +602,13 @@ fn tile_at(g: &Game, x: i64, y: i64) -> Result<TileIdx, ActionError> {
     })
 }
 
-/// The worked tiles as `[x, y]` pairs.
+/// Tiles as `[x, y]` pairs, by column and then row, as `inspect` lists a city's: a tool's result
+/// is what the city shows after the call.
+// refcheck: citizen-tools-list-tiles-sorted
 fn xys(g: &Game, tiles: &[TileIdx]) -> Value {
-    Value::Array(
-        tiles
-            .iter()
-            .map(|&t| {
-                let (x, y) = g.xy(t);
-                json!([x, y])
-            })
-            .collect(),
-    )
+    let mut v: SmallVec<[(i32, i32); 16]> = tiles.iter().map(|&t| g.xy(t)).collect();
+    v.sort_unstable();
+    Value::Array(v.into_iter().map(|(x, y)| json!([x, y])).collect())
 }
 
 /// A city's specialists as the tools report them: `{name: count}` of those it has.
