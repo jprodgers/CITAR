@@ -1,0 +1,11 @@
+# Deliberate differences that only the rule scripts can show: a check whose expected value is the
+# Rust engine's carries `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md).
+# Differences a refcheck group shows belong in refcheck/intended.toml, which scripts may cite too.
+#
+# One [[differences]] table per entry, as in refcheck/intended.toml but without `where`:
+#   id      kebab-case and unique; the code that makes the fix cites it as `// refcheck: <id>`
+#   reason  one line: what Python did, and what Rust does instead
+
+[[differences]]
+id = "atomic-apply-ops"
+reason = "Python applied scenario operations until the first failure and left the earlier ones applied; Rust applies a list all or nothing"

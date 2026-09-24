@@ -1,0 +1,513 @@
+about = """
+The runners themselves: every matcher passes where it should and fails where it should, values
+and expressions evaluate alike, tile references land on the same tiles, errors are expected and
+caught, and a script that types a number as a string is refused. Both runners must pass it.
+"""
+
+[config]
+players = [{ nation = "BenchmarkCiv" }, {}]
+
+# ---- The bare game --------------------------------------------------------------------------
+
+[[step]]
+note = "A bare game: the default two seats on the arena, no city-states, no barbarians, no units."
+check = { what = "game" }
+subset = { turn = 1, width = 24, height = 16, players = 2, majors = [0, 1], city_states = [], barbarians = "=null" }
+
+[[step]]
+check = { what = "units" }
+eq = []
+
+[[step]]
+note = "Unnamed seats play the benchmark civilization, named by seat."
+check = { what = "player", player = 1 }
+subset = { name = "Civilization 2", nation = "BenchmarkCiv", kind = "major", alive = true }
+
+# ---- Matchers that hold ---------------------------------------------------------------------
+
+[[step]]
+set = { v = { n = 3, f = 2.5, s = "hello world", xs = [1, 2, 3], o = { k = "v" }, t = true, units = [{ id = 7, type = "Warrior" }, { id = 9, type = "Settler" }], pairs = [[1, "one"], [2, "two"]] } }
+
+[[step]]
+check = "v"
+path = "n"
+eq = 3.0
+ne = 4
+gt = 2
+ge = 3
+lt = 4
+le = 3
+
+[[step]]
+check = "v"
+path = "f"
+approx = 2.5000001
+
+[[step]]
+check = "v"
+path = "f"
+approx = 2.6
+tol = 0.05
+
+[[step]]
+check = "v"
+path = "s"
+contains = "lo wo"
+not_contains = "xyz"
+len = 11
+matches = "^h.l+o\\s"
+
+[[step]]
+check = "v"
+path = "xs"
+contains = 2
+not_contains = 5
+len = 3
+subset = [3, 1]
+any = { gt = 2 }
+none = { gt = 3 }
+
+[[step]]
+check = "v"
+path = "o"
+contains = "k"
+subset = { k = "v" }
+eq = { k = "v" }
+
+[[step]]
+check = "v"
+path = "missing"
+absent = true
+
+[[step]]
+check = "v"
+path = "t"
+absent = false
+is_null = false
+eq = true
+
+[[step]]
+check = "v"
+path = "units[type=Settler].id"
+eq = 9
+
+[[step]]
+check = "v"
+path = "units"
+any = { path = "type", eq = "Warrior" }
+
+[[step]]
+check = "v"
+path = "pairs[#0=2][1]"
+eq = "two"
+
+[[step]]
+check = "v"
+path = "units[1]"
+subset = { id = 9 }
+
+# ---- Matchers that fail ---------------------------------------------------------------------
+
+[[step]]
+check = "v"
+path = "n"
+eq = 4
+must_fail = "expected eq 4, got 3"
+
+[[step]]
+check = "v"
+path = "n"
+ne = 3
+must_fail = "expected ne"
+
+[[step]]
+check = "v"
+path = "t"
+eq = 1
+must_fail = "expected eq 1, got true"
+note = "A boolean is never a number."
+
+[[step]]
+check = "v"
+path = "n"
+gt = 3
+must_fail = "expected gt"
+
+[[step]]
+check = "v"
+path = "n"
+ge = 4
+must_fail = "expected ge"
+
+[[step]]
+check = "v"
+path = "n"
+lt = 3
+must_fail = "expected lt"
+
+[[step]]
+check = "v"
+path = "n"
+le = 2
+must_fail = "expected le"
+
+[[step]]
+check = "v"
+path = "f"
+approx = 2.6
+must_fail = "expected approx"
+
+[[step]]
+check = "v"
+path = "xs"
+contains = 5
+must_fail = "expected contains"
+
+[[step]]
+check = "v"
+path = "xs"
+not_contains = 1
+must_fail = "expected not_contains"
+
+[[step]]
+check = "v"
+path = "xs"
+len = 4
+must_fail = "expected len"
+
+[[step]]
+check = "v"
+path = "s"
+matches = "^world"
+must_fail = "expected matches"
+
+[[step]]
+check = "v"
+path = "xs"
+any = { gt = 3 }
+must_fail = "expected any"
+
+[[step]]
+check = "v"
+path = "xs"
+none = { gt = 2 }
+must_fail = "expected none"
+
+[[step]]
+check = "v"
+path = "o"
+subset = { k = "w" }
+must_fail = "expected subset"
+
+[[step]]
+check = "v"
+path = "n"
+absent = true
+must_fail = "expected nothing there"
+
+[[step]]
+check = "v"
+path = "missing"
+absent = false
+must_fail = "expected a value there"
+
+[[step]]
+check = "v"
+path = "missing"
+eq = 1
+must_fail = "found nothing"
+
+[[step]]
+check = "v"
+path = "t"
+is_null = true
+must_fail = "expected is_null"
+
+[[step]]
+note = "A check with no matcher is a broken script."
+check = "v"
+path = "n"
+must_fail = "at least one matcher"
+
+[[step]]
+check = "nothing_bound"
+eq = 1
+must_fail = "no variable nothing_bound"
+
+# ---- Expressions ----------------------------------------------------------------------------
+
+[[step]]
+set = { a = "=v.n * 2 + 1", b = "=7 // 2", c = "=-7 // 2", d = "=-7 % 3", e = "=7 / 2", f = "=len(v.xs) + len(v.s)", g = "='ab' + 'c'", h = "=null", i = "==literal" }
+
+[[step]]
+check = "a"
+eq = 7
+
+[[step]]
+check = "b"
+eq = 3
+
+[[step]]
+check = "c"
+eq = -4
+
+[[step]]
+check = "d"
+eq = 2
+
+[[step]]
+check = "e"
+eq = 3.5
+
+[[step]]
+check = "f"
+eq = 14
+
+[[step]]
+check = "g"
+eq = "abc"
+
+[[step]]
+check = "h"
+is_null = true
+
+[[step]]
+note = "Matcher values are evaluated too, so the literal is doubled there as well."
+check = "i"
+eq = "==literal"
+
+[[step]]
+set = { bad = "=1 // 0" }
+must_fail = "division by zero"
+
+# ---- Tile references ------------------------------------------------------------------------
+
+[[step]]
+set = { ax = "=x('A')", ay = "=y('A')", ne = "=x('A>ne') * 100 + y('A>ne')", back = "=x('A>w>w>e>e')", nene = "=y('A>ne>ne') * 100 + x('A>ne>ne')", xy = "=x('(12, 3)')" }
+
+[[step]]
+check = "ax"
+eq = 5
+
+[[step]]
+check = "ay"
+eq = 5
+
+[[step]]
+note = "Row 5 is odd, so north-east is (x + 1, y - 1); from row 4, which is even, it is (x, y - 1)."
+check = "ne"
+eq = 604
+
+[[step]]
+check = "nene"
+eq = 306
+
+[[step]]
+check = "back"
+eq = 5
+
+[[step]]
+check = "xy"
+eq = 12
+
+[[step]]
+check = { what = "tile", at = "H" }
+subset = { x = 7, y = 5, terrain = "Grassland", features = ["Hill"] }
+
+[[step]]
+check = { what = "tile", at = "F" }
+path = "features"
+eq = ["Forest"]
+
+[[step]]
+check = { what = "tile", at = "M" }
+path = "terrain"
+eq = "Mountain"
+
+[[step]]
+check = { what = "tile", at = "L" }
+subset = { resource = "Cotton", resource_amount = 0 }
+
+[[step]]
+check = { what = "tile", at = "W" }
+path = "terrain"
+eq = "Coast"
+
+[[step]]
+note = "R's river runs along its east and north-east edges (bits 0 and 1); its neighbours carry the other side."
+check = { what = "tile", at = "R" }
+path = "river"
+eq = 3
+
+[[step]]
+check = { what = "tile", at = "R>e" }
+path = "river"
+eq = 8
+
+[[step]]
+check = { what = "tile", at = "(0,0)>w" }
+must_fail = "walks off the map"
+
+[[step]]
+note = "A selector: the nearest plains to B, which stands on plains, is B itself; the next is a neighbour."
+check = { what = "tile", at = { at = "B", terrain = "Plains" } }
+subset = { x = 18, y = 10 }
+
+[[step]]
+check = { what = "find_tiles", at = "A", radius = 2, feature = "Hill" }
+eq = [{ x = 7, y = 5, distance = 2 }]
+
+[[step]]
+check = { what = "find_tiles", at = "A", radius = 1 }
+len = 7
+
+[[step]]
+check = { what = "find_tiles", at = "A", radius = 1, limit = 2 }
+eq = [{ x = 5, y = 5, distance = 0 }, { x = 5, y = 4, distance = 1 }]
+
+[[step]]
+check = { what = "find_tiles", land = false, limit = 1 }
+eq = [{ x = 0, y = 0, distance = 0 }]
+
+[[step]]
+note = "Within 3 of A, only the hill, the forest and the cotton have something on them: a river or a mountain is no feature."
+check = { what = "find_tiles", at = "A", radius = 3, bare = false }
+eq = [{ x = 3, y = 5, distance = 2 }, { x = 7, y = 5, distance = 2 }, { x = 4, y = 3, distance = 2 }]
+must_fail = "expected eq"
+
+[[step]]
+check = { what = "find_tiles", at = "A", radius = 3, bare = false }
+eq = [{ x = 4, y = 3, distance = 2 }, { x = 3, y = 5, distance = 2 }, { x = 7, y = 5, distance = 2 }]
+
+[[step]]
+check = { what = "tile", at = { at = "A", terrain = "Desert" } }
+must_fail = "finds no tile"
+
+# ---- Operations, errors and variables -------------------------------------------------------
+
+[[step]]
+op = "set_player"
+args = { player = 0, gold = 120, name = "Testland" }
+as = "done"
+
+[[step]]
+check = "done"
+eq = {}
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { gold = 120, name = "Testland" }
+
+[[step]]
+op = "set_player"
+args = { player = 9, gold = 1 }
+error = "No player 9."
+
+[[step]]
+op = "set_player"
+args = { player = 0, gold = 1 }
+error = "No player"
+must_fail = "expected an error"
+note = "An error that does not come fails the step."
+
+[[step]]
+op = "set_player"
+args = { player = 9 }
+must_fail = "No player 9."
+note = "An error that is not expected fails the step."
+
+[[step]]
+op = "set_player"
+args = { player = 9 }
+error = "gold"
+must_fail = "expected an error with"
+note = "An error with other text fails the step."
+
+[[step]]
+op = "set_player"
+args = { player = 9 }
+error = true
+
+[[step]]
+op = "no_such_op"
+error = "Operation 1: unknown op 'no_such_op'. Known: add_unit, adopt_policy, found_city,"
+
+[[step]]
+op = "unmeet"
+args = { a = 0, b = 0 }
+error = "Test operation 1 (unmeet)"
+
+[[step]]
+tool = "no_such_tool"
+error = "Unknown tool 'no_such_tool'."
+
+# ---- Numbers typed as strings ---------------------------------------------------------------
+
+[[step]]
+op = "set_player"
+args = { player = "0", gold = 50 }
+must_fail = "typed as a string"
+
+[[step]]
+op = "set_player"
+args = { player = "0", gold = "75" }
+coerce = true
+note = "Operations read numbers with Python's int() and float(), strings included."
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 75
+
+[[step]]
+check = { what = "player", player = "1" }
+must_fail = "typed as a string"
+
+# ---- New games ------------------------------------------------------------------------------
+
+[[step]]
+new_game = { players = [{ controller = "bot" }, { controller = "llm" }, { controller = "human" }] }
+
+[[step]]
+check = { what = "game" }
+path = "majors"
+eq = [0, 1, 2]
+
+[[step]]
+new_game = { players = [{ controller = "bot", handicap = "deity" }] }
+error = "handicap must be 'human' or 'ai', not 'deity'."
+
+[[step]]
+new_game = { players = [{ controller = "bot" }] }
+error = true
+must_fail = "expected the settings to be refused"
+
+# ---- Repeat, and the script's own shape -----------------------------------------------------
+
+[[step]]
+set = { count = 0 }
+
+[[step]]
+repeat = 3
+steps = [{ set = { count = "=count + 1" } }]
+
+[[step]]
+check = "count"
+eq = 3
+
+[[step]]
+check = "count"
+eq = 3
+op = "set_turn"
+must_fail = "exactly one of"
+
+[[step]]
+check = "count"
+equals = 3
+must_fail = "has no key"
+
+[[step]]
+check = "count"
+eq = 3
+intended = "no-such-difference"
+must_fail = "is in neither"

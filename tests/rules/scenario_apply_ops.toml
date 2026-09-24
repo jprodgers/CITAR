@@ -1,0 +1,41 @@
+about = """
+A list of scenario operations applies all or nothing: when one fails, the error names it by its
+place and name, and the operations before it are undone too, so an editor never sees a game half
+edited. Python left the earlier ones applied.
+"""
+from = "citar/engine/scenario.py: apply_ops"
+
+[[step]]
+ops = [
+  { op = "set_player", player = 0, gold = 40 },
+  { op = "grant_tech", player = 1, tech = "Pottery" },
+]
+as = "done"
+
+[[step]]
+check = "done"
+eq = [{}, { techs_added = { "1" = ["Pottery"] } }]
+
+[[step]]
+ops = [
+  { op = "set_player", player = 0, gold = 99 },
+  { op = "grant_tech", player = 1, tech = "Writing" },
+  { op = "set_tile", at = "A", terrain = "Nowhere" },
+]
+error = "Operation 3 (set_tile): Unknown terrain 'Nowhere'."
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 40
+intended = "atomic-apply-ops"
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "techs"
+not_contains = "Writing"
+intended = "atomic-apply-ops"
+
+[[step]]
+ops = [{ op = "set_player", player = 0, gold = 1 }, { op = "found_it", player = 0 }]
+error = "Operation 2: unknown op 'found_it'."

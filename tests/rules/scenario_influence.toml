@@ -1,0 +1,86 @@
+about = """
+set_influence sets a civilization's influence with a city-state, meeting them first, and never
+below the floor of -60. The city-state's ally is the civilization with the most influence, if it
+has at least 60; a new ally, and the one it replaces, are told.
+"""
+from = "citar/engine/scenario.py: set_influence; citar/engine/city_states.py: set_influence, update_ally"
+
+[config]
+city_states = 1
+
+[[step]]
+check = { what = "player", player = 2 }
+subset = { kind = "city_state", controller = "minor" }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "city_state"
+subset = { ally = "=null", influence = { "0" = 0, "1" = 0 } }
+
+[[step]]
+op = "set_influence"
+args = { city_state = 2, player = 0, amount = 45 }
+as = "set"
+
+[[step]]
+check = "set"
+eq = { influence = 45 }
+
+[[step]]
+note = "The city-state's type is whichever the engine drew, so only its ally and influence are pinned."
+check = { what = "player", player = 2 }
+subset = { met = [0] }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "city_state"
+subset = { ally = "=null", influence = { "0" = 45, "1" = 0 } }
+
+[[step]]
+op = "set_influence"
+args = { city_state = 2, player = 0, amount = 70 }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "city_state.ally"
+eq = 0
+
+[[step]]
+check = { what = "events", type = "cs_ally" }
+len = 1
+
+[[step]]
+op = "set_influence"
+args = { city_state = 2, player = 1, amount = 80 }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "city_state"
+subset = { ally = 1, influence = { "0" = 70, "1" = 80 } }
+
+[[step]]
+check = { what = "events", type = "cs_ally_lost", player = 0 }
+len = 1
+
+[[step]]
+check = { what = "events", type = "cs_ally", player = 1 }
+len = 1
+
+[[step]]
+op = "set_influence"
+args = { city_state = 2, player = 1, amount = -500 }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "city_state"
+subset = { ally = 0, influence = { "0" = 70, "1" = -60 } }
+
+[[step]]
+op = "set_influence"
+args = { city_state = 0, player = 1, amount = 10 }
+error = "Player 0 is not a city-state."
+
+[[step]]
+op = "set_influence"
+args = { city_state = 2, player = 5, amount = 10 }
+error = "Operation 1 (set_influence): No player 5."

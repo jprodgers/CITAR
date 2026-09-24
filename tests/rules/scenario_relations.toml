@@ -1,0 +1,100 @@
+about = """
+The scenario operations between players: meet makes civilizations known to each other once, with
+the first-contact event; set_relation meets them, then sets embassies, friendship, a defensive
+pact and open borders for some turns, an opinion, and war or peace. War ends friendship, pacts and
+open borders, and those who were betrayed think less of the aggressor; a scenario's peace leaves
+no treaty behind.
+"""
+from = "citar/engine/scenario.py: meet, set_relation"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+op = "meet"
+args = { a = 0, b = "all" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "met"
+eq = [1, 2]
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "met"
+eq = [0]
+
+[[step]]
+check = { what = "events", type = "first_contact" }
+len = 2
+
+[[step]]
+op = "meet"
+args = { a = 0, b = 1 }
+
+[[step]]
+check = { what = "events", type = "first_contact" }
+len = 2
+
+[[step]]
+op = "set_relation"
+args = { a = 1, b = 2, embassies = true, friends = true, defensive_pact = true, open_borders = true, turns = 20, opinion = 15 }
+as = "rel"
+
+[[step]]
+check = "rel"
+eq = { war = false }
+
+[[step]]
+check = { what = "relation", a = 1, b = 2 }
+subset = { met = true, war = false, embassy = [true, true], friendship_until = 21, pact_until = 21, open_borders_until = [21, 21], opinion = [15, 0], friends = true, pact = true }
+
+[[step]]
+note = "The two-sided terms read from each side."
+check = { what = "relation", a = 2, b = 1 }
+subset = { embassy = [true, true], opinion = [0, 15] }
+
+[[step]]
+op = "set_relation"
+args = { a = 1, b = 2, embassies = false, open_borders = false }
+
+[[step]]
+check = { what = "relation", a = 1, b = 2 }
+subset = { embassy = [false, false], open_borders_until = [0, 0], friends = true }
+
+[[step]]
+note = "War: the friendship and the pact end, and the betrayed friend thinks less of the aggressor, as does everyone else who knows it."
+op = "set_relation"
+args = { a = 1, b = 2, state = "war" }
+as = "rel"
+
+[[step]]
+check = "rel"
+eq = { war = true }
+
+[[step]]
+check = { what = "relation", a = 1, b = 2 }
+subset = { war = true, war_declared_by = 1, since = 1, friendship_until = 0, pact_until = 0, friends = false, pact = false, opinion = [15, -60] }
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "opinion"
+eq = [-30, 0]
+
+[[step]]
+op = "set_relation"
+args = { a = 2, b = 1, state = "peace" }
+
+[[step]]
+check = { what = "relation", a = 1, b = 2 }
+subset = { war = false, treaty_until = 0, since = 1 }
+
+[[step]]
+check = { what = "events", type = "peace" }
+path = "[0].text"
+eq = "Civilization 3 and Civilization 2 signed a peace treaty (until turn 11)."
+
+[[step]]
+op = "set_relation"
+args = { a = 1, b = 1, state = "war" }
+error = "A relation needs two different players."

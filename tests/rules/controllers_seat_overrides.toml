@@ -1,0 +1,55 @@
+about = """
+A seat's explicit handicap and automatic decisions are kept over its controller's defaults, and
+bad ones refuse the whole game with a message naming the rule: a handicap other than human or ai,
+an automatic decision that does not exist, and a value that is not true or false (the string
+"false" would read as true, handing the seat the very decision it declined; only the bad key is
+named).
+"""
+from = "tests/test_controllers.py::DefaultTests::test_overrides_are_kept_and_checked, test_auto_values_must_be_true_or_false"
+
+[config]
+players = [
+  { controller = "hybrid", handicap = "human", auto = { un_vote = false, conquest = false } },
+  { controller = "llm", auto = { free_picks = true } },
+]
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { handicap = "human", auto = { un_vote = false, conquest = false, free_picks = true }, overrides = { handicap = "human", auto = { un_vote = false, conquest = false } } }
+
+[[step]]
+check = { what = "player", player = 1 }
+subset = { handicap = "human", auto = { un_vote = false, conquest = false, free_picks = true }, overrides = { auto = { free_picks = true } } }
+
+[[step]]
+new_game = { players = [{ controller = "bot", handicap = "deity" }, { controller = "bot" }] }
+error = "handicap must be 'human' or 'ai', not 'deity'."
+
+[[step]]
+new_game = { players = [{ controller = "bot", auto = { trades = true } }, { controller = "bot" }] }
+error = 'auto must be an object whose keys are among un_vote, conquest, free_picks, e.g. {"un_vote": false}.'
+
+[[step]]
+new_game = { players = [{ controller = "bot", auto = { un_vote = "false" } }, { controller = "bot" }] }
+error = "auto values must be true or false (un_vote is not)."
+
+[[step]]
+new_game = { players = [{ controller = "bot", auto = { conquest = 0 } }, { controller = "bot" }] }
+error = "auto values must be true or false (conquest is not)."
+
+[[step]]
+note = "Only the bad value is named, not the good one beside it."
+new_game = { players = [{ controller = "bot", auto = { un_vote = "false", conquest = true } }, { controller = "bot" }] }
+error = "auto values must be true or false (un_vote is not)."
+
+[[step]]
+note = "An empty handicap leaves it to the controller, as no handicap does."
+new_game = { players = [{ controller = "bot", handicap = "" }, { controller = "human", auto = {} }] }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { handicap = "ai", overrides = {} }
+
+[[step]]
+check = { what = "player", player = 1 }
+subset = { handicap = "human", overrides = {} }

@@ -1,0 +1,120 @@
+about = """
+The scenario operations that edit a civilization and a tile: set_player sets stocks, counters, the
+name (at most 40 characters), the seat's difficulty and notes, for one civilization or all of
+them; set_tile sets a tile's terrain, features, resource and deposit, improvement, route, river
+and owner; reveal explores the whole map, and with meet has the civilization meet everyone.
+"""
+from = "citar/engine/scenario.py: set_player, set_tile, reveal"
+
+[[step]]
+op = "set_player"
+args = { player = 0, gold = 250.5, faith = 12, culture = 7, golden_age_turns = 3, free_policies = 2, free_techs = 1, name = "A name of well over forty characters, cut short", difficulty = "king", notes = "Plans." }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { gold = 250.5, faith = 12, culture = 7, golden_age_turns = 3, free_policies = 2, free_techs = 1, name = "A name of well over forty characters, cu", difficulty = "King", notes = "Plans." }
+
+[[step]]
+op = "set_player"
+args = { player = "all", gold = 5 }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "gold"
+eq = 5
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 5
+
+[[step]]
+op = "set_player"
+args = { player = 0, difficulty = "Emperor of Everything" }
+error = "Unknown difficulty 'Emperor of Everything'."
+
+[[step]]
+op = "set_tile"
+args = { at = "A>e", terrain = "plains", features = ["Forest"], resource = "Deer", improvement = "Camp", route = "Road", river = 65 }
+
+[[step]]
+check = { what = "tile", at = "A>e" }
+subset = { terrain = "Plains", features = ["Forest"], resource = "Deer", improvement = "Camp", pillaged = false, route = "Road", river = 1 }
+
+[[step]]
+note = "A deposit's size, and a resource cleared."
+op = "set_tile"
+args = { at = "(8,8)", resource = "Iron", amount = 4 }
+
+[[step]]
+check = { what = "tile", at = "(8,8)" }
+subset = { resource = "Iron", resource_amount = 4 }
+
+[[step]]
+op = "set_tile"
+args = { at = "(8,8)", resource = "", route = "Highway" }
+
+[[step]]
+check = { what = "tile", at = "(8,8)" }
+subset = { resource = "=null", route = "=null" }
+
+[[step]]
+note = "An owner for a tile no city claims, and back to nobody."
+op = "set_tile"
+args = { at = "(8,8)", owner = 1 }
+
+[[step]]
+check = { what = "tile", at = "(8,8)" }
+subset = { owner = 1, city = "=null" }
+
+[[step]]
+op = "set_tile"
+args = { at = "(8,8)", owner = "=null" }
+
+[[step]]
+check = { what = "tile", at = "(8,8)" }
+path = "owner"
+is_null = true
+
+[[step]]
+op = "set_tile"
+args = { x = 30, y = 2, terrain = "Desert" }
+error = "(30, 2) is off the map."
+
+[[step]]
+op = "set_tile"
+args = { at = "A", terrain = "Nowhere" }
+error = "Unknown terrain 'Nowhere'."
+
+[[step]]
+op = "set_tile"
+args = { y = 2 }
+error = "This operation needs integer x and y."
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "met"
+eq = []
+
+[[step]]
+op = "reveal"
+args = { player = 0, meet = true }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { explored = 384, met = [1] }
+
+[[step]]
+note = "The other civilization met it, and explored nothing more."
+check = { what = "player", player = 1 }
+path = "met"
+eq = [0]
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "explored"
+lt = 384
+
+[[step]]
+check = { what = "events", type = "first_contact" }
+len = 1
