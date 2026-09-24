@@ -112,7 +112,7 @@ impl Game {
             }
         }
         if self.debug.verify_caches {
-            for why in self.dv.verify(&self.st) {
+            for why in self.verify_caches() {
                 self.report(Violation::new(Code::Cache1, why));
             }
         }

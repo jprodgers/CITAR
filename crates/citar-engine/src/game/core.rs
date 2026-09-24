@@ -97,7 +97,7 @@ impl Game {
         chron: Chronicle,
         journaled: bool,
     ) -> Self {
-        let dv = Derived::new(&st);
+        let dv = Derived::new(rules, &st);
         let journal =
             if journaled { JournalCursor::at_end(&chron) } else { JournalCursor::default() };
         let batch_start = st.host().next_event_id;
@@ -252,7 +252,9 @@ impl Game {
     /// Where the caches disagree with a cold recompute (the cache oracle, DESIGN.md 9.4).
     #[must_use]
     pub fn verify_caches(&self) -> Vec<String> {
-        self.dv.verify(&self.st)
+        let mut out = self.dv.verify(self.rules, &self.st);
+        out.extend(super::derive::civ::verify(self));
+        out
     }
 
     /// What the checks have found since the last take, oldest first.
@@ -459,7 +461,9 @@ impl Game {
 
     /// A civilization's effective difficulty (`economy.difficulty`, `economy.py:37-50`,
     /// UnCiv's `Civilization.getDifficulty`): a humanlike seat plays on its seat's difficulty,
-    /// an AI on that difficulty's `aiDifficultyLevel`.
+    /// an AI on that difficulty's `aiDifficultyLevel`. With `ai_base_values = monotonic`, an AI
+    /// seated below Prince plays on Prince's base values instead (UnCiv gives every non-Prince AI
+    /// Chieftain's, so a Chieftain AI could out-expand a Prince one).
     #[must_use]
     pub fn difficulty(&self, p: Option<PlayerId>) -> DifficultyId {
         let base = self.seat_difficulty(p);
@@ -467,10 +471,11 @@ impl Game {
         if self.is_humanlike(p) {
             return base;
         }
-        if self.st.config().ai_base_values == AiBaseValues::Monotonic {
-            // The easier AIs play on Prince's base values (economy.py:44-49), which needs Prince
-            // among the ruleset's known objects.
-            pending(Porting::Pending("1b-05"));
+        if self.st.config().ai_base_values == AiBaseValues::Monotonic
+            && let Some(prince) = self.rules.derived().known.prince
+            && base < prince
+        {
+            return prince;
         }
         self.rules.difficulties()[base].ai_difficulty_level
     }

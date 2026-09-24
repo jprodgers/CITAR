@@ -3,6 +3,7 @@
 
 mod engine {
     mod convert;
+    mod economy;
     mod eval;
     mod filters;
     mod game;

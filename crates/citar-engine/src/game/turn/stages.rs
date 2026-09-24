@@ -25,6 +25,7 @@
 
 use crate::base::ids::PlayerId;
 use crate::game::derive::rev::UnitTouch;
+use crate::game::economy;
 use crate::game::{Game, Porting, pending};
 use crate::state::Phase;
 use crate::state::TurnClock;
@@ -240,7 +241,13 @@ pub static PLAYER_END: [Stage; 25] = [
         Always,
         Porting::Pending("1c-06"),
     ),
-    Stage::later("E3", "gold and bankruptcy", Who::CIVS, Always, Porting::Pending("1b-05")),
+    Stage::run(
+        "E3",
+        "gold and bankruptcy",
+        Who::CIVS,
+        Always,
+        Step::Player(economy::end_turn_gold),
+    ),
     Stage::later("E3", "science", Who::CIVS, HasCities, Porting::Pending("1b-07")),
     Stage::later("E3", "faith", Who::CIVS, Religion, Porting::Pending("1b-08")),
     Stage::later("E3", "espionage", Who::MAJOR, Always, Porting::Pending("1c-05")),
@@ -252,7 +259,13 @@ pub static PLAYER_END: [Stage; 25] = [
         Always,
         Porting::Pending("1b-07"),
     ),
-    Stage::later("E5", "temporary uniques expire", Who::CIVS, Always, Porting::Pending("1b-05")),
+    Stage::run(
+        "E5",
+        "temporary uniques expire",
+        Who::CIVS,
+        Always,
+        Step::Player(economy::expire_temp_uniques),
+    ),
     Stage::settle("E5", Who::CIVS),
     Stage::later("E6", "golden-age progress", Who::MAJOR, Always, Porting::Pending("1b-08")),
     Stage::later("E6", "worker builds", Who::CIVS, Always, Porting::Pending("1c-04")),

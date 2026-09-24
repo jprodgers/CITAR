@@ -75,6 +75,10 @@ pub struct CivRevs {
     pub seat: Rev,
     /// Which units it has, and where they stand.
     pub units: Rev,
+    /// Which units it has and what they are, but not where they stand: what its resource supply
+    /// and unit upkeep read (DESIGN.md 6.5). A move does not move it; a unit made, lost, given
+    /// away or touched in its core (an upgrade) does.
+    pub roster: Rev,
     /// Which cities it has.
     pub cities: Rev,
     /// The buildings in its cities.
@@ -99,6 +103,7 @@ impl CivRevs {
             gold_rate: r,
             seat: r,
             units: r,
+            roster: r,
             cities: r,
             buildings: r,
             religion: r,
@@ -118,6 +123,7 @@ impl CivRevs {
             self.gold_rate,
             self.seat,
             self.units,
+            self.roster,
             self.cities,
             self.buildings,
             self.religion,
@@ -451,7 +457,11 @@ impl Revs {
                 CondDeps::TURN | CondDeps::CHANCE => self.turn,
                 CondDeps::HAPPINESS_SEEN => civ.map_or(Rev::START, |c| c.happiness_seen),
                 CondDeps::STOCKS | CondDeps::GOLDEN_AGE => civ.map_or(Rev::START, |c| c.stocks),
-                CondDeps::RESOURCES => civ.map_or(Rev::START, |c| self.resource_inputs(&c)),
+                // The resource supply is a memo (`ResourceSupply`, package 1b-05), which the
+                // revisions alone cannot validate: `game::derive::civ::cond` maps this class to
+                // the memo's own stamp. Here it reads as moved on every write, which is always
+                // correct.
+                CondDeps::RESOURCES => civ.map_or(Rev::START, |_| self.now),
                 // The leaves that read a city-state's influence (friendly civilizations and
                 // land) read every class, WAR among them.
                 CondDeps::WAR => self.diplo.max(self.influence),
@@ -486,22 +496,6 @@ impl Revs {
             r = r.max(at);
         }
         r
-    }
-
-    /// What a civilization's resource supply is computed from (DESIGN.md 6.5, `ResourceSupply`):
-    /// its unique index, the tiles and their owners, its units and cities and their buildings,
-    /// deals, and the city-states allied with it. Until the supply is a memo of its own (package
-    /// 1b-05), conditionals about resources validate against all of these.
-    fn resource_inputs(&self, c: &CivRevs) -> Rev {
-        c.index
-            .max(c.units)
-            .max(c.cities)
-            .max(c.buildings)
-            .max(self.tile_log.rev())
-            .max(self.owners)
-            .max(self.diplo)
-            .max(self.alliances)
-            .max(self.turn)
     }
 
     /// The latest revision of everything the conditionals of `deps` read in `ctx`, the
@@ -624,11 +618,15 @@ impl Revs {
                     }
                 }
             }
-            Change::UnitPlaced { u, owner, .. } => {
+            Change::UnitPlaced { u, owner, from, .. } => {
                 self.unit_mut(u).place = r;
                 self.unit_pos = r;
                 if let Some(c) = self.civ_mut(owner) {
                     c.units = r;
+                    // A unit placed from nowhere is a new one.
+                    if from.is_none() {
+                        c.roster = r;
+                    }
                 }
             }
             Change::UnitOwner { u, old, new } => {
@@ -638,6 +636,7 @@ impl Revs {
                 for p in [old, new] {
                     if let Some(c) = self.civ_mut(p) {
                         c.units = r;
+                        c.roster = r;
                     }
                 }
             }
@@ -647,6 +646,7 @@ impl Revs {
                 self.units_core = r;
                 if let Some(c) = self.civ_mut(owner) {
                     c.units = r;
+                    c.roster = r;
                 }
             }
             Change::CityAdded(c) => {
@@ -804,12 +804,17 @@ impl Revs {
         }
     }
 
-    /// A touch of a unit's fields.
-    pub(crate) fn touch_unit(&mut self, u: UnitId, t: UnitTouch) {
+    /// A touch of a unit's fields; `owner` is the unit's.
+    pub(crate) fn touch_unit(&mut self, u: UnitId, owner: PlayerId, t: UnitTouch) {
         let r = self.next();
         if t.contains(UnitTouch::CORE) {
             self.unit_mut(u).core = r;
             self.units_core = r;
+            // Its base unit is in its core: an upgrade changes what its owner's supply and
+            // upkeep read.
+            if let Some(c) = self.civ_mut(owner) {
+                c.roster = r;
+            }
         }
         if t.contains(UnitTouch::MOVES) {
             self.unit_mut(u).moves = r;

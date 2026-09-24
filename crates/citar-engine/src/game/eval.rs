@@ -9,10 +9,16 @@
 //! Ports the reads the Python evaluator made of `Game` (`uniques.py:398-701, 778-1083`): the
 //! accessors of `game.py` (`at_war`, `has_met`, `is_friend`, `has_open_borders`, `stat_reserve`,
 //! `religion_enabled`, `victory_enabled`), the tile predicates of `tiles.py:100-165`, and the
-//! plain fields of the state. The answers that need a system a later package ports are marked
-//! where they are (`pending_or`): the unique indexes (1b-05), resource supply (1b-05),
-//! coast and the trade network (1b-06), the civilization's era (1b-07), and religious majorities
-//! (1b-08). Until then they answer what a game without that system would.
+//! plain fields of the state; the unique indexes, the resource supply and the civilization's era
+//! come from the memos of `game::derive::civ` (package 1b-05). The answers that need a system a
+//! later package ports are marked where they are (`pending_or`): coast and the trade network
+//! (1b-06) and religious majorities (1b-08). Until then they answer what a game without that
+//! system would.
+//!
+//! The resource supply is computed in a view of its own (`EvalView::for_supply`), in which a
+//! civilization's index has no resource layer and its resources read as none: the uniques of the
+//! resources a civilization has depend on its supply, so the supply cannot read them (DESIGN.md
+//! 6.6), as Python's `_civ_uniques_nores` read none.
 
 use crate::base::hex::HexGrid;
 use crate::base::ids::{
@@ -21,6 +27,7 @@ use crate::base::ids::{
 };
 use crate::base::sets::{BeliefSet, BuildingSet, PolicySet, PromotionSet, TechSet, TerrainSet};
 use crate::base::stats::Stat;
+use crate::game::derive::civ;
 use crate::game::{Game, Porting, pending_or};
 use crate::rules::Ruleset;
 use crate::rules::defs::{BeliefType, Domain, NationKind, PolicyKind, ReligionProgress, Route};
@@ -36,13 +43,32 @@ use crate::unique::{Ctx, EvalWorld, FilterFacts, IndexLayer, IndexRef, TileFacts
 #[derive(Clone, Copy)]
 pub struct EvalView<'a> {
     g: &'a Game,
+    /// The view the resource supply is computed in: no resource layer, no resources.
+    supply: bool,
 }
 
 impl<'a> EvalView<'a> {
     /// The view of `g`.
     #[must_use]
     pub const fn new(g: &'a Game) -> Self {
-        Self { g }
+        Self { g, supply: false }
+    }
+
+    /// The view a civilization's resource supply is computed in (DESIGN.md 6.6): every
+    /// civilization's index without its resource layer (`_civ_uniques_nores`,
+    /// `economy.py:314-320`), and every civilization's resources none. A resource's uniques
+    /// depend on the supply, which is why the supply may not read them; and reading none, rather
+    /// than the supply of some other civilization, keeps the supplies of an ally and its
+    /// city-states from depending on each other.
+    #[must_use]
+    pub(crate) const fn for_supply(g: &'a Game) -> Self {
+        Self { g, supply: true }
+    }
+
+    /// The game it views.
+    #[must_use]
+    pub const fn game(&self) -> &'a Game {
+        self.g
     }
 
     fn st(&self) -> &'a State {
@@ -399,14 +425,16 @@ impl EvalWorld for EvalView<'_> {
         self.g.stat_reserve(p, s)
     }
 
-    fn civ_resource(&self, _: PlayerId, _: ResourceId) -> i32 {
-        // economy.resource_amount: the staged supply (economy.py:235-353).
-        pending_or(Porting::Pending("1b-05"), 0)
+    /// `economy.resource_amount` (`economy.py:356-358`): the `ResourceSupply` memo; none while a
+    /// supply is being computed.
+    fn civ_resource(&self, p: PlayerId, r: ResourceId) -> i32 {
+        if self.supply { 0 } else { crate::game::economy::resource_amount(self.g, p, r) }
     }
 
-    fn civ_era(&self, _: PlayerId) -> EraId {
-        // research.player_era (research.py:254-275).
-        pending_or(Porting::Pending("1b-07"), self.starting_era())
+    /// `research.player_era` (`research.py:254-275`).
+    fn civ_era(&self, p: PlayerId) -> EraId {
+        self.civ_at(p)
+            .map_or(EraId(0), |x| crate::game::research::player_era(self.r(), &x.tech.known))
     }
 
     fn civ_techs(&self, p: PlayerId) -> TechSet {
@@ -529,24 +557,28 @@ impl EvalWorld for EvalView<'_> {
         self.unit_at(u).is_some_and(|x| !x.abilities_used.is_empty())
     }
 
-    fn civ_index(&self, _: PlayerId, _: IndexLayer) -> IndexRef<'_> {
-        // economy.civ_umaps (economy.py:64-147): the CivIndex and CivIndexFull memos.
-        pending_or(Porting::Pending("1b-05"), IndexRef::Plain(self.g.dv.empty_index()))
+    /// `economy.civ_umaps` and `civ_umaps_no_resources` (`economy.py:77-129`): the `CivIndex`
+    /// and `CivIndexFull` memos; without the resource layer while a supply is being computed.
+    fn civ_index(&self, p: PlayerId, layer: IndexLayer) -> IndexRef<'_> {
+        match layer {
+            IndexLayer::Full if !self.supply => civ::civ_index_full(self.g, p),
+            _ => civ::civ_index(self.g, p),
+        }
     }
 
-    fn city_local(&self, _: CityId) -> IndexRef<'_> {
-        // cities.local_umaps (cities.py:48-68): the CityLocal memo.
-        pending_or(Porting::Pending("1b-05"), IndexRef::Plain(self.g.dv.empty_index()))
+    /// `cities.local_umaps` without the religion (`cities.py:48-66`): the `CityLocal` memo.
+    fn city_local(&self, c: CityId) -> IndexRef<'_> {
+        civ::city_local(self.g, c)
     }
 
-    fn follower(&self, _: ReligionId) -> IndexRef<'_> {
-        // The follower beliefs of a religion: the FollowerIndex memo.
-        pending_or(Porting::Pending("1b-05"), IndexRef::Plain(self.g.dv.empty_index()))
+    /// `religion.follower_umap` (`religion.py:72-82`): the follower index table.
+    fn follower(&self, r: ReligionId) -> IndexRef<'_> {
+        civ::follower(self.g, r)
     }
 
-    fn unit_index(&self, _: UnitId) -> IndexRef<'_> {
-        // units.unit_umap (units.py:21-33): the unit profile table.
-        pending_or(Porting::Pending("1b-05"), IndexRef::Plain(self.g.dv.empty_index()))
+    /// `units.unit_umap` (`units.py:21-33`): the unit profile table.
+    fn unit_index(&self, u: UnitId) -> IndexRef<'_> {
+        civ::unit_profile(self.g, u)
     }
 }
 

@@ -5,12 +5,14 @@
 //! Package 1b-01 lands the skeleton: the revisions ([`rev::Revs`]), the grid, the name index
 //! events read, the visibility counts (filled by package 1c-01), and what a write means for the
 //! caches ([`Derived::on`]). The memos of DESIGN.md 6.5 join it package by package: the unique
-//! index memos, resource supply and unit profiles (1b-05), tile yields, city and civilization
-//! stats and connectivity (1b-06), the buildable lists (1b-07), and the rest with their systems.
+//! index memos, resource supply and unit profiles ([`civ`], 1b-05), tile yields, city and
+//! civilization stats and connectivity (1b-06), the buildable lists (1b-07), and the rest with
+//! their systems.
 //!
 //! Replaces the caches of `game.py:100-145` (`_cache`, `_ycache`, `_static`, `_jobcache`,
 //! `_viewcache`, `_names`) and the invalidation of `game.py:565-609`.
 
+pub mod civ;
 pub mod rev;
 
 use core::cell::Ref;
@@ -27,7 +29,6 @@ use crate::rules::Ruleset;
 use crate::state::State;
 use crate::state::change::Change;
 use crate::state::map::Tile;
-use crate::unique::Csr;
 
 /// What a write means beyond the revisions it moves: which cities must look at their citizens
 /// again, and which vision sources must be brought up to date. Read from the state after the
@@ -47,8 +48,8 @@ pub struct Derived {
     grid: HexGrid,
     names: Memo<NameIndex>,
     pub(crate) vis: Visibility,
-    /// The index a unique index read hands out until package 1b-05 builds the real ones.
-    empty: Csr,
+    /// The unique index memos, the resource supply and the unit profiles.
+    pub(crate) civ: civ::CivCaches,
 }
 
 impl Derived {
@@ -59,7 +60,7 @@ impl Derived {
     /// Never for a state built by `State::new` or `State::from_parts`, which refuse a map whose
     /// shape is not a valid grid.
     #[must_use]
-    pub fn new(st: &State) -> Self {
+    pub fn new(rules: &Ruleset, st: &State) -> Self {
         let grid = st.map().grid().unwrap_or_else(|e| {
             // State::from_parts checked the shape; reaching this is a bug in state.
             panic!("a state's map is always a valid grid: {e}")
@@ -69,7 +70,7 @@ impl Derived {
             grid,
             names: Memo::new(),
             vis: Visibility::new(st),
-            empty: Csr::default(),
+            civ: civ::CivCaches::new(rules, st),
         }
     }
 
@@ -98,9 +99,10 @@ impl Derived {
         self.names.get(revs.now(), || revs.names.max(revs.cities), || NameIndex::build(st))
     }
 
-    /// The empty index, which the unique index reads hand out until package 1b-05.
-    pub(crate) const fn empty_index(&self) -> &Csr {
-        &self.empty
+    /// The unique index memos, the resource supply and the unit profiles.
+    #[must_use]
+    pub const fn civ(&self) -> &civ::CivCaches {
+        &self.civ
     }
 
     /// What a change means for the caches beyond its revisions: the cities that must recheck
@@ -260,11 +262,12 @@ impl Derived {
         }
     }
 
-    /// The cache oracle (DESIGN.md 9.4): every memo, validated, against a cold recompute from
-    /// the same state. Returns what disagrees, one line each.
+    /// The cache oracle (DESIGN.md 9.4) for the caches that read the state alone: validated,
+    /// against a cold recompute from the same state. Returns what disagrees, one line each. The
+    /// memos that evaluate uniques need the whole game: [`civ::verify`] checks them.
     #[must_use]
-    pub fn verify(&self, st: &State) -> Vec<String> {
-        let cold = Self::new(st);
+    pub fn verify(&self, rules: &Ruleset, st: &State) -> Vec<String> {
+        let cold = Self::new(rules, st);
         let mut out = Vec::new();
         if self.names(st).entries() != cold.names(st).entries() {
             out.push("the event name index differs from a cold rebuild".to_owned());
