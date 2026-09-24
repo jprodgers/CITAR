@@ -9,9 +9,10 @@
 //! Package 1b-02 ports the framework and the operations whose rules exist: `grant_era`,
 //! `grant_tech`, `remove_tech`, `set_player`, `set_tile`, `meet`, `set_relation`,
 //! `set_influence`, `reveal` and `set_research`; package 1b-03 adds `add_unit`, which the turn
-//! scripts need to keep a civilization in the game across a round, and package 1b-05
-//! `remove_units`. The others are listed with the package that ports their system, and are
-//! refused as not ported until then.
+//! scripts need to keep a civilization in the game across a round, package 1b-05
+//! `remove_units`, and package 1b-06 `found_city` and `set_city`, which its scripts need a city
+//! for (`set_city`'s `production` waits for package 1b-07's queue). The others are listed with
+//! the package that ports their system, and are refused as not ported until then.
 //!
 //! What differs from Python, on purpose, each listed in `tests/rules/intended.toml` under its id
 //! and cited where the fix is made:
@@ -38,13 +39,14 @@
 use serde_json::{Map, Value, json};
 
 use crate::base::ids::{
-    BaseUnitId, DifficultyId, EraId, ImprovementId, PlayerId, PromotionId, ResourceId, TechId,
-    TerrainId, TileIdx, UnitId,
+    BaseUnitId, BuildingId, CityId, DifficultyId, EraId, ImprovementId, PlayerId, PromotionId,
+    ResourceId, TechId, TerrainId, TileIdx, UnitId,
 };
 use crate::base::py;
 use crate::base::sets::{BitSet, FeatureSet};
+use crate::game::cities::founding;
 use crate::game::city_states::influence::{add_influence, raw_influence};
-use crate::game::derive::rev::{PlayerTouch, UnitTouch};
+use crate::game::derive::rev::{CityTouch, PlayerTouch, UnitTouch, WorldTouch};
 use crate::game::diplomacy::relations::{WarReason, make_peace, set_opinion, set_war};
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::research::{self, TechSource};
@@ -89,7 +91,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec {
         name: "found_city",
         params: "player, x, y; optional name, pop, buildings: [...], capital (bool)",
-        porting: Porting::Pending("1b-07"),
+        porting: Porting::Ported,
         run: found_city,
     },
     OpSpec {
@@ -141,7 +143,7 @@ pub static OPS: &[OpSpec] = &[
         name: "set_city",
         params: "city (id) or x, y; any of pop, add_buildings, remove_buildings, name, \
                  claim_radius (border radius), production",
-        porting: Porting::Pending("1b-07"),
+        porting: Porting::Ported,
         run: set_city,
     },
     OpSpec {
@@ -438,9 +440,7 @@ fn set_player(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
         }
         if let Some(v) = given(o, "golden_age_turns") {
             let n = whole(v, "golden_age_turns")?;
-            if let Some(pl) = g.player_mut(p, PlayerTouch::STOCKS) {
-                pl.econ.golden_age_turns = n;
-            }
+            g.set_golden_age_turns(p, n);
         }
         for key in ["free_policies", "free_techs"] {
             if let Some(v) = given(o, key) {
@@ -689,12 +689,121 @@ fn not_ported(path: &str) -> ActionError {
     )
 }
 
-fn found_city(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::cities::founding"))
+// ---- Cities (scenario.py:243-305) ------------------------------------------------------------
+
+/// Founds a city, with population and buildings in place if asked (`scenario.py:243-259`): the
+/// other players' units on its tile go first, and `capital` moves the owner's palace to it.
+fn found_city(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let p = pid(g, o.get("player"), false)?;
+    let at = tile(g, o)?;
+    let others: Vec<UnitId> =
+        g.units_at(at).filter(|u| u.owner() != p).map(crate::state::units::Unit::id).collect();
+    for u in others {
+        g.despawn_unit(u).map_err(|e| refused(&e))?;
+    }
+    let name = given(o, "name").map(py::str_of);
+    let c = founding::found_city(g, p, at, name.as_deref())?;
+    let capital = g.player(p).and_then(|x| x.capital);
+    if o.get("capital").is_some_and(py::truthy) && capital != Some(c) {
+        if let Some(ind) = founding::capital_indicator(g, p) {
+            if let Some(old) = capital.filter(|&x| g.city(x).is_some()) {
+                founding::remove_building(g, old, ind);
+            }
+            founding::add_building(g, c, ind, false);
+        }
+        if let Some(x) = g.player_mut(p, PlayerTouch::CAPITAL) {
+            x.capital = Some(c);
+        }
+    }
+    set_city_fields(g, c, o)?;
+    let name = g.city(c).map(|x| x.name.to_string()).unwrap_or_default();
+    Ok(json!({"city_id": c.get(), "name": name}))
 }
 
-fn set_city(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::cities::lifecycle"))
+/// The city an operation names, by `city` id or by `x` and `y` (`_city`, `scenario.py:69-77`).
+fn city_of(g: &Game, o: &Params) -> Result<CityId, ActionError> {
+    let found = match given(o, "city") {
+        Some(v) => {
+            let n: i64 = whole(v, "city")?;
+            u32::try_from(n).ok().and_then(CityId::new).filter(|&c| g.city(c).is_some())
+        }
+        None => {
+            let at = tile(g, o)?;
+            g.state().city_at(at)
+        }
+    };
+    found.ok_or_else(|| ActionError::new(ErrCode::NoSuchCity, "No such city."))
+}
+
+/// Changes a city's population, buildings, name and borders (`_set_city_fields`,
+/// `scenario.py:262-289`); its citizens are placed again when the list settles. What it builds
+/// is package 1b-07's queue.
+fn set_city_fields(g: &mut Game, c: CityId, o: &Params) -> Result<(), ActionError> {
+    if let Some(v) = given(o, "pop") {
+        let n: i64 = whole(v, "pop")?;
+        let pop =
+            u16::try_from(n.max(1)).map_err(|_| bad("pop must be a whole number in range."))?;
+        if let Some(x) = g.city_mut(c, CityTouch::CORE | CityTouch::STOCKS) {
+            x.pop = pop;
+            x.food = 0.0;
+        }
+    }
+    let add = o
+        .get("buildings")
+        .filter(|v| py::truthy(v))
+        .or_else(|| o.get("add_buildings").filter(|v| py::truthy(v)));
+    for name in list_of(add, "buildings")? {
+        let b: BuildingId = resolve(g, Some(&name))?;
+        if g.city(c).is_some_and(|x| x.buildings.contains(b)) {
+            continue;
+        }
+        if g.rules().buildings()[b].is_wonder {
+            let w = g.edit_world(WorldTouch::WONDERS);
+            w.wonders_built.entry(b).or_insert(c);
+        }
+        founding::add_building(g, c, b, false);
+    }
+    for name in list_of(o.get("remove_buildings").filter(|v| py::truthy(v)), "remove_buildings")? {
+        let b: BuildingId = resolve(g, Some(&name))?;
+        founding::remove_building(g, c, b);
+    }
+    if let Some(v) = o.get("name").filter(|v| py::truthy(v)) {
+        founding::rename_city(g, c, &py::str_of(v))?;
+    }
+    if let Some(v) = given(o, "claim_radius") {
+        let n: i64 = whole(v, "claim_radius")?;
+        let most = i64::from(g.rules().constants().formulas.city_expand_range);
+        let r = u32::try_from(n.clamp(1, most.max(1))).unwrap_or(1);
+        let (owner, centre) =
+            g.city(c).map(|x| (x.owner(), x.tile())).ok_or_else(|| bad("No such city."))?;
+        for t in g.grid().within(centre, r) {
+            let free = g.tile(t).is_some_and(|x| x.city().is_none() && x.owner().is_none());
+            if free {
+                g.set_tile_owner(t, TileClaim::city(owner, c)).map_err(|e| refused(&e))?;
+            }
+        }
+    }
+    if o.get("production").is_some_and(py::truthy) {
+        return Err(not_ported("game::cities::queue"));
+    }
+    Ok(())
+}
+
+/// A list parameter of names: absent, or a list.
+fn list_of(v: Option<&Value>, key: &str) -> Result<Vec<Value>, ActionError> {
+    match v {
+        None => Ok(Vec::new()),
+        Some(Value::Array(a)) => Ok(a.clone()),
+        // refcheck: scenario-errors-are-sentences
+        Some(other) => Err(bad(format!("{key} must be a list of names, not {}.", py::repr(other)))),
+    }
+}
+
+/// Changes a city (`scenario.py:292-298`): its population, buildings, name and borders.
+fn set_city(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let c = city_of(g, o)?;
+    set_city_fields(g, c, o)?;
+    Ok(json!({"city_id": c.get()}))
 }
 
 fn remove_city(_: &mut Game, _: &Params) -> Result<Value, ActionError> {

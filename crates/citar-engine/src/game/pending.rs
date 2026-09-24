@@ -78,6 +78,13 @@ impl PendingWork {
         !self.recheck.is_empty()
     }
 
+    /// The first flagged city at or after raw id `from`, unflagged.
+    pub fn take_recheck_from(&mut self, from: u32) -> Option<CityId> {
+        let n = self.recheck.iter().find(|&i| i >= from)?;
+        self.recheck.remove(n);
+        CityId::new(n)
+    }
+
     /// The flagged cities, in id order, unflagging them.
     pub fn take_recheck(&mut self) -> Vec<CityId> {
         let out = self.recheck.iter().filter_map(CityId::new).collect();

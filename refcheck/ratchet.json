@@ -6,8 +6,10 @@
   "unexplained": {
     "uniques": 0,
     "state_echo": 0,
+    "tile_yields": 0,
+    "city_stats": 160,
     "fixed_point": 0,
-    "civs": 848,
+    "civs": 392,
     "visible": 0
   },
   "failed": {}

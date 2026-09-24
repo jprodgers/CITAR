@@ -86,6 +86,7 @@ def _game(g: Game) -> dict:
 
 def _player(g: Game, pid: int) -> dict:
     """``player``: one civilization, city-state or the barbarians."""
+    from .economy import happiness
     p = g.player(pid)
     overrides: dict = {}
     if p.overrides.get("handicap"):
@@ -113,6 +114,10 @@ def _player(g: Game, pid: int) -> dict:
         "explored": sum(1 for b in p.explored if b), "natural_wonders": sorted(p.natural_wonders),
         "notes": p.notes if p.kind == "major" else "",
         "city_state": city_state,
+        # Python read happiness live where the Rust engine commits it at fixed stages of a turn:
+        # the checks that see the difference are intended (happiness-seen-committed).
+        "happiness": int(happiness(g, pid)["total"]), "happiness_seen": int(happiness(g, pid)["total"]),
+        "gold_rate": float(p.flags.get("last_gold_rate", 0.0)),
     }
 
 
@@ -177,10 +182,21 @@ def _units(g: Game, q: dict) -> list:
 
 
 def _city(g: Game, c) -> dict:
-    """``city``: one city."""
+    """``city``: one city, with where its citizens work and its yields."""
+    from . import cities as C
     x, y = g.grid.xy(c.idx)
+
+    def xys(tiles):
+        """Tiles as sorted ``[x, y]`` pairs."""
+        return [list(t) for t in sorted(g.grid.xy(i) for i in tiles)]
+
+    total = C.city_stats(g, c)["total"]
     return {"id": c.id, "name": c.name, "owner": c.owner, "x": x, "y": y, "pop": c.pop,
-            "buildings": sorted(c.buildings)}
+            "buildings": sorted(c.buildings), "worked": xys(c.worked), "locked": xys(c.locked),
+            "workable": xys(C.workable_tiles(g, c)),
+            "specialists": {k: int(v) for k, v in sorted(c.specialists.items()) if v > 0},
+            "focus": c.focus, "avoid_growth": bool(c.avoid_growth), "food": float(c.food),
+            "yields": {k: float(total.get(k, 0.0)) for k in C.STATS}}
 
 
 def _events(g: Game, q: dict) -> list:

@@ -130,6 +130,7 @@ fn player_1_a_negative_stock() {
             if let Some(p) = g.player_mut(ROME, PlayerTouch::STOCKS) {
                 p.econ.faith = -1.0;
             }
+            clear_pending(g);
         }),
         [Code::Player1]
     );
@@ -154,6 +155,7 @@ fn player_2_a_major_with_cities_and_no_capital() {
             if let Some(p) = g.player_mut(ROME, PlayerTouch::CAPITAL) {
                 p.capital = None;
             }
+            clear_pending(g);
         }),
         [Code::Player2]
     );

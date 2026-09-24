@@ -14,7 +14,7 @@ use crate::base::ids::{
     BaseUnitId, BuildingId, DifficultyId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
     ObjectFilterId, ResourceId, TechId, TerrainId,
 };
-use crate::base::sets::{FeatureSet, TerrainSet};
+use crate::base::sets::{FeatureSet, ImprovementSet, TerrainSet};
 use crate::base::stats::{Stat, StatMask};
 use crate::unique::{SourceUniques, UniqueData, UniqueTable, UniqueType};
 
@@ -31,6 +31,8 @@ const CITY_CENTER: &str = "City center";
 /// The difficulty whose base values the easier AIs play on with `ai_base_values = monotonic`
 /// (`economy.py:44-49`).
 const PRINCE: &str = "Prince";
+const THE_WHEEL: &str = "The Wheel";
+const RIVER: &str = "River";
 const CITY_RUINS: &str = "City ruins";
 const ANCIENT_RUINS: &str = "Ancient ruins";
 const BARBARIAN_CAMP: &str = "Barbarian encampment";
@@ -97,6 +99,11 @@ pub struct Known {
     /// `ai_base_values = monotonic` (`economy.py:44-49`); a ruleset without it has no such
     /// floor, as Python's `difficulty_index` read a missing name as the first.
     pub prince: Option<DifficultyId>,
+    /// The Wheel, the tech that lets `Forests and Jungles are roads` connect cities
+    /// (`cities.py:1987-1988`).
+    pub the_wheel: Option<TechId>,
+    /// River, the terrain whose yields a tile with a river gets (`tiles.py:306-307`).
+    pub river: Option<TerrainId>,
     /// The terrains and resources map generation names.
     pub map: KnownMap,
 }
@@ -163,6 +170,10 @@ pub struct Derived {
     /// `Fresh water` (`tiles._is_fresh_source`, `tiles.py:120-124`), which Python looked up per
     /// tile and cached.
     pub fresh_water: TerrainSet,
+    /// The improvements and terrains that yield with no citizen on them, as a Citadel does
+    /// (`Tile provides yield without assigned population`, `cities.provides_yield_without_pop`,
+    /// `cities.py:196-202`), which Python asked per tile.
+    pub yields_without_pop: (ImprovementSet, TerrainSet),
     /// For each building, the other buildings that count as it in a city
     /// (`cities.contains_building`, `cities.py:107-111`, UnCiv's `containsBuildingOrEquivalent`):
     /// those that replace it, and those that carry its name as a tag, with or without
@@ -188,6 +199,7 @@ impl Derived {
             feature_removals: Vec::new(),
             removal_of: IdVec::new(),
             fresh_water: TerrainSet::new(),
+            yields_without_pop: (ImprovementSet::new(), TerrainSet::new()),
             building_equivalents: IdVec::new(),
             known: Known {
                 hill: FeatureId(0),
@@ -201,6 +213,8 @@ impl Derived {
                 ancient_ruins: None,
                 barbarian_camp: None,
                 prince: None,
+                the_wheel: None,
+                river: None,
                 map: KnownMap::default(),
             },
         }
@@ -244,6 +258,19 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
             fresh_water.insert(id);
         }
     }
+    let free = UniqueType::TileProvidesYieldWithoutPopulation;
+    let yields_without_pop = (
+        r.improvements
+            .iter()
+            .filter(|(_, i)| has(&r.uniques, &i.uniques, free))
+            .map(|(id, _)| id)
+            .collect(),
+        r.terrains
+            .iter()
+            .filter(|(_, t)| has(&r.uniques, &t.uniques, free))
+            .map(|(id, _)| id)
+            .collect(),
+    );
 
     let improvement_names: Vec<Box<str>> =
         r.improvements.as_slice().iter().map(|i| i.name.clone()).collect();
@@ -311,6 +338,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         ancient_ruins: find_improvement(ANCIENT_RUINS),
         barbarian_camp: find_improvement(BARBARIAN_CAMP),
         prince: r.difficulties.iter().find(|(_, d)| &*d.name == PRINCE).map(|(id, _)| id),
+        the_wheel: r.techs.iter().find(|(_, t)| &*t.name == THE_WHEEL).map(|(id, _)| id),
+        river: r.terrains.iter().find(|(_, t)| &*t.name == RIVER).map(|(id, _)| id),
         map: known_map(r),
     };
 
@@ -399,6 +428,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         feature_removals,
         removal_of,
         fresh_water,
+        yields_without_pop,
         building_equivalents,
         known,
     })

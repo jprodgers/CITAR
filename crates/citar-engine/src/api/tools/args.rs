@@ -6,7 +6,7 @@
 //! arguments from it (DESIGN.md 9.5). The specs land with the typed actions: each system package
 //! adds its tools' entries to [`TOOLS`] together with their `Action` variants, with the
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
-//! the coercion; no action is ported yet, so the table is empty.
+//! the coercion; package 1b-06 adds the citizen tools.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -65,7 +65,33 @@ impl ToolArgs {
 }
 
 /// Every tool whose action is ported, sorted by name.
-pub static TOOLS: &[ToolArgs] = &[];
+pub static TOOLS: &[ToolArgs] = &[
+    // Package 1b-06 (tools.py:679-757).
+    ToolArgs {
+        tool: "set_city_focus",
+        params: &[
+            ("city_id", ArgType::Integer),
+            ("focus", ArgType::String),
+            ("avoid_growth", ArgType::Boolean),
+        ],
+        required: &["city_id"],
+    },
+    ToolArgs {
+        tool: "set_specialists",
+        params: &[("city_id", ArgType::Integer), ("specialists", ArgType::Object)],
+        required: &["city_id", "specialists"],
+    },
+    ToolArgs {
+        tool: "work_tile",
+        params: &[
+            ("city_id", ArgType::Integer),
+            ("x", ArgType::Integer),
+            ("y", ArgType::Integer),
+            ("locked", ArgType::Boolean),
+        ],
+        required: &["city_id", "x", "y"],
+    },
+];
 
 /// The spec of the tool called `name`, exactly.
 #[must_use]

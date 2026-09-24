@@ -1432,7 +1432,6 @@ fn what_each_conditional_reads() {
     use CondDeps as D;
     let r = rules();
     let t = r.uniques();
-    let all = D::all();
     let city = D::CITY.union(D::TILE);
     let around = D::TILE.union(D::MAP);
     let table: &[(&str, CondDeps)] = &[
@@ -1508,9 +1507,10 @@ fn what_each_conditional_reads() {
         ("when between [10] and [20] [Happiness]", D::HAPPINESS_SEEN),
         // The city a rule means: in a tile's or a unit's context, the territory's city.
         ("in this city", city),
-        ("in [Capital] cities", city.union(D::CITY_COUNT)),
-        // The trade network reads the civilization's own uniques, which no class names.
-        ("in cities connected to the capital", all),
+        // Whether a city is the capital is the city's own fact.
+        ("in [Capital] cities", city),
+        // The trade network, which its memo keeps.
+        ("in cities connected to the capital", city.union(D::CONNECTED)),
         ("in cities with a [Temple]", city),
         ("in cities without a [Temple]", city),
         ("in cities with at least [3] [Population]", city),
@@ -1596,9 +1596,9 @@ fn what_each_conditional_reads() {
         .expect("the Celts' neighbouring forests");
     assert_eq!(celts, around, "`{{unimproved}} {{Forest}}` reads the tiles alone");
     // The city leaves that read beyond the city.
-    assert_eq!(CityLeaf::Capital.deps(), D::CITY_COUNT);
+    assert_eq!(CityLeaf::Capital.deps(), D::CITY);
     assert_eq!(CityLeaf::Garrisoned.deps(), D::UNIT_SET);
-    assert_eq!(CityLeaf::ConnectedToCapital.deps(), all);
+    assert_eq!(CityLeaf::ConnectedToCapital.deps(), D::CONNECTED);
     assert_eq!(CityLeaf::Puppeted.deps(), D::empty());
 }
 

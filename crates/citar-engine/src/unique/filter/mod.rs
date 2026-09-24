@@ -36,14 +36,14 @@ pub use self::unit::{UnitFacts, UnitLeaf, UnitScope};
 use super::countable::Countable;
 use super::generated::{ParamKind, UniqueType};
 use super::params::Param;
-use super::table::{ObjectFilter, Source, StaticDomain, StaticId, UniqueTable};
+use super::table::{CondDeps, ObjectFilter, Source, StaticDomain, StaticId, UniqueTable};
 use super::world::{FilterFacts, TileFacts};
 use crate::base::collections::DetSet;
 use crate::base::ids::{
     CityFilterId, CityId, CivFilterId, CombatantFilterId, IdVec, ObjectFilterId, PlayerId, SetRef,
     TileFilterId, TileIdx, UniqueId, UnitFilterId, UnitId,
 };
-use crate::base::sets::{BitSet, TerrainSet};
+use crate::base::sets::{BitSet, ImprovementSet, TerrainSet};
 use crate::rules::Ruleset;
 
 /// A tile filter, compiled for each way the rules read one.
@@ -56,9 +56,55 @@ pub struct TileFilter {
     /// `terrain_matches` over each terrain: the terrains the filter names, for the rules that ask
     /// it of a terrain rather than a tile (`workers.py:44-52`).
     pub terrains: TerrainSet,
+    /// `improvement_matches` over each improvement: the improvements the filter names, read as
+    /// an improvement filter, term by term (`uniques.py:363-370`). The tile yields ask it of the
+    /// improvement and the route on a tile before they ask the tile (`tiles.py:295-301`).
+    pub improvements: ImprovementSet,
     /// Whether map generation can read it: every term known from the terrain alone, through
     /// [`TileFacts`] (DESIGN.md 5.7).
     pub terrain_level: bool,
+}
+
+impl TileFilter {
+    /// What asking it of the tile in context reads: its leaves' classes, and for `worked` the
+    /// worked tiles of the tile's territory city (`TILE`).
+    #[must_use]
+    pub fn deps_here(&self) -> CondDeps {
+        let mut d = self.full.deps();
+        if self.full.leaves().iter().any(|l| matches!(l, TileLeaf::Worked)) {
+            d |= CondDeps::TILE;
+        }
+        d
+    }
+
+    /// What asking it of the tiles around the one in context reads (`[stats] for each adjacent
+    /// [tileFilter]`, `tiles.py:241-248`). A memo of a tile's yield reads its neighbours' own
+    /// facts already: their terrain, river, resource and improvement. A filter that reads more of
+    /// a neighbour (its owner, whether a city works it, fresh water or the coast beside it, which
+    /// are two tiles away) reads the map (`MAP`), as do the local classes of its leaves, which are
+    /// about the neighbour and not the tile in context.
+    #[must_use]
+    pub fn deps_around(&self) -> CondDeps {
+        let own = |l: &TileLeaf| {
+            matches!(
+                l,
+                TileLeaf::Terrains(_)
+                    | TileLeaf::River
+                    | TileLeaf::AnyResource
+                    | TileLeaf::Resource(_)
+                    | TileLeaf::Unimproved
+                    | TileLeaf::Improved
+                    | TileLeaf::Pillaged
+                    | TileLeaf::Improvement(_)
+            )
+        };
+        let d = self.full.deps();
+        if self.full.leaves().into_iter().all(own) && !d.intersects(CondDeps::LOCAL) {
+            d
+        } else {
+            d.difference(CondDeps::LOCAL) | CondDeps::MAP
+        }
+    }
 }
 
 /// A combatant filter: a unit is asked as a unit filter, a city as a city filter in which `City`
@@ -355,9 +401,12 @@ impl<'r> Compiler<'r> {
         let terrains = statics::typed(
             &st.filter(StaticDomain::Terrain, text).unwrap_or_else(|_| BitSet::new()),
         );
+        let improvements = statics::typed(
+            &st.filter(StaticDomain::Improvement, text).unwrap_or_else(|_| BitSet::new()),
+        );
         let terrain_level =
             dead_terrain.is_empty() && terrain.leaves().iter().all(|l| l.is_terrain_level());
-        (TileFilter { full, terrain, terrains, terrain_level }, dead, dead_terrain)
+        (TileFilter { full, terrain, terrains, improvements, terrain_level }, dead, dead_terrain)
     }
 
     fn city(&mut self, text: &str) -> (Expr<CityLeaf>, Dead) {
@@ -786,8 +835,13 @@ mod tests {
     /// Filters holding one tile filter, a single leaf.
     fn one(leaf: TileLeaf, terrain_level: bool) -> Filters {
         let e = Expr::Leaf(leaf);
-        let f =
-            TileFilter { full: e.clone(), terrain: e, terrains: TerrainSet::new(), terrain_level };
+        let f = TileFilter {
+            full: e.clone(),
+            terrain: e,
+            terrains: TerrainSet::new(),
+            improvements: ImprovementSet::new(),
+            terrain_level,
+        };
         Filters { tiles: IdVec::from_vec(vec![f]), ..Filters::default() }
     }
 

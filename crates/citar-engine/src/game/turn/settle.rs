@@ -9,7 +9,7 @@
 //!    and the two alternate until neither has anything left;
 //! 2. citizens: flagged cities reassign their citizens in id order, pass after pass, until no
 //!    city is flagged or [`SETTLE_PASSES`] passes are spent, which is invariant violation
-//!    SETTLE-1 (package 1b-06 ports the assignment);
+//!    SETTLE-1 (`game::cities::citizens`, package 1b-06);
 //! 3. the checks [`DebugOptions`](crate::game::DebugOptions) asks for.
 //!
 //! Settle runs at the end of every successful mutating call and at the settle points of a turn,
@@ -18,9 +18,9 @@
 //! sight never depends on citizens. So the passes converge, and what a settle does is a pure
 //! function of the calls that succeeded.
 
+use crate::game::Game;
 use crate::game::invariants::{self, Code, Violation};
 use crate::game::pending::{Effect, EffectQueue};
-use crate::game::{Game, Porting, pending};
 
 /// How many citizen passes one settle may take (DESIGN.md 6.7).
 pub const SETTLE_PASSES: u32 = 8;
@@ -76,6 +76,40 @@ impl Game {
         }
     }
 
+    /// A settle on its own, for the benchmark of one with nothing pending (DESIGN.md 10): the
+    /// engine settles only inside its own calls.
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    pub fn settle_for_bench(&mut self) {
+        self.settle();
+    }
+
+    /// A write that moves the game's revision and nothing any cache reads (a touch of player
+    /// `p`'s `OTHER` fields), for the benchmark of a first read after an unrelated change
+    /// (DESIGN.md 10).
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    pub fn unrelated_change_for_bench(&mut self, p: crate::base::ids::PlayerId) {
+        let _touched = self.player_mut(p, crate::game::derive::rev::PlayerTouch::OTHER).is_some();
+    }
+
+    /// Moves unit `u` to tile `t` without movement rules and settles, for the benchmark of the
+    /// memos read after a move (DESIGN.md 6.5: a move recomputes none that did not read it).
+    ///
+    /// # Errors
+    /// If there is no such unit or tile.
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    pub fn move_unit_for_bench(
+        &mut self,
+        u: crate::base::ids::UnitId,
+        t: crate::base::ids::TileIdx,
+    ) -> Result<(), crate::state::StateError> {
+        self.relocate_unit(u, t)?;
+        self.settle();
+        Ok(())
+    }
+
     /// Stops a runaway effect queue: a bug, reported as SETTLE-1 where checks run.
     fn runaway(&mut self, why: String) {
         while self.fx.pop().is_some() {}
@@ -95,15 +129,18 @@ impl Game {
     }
 
     /// One pass over the flagged cities, in id order: each reassigns its citizens, which may
-    /// flag a sibling city whose tiles it took or released (DESIGN.md 6.7).
+    /// flag a sibling city whose tiles it took or released (DESIGN.md 6.7). A sibling with a
+    /// higher id is reassigned in the same pass, one with a lower id in the next.
     fn reassign_flagged(&mut self) {
-        // cities.assign_citizens (cities.py:748-926) and the citizen oracle's settled flag.
-        pending(Porting::Pending("1b-06"));
         #[cfg(test)]
         if self.pending.stubborn {
             return;
         }
-        self.pending.clear_recheck();
+        let mut from = 0;
+        while let Some(c) = self.pending.take_recheck_from(from) {
+            from = c.get().saturating_add(1);
+            self.reassign(c);
+        }
     }
 
     /// The checks the debug options ask for (DESIGN.md 9.4): they only read.

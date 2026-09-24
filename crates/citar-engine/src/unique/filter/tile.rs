@@ -99,10 +99,9 @@ impl Leaf for TileLeaf {
 
     /// The viewer's techs for its resources, and the war state for enemy land. Friendly and
     /// foreign land read what [`FilterFacts::tile_friendly_to`] lists: met, open borders and the
-    /// turn they end, a city-state's influence, and the viewer's own uniques. Influence is the
-    /// city-state's state, and a civilization's uniques come from everything its index holds, so
-    /// no class names them (package 1a-07 decided): they read every class, which is always
-    /// correct (DESIGN.md 5.8).
+    /// turn they end, a city-state's influence, and the viewer's own uniques. A civilization's
+    /// uniques come from everything its index holds, so no class names them (package 1a-07
+    /// decided): they read every class, which is always correct (DESIGN.md 5.8).
     fn deps(&self) -> CondDeps {
         match self {
             Self::Owner(c) => c.deps(),

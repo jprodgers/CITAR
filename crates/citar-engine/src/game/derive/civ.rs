@@ -33,6 +33,7 @@
 
 use core::cell::{Ref, RefCell};
 use core::hash::Hash;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 use super::rev::{CopyMemo, Memo, Rev};
@@ -256,6 +257,12 @@ pub(crate) fn civ_index_full(g: &Game, p: PlayerId) -> IndexRef<'_> {
     IndexRef::Memo(m.full.get(g.dv.revs.now(), inputs, compute))
 }
 
+/// When civilization `p`'s index with its resource layer last changed, validated now.
+pub(crate) fn civ_index_full_changed(g: &Game, p: PlayerId) -> Rev {
+    drop(civ_index_full(g, p));
+    g.dv.civ.civs.get(p).map_or(Rev::START, |m| m.full.changed())
+}
+
 /// Civilization `p`'s resources (`ResourceSupply`); `None` for a player the game does not have.
 pub(crate) fn supply(g: &Game, p: PlayerId) -> Option<Ref<'_, ResourceSupply>> {
     let m = g.dv.civ.civs.get(p)?;
@@ -268,7 +275,7 @@ pub(crate) fn supply(g: &Game, p: PlayerId) -> Option<Ref<'_, ResourceSupply>> {
 }
 
 /// When civilization `p`'s supply last changed, validated now.
-fn supply_changed(g: &Game, p: PlayerId) -> Rev {
+pub(crate) fn supply_changed(g: &Game, p: PlayerId) -> Rev {
     drop(supply(g, p));
     g.dv.civ.civs.get(p).map_or(Rev::START, |m| m.supply.changed())
 }
@@ -380,6 +387,7 @@ pub(crate) fn city_local(g: &Game, c: CityId) -> IndexRef<'_> {
 /// hold in it alone of the resources its improved tiles give its owner, of those its owner's
 /// supply has some of (the Marble decision, DESIGN.md 5.12). A resource traded away, or all used
 /// up, gives its uniques nowhere, as Python's resource layer held only what the supply had.
+// refcheck: marble-bonus-in-its-own-city
 pub(crate) fn city_local_full(g: &Game, c: CityId) -> IndexRef<'_> {
     let caches = &g.dv.civ;
     let (Some(m), Some(city)) = (caches.cities.get(&c), g.st.cities().get(c)) else {
@@ -414,6 +422,12 @@ pub(crate) fn city_local_full(g: &Game, c: CityId) -> IndexRef<'_> {
     IndexRef::Memo(m.full.get(revs.now(), inputs, compute))
 }
 
+/// When city `c`'s own index with its resources last changed, validated now.
+pub(crate) fn city_local_full_changed(g: &Game, c: CityId) -> Rev {
+    drop(city_local_full(g, c));
+    g.dv.civ.cities.get(&c).map_or(Rev::START, |m| m.full.changed())
+}
+
 /// What religion `r` gives the cities that follow it: its follower beliefs' uniques
 /// (`religion.follower_umap`, `religion.py:72-82`).
 pub(crate) fn follower(g: &Game, r: ReligionId) -> IndexRef<'_> {
@@ -437,15 +451,53 @@ pub(crate) fn unit_profile(g: &Game, u: UnitId) -> IndexRef<'_> {
 }
 
 /// The latest revision of everything the conditionals of `deps` read in `ctx` (DESIGN.md 6.3):
-/// the revisions `Revs::cond` maps them to, and for `RESOURCES` when the supply of the
-/// civilization in context last changed. A memo that evaluates uniques validates against this.
+/// the revisions `Revs::cond` maps them to, for `RESOURCES` when the supply of the civilization
+/// in context last changed, and for `CONNECTED` when the trade networks the context names last
+/// changed (the memo `Connectivity`). A memo that evaluates uniques validates against this.
 #[must_use]
 pub fn cond(g: &Game, deps: CondDeps, ctx: &Ctx) -> Rev {
-    let r = g.dv.revs.cond(&g.st, deps.difference(CondDeps::RESOURCES), ctx);
-    match ctx.civ {
-        Some(p) if deps.contains(CondDeps::RESOURCES) => r.max(supply_changed(g, p)),
-        _ => r,
+    let memos = CondDeps::RESOURCES | CondDeps::CONNECTED;
+    let mut r = g.dv.revs.cond(&g.st, deps.difference(memos), ctx);
+    if let Some(p) = ctx.civ
+        && deps.contains(CondDeps::RESOURCES)
+    {
+        r = r.max(supply_changed(g, p));
     }
+    if deps.contains(CondDeps::CONNECTED) {
+        for p in networks(g, ctx) {
+            r = r.max(super::stats::connectivity_changed(g, p));
+        }
+    }
+    r
+}
+
+/// Whose trade networks the class `CONNECTED` reads in `ctx`: the civilization in context's, and
+/// the owners' of the city in context and of the cities of the fight, whose connection a city
+/// filter may ask.
+fn networks(g: &Game, ctx: &Ctx) -> SmallVec<[PlayerId; 3]> {
+    let mut out: SmallVec<[PlayerId; 3]> = SmallVec::new();
+    let mut add = |p: PlayerId| {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    if let Some(p) = ctx.civ {
+        add(p);
+    }
+    let owner = |c| g.st.cities().get(c).map(crate::state::cities::City::owner);
+    if let Some(p) = ctx.city.and_then(owner) {
+        add(p);
+    }
+    if let Some(f) = ctx.combat {
+        for side in [Some(f.our), f.their].into_iter().flatten() {
+            if let crate::unique::filter::Combatant::City(c) = side
+                && let Some(p) = owner(c)
+            {
+                add(p);
+            }
+        }
+    }
+    out
 }
 
 // ---- The cache oracle (DESIGN.md 9.4) ----------------------------------------------------------

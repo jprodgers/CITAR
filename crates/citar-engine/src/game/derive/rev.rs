@@ -34,7 +34,7 @@ use crate::base::stats::Stats;
 use crate::state::State;
 use crate::state::change::Change;
 use crate::unique::filter::Combatant;
-use crate::unique::{CondDeps, Csr, Ctx};
+use crate::unique::{CondDeps, Csr, Ctx, record};
 
 // ---- Revisions --------------------------------------------------------------------------------
 
@@ -65,8 +65,12 @@ pub struct CivRevs {
     /// of its cities, and its city-state bonuses: which city-states it has met, which are alive,
     /// which it is allied with, and with which it stands at the friend level.
     pub index: Rev,
-    /// Gold, culture, faith, golden age points and golden age turns.
+    /// Gold, culture, faith, golden age points, the turns left of a golden age, and the natural
+    /// wonders it has found.
     pub stocks: Rev,
+    /// Whether it is in a golden age: its turns left crossing 0 ([`PlayerTouch::GOLDEN_AGE`]),
+    /// which tile yields and city stats read.
+    pub golden_age: Rev,
     /// The research queue, goal and progress.
     pub research: Rev,
     /// Happiness as conditionals see it, committed at fixed stages (DESIGN.md 6.6).
@@ -105,6 +109,7 @@ impl CivRevs {
         Self {
             index: r,
             stocks: r,
+            golden_age: r,
             research: r,
             happiness_seen: r,
             gold_rate: r,
@@ -125,6 +130,7 @@ impl CivRevs {
         [
             self.index,
             self.stocks,
+            self.golden_age,
             self.research,
             self.happiness_seen,
             self.gold_rate,
@@ -163,14 +169,18 @@ pub struct CityRevs {
     pub stocks: Rev,
     /// Religious pressure and followers, and whose holy city it is.
     pub religion: Rev,
+    /// Its territory: which tiles are its and what they are and bear (their inputs,
+    /// [`Revs::tile`]), which a city's yields read of the tiles it owns but does not work, as a
+    /// Citadel's. Not in [`max`](Self::max), which is the city itself.
+    pub tiles: Rev,
 }
 
 impl CityRevs {
     const fn at(r: Rev) -> Self {
-        Self { core: r, buildings: r, work: r, stocks: r, religion: r }
+        Self { core: r, buildings: r, work: r, stocks: r, religion: r, tiles: r }
     }
 
-    /// The latest of them all.
+    /// The latest of them all but [`tiles`](Self::tiles).
     #[must_use]
     pub fn max(&self) -> Rev {
         self.core.max(self.buildings).max(self.work).max(self.stocks).max(self.religion)
@@ -437,6 +447,7 @@ impl Revs {
             work: r.work.max(f),
             stocks: r.stocks.max(f),
             religion: r.religion.max(f),
+            tiles: r.tiles.max(f),
         }
     }
 
@@ -471,15 +482,21 @@ impl Revs {
             let at = match class {
                 CondDeps::TURN | CondDeps::CHANCE => self.turn,
                 CondDeps::HAPPINESS_SEEN => civ.map_or(Rev::START, |c| c.happiness_seen),
-                CondDeps::STOCKS | CondDeps::GOLDEN_AGE => civ.map_or(Rev::START, |c| c.stocks),
+                CondDeps::STOCKS => civ.map_or(Rev::START, |c| c.stocks),
+                CondDeps::GOLDEN_AGE => civ.map_or(Rev::START, |c| c.golden_age),
                 // The resource supply is a memo (`ResourceSupply`, package 1b-05), which the
                 // revisions alone cannot validate: `game::derive::civ::cond` maps this class to
                 // the memo's own stamp. Should a release build get here, it reads as moved on
                 // every write, which is always correct.
                 CondDeps::RESOURCES => civ.map_or(Rev::START, |_| self.now),
-                // The leaves that read a city-state's influence (friendly civilizations and
-                // land) read every class, WAR among them.
-                CondDeps::WAR => self.diplo.max(self.influence),
+                CondDeps::WAR => self.diplo,
+                CondDeps::INFLUENCE => self.influence,
+                // The trade network is a memo (`Connectivity`, package 1b-06), which the
+                // revisions alone cannot validate: `game::derive::civ::cond` maps this class to
+                // the memo's own stamp. Read here, it reads as moved on every write, which is
+                // always correct: the resource supply, which validates with the revisions and sees
+                // the network without the memo, reads it so.
+                CondDeps::CONNECTED => self.now,
                 CondDeps::ERA | CondDeps::TECHS | CondDeps::POLICIES => {
                     civ.map_or(Rev::START, |c| c.index)
                 }
@@ -525,8 +542,11 @@ impl Revs {
     pub(crate) fn cond(&self, st: &State, deps: CondDeps, ctx: &Ctx) -> Rev {
         let mut r = self.cond_civ(ctx.civ, deps);
         if deps.contains(CondDeps::CITY) {
+            // Not where its citizens work: that is `TILE`'s, which a conditional about the
+            // citizens reads too.
             if let Some(c) = rel_city(st, ctx) {
-                r = r.max(self.city(c).max()).max(self.cities);
+                let x = self.city(c);
+                r = r.max(x.core.max(x.buildings).max(x.stocks).max(x.religion)).max(self.cities);
             }
             // Which city's territory the tile is, and whether it is the civilization's.
             for t in [ctx.tile, ctx.rel_tile()].into_iter().flatten() {
@@ -559,8 +579,8 @@ impl Revs {
         r
     }
 
-    /// Everything a tile conditional reads of one tile: its inputs, its owner, and which of its
-    /// territory city's tiles are worked.
+    /// Everything a tile conditional reads of one tile: its inputs, its owner, and where its
+    /// territory city's citizens work (which of its tiles, its specialists).
     fn tile_facts(&self, st: &State, t: TileIdx) -> Rev {
         let mut r = self.tile(t).max(self.tile_owner(t));
         if let Some(c) = st.tiles().get(t).and_then(|x| x.city()) {
@@ -617,18 +637,22 @@ impl Revs {
             Change::TileInput(t) => {
                 Self::at_tile(&mut self.tile, t, r);
                 self.tile_log.push(r, t);
+                self.territory(st, t, r);
             }
             Change::TileHeight(t) => {
                 Self::at_tile(&mut self.tile, t, r);
                 Self::at_tile(&mut self.tile_height, t, r);
                 self.tile_log.push(r, t);
+                self.territory(st, t, r);
             }
             Change::TileOwner { t, old, new } => {
                 Self::at_tile(&mut self.tile_owner, t, r);
                 self.owners = r;
                 self.tile_log.push(r, t);
                 for c in [old.city, new.city].into_iter().flatten() {
-                    self.city_mut(c).work = r;
+                    let x = self.city_mut(c);
+                    x.work = r;
+                    x.tiles = r;
                 }
                 for p in [old.owner, new.owner].into_iter().flatten() {
                     if let Some(c) = self.civ_mut(p) {
@@ -731,6 +755,13 @@ impl Revs {
         }
     }
 
+    /// Tile `t`'s inputs moved: so did its territory city's [`CityRevs::tiles`].
+    fn territory(&mut self, st: &State, t: TileIdx, r: Rev) {
+        if let Some(c) = st.tiles().get(t).and_then(crate::state::map::Tile::city) {
+            self.city_mut(c).tiles = r;
+        }
+    }
+
     /// A city appeared, went, or changed hands: everything about it, which cities exist, and
     /// what its owners' indexes hold (its buildings) moved.
     fn city_event(&mut self, c: CityId, owners: Vec<PlayerId>, r: Rev) {
@@ -804,9 +835,10 @@ impl Revs {
         }
         let Some(c) = self.civ_mut(p) else { return };
         // Its religion's founder beliefs are in its index (`economy.py:124-128`).
-        let fields: [(PlayerTouch, &mut Rev); 9] = [
+        let fields: [(PlayerTouch, &mut Rev); 10] = [
             (PlayerTouch::INDEX | PlayerTouch::POLICIES | PlayerTouch::RELIGION, &mut c.index),
             (PlayerTouch::STOCKS, &mut c.stocks),
+            (PlayerTouch::GOLDEN_AGE, &mut c.golden_age),
             (PlayerTouch::RESEARCH, &mut c.research),
             (PlayerTouch::HAPPINESS_SEEN, &mut c.happiness_seen),
             (PlayerTouch::GOLD_RATE, &mut c.gold_rate),
@@ -925,8 +957,12 @@ bitflags::bitflags! {
         /// Its adopted branches and policies: its index, and what every civilization has
         /// adopted.
         const POLICIES = 1 << 11;
-        /// Gold, culture, faith, golden age points and turns.
+        /// Gold, culture, faith, golden age points, the turns left of a golden age while it lasts,
+        /// and the natural wonders it has found.
         const STOCKS = 1 << 1;
+        /// A golden age beginning or ending: the turns left crossing 0, which tile yields and
+        /// city stats read. `Game::set_golden_age_turns` picks it or `STOCKS`.
+        const GOLDEN_AGE = 1 << 12;
         /// The research queue, goal and progress.
         const RESEARCH = 1 << 2;
         /// The happiness conditionals see (committed at stages S1 and E1).
@@ -1247,22 +1283,26 @@ impl<T: BitEq + Default> Memo<T> {
         if self.stamp.hit(now) {
             return self.value.borrow();
         }
-        // Held for the whole validation: a read of this memo from inside it is a cycle, and it
-        // fails here on the RefCell rather than recursing without end.
-        let mut slot: RefMut<'_, T> = self.value.borrow_mut();
-        let input = inputs();
-        if !self.stamp.still_valid(input) {
-            let fresh = compute();
-            let first = self.stamp.verified() == Rev::NEVER && self.stamp.changed() == Rev::NEVER;
-            let differs = first || !fresh.bit_eq(&slot);
-            if differs {
-                *slot = fresh;
+        // What the memo reads is its own: a computation downstream that records what it reads
+        // validates against this memo's stamp instead (`unique::record`).
+        record::isolated(|| {
+            // Held for the whole validation: a read of this memo from inside it is a cycle, and
+            // it fails here on the RefCell rather than recursing without end.
+            let mut slot: RefMut<'_, T> = self.value.borrow_mut();
+            let input = inputs();
+            if !self.stamp.still_valid(input) {
+                let fresh = compute();
+                let first =
+                    self.stamp.verified() == Rev::NEVER && self.stamp.changed() == Rev::NEVER;
+                let differs = first || !fresh.bit_eq(&slot);
+                if differs {
+                    *slot = fresh;
+                }
+                self.stamp.settle(now, differs);
+            } else {
+                self.stamp.settle(now, false);
             }
-            self.stamp.settle(now, differs);
-        } else {
-            self.stamp.settle(now, false);
-        }
-        drop(slot);
+        });
         self.value.borrow()
     }
 
@@ -1332,18 +1372,21 @@ impl<T: Copy + BitEq + Default> CopyMemo<T> {
         assert!(!self.busy.get(), "a memo was read while it was being validated: a memo cycle");
         self.busy.set(true);
         let _busy = Busy(&self.busy);
-        let input = inputs();
-        if !self.stamp.still_valid(input) {
-            let fresh = compute();
-            let first = self.stamp.verified() == Rev::NEVER && self.stamp.changed() == Rev::NEVER;
-            let differs = first || !fresh.bit_eq(&self.value.get());
-            if differs {
-                self.value.set(fresh);
+        record::isolated(|| {
+            let input = inputs();
+            if !self.stamp.still_valid(input) {
+                let fresh = compute();
+                let first =
+                    self.stamp.verified() == Rev::NEVER && self.stamp.changed() == Rev::NEVER;
+                let differs = first || !fresh.bit_eq(&self.value.get());
+                if differs {
+                    self.value.set(fresh);
+                }
+                self.stamp.settle(now, differs);
+            } else {
+                self.stamp.settle(now, false);
             }
-            self.stamp.settle(now, differs);
-        } else {
-            self.stamp.settle(now, false);
-        }
+        });
         self.value.get()
     }
 

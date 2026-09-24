@@ -9,7 +9,12 @@
 //!   6.5), read through [`supply`]; Python rebuilt it whenever anything was invalidated;
 //! - the upkeep of units and routes and the unit supply, `economy.py:505-600`;
 //! - gold at the end of a turn and bankruptcy (`process_gold`, `economy.py:731-746`): stage E3;
-//! - temporary uniques running out (`_temp_uniques_end_turn`, `turns.py:120-131`): stage E5.
+//! - temporary uniques running out (`_temp_uniques_end_turn`, `turns.py:120-131`): stage E5;
+//! - happiness, `economy.py:404-499` (package 1b-06): its sources, and its commits at stages S1
+//!   and E1 (DESIGN.md 6.6), as the memo `Happiness` holds it;
+//! - the stats for the next turn, `economy.py:603-718` (package 1b-06): the empire-wide uniques,
+//!   the breakdown by source (`stat_map`), the totals (`civ_stats`) and gold per turn, as the memo
+//!   `CivStats` holds them; and stage E2, which writes the gold rate citizen ranking reads.
 //!
 //! What differs from Python, on purpose:
 //! - the supply is computed from the unique index without its resource layer, as Python's
@@ -17,10 +22,17 @@
 //!   computed a civilization's resources read as none (DESIGN.md 6.6). Python recursed without
 //!   end on a resource unique whose conditional asked for a resource;
 //! - a `[n] units cost no maintenance` that takes the allowance below none leaves it at none,
-//!   where Python's slice counted the free units from the other end.
+//!   where Python's slice counted the free units from the other end;
+//! - happiness is committed at fixed stages, and conditionals and citizens read what was
+//!   committed (DESIGN.md 6.6; `happiness-seen-committed`), where Python read it live;
+//! - the gold rate is written at stage E2 (`last-gold-rate-written`), where Python read a rate
+//!   nothing wrote, so a bankrupt civilization's citizens never valued gold more.
 
 use core::cell::Ref;
 
+use smallvec::SmallVec;
+
+use super::cities::stats::{HappinessSource, SourceKind, StatSource, Yields};
 use super::derive::civ;
 use super::derive::rev::PlayerTouch;
 use super::eval::EvalView;
@@ -28,7 +40,7 @@ use super::{Game, Porting, pending_or};
 use crate::base::ids::{BuildingId, CityId, Id, PlayerId, ResourceId, TileIdx, UnitId};
 use crate::base::num::{self, trunc_i32};
 use crate::base::sets::{PlayerSet, ResourceSet};
-use crate::base::stats::Stats;
+use crate::base::stats::{Stat, Stats};
 use crate::rules::Ruleset;
 use crate::rules::defs::{ResourceType, Route};
 use crate::state::chronicle::{EngineEvent, EventData};
@@ -510,6 +522,10 @@ pub fn unit_maintenance(g: &Game, p: PlayerId) -> i32 {
         }
     }
     let skip_garrisons = uq::any(uq::civ(&v, p, UniqueType::UnitsInCitiesNoMaintenance, &ctx));
+    if skip_garrisons {
+        // Where its units stand is read too: a memo of this reads its units' moves.
+        crate::unique::record::note_classes(crate::unique::CondDeps::UNIT);
+    }
     let civ_wide: Vec<(crate::base::ids::UniqueId, u16, i32)> =
         uq::raw(&v, p, UniqueType::UnitMaintenanceDiscount)
             .filter_map(|h| match h.data() {
@@ -701,7 +717,6 @@ pub const BANKRUPTCY: f64 = -200.0;
 /// what Python read from `civ_stats` just before.
 pub(crate) fn end_turn_gold(g: &mut Game, p: PlayerId) {
     let Some(rate) = g.player(p).map(|x| x.econ.last_gold_rate) else { return };
-    let upkeep = unit_maintenance(g, p);
     let mut gold = rate;
     while gold < 0.0 && g.player(p).is_some_and(|x| x.econ.gold <= BANKRUPTCY) {
         let rules = g.rules;
@@ -726,18 +741,17 @@ pub(crate) fn end_turn_gold(g: &mut Game, p: PlayerId) {
             EventData::default(),
             &[],
         );
-        gold = gold_after_disbanding(g, p, rate, upkeep);
+        gold = gold_after_disbanding(g, p);
     }
     if let Some(x) = g.player_mut(p, PlayerTouch::STOCKS) {
         x.econ.gold += gold.trunc();
     }
 }
 
-/// The turn's gold again after bankruptcy disbanded units. Python read `civ_stats` afresh; until
-/// the civilization's stats are a memo (package 1b-06), the unit upkeep saved is added back to
-/// the rate, the only part of it disbanding changes.
-fn gold_after_disbanding(g: &Game, p: PlayerId, rate: f64, upkeep: i32) -> f64 {
-    pending_or(Porting::Pending("1b-06"), rate + f64::from(upkeep - unit_maintenance(g, p)))
+/// The turn's gold again after bankruptcy disbanded units: the civilization's stats read afresh,
+/// as Python read `civ_stats` (`economy.py:744`).
+fn gold_after_disbanding(g: &Game, p: PlayerId) -> f64 {
+    super::derive::stats::civ_stats(g, p).total[Stat::Gold]
 }
 
 /// Disbands a unit (`units.disband`, `units.py:769-776`): what it carries goes with it. Inside
@@ -778,5 +792,584 @@ pub(crate) fn expire_temp_uniques(g: &mut Game, p: PlayerId) {
             t.turns = t.turns.saturating_sub(1);
         }
         x.civ.temp_uniques.retain(|t| t.turns > 0);
+    }
+}
+
+// ---- Where a civilization's happiness and stats come from ------------------------------------------
+
+/// A source of a civilization's happiness or stats: the keys of Python's happiness `breakdown`
+/// and `stat_map` (`economy.py:436-697`). A key Python wrote from two places is one variant here,
+/// so the two add up as Python's dict added them: a unique's by the kind of its source, whether
+/// a city's or the empire's (`"Policy"`), and `"City-States"` and `"Policies"`, which several
+/// lines fill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CivSource {
+    /// A source of its cities' stats, over every city: `"Tile yields"`, `"Maintenance"`. Never
+    /// [`StatSource::Uniques`], which is [`CivSource::Uniques`].
+    City(StatSource),
+    /// A source of its cities' happiness, over every city: `"Population"`, `"Occupied City"`.
+    /// Never [`HappinessSource::Uniques`], which is [`CivSource::Uniques`].
+    CityHappiness(HappinessSource),
+    /// A unique's yields, a city's or the empire's, by the kind of its source: `"Policy"`.
+    Uniques(SourceKind),
+    /// `"Base happiness"`: the difficulty's.
+    BaseHappiness,
+    /// `"Luxury resources"`.
+    LuxuryResources,
+    /// `"City-State Luxuries"`: the allied city-states' luxuries it has too.
+    CityStateLuxuries,
+    /// `"Traded Luxuries"`: the luxuries it traded away.
+    TradedLuxuries,
+    /// `"Transportation Upkeep"`: the unhappiness of its routes.
+    RouteUnhappiness,
+    /// `"City-States"`: its allied city-states' share, and a city-state's own bonuses.
+    CityStates,
+    /// `"Transportation upkeep"`: what its routes cost.
+    TransportUpkeep,
+    /// `"Unit upkeep"`.
+    UnitUpkeep,
+    /// `"Policies"`: yields per policy adopted, and excess happiness turned into a stat.
+    Policies,
+    /// `"Treasury deficit"`: science lost to a treasury in debt.
+    TreasuryDeficit,
+    /// `"Trade"`: gold per turn from deals.
+    Trade,
+    /// `"Religion"`: its religion's founder beliefs.
+    Religion,
+    /// `"Natural Wonders"`.
+    NaturalWonders,
+}
+
+impl CivSource {
+    /// Python's key.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::City(s) => s.name(),
+            Self::CityHappiness(h) => h.name(),
+            Self::Uniques(k) => k.name(),
+            Self::BaseHappiness => "Base happiness",
+            Self::LuxuryResources => "Luxury resources",
+            Self::CityStateLuxuries => "City-State Luxuries",
+            Self::TradedLuxuries => "Traded Luxuries",
+            Self::RouteUnhappiness => "Transportation Upkeep",
+            Self::CityStates => "City-States",
+            Self::TransportUpkeep => "Transportation upkeep",
+            Self::UnitUpkeep => "Unit upkeep",
+            Self::Policies => "Policies",
+            Self::TreasuryDeficit => "Treasury deficit",
+            Self::Trade => "Trade",
+            Self::Religion => "Religion",
+            Self::NaturalWonders => "Natural Wonders",
+        }
+    }
+}
+
+impl From<StatSource> for CivSource {
+    fn from(s: StatSource) -> Self {
+        match s {
+            StatSource::Uniques(k) => Self::Uniques(k),
+            s => Self::City(s),
+        }
+    }
+}
+
+impl From<HappinessSource> for CivSource {
+    fn from(h: HappinessSource) -> Self {
+        match h {
+            HappinessSource::Uniques(k) => Self::Uniques(k),
+            h => Self::CityHappiness(h),
+        }
+    }
+}
+
+// ---- Happiness (economy.py:404-499) --------------------------------------------------------------
+
+/// A civilization's happiness (`economy.happiness`, `economy.py:419-499`): the total, what it
+/// is made of, and the luxuries it has.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Happiness {
+    /// The total: the breakdown's sum, a whole number when it is within 1e-6 of one, else
+    /// rounded down.
+    pub total: i32,
+    /// Whether the civilization is a major one; the others have none, and Python's answer for
+    /// them had no luxury types.
+    pub major: bool,
+    /// Each source and its happiness, in Python's order, unrounded, zeros kept.
+    pub breakdown: SmallVec<[(CivSource, f64); 16]>,
+    /// The luxuries it has some of, in the supply's order.
+    pub luxury_types: SmallVec<[ResourceId; 8]>,
+}
+
+impl super::derive::rev::BitEq for Happiness {
+    fn bit_eq(&self, other: &Self) -> bool {
+        self.total == other.total
+            && self.major == other.major
+            && self.luxury_types == other.luxury_types
+            && self.breakdown.len() == other.breakdown.len()
+            && self
+                .breakdown
+                .iter()
+                .zip(&other.breakdown)
+                .all(|(a, b)| a.0 == b.0 && a.1.to_bits() == b.1.to_bits())
+    }
+}
+
+impl Happiness {
+    /// How Python named the mood: `very unhappy` below -10, `unhappy` below 0, else `content`.
+    #[must_use]
+    pub const fn status(&self) -> &'static str {
+        if self.total < -10 {
+            "very unhappy"
+        } else if self.total < 0 {
+            "unhappy"
+        } else {
+            "content"
+        }
+    }
+}
+
+/// Adds `x` to the entry `k` of a breakdown, making it if it is not there.
+fn add_entry(bd: &mut SmallVec<[(CivSource, f64); 16]>, k: CivSource, x: f64) {
+    match bd.iter_mut().find(|(key, _)| *key == k) {
+        Some((_, v)) => *v += x,
+        None => bd.push((k, x)),
+    }
+}
+
+/// Python's whole number of a happiness sum (`economy.py:487`): the nearest integer when within
+/// 1e-6 of it, else the floor.
+fn whole(total: f64) -> i32 {
+    let r = num::round_half_even(total);
+    if (total - r).abs() < 1e-6 { num::trunc_i32(r) } else { num::floor_i32(total) }
+}
+
+/// Civilization `p`'s happiness, computed (`economy._happiness`, `economy.py:436-499`): the
+/// difficulty's base, its luxuries (and those its allied city-states share, and those it traded
+/// away, where its uniques count them), each city's happiness, route upkeep, and its empire-wide
+/// uniques. The memo `Happiness` holds it (DESIGN.md 6.5).
+pub(crate) fn compute_happiness(g: &Game, p: PlayerId) -> Happiness {
+    let mut out = Happiness::default();
+    let Some(player) = g.player(p) else { return out };
+    if !player.is_major() {
+        return out;
+    }
+    out.major = true;
+    let r = g.rules();
+    let v = g.view();
+    let ctx = Ctx::civ(p);
+    let diff = &r.difficulties()[g.difficulty(Some(p))];
+    let mut bd: SmallVec<[(CivSource, f64); 16]> = SmallVec::new();
+    bd.push((CivSource::BaseHappiness, f64::from(diff.base_happiness)));
+    let sum_nores = |ty: UniqueType| -> f64 {
+        uq::civ_no_resources(&v, p, ty, &ctx)
+            .map(|h| {
+                let x = match *h.data() {
+                    UniqueData::BonusHappinessFromLuxury(x) => x.happiness,
+                    UniqueData::CityStateLuxuryHappiness(x) => x.percent,
+                    UniqueData::RetainHappinessFromLuxury(x) => x.percent,
+                    _ => 0,
+                };
+                f64::from(x) * f64::from(h.n)
+            })
+            .sum()
+    };
+    let per_lux = 4.0
+        + f64::from(diff.extra_happiness_per_luxury)
+        + sum_nores(UniqueType::BonusHappinessFromLuxury);
+    let is_lux = |res: ResourceId| r.resources()[res].kind == ResourceType::Luxury;
+    let owned_lux: SmallVec<[ResourceId; 8]> = supply(g, p).map_or_else(SmallVec::new, |s| {
+        s.totals().iter().filter(|&&(res, a)| a > 0 && is_lux(res)).map(|&(res, _)| res).collect()
+    });
+    #[allow(clippy::cast_precision_loss, reason = "a count of luxuries")]
+    bd.push((CivSource::LuxuryResources, owned_lux.len() as f64 * per_lux));
+    let bonus = sum_nores(UniqueType::CityStateLuxuryHappiness) / 100.0;
+    if bonus != 0.0 {
+        let sv = EvalView::for_supply(g);
+        let mut cs_lux = ResourceSet::new();
+        for cs in allied_city_states(g, p) {
+            for (res, a) in resources_for_ally(&sv, cs) {
+                if a > 0 && is_lux(res) && owned_lux.contains(&res) {
+                    cs_lux.insert(res);
+                }
+            }
+        }
+        #[allow(clippy::cast_precision_loss, reason = "a count of luxuries")]
+        bd.push((CivSource::CityStateLuxuries, per_lux * cs_lux.len() as f64 * bonus));
+    }
+    let retain = sum_nores(UniqueType::RetainHappinessFromLuxury) / 100.0;
+    if retain != 0.0 {
+        let mut away = ResourceSet::new();
+        for it in supply(g, p).iter().flat_map(|s| s.items().iter()) {
+            if it.origin == Origin::Trade
+                && it.amount < 0
+                && is_lux(it.resource)
+                && !owned_lux.contains(&it.resource)
+            {
+                away.insert(it.resource);
+            }
+        }
+        #[allow(clippy::cast_precision_loss, reason = "a count of luxuries")]
+        bd.push((CivSource::TradedLuxuries, away.len() as f64 * per_lux * retain));
+    }
+    for &c in g.state().cities().of(p) {
+        let parts = super::derive::stats::city_parts(g, c);
+        for &(k, x) in &parts.happiness {
+            add_entry(&mut bd, k.into(), x);
+        }
+    }
+    let up = transport_upkeep(g, p);
+    if up[Stat::Happiness] != 0.0 {
+        add_entry(&mut bd, CivSource::RouteUnhappiness, -up[Stat::Happiness]);
+    }
+    for (k, s) in global_stats_from_uniques(g, p) {
+        if s.get(Stat::Happiness) != 0.0 {
+            add_entry(&mut bd, k, s.get(Stat::Happiness));
+        }
+    }
+    let total: f64 = bd.iter().map(|&(_, x)| x).sum();
+    out.total = whole(total);
+    out.breakdown = bd;
+    out.luxury_types = owned_lux;
+    out
+}
+
+// ---- Stats for next turn (economy.py:603-708) ----------------------------------------------------
+
+/// A breakdown of stats by source, in the order the sources first appear (Python's dicts).
+pub type StatMap = SmallVec<[(CivSource, Yields); 16]>;
+
+/// The entry of `src` in a breakdown, made at the end if it is not there.
+fn entry(out: &mut StatMap, src: CivSource) -> &mut Yields {
+    let i = match out.iter().position(|(k, _)| *k == src) {
+        Some(i) => i,
+        None => {
+            out.push((src, Yields::default()));
+            out.len() - 1
+        }
+    };
+    &mut out[i].1
+}
+
+fn add_source(out: &mut StatMap, src: CivSource, stats: &Stats, mult: f64) {
+    entry(out, src).add(stats, mult);
+}
+
+/// A civilization's empire-wide yields from its uniques, by source
+/// (`economy.global_stats_from_uniques`, `economy.py:603-642`): its religion's founder beliefs
+/// by the cities and followers it has, `[stats] per [n] social policies adopted`, its `Stats`
+/// uniques but its buildings' (a city-state's as `City-States`, times `[n]% [stat] from
+/// City-States`), and its natural wonders.
+#[must_use]
+pub fn global_stats_from_uniques(g: &Game, p: PlayerId) -> StatMap {
+    let mut out = StatMap::new();
+    let Some(player) = g.player(p) else { return out };
+    let r = g.rules();
+    let t = r.uniques();
+    let v = g.view();
+    let ctx = Ctx::civ(p);
+    if let Some(rel) = player.religion.founded
+        && v.religion_is_major(rel)
+        && let Some(founded) = g.state().world().religion(rel)
+    {
+        for b in founded.founder_beliefs.iter() {
+            let uniques = &r.beliefs()[b].uniques;
+            for h in
+                uq::object(&v, uniques, UniqueType::StatsFromGlobalCitiesFollowingReligion, &ctx)
+            {
+                if let UniqueData::StatsFromGlobalCitiesFollowingReligion(x) = h.data() {
+                    let n = f64::from(super::religion::cities_following(g, rel));
+                    add_source(&mut out, CivSource::Religion, t.stats(x.stats), n);
+                }
+            }
+            for h in uq::object(&v, uniques, UniqueType::StatsFromGlobalFollowers, &ctx) {
+                if let UniqueData::StatsFromGlobalFollowers(x) = h.data() {
+                    let n = f64::from(super::religion::followers_of(g, rel, x.cities, p));
+                    let per = n / f64::from(x.per);
+                    add_source(&mut out, CivSource::Religion, t.stats(x.stats), per);
+                }
+            }
+        }
+    }
+    let policies = player
+        .policy
+        .adopted
+        .iter()
+        .filter(|&x| {
+            !matches!(
+                r.policies()[x].kind,
+                crate::rules::defs::PolicyKind::Member { finisher: true, .. }
+            )
+        })
+        .count();
+    let policies = i32::try_from(policies).unwrap_or(i32::MAX);
+    for h in uq::civ(&v, p, UniqueType::StatsPerPolicies, &ctx) {
+        if let UniqueData::StatsPerPolicies(x) = h.data() {
+            let n = policies.div_euclid(x.per.max(1));
+            for _ in 0..h.n {
+                add_source(&mut out, CivSource::Policies, t.stats(x.stats), f64::from(n));
+            }
+        }
+    }
+    for h in uq::civ(&v, p, UniqueType::Stats, &ctx) {
+        let UniqueData::Stats(x) = h.data() else { continue };
+        let kind = SourceKind::of(t.meta(h.id).source);
+        if kind == SourceKind::Building {
+            continue;
+        }
+        let src = if kind == SourceKind::CityState {
+            CivSource::CityStates
+        } else {
+            CivSource::Uniques(kind)
+        };
+        for _ in 0..h.n {
+            add_source(&mut out, src, t.stats(x.stats), 1.0);
+        }
+    }
+    let mut nw = Stats::single(Stat::Happiness, 1.0);
+    for h in uq::civ(&v, p, UniqueType::StatsFromNaturalWonders, &ctx) {
+        if let UniqueData::StatsFromNaturalWonders(x) = h.data() {
+            nw.add_scaled(t.stats(x.stats), f64::from(h.n));
+        }
+    }
+    if !player.civ.natural_wonders.is_empty() {
+        #[allow(clippy::cast_precision_loss, reason = "a count of natural wonders")]
+        let n = player.civ.natural_wonders.len() as f64;
+        add_source(&mut out, CivSource::NaturalWonders, &nw, n);
+    }
+    if let Some(i) = out.iter().position(|(k, _)| *k == CivSource::CityStates) {
+        for h in uq::civ(&v, p, UniqueType::BonusStatsFromCityStates, &ctx) {
+            if let UniqueData::BonusStatsFromCityStates(x) = h.data() {
+                for _ in 0..h.n {
+                    let y = &mut out[i].1;
+                    if y.has(x.stat) {
+                        y.stats[x.stat] *= 1.0 + f64::from(x.percent) / 100.0;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Net gold per turn from the deals in force (`diplomacy.deal_gold_per_turn`,
+/// `diplomacy.py:628-641`).
+#[must_use]
+pub fn deal_gold_per_turn(g: &Game, p: PlayerId) -> f64 {
+    let turn = g.turn();
+    let mut total = 0.0;
+    for d in g.state().diplo().deals.iter().filter(|d| d.active) {
+        for it in &d.ongoing {
+            let DealItem::GoldPerTurn { amount, .. } = it.item else { continue };
+            if it.until < turn {
+                continue;
+            }
+            if it.to == p {
+                total += f64::from(amount);
+            } else if it.from == p {
+                total -= f64::from(amount);
+            }
+        }
+    }
+    total
+}
+
+/// A civilization's yields for the next turn, by source, and their totals
+/// (`economy.stat_map` and `civ_stats`, `economy.py:645-697`). The memo `CivStats` holds it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CivStats {
+    /// `stat_map`: every city's breakdown merged, then its allied city-states' share, route and
+    /// unit upkeep, excess happiness, the treasury deficit, trade and its empire-wide uniques.
+    pub map: StatMap,
+    /// `civ_stats`: the sums, and happiness as its total.
+    pub total: Stats,
+}
+
+impl super::derive::rev::BitEq for CivStats {
+    fn bit_eq(&self, other: &Self) -> bool {
+        self.total.bit_eq(&other.total)
+            && self.map.len() == other.map.len()
+            && self
+                .map
+                .iter()
+                .zip(&other.map)
+                .all(|(a, b)| a.0 == b.0 && a.1.keys == b.1.keys && a.1.stats.bit_eq(&b.1.stats))
+    }
+}
+
+/// Civilization `p`'s stats for the next turn, computed (`economy.stat_map` and `civ_stats`,
+/// `economy.py:645-697`).
+pub(crate) fn compute_civ_stats(g: &Game, p: PlayerId) -> CivStats {
+    let mut map = StatMap::new();
+    let v = g.view();
+    let ctx = Ctx::civ(p);
+    for &c in g.state().cities().of(p) {
+        let cs = super::derive::stats::city_stats(g, c);
+        for (src, s) in &cs.breakdown {
+            let y = entry(&mut map, (*src).into());
+            y.stats += s.stats;
+            y.keys |= s.keys;
+        }
+    }
+    for cs in allied_city_states(g, p) {
+        for h in uq::civ(&v, p, UniqueType::CityStateStatPercent, &ctx) {
+            if let UniqueData::CityStateStatPercent(x) = h.data() {
+                let theirs = super::derive::stats::civ_stats(g, cs).total[x.stat];
+                for _ in 0..h.n {
+                    let y = entry(&mut map, CivSource::CityStates);
+                    y.add(&Stats::single(x.stat, theirs * f64::from(x.percent) / 100.0), 1.0);
+                    y.keys.insert(x.stat);
+                }
+            }
+        }
+    }
+    let up = transport_upkeep(g, p);
+    let y = entry(&mut map, CivSource::TransportUpkeep);
+    for (k, x) in up.nonzero() {
+        y.add_to(k, -x);
+    }
+    let mut unit = Yields::default();
+    unit.put(Stat::Gold, -f64::from(super::derive::stats::unit_upkeep(g, p)));
+    match map.iter_mut().find(|(k, _)| *k == CivSource::UnitUpkeep) {
+        Some((_, y)) => y.add_to(Stat::Gold, unit.get(Stat::Gold)),
+        None => map.push((CivSource::UnitUpkeep, unit)),
+    }
+    let hap = super::derive::stats::happiness_total(g, p);
+    if hap > 0 {
+        for h in uq::civ(&v, p, UniqueType::ExcessHappinessToGlobalStat, &ctx) {
+            if let UniqueData::ExcessHappinessToGlobalStat(x) = h.data() {
+                for _ in 0..h.n {
+                    let mut y = Yields::default();
+                    y.put(x.stat, f64::from(x.percent) / 100.0 * f64::from(hap));
+                    merge(&mut map, CivSource::Policies, &y);
+                }
+            }
+        }
+    }
+    let gold: f64 = map.iter().map(|(_, s)| s.get(Stat::Gold)).sum();
+    if gold < 0.0 && g.player(p).is_some_and(|x| x.econ.gold < 0.0) {
+        let sci: f64 = map.iter().map(|(_, s)| s.get(Stat::Science)).sum();
+        let mut y = Yields::default();
+        y.put(Stat::Science, gold.max(1.0 - sci));
+        merge(&mut map, CivSource::TreasuryDeficit, &y);
+    }
+    let gpt = deal_gold_per_turn(g, p);
+    if gpt != 0.0 {
+        let mut y = Yields::default();
+        y.put(Stat::Gold, gpt);
+        merge(&mut map, CivSource::Trade, &y);
+    }
+    for (src, s) in global_stats_from_uniques(g, p) {
+        merge(&mut map, src, &s);
+    }
+    let mut total = Stats::ZERO;
+    for (_, s) in &map {
+        total += s.stats;
+    }
+    total[Stat::Happiness] = f64::from(hap);
+    CivStats { map, total }
+}
+
+/// Adds a source's stats into the map under `src`, key by key.
+fn merge(map: &mut StatMap, src: CivSource, y: &Yields) {
+    match map.iter_mut().find(|(k, _)| *k == src) {
+        Some((_, d)) => {
+            d.stats += y.stats;
+            d.keys |= y.keys;
+        }
+        None => map.push((src, *y)),
+    }
+}
+
+/// Net gold per turn and where it comes from (`economy.gold_per_turn`, `economy.py:705-718`),
+/// each rounded to one place.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GoldPerTurn {
+    pub income: f64,
+    pub building_maintenance: f64,
+    pub unit_upkeep: f64,
+    pub route_maintenance: f64,
+    pub trade: f64,
+    pub net: f64,
+}
+
+/// A civilization's gold per turn (`economy.gold_per_turn`, `economy.py:705-718`). The sums are
+/// taken in the order of the cities' sorted worked tiles, so one a hair from a half can round
+/// the other way from Python's.
+// refcheck: gold-per-turn-rounds-a-sum-at-a-half
+#[must_use]
+pub fn gold_per_turn(g: &Game, p: PlayerId) -> GoldPerTurn {
+    let cs = super::derive::stats::civ_stats(g, p);
+    let maintenance = CivSource::City(StatSource::Maintenance);
+    let of = |k: CivSource| {
+        cs.map.iter().find(|&&(s, _)| s == k).map_or(0.0, |(_, y)| y.get(Stat::Gold))
+    };
+    let spent = [CivSource::UnitUpkeep, CivSource::TransportUpkeep, CivSource::Trade, maintenance];
+    let income: f64 =
+        cs.map.iter().filter(|(k, _)| !spent.contains(k)).map(|(_, y)| y.get(Stat::Gold)).sum();
+    GoldPerTurn {
+        income: num::round_ndigits(income, 1),
+        building_maintenance: num::round_ndigits(of(maintenance), 1),
+        unit_upkeep: num::round_ndigits(of(CivSource::UnitUpkeep), 1),
+        route_maintenance: num::round_ndigits(of(CivSource::TransportUpkeep), 1),
+        trade: num::round_ndigits(of(CivSource::Trade), 1),
+        net: num::round_ndigits(cs.total[Stat::Gold], 1),
+    }
+}
+
+// ---- The commits of happiness and the gold rate (DESIGN.md 6.6) -----------------------------------
+
+/// The happiness bands citizen ranking reads (`cities.py:748-771`): below -8 growth is worth
+/// nothing, below 0 happiness counts double.
+fn band(h: i32) -> u8 {
+    u8::from(h < 0) + u8::from(h < -8)
+}
+
+/// Commits the happiness conditionals and citizen ranking see (DESIGN.md 6.6): at stages S1 and
+/// E1 of the civilization's own turn, once for every civilization when a game is set up, and once
+/// after a Python conversion (without `flag`, which keeps the cities Python assigned). A new value
+/// flags the civilization's cities for a citizen recheck when it moves the ranking's bands (0 and
+/// -8) or the conditionals of their uniques read it.
+pub(crate) fn commit_happiness(g: &mut Game, p: PlayerId, flag: bool) {
+    let now = super::derive::stats::happiness_total(g, p);
+    let Some(was) = g.player(p).map(|x| x.econ.happiness_seen) else { return };
+    if now == was {
+        return;
+    }
+    if let Some(x) = g.player_mut(p, PlayerTouch::HAPPINESS_SEEN) {
+        x.econ.happiness_seen = now;
+    }
+    if flag
+        && (band(now) != band(was)
+            || g.dv.stats.deps().citizens.contains(crate::unique::CondDeps::HAPPINESS_SEEN))
+    {
+        g.flag_cities_of(p);
+    }
+}
+
+/// Stages S1 and E1: the commit of happiness for the player whose turn it is.
+pub(crate) fn commit_happiness_stage(g: &mut Game, p: PlayerId) {
+    commit_happiness(g, p, true);
+}
+
+/// Stage E2 (`turns.end_player_turn`, `turns.py:88-100`): the civilization's yields for the next
+/// turn are read once. The gold rate is written for citizen ranking (DESIGN.md 6.6; Python read
+/// `last_gold_rate` and never wrote it), and the culture and faith earned over the game grow by
+/// the turn's. A gold rate that changes sign flags the civilization's cities for a citizen
+/// recheck.
+// refcheck: last-gold-rate-written
+pub(crate) fn end_turn_rates(g: &mut Game, p: PlayerId) {
+    let total = super::derive::stats::civ_stats(g, p).total;
+    let Some(was) = g.player(p).map(|x| x.econ.last_gold_rate) else { return };
+    let gold = total[Stat::Gold];
+    if let Some(x) = g.player_mut(p, PlayerTouch::GOLD_RATE) {
+        x.econ.last_gold_rate = gold;
+    }
+    if let Some(x) = g.player_mut(p, PlayerTouch::OTHER) {
+        x.econ.total_culture += num::trunc_i64(total[Stat::Culture]);
+        x.econ.total_faith += num::trunc_i64(total[Stat::Faith]);
+    }
+    if (was < 0.0) != (gold < 0.0) {
+        g.flag_cities_of(p);
     }
 }

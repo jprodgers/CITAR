@@ -9,15 +9,22 @@
 //! - `unit_maintenance` and `unit_supply`;
 //! - `era`, which the unique index is built with.
 //!
-//! The group's other paths (happiness, stats, costs, score, victory, the world) are answered by
-//! the packages that port them; until then they are missing here, and counted in the ratchet.
+//! Package 1b-06 answers `happiness`, `civ_stats`, `stat_map` and `gold_per_turn`: the memos
+//! `Happiness` and `CivStats`, with Python's keys.
+//!
+//! The group's other paths (costs, score, victory, the world) are answered by the packages that
+//! port them; until then they are missing here, and counted in the ratchet.
 
+use citar_engine::base::ids::PlayerId;
+use citar_engine::base::num;
 use citar_engine::game::economy::ResourceItem;
 use citar_engine::game::{Game, economy, query};
 use citar_engine::rules::Ruleset;
 use citar_engine::state::players::PlayerKind;
 use serde_json::{Map, Value, json};
 
+use super::city_stats::named;
+use super::tile_yields::yields;
 use super::{AnswerError, AnswerModule, Ctx};
 use crate::Group;
 
@@ -59,9 +66,24 @@ fn civs(g: &Game) -> Vec<Value> {
             .into_iter()
             .map(|(ph, n)| (ph, Value::from(n)))
             .collect();
+        let cs = query::civ_stats(g, p);
+        let stat_map: Map<String, Value> =
+            cs.map.iter().map(|(src, y)| (src.name().to_owned(), named(y))).collect();
+        let gpt = economy::gold_per_turn(g, p);
         out.push(json!({
             "pid": p.0,
             "kind": kind,
+            "happiness": happiness(g, p),
+            "civ_stats": yields(&cs.total),
+            "stat_map": stat_map,
+            "gold_per_turn": {
+                "income": gpt.income,
+                "building_maintenance": gpt.building_maintenance,
+                "unit_upkeep": gpt.unit_upkeep,
+                "route_maintenance": gpt.route_maintenance,
+                "trade": gpt.trade,
+                "net": gpt.net,
+            },
             "resource_supply": supply,
             "detailed_resources": detailed,
             "unique_index": index,
@@ -69,6 +91,27 @@ fn civs(g: &Game) -> Vec<Value> {
             "unit_supply": economy::unit_supply(g, p),
             "era": query::era(g, p).0,
         }));
+    }
+    out
+}
+
+/// A civilization's happiness as Python answered it (`economy.happiness`): the total, the
+/// sources that are not zero rounded to two places, the luxuries it has (a major's), and its
+/// mood.
+fn happiness(g: &Game, p: PlayerId) -> Value {
+    let h = query::happiness(g, p);
+    let breakdown: Map<String, Value> = h
+        .breakdown
+        .iter()
+        .filter(|&&(_, x)| x != 0.0)
+        .map(|&(k, x)| (k.name().to_owned(), json!(num::round_ndigits(x, 2))))
+        .collect();
+    let mut out = json!({"total": h.total, "breakdown": breakdown, "status": h.status()});
+    if h.major {
+        let r = g.rules();
+        let mut lux: Vec<&str> = h.luxury_types.iter().map(|&x| &*r.resources()[x].name).collect();
+        lux.sort_unstable();
+        out["luxury_types"] = json!(lux);
     }
     out
 }

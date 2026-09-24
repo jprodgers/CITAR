@@ -8,12 +8,16 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# test-ops: Game::step_unit_for_test, a unit's step (package 1c-01), and Game::settle_for_bench, the
+# settle with nothing pending (package 1b-06).
 citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
 # The synthetic states the save and digest benchmarks time.
 citar-testkit.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+# The scenario operations the stats benchmarks set their states up with.
+serde_json.workspace = true
 
 # The digest and the save of a synthetic gargantuan state (package 1a-09): the digest is gated at
 # 5 ms (report-only) and fails the run above 15 ms (DESIGN.md 4.10, 10).
@@ -38,6 +42,14 @@ harness = false
 # above three times either.
 [[bench]]
 name = "vis"
+harness = false
+
+# Tile yields, city stats, citizens, connectivity and settle (package 1b-06): a tile yield hit at
+# 5 ns, its first read after an unrelated change at 50 ns and a recompute at 1 us; city stats at
+# 10 us; a city of 20's citizens at 10 us; connectivity on a small map at 30 us; a settle with
+# nothing pending at 0.5 us (report-only), failing above three times any.
+[[bench]]
+name = "stats"
 harness = false
 
 [lints]

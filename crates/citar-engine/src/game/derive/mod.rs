@@ -6,14 +6,15 @@
 //! events read, the visibility counts (`game::vis`, package 1c-01), and what a write means for the
 //! caches ([`Derived::on`]). The memos of DESIGN.md 6.5 join it package by package: the unique
 //! index memos, resource supply and unit profiles ([`civ`], 1b-05), tile yields, city and
-//! civilization stats and connectivity (1b-06), the buildable lists (1b-07), and the rest with
-//! their systems.
+//! civilization stats, happiness and connectivity ([`stats`], 1b-06), the buildable lists
+//! (1b-07), and the rest with their systems.
 //!
 //! Replaces the caches of `game.py:100-145` (`_cache`, `_ycache`, `_static`, `_jobcache`,
 //! `_viewcache`, `_names`) and the invalidation of `game.py:565-609`.
 
 pub mod civ;
 pub mod rev;
+pub mod stats;
 
 use core::cell::Ref;
 
@@ -50,6 +51,8 @@ pub struct Derived {
     pub(crate) vis: Visibility,
     /// The unique index memos, the resource supply and the unit profiles.
     pub(crate) civ: civ::CivCaches,
+    /// Tile yields, city and civilization stats, happiness and connectivity.
+    pub(crate) stats: stats::StatsCaches,
 }
 
 impl Derived {
@@ -71,6 +74,7 @@ impl Derived {
             names: Memo::new(),
             vis: Visibility::new(rules, st),
             civ: civ::CivCaches::new(rules, st),
+            stats: stats::StatsCaches::new(rules, st),
         }
     }
 
@@ -131,20 +135,20 @@ impl Derived {
         let owner = |t: TileIdx| st.tiles().get(t).and_then(Tile::owner);
         match *ch {
             Change::TileInput(t) => {
-                self.flag_near(st, range, t, &[owner(t)], &mut out);
+                self.flag_around(st, range, t, &[owner(t)], &mut out);
                 // What units on it see, when the ruleset's sight uniques read the tile.
                 if self.vis.tile_sensitive() {
                     out.sight.push(SightSource::Tile(t));
                 }
             }
             Change::TileHeight(t) => {
-                self.flag_near(st, range, t, &[owner(t)], &mut out);
+                self.flag_around(st, range, t, &[owner(t)], &mut out);
                 out.sight.push(SightSource::Area(t));
             }
             Change::TileOwner { t, old, new } => {
                 out.recheck.extend(old.city);
                 out.recheck.extend(new.city);
-                self.flag_near(st, range, t, &[old.owner, new.owner], &mut out);
+                self.flag_around(st, range, t, &[old.owner, new.owner], &mut out);
                 // The cities that see it through their tiles, and those who see it meeting its
                 // new owner.
                 for c in [old.city, new.city].into_iter().flatten() {
@@ -160,6 +164,9 @@ impl Derived {
                     .units()
                     .get(u)
                     .is_some_and(|x| rules.base_units().get(x.base).is_some_and(|b| b.military));
+                // A blockade begins or ends as the unit comes or goes, and the cities in range
+                // look again at once.
+                // refcheck: citizens-follow-a-blockade-at-once
                 if military {
                     for t in [from, Some(to)].into_iter().flatten() {
                         self.flag_blockade(st, range, by, t, &mut out);
@@ -231,6 +238,32 @@ impl Derived {
             Change::PlayerAlive(p) => out.sight.push(SightSource::Civ(p)),
         }
         out
+    }
+
+    /// Flags the cities a change to tile `t` concerns: those of `owners` (its owners before and
+    /// after) whose work range reaches it, and those that may work one of its neighbours, since a
+    /// tile's yield reads its neighbours (a Moai's culture for each Moai beside it, fresh water,
+    /// the coast): the cities of each neighbour's owner whose range reaches that neighbour. For
+    /// those it flags every city of the neighbours' owners within one tile more than the range,
+    /// which holds them all; the write path still allocates nothing.
+    // refcheck: citizens-follow-a-neighbour-at-once
+    fn flag_around(
+        &self,
+        st: &State,
+        range: u32,
+        t: TileIdx,
+        owners: &[Option<PlayerId>],
+        out: &mut Reactions,
+    ) {
+        self.flag_near(st, range, t, owners, out);
+        if !self.grid.contains(t) {
+            return;
+        }
+        let mut around: [Option<PlayerId>; 6] = [None; 6];
+        for (slot, nb) in around.iter_mut().zip(self.grid.neighbors(t)) {
+            *slot = st.tiles().get(nb).and_then(Tile::owner);
+        }
+        self.flag_near(st, range.saturating_add(1), t, &around, out);
     }
 
     /// Flags every city of one of `owners` whose work range reaches tile `t`. It walks the
@@ -357,6 +390,21 @@ mod tests {
     }
 
     #[test]
+    fn a_tile_change_flags_the_cities_that_may_work_a_neighbour() {
+        use crate::state::TileClaim;
+        let mut g = testing::duel();
+        let rome = PlayerId(0);
+        // Roma at (2, 2); (5, 2) is three tiles away, in its range; (6, 2) four and (7, 2) five.
+        let roma = testing::city(&mut g, rome, TileIdx(22), "Roma");
+        g.set_tile_owner(TileIdx(25), TileClaim::city(rome, roma)).expect("a tile");
+        g.settle();
+        let next_to_ours = g.dv.on(&g.st, g.rules, &Change::TileInput(TileIdx(26)));
+        assert_eq!(next_to_ours.recheck.to_vec(), [roma], "(6, 2) is next to Roma's (5, 2)");
+        let farther = g.dv.on(&g.st, g.rules, &Change::TileInput(TileIdx(27)));
+        assert!(farther.recheck.is_empty(), "no tile next to (7, 2) is Roma's to work");
+    }
+
+    #[test]
     fn war_flags_the_cities_an_enemy_unit_blocks_and_other_terms_none() {
         use crate::state::TileClaim;
         let mut g = testing::duel();
@@ -382,11 +430,14 @@ mod tests {
         for ch in [peace_terms, talks] {
             assert!(g.dv.on(&g.st, g.rules, &ch).recheck.is_empty(), "{ch:?}");
         }
-        // Through the setter: a war flags Roma; a research agreement's science flags nothing.
+        // Through the setter: a research agreement's science flags nothing, and a war flags Roma,
+        // blockaded; the shipped ruleset's `[n]% growth <when not at war>` makes every city
+        // look again besides.
         g.settle();
         g.update_relation(rome, greece, |r| r.ra_science = [5, 5]).expect("a pair");
         assert!(g.pending.is_empty());
         g.update_relation(rome, greece, |r| r.war = true).expect("a pair");
-        assert_eq!(g.pending.take_recheck(), [roma]);
+        let flagged = g.pending.take_recheck();
+        assert!(flagged.contains(&roma), "{flagged:?}");
     }
 }

@@ -2,14 +2,14 @@
 //! - `Game::from_python` loads every committed fixture (9 mini and 3 late), and the corpus when
 //!   `CITAR_REFCHECK_CORPUS` names its folder, with every invariant of DESIGN.md 9.4 holding and
 //!   the caches equal to a cold rebuild (gate 6);
-//! - the settle on load changes nothing the state holds (sight is at Python's fixed point, and
-//!   citizens do not react yet), and a game saves and loads back to the same digest;
+//! - the settle on load changes nothing the state holds but the happiness it commits once (sight
+//!   is at Python's fixed point, and the citizens Python placed stay), and a game saves and loads
+//!   back to the same digest;
 //! - reads are free: views, scrubbed feeds, queries and refused calls leave the digest and the
 //!   revision alone (a first taste of property P8).
 
 use citar_engine::game::{Game, invariants::Violation};
 use citar_engine::rules::Ruleset;
-use citar_engine::save;
 use citar_testkit::fixtures::{self, Fixture};
 
 fn every_fixture() -> Vec<Fixture> {
@@ -49,13 +49,27 @@ fn the_settle_on_load_changes_nothing_yet_and_a_save_round_trips() {
         let r = Ruleset::shared();
         let digest = g.digest().unwrap_or_else(|e| panic!("{}: {e}", f.name));
         // Sight is built from nothing in the settle, and a state Python saved after its refresh
-        // is its fixed point (package 1c-01): nothing new is explored, met or discovered.
-        // Citizens do not react yet (1b-06). So the loaded state is the converted one, but for
-        // the civilians Python left at 0 health, which keep 1.
+        // is its fixed point (package 1c-01): nothing new is explored, met or discovered. So the
+        // loaded state is the converted one but for the happiness the load commits once
+        // (DESIGN.md 4.12) and the civilians Python left at 0 health, which keep 1: the settle
+        // keeps the citizens Python placed.
         let zero: Vec<_> =
             converted.state.units().iter().filter(|u| u.hp <= 0).map(|u| u.id()).collect();
         if zero.is_empty() {
-            assert_eq!(save::digest(r, &converted.state).ok(), Some(digest), "{}", f.name);
+            let as_converted = Game::from_state(
+                r,
+                converted.state.clone(),
+                citar_engine::state::chronicle::Chronicle::new(),
+            )
+            .unwrap_or_else(|e| panic!("{}: {e}", f.name));
+            let json = |g: &Game| {
+                let bytes = g.snapshot().to_json().unwrap_or_else(|e| panic!("{}: {e}", f.name));
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{}: {e}", f.name));
+                forget(&mut v, "happiness_seen");
+                v
+            };
+            assert!(json(&as_converted) == json(&g), "{}", f.name);
         }
         for u in converted.state.units().iter() {
             let hp = g.unit(u.id()).map(|x| x.hp);
@@ -75,6 +89,24 @@ fn the_settle_on_load_changes_nothing_yet_and_a_save_round_trips() {
         assert_eq!(back.digest().ok(), Some(digest), "{}", f.name);
         assert_eq!(back.chronicle().events().len(), g.chronicle().events().len(), "{}", f.name);
         assert!(back.check_invariants().is_empty(), "{}", f.name);
+    }
+}
+
+/// Takes every `key` out of a JSON document, at any depth.
+fn forget(v: &mut serde_json::Value, key: &str) {
+    match v {
+        serde_json::Value::Object(m) => {
+            m.shift_remove(key);
+            for x in m.values_mut() {
+                forget(x, key);
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for x in a {
+                forget(x, key);
+            }
+        }
+        _ => {}
     }
 }
 

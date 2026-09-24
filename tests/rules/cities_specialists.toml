@@ -1,0 +1,128 @@
+about = """
+set_specialists puts a city's citizens into its buildings' specialist slots by hand, or with {}
+back to the automatic choice: the rest work tiles, and the call says where, as the city shows it
+afterwards. A request the slots or the citizens cannot hold is refused whole. A specialist whose
+slot goes with its building goes back to a tile.
+
+The Rust engine refuses a count that is not a number with a sentence, where Python raised a
+ValueError (intended: specialist-counts-must-be-numbers).
+"""
+from = "citar/engine/tools.py: set_specialists; citar/engine/cities.py: max_specialists, _unassign_extra"
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma", pop = 3, claim_radius = 2, buildings = ["Market"] }
+as = "roma"
+
+[[step]]
+set = { city = "=roma.city_id" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { specialists = {}, buildings = ["Market", "Palace"] }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.gold"
+absent = false
+as = "gold"
+
+[[step]]
+tool = "set_specialists"
+args = { city_id = "=city", specialists = { Merchant = 1 } }
+as = "merchant"
+
+[[step]]
+check = "merchant"
+path = "specialists"
+eq = { Merchant = 1 }
+
+[[step]]
+check = "merchant"
+path = "worked_tiles"
+len = 2
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { specialists = { Merchant = 1 } }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 2
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+contains = "=merchant.worked_tiles[0]"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+contains = "=merchant.worked_tiles[1]"
+
+[[step]]
+note = "a merchant earns more gold than the tile the citizen left"
+check = { what = "city", city = "=city" }
+path = "yields.gold"
+gt = "=gold"
+
+[[step]]
+tool = "set_specialists"
+args = { city_id = "=city", specialists = { Scientist = 1 } }
+error = "Roma has no slots for Scientist. Available: {'Merchant': 1}."
+
+[[step]]
+tool = "set_specialists"
+args = { city_id = "=city", specialists = { Merchant = 2 } }
+error = "Roma has 1 Merchant slot(s)."
+
+[[step]]
+tool = "set_specialists"
+args = { city_id = "=city", specialists = { Merchant = "several" } }
+error = "The number of Merchant specialists must be a whole number."
+intended = "specialist-counts-must-be-numbers"
+
+[[step]]
+tool = "set_specialists"
+args = { city_id = "=city", specialists = [1] }
+error = "specialists must be an object like"
+
+[[step]]
+note = "the refusals changed nothing"
+check = { what = "city", city = "=city" }
+subset = { specialists = { Merchant = 1 } }
+
+[[step]]
+note = "the Market goes, and its merchant with it"
+op = "set_city"
+args = { city = "=city", remove_buildings = ["Market"] }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { specialists = {}, buildings = ["Palace"] }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 3
+
+[[step]]
+tool = "set_specialists"
+args = { city_id = "=city", specialists = { Merchant = 1 } }
+error = "Roma has no slots for Merchant. Available: none."
+
+[[step]]
+note = "{} hands the choice back"
+tool = "set_specialists"
+args = { city_id = "=city", specialists = {} }
+as = "auto"
+
+[[step]]
+check = "auto"
+eq = { specialists = {}, worked_tiles = "=auto.worked_tiles" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 3

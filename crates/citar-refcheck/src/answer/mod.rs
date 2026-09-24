@@ -9,7 +9,10 @@
 //! - [`uniques`] (package 1a-05), which compares the compiled ruleset once per run;
 //! - [`state_echo`] (package 1a-10), the fixture's own state read back from its conversion;
 //! - [`civs`] (package 1b-05), the civilization-level data: resources, the unique index, unit
-//!   upkeep and supply, and the era;
+//!   upkeep and supply, and the era; with package 1b-06 happiness and the stats for the next
+//!   turn;
+//! - [`tile_yields`] and [`city_stats`] (package 1b-06), what tiles yield and everything the
+//!   engine derives for a city;
 //! - [`fixed_point`] and [`visible`] (package 1c-01): the settle on load changes no explored tile
 //!   and no meeting, and what each major sees.
 //!
@@ -27,9 +30,11 @@ use serde_json::Value;
 use crate::Group;
 use crate::fixture::Fixture;
 
+pub mod city_stats;
 pub mod civs;
 pub mod fixed_point;
 pub mod state_echo;
+pub mod tile_yields;
 pub mod uniques;
 pub mod visible;
 
@@ -95,6 +100,8 @@ static MODULES: &[&dyn AnswerModule] = &[
     &uniques::Uniques,
     &state_echo::StateEcho,
     &fixed_point::FixedPoint,
+    &tile_yields::TileYields,
+    &city_stats::CityStats,
     &civs::Civs,
     &visible::Visible,
 ];

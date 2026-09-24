@@ -60,15 +60,13 @@ impl Leaf for CivLeaf {
     /// the diplomatic state, which `CondDeps::WAR` covers whole (package 1a-07): `Hostile` the
     /// war state, `Known` who has met whom, `Open Borders` the agreement and the turn it ends
     /// (`game.py:705-708`). `Friendly` reads a declared friendship and the turn it ends, or a
-    /// city-state's influence with the viewer (`game.py:677-686`); influence is another
-    /// civilization's state, which no class of the civilization in context names, so it reads
-    /// every class, which is always correct (DESIGN.md 5.8).
+    /// city-state's influence with the viewer (`game.py:677-686`), which is war at its floor.
     fn deps(&self) -> CondDeps {
         match self {
             Self::Human | Self::Ai => CondDeps::SEAT,
             Self::Hostile | Self::Known => CondDeps::WAR,
             Self::OpenBorders => CondDeps::WAR | CondDeps::TURN,
-            Self::Friendly => CondDeps::all(),
+            Self::Friendly => CondDeps::WAR | CondDeps::TURN | CondDeps::INFLUENCE,
             Self::Kind(_) | Self::Nation(_) => CondDeps::empty(),
         }
     }

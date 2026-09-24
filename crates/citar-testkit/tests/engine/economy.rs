@@ -3,16 +3,18 @@
 //!   city`, `[n] Unit Supply per [k] population [cities]`) and the route upkeep of
 //!   `Costs [n] [stat] per turn when in your territory`;
 //! - unit upkeep after the free allowance, growing with the game;
-//! - stage E3 banks the turn's gold, and bankruptcy disbands military units, the abroad and the
-//!   least promoted first; stage E5 runs temporary uniques out;
+//! - stage E2 writes the gold rate from the civilization's stats and E3 banks it, and bankruptcy
+//!   disbands military units, the abroad and the least promoted first, reading the stats afresh
+//!   after each; stage E5 runs temporary uniques out;
 //! - the scenario operation `remove_units`;
 //! - every check, the cache oracle among them, clean after each.
 
 use citar_engine::base::ids::{
-    BarbarianLevelId, BaseUnitId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId,
-    PlayerId, PromotionId, SpeedId, TerrainId, TileIdx, UnitId,
+    BarbarianLevelId, BaseUnitId, BuildingId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId,
+    NationId, PlayerId, PromotionId, SpeedId, TerrainId, TileIdx, UnitId,
 };
 use citar_engine::base::sets::PlayerVec;
+use citar_engine::base::stats::Stat;
 use citar_engine::game::{DebugOptions, ErrCode, Game, economy};
 use citar_engine::rules::defs::Route;
 use citar_engine::rules::{Named, Ruleset};
@@ -59,6 +61,8 @@ struct Setup<'a> {
     temp: Vec<TempUnique>,
     /// Tiles with a road, and whether it is pillaged.
     roads: &'a [(u32, bool)],
+    /// The buildings of the first player's first city.
+    buildings: &'a [&'a str],
 }
 
 impl Default for Setup<'_> {
@@ -72,6 +76,7 @@ impl Default for Setup<'_> {
             gold_rate: 0.0,
             temp: Vec::new(),
             roads: &[],
+            buildings: &[],
         }
     }
 }
@@ -131,6 +136,11 @@ fn game(r: &'static Ruleset, s: &Setup<'_>) -> Game {
         }
         let mut city = City::new(c, format!("City {}", c.get()).into(), ME, TileIdx(t), 1);
         city.pop = pop;
+        if i == 0 {
+            for &b in s.buildings {
+                city.buildings.insert(id::<BuildingId>(r, b));
+            }
+        }
         cities.push(city);
     }
     for &(t, pillaged) in s.roads {
@@ -226,13 +236,36 @@ fn unit_upkeep_starts_after_the_free_units_and_grows_with_the_game() {
     clean(&mut g);
 }
 
+/// The first player's treasury, and the gold rate its last stage E2 wrote.
+fn gold(g: &Game) -> (f64, f64) {
+    g.state().player(ME).map_or((0.0, 0.0), |p| (p.econ.gold, p.econ.last_gold_rate))
+}
+
 #[test]
 fn the_turns_gold_is_banked_and_bankruptcy_disbands_units() {
     let r = kitchen_sink();
-    // A treasury in the black takes the turn's rate, truncated.
+    // A civilization with nothing earns nothing: stage E2 writes a rate of 0 over the one the
+    // last turn left, and E3 banks it.
     let mut g = game(r, &Setup { gold: 10.0, gold_rate: 3.7, ..Setup::default() });
     g.end_turn(ME).expect("my turn");
-    assert!((g.state().player(ME).map_or(0.0, |p| p.econ.gold) - 13.0).abs() < 1e-9);
+    assert_eq!(gold(&g), (10.0, 0.0));
+    clean(&mut g);
+
+    // A city pays for its buildings: the rate E2 writes is its stats' gold, and E3 banks it,
+    // truncated.
+    let mut g = game(
+        r,
+        &Setup {
+            gold: 10.0,
+            cities: &[(22, 1)],
+            buildings: &["Monument", "Temple"],
+            ..Setup::default()
+        },
+    );
+    let rate = citar_engine::game::query::civ_stats(&g, ME).total[Stat::Gold];
+    assert!(rate < 0.0, "{rate}");
+    g.end_turn(ME).expect("my turn");
+    assert_eq!(gold(&g), (10.0 + rate.trunc(), rate));
     clean(&mut g);
 
     // At -200 or below with a negative rate, the military go: those in its own land first, the
@@ -249,7 +282,7 @@ fn the_turns_gold_is_banked_and_bankruptcy_disbands_units() {
             cities: &[(22, 1)],
             units: &units,
             gold: -250.0,
-            gold_rate: -5.0,
+            buildings: &["Monument", "Granary", "Shrine", "Library", "Temple", "Courthouse"],
             ..Setup::default()
         },
     );
@@ -273,7 +306,10 @@ fn the_turns_gold_is_banked_and_bankruptcy_disbands_units() {
     let order: Vec<Option<TileIdx>> =
         batch.events().iter().filter(|e| e.kind.name() == "bankrupt").map(|e| e.tile).collect();
     assert_eq!(order, [Some(TileIdx(23)), Some(TileIdx(21)), Some(TileIdx(70))]);
-    assert!((g.state().player(ME).map_or(0.0, |p| p.econ.gold) + 255.0).abs() < 1e-9);
+    // Once the last military unit went, the rate read afresh is banked.
+    let left_rate = citar_engine::game::query::civ_stats(&g, ME).total[Stat::Gold];
+    assert!(left_rate < 0.0);
+    assert!((gold(&g).0 - (-250.0 + left_rate.trunc())).abs() < 1e-9, "{:?}", gold(&g));
     clean(&mut g);
 }
 

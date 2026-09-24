@@ -669,10 +669,19 @@ pub static SETUP: [SetupStage; 15] = [
     SetupStage::later("starting triggers", Porting::Pending("1b-08")),
     SetupStage::game("relations", relations),
     SetupStage::later("camps", Porting::Pending("1c-06")),
-    SetupStage::later("happiness", Porting::Pending("1b-06")),
+    SetupStage::game("happiness", happiness),
     SetupStage::game("visibility", visibility),
     SetupStage::game("begin", begin),
 ];
+
+/// Commits every civilization's happiness once, so the conditionals of the first turn see it
+/// (DESIGN.md 6.6, 6.14).
+fn happiness(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
+    for p in g.state().players().ids().collect::<Vec<_>>() {
+        super::economy::commit_happiness(g, p, true);
+    }
+    Ok(())
+}
 
 /// Every setup stage still waiting for its package: `(stage, package)`.
 pub fn waiting() -> impl Iterator<Item = (&'static SetupStage, &'static str)> {

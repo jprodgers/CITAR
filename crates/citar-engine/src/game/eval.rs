@@ -10,10 +10,9 @@
 //! accessors of `game.py` (`at_war`, `has_met`, `is_friend`, `has_open_borders`, `stat_reserve`,
 //! `religion_enabled`, `victory_enabled`), the tile predicates of `tiles.py:100-165`, and the
 //! plain fields of the state; the unique indexes, the resource supply and the civilization's era
-//! come from the memos of `game::derive::civ` (package 1b-05). The answers that need a system a
-//! later package ports are marked where they are (`pending_or`): coast and the trade network
-//! (1b-06) and religious majorities (1b-08). Until then they answer what a game without that
-//! system would.
+//! come from the memos of `game::derive::civ` (package 1b-05); coast, the trade network and
+//! religious majorities from `game::tiles`, the `Connectivity` memo and `game::religion`
+//! (package 1b-06).
 //!
 //! The resource supply is computed in a view of its own (`EvalView::for_supply`), in which a
 //! civilization's index has no resource layer, a city's own index none of its resources' uniques,
@@ -28,8 +27,8 @@ use crate::base::ids::{
 };
 use crate::base::sets::{BeliefSet, BuildingSet, PolicySet, PromotionSet, TechSet, TerrainSet};
 use crate::base::stats::Stat;
+use crate::game::Game;
 use crate::game::derive::civ;
-use crate::game::{Game, Porting, pending_or};
 use crate::rules::Ruleset;
 use crate::rules::defs::{BeliefType, Domain, NationKind, PolicyKind, ReligionProgress, Route};
 use crate::state::State;
@@ -145,10 +144,9 @@ impl TileFacts for EvalView<'_> {
             || self.fresh_source(t)
     }
 
-    fn tile_next_to_coast(&self, _: TileIdx) -> bool {
-        // tiles.adjacent_to_coast (tiles.py:127-134) compares a neighbour's terrain with Coast,
-        // which needs Coast among the ruleset's known objects.
-        pending_or(Porting::Pending("1b-06"), false)
+    /// `tiles.adjacent_to_coast` (`tiles.py:127-134`): a neighbour is the ruleset's Coast.
+    fn tile_next_to_coast(&self, t: TileIdx) -> bool {
+        crate::game::tiles::adjacent_to_coast(self.g, t)
     }
 }
 
@@ -318,9 +316,16 @@ impl FilterFacts for EvalView<'_> {
         self.city_at(c).is_some_and(|x| x.puppet)
     }
 
-    fn city_connected_to_capital(&self, _: CityId) -> bool {
-        // cities.connected_to_capital (cities.py:1967-2072): the Connectivity memo.
-        pending_or(Porting::Pending("1b-06"), false)
+    /// `cities.connected_to_capital` (`cities.py:2067-2076`): the `Connectivity` memo; in the
+    /// supply's view the links computed afresh, since the memo reads the index the supply
+    /// feeds.
+    fn city_connected_to_capital(&self, c: CityId) -> bool {
+        if !self.supply {
+            return crate::game::derive::stats::connected_to_capital(self.g, c);
+        }
+        let owner = self.city_owner(c);
+        self.st().cities().of(owner).len() >= 2
+            && crate::game::cities::connections::connected_cities_in(self, owner).media(c).is_some()
     }
 
     /// `cities.is_garrisoned` (`cities.py:131-134`).
@@ -344,9 +349,9 @@ impl FilterFacts for EvalView<'_> {
         self.city_at(c).is_some_and(|x| x.holy_city_of.is_some())
     }
 
-    fn city_majority_religion(&self, _: CityId) -> Option<ReligionId> {
-        // religion.majority_religion: followers from the city's pressures.
-        pending_or(Porting::Pending("1b-08"), None)
+    /// `religion.majority_religion` (`religion.py:136-149`).
+    fn city_majority_religion(&self, c: CityId) -> Option<ReligionId> {
+        crate::game::religion::majority_religion(self.g, c)
     }
 
     fn religion_is_major(&self, r: ReligionId) -> bool {
@@ -529,9 +534,9 @@ impl EvalWorld for EvalView<'_> {
         i32::from(x.pop) - worked - self.city_specialists(c, None)
     }
 
-    fn city_majority_followers(&self, _: CityId) -> i32 {
-        // religion.followers_of_majority.
-        pending_or(Porting::Pending("1b-08"), 0)
+    /// `religion.followers_of_majority` (`religion.py:152-156`).
+    fn city_majority_followers(&self, c: CityId) -> i32 {
+        crate::game::religion::followers_of_majority(self.g, c)
     }
 
     fn tile_city(&self, t: TileIdx) -> Option<CityId> {
