@@ -1,0 +1,54 @@
+about = """
+Contact goes both ways: a civilization that sees another's unit meets it even when the other
+cannot see back. A warrior on a hill is seen from three tiles off, while from the hill it does not
+see the flat tile three tiles away (the ring past its sight shows only higher ground).
+"""
+from = "citar/engine/visibility.py: viewable_from, refresh; DESIGN.md 6.9"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+note = "The first seat's warrior on flat land, three tiles west of the hill; the second's on the hill."
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "H>w>w>w" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "H" },
+]
+
+[[step]]
+check = { what = "tile", at = "H" }
+path = "visible"
+eq = [0, 1]
+
+[[step]]
+check = { what = "tile", at = "H>w>w>w" }
+path = "visible"
+eq = [0]
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "met"
+eq = true
+
+[[step]]
+check = { what = "events", type = "first_contact" }
+len = 1
+
+[[step]]
+note = "The other way round, far from the first pair: the third seat looks up at the second's hill."
+ops = [
+  { op = "set_tile", at = "B>w>w>w", features = ["Hill"] },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B>w>w>w" },
+  { op = "add_unit", player = 2, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+check = { what = "tile", at = "B" }
+path = "visible"
+eq = [2]
+
+[[step]]
+check = { what = "relation", a = 1, b = 2 }
+path = "met"
+eq = true
+

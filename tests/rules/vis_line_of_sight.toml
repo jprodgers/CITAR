@@ -1,0 +1,85 @@
+about = """
+Sight follows the ground: a forest hides the tile behind it, a mountain hides the plain beyond it
+but is itself seen from three tiles off, and a unit standing on a hill looks over a forest.
+Every tile in sight is explored.
+"""
+from = "citar/engine/visibility.py: viewable_from (UnCiv's TileMap.getViewableTiles)"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+note = "Next to the forest F: the coast W behind it is hidden, the forest itself seen."
+op = "add_unit"
+args = { player = 0, unit = "Warrior", at = "F>e" }
+
+[[step]]
+check = { what = "tile", at = "F" }
+path = "visible"
+eq = [0]
+
+[[step]]
+check = { what = "tile", at = "W" }
+path = "visible"
+eq = []
+
+[[step]]
+check = { what = "tile", at = "F>e>ne" }
+path = "visible"
+eq = [0]
+
+[[step]]
+note = "Next to the mountain M: the tile beyond it is hidden, the one beside it seen."
+op = "add_unit"
+args = { player = 1, unit = "Warrior", at = "M>w" }
+
+[[step]]
+check = { what = "tile", at = "M" }
+path = "visible"
+contains = 1
+
+[[step]]
+check = { what = "tile", at = "M>e" }
+path = "visible"
+eq = []
+
+[[step]]
+check = { what = "tile", at = "M>w>w" }
+path = "visible"
+contains = 1
+
+[[step]]
+note = "Three tiles from the mountain, on flat land: the mountain rises into the ring past the sight."
+op = "add_unit"
+args = { player = 2, unit = "Warrior", at = "M>e>e>e" }
+
+[[step]]
+check = { what = "tile", at = "M" }
+path = "visible"
+contains = 2
+
+[[step]]
+check = { what = "tile", at = "M>w" }
+path = "visible"
+not_contains = 2
+
+[[step]]
+check = { what = "tile", at = "M>e>e>e>e>e>e" }
+path = "visible"
+not_contains = 2
+
+[[step]]
+note = "A hill under the first warrior: it now sees over the forest."
+op = "set_tile"
+args = { at = "F>e", features = ["Hill"] }
+
+[[step]]
+check = { what = "tile", at = "W" }
+path = "visible"
+eq = [0]
+
+[[step]]
+note = "What is seen is explored."
+check = { what = "player", player = 0 }
+path = "explored"
+ge = 19

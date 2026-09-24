@@ -110,7 +110,8 @@ def _player(g: Game, pid: int) -> dict:
         "techs": sorted(p.techs), "research": {"queue": list(p.research_queue), "goal": p.research_goal},
         "policies": sorted(p.policies), "met": sorted(q for q in p.met if q != pid), "capital": p.capital,
         "cities": sorted(c.id for c in g.player_cities(pid)), "units": sorted(u.id for u in g.player_units(pid)),
-        "explored": sum(1 for b in p.explored if b), "notes": p.notes if p.kind == "major" else "",
+        "explored": sum(1 for b in p.explored if b), "natural_wonders": sorted(p.natural_wonders),
+        "notes": p.notes if p.kind == "major" else "",
         "city_state": city_state,
     }
 
@@ -123,7 +124,13 @@ def _tile(g: Game, idx: int) -> dict:
             "resource": t.resource, "resource_amount": int(t.resource_amount or 0) if t.resource else 0,
             "improvement": t.improvement, "pillaged": bool(t.pillaged), "route": t.route,
             "route_pillaged": bool(t.route_pillaged), "river": int(t.river or 0), "owner": t.owner, "city": t.city,
-            "units": sorted(u.id for u in g.units_at(idx))}
+            "units": sorted(u.id for u in g.units_at(idx)), "visible": _seen_by(g, idx)}
+
+
+def _seen_by(g: Game, idx: int) -> list:
+    """Who sees a tile now: every living player but the barbarians whose sight covers it."""
+    from .visibility import visible_tiles
+    return [p.id for p in g.s.players if p.alive and p.kind != "barbarian" and idx in visible_tiles(g, p.id)]
 
 
 def _opinion(g: Game, holder: int, about: int) -> float:
