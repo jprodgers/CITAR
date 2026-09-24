@@ -43,7 +43,7 @@ use crate::base::ids::{
     CityFilterId, CityId, CivFilterId, CombatantFilterId, IdVec, ObjectFilterId, PlayerId, SetRef,
     TileFilterId, TileIdx, UniqueId, UnitFilterId, UnitId,
 };
-use crate::base::sets::{BitSet, TerrainSet};
+use crate::base::sets::{BitSet, ImprovementSet, TerrainSet};
 use crate::rules::Ruleset;
 
 /// A tile filter, compiled for each way the rules read one.
@@ -56,6 +56,10 @@ pub struct TileFilter {
     /// `terrain_matches` over each terrain: the terrains the filter names, for the rules that ask
     /// it of a terrain rather than a tile (`workers.py:44-52`).
     pub terrains: TerrainSet,
+    /// `improvement_matches` over each improvement: the improvements the filter names, read as
+    /// an improvement filter, term by term (`uniques.py:363-370`). The tile yields ask it of the
+    /// improvement and the route on a tile before they ask the tile (`tiles.py:295-301`).
+    pub improvements: ImprovementSet,
     /// Whether map generation can read it: every term known from the terrain alone, through
     /// [`TileFacts`] (DESIGN.md 5.7).
     pub terrain_level: bool,
@@ -355,9 +359,12 @@ impl<'r> Compiler<'r> {
         let terrains = statics::typed(
             &st.filter(StaticDomain::Terrain, text).unwrap_or_else(|_| BitSet::new()),
         );
+        let improvements = statics::typed(
+            &st.filter(StaticDomain::Improvement, text).unwrap_or_else(|_| BitSet::new()),
+        );
         let terrain_level =
             dead_terrain.is_empty() && terrain.leaves().iter().all(|l| l.is_terrain_level());
-        (TileFilter { full, terrain, terrains, terrain_level }, dead, dead_terrain)
+        (TileFilter { full, terrain, terrains, improvements, terrain_level }, dead, dead_terrain)
     }
 
     fn city(&mut self, text: &str) -> (Expr<CityLeaf>, Dead) {
@@ -786,8 +793,13 @@ mod tests {
     /// Filters holding one tile filter, a single leaf.
     fn one(leaf: TileLeaf, terrain_level: bool) -> Filters {
         let e = Expr::Leaf(leaf);
-        let f =
-            TileFilter { full: e.clone(), terrain: e, terrains: TerrainSet::new(), terrain_level };
+        let f = TileFilter {
+            full: e.clone(),
+            terrain: e,
+            terrains: TerrainSet::new(),
+            improvements: ImprovementSet::new(),
+            terrain_level,
+        };
         Filters { tiles: IdVec::from_vec(vec![f]), ..Filters::default() }
     }
 

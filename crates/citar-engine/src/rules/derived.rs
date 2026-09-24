@@ -31,6 +31,8 @@ const CITY_CENTER: &str = "City center";
 /// The difficulty whose base values the easier AIs play on with `ai_base_values = monotonic`
 /// (`economy.py:44-49`).
 const PRINCE: &str = "Prince";
+const THE_WHEEL: &str = "The Wheel";
+const RIVER: &str = "River";
 const CITY_RUINS: &str = "City ruins";
 const ANCIENT_RUINS: &str = "Ancient ruins";
 const BARBARIAN_CAMP: &str = "Barbarian encampment";
@@ -97,6 +99,11 @@ pub struct Known {
     /// `ai_base_values = monotonic` (`economy.py:44-49`); a ruleset without it has no such
     /// floor, as Python's `difficulty_index` read a missing name as the first.
     pub prince: Option<DifficultyId>,
+    /// The Wheel, the tech that lets `Forests and Jungles are roads` connect cities
+    /// (`cities.py:1987-1988`).
+    pub the_wheel: Option<TechId>,
+    /// River, the terrain whose yields a tile with a river gets (`tiles.py:306-307`).
+    pub river: Option<TerrainId>,
     /// The terrains and resources map generation names.
     pub map: KnownMap,
 }
@@ -201,6 +208,8 @@ impl Derived {
                 ancient_ruins: None,
                 barbarian_camp: None,
                 prince: None,
+                the_wheel: None,
+                river: None,
                 map: KnownMap::default(),
             },
         }
@@ -311,6 +320,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         ancient_ruins: find_improvement(ANCIENT_RUINS),
         barbarian_camp: find_improvement(BARBARIAN_CAMP),
         prince: r.difficulties.iter().find(|(_, d)| &*d.name == PRINCE).map(|(id, _)| id),
+        the_wheel: r.techs.iter().find(|(_, t)| &*t.name == THE_WHEEL).map(|(id, _)| id),
+        river: r.terrains.iter().find(|(_, t)| &*t.name == RIVER).map(|(id, _)| id),
         map: known_map(r),
     };
 
