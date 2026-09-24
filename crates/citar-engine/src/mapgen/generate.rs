@@ -215,6 +215,7 @@ pub(crate) fn generate_with(
 mod tests {
     use super::*;
     use crate::base::ids::TerrainId;
+    use crate::mapgen::document::MapDocument;
 
     fn spec(players: usize) -> GenSpec<'static> {
         GenSpec {
@@ -258,9 +259,19 @@ mod tests {
         let grid = map.grid().expect("grid");
         let ruins = r.derived().known.ancient_ruins;
         assert!(map.tiles.iter().all(|t| t.improvement().is_none()), "no ruins asked for");
+        let mut doc = MapDocument {
+            width: map.width,
+            height: map.height,
+            wrap_x: map.wrap_x,
+            wrap_y: map.wrap_y,
+            tiles: map.tiles.clone(),
+            starts: Vec::new(),
+            cs_starts: Vec::new(),
+            warnings: Vec::new(),
+        };
         // Keep one start, and ask for three.
         let filled =
-            super::super::fill_starts_on(r, &grid, &map.tiles, &map.starts[..1], 3, 7, &[], 0);
+            super::super::fill_starts_on(r, &doc, &map.starts[..1], 3, 7, &[], 0).expect("starts");
         assert_eq!(filled.len(), 3);
         assert_eq!(filled[0], map.starts[0]);
         for (i, &a) in filled.iter().enumerate() {
@@ -268,11 +279,48 @@ mod tests {
                 assert!(grid.distance(a, b) >= 2, "{a:?} and {b:?}");
             }
         }
-        let mut tiles = map.tiles.clone();
         let mut rng = Rng::keyed(5, Purpose::MapPrepare, &[]);
-        super::super::ruins_on(r, &grid, &mut tiles, &mut rng, &filled, &[]);
-        let n = tiles.iter().filter(|t| t.improvement().is_some()).count();
-        assert!(n > 0 && tiles.iter().all(|t| t.improvement().is_none_or(|i| Some(i) == ruins)));
+        super::super::ruins_on(r, &mut doc, &mut rng, &filled, &[]).expect("ruins");
+        let n = doc.tiles.iter().filter(|t| t.improvement().is_some()).count();
+        assert!(n > 0);
+        assert!(doc.tiles.iter().all(|t| t.improvement().is_none_or(|i| Some(i) == ruins)));
+    }
+
+    /// The helpers `maps.prepare` reuses refuse a document whose tiles do not fill its size, or
+    /// a start off the map, instead of reading past the tiles, and leave the document alone.
+    #[test]
+    fn starts_and_ruins_refuse_a_document_that_does_not_add_up() {
+        let r = Ruleset::shared();
+        let map = generate(r, 5, &GenSpec { ruins: false, ..spec(2) }).expect("a map");
+        let mut doc = MapDocument {
+            width: map.width,
+            height: map.height,
+            wrap_x: false,
+            wrap_y: false,
+            tiles: map.tiles[..map.tiles.len() - 1].to_vec(),
+            starts: Vec::new(),
+            cs_starts: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let mut rng = Rng::keyed(5, Purpose::MapPrepare, &[]);
+        let e = super::super::fill_starts_on(r, &doc, &[], 2, 7, &[], 0).expect_err("short");
+        assert_eq!(e.0, "The map has 1231 tiles; a 44x28 map has 1232.");
+        let before = doc.clone();
+        let e = super::super::ruins_on(r, &mut doc, &mut rng, &[], &[]).expect_err("short");
+        assert_eq!(e.0, "The map has 1231 tiles; a 44x28 map has 1232.");
+        assert_eq!(doc, before);
+        doc.tiles.clone_from(&map.tiles);
+        doc.tiles.push(map.tiles[0]);
+        assert!(super::super::fill_starts_on(r, &doc, &[], 2, 7, &[], 0).is_err(), "too long");
+        doc.tiles.clone_from(&map.tiles);
+        let off = [TileIdx(44 * 28)];
+        let e = super::super::fill_starts_on(r, &doc, &off, 2, 7, &[], 0).expect_err("off");
+        assert_eq!(e.0, "Tile 1232 is not on the 44x28 map.");
+        let e = super::super::fill_starts_on(r, &doc, &[], 2, 7, &off, 3).expect_err("off");
+        assert_eq!(e.0, "Tile 1232 is not on the 44x28 map.");
+        let e = super::super::ruins_on(r, &mut doc, &mut rng, &[], &off).expect_err("off");
+        assert_eq!(e.0, "Tile 1232 is not on the 44x28 map.");
+        assert_eq!(doc.tiles, map.tiles, "a refused document keeps its tiles");
     }
 
     /// Gate 4 of package 1b-04: swapping the vegetation's stream changes the vegetation and

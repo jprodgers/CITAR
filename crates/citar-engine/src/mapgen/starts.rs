@@ -8,15 +8,14 @@
 //! at the best tile at least a distance from the others; a few trials keep the best spread.
 //! City-states go on the best tiles left, away from the civilizations.
 
+use super::document::{MapDocument, MapError};
 use super::map::{GenMap, Kit};
 use super::options::MapOptions;
-use crate::base::hex::HexGrid;
 use crate::base::ids::{NationId, TileIdx};
 use crate::base::num::trunc_i64;
 use crate::base::rng::Rng;
 use crate::rules::Ruleset;
 use crate::rules::defs::StartBias;
-use crate::state::map::Tile;
 
 /// Start-location fertility (`_fertility`): `[+n] to Fertility for Map Generation` summed over
 /// the tile's terrains, or the last `Always Fertility [n]`, plus one for a river and one for
@@ -300,24 +299,27 @@ pub(crate) fn fill_starts(
     out
 }
 
-/// Start filling on a map from anywhere, an editor document included: `maps.prepare` fills the
-/// starts a document lacks with it (`maps.py:334-341`; package 1c-09). A ruleset without land
-/// or water terrain adds nothing.
-#[must_use]
-#[allow(clippy::too_many_arguments, reason = "maps._fill_starts' parameters, and the map's")]
+/// Start filling on an editor map: `maps.prepare` fills the starts a document lacks with it
+/// (`maps.py:334-341`; package 1c-09). `have` are the starts kept, first in the result; `avoid`
+/// are tiles the new starts keep `avoid_gap` from. A ruleset without land or water terrain adds
+/// nothing.
+///
+/// # Errors
+/// A document whose tiles do not fill its size, or a tile of `have` or `avoid` off the map.
 pub fn fill_starts_on(
     rules: &Ruleset,
-    grid: &HexGrid,
-    tiles: &[Tile],
+    doc: &MapDocument,
     have: &[TileIdx],
     n: usize,
     min_gap: u32,
     avoid: &[TileIdx],
     avoid_gap: u32,
-) -> Vec<TileIdx> {
-    let Some(kit) = Kit::new(rules) else { return have.to_vec() };
+) -> Result<Vec<TileIdx>, MapError> {
+    let grid = doc.checked_grid(&[have, avoid])?;
+    let Some(kit) = Kit::new(rules) else { return Ok(have.to_vec()) };
     let opts = MapOptions::default();
-    let mut m = GenMap::new(&kit, &opts, grid.clone(), tiles.to_vec(), vec![false; tiles.len()]);
+    let n_tiles = doc.tiles.len();
+    let mut m = GenMap::new(&kit, &opts, grid, doc.tiles.clone(), vec![false; n_tiles]);
     m.assign_continents();
-    fill_starts(&m, have, n, min_gap, avoid, avoid_gap)
+    Ok(fill_starts(&m, have, n, min_gap, avoid, avoid_gap))
 }

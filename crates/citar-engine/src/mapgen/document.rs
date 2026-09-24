@@ -71,6 +71,25 @@ impl MapDocument {
         HexGrid::new(self.width, self.height, self.wrap_x, self.wrap_y)
             .map_err(|_| MapError(size_message()))
     }
+
+    /// The grid, once the tiles fill it exactly and each of `given` lies on it: what the start
+    /// filling and the ruins (package 1c-09) check before they read the tiles by the grid, as
+    /// the fields are the caller's to change after [`read`].
+    pub(crate) fn checked_grid(&self, given: &[&[TileIdx]]) -> Result<HexGrid, MapError> {
+        let grid = self.grid()?;
+        let (w, h) = (self.width, self.height);
+        if self.tiles.len() != grid.size() as usize {
+            return Err(MapError(format!(
+                "The map has {} tiles; a {w}x{h} map has {}.",
+                self.tiles.len(),
+                grid.size()
+            )));
+        }
+        if let Some(t) = given.iter().flat_map(|g| g.iter()).find(|&&t| !grid.contains(t)) {
+            return Err(MapError(format!("Tile {} is not on the {w}x{h} map.", t.0)));
+        }
+        Ok(grid)
+    }
 }
 
 fn size_message() -> String {

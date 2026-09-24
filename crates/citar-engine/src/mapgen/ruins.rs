@@ -2,16 +2,15 @@
 //! one passable land tile in forty, spread out, none within two tiles of a start, none under a
 //! feature but hills, forest or jungle.
 
+use super::document::{MapDocument, MapError};
 use super::map::{GenMap, Kit};
 use super::options::MapOptions;
 use super::spread::spread_out;
-use crate::base::hex::HexGrid;
 use crate::base::ids::TileIdx;
 use crate::base::num::{floor_i64, round_half_even};
 use crate::base::rng::Rng;
 use crate::base::sets::FeatureSet;
 use crate::rules::Ruleset;
-use crate::state::map::Tile;
 
 /// Spreads the ruins; nothing if the ruleset has no `Ancient ruins` improvement.
 pub(crate) fn ruins(m: &mut GenMap<'_>, rng: &mut Rng, starts: &[TileIdx], cs: &[TileIdx]) {
@@ -50,19 +49,26 @@ pub(crate) fn ruins(m: &mut GenMap<'_>, rng: &mut Rng, starts: &[TileIdx], cs: &
     }
 }
 
-/// The ruins on a map from anywhere: `maps.prepare` spreads them on an editor document that has
-/// none (`maps.py:342-343`; package 1c-09, drawing from `Purpose::MapPrepare`).
+/// The ruins on an editor map: `maps.prepare` spreads them on a document that has none
+/// (`maps.py:342-343`; package 1c-09, drawing from `Purpose::MapPrepare`), none within two tiles
+/// of `starts` or `cs`. A ruleset without land or water terrain, or without ruins, adds none.
+///
+/// # Errors
+/// A document whose tiles do not fill its size, or a start off the map; the document is left
+/// as it was.
 pub fn ruins_on(
     rules: &Ruleset,
-    grid: &HexGrid,
-    tiles: &mut [Tile],
+    doc: &mut MapDocument,
     rng: &mut Rng,
     starts: &[TileIdx],
     cs: &[TileIdx],
-) {
-    let Some(kit) = Kit::new(rules) else { return };
+) -> Result<(), MapError> {
+    let grid = doc.checked_grid(&[starts, cs])?;
+    let Some(kit) = Kit::new(rules) else { return Ok(()) };
     let opts = MapOptions::default();
-    let mut m = GenMap::new(&kit, &opts, grid.clone(), tiles.to_vec(), vec![false; tiles.len()]);
+    let n = doc.tiles.len();
+    let mut m = GenMap::new(&kit, &opts, grid, core::mem::take(&mut doc.tiles), vec![false; n]);
     ruins(&mut m, rng, starts, cs);
-    tiles.copy_from_slice(&m.tiles);
+    doc.tiles = m.tiles;
+    Ok(())
 }
