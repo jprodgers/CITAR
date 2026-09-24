@@ -562,10 +562,6 @@ impl Seat {
         self.difficulty = d;
     }
 
-    fn take_driver(&mut self) -> Option<DriverMemory> {
-        self.driver.take()
-    }
-
     fn put_driver(&mut self, mem: Option<DriverMemory>) {
         self.driver = mem;
     }
@@ -1117,14 +1113,8 @@ impl Player {
         &self.seat
     }
 
-    /// Takes its driver's memory out for a turn; `drive` hands it back with
-    /// [`put_driver`](Self::put_driver) (DESIGN.md 6.12). The memory feeds no cache, so this is
-    /// no seat change.
-    pub fn take_driver(&mut self) -> Option<DriverMemory> {
-        self.seat.take_driver()
-    }
-
-    /// Stores its driver's memory.
+    /// Stores its driver's memory, as `drive` does when a driver changed its copy (DESIGN.md
+    /// 6.12); `None` keeps none. The memory feeds no cache, so this is no seat change.
     pub fn put_driver(&mut self, mem: Option<DriverMemory>) {
         self.seat.put_driver(mem);
     }
@@ -1220,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn a_driver_memory_comes_out_for_a_turn_and_goes_back() {
+    fn a_seat_keeps_its_drivers_memory_until_it_is_replaced() {
         let seat = Seat::new(Controller::Bot, SeatOverrides::default(), None);
         let mut p = Player::new(
             PlayerId(0),
@@ -1231,11 +1221,12 @@ mod tests {
             seat,
             4,
         );
-        assert!(p.take_driver().is_none());
+        assert!(p.seat().driver().is_none());
         p.put_driver(DriverMemory::new(1, 2, vec![7, 8]).ok());
         let held = p.seat().driver().map(|d| (d.kind(), d.version(), d.bytes().len()));
         assert_eq!(held, Some((1, 2, 2)));
-        assert_eq!(p.take_driver().map(|d| d.into_bytes().to_vec()), Some(vec![7, 8]));
+        assert_eq!(p.seat().driver().map(|d| d.clone().into_bytes().to_vec()), Some(vec![7, 8]));
+        p.put_driver(None);
         assert!(p.seat().driver().is_none());
         // A memory over the limit cannot be built, so no seat can hold one.
         let most = DriverMemory::new(1, 2, vec![0; DriverMemory::MAX_LEN]);

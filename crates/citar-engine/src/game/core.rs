@@ -77,6 +77,11 @@ pub struct Game {
     pub(crate) poisoned: Option<Box<str>>,
     /// What the checks found, for tests to collect; never saved.
     pub(crate) violations: Vec<Violation>,
+    /// The chain of round digests, for a game that keeps one (DESIGN.md 4.10); never saved.
+    pub(crate) chain: Option<Box<super::turn::driver::RoundChain>>,
+    /// The seat whose driver is playing inside [`Game::drive`], which alone ends its turn;
+    /// never saved.
+    pub(crate) driving: Option<PlayerId>,
 }
 
 impl Game {
@@ -109,6 +114,8 @@ impl Game {
             debug: DebugOptions::default(),
             poisoned: None,
             violations: Vec::new(),
+            chain: None,
+            driving: None,
         }
     }
 
@@ -739,10 +746,6 @@ impl Game {
     // ---- Units (game.py:720-804) --------------------------------------------------------------
 
     /// Creates a unit of `base` for `p` on `t` (`game.py:729-742`) and returns its id.
-    #[allow(
-        dead_code,
-        reason = "setup, production, great people and barbarians call it from 1b-07"
-    )]
     pub(crate) fn create_unit(
         &mut self,
         p: PlayerId,

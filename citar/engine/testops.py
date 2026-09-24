@@ -114,6 +114,50 @@ def _set_auto(g: Game, o: dict):
     return {}
 
 
+def _clock(g: Game) -> dict:
+    """Where the game is in time, as the turn operations report it."""
+    return {"turn": g.turn, "current": g.s.current}
+
+
+@op("end_turn", "optional player (the current one by default): that player's turn ends, and play moves on to the "
+                "next major civilization's")
+def _end_turn(g: Game, o: dict):
+    """End a player's turn, the current one's unless another is named, as the host does."""
+    from .scenario import _pid
+    pid = g.s.current if o.get("player") is None else _pid(g, o.get("player"), majors_only=False)
+    g.end_turn(pid)
+    return _clock(g)
+
+
+@op("end_round", "every remaining turn of the round ends, and the round with them")
+def _end_round(g: Game, o: dict):
+    """End every turn left in the round, and the round."""
+    start = g.turn
+    while g.s.phase == "playing" and g.turn == start:
+        g.end_turn(g.s.current)
+    return _clock(g)
+
+
+@op("force_turn", "player: it is that player's turn now, started")
+def _force_turn(g: Game, o: dict):
+    """Make it a player's turn now and start it (EngineGame.force_turn).
+
+    Refused, as the Rust engine refuses it, for a player who has been eliminated and in a game that is over, which
+    EngineGame.force_turn allowed (tests/rules/intended.toml: force-turn-only-for-the-living).
+    """
+    from .scenario import _pid
+    pid = _pid(g, o.get("player"), majors_only=False)
+    if not g.player(pid).alive:
+        raise ActionError(f"{g.player(pid).name} has been eliminated and plays no turns.")
+    if g.s.phase != "playing":
+        raise ActionError("The game is over.")
+    if g.s.current != pid:
+        g.s.current = pid
+        g.s.turn_started = False
+        g.begin_turn()
+    return _clock(g)
+
+
 @op("refresh_visibility", "what every civilization sees is brought up to date")
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""

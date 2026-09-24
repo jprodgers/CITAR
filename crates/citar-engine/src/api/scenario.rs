@@ -8,8 +8,9 @@
 //!
 //! Package 1b-02 ports the framework and the operations whose rules exist: `grant_era`,
 //! `grant_tech`, `remove_tech`, `set_player`, `set_tile`, `meet`, `set_relation`,
-//! `set_influence`, `reveal` and `set_research`. The others are listed with the package that
-//! ports their system, and are refused as not ported until then.
+//! `set_influence`, `reveal` and `set_research`; package 1b-03 adds `add_unit`, which the turn
+//! scripts need to keep a civilization in the game across a round. The others are listed with
+//! the package that ports their system, and are refused as not ported until then.
 //!
 //! What differs from Python, on purpose, each listed in `tests/rules/intended.toml` under its id
 //! and cited where the fix is made:
@@ -36,12 +37,13 @@
 use serde_json::{Map, Value, json};
 
 use crate::base::ids::{
-    DifficultyId, EraId, ImprovementId, PlayerId, ResourceId, TechId, TerrainId, TileIdx,
+    BaseUnitId, DifficultyId, EraId, ImprovementId, PlayerId, PromotionId, ResourceId, TechId,
+    TerrainId, TileIdx,
 };
 use crate::base::py;
 use crate::base::sets::{BitSet, FeatureSet};
 use crate::game::city_states::influence::{add_influence, raw_influence};
-use crate::game::derive::rev::PlayerTouch;
+use crate::game::derive::rev::{PlayerTouch, UnitTouch};
 use crate::game::diplomacy::relations::{WarReason, make_peace, set_opinion, set_war};
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::research::{self, TechSource};
@@ -74,7 +76,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec {
         name: "add_unit",
         params: "player, unit, x, y; optional count, promotions: [...], xp, hp",
-        porting: Porting::Pending("1c-02"),
+        porting: Porting::Ported,
         run: add_unit,
     },
     OpSpec {
@@ -702,8 +704,54 @@ fn adopt_policy(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::policies"))
 }
 
-fn add_unit(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::units"))
+/// Adds units, optionally with promotions, experience and damage (`scenario.py:313-330`): 1 to
+/// 50 of them, all on the tile. What a unit gets when it is made (its base promotions, its
+/// moves) is `Game::create_unit`'s, which package 1c-02 completes.
+fn add_unit(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let p = pid(g, o.get("player"), false)?;
+    let base: BaseUnitId = resolve(g, o.get("unit"))?;
+    let at = tile(g, o)?;
+    let count = match o.get("count").filter(|v| py::truthy(v)) {
+        None => 1,
+        Some(v) => whole::<i64>(v, "count")?.clamp(1, 50),
+    };
+    let xp: i32 = match o.get("xp").filter(|v| py::truthy(v)) {
+        None => 0,
+        Some(v) => whole(v, "xp")?,
+    };
+    let promotions: Vec<PromotionId> = match o.get("promotions").filter(|v| py::truthy(v)) {
+        None => Vec::new(),
+        Some(Value::Array(names)) => {
+            names.iter().map(|n| resolve(g, Some(n))).collect::<Result<_, _>>()?
+        }
+        // refcheck: scenario-errors-are-sentences
+        Some(other) => {
+            return Err(bad(format!(
+                "promotions must be a list of promotion names, not {}.",
+                py::repr(other)
+            )));
+        }
+    };
+    let hp = match given(o, "hp") {
+        None => None,
+        Some(v) => Some(i16::try_from(whole::<i64>(v, "hp")?.clamp(1, 100)).unwrap_or(100)),
+    };
+    let mut ids = Vec::new();
+    for _ in 0..count {
+        let u = g
+            .create_unit(p, base, at, xp)
+            .map_err(|e| ActionError::rule(format!("The game refused the edit ({e}).")))?;
+        if let Some(x) = g.unit_mut(u, UnitTouch::CORE) {
+            for &pr in &promotions {
+                x.promotions.insert(pr);
+            }
+            if let Some(h) = hp {
+                x.hp = h;
+            }
+        }
+        ids.push(u.get());
+    }
+    Ok(json!({"unit_ids": ids}))
 }
 
 fn remove_units(_: &mut Game, _: &Params) -> Result<Value, ActionError> {

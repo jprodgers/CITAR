@@ -147,5 +147,10 @@ pub fn check_states() -> SetReport {
             problems.extend(diff_rows("states.json", "states", want.get("states"), &got["states"]));
         }
     }
-    SetReport { name: "states", computed: digest_of(&got), problems: capped(problems) }
+    SetReport {
+        name: "states",
+        computed: digest_of(&got),
+        problems: capped(problems),
+        waiting: Vec::new(),
+    }
 }

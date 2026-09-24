@@ -305,7 +305,7 @@ fn check(name: &'static str, file: &str, got: &Value, lists: &[&str]) -> SetRepo
             }
         }
     }
-    SetReport { name, computed: digest_of(got), problems: capped(problems) }
+    SetReport { name, computed: digest_of(got), problems: capped(problems), waiting: Vec::new() }
 }
 
 pub(super) fn check_filters() -> SetReport {

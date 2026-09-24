@@ -6,8 +6,9 @@
 //! - [`load`] reads a script, [`run`] plays it on the engine, [`discover`] lists them;
 //! - [`path`], [`matchers`] and [`expr`]: paths into values, what checks assert, and the `=`
 //!   expressions;
-//! - [`tiles`]: tile references; [`setup`]: new games from a script's settings until
-//!   `Game::new` exists (package 1b-03).
+//! - [`tiles`]: tile references;
+//! - [`new_game`] and [`map_doc`]: new games from settings and the maps of `tests/rules/maps/`,
+//!   through the engine's own setup (`Game::new`).
 //!
 //! `crates/citar-testkit/tests/rules.rs` runs every script as its own test.
 
@@ -15,15 +16,41 @@ pub mod expr;
 pub mod matchers;
 pub mod path;
 mod runner;
-pub mod setup;
 pub mod tiles;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use citar_engine::game::Game;
+use citar_engine::game::setup::config_from_value;
+use citar_engine::rules::Ruleset;
 use serde_json::{Map, Number, Value};
 
 pub use self::runner::run;
+
+/// A map of `tests/rules/maps/`, as the engines take it, and its anchors: the runners read the
+/// anchors, and the engines get the document without them.
+pub fn map_doc(name: &str) -> Result<(Value, Map<String, Value>), String> {
+    let file = rules_dir().join("maps").join(format!("{name}.json"));
+    #[allow(clippy::disallowed_methods, reason = "the maps are files")]
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut doc: Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+    let anchors = doc
+        .as_object_mut()
+        .and_then(|m| m.shift_remove("anchors"))
+        .and_then(|a| a.as_object().cloned())
+        .unwrap_or_default();
+    Ok((doc, anchors))
+}
+
+/// A new game from settings as a lobby sends them (`Game::config_from_json`, then `Game::new`);
+/// a refusal is the engine's own text.
+pub fn new_game(rules: &'static Ruleset, cfg: &Map<String, Value>) -> Result<Game, String> {
+    let setup = config_from_value(rules, Value::Object(cfg.clone())).map_err(|e| e.to_string())?;
+    let (g, _) = Game::new(rules, &setup).map_err(|e| e.to_string())?;
+    Ok(g)
+}
 
 /// The folder of the rule scripts: `tests/rules` at the repository's root.
 #[must_use]

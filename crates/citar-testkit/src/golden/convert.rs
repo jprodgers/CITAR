@@ -81,5 +81,10 @@ pub fn check_convert() -> SetReport {
             ));
         }
     }
-    SetReport { name: "convert", computed: digest_of(&got), problems: capped(problems) }
+    SetReport {
+        name: "convert",
+        computed: digest_of(&got),
+        problems: capped(problems),
+        waiting: Vec::new(),
+    }
 }

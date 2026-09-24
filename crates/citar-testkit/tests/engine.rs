@@ -14,5 +14,6 @@ mod engine {
     mod scenario;
     mod state;
     mod tools;
+    mod turns;
     mod uniques;
 }

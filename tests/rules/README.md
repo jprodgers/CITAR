@@ -63,8 +63,14 @@ Player ids are the seats in order, then the city-states, then the barbarians. Th
 city-states' nations differently, so scripts refer to a city-state by id and never by name.
 
 `start = "full"` keeps the starting units and camps. The Rust runner refuses it until package
-1c-09 ports the rest of setup; until 1b-03 it sets bare games up itself
-(`script::setup`), as far as a bare game needs.
+1c-09 ports the rest of setup. Both runners set games up through the engine's own setup
+(`EngineGame.new`, and `Game::config_from_json` with `Game::new` in Rust), which begins the first
+seat's turn and announces it (`turn_start`, then `game_start`) before the bare prelude runs: count
+events by type, and never pin an event id at the start of a game.
+
+A civilization, or a city-state, with no unit and no city is eliminated at the end of a round
+(once package 1c-08 ports eliminations in Rust; Python always did). A script that plays across a
+round gives each player a unit first, with the `add_unit` operation.
 
 ## Steps
 
@@ -248,7 +254,7 @@ same from both engines, and every set in it is sorted.
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
 | `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |
 | `ops` | | `scenario` and `test`: each operation with its `params` |
-| `pending` | | what the Rust engine has not ported yet: `kind` (`inspect`, `scenario_op`, `test_op`), `name`, `package` (Python: nothing) |
+| `pending` | | what the Rust engine has not ported yet: `kind` (`inspect`, `scenario_op`, `test_op`, `turn_stage`, `setup_stage`), `name`, `package` (Python: nothing). A turn stage is named by its table and stage, `player_start S2: research progress` |
 | `negotiation`, `view`, `briefing` | | not yet: they come with packages 1c-05, 1d-02 and 1d-03, and the Rust engine refuses them as not ported until then |
 
 `find_tiles` filters: `x` and `y` (or `at`), the place distances are counted from; `radius`, the
@@ -269,9 +275,11 @@ What a script does that no player or editor may. `{ what = "ops" }` lists them.
 | `set_auto` | `player`, `decision`, `on` | the engine takes one decision for the civilization, or not, until its controller changes |
 | `refresh_visibility` | | brings what everyone sees up to date |
 | `reload` | | saves the game and loads the save |
+| `end_turn` | optionally `player` (the current one by default) | ends that player's turn, as the host's `end_turn` does: city-states and the barbarians play inside the call, a round ends after the last player, and play stops at the next major civilization, whose turn begins. Gives `turn` and `current` |
+| `end_round` | | ends every turn left in the round, and the round. Gives `turn` and `current` |
+| `force_turn` | `player` | makes it that player's turn now and begins it (nothing if it already is). Gives `turn` and `current` |
 
-The rest land with their systems: `end_turn`, `end_round` and `force_turn` (1b-03),
-`complete_construction` (1b-07), `set_unit` and `ready_unit` (1c-02), `capture_civilian` and
+The rest land with their systems: `complete_construction` (1b-07), `set_unit` and `ready_unit` (1c-02), `capture_civilian` and
 `attack_as` (1c-03), `automate` and `progress_builds` (1c-04), `add_spy`, `close_negotiation` and
 `open_negotiation_as` (1c-05), `barbarian_act` and `sack_city` (1c-06).
 

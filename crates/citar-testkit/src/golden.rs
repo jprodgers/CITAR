@@ -37,6 +37,11 @@
 //! - **`convert.json`**: the digests of the twelve committed refcheck fixtures right after the
 //!   Python-state converter reads them, before any settle. Written by `golden bless`.
 //!
+//! Package 1b-03 adds, in [`turns`]:
+//! - **`turns.json`**: a game on the arena played to its turn limit, each round's digest chained.
+//!   It depends on every stage of setup and of a turn, so `golden bless` refuses it while one is
+//!   pending, and until then `golden check` computes it without a committed file.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -70,11 +75,16 @@ pub struct SetReport {
     pub computed: String,
     /// What differs from the committed file, or fails a bound; empty when the set passes.
     pub problems: Vec<String>,
+    /// The engine's stages the set depends on that are still pending (DESIGN.md 9.6): a set
+    /// waiting for any is computed, so the targets can be compared, but it has no committed file
+    /// yet and `golden bless` refuses it.
+    pub waiting: Vec<String>,
 }
 
 pub mod convert;
 pub mod filters;
 pub mod states;
+pub mod turns;
 
 /// Every golden set this package knows, checked against the committed files.
 #[must_use]
@@ -89,7 +99,15 @@ pub fn check_all() -> Vec<SetReport> {
         filters::check_gen(),
         states::check_states(),
         convert::check_convert(),
+        turns::check_turns(),
     ]
+}
+
+/// The sets `golden bless` refuses, and why: those that depend on a stage of the engine that is
+/// still pending (DESIGN.md 3.4, rule 3; 9.6).
+#[must_use]
+pub fn bless_refusals() -> Vec<(&'static str, String)> {
+    turns::refusal().map(|why| ("turns.json", why)).into_iter().collect()
 }
 
 /// The report `golden check --out` writes: one entry per set.
@@ -99,7 +117,11 @@ pub fn report_json(reports: &[SetReport]) -> Value {
     for r in reports {
         sets.insert(
             r.name.to_owned(),
-            json!({"computed": r.computed, "matches_committed": r.problems.is_empty()}),
+            json!({
+                "computed": r.computed,
+                "matches_committed": r.problems.is_empty(),
+                "waiting": r.waiting.len(),
+            }),
         );
     }
     json!({
@@ -124,6 +146,7 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
     .chain(filters::blessed())
     .chain(states::blessed())
     .chain(convert::blessed())
+    .chain(turns::blessed())
     .collect()
 }
 
@@ -341,7 +364,12 @@ fn check_rng() -> SetReport {
             }
         }
     }
-    SetReport { name: "rng", computed: digest_of(&got), problems: capped(problems) }
+    SetReport {
+        name: "rng",
+        computed: digest_of(&got),
+        problems: capped(problems),
+        waiting: Vec::new(),
+    }
 }
 
 fn render_rows(head: &Value, lists: &[&str]) -> String {
@@ -551,7 +579,12 @@ fn check_libm() -> SetReport {
     let committed = match read_committed("libm.json") {
         Ok(v) => v,
         Err(e) => {
-            return SetReport { name: "libm", computed: String::new(), problems: vec![e] };
+            return SetReport {
+                name: "libm",
+                computed: String::new(),
+                problems: vec![e],
+                waiting: Vec::new(),
+            };
         }
     };
     let rows = committed.get("cases").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -576,7 +609,12 @@ fn check_libm() -> SetReport {
         inputs.iter().map(|(n, a)| (n.as_str(), a.clone())).collect();
     let got = libm_answers(&named);
     problems.extend(diff_rows("libm.json", "cases", committed.get("cases"), &got["cases"]));
-    SetReport { name: "libm", computed: digest_of(&got["cases"]), problems: capped(problems) }
+    SetReport {
+        name: "libm",
+        computed: digest_of(&got["cases"]),
+        problems: capped(problems),
+        waiting: Vec::new(),
+    }
 }
 
 // ---- ruleset.json -----------------------------------------------------------------------------
@@ -617,7 +655,12 @@ fn check_ruleset() -> SetReport {
             }
         }
     }
-    SetReport { name: "ruleset", computed: digest_of(&got), problems: capped(problems) }
+    SetReport {
+        name: "ruleset",
+        computed: digest_of(&got),
+        problems: capped(problems),
+        waiting: Vec::new(),
+    }
 }
 
 // ---- uniques.json -----------------------------------------------------------------------------
@@ -851,7 +894,12 @@ fn check_uniques() -> SetReport {
             }
         }
     }
-    SetReport { name: "uniques", computed: digest_of(&got), problems: capped(problems) }
+    SetReport {
+        name: "uniques",
+        computed: digest_of(&got),
+        problems: capped(problems),
+        waiting: Vec::new(),
+    }
 }
 
 // ---- pyfmt.json -------------------------------------------------------------------------------
@@ -867,7 +915,14 @@ fn same_float(a: f64, b: f64) -> bool {
 fn check_pyfmt() -> SetReport {
     let want = match read_committed("pyfmt.json") {
         Ok(v) => v,
-        Err(e) => return SetReport { name: "pyfmt", computed: String::new(), problems: vec![e] },
+        Err(e) => {
+            return SetReport {
+                name: "pyfmt",
+                computed: String::new(),
+                problems: vec![e],
+                waiting: Vec::new(),
+            };
+        }
     };
     let mut problems = Vec::new();
     let ndigits: Vec<i32> = want
@@ -997,7 +1052,12 @@ fn check_pyfmt() -> SetReport {
         "fixed": computed_fixed,
         "floor": computed_floor,
     });
-    SetReport { name: "pyfmt", computed: digest_of(&computed), problems: capped(problems) }
+    SetReport {
+        name: "pyfmt",
+        computed: digest_of(&computed),
+        problems: capped(problems),
+        waiting: Vec::new(),
+    }
 }
 
 #[cfg(test)]
