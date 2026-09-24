@@ -24,7 +24,7 @@
 //!   `last_gold_rate` 0 (unless Python had one), `happiness_seen` 0, `combat_seq` 0, no driver
 //!   memory.
 //!
-//! What is dropped is counted in the [`ConvertReport`], field by field ([`Drop`]): the dead
+//! What is dropped is counted in the [`ConvertReport`], field by field ([`Dropped`]): the dead
 //! fields of DESIGN.md 4.4-4.6, the barbarians' explored tiles and the non-majors' memories, which
 //! nothing read, the explorer state of units that are gone, free buildings of cities their holder
 //! no longer has, and the order of lists that are sets. Nothing else is: the converted state is
@@ -66,7 +66,7 @@ pub struct ConvertError {
 
 /// A field, or part of one, the conversion dropped, and why (DESIGN.md 4.12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Drop {
+pub enum Dropped {
     /// Python's Mersenne Twister state: every draw is keyed from the seed (DESIGN.md 7).
     RngState,
     /// `GameState.barbarian_state`, which nothing outside `state.py` read or wrote.
@@ -118,7 +118,7 @@ pub enum Drop {
     ListOrder,
 }
 
-impl Drop {
+impl Dropped {
     /// Every kind, in report order.
     pub const ALL: [Self; 22] = [
         Self::RngState,
@@ -204,33 +204,33 @@ impl Drop {
     }
 }
 
-/// What the conversion dropped, counted by [`Drop`]. A field counts once per record that held
+/// What the conversion dropped, counted by [`Dropped`]. A field counts once per record that held
 /// something there (a unit's `build` that was not `None`, a player's non-empty `faith_buys`),
 /// not once per record that has the key.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConvertReport {
-    counts: [u32; Drop::ALL.len()],
+    counts: [u32; Dropped::ALL.len()],
 }
 
 impl ConvertReport {
-    fn note(&mut self, d: Drop) {
+    fn note(&mut self, d: Dropped) {
         self.add(d, 1);
     }
 
-    fn add(&mut self, d: Drop, n: u32) {
+    fn add(&mut self, d: Dropped, n: u32) {
         let slot = &mut self.counts[d as usize];
         *slot = slot.saturating_add(n);
     }
 
     /// How many were dropped of one kind.
     #[must_use]
-    pub const fn count(&self, d: Drop) -> u32 {
+    pub const fn count(&self, d: Dropped) -> u32 {
         self.counts[d as usize]
     }
 
     /// Every kind something was dropped of, with its count, in report order.
-    pub fn dropped(&self) -> impl Iterator<Item = (Drop, u32)> + '_ {
-        Drop::ALL.into_iter().map(|d| (d, self.count(d))).filter(|&(_, n)| n > 0)
+    pub fn dropped(&self) -> impl Iterator<Item = (Dropped, u32)> + '_ {
+        Dropped::ALL.into_iter().map(|d| (d, self.count(d))).filter(|&(_, n)| n > 0)
     }
 
     /// Whether nothing was dropped.
@@ -241,7 +241,7 @@ impl ConvertReport {
 
     /// Adds another report's counts, for a summary over many states.
     pub fn merge(&mut self, other: &Self) {
-        for d in Drop::ALL {
+        for d in Dropped::ALL {
             self.add(d, other.count(d));
         }
     }
@@ -369,14 +369,14 @@ fn convert(doc: &Value, rules: &'static Ruleset) -> Result<Converted, ConvertErr
         report: ConvertReport::default(),
     };
     for (drop, key) in [
-        (Drop::BarbarianState, "barbarian_state"),
-        (Drop::CaptureIds, "capture_ids"),
-        (Drop::FirstDiscovered, "first_discovered"),
+        (Dropped::BarbarianState, "barbarian_state"),
+        (Dropped::CaptureIds, "capture_ids"),
+        (Dropped::FirstDiscovered, "first_discovered"),
     ] {
         dead(&mut cx, &top, key, drop)?;
     }
     if !read::is_none(top.get("rng_state")) {
-        cx.report.note(Drop::RngState);
+        cx.report.note(Dropped::RngState);
     }
 
     let religions = world::religions(&mut cx, &top)?;
@@ -417,7 +417,7 @@ fn convert(doc: &Value, rules: &'static Ruleset) -> Result<Converted, ConvertErr
 
 /// Checks a record that must be empty, or counts it as dropped: a dead field that held nothing
 /// drops nothing.
-fn dead(cx: &mut Cx<'_>, o: &Obj<'_>, key: &str, drop: Drop) -> Res<()> {
+fn dead(cx: &mut Cx<'_>, o: &Obj<'_>, key: &str, drop: Dropped) -> Res<()> {
     let Some(v) = o.get(key) else { return Ok(()) };
     let empty = match v {
         Value::Null => true,

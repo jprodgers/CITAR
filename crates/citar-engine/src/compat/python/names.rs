@@ -8,7 +8,7 @@
 use serde_json::Value;
 
 use super::read::{Path, Res, int, key_int, shown, text};
-use super::{Cx, Drop};
+use super::{Cx, Dropped};
 use crate::base::ids::{
     AbilityKey, BaseUnitId, BeliefId, BuildingId, CityId, CityStateTypeId, DifficultyId, EraId,
     FeatureId, ImprovementId, NationId, PlayerId, PolicyId, PromotionId, QuestKindId, ReligionId,
@@ -115,7 +115,7 @@ impl Cx<'_> {
             last = Some(id);
         }
         if !sorted {
-            self.report.note(Drop::ListOrder);
+            self.report.note(Dropped::ListOrder);
         }
         Ok(set)
     }
@@ -186,7 +186,7 @@ impl Cx<'_> {
             last = Some(id);
         }
         if !sorted {
-            self.report.note(Drop::ListOrder);
+            self.report.note(Dropped::ListOrder);
         }
         Ok(set)
     }

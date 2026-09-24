@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::read::{self, Obj, Path, Res, flag, int, list, text};
-use super::{Cx, Drop};
+use super::{Cx, Dropped};
 use crate::base::ids::{
     BarbarianLevelId, CityId, DifficultyId, EraId, FeatureId, ImprovementId, ResourceId, SpeedId,
     TerrainId, TileIdx, VictoryId,
@@ -397,7 +397,7 @@ pub(super) fn features(cx: &mut Cx<'_>, names: &[Value], p: &Path<'_>) -> Res<Fe
         last = Some(f);
     }
     if !sorted {
-        cx.report.note(Drop::ListOrder);
+        cx.report.note(Dropped::ListOrder);
     }
     Ok(set)
 }

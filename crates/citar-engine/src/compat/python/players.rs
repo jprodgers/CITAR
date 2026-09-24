@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use super::entities::PendingUnit;
 use super::read::{Obj, Path, Res, dict, flag, int, key_int, list, real, text};
-use super::{Cx, Drop, dead};
+use super::{Cx, Dropped, dead};
 use crate::base::codec::b64_decode;
 use crate::base::ids::{
     BaseUnitId, BuildingId, CityId, EraId, NationId, PlayerId, QuestKindId, RuinId, TextId, TileIdx,
@@ -163,7 +163,7 @@ fn player(
     gp.free = o.int("free_great_people", 0)?;
     gp.earned = o.int("great_people_earned", 0)?;
     if o.real("gp_threshold", 100.0)?.to_bits() != 100.0f64.to_bits() {
-        cx.report.note(Drop::GpThreshold);
+        cx.report.note(Dropped::GpThreshold);
     }
 
     // The rest of the civilization's standing data.
@@ -214,11 +214,11 @@ fn player(
     city_state_fields(cx, &o, &mut pl)?;
 
     for (key, drop) in [
-        ("cs_unit_timer", Drop::CsUnitTimer),
-        ("tribute_turn", Drop::TributeTurn),
-        ("ruins_rewards", Drop::RuinsRewards),
-        ("spy_eras", Drop::SpyEras),
-        ("faith_buys", Drop::FaithBuys),
+        ("cs_unit_timer", Dropped::CsUnitTimer),
+        ("tribute_turn", Dropped::TributeTurn),
+        ("ruins_rewards", Dropped::RuinsRewards),
+        ("spy_eras", Dropped::SpyEras),
+        ("faith_buys", Dropped::FaithBuys),
     ] {
         dead(cx, &o, key, drop)?;
     }
@@ -310,7 +310,7 @@ fn sorted_pairs<T: Ord + Copy>(
         return Err(o.at(key).err("a pair is listed twice"));
     }
     if sorted != pairs {
-        cx.report.note(Drop::ListOrder);
+        cx.report.note(Dropped::ListOrder);
     }
     Ok(sorted)
 }
@@ -335,7 +335,7 @@ fn free_buildings(cx: &mut Cx<'_>, o: &Obj<'_>, id: PlayerId, cities: &mut [City
             .filter(|x| x.owner() == id);
         match city {
             Some(city) => city.free_buildings |= set,
-            None => cx.report.note(Drop::FreeBuildingsElsewhere),
+            None => cx.report.note(Dropped::FreeBuildingsElsewhere),
         }
     }
     Ok(())
@@ -361,7 +361,7 @@ fn explored(cx: &mut Cx<'_>, o: &Obj<'_>, kind: PlayerKind) -> Res<BitSet> {
     }
     if kind == PlayerKind::Barbarian {
         if !set.is_empty() {
-            cx.report.note(Drop::BarbarianExplored);
+            cx.report.note(Dropped::BarbarianExplored);
         }
         return Ok(BitSet::new());
     }
@@ -412,7 +412,7 @@ fn memory(cx: &mut Cx<'_>, o: &Obj<'_>, kind: PlayerKind) -> Res<Option<TileMemo
     })?;
     if kind != PlayerKind::Major {
         if !entries.is_empty() {
-            cx.report.note(Drop::MinorMemory);
+            cx.report.note(Dropped::MinorMemory);
         }
         return Ok(None);
     }
@@ -533,7 +533,7 @@ fn quest(cx: &mut Cx<'_>, v: &Value, p: &Path<'_>) -> Res<Quest> {
         other => return Err(o.at("kind").err(format!("no quest scope {other:?}"))),
     };
     if !o.text("data2", "")?.is_empty() {
-        cx.report.note(Drop::QuestData2);
+        cx.report.note(Dropped::QuestData2);
     }
     let q = Quest {
         kind,
@@ -618,16 +618,16 @@ fn flags(
             return Err(at.err(format!("{} tiles; the explorers keep at most 300", sorted.len())));
         }
         if sorted != tiles {
-            cx.report.note(Drop::ListOrder);
+            cx.report.note(Dropped::ListOrder);
         }
         pl.civ.explore_skip = sorted;
     }
     explorers(cx, &f, id, units)?;
     if !super::read::is_none(f.get("last_stats")) {
-        cx.report.note(Drop::LastStats);
+        cx.report.note(Dropped::LastStats);
     }
     if f.get("unreachable_explore").is_some() {
-        cx.report.note(Drop::UnreachableExplore);
+        cx.report.note(Dropped::UnreachableExplore);
     }
 
     // A city-state's.
@@ -752,7 +752,7 @@ fn explorers(cx: &mut Cx<'_>, f: &Obj<'_>, id: PlayerId, units: &mut [PendingUni
     for (uid, target) in targets {
         match find(units, uid).and_then(|i| units.get_mut(i)) {
             Some(u) => u.unit.explore.target = target,
-            None => cx.report.note(Drop::ExplorerGone),
+            None => cx.report.note(Dropped::ExplorerGone),
         }
     }
     let hist = f.entries("explore_hist", |k, v, p| {
@@ -769,7 +769,7 @@ fn explorers(cx: &mut Cx<'_>, f: &Obj<'_>, id: PlayerId, units: &mut [PendingUni
     for (uid, tiles) in hist {
         match find(units, uid).and_then(|i| units.get_mut(i)) {
             Some(u) => u.unit.explore.recent = tiles.into_iter().collect(),
-            None => cx.report.note(Drop::ExplorerGone),
+            None => cx.report.note(Dropped::ExplorerGone),
         }
     }
     Ok(())

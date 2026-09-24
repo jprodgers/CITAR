@@ -9,7 +9,7 @@
 use smallvec::SmallVec;
 
 use super::read::{Obj, Path, Res, dict, int, key_int, list, real, text};
-use super::{Cx, Drop, dead};
+use super::{Cx, Dropped, dead};
 use crate::base::ids::{AbilityKey, CampId, CityId, ReligionId, SpecialistId, TileIdx, UnitId};
 use crate::base::sets::MAX_SPECIALISTS;
 use crate::state::cities::{City, CityFocus, NO_RELIGION_PRESSURE};
@@ -89,7 +89,7 @@ fn unit(cx: &mut Cx<'_>, id: u32, v: &serde_json::Value, p: &Path<'_>) -> Res<Pe
         return Err(o.at("abilities_used").err("an ability is counted twice"));
     }
     if !keyed.is_sorted() {
-        cx.report.note(Drop::ListOrder);
+        cx.report.note(Dropped::ListOrder);
     }
     u.abilities_used = used.into_iter().collect();
     u.origin_city = cx.opt_city(o.get("origin_city"), &o.at("origin_city"))?;
@@ -102,10 +102,10 @@ fn unit(cx: &mut Cx<'_>, id: u32, v: &serde_json::Value, p: &Path<'_>) -> Res<Pe
         }
     };
     if !super::read::is_none(o.get("build")) {
-        cx.report.note(Drop::UnitBuild);
+        cx.report.note(Dropped::UnitBuild);
     }
     if o.flag("due_heal", false)? {
-        cx.report.note(Drop::UnitDueHeal);
+        cx.report.note(Dropped::UnitDueHeal);
     }
     o.finish()?;
     Ok(PendingUnit { unit: u, carried_by })
@@ -218,7 +218,7 @@ fn city(cx: &mut Cx<'_>, id: u32, v: &serde_json::Value, p: &Path<'_>) -> Res<Ci
     c.wltkd = o.int("wltkd", 0)?;
     c.demanded_resource = cx.opt_named(o.get("demanded_resource"), &o.at("demanded_resource"))?;
     c.demand_countdown = o.int("demand_countdown", 0)?;
-    dead(cx, &o, "spaceship_parts", Drop::CitySpaceshipParts)?;
+    dead(cx, &o, "spaceship_parts", Dropped::CitySpaceshipParts)?;
     o.finish()?;
     Ok(c)
 }
@@ -232,7 +232,7 @@ fn tile_list(cx: &mut Cx<'_>, o: &Obj<'_>, key: &str) -> Res<Vec<TileIdx>> {
         return Err(o.at(key).err("a tile is listed twice"));
     }
     if sorted != tiles {
-        cx.report.note(Drop::ListOrder);
+        cx.report.note(Dropped::ListOrder);
     }
     Ok(sorted)
 }

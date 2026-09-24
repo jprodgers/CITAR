@@ -158,7 +158,7 @@ fn fields_python_lacks_start_as_the_design_says() {
     assert_eq!(p.econ.last_gold_rate.to_bits(), 0f64.to_bits());
     assert!(p.seat().driver().is_none());
     assert_eq!(got.state.ids().combat_seq, 0);
-    assert_eq!(got.report.count(Drop::LastStats), 1);
+    assert_eq!(got.report.count(Dropped::LastStats), 1);
 }
 
 #[test]
@@ -194,8 +194,134 @@ fn the_report_counts_what_was_dropped() {
     v["players"][0]["faith_buys"] = json!({"Great Prophet": 1});
     v["players"][0]["techs"] = json!(["Pottery", "Agriculture"]);
     let got = convert_value(&v).expect("converts");
-    let dropped: Vec<Drop> = got.report.dropped().map(|(d, _)| d).collect();
-    assert_eq!(dropped, [Drop::RngState, Drop::BarbarianState, Drop::FaithBuys, Drop::ListOrder]);
+    let dropped: Vec<Dropped> = got.report.dropped().map(|(d, _)| d).collect();
+    assert_eq!(
+        dropped,
+        [Dropped::RngState, Dropped::BarbarianState, Dropped::FaithBuys, Dropped::ListOrder]
+    );
     let text = got.report.to_string();
     assert!(text.contains("players[*].faith_buys: 1 (never read)"), "{text}");
+}
+
+/// A city-state, and the shapes no fixture holds: temporary uniques, war quests, gained units,
+/// a scenario's opinion, a carrier's cargo, the lobby's resource and diplomacy options.
+#[test]
+fn the_rarer_shapes_convert() {
+    use crate::base::ids::{PlayerId, UnitId};
+    use crate::rules::defs::BeliefKind;
+    use crate::state::diplo::{OpinionKey, side};
+    use crate::state::players::QuestTarget;
+
+    let mut v = tiny();
+    let mut cs = v["players"][1].clone();
+    for (k, x) in [
+        ("id", json!(2)),
+        ("name", json!("Almaty")),
+        ("nation", json!("Almaty")),
+        ("kind", json!("city_state")),
+        ("controller", json!("minor")),
+        ("cs_type", json!("Maritime")),
+        ("cs_personality", json!("Hostile")),
+        ("influence", json!({"0": 12.5})),
+        ("ally", json!(0)),
+        ("protectors", json!([1, 0])),
+        ("met", json!([0])),
+        (
+            "quests",
+            json!([{"name": "Invest", "assignee": 0, "turn": 30, "kind": "global", "data1": 50.0,
+                    "data2": "", "influence": 40, "duration": 30}]),
+        ),
+        (
+            "flags",
+            json!({"pairs": {"0": {"anger_free": 3, "unit_timer": 0, "wary": true}},
+                   "quest_state": {"global": 5, "individual": {"0": -1, "1": 4}},
+                   "war_quests": {"1": {"needed": 2, "kills": {"0": 1}}},
+                   "election_in": 3, "barb_help_cd": 2, "recently_bullied": 1}),
+        ),
+    ] {
+        cs[k] = x;
+    }
+    v["players"].as_array_mut().expect("players").push(cs);
+    v["players"][0]["met"] = json!([2]);
+    v["players"][0]["temp_uniques"] = json!([{
+        "text": "[+25]% Strength <when attacking> <for [Military] units> <for [50] turns>",
+        "turns": 12}]);
+    v["players"][0]["flags"] = json!({"gained_Warrior": true, "revolt_in": 3,
+                                      "choose_pantheon_belief": true,
+                                      "free_beliefs": {"Pantheon": 1, "Any": 2},
+                                      "gp_threshold": {"": 100, "Great Person": 200}});
+    v["relations"] = json!({"0,1": {"war": true, "war_declared_by": 1, "since": 2,
+                                    "treaty_until": 0, "embassy": {"0>1": true},
+                                    "friendship_until": 0, "pact_until": 0, "ra_until": 0,
+                                    "ra_science": {"0": 5}, "denounced_by": {"1": 30},
+                                    "opinion": {"0": {"warmonger": -5.0},
+                                                "1>0": {"scenario": 20.0}}}});
+    v["open_borders"] = json!({"1>0": 20});
+    v["spaceship"] = json!({"0": {"SS Booster": 1}});
+    v["units"] = json!({"3": {"id": 3, "type": "Carrier", "owner": 0, "idx": 10},
+                        "4": {"id": 4, "type": "Fighter", "owner": 0, "idx": 10,
+                              "carried_by": 3, "status": ["Set Up"]}});
+    v["next_id"] = json!(5);
+    v["thoughts"] = json!([{"turn": 3, "player": 0, "text": "Hmm.", "kind": "thought"}]);
+    v["messages"] = json!([{"id": 1, "turn": 3, "from": 0, "to": [1], "text": "Hello."}]);
+    v["stats"] = json!([{"turn": 2, "players": {"1": {"alive": false, "score": 0},
+                                                "0": {"alive": true, "score": 7, "era": 1}}}]);
+    v["config"]["resources"] = json!({"density": 1.5,
+                                      "luxury": {"density": 0.5, "each": {"Silk": {"mode": "off"}}},
+                                      "strategic": {"each": {"Iron": {"mode": "cap", "value": 2}}}});
+    v["config"]["diplomacy"] = json!({"max_chat_messages": 1});
+
+    let got = convert_value(&v).expect("converts");
+    let st = &got.state;
+    let r = rules();
+    let p0 = st.player(PlayerId(0)).expect("player 0");
+    assert_eq!(p0.civ.temp_uniques.len(), 1);
+    assert_eq!(p0.civ.temp_uniques[0].turns, 12);
+    let warrior = r.lookup("Warrior").expect("Warrior");
+    assert!(p0.civ.units_gained.contains(warrior));
+    assert_eq!((p0.civ.revolt_in, p0.religion.choose_pantheon_belief), (Some(3), true));
+    assert_eq!(p0.religion.free(BeliefKind::Any), 2);
+    assert_eq!(p0.gp.pool_threshold.len(), 2);
+    assert_eq!(p0.major.as_ref().map(|m| m.spaceship.len()), Some(1));
+    let cs = st.player(PlayerId(2)).and_then(|p| p.city_state.as_deref()).expect("a city-state");
+    assert_eq!(cs.ally(), Some(PlayerId(0)));
+    assert_eq!(cs.influence_of(PlayerId(0)).to_bits(), 12.5f64.to_bits());
+    assert_eq!(cs.pair(PlayerId(0)).unit_timer, Some(0));
+    assert!(cs.pair(PlayerId(0)).wary);
+    assert_eq!(cs.timers.individual(PlayerId(0)), -1, "not scheduled");
+    assert_eq!(cs.timers.individual(PlayerId(1)), 4);
+    assert_eq!(cs.war_quests.get(&PlayerId(1)).map(|w| w.needed), Some(2));
+    assert_eq!(cs.quests[0].target, QuestTarget::Percent(50));
+    assert_eq!(cs.election_in, Some(3));
+    let rel = st.diplo().relation(PlayerId(0), PlayerId(1)).expect("the pair");
+    assert!(rel.war && st.diplo().at_war(PlayerId(0), PlayerId(1)));
+    assert!(rel.embassy[side(PlayerId(0), PlayerId(1))]);
+    assert_eq!(rel.denounced_until[side(PlayerId(1), PlayerId(0))], 30);
+    assert_eq!(rel.open_borders_until[side(PlayerId(1), PlayerId(0))], 20);
+    assert_eq!(rel.ra_science[side(PlayerId(0), PlayerId(1))], 5);
+    let ops = &st.diplo().opinions;
+    assert_eq!(
+        ops.get(PlayerId(0), PlayerId(1), OpinionKey::Warmonger).to_bits(),
+        (-5.0f64).to_bits()
+    );
+    assert_eq!(ops.get(PlayerId(1), PlayerId(0), OpinionKey::Scenario).to_bits(), 20f64.to_bits());
+    assert!(st.diplo().has_met(PlayerId(0), PlayerId(2)));
+    let fighter = st.units().get(UnitId::new(4).expect("4")).expect("the fighter");
+    assert_eq!(fighter.carried_by(), UnitId::new(3));
+    assert!(fighter.set_up);
+    assert_eq!(st.ids().unit, 5);
+    let cfg = st.config();
+    assert_eq!(cfg.resources.luxury.each.len(), 1);
+    assert_eq!(cfg.resources.strategic.each.len(), 1);
+    assert_eq!(cfg.diplomacy.max_chat_messages, Some(2), "Python's floor of two");
+    assert_eq!(got.chronicle.thoughts().len(), 1);
+    assert_eq!(st.host().thoughts, 1);
+    assert_eq!(st.chronicle().messages, 1);
+    let row = &got.chronicle.stats()[0];
+    assert_eq!(row.civs.iter().map(|c| c.alive).collect::<Vec<_>>(), [true, false]);
+    assert_eq!(st.chronicle().last_stats.as_ref(), Some(row));
+    // A flag a city-state keeps is refused on a major.
+    let mut bad = v.clone();
+    bad["players"][0]["flags"]["pairs"] = json!({});
+    assert_eq!(convert_value(&bad).err().map(|e| e.path), Some("players[0].flags.pairs".into()));
 }

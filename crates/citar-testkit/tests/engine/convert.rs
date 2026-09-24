@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 
 use citar_engine::base::ids::{CityId, PlayerId};
-use citar_engine::compat::python::{ConvertReport, Converted, Drop, state_from_python};
+use citar_engine::compat::python::{ConvertReport, Converted, Dropped, state_from_python};
 use citar_engine::rules::Ruleset;
 use citar_engine::save::{self, journal, json};
 use citar_engine::state::chronicle::Chronicle;
@@ -161,13 +161,13 @@ fn every_fixture_converts_with_counts_and_ids_kept_and_round_trips() {
 // Gate 5 ---------------------------------------------------------------------------------------
 
 /// The kinds of drop the committed fixtures hold: every dead field they fill.
-const COMMITTED_DROPS: [Drop; 6] = [
-    Drop::RngState,
-    Drop::LastStats,
-    Drop::ExplorerGone,
-    Drop::BarbarianExplored,
-    Drop::MinorMemory,
-    Drop::ListOrder,
+const COMMITTED_DROPS: [Dropped; 6] = [
+    Dropped::RngState,
+    Dropped::LastStats,
+    Dropped::ExplorerGone,
+    Dropped::BarbarianExplored,
+    Dropped::MinorMemory,
+    Dropped::ListOrder,
 ];
 
 #[test]
@@ -178,7 +178,7 @@ fn the_committed_fixtures_drop_what_the_design_drops() {
         let got = convert(&f.name, &bytes);
         union.extend(got.report.dropped().map(|(d, _)| d));
     }
-    let want: BTreeSet<Drop> = COMMITTED_DROPS.into_iter().collect();
+    let want: BTreeSet<Dropped> = COMMITTED_DROPS.into_iter().collect();
     assert_eq!(union, want);
 }
 
@@ -238,9 +238,9 @@ fn everything_dropped() -> Value {
 fn a_state_with_every_dead_field_filled_drops_each_kind() {
     let v = everything_dropped();
     let got = convert("the filled state", v.to_string().as_bytes());
-    let dropped: Vec<Drop> = got.report.dropped().map(|(d, _)| d).collect();
-    assert_eq!(dropped, Drop::ALL, "{}", got.report);
-    for d in Drop::ALL {
+    let dropped: Vec<Dropped> = got.report.dropped().map(|(d, _)| d).collect();
+    assert_eq!(dropped, Dropped::ALL, "{}", got.report);
+    for d in Dropped::ALL {
         assert!(!d.field().is_empty() && !d.reason().is_empty());
     }
 }

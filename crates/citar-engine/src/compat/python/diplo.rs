@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 
 use super::players::PlayerOut;
 use super::read::{Obj, Path, Res, dict, flag, int, real};
-use super::{Cx, Drop};
+use super::{Cx, Dropped};
 use crate::base::ids::{DealId, NegotiationId, PlayerId, Turn};
 use crate::base::sets::PlayerSet;
 use crate::state::diplo::{
@@ -223,7 +223,7 @@ fn negotiation(cx: &mut Cx<'_>, v: &Value, p: &Path<'_>) -> Res<Negotiation> {
     let history = o.each("history", |v, p| entry(cx, v, p))?;
     let exchanges: usize = o.int("exchanges", history.len())?;
     if exchanges != history.len() {
-        cx.report.note(Drop::Exchanges);
+        cx.report.note(Dropped::Exchanges);
     }
     let deal = match o.opt_int::<u32>("deal_id")? {
         None => None,
