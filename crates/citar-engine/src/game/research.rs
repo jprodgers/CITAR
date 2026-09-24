@@ -9,6 +9,9 @@
 //! - learning a tech (`add_tech`, `research.py:284-331`), as far as the systems it touches are
 //!   ported, and forgetting one with every tech that needs it (`scenario.py:155-174`).
 //!
+//! Package 1b-03 adds `add_tech_silently` (`research.py:247-251`) for the starting techs of a
+//! new game; package 1c-06's city-state catch-up calls it too (`city_states.py:416`).
+//!
 //! Package 1b-07 ports the rest of research: costs, progress and overflow, the era a tech brings
 //! and the units it makes obsolete in production queues. Package 1b-08 fires the uniques a tech
 //! triggers. Each is marked where it belongs.
@@ -228,6 +231,21 @@ pub fn add_tech(g: &mut Game, p: PlayerId, tech: TechId, source: TechSource) {
     }
     // update_research_progress (research.py:326).
     pending(Porting::Pending("1b-07"));
+}
+
+/// Adds techs with no announcement and nothing a new tech triggers, as setup and the city-states'
+/// catch-up do (`research.add_tech_silently`, `research.py:247-251`); techs already known are
+/// skipped. Python's `g.invalidate()` is the `INDEX` touch.
+pub(crate) fn add_tech_silently(g: &mut Game, p: PlayerId, techs: &[TechId]) {
+    let missing: Vec<TechId> = techs.iter().copied().filter(|&t| !g.has_tech(p, Some(t))).collect();
+    if missing.is_empty() {
+        return;
+    }
+    if let Some(pl) = g.player_mut(p, PlayerTouch::INDEX) {
+        for t in missing {
+            pl.tech.known.insert(t);
+        }
+    }
 }
 
 /// What a tech unlocks, as the announcement lists it: "units: Warrior; reveals: Iron"

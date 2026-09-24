@@ -47,7 +47,7 @@ pub fn map_doc(name: &str) -> Result<(Value, Map<String, Value>), String> {
 /// A new game from settings as a lobby sends them (`Game::config_from_json`, then `Game::new`);
 /// a refusal is the engine's own text.
 pub fn new_game(rules: &'static Ruleset, cfg: &Map<String, Value>) -> Result<Game, String> {
-    let setup = config_from_value(rules, &Value::Object(cfg.clone())).map_err(|e| e.to_string())?;
+    let setup = config_from_value(rules, Value::Object(cfg.clone())).map_err(|e| e.to_string())?;
     let (g, _) = Game::new(rules, &setup).map_err(|e| e.to_string())?;
     Ok(g)
 }

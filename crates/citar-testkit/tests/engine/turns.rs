@@ -38,7 +38,7 @@ fn settings(extra: &Value) -> Map<String, Value> {
 }
 
 fn new_game(rules: &'static Ruleset, extra: &Value) -> Result<(Game, Vec<String>), EngineError> {
-    let setup = config_from_value(rules, &Value::Object(settings(extra)))?;
+    let setup = config_from_value(rules, Value::Object(settings(extra)))?;
     let (mut g, batch) = Game::new(rules, &setup)?;
     g.set_debug_options(DebugOptions::ALL);
     let kinds = batch.events().iter().map(|e| e.kind.name().to_owned()).collect();
@@ -137,7 +137,7 @@ fn settings_without_a_seed_or_with_a_map_id_are_refused_readably() {
 fn settings_that_name_nothing_are_refused_naming_what_is_valid() {
     let r = Ruleset::shared();
     let refuse = |extra: Value| {
-        let e = config_from_value(r, &Value::Object(settings(&extra))).expect_err("refused");
+        let e = config_from_value(r, Value::Object(settings(&extra))).expect_err("refused");
         let text = e.to_string();
         readable(&text);
         text
@@ -166,7 +166,7 @@ fn settings_that_name_nothing_are_refused_naming_what_is_valid() {
     // Loose names resolve, and an empty one is the default, as Python read them.
     let ok = config_from_value(
         r,
-        &Value::Object(settings(
+        Value::Object(settings(
             &json!({"speed": "quick", "difficulty": "", "victories": {"science": false}}),
         )),
     )

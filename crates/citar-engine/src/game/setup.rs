@@ -28,7 +28,7 @@ use serde_json::{Map, Value};
 use super::derive::rev::PlayerTouch;
 use super::error::{ActionError, EngineError, ErrCode};
 use super::events::EventBatch;
-use super::{Game, Porting, pending};
+use super::{Game, Porting, pending, research};
 use crate::base::hex::HexGrid;
 use crate::base::ids::{
     BarbarianLevelId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId, PlayerId, ResourceId,
@@ -105,13 +105,20 @@ impl Game {
     pub fn config_from_json(rules: &'static Ruleset, json: &[u8]) -> Result<NewGame, EngineError> {
         let v: Value = serde_json::from_slice(json)
             .map_err(|e| config(format!("The settings are not valid JSON ({e}).")))?;
-        config_from_value(rules, &v)
+        config_from_value(rules, v)
     }
 }
 
-/// [`Game::config_from_json`] from JSON already parsed.
-pub fn config_from_value(rules: &'static Ruleset, v: &Value) -> Result<NewGame, EngineError> {
-    let o = v.as_object().ok_or_else(|| config("The settings must be a JSON object."))?;
+/// [`Game::config_from_json`] from JSON already parsed. It takes the settings whole, so that the
+/// map document and the seats move into the [`NewGame`] rather than being copied: an editor
+/// map's document is its biggest part by far.
+pub fn config_from_value(rules: &'static Ruleset, v: Value) -> Result<NewGame, EngineError> {
+    let Value::Object(mut o) = v else {
+        return Err(config("The settings must be a JSON object."));
+    };
+    // Both are the engine's (`ENGINE_KEYS`, and the seats go back into the host's keys).
+    let map_setting = o.shift_remove("map").filter(py::truthy);
+    let seats_setting = o.shift_remove("players").filter(|s| !s.is_null());
     let get = |k: &str| o.get(k).filter(|x| !x.is_null());
     let c = rules.constants();
 
@@ -153,30 +160,29 @@ pub fn config_from_value(rules: &'static Ruleset, v: &Value) -> Result<NewGame, 
     };
 
     // The map: an editor document inline, or the generator's settings.
-    let (map, doc) = match get("map").filter(|m| py::truthy(m)) {
+    let (map, doc) = match map_setting {
         Some(Value::String(id)) => {
             return Err(config(format!(
                 "The map must come inline, as the editor's document: the host resolves a map id \
                  to its document (got the id '{id}')."
             )));
         }
-        Some(body @ Value::Object(m)) => {
-            let (w, h) = document::dimensions(body).map_err(|e| EngineError::Map(e.0))?;
+        Some(body @ Value::Object(_)) => {
+            let (w, h) = document::dimensions(&body).map_err(|e| EngineError::Map(e.0))?;
             let id: Box<str> = ["id", "name"]
                 .iter()
-                .filter_map(|k| m.get(*k).filter(|x| py::truthy(x)))
+                .filter_map(|k| body.get(*k).filter(|x| py::truthy(x)))
                 .map(py::str_of)
                 .next()
                 .unwrap_or_else(|| "custom".to_owned())
                 .into();
             let size = nearest_size(rules, w, h)?;
-            let doc = MapDoc { id: id.clone(), body: body.clone() };
-            (MapSource::Editor { id, size }, Some(doc))
+            (MapSource::Editor { id: id.clone(), size }, Some(MapDoc { id, body }))
         }
         Some(other) => {
             return Err(config(format!(
                 "map must be the editor's map document, an object, not {}.",
-                py::repr(other)
+                py::repr(&other)
             )));
         }
         None => (generated_map(rules, &get)?, None),
@@ -187,13 +193,13 @@ pub fn config_from_value(rules: &'static Ruleset, v: &Value) -> Result<NewGame, 
 
     // The seats (game.py:191-196), checked before anything is made.
     let body = doc.as_ref().map(|d| &d.body);
-    let seats = match get("players") {
+    let seats = match seats_setting {
         None => Vec::new(),
-        Some(Value::Array(a)) => a.clone(),
+        Some(Value::Array(a)) => a,
         Some(other) => {
             return Err(config(format!(
                 "players must be a list of seats, such as [{{\"controller\": \"bot\"}}], not {}.",
-                py::repr(other)
+                py::repr(&other)
             )));
         }
     };
@@ -250,8 +256,8 @@ pub fn config_from_value(rules: &'static Ruleset, v: &Value) -> Result<NewGame, 
     let mut host = BTreeMap::new();
     for (k, x) in o {
         // Python dropped null settings (`game.py:150`).
-        if !x.is_null() && !ENGINE_KEYS.contains(&k.as_str()) && k != "players" {
-            host.insert(k.clone(), x.clone());
+        if !x.is_null() && !ENGINE_KEYS.contains(&k.as_str()) {
+            host.insert(k, x);
         }
     }
     host.insert("players".to_owned(), Value::Array(seats));
@@ -720,7 +726,8 @@ pub fn waiting() -> impl Iterator<Item = (&'static SetupStage, &'static str)> {
     })
 }
 
-/// What a new game is made from, as the stages before it exists work it out.
+/// What a new game is made from, as the stages before it exists work it out. The map's tiles and
+/// continents and the players move into the new state, so the stages on the game see the rest.
 #[derive(Debug)]
 pub struct Draft<'a> {
     rules: &'static Ruleset,
@@ -969,28 +976,15 @@ fn starting_techs(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
             let level = g.seat_difficulty(Some(p));
             grant.extend(r.difficulties()[level].ai_free_techs.iter().copied());
         }
-        add_techs(g, p, &grant);
+        research::add_tech_silently(g, p, &grant);
         let more = starts_with(g, p);
-        add_techs(g, p, &more);
+        research::add_tech_silently(g, p, &more);
         if let Some(pl) = g.player_mut(p, PlayerTouch::STOCKS) {
             pl.econ.gold += gold;
             pl.econ.culture += culture;
         }
     }
     Ok(())
-}
-
-/// Adds techs with no announcement (`research.add_tech_silently`, `research.py:247-251`).
-fn add_techs(g: &mut Game, p: PlayerId, techs: &[TechId]) {
-    let missing: Vec<TechId> = techs.iter().copied().filter(|&t| !g.has_tech(p, Some(t))).collect();
-    if missing.is_empty() {
-        return;
-    }
-    if let Some(pl) = g.player_mut(p, PlayerTouch::INDEX) {
-        for t in missing {
-            pl.tech.known.insert(t);
-        }
-    }
 }
 
 /// The techs `Starts with [tech]` grants the civilization now (`civ_uniques(StartsWithTech)`,
@@ -1056,16 +1050,16 @@ impl Game {
                 f(&mut d)?;
             }
         }
-        let map = d.map.as_ref().ok_or_else(no_map)?;
+        let map = d.map.as_mut().ok_or_else(no_map)?;
         let info = MapInfo {
             width: map.width,
             height: map.height,
             wrap_x: map.wrap_x,
             wrap_y: map.wrap_y,
-            continents: d.continents.clone(),
+            continents: std::mem::take(&mut d.continents),
         };
-        let tiles = Tiles::new(map.tiles.clone());
-        let players: PlayerVec<Player> = d.players.iter().cloned().collect();
+        let tiles = Tiles::new(std::mem::take(&mut map.tiles));
+        let players: PlayerVec<Player> = std::mem::take(&mut d.players).into_iter().collect();
         let st = State::new(setup.config().clone(), info, tiles, players)?;
         let mut g = Self::from_state(rules, st, Chronicle::new())?;
         g.begin_call();
@@ -1119,7 +1113,7 @@ mod tests {
     #[test]
     fn settings_default_as_python_defaulted_them() {
         let r = Ruleset::shared();
-        let new = config_from_value(r, &json!({"seed": 3})).expect("a generated game");
+        let new = config_from_value(r, json!({"seed": 3})).expect("a generated game");
         let c = new.config();
         assert_eq!(c.seed, 3);
         assert_eq!(c.speed, r.constants().default_speed);
