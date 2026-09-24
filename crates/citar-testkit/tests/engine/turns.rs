@@ -9,7 +9,8 @@
 //!   the round ends after the last player, a refusal changes nothing, a forced turn;
 //! - `Game::new` on an editor map: the settings, the nations, the players and their seats, the
 //!   starting techs, the first turn; and what it refuses;
-//! - a chain of round digests, and a driver's memory kept in the save.
+//! - a chain of round digests, and a driver's memory kept in the save and in its seat all turn;
+//! - a driver does not end its own turn: `drive` does, so the chain is the same whoever asks.
 
 use citar_engine::api::{ErrCode, inspect, testops};
 use citar_engine::base::ids::{NationId, NegotiationId, PlayerId, TechId};
@@ -410,6 +411,76 @@ fn a_drivers_memory_is_handed_back_each_turn_and_kept_in_the_save() {
         Game::load(g.rules(), &json, &mut std::iter::once(chunk.as_slice())).expect("it loads");
     assert_eq!(loaded.player(PlayerId(0)).and_then(|p| p.seat().driver()).cloned(), mem);
     assert_eq!(loaded.digest().ok(), g.digest().ok());
+}
+
+/// A driver that counts its turns in the seat's memory, as `Counter` does, and checks that the
+/// seat holds the memory it was handed while it plays. With `ends`, it also tries to end its own
+/// turn, to force another's and to drive, and counts the refusals.
+struct Ender {
+    ends: bool,
+    refused: u32,
+    turns: u32,
+}
+
+impl SeatDriver for Ender {
+    fn play_turn(&mut self, g: &mut Game, pid: PlayerId, mem: &mut DriverMemory) -> DriverOutcome {
+        let in_seat = g.player(pid).and_then(|p| p.seat().driver()).cloned();
+        let handed = (!mem.bytes().is_empty()).then(|| mem.clone());
+        assert_eq!(in_seat, handed, "the seat keeps its memory while its driver plays");
+        let n = mem.bytes().first().copied().unwrap_or(0);
+        *mem = DriverMemory::new(7, 1, vec![n + 1]).expect("a byte");
+        self.turns += 1;
+        if self.ends {
+            let other = PlayerId(1 - pid.0);
+            let n = g.state().players().len();
+            let refusals = [
+                g.end_turn(pid).map(|_| ()),
+                g.force_turn(other).map(|_| ()),
+                g.drive(&mut Drivers::none(n), DriveOptions::default()).map(|_| ()),
+            ];
+            for r in refusals {
+                let e = r.expect_err("drive ends a driver's turn");
+                assert_eq!(e.code, ErrCode::Rule);
+                assert!(e.message.contains("a driver neither ends nor passes"), "{}", e.message);
+                readable(&e.message);
+                self.refused += 1;
+            }
+            assert_eq!(g.current(), pid, "the turn is still the driver's");
+        }
+        DriverOutcome::Done
+    }
+
+    fn respond(
+        &mut self,
+        _: &mut Game,
+        _: PlayerId,
+        _: NegotiationId,
+        _: &mut DriverMemory,
+    ) -> DriverOutcome {
+        DriverOutcome::Done
+    }
+}
+
+#[test]
+fn a_driver_does_not_end_its_own_turn_so_the_chain_is_the_same_whoever_asks() {
+    let play = |ends: bool| {
+        let mut g = game(&json!({"players": [{}, {}], "city_states": 1, "turn_limit": 5}));
+        g.set_chain(Some(DigestChain::new(b"test")));
+        let mut x = Ender { ends, refused: 0, turns: 0 };
+        let mut y = Ender { ends, refused: 0, turns: 0 };
+        let mut d = Drivers::none(g.state().players().len())
+            .with(PlayerId(0), &mut x)
+            .with(PlayerId(1), &mut y);
+        let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("a live game");
+        assert_eq!(stop, Stop::GameOver);
+        clean(&mut g);
+        let refused = x.refused + y.refused;
+        assert_eq!(refused, if ends { 3 * (x.turns + y.turns) } else { 0 });
+        (g.chain().copied(), g.digest().ok(), g.turn(), x.turns + y.turns)
+    };
+    let quiet = play(false);
+    assert_eq!(quiet.3, 10, "five turns each");
+    assert_eq!(play(true), quiet, "the same rounds, digests and chain");
 }
 
 #[test]

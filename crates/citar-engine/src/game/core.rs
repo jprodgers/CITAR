@@ -79,6 +79,9 @@ pub struct Game {
     pub(crate) violations: Vec<Violation>,
     /// The chain of round digests, for a game that keeps one (DESIGN.md 4.10); never saved.
     pub(crate) chain: Option<Box<super::turn::driver::RoundChain>>,
+    /// The seat whose driver is playing inside [`Game::drive`], which alone ends its turn;
+    /// never saved.
+    pub(crate) driving: Option<PlayerId>,
 }
 
 impl Game {
@@ -112,6 +115,7 @@ impl Game {
             poisoned: None,
             violations: Vec::new(),
             chain: None,
+            driving: None,
         }
     }
 

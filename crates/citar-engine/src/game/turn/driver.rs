@@ -21,6 +21,9 @@
 //! - a forced turn is refused for a dead player and in a game that is over, where Python's
 //!   `force_turn` made it the dead player's turn, or moved the turn of a finished game
 //!   (`force-turn-only-for-the-living`).
+//!
+//! While a seat's driver plays inside `drive`, ending or forcing a turn is refused: `drive` ends
+//! the turn itself once the driver has returned (DESIGN.md 6.12).
 
 use super::stages::{self, PLAYER_END, PLAYER_START, ROUND_END};
 use crate::base::digest::Digest;
@@ -63,6 +66,7 @@ impl Game {
     /// more at its end.
     pub(crate) fn end_turn_now(&mut self, pid: PlayerId) -> Result<(), ActionError> {
         self.ensure_live()?;
+        self.ensure_not_driving()?;
         if self.phase() != Phase::Playing {
             return Err(ActionError::new(ErrCode::GameOver, "The game is over."));
         }
@@ -127,9 +131,11 @@ impl Game {
 
     /// Makes it `pid`'s turn now and starts it, as a probe's single-turn case does
     /// (`EngineGame.force_turn`, `engine_api.py:754-762`); nothing if it is already. Refused for
-    /// a player the game does not have, a dead one, and a game that is over.
+    /// a player the game does not have, a dead one, a game that is over, and while a seat's
+    /// driver plays.
     pub(crate) fn force_turn_now(&mut self, pid: PlayerId) -> Result<(), ActionError> {
         self.ensure_live()?;
+        self.ensure_not_driving()?;
         let Some(p) = self.player(pid) else {
             return Err(ActionError::new(ErrCode::InvalidPlayer, format!("No player {}.", pid.0)));
         };

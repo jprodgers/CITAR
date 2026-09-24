@@ -5,19 +5,24 @@
 //! engine never depends on bot code, and Python's `run_ai` loop (`bots/headless.py:47-63`)
 //! becomes `drive` plus drivers.
 //!
-//! `drive` plays seat after seat: it takes the seat's [`DriverMemory`] out of the seat, hands it
-//! to the driver with the turn, puts it back, and ends the turn if the driver has not. It stops
-//! at a seat with no driver ([`Stop::External`]: a person, a model, an MCP client) and when the
-//! game is over ([`Stop::GameOver`]). Package 1c-09 adds the other stops (a hybrid seat's
-//! diplomat, a reply awaited, a limit on seats per call) and answers negotiations through
-//! [`SeatDriver::respond`].
+//! `drive` plays seat after seat: it hands the driver the turn and a copy of the seat's
+//! [`DriverMemory`], writes the memory back when the driver changed it, and then ends the turn,
+//! as `run_ai` did (`play_turn(end_turn=False)`, then `g.end_turn`). The seat keeps its memory
+//! the whole time, so a digest, a snapshot or a round's end never sees the seat without it
+//! (DESIGN.md 6.12). Ending the turn is `drive`'s alone: while a driver plays, the game refuses
+//! to end or force a turn, so the round a driver's turn closes is digested with the memory that
+//! turn left, whoever asked for the turn to end. It stops at a seat with no driver
+//! ([`Stop::External`]: a person, a model, an MCP client) and when the game is over
+//! ([`Stop::GameOver`]). Package 1c-09 adds the other stops (a hybrid seat's diplomat, a reply
+//! awaited, a limit on seats per call) and answers negotiations through [`SeatDriver::respond`].
 
 use super::super::Game;
 use crate::base::ids::{NegotiationId, PlayerId};
 use crate::base::sets::PlayerVec;
 use crate::game::derive::rev::PlayerTouch;
-use crate::game::error::ActionError;
+use crate::game::error::{ActionError, ErrCode};
 use crate::game::events::EventBatch;
+use crate::game::invariants::{Code, Violation};
 use crate::state::Phase;
 use crate::state::players::DriverMemory;
 
@@ -25,15 +30,18 @@ use crate::state::players::DriverMemory;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DriverOutcome {
-    /// It has played: [`Game::drive`] ends the turn, if it is still the seat's.
+    /// It has played: [`Game::drive`] ends the turn.
     Done,
 }
 
 /// Whoever plays a seat for the host: `Send`, since hosts drive games inside
 /// `py.allow_threads`, whose closure must be (DESIGN.md 6.12).
 pub trait SeatDriver: Send {
-    /// Plays `pid`'s turn: acts through [`Game::act`], and may end the turn itself. `mem` is the
-    /// seat's own memory, kept in the save; a driver that keeps none leaves it as it was given.
+    /// Plays `pid`'s turn: acts through [`Game::act`] and returns, and [`Game::drive`] ends the
+    /// turn. A driver does not end the turn itself: while it plays, [`Game::end_turn`] and
+    /// [`Game::force_turn`] refuse. `mem` is a copy of the seat's own memory, kept in the save and
+    /// written back when the driver changes it; a driver that keeps none leaves it as it was
+    /// given.
     fn play_turn(&mut self, g: &mut Game, pid: PlayerId, mem: &mut DriverMemory) -> DriverOutcome;
 
     /// Answers negotiation `nid`, which waits on `pid` (package 1c-09 calls it).
@@ -101,13 +109,14 @@ impl Game {
     /// the game is over (DESIGN.md 6.12). Returns why it stopped, and every event the turns
     /// appended. City-states and the barbarians play inside the turns, as ever.
     ///
-    /// Refused only on a game stopped by an internal error.
+    /// Refused on a game stopped by an internal error, and from inside a driver.
     pub fn drive(
         &mut self,
         d: &mut Drivers<'_>,
         _opts: DriveOptions,
     ) -> Result<(Stop, EventBatch), ActionError> {
         self.ensure_live()?;
+        self.ensure_not_driving()?;
         let first = self.st.host().next_event_id;
         let stop = loop {
             if self.phase() != Phase::Playing || self.majors(true).next().is_none() {
@@ -131,25 +140,52 @@ impl Game {
             let Some(driver) = d.seats.get_mut(pid).and_then(Option::as_mut) else {
                 break Stop::External(pid);
             };
-            let mut mem = self
-                .player_mut(pid, PlayerTouch::OTHER)
-                .and_then(|p| p.take_driver())
-                .unwrap_or_else(no_memory);
+            // The seat keeps its memory while the driver works on a copy.
+            let mut mem =
+                self.player(pid).and_then(|p| p.seat().driver()).cloned().unwrap_or_else(no_memory);
+            self.driving = Some(pid);
             let outcome = driver.play_turn(self, pid, &mut mem);
-            let kept = (mem != no_memory()).then_some(mem);
-            if let Some(p) = self.player_mut(pid, PlayerTouch::OTHER) {
-                p.put_driver(kept);
-            }
+            self.driving = None;
             match outcome {
                 DriverOutcome::Done => {}
             }
+            let kept = (mem != no_memory()).then_some(mem);
+            let changed = self.player(pid).is_some_and(|p| p.seat().driver() != kept.as_ref());
+            if changed && let Some(p) = self.player_mut(pid, PlayerTouch::OTHER) {
+                p.put_driver(kept);
+            }
             self.ensure_live()?;
-            if self.phase() == Phase::Playing && self.current() == pid {
+            if self.phase() != Phase::Playing {
+                continue;
+            }
+            if self.current() == pid {
                 self.end_turn_now(pid)?;
+            } else if self.debug.invariants {
+                // Nothing a driver may call passes the turn while it plays.
+                self.report(Violation::new(
+                    Code::Turn1,
+                    format!("player {}'s turn passed while its driver played it", pid.0),
+                ));
             }
             self.settle();
         };
         self.batch_start = first;
         Ok((stop, self.take_batch()))
+    }
+
+    /// Refuses to end, force or drive a turn while a seat's driver plays inside [`Game::drive`]:
+    /// `drive` ends that turn once the driver has returned and the seat has its memory back.
+    pub(crate) fn ensure_not_driving(&self) -> Result<(), ActionError> {
+        match self.driving {
+            None => Ok(()),
+            Some(p) => Err(ActionError::new(
+                ErrCode::Rule,
+                format!(
+                    "Player {} is being played by its driver, whose turn ends when it returns: a \
+                     driver neither ends nor passes the turn itself.",
+                    p.0
+                ),
+            )),
+        }
     }
 }

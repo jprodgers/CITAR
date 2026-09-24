@@ -55,9 +55,10 @@ impl Game {
 
     /// Makes it `pid`'s turn now and starts it, a probe's single-turn case
     /// (`EngineGame.force_turn`, `engine_api.py:754-762`); nothing if it is already `pid`'s turn.
-    /// Refused for a player the game does not have, a player who has been eliminated, and a game
-    /// that is over: Python made a dead player's turn current and moved the turn of a finished
-    /// game (`force-turn-only-for-the-living`).
+    /// Refused for a player the game does not have, a player who has been eliminated, a game
+    /// that is over, and while a seat's driver plays inside [`Game::drive`]: Python made a dead
+    /// player's turn current and moved the turn of a finished game
+    /// (`force-turn-only-for-the-living`).
     pub fn force_turn(&mut self, pid: PlayerId) -> Result<EventBatch, ActionError> {
         self.ensure_live()?;
         self.begin_call();
