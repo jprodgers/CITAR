@@ -68,3 +68,23 @@ reason = "With no major civilization alive, ending a turn played round after rou
 [[differences]]
 id = "force-turn-only-for-the-living"
 reason = "Forcing a turn (EngineGame.force_turn) made an eliminated player's turn current, and moved the turn of a game that was over; Rust refuses both"
+
+[[differences]]
+id = "mapgen-wonder-conversions-read-every-condition"
+reason = "A natural wonder's 'Neighboring tiles will convert to [terrain]' read only its <in tiles without [...]> conditions; Rust converts a neighbour only where every condition holds"
+
+[[differences]]
+id = "mapgen-no-river-along-new-water"
+reason = "A natural wonder that turned the land beside it into coast (Krakatoa, the Rock of Gibraltar) left rivers running along the sea; Rust takes a river off a tile that becomes water, on both sides of the edge"
+
+[[differences]]
+id = "mapgen-features-that-never-generate"
+reason = "Map generation drew vegetation and rare features even when the ruleset marked them 'Doesn't generate naturally'; Rust never places one marked so, and one marked 'Doesn't generate naturally <in [...] tiles>' only where its conditions do not hold (no shipped feature is either)"
+
+[[differences]]
+id = "mapgen-shares-keep-every-type"
+reason = "A resource's share of its kind took over normal resources' tiles down to a type's last deposit, which the variety top-ups after it put back as a fresh cluster of two or three, so a 25% luxury share came out near 20%; Rust takes no normal type's last deposit, so the share holds to a tile and the variety needs no top-up"
+
+[[differences]]
+id = "mapgen-luxury-variety-by-tile-count"
+reason = "The share of luxury types a generated map keeps was interpolated over the areas of the ruleset's lobby sizes, looked up by their keys; Rust interpolates over the tile counts of the shipped sizes, the same for the shipped ruleset and for any other"

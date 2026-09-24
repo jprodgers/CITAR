@@ -9,6 +9,7 @@ mod engine {
     mod game_eval;
     mod hex;
     mod kitchen_sink;
+    mod mapgen;
     mod rules;
     mod save;
     mod scenario;

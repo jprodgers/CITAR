@@ -129,7 +129,7 @@ fn inspect_reads_and_lists_what_is_pending() {
         ("player_end E3: gold and bankruptcy", "1b-05"),
         ("round_end R0: eliminations", "1c-08"),
         ("starting units", "1c-02"),
-        ("map: a generated map", "1b-04"),
+        ("map: starts and ruins a document lacks", "1c-09"),
     ] {
         assert!(listed.contains(&(name.to_owned(), pkg.to_owned())), "{name} waits for {pkg}");
     }
@@ -141,7 +141,7 @@ fn inspect_reads_and_lists_what_is_pending() {
         [3, 5, 12],
         "three queries, five scenario ops and twelve test ops wait"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [40, 8], "the stages that wait");
+    assert_eq!([count("turn_stage"), count("setup_stage")], [40, 7], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(

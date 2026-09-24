@@ -14,7 +14,7 @@ fn golden_sets_match_the_committed_files() {
         names,
         [
             "rng", "libm", "pyfmt", "ruleset", "uniques", "filters", "gen", "states", "convert",
-            "turns"
+            "turns", "maps"
         ]
     );
     let problems: Vec<String> = reports

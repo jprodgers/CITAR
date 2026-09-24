@@ -42,6 +42,10 @@
 //!   It depends on every stage of setup and of a turn, so `golden bless` refuses it while one is
 //!   pending, and until then `golden check` computes it without a committed file.
 //!
+//! Package 1b-04 adds, in [`maps`]:
+//! - **`maps.json`**: ten generated maps, duel to huge, every map type, each a blake3 of its
+//!   tiles, landmasses and starts. Written by `golden bless`.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -83,6 +87,7 @@ pub struct SetReport {
 
 pub mod convert;
 pub mod filters;
+pub mod maps;
 pub mod states;
 pub mod turns;
 
@@ -100,6 +105,7 @@ pub fn check_all() -> Vec<SetReport> {
         states::check_states(),
         convert::check_convert(),
         turns::check_turns(),
+        maps::check_maps(),
     ]
 }
 
@@ -147,6 +153,7 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
     .chain(states::blessed())
     .chain(convert::blessed())
     .chain(turns::blessed())
+    .chain(maps::blessed())
     .collect()
 }
 
