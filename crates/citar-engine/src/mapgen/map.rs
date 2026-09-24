@@ -132,22 +132,24 @@ impl<'r> Kit<'r> {
                     .collect()
             })
             .collect();
-        let never_here = |x: &TerrainGen| x.never || !x.not_where.is_empty();
         let of_kind = |kind: TerrainType, f: &dyn Fn(TerrainId, &TerrainGen) -> bool| {
             t.ids().filter(|&id| t[id].kind == kind && f(id, &g.terrains[id])).collect::<Vec<_>>()
         };
+        // Any `Doesn't generate naturally`, conditional or not, keeps a land out of the climate's
+        // choice, as Python's `has_tag` did (`mapgen.py:552-554`).
         let climate_lands = of_kind(TerrainType::Land, &|id, x| {
-            !t[id].impassable && !t[id].rough && !x.rare && !never_here(x)
+            !t[id].impassable && !t[id].rough && !x.rare && !x.never && x.not_where.is_empty()
         });
         let flats = of_kind(TerrainType::Land, &|id, x| {
             !t[id].impassable && !t[id].rough && !x.climates.is_empty()
         });
         // A feature marked `Doesn't generate naturally` is never placed, which Python's lists did
-        // not check (no shipped feature is both).
+        // not check (no shipped feature is both); one marked so under conditions is dropped
+        // tile by tile, where they hold (`terrain::vegetation`, `terrain::rare_features`).
         // refcheck: mapgen-features-that-never-generate
         let vegetation =
-            of_kind(TerrainType::TerrainFeature, &|_, x| x.vegetation && !x.rare && !never_here(x));
-        let rare = of_kind(TerrainType::TerrainFeature, &|_, x| x.rare && !never_here(x));
+            of_kind(TerrainType::TerrainFeature, &|_, x| x.vegetation && !x.rare && !x.never);
+        let rare = of_kind(TerrainType::TerrainFeature, &|_, x| x.rare && !x.never);
         let wonders = of_kind(TerrainType::NaturalWonder, &|_, _| true);
         let resources = r.resources();
         let has = |id: ResourceId, ty: UniqueType| {
@@ -368,6 +370,13 @@ impl<'r> GenMap<'r> {
     pub(crate) fn climate_ok(&self, terrain: TerrainId, t: TileIdx) -> bool {
         let i = t.0 as usize;
         self.kit.climate_ok(terrain, self.temp[i], self.humid[i])
+    }
+
+    /// Whether terrain `terrain` may be generated on tile `t` as it is now: not where one of
+    /// its `Doesn't generate naturally <...>` holds.
+    pub(crate) fn may_generate(&self, terrain: TerrainId, t: TileIdx) -> bool {
+        // refcheck: mapgen-features-that-never-generate
+        !self.kit.r.gen_tables().terrains[terrain].not_where.iter().any(|c| self.holds(c, t))
     }
 
     /// The tile with its features replaced.

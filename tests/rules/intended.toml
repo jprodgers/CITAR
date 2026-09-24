@@ -79,7 +79,7 @@ reason = "A natural wonder that turned the land beside it into coast (Krakatoa, 
 
 [[differences]]
 id = "mapgen-features-that-never-generate"
-reason = "Map generation drew vegetation and rare features even when the ruleset marked them 'Doesn't generate naturally'; Rust never places them (no shipped feature is both)"
+reason = "Map generation drew vegetation and rare features even when the ruleset marked them 'Doesn't generate naturally'; Rust never places one marked so, and one marked 'Doesn't generate naturally <in [...] tiles>' only where its conditions do not hold (no shipped feature is either)"
 
 [[differences]]
 id = "mapgen-luxury-variety-by-tile-count"

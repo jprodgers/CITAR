@@ -246,12 +246,9 @@ pub(crate) fn vegetation(m: &mut GenMap<'_>, rng: &mut Rng) {
             continue;
         }
         options.clear();
-        options.extend(
-            kit.vegetation
-                .iter()
-                .copied()
-                .filter(|&f| terrains[f].occurs_on.contains(&last) && m.climate_ok(f, t)),
-        );
+        options.extend(kit.vegetation.iter().copied().filter(|&f| {
+            terrains[f].occurs_on.contains(&last) && m.climate_ok(f, t) && m.may_generate(f, t)
+        }));
         if let (Some(fo), Some(ju)) = (forest, jungle)
             && options.contains(&fo)
             && options.contains(&ju)
@@ -291,12 +288,9 @@ pub(crate) fn rare_features(m: &mut GenMap<'_>, rng: &mut Rng) {
         }
         let base = m.tile(t).terrain();
         options.clear();
-        options.extend(
-            kit.rare
-                .iter()
-                .copied()
-                .filter(|&f| terrains[f].occurs_on.contains(&base) && m.climate_ok(f, t)),
-        );
+        options.extend(kit.rare.iter().copied().filter(|&f| {
+            terrains[f].occurs_on.contains(&base) && m.climate_ok(f, t) && m.may_generate(f, t)
+        }));
         if let Some(&f) = rng.pick(&options) {
             add_feature(m, t, f);
         }
