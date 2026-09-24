@@ -30,6 +30,20 @@ use crate::base::ids::{
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostOnly<T>(pub T);
 
+/// The value in JSON, so a save keeps it; nothing at all in `CANON_V1`, so the digest never sees
+/// it.
+impl<T: serde::Serialize> serde::Serialize for HostOnly<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() { self.0.serialize(s) } else { s.serialize_unit() }
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for HostOnly<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        T::deserialize(d).map(Self)
+    }
+}
+
 impl<T> Deref for HostOnly<T> {
     type Target = T;
 
@@ -45,7 +59,20 @@ impl<T> DerefMut for HostOnly<T> {
 }
 
 /// What happens at the map's edges (`mapgen.py:26-34`, `EDGE_MODES`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum MapEdges {
     /// Polar ice north and south, open ocean east and west.
     #[default]
@@ -96,7 +123,10 @@ impl MapEdges {
 }
 
 /// Which difficulty base values the AI gets (`game.py:40`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum AiBaseValues {
     /// UnCiv's.
     #[default]
@@ -107,7 +137,8 @@ pub enum AiBaseValues {
 
 /// A lobby rule for one resource (`mapgen.py:35, 84-93`); a resource without one is placed
 /// normally.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResourceRule {
     /// Not placed at all.
     Off,
@@ -118,7 +149,8 @@ pub enum ResourceRule {
 }
 
 /// The lobby's density and rules for one kind of resource.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceKindOptions {
     /// Scales how many of this kind are placed, 1 being normal.
     pub density: f64,
@@ -133,7 +165,8 @@ impl Default for ResourceKindOptions {
 }
 
 /// How the map generator places resources (`mapgen.py:52-93`, the lobby's `resources`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceOptions {
     /// Scales every kind, 1 being normal.
     pub density: f64,
@@ -165,7 +198,8 @@ pub struct MapDoc {
 }
 
 /// Where the map came from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MapSource {
     /// The generator (`mapgen.generate_map`).
     Generated {
@@ -232,14 +266,18 @@ impl NewGame {
 }
 
 /// The game's own diplomacy settings (`diplomacy.py:686-691`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct DiplomacyConfig {
     /// How many messages a negotiation may hold before it closes; `None` for the ruleset's.
     pub max_chat_messages: Option<u16>,
 }
 
 /// A game's settings (`DEFAULT_CONFIG`, `game.py:32-60`, normalised).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GameConfig {
     /// Every random stream derives from it (DESIGN.md 7).
     pub seed: u64,

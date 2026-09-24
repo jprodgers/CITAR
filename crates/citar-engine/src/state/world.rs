@@ -19,14 +19,18 @@ use crate::base::sets::{BeliefSet, PlayerSet};
 
 /// What a founded religion is called: a pantheon by its belief, a religion by its row of
 /// `religions.json` (`religion.py:509, 652`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ReligionName {
     Pantheon(BeliefId),
     Religion(RulesReligionId),
 }
 
 /// A founded pantheon or religion (`religion.py:473-477`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Religion {
     pub name: ReligionName,
     /// The name it is shown under, which its founder may have chosen.
@@ -41,7 +45,8 @@ pub struct Religion {
 }
 
 /// One result of a world leader vote (`victory.py:216-217`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnResult {
     pub turn: Turn,
     /// Votes per candidate, most first.
@@ -51,7 +56,8 @@ pub struct UnResult {
 }
 
 /// The United Nations (`victory.py:97-104`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Un {
     /// The turn of the next vote, once one is scheduled.
     pub next_vote: Option<Turn>,
@@ -66,7 +72,8 @@ pub struct Un {
 }
 
 /// A barbarian encampment (`barbarians.py:190`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Camp {
     pub tile: TileIdx,
     /// Turns to its next spawn, or, once destroyed, until it is forgotten.
@@ -85,7 +92,8 @@ impl Camp {
 }
 
 /// The world's shared state.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct World {
     /// Founded religions and pantheons; a [`ReligionId`] is an index here.
     pub religions: Vec<Religion>,

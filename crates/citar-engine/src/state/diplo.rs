@@ -116,7 +116,10 @@ pub const fn side(a: PlayerId, b: PlayerId) -> usize {
 ///
 /// Two-sided fields are indexed by [`side`]: `embassy[side(p, q)]` says whether `p` has an
 /// embassy with `q`. A turn of 0 means never, since turns start at 1.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct Relation {
     pub met: bool,
     pub war: bool,
@@ -382,8 +385,10 @@ impl DealItemKind {
     }
 }
 
-/// One thing a side gives in a deal (DESIGN.md 4.6).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// One thing a side gives in a deal (DESIGN.md 4.6). A save writes it as Python's dict:
+/// `{"type": "resource", "resource": "Iron", "amount": 1, "turns": 30}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DealItem {
     /// A lump sum of gold.
     Gold {
@@ -571,7 +576,8 @@ impl DealItem {
 }
 
 /// What one side gives.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Side {
     pub giver: PlayerId,
     pub items: Vec<DealItem>,
@@ -579,7 +585,8 @@ pub struct Side {
 
 /// A proposal, or a concluded deal's terms: what each of the two sides gives. Python kept a dict
 /// from `str(player)` to items, the proposer's side first.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Terms {
     pub sides: [Side; 2],
 }
@@ -639,7 +646,8 @@ impl Terms {
 }
 
 /// A recurring part of a deal: gold or a resource every turn until a turn (`diplomacy.py:554-557`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Ongoing {
     /// A `GoldPerTurn` or `Resource` item.
     pub item: DealItem,
@@ -650,7 +658,8 @@ pub struct Ongoing {
 }
 
 /// A concluded deal (`diplomacy.py:530-609`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Deal {
     pub id: DealId,
     pub turn: Turn,
@@ -665,7 +674,10 @@ pub struct Deal {
 // ---- Negotiations -----------------------------------------------------------------------------
 
 /// Where a negotiation stands (`diplomacy.py:700`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum NegStatus {
     Open,
     Accepted,
@@ -699,7 +711,10 @@ impl NegStatus {
 }
 
 /// What an entry of a negotiation did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum NegAction {
     Open,
     Reply,
@@ -737,7 +752,8 @@ impl NegAction {
 
 /// One entry of a negotiation's history (`diplomacy.py:712-722`). `exchanges`, which only the
 /// archived bots read, is dropped.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NegEntry {
     /// Its number, from 1.
     pub seq: u16,
@@ -752,7 +768,8 @@ pub struct NegEntry {
 }
 
 /// A chat between two major civilizations with a deal on the table (`diplomacy.py:695-760`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Negotiation {
     pub id: NegotiationId,
     pub initiator: PlayerId,

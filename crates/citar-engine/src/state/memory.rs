@@ -132,7 +132,8 @@ impl core::fmt::Debug for TileMemory {
 }
 
 /// A city as last seen from afar (Python's `"c": [name, pop, owner]`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CityMemory {
     /// Its name then.
     pub name: Box<str>,
@@ -142,7 +143,8 @@ pub struct CityMemory {
     pub owner: PlayerId,
 }
 
-/// One major civilization's memory of the map.
+/// One major civilization's memory of the map, saved as base64 columns (`save::columns`) and
+/// digested as each tile's [`TileMemory::canon_bytes`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TileMemoryLayer {
     tiles: Vec<TileMemory>,

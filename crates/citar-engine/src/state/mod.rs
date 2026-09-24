@@ -47,7 +47,10 @@ use units::{Units, UnitsError};
 use world::World;
 
 /// Whether the game goes on.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Phase {
     #[default]
     Playing,
@@ -56,7 +59,8 @@ pub enum Phase {
 
 /// Where the game is in time (`GameState.turn`, `current`, `turn_started`, `phase`, `winner`,
 /// `victory`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnClock {
     pub turn: Turn,
     /// Whose turn it is.
@@ -84,7 +88,8 @@ impl Default for TurnClock {
 /// The next id of each kind of entity, and the combat counter: persisted, and never reused
 /// (DESIGN.md 4.2). Python drew units, cities and camps from one `next_id` (`state.py:343`); the
 /// converter starts all three at it, so converted ids stay unique across kinds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdCounters {
     pub unit: u32,
     pub city: u32,
@@ -198,7 +203,10 @@ pub struct StateParts {
 ///
 /// Every part is readable through `&State`. Only this module's setters, which report a
 /// [`Change`], and the restricted accessors write.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Its `Serialize` is the canonical form the digest hashes (`save::canon`): the parts in this
+/// order, the host's heads as nothing. The JSON save writes its own top level (`save::json`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct State {
     config: GameConfig,
     map: MapInfo,

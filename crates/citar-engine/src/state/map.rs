@@ -5,6 +5,9 @@
 //! (`state.py:335-337, 364`), and the tile writes scattered through the rules, which here are
 //! setters that each return a [`Change`].
 //!
+//! The map's shape, the tiles and their build queues are saved as base64 columns
+//! (`save::columns`), and digested as each tile's [`Tile::canon_bytes`].
+//!
 //! A tile is 16 bytes of plain data, four to a cache line, so the hot loops (movement costs,
 //! yields, worker scoring) read a tile and its neighbours from one or two lines. Its fields are
 //! private: they are read through typed accessors and written only through [`Tiles`], whose

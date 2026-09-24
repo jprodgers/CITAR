@@ -150,6 +150,9 @@ pub enum SpyAction {
     Dead,
 }
 
+// A save writes a spy's action by its name, the digest by its index.
+crate::base::codec::serde_by_name!(SpyAction);
+
 impl SpyAction {
     /// Every action, in Python's order (`espionage.py:17-19`).
     pub const ALL: [Self; 9] = [
@@ -238,6 +241,8 @@ pub enum ReligionProgress {
     Enhanced,
 }
 
+crate::base::codec::serde_by_name!(ReligionProgress);
+
 impl ReligionProgress {
     /// Every stage, in order.
     pub const ALL: [Self; 6] = [
@@ -276,8 +281,8 @@ impl ReligionProgress {
     }
 }
 
-/// A nation's `kind`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+/// A nation's `kind`, and a player's in a save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NationKind {
     /// A civilization a player or a bot can lead.
@@ -301,7 +306,7 @@ pub enum VictoryFocus {
 
 /// Whether a city-state quest is given to one civilization or to all of them as a contest.
 /// Python's default for a quest without `type` is `Individual` (`city_states.py:1037`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Deserialize, serde::Serialize)]
 pub enum QuestScope {
     #[default]
     Individual,
@@ -463,6 +468,8 @@ pub enum CityStatePersonality {
     Hostile,
     Irrational,
 }
+
+crate::base::codec::serde_by_name!(CityStatePersonality);
 
 impl CityStatePersonality {
     /// Every personality, in Python's order.

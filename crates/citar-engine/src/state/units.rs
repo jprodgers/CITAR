@@ -21,7 +21,10 @@ use crate::base::ids::{
 use crate::base::sets::{PlayerVec, PromotionSet};
 
 /// A standing order (Python's `Unit.activity`, `state.py:122`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Activity {
     Fortify,
     /// Fortified until healed.
@@ -79,7 +82,8 @@ impl Activity {
 /// An explorer's own memory: the target it is heading for and where it stood on its last turns,
 /// so it can tell when fog has it going back and forth (`automation.py:236-285`). Python kept
 /// both in `Player.flags` keyed by unit id.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExploreMemory {
     /// The tile it is exploring toward.
     pub target: Option<TileIdx>,
@@ -91,7 +95,8 @@ pub struct ExploreMemory {
 ///
 /// Dropped from Python: `build` and `due_heal`, which nothing read, and `status`, whose one
 /// value is [`set_up`](Self::set_up).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Unit {
     id: UnitId,
     /// Its row of `units.json`.

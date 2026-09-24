@@ -9,7 +9,7 @@
 //!   the same bytes: a length, then each key and value in turn.
 //! - [`bytes_b64`]: bytes as base64 text in JSON, as a length and the bytes in `CANON_V1`.
 //! - [`hash_hex`]: a 32-byte hash as 64 hex digits in JSON, as the 32 bytes in `CANON_V1`.
-//! - [`serde_by_name`]: a fieldless enum by its `name()` in JSON, by its index in `CANON_V1`.
+//! - `serde_by_name!`: a fieldless enum by its `name()` in JSON, by its index in `CANON_V1`.
 //! - [`b64_encode`] and [`b64_decode`]: standard base64 with padding, decoded strictly.
 //!
 //! Rule ids, which the save writes as names, need the ruleset: `save::ctx` gives them their forms.
@@ -155,7 +155,7 @@ pub mod hash_hex {
     }
 }
 
-/// Reads a fieldless enum written by [`serde_by_name`]: its name in JSON, its index in
+/// Reads a fieldless enum written by `serde_by_name!`: its name in JSON, its index in
 /// `CANON_V1`.
 pub fn deserialize_by_name<'de, D, T>(
     d: D,

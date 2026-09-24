@@ -54,7 +54,10 @@ pub use crate::rules::defs::{ReligionProgress, SpyAction};
 // ---- Seats ------------------------------------------------------------------------------------
 
 /// Who drives a civilization's turns (`state.py:20-24`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Controller {
     /// A person at the web client.
     Human,
@@ -129,7 +132,10 @@ impl Controller {
 
 /// Which difficulty numbers a civilization gets, and which of UnCiv's "Human player" and
 /// "AI player" filters match it (`HANDICAPS`, `state.py:24`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Handicap {
     Human,
     Ai,
@@ -189,7 +195,10 @@ impl AutoDecision {
 }
 
 /// Which decisions the engine takes for a civilization.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct AutoDecisions {
     pub un_vote: bool,
     pub conquest: bool,
@@ -229,7 +238,10 @@ impl AutoDecisions {
 }
 
 /// Some of the automatic decisions set explicitly, the rest left to the controller.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct AutoOverrides {
     pub un_vote: Option<bool>,
     pub conquest: Option<bool>,
@@ -276,7 +288,10 @@ impl AutoOverrides {
 
 /// A seat's explicit handicap and automatic decisions, which outlast a change of controller
 /// (`Player.overrides`, `state.py:206`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct SeatOverrides {
     pub handicap: Option<Handicap>,
     pub auto: AutoOverrides,
@@ -480,7 +495,8 @@ impl fmt::Debug for DriverMemory {
 /// The handicap and automatic decisions follow the controller, except where the seat set them
 /// explicitly: those overrides outlast a change of controller. The automatic decisions may also
 /// be changed during play; a new controller re-derives them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Seat {
     controller: Controller,
     handicap: Handicap,
@@ -637,6 +653,25 @@ impl Rgb {
     }
 }
 
+/// `#rrggbb` in JSON, the three bytes in `CANON_V1`.
+impl serde::Serialize for Rgb {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() { s.serialize_str(&self.to_hex()) } else { self.0.serialize(s) }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Rgb {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if !d.is_human_readable() {
+            return <[u8; 3]>::deserialize(d).map(Self);
+        }
+        let text = String::deserialize(d)?;
+        Self::from_hex(&text)
+            .filter(|c| c.to_hex() == text)
+            .ok_or_else(|| serde::de::Error::custom(format!("{text:?} is not a #rrggbb colour")))
+    }
+}
+
 impl fmt::Debug for Rgb {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_hex())
@@ -646,7 +681,8 @@ impl fmt::Debug for Rgb {
 // ---- Stocks and progress ----------------------------------------------------------------------
 
 /// Stocks, golden ages and the recent history of yields.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Economy {
     pub gold: f64,
     pub culture: f64,
@@ -673,7 +709,8 @@ pub struct Economy {
 }
 
 /// Research.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TechState {
     pub known: TechSet,
     /// The current tech, then the rest of the path to the goal.
@@ -689,7 +726,8 @@ pub struct TechState {
 }
 
 /// Social policies.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyState {
     /// Adopted policies and branches, finishers included.
     pub adopted: PolicySet,
@@ -699,7 +737,8 @@ pub struct PolicyState {
 }
 
 /// Great people: points toward the next one, and the thresholds that rise with each.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GreatPeople {
     /// Points toward each great person, from buildings and specialists.
     pub points: BTreeMap<BaseUnitId, f64>,
@@ -707,6 +746,7 @@ pub struct GreatPeople {
     pub combat_points: BTreeMap<BaseUnitId, f64>,
     /// The next threshold of each great-person pool, `None` being the shared pool of the units
     /// with no `Is part of Great Person group []` unique (`great_people.py:75-81`).
+    #[serde(with = "crate::base::codec::pairs")]
     pub pool_threshold: BTreeMap<Option<TextId>, i64>,
     /// The next threshold of each combat great person.
     pub combat_threshold: BTreeMap<BaseUnitId, i64>,
@@ -721,7 +761,8 @@ pub struct GreatPeople {
 }
 
 /// A civilization's religion.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReligionState {
     pub progress: ReligionProgress,
     /// The religion (or pantheon) it founded.
@@ -747,7 +788,8 @@ impl ReligionState {
 }
 
 /// A unique a civilization holds for some turns (`{"text", "turns"}`, `triggers.py:91`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TempUnique {
     pub unique: UniqueId,
     /// Turns left.
@@ -755,12 +797,15 @@ pub struct TempUnique {
 }
 
 /// The rest of a civilization's standing data.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CivExtras {
     pub temp_uniques: Vec<TempUnique>,
     /// Times each item was built, for "Cost increases when built".
+    #[serde(with = "crate::base::codec::pairs")]
     pub built_increasing: BTreeMap<Constructible, u16>,
     /// Times each item was bought with increasing cost, great prophets included.
+    #[serde(with = "crate::base::codec::pairs")]
     pub bought_increasing: BTreeMap<Constructible, u16>,
     /// Free buildings of a stat already granted, by (stat, city), sorted.
     pub free_stat_buildings: Vec<(Stat, CityId)>,
@@ -782,7 +827,8 @@ pub struct CivExtras {
 // ---- Major civilizations ----------------------------------------------------------------------
 
 /// A spy (`espionage.py:4`). Spies are not map units.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Spy {
     pub name: Box<str>,
     pub rank: u8,
@@ -796,7 +842,8 @@ pub struct Spy {
 }
 
 /// What only a major civilization has.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MajorData {
     /// Its memory of tiles out of sight.
     pub memory: TileMemoryLayer,
@@ -825,7 +872,10 @@ impl MajorData {
 
 /// What a city-state quest is about, typed by the quest's kind (DESIGN.md 4.5). Python kept it
 /// untyped in `data1`; `data2` was always empty and is dropped.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum QuestTarget {
     /// Nothing: the route quest.
     #[default]
@@ -867,7 +917,8 @@ impl QuestTarget {
 }
 
 /// A quest a city-state gave (`city_states.py:1055-1062`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Quest {
     /// Its row of `quests.json`.
     pub kind: QuestKindId,
@@ -885,7 +936,8 @@ pub struct Quest {
 
 /// When a city-state next gives quests: -1 means not scheduled, 0 due, more a countdown
 /// (Python's `flags["quest_state"]`, `city_states.py:983-997`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QuestTimers {
     /// The countdown to the next global quest.
     pub global: i16,
@@ -909,7 +961,10 @@ impl QuestTimers {
 
 /// A city-state's standing with one major: countdowns, and what it remembers of them
 /// (Python's `flags["pairs"][major]`, `city_states.py:25-31`). A countdown at 0 is off.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct CsPair {
     /// Turns since the major last demanded tribute, counting down.
     pub bullied: i16,
@@ -930,7 +985,8 @@ pub struct CsPair {
 
 /// The "kill the attacker's units" pseudo-quest of a city-state under attack
 /// (`city_states.py:731-760`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WarQuest {
     /// Kills wanted.
     pub needed: u16,
@@ -939,7 +995,8 @@ pub struct WarQuest {
 }
 
 /// What only a city-state has.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CityStateData {
     pub cs_type: Option<CityStateTypeId>,
     pub personality: Option<CityStatePersonality>,
@@ -999,7 +1056,8 @@ impl CityStateData {
 ///
 /// Its seat, and whether it is alive, are private: they change through `State`, which reports
 /// the change.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Player {
     id: PlayerId,
     seat: Seat,

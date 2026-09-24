@@ -165,6 +165,19 @@ engine_events! {
     WonderStarted "wonder_started" false,
 }
 
+/// A save or journal writes an event type by its name, the digest by its index.
+impl serde::Serialize for EngineEvent {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_unit_variant("EngineEvent", *self as u32, self.name())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EngineEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        crate::base::codec::deserialize_by_name(d, "event type", Self::ALL, Self::name)
+    }
+}
+
 impl EngineEvent {
     /// The type called `name`, exactly.
     #[must_use]
@@ -178,7 +191,8 @@ impl EngineEvent {
 
 /// An event's type: one the engine emits, or one a host adds (`agent_error`, `game_paused`,
 /// `game_resumed`), which counts only in the host heads.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventType {
     Engine(EngineEvent),
     Host(Box<str>),
@@ -197,7 +211,8 @@ impl EventType {
 
 /// What an event says in fields, beyond its text: every key `emit` is passed today, typed
 /// (`game.py:860`). Scrubbing walks the typed player fields instead of `_EVENT_PID_KEYS`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventData {
     pub player: Option<PlayerId>,
     pub a: Option<PlayerId>,
@@ -296,7 +311,10 @@ impl EventData {
 }
 
 /// What a name in an event's text refers to (Python's `"c"`, `"l"` and `"t"`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum RefKind {
     Civ,
     Leader,
@@ -329,7 +347,10 @@ impl RefKind {
 /// Where an event's text names a civilization, leader or city (`game.py:842-858`), so each viewer
 /// can be shown "Unknown Civilization" for civilizations it has not met. Offsets are UTF-8 bytes;
 /// Python's were code points.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub struct NameRef {
     pub start: u32,
     pub end: u32,
@@ -338,7 +359,8 @@ pub struct NameRef {
 }
 
 /// One event (`game.py:873-878`). Its `x` and `y` are derived from its tile.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Event {
     pub id: EventId,
     pub turn: Turn,
@@ -352,7 +374,8 @@ pub struct Event {
 }
 
 /// A message between civilizations (`diplomacy.py:306-311`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Message {
     pub id: MessageId,
     pub turn: Turn,
@@ -363,7 +386,8 @@ pub struct Message {
 
 /// A seat's recorded reasoning, or an action or system note, for spectators and the replay
 /// (`tools.py:1084`, `engine_api.py:642-645`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Thought {
     pub turn: Turn,
     pub player: PlayerId,
@@ -375,7 +399,8 @@ pub struct Thought {
 /// One major civilization's statistics at the end of a round (`victory.py:431-453`). It carries
 /// every key of `scripts/refcheck/baseline.py`'s `STAT_KEYS`, which the Phase 2 runner writes
 /// from these rows.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CivStats {
     pub player: PlayerId,
     pub alive: bool,
@@ -449,14 +474,16 @@ impl CivStats {
 }
 
 /// One round's statistics, a row per major civilization in id order.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatsRow {
     pub turn: Turn,
     pub civs: Vec<CivStats>,
 }
 
 /// A tool call as the host logged it, with no wall-clock time: hosts add their own.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionRecord {
     pub turn: Turn,
     pub player: PlayerId,
@@ -466,10 +493,12 @@ pub struct ActionRecord {
 }
 
 /// One replay frame, as `save::journal`'s frame writer encoded it: a keyframe or a delta.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FrameRecord {
     pub turn: Turn,
     pub keyframe: bool,
+    #[serde(with = "crate::base::codec::bytes_b64")]
     pub bytes: Box<[u8]>,
 }
 
@@ -479,7 +508,22 @@ pub struct FrameLog {
     pub frames: Vec<FrameRecord>,
 }
 
+/// What kind of entry was appended to a [`Chronicle`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Appended {
+    Event,
+    Message,
+    Thought,
+    Stats,
+    Action,
+    Frame,
+}
+
 /// A game's history, append-only, in memory beside its state.
+///
+/// Each kind of entry has its own list, and [`order`](Self::order) records the order they were
+/// appended in across the lists: the journal writes entries in that order, so the running hash,
+/// which folds events, messages and stats rows in as they happen, can be recomputed on load.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Chronicle {
     events: Vec<Event>,
@@ -488,6 +532,7 @@ pub struct Chronicle {
     stats: Vec<StatsRow>,
     actions: Vec<ActionRecord>,
     frames: FrameLog,
+    order: Vec<Appended>,
 }
 
 impl Chronicle {
@@ -540,34 +585,46 @@ impl Chronicle {
         &self.frames
     }
 
+    /// The kind of every entry, in the order they were appended.
+    #[must_use]
+    pub fn order(&self) -> &[Appended] {
+        &self.order
+    }
+
     /// Appends an event.
     pub fn push_event(&mut self, e: Event) {
         self.events.push(e);
+        self.order.push(Appended::Event);
     }
 
     /// Appends a message.
     pub fn push_message(&mut self, m: Message) {
         self.messages.push(m);
+        self.order.push(Appended::Message);
     }
 
     /// Appends a thought.
     pub fn push_thought(&mut self, t: Thought) {
         self.thoughts.push(t);
+        self.order.push(Appended::Thought);
     }
 
     /// Appends a stats row.
     pub fn push_stats(&mut self, s: StatsRow) {
         self.stats.push(s);
+        self.order.push(Appended::Stats);
     }
 
     /// Appends an action record.
     pub fn push_action(&mut self, a: ActionRecord) {
         self.actions.push(a);
+        self.order.push(Appended::Action);
     }
 
     /// Appends a replay frame.
     pub fn push_frame(&mut self, f: FrameRecord) {
         self.frames.frames.push(f);
+        self.order.push(Appended::Frame);
     }
 }
 
@@ -585,11 +642,13 @@ pub enum EntryKind {
 /// The running hash is `blake3(hash ‖ kind ‖ canon(entry))`; for an event, `canon(entry)`
 /// covers everything but its id, which host events shift. It pins event wording across platforms,
 /// which the state digest alone would miss.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChronicleHeads {
     pub engine_events: u32,
     pub messages: u32,
     pub stats: u32,
+    #[serde(with = "crate::base::codec::hash_hex")]
     pub hash: [u8; 32],
     /// The newest stats row, which `save::summary` reads for the scores.
     pub last_stats: Option<StatsRow>,
@@ -613,7 +672,8 @@ impl ChronicleHeads {
 }
 
 /// The heads of host activity, kept in `State`, saved, never digested.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostHeads {
     /// The next event id, shared by engine and host events so the feed stays one sequence.
     pub next_event_id: u32,

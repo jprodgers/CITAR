@@ -26,7 +26,10 @@ use crate::base::sets::{BuildingSet, MAX_SPECIALISTS, PlayerVec};
 
 /// A production item that is not a thing: turning production into gold or science, or into
 /// nothing (`cities.py:24`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Perpetual {
     Gold,
     Science,
@@ -55,7 +58,10 @@ impl Perpetual {
 }
 
 /// Something a city can build (Python's queue entries, `{"kind", "id"}`, `state.py:159`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Constructible {
     Building(BuildingId),
     Unit(BaseUnitId),
@@ -63,7 +69,20 @@ pub enum Constructible {
 }
 
 /// What a city's citizens favour (`cities.py:25-31`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum CityFocus {
     #[default]
     Balanced,
@@ -125,7 +144,8 @@ impl CityFocus {
 pub const NO_RELIGION_PRESSURE: i32 = 100;
 
 /// One city (`state.py:147-190`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct City {
     id: CityId,
     owner: PlayerId,
@@ -149,6 +169,7 @@ pub struct City {
     pub free_buildings: BuildingSet,
     pub queue: SmallVec<[Constructible; 4]>,
     /// Production invested in each item.
+    #[serde(with = "crate::base::codec::pairs")]
     pub progress: BTreeMap<Constructible, f64>,
     pub overflow: f64,
     pub bought_this_turn: SmallVec<[Constructible; 2]>,
@@ -158,6 +179,7 @@ pub struct City {
     /// The tiles the player locked, sorted.
     pub locked: Vec<TileIdx>,
     /// Specialists by `SpecialistId`.
+    #[serde(with = "specialist_counts")]
     pub specialists: [u8; MAX_SPECIALISTS],
     pub manual_specialists: bool,
     pub focus: CityFocus,
@@ -182,6 +204,49 @@ pub struct City {
     pub wltkd: i16,
     pub demanded_resource: Option<ResourceId>,
     pub demand_countdown: i16,
+}
+
+/// A city's specialists: in JSON the non-zero counts by specialist, which a reordered ruleset
+/// cannot misread; in `CANON_V1` the fixed array.
+mod specialist_counts {
+    use std::collections::BTreeMap;
+
+    use serde::de::{self, Deserializer};
+    use serde::ser::Serializer;
+    use serde::{Deserialize, Serialize};
+
+    use crate::base::ids::{Id, SpecialistId};
+    use crate::base::sets::MAX_SPECIALISTS;
+
+    pub fn serialize<S: Serializer>(
+        counts: &[u8; MAX_SPECIALISTS],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        if !s.is_human_readable() {
+            return counts.serialize(s);
+        }
+        let mut map = BTreeMap::new();
+        for (i, &n) in counts.iter().enumerate() {
+            if let Some(id) = SpecialistId::from_index(i).filter(|_| n != 0) {
+                map.insert(id, n);
+            }
+        }
+        map.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; MAX_SPECIALISTS], D::Error> {
+        if !d.is_human_readable() {
+            return <[u8; MAX_SPECIALISTS]>::deserialize(d);
+        }
+        let mut out = [0u8; MAX_SPECIALISTS];
+        for (id, n) in BTreeMap::<SpecialistId, u8>::deserialize(d)? {
+            let slot = out.get_mut(id.index()).ok_or_else(|| {
+                de::Error::custom(format!("specialist {} is past the {MAX_SPECIALISTS} kept", id.0))
+            })?;
+            *slot = n;
+        }
+        Ok(out)
+    }
 }
 
 impl City {
