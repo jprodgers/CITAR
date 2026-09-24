@@ -14,8 +14,8 @@
 //! The game core (package 1b-01):
 //! - [`core`]: [`Game`] itself, loading, and the accessors of `game.py` (`game.py:100-145`,
 //!   `320-540`, `656-812`);
-//! - [`derive`]: the caches ([`derive::Derived`]) and the revisions and memos they validate
-//!   themselves with ([`derive::rev`]), which replace `game.py:565-609`;
+//! - [`derive`](mod@derive): the caches ([`derive::Derived`]) and the revisions and memos they
+//!   validate themselves with ([`derive::rev`]), which replace `game.py:565-609`;
 //! - [`eval`]: [`eval::EvalView`], the unique evaluator's view of a game;
 //! - [`mutate`]: every write to the state, and what each one tells the caches;
 //! - [`pending`]: work raised by a write and done by the next settle, and the effect queue;
@@ -28,7 +28,7 @@
 //! - [`error`]: what a refused call says.
 //!
 //! **Porting markers.** A step whose system a later package ports is written as
-//! [`pending`]`(Porting::Pending("<package>"))`, or [`pending_or`] where it must answer
+//! `pending(Porting::Pending("<package>"))`, or `pending_or` where it must answer
 //! something meanwhile. `cargo xtask check` counts these by their literal argument and fails
 //! once that package is done (DESIGN.md 3.4, rule 3).
 

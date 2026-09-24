@@ -5,7 +5,7 @@
 //! and `_scrub_event` (`game.py:806-990`), and the listeners of `game.py:139` (every call returns
 //! the events it appended as an [`EventBatch`] instead).
 //!
-//! **Emitting** ([`Game::emit`]) does five things, in Python's order:
+//! **Emitting** (`Game::emit`) does five things, in Python's order:
 //! 1. the possessive fix, "Aztecs's" to "Aztecs'" (`base::text::possessive_s`);
 //! 2. a non-public event anchored on a tile reaches every major that sees the tile too, unless
 //!    its type is private (`EngineEvent::is_private`, Python's `PRIVATE_EVENTS`): rivals are

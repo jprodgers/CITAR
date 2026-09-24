@@ -10,7 +10,7 @@
 //! accessors of `game.py` (`at_war`, `has_met`, `is_friend`, `has_open_borders`, `stat_reserve`,
 //! `religion_enabled`, `victory_enabled`), the tile predicates of `tiles.py:100-165`, and the
 //! plain fields of the state. The answers that need a system a later package ports are marked
-//! where they are ([`super::pending_or`]): the unique indexes (1b-05), resource supply (1b-05),
+//! where they are (`pending_or`): the unique indexes (1b-05), resource supply (1b-05),
 //! coast and the trade network (1b-06), the civilization's era (1b-07), and religious majorities
 //! (1b-08). Until then they answer what a game without that system would.
 

@@ -3,12 +3,12 @@
 //! Only this file may call `State`'s mutable accessors (`cargo xtask check`). Rule code writes
 //! through `Game` in one of two ways:
 //! - **setters**, which wrap the state's own: each state setter returns a `#[must_use]`
-//!   [`Change`], and the wrapper passes it to [`Game::changed`], which moves the revisions of
+//!   [`Change`], and the wrapper passes it to `Game::changed`, which moves the revisions of
 //!   what it touched and raises the work the next settle does (citizen rechecks, dirty vision
 //!   sources). They are for writes whose consequences need the new state: ownership, placement,
 //!   a city or unit appearing or going, a tile changing, a seat, a player's fate, the clock;
-//! - **touches** ([`Game::city_mut`], [`Game::player_mut`], [`Game::unit_mut`],
-//!   [`Game::edit_world`], [`Game::edit_diplo`]), for field edits on one entity: the touch moves
+//! - **touches** (`Game::city_mut`, `player_mut`, `unit_mut`, `edit_world` and
+//!   `edit_diplo`), for field edits on one entity: the touch moves
 //!   the revisions its flags name *before* handing out `&mut`. The fields a touch cannot reach
 //!   (a unit's owner, tile and carrier; a city's owner and tile; every tile field) move only
 //!   through setters.
@@ -240,7 +240,8 @@ impl Game {
 
     // ---- Cities -----------------------------------------------------------------------------
 
-    /// Adds a new city; the tiles it claims are claimed with [`set_tile_owner`](Self::set_tile_owner).
+    /// Adds a new city; the tiles it claims are claimed with
+    /// [`set_tile_owner`](Self::set_tile_owner).
     pub(crate) fn add_city(&mut self, city: City) -> Result<(), StateError> {
         let ch = self.st.cities_mut().found(city)?;
         self.changed(ch);
