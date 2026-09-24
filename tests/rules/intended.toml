@@ -121,3 +121,7 @@ reason = "Python placed a city's citizens again at the end of its turn when a ti
 [[differences]]
 id = "citizen-tools-list-tiles-sorted"
 reason = "work_tile, set_city_focus and set_specialists listed a city's worked and locked tiles in the order its citizens took them; Rust lists them by column and then row, as the city's own view does"
+
+[[differences]]
+id = "cities-never-share-a-tile"
+reason = "Python let a city work a tile a sibling city of the same owner worked, unless the tile was that sibling's own territory, so two cities could work one tile; Rust gives a worked tile to one city, and no other may work it"

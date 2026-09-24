@@ -36,6 +36,43 @@ impl AnswerModule for CityStats {
     }
 }
 
+/// The tiles a city could work, as the group compares them: the engine's, and those it leaves out
+/// only because another city of the owner works them where Python let the city take them too.
+/// Python refused a tile only when the city of the tile's territory worked it, so two cities
+/// could work one tile; the engine never lets them (`cities-never-share-a-tile`, a rule script's
+/// difference). Adding those back leaves every other way the engine could leave a tile out to the
+/// comparison.
+fn workable(g: &Game, c: citar_engine::base::ids::CityId) -> Vec<u32> {
+    let mut out = cstats::workable_tiles(g, c);
+    if let Some(city) = g.city(c) {
+        let owner = city.owner();
+        let st = g.state();
+        let works = |x: citar_engine::base::ids::CityId, t| {
+            g.city(x).is_some_and(|y| y.worked.contains(&t))
+        };
+        for t in cstats::tiles_in_range(g, c) {
+            let Some(tile) = g.tile(t) else { continue };
+            let blocked = g.military_at(t).is_some_and(|m| g.at_war(owner, m.owner()));
+            if out.contains(&t)
+                || t == city.tile()
+                || tile.owner() != Some(owner)
+                || st.city_at(t).is_some()
+                || blocked
+            {
+                continue;
+            }
+            let sibling = st.cities().of(owner).iter().any(|&x| x != c && works(x, t));
+            let refused = tile.city().is_some_and(|x| x != c && works(x, t));
+            if sibling && !refused {
+                out.push(t);
+            }
+        }
+    }
+    let mut ids: Vec<u32> = out.iter().map(|t| t.0).collect();
+    ids.sort();
+    ids
+}
+
 /// A source's stats as Python's dict held them: the keys it named.
 pub fn named(y: &Yields) -> Value {
     keyed(&y.stats, y.keys)
@@ -92,7 +129,7 @@ fn city(g: &Game, c: citar_engine::base::ids::CityId) -> Value {
         "maintenance": cstats::maintenance(g, c),
         "max_health": cstats::max_health(g, c),
         "strength": cstats::city_strength(g, c),
-        "workable": cstats::workable_tiles(g, c).iter().map(|t| t.0).collect::<Vec<_>>(),
+        "workable": workable(g, c),
         "connected_to_capital": query::connected_to_capital(g, c),
     });
     if let Some(cur) = cstats::current_construction(x) {
