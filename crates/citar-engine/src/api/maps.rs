@@ -176,6 +176,20 @@ mod tests {
         assert_eq!(e.to_string(), "players must be a whole number from 0 to 255, not 'many'.");
         let e = generate_map(r, 1, &json!({"width": 4})).expect_err("too narrow");
         assert!(matches!(e, EngineError::Map(_)));
+        // A height is checked as given, then made even on a map that wraps north-south: the
+        // longest a u16 holds is refused, not overflowed, and so is one past the longest side.
+        for (height, edges) in [(65_535, "wrap_y"), (257, "wrap_both"), (7, "wrap_y")] {
+            let e = generate_map(r, 1, &json!({"height": height, "map_edges": edges}))
+                .expect_err("out of bounds");
+            assert_eq!(e.to_string(), "Maps must be between 8 and 256 tiles on each side.");
+        }
+        let cfg = json!({"seed": 1, "height": 65_535, "map_edges": "wrap_y"});
+        let e = crate::game::Game::config_from_json(r, cfg.to_string().as_bytes())
+            .expect_err("too tall");
+        assert!(matches!(e, EngineError::Map(_)), "{e}");
+        let odd = json!({"map_size": "duel", "height": 29, "map_edges": "wrap_y", "players": 2});
+        let tall = generate_map(r, 1, &odd).expect("an odd height made even");
+        assert_eq!(tall["height"], 30);
         let named = generate_map(r, 1, &json!({"map_size": "duel", "name": "Twin Islands!"}))
             .expect("a map");
         assert_eq!(

@@ -382,17 +382,21 @@ pub(crate) fn generated_map<'a>(
     let width = side("width", lobby.width)?;
     let mut height = side("height", lobby.height)?;
     let (wrap_x, wrap_y) = edges.wraps();
-    // Odd rows are offset: only an even height tiles north-south (game.py:188-189).
-    if wrap_y && height % 2 == 1 {
+    let (lo, hi) = (crate::base::hex::MIN_SIDE, crate::base::hex::MAX_SIDE);
+    let size_error =
+        || EngineError::Map(format!("Maps must be between {lo} and {hi} tiles on each side."));
+    // The sides as given are checked first, as `maps.generated_map` did (maps.py:88-91): a
+    // height beyond the grid is refused before it is made even, so it cannot overflow.
+    if !(lo..=hi).contains(&width) || !(lo..=hi).contains(&height) {
+        return Err(size_error());
+    }
+    // Odd rows are offset: only an even height tiles north-south (game.py:188-189). The longest
+    // side is even, so an odd height within it stays within it.
+    const { assert!(crate::base::hex::MAX_SIDE.is_multiple_of(2)) };
+    if wrap_y && !height.is_multiple_of(2) {
         height += 1;
     }
-    HexGrid::new(width, height, wrap_x, wrap_y).map_err(|_| {
-        EngineError::Map(format!(
-            "Maps must be between {} and {} tiles on each side.",
-            crate::base::hex::MIN_SIDE,
-            crate::base::hex::MAX_SIDE
-        ))
-    })?;
+    HexGrid::new(width, height, wrap_x, wrap_y).map_err(|_| size_error())?;
     let dims = ((width, height) != (lobby.width, lobby.height)).then_some((width, height));
     Ok(MapSource::Generated { size, map_type, edges, dims })
 }
