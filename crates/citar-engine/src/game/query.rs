@@ -8,16 +8,20 @@
 //! Package 1b-01 lands the skeleton: the unique queries in a game's view. Each system package
 //! adds the reads its refcheck group compares (DESIGN.md 3.4, rule 1): package 1b-05 the
 //! resource supply, the unique index by placeholder, unit upkeep and unit supply of the `civs`
-//! group.
+//! group; package 1b-06 tile yields, city stats and happiness, civilization stats and
+//! connectivity.
 
 use std::collections::BTreeMap;
 
-use crate::base::ids::{EraId, PlayerId, ResourceId, UniqueId};
+use crate::base::ids::{CityId, EraId, PlayerId, ResourceId, TileIdx, UniqueId};
+use crate::base::stats::Stats;
 use crate::unique::{Ctx, UniqueType, index, uq};
 
 use super::Game;
+use super::cities::connections::Connectivity;
+use super::cities::stats::{CityParts, CityStats};
 use super::derive::civ;
-use super::economy::{self, ResourceItem};
+use super::economy::{self, CivStats, Happiness, ResourceItem};
 
 /// The civilization's uniques of type `ty` that hold in `ctx`, with their copies, in index
 /// order (`civ_uniques`, `economy.py:132-148`).
@@ -76,6 +80,51 @@ pub fn unique_index_counts(g: &Game, p: PlayerId) -> BTreeMap<String, u32> {
 #[must_use]
 pub fn era(g: &Game, p: PlayerId) -> EraId {
     civ::era(g, p)
+}
+
+// ---- Yields, stats and happiness (package 1b-06) ----------------------------------------------
+
+/// What tile `t` yields to `viewer`, as `city` works it (`tiles.tile_stats`, `tiles.py:259-262`):
+/// from its memo (DESIGN.md 6.5).
+#[must_use]
+pub fn tile_yield(g: &Game, t: TileIdx, viewer: Option<PlayerId>, city: Option<CityId>) -> Stats {
+    super::derive::stats::tile_yield(g, t, viewer, city)
+}
+
+/// City `c`'s parts and happiness (`cities.city_happiness`).
+#[must_use]
+pub fn city_parts(g: &Game, c: CityId) -> CityParts {
+    super::derive::stats::city_parts(g, c).clone()
+}
+
+/// City `c`'s stats (`cities.city_stats`).
+#[must_use]
+pub fn city_stats(g: &Game, c: CityId) -> CityStats {
+    super::derive::stats::city_stats(g, c).clone()
+}
+
+/// Civilization `p`'s happiness (`economy.happiness`).
+#[must_use]
+pub fn happiness(g: &Game, p: PlayerId) -> Happiness {
+    super::derive::stats::happiness(g, p).clone()
+}
+
+/// Civilization `p`'s stats for the next turn (`economy.stat_map` and `civ_stats`).
+#[must_use]
+pub fn civ_stats(g: &Game, p: PlayerId) -> CivStats {
+    super::derive::stats::civ_stats(g, p).clone()
+}
+
+/// How civilization `p`'s cities are linked to its capital (`cities.connected_cities`).
+#[must_use]
+pub fn connectivity(g: &Game, p: PlayerId) -> Connectivity {
+    super::derive::stats::connectivity(g, p).clone()
+}
+
+/// Whether city `c` has a trade route to its capital (`cities.connected_to_capital`).
+#[must_use]
+pub fn connected_to_capital(g: &Game, c: CityId) -> bool {
+    super::derive::stats::connected_to_capital(g, c)
 }
 
 /// The context of a question about civilization `p` in this game.

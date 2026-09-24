@@ -162,8 +162,13 @@ impl Game {
             }
         }
         // Python's conditionals see the happiness `happiness()` computed while it was computing
-        // it from 0 (economy.py:404-433): commit it once from 0, once Happiness exists.
-        pending(Porting::Pending("1b-06"));
+        // it from 0 (economy.py:404-433): commit it once, from the 0 a conversion starts with.
+        for p in g.st.players().ids().collect::<Vec<_>>() {
+            super::economy::commit_happiness(&mut g, p, false);
+        }
+        // Converted cities keep the citizens Python placed (DESIGN.md 6.8): nothing the
+        // conversion's own fixes touched reassigns them.
+        g.pending.clear_recheck();
         g.settle();
         Ok((g, c.report))
     }
@@ -254,6 +259,8 @@ impl Game {
     pub fn verify_caches(&self) -> Vec<String> {
         let mut out = self.dv.verify(self.rules, &self.st);
         out.extend(super::derive::civ::verify(self));
+        out.extend(super::derive::stats::verify(self));
+        out.extend(super::cities::citizens::verify(self));
         out
     }
 

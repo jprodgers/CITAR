@@ -243,6 +243,9 @@ fn player(g: &Game, p: PlayerId) -> Value {
         "explored": pl.explored.len(),
         "notes": pl.major.as_deref().map_or("", |m| &*m.notes),
         "city_state": city_state,
+        "happiness": crate::game::query::happiness(g, p).total,
+        "happiness_seen": pl.econ.happiness_seen,
+        "gold_rate": pl.econ.last_gold_rate,
     })
 }
 
@@ -334,6 +337,30 @@ fn units(g: &Game, o: &Map<String, Value>) -> Result<Value, ActionError> {
 fn city(g: &Game, c: CityId) -> Value {
     let Some(x) = g.city(c) else { return Value::Null };
     let (tx, ty) = g.xy(x.tile());
+    let xys = |tiles: &[TileIdx]| {
+        let mut v: Vec<(i32, i32)> = tiles.iter().map(|&t| g.xy(t)).collect();
+        v.sort();
+        v.into_iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>()
+    };
+    let r = g.rules();
+    let mut specialists: Vec<(&str, u8)> = x
+        .specialists
+        .iter()
+        .enumerate()
+        .filter(|&(_, &n)| n > 0)
+        .filter_map(|(i, &n)| {
+            let s = crate::base::ids::SpecialistId(u8::try_from(i).ok()?);
+            Some((&*r.specialists().get(s)?.name, n))
+        })
+        .collect();
+    specialists.sort();
+    let specialists: Map<String, Value> =
+        specialists.into_iter().map(|(k, n)| (k.to_owned(), json!(n))).collect();
+    let total = crate::game::query::city_stats(g, c).total;
+    let yields: Map<String, Value> = crate::base::stats::Stat::ALL
+        .into_iter()
+        .map(|k| (k.key().to_owned(), json!(total[k])))
+        .collect();
     json!({
         "id": c.get(),
         "name": &*x.name,
@@ -342,6 +369,14 @@ fn city(g: &Game, c: CityId) -> Value {
         "y": ty,
         "pop": x.pop,
         "buildings": sorted_names(g, x.buildings.iter()),
+        "worked": xys(&x.worked),
+        "locked": xys(&x.locked),
+        "workable": xys(&crate::game::cities::stats::workable_tiles(g, c)),
+        "specialists": specialists,
+        "focus": x.focus.name(),
+        "avoid_growth": x.avoid_growth,
+        "food": x.food,
+        "yields": yields,
     })
 }
 

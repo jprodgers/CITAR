@@ -19,7 +19,7 @@
 //!
 //! What differs from Python, on purpose:
 //! - happiness is committed at S1 and E1 and read as committed (DESIGN.md 6.6), and the gold
-//!   rate at E2 (package 1b-06);
+//!   rate is written at E2;
 //! - the game ends at its turn limit with no winner until scores exist (package 1c-08 declares
 //!   the Time victory).
 
@@ -160,12 +160,12 @@ pub static PLAYER_START: [Stage; 23] = [
     Stage::later("S0", "the barbarians act", Who::BARBARIAN, Always, Porting::Pending("1c-06")),
     Stage::settle("S0", Who::BARBARIAN),
     Stage::run("S0", "the barbarians' turn ends here", Who::ALL, Always, Step::StopIfBarbarian),
-    Stage::later(
+    Stage::run(
         "S1",
         "commit the happiness conditionals see",
         Who::CIVS,
         Always,
-        Porting::Pending("1b-06"),
+        Step::Player(economy::commit_happiness_stage),
     ),
     Stage::settle("S1", Who::CIVS),
     Stage::later("S2", "research progress", Who::CIVS, HasCities, Porting::Pending("1b-07")),
@@ -218,20 +218,20 @@ pub static PLAYER_END: [Stage; 25] = [
     ),
     Stage::run("E0", "the barbarians' turn ends here", Who::ALL, Always, Step::StopIfBarbarian),
     Stage::later("E1", "triggers upon turn end", Who::CIVS, Always, Porting::Pending("1b-08")),
-    Stage::later(
+    Stage::run(
         "E1",
         "commit the happiness conditionals see",
         Who::CIVS,
         Always,
-        Porting::Pending("1b-06"),
+        Step::Player(economy::commit_happiness_stage),
     ),
     Stage::settle("E1", Who::CIVS),
-    Stage::later(
+    Stage::run(
         "E2",
         "the civilization's yields, its gold rate and totals",
         Who::CIVS,
         Always,
-        Porting::Pending("1b-06"),
+        Step::Player(economy::end_turn_rates),
     ),
     Stage::later("E3", "culture and policies", Who::CIVS, Always, Porting::Pending("1b-07")),
     Stage::later(

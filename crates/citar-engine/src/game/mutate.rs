@@ -56,6 +56,7 @@ use crate::state::players::{AutoDecision, AutoOverrides, Controller, Handicap, P
 use crate::state::units::Unit;
 use crate::state::world::World;
 use crate::state::{Change, Changes, StateError, TileClaim, TurnClock};
+use crate::unique::CondDeps;
 
 #[allow(
     dead_code,
@@ -68,12 +69,100 @@ impl Game {
     pub(crate) fn changed(&mut self, ch: Change) {
         self.dv.revs.on_change(&self.st, &ch);
         self.dv.civ.track(&ch);
+        self.dv.stats.track(&ch);
         let react = self.dv.on(&self.st, self.rules, &ch);
         for c in react.recheck {
             self.pending.flag_city(c);
         }
         for s in react.sight {
             self.pending.flag_sight(s);
+        }
+        self.recheck_civs(&ch);
+    }
+
+    /// Flags for a citizen recheck the cities a change concerns through their owners' indexes,
+    /// supplies and conditionals, beyond the tiles [`Derived::on`] names (DESIGN.md 6.7): a
+    /// city-state's bonuses (contact, war, an ally, its fate), a unit made or lost (the supply),
+    /// a resource's tile, a friendship (great person points), a city appearing or changing
+    /// hands, and the turn.
+    fn recheck_civs(&mut self, ch: &Change) {
+        let cs = |g: &Self, p: PlayerId| g.st.player(p).is_some_and(Player::is_city_state);
+        match *ch {
+            Change::Turn | Change::PlayerAlive(_) => {
+                for c in self.st.cities().ids() {
+                    self.pending.flag_city(c);
+                }
+            }
+            Change::Alliance { cs: q, old, new } => {
+                for p in [Some(q), old, new].into_iter().flatten() {
+                    self.flag_cities_of(p);
+                }
+            }
+            Change::War { a, b } | Change::Met { a, b } => {
+                if cs(self, a) || cs(self, b) {
+                    self.flag_cities_of(a);
+                    self.flag_cities_of(b);
+                }
+                self.recheck_for(CondDeps::WAR, None);
+            }
+            Change::Diplo { a, b } => {
+                self.flag_cities_of(a);
+                self.flag_cities_of(b);
+                self.recheck_for(CondDeps::WAR, None);
+            }
+            Change::UnitPlaced { owner, from, .. } => {
+                if from.is_none() {
+                    self.flag_cities_of(owner);
+                }
+                self.recheck_for(CondDeps::UNIT_SET, None);
+            }
+            Change::UnitRemoved { owner, .. } => {
+                self.flag_cities_of(owner);
+                self.recheck_for(CondDeps::UNIT_SET, None);
+            }
+            Change::UnitOwner { old, new, .. } => {
+                self.flag_cities_of(old);
+                self.flag_cities_of(new);
+                self.recheck_for(CondDeps::UNIT_SET, None);
+            }
+            Change::TileInput(t) | Change::TileHeight(t) => {
+                if let Some(tile) = self.st.tiles().get(t)
+                    && tile.resource().is_some()
+                    && let Some(p) = tile.owner()
+                {
+                    self.flag_cities_of(p);
+                }
+                self.recheck_for(CondDeps::MAP, None);
+            }
+            Change::TileOwner { t, old, new } => {
+                if self.st.tiles().get(t).is_some_and(|x| x.resource().is_some()) {
+                    for p in [old.owner, new.owner].into_iter().flatten() {
+                        self.flag_cities_of(p);
+                    }
+                }
+                self.recheck_for(CondDeps::MAP, None);
+            }
+            Change::CityAdded(c) => {
+                if let Some(p) = self.st.cities().get(c).map(City::owner) {
+                    self.flag_cities_of(p);
+                }
+                self.recheck_for(CondDeps::CITY_COUNT, None);
+            }
+            Change::CityRemoved { owner, .. } => {
+                self.flag_cities_of(owner);
+                self.recheck_for(CondDeps::CITY_COUNT, None);
+            }
+            Change::CityOwner { old, new, .. } => {
+                self.flag_cities_of(old);
+                self.flag_cities_of(new);
+                self.recheck_for(CondDeps::CITY_COUNT, None);
+            }
+            Change::CityTiles(_)
+            | Change::Talks { .. }
+            | Change::Spy(_)
+            | Change::Seat(_)
+            | Change::Clock
+            | Change::Names => {}
         }
     }
 
@@ -346,6 +435,7 @@ impl Game {
         value: f64,
     ) -> Result<(), StateError> {
         let was = self.is_friend_level(cs, major);
+        self.recheck_for(CondDeps::WAR, None);
         let slot = self
             .st
             .players_mut()
@@ -357,6 +447,7 @@ impl Game {
         self.dv.revs.touch_player(cs, PlayerTouch::CITY_STATE);
         if self.is_friend_level(cs, major) != was {
             self.dv.revs.touch_player(major, PlayerTouch::INDEX);
+            self.flag_cities_of(major);
         }
         Ok(())
     }
@@ -390,10 +481,59 @@ impl Game {
     pub(crate) fn city_mut(&mut self, c: CityId, t: CityTouch) -> Option<&mut City> {
         let owner = self.st.cities().get(c)?.owner();
         self.dv.revs.touch_city(c, owner, t);
-        if t.intersects(CityTouch::CORE | CityTouch::BUILDINGS | CityTouch::WORK) {
+        if t.intersects(
+            CityTouch::CORE | CityTouch::BUILDINGS | CityTouch::WORK | CityTouch::RELIGION,
+        ) {
             self.pending.flag_city(c);
         }
+        if t.contains(CityTouch::BUILDINGS) {
+            // Its buildings are in its owner's index, which every city of its owner reads.
+            self.flag_cities_of(owner);
+            self.recheck_for(CondDeps::GLOBAL_BUILDINGS | CondDeps::CIV_BUILDINGS, None);
+        }
+        if t.contains(CityTouch::STOCKS) {
+            self.recheck_for(CondDeps::CITY, None);
+        }
         self.st.cities_mut().get_mut(c)
+    }
+
+    /// Writes where a city's citizens are, as the settle's reassignment decided, and marks the
+    /// city assigned by this engine (DESIGN.md 6.8). It moves the city's `work` revisions but
+    /// flags nothing: the settle flags the cities the change concerns.
+    pub(crate) fn set_citizens(&mut self, c: CityId, a: super::cities::citizens::Assignment) {
+        let Some(owner) = self.st.cities().get(c).map(City::owner) else { return };
+        self.dv.revs.touch_city(c, owner, CityTouch::WORK);
+        if let Some(x) = self.st.cities_mut().get_mut(c) {
+            x.worked = a.worked;
+            x.locked = a.locked;
+            x.specialists = a.specialists;
+            x.citizens_settled = true;
+        }
+    }
+
+    /// Flags every city of `p` for a citizen recheck.
+    pub(crate) fn flag_cities_of(&mut self, p: PlayerId) {
+        for &c in self.st.cities().of(p) {
+            self.pending.flag_city(c);
+        }
+    }
+
+    /// Flags cities for a citizen recheck when a write moved one of `classes` and the
+    /// conditionals or filters of the uniques citizens read (tile yields, city stats, great
+    /// person points) read one of them: the cities of `civ` for its own classes, every city
+    /// otherwise.
+    pub(crate) fn recheck_for(&mut self, classes: CondDeps, civ: Option<PlayerId>) {
+        if !self.dv.stats.deps().citizens.intersects(classes) {
+            return;
+        }
+        match civ {
+            Some(p) => self.flag_cities_of(p),
+            None => {
+                for c in self.st.cities().ids() {
+                    self.pending.flag_city(c);
+                }
+            }
+        }
     }
 
     /// A player's fields, after moving the revisions `t` names. A seat, and whether the player
@@ -401,6 +541,32 @@ impl Game {
     pub(crate) fn player_mut(&mut self, p: PlayerId, t: PlayerTouch) -> Option<&mut Player> {
         self.st.player(p)?;
         self.dv.revs.touch_player(p, t);
+        // What its cities' yields read: its index (techs, policies, beliefs), its stocks (a
+        // golden age), its capital.
+        if t.intersects(
+            PlayerTouch::INDEX
+                | PlayerTouch::POLICIES
+                | PlayerTouch::RELIGION
+                | PlayerTouch::STOCKS
+                | PlayerTouch::CAPITAL,
+        ) {
+            self.flag_cities_of(p);
+        }
+        if t.contains(PlayerTouch::RESEARCH) {
+            self.recheck_for(CondDeps::RESEARCH_QUEUE, Some(p));
+        }
+        if t.contains(PlayerTouch::POLICIES) {
+            self.recheck_for(CondDeps::GLOBAL_POLICIES, None);
+        }
+        if t.contains(PlayerTouch::RELIGION) {
+            self.recheck_for(CondDeps::RELIGION_STATE | CondDeps::GLOBAL_POLICIES, None);
+        }
+        if t.contains(PlayerTouch::CAPITAL) {
+            self.recheck_for(CondDeps::CITY_COUNT, None);
+        }
+        if t.contains(PlayerTouch::CITY_STATE) {
+            self.recheck_for(CondDeps::WAR, None);
+        }
         self.st.players_mut().get_mut(p)
     }
 
@@ -409,6 +575,13 @@ impl Game {
     pub(crate) fn unit_mut(&mut self, u: UnitId, t: UnitTouch) -> Option<&mut Unit> {
         let owner = self.st.units().get(u)?.owner();
         self.dv.revs.touch_unit(u, owner, t);
+        if t.intersects(UnitTouch::CORE | UnitTouch::BASE) {
+            self.recheck_for(CondDeps::UNIT_SET, None);
+        }
+        if t.contains(UnitTouch::BASE) {
+            // An upgrade may change what its owner's supply uses.
+            self.flag_cities_of(owner);
+        }
         if t.contains(UnitTouch::SIGHT) {
             self.pending.flag_sight(SightSource::Unit(u));
         }
@@ -419,6 +592,15 @@ impl Game {
     /// names.
     pub(crate) fn edit_world(&mut self, t: WorldTouch) -> &mut World {
         self.dv.revs.touch_world(t);
+        if t.contains(WorldTouch::RELIGIONS) {
+            // Founder beliefs are in every civilization's index, follower beliefs in every city.
+            for c in self.st.cities().ids() {
+                self.pending.flag_city(c);
+            }
+        }
+        if t.contains(WorldTouch::WONDERS) {
+            self.recheck_for(CondDeps::GLOBAL_BUILDINGS, None);
+        }
         self.st.world_mut()
     }
 
@@ -427,6 +609,12 @@ impl Game {
     /// reports what moved.
     pub(crate) fn edit_diplo(&mut self, t: DiploTouch) -> &mut Diplomacy {
         self.dv.revs.touch_diplo(t);
+        if t.contains(DiploTouch::DEALS) {
+            // Deals trade resources, which are in their parties' indexes.
+            for c in self.st.cities().ids() {
+                self.pending.flag_city(c);
+            }
+        }
         self.st.diplo_mut()
     }
 

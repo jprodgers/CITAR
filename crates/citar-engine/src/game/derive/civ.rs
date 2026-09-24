@@ -256,6 +256,12 @@ pub(crate) fn civ_index_full(g: &Game, p: PlayerId) -> IndexRef<'_> {
     IndexRef::Memo(m.full.get(g.dv.revs.now(), inputs, compute))
 }
 
+/// When civilization `p`'s index with its resource layer last changed, validated now.
+pub(crate) fn civ_index_full_changed(g: &Game, p: PlayerId) -> Rev {
+    drop(civ_index_full(g, p));
+    g.dv.civ.civs.get(p).map_or(Rev::START, |m| m.full.changed())
+}
+
 /// Civilization `p`'s resources (`ResourceSupply`); `None` for a player the game does not have.
 pub(crate) fn supply(g: &Game, p: PlayerId) -> Option<Ref<'_, ResourceSupply>> {
     let m = g.dv.civ.civs.get(p)?;
@@ -268,7 +274,7 @@ pub(crate) fn supply(g: &Game, p: PlayerId) -> Option<Ref<'_, ResourceSupply>> {
 }
 
 /// When civilization `p`'s supply last changed, validated now.
-fn supply_changed(g: &Game, p: PlayerId) -> Rev {
+pub(crate) fn supply_changed(g: &Game, p: PlayerId) -> Rev {
     drop(supply(g, p));
     g.dv.civ.civs.get(p).map_or(Rev::START, |m| m.supply.changed())
 }
@@ -380,6 +386,7 @@ pub(crate) fn city_local(g: &Game, c: CityId) -> IndexRef<'_> {
 /// hold in it alone of the resources its improved tiles give its owner, of those its owner's
 /// supply has some of (the Marble decision, DESIGN.md 5.12). A resource traded away, or all used
 /// up, gives its uniques nowhere, as Python's resource layer held only what the supply had.
+// refcheck: marble-bonus-in-its-own-city
 pub(crate) fn city_local_full(g: &Game, c: CityId) -> IndexRef<'_> {
     let caches = &g.dv.civ;
     let (Some(m), Some(city)) = (caches.cities.get(&c), g.st.cities().get(c)) else {
@@ -412,6 +419,12 @@ pub(crate) fn city_local_full(g: &Game, c: CityId) -> IndexRef<'_> {
         city_local(g, c).merged(&index::city_local(g.rules, &BuildingSet::new(), &given))
     };
     IndexRef::Memo(m.full.get(revs.now(), inputs, compute))
+}
+
+/// When city `c`'s own index with its resources last changed, validated now.
+pub(crate) fn city_local_full_changed(g: &Game, c: CityId) -> Rev {
+    drop(city_local_full(g, c));
+    g.dv.civ.cities.get(&c).map_or(Rev::START, |m| m.full.changed())
 }
 
 /// What religion `r` gives the cities that follow it: its follower beliefs' uniques

@@ -9,7 +9,7 @@
 //!    alternate until neither has anything left;
 //! 2. citizens: flagged cities reassign their citizens in id order, pass after pass, until no
 //!    city is flagged or [`SETTLE_PASSES`] passes are spent, which is invariant violation
-//!    SETTLE-1 (package 1b-06 ports the assignment);
+//!    SETTLE-1 (`game::cities::citizens`, package 1b-06);
 //! 3. the checks [`DebugOptions`](crate::game::DebugOptions) asks for.
 //!
 //! Settle runs at the end of every successful mutating call and at the settle points of a turn,
@@ -93,15 +93,18 @@ impl Game {
     }
 
     /// One pass over the flagged cities, in id order: each reassigns its citizens, which may
-    /// flag a sibling city whose tiles it took or released (DESIGN.md 6.7).
+    /// flag a sibling city whose tiles it took or released (DESIGN.md 6.7). A sibling with a
+    /// higher id is reassigned in the same pass, one with a lower id in the next.
     fn reassign_flagged(&mut self) {
-        // cities.assign_citizens (cities.py:748-926) and the citizen oracle's settled flag.
-        pending(Porting::Pending("1b-06"));
         #[cfg(test)]
         if self.pending.stubborn {
             return;
         }
-        self.pending.clear_recheck();
+        let mut from = 0;
+        while let Some(c) = self.pending.take_recheck_from(from) {
+            from = c.get().saturating_add(1);
+            self.reassign(c);
+        }
     }
 
     /// The checks the debug options ask for (DESIGN.md 9.4): they only read.

@@ -6,14 +6,15 @@
 //! events read, the visibility counts (filled by package 1c-01), and what a write means for the
 //! caches ([`Derived::on`]). The memos of DESIGN.md 6.5 join it package by package: the unique
 //! index memos, resource supply and unit profiles ([`civ`], 1b-05), tile yields, city and
-//! civilization stats and connectivity (1b-06), the buildable lists (1b-07), and the rest with
-//! their systems.
+//! civilization stats, happiness and connectivity ([`stats`], 1b-06), the buildable lists
+//! (1b-07), and the rest with their systems.
 //!
 //! Replaces the caches of `game.py:100-145` (`_cache`, `_ycache`, `_static`, `_jobcache`,
 //! `_viewcache`, `_names`) and the invalidation of `game.py:565-609`.
 
 pub mod civ;
 pub mod rev;
+pub mod stats;
 
 use core::cell::Ref;
 
@@ -50,6 +51,8 @@ pub struct Derived {
     pub(crate) vis: Visibility,
     /// The unique index memos, the resource supply and the unit profiles.
     pub(crate) civ: civ::CivCaches,
+    /// Tile yields, city and civilization stats, happiness and connectivity.
+    pub(crate) stats: stats::StatsCaches,
 }
 
 impl Derived {
@@ -71,6 +74,7 @@ impl Derived {
             names: Memo::new(),
             vis: Visibility::new(st),
             civ: civ::CivCaches::new(rules, st),
+            stats: stats::StatsCaches::new(rules, st),
         }
     }
 
@@ -351,11 +355,14 @@ mod tests {
         for ch in [peace_terms, talks] {
             assert!(g.dv.on(&g.st, g.rules, &ch).recheck.is_empty(), "{ch:?}");
         }
-        // Through the setter: a war flags Roma; a research agreement's science flags nothing.
+        // Through the setter: a research agreement's science flags nothing, and a war flags Roma,
+        // blockaded; the shipped ruleset's `[n]% growth <when not at war>` makes every city
+        // look again besides.
         g.settle();
         g.update_relation(rome, greece, |r| r.ra_science = [5, 5]).expect("a pair");
         assert!(g.pending.is_empty());
         g.update_relation(rome, greece, |r| r.war = true).expect("a pair");
-        assert_eq!(g.pending.take_recheck(), [roma]);
+        let flagged = g.pending.take_recheck();
+        assert!(flagged.contains(&roma), "{flagged:?}");
     }
 }

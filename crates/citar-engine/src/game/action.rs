@@ -15,6 +15,7 @@
 //! 1b-01 lands the pipeline. The JSON registry of tools comes in package 1d-01.
 
 use super::Game;
+use super::cities::citizens::{SetCityFocus, SetSpecialists, WorkTile};
 use super::error::{ActionError, ErrCode};
 use super::events::EventBatch;
 use crate::base::ids::PlayerId;
@@ -66,10 +67,6 @@ pub trait Rule {
 }
 
 /// Checks, then applies: the part of the pipeline each action shares.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "every Action variant calls it; the systems add them from 1b-02")
-)]
 fn run<R: Rule>(g: &mut Game, pid: PlayerId, r: R) -> Result<OutcomeSpec, ActionError> {
     let plan = r.check(g, pid)?;
     Ok(r.apply(g, pid, plan))
@@ -82,6 +79,12 @@ pub enum Action {
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
+    /// `set_city_focus` (package 1b-06).
+    SetCityFocus(SetCityFocus),
+    /// `set_specialists` (package 1b-06).
+    SetSpecialists(SetSpecialists),
+    /// `work_tile` (package 1b-06).
+    WorkTile(WorkTile),
 }
 
 impl Action {
@@ -91,6 +94,9 @@ impl Action {
         match *self {
             #[cfg(test)]
             Self::Probe(_) => "probe",
+            Self::SetCityFocus(_) => "set_city_focus",
+            Self::SetSpecialists(_) => "set_specialists",
+            Self::WorkTile(_) => "work_tile",
         }
     }
 
@@ -100,20 +106,17 @@ impl Action {
         match *self {
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
+            Self::SetCityFocus(_) | Self::SetSpecialists(_) | Self::WorkTile(_) => false,
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(
-            unused_variables,
-            reason = "every variant uses them; the systems add them from 1b-02"
-        )
-    )]
     fn run(self, g: &mut Game, pid: PlayerId) -> Result<OutcomeSpec, ActionError> {
         match self {
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
+            Self::SetCityFocus(x) => run(g, pid, x),
+            Self::SetSpecialists(x) => run(g, pid, x),
+            Self::WorkTile(x) => run(g, pid, x),
         }
     }
 }
