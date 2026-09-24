@@ -12,8 +12,9 @@
 #
 # The golden sets grow with the engine (DESIGN.md 9.6): package 1a-02 brought rng, libm and pyfmt,
 # 1a-03 the RulesetId of the embedded ruleset (ruleset), 1a-05 every compiled unique (uniques), and
-# 1a-06 every compiled filter (filters) and the map-generation, AI and victory tables (gen), and
-# 1a-09 the digests of three checked-in states (states).
+# 1a-06 every compiled filter (filters) and the map-generation, AI and victory tables (gen),
+# 1a-09 the digests of three checked-in states (states), and 1a-10 the digests of the twelve
+# committed refcheck fixtures as the Python-state converter reads them (convert).
 name: determinism
 
 on:
@@ -27,6 +28,8 @@ on:
       - "rust-toolchain.toml"
       - ".cargo/**"
       - "citar/data/**"
+      - "refcheck/fixtures-mini/**"
+      - "refcheck/fixtures-late/**"
       - ".github/workflows/determinism.yml"
   pull_request:
     paths:
@@ -37,6 +40,8 @@ on:
       - "rust-toolchain.toml"
       - ".cargo/**"
       - "citar/data/**"
+      - "refcheck/fixtures-mini/**"
+      - "refcheck/fixtures-late/**"
       - ".github/workflows/determinism.yml"
   workflow_dispatch:
 

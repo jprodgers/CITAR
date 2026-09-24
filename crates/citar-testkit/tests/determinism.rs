@@ -10,7 +10,10 @@ use citar_testkit::golden;
 fn golden_sets_match_the_committed_files() {
     let reports = golden::check_all();
     let names: Vec<&str> = reports.iter().map(|r| r.name).collect();
-    assert_eq!(names, ["rng", "libm", "pyfmt", "ruleset", "uniques", "filters", "gen", "states"]);
+    assert_eq!(
+        names,
+        ["rng", "libm", "pyfmt", "ruleset", "uniques", "filters", "gen", "states", "convert"]
+    );
     let problems: Vec<String> = reports
         .iter()
         .flat_map(|r| r.problems.iter().map(move |p| format!("{}: {p}", r.name)))

@@ -33,6 +33,10 @@
 //!   pin `CANON_V1` and the save format on every target. Written by `golden bless`; the states
 //!   themselves only by `golden states`.
 //!
+//! Package 1a-10 adds, in [`convert`]:
+//! - **`convert.json`**: the digests of the twelve committed refcheck fixtures right after the
+//!   Python-state converter reads them, before any settle. Written by `golden bless`.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -68,6 +72,7 @@ pub struct SetReport {
     pub problems: Vec<String>,
 }
 
+pub mod convert;
 pub mod filters;
 pub mod states;
 
@@ -83,6 +88,7 @@ pub fn check_all() -> Vec<SetReport> {
         filters::check_filters(),
         filters::check_gen(),
         states::check_states(),
+        convert::check_convert(),
     ]
 }
 
@@ -117,6 +123,7 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
     .into_iter()
     .chain(filters::blessed())
     .chain(states::blessed())
+    .chain(convert::blessed())
     .collect()
 }
 
