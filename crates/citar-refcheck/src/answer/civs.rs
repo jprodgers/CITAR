@@ -68,7 +68,7 @@ fn civs(g: &Game) -> Vec<Value> {
             .collect();
         let cs = query::civ_stats(g, p);
         let stat_map: Map<String, Value> =
-            cs.map.iter().map(|(src, y)| ((*src).to_owned(), named(y))).collect();
+            cs.map.iter().map(|(src, y)| (src.name().to_owned(), named(y))).collect();
         let gpt = economy::gold_per_turn(g, p);
         out.push(json!({
             "pid": p.0,
@@ -104,7 +104,7 @@ fn happiness(g: &Game, p: PlayerId) -> Value {
         .breakdown
         .iter()
         .filter(|&&(_, x)| x != 0.0)
-        .map(|&(k, x)| (k.to_owned(), json!(num::round_ndigits(x, 2))))
+        .map(|&(k, x)| (k.name().to_owned(), json!(num::round_ndigits(x, 2))))
         .collect();
     let mut out = json!({"total": h.total, "breakdown": breakdown, "status": h.status()});
     if h.major {
