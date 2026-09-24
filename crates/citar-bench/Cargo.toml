@@ -21,5 +21,11 @@ criterion.workspace = true
 name = "digest"
 harness = false
 
+# The unique indexes of a civilization (package 1b-05): a lookup at 20 ns and a rebuild at 10 us
+# (report-only), failing above three times either.
+[[bench]]
+name = "index"
+harness = false
+
 [lints]
 workspace = true
