@@ -21,5 +21,11 @@ criterion.workspace = true
 name = "digest"
 harness = false
 
+# Map generation (package 1b-04): a small map is budgeted at 50 ms and a gargantuan one at 1.5 s
+# (report-only); the run fails above three times either (DESIGN.md 9.7).
+[[bench]]
+name = "mapgen"
+harness = false
+
 [lints]
 workspace = true
