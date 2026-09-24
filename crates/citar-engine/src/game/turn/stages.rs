@@ -25,8 +25,8 @@
 
 use crate::base::ids::PlayerId;
 use crate::game::derive::rev::UnitTouch;
-use crate::game::economy;
 use crate::game::{Game, Porting, pending};
+use crate::game::{economy, units};
 use crate::state::Phase;
 use crate::state::TurnClock;
 use crate::state::chronicle::{EngineEvent, EventData};
@@ -150,12 +150,12 @@ use When::{Always, EvenIfOver, HasCities, HasCitiesAndReligion, Religion};
 /// A player's turn begins (`turns.start_player_turn`, `turns.py:20-67`).
 pub static PLAYER_START: [Stage; 23] = [
     Stage::run("S0", "a dead civilization plays no turn", Who::ALL, Always, Step::StopIfDead),
-    Stage::later(
+    Stage::run(
         "S0",
         "the barbarians' units start their turn",
         Who::BARBARIAN,
         Always,
-        Porting::Pending("1c-02"),
+        Step::Player(units::turn::start_units),
     ),
     Stage::later("S0", "the barbarians act", Who::BARBARIAN, Always, Porting::Pending("1c-06")),
     Stage::settle("S0", Who::BARBARIAN),
@@ -182,7 +182,13 @@ pub static PLAYER_START: [Stage; 23] = [
     Stage::later("S3", "revolts", Who::MAJOR, Always, Porting::Pending("1c-08")),
     Stage::later("S4", "triggers upon turn start", Who::CIVS, Always, Porting::Pending("1b-08")),
     Stage::later("S5", "cities start their turn", Who::CIVS, Always, Porting::Pending("1b-07")),
-    Stage::later("S6", "units start their turn", Who::CIVS, Always, Porting::Pending("1c-02")),
+    Stage::run(
+        "S6",
+        "units start their turn",
+        Who::CIVS,
+        Always,
+        Step::Player(units::turn::start_units),
+    ),
     Stage::settle("S7", Who::CIVS),
     Stage::later("S8", "the city-state's turn", Who::CITY_STATE, Always, Porting::Pending("1c-06")),
     Stage::later("S8", "standing unit orders", Who::MAJOR, Always, Porting::Pending("1c-04")),
@@ -209,12 +215,12 @@ pub static PLAYER_END: [Stage; 25] = [
         Step::Player(lapse_return_offers),
     ),
     Stage::run("E0", "a dead civilization ends no turn", Who::ALL, Always, Step::StopIfDead),
-    Stage::later(
+    Stage::run(
         "E0",
         "the barbarians' units end their turn",
         Who::BARBARIAN,
         Always,
-        Porting::Pending("1c-02"),
+        Step::Player(units::turn::end_units),
     ),
     Stage::run("E0", "the barbarians' turn ends here", Who::ALL, Always, Step::StopIfBarbarian),
     Stage::later("E1", "triggers upon turn end", Who::CIVS, Always, Porting::Pending("1b-08")),
@@ -269,7 +275,13 @@ pub static PLAYER_END: [Stage; 25] = [
     Stage::settle("E5", Who::CIVS),
     Stage::later("E6", "golden-age progress", Who::MAJOR, Always, Porting::Pending("1b-08")),
     Stage::later("E6", "worker builds", Who::CIVS, Always, Porting::Pending("1c-04")),
-    Stage::later("E6", "units end their turn", Who::CIVS, Always, Porting::Pending("1c-02")),
+    Stage::run(
+        "E6",
+        "units end their turn",
+        Who::CIVS,
+        Always,
+        Step::Player(units::turn::end_units),
+    ),
     Stage::settle("E6", Who::CIVS),
     Stage::later("E6", "victory", Who::CIVS, Always, Porting::Pending("1c-08")),
     Stage::run("E6", "the turn's close", Who::MAJOR, Always, Step::Player(announce_end)),

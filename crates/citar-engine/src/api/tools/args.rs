@@ -6,7 +6,7 @@
 //! arguments from it (DESIGN.md 9.5). The specs land with the typed actions: each system package
 //! adds its tools' entries to [`TOOLS`] together with their `Action` variants, with the
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
-//! the coercion; no action is ported yet, so the table is empty.
+//! the coercion; package 1c-02 adds the unit tools.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -65,7 +65,28 @@ impl ToolArgs {
 }
 
 /// Every tool whose action is ported, sorted by name.
-pub static TOOLS: &[ToolArgs] = &[];
+pub static TOOLS: &[ToolArgs] = &[
+    ToolArgs {
+        tool: "move_unit",
+        params: &[("unit_id", ArgType::Integer), ("x", ArgType::Integer), ("y", ArgType::Integer)],
+        required: &["unit_id", "x", "y"],
+    },
+    ToolArgs {
+        tool: "promote_unit",
+        params: &[("unit_id", ArgType::Integer), ("promotion", ArgType::String)],
+        required: &["unit_id", "promotion"],
+    },
+    ToolArgs {
+        tool: "unit_order",
+        params: &[("unit_id", ArgType::Integer), ("order", ArgType::String)],
+        required: &["unit_id", "order"],
+    },
+    ToolArgs {
+        tool: "upgrade_unit",
+        params: &[("unit_id", ArgType::Integer)],
+        required: &["unit_id"],
+    },
+];
 
 /// The spec of the tool called `name`, exactly.
 #[must_use]

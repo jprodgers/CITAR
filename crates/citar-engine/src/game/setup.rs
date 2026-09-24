@@ -665,7 +665,7 @@ pub static SETUP: [SetupStage; 15] = [
     SetupStage::draft("players", make_players),
     SetupStage::game("starting techs, gold and culture", starting_techs),
     SetupStage::later("city-state init", Porting::Pending("1c-06")),
-    SetupStage::later("starting units", Porting::Pending("1c-02")),
+    SetupStage::game("starting units", starting_units),
     SetupStage::later("starting triggers", Porting::Pending("1b-08")),
     SetupStage::game("relations", relations),
     SetupStage::later("camps", Porting::Pending("1c-06")),
@@ -982,6 +982,27 @@ fn starting_techs(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
         if let Some(pl) = g.player_mut(p, PlayerTouch::STOCKS) {
             pl.econ.gold += gold;
             pl.econ.culture += culture;
+        }
+    }
+    Ok(())
+}
+
+/// starting units (`game.py:278-289`): each civilization's and city-state's starting units
+/// (`units::starting_units`), each on the first tile within three of its start it may stand on,
+/// ring by ring; a unit with no such tile is left out.
+fn starting_units(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
+    let era = g.st.config().starting_era;
+    let starts: Vec<(PlayerId, crate::base::ids::TileIdx)> =
+        g.st.players()
+            .iter()
+            .filter(|(_, p)| !p.is_barbarian())
+            .filter_map(|(id, p)| p.start_tile.map(|t| (id, t)))
+            .collect();
+    for (p, start) in starts {
+        for base in super::units::starting_units(g, p, era) {
+            if let Some(spot) = super::units::find_spawn_tile(g, start, base, p) {
+                g.create_unit(p, base, spot, 0)?;
+            }
         }
     }
     Ok(())
