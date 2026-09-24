@@ -5,10 +5,13 @@
 //! through the Python converter. The step moves a military land unit of sight 2 back and forth
 //! between two tiles, each move followed by the sight part of a settle (footprint, counts,
 //! explored tiles, memories, contacts): Python recomputed every civilization's sight there, at
-//! 0.9-8.6 ms. Line of sight is the elevation walk at sight 3 from each of 64 tiles in turn.
-//! Budgets (DESIGN.md 10, report-only until 1e-03): the step at or under 1.5 µs, the walk at or
-//! under 1 µs. After Criterion, the run takes the median of its own timings and fails above three
-//! times a budget.
+//! 0.9-8.6 ms. `vis_step/sight2` finds both tiles' footprints in the line-of-sight cache after
+//! the first two steps, as a unit pacing in place does; `vis_step/sight2_fresh` forgets the cache
+//! before each step (untimed), so each step walks its new footprint and allocates it, as a step
+//! onto a tile no unit saw from lately does. Line of sight is the elevation walk at sight 3 from
+//! each of 64 tiles in turn. Budgets (DESIGN.md 10, report-only until 1e-03): each step at or
+//! under 1.5 µs, the walk at or under 1 µs. After Criterion, the run takes the median of its own
+//! timings and fails above three times a budget.
 //!
 //! ```text
 //! cargo bench -p citar-bench --bench vis
@@ -60,17 +63,35 @@ fn walker(g: &Game) -> (UnitId, TileIdx, TileIdx) {
 
 /// The median of `n` timings of `f`, each of `batch` calls.
 fn median(n: usize, batch: u32, mut f: impl FnMut()) -> Duration {
+    median_of(n, batch, || {
+        let t = Instant::now();
+        f();
+        t.elapsed()
+    })
+}
+
+/// The median of `n` timings of `batch` calls of `f`, each call timing itself.
+fn median_of(n: usize, batch: u32, mut f: impl FnMut() -> Duration) -> Duration {
     let mut times: Vec<Duration> = (0..n)
         .map(|_| {
-            let t = Instant::now();
+            let mut took = Duration::ZERO;
             for _ in 0..batch {
-                f();
+                took += f();
             }
-            t.elapsed() / batch
+            took / batch
         })
         .collect();
     times.sort();
     times[n / 2]
+}
+
+/// One step whose footprint the line-of-sight cache does not hold: the cache is forgotten first,
+/// untimed.
+fn fresh(g: &mut Game, step: &mut impl FnMut(&mut Game)) -> Duration {
+    g.derived().vis().forget_line_of_sight();
+    let t = Instant::now();
+    step(g);
+    t.elapsed()
 }
 
 fn check(name: &str, took: Duration, budget: Duration) {
@@ -105,8 +126,12 @@ fn main() {
     };
     let mut c = Criterion::default().configure_from_args();
     c.bench_function("vis_step/sight2", |bch| bch.iter(|| step(&mut g)));
+    c.bench_function("vis_step/sight2_fresh", |bch| {
+        bch.iter_custom(|n| (0..n).map(|_| fresh(&mut g, &mut step)).sum())
+    });
     c.bench_function("los/sight3_uncached", |bch| bch.iter(&mut walk));
     c.final_summary();
     check("vis_step/sight2", median(31, 1_000, || step(&mut g)), STEP);
+    check("vis_step/sight2_fresh", median_of(31, 1_000, || fresh(&mut g, &mut step)), STEP);
     check("los/sight3_uncached", median(31, 1_000, &mut walk), LOS);
 }
