@@ -26,3 +26,17 @@ group = "uniques"
 # persisted field the converter keeps; what its report drops aside).
 [[enforce]]
 group = "state_echo"
+
+# civs (package 1b-05): the civilization-level data it ports. Its resources, line by line and net; the unique
+# index by placeholder; unit upkeep and unit supply; and the era the index is built with. The group's other
+# paths wait for their packages (happiness and stats 1b-06; costs and policies 1b-07; score and victory 1c-08).
+[[enforce]]
+group = "civs"
+paths = [
+  "civs[*].resource_supply.**",
+  "civs[*].detailed_resources.**",
+  "civs[*].unique_index.**",
+  "civs[*].unit_maintenance",
+  "civs[*].unit_supply",
+  "civs[*].era",
+]
