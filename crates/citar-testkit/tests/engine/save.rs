@@ -385,8 +385,13 @@ fn inconsistent_saves_are_refused_with_their_place() {
         },
         "over the limit",
     );
-    // An id counter behind an id in use.
+    // An id counter behind an id in use, or past the largest entity id.
     invalid(&|v| v["ids"]["unit"] = Value::from(1), "unit id");
+    invalid(&|v| v["ids"]["city"] = Value::from(4_000_000_000u32), "largest entity id");
+    // An entity id past the largest, refused before anything is sized by it.
+    invalid(&|v| v["units"][0]["id"] = Value::from(4_000_000_000u32), "largest entity id");
+    // A build queue off the map.
+    invalid(&|v| v["tiles"]["builds"] = serde_json::json!([[64, [["Farm", 3]]]]), "not on the map");
     // A relation of a pair that is not one.
     let fresh =
         serde_json::to_value(citar_engine::state::diplo::Relation::default()).expect("JSON");
