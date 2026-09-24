@@ -256,6 +256,10 @@ fn tile(rules: &Ruleset, row: &Row<'_>, at: u32, warn: &mut Warnings) -> Result<
             accepted.push(id);
         }
     }
+    // Hills first, the rest as given (`maps.py:176-177`): the top feature, which the resource
+    // check reads, is the last of that order.
+    let hill = rules.derived().known.hill;
+    accepted.sort_by_key(|&id| terrains[id].feature != Some(hill));
 
     let wonder: Option<TerrainId> = match row.wonder {
         v if !py::truthy(v) => None,
@@ -487,6 +491,8 @@ mod tests {
         doc["tiles"][1] = json!(["Ocean", [], null, 0, "Iron", 0, "Farm", "Road"]);
         doc["tiles"][2] = json!(["Plains", [], null, 0, "Iron", 0, "Mine", "Railroad"]);
         doc["tiles"][3] = json!(["Grassland", [], null, 0, "Wheat", 5, "Citadel", null]);
+        // Deer in a forest on a hill: the forest is the top feature, however the row orders them.
+        doc["tiles"][4] = json!(["Grassland", ["Forest", "Hill"], null, 0, "Deer", 0, null, null]);
         let d = read(r, &doc).expect("fixed, not refused");
         let t0 = &d.tiles[0];
         let hill = r.derived().known.hill;
@@ -503,6 +509,8 @@ mod tests {
         assert_eq!(d.tiles[2].route(), Some(Route::Railroad));
         assert_eq!(d.tiles[3].resource_amount(), 0, "a bonus resource has no deposit size");
         assert_eq!(d.tiles[3].improvement(), None, "a great improvement belongs to a scenario");
+        assert_eq!(d.tiles[4].features().iter().count(), 2);
+        assert_eq!(d.tiles[4].resource(), r.lookup::<ResourceId>("Deer"));
         assert_eq!(
             d.warnings,
             [
