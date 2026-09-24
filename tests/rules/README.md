@@ -246,7 +246,8 @@ same from both engines, and every set in it is sorted.
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
 | `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |
 | `ops` | | `scenario` and `test`: each operation with its `params` |
-| `pending` | | what the Rust engine has not ported yet: `kind`, `name`, `package` (Python: nothing) |
+| `pending` | | what the Rust engine has not ported yet: `kind` (`inspect`, `scenario_op`, `test_op`), `name`, `package` (Python: nothing) |
+| `negotiation`, `view`, `briefing` | | not yet: they come with packages 1c-05, 1d-02 and 1d-03, and the Rust engine refuses them as not ported until then |
 
 `find_tiles` filters: `x` and `y` (or `at`), the place distances are counted from; `radius`, the
 farthest a tile may be; `terrain`, `feature`, `resource`, `improvement`, names the tile must have;

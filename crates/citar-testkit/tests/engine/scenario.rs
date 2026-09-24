@@ -125,12 +125,35 @@ fn inspect_reads_and_lists_what_is_pending() {
         ("add_unit", "1c-02"),
         ("end_turn", "1b-03"),
         ("attack_as", "1c-03"),
+        ("negotiation", "1c-05"),
+        ("view", "1d-02"),
+        ("briefing", "1d-03"),
     ] {
         assert!(listed.contains(&(name.to_owned(), pkg.to_owned())), "{name} waits for {pkg}");
     }
-    assert_eq!(listed.len(), 6 + 15, "six scenario ops and fifteen test ops wait");
+    assert_eq!(
+        listed.len(),
+        3 + 6 + 15,
+        "three queries, six scenario ops and fifteen test ops wait"
+    );
+    let kinds: Vec<&str> =
+        pending.as_array().into_iter().flatten().filter_map(|p| p["kind"].as_str()).collect();
+    assert_eq!(kinds.iter().filter(|&&k| k == "inspect").count(), 3);
+    for (what, system) in [
+        ("negotiation", "game::diplomacy::negotiation"),
+        ("view", "api::views"),
+        ("briefing", "api::briefing"),
+    ] {
+        let e = inspect::inspect(&g, &json!({"what": what, "player": 0}))
+            .expect_err("a query that waits for its package");
+        assert_eq!(e.code, ErrCode::NotPorted, "{what}");
+        assert!(e.message.contains(system), "{what}: {}", e.message);
+    }
     let e = inspect::inspect(&g, &json!({"what": "nothing"})).expect_err("an unknown query");
-    assert!(e.message.starts_with("Unknown inspect query 'nothing'. Known: city, events"));
+    assert_eq!(e.code, ErrCode::BadParam);
+    assert!(
+        e.message.starts_with("Unknown inspect query 'nothing'. Known: briefing, city, events")
+    );
 }
 
 #[test]

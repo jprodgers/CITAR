@@ -15,7 +15,11 @@
 //! - `events` (optionally `since`, `type` and `player`, the last keeping what that player hears);
 //! - `find_tiles`: the tiles that pass the filters given, nearest first (see [`find_tiles`]);
 //! - `ops`: the scenario and test operations with their parameters;
-//! - `pending`: what is not ported yet, as the operations and stages that wait for a package.
+//! - `pending`: what is not ported yet, as the queries, operations and stages that wait for a
+//!   package.
+//!
+//! `negotiation`, `view` and `briefing` wait for the packages that port what they read (1c-05,
+//! 1d-02 and 1d-03), and are refused as not ported until then.
 //!
 //! Reads only: a query never changes the game or its digest.
 
@@ -34,19 +38,22 @@ use crate::state::Phase;
 use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
-/// The queries, by `what`.
-const QUERIES: [&str; 11] = [
-    "city",
-    "events",
-    "find_tiles",
-    "game",
-    "ops",
-    "pending",
-    "player",
-    "relation",
-    "tile",
-    "unit",
-    "units",
+/// The queries, by `what`, sorted, with whether what each reads is ported yet.
+const QUERIES: [(&str, Porting); 14] = [
+    ("briefing", Porting::Pending("1d-03")),
+    ("city", Porting::Ported),
+    ("events", Porting::Ported),
+    ("find_tiles", Porting::Ported),
+    ("game", Porting::Ported),
+    ("negotiation", Porting::Pending("1c-05")),
+    ("ops", Porting::Ported),
+    ("pending", Porting::Ported),
+    ("player", Porting::Ported),
+    ("relation", Porting::Ported),
+    ("tile", Porting::Ported),
+    ("unit", Porting::Ported),
+    ("units", Porting::Ported),
+    ("view", Porting::Pending("1d-02")),
 ];
 
 /// Answers one query.
@@ -87,16 +94,31 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
         "find_tiles" => find_tiles(g, o),
         "ops" => Ok(json!({"scenario": scenario::ops_help(), "test": testops::help()})),
         "pending" => Ok(pending()),
-        _ => Err(bad(format!(
-            "Unknown inspect query {}. Known: {}.",
-            py::repr(&Value::from(what)),
-            QUERIES.join(", ")
-        ))),
+        "negotiation" => Err(not_ported("game::diplomacy::negotiation")),
+        "view" => Err(not_ported("api::views")),
+        "briefing" => Err(not_ported("api::briefing")),
+        _ => {
+            let known: Vec<&str> = QUERIES.iter().map(|&(name, _)| name).collect();
+            Err(bad(format!(
+                "Unknown inspect query {}. Known: {}.",
+                py::repr(&Value::from(what)),
+                known.join(", ")
+            )))
+        }
     }
 }
 
 fn bad(message: impl Into<String>) -> ActionError {
     ActionError::new(ErrCode::BadParam, message)
+}
+
+/// The refusal of a query whose system is not ported yet: `path` names the system, and
+/// `cargo xtask check` counts the calls (DESIGN.md 3.4, rule 4).
+fn not_ported(path: &str) -> ActionError {
+    ActionError::new(
+        ErrCode::NotPorted,
+        format!("This inspect query is not ported to the new engine yet ({path})."),
+    )
 }
 
 /// A player by id, the barbarians included, which scenario operations may not name but a script
@@ -452,9 +474,14 @@ pub fn find_tiles(g: &Game, o: &Map<String, Value>) -> Result<Value, ActionError
     ))
 }
 
-/// `pending`: every operation, test operation and stage still waiting for its package.
+/// `pending`: every query, operation, test operation and stage still waiting for its package.
 fn pending() -> Value {
     let mut out = Vec::new();
+    for (name, porting) in QUERIES {
+        if let Porting::Pending(pkg) = porting {
+            out.push(json!({"kind": "inspect", "name": name, "package": pkg}));
+        }
+    }
     for o in scenario::OPS {
         if let Porting::Pending(pkg) = o.porting {
             out.push(json!({"kind": "scenario_op", "name": o.name, "package": pkg}));
