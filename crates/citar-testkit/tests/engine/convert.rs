@@ -26,14 +26,14 @@ fn rules() -> &'static Ruleset {
     Ruleset::shared()
 }
 
-/// Every fixture the gates cover in this run.
-fn every_fixture() -> Vec<Fixture> {
+/// Every fixture the gates cover in this run, and whether the corpus is among them.
+fn every_fixture() -> (Vec<Fixture>, bool) {
     let mut out = fixtures::committed().unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(out.len(), 12, "9 mini and 3 late states (DESIGN.md 2.2)");
-    if let Some(corpus) = fixtures::corpus().unwrap_or_else(|e| panic!("{e}")) {
-        out.extend(corpus);
-    }
-    out
+    let corpus = fixtures::corpus().unwrap_or_else(|e| panic!("{e}"));
+    let with_corpus = corpus.is_some();
+    out.extend(corpus.into_iter().flatten());
+    (out, with_corpus)
 }
 
 fn state_json(f: &Fixture) -> (Vec<u8>, Value) {
@@ -150,12 +150,21 @@ fn assert_history_rebuilds(name: &str, chron: &Chronicle, st: &citar_engine::sta
 #[allow(clippy::disallowed_macros, reason = "the run's drops, for --no-capture")]
 fn every_fixture_converts_with_counts_and_ids_kept_and_round_trips() {
     let mut total = ConvertReport::default();
-    let all = every_fixture();
+    let (all, with_corpus) = every_fixture();
     for f in &all {
         check(f, &mut total);
     }
     // What was dropped over the run, for the log.
     println!("{} states converted; dropped:\n{total}", all.len());
+
+    // Gate 5 over the run: a new kind of drop must be acknowledged here. The corpus adds one
+    // kind to the committed fixtures', two free-building entries of cities since lost.
+    let kinds: BTreeSet<Dropped> = total.dropped().map(|(d, _)| d).collect();
+    let mut want: BTreeSet<Dropped> = COMMITTED_DROPS.into_iter().collect();
+    if with_corpus {
+        want.extend(CORPUS_DROPS);
+    }
+    assert_eq!(kinds, want, "the kinds dropped over the run:\n{total}");
 }
 
 // Gate 5 ---------------------------------------------------------------------------------------
@@ -169,6 +178,9 @@ const COMMITTED_DROPS: [Dropped; 6] = [
     Dropped::MinorMemory,
     Dropped::ListOrder,
 ];
+
+/// The kinds the corpus drops besides those.
+const CORPUS_DROPS: [Dropped; 1] = [Dropped::FreeBuildingsElsewhere];
 
 #[test]
 fn the_committed_fixtures_drop_what_the_design_drops() {
