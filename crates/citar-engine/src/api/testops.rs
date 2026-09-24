@@ -172,7 +172,8 @@ pub static TEST_OPS: &[TestOp] = &[
     },
     TestOp {
         name: "set_unit",
-        params: "unit; any of hp, moves, xp, x and y, promotions (the list it then has), carrier                  (a unit on its tile that carries it, or null)",
+        params: "unit; any of hp, moves, xp, x and y, promotions (the list it then has), carrier \
+                 (a unit on its tile that carries it, or null)",
         porting: Porting::Ported,
         run: set_unit,
     },
@@ -535,4 +536,26 @@ fn progress_builds(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
 
 fn sack_city(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::barbarians"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TEST_OPS;
+
+    /// The operations are sorted, which `op` searches by, and each is described in one line as
+    /// Python's `testops.py` describes it, with no run of spaces a broken literal would leave.
+    #[test]
+    fn the_operations_are_sorted_and_described_in_one_line() {
+        for w in TEST_OPS.windows(2) {
+            assert!(w[0].name < w[1].name, "{} before {}", w[0].name, w[1].name);
+        }
+        for o in TEST_OPS {
+            assert!(
+                !o.params.contains("  ") && !o.params.contains('\n'),
+                "{}: {:?}",
+                o.name,
+                o.params
+            );
+        }
+    }
 }
