@@ -28,6 +28,10 @@ pub struct Package {
 pub struct Dependency {
     /// The package name, even when the dependency is renamed.
     pub name: String,
+    /// The name the dependent uses for it (`engine = { package = "citar-engine" }`), which its
+    /// feature table then names it by.
+    #[serde(default)]
+    pub rename: Option<String>,
     pub req: String,
     /// `None` for a normal dependency, else `"dev"` or `"build"`.
     pub kind: Option<String>,
