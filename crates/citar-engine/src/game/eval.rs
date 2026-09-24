@@ -21,7 +21,6 @@ use crate::base::ids::{
 };
 use crate::base::sets::{BeliefSet, BuildingSet, PolicySet, PromotionSet, TechSet, TerrainSet};
 use crate::base::stats::Stat;
-use crate::game::core::has_type;
 use crate::game::{Game, Porting, pending_or};
 use crate::rules::Ruleset;
 use crate::rules::defs::{BeliefType, Domain, NationKind, PolicyKind, ReligionProgress, Route};
@@ -75,12 +74,10 @@ impl<'a> EvalView<'a> {
     }
 
     /// Whether any terrain on the tile is a source of fresh water, a lake or an oasis
-    /// (`tiles._is_fresh_source`, `tiles.py:120-124`).
+    /// (`tiles._is_fresh_source`, `tiles.py:120-124`): one set test against the terrains the
+    /// ruleset marks at load.
     fn fresh_source(&self, t: TileIdx) -> bool {
-        let r = self.r();
-        self.tile_terrains(t).iter().any(|x| {
-            r.terrains().get(x).is_some_and(|d| has_type(r, &d.uniques, UniqueType::FreshWater))
-        })
+        !self.tile_terrains(t).is_disjoint(&self.r().derived().fresh_water)
     }
 
     /// Whether a religion has a belief of this type among its founder beliefs

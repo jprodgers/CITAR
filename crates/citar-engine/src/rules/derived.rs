@@ -14,7 +14,7 @@ use crate::base::ids::{
     BaseUnitId, BuildingId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId, ObjectFilterId,
     ResourceId, TechId, TerrainId,
 };
-use crate::base::sets::FeatureSet;
+use crate::base::sets::{FeatureSet, TerrainSet};
 use crate::base::stats::{Stat, StatMask};
 use crate::unique::{SourceUniques, UniqueData, UniqueTable, UniqueType};
 
@@ -101,6 +101,10 @@ pub struct Derived {
     pub feature_removals: Vec<ImprovementId>,
     /// The improvement that removes each feature, if one does.
     pub removal_of: IdVec<FeatureId, Option<ImprovementId>>,
+    /// The terrains that are a source of fresh water, a lake or an oasis: those carrying
+    /// `Fresh water` (`tiles._is_fresh_source`, `tiles.py:120-124`), which Python looked up per
+    /// tile and cached.
+    pub fresh_water: TerrainSet,
     pub known: Known,
 }
 
@@ -120,6 +124,7 @@ impl Derived {
             builder_classes: Vec::new(),
             feature_removals: Vec::new(),
             removal_of: IdVec::new(),
+            fresh_water: TerrainSet::new(),
             known: Known {
                 hill: FeatureId(0),
                 fallout: FeatureId(0),
@@ -166,6 +171,12 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
     let Layers { features, hill, fallout } = layers;
     for t in r.terrains.as_mut_slice() {
         t.rough = has(&r.uniques, &t.uniques, UniqueType::RoughTerrain);
+    }
+    let mut fresh_water = TerrainSet::new();
+    for (id, t) in r.terrains.iter() {
+        if has(&r.uniques, &t.uniques, UniqueType::FreshWater) {
+            fresh_water.insert(id);
+        }
     }
 
     let improvement_names: Vec<Box<str>> =
@@ -318,6 +329,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         builder_classes,
         feature_removals,
         removal_of,
+        fresh_water,
         known,
     })
 }
