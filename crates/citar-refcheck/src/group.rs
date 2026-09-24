@@ -13,7 +13,7 @@ use crate::{Error, Result};
 pub enum Group {
     /// Rust compiles every unique text in `refcheck/uniques.json.gz` (package 1a-05).
     Uniques,
-    /// A projection of the fixture's own state, read back from the converted game (1a-10).
+    /// A projection of the fixture's own state, read back from the loaded game (1a-10).
     StateEcho,
     /// The settle on load changes neither explored tiles nor who has met whom (1c-01).
     FixedPoint,

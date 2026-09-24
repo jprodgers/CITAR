@@ -16,7 +16,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use citar_engine::compat::python::{ConvertReport, state_from_python};
+use citar_engine::compat::python::ConvertReport;
+use citar_engine::game::Game;
 use citar_engine::rules::Ruleset;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rayon::prelude::*;
@@ -344,19 +345,20 @@ fn check_fixture(
 ) -> std::result::Result<FixtureResult, LoadFailure> {
     let fail = |error: String| LoadFailure { name: r.name.clone(), error };
     let fixture = Fixture::load(r, &opts.sets).map_err(|e| fail(e.to_string()))?;
-    // Converted once for every group (DESIGN.md 9.2); a state that does not convert is a load
-    // failure, and so is one whose conversion panics, which must not end the whole run. With no
-    // fixture group to answer, there is nothing to convert for.
-    let converted = if groups.is_empty() {
+    // Loaded once for every group (DESIGN.md 9.2); a state that does not load is a load failure,
+    // and so is one whose conversion or settle panics, which must not end the whole run. With no
+    // fixture group to answer, there is nothing to load for.
+    let loaded = if groups.is_empty() {
         None
     } else {
         let json = fixture.state.get().as_bytes();
-        let state = guarded(|| state_from_python(json, Ruleset::shared()))
-            .map_err(|e| fail(format!("{}: the state does not convert: {e}", r.path.display())))?;
-        Some(state)
+        let loaded = guarded(|| Game::from_python(Ruleset::shared(), json))
+            .map_err(|e| fail(format!("{}: the state does not load: {e}", r.path.display())))?;
+        Some(loaded)
     };
-    let dropped = converted.as_ref().map(|c| c.report.clone()).unwrap_or_default();
-    let cx = Ctx { root: &opts.root, fixture: Some(&fixture), converted: converted.as_ref() };
+    let dropped = loaded.as_ref().map(|(_, report)| report.clone()).unwrap_or_default();
+    let cx =
+        Ctx { root: &opts.root, fixture: Some(&fixture), game: loaded.as_ref().map(|(g, _)| g) };
     let mut tally = Tally::new(config.intended.entries().len());
     let mut subjects = Vec::with_capacity(groups.len());
     let mut fns = Vec::new();
@@ -394,7 +396,7 @@ fn check_run_group(
     match answers.module(group) {
         None => Outcome::NotPorted,
         Some(m) => {
-            let cx = Ctx { root: &opts.root, fixture: None, converted: None };
+            let cx = Ctx { root: &opts.root, fixture: None, game: None };
             let found = answer_and_compare(m, &cx, None, opts.with_bot);
             judge(config, group, Group::RUN_CASE, found, opts.with_bot, tally)
         }
@@ -453,8 +455,8 @@ fn judge(
     }
 }
 
-/// Runs a step that loads a fixture (today the conversion, from 1b-01 `Game::from_python`), with
-/// a panic turned into its error: one bad fixture is a load failure, not the end of the run.
+/// Runs a step that loads a fixture (`Game::from_python`), with a panic turned into its error:
+/// one bad fixture is a load failure, not the end of the run.
 fn guarded<T, E: std::fmt::Display>(
     step: impl FnOnce() -> std::result::Result<T, E>,
 ) -> std::result::Result<T, String> {
