@@ -11,6 +11,7 @@
 //! neighbour that becomes water loses its rivers, which Python left running along the sea.
 
 use super::map::GenMap;
+use crate::base::hex::HexGrid;
 use crate::base::ids::{TerrainId, TileIdx};
 use crate::base::num::{floor_i64, round_half_even};
 use crate::base::rng::Rng;
@@ -141,16 +142,7 @@ fn try_wonder(
         return false;
     }
     let Some(&first) = rng.pick(spots) else { return false };
-    let mut group = vec![first];
-    while group.len() < size {
-        let next: Vec<TileIdx> = spots
-            .iter()
-            .copied()
-            .filter(|&s| !group.contains(&s) && group.iter().any(|&g| m.grid.distance(g, s) == 1))
-            .collect();
-        let Some(&c) = rng.pick(&next) else { break };
-        group.push(c);
-    }
+    let group = grow_group(&m.grid, rng, spots, first, size);
     if group.len() < lo {
         return false;
     }
@@ -162,6 +154,44 @@ fn try_wonder(
         }
     }
     true
+}
+
+/// A group of up to `size` spots grown from `first`, each next to one already in it, drawn at
+/// random among those (`_try_wonder`'s loop). The group and the tiles next to it are kept as
+/// masks, so each step reads the spots once and a large group grows in time linear in its size.
+fn grow_group(
+    grid: &HexGrid,
+    rng: &mut Rng,
+    spots: &[TileIdx],
+    first: TileIdx,
+    size: usize,
+) -> Vec<TileIdx> {
+    let mut group = vec![first];
+    if size <= 1 {
+        return group;
+    }
+    let n = grid.size() as usize;
+    let mut in_group = vec![false; n];
+    let mut frontier = vec![false; n];
+    let join = |t: TileIdx, in_group: &mut [bool], frontier: &mut [bool]| {
+        in_group[t.0 as usize] = true;
+        for x in grid.neighbors(t) {
+            frontier[x.0 as usize] = true;
+        }
+    };
+    join(first, &mut in_group, &mut frontier);
+    let mut next: Vec<TileIdx> = Vec::new();
+    while group.len() < size {
+        next.clear();
+        next.extend(spots.iter().copied().filter(|s| {
+            let i = s.0 as usize;
+            frontier[i] && !in_group[i]
+        }));
+        let Some(&c) = rng.pick(&next) else { break };
+        group.push(c);
+        join(c, &mut in_group, &mut frontier);
+    }
+    group
 }
 
 /// Puts a natural wonder on a tile, with the terrain changes it brings (`_place_wonder`): the
@@ -236,5 +266,49 @@ mod tests {
         assert!(!fits_gen(&off(9), &m, small));
         let polar = NaturalWonderGen { latitudes: vec![(90, 100)], ..NaturalWonderGen::default() };
         assert!(fits_gen(&polar, &m, TileIdx(0)) && !fits_gen(&polar, &m, TileIdx(3 * 12)));
+    }
+
+    /// A wonder's group (`Occurs in groups of [lo] to [hi] tiles`) grows one neighbour at a time
+    /// over the spots: as large as asked where the spots allow, joined, each spot once, across
+    /// a wrapping edge, and no larger than the spots joined to the first.
+    #[test]
+    fn a_wonder_group_grows_over_joined_spots() {
+        use crate::base::rng::Purpose;
+        let mut rng = Rng::keyed(1, Purpose::MapWonders, &[]);
+        // A large group on a large map, which grew in quadratic time before.
+        let grid = HexGrid::new(160, 100, true, false).expect("grid");
+        // Rows 20 to 79, with holes a tile wide: one joined area of about 5,800 spots.
+        let spots: Vec<TileIdx> = grid
+            .tiles()
+            .filter(|&t| {
+                let (x, y) = grid.xy(t);
+                (20..80).contains(&y) && !(x % 13 == 5 && y % 3 == 0)
+            })
+            .collect();
+        let first = spots[spots.len() / 2];
+        let group = grow_group(&grid, &mut rng, &spots, first, 3000);
+        assert_eq!(group.len(), 3000);
+        assert_eq!(group[0], first);
+        let mut is_spot = vec![false; grid.size() as usize];
+        for &t in &spots {
+            is_spot[t.0 as usize] = true;
+        }
+        let mut seen = vec![false; grid.size() as usize];
+        for (k, &t) in group.iter().enumerate() {
+            assert!(!seen[t.0 as usize], "{t:?} twice");
+            assert!(is_spot[t.0 as usize], "{t:?} is no spot");
+            assert!(k == 0 || grid.neighbors(t).any(|n| seen[n.0 as usize]), "{t:?} apart");
+            seen[t.0 as usize] = true;
+        }
+        // The spots at both ends of a row are neighbours on a map that wraps east-west.
+        let small = HexGrid::new(12, 8, true, false).expect("grid");
+        let ends = [TileIdx(2 * 12), TileIdx(2 * 12 + 11)];
+        assert_eq!(grow_group(&small, &mut rng, &ends, ends[0], 2), ends.to_vec());
+        // A group stops where the spots joined to the first run out.
+        let line = [TileIdx(12), TileIdx(13), TileIdx(14), TileIdx(5 * 12 + 6)];
+        let g = grow_group(&small, &mut rng, &line, TileIdx(13), 10);
+        assert_eq!(g.len(), 3);
+        assert!(!g.contains(&TileIdx(5 * 12 + 6)));
+        assert_eq!(grow_group(&small, &mut rng, &line, TileIdx(13), 1), vec![TileIdx(13)]);
     }
 }

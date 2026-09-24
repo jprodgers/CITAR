@@ -205,9 +205,8 @@ pub(crate) fn rivers(m: &mut GenMap<'_>, rng: &mut Rng) {
     let far: Vec<TileIdx> = land.iter().copied().filter(|&t| reach(t) >= 3).collect();
     let mut opts: Vec<TileIdx> = far.iter().copied().filter(|&t| mountain[t.0 as usize]).collect();
     if opts.len() < n {
-        let more: Vec<TileIdx> =
-            far.iter().copied().filter(|&t| m.hill(t) && !opts.contains(&t)).collect();
-        opts.extend(more);
+        // The options so far are the far mountains: the mask says which, without a search.
+        opts.extend(far.iter().copied().filter(|&t| m.hill(t) && !mountain[t.0 as usize]));
     }
     if opts.len() < n {
         opts = if far.is_empty() {
