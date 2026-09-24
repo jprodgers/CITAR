@@ -75,7 +75,7 @@ pub fn unique_index_counts(g: &Game, p: PlayerId) -> BTreeMap<String, u32> {
 /// The era a civilization is in (`research.player_era`, `research.py:254-275`).
 #[must_use]
 pub fn era(g: &Game, p: PlayerId) -> EraId {
-    g.player(p).map_or(EraId(0), |x| super::research::player_era(g.rules(), &x.tech.known))
+    civ::era(g, p)
 }
 
 /// The context of a question about civilization `p` in this game.

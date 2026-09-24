@@ -573,11 +573,12 @@ mod tests {
                     g.player_mut(PlayerId(0), PlayerTouch::STOCKS);
                 }),
             ),
+            // The supply memo's stamp: a Swordsman needs Iron, a line of Rome's supply.
             (
                 CondDeps::RESOURCES,
                 Ctx::civ(p),
                 Box::new(|g| {
-                    let _ok = g.set_resource(TileIdx(3), None, 0);
+                    testing::unit(g, PlayerId(0), "Swordsman", TileIdx(30));
                 }),
             ),
             (
@@ -756,9 +757,9 @@ mod tests {
             ),
         ];
         for (i, (class, ctx, write)) in cases.iter().enumerate() {
-            let before = g.dv.revs.cond(&g.st, *class, ctx);
+            let before = super::super::derive::civ::cond(&g, *class, ctx);
             write(&mut g);
-            let after = g.dv.revs.cond(&g.st, *class, ctx);
+            let after = super::super::derive::civ::cond(&g, *class, ctx);
             assert!(after > before, "case {i}: {class:?} did not move");
         }
         // Every class is covered, and the two halves partition them.

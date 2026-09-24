@@ -2,7 +2,7 @@
 //!
 //! A city's uniques are, in Python's order, its own (its buildings' that hold in their city
 //! alone, and the Marble decision's resources, DESIGN.md 5.12), its majority religion's
-//! follower beliefs', then its owner's: three indexes, each a memo (`CityLocal`,
+//! follower beliefs', then its owner's: three indexes, each a memo (`CityLocalFull`,
 //! `FollowerIndex`, `CivIndexFull` in `game::derive::civ`), which `unique::query::city` walks in
 //! turn. Python rebuilt the city's list of maps on every read that missed its cache
 //! (`local_umaps`, `cities.py:48-66`), and its cache was dropped at every write.

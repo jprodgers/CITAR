@@ -307,8 +307,9 @@ pub fn tile_provides_resource(g: &Game, t: TileIdx, p: PlayerId) -> bool {
     rd.kind == ResourceType::Strategic && r.improvements()[imp].great
 }
 
-/// The resources a city's owner gets from the tiles the city owns: the resources whose uniques
-/// that hold in one city alone hold in this one (the Marble decision, DESIGN.md 5.12).
+/// The resources a city's owner gets from the tiles the city owns. Of these, those its owner's
+/// supply has some of give the city their uniques that hold in one city alone (the Marble
+/// decision, DESIGN.md 5.12).
 #[must_use]
 pub fn provided_resources(g: &Game, c: CityId) -> ResourceSet {
     let mut out = ResourceSet::new();
@@ -468,15 +469,25 @@ fn deal_resource_flows(g: &Game, p: PlayerId) -> Vec<(ResourceId, i32)> {
 }
 
 /// The players whose lands and cities a civilization's supply reads: itself, and for a major
-/// the city-states allied with it.
+/// the city-states allied with it. Read on every validation of the supply, so it allocates
+/// nothing.
 pub(crate) fn supply_owners(g: &Game, p: PlayerId) -> PlayerSet {
     let mut out = PlayerSet::single(p);
     if g.player(p).is_some_and(crate::state::players::Player::is_major) {
-        for cs in allied_city_states(g, p) {
-            out.insert(cs);
+        for q in g.city_states(true) {
+            if q.city_state.as_deref().and_then(|d| d.ally()) == Some(p) {
+                out.insert(q.id());
+            }
         }
     }
     out
+}
+
+/// The tiles a civilization owns, in map order (`economy.owned_tiles`, `economy.py:186-193`),
+/// from their memo; `None` for a player the game does not have.
+#[must_use]
+pub fn owned_tiles(g: &Game, p: PlayerId) -> Option<Ref<'_, Vec<TileIdx>>> {
+    civ::owned_tiles(g, p)
 }
 
 // ---- Upkeep and supply (economy.py:505-600) ----------------------------------------------------
@@ -550,7 +561,8 @@ pub fn unit_maintenance(g: &Game, p: PlayerId) -> i32 {
 /// What a civilization's roads and railroads cost each turn, by stat (`economy.transport_upkeep`,
 /// `economy.py:541-567`): the `Costs [n] [stat] per turn` of the unpillaged route on each tile
 /// it owns but a city's, but in tiles its `No Maintenance costs for improvements in [tiles]
-/// tiles` names, times its `[n]% maintenance on road & railroads`.
+/// tiles` names, times its `[n]% maintenance on road & railroads`. It walks the tiles the
+/// civilization owns ([`owned_tiles`]), not the map.
 #[must_use]
 pub fn transport_upkeep(g: &Game, p: PlayerId) -> Stats {
     let v = g.view();
@@ -565,10 +577,9 @@ pub fn transport_upkeep(g: &Game, p: PlayerId) -> Stats {
             .collect();
     let known = &r.derived().known;
     let mut out = Stats::ZERO;
-    for (t, tile) in g.state().tiles().iter() {
-        if tile.owner() != Some(p) {
-            continue;
-        }
+    let Some(owned) = owned_tiles(g, p) else { return out };
+    for &t in owned.iter() {
+        let Some(tile) = g.tile(t) else { continue };
         let road = match tile.route().filter(|_| !tile.route_pillaged()) {
             None => continue,
             Some(Route::Road) => known.road,

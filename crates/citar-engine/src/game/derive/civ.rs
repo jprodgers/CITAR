@@ -16,8 +16,12 @@
 //!   (`game::economy::compute_supply`), computed from `CivIndex` alone (DESIGN.md 6.6);
 //! - `CivIndexFull` (per civilization): `CivIndex` with the resource layer, the uniques of the
 //!   resources the supply has some of ([`Csr::merged`]);
-//! - `CityLocal` (per city): its buildings' uniques that hold in it alone, and those of the
-//!   resources its improved tiles give (the Marble decision, DESIGN.md 5.12);
+//! - the era (per civilization, `research.player_era`), which era conditionals read once per
+//!   unique, and the tiles it owns (`economy.owned_tiles`), which route upkeep walks;
+//! - `CityLocal` (per city): its buildings' uniques that hold in it alone. `CityLocalFull` adds
+//!   those of the resources its improved tiles give, of the ones its owner's supply has some of
+//!   (the Marble decision, DESIGN.md 5.12); the supply's own view reads `CityLocal`, so the
+//!   supply never depends on a resource's uniques;
 //! - the follower index of a religion and the index of a unit's profile, which are pure
 //!   functions of their keys (the follower beliefs; the base unit and its promotions): tables
 //!   that only grow and are never iterated, shared out as `Arc`s so that a lookup may add to
@@ -31,12 +35,12 @@ use core::cell::{Ref, RefCell};
 use core::hash::Hash;
 use std::sync::Arc;
 
-use super::rev::{Memo, Rev};
+use super::rev::{CopyMemo, Memo, Rev};
 use crate::base::collections::LookupMap;
 use crate::base::ids::{
-    BaseUnitId, BuildingId, CityId, EraId, Id, NationId, PlayerId, ReligionId, UnitId,
+    BaseUnitId, BuildingId, CityId, EraId, Id, NationId, PlayerId, ReligionId, TileIdx, UnitId,
 };
-use crate::base::sets::{BeliefSet, PlayerVec, PromotionSet};
+use crate::base::sets::{BeliefSet, BuildingSet, PlayerVec, PromotionSet, ResourceSet};
 use crate::game::Game;
 use crate::game::economy::{self, ResourceSupply};
 use crate::game::research;
@@ -55,6 +59,20 @@ struct CivMemos {
     /// `ResourceSupply`.
     supply: Memo<ResourceSupply>,
     /// `CivIndexFull`: with it.
+    full: Memo<Csr>,
+    /// Its era; `None` only before the first read.
+    era: CopyMemo<Option<EraId>>,
+    /// The tiles it owns, in map order.
+    owned: Memo<Vec<TileIdx>>,
+}
+
+/// The memos of one city.
+#[derive(Clone, Debug, Default)]
+struct CityMemos {
+    /// `CityLocal`: its buildings' uniques that hold in it alone.
+    local: Memo<Csr>,
+    /// `CityLocalFull`: `CityLocal` and the uniques that hold in it alone of the resources its
+    /// tiles give its owner and its owner's supply has some of.
     full: Memo<Csr>,
 }
 
@@ -92,8 +110,9 @@ impl<K: Eq + Hash> Shared<K> {
 #[derive(Clone, Debug)]
 pub struct CivCaches {
     civs: PlayerVec<CivMemos>,
-    /// `CityLocal`, one per city of the state: added when a city is, and dropped with it.
-    cities: LookupMap<CityId, Memo<Csr>>,
+    /// `CityLocal` and `CityLocalFull`, for each city of the state: added when a city is, and
+    /// dropped with it.
+    cities: LookupMap<CityId, CityMemos>,
     profiles: Shared<(BaseUnitId, PromotionSet)>,
     followers: Shared<BeliefSet>,
     /// What the conditionals of the uniques the supply evaluates read, but resources: while the
@@ -109,7 +128,7 @@ impl CivCaches {
     pub fn new(rules: &Ruleset, st: &State) -> Self {
         let mut cities = LookupMap::with_capacity(st.cities().len());
         for c in st.cities().iter() {
-            cities.insert(c.id(), Memo::new());
+            cities.insert(c.id(), CityMemos::default());
         }
         Self {
             civs: st.players().ids().map(|_| CivMemos::default()).collect(),
@@ -126,7 +145,7 @@ impl CivCaches {
     pub(crate) fn track(&mut self, ch: &Change) {
         match *ch {
             Change::CityAdded(c) => {
-                self.cities.get_or_insert_with(c, Memo::new);
+                self.cities.get_or_insert_with(c, CityMemos::default);
             }
             Change::CityRemoved { c, .. } => {
                 self.cities.remove(&c);
@@ -169,7 +188,7 @@ fn supply_deps(rules: &Ruleset) -> CondDeps {
 pub fn sources(g: &Game, p: PlayerId) -> CivSources {
     let Some(pl) = g.player(p) else { return CivSources::new(NationId(0), EraId(0)) };
     let r = g.rules;
-    let mut src = CivSources::new(pl.nation, research::player_era(r, &pl.tech.known));
+    let mut src = CivSources::new(pl.nation, era(g, p));
     let mut counts: Vec<u16> = vec![0; r.buildings().len()];
     for city in g.player_cities(p) {
         for b in city.buildings.iter() {
@@ -254,6 +273,35 @@ fn supply_changed(g: &Game, p: PlayerId) -> Rev {
     g.dv.civ.civs.get(p).map_or(Rev::START, |m| m.supply.changed())
 }
 
+/// The era civilization `p` is in (`research.player_era`, `research.py:254-275`), from its
+/// techs: valid while its `index` revision stands, which every change of its techs moves. The
+/// era conditionals read it once per unique they are asked about, so it is kept rather than
+/// found in the tech tree each time, as Python kept it per count of techs (`research.py:257`).
+pub(crate) fn era(g: &Game, p: PlayerId) -> EraId {
+    let Some(m) = g.dv.civ.civs.get(p) else { return EraId(0) };
+    let revs = &g.dv.revs;
+    m.era
+        .get(
+            revs.now(),
+            || revs.civ(p).index,
+            || g.player(p).map(|x| research::player_era(g.rules, &x.tech.known)),
+        )
+        .unwrap_or(EraId(0))
+}
+
+/// The tiles civilization `p` owns, in map order (`economy.owned_tiles`, `economy.py:186-193`):
+/// valid while its `cities` revision stands, which a tile changing hands moves for both sides.
+/// `None` for a player the game does not have.
+pub(crate) fn owned_tiles(g: &Game, p: PlayerId) -> Option<Ref<'_, Vec<TileIdx>>> {
+    let m = g.dv.civ.civs.get(p)?;
+    let revs = &g.dv.revs;
+    Some(m.owned.get(
+        revs.now(),
+        || revs.civ(p).cities,
+        || g.st.tiles().iter().filter(|(_, t)| t.owner() == Some(p)).map(|(i, _)| i).collect(),
+    ))
+}
+
 /// The latest revision of what civilization `p`'s supply is computed from, for a memo last
 /// verified at `verified`: its index's inputs (its techs among them, which reveal resources and
 /// allow improvements), the units it has, its cities, their buildings, religions and the tiles
@@ -275,6 +323,9 @@ fn supply_inputs(g: &Game, p: PlayerId, verified: Rev) -> Rev {
         .max(revs.cities)
         .max(revs.religions);
     let deps = g.dv.civ.supply_deps;
+    // The civilization-level classes read the same in every city of one owner: only the local
+    // ones are asked city by city.
+    let local = deps.intersection(CondDeps::LOCAL);
     for q in owners.iter() {
         let x = revs.civ(q);
         r = r.max(x.index).max(x.cities).max(x.buildings).max(x.city_state);
@@ -284,14 +335,14 @@ fn supply_inputs(g: &Game, p: PlayerId, verified: Rev) -> Rev {
         for city in g.player_cities(q) {
             // Its majority religion's follower beliefs are among its own uniques.
             r = r.max(revs.city(city.id()).religion);
-            if !deps.is_empty() {
+            if !local.is_empty() {
                 let ctx = Ctx {
                     civ: Some(q),
                     city: Some(city.id()),
                     tile: Some(city.tile()),
                     ..Ctx::default()
                 };
-                r = r.max(revs.cond(st, deps, &ctx));
+                r = r.max(revs.cond(st, local, &ctx));
             }
         }
     }
@@ -309,26 +360,58 @@ fn supply_inputs(g: &Game, p: PlayerId, verified: Rev) -> Rev {
     r
 }
 
-/// City `c`'s own index (`CityLocal`): its buildings' uniques that hold in it alone, and those of
-/// the resources its improved tiles give its owner.
+/// City `c`'s own index (`CityLocal`, `cities.local_umaps` without the religion,
+/// `cities.py:48-66`): its buildings' uniques that hold in it alone. What the supply's view
+/// reads.
 pub(crate) fn city_local(g: &Game, c: CityId) -> IndexRef<'_> {
     let caches = &g.dv.civ;
     let (Some(m), Some(city)) = (caches.cities.get(&c), g.st.cities().get(c)) else {
         return IndexRef::Plain(&caches.empty);
     };
     let revs = &g.dv.revs;
-    let verified = m.stamp().verified();
+    IndexRef::Memo(m.local.get(
+        revs.now(),
+        || revs.city(c).buildings,
+        || index::city_local(g.rules, &city.buildings, &ResourceSet::new()),
+    ))
+}
+
+/// City `c`'s own index with its resources (`CityLocalFull`): `CityLocal`, and the uniques that
+/// hold in it alone of the resources its improved tiles give its owner, of those its owner's
+/// supply has some of (the Marble decision, DESIGN.md 5.12). A resource traded away, or all used
+/// up, gives its uniques nowhere, as Python's resource layer held only what the supply had.
+pub(crate) fn city_local_full(g: &Game, c: CityId) -> IndexRef<'_> {
+    let caches = &g.dv.civ;
+    let (Some(m), Some(city)) = (caches.cities.get(&c), g.st.cities().get(c)) else {
+        return IndexRef::Plain(&caches.empty);
+    };
+    let revs = &g.dv.revs;
+    let owner = city.owner();
+    let verified = m.full.stamp().verified();
+    // The tiles a city gives resources from: its territory (a tile changing hands moves both
+    // owners' `cities`), what is on them and whether its owner may use it (its techs, in its
+    // `index`), and whether a city stands on one.
     let inputs = || {
-        let owner = revs.civ(city.owner());
-        let r = revs.city(c).buildings.max(owner.index).max(owner.cities).max(revs.cities);
+        drop(city_local(g, c));
+        let o = revs.civ(owner);
+        let r = m
+            .local
+            .changed()
+            .max(supply_changed(g, owner))
+            .max(o.index)
+            .max(o.cities)
+            .max(revs.cities);
         let Some(changed) = revs.tile_log.since(verified) else { return revs.now() };
         changed
             .filter(|&t| g.st.tiles().get(t).and_then(crate::state::map::Tile::city) == Some(c))
             .fold(r, |r, t| r.max(revs.tile(t)))
     };
-    let compute =
-        || index::city_local(g.rules, &city.buildings, &economy::provided_resources(g, c));
-    IndexRef::Memo(m.get(revs.now(), inputs, compute))
+    let compute = || {
+        let had = supply(g, owner).map(|s| s.positive()).unwrap_or_default();
+        let given = economy::provided_resources(g, c) & had;
+        city_local(g, c).merged(&index::city_local(g.rules, &BuildingSet::new(), &given))
+    };
+    IndexRef::Memo(m.full.get(revs.now(), inputs, compute))
 }
 
 /// What religion `r` gives the cities that follow it: its follower beliefs' uniques
@@ -386,13 +469,27 @@ pub fn verify(g: &Game) -> Vec<String> {
                 p.0
             ));
         }
+        if era(g, p) != era(&cold, p) {
+            out.push(format!("player {}: the era differs from a cold rebuild", p.0));
+        }
+        if owned_tiles(g, p).as_deref() != owned_tiles(&cold, p).as_deref() {
+            out.push(format!("player {}: the tiles it owns differ from a cold rebuild", p.0));
+        }
     }
     for city in g.st.cities().iter() {
         let c = city.id();
         if !g.dv.civ.cities.contains_key(&c) {
             out.push(format!("city {}: no local index memo", c.get()));
-        } else if *city_local(g, c) != *city_local(&cold, c) {
+            continue;
+        }
+        if *city_local(g, c) != *city_local(&cold, c) {
             out.push(format!("city {}: the local index differs from a cold rebuild", c.get()));
+        }
+        if *city_local_full(g, c) != *city_local_full(&cold, c) {
+            out.push(format!(
+                "city {}: the local index with resources differs from a cold rebuild",
+                c.get()
+            ));
         }
     }
     for i in 0..g.st.world().religions.len() {

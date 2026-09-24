@@ -157,8 +157,9 @@ fn every_kitchen_sink_conditional_evaluates_in_a_game() {
             let halves = applies_scoped(u, ctx, &v, CondDeps::CIV_LEVEL)
                 && applies_scoped(u, ctx, &v, CondDeps::LOCAL);
             assert_eq!(whole, halves, "{} in {ctx:?}", t.text_of(u));
-            // What the conditionals read has revisions a memo can validate against.
-            let rev = g.derived().revs().cond(g.state(), x.deps(), ctx);
+            // What the conditionals read has revisions a memo can validate against, the
+            // resource supply's stamp among them.
+            let rev = citar_engine::game::derive::civ::cond(&g, x.deps(), ctx);
             assert!(rev.get() >= 1);
             held += usize::from(whole);
             evaluated += 1;

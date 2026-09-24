@@ -16,9 +16,10 @@
 //! system would.
 //!
 //! The resource supply is computed in a view of its own (`EvalView::for_supply`), in which a
-//! civilization's index has no resource layer and its resources read as none: the uniques of the
-//! resources a civilization has depend on its supply, so the supply cannot read them (DESIGN.md
-//! 6.6), as Python's `_civ_uniques_nores` read none.
+//! civilization's index has no resource layer, a city's own index none of its resources' uniques,
+//! and resources read as none: the uniques of the resources a civilization has depend on its
+//! supply, so the supply cannot read them (DESIGN.md 6.6), as Python's `_civ_uniques_nores` and
+//! `local_umaps` held none.
 
 use crate::base::hex::HexGrid;
 use crate::base::ids::{
@@ -56,7 +57,8 @@ impl<'a> EvalView<'a> {
 
     /// The view a civilization's resource supply is computed in (DESIGN.md 6.6): every
     /// civilization's index without its resource layer (`_civ_uniques_nores`,
-    /// `economy.py:314-320`), and every civilization's resources none. A resource's uniques
+    /// `economy.py:314-320`), every city's own index without its resources' uniques (Python's
+    /// `local_umaps` held none), and every civilization's resources none. A resource's uniques
     /// depend on the supply, which is why the supply may not read them; and reading none, rather
     /// than the supply of some other civilization, keeps the supplies of an ally and its
     /// city-states from depending on each other.
@@ -431,10 +433,9 @@ impl EvalWorld for EvalView<'_> {
         if self.supply { 0 } else { crate::game::economy::resource_amount(self.g, p, r) }
     }
 
-    /// `research.player_era` (`research.py:254-275`).
+    /// `research.player_era` (`research.py:254-275`): the civilization's era memo.
     fn civ_era(&self, p: PlayerId) -> EraId {
-        self.civ_at(p)
-            .map_or(EraId(0), |x| crate::game::research::player_era(self.r(), &x.tech.known))
+        civ::era(self.g, p)
     }
 
     fn civ_techs(&self, p: PlayerId) -> TechSet {
@@ -566,9 +567,11 @@ impl EvalWorld for EvalView<'_> {
         }
     }
 
-    /// `cities.local_umaps` without the religion (`cities.py:48-66`): the `CityLocal` memo.
+    /// `cities.local_umaps` without the religion (`cities.py:48-66`): the `CityLocalFull`
+    /// memo, with the uniques that hold in the city alone of the resources it gives its owner
+    /// (the Marble decision, DESIGN.md 5.12); in the supply's view `CityLocal`, without them.
     fn city_local(&self, c: CityId) -> IndexRef<'_> {
-        civ::city_local(self.g, c)
+        if self.supply { civ::city_local(self.g, c) } else { civ::city_local_full(self.g, c) }
     }
 
     /// `religion.follower_umap` (`religion.py:72-82`): the follower index table.
