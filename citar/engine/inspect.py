@@ -126,11 +126,12 @@ def _tile(g: Game, idx: int) -> dict:
             "units": sorted(u.id for u in g.units_at(idx))}
 
 
-def _opinion(rel: dict, holder: int, about: int) -> float:
-    """What ``holder`` thinks of ``about``: its own entry, and a scenario's under "holder>about" (which Python's
-    ``diplomacy.opinion`` never read; the Rust engine keeps the two together)."""
-    op = rel.get("opinion") or {}
-    return float(sum((op.get(str(holder)) or {}).values()) + sum((op.get(f"{holder}>{about}") or {}).values()))
+def _opinion(g: Game, holder: int, about: int) -> float:
+    """What ``holder`` thinks of ``about``, as ``diplomacy.opinion`` reads it. A scenario's opinion is not in it: Python
+    stored it under "holder>about", which nothing read, where the Rust engine counts it as the holder's own (intended:
+    scenario-opinion-counts), so scripts mark the checks that see it."""
+    from .diplomacy import opinion
+    return float(opinion(g, holder, about))
 
 
 def _relation(g: Game, a: int, b: int) -> dict:
@@ -144,7 +145,7 @@ def _relation(g: Game, a: int, b: int) -> dict:
             "pact_until": int(rel.get("pact_until") or 0), "ra_until": int(rel.get("ra_until") or 0),
             "embassy": [has_embassy(g, a, b), has_embassy(g, b, a)],
             "open_borders_until": [int(ob.get(f"{a}>{b}") or 0), int(ob.get(f"{b}>{a}") or 0)],
-            "opinion": [_opinion(rel, a, b), _opinion(rel, b, a)],
+            "opinion": [_opinion(g, a, b), _opinion(g, b, a)],
             "friends": is_friends(g, a, b), "pact": has_pact(g, a, b)}
 
 

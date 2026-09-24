@@ -23,8 +23,9 @@ use rayon::prelude::*;
 
 use citar_refcheck::answer::{Answers, Engine};
 use citar_refcheck::fixture::{self, Fixture, FixtureSet};
+use citar_refcheck::intended::{self, ScriptIntended};
 use citar_refcheck::ratchet::{Count, DEFAULT_FIXTURES, Ratchet};
-use citar_refcheck::run::{self, Config, INTENDED, RATCHET, RunOptions};
+use citar_refcheck::run::{self, Config, INTENDED, RATCHET, RunOptions, SCRIPT_INTENDED};
 use citar_refcheck::{Error, Group, Result, report, suggest};
 
 #[derive(Parser)]
@@ -153,9 +154,12 @@ fn execute(cli: Cli) -> Result<u8> {
         Command::Ratchet { update } => ratchet(&root, update, &answers),
         Command::Changelog => {
             let config = Config::load(&root)?;
-            let text = config.intended.changelog();
+            let scripts = ScriptIntended::load(&root.join(SCRIPT_INTENDED))?;
+            let text = intended::changelog(&config.intended, &scripts)?;
             if text.is_empty() {
-                eprintln!("refcheck: {INTENDED} lists no differences yet");
+                eprintln!(
+                    "refcheck: neither {INTENDED} nor {SCRIPT_INTENDED} lists a difference yet"
+                );
             }
             print!("{text}");
             Ok(0)

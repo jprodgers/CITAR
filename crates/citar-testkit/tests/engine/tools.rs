@@ -1,9 +1,10 @@
 //! Tool arguments (package 1b-02): `api::tools::normalize` coerces a call's arguments as
 //! `tools.execute` did (`tools.py:113-127`), case for case with `tests/rules/normalize.json`,
-//! which `tests/test_rule_scripts.py` runs through the Python engine (gate 4).
+//! which `tests/test_rule_scripts.py` runs through the Python engine (gate 4). A case marked
+//! `intended` is a deliberate difference, which only this side runs.
 
 use citar_engine::api::tools::{ArgType, ToolArgs, normalize_with};
-use citar_testkit::script::{matchers::same, rules_dir};
+use citar_testkit::script::{intended_ids, matchers::same, rules_dir};
 use serde_json::Value;
 
 /// A tool of the table, leaked: a spec's names are `'static`, as the tools' own are.
@@ -41,8 +42,15 @@ fn arguments_are_coerced_as_python_coerced_them() {
     let tools = table["tools"].as_object().expect("the tools");
     let cases = table["cases"].as_array().expect("the cases");
     assert!(cases.len() >= 20, "the table covers the rules");
+    let listed = intended_ids().expect("the intended lists");
     let mut wrong = Vec::new();
     for case in cases {
+        if let Some(id) = case.get("intended") {
+            assert!(
+                id.as_str().is_some_and(|id| listed.contains(id)),
+                "{case}: no such intended id"
+            );
+        }
         let name = case["tool"].as_str().unwrap_or_default();
         let spec = tool(name, &tools[name]);
         let got = normalize_with(spec, &case["args"]);

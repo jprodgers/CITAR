@@ -3,6 +3,10 @@ The scenario operations that edit a civilization and a tile: set_player sets sto
 name (at most 40 characters), the seat's difficulty and notes, for one civilization or all of
 them; set_tile sets a tile's terrain, features, resource and deposit, improvement, route, river
 and owner; reveal explores the whole map, and with meet has the civilization meet everyone.
+
+The Rust engine refuses a name of the wrong kind for a tile, a number that does not fit its field,
+and a parameter of the wrong type with a sentence (intended: scenario-set-tile-checks-kinds,
+scenario-numbers-finite-and-in-range, scenario-errors-are-sentences).
 """
 from = "citar/engine/scenario.py: set_player, set_tile, reveal"
 
@@ -90,6 +94,48 @@ error = "Unknown terrain 'Nowhere'."
 op = "set_tile"
 args = { y = 2 }
 error = "This operation needs integer x and y."
+
+[[step]]
+note = "A name of the wrong kind: a feature as the terrain, a base terrain as a feature, a terrain as the natural wonder. Python stored each."
+op = "set_tile"
+args = { at = "A", terrain = "Forest" }
+error = "Operation 1 (set_tile): Forest is not a base terrain."
+intended = "scenario-set-tile-checks-kinds"
+
+[[step]]
+op = "set_tile"
+args = { at = "A", features = ["Plains"] }
+error = "Plains is not a terrain feature."
+intended = "scenario-set-tile-checks-kinds"
+
+[[step]]
+op = "set_tile"
+args = { at = "A", wonder = "Grassland" }
+error = "Grassland is not a natural wonder."
+intended = "scenario-set-tile-checks-kinds"
+
+[[step]]
+check = { what = "tile", at = "A" }
+subset = { terrain = "Grassland", features = [], wonder = "=null" }
+
+[[step]]
+note = "A deposit's size fits a byte."
+op = "set_tile"
+args = { at = "(8,8)", resource = "Iron", amount = 300 }
+error = "amount must be a whole number in range, not 300."
+intended = "scenario-numbers-finite-and-in-range"
+
+[[step]]
+note = "Python quoted its own exception: bad parameters (ValueError: could not convert string to float: 'plenty')."
+op = "set_player"
+args = { player = 0, gold = "plenty" }
+error = "Operation 1 (set_player): gold must be a finite number, not 'plenty'."
+intended = "scenario-errors-are-sentences"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 5
 
 [[step]]
 check = { what = "player", player = 0 }

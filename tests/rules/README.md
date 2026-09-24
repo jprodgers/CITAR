@@ -228,7 +228,8 @@ types a number as a string, unless the step says `coerce = true`.
 
 `normalize.json` is the table of how a tool's arguments are coerced (`tools.py:113-127`): both
 engines run every case, Python through `tools.execute` in `tests/test_rule_scripts.py`, Rust
-through `api::tools::normalize_with` in `crates/citar-testkit/tests/engine/tools.rs`.
+through `api::tools::normalize_with` in `crates/citar-testkit/tests/engine/tools.rs`. A case with
+an `"intended"` id is a deliberate difference, which only Rust runs, as with an `intended` step.
 
 ## Inspect
 

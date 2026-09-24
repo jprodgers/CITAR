@@ -22,6 +22,7 @@ impl Game {
     /// and unsettled. The error names the operation: "Operation 3 (set_tile): ...".
     pub fn apply_ops(&mut self, ops: &Value) -> Result<(Vec<Value>, EventBatch), ActionError> {
         self.ensure_live()?;
+        // refcheck: atomic-apply-ops
         let before = self.clone();
         self.begin_call();
         match scenario::apply(self, ops) {

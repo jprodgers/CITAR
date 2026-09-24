@@ -84,3 +84,10 @@ error = "Player 0 is not a city-state."
 op = "set_influence"
 args = { city_state = 2, player = 5, amount = 10 }
 error = "Operation 1 (set_influence): No player 5."
+
+[[step]]
+note = "Only a major civilization has influence with a city-state; Python took the city-state itself."
+op = "set_influence"
+args = { city_state = 2, player = 2, amount = 10 }
+error = "Operation 1 (set_influence): Player 2 is not a major civilization."
+intended = "scenario-influence-majors-only"

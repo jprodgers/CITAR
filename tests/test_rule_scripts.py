@@ -39,7 +39,8 @@ for _path in rulescript.discover():
 
 class Normalize(unittest.TestCase):
     """tests/rules/normalize.json through tools.execute, the coercion the Rust engine's api::tools::normalize ports
-    (tools.py:113-127): each case's tool is registered for the test, as a query that hands back what it received."""
+    (tools.py:113-127): each case's tool is registered for the test, as a query that hands back what it received. A
+    case marked ``intended`` is a deliberate difference only the Rust engine runs."""
 
     def test_the_coercion_table(self):
         from citar.engine import tools
@@ -54,7 +55,11 @@ class Normalize(unittest.TestCase):
                 tools.REGISTRY[tool_name] = tools.Tool(tool_name, "a test probe", props, list(spec["required"]),
                                                        lambda _g, _pid, **kw: kw, kind="query")
                 names.append(tool_name)
+            listed = rulescript.intended_ids()
             for case in table["cases"]:
+                if "intended" in case:
+                    self.assertIn(case["intended"], listed, case)
+                    continue
                 with self.subTest(case=case):
                     try:
                         got = rulescript.plain(g.execute(0, f"_rulescript_{case['tool']}", dict(case["args"])))

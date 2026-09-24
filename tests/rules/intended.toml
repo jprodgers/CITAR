@@ -1,11 +1,50 @@
 # Deliberate differences that only the rule scripts can show: a check whose expected value is the
 # Rust engine's carries `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md).
 # Differences a refcheck group shows belong in refcheck/intended.toml, which scripts may cite too.
+# `cargo refcheck changelog` lists both files as the changelog's rule fixes, so the reason is
+# written for a reader of the changelog, and an id may be in only one of them.
 #
 # One [[differences]] table per entry, as in refcheck/intended.toml but without `where`:
 #   id      kebab-case and unique; the code that makes the fix cites it as `// refcheck: <id>`
+#           (citar-refcheck's tests check that every id here is cited in the engine)
 #   reason  one line: what Python did, and what Rust does instead
 
 [[differences]]
 id = "atomic-apply-ops"
 reason = "Python applied scenario operations until the first failure and left the earlier ones applied; Rust applies a list all or nothing"
+
+[[differences]]
+id = "scenario-set-tile-checks-kinds"
+reason = "The scenario operation set_tile stored any terrain name as a tile's terrain, feature or natural wonder; Rust refuses a name of the wrong kind"
+
+[[differences]]
+id = "scenario-numbers-finite-and-in-range"
+reason = "Scenario operations stored any number they were given; Rust refuses one that is not finite, and a whole number that does not fit its field (a resource amount above 255)"
+
+[[differences]]
+id = "scenario-war-refuses-standing-treaties"
+reason = "The scenario operation set_relation could leave two players at war with a friendship, defensive pact or open borders in force; Rust refuses a relation no game can reach"
+
+[[differences]]
+id = "scenario-opinion-counts"
+reason = "The scenario operation set_relation stored an opinion under a key nothing read; in Rust it is the holder's own opinion of the other, within the -100 to 100 every reason keeps"
+
+[[differences]]
+id = "scenario-influence-majors-only"
+reason = "The scenario operation set_influence took a city-state as the player whose influence it set; Rust takes only a major civilization"
+
+[[differences]]
+id = "scenario-techs-string-is-one-name"
+reason = "The scenario operation grant_tech read a techs string letter by letter; Rust reads it as one tech's name"
+
+[[differences]]
+id = "scenario-tech-announcement-wording"
+reason = "A tech a scenario granted was announced as 'Rome scenario Pottery.'; Rust announces 'Rome was granted Pottery.'"
+
+[[differences]]
+id = "scenario-errors-are-sentences"
+reason = "A scenario parameter of the wrong type was refused with Python's own exception ('bad parameters (ValueError: ...)'); Rust refuses it with a sentence naming the parameter and what it takes"
+
+[[differences]]
+id = "normalize-refuses-big-ints-and-non-objects"
+reason = "Tool arguments took integers of any size, and arguments sent as a list of pairs; Rust refuses an integer beyond 64 bits and arguments that are not an object"

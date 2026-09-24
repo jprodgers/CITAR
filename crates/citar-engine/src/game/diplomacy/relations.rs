@@ -15,7 +15,7 @@
 //!
 //! One fix: a scenario's opinion is the holder's own opinion of the other, within the ±100 every
 //! reason keeps. Python kept it under a key (`"a>b"`) that `opinion()` never read, so a scenario
-//! could not move what a bot thought.
+//! could not move what a bot thought (refcheck: scenario-opinion-counts).
 
 use crate::base::ids::PlayerId;
 use crate::game::city_states::influence::{add_influence, set_influence};
@@ -73,6 +73,7 @@ pub fn add_opinion(g: &mut Game, holder: PlayerId, about: PlayerId, key: Opinion
 /// ±100 [`add_opinion`] keeps each reason to: now that the scenario's reason counts, a value
 /// beyond it would make an opinion no play can reach.
 pub fn set_opinion(g: &mut Game, holder: PlayerId, about: PlayerId, key: OpinionKey, value: f64) {
+    // refcheck: scenario-opinion-counts
     let value = value.clamp(-OPINION_LIMIT, OPINION_LIMIT);
     g.edit_diplo(DiploTouch::OPINIONS).opinions.set(holder, about, key, value);
 }

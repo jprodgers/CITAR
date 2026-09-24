@@ -16,9 +16,11 @@
 //!
 //! There is no `at` to `x, y` coercion: Python never had one.
 //!
-//! Two differences, on purpose: an integer outside `i64` is refused where Python made a big
-//! integer of it, and arguments that are neither an object nor empty are refused where Python's
-//! `dict()` accepted a list of pairs or raised a `TypeError` that escaped as a crash.
+//! Two differences, on purpose (`normalize-refuses-big-ints-and-non-objects` in
+//! `tests/rules/intended.toml`, and cases of `tests/rules/normalize.json` only the Rust engine
+//! runs): an integer outside `i64` is refused where Python made a big integer of it, and
+//! arguments that are neither an object nor empty are refused where Python's `dict()` accepted a
+//! list of pairs or raised a `TypeError` that escaped as a crash.
 
 use serde_json::{Map, Value};
 
@@ -37,6 +39,7 @@ pub fn normalize(tool: &str, args: &Value) -> Result<Map<String, Value>, ActionE
 /// The arguments of a call to the tool `spec` describes, coerced.
 pub fn normalize_with(spec: &ToolArgs, args: &Value) -> Result<Map<String, Value>, ActionError> {
     // `dict(args or {})`: anything false is no arguments.
+    // refcheck: normalize-refuses-big-ints-and-non-objects (a list of pairs is refused)
     let mut out = match args {
         Value::Object(m) => m.clone(),
         v if !py::truthy(v) => Map::new(),
@@ -60,6 +63,7 @@ pub fn normalize_with(spec: &ToolArgs, args: &Value) -> Result<Map<String, Value
         let Some(v) = out.get_mut(name) else { continue };
         match ty {
             ArgType::Integer if !v.is_null() => {
+                // refcheck: normalize-refuses-big-ints-and-non-objects (beyond i64 is refused)
                 let n = py::int_of(v).ok_or_else(|| {
                     ActionError::new(
                         ErrCode::BadParam,

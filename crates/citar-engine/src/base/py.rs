@@ -7,8 +7,9 @@
 //! engine reads such values exactly as Python did, and quotes them back as Python would.
 //!
 //! What differs, on purpose: an integer beyond `i64` is refused where Python made a big integer
-//! of it, and `float()` of `inf` or `nan` is left to the caller to refuse, since no game value may
-//! be infinite (invariant PLAYER-1).
+//! of it (refcheck: normalize-refuses-big-ints-and-non-objects, for tool arguments), and
+//! `float()` of `inf` or `nan` is left to the caller to refuse, since no game value may be
+//! infinite (invariant PLAYER-1).
 
 use serde_json::Value;
 

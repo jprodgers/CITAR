@@ -4,6 +4,10 @@ the first-contact event; set_relation meets them, then sets embassies, friendshi
 pact and open borders for some turns, an opinion, and war or peace. War ends friendship, pacts and
 open borders, and those who were betrayed think less of the aggressor; a scenario's peace leaves
 no treaty behind.
+
+The Rust engine counts the scenario's opinion as the holder's own, within the -100 to 100 every
+reason keeps, and refuses a war with a treaty still in force (intended: scenario-opinion-counts,
+scenario-war-refuses-standing-treaties).
 """
 from = "citar/engine/scenario.py: meet, set_relation"
 
@@ -47,12 +51,25 @@ eq = { war = false }
 
 [[step]]
 check = { what = "relation", a = 1, b = 2 }
-subset = { met = true, war = false, embassy = [true, true], friendship_until = 21, pact_until = 21, open_borders_until = [21, 21], opinion = [15, 0], friends = true, pact = true }
+subset = { met = true, war = false, embassy = [true, true], friendship_until = 21, pact_until = 21, open_borders_until = [21, 21], friends = true, pact = true }
+
+[[step]]
+note = "The scenario's opinion is a's own of b; Python stored it where diplomacy.opinion never looked."
+check = { what = "relation", a = 1, b = 2 }
+path = "opinion"
+eq = [15, 0]
+intended = "scenario-opinion-counts"
 
 [[step]]
 note = "The two-sided terms read from each side."
 check = { what = "relation", a = 2, b = 1 }
-subset = { embassy = [true, true], opinion = [0, 15] }
+subset = { embassy = [true, true], open_borders_until = [21, 21] }
+
+[[step]]
+check = { what = "relation", a = 2, b = 1 }
+path = "opinion"
+eq = [0, 15]
+intended = "scenario-opinion-counts"
 
 [[step]]
 op = "set_relation"
@@ -74,7 +91,19 @@ eq = { war = true }
 
 [[step]]
 check = { what = "relation", a = 1, b = 2 }
-subset = { war = true, war_declared_by = 1, since = 1, friendship_until = 0, pact_until = 0, friends = false, pact = false, opinion = [15, -60] }
+subset = { war = true, war_declared_by = 1, since = 1, friendship_until = 0, pact_until = 0, friends = false, pact = false }
+
+[[step]]
+note = "The betrayed friend and partner: -40 for the friendship, -20 for the pact."
+check = { what = "relation", a = 1, b = 2 }
+path = "opinion[1]"
+eq = -60
+
+[[step]]
+check = { what = "relation", a = 1, b = 2 }
+path = "opinion"
+eq = [15, -60]
+intended = "scenario-opinion-counts"
 
 [[step]]
 check = { what = "relation", a = 0, b = 1 }
@@ -93,6 +122,38 @@ subset = { war = false, treaty_until = 0, since = 1 }
 check = { what = "events", type = "peace" }
 path = "[0].text"
 eq = "Civilization 3 and Civilization 2 signed a peace treaty (until turn 11)."
+
+[[step]]
+note = "A scenario's opinion is one reason among the others, and keeps within their -100 to 100."
+op = "set_relation"
+args = { a = 0, b = 2, opinion = 500 }
+
+[[step]]
+check = { what = "relation", a = 0, b = 2 }
+path = "opinion"
+eq = [100, 0]
+intended = "scenario-opinion-counts"
+
+[[step]]
+op = "set_relation"
+args = { a = 2, b = 0, opinion = -250.5 }
+
+[[step]]
+check = { what = "relation", a = 0, b = 2 }
+path = "opinion"
+eq = [100, -100]
+intended = "scenario-opinion-counts"
+
+[[step]]
+note = "War with a friendship, a pact or open borders in force is no state a game can reach: refused, and nothing of the operation is kept."
+op = "set_relation"
+args = { a = 0, b = 2, state = "war", friends = true }
+error = "Operation 1 (set_relation): Two players at war can have no friendship, defensive pact or open borders."
+intended = "scenario-war-refuses-standing-treaties"
+
+[[step]]
+check = { what = "relation", a = 0, b = 2 }
+subset = { war = false, friends = false }
 
 [[step]]
 op = "set_relation"

@@ -11,19 +11,27 @@
 //! `set_influence`, `reveal` and `set_research`. The others are listed with the package that
 //! ports their system, and are refused as not ported until then.
 //!
-//! What differs from Python, on purpose:
-//! - a list of operations applies all or nothing (DESIGN.md 8.1);
+//! What differs from Python, on purpose, each listed in `tests/rules/intended.toml` under its id
+//! and cited where the fix is made:
+//! - a list of operations applies all or nothing (DESIGN.md 8.1; `atomic-apply-ops`);
 //! - `set_tile` refuses a terrain, feature or natural wonder of the wrong kind, where Python
-//!   stored any terrain name in any slot;
+//!   stored any terrain name in any slot (`scenario-set-tile-checks-kinds`);
 //! - numbers must be finite, and a whole number must fit its field (a resource amount fits a
-//!   byte), where Python stored anything;
+//!   byte), where Python stored anything (`scenario-numbers-finite-and-in-range`);
 //! - `set_relation` refuses a war with a friendship, a defensive pact or open borders in force,
-//!   which Python set as asked and no rule of the game can reach (invariant DIPLO-1);
+//!   which Python set as asked and no rule of the game can reach (invariant DIPLO-1;
+//!   `scenario-war-refuses-standing-treaties`);
+//! - `set_relation`'s opinion is the holder's own, within the ±100 every reason keeps, where
+//!   Python stored it where nothing read it (`scenario-opinion-counts`, in
+//!   `game::diplomacy::relations`);
 //! - `set_influence` takes only a major civilization as the one whose influence is set, where
-//!   Python took a city-state too; `grant_tech` reads a `techs` string as one name, where Python
-//!   took each of its letters;
+//!   Python took a city-state too (`scenario-influence-majors-only`);
+//! - `grant_tech` reads a `techs` string as one name, where Python took each of its letters
+//!   (`scenario-techs-string-is-one-name`);
+//! - a granted tech is announced "Rome was granted Pottery." where Python wrote "Rome scenario
+//!   Pottery." (`scenario-tech-announcement-wording`, in `game::research`);
 //! - a parameter of the wrong type is refused with a sentence, where Python quoted its own
-//!   exception ("bad parameters (ValueError: ...)").
+//!   exception ("bad parameters (ValueError: ...)"; `scenario-errors-are-sentences`).
 
 use serde_json::{Map, Value, json};
 
@@ -293,6 +301,8 @@ pub(crate) fn resolve<I: Named>(g: &Game, v: Option<&Value>) -> Result<I, Action
 
 /// A number parameter (Python's `float()`), which must be finite.
 fn number(v: &Value, key: &str) -> Result<f64, ActionError> {
+    // refcheck: scenario-numbers-finite-and-in-range
+    // refcheck: scenario-errors-are-sentences
     py::float_of(v)
         .filter(|x| x.is_finite())
         .ok_or_else(|| bad(format!("{key} must be a finite number, not {}.", py::repr(v))))
@@ -300,6 +310,8 @@ fn number(v: &Value, key: &str) -> Result<f64, ActionError> {
 
 /// A whole-number parameter (Python's `int()`) that must fit `T`.
 fn whole<T: TryFrom<i64>>(v: &Value, key: &str) -> Result<T, ActionError> {
+    // refcheck: scenario-numbers-finite-and-in-range
+    // refcheck: scenario-errors-are-sentences
     py::int_of(v)
         .and_then(|n| T::try_from(n).ok())
         .ok_or_else(|| bad(format!("{key} must be a whole number in range, not {}.", py::repr(v))))
@@ -348,6 +360,7 @@ fn grant_era(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
 
 /// Grants techs with every prerequisite they are missing (`scenario.py:129-152`).
 fn grant_tech(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    // refcheck: scenario-techs-string-is-one-name (Python iterated a string's letters)
     let names: Vec<&Value> = match o.get("techs").filter(|v| py::truthy(v)) {
         Some(Value::Array(list)) => list.iter().collect(),
         Some(one) => vec![one],
@@ -469,6 +482,7 @@ fn set_tile(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let r = g.rules();
     let before = *g.tile(t).ok_or_else(|| bad("No such tile."))?;
     let kind = |id: TerrainId| r.terrains()[id].kind;
+    // refcheck: scenario-set-tile-checks-kinds (the terrain, the features and the wonder)
     if let Some(v) = o.get("terrain") {
         let id: TerrainId = resolve(g, Some(v))?;
         if !matches!(kind(id), TerrainType::Land | TerrainType::Water) {
@@ -598,6 +612,7 @@ fn set_relation(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     })
     .map_err(|e| refused(&e))?;
     let turn = g.turn();
+    // refcheck: scenario-war-refuses-standing-treaties
     if g.relation(a, b).is_some_and(|r| {
         r.war
             && (r.friendship_until >= turn
@@ -610,6 +625,7 @@ fn set_relation(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     }
     if let Some(v) = given(o, "opinion") {
         let x = number(v, "opinion")?;
+        // refcheck: scenario-opinion-counts (within the ±100 every reason keeps)
         set_opinion(g, a, b, OpinionKey::Scenario, x);
     }
     Ok(json!({"war": g.relation(a, b).is_some_and(|r| r.war)}))
@@ -622,6 +638,7 @@ fn set_influence(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     if !g.is_city_state(cs) {
         return Err(bad(format!("Player {} is not a city-state.", cs.0)));
     }
+    // refcheck: scenario-influence-majors-only
     let p = pid(g, o.get("player"), true)?;
     g.make_contact(cs, p);
     let current = raw_influence(g, cs, p);

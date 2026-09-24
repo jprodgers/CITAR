@@ -15,7 +15,7 @@
 //!
 //! One wording differs on purpose: Python announced a tech a scenario granted as "Rome scenario
 //! Pottery.", putting the source's key where the verb goes; here it is "Rome was granted
-//! Pottery.".
+//! Pottery." (refcheck: scenario-tech-announcement-wording).
 
 use serde_json::{Value, json};
 
@@ -54,6 +54,7 @@ impl TechSource {
             Self::Free => "chose as a free technology",
             Self::GreatPerson => "discovered with a Great Scientist",
             Self::Espionage => "stole",
+            // refcheck: scenario-tech-announcement-wording
             Self::Scenario => "was granted",
         }
     }
