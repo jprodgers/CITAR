@@ -9,6 +9,17 @@ publish.workspace = true
 
 [dependencies]
 citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy"] }
+# The synthetic states the save and digest benchmarks time.
+citar-testkit.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+# The digest and the save of a synthetic gargantuan state (package 1a-09): the digest is gated at
+# 5 ms (report-only) and fails the run above 15 ms (DESIGN.md 4.10, 10).
+[[bench]]
+name = "digest"
+harness = false
 
 [lints]
 workspace = true
