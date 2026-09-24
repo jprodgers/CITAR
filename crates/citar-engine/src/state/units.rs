@@ -192,11 +192,12 @@ impl Unit {
         }
     }
 
-    /// The same unit, carried by `carrier`: for units read from a save or converted from Python,
-    /// before they are in a store. [`Units::from_units`] checks the link; a unit already in a
-    /// store boards through [`Units::board`], which reports the change.
+    /// The same unit, carried by `carrier`: for units the converter builds, before they are in a
+    /// store. [`Units::from_units`] checks the link; a unit already in a store boards through
+    /// [`Units::board`], which reports the change.
+    #[cfg(feature = "legacy")]
     #[must_use]
-    pub fn with_carrier(mut self, carrier: Option<UnitId>) -> Self {
+    pub(crate) fn with_carrier(mut self, carrier: Option<UnitId>) -> Self {
         self.carried_by = carrier;
         self
     }

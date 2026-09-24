@@ -1029,10 +1029,11 @@ impl CityStateData {
         Self { cs_type, ..Self::default() }
     }
 
-    /// The same city-state data with this ally: for a player being built from a save or a
-    /// conversion. An ally in play changes only through `State::set_ally`, which reports it.
+    /// The same city-state data with this ally: for a player the converter builds. An ally in
+    /// play changes only through `State::set_ally`, which reports it; a save sets it as it loads.
+    #[cfg(feature = "legacy")]
     #[must_use]
-    pub fn with_ally(mut self, ally: Option<PlayerId>) -> Self {
+    pub(crate) fn with_ally(mut self, ally: Option<PlayerId>) -> Self {
         self.ally = ally;
         self
     }

@@ -5,7 +5,9 @@
 //! fields indexed by [`side`]; whether a pair has met comes from the players' `met` lists, which
 //! Python kept symmetric. Opinions leave the relation for the [`OpinionBook`], keyed by their
 //! holder: a scenario's `"a>b"` entry (`scenario.py:429`), which Python never read, now counts as
-//! `a`'s opinion of `b`. Deal items and terms read with `DealItem::from_json`, which is strict.
+//! `a`'s opinion of `b`, and must name the relation's own pair; a reason set both there and in
+//! `a`'s own entry is refused. Deal items and terms read with `DealItem::from_json`, which is
+//! strict.
 
 use serde_json::{Map, Value};
 
@@ -76,10 +78,12 @@ pub(super) fn diplomacy(cx: &mut Cx<'_>, top: &Obj<'_>, players: &[PlayerOut]) -
         })? {
             r.denounced_until[side(who, other(who, a, b))] = until;
         }
-        for (holder, about, values) in o.entries("opinion", |k, x, pp| {
+        let entries = o.entries("opinion", |k, x, pp| {
             let (holder, about) = if k.contains('>') {
-                // A scenario's opinion, written under "a>b" and read by nobody (scenario.py:429).
-                pair_key(cx, k, '>', pp)?
+                // A scenario's opinion, written under "a>b" of this pair and read by nobody
+                // (scenario.py:429).
+                let (h, g) = pair_key(cx, k, '>', pp)?;
+                (one_of(h, a, b, pp)?, one_of(g, a, b, pp)?)
             } else {
                 let h = one_of(cx.player_key(k, pp)?, a, b, pp)?;
                 (h, other(h, a, b))
@@ -87,14 +91,23 @@ pub(super) fn diplomacy(cx: &mut Cx<'_>, top: &Obj<'_>, players: &[PlayerOut]) -
             if holder == about {
                 return Err(pp.err("an opinion of oneself"));
             }
-            Ok((holder, about, opinion_values(x, pp)?))
-        })? {
+            Ok((k, holder, about, opinion_values(x, pp)?))
+        })?;
+        for (key, holder, about, values) in entries {
             match opinions.iter_mut().find(|(k, _)| *k == (holder, about)) {
+                // A holder's own entry and a scenario's about the same player: a reason may be
+                // set in one of them only, so the result does not depend on their order.
                 Some((_, old)) => {
                     for (slot, x) in old.iter_mut().zip(values) {
-                        if x.to_bits() != 0 {
-                            *slot = x;
+                        if x.to_bits() == 0 {
+                            continue;
                         }
+                        if slot.to_bits() != 0 {
+                            return Err(o.at("opinion").key(key).err(format!(
+                                "player {holder}'s opinion of {about} sets a reason twice"
+                            )));
+                        }
+                        *slot = x;
                     }
                 }
                 None => opinions.push(((holder, about), values)),

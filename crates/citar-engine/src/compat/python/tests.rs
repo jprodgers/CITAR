@@ -328,3 +328,64 @@ fn the_rarer_shapes_convert() {
     bad["players"][0]["flags"]["pairs"] = json!({});
     assert_eq!(convert_value(&bad).err().map(|e| e.path), Some("players[0].flags.pairs".into()));
 }
+
+#[test]
+fn a_message_not_numbered_by_its_place_is_refused() {
+    let mut v = tiny();
+    v["messages"] = json!([{"id": 1, "turn": 3, "from": 0, "to": [1], "text": "Hello."},
+                           {"id": 3, "turn": 3, "from": 1, "to": [0], "text": "Hi."}]);
+    let e = convert_value(&v).expect_err("refused");
+    assert_eq!(e.path, "messages[1].id", "{e}");
+    v["messages"][1]["id"] = json!(2);
+    assert!(convert_value(&v).is_ok());
+}
+
+/// `tiny()` with a third major, so that a relation's key can name a player outside its pair.
+fn three_majors() -> Value {
+    let mut v = tiny();
+    let mut third = v["players"][1].clone();
+    third["id"] = json!(2);
+    third["name"] = json!("Egypt");
+    third["nation"] = json!("Egypt");
+    v["players"].as_array_mut().expect("players").push(third);
+    v
+}
+
+#[test]
+fn opinions_are_read_strictly_and_in_no_order() {
+    use crate::base::ids::PlayerId;
+    use crate::state::diplo::OpinionKey;
+
+    let relation = |opinion: Value| {
+        json!({"war": false, "war_declared_by": null, "since": 0, "treaty_until": 0,
+               "embassy": {}, "friendship_until": 0, "pact_until": 0, "ra_until": 0,
+               "ra_science": {}, "denounced_by": {}, "opinion": opinion})
+    };
+    // A scenario's key must name the relation's own pair.
+    let mut v = three_majors();
+    v["relations"] = json!({"0,1": relation(json!({"0>2": {"scenario": 20.0}}))});
+    let e = convert_value(&v).expect_err("refused");
+    assert_eq!(e.path, r#"relations["0,1"].opinion["0>2"]"#, "{e}");
+
+    // A holder's own entry and a scenario's merge the same in either order.
+    for opinion in [
+        json!({"0": {"warmonger": -5.0}, "0>1": {"scenario": 20.0}}),
+        json!({"0>1": {"scenario": 20.0}, "0": {"warmonger": -5.0}}),
+    ] {
+        let mut v = three_majors();
+        v["relations"] = json!({"0,1": relation(opinion)});
+        let got = convert_value(&v).expect("converts");
+        let ops = &got.state.diplo().opinions;
+        let (a, b) = (PlayerId(0), PlayerId(1));
+        assert_eq!(ops.get(a, b, OpinionKey::Warmonger).to_bits(), (-5f64).to_bits());
+        assert_eq!(ops.get(a, b, OpinionKey::Scenario).to_bits(), 20f64.to_bits());
+    }
+
+    // A reason set in both is refused, whichever comes first.
+    let mut v = three_majors();
+    v["relations"] =
+        json!({"0,1": relation(json!({"0": {"scenario": 5.0}, "0>1": {"scenario": 20.0}}))});
+    let e = convert_value(&v).expect_err("refused");
+    assert!(e.path.starts_with(r#"relations["0,1"].opinion["#), "{e}");
+    assert!(e.message.contains("sets a reason twice"), "{e}");
+}

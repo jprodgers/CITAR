@@ -8,7 +8,8 @@
 //! events). Each list keeps its own order.
 //!
 //! An event keeps its id, which must be its position from 1, as `Game.emit` gave it
-//! (`game.py:876`), so the feed engine and host events share goes on from it. Its name
+//! (`game.py:876`), so the feed engine and host events share goes on from it. A message keeps its
+//! id too, which must also be its position from 1 (`diplomacy.py:308`). An event's name
 //! references (`game.py:842-858`) move from code points to UTF-8 byte offsets; its `x` and `y`,
 //! derived from its tile, are checked and dropped; its data becomes the typed [`EventData`]. The
 //! host's own event types (`agent_error`, `game_paused`, `game_resumed`) are host events, counted
@@ -48,6 +49,18 @@ pub(super) fn history(
     let width = cx.width;
     let events = top.each("events", |v, p| event(cx, width, v, p))?;
     let messages = top.each("messages", |v, p| message(cx, v, p))?;
+    // Python numbered messages by their place from 1 (`diplomacy.py:308`). No counter holds the
+    // next message id, so the engine numbers new ones from the heads' count, which any other
+    // numbering would collide with.
+    for (i, m) in messages.iter().enumerate() {
+        if usize::try_from(m.id.get()).ok() != Some(i + 1) {
+            return Err(top.at("messages").index(i).field("id").err(format!(
+                "message {} is not numbered by its place ({})",
+                m.id,
+                i + 1
+            )));
+        }
+    }
     let thoughts = top.each("thoughts", |v, p| thought(cx, v, p))?;
     let stats = top.each("stats", |v, p| stats_row(cx, v, p))?;
 
