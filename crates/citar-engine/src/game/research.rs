@@ -26,8 +26,8 @@ use super::core::has_type;
 use super::derive::rev::PlayerTouch;
 use super::error::ActionError;
 use super::{Game, Porting, pending, pending_or};
-use crate::base::ids::{PlayerId, TechId};
-use crate::base::sets::PlayerSet;
+use crate::base::ids::{EraId, PlayerId, TechId};
+use crate::base::sets::{PlayerSet, TechSet};
 use crate::rules::Ruleset;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::unique::{Ctx, UniqueType};
@@ -71,6 +71,37 @@ pub fn is_repeatable(rules: &Ruleset, t: TechId) -> bool {
         .techs()
         .get(t)
         .is_some_and(|d| has_type(rules, &d.uniques, UniqueType::ResearchableMultipleTimes))
+}
+
+/// The era a civilization is in, from the techs it knows (`research.player_era`,
+/// `research.py:254-275`, UnCiv's `TechManager.updateEra`): the era of its furthest column of
+/// the tech tree, or, once it has every tech of the earlier columns, the era of the first column
+/// it has not finished, if that is later. With no tech at all it is in the first era.
+///
+/// Package 1b-05 ports it for the unique index, which holds the era's uniques; within a column
+/// the first tech by id stands for it, where Python took the first of the civilization's own
+/// list (the techs of one column share an era).
+#[must_use]
+pub fn player_era(rules: &Ruleset, known: &TechSet) -> EraId {
+    let techs = rules.techs();
+    let mut furthest: Option<(u16, EraId)> = None;
+    let mut first_missing: Option<(u16, EraId)> = None;
+    for (t, def) in techs.iter() {
+        let slot = if known.contains(t) { &mut furthest } else { &mut first_missing };
+        let better = match (*slot, known.contains(t)) {
+            (None, _) => true,
+            (Some((col, _)), true) => def.column > col,
+            (Some((col, _)), false) => def.column < col,
+        };
+        if better {
+            *slot = Some((def.column, def.era));
+        }
+    }
+    match (furthest, first_missing) {
+        (None, _) => EraId(0),
+        (Some((_, era)), None) => era,
+        (Some((_, era)), Some((_, next))) => era.max(next),
+    }
 }
 
 /// Whether a civilization can never research a tech in this game (`research.py:52-58`): one of
