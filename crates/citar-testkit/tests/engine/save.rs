@@ -926,5 +926,11 @@ fn the_summary_of_the_duel_state_matches_its_fixture() {
     doc["version"] = Value::from(9);
     let newer = save::summary(&serde_json::to_vec(&doc).expect("JSON"));
     assert_eq!(newer.err(), Some(LoadError::Version(9)));
+    // A newer version is refused as such, whatever shape its parts took.
+    doc["version"] = Value::from(2);
+    doc["config"]["map"] = serde_json::json!({"atlas": {"sheet": 4}});
+    doc["players"] = Value::from(3);
+    let reshaped = save::summary(&serde_json::to_vec(&doc).expect("JSON"));
+    assert_eq!(reshaped.err(), Some(LoadError::Version(2)));
     assert!(save::summary(b"{\"format\": \"citar-journal\"}").is_err());
 }

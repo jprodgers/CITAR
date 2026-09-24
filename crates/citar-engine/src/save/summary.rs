@@ -47,10 +47,15 @@ pub struct MajorSummary {
     pub alive: bool,
 }
 
+/// What says how to read the rest.
 #[derive(Deserialize)]
-struct Head {
+struct Header {
     format: String,
     version: u32,
+}
+
+#[derive(Deserialize)]
+struct Head {
     clock: ClockHead,
     config: ConfigHead,
     players: Vec<PlayerHead>,
@@ -103,14 +108,27 @@ struct CivHead {
 }
 
 /// The headline facts of the save `bytes`, without loading it or needing its ruleset.
+///
+/// The format and version are read first, so a save of another version is refused as such
+/// whatever shape its parts have; an older one is upgraded (`save::migrate`) before its parts
+/// are read.
 pub fn summary(bytes: &[u8]) -> Result<Summary, LoadError> {
-    let head: Head = serde_json::from_slice(bytes).map_err(|e| LoadError::Json(e.to_string()))?;
-    if head.format != json::FORMAT {
+    let json_err = |e: serde_json::Error| LoadError::Json(e.to_string());
+    let header: Header = serde_json::from_slice(bytes).map_err(json_err)?;
+    if header.format != json::FORMAT {
         return Err(LoadError::Json(format!("not a {} document", json::FORMAT)));
     }
-    if !(migrate::OLDEST..=migrate::CURRENT).contains(&head.version) {
-        return Err(LoadError::Version(head.version));
+    if !(migrate::OLDEST..=migrate::CURRENT).contains(&header.version) {
+        return Err(LoadError::Version(header.version));
     }
+    let head: Head = if header.version == migrate::CURRENT {
+        // The common case reads the parts it needs straight from the text, skipping the rest.
+        serde_json::from_slice(bytes).map_err(json_err)?
+    } else {
+        let mut doc: serde_json::Value = serde_json::from_slice(bytes).map_err(json_err)?;
+        migrate::upgrade(&mut doc, header.version)?;
+        Head::deserialize(&doc).map_err(json_err)?
+    };
     let (map_size, map_type) = match head.config.map {
         MapHead::Generated { size, map_type } => (size, map_type),
         MapHead::Editor { size } => (size, "custom".to_owned()),
