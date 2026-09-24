@@ -64,10 +64,16 @@ mod gates {
         Action::Probe(Probe { gold, refuse, any_time: false })
     }
 
-    /// Everything a refusal must leave as it was: the digest, the revision, the events and the
-    /// pending work (a refusal never settles).
-    fn snapshot(g: &Game) -> (crate::base::digest::Digest, u64, usize, bool) {
-        (g.digest().expect("a digest"), g.rev(), g.chronicle().events().len(), g.pending.is_empty())
+    /// Everything a refusal must leave as it was: the digest, the revision, the events, the
+    /// action log and the pending work (a refusal never settles).
+    fn snapshot(g: &Game) -> (crate::base::digest::Digest, u64, usize, usize, bool) {
+        (
+            g.digest().expect("a digest"),
+            g.rev(),
+            g.chronicle().events().len(),
+            g.chronicle().actions().len(),
+            g.pending.is_empty(),
+        )
     }
 
     #[test]
@@ -77,7 +83,7 @@ mod gates {
         let c = g.st.cities().ids()[0];
         g.city_mut(c, CityTouch::WORK);
         let before = snapshot(&g);
-        assert!(!before.3);
+        assert!(!before.4);
         let refusals = [
             (ROME, probe(5, true), ErrCode::Rule),
             (PlayerId(1), probe(5, false), ErrCode::NotYourTurn),
@@ -124,6 +130,23 @@ mod gates {
         // Any time: another player's turn is no refusal.
         let any = Action::Probe(Probe { gold: 1, refuse: false, any_time: true });
         assert!(g.act(PlayerId(1), any).is_ok());
+    }
+
+    #[test]
+    fn an_action_that_succeeds_is_logged_and_a_refusal_is_not() {
+        let mut g = game();
+        let (hosted, digest) = (g.st.host().actions, g.digest().expect("a digest"));
+        g.act(ROME, probe(0, false)).expect("accepted");
+        let _refused = g.act(ROME, probe(4, true)).expect_err("refused");
+        let log = g.chronicle().actions();
+        assert_eq!(log.len(), 1);
+        let rec = &log[0];
+        assert_eq!((rec.turn, rec.player, &*rec.tool), (g.turn(), ROME, "probe"));
+        let args: serde_json::Value = serde_json::from_str(&rec.args).expect("JSON");
+        assert_eq!(args, serde_json::json!({"gold": 0, "refuse": false, "any_time": false}));
+        // Host activity: counted in the host heads, never in the digest.
+        assert_eq!(g.st.host().actions, hosted + 1);
+        assert_eq!(g.digest().expect("a digest"), digest);
     }
 
     #[test]

@@ -18,7 +18,9 @@ use super::Game;
 use super::error::{ActionError, ErrCode};
 use super::events::EventBatch;
 use crate::base::ids::PlayerId;
+use crate::save::journal::Record;
 use crate::state::Phase;
+use crate::state::chronicle::ActionRecord;
 
 /// What an action reports: the tool's result, as the model reads it.
 pub type Outcome = serde_json::Value;
@@ -120,14 +122,34 @@ impl Game {
     /// Takes an action for a player (DESIGN.md 8.3): the guard and the rule's check, which only
     /// read; then the apply, a settle, and the result read from the settled game, with the
     /// events the call appended.
+    ///
+    /// An action that succeeds is logged (`tools.py:129-130`), here and not in the JSON layer,
+    /// since bots and drivers call `act` directly and Python logged theirs too.
     pub fn act(&mut self, pid: PlayerId, a: Action) -> Result<(Outcome, EventBatch), ActionError> {
         self.ensure_live()?;
         self.begin_call();
         self.guard(pid, a.any_time())?;
+        let record = self.action_record(pid, &a);
         let spec = a.run(self, pid)?;
         self.settle();
+        Record::of(&mut self.st, &mut self.chron).action(record);
         let out = spec.finish(self);
         Ok((out, self.take_batch()))
+    }
+
+    /// The log entry of an action (`tools.py:130`): the turn it was taken on, and its arguments
+    /// as the tool took them, the action's fields without the tag that names the tool. Python
+    /// logged the turn after the call, which for an `end_turn` that closed the round was the
+    /// next one; the wall-clock time is the host's to add.
+    fn action_record(&self, pid: PlayerId, a: &Action) -> ActionRecord {
+        // An action's fields are plain data, so it always serialises; an empty object stands
+        // in if one ever does not.
+        let mut args = serde_json::to_value(a).unwrap_or_default();
+        if let Some(fields) = args.as_object_mut() {
+            fields.shift_remove("tool");
+        }
+        let args = if args.is_object() { args.to_string() } else { "{}".to_owned() };
+        ActionRecord { turn: self.turn(), player: pid, tool: a.tool().into(), args: args.into() }
     }
 
     /// Whether `pid` may act now (`tools.py:105-112`): a major civilization of this game, alive,
