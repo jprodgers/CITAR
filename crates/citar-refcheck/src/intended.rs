@@ -36,6 +36,10 @@
 //!
 //! The v1 form, one inline `differences = [...]` array, is refused: there were never any v1
 //! entries to carry over, so the file went straight to v2.
+//!
+//! [`ScriptIntended`] reads `tests/rules/intended.toml`: the differences only the rule scripts
+//! show (DESIGN.md 9.3), each an `id` and a `reason` and nothing else, since no group compares
+//! them. The changelog lists both files.
 
 use std::path::Path;
 
@@ -266,6 +270,89 @@ struct RawEntry {
     rule: Option<String>,
     #[serde(default)]
     broad: bool,
+}
+
+/// `tests/rules/intended.toml`: one entry per `[[differences]]` table, `id` and `reason` only.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScriptFile {
+    #[serde(default)]
+    differences: Vec<RawScriptEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScriptEntry {
+    id: String,
+    reason: String,
+}
+
+/// A deliberate difference only the rule scripts show: a check that expects the Rust engine's
+/// value cites it with `intended = "<id>"`, and the Python runner skips that check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptEntry {
+    pub id: String,
+    pub reason: String,
+}
+
+/// `tests/rules/intended.toml`, the differences no refcheck group compares.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptIntended {
+    entries: Vec<ScriptEntry>,
+}
+
+impl ScriptIntended {
+    pub fn load(path: &Path) -> Result<ScriptIntended> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?;
+        ScriptIntended::parse(&text).map_err(|e| e.context(path.display()))
+    }
+
+    /// Parses the list: kebab-case ids, each once, and one-line reasons, as `intended.toml`'s.
+    pub fn parse(text: &str) -> Result<ScriptIntended> {
+        reject_inline_form(text)?;
+        let raw: RawScriptFile =
+            toml::from_str(text).map_err(|e| Error::new(e.to_string().trim_end().to_string()))?;
+        let mut entries: Vec<ScriptEntry> = Vec::with_capacity(raw.differences.len());
+        for r in raw.differences {
+            let context = format!("difference `{}`", r.id);
+            if !is_kebab(&r.id) {
+                return Err(Error::new(
+                    "the id must be kebab-case: lower-case words joined by `-`",
+                )
+                .context(&context));
+            }
+            let reason = r.reason.trim();
+            if reason.is_empty() || reason.contains('\n') {
+                return Err(Error::new("the reason must be one non-empty line").context(&context));
+            }
+            if entries.iter().any(|e| e.id == r.id) {
+                return Err(Error::new(format!("the id `{}` is used twice", r.id)));
+            }
+            entries.push(ScriptEntry { id: r.id, reason: reason.to_string() });
+        }
+        Ok(ScriptIntended { entries })
+    }
+
+    pub fn entries(&self) -> &[ScriptEntry] {
+        &self.entries
+    }
+}
+
+/// The CHANGELOG's list of rule fixes: `intended`'s entries, then those only the scripts show,
+/// one Markdown bullet each. An id in both lists is refused, since a script cites either by id.
+pub fn changelog(intended: &Intended, scripts: &ScriptIntended) -> Result<String> {
+    if let Some(e) = scripts.entries.iter().find(|e| intended.get(&e.id).is_some()) {
+        return Err(Error::new(format!(
+            "the id `{}` is in both refcheck/intended.toml and tests/rules/intended.toml",
+            e.id
+        )));
+    }
+    let mut out = intended.changelog();
+    for e in &scripts.entries {
+        out.push_str(&format!("- {} (`{}`)\n", e.reason, e.id));
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -708,5 +795,71 @@ where = [{ group = "deal_checks", path = "deals[*].bot_value" }]
     fn the_changelog_lists_every_entry() {
         let list = Intended::parse(ONE).unwrap();
         assert_eq!(list.changelog(), "- Python never wrote the gold total (`gold-fix`)\n");
+    }
+
+    const SCRIPTS: &str = r#"
+[[differences]]
+id = "atomic-ops"
+reason = "Python left half a list applied; Rust applies all or nothing"
+"#;
+
+    #[test]
+    fn the_script_list_joins_the_changelog() {
+        let list = Intended::parse(ONE).unwrap();
+        let scripts = ScriptIntended::parse(SCRIPTS).unwrap();
+        assert_eq!(scripts.entries().len(), 1);
+        assert_eq!(
+            changelog(&list, &scripts).unwrap(),
+            "- Python never wrote the gold total (`gold-fix`)\n\
+             - Python left half a list applied; Rust applies all or nothing (`atomic-ops`)\n"
+        );
+        let both = ScriptIntended::parse(
+            "[[differences]]\nid = \"gold-fix\"\nreason = \"the same id twice\"\n",
+        )
+        .unwrap();
+        assert!(changelog(&list, &both).is_err());
+    }
+
+    #[test]
+    fn a_script_entry_is_an_id_and_a_reason() {
+        let bad = [
+            "[[differences]]\nid = \"Not_Kebab\"\nreason = \"x\"\n",
+            "[[differences]]\nid = \"a\"\nreason = \"  \"\n",
+            "[[differences]]\nid = \"a\"\nreason = \"x\"\nwhere = []\n",
+            "[[differences]]\nid = \"a\"\nreason = \"x\"\n[[differences]]\nid = \"a\"\nreason = \"y\"\n",
+            "differences = [{ id = \"a\", reason = \"x\" }]\n",
+        ];
+        for text in bad {
+            assert!(ScriptIntended::parse(text).is_err(), "{text}");
+        }
+    }
+
+    /// The repository's own list: it loads, shares no id with `refcheck/intended.toml`, and every
+    /// entry is cited where its fix is made (`// refcheck: <id>`), as `intended.toml`'s are.
+    #[test]
+    fn the_repository_script_list_is_well_formed_and_cited() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let intended = Intended::load(&root.join(crate::run::INTENDED)).unwrap();
+        let scripts = ScriptIntended::load(&root.join(crate::run::SCRIPT_INTENDED)).unwrap();
+        changelog(&intended, &scripts).unwrap();
+        let mut sources = String::new();
+        let mut stack = vec![root.join("crates/citar-engine/src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    sources.push_str(&std::fs::read_to_string(&path).unwrap());
+                }
+            }
+        }
+        let uncited: Vec<&str> = scripts
+            .entries()
+            .iter()
+            .map(|e| e.id.as_str())
+            .filter(|id| !sources.contains(&format!("refcheck: {id}")))
+            .collect();
+        assert!(uncited.is_empty(), "not cited in the engine: {uncited:?}");
     }
 }

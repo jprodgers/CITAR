@@ -779,6 +779,30 @@ class EngineGame:
         else:
             raise ValueError("Unknown debug action.")
 
+    # ------------------------------------------------------------------ rule scripts (tests only)
+    def inspect(self, query: dict):
+        """What a rule script reads of the game: ``query`` is ``{"what": ..., ...}`` and the answer a small shape,
+        the same from both engines, as tests/rules/README.md documents. A copy; reads only. Raises ActionError for
+        a bad query. For tests: the Rust backend has it only with the ``test-ops`` feature.
+        Rust: api::inspect (feature test-ops)."""
+        from .engine.inspect import inspect
+        return _plain(inspect(self._g, query))
+
+    def test_ops(self, ops: list[dict]) -> list[dict]:
+        """Apply test operations in order (``{"op": name, ...}``, see tests/rules/README.md): what a rule script
+        does to a game that no player or editor may. Returns what each did. Raises ActionError at the first that
+        fails, naming it. ``reload`` saves the game and plays on from the save. For tests only.
+        Rust: api::testops (feature test-ops)."""
+        from .engine import testops
+        out = []
+        for n, o in enumerate(ops or [], start=1):
+            if isinstance(o, dict) and o.get("op") == "reload":
+                self._g = EngineGame.from_save(self.to_save())._g
+                out.append({})
+            else:
+                out.append(_plain(testops.apply_one(self._g, n, o)))
+        return out
+
     # ------------------------------------------------------------------ replay
     def replay_data(self) -> dict:
         """Everything the recap needs: the map, the players, and the whole game's frames, stats, events, messages,

@@ -11,6 +11,8 @@ mod engine {
     mod kitchen_sink;
     mod rules;
     mod save;
+    mod scenario;
     mod state;
+    mod tools;
     mod uniques;
 }

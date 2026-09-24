@@ -15,9 +15,18 @@ serde_json = { workspace = true, features = ["raw_value"] }
 blake3.workspace = true
 # The refcheck fixtures are gzipped.
 flate2.workspace = true
+# Rule scripts are TOML, and their `matches` checks regular expressions (DESIGN.md 9.3).
+toml.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# One trial per rule script, so that nextest lists each (tests/rules.rs).
+libtest-mimic.workspace = true
+
+[[test]]
+name = "rules"
+harness = false
 
 [lints]
 workspace = true

@@ -34,6 +34,8 @@ use crate::{Error, Group, Result};
 
 /// The committed configuration files, relative to the repository root.
 pub const INTENDED: &str = "refcheck/intended.toml";
+/// The differences only the rule scripts show (DESIGN.md 9.3), which the changelog lists too.
+pub const SCRIPT_INTENDED: &str = "tests/rules/intended.toml";
 pub const ENFORCED: &str = "refcheck/enforced.toml";
 pub const RATCHET: &str = "refcheck/ratchet.json";
 
