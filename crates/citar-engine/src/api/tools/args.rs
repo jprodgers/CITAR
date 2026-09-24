@@ -6,7 +6,8 @@
 //! arguments from it (DESIGN.md 9.5). The specs land with the typed actions: each system package
 //! adds its tools' entries to [`TOOLS`] together with their `Action` variants, with the
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
-//! the coercion; package 1b-06 adds the citizen tools.
+//! the coercion; package 1b-06 adds the citizen tools, and package 1b-07 the tools of production,
+//! purchases, research and policies.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -66,6 +67,55 @@ impl ToolArgs {
 
 /// Every tool whose action is ported, sorted by name.
 pub static TOOLS: &[ToolArgs] = &[
+    // Package 1b-07 (tools.py:631-676, 760-795, 833-869).
+    ToolArgs {
+        tool: "adopt_policy",
+        params: &[("policy", ArgType::String)],
+        required: &["policy"],
+    },
+    ToolArgs {
+        tool: "buy",
+        params: &[
+            ("city_id", ArgType::Integer),
+            ("item", ArgType::String),
+            ("currency", ArgType::String),
+        ],
+        required: &["city_id", "item"],
+    },
+    ToolArgs {
+        tool: "buy_tile",
+        params: &[("city_id", ArgType::Integer), ("x", ArgType::Integer), ("y", ArgType::Integer)],
+        required: &["city_id", "x", "y"],
+    },
+    ToolArgs {
+        tool: "change_queue",
+        params: &[
+            ("city_id", ArgType::Integer),
+            ("index", ArgType::Integer),
+            ("action", ArgType::String),
+        ],
+        required: &["city_id", "action"],
+    },
+    ToolArgs {
+        tool: "choose_free_tech",
+        params: &[("tech", ArgType::String)],
+        required: &["tech"],
+    },
+    ToolArgs {
+        tool: "dequeue_research",
+        params: &[("tech", ArgType::String)],
+        required: &["tech"],
+    },
+    ToolArgs {
+        tool: "rename_city",
+        params: &[("city_id", ArgType::Integer), ("name", ArgType::String)],
+        required: &["city_id", "name"],
+    },
+    ToolArgs {
+        tool: "set_auto_production",
+        params: &[("city_id", ArgType::Integer), ("enabled", ArgType::Boolean)],
+        required: &["city_id", "enabled"],
+    },
     // Package 1b-06 (tools.py:679-757).
     ToolArgs {
         tool: "set_city_focus",
@@ -75,6 +125,20 @@ pub static TOOLS: &[ToolArgs] = &[
             ("avoid_growth", ArgType::Boolean),
         ],
         required: &["city_id"],
+    },
+    ToolArgs {
+        tool: "set_production",
+        params: &[
+            ("city_id", ArgType::Integer),
+            ("item", ArgType::String),
+            ("append", ArgType::Boolean),
+        ],
+        required: &["city_id", "item"],
+    },
+    ToolArgs {
+        tool: "set_research",
+        params: &[("tech", ArgType::String), ("append", ArgType::Boolean)],
+        required: &["tech"],
     },
     ToolArgs {
         tool: "set_specialists",

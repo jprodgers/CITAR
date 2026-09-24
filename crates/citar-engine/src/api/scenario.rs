@@ -11,8 +11,9 @@
 //! `set_influence`, `reveal` and `set_research`; package 1b-03 adds `add_unit`, which the turn
 //! scripts need to keep a civilization in the game across a round, package 1b-05
 //! `remove_units`, and package 1b-06 `found_city` and `set_city`, which its scripts need a city
-//! for (`set_city`'s `production` waits for package 1b-07's queue). The others are listed with
-//! the package that ports their system, and are refused as not ported until then.
+//! for; package 1b-07 `set_city`'s `production`, its new `health`, `attacked` and `food`
+//! (DESIGN.md 9.3), `remove_city` and `adopt_policy`. The others are listed with the package that
+//! ports their system, and are refused as not ported until then.
 //!
 //! What differs from Python, on purpose, each listed in `tests/rules/intended.toml` under its id
 //! and cited where the fix is made:
@@ -34,25 +35,28 @@
 //! - a granted tech is announced "Rome was granted Pottery." where Python wrote "Rome scenario
 //!   Pottery." (`scenario-tech-announcement-wording`, in `game::research`);
 //! - a parameter of the wrong type is refused with a sentence, where Python quoted its own
-//!   exception ("bad parameters (ValueError: ...)"; `scenario-errors-are-sentences`).
+//!   exception ("bad parameters (ValueError: ...)"; `scenario-errors-are-sentences`);
+//! - `adopt_policy` adopts a policy whose branch's era the civilization has not reached, as its
+//!   reference says, where Python's retry checked the era again and failed
+//!   (`scenario-adopt-policy-skips-the-era`, in `game::policies`).
 
 use serde_json::{Map, Value, json};
 
 use crate::base::ids::{
-    BaseUnitId, BuildingId, CityId, DifficultyId, EraId, ImprovementId, PlayerId, PromotionId,
-    ResourceId, TechId, TerrainId, TileIdx, UnitId,
+    BaseUnitId, BuildingId, CityId, DifficultyId, EraId, ImprovementId, PlayerId, PolicyId,
+    PromotionId, ResourceId, TechId, TerrainId, TileIdx, UnitId,
 };
 use crate::base::py;
 use crate::base::sets::{BitSet, FeatureSet};
-use crate::game::cities::founding;
+use crate::game::cities::{founding, lifecycle, queue};
 use crate::game::city_states::influence::{add_influence, raw_influence};
 use crate::game::derive::rev::{CityTouch, PlayerTouch, UnitTouch, WorldTouch};
 use crate::game::diplomacy::relations::{WarReason, make_peace, set_opinion, set_war};
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::research::{self, TechSource};
-use crate::game::{Game, Porting};
+use crate::game::{Game, Porting, policies};
 use crate::rules::Named;
-use crate::rules::defs::{Route, TerrainType};
+use crate::rules::defs::{PolicyKind, Route, TerrainType};
 use crate::state::diplo::{OpinionKey, side};
 use crate::state::{StateError, TileClaim};
 
@@ -85,7 +89,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec {
         name: "adopt_policy",
         params: "player, policy (or policies: [...]); branches open automatically",
-        porting: Porting::Pending("1b-07"),
+        porting: Porting::Ported,
         run: adopt_policy,
     },
     OpSpec {
@@ -117,7 +121,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec {
         name: "remove_city",
         params: "city (id) or x, y",
-        porting: Porting::Pending("1b-07"),
+        porting: Porting::Ported,
         run: remove_city,
     },
     OpSpec {
@@ -678,17 +682,6 @@ fn reveal(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(json!({}))
 }
 
-// ---- Operations whose systems are not ported yet ---------------------------------------------
-
-/// The refusal of an operation whose system is not ported yet: `path` names the system, and
-/// `cargo xtask check` counts the calls (DESIGN.md 3.4, rule 4).
-fn not_ported(path: &str) -> ActionError {
-    ActionError::new(
-        ErrCode::NotPorted,
-        format!("This operation is not ported to the new engine yet ({path})."),
-    )
-}
-
 // ---- Cities (scenario.py:243-305) ------------------------------------------------------------
 
 /// Founds a city, with population and buildings in place if asked (`scenario.py:243-259`): the
@@ -783,8 +776,33 @@ fn set_city_fields(g: &mut Game, c: CityId, o: &Params) -> Result<(), ActionErro
             }
         }
     }
-    if o.get("production").is_some_and(py::truthy) {
-        return Err(not_ported("game::cities::queue"));
+    if let Some(v) = given(o, "health") {
+        let most = crate::game::cities::stats::max_health(g, c);
+        let n: i64 = whole(v, "health")?;
+        let health = i32::try_from(n.clamp(1, i64::from(most.max(1)))).unwrap_or(1);
+        if let Some(x) = g.city_mut(c, CityTouch::CORE) {
+            x.health = health;
+        }
+    }
+    if let Some(v) = given(o, "attacked") {
+        let on = py::truthy(v);
+        if let Some(x) = g.city_mut(c, CityTouch::CORE) {
+            x.attacked = on;
+        }
+    }
+    if let Some(v) = given(o, "food") {
+        let food = number(v, "food")?.max(0.0);
+        if let Some(x) = g.city_mut(c, CityTouch::STOCKS) {
+            x.food = food;
+        }
+    }
+    if let Some(v) = o.get("production").filter(|v| py::truthy(v)) {
+        let owner = g.city(c).map(crate::state::cities::City::owner);
+        let item = queue::resolve_item(g, &py::str_of(v), owner)?;
+        let q = queue::plan_production(g, c, item, false)?;
+        if let Some(x) = g.city_mut(c, CityTouch::CORE) {
+            x.queue = q;
+        }
     }
     Ok(())
 }
@@ -806,12 +824,61 @@ fn set_city(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(json!({"city_id": c.get()}))
 }
 
-fn remove_city(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::cities::lifecycle"))
+/// Removes a city (`scenario.py:301-310`): it is destroyed, and its ruins go unless `ruins` is
+/// true.
+fn remove_city(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let c = city_of(g, o)?;
+    let at = g.city(c).map(crate::state::cities::City::tile).ok_or_else(|| bad("No such city."))?;
+    lifecycle::destroy_city(g, c);
+    let ruins = g.rules().derived().known.city_ruins;
+    if ruins.is_some()
+        && g.tile(at).is_some_and(|x| x.improvement() == ruins)
+        && !o.get("ruins").is_some_and(py::truthy)
+    {
+        g.set_improvement(at, None).map_err(|e| refused(&e))?;
+    }
+    Ok(json!({"removed": c.get()}))
 }
 
-fn adopt_policy(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::policies"))
+/// Adopts policies for civilizations without culture, their branches and the policies they need
+/// first too, each counted toward the next policy's cost (`scenario.py:199-237`). Names are
+/// exact.
+fn adopt_policy(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let names: Vec<Value> = match o.get("policies").filter(|v| py::truthy(v)) {
+        Some(Value::Array(list)) => list.clone(),
+        Some(other) => vec![other.clone()],
+        None => vec![o.get("policy").cloned().unwrap_or(Value::Null)],
+    };
+    let r = g.rules();
+    let mut out = Vec::new();
+    for p in players(g, o.get("player"), true)? {
+        let mut done = Vec::new();
+        for n in &names {
+            let text = py::str_of(n);
+            let policy = r
+                .lookup::<PolicyId>(&text)
+                .ok_or_else(|| bad(format!("Unknown policy '{text}'.")))?;
+            let adopted =
+                |g: &Game, q: PolicyId| g.player(p).is_some_and(|x| x.policy.adopted.contains(q));
+            let branch = policies::branch_of(g, policy);
+            if branch != policy && !adopted(g, branch) {
+                policies::adopt_counted(g, p, branch)?;
+            }
+            if let PolicyKind::Member { requires, .. } = &r.policies()[policy].kind {
+                for &pre in requires.iter() {
+                    if !adopted(g, pre) {
+                        policies::adopt_counted(g, p, pre)?;
+                    }
+                }
+            }
+            if !adopted(g, policy) {
+                policies::adopt_counted(g, p, policy)?;
+                done.push(json!(r.name(policy)));
+            }
+        }
+        out.push((p, Value::Array(done)));
+    }
+    Ok(json!({"adopted": by_player(out)}))
 }
 
 /// Adds units, optionally with promotions, experience and damage (`scenario.py:313-330`): 1 to

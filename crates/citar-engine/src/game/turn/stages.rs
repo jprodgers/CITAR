@@ -24,9 +24,10 @@
 //!   the Time victory).
 
 use crate::base::ids::PlayerId;
+use crate::base::stats::Stat;
+use crate::game::cities::lifecycle;
 use crate::game::derive::rev::UnitTouch;
-use crate::game::economy;
-use crate::game::{Game, Porting, pending};
+use crate::game::{Game, Porting, economy, pending, policies, research};
 use crate::state::Phase;
 use crate::state::TurnClock;
 use crate::state::chronicle::{EngineEvent, EventData};
@@ -168,7 +169,7 @@ pub static PLAYER_START: [Stage; 23] = [
         Step::Player(economy::commit_happiness_stage),
     ),
     Stage::settle("S1", Who::CIVS),
-    Stage::later("S2", "research progress", Who::CIVS, HasCities, Porting::Pending("1b-07")),
+    Stage::run("S2", "research progress", Who::CIVS, HasCities, Step::Player(research::start_turn)),
     Stage::later("S2", "great people", Who::CIVS, HasCities, Porting::Pending("1b-08")),
     Stage::later("S2", "religion", Who::CIVS, HasCitiesAndReligion, Porting::Pending("1b-08")),
     Stage::later("S2", "the Maya long count", Who::CIVS, HasCities, Porting::Pending("1b-08")),
@@ -181,14 +182,20 @@ pub static PLAYER_START: [Stage; 23] = [
     ),
     Stage::later("S3", "revolts", Who::MAJOR, Always, Porting::Pending("1c-08")),
     Stage::later("S4", "triggers upon turn start", Who::CIVS, Always, Porting::Pending("1b-08")),
-    Stage::later("S5", "cities start their turn", Who::CIVS, Always, Porting::Pending("1b-07")),
+    Stage::run(
+        "S5",
+        "cities start their turn",
+        Who::CIVS,
+        Always,
+        Step::Player(lifecycle::start_turn_stage),
+    ),
     Stage::later("S6", "units start their turn", Who::CIVS, Always, Porting::Pending("1c-02")),
     Stage::settle("S7", Who::CIVS),
     Stage::later("S8", "the city-state's turn", Who::CITY_STATE, Always, Porting::Pending("1c-06")),
     Stage::later("S8", "standing unit orders", Who::MAJOR, Always, Porting::Pending("1c-04")),
     Stage::settle("S9", Who::CIVS),
     Stage::later("S9", "victory", Who::CIVS, Always, Porting::Pending("1c-08")),
-    Stage::later("S9", "a research reminder", Who::MAJOR, Always, Porting::Pending("1b-07")),
+    Stage::run("S9", "a research reminder", Who::MAJOR, Always, Step::Player(research::remind)),
     Stage::run("S9", "the turn's announcement", Who::MAJOR, Always, Step::Player(announce_start)),
 ];
 
@@ -233,7 +240,7 @@ pub static PLAYER_END: [Stage; 25] = [
         Always,
         Step::Player(economy::end_turn_rates),
     ),
-    Stage::later("E3", "culture and policies", Who::CIVS, Always, Porting::Pending("1b-07")),
+    Stage::run("E3", "culture and policies", Who::CIVS, Always, Step::Player(culture_and_policies)),
     Stage::later(
         "E3",
         "the city-state's own end of turn",
@@ -248,16 +255,16 @@ pub static PLAYER_END: [Stage; 25] = [
         Always,
         Step::Player(economy::end_turn_gold),
     ),
-    Stage::later("E3", "science", Who::CIVS, HasCities, Porting::Pending("1b-07")),
+    Stage::run("E3", "science", Who::CIVS, HasCities, Step::Player(science)),
     Stage::later("E3", "faith", Who::CIVS, Religion, Porting::Pending("1b-08")),
     Stage::later("E3", "espionage", Who::MAJOR, Always, Porting::Pending("1c-05")),
     Stage::later("E3", "great person points", Who::MAJOR, Always, Porting::Pending("1b-08")),
-    Stage::later(
+    Stage::run(
         "E4",
         "cities end their turn, razing ones first",
         Who::CIVS,
         Always,
-        Porting::Pending("1b-07"),
+        Step::Player(cities_end),
     ),
     Stage::run(
         "E5",
@@ -380,6 +387,34 @@ fn lapse_return_offers(g: &mut Game, p: PlayerId) {
             x.return_offer = None;
         }
     }
+}
+
+/// The civilization's yield of `stat` this turn, as stage E2 read it for the end of the turn
+/// (`turns.py:88-89`: Python read `civ_stats` once, before banking gold), or read now for a
+/// civilization E2 has not read this turn.
+fn turn_yield(g: &Game, p: PlayerId, stat: Stat) -> f64 {
+    match g.turn_yields {
+        Some((q, s)) if q == p => s[stat],
+        _ => crate::game::derive::stats::civ_stats(g, p).total[stat],
+    }
+}
+
+/// Stage E3, culture and policies (`policies.end_turn`, `turns.py:90`).
+fn culture_and_policies(g: &mut Game, p: PlayerId) {
+    let culture = turn_yield(g, p, Stat::Culture);
+    policies::end_turn(g, p, culture);
+}
+
+/// Stage E3, science (`research.end_turn`, `turns.py:96-97`).
+fn science(g: &mut Game, p: PlayerId) {
+    let science = turn_yield(g, p, Stat::Science);
+    research::end_turn(g, p, science);
+}
+
+/// Stage E4: the cities end their turn, and the turn's yields read at E2 are done with.
+fn cities_end(g: &mut Game, p: PlayerId) {
+    lifecycle::end_turn_stage(g, p);
+    g.turn_yields = None;
 }
 
 /// The turn number moves on (`turns.py:201`).

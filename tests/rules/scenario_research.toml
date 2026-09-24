@@ -90,7 +90,7 @@ subset = { researching = "Pottery", queue = ["Pottery", "Writing"], goal = "Writ
 [[step]]
 check = { what = "player", player = 0 }
 path = "research"
-eq = { queue = ["Pottery", "Writing"], goal = "Writing" }
+subset = { queue = ["Pottery", "Writing"], goal = "Writing", progress = {} }
 
 [[step]]
 op = "set_research"

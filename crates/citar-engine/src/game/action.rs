@@ -15,9 +15,14 @@
 //! 1b-01 lands the pipeline. The JSON registry of tools comes in package 1d-01.
 
 use super::Game;
+use super::cities::borders::BuyTile;
 use super::cities::citizens::{SetCityFocus, SetSpecialists, WorkTile};
+use super::cities::purchase::Buy;
+use super::cities::queue::{ChangeQueue, RenameCity, SetAutoProduction, SetProduction};
 use super::error::{ActionError, ErrCode};
 use super::events::EventBatch;
+use super::policies::AdoptPolicy;
+use super::research::{ChooseFreeTech, DequeueResearch, SetResearch};
 use crate::base::ids::PlayerId;
 use crate::save::journal::Record;
 use crate::state::Phase;
@@ -79,8 +84,28 @@ pub enum Action {
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
+    /// `adopt_policy` (package 1b-07).
+    AdoptPolicy(AdoptPolicy),
+    /// `buy` (package 1b-07).
+    Buy(Buy),
+    /// `buy_tile` (package 1b-07).
+    BuyTile(BuyTile),
+    /// `change_queue` (package 1b-07).
+    ChangeQueue(ChangeQueue),
+    /// `choose_free_tech` (package 1b-07).
+    ChooseFreeTech(ChooseFreeTech),
+    /// `dequeue_research` (package 1b-07).
+    DequeueResearch(DequeueResearch),
+    /// `rename_city` (package 1b-07).
+    RenameCity(RenameCity),
+    /// `set_auto_production` (package 1b-07).
+    SetAutoProduction(SetAutoProduction),
     /// `set_city_focus` (package 1b-06).
     SetCityFocus(SetCityFocus),
+    /// `set_production` (package 1b-07).
+    SetProduction(SetProduction),
+    /// `set_research` (package 1b-07).
+    SetResearch(SetResearch),
     /// `set_specialists` (package 1b-06).
     SetSpecialists(SetSpecialists),
     /// `work_tile` (package 1b-06).
@@ -94,6 +119,16 @@ impl Action {
         match *self {
             #[cfg(test)]
             Self::Probe(_) => "probe",
+            Self::AdoptPolicy(_) => "adopt_policy",
+            Self::Buy(_) => "buy",
+            Self::BuyTile(_) => "buy_tile",
+            Self::ChangeQueue(_) => "change_queue",
+            Self::ChooseFreeTech(_) => "choose_free_tech",
+            Self::DequeueResearch(_) => "dequeue_research",
+            Self::RenameCity(_) => "rename_city",
+            Self::SetAutoProduction(_) => "set_auto_production",
+            Self::SetProduction(_) => "set_production",
+            Self::SetResearch(_) => "set_research",
             Self::SetCityFocus(_) => "set_city_focus",
             Self::SetSpecialists(_) => "set_specialists",
             Self::WorkTile(_) => "work_tile",
@@ -106,7 +141,20 @@ impl Action {
         match *self {
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
-            Self::SetCityFocus(_) | Self::SetSpecialists(_) | Self::WorkTile(_) => false,
+            // `tools.rename_city` is `any_time` (tools.py:782).
+            Self::RenameCity(_) => true,
+            Self::AdoptPolicy(_)
+            | Self::Buy(_)
+            | Self::BuyTile(_)
+            | Self::ChangeQueue(_)
+            | Self::ChooseFreeTech(_)
+            | Self::DequeueResearch(_)
+            | Self::SetAutoProduction(_)
+            | Self::SetProduction(_)
+            | Self::SetResearch(_)
+            | Self::SetCityFocus(_)
+            | Self::SetSpecialists(_)
+            | Self::WorkTile(_) => false,
         }
     }
 
@@ -114,6 +162,16 @@ impl Action {
         match self {
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
+            Self::AdoptPolicy(x) => run(g, pid, x),
+            Self::Buy(x) => run(g, pid, x),
+            Self::BuyTile(x) => run(g, pid, x),
+            Self::ChangeQueue(x) => run(g, pid, x),
+            Self::ChooseFreeTech(x) => run(g, pid, x),
+            Self::DequeueResearch(x) => run(g, pid, x),
+            Self::RenameCity(x) => run(g, pid, x),
+            Self::SetAutoProduction(x) => run(g, pid, x),
+            Self::SetProduction(x) => run(g, pid, x),
+            Self::SetResearch(x) => run(g, pid, x),
             Self::SetCityFocus(x) => run(g, pid, x),
             Self::SetSpecialists(x) => run(g, pid, x),
             Self::WorkTile(x) => run(g, pid, x),

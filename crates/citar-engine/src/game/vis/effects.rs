@@ -31,9 +31,9 @@ use super::sight::{ally_sources, city_source, has_sight, sight_mods, spy_sources
 use super::visibility::{SourceKey, Transition, VisSource, Visibility};
 use crate::base::ids::{CityId, PlayerId, TileIdx, UnitId};
 use crate::base::stats::{Stat, Stats};
+use crate::game::Game;
 use crate::game::derive::rev::{PlayerTouch, Rev};
 use crate::game::pending::{Effect, SightSource};
-use crate::game::{Game, Porting, pending};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::map::Tile;
 use crate::state::memory::CityMemory;
@@ -461,11 +461,7 @@ impl Game {
     /// culture and faith; happiness to its golden age points; science to its research.
     pub(crate) fn add_stat(&mut self, p: PlayerId, stat: Stat, amount: f64) {
         match stat {
-            Stat::Science => {
-                // research.add_science (research.py:206-219): progress toward the current
-                // research, with its completion and overflow.
-                pending(Porting::Pending("1b-07"));
-            }
+            Stat::Science => crate::game::research::add_science(self, p, amount),
             Stat::Gold | Stat::Culture | Stat::Faith | Stat::Happiness => {
                 if let Some(pl) = self.player_mut(p, PlayerTouch::STOCKS) {
                     let e = &mut pl.econ;

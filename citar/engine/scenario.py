@@ -283,6 +283,12 @@ def _set_city_fields(g: Game, c, o: dict):
             t = g.s.tiles[i]
             if t.city is None and t.owner is None:
                 t.owner, t.city = c.owner, c.id
+    if o.get("health") is not None:
+        c.health = max(1, min(int(o["health"]), cities.max_health(g, c)))
+    if o.get("attacked") is not None:
+        c.attacked = bool(o["attacked"])
+    if o.get("food") is not None:
+        c.food = max(0.0, float(o["food"]))
     if o.get("production"):
         cities.set_production(g, c, o["production"])
     g.invalidate()
@@ -290,7 +296,7 @@ def _set_city_fields(g: Game, c, o: dict):
 
 
 @op("set_city", "city (id) or x, y; any of pop, add_buildings, remove_buildings, name, claim_radius (border radius), "
-                "production")
+                "health, attacked (bool), food, production")
 def _set_city(g: Game, o: dict):
     """Change an existing city: population, buildings, name, borders, production."""
     c = _city(g, o)

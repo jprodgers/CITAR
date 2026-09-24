@@ -306,10 +306,21 @@ fn the_turns_gold_is_banked_and_bankruptcy_disbands_units() {
     let order: Vec<Option<TileIdx>> =
         batch.events().iter().filter(|e| e.kind.name() == "bankrupt").map(|e| e.tile).collect();
     assert_eq!(order, [Some(TileIdx(23)), Some(TileIdx(21)), Some(TileIdx(70))]);
+    // Each Warrior disbanded in its own land refunds a twentieth of its gold price
+    // (`units.disband_gold`); the Archer abroad refunds nothing.
+    let warrior = r.lookup::<citar_engine::base::ids::BaseUnitId>("Warrior").expect("a Warrior");
+    let price = citar_engine::game::cities::purchase::base_gold_cost(
+        &g,
+        ME,
+        citar_engine::state::cities::Constructible::Unit(warrior),
+        None,
+    );
+    let refund = 2.0 * (price.trunc() / 20.0).floor();
+    assert!(refund > 0.0);
     // Once the last military unit went, the rate read afresh is banked.
     let left_rate = citar_engine::game::query::civ_stats(&g, ME).total[Stat::Gold];
     assert!(left_rate < 0.0);
-    assert!((gold(&g).0 - (-250.0 + left_rate.trunc())).abs() < 1e-9, "{:?}", gold(&g));
+    assert!((gold(&g).0 - (-250.0 + refund + left_rate.trunc())).abs() < 1e-9, "{:?}", gold(&g));
     clean(&mut g);
 }
 

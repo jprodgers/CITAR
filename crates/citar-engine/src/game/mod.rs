@@ -57,6 +57,7 @@ pub mod events;
 pub mod invariants;
 pub mod mutate;
 pub mod pending;
+pub mod policies;
 pub mod query;
 pub mod religion;
 pub mod research;
