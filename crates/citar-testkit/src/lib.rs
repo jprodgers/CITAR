@@ -8,14 +8,16 @@
 //!   `golden` binary's logic (DESIGN.md 9.6);
 //! - [`rulesets`]: test rulesets made from the shipped one by overlays, the kitchen sink among
 //!   them, which uses every unique type the engine supports;
+//! - [`script`]: the Rust runner of the rule scripts in `tests/rules/` (DESIGN.md 9.3);
 //! - [`states`]: synthetic game states with every field filled, for the save, digest and journal
 //!   tests, the golden states and the digest benchmark.
 //!
-//! Later packages add the rule-script runner, `RandomAgent`, and the `chaos` and `soak` binaries.
+//! Later packages add `RandomAgent`, and the `chaos` and `soak` binaries.
 
 #![forbid(unsafe_code)]
 
 pub mod fixtures;
 pub mod golden;
 pub mod rulesets;
+pub mod script;
 pub mod states;
