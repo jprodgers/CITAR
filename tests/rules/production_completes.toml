@@ -1,0 +1,147 @@
+about = """
+What a city builds: each turn's production goes into the item at the front of its queue at the
+end of the city's turn, and the item is finished at the start of a later one when what is stored
+pays for it. A finished unit stands in its city, or beside it when a unit of its kind is already
+there, and is told to its owner alone; a finished building joins the city. A city with nothing to
+build says so to its human owner. set_city's production fills the queue as set_production does.
+"""
+from = "citar/engine/cities.py: end_turn_production, construct_if_enough, complete_construction"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 3, production = "Warrior" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { city = "=made[0].city_id" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { queue = ["Warrior"], progress = {}, overflow = 0 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.production"
+eq = 4
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { queue = ["Warrior"], progress = { Warrior = 4 } }
+
+[[step]]
+repeat = 4
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { queue = ["Warrior"], progress = { Warrior = 20 } }
+
+[[step]]
+note = "The test operation finishes it now: the Warrior stands in Roma."
+op = "complete_construction"
+args = { city = "=city" }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { completed = "Warrior" }
+
+[[step]]
+check = { what = "units", player = 0 }
+len = 1
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[0]"
+subset = { type = "Warrior", x = 5, y = 5 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { queue = [], progress = {} }
+
+[[step]]
+check = { what = "events", type = "unit_built" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "unit_built", player = 1 }
+eq = []
+
+[[step]]
+check = { what = "events", type = "unit_built" }
+path = "[0].text"
+eq = "Roma trained a Warrior."
+
+[[step]]
+note = "A second Warrior finds Roma's tile taken, and stands beside it."
+tool = "set_production"
+args = { city_id = "=city", item = "Warrior" }
+
+[[step]]
+op = "complete_construction"
+args = { city = "=city" }
+
+[[step]]
+check = { what = "units", player = 0 }
+len = 2
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[1]"
+subset = { type = "Warrior" }
+
+[[step]]
+check = { what = "units", x = 5, y = 5 }
+len = 1
+
+[[step]]
+note = "A building joins the city, and is told to its owner."
+tool = "set_production"
+args = { city_id = "=city", item = "Monument" }
+
+[[step]]
+op = "complete_construction"
+args = { city = "=city" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { buildings = ["Monument", "Palace"], queue = [] }
+
+[[step]]
+check = { what = "events", type = "building_built" }
+path = "[0]"
+subset = { text = "Roma completed Monument.", audience = [0] }
+
+[[step]]
+op = "complete_construction"
+args = { city = "=city" }
+error = "Roma is building nothing that completes."
+
+[[step]]
+note = "An empty queue: the city is idle, and says so to its human owner at the start of its turn."
+op = "end_round"
+
+[[step]]
+check = { what = "events", type = "city_idle" }
+path = "[0].text"
+eq = "Roma has nothing to produce."
+
+[[step]]
+note = "set_city's production queues an item, and refuses one the city cannot build."
+op = "set_city"
+args = { city = "=city", production = "Library" }
+error = "Operation 1 (set_city): Library requires Writing."
+
+[[step]]
+op = "set_city"
+args = { city = "=city", production = "Scout" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "queue"
+eq = ["Scout"]

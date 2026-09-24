@@ -125,3 +125,7 @@ reason = "work_tile, set_city_focus and set_specialists listed a city's worked a
 [[differences]]
 id = "cities-never-share-a-tile"
 reason = "Python let a city work a tile a sibling city of the same owner worked, unless the tile was that sibling's own territory, so two cities could work one tile; Rust gives a worked tile to one city, and no other may work it"
+
+[[differences]]
+id = "scenario-adopt-policy-skips-the-era"
+reason = "The scenario operation adopt_policy skipped the era check, then checked it again inside the adoption and refused a branch of a later era; Rust adopts it whatever the era, as the operation promises"
