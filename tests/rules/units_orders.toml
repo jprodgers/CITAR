@@ -1,0 +1,76 @@
+about = """
+Standing orders: a civilian cannot fortify, sleeping and waking set and clear the order, skipping
+spends the turn's movement, a siege unit sets up for one movement point, and an unknown order is
+refused with the list of orders.
+"""
+from = "citar/engine/tools.py: unit_order"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Worker", at = "D" },
+  { op = "add_unit", player = 0, unit = "Catapult", at = "(8,11)" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "(10,11)" },
+]
+as = "made"
+
+[[step]]
+set = { worker = "=made[0].unit_ids[0]", cat = "=made[1].unit_ids[0]", w = "=made[2].unit_ids[0]" }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=worker", order = "fortify" }
+error = "Civilians cannot fortify; use sleep."
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=worker", order = " Sleep " }
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+path = "activity"
+eq = "sleep"
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=worker", order = "wake" }
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+path = "activity"
+is_null = true
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=w", order = "skip" }
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+path = "moves"
+eq = 0
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=w", order = "setup" }
+error = "This unit does not need to set up."
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=cat", order = "setup" }
+
+[[step]]
+check = { what = "unit", unit = "=cat" }
+subset = { set_up = true, moves = 60 }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=cat", order = "setup" }
+as = "again"
+
+[[step]]
+check = "again"
+eq = { ok = true, note = "Already set up." }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=w", order = "dance" }
+error = "Unknown order. Use fortify, sleep, wake, skip, heal, explore, automate, pillage, setup, disband, cancel."
