@@ -19,7 +19,7 @@ use crate::game::action::{OutcomeSpec, Rule};
 use crate::game::derive::rev::UnitTouch;
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::movement;
-use crate::game::path::{Blocked, stack_reason};
+use crate::game::path::{Blocked, Mover, stack_reason};
 use crate::rules::defs::Domain;
 use crate::state::units::{Activity, Unit};
 use crate::unique::UniqueType;
@@ -91,6 +91,7 @@ pub struct MovePlan {
 impl Rule for MoveUnit {
     type Plan = MovePlan;
 
+    // refcheck: unit-refusals-change-nothing (Python woke the unit before it looked for a path)
     fn check(&self, g: &Game, pid: PlayerId) -> Result<MovePlan, ActionError> {
         let u = own_unit(g, pid, self.unit_id)?;
         let target = tile_at(g, self.x, self.y)?;
@@ -165,6 +166,7 @@ impl Rule for MoveUnit {
 fn first_step_refused(g: &Game, u: UnitId, path: &[TileIdx], target: TileIdx) -> Option<Blocked> {
     let &nb = path.get(1)?;
     let x = g.unit(u)?;
+    let m = Mover::unit(g, u)?;
     let owner = x.owner();
     let r = g.rules();
     let foreign: Vec<&Unit> = g
@@ -172,7 +174,7 @@ fn first_step_refused(g: &Game, u: UnitId, path: &[TileIdx], target: TileIdx) ->
         .filter(|o| o.owner() != owner && r.base_units()[o.base].domain != Domain::Air)
         .collect();
     if foreign.is_empty() && stack_reason(g, owner, x.base, nb, Some(u)).is_some() {
-        let cost = movement::enter_cost(g, u, x.tile(), nb);
+        let cost = m.edge_cost(x.tile(), nb);
         if nb == target || cost >= x.moves {
             return None;
         }
@@ -185,7 +187,7 @@ fn first_step_refused(g: &Game, u: UnitId, path: &[TileIdx], target: TileIdx) ->
     if !foreign.is_empty() && !capturable {
         return None;
     }
-    movement::step_check(g, u, nb).err()
+    movement::check_step(&m, nb).err()
 }
 
 // ---- unit_order ------------------------------------------------------------------------------------

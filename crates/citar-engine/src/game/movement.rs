@@ -96,14 +96,35 @@ pub fn reachable_this_turn(g: &Game, u: UnitId) -> Vec<(TileIdx, i32)> {
 /// Moves a unit one tile (`movement.step`, `movement.py:515-549`): it needs moves, a neighbour it
 /// may pass into that is no foreign city and holds no foreign unit but a civilian it captures; it
 /// pays the step, captures, moves, stops fortifying or sleeping, has acted, and enters the tile.
+/// One look at the unit's movement ([`Mover`]) checks the step and prices it.
 pub fn step(g: &mut Game, u: UnitId, nb: TileIdx) -> Result<(), Blocked> {
-    let capture = step_check(g, u, nb)?;
-    let from = g.unit(u).map(crate::state::units::Unit::tile).ok_or(Blocked::NoMoves)?;
-    let cost = enter_cost(g, u, from, nb);
+    let checked = {
+        let m = Mover::unit(g, u).ok_or(Blocked::NoMoves)?;
+        priced_step(&m, nb)?
+    };
+    take_step(g, u, nb, checked)
+}
+
+/// A step checked and priced ([`priced_step`]): the civilian it captures, and what it costs.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Checked {
+    capture: Option<UnitId>,
+    cost: i32,
+}
+
+/// Checks the step of `m`'s unit onto `nb` ([`check_step`]) and prices it, with that one mover.
+pub(crate) fn priced_step(m: &Mover<'_>, nb: TileIdx) -> Result<Checked, Blocked> {
+    let capture = check_step(m, nb)?;
+    let from = m.unit.and_then(|u| m.game().unit(u)).ok_or(Blocked::NoMoves)?.tile();
+    Ok(Checked { capture, cost: m.edge_cost(from, nb) })
+}
+
+/// Takes a step [`priced_step`] allowed, before anything was written.
+pub(crate) fn take_step(g: &mut Game, u: UnitId, nb: TileIdx, c: Checked) -> Result<(), Blocked> {
     if let Some(x) = g.unit_mut(u, UnitTouch::MOVES) {
-        x.moves = if cost >= x.moves { 0 } else { x.moves - cost };
+        x.moves = if c.cost >= x.moves { 0 } else { x.moves - c.cost };
     }
-    if let Some(v) = capture {
+    if let Some(v) = c.capture {
         units::capture::capture_civilian(g, u, v);
     }
     if g.relocate_unit(u, nb).is_err() {
@@ -128,8 +149,13 @@ pub fn step(g: &mut Game, u: UnitId, nb: TileIdx) -> Result<(), Blocked> {
 /// and passable, no foreign city, and holds no foreign unit but a civilian of an enemy's with no
 /// military unit beside it, which a military unit captures.
 pub fn step_check(g: &Game, u: UnitId, nb: TileIdx) -> Result<Option<UnitId>, Blocked> {
-    let m = Mover::unit(g, u).ok_or(Blocked::NoMoves)?;
-    let x = g.unit(u).ok_or(Blocked::NoMoves)?;
+    check_step(&Mover::unit(g, u).ok_or(Blocked::NoMoves)?, nb)
+}
+
+/// [`step_check`] with the unit's movement already looked at: `m` is its mover.
+pub(crate) fn check_step(m: &Mover<'_>, nb: TileIdx) -> Result<Option<UnitId>, Blocked> {
+    let g = m.game();
+    let x = m.unit.and_then(|u| g.unit(u)).ok_or(Blocked::NoMoves)?;
     if x.moves <= 0 {
         return Err(Blocked::NoMoves);
     }
@@ -381,38 +407,50 @@ pub fn follow(
     let military = r.base_units()[base].military;
     let mut stop = None;
     for &nb in path.iter().skip(1) {
-        let Some((here, moves)) = g.unit(u).map(|x| (x.tile(), x.moves)) else {
-            stop = Some(Stop::UnitLost);
-            break;
-        };
-        if moves <= 0 {
-            stop = Some(Stop::OutOfMoves);
-            break;
-        }
-        let others: Vec<PlayerId> = g
-            .units_at(nb)
-            .filter(|o| o.owner() != owner && r.base_units()[o.base].domain != Domain::Air)
-            .map(crate::state::units::Unit::owner)
-            .collect();
-        if others.is_empty() && stack_reason(g, owner, base, nb, Some(u)).is_some() {
-            let cost = enter_cost(g, u, here, nb);
-            if nb == target || cost >= moves {
+        // One look at the unit's movement for everything this step asks of it.
+        let checked = {
+            let (Some(m), Some((here, moves))) =
+                (Mover::unit(g, u), g.unit(u).map(|x| (x.tile(), x.moves)))
+            else {
+                stop = Some(Stop::UnitLost);
+                break;
+            };
+            if moves <= 0 {
+                stop = Some(Stop::OutOfMoves);
+                break;
+            }
+            let others: Vec<PlayerId> = g
+                .units_at(nb)
+                .filter(|o| o.owner() != owner && r.base_units()[o.base].domain != Domain::Air)
+                .map(crate::state::units::Unit::owner)
+                .collect();
+            if others.is_empty()
+                && stack_reason(g, owner, base, nb, Some(u)).is_some()
+                && (nb == target || m.edge_cost(here, nb) >= moves)
+            {
                 stop = Some(Stop::BlockedFriendly);
                 break;
             }
-        }
-        let capturable = !others.is_empty()
-            && military
-            && g.at_war(owner, others[0])
-            && !g
-                .units_at(nb)
-                .filter(|o| o.owner() != owner && r.base_units()[o.base].domain != Domain::Air)
-                .any(|o| r.base_units()[o.base].military);
-        if !others.is_empty() && !capturable {
-            stop = Some(Stop::BlockedForeign);
-            break;
-        }
-        let (stepped, seen) = g.step_seeing(owner, |g| step(g, u, nb));
+            let capturable = !others.is_empty()
+                && military
+                && g.at_war(owner, others[0])
+                && !g
+                    .units_at(nb)
+                    .filter(|o| o.owner() != owner && r.base_units()[o.base].domain != Domain::Air)
+                    .any(|o| r.base_units()[o.base].military);
+            if !others.is_empty() && !capturable {
+                stop = Some(Stop::BlockedForeign);
+                break;
+            }
+            match priced_step(&m, nb) {
+                Ok(c) => c,
+                Err(why) => {
+                    stop = Some(Stop::Step(why));
+                    break;
+                }
+            }
+        };
+        let (stepped, seen) = g.step_seeing(owner, |g| take_step(g, u, nb, checked));
         if let Err(why) = stepped {
             stop = Some(Stop::Step(why));
             break;
