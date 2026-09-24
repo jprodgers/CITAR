@@ -28,6 +28,11 @@
 //! - **`gen.json`**: the tables map generation, the AI and victory read, and every
 //!   map-generation unique they hold.
 //!
+//! Package 1a-09 adds, in [`states`]:
+//! - **`states.json`**: the digests of three states checked in under `testdata/states/`, which
+//!   pin `CANON_V1` and the save format on every target. Written by `golden bless`; the states
+//!   themselves only by `golden states`.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -64,6 +69,7 @@ pub struct SetReport {
 }
 
 pub mod filters;
+pub mod states;
 
 /// Every golden set this package knows, checked against the committed files.
 #[must_use]
@@ -76,6 +82,7 @@ pub fn check_all() -> Vec<SetReport> {
         check_uniques(),
         filters::check_filters(),
         filters::check_gen(),
+        states::check_states(),
     ]
 }
 
@@ -109,6 +116,7 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
     ]
     .into_iter()
     .chain(filters::blessed())
+    .chain(states::blessed())
     .collect()
 }
 

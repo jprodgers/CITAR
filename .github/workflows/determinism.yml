@@ -12,7 +12,8 @@
 #
 # The golden sets grow with the engine (DESIGN.md 9.6): package 1a-02 brought rng, libm and pyfmt,
 # 1a-03 the RulesetId of the embedded ruleset (ruleset), 1a-05 every compiled unique (uniques), and
-# 1a-06 every compiled filter (filters) and the map-generation, AI and victory tables (gen).
+# 1a-06 every compiled filter (filters) and the map-generation, AI and victory tables (gen), and
+# 1a-09 the digests of three checked-in states (states).
 name: determinism
 
 on:

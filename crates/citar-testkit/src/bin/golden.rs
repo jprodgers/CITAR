@@ -4,7 +4,9 @@
 //! cargo golden check [--out FILE]   compare this build's answers with the committed files;
 //!                                   --out writes a report for the cross-target comparison
 //! cargo golden bless                rewrite rng.json, libm.json, ruleset.json, uniques.json,
-//!                                   filters.json and gen.json from this build
+//!                                   filters.json, gen.json and states.json from this build
+//! cargo golden states               rewrite the checked-in states of testdata/states/ from the
+//!                                   generator (then bless); only when the save format changes
 //! cargo golden diff A B             compare two --out reports
 //! ```
 //!
@@ -27,7 +29,8 @@ use std::process::ExitCode;
 use citar_testkit::golden;
 use serde_json::Value;
 
-const USAGE: &str = "usage: golden check [--out FILE] | golden bless | golden diff A B";
+const USAGE: &str =
+    "usage: golden check [--out FILE] | golden bless | golden states | golden diff A B";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -36,6 +39,7 @@ fn main() -> ExitCode {
         ["check"] => check(None),
         ["check", "--out", path] => check(Some(path)),
         ["bless"] => bless(),
+        ["states"] => write_states(),
         ["diff", a, b] => diff(a, b),
         _ => {
             eprintln!("{USAGE}");
@@ -69,7 +73,7 @@ fn check(out: Option<&str>) -> ExitCode {
     if failed {
         println!(
             "golden: a set differs from its committed file. If this build is right, `cargo golden \
-             bless` (rng, libm, ruleset, uniques, filters, gen) or \
+             bless` (rng, libm, ruleset, uniques, filters, gen, states) or \
              scripts/refcheck/pyfmt_vectors.py (pyfmt), and say why."
         );
         ExitCode::from(1)
@@ -94,6 +98,23 @@ fn bless() -> ExitCode {
     }
     // Blessing cannot fix a chi-square bound or Python's answers, so check what was written.
     check(None)
+}
+
+fn write_states() -> ExitCode {
+    let dir = golden::states::states_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("golden: cannot create {}: {e}", dir.display());
+        return ExitCode::from(2);
+    }
+    for (file, bytes) in golden::states::generated() {
+        let path = dir.join(file);
+        if let Err(e) = std::fs::write(&path, bytes) {
+            eprintln!("golden: cannot write {}: {e}", path.display());
+            return ExitCode::from(2);
+        }
+        println!("golden: wrote {}", path.display());
+    }
+    ExitCode::SUCCESS
 }
 
 fn read_report(path: &str) -> Result<Value, String> {

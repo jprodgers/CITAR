@@ -7,6 +7,7 @@ mod engine {
     mod hex;
     mod kitchen_sink;
     mod rules;
+    mod save;
     mod state;
     mod uniques;
 }
