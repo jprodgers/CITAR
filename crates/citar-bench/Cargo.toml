@@ -40,5 +40,12 @@ harness = false
 name = "vis"
 harness = false
 
+# Paths (package 1c-02): the best path on a small map at 20 us, across fog on a gargantuan one at
+# 150 us, and what a unit reaches this turn at 5 us (report-only); the run fails above three times
+# any of them.
+[[bench]]
+name = "path"
+harness = false
+
 [lints]
 workspace = true
