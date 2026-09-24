@@ -431,5 +431,5 @@ fn dead(cx: &mut Cx<'_>, o: &Obj<'_>, key: &str, drop: Drop) -> Res<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "embedded-ruleset"))]
 mod tests;

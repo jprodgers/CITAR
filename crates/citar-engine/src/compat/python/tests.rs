@@ -1,17 +1,16 @@
-//! Unit tests of the converter on small hand-made Python states. The fixtures' conversion, and
-//! the gates of package 1a-10, are in `crates/citar-testkit/tests/engine/convert.rs`.
+//! Unit tests of the converter on small hand-made Python states, under the embedded ruleset. The
+//! fixtures' conversion, and the gates of package 1a-10, are in
+//! `crates/citar-testkit/tests/engine/convert.rs`.
 
 use serde_json::{Value, json};
 
 use super::*;
 
-#[cfg(feature = "embedded-ruleset")]
 fn rules() -> &'static Ruleset {
     Ruleset::shared()
 }
 
 /// A two-player duel state on the smallest map, as `GameState.to_dict()` writes one.
-#[cfg(feature = "embedded-ruleset")]
 fn tiny() -> Value {
     let size = 8 * 8;
     let tiles: Vec<Value> = (0..size)
@@ -88,12 +87,10 @@ fn tiny() -> Value {
     })
 }
 
-#[cfg(feature = "embedded-ruleset")]
 fn convert_value(v: &Value) -> Result<Converted, ConvertError> {
     state_from_python(v.to_string().as_bytes(), rules())
 }
 
-#[cfg(feature = "embedded-ruleset")]
 #[test]
 fn a_tiny_state_converts_and_drops_nothing() {
     let got = convert_value(&tiny()).expect("converts");
@@ -107,7 +104,6 @@ fn a_tiny_state_converts_and_drops_nothing() {
     assert_eq!(st.config().host.len(), 3, "on_disconnect, reconnect_seconds, players");
 }
 
-#[cfg(feature = "embedded-ruleset")]
 #[test]
 fn an_unknown_key_fails_with_its_path() {
     let mut v = tiny();
@@ -122,7 +118,6 @@ fn an_unknown_key_fails_with_its_path() {
     assert_eq!(convert_value(&v).err().map(|e| e.path), Some("surprise".into()));
 }
 
-#[cfg(feature = "embedded-ruleset")]
 #[test]
 fn an_unknown_name_fails_with_its_path() {
     let mut v = tiny();
@@ -139,7 +134,6 @@ fn an_unknown_name_fails_with_its_path() {
     assert!(convert_value(&v).is_ok());
 }
 
-#[cfg(feature = "embedded-ruleset")]
 #[test]
 fn an_unknown_event_type_and_a_nan_fail_with_their_paths() {
     let mut v = tiny();
@@ -151,7 +145,6 @@ fn an_unknown_event_type_and_a_nan_fail_with_their_paths() {
     assert_eq!(e.path, "players[0].gold", "{e}");
 }
 
-#[cfg(feature = "embedded-ruleset")]
 #[test]
 fn fields_python_lacks_start_as_the_design_says() {
     let mut v2 = tiny();
@@ -168,7 +161,6 @@ fn fields_python_lacks_start_as_the_design_says() {
     assert_eq!(got.report.count(Drop::LastStats), 1);
 }
 
-#[cfg(feature = "embedded-ruleset")]
 #[test]
 fn name_references_move_from_code_points_to_bytes() {
     let mut v = tiny();
@@ -194,7 +186,6 @@ fn name_references_move_from_code_points_to_bytes() {
     assert_eq!(convert_value(&v).err().map(|e| e.path), Some("events[0].x".into()));
 }
 
-#[cfg(feature = "embedded-ruleset")]
 #[test]
 fn the_report_counts_what_was_dropped() {
     let mut v = tiny();

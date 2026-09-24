@@ -1,6 +1,7 @@
 //! The parts of `cargo metadata` the checks read.
 
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -18,6 +19,9 @@ pub struct Package {
     pub id: String,
     pub dependencies: Vec<Dependency>,
     pub targets: Vec<Target>,
+    /// The package's own features and what each turns on.
+    #[serde(default)]
+    pub features: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +32,9 @@ pub struct Dependency {
     /// `None` for a normal dependency, else `"dev"` or `"build"`.
     pub kind: Option<String>,
     pub uses_default_features: bool,
+    /// The features the dependent turns on.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

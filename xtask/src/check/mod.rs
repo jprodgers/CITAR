@@ -1,6 +1,7 @@
 //! `cargo xtask check`: the rules of DESIGN.md that clippy cannot see.
 //!
 //! - the engine's normal dependencies stay on the allow-list, with `libm` pinned and plain;
+//! - only refcheck, testkit and bench build the engine with `legacy`, which never ships;
 //! - the workspace version equals `__version__` in `citar/__init__.py`;
 //! - each layer of the engine uses only the layers below it;
 //! - only `game/mutate.rs`, `save/` and `compat/` call `State`'s mutable accessors;
@@ -14,6 +15,7 @@
 mod access;
 mod config;
 mod deps;
+mod features;
 mod generated;
 mod layers;
 mod metadata;
@@ -77,6 +79,7 @@ fn run_all(root: &Path) -> Result<(Vec<Finding>, String), String> {
 
     let mut findings = Vec::new();
     findings.extend(deps::check(&meta));
+    findings.extend(features::check(&meta));
     findings.extend(version::check(root, &meta)?);
     findings.extend(layers::check(&tree));
     findings.extend(access::check(&tree));
