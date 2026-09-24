@@ -1,4 +1,5 @@
-//! Editor maps: the map editor's document, read and cleaned (`maps.py:48-60, 124-248`).
+//! Editor maps: the map editor's document, read and cleaned (`maps.py:48-60, 124-248`), and a
+//! tile written back in its row form ([`tile_row`], `maps.py:52-55`).
 //!
 //! A document is plain JSON, written by the editor or by hand:
 //!
@@ -358,6 +359,41 @@ fn improvement(rules: &Ruleset, v: &Value, at: u32, warn: &mut Warnings) -> Opti
         );
     }
     id
+}
+
+/// One tile in the compact row form maps are stored in (`maps.tile_row`, `maps.py:52-55`):
+/// `[terrain, [features], wonder, river_mask, resource, amount, improvement, route]`, the
+/// features lowest layer first (Hill first, as [`read`] sorts them), and only an improvement a
+/// map may carry.
+#[must_use]
+pub fn tile_row(rules: &Ruleset, t: &Tile) -> Value {
+    let terrains = rules.terrains();
+    let name = |id: TerrainId| Value::String(terrains[id].name.to_string());
+    let features: Vec<Value> = t
+        .features()
+        .iter()
+        .filter_map(|f| rules.derived().features.get(f).copied())
+        .map(name)
+        .collect();
+    let improvement = t
+        .improvement()
+        .filter(|&i| on_maps(rules, i))
+        .map_or(Value::Null, |i| Value::String(rules.improvements()[i].name.to_string()));
+    let route = match t.route() {
+        None => Value::Null,
+        Some(Route::Road) => Value::String("Road".to_owned()),
+        Some(Route::Railroad) => Value::String("Railroad".to_owned()),
+    };
+    Value::Array(vec![
+        name(t.terrain()),
+        Value::Array(features),
+        t.wonder().map_or(Value::Null, name),
+        Value::from(t.river_mask()),
+        t.resource().map_or(Value::Null, |r| Value::String(rules.resources()[r].name.to_string())),
+        Value::from(t.resource_amount()),
+        improvement,
+        route,
+    ])
 }
 
 /// Whether a map may carry an improvement before the game starts: an improvement proper, not the
