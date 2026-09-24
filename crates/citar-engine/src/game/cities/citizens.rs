@@ -493,6 +493,24 @@ impl Game {
             .collect();
         let changed = before != a;
         self.set_citizens(c, a);
+        let deps = self.dv.stats.deps().citizens;
+        if !moved.is_empty() && deps.contains(crate::unique::CondDeps::MAP) {
+            // What a tile yields reads whether a city works the tiles around it (a filter asked
+            // of every tile, or of the neighbours): any city in reach of a tile taken or
+            // released may rank its tiles differently.
+            let reach = cstats::work_range(self).saturating_add(1);
+            let near: SmallVec<[CityId; 8]> = self
+                .state()
+                .cities()
+                .iter()
+                .filter(|y| y.id() != c)
+                .filter(|y| moved.iter().any(|&t| self.grid().distance(y.tile(), t) <= reach))
+                .map(City::id)
+                .collect();
+            for x in near {
+                self.pending.flag_city(x);
+            }
+        }
         if !moved.is_empty() {
             let range = cstats::work_range(self);
             let siblings: SmallVec<[CityId; 8]> = self

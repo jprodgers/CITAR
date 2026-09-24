@@ -144,6 +144,8 @@ pub fn unique_deps(rules: &Ruleset, id: UniqueId) -> CondDeps {
     let filters = t.filters();
     let u = t.get(id);
     let mut d = u.deps();
+    // Its tile filter is asked of the neighbours, not of the tile in context.
+    let adjacent = matches!(u.data, crate::unique::UniqueData::ImprovementStatsForAdjacencies(_));
     for p in u.data.params() {
         d |= match p {
             Param::CityFilter(f) => filters.city(f).deps(),
@@ -153,6 +155,7 @@ pub fn unique_deps(rules: &Ruleset, id: UniqueId) -> CondDeps {
                 let c = filters.combatant(f);
                 c.unit.deps() | c.city.deps()
             }
+            Param::TileFilter(f) if adjacent => tiles::adjacency_deps(filters.tile(f)),
             Param::TileFilter(f) => tile_leaves(filters.tile(f)),
             Param::Object(o) => {
                 t.object(o).tiles.map_or(CondDeps::empty(), |f| tile_leaves(filters.tile(f)))

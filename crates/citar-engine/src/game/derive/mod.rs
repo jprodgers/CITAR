@@ -126,15 +126,15 @@ impl Derived {
         let range = u32::try_from(rules.constants().formulas.city_work_range).unwrap_or(0);
         let owner = |t: TileIdx| st.tiles().get(t).and_then(Tile::owner);
         match *ch {
-            Change::TileInput(t) => self.flag_near(st, range, t, &[owner(t)], &mut out),
+            Change::TileInput(t) => self.flag_around(st, range, t, &[owner(t)], &mut out),
             Change::TileHeight(t) => {
-                self.flag_near(st, range, t, &[owner(t)], &mut out);
+                self.flag_around(st, range, t, &[owner(t)], &mut out);
                 out.sight.push(SightSource::Area(t));
             }
             Change::TileOwner { t, old, new } => {
                 out.recheck.extend(old.city);
                 out.recheck.extend(new.city);
-                self.flag_near(st, range, t, &[old.owner, new.owner], &mut out);
+                self.flag_around(st, range, t, &[old.owner, new.owner], &mut out);
                 out.sight.push(SightSource::Tile(t));
             }
             Change::UnitPlaced { u, owner: by, from, to } => {
@@ -207,6 +207,32 @@ impl Derived {
             Change::PlayerAlive(p) => out.sight.push(SightSource::Civ(p)),
         }
         out
+    }
+
+    /// Flags the cities a change to tile `t` concerns: those of `owners` (its owners before and
+    /// after) whose work range reaches it, and those that may work one of its neighbours, since a
+    /// tile's yield reads its neighbours (a Moai's culture for each Moai beside it, fresh water,
+    /// the coast): the cities of each neighbour's owner whose range reaches that neighbour. For
+    /// those it flags every city of the neighbours' owners within one tile more than the range,
+    /// which holds them all; the write path still allocates nothing.
+    // refcheck: citizens-follow-a-neighbour-at-once
+    fn flag_around(
+        &self,
+        st: &State,
+        range: u32,
+        t: TileIdx,
+        owners: &[Option<PlayerId>],
+        out: &mut Reactions,
+    ) {
+        self.flag_near(st, range, t, owners, out);
+        if !self.grid.contains(t) {
+            return;
+        }
+        let mut around: [Option<PlayerId>; 6] = [None; 6];
+        for (slot, nb) in around.iter_mut().zip(self.grid.neighbors(t)) {
+            *slot = st.tiles().get(nb).and_then(Tile::owner);
+        }
+        self.flag_near(st, range.saturating_add(1), t, &around, out);
     }
 
     /// Flags every city of one of `owners` whose work range reaches tile `t`. It walks the
@@ -330,6 +356,21 @@ mod tests {
         flagged.sort();
         assert_eq!(flagged, [roma, antium]);
         assert!(!flagged.contains(&athens));
+    }
+
+    #[test]
+    fn a_tile_change_flags_the_cities_that_may_work_a_neighbour() {
+        use crate::state::TileClaim;
+        let mut g = testing::duel();
+        let rome = PlayerId(0);
+        // Roma at (2, 2); (5, 2) is three tiles away, in its range; (6, 2) four and (7, 2) five.
+        let roma = testing::city(&mut g, rome, TileIdx(22), "Roma");
+        g.set_tile_owner(TileIdx(25), TileClaim::city(rome, roma)).expect("a tile");
+        g.settle();
+        let next_to_ours = g.dv.on(&g.st, g.rules, &Change::TileInput(TileIdx(26)));
+        assert_eq!(next_to_ours.recheck.to_vec(), [roma], "(6, 2) is next to Roma's (5, 2)");
+        let farther = g.dv.on(&g.st, g.rules, &Change::TileInput(TileIdx(27)));
+        assert!(farther.recheck.is_empty(), "no tile next to (7, 2) is Roma's to work");
     }
 
     #[test]

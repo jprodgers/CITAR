@@ -176,6 +176,36 @@ pub fn tile_filter_deps(g: &Game, f: TileFilterId) -> CondDeps {
     d
 }
 
+/// What a tile filter asked of a tile's neighbours reads (`[stats] for each adjacent [tileFilter]`,
+/// `tiles.py:241-248`). A memo of a tile's yield reads its neighbours' own facts already: their
+/// terrain, river, resource and improvement. A filter that reads more of a neighbour (its owner,
+/// whether a city works it, fresh water or the coast beside it, which are two tiles away) reads
+/// the map (`MAP`), as do the local classes of its leaves, which are about the neighbour and not
+/// the tile in context.
+#[must_use]
+pub fn adjacency_deps(f: &crate::unique::TileFilter) -> CondDeps {
+    let e = &f.full;
+    let own = |l: &TileLeaf| {
+        matches!(
+            l,
+            TileLeaf::Terrains(_)
+                | TileLeaf::River
+                | TileLeaf::AnyResource
+                | TileLeaf::Resource(_)
+                | TileLeaf::Unimproved
+                | TileLeaf::Improved
+                | TileLeaf::Pillaged
+                | TileLeaf::Improvement(_)
+        )
+    };
+    let d = e.deps();
+    if e.leaves().into_iter().all(own) && !d.intersects(CondDeps::LOCAL) {
+        d
+    } else {
+        d.difference(CondDeps::LOCAL) | CondDeps::MAP
+    }
+}
+
 fn target_deps(g: &Game, t: Target) -> CondDeps {
     match t {
         Target::Tiles(f) => tile_filter_deps(g, f),
@@ -356,10 +386,10 @@ fn extra_improvement_stats(
         }
     }
     for h in uq::object(v, &def.uniques, UniqueType::ImprovementStatsForAdjacencies, &Ctx::IGNORE) {
-        *deps |= h.unique.deps() | CondDeps::MAP;
-        if let UniqueData::ImprovementStatsForAdjacencies(x) = h.data()
-            && applies(h.id, ctx, v)
-        {
+        *deps |= h.unique.deps();
+        let UniqueData::ImprovementStatsForAdjacencies(x) = h.data() else { continue };
+        *deps |= adjacency_deps(filters.tile(x.tiles));
+        if applies(h.id, ctx, v) {
             let n = g
                 .grid()
                 .neighbors(t)

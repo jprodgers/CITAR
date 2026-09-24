@@ -113,3 +113,7 @@ reason = "set_specialists let a count that is not a number raise Python's ValueE
 [[differences]]
 id = "citizens-follow-a-blockade-at-once"
 reason = "Python took a citizen off a blockaded tile, and its lock, at the end of its city's turn; Rust places the city's citizens again as soon as a blockade begins or ends, as after any change to what they can work"
+
+[[differences]]
+id = "citizens-follow-a-neighbour-at-once"
+reason = "Python placed a city's citizens again at the end of its turn when a tile next to one it could work changed, as a Moai beside a Moai does; Rust places them at once, as after any change to what its tiles yield"
