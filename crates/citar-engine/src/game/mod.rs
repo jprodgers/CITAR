@@ -21,6 +21,7 @@
 //! - [`pending`]: work raised by a write and done by the next settle, and the effect queue;
 //! - [`turn`]: settle, the stage tables of a turn, ending turns and rounds, and the seat drivers
 //!   (package 1b-03);
+//! - [`setup`]: new games, from the lobby's settings (package 1b-03);
 //! - [`events`]: emitting events, their name references, and scrubbing them for a viewer
 //!   (`game.py:806-990`);
 //! - [`action`]: the typed actions and the pipeline every one runs through;
@@ -51,6 +52,7 @@ pub mod mutate;
 pub mod pending;
 pub mod query;
 pub mod research;
+pub mod setup;
 pub mod turn;
 pub mod vis;
 
