@@ -52,5 +52,11 @@ harness = false
 name = "stats"
 harness = false
 
+# What a city can build (package 1b-07): the Buildable memo read at 50 ns and recomputed at 20 us
+# (report-only), failing above three times either.
+[[bench]]
+name = "buildable"
+harness = false
+
 [lints]
 workspace = true
