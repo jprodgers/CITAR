@@ -68,3 +68,19 @@ reason = "With no major civilization alive, ending a turn played round after rou
 [[differences]]
 id = "force-turn-only-for-the-living"
 reason = "Forcing a turn (EngineGame.force_turn) made an eliminated player's turn current, and moved the turn of a game that was over; Rust refuses both"
+
+[[differences]]
+id = "mapgen-wonder-conversions-read-every-condition"
+reason = "A natural wonder's 'Neighboring tiles will convert to [terrain]' read only its <in tiles without [...]> conditions; Rust converts a neighbour only where every condition holds"
+
+[[differences]]
+id = "mapgen-no-river-along-new-water"
+reason = "A natural wonder that turned the land beside it into coast (Krakatoa, the Rock of Gibraltar) left rivers running along the sea; Rust takes a river off a tile that becomes water, on both sides of the edge"
+
+[[differences]]
+id = "mapgen-features-that-never-generate"
+reason = "Map generation drew vegetation and rare features even when the ruleset marked them 'Doesn't generate naturally'; Rust never places them (no shipped feature is both)"
+
+[[differences]]
+id = "mapgen-luxury-variety-by-tile-count"
+reason = "The share of luxury types a generated map keeps was interpolated over the areas of the ruleset's lobby sizes, looked up by their keys; Rust interpolates over the tile counts of the shipped sizes, the same for the shipped ruleset and for any other"
