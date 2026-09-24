@@ -41,7 +41,6 @@
 //! `GameState.to_dict` (`state.py:352-356`).
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::SaveError;
 use super::canon;
@@ -112,10 +111,10 @@ enum EntryRef<'a> {
     Frame(&'a FrameRecord),
 }
 
-/// One entry of a chunk, read back.
-#[derive(Deserialize)]
+/// One entry of a chunk, read back by [`decode_chunk`].
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Entry {
+pub enum JournalEntry {
     Event(Event),
     Message(Message),
     Thought(Thought),
@@ -123,6 +122,11 @@ enum Entry {
     Action(ActionRecord),
     Frame(FrameRecord),
 }
+
+/// Why a chunk would not decode.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a journal chunk does not decode: {0}")]
+pub struct JournalError(pub String);
 
 #[derive(Serialize)]
 struct ChunkRef<'a> {
@@ -138,7 +142,7 @@ struct ChunkDoc {
     format: String,
     version: u32,
     seq: u32,
-    entries: Vec<Entry>,
+    entries: Vec<JournalEntry>,
 }
 
 /// The entries of `chron` past `cursor`, in the order they were appended, moving the cursor to
@@ -199,13 +203,16 @@ pub fn take_chunk(
     Ok(Some(JournalChunk { seq, json }))
 }
 
-/// The number and entries of a chunk.
-fn decode(rules: &'static Ruleset, bytes: &[u8]) -> Result<(u32, Vec<Entry>), String> {
-    let v: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    let doc: ChunkDoc =
-        with_rules(rules, || ChunkDoc::deserialize(&v)).map_err(|e| e.to_string())?;
+/// A chunk's number and entries, in the order they were appended, with rule objects named in
+/// `rules`.
+pub fn decode_chunk(
+    rules: &'static Ruleset,
+    bytes: &[u8],
+) -> Result<(u32, Vec<JournalEntry>), JournalError> {
+    let doc: ChunkDoc = with_rules(rules, || serde_json::from_slice(bytes))
+        .map_err(|e| JournalError(e.to_string()))?;
     if doc.format != FORMAT || doc.version != VERSION {
-        return Err(format!("not a {FORMAT} v{VERSION} chunk"));
+        return Err(JournalError(format!("not a {FORMAT} v{VERSION} chunk")));
     }
     Ok((doc.seq, doc.entries))
 }
@@ -234,7 +241,7 @@ pub fn rebuild(
     let mut counts = HostCounts::default();
     let mut complete = true;
     for bytes in chunks {
-        let Ok((seq, entries)) = decode(rules, bytes) else {
+        let Ok((seq, entries)) = decode_chunk(rules, bytes) else {
             complete = false;
             continue;
         };
@@ -268,11 +275,11 @@ fn absorb(
     chron: &mut Chronicle,
     heads: &mut ChronicleHeads,
     counts: &mut HostCounts,
-    e: Entry,
+    e: JournalEntry,
 ) -> bool {
     let mut ok = true;
     match e {
-        Entry::Event(ev) => {
+        JournalEntry::Event(ev) => {
             if matches!(ev.kind, EventType::Engine(_)) {
                 match canon::event_entry(&ev) {
                     Ok(bytes) => heads.absorb(EntryKind::Event, &bytes),
@@ -283,14 +290,14 @@ fn absorb(
             }
             chron.push_event(ev);
         }
-        Entry::Message(m) => {
+        JournalEntry::Message(m) => {
             match canon::message_entry(&m) {
                 Ok(bytes) => heads.absorb(EntryKind::Message, &bytes),
                 Err(_) => ok = false,
             }
             chron.push_message(m);
         }
-        Entry::Stats(s) => {
+        JournalEntry::Stats(s) => {
             match canon::stats_entry(&s) {
                 Ok(bytes) => heads.absorb(EntryKind::Stats, &bytes),
                 Err(_) => ok = false,
@@ -298,15 +305,15 @@ fn absorb(
             heads.last_stats = Some(s.clone());
             chron.push_stats(s);
         }
-        Entry::Thought(t) => {
+        JournalEntry::Thought(t) => {
             counts.thoughts = counts.thoughts.saturating_add(1);
             chron.push_thought(t);
         }
-        Entry::Action(a) => {
+        JournalEntry::Action(a) => {
             counts.actions = counts.actions.saturating_add(1);
             chron.push_action(a);
         }
-        Entry::Frame(f) => {
+        JournalEntry::Frame(f) => {
             counts.frames = counts.frames.saturating_add(1);
             chron.push_frame(f);
         }

@@ -202,12 +202,40 @@ fn no_state_type_uses_an_attribute_that_makes_the_encoding_ambiguous() {
         }
         files += 1;
         let text = std::fs::read_to_string(&path).expect("readable");
-        for banned in ["skip_serializing_if", "flatten", "untagged"] {
-            let used = text.lines().any(|l| l.contains("serde(") && l.contains(banned));
-            assert!(!used, "{} uses serde({banned}), which state types may not", path.display());
+        for args in serde_attributes(&text) {
+            for banned in ["skip_serializing_if", "flatten", "untagged"] {
+                assert!(
+                    !args.contains(banned),
+                    "{} uses serde({banned}), which state types may not: serde({args})",
+                    path.display()
+                );
+            }
         }
     }
     assert!(files >= 12, "found {files} state files");
+    let found = serde_attributes("#[serde(\n    untagged,\n)]\nx.flatten()");
+    assert_eq!(found, ["\n    untagged,\n"], "an attribute over several lines is read whole");
+}
+
+/// The arguments of every `serde(...)` in `text`, to the matching parenthesis.
+fn serde_attributes(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for (start, _) in text.match_indices("serde(") {
+        let args = start + "serde(".len();
+        let mut depth = 1;
+        for (i, c) in text[args..].char_indices() {
+            depth += match c {
+                '(' => 1,
+                ')' => -1,
+                _ => 0,
+            };
+            if depth == 0 {
+                out.push(&text[args..args + i]);
+                break;
+            }
+        }
+    }
+    out
 }
 
 // ---- Gate 6: what the digest ignores ------------------------------------------------------------
@@ -568,6 +596,10 @@ fn a_loaded_game_rebuilds_its_history_from_its_chunks() {
         states::history(r, i, 20, &mut heads, &mut host, &mut chron);
         chunks.extend(journal::take_chunk(r, &chron, &mut cursor, &mut host).expect("saves"));
     }
+    let (seq, entries) = journal::decode_chunk(r, &chunks[1].json).expect("decodes");
+    assert_eq!(seq, 1);
+    assert_eq!(entries.len(), 20, "the second round's entries");
+    assert!(journal::decode_chunk(r, b"{\"format\": \"citar-state\"}").is_err());
     let mut parts = states::build(r, 37, &Shape::TINY).into_parts();
     parts.chronicle = heads;
     parts.host.0 = host;
