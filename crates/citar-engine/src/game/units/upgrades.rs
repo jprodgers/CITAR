@@ -188,6 +188,7 @@ pub fn plan_upgrade(g: &Game, u: UnitId) -> Result<UpgradePlan, ActionError> {
     }
     let x = g.unit(u).ok_or_else(|| ActionError::rule("No such unit."))?;
     let target = c.target.ok_or_else(|| ActionError::rule("No upgrade."))?;
+    // refcheck: upgrade-places-before-removing
     let spot = spawn_spot(g, x.owner(), target, x.tile(), 10, Some(u))
         .ok_or_else(|| ActionError::rule("The upgraded unit could not be placed."))?;
     Ok(UpgradePlan { unit: u, target, spot, cost: c.cost })
@@ -210,8 +211,9 @@ pub fn apply_upgrade(g: &mut Game, p: UpgradePlan) -> Value {
     })
 }
 
-/// Replaces a unit with a new one of `target` on `spot`, keeping what carries over
-/// (`units._perform_upgrade`, `units.py:563-581`).
+/// Replaces a unit with a new one of `target` on `spot`, which the caller found before, keeping
+/// what carries over (`units._perform_upgrade`, `units.py:563-581`).
+// refcheck: upgrade-places-before-removing (Python removed the unit, then looked for a spot)
 fn replace(
     g: &mut Game,
     u: UnitId,
@@ -243,6 +245,7 @@ pub fn free_upgrade(g: &mut Game, u: UnitId, special: bool) -> bool {
         if blockers(g, u, t, true, true).is_some() {
             continue;
         }
+        // refcheck: upgrade-places-before-removing
         return match spawn_spot(g, owner, t, tile, 10, Some(u)) {
             Some(spot) => replace(g, u, t, spot).is_some(),
             None => false,

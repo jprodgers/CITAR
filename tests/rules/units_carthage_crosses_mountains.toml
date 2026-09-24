@@ -1,0 +1,39 @@
+about = """
+A mountain is impassable, but Carthage's land units may cross mountains once it has gained its
+first Great General. Python never recorded the units a civilization gained, so the crossing never
+opened there; in Rust it does.
+"""
+from = "citar/engine/movement.py: terrain_reason (Carthage)"
+
+[config]
+players = [{ nation = "Carthage" }, {}]
+
+[[step]]
+note = "A warrior beside the mountain M, which is in its sight, so it is known to be a mountain."
+op = "add_unit"
+args = { player = 0, unit = "Warrior", at = "(4,7)" }
+as = "added"
+
+[[step]]
+set = { w = "=added.unit_ids[0]" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=w", x = 5, y = 7 }
+error = "No path from (4,7) to (5,7)."
+
+[[step]]
+op = "add_unit"
+args = { player = 0, unit = "Great General", at = "A" }
+
+[[step]]
+note = "The Great General is recorded among the units Carthage gained, and the mountain opens."
+tool = "move_unit"
+args = { unit_id = "=w", x = 5, y = 7 }
+as = "crossed"
+intended = "units-gained-recorded"
+
+[[step]]
+check = "crossed"
+subset = { to = { x = 5, y = 7 }, arrived = true }
+intended = "units-gained-recorded"

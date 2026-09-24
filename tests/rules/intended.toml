@@ -88,3 +88,19 @@ reason = "A resource's share of its kind took over normal resources' tiles down 
 [[differences]]
 id = "mapgen-luxury-variety-by-tile-count"
 reason = "The share of luxury types a generated map keeps was interpolated over the areas of the ruleset's lobby sizes, looked up by their keys; Rust interpolates over the tile counts of the shipped sizes, the same for the shipped ruleset and for any other"
+
+[[differences]]
+id = "promotion-needs-its-experience"
+reason = "A promotion bought while a free one was on offer went through without the experience, which Python then took anyway, leaving the unit's experience below zero; Rust refuses a paid promotion without the experience or a free pick of its own, and a unit's experience never goes below zero"
+
+[[differences]]
+id = "upgrade-places-before-removing"
+reason = "An upgrade whose new unit had nowhere to stand removed the unit and put a copy back (a new id, without its name, religion, used abilities or original owner), then refused; Rust finds where the new unit will stand before the old one goes, so such an upgrade, bought or free, changes nothing"
+
+[[differences]]
+id = "units-gained-recorded"
+reason = "Python never recorded the units a civilization gained, so Carthage's `Land units may cross [Mountain] tiles after the first [Great General] is earned` never held; Rust records each unit a civilization gains, and Carthage's land units cross mountains once it has had a Great General"
+
+[[differences]]
+id = "unit-refusals-change-nothing"
+reason = "A move_unit that was refused (no path, or its first step refused) had already woken the unit from its sleep, fortification or other order, and cleared its standing move order when the step was refused; Rust refuses the move with the unit as it was"

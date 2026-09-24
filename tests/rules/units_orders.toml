@@ -1,7 +1,7 @@
 about = """
 Standing orders: a civilian cannot fortify, sleeping and waking set and clear the order, skipping
 spends the turn's movement, a siege unit sets up for one movement point, and an unknown order is
-refused with the list of orders.
+refused with the list of orders. A move that is refused leaves the unit's order as it was.
 """
 from = "citar/engine/tools.py: unit_order"
 
@@ -74,3 +74,25 @@ eq = { ok = true, note = "Already set up." }
 tool = "unit_order"
 args = { unit_id = "=w", order = "dance" }
 error = "Unknown order. Use fortify, sleep, wake, skip, heal, explore, automate, pillage, setup, disband, cancel."
+
+[[step]]
+note = "A worker asleep beside the mountain M, which it sees."
+op = "add_unit"
+args = { player = 0, unit = "Worker", at = "(4,7)" }
+as = "sleeper"
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=sleeper.unit_ids[0]", order = "sleep" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=sleeper.unit_ids[0]", x = 5, y = 7 }
+error = "No path from (4,7) to (5,7)."
+
+[[step]]
+note = "The refused move leaves it asleep: Python had woken it before looking for a path."
+check = { what = "unit", unit = "=sleeper.unit_ids[0]" }
+path = "activity"
+eq = "sleep"
+intended = "unit-refusals-change-nothing"

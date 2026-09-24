@@ -103,13 +103,14 @@ pub fn add_promotion(g: &mut Game, u: UnitId, pr: PromotionId, free: bool) {
                 if x.pending_promotions > 0 {
                     x.pending_promotions -= 1;
                 } else {
+                    // refcheck: promotion-needs-its-experience (never below zero)
                     x.xp = x.xp.saturating_sub(cost).max(0);
                     x.promotion_count = x.promotion_count.saturating_add(1);
                 }
             }
         }
         let site = TriggerSite { civ: owner, city: None, unit: Some(u), tile: None };
-        triggers::fire(g, &site, &TriggerEvent::Promotion, true);
+        triggers::fire(g, &site, &TriggerEvent::Promotion, true, None);
         if g.unit(u).is_none() {
             return;
         }
@@ -158,6 +159,7 @@ pub fn plan_promotion(g: &Game, u: UnitId, name: &str) -> Result<PromotionId, Ac
     };
     // A paid promotion needs the experience or a free pick of its own: Python let any promotion
     // through while a free one was available, and took the experience the unit did not have.
+    // refcheck: promotion-needs-its-experience
     let (xp, picks) = g.unit(u).map_or((0, 0), |x| (x.xp, x.pending_promotions));
     let next = xp_for_next(g, u);
     if !(is_free(g, pr) || xp >= next || picks > 0) {

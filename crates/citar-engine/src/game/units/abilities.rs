@@ -87,12 +87,13 @@ pub fn consume_action(g: &mut Game, u: UnitId, id: UniqueId) {
 }
 
 /// Uses a unit up (`units.consume`, `units.py:477-482`): `upon expending a [unit]` fires for its
-/// owner, then it leaves the game.
+/// owner, its announcements saying why, then it leaves the game.
 pub fn consume(g: &mut Game, u: UnitId) {
-    let Some(owner) = g.unit(u).map(crate::state::units::Unit::owner) else { return };
+    let Some((owner, base)) = g.unit(u).map(|x| (x.owner(), x.base)) else { return };
     let facts = UnitFacts::of(&g.view(), u);
     let site = TriggerSite::civ(owner);
-    triggers::fire(g, &site, &TriggerEvent::ExpendingUnit(facts), false);
+    let note = format!("due to expending our {}", g.rules().name(base).unwrap_or(""));
+    triggers::fire(g, &site, &TriggerEvent::ExpendingUnit(facts), false, Some(&note));
     if g.unit(u).is_some() {
         let _removed = g.despawn_unit(u);
     }

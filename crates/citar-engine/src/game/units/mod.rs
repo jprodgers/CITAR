@@ -167,6 +167,8 @@ pub(crate) fn on_created(g: &mut Game, u: UnitId) {
     {
         x.original_owner = Some(owner);
     }
+    // refcheck: units-gained-recorded
+    // The unit placed moved its owner's roster, which the movement memos read for this set.
     if let Some(p) = g.player_mut(owner, PlayerTouch::OTHER) {
         p.civ.units_gained.insert(base);
     }
@@ -278,7 +280,7 @@ pub fn add_unit_in_city(g: &mut Game, c: CityId, base: BaseUnitId) -> Option<Uni
         pending(Porting::Pending("1b-08"));
     }
     let site = TriggerSite { civ: owner, city: None, unit: Some(u), tile: None };
-    super::triggers::fire(g, &site, &TriggerEvent::GainingUnit(base), true);
+    super::triggers::fire(g, &site, &TriggerEvent::GainingUnit(base), true, None);
     Some(u)
 }
 

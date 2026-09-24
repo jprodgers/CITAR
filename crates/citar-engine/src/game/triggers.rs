@@ -12,14 +12,21 @@ use crate::base::ids::UniqueId;
 use crate::unique::trigger::{OneTimeEffect, TriggerEvent, TriggerSite};
 
 /// Fires the uniques that wait for `event` at `site` (`triggers.fire`): the civilization's, the
-/// city's local ones and, with `include_unit`, the unit's, each applied in turn.
-pub fn fire(g: &mut Game, site: &TriggerSite, event: &TriggerEvent, include_unit: bool) {
+/// city's local ones and, with `include_unit`, the unit's, each applied in turn. `note` is what
+/// caused them, for their announcements (`due to expending our Great Prophet`).
+pub fn fire(
+    g: &mut Game,
+    site: &TriggerSite,
+    event: &TriggerEvent,
+    include_unit: bool,
+    note: Option<&str>,
+) {
     let found = {
         let v = g.view();
         crate::unique::trigger::fire(&v, site, event, include_unit)
     };
     for id in found {
-        apply(g, id, site, None);
+        apply(g, id, site, note);
     }
 }
 
