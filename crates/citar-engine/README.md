@@ -15,6 +15,7 @@ and the dev loop.
 | No hash-order iteration; no platform maths; no half-away-from-zero rounding (`f64::round`, `libm::round`) under a name that does not say so; no order-breaking removals from an `IndexMap`, `IndexSet` or `serde_json::Map`, their entry APIs included; no unstable sorts of slices, `IndexMap`s or `IndexSet`s; no file system, network, processes, environment, threads, or console (print macros and `std::io::{stdin, stdout, stderr}`) | clippy, with the strict [clippy.toml](../../clippy.toml) at the root |
 | No `unsafe`, no `exit`, no `dbg!`; no `Change` dropped by a bare `g.set_x();` or by `let _ = g.set_x();` | the workspace lints in the root [Cargo.toml](../../Cargo.toml) |
 | Only allow-listed dependencies, with `libm` pinned and without its `arch` feature | `cargo xtask check` |
+| Only refcheck, testkit and bench build the engine with `legacy`, which never ships | `cargo xtask check` |
 | One version for the Rust workspace and `citar/__init__.py` | `cargo xtask check` |
 | Layering, and who may call `State`'s mutable accessors | `cargo xtask check` |
 | Generated files up to date; no `Pending` stage or `NotPorted` left once its time has come | `cargo xtask check` ([xtask/check.toml](../../xtask/check.toml) holds the switches) |
@@ -113,7 +114,7 @@ Each top-level module is a layer, and a layer may use only the layers listed for
 | Feature | Default | Effect |
 |---|---|---|
 | `embedded-ruleset` | yes | the ruleset files compiled in through `include_bytes!`, and `Ruleset::shared()` |
-| `legacy` | no | `compat::python`, the Python-state converter; refcheck, testkit and bench only |
+| `legacy` | no | `compat::python`, the Python-state converter; refcheck, testkit and bench only (`cargo xtask check`) |
 | `test-ops` | no | `api::testops` and `api::inspect`, for rule scripts; never in shipped builds |
 | `checks` | no | invariants and the cache oracle in release builds (debug builds always have them) |
 | `stats` | no | memo hit and miss counters, search node counts, settles per round |

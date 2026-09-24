@@ -10,8 +10,9 @@
 //! 5. reports in dependency order ([`report`]), while `refcheck/ratchet.json` ([`ratchet`])
 //!    keeps the counts of every group from rising.
 //!
-//! Each system package adds its group's answer module (DESIGN.md 3.4, rule 1); the first is
-//! `uniques` (package 1a-05).
+//! Each system package adds its group's answer module (DESIGN.md 3.4, rule 1); the first were
+//! `uniques` (package 1a-05) and `state_echo` (1a-10). Each fixture's state is converted once by
+//! the engine's Python-state converter (`compat::python`) for every group.
 
 #![forbid(unsafe_code)]
 
