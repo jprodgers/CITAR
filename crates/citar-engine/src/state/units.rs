@@ -669,6 +669,15 @@ impl Units {
         Ok(Change::UnitPlaced { u, owner: x.owner, from: Some(x.tile), to: x.tile })
     }
 
+    /// Takes a unit off its tile's occupancy list and nothing else, breaking the index on
+    /// purpose, for the tests of the checks that must catch it.
+    #[cfg(all(test, feature = "embedded-ruleset"))]
+    pub(crate) fn unlist_for_test(&mut self, u: UnitId) {
+        if let Some(t) = self.get(u).map(|x| x.tile) {
+            self.occ_remove(t, u);
+        }
+    }
+
     // ---- Checks ---------------------------------------------------------------------------------
 
     /// Checks that the indexes agree with the units, and the carrier links hold: each unit is
