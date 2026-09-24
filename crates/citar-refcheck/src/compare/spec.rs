@@ -175,6 +175,8 @@ impl CompareSpec {
                 .multiset("players[*].gained")
                 .multiset("players[*].free_stat_buildings")
                 .multiset("players[*].free_specific_buildings")
+                .multiset("players[*].explored")
+                .multiset("players[*].memory.*.f")
                 .keyed_pos("players[*].remembered_cities", 0)
                 .keyed("units", "id")
                 .multiset("units[*].promotions")

@@ -345,11 +345,13 @@ fn check_fixture(
     let fail = |error: String| LoadFailure { name: r.name.clone(), error };
     let fixture = Fixture::load(r, &opts.sets).map_err(|e| fail(e.to_string()))?;
     // Converted once for every group (DESIGN.md 9.2); a state that does not convert is a load
-    // failure. With no fixture group to answer, there is nothing to convert for.
+    // failure, and so is one whose conversion panics, which must not end the whole run. With no
+    // fixture group to answer, there is nothing to convert for.
     let converted = if groups.is_empty() {
         None
     } else {
-        let state = state_from_python(fixture.state.get().as_bytes(), Ruleset::shared())
+        let json = fixture.state.get().as_bytes();
+        let state = guarded(|| state_from_python(json, Ruleset::shared()))
             .map_err(|e| fail(format!("{}: the state does not convert: {e}", r.path.display())))?;
         Some(state)
     };
@@ -448,6 +450,18 @@ fn judge(
                 diffs.into_iter().map(|d| verdict(config, &scoped, group, d, tally)).collect(),
             )
         }
+    }
+}
+
+/// Runs a step that loads a fixture (today the conversion, from 1b-01 `Game::from_python`), with
+/// a panic turned into its error: one bad fixture is a load failure, not the end of the run.
+fn guarded<T, E: std::fmt::Display>(
+    step: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, String> {
+    match catch_unwind(AssertUnwindSafe(step)) {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(p) => Err(format!("it panicked: {}", panic_text(p.as_ref()))),
     }
 }
 
@@ -588,5 +602,25 @@ impl Run {
             return 3;
         }
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_step_that_panics_is_an_error_not_the_end_of_the_run() {
+        let ok: std::result::Result<u8, String> = guarded(|| Ok::<u8, String>(3));
+        assert_eq!(ok, Ok(3));
+        let refused =
+            guarded(|| Err::<u8, _>("players[1].grudge: a field the converter does not know"));
+        assert_eq!(
+            refused,
+            Err("players[1].grudge: a field the converter does not know".to_owned())
+        );
+        let panicked =
+            guarded(|| -> std::result::Result<u8, String> { panic!("index out of bounds") });
+        assert_eq!(panicked, Err("it panicked: index out of bounds".to_owned()));
     }
 }

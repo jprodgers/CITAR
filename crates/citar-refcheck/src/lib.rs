@@ -12,7 +12,8 @@
 //!
 //! Each system package adds its group's answer module (DESIGN.md 3.4, rule 1); the first were
 //! `uniques` (package 1a-05) and `state_echo` (1a-10). Each fixture's state is converted once by
-//! the engine's Python-state converter (`compat::python`) for every group.
+//! the engine's Python-state converter (`compat::python`) for every group; a state that does not
+//! convert, or whose conversion panics, is a load failure of that fixture alone.
 
 #![forbid(unsafe_code)]
 

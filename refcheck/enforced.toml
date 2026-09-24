@@ -22,6 +22,7 @@
 [[enforce]]
 group = "uniques"
 
-# state_echo (package 1a-10): each fixture's state reads back whole from its conversion.
+# state_echo (package 1a-10): each fixture's state reads back from its conversion, field by field (every
+# persisted field the converter keeps; what its report drops aside).
 [[enforce]]
 group = "state_echo"

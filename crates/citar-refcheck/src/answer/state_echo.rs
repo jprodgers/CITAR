@@ -8,12 +8,15 @@
 //! converter's code, so a field the converter misreads, misplaces or misnames shows as a
 //! difference at its place.
 //!
-//! The projection is of what the Rust state keeps, in the form the design gives it
-//! (DESIGN.md 4.4-4.7): lists that became sets compare as multisets, flags are read where they
-//! moved, and what the converter drops by design (its `ConvertReport`) is left out on both sides:
-//! the barbarians' explored tiles, the non-majors' memories, the explorers of units that are
-//! gone, the dead fields. Python's reads that created state are read as Python's first read left
-//! them: a city whose pressures nothing had read yet is seeded (`religion.py:105-109`).
+//! The projection is of everything the Rust state keeps from Python, in the form the design gives
+//! it (DESIGN.md 4.4-4.7): the settings (host keys included), the map and each tile's continent,
+//! the tiles, the players with their seats, flags, explored tiles and each major's memory of
+//! every tile, units, cities, relations, opinions, deals, negotiations, the world, the id counter
+//! and the history. Lists that became sets compare as multisets, flags are read where they moved,
+//! and what the converter drops by design (its `ConvertReport`) is left out on both sides: the
+//! barbarians' explored tiles, the non-majors' memories, the explorers of units that are gone,
+//! the dead fields. Python's reads that created state are read as Python's first read left them:
+//! a city whose pressures nothing had read yet is seeded (`religion.py:105-109`).
 //!
 //! [`State`]: citar_engine::state::State
 //! [`Chronicle`]: citar_engine::state::chronicle::Chronicle
@@ -26,13 +29,16 @@ use citar_engine::base::ids::{
 };
 use citar_engine::base::sets::IdSet;
 use citar_engine::compat::python::Converted;
+use citar_engine::rules::defs::Route;
 use citar_engine::rules::{Named, Ruleset};
 use citar_engine::state::State;
 use citar_engine::state::chronicle::{Event, EventData, EventType, RefKind, StatsRow};
 use citar_engine::state::cities::Constructible;
-use citar_engine::state::config::MapSource;
+use citar_engine::state::config::{MapSource, ResourceKindOptions, ResourceOptions, ResourceRule};
 use citar_engine::state::diplo::{Deal, Negotiation, OpinionKey, Relation, Terms, side};
-use citar_engine::state::players::{Player, QuestTarget};
+use citar_engine::state::map::WATER;
+use citar_engine::state::memory::TileMemoryLayer;
+use citar_engine::state::players::{AutoDecision, Player, QuestTarget};
 use citar_engine::state::world::{ReligionName, UnResult};
 use serde_json::{Map, Value, json};
 
@@ -66,7 +72,7 @@ impl AnswerModule for StateEcho {
 /// The projection of Python's state.
 pub fn python(s: &Value) -> Value {
     json!({
-        "clock": pick(s, &["turn", "current", "turn_started", "phase", "winner", "victory"]),
+        "clock": pick(s, &["turn", "current", "turn_started", "phase", "winner", "victory", "next_id"]),
         "map": py_map(s),
         "settings": py_settings(&s["config"]),
         "tiles": py_tiles(s),
@@ -97,17 +103,72 @@ fn obj(v: &Value) -> impl Iterator<Item = (&String, &Value)> {
 }
 
 fn py_map(s: &Value) -> Value {
-    let mut continents = Map::new();
-    for c in arr(&s["continents"]) {
-        let k = c.as_i64().map_or_else(|| "?".to_owned(), |c| c.to_string());
-        let n = continents.get(&k).and_then(Value::as_u64).unwrap_or(0);
-        continents.insert(k, json!(n + 1));
-    }
     json!({
         "width": s["width"], "height": s["height"],
         "wrap_x": s["config"]["wrap_x"], "wrap_y": s["config"]["wrap_y"],
-        "continents": continents,
+        "continents": s["continents"],
     })
+}
+
+/// The settings keys the engine reads (`game.py:32-60`, and what `Game.new` adds); the rest are
+/// the host's.
+const ENGINE_KEYS: [&str; 27] = [
+    "map_size",
+    "map_type",
+    "map",
+    "width",
+    "height",
+    "wrap_x",
+    "wrap_y",
+    "seed",
+    "speed",
+    "difficulty",
+    "barbarian_difficulty",
+    "ai_base_values",
+    "starting_era",
+    "barbarians",
+    "barbarian_aggression",
+    "turn_limit",
+    "victories",
+    "city_states",
+    "religion",
+    "espionage",
+    "nuclear_weapons",
+    "tech_trading",
+    "ruins",
+    "map_edges",
+    "river_density",
+    "resources",
+    "diplomacy",
+];
+
+/// Python's `_num` (`mapgen.py:43-48`): a number clamped to a range, or the default.
+fn num(v: Option<&Value>, default: f64, lo: f64, hi: f64) -> Value {
+    json!(v.and_then(Value::as_f64).map_or(default, |x| x.clamp(lo, hi)))
+}
+
+/// The lobby's resource options as `mapgen.MapOptions` read them (`mapgen.py:73-93`): each
+/// kind's density, and each resource's rule other than `normal`, as `[mode, value]`.
+fn py_resources(v: &Value) -> Value {
+    let none = Value::Null;
+    let r = if v.is_object() { v } else { &none };
+    let mut out = json!({"density": num(r.get("density"), 1.0, 0.0, 5.0)});
+    for kind in ["strategic", "luxury", "bonus"] {
+        let sub = r.get(kind).filter(|s| s.is_object()).unwrap_or(&none);
+        let each: Map<String, Value> = obj(sub.get("each").unwrap_or(&none))
+            .filter_map(|(name, rule)| {
+                let mode = rule.get("mode").and_then(Value::as_str)?;
+                let value = match mode {
+                    "off" => json!(0.0),
+                    "cap" | "share" => num(rule.get("value"), 0.0, 0.0, 10_000.0),
+                    _ => return None,
+                };
+                Some((name.clone(), json!([mode, value])))
+            })
+            .collect();
+        out[kind] = json!({"density": num(sub.get("density"), 1.0, 0.0, 5.0), "each": each});
+    }
+    out
 }
 
 fn py_settings(c: &Value) -> Value {
@@ -138,8 +199,27 @@ fn py_settings(c: &Value) -> Value {
         Some(id) => ("custom".to_owned(), json!(id)),
         None => (c["map_type"].as_str().unwrap_or_default().to_owned(), Value::Null),
     };
+    // An editor map's wraps are its own, and it has no edges setting (game.py:185-191).
+    out["map_edges"] = match (&map, c.get("map_edges")) {
+        (Value::String(_), _) => Value::Null,
+        (_, Some(Value::String(e))) => json!(e),
+        _ => json!("ice_caps"),
+    };
     out["map_type"] = json!(ty);
     out["map"] = map;
+    out["resources"] = py_resources(&c["resources"]);
+    // A game's own chat limit, at least two (diplomacy.py:712-717).
+    let chat = c["diplomacy"]["max_chat_messages"]
+        .as_f64()
+        .filter(|&m| m != 0.0)
+        .map(|m| (m.trunc() as i64).max(2));
+    out["diplomacy"] = json!({"max_chat_messages": chat});
+    out["host"] = Value::Object(
+        obj(c)
+            .filter(|(k, _)| !ENGINE_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    );
     out
 }
 
@@ -212,10 +292,11 @@ const PLAYER_FIELDS: [&str; 38] = [
 
 /// The scalar flags, each projected as its value, with 0, false and absent all read as nothing:
 /// Python's readers defaulted a missing flag to 0 or false (`flags.get(k, 0)`).
-const FLAG_FIELDS: [&str; 12] = [
+const FLAG_FIELDS: [&str; 13] = [
     "start",
     "total_culture",
     "total_faith",
+    "last_gold_rate",
     "ra_science",
     "maya_limited",
     "revolt_in",
@@ -264,12 +345,20 @@ fn py_players(s: &Value) -> Value {
             o["built_increasing"] = p["built_increasing"].clone();
             o["bought_increasing"] = p["bought_increasing"].clone();
             o["temp_uniques"] = p["temp_uniques"].clone();
+            let ov = &p["overrides"];
+            o["overrides"] = json!({
+                "handicap": ov["handicap"].as_str().filter(|h| !h.is_empty()),
+                "auto": ov.get("auto").filter(|a| !a.is_null()).cloned().unwrap_or(json!({})),
+            });
+            // Each tile explored, by index.
             o["explored"] = if kind == "barbarian" {
                 Value::Null
             } else {
                 let bytes =
                     b64_decode(p["explored"].as_str().unwrap_or_default()).unwrap_or_default();
-                json!(bytes.iter().filter(|&&b| b != 0).count())
+                let tiles: Vec<usize> =
+                    bytes.iter().enumerate().filter(|(_, b)| **b != 0).map(|(i, _)| i).collect();
+                json!(tiles)
             };
             for k in FLAG_FIELDS {
                 o[k] = zn(flag_or(k, Value::Null));
@@ -291,7 +380,20 @@ fn py_players(s: &Value) -> Value {
             if kind == "major" {
                 o["spies"] = p["spies"].clone();
                 o["notes"] = p["notes"].clone();
-                o["remembered"] = json!(obj(&p["memory"]).count());
+                // The last sight of each tile out of view (visibility.py:116-125).
+                o["memory"] = Value::Object(
+                    obj(&p["memory"])
+                        .map(|(k, m)| {
+                            let f = m.get("f").filter(|f| !f.is_null()).cloned();
+                            let at = |key: &str| m.get(key).cloned().unwrap_or(Value::Null);
+                            let seen = json!({
+                                "f": f.unwrap_or(json!([])), "i": at("i"), "r": at("r"),
+                                "o": at("o"), "p": m.get("p").cloned().unwrap_or(json!(false)),
+                            });
+                            (k.clone(), seen)
+                        })
+                        .collect(),
+                );
                 o["remembered_cities"] = Value::Array(
                     obj(&p["memory"])
                         .filter_map(|(k, m)| {
@@ -707,10 +809,18 @@ pub fn rust(r: &Ruleset, c: &Converted) -> Value {
     let st = &c.state;
     let n = Names { r, st };
     let clock = st.clock();
+    // Python's one counter for units, cities and camps; three counters that part show apart.
+    let ids = st.ids();
+    let next_id = if ids.unit == ids.city && ids.unit == ids.camp {
+        json!(ids.unit)
+    } else {
+        json!([ids.unit, ids.city, ids.camp])
+    };
     json!({
         "clock": {"turn": clock.turn, "current": clock.current.0, "turn_started": clock.turn_started,
                   "phase": match clock.phase { citar_engine::state::Phase::Playing => "playing", citar_engine::state::Phase::Over => "over" },
-                  "winner": clock.winner.map(|p| p.0), "victory": clock.victory.map(|v| n.of(v))},
+                  "winner": clock.winner.map(|p| p.0), "victory": clock.victory.map(|v| n.of(v)),
+                  "next_id": next_id},
         "map": rs_map(st),
         "settings": rs_settings(&n),
         "tiles": rs_tiles(&n),
@@ -787,25 +897,43 @@ fn opt<T>(x: Option<T>, f: impl FnOnce(T) -> Value) -> Value {
 
 fn rs_map(st: &State) -> Value {
     let m = st.map();
-    let mut continents = Map::new();
-    for &c in &m.continents {
-        let k = if c == u16::MAX { "-1".to_owned() } else { c.to_string() };
-        let n = continents.get(&k).and_then(Value::as_u64).unwrap_or(0);
-        continents.insert(k, json!(n + 1));
-    }
+    // Water is -1 in Python.
+    let continents: Vec<i64> =
+        m.continents.iter().map(|&c| if c == WATER { -1 } else { i64::from(c) }).collect();
     json!({"width": m.width, "height": m.height, "wrap_x": m.wrap_x, "wrap_y": m.wrap_y,
            "continents": continents})
 }
 
+fn rs_resources(n: &Names<'_>, o: &ResourceOptions) -> Value {
+    let kind = |k: &ResourceKindOptions| {
+        let each: Map<String, Value> = k
+            .each
+            .iter()
+            .map(|&(res, rule)| {
+                let rule = match rule {
+                    ResourceRule::Off => json!(["off", 0.0]),
+                    ResourceRule::Cap(v) => json!(["cap", v]),
+                    ResourceRule::Share(v) => json!(["share", v]),
+                };
+                (n.of(res).as_str().unwrap_or_default().to_owned(), rule)
+            })
+            .collect();
+        json!({"density": k.density, "each": each})
+    };
+    json!({"density": o.density, "strategic": kind(&o.strategic), "luxury": kind(&o.luxury),
+           "bonus": kind(&o.bonus)})
+}
+
 fn rs_settings(n: &Names<'_>) -> Value {
     let (r, c) = (n.r, n.st.config());
-    let (size, ty, map) = match &c.map {
-        MapSource::Generated { size, map_type, .. } => (
+    let (size, ty, map, edges) = match &c.map {
+        MapSource::Generated { size, map_type, edges, .. } => (
             *size,
             r.constants().map_types.get(*map_type).map_or(Value::Null, |t| json!(&*t.key)),
             Value::Null,
+            json!(edges.name()),
         ),
-        MapSource::Editor { id, size } => (*size, json!("custom"), json!(&**id)),
+        MapSource::Editor { id, size } => (*size, json!("custom"), json!(&**id), Value::Null),
     };
     let victories: Map<String, Value> = r
         .victories()
@@ -836,6 +964,10 @@ fn rs_settings(n: &Names<'_>) -> Value {
         "tech_trading": c.tech_trading,
         "ruins": c.ruins,
         "river_density": c.river_density,
+        "map_edges": edges,
+        "resources": rs_resources(n, &c.resources),
+        "diplomacy": {"max_chat_messages": c.diplomacy.max_chat_messages},
+        "host": Value::Object(c.host.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
     })
 }
 
@@ -859,10 +991,7 @@ fn rs_tiles(n: &Names<'_>) -> Value {
                 "resource_amount": t.resource_amount(),
                 "improvement": opt(t.improvement(), |x| n.of(x)),
                 "pillaged": t.improvement_pillaged(),
-                "route": opt(t.route(), |x| json!(match x {
-                    citar_engine::rules::defs::Route::Road => "Road",
-                    citar_engine::rules::defs::Route::Railroad => "Railroad",
-                })),
+                "route": opt(t.route(), |x| json!(route_name(x))),
                 "route_pillaged": t.route_pillaged(),
                 "owner": t.owner().map(|p| p.0),
                 "city": t.city().map(|c| c.get()),
@@ -949,10 +1078,17 @@ fn rs_player(n: &Names<'_>, r: &Ruleset, st: &State, id: PlayerId, p: &Player) -
         "built_increasing": Value::Object(p.civ.built_increasing.iter().map(|(&c, &x)| (n.item(c).as_str().unwrap_or_default().to_owned(), json!(x))).collect()),
         "bought_increasing": Value::Object(p.civ.bought_increasing.iter().map(|(&c, &x)| (n.item(c).as_str().unwrap_or_default().to_owned(), json!(x))).collect()),
         "temp_uniques": p.civ.temp_uniques.iter().map(|t| json!({"text": r.uniques().text_of(t.unique), "turns": t.turns})).collect::<Vec<_>>(),
-        "explored": if p.is_barbarian() { Value::Null } else { json!(p.explored.len()) },
+        "explored": if p.is_barbarian() { Value::Null } else { json!(p.explored.iter().collect::<Vec<u32>>()) },
+        "overrides": {
+            "handicap": seat.overrides().handicap.map(|h| h.name()),
+            "auto": Value::Object(AutoDecision::ALL.into_iter().filter_map(|d| {
+                seat.overrides().auto.get(d).map(|on| (d.name().to_owned(), json!(on)))
+            }).collect()),
+        },
         "start": zn(json!(p.start_tile.map(|t| t.0))),
         "total_culture": zn(json!(p.econ.total_culture)),
         "total_faith": zn(json!(p.econ.total_faith)),
+        "last_gold_rate": zn(json!(p.econ.last_gold_rate)),
         "ra_science": zn(json!(p.tech.ra_bonus)),
         "maya_limited": zn(json!(p.gp.maya_limited)),
         "revolt_in": zn(json!(p.civ.revolt_in)),
@@ -988,7 +1124,7 @@ fn rs_player(n: &Names<'_>, r: &Ruleset, st: &State, id: PlayerId, p: &Player) -
                 .collect(),
         );
         o["notes"] = json!(&*m.notes);
-        o["remembered"] = json!(m.memory.remembered());
+        o["memory"] = rs_memory(n, &m.memory);
         o["remembered_cities"] = Value::Array(
             m.memory.cities().map(|(t, c)| json!([t.0, [&*c.name, c.pop, c.owner.0]])).collect(),
         );
@@ -1085,6 +1221,40 @@ fn rs_player(n: &Names<'_>, r: &Ruleset, st: &State, id: PlayerId, p: &Player) -
         );
     }
     o
+}
+
+/// A major's memory in Python's form, `{tile: {f, i, r, o, p}}`, for each tile remembered. The
+/// route's own pillage bit, which Python's memory never held, shows only when set.
+fn rs_memory(n: &Names<'_>, layer: &TileMemoryLayer) -> Value {
+    Value::Object(
+        layer
+            .tiles()
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.is_remembered())
+            .map(|(i, m)| {
+                let route = m.route();
+                let mut seen = json!({
+                    "f": m.features().iter().map(|f| n.feature(f)).collect::<Vec<_>>(),
+                    "i": opt(m.improvement(), |x| n.of(x)),
+                    "r": opt(route.route(), |x| json!(route_name(x))),
+                    "o": m.owner().map(|p| p.0),
+                    "p": route.improvement_pillaged(),
+                });
+                if route.route_pillaged() {
+                    seen["rp"] = json!(true);
+                }
+                (i.to_string(), seen)
+            })
+            .collect(),
+    )
+}
+
+fn route_name(r: Route) -> &'static str {
+    match r {
+        Route::Road => "Road",
+        Route::Railroad => "Railroad",
+    }
 }
 
 fn rs_units(n: &Names<'_>) -> Value {
@@ -1476,7 +1646,24 @@ mod tests {
         c["tiles"][5][3] = json!(1);
         c["cities"]["16"]["pop"] = json!(9);
         c["players"][0]["flags"]["start"] = json!(3);
+        // A remembered tile's owner, one more tile explored, a tile's continent, the seat's
+        // explicit handicap, the map's edges and a host key.
+        let remembered = s["players"][0]["memory"]
+            .as_object()
+            .and_then(|m| m.keys().next().cloned())
+            .expect("player 0 remembers a tile");
+        c["players"][0]["memory"][&remembered]["o"] = json!(1);
+        let mut explored =
+            b64_decode(s["players"][0]["explored"].as_str().unwrap_or_default()).expect("base64");
+        let unexplored = explored.iter().position(|&b| b == 0).expect("a tile not explored");
+        explored[unexplored] = 1;
+        c["players"][0]["explored"] = json!(citar_engine::base::codec::b64_encode(&explored));
+        c["continents"][0] = json!(7);
+        c["players"][0]["overrides"] = json!({"handicap": "human"});
+        c["config"]["map_edges"] = json!("boxed");
+        c["config"]["on_disconnect"] = json!("skip");
         let got = paths(&echo(&s, &c));
+        let memory = format!("players[id=0].memory.{remembered}.o");
         for want in [
             "units[id=2].hp",
             "players[id=0].techs",
@@ -1484,6 +1671,12 @@ mod tests {
             "tiles[i=5].river",
             "cities[id=16].pop",
             "players[id=0].start",
+            &memory,
+            "players[id=0].explored",
+            "map.continents[0]",
+            "players[id=0].overrides.handicap",
+            "settings.map_edges",
+            "settings.host.on_disconnect",
         ] {
             assert!(got.iter().any(|p| p.starts_with(want)), "{want} in {got:?}");
         }
