@@ -86,6 +86,12 @@ Each top-level module is a layer, and a layer may use only the layers listed for
    fails silently, while a name that does not resolve fails when the ruleset loads.
 8. **Layering and restricted mutation access** (above) hold. `cargo xtask check` enforces
    both.
+9. **State types derive serde, and use no `skip_serializing_if`, `flatten` or `untagged`**
+   (a test scans `src/state/`). The derive is both the JSON save and the canonical digest
+   (DESIGN.md 4.9-4.10), so a new field is saved and digested without further work; a new part
+   of `State` also needs its line in `save::json`'s document. A form that needs the ruleset (a
+   rule id's name) or a container's private parts is a trait impl in `save`, never a `save` path
+   named from `state`.
 
 ## Also
 
