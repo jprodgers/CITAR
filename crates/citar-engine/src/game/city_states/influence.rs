@@ -5,6 +5,9 @@
 //! the most influence, if that is at least [`ALLY_INFLUENCE`]: an alliance is a contest, not a
 //! shared benefit. Every write of influence ends in [`update_ally`], and goes through
 //! `Game::set_influence`, which moves a major's unique index when its friend level flips.
+//!
+//! A write the state refuses (a player that is no city-state, or no major) is an engine bug; the
+//! rules return it rather than stop quietly halfway.
 
 use crate::base::ids::PlayerId;
 use crate::base::sets::PlayerSet;
@@ -36,6 +39,9 @@ pub fn raw_influence(g: &Game, cs: PlayerId, major: PlayerId) -> f64 {
 
 /// Sets a major's influence, never below the floor, and settles who the city-state's ally is
 /// (`city_states.set_influence`, `city_states.py:82-87`).
+///
+/// # Errors
+/// A write the state refused: `cs` is no city-state or `major` no major.
 pub fn set_influence(
     g: &mut Game,
     cs: PlayerId,
@@ -43,12 +49,14 @@ pub fn set_influence(
     amount: f64,
 ) -> Result<(), StateError> {
     g.set_influence(cs, major, amount.max(MIN_INFLUENCE))?;
-    update_ally(g, cs);
-    Ok(())
+    update_ally(g, cs)
 }
 
 /// Changes a major's influence by an amount (`city_states.add_influence`,
 /// `city_states.py:90-92`).
+///
+/// # Errors
+/// A write the state refused, as [`set_influence`]'s.
 pub fn add_influence(
     g: &mut Game,
     cs: PlayerId,
@@ -61,10 +69,15 @@ pub fn add_influence(
 /// Recomputes a city-state's ally and announces a change (`city_states.update_ally`,
 /// `city_states.py:118-152`): the met major with the most influence, the first by id among
 /// equals, if that is at least [`ALLY_INFLUENCE`]. A new ally's enemies become the city-state's.
-pub fn update_ally(g: &mut Game, cs: PlayerId) {
-    let Some(old) = g.player(cs).and_then(|p| p.city_state.as_deref()).map(|d| d.ally()) else {
-        return;
-    };
+///
+/// # Errors
+/// A write the state refused: `cs` is no city-state, or a war it joins is refused.
+pub fn update_ally(g: &mut Game, cs: PlayerId) -> Result<(), StateError> {
+    let old = g
+        .player(cs)
+        .and_then(|p| p.city_state.as_deref())
+        .map(|d| d.ally())
+        .ok_or(StateError::NotACityState(cs))?;
     let mut best: Option<(PlayerId, f64)> = None;
     for q in g.majors(true).map(|p| p.id()).collect::<Vec<_>>() {
         if !g.has_met(cs, q) {
@@ -76,9 +89,10 @@ pub fn update_ally(g: &mut Game, cs: PlayerId) {
         }
     }
     let new = best.filter(|&(_, v)| v >= ALLY_INFLUENCE).map(|(q, _)| q);
-    if new == old || g.set_ally(cs, new).is_err() {
-        return;
+    if new == old {
+        return Ok(());
     }
+    g.set_ally(cs, new)?;
     let name = |g: &Game, p: PlayerId| g.player(p).map(|x| x.name.to_string()).unwrap_or_default();
     let data = EventData { player: Some(cs), ..EventData::default() };
     if let Some(ally) = new {
@@ -110,7 +124,7 @@ pub fn update_ally(g: &mut Game, cs: PlayerId) {
             let alive = g.player(e).is_some_and(crate::state::players::Player::alive);
             if alive && g.at_war(e, ally) && !g.at_war(cs, e) {
                 g.make_contact(cs, e);
-                set_war(g, cs, e, WarReason::CityStateAlliance);
+                set_war(g, cs, e, WarReason::CityStateAlliance)?;
             }
         }
     }
@@ -120,4 +134,5 @@ pub fn update_ally(g: &mut Game, cs: PlayerId) {
         let text = format!("{} lost its alliance with {}.", name(g, lost), name(g, cs));
         g.emit(EngineEvent::CsAllyLost, &text, Some(PlayerSet::single(lost)), None, data, &[]);
     }
+    Ok(())
 }

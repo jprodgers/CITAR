@@ -3,7 +3,9 @@
 //!
 //! Package 1b-02 ports what the scenario operations need:
 //! - repeatable and unresearchable techs (`research.py:14-17, 52-58`);
-//! - the research path to a goal and setting the research (`research.py:81-135`);
+//! - the research path to a goal and setting the research (`research.py:81-135`), split as the
+//!   action pipeline runs a tool: [`plan_research`] checks and only reads, [`apply_research`]
+//!   writes and cannot fail, and [`research_result`] reads the result from the settled game;
 //! - learning a tech (`add_tech`, `research.py:284-331`), as far as the systems it touches are
 //!   ported, and forgetting one with every tech that needs it (`scenario.py:155-174`).
 //!
@@ -113,54 +115,74 @@ pub fn path_to(g: &Game, p: PlayerId, goal: TechId) -> Vec<TechId> {
     out
 }
 
-/// Sets what a civilization researches: `tech`, or the path to it when it needs other techs
-/// first; with `append`, the path goes on the end of the queue instead (`research.py:109-135`).
-/// The result is the tool's: what is researched now, the turns it takes, the queue, and the
-/// goal and path when there is one.
-pub fn set_research(
-    g: &mut Game,
+/// The research queue that setting research to `tech` makes (`research.py:109-128`): `tech`, or
+/// the path to it when it needs other techs first; with `append`, the path goes on the end of the
+/// queue instead. Reads only, so a refusal changes nothing.
+///
+/// # Errors
+/// The civilization knows `tech` (and it is not repeatable), cannot research it, or, with
+/// `append`, has it queued already.
+pub fn plan_research(
+    g: &Game,
     p: PlayerId,
     tech: TechId,
     append: bool,
-) -> Result<Value, ActionError> {
+) -> Result<Vec<TechId>, ActionError> {
     let r = g.rules;
     let name = r.name(tech).unwrap_or("?");
     let repeatable = is_repeatable(r, tech);
     if g.has_tech(p, Some(tech)) && !repeatable {
         return Err(ActionError::rule(format!("You already know {name}.")));
     }
-    let mut path = path_to(g, p, tech);
+    let path = path_to(g, p, tech);
     if path.is_empty() {
         return Err(ActionError::rule(format!("{name} cannot be researched.")));
     }
-    let queue = g.player(p).map(|pl| pl.tech.queue.clone()).unwrap_or_default();
-    if append {
-        if queue.contains(&tech) && !repeatable {
-            return Err(ActionError::rule(format!("{name} is already queued.")));
-        }
-        let rest: Vec<TechId> = path.iter().copied().filter(|t| !queue.contains(t)).collect();
-        path = queue;
-        path.extend(rest);
+    if !append {
+        return Ok(path);
     }
+    let mut queue = g.player(p).map(|pl| pl.tech.queue.clone()).unwrap_or_default();
+    if queue.contains(&tech) && !repeatable {
+        return Err(ActionError::rule(format!("{name} is already queued.")));
+    }
+    let rest: Vec<TechId> = path.into_iter().filter(|t| !queue.contains(t)).collect();
+    queue.extend(rest);
+    Ok(queue)
+}
+
+/// Writes the queue [`plan_research`] made, with its last tech as the goal when there is more
+/// than one (`research.py:129-131`).
+pub fn apply_research(g: &mut Game, p: PlayerId, path: &[TechId]) {
     let goal = (path.len() > 1).then(|| path[path.len() - 1]);
     if let Some(pl) = g.player_mut(p, PlayerTouch::RESEARCH) {
-        pl.tech.queue.clone_from(&path);
+        pl.tech.queue = path.to_vec();
         pl.tech.goal = goal;
     }
-    // update_research_progress (research.py:222-231): overflow may complete the new tech.
+    // update_research_progress (research.py:222-231): overflow may complete the new tech, which
+    // leaves the queue then.
     pending(Porting::Pending("1b-07"));
+}
+
+/// What setting the research reports (`research.py:132-135`), read after the write and the
+/// settle, since overflow may already have completed the first tech: what is researched now,
+/// the turns it takes and the queue; and, when `path` (what [`plan_research`] made) is more than
+/// one tech, its goal and the path itself.
+#[must_use]
+pub fn research_result(g: &Game, p: PlayerId, path: &[TechId]) -> Value {
+    let r = g.rules;
     let names = |ts: &[TechId]| -> Vec<&str> { ts.iter().filter_map(|&t| r.name(t)).collect() };
-    let current = path.first().and_then(|&t| r.name(t));
+    let queue: &[TechId] = g.player(p).map_or(&[], |pl| &pl.tech.queue);
+    let current = queue.first().and_then(|&t| r.name(t));
     // turns_left (research.py:160-173) needs the tech's cost and the civilization's science.
     let turns = pending_or(Porting::Pending("1b-07"), Value::Null);
-    let mut out = json!({"researching": current, "turns": turns, "queue": names(&path)});
-    if path.len() > 1
-        && let Some(o) = out.as_object_mut()
+    let mut out = json!({"researching": current, "turns": turns, "queue": names(queue)});
+    if let (Some(&goal), Some(o)) = (path.last(), out.as_object_mut())
+        && path.len() > 1
     {
-        o.insert("goal".into(), json!(goal.and_then(|t| r.name(t))));
-        o.insert("path".into(), json!(names(&path)));
+        o.insert("goal".into(), json!(r.name(goal)));
+        o.insert("path".into(), json!(names(path)));
     }
-    Ok(out)
+    out
 }
 
 /// A civilization learns a tech (`research.py:284-331`): it joins the known techs (a repeatable

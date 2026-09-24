@@ -3,11 +3,18 @@
 //!   digest, history and revision as they were before the call (gate 5), and so does a failing
 //!   list of test operations;
 //! - `inspect` reads without writing, and lists what waits for a later package;
-//! - a game survives the `reload` test operation whole.
+//! - a game survives the `reload` test operation whole;
+//! - the rules the operations need report a write the state refuses instead of stopping
+//!   halfway, and setting research plans on `&Game` before it writes.
 
 use citar_engine::api::{ErrCode, inspect, testops};
+use citar_engine::base::ids::{PlayerId, TechId};
 use citar_engine::game::Game;
+use citar_engine::game::city_states::influence::{set_influence, update_ally};
+use citar_engine::game::diplomacy::relations::{WarReason, make_peace, set_war};
+use citar_engine::game::research::{apply_research, plan_research, research_result};
 use citar_engine::rules::Ruleset;
+use citar_engine::state::StateError;
 use citar_testkit::script::{rules_dir, setup};
 use serde_json::{Value, json};
 
@@ -138,4 +145,65 @@ fn a_reload_keeps_the_game_and_its_history() {
     // And again, from a game that was itself loaded.
     testops::apply(&mut g, &json!([{"op": "reload"}])).expect("a second reload");
     assert_eq!((g.digest().ok(), g.chronicle().events().len()), before);
+}
+
+#[test]
+fn the_rules_report_a_write_the_state_refuses() {
+    let mut g = arena();
+    let (a, cs) = (PlayerId(0), PlayerId(3));
+    assert!(g.is_city_state(cs));
+    let before = (g.digest().ok(), g.rev());
+    // Two ids that are no pair, and a player that is no city-state: engine bugs, reported rather
+    // than a rule stopped quietly halfway.
+    assert!(matches!(set_war(&mut g, a, a, WarReason::Direct), Err(StateError::Pair(_))));
+    assert!(matches!(make_peace(&mut g, a, a), Err(StateError::Pair(_))));
+    assert!(matches!(update_ally(&mut g, a), Err(StateError::NotACityState(_))));
+    assert!(set_influence(&mut g, cs, PlayerId(1), 10.0).is_ok());
+    assert!(set_influence(&mut g, a, PlayerId(1), 10.0).is_err(), "a major has no influence");
+    assert_ne!((g.digest().ok(), g.rev()), before, "the good write went through");
+    // A war and a peace between two real players go through whole.
+    g.apply_ops(&json!([{"op": "meet", "a": 0, "b": 1}])).expect("they meet");
+    set_war(&mut g, a, PlayerId(1), WarReason::Scenario).expect("a war");
+    assert!(g.at_war(a, PlayerId(1)));
+    make_peace(&mut g, a, PlayerId(1)).expect("a peace");
+    assert!(!g.at_war(a, PlayerId(1)));
+}
+
+#[test]
+fn research_is_planned_before_it_is_written() {
+    let mut g = arena();
+    let p = PlayerId(0);
+    let tech = |name: &str| -> TechId { g_rules().resolve(name).expect(name) };
+    let (pottery, writing, sailing, mining) =
+        (tech("Pottery"), tech("Writing"), tech("Sailing"), tech("Mining"));
+    let before = (g.digest().ok(), g.rev());
+    let path = plan_research(&g, p, writing, false).expect("a path to Writing");
+    assert_eq!(path, vec![pottery, writing]);
+    assert_eq!((g.digest().ok(), g.rev()), before, "planning only reads");
+    apply_research(&mut g, p, &path);
+    let out = research_result(&g, p, &path);
+    assert_eq!(
+        out,
+        json!({"researching": "Pottery", "turns": null, "queue": ["Pottery", "Writing"],
+               "goal": "Writing", "path": ["Pottery", "Writing"]})
+    );
+    // Appended, the path goes after what is queued, and what is queued already is refused.
+    let more = plan_research(&g, p, sailing, true).expect("Sailing appended");
+    assert_eq!(more, vec![pottery, writing, sailing]);
+    let e = plan_research(&g, p, writing, true).expect_err("Writing is queued");
+    assert_eq!(e.message, "Writing is already queued.");
+    let e = plan_research(&g, p, tech("Agriculture"), false).expect_err("known");
+    assert_eq!(e.message, "You already know Agriculture.");
+    // One tech has no goal or path in its result.
+    let one = plan_research(&g, p, mining, false).expect("Mining alone");
+    assert_eq!(one, vec![mining]);
+    apply_research(&mut g, p, &one);
+    assert_eq!(
+        research_result(&g, p, &one),
+        json!({"researching": "Mining", "turns": null, "queue": ["Mining"]})
+    );
+}
+
+fn g_rules() -> &'static Ruleset {
+    Ruleset::shared()
 }

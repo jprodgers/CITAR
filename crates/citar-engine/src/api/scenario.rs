@@ -394,11 +394,13 @@ fn remove_tech(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
 }
 
 /// Sets what a civilization researches (`scenario.py:463-468`); a city-state too, as Python's
-/// `_pid` let it.
+/// `_pid` let it. The result is read before `apply_ops` settles, as Python's was.
 fn set_research(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let p = pid(g, o.get("player"), false)?;
     let tech: TechId = resolve(g, o.get("tech"))?;
-    research::set_research(g, p, tech, false)
+    let path = research::plan_research(g, p, tech, false)?;
+    research::apply_research(g, p, &path);
+    Ok(research::research_result(g, p, &path))
 }
 
 // ---- Players (scenario.py:177-196) ------------------------------------------------------------
@@ -565,9 +567,11 @@ fn set_relation(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let turns: i32 = whole(or(o, "turns", &thirty), "turns")?;
     g.make_contact(a, b);
     match o.get("state").and_then(Value::as_str) {
-        Some("war") if !g.at_war(a, b) => set_war(g, a, b, WarReason::Scenario),
+        Some("war") if !g.at_war(a, b) => {
+            set_war(g, a, b, WarReason::Scenario).map_err(|e| refused(&e))?;
+        }
         Some("peace") if g.relation(a, b).is_some_and(|r| r.war) => {
-            make_peace(g, a, b);
+            make_peace(g, a, b).map_err(|e| refused(&e))?;
             g.update_relation(a, b, |r| r.treaty_until = 0).map_err(|e| refused(&e))?;
         }
         _ => {}
