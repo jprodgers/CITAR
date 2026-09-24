@@ -29,21 +29,21 @@ impl Game {
     /// Settles the game: sight and its effects, then citizens, then the checks (DESIGN.md 6.7).
     /// Pending work is empty afterwards.
     pub(crate) fn settle(&mut self) {
-        let mut applied = 0u32;
+        let limit = EffectQueue::limit(self.st.tiles().len(), self.st.players().len());
+        let mut applied = 0u64;
         while self.pending.any_sight() || !self.fx.is_empty() {
             self.sync_sight();
             while let Some(e) = self.fx.pop() {
                 applied += 1;
-                if applied > EffectQueue::LIMIT {
+                if applied > limit {
                     self.runaway(format!(
-                        "the effect queue ran past {} effects; the last was {e:?}",
-                        EffectQueue::LIMIT
+                        "the effect queue ran past {limit} effects; the last was {e:?}"
                     ));
                     break;
                 }
                 self.apply_effect(e);
             }
-            if applied > EffectQueue::LIMIT {
+            if applied > limit {
                 break;
             }
         }

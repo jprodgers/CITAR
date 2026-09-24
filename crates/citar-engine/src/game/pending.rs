@@ -125,16 +125,41 @@ impl Effect {
 
 /// The effects waiting to be applied, drained in [`Effect`] order (DESIGN.md 6.4). An effect
 /// queued twice before it is applied is applied once.
+///
+/// Effects are idempotent per key: applying one whose work is done does nothing (two players
+/// meet once; a tile is explored once, and its memory snapshot is taken once per sighting). So
+/// every effect applied moves the game toward a state with fewer effects to come, and one settle
+/// applies at most a few per tile per civilization and per player pair.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EffectQueue {
     queue: BTreeSet<Effect>,
 }
 
 impl EffectQueue {
-    /// How many effects one drain may apply before it is a runaway, which is a bug: every
-    /// effect applied moves the game toward a state with fewer effects to come (a meeting
-    /// happens once), so a real game needs a few per player pair at most.
-    pub const LIMIT: u32 = 1 << 16;
+    /// The kinds of effect keyed by a tile and a civilization (explored bit, memory snapshot,
+    /// natural wonder, contact across a border), with room for the ones systems add.
+    const PER_TILE: u64 = 8;
+
+    /// The kinds keyed by two players (a meeting), with room likewise.
+    const PER_PAIR: u64 = 8;
+
+    /// The fewest effects a runaway takes, whatever the map.
+    const FLOOR: u64 = 1 << 16;
+
+    /// How many effects one settle may apply on a map of `tiles` tiles with `players` players
+    /// before it is a runaway, which is a bug: every tile's effects for every civilization and
+    /// every pair's, twice over. A whole map revealed to a civilization is one tile effect of
+    /// each kind per tile, far below it.
+    #[must_use]
+    pub fn limit(tiles: usize, players: usize) -> u64 {
+        let wide = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        let (t, p) = (wide(tiles), wide(players));
+        let per_settle = Self::PER_TILE
+            .saturating_mul(t)
+            .saturating_mul(p)
+            .saturating_add(Self::PER_PAIR.saturating_mul(p).saturating_mul(p));
+        per_settle.saturating_mul(2).max(Self::FLOOR)
+    }
 
     /// Queues an effect.
     pub fn push(&mut self, e: Effect) {
@@ -166,6 +191,17 @@ mod tests {
         assert_eq!(q.pop(), Some(Effect::Meet { a: PlayerId(0), b: PlayerId(2) }));
         assert_eq!(q.pop(), Some(Effect::Meet { a: PlayerId(1), b: PlayerId(3) }));
         assert_eq!(q.pop(), None);
+    }
+
+    #[test]
+    fn the_runaway_limit_grows_with_the_map_and_the_players() {
+        // The largest map, every tile revealed to every civilization, is no runaway.
+        let (tiles, players) = (256 * 256, 24);
+        let reveal = u64::try_from(tiles * players).unwrap_or(u64::MAX);
+        assert!(EffectQueue::limit(tiles, players) > 4 * reveal);
+        assert_eq!(EffectQueue::limit(0, 0), 1 << 16, "a floor for tiny games");
+        assert!(EffectQueue::limit(80, 3) >= 1 << 16);
+        assert_eq!(EffectQueue::limit(usize::MAX, usize::MAX), u64::MAX, "saturates");
     }
 
     #[test]
