@@ -12,8 +12,12 @@
 //! - [`tools`]: the tools' argument specs and their coercion (`tools.py:113-127`);
 //! - `inspect` and `testops` (feature `test-ops`): what rule scripts read and the test
 //!   operations they set games up with (DESIGN.md 9.3). Never in a shipped build.
+//!
+//! From package 1b-04:
+//! - [`maps`]: `generate_map`, a generated map as the editor's document (`maps.py:80-100`).
 
 pub mod game;
+pub mod maps;
 pub mod scenario;
 pub mod tools;
 

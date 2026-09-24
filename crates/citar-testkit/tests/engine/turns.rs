@@ -247,14 +247,6 @@ fn a_civilization_that_starts_with_a_tech_has_it() {
 #[test]
 fn what_setup_cannot_do_yet_is_refused_as_not_ported() {
     let r = Ruleset::shared();
-    let generated = Game::config_from_json(r, br#"{"seed": 1}"#).expect("settings");
-    match Game::new(r, &generated) {
-        Err(EngineError::Action(e)) => {
-            assert_eq!(e.code, ErrCode::NotPorted);
-            assert!(e.message.contains("mapgen::generate"), "{}", e.message);
-        }
-        other => panic!("not ported, not {:?}", other.map(|_| ())),
-    }
     // The arena gives five starts: a sixth seat needs start filling (package 1c-09).
     let six = new_game(r, &json!({"players": [{}, {}, {}, {}, {}, {}]}));
     assert!(matches!(six, Err(EngineError::Action(e)) if e.code == ErrCode::NotPorted));

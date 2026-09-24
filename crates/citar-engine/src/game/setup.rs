@@ -6,6 +6,7 @@
 //! `Pending` and an explicit no-op, and `inspect` lists it. Package 1b-03 ports the settings, the
 //! nations, the players, the relations and the first turn, games on an editor map that gives
 //! its start positions, and the starting techs, gold and culture that rule scripts rely on.
+//! Package 1b-04 ports games on a generated map (`mapgen::generate`, `game.py:218-221`).
 //!
 //! What differs from Python, on purpose (`tests/rules/intended.toml`):
 //! - the engine draws nothing and reads no file: the settings must carry a seed, and an editor
@@ -31,22 +32,23 @@ use super::events::EventBatch;
 use super::{Game, Porting, pending, research};
 use crate::base::hex::HexGrid;
 use crate::base::ids::{
-    BarbarianLevelId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId, PlayerId, ResourceId,
-    SpeedId, TechId, TileIdx, VictoryId,
+    BarbarianLevelId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId, PlayerId, SpeedId,
+    TechId, TileIdx, VictoryId,
 };
 use crate::base::py;
 use crate::base::rng::{Purpose, Rng};
 use crate::base::sets::PlayerVec;
 use crate::mapgen::continents;
 use crate::mapgen::document::{self, MapDocument};
+use crate::mapgen::options::{self, MapOptions, MapType};
+use crate::mapgen::{self, GenSpec};
 use crate::rules::constants::PLAYER_COLORS;
-use crate::rules::defs::{NationKind, ResourceType};
+use crate::rules::defs::NationKind;
 use crate::rules::{Named, Ruleset};
 use crate::state::State;
 use crate::state::chronicle::{Chronicle, EngineEvent, EventData};
 use crate::state::config::{
     AiBaseValues, DiplomacyConfig, GameConfig, HostOnly, MapDoc, MapEdges, MapSource, NewGame,
-    ResourceKindOptions, ResourceOptions, ResourceRule,
 };
 use crate::state::map::{MapInfo, Tiles};
 use crate::state::players::{Controller, Player, PlayerKind, Rgb, Seat, SeatOverrides};
@@ -250,8 +252,8 @@ pub fn config_from_value(rules: &'static Ruleset, v: Value) -> Result<NewGame, E
             *slot = py::truthy(x);
         }
     }
-    out.river_density = option_number(get("river_density"), 1.0, 0.0, 5.0);
-    out.resources = resources(rules, get("resources"));
+    out.river_density = options::option_number(get("river_density"), 1.0, 0.0, 5.0);
+    out.resources = options::resource_options(rules, get("resources"));
     out.diplomacy = diplomacy(get("diplomacy"))?;
     let mut host = BTreeMap::new();
     for (k, x) in o {
@@ -334,7 +336,7 @@ fn nearest_size(rules: &Ruleset, w: u16, h: u16) -> Result<MapSizeId, EngineErro
 
 /// A generated map's settings (`game.py:180-190`): the lobby size (small by default), its type,
 /// its edges, and a width and height set apart from the size's.
-fn generated_map<'a>(
+pub(crate) fn generated_map<'a>(
     rules: &Ruleset,
     get: &impl Fn(&str) -> Option<&'a Value>,
 ) -> Result<MapSource, EngineError> {
@@ -455,11 +457,6 @@ fn victories(rules: &Ruleset, v: Option<&Value>) -> Result<Vec<VictoryId>, Engin
     Ok(off)
 }
 
-/// A number from a lobby option, with a default and clamped (`mapgen._num`, `mapgen.py:45-50`).
-fn option_number(v: Option<&Value>, default: f64, lo: f64, hi: f64) -> f64 {
-    v.and_then(py::float_of).filter(|x| !x.is_nan()).map_or(default, |x| x.clamp(lo, hi))
-}
-
 /// A whole number clamped to `0..=hi`, as a byte.
 fn clamp_u8(x: f64, hi: f64) -> u8 {
     // In range after the clamp, and whole.
@@ -470,51 +467,6 @@ fn clamp_u8(x: f64, hi: f64) -> u8 {
     )]
     let b = x.clamp(0.0, hi) as u8;
     b
-}
-
-/// The lobby's resource options (`mapgen.MapOptions`, `mapgen.py:52-93`), read as leniently as
-/// Python read them: what is not a number or an object is left at its default, and a resource the
-/// ruleset does not have, or of another kind, is skipped, so settings written for one ruleset do
-/// not break another.
-fn resources(rules: &Ruleset, v: Option<&Value>) -> ResourceOptions {
-    let res = v.and_then(Value::as_object);
-    let num = |o: Option<&Map<String, Value>>, k: &str| {
-        option_number(o.and_then(|o| o.get(k)), 1.0, 0.0, 5.0)
-    };
-    let mut out = ResourceOptions { density: num(res, "density"), ..ResourceOptions::default() };
-    for (key, kind) in [
-        ("strategic", ResourceType::Strategic),
-        ("luxury", ResourceType::Luxury),
-        ("bonus", ResourceType::Bonus),
-    ] {
-        let sub = res.and_then(|r| r.get(key)).and_then(Value::as_object);
-        let mut opts = ResourceKindOptions { density: num(sub, "density"), each: Vec::new() };
-        let each = sub.and_then(|s| s.get("each")).and_then(Value::as_object);
-        for (name, rule) in each.into_iter().flatten() {
-            let Some(rule) = rule.as_object() else { continue };
-            let mode = rule.get("mode").and_then(Value::as_str);
-            let Some(id) = rules.resolve::<ResourceId>(name) else { continue };
-            if rules.resources()[id].kind != kind {
-                continue;
-            }
-            let value = || option_number(rule.get("value"), 0.0, 0.0, 10_000.0);
-            let r = match mode {
-                Some("off") => ResourceRule::Off,
-                Some("cap") => ResourceRule::Cap(value()),
-                Some("share") => ResourceRule::Share(value()),
-                _ => continue,
-            };
-            opts.each.retain(|&(x, _)| x != id);
-            opts.each.push((id, r));
-        }
-        opts.each.sort_by_key(|&(id, _)| id);
-        match kind {
-            ResourceType::Strategic => out.strategic = opts,
-            ResourceType::Luxury => out.luxury = opts,
-            ResourceType::Bonus => out.bonus = opts,
-        }
-    }
-    out
 }
 
 /// The game's own diplomacy settings (`diplomacy.max_chat_messages`, `diplomacy.py:712-717`): a
@@ -704,7 +656,7 @@ pub static SETUP: [SetupStage; 15] = [
     SetupStage::draft("config", read_seats),
     SetupStage::draft("nations", choose_nations),
     SetupStage::draft("map: an editor document", read_map),
-    SetupStage::later("map: a generated map", Porting::Pending("1b-04")),
+    SetupStage::draft("map: a generated map", generate_map),
     SetupStage::later("map: starts and ruins a document lacks", Porting::Pending("1c-09")),
     SetupStage::draft("players", make_players),
     SetupStage::game("starting techs, gold and culture", starting_techs),
@@ -825,11 +777,10 @@ fn choose_nations(d: &mut Draft<'_>) -> Result<(), EngineError> {
 }
 
 /// map: the editor's document read and cleaned (`maps.prepare`, `maps.py:323-346`), its
-/// continents, and the start positions it gives.
+/// continents, and the start positions it gives. Settings without a document generate the map
+/// in the next stage.
 fn read_map(d: &mut Draft<'_>) -> Result<(), EngineError> {
-    let Some(doc) = d.setup.map_doc() else {
-        return Err(not_ported("mapgen::generate", "Generating a map"));
-    };
+    let Some(doc) = d.setup.map_doc() else { return Ok(()) };
     let map = document::read(d.rules, &doc.body).map_err(|e| EngineError::Map(e.0))?;
     let grid = map.grid().map_err(|e| EngineError::Map(e.0))?;
     d.continents = continents::assign(d.rules, &grid, &map.tiles);
@@ -868,6 +819,51 @@ fn read_map(d: &mut Draft<'_>) -> Result<(), EngineError> {
     d.starts = starts;
     d.cs_starts = cs_starts;
     d.map = Some(map);
+    Ok(())
+}
+
+/// map: a generated map, for settings without an editor document (`mapgen.generate_map`,
+/// `game.py:218-221`): the lobby size's width and height or those the settings give, the map
+/// type, the edges, the rivers and the resources the lobby set; a start for each seat, placed
+/// by its nation's start bias; a site for each city-state it has room for; and ruins if the
+/// settings want them. The map draws from the `Map*` streams of the game's seed.
+fn generate_map(d: &mut Draft<'_>) -> Result<(), EngineError> {
+    let setup = d.setup;
+    if setup.map_doc().is_some() {
+        return Ok(());
+    }
+    let r = d.rules;
+    let cfg = setup.config();
+    let MapSource::Generated { size, map_type, edges, dims } = cfg.map else {
+        return Err(no_map());
+    };
+    let lobby = &r.map_sizes()[size];
+    let (width, height) = dims.unwrap_or((lobby.width, lobby.height));
+    let nations: Vec<Option<NationId>> = d.nations.iter().copied().map(Some).collect();
+    let spec = GenSpec {
+        width,
+        height,
+        map_type: MapType::from_key(&r.constants().map_types[map_type].key),
+        options: MapOptions { edges, rivers: cfg.river_density, resources: cfg.resources.clone() },
+        players: d.seats.len(),
+        city_states: d.cs_nations.len(),
+        nations: &nations,
+        ruins: cfg.ruins,
+    };
+    let map = mapgen::generate(r, cfg.seed, &spec).map_err(|e| EngineError::Map(e.0))?;
+    d.continents = map.continents;
+    d.starts.clone_from(&map.starts);
+    d.cs_starts.clone_from(&map.cs_starts);
+    d.map = Some(MapDocument {
+        width: map.width,
+        height: map.height,
+        wrap_x: map.wrap_x,
+        wrap_y: map.wrap_y,
+        tiles: map.tiles,
+        starts: map.starts,
+        cs_starts: map.cs_starts,
+        warnings: Vec::new(),
+    });
     Ok(())
 }
 
