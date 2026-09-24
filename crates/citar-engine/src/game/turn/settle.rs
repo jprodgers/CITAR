@@ -5,8 +5,8 @@
 //! the yield code (`game.py:588-601`, `cities.py:748`). Here writes only flag what they made
 //! stale (`game::pending`), and a settle catches up, in a fixed order:
 //! 1. sight: dirty vision sources are brought up to date, and what the transitions reveal is
-//!    queued as effects (package 1c-01); the effects are applied in their order, and the two
-//!    alternate until neither has anything left;
+//!    queued as effects (`game::vis`, package 1c-01); the effects are applied in their order,
+//!    and the two alternate until neither has anything left;
 //! 2. citizens: flagged cities reassign their citizens in id order, pass after pass, until no
 //!    city is flagged or [`SETTLE_PASSES`] passes are spent, which is invariant violation
 //!    SETTLE-1 (package 1b-06 ports the assignment);
@@ -29,24 +29,7 @@ impl Game {
     /// Settles the game: sight and its effects, then citizens, then the checks (DESIGN.md 6.7).
     /// Pending work is empty afterwards.
     pub(crate) fn settle(&mut self) {
-        let limit = EffectQueue::limit(self.st.tiles().len(), self.st.players().len());
-        let mut applied = 0u64;
-        while self.pending.any_sight() || !self.fx.is_empty() {
-            self.sync_sight();
-            while let Some(e) = self.fx.pop() {
-                applied += 1;
-                if applied > limit {
-                    self.runaway(format!(
-                        "the effect queue ran past {limit} effects; the last was {e:?}"
-                    ));
-                    break;
-                }
-                self.apply_effect(e);
-            }
-            if applied > limit {
-                break;
-            }
-        }
+        self.settle_sight();
         let mut passes = 0;
         while self.pending.any_recheck() && passes < SETTLE_PASSES {
             self.reassign_flagged();
@@ -64,7 +47,33 @@ impl Game {
                 ));
             }
         }
+        self.dv.vis.clear_newly_seen();
         self.run_checks();
+    }
+
+    /// Sight and its effects to a fixed point, the first part of a settle (`visibility.refresh`,
+    /// `visibility.py:128-168`): the dirty vision sources are brought up to date, which queues
+    /// meetings and discoveries; they are applied in their order, which may make more sources
+    /// dirty; and so on until nothing is left. Also what setup's visibility stage runs.
+    pub(crate) fn settle_sight(&mut self) {
+        let limit = EffectQueue::limit(self.st.tiles().len(), self.st.players().len());
+        let mut applied = 0u64;
+        loop {
+            self.sync_sight();
+            if self.fx.is_empty() {
+                break;
+            }
+            while let Some(e) = self.fx.pop() {
+                applied += 1;
+                if applied > limit {
+                    self.runaway(format!(
+                        "the effect queue ran past {limit} effects; the last was {e:?}"
+                    ));
+                    return;
+                }
+                self.apply_effect(e);
+            }
+        }
     }
 
     /// Stops a runaway effect queue: a bug, reported as SETTLE-1 where checks run.
@@ -77,18 +86,11 @@ impl Game {
         }
     }
 
-    /// Brings the dirty vision sources up to date and queues what their transitions reveal:
-    /// explored tiles, memory, first contact, natural wonders (DESIGN.md 6.9).
-    fn sync_sight(&mut self) {
-        // visibility.py:96-168: footprints, counts, transitions and their effects.
-        pending(Porting::Pending("1c-01"));
-        self.pending.clear_sight();
-    }
-
     /// Applies one effect, which may raise more work.
     fn apply_effect(&mut self, e: Effect) {
         match e {
             Effect::Meet { a, b } => self.make_contact(a, b),
+            Effect::Wonder { civ, tile } => self.discover_wonder(civ, tile),
         }
     }
 

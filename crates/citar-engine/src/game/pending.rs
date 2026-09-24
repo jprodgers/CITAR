@@ -27,8 +27,12 @@ pub enum SightSource {
     Civ(PlayerId),
     /// What blocks sight changed on a tile, for every unit that sees across it.
     Area(TileIdx),
-    /// A tile changed hands, which may bring its new owner into contact with those who see it.
+    /// A tile changed hands, which may bring its new owner into contact with those who see it,
+    /// or (when the ruleset's sight uniques read tiles) what a unit on it sees changed.
     Tile(TileIdx),
+    /// Everything a player sees, and everything of its that others see, must be checked for
+    /// first contact again: two players forgot they had met.
+    Contact(PlayerId),
 }
 
 /// What the next settle must do.
@@ -112,6 +116,14 @@ pub enum Effect {
         a: PlayerId,
         /// The other.
         b: PlayerId,
+    },
+    /// A major discovers the natural wonder it sees on a tile
+    /// (`visibility._discover_natural_wonders`, `visibility.py:171-198`).
+    Wonder {
+        /// The major.
+        civ: PlayerId,
+        /// The wonder's tile.
+        tile: TileIdx,
     },
 }
 

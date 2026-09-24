@@ -1,62 +1,30 @@
-//! What each civilization sees (DESIGN.md 6.9).
+//! What each civilization sees (DESIGN.md 6.9): incremental visibility, ported from
+//! `visibility.py:1-243`, `units.sight` (`units.py:304-310`) and the spies' sight
+//! (`espionage.py:444-451`).
 //!
-//! Package 1b-01 lands the part other systems read: per civilization, the tiles it sees now
-//! ([`Visibility::sees`]), which event audiences widen by (`game.py:872-875`) and which invariant
-//! VIS-1 holds to the explored tiles. Package 1c-01 ports `visibility.py`: the sight sources and
-//! their footprints, the counts, the transitions and their effects (explored tiles, memory,
-//! first contact, natural wonders). Until then nobody sees anything, and settle's `sync_sight`
-//! only drops the dirty sources.
+//! - [`los`]: line of sight, the elevation walk, and the cache of its answers;
+//! - [`visibility`]: the sources, their footprints and each civilization's counts
+//!   ([`Visibility`]);
+//! - [`sight`](mod@sight): what each source sees (a unit's sight, a city's tiles, an ally's, a
+//!   spy's), what a civilization can make out of a unit it sees, and line of sight for an attack;
+//! - [`effects`]: bringing dirty sources up to date in settle (`Game::sync_sight`), and what it
+//!   reveals: explored tiles, memory, first contact and natural wonders; `reveal_tiles`; the cache
+//!   oracle ([`verify`]).
+//!
+//! Python recomputed every civilization's sight after every unit step, which was 54% of a
+//! gargantuan game's time and changed nothing 98.5-99.5% of the time. Here a write marks the
+//! sources it made stale, and only those are looked at again.
 
-use crate::base::ids::{PlayerId, TileIdx};
-use crate::base::sets::{BitSet, PlayerVec};
-use crate::game::{Porting, pending};
-use crate::state::State;
+pub mod effects;
+pub mod los;
+pub mod sight;
+pub mod visibility;
 
-/// Each civilization's visible tiles: derived, never saved.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Visibility {
-    visible: PlayerVec<BitSet>,
-}
+pub use self::effects::verify;
+pub use self::sight::{
+    enemy_spotted, has_los, has_sight, sight, sight_of, unit_viewable, unit_visible_to,
+};
+pub use self::visibility::{Sight, SightRules, SourceKey, Transition, VisSource, Visibility};
 
-impl Visibility {
-    /// The visibility of `st`, cold.
-    #[must_use]
-    pub fn new(st: &State) -> Self {
-        // visibility.py:96-168: sources, footprints and counts.
-        pending(Porting::Pending("1c-01"));
-        Self { visible: st.players().ids().map(|_| BitSet::new()).collect() }
-    }
-
-    /// Whether `p` sees tile `t` now.
-    #[must_use]
-    #[inline]
-    pub fn sees(&self, p: PlayerId, t: TileIdx) -> bool {
-        self.visible.get(p).is_some_and(|v| v.contains(t.0))
-    }
-
-    /// The tiles `p` sees now.
-    #[must_use]
-    pub fn visible(&self, p: PlayerId) -> Option<&BitSet> {
-        self.visible.get(p)
-    }
-
-    /// Where these counts disagree with a rebuild from `st`, one line each (the cache oracle).
-    #[must_use]
-    pub fn verify(&self, st: &State) -> Vec<String> {
-        let cold = Self::new(st);
-        if *self == cold {
-            Vec::new()
-        } else {
-            vec!["the visible tiles differ from a cold rebuild".to_owned()]
-        }
-    }
-
-    /// Lets `p` see `t`, as a test arranges what a civilization sees before the sight sources
-    /// exist (package 1c-01).
-    #[cfg(any(test, feature = "test-ops"))]
-    pub fn reveal_for_test(&mut self, p: PlayerId, t: TileIdx) {
-        if let Some(v) = self.visible.get_mut(p) {
-            v.insert(t.0);
-        }
-    }
-}
+#[cfg(all(test, feature = "embedded-ruleset"))]
+mod tests;

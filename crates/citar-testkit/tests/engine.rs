@@ -18,4 +18,5 @@ mod engine {
     mod tools;
     mod turns;
     mod uniques;
+    mod vis;
 }

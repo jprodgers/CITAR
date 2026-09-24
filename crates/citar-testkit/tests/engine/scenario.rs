@@ -140,7 +140,7 @@ fn inspect_reads_and_lists_what_is_pending() {
         [3, 4, 12],
         "three queries, four scenario ops and twelve test ops wait"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [38, 7], "the stages that wait");
+    assert_eq!([count("turn_stage"), count("setup_stage")], [38, 6], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(

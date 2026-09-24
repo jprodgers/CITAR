@@ -120,26 +120,34 @@ impl Game {
     }
 
     /// A game over `st` and its history, once `st` passes the checks a save must pass
-    /// (`save::validate`). For tests and tools that build states directly.
+    /// (`save::validate`). For tests and tools that build states directly. What each
+    /// civilization sees is built from nothing, as Python's first refresh did: the tiles its units
+    /// and cities see are explored, and those who see each other meet (DESIGN.md 6.9).
     pub fn from_state(
         rules: &'static Ruleset,
         st: State,
         chron: Chronicle,
     ) -> Result<Self, LoadError> {
         crate::save::validate(&st, rules).map_err(LoadError::Invalid)?;
-        Ok(Self::assemble(rules, st, chron, false))
+        let mut g = Self::assemble(rules, st, chron, false);
+        g.sight_from_scratch();
+        g.settle_sight();
+        Ok(g)
     }
 
     /// Loads a save: format v1 state JSON, and the journal chunks that rebuild its history
     /// (DESIGN.md 4.9, 4.11). A corrupt save is refused here, whole. The loaded game is at a
-    /// settle point, as it was saved, so nothing is settled.
+    /// settle point, as it was saved, so nothing is settled: what each civilization sees is
+    /// rebuilt from its sources with no effect (DESIGN.md 6.9).
     pub fn load(
         rules: &'static Ruleset,
         state_json: &[u8],
         chunks: &mut dyn Iterator<Item = &[u8]>,
     ) -> Result<(Self, LoadReport), LoadError> {
         let loaded = crate::save::load(rules, state_json, chunks)?;
-        Ok((Self::assemble(rules, loaded.state, loaded.chronicle, true), loaded.report))
+        let mut g = Self::assemble(rules, loaded.state, loaded.chronicle, true);
+        g.rebuild_sight();
+        Ok((g, loaded.report))
     }
 
     /// Loads a state Python wrote (`GameState.to_dict()`): converts it strictly
@@ -164,6 +172,9 @@ impl Game {
         // Python's conditionals see the happiness `happiness()` computed while it was computing
         // it from 0 (economy.py:404-433): commit it once from 0, once Happiness exists.
         pending(Porting::Pending("1b-06"));
+        // Sight from nothing, as Python's refresh on load: a state it saved after a refresh is
+        // its fixed point (refcheck `fixed_point`).
+        g.sight_from_scratch();
         g.settle();
         Ok((g, c.report))
     }
@@ -254,6 +265,7 @@ impl Game {
     pub fn verify_caches(&self) -> Vec<String> {
         let mut out = self.dv.verify(self.rules, &self.st);
         out.extend(super::derive::civ::verify(self));
+        out.extend(super::vis::verify(self));
         out
     }
 
