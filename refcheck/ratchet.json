@@ -6,10 +6,11 @@
   "unexplained": {
     "uniques": 0,
     "state_echo": 0,
+    "fixed_point": 0,
     "tile_yields": 0,
     "city_stats": 160,
-    "fixed_point": 0,
-    "civs": 392,
+    "civs": 126,
+    "buildable": 0,
     "visible": 0
   },
   "failed": {}

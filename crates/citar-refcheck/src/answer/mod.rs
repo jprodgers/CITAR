@@ -14,7 +14,9 @@
 //! - [`tile_yields`] and [`city_stats`] (package 1b-06), what tiles yield and everything the
 //!   engine derives for a city;
 //! - [`fixed_point`] and [`visible`] (package 1c-01): the settle on load changes no explored tile
-//!   and no meeting, and what each major sees.
+//!   and no meeting, and what each major sees;
+//! - [`buildable`] (package 1b-07), what each major's cities can build, and what it costs; with
+//!   it, `civs` answers the tech and policy costs and the policies a civilization could adopt.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -30,6 +32,7 @@ use serde_json::Value;
 use crate::Group;
 use crate::fixture::Fixture;
 
+pub mod buildable;
 pub mod city_stats;
 pub mod civs;
 pub mod fixed_point;
@@ -103,6 +106,7 @@ static MODULES: &[&dyn AnswerModule] = &[
     &tile_yields::TileYields,
     &city_stats::CityStats,
     &civs::Civs,
+    &buildable::Buildable,
     &visible::Visible,
 ];
 

@@ -59,8 +59,9 @@ group = "fixed_point"
 
 # civs (package 1b-05): the civilization-level data it ports. Its resources, line by line and net; the unique
 # index by placeholder; unit upkeep and unit supply; and the era the index is built with. Package 1b-06 adds
-# happiness, the stats for the next turn by source and in total, and gold per turn. The group's other paths
-# wait for their packages (costs and policies 1b-07; score and victory 1c-08).
+# happiness, the stats for the next turn by source and in total, and gold per turn; package 1b-07 what each tech
+# it could research costs, its next policy's culture and the policies it could adopt. The group's other paths
+# wait for their package (score, victory and the world, 1c-08).
 [[enforce]]
 group = "civs"
 paths = [
@@ -74,8 +75,16 @@ paths = [
   "civs[*].civ_stats.**",
   "civs[*].stat_map.**",
   "civs[*].gold_per_turn.**",
+  "civs[*].tech_cost.**",
+  "civs[*].policy_cost",
+  "civs[*].adoptable_policies.**",
 ]
 
 # visible (package 1c-01): the tiles each living major sees.
 [[enforce]]
 group = "visible"
+
+# buildable (package 1b-07): what each major's cities can build, and for each unit, building and wonder its
+# production cost, the turns it takes, and whether and for how much it can be bought with gold and with faith.
+[[enforce]]
+group = "buildable"
