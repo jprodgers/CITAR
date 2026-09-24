@@ -17,7 +17,7 @@ name. `citar_testkit::rulesets::kitchen_sink()` loads the result, and
 | `units.json` | seven units | embarking, water travel, pillaging, invisibility, interception, great-person actions, unit triggers |
 | `promotions.json` | Kitchen Sink Veteran | free promotion, flat strength, the unit conditionals |
 | `improvements.json` | Kitchen Sink Outpost | pillaging, maintenance, obsolescence |
-| `terrains.json` | Kitchen Sink Spire | a natural wonder on the largest landmass |
+| `terrains.json` | Kitchen Sink Spire, Kitchen Sink Lookout | a natural wonder on the largest landmass; a feature whose `[+1] Sight` lifts the units on it |
 | `beliefs.json` | Kitchen Sink Faith | buying units and buildings with faith |
 | `city_state_types.json` | Kitchen Sink | city-state gifts |
 | `ruins.json` | four ruins | one-time effects on the unit that enters them |

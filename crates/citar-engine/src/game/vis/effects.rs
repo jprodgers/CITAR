@@ -22,7 +22,8 @@
 //! each other, everything the player sees and everything of its that others see. Nobody meets
 //! itself, the barbarians, a dead player or one it has met, and two city-states never meet
 //! (`visibility.py:160-165`). Meetings and discoveries are queued as effects, which settle applies
-//! in their order.
+//! in their order: the meetings viewer first, so they go viewer by viewer as Python's did, then
+//! the discoveries.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,18 +62,31 @@ fn undiscovered(g: &Game, p: PlayerId, t: TileIdx) -> bool {
     g.player(p).is_some_and(|x| x.is_major() && x.alive() && !x.civ.natural_wonders.contains(w))
 }
 
-/// What one sync found to do: meetings, as ordered pairs, and discoveries.
+/// What one sync found to do: meetings and discoveries.
 #[derive(Default)]
 struct Found {
-    meet: BTreeSet<(PlayerId, PlayerId)>,
+    /// Each pair that meets, the lower id first, with the viewer that meets the other: the
+    /// lowest id of those that saw something of the other's. Python's refresh looped over the
+    /// viewers in id order and met each with what it saw, viewer first (`visibility.py:152-165`),
+    /// so the lowest viewer made the meeting, and its announcement names it first.
+    meet: BTreeMap<(PlayerId, PlayerId), PlayerId>,
     discover: BTreeSet<(PlayerId, TileIdx)>,
 }
 
 impl Found {
     fn meet(&mut self, g: &Game, viewer: PlayerId, q: PlayerId) {
         if may_meet(g, viewer, q) {
-            self.meet.insert((viewer.min(q), viewer.max(q)));
+            let v = self.meet.entry((viewer.min(q), viewer.max(q))).or_insert(viewer);
+            *v = (*v).min(viewer);
         }
+    }
+
+    /// The meetings as effects, each viewer first: the queue applies them in Python's order,
+    /// viewer by viewer.
+    fn meetings(&self) -> impl Iterator<Item = Effect> + '_ {
+        self.meet
+            .iter()
+            .map(|(&(lo, hi), &v)| Effect::Meet { a: v, b: if v == lo { hi } else { lo } })
     }
 
     /// What a player seeing tile `t` newly meets and discovers.
@@ -175,27 +189,29 @@ impl Game {
             return;
         }
         let todo = self.pending.take_sight();
-        let mut vis = core::mem::take(&mut self.dv.vis);
-        let rules = self.rules;
         let mut work = Work::default();
-        // Heights first, so that no footprint below reads a stale one.
+        // The heights and the line-of-sight cache followed each terrain change as it happened
+        // (`Game::changed`); what is left is to look again at what those tiles hold.
         for s in &todo {
-            if let SightSource::Area(t) = *s
-                && let Some(tile) = self.st.tiles().get(t)
-            {
-                vis.height_changed(rules, self.dv.grid(), t, tile);
+            if let SightSource::Area(t) = *s {
                 work.reshaped.insert(t);
             }
         }
-        let g: &Game = self;
-        work.gather(g, &vis, &todo);
-        let size = u32::try_from(g.st.tiles().len()).unwrap_or(u32::MAX);
-        let plan = work.plan(g, &vis);
+        // Every new source is worked out from the game as it is, before any is registered: the
+        // sources read the game's own sight, never a half-updated one.
+        let plan = {
+            let g: &Game = self;
+            work.gather(g, &g.dv.vis, &todo);
+            work.plan(g, &g.dv.vis)
+        };
+        let size = u32::try_from(self.st.tiles().len()).unwrap_or(u32::MAX);
         let mut tr = Vec::new();
         for (k, s) in plan {
-            vis.set(size, k, s, &mut tr);
+            self.dv.vis.set(size, k, s, &mut tr);
         }
-        let net = net(&vis, tr);
+        let g: &Game = self;
+        let vis = &g.dv.vis;
+        let net = net(vis, tr);
         let mut found = Found::default();
         for x in net.iter().filter(|x| x.up) {
             found.seen(g, x.civ, x.tile);
@@ -222,7 +238,7 @@ impl Game {
             }
         }
         for &p in &work.whole {
-            found.everything_of(g, &vis, p);
+            found.everything_of(g, vis, p);
         }
         for &t in &work.reshaped {
             for q in vis.seers(t) {
@@ -248,8 +264,11 @@ impl Game {
                 remember.entry(x.civ).or_default().push(snap);
             }
         }
-        vis.note_seen(net.iter().filter(|x| x.up).map(|x| (x.civ, x.tile)));
-        self.dv.vis = vis;
+        let effects: Vec<Effect> = found
+            .meetings()
+            .chain(found.discover.iter().map(|&(civ, tile)| Effect::Wonder { civ, tile }))
+            .collect();
+        self.dv.vis.note_seen(net.iter().filter(|x| x.up).map(|x| (x.civ, x.tile)));
         for (p, tiles) in explore {
             if let Some(pl) = self.player_mut(p, PlayerTouch::OTHER) {
                 for t in tiles {
@@ -266,12 +285,16 @@ impl Game {
                 }
             }
         }
-        for (a, b) in found.meet {
-            self.fx.push(Effect::meet(a, b));
+        for e in effects {
+            self.fx.push(e);
         }
-        for (civ, tile) in found.discover {
-            self.fx.push(Effect::Wonder { civ, tile });
-        }
+    }
+
+    /// Whether the registered sources are what a sync would register now: no source is marked,
+    /// and no civilization's sight uniques can have changed since the last look.
+    pub(crate) fn sight_current(&self) -> bool {
+        !self.pending.any_sight()
+            && (self.dv.vis.checked == self.dv.revs.now() || !self.dv.vis.sight_rules().civ_level())
     }
 
     /// Marks the units of every civilization whose sight uniques changed since the last look
@@ -334,12 +357,30 @@ impl Game {
         }
     }
 
-    /// The tiles that came into `p`'s sight since the last settle, in the order they did,
-    /// forgetting them: what a move reads after each step to stop when an enemy comes into view
-    /// (`movement.py:628-640`, with [`super::enemy_spotted`]).
-    #[allow(dead_code, reason = "move_toward calls it after each step from package 1c-02")]
+    /// The tiles that came into `p`'s sight since the last settle or the last take, in the order
+    /// they did, forgetting them. A move reads them through [`step_seeing`](Self::step_seeing),
+    /// which takes them on both sides of a step.
     pub(crate) fn take_newly_seen(&mut self, p: PlayerId) -> Vec<TileIdx> {
         self.dv.vis.take_newly_seen(p)
+    }
+
+    /// Runs one step of a move of `p`'s and returns what it did with the tiles it brought into
+    /// `p`'s sight: what `move_toward` reads to stop when an enemy comes into view
+    /// (`movement.py:627-640`, with [`super::enemy_spotted`]). Python took what it saw before the
+    /// step after a refresh, stepped, refreshed and compared; so sight is settled and what came
+    /// into view earlier (a border that grew in the same stage, a sync an event ran) is dropped
+    /// before the step, and sight is settled again after it.
+    #[allow(dead_code, reason = "move_toward steps through it from package 1c-02")]
+    pub(crate) fn step_seeing<R>(
+        &mut self,
+        p: PlayerId,
+        step: impl FnOnce(&mut Self) -> R,
+    ) -> (R, Vec<TileIdx>) {
+        self.settle_sight();
+        drop(self.take_newly_seen(p));
+        let r = step(self);
+        self.settle_sight();
+        (r, self.take_newly_seen(p))
     }
 
     /// Discovers a natural wonder (`visibility._discover_natural_wonders`,
@@ -667,6 +708,7 @@ pub(crate) fn cold(g: &Game) -> Visibility {
 pub fn verify(g: &Game) -> Vec<String> {
     let rebuilt = cold(g);
     let mut out = g.dv.vis.differences(&rebuilt);
+    out.extend(g.dv.vis.stale_line_of_sight(g.grid()));
     // The sight a step reads from the kept sight uniques is the one the index gives.
     for (k, s) in rebuilt.sources() {
         if let SourceKey::Unit(u) = k
@@ -712,9 +754,10 @@ impl Game {
         u: UnitId,
         to: TileIdx,
     ) -> Result<Vec<TileIdx>, crate::state::StateError> {
-        let owner = self.unit(u).map(crate::state::units::Unit::owner);
-        self.relocate_unit(u, to)?;
-        self.settle_sight();
-        Ok(owner.map(|p| self.take_newly_seen(p)).unwrap_or_default())
+        let Some(owner) = self.unit(u).map(crate::state::units::Unit::owner) else {
+            return Err(crate::state::units::UnitsError::NoSuchUnit(u).into());
+        };
+        let (moved, seen) = self.step_seeing(owner, |g| g.relocate_unit(u, to));
+        moved.map(|()| seen)
     }
 }

@@ -289,6 +289,30 @@ impl LosCache {
         self.map.retain(|&(c, r, _), _| grid.distance(c, t) > r.saturating_add(1));
     }
 
+    /// The answers that differ from the walk over `h` now, in key order: none, while every
+    /// change of heights evicts the answers it reached (the cache oracle).
+    #[must_use]
+    pub fn stale(&self, grid: &HexGrid, h: &Heights) -> Vec<LosKey> {
+        let mut scratch = LosScratch::default();
+        let mut out = Vec::new();
+        let mut bad: Vec<LosKey> = self
+            .map
+            .iter()
+            .filter(|&(&(c, r, attack), v)| {
+                viewable_into(grid, h, c, r, attack, &mut scratch, &mut out);
+                out[..] != v[..]
+            })
+            .map(|(&k, _)| k)
+            .collect();
+        bad.sort();
+        bad
+    }
+
+    /// Forgets every answer.
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
+
     /// How many answers it holds.
     #[must_use]
     pub fn len(&self) -> usize {

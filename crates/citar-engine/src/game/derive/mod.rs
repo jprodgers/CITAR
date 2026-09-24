@@ -92,6 +92,14 @@ impl Derived {
         &self.vis
     }
 
+    /// Reads tile `t`'s heights for sight again after its terrains changed, and forgets the
+    /// line-of-sight answers that read them.
+    pub(crate) fn height_changed(&mut self, rules: &Ruleset, st: &State, t: TileIdx) {
+        if let Some(tile) = st.tiles().get(t) {
+            self.vis.height_changed(rules, &self.grid, t, tile);
+        }
+    }
+
     /// The name index of `st` (`Game._name_index`, `game.py:814-840`), rebuilt only when a name
     /// or a city's owner changed.
     pub fn names<'a>(&'a self, st: &State) -> Ref<'a, NameIndex> {
@@ -205,10 +213,12 @@ impl Derived {
                 self.flag_blockades_of(st, rules, range, b, a, &mut out);
             }
             // Two who forget they met meet again if they see each other, as Python's next
-            // refresh met them; a meeting is checked the same way, and finds nothing new.
+            // refresh met them. A meeting makes no other pair meet, so it needs no look.
             Change::Met { a, b } => {
-                out.sight.push(SightSource::Contact(a));
-                out.sight.push(SightSource::Contact(b));
+                if !st.diplo().has_met(a, b) {
+                    out.sight.push(SightSource::Contact(a));
+                    out.sight.push(SightSource::Contact(b));
+                }
             }
             Change::Diplo { .. }
             | Change::Talks { .. }

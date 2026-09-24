@@ -25,7 +25,9 @@ pub enum SightSource {
     Spies(PlayerId),
     /// Every source of a player, as when it is eliminated or revived.
     Civ(PlayerId),
-    /// What blocks sight changed on a tile, for every unit that sees across it.
+    /// What blocks sight changed on a tile, for every unit that sees across it. The heights and
+    /// the line-of-sight cache were updated when it changed; the units near it and a natural
+    /// wonder on it are looked at at the sync.
     Area(TileIdx),
     /// A tile changed hands, which may bring its new owner into contact with those who see it,
     /// or (when the ruleset's sight uniques read tiles) what a unit on it sees changed.
@@ -110,9 +112,12 @@ impl PendingWork {
 /// drains in: `(kind, civ, other, tile)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Effect {
-    /// Two players meet (`Game.meet`, `game.py:694-701`); the lower id first.
+    /// Two players meet (`Game.meet`, `game.py:694-701`). Sight queues it viewer first, the
+    /// civilization that saw something of the other's, as Python's refresh met them viewer by
+    /// viewer in id order (`visibility.py:152-165`): the queue's `(a, b)` order is that order,
+    /// and the announcement names `a` first.
     Meet {
-        /// One side.
+        /// The side that saw the other, or the lower id (`Effect::meet`).
         a: PlayerId,
         /// The other.
         b: PlayerId,
@@ -128,7 +133,8 @@ pub enum Effect {
 }
 
 impl Effect {
-    /// A meeting of `a` and `b`, the same whichever way round they are given.
+    /// A meeting of `a` and `b` with no viewer, the same whichever way round they are given:
+    /// the lower id first.
     #[must_use]
     pub fn meet(a: PlayerId, b: PlayerId) -> Self {
         Self::Meet { a: a.min(b), b: a.max(b) }

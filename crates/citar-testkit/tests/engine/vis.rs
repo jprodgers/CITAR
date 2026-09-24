@@ -2,7 +2,8 @@
 //! ruleset: its two extra types of this subsystem, `No Sight` (the Kitchen Sink Drone sees its
 //! own tile alone) and `Invisible to others` (the Kitchen Sink Sub, seen only by a unit that
 //! `Can see invisible [Submarine] units`), beside the shipped `Invisible to non-adjacent units`
-//! of submarines; every check, the cache oracle among them, clean after each step.
+//! of submarines; and a `[+1] Sight` on a terrain (the Kitchen Sink Lookout), which no shipped
+//! terrain carries. Every check, the cache oracle among them, is clean after each step.
 
 use citar_engine::base::ids::{
     BarbarianLevelId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId, PlayerId, SpeedId,
@@ -144,4 +145,50 @@ fn a_submarine_is_seen_from_next_to_it_alone() {
     clean(&mut g);
     assert!(vis::unit_visible_to(&g, ME, sub));
     assert!(g.has_met(ME, THEM), "seeing its tile was enough to meet, as Python's rule has it");
+}
+
+/// Puts the Kitchen Sink Lookout on a tile, or takes every feature off it.
+fn lookout(g: &mut Game, t: TileIdx, on: bool) {
+    let (x, y) = g.grid().xy(t);
+    let features: Vec<&str> = if on { vec!["Kitchen Sink Lookout"] } else { Vec::new() };
+    g.apply_ops(&json!([{"op": "set_tile", "x": x, "y": y, "features": features}]))
+        .unwrap_or_else(|e| panic!("set_tile: {e}"));
+}
+
+/// The sight a unit's registered source has.
+fn registered(g: &Game, u: UnitId) -> Option<Sight> {
+    g.derived().vis().source(SourceKey::Unit(u)).and_then(|s| s.sight)
+}
+
+#[test]
+fn a_terrain_with_sight_lifts_the_units_on_it() {
+    let r = kitchen_sink();
+    let mut g = game(r);
+    let (flat, high) = (at(5, 4), at(6, 4));
+    lookout(&mut g, high, true);
+    let w = add(&mut g, ME, "Warrior", flat);
+    clean(&mut g);
+    assert_eq!(registered(&g, w), Some(Sight::Walk(2)));
+    // Onto the lookout: one tile further, the whole disc of flat land.
+    g.step_unit_for_test(w, high).expect("a step");
+    clean(&mut g);
+    assert_eq!(
+        (vis::sight_of(&g, w), registered(&g, w)),
+        (Some(Sight::Walk(3)), Some(Sight::Walk(3)))
+    );
+    let mut disc = g.grid().within(high, 3);
+    disc.sort();
+    let seen = g.derived().vis().source(SourceKey::Unit(w)).map(|s| s.footprint.to_vec());
+    assert_eq!(seen, Some(disc));
+    // And off it again.
+    g.step_unit_for_test(w, flat).expect("a step");
+    clean(&mut g);
+    assert_eq!(registered(&g, w), Some(Sight::Walk(2)));
+    // A lookout raised under a unit that stands still lifts it too, and taking it away lowers it.
+    lookout(&mut g, flat, true);
+    clean(&mut g);
+    assert_eq!(registered(&g, w), Some(Sight::Walk(3)));
+    lookout(&mut g, flat, false);
+    clean(&mut g);
+    assert_eq!(registered(&g, w), Some(Sight::Walk(2)));
 }

@@ -549,6 +549,25 @@ impl Visibility {
         out
     }
 
+    /// The line-of-sight answers the cache holds that the walk over the heights now does not
+    /// give, one line each (the cache oracle).
+    #[must_use]
+    pub fn stale_line_of_sight(&self, grid: &HexGrid) -> Vec<String> {
+        let los = self.los.borrow();
+        los.stale(grid, &self.heights)
+            .into_iter()
+            .map(|(c, r, attack)| {
+                format!("the line of sight from tile {} at {r} (attack: {attack}) is stale", c.0)
+            })
+            .collect()
+    }
+
+    /// Forgets every line-of-sight answer, so that the next footprint is walked afresh.
+    #[cfg(any(test, feature = "test-ops"))]
+    pub fn forget_line_of_sight(&self) {
+        self.los.borrow_mut().clear();
+    }
+
     /// Lets `p` see `t` without a source, as a test arranges what a civilization sees.
     #[cfg(any(test, feature = "test-ops"))]
     pub fn reveal_for_test(&mut self, p: PlayerId, t: TileIdx) {

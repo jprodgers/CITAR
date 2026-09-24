@@ -14,5 +14,16 @@
     "unbuildable": true,
     "weight": 10,
     "id": "kitchen_sink_spire"
+  },
+  "Kitchen Sink Lookout": {
+    "name": "Kitchen Sink Lookout",
+    "type": "TerrainFeature",
+    "movementCost": 1,
+    "occursOn": ["Grassland", "Plains"],
+    "uniques": [
+      "[+1] Sight",
+      "Doesn't generate naturally"
+    ],
+    "id": "kitchen_sink_lookout"
   }
 }

@@ -68,6 +68,12 @@ impl Game {
     pub(crate) fn changed(&mut self, ch: Change) {
         self.dv.revs.on_change(&self.st, &ch);
         self.dv.civ.track(&ch);
+        // Line of sight follows the terrain at once, so that an attack between a terrain change
+        // and the next settle sees what stands there now (DESIGN.md 6.5); the units near it are
+        // looked at again at the sync.
+        if let Change::TileHeight(t) = ch {
+            self.dv.height_changed(self.rules, &self.st, t);
+        }
         let react = self.dv.on(&self.st, self.rules, &ch);
         for c in react.recheck {
             self.pending.flag_city(c);

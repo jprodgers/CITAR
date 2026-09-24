@@ -143,9 +143,13 @@ fn a_tile_out_of_sight_is_remembered_as_it_was() {
 
 #[test]
 fn first_contact_goes_both_ways() {
-    // Rome sees the hill Greece stands on three tiles off, while Greece, looking down from it,
-    // does not see Rome's flat tile: they meet all the same.
-    for (low, high) in [(ROME, GREECE), (GREECE, ROME)] {
+    // One sees the hill the other stands on three tiles off, while the other, looking down from
+    // it, does not see the flat tile: they meet all the same, and the one that saw is named
+    // first, as Python's refresh met them viewer first.
+    for (low, high, text) in [
+        (ROME, GREECE, "Rome and Greece have made contact."),
+        (GREECE, ROME, "Greece and Rome have made contact."),
+    ] {
         let mut g = testing::duel();
         let h = at(6, 4);
         hill(&mut g, h);
@@ -155,8 +159,90 @@ fn first_contact_goes_both_ways() {
         assert!(g.derived().vis().sees(low, h));
         assert!(!g.derived().vis().sees(high, at(3, 4)));
         assert!(g.has_met(ROME, GREECE));
-        assert_eq!(events(&g, EngineEvent::FirstContact), ["Rome and Greece have made contact."]);
+        assert_eq!(events(&g, EngineEvent::FirstContact), [text]);
     }
+}
+
+#[test]
+fn meetings_found_in_one_sync_go_viewer_by_viewer() {
+    // Rome and Geneva see each other's warriors; Geneva's other warrior sees Greece's on a hill
+    // three tiles off, which does not see it back. Both meetings come from one sync. Python met
+    // them viewer by viewer in id order, each viewer named first: Rome's, then Geneva's.
+    let mut g = testing::duel();
+    let h = at(6, 2);
+    hill(&mut g, h);
+    testing::unit(&mut g, ROME, "Warrior", at(1, 6));
+    testing::unit(&mut g, GENEVA, "Warrior", at(3, 6));
+    testing::unit(&mut g, GREECE, "Warrior", h);
+    testing::unit(&mut g, GENEVA, "Warrior", at(9, 2));
+    clean(&mut g);
+    assert!(g.derived().vis().sees(GENEVA, h) && !g.derived().vis().sees(GREECE, at(9, 2)));
+    assert!(g.has_met(ROME, GENEVA) && g.has_met(GREECE, GENEVA) && !g.has_met(ROME, GREECE));
+    assert_eq!(
+        events(&g, EngineEvent::FirstContact),
+        ["Rome and Geneva have made contact.", "Geneva and Greece have made contact."]
+    );
+}
+
+#[test]
+fn a_meeting_asks_for_no_look_and_a_forgotten_one_does() {
+    let mut g = testing::duel();
+    testing::unit(&mut g, ROME, "Warrior", at(2, 4));
+    clean(&mut g);
+    g.update_relation(ROME, GREECE, |x| x.met = true).expect("a pair");
+    assert!(!g.pending.any_sight(), "a meeting makes no other pair meet");
+    g.update_relation(ROME, GREECE, |x| x.met = false).expect("a pair");
+    assert!(g.pending.any_sight(), "two who forgot each other are looked at again");
+    clean(&mut g);
+}
+
+#[test]
+fn line_of_sight_follows_the_terrain_before_any_settle() {
+    let mut g = testing::duel();
+    let u = testing::unit(&mut g, ROME, "Warrior", at(2, 4));
+    clean(&mut g);
+    let (from, to) = (at(2, 4), at(4, 4));
+    assert!(super::has_los(&g, from, to));
+    assert!(super::unit_viewable(&g, u).contains(&to));
+    // A forest grows between them: an attack sees it at once, with no settle in between.
+    let mut f = FeatureSet::EMPTY;
+    f.insert(feature("Forest"));
+    g.set_features(at(3, 4), f).expect("a tile");
+    assert!(!super::has_los(&g, from, to), "the forest blocks the attack");
+    assert!(!super::unit_viewable(&g, u).contains(&to), "and what the warrior sees");
+    assert_eq!(g.derived().vis().stale_line_of_sight(g.grid()), Vec::<String>::new());
+    // A unit that moved sees from where it stands, before the settle registers it.
+    g.relocate_unit(u, at(6, 4)).expect("a tile");
+    let seen = super::unit_viewable(&g, u);
+    assert!(seen.contains(&at(8, 4)) && !seen.contains(&at(2, 4)), "{seen:?}");
+    clean(&mut g);
+    assert_eq!(super::unit_viewable(&g, u), seen);
+    assert!(super::has_los(&g, at(6, 4), at(8, 4)));
+}
+
+#[test]
+fn a_step_reports_only_what_the_step_brought_into_view() {
+    let mut g = testing::duel();
+    let u = testing::unit(&mut g, ROME, "Warrior", at(1, 6));
+    let scout = testing::unit(&mut g, ROME, "Warrior", at(1, 1));
+    testing::unit(&mut g, GREECE, "Warrior", at(6, 1));
+    clean(&mut g);
+    g.update_relation(ROME, GREECE, |x| x.war = true).expect("a pair");
+    clean(&mut g);
+    assert!(!g.derived().vis().sees(ROME, at(6, 1)));
+    // Before the step, with no settle between, Rome's other warrior walks up to the enemy.
+    g.relocate_unit(scout, at(4, 1)).expect("a tile");
+    let (moved, seen) = g.step_seeing(ROME, |g| g.relocate_unit(u, at(2, 6)));
+    assert!(moved.is_ok());
+    assert!(g.derived().vis().sees(ROME, at(6, 1)));
+    assert!(!seen.contains(&at(6, 1)), "the enemy came into view before the step: {seen:?}");
+    assert!(!seen.is_empty() && !enemy_spotted(&g, ROME, &seen));
+    // The next step brings another soldier's tile into view.
+    testing::unit(&mut g, GREECE, "Warrior", at(5, 6));
+    let (_, seen) = g.step_seeing(ROME, |g| g.relocate_unit(u, at(3, 6)));
+    assert!(seen.contains(&at(5, 6)), "{seen:?}");
+    assert!(enemy_spotted(&g, ROME, &seen));
+    clean(&mut g);
 }
 
 #[test]
@@ -749,7 +835,9 @@ proptest! {
 
     /// Gate 2: after random moves, border growth and tile purchases, cities founded, captured and
     /// razed, terrain that blocks sight, alliances, deaths and revivals, forgotten meetings and
-    /// spies, the incremental sight equals Python's from nothing, and the met sets hold its rule.
+    /// spies, the incremental sight equals Python's from nothing, and the met sets hold its rule;
+    /// and every line-of-sight answer the cache holds is the walk over the terrain as it is, even
+    /// before the settle.
     #[test]
     fn incremental_sight_is_a_rebuild_by_pythons_rule(
         start in proptest::collection::vec((0u8..4, 0u8..3, 0u16..120), 6..14),
@@ -771,6 +859,9 @@ proptest! {
         prop_assert!(g.take_violations().is_empty());
         for (i, o) in ops.iter().enumerate() {
             apply(&mut g, o);
+            // Line of sight follows the terrain before any settle.
+            let stale = g.derived().vis().stale_line_of_sight(g.grid());
+            prop_assert!(stale.is_empty(), "step {i} {o:?}, before the settle: {stale:?}");
             fix_capitals(&mut g);
             g.settle();
             let bad = g.take_violations();

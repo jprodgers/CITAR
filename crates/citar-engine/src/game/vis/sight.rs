@@ -79,11 +79,14 @@ pub(crate) fn footprint(g: &Game, vis: &Visibility, at: TileIdx, sight: Sight) -
 }
 
 /// How a unit sees, as [`sight_of`] finds it, with its civilization's `[n] Sight` uniques read
-/// from `mods`, the ones its index holds (kept by the sync's check of each civilization's sight
-/// uniques), rather than from the index itself: a step then reads no civilization-wide memo.
-/// The cache oracle checks it against [`sight_of`].
-pub(crate) fn sight_with(g: &Game, mods: &[(UniqueId, u16)], u: UnitId) -> Option<Sight> {
+/// from the ones `vis` keeps for it (what its index held at the sync's last check of each
+/// civilization's sight uniques), rather than from the index itself: a step then reads no
+/// civilization-wide memo. Everything it reads of sight comes from `vis`, never from the game's
+/// own, so a rebuild (`cold`) and a sync read the same rules. The cache oracle checks it against
+/// [`sight_of`].
+pub(crate) fn sight_with(g: &Game, vis: &Visibility, u: UnitId) -> Option<Sight> {
     let unit = g.unit(u)?;
+    let mods = vis.stamp(unit.owner()).1;
     let v = g.view();
     let ctx = Ctx::unit(&v, u);
     let t = g.rules().uniques();
@@ -107,7 +110,7 @@ pub(crate) fn sight_with(g: &Game, mods: &[(UniqueId, u16)], u: UnitId) -> Optio
             r = r.saturating_add(amount(id).saturating_mul(i32::from(n)));
         }
     }
-    let rules = g.derived().vis().sight_rules();
+    let rules = vis.sight_rules();
     if !rules.terrains.is_empty() && !v.tile_terrains(unit.tile()).is_disjoint(&rules.terrains) {
         let ground = uq::terrains(&v, unit.tile(), UniqueType::Sight, &ctx);
         r = r.saturating_add(uq::sum_i32(ground, |d| match d {
@@ -134,7 +137,7 @@ pub(crate) fn unit_source(g: &Game, vis: &Visibility, u: UnitId, reuse: bool) ->
         return None;
     }
     let at = unit.tile();
-    let sight = sight_with(g, vis.stamp(owner).1, u)?;
+    let sight = sight_with(g, vis, u)?;
     // Nothing that decides it moved: keep the footprint as it is.
     if reuse
         && let Some(old) = vis.source(SourceKey::Unit(u))
@@ -241,22 +244,30 @@ pub(crate) fn sight_mods(g: &Game, p: PlayerId) -> Vec<(UniqueId, u16)> {
     ix.get(UniqueType::Sight).iter().map(|e| (e.id, e.n)).collect()
 }
 
-/// The tiles a unit sees (`visibility.unit_viewable`), sorted: its registered footprint, or
-/// what it would see if its owner had sight.
+/// The tiles a unit sees now (`visibility.unit_viewable`), sorted, whether or not its owner has
+/// sight. A registered footprint is as of the last sync, so it is read only while nothing sight
+/// reads has moved since; otherwise the footprint is worked out from where the unit stands, with
+/// the heights as they are (they and the line-of-sight cache follow every terrain change at
+/// once).
 #[must_use]
 pub fn unit_viewable(g: &Game, u: UnitId) -> Arc<[TileIdx]> {
     let vis = g.derived().vis();
-    if let Some(s) = vis.source(SourceKey::Unit(u)) {
+    let Some(unit) = g.unit(u) else { return Arc::from([].as_slice()) };
+    if g.sight_current()
+        && let Some(s) = vis.source(SourceKey::Unit(u))
+        && s.at == unit.tile()
+    {
         return Arc::clone(&s.footprint);
     }
-    match (g.unit(u), sight_of(g, u)) {
-        (Some(unit), Some(sight)) => footprint(g, vis, unit.tile(), sight),
-        _ => Arc::from([].as_slice()),
+    match sight_of(g, u) {
+        Some(sight) => footprint(g, vis, unit.tile(), sight),
+        None => Arc::from([].as_slice()),
     }
 }
 
 /// Whether a ranged attack from `from` can see `to` (`visibility.has_los`): the elevation walk
-/// for an attack, with the distance between them as its radius.
+/// for an attack, with the distance between them as its radius. It reads the heights as they are
+/// now, even between a terrain change and the next settle.
 #[must_use]
 pub fn has_los(g: &Game, from: TileIdx, to: TileIdx) -> bool {
     let d = g.grid().distance(from, to);
@@ -271,6 +282,9 @@ pub fn has_los(g: &Game, from: TileIdx, to: TileIdx) -> bool {
 /// tile it sees, unless they are `Invisible to others` and none of its units that
 /// `Can see invisible [...] units` of theirs sees them, or `Invisible to non-adjacent units` and
 /// none of its units stands next to them.
+///
+/// What `p` sees is as of the last sync: after a write that moves sight, sync first
+/// (`Game::settle_sight`, as Python's `visible_tiles` refreshed).
 #[must_use]
 pub fn unit_visible_to(g: &Game, p: PlayerId, u: UnitId) -> bool {
     let Some(unit) = g.unit(u) else { return false };
