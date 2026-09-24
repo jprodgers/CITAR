@@ -32,6 +32,25 @@ const CITY_RUINS: &str = "City ruins";
 const ANCIENT_RUINS: &str = "Ancient ruins";
 const BARBARIAN_CAMP: &str = "Barbarian encampment";
 
+// The terrains and resources map generation names (`mapgen.py:551-1660`).
+const OCEAN: &str = "Ocean";
+const COAST: &str = "Coast";
+const LAKES: &str = "Lakes";
+const MOUNTAIN: &str = "Mountain";
+const SNOW: &str = "Snow";
+const TUNDRA: &str = "Tundra";
+const PLAINS: &str = "Plains";
+const GRASSLAND: &str = "Grassland";
+const DESERT: &str = "Desert";
+const ICE: &str = "Ice";
+const MARSH: &str = "Marsh";
+const OASIS: &str = "Oasis";
+const FOREST: &str = "Forest";
+const JUNGLE: &str = "Jungle";
+const HORSES: &str = "Horses";
+const IRON: &str = "Iron";
+const CATTLE: &str = "Cattle";
+
 /// What a technology makes available (`rules.py:192-205`): the units, buildings and
 /// improvements it unlocks for everyone (not those unique to one nation), and the resources it
 /// reveals.
@@ -71,6 +90,38 @@ pub struct Known {
     pub city_ruins: Option<ImprovementId>,
     pub ancient_ruins: Option<ImprovementId>,
     pub barbarian_camp: Option<ImprovementId>,
+    /// The terrains and resources map generation names.
+    pub map: KnownMap,
+}
+
+/// The terrains and resources map generation names (`mapgen.py:551-1660`), each only if the
+/// ruleset has it, and of the kind map generation puts it to: the water terrains are base
+/// terrains of water, the land ones base terrains of land, the rest features. A ruleset without
+/// one skips what needs it: no lakes without Lakes, no polar ice without Ice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KnownMap {
+    /// The open sea, which every water tile starts as.
+    pub ocean: Option<TerrainId>,
+    /// The shallow water along the land.
+    pub coast: Option<TerrainId>,
+    /// Small enclosed water.
+    pub lakes: Option<TerrainId>,
+    pub mountain: Option<TerrainId>,
+    pub snow: Option<TerrainId>,
+    pub tundra: Option<TerrainId>,
+    /// The terrain land starts as, and a flattened mountain becomes.
+    pub plains: Option<TerrainId>,
+    pub grassland: Option<TerrainId>,
+    pub desert: Option<TerrainId>,
+    /// The polar ice, a feature.
+    pub ice: Option<TerrainId>,
+    pub marsh: Option<TerrainId>,
+    pub oasis: Option<TerrainId>,
+    pub forest: Option<TerrainId>,
+    pub jungle: Option<TerrainId>,
+    pub horses: Option<ResourceId>,
+    pub iron: Option<ResourceId>,
+    pub cattle: Option<ResourceId>,
 }
 
 /// The tables derived at load that belong to no single object.
@@ -136,6 +187,7 @@ impl Derived {
                 city_ruins: None,
                 ancient_ruins: None,
                 barbarian_camp: None,
+                map: KnownMap::default(),
             },
         }
     }
@@ -244,6 +296,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         city_ruins: find_improvement(CITY_RUINS),
         ancient_ruins: find_improvement(ANCIENT_RUINS),
         barbarian_camp: find_improvement(BARBARIAN_CAMP),
+        map: known_map(r),
     };
 
     let UnitLists { great_person_units, spaceship_parts, builder_classes } = derive_units(r, p);
@@ -340,6 +393,36 @@ fn put<K: PartialEq, V>(map: &mut Vec<(K, V)>, key: K, value: V) {
     match map.iter_mut().find(|(k, _)| *k == key) {
         Some(slot) => slot.1 = value,
         None => map.push((key, value)),
+    }
+}
+
+/// The objects map generation names, each where the ruleset has it as the kind generation uses.
+fn known_map(r: &Ruleset) -> KnownMap {
+    let terrain = |name: &str, kind: TerrainType| {
+        r.terrains.iter().find(|(_, t)| &*t.name == name && t.kind == kind).map(|(id, _)| id)
+    };
+    let resource =
+        |name: &str| r.resources.iter().find(|(_, x)| &*x.name == name).map(|(id, _)| id);
+    let (land, water, feature) =
+        (TerrainType::Land, TerrainType::Water, TerrainType::TerrainFeature);
+    KnownMap {
+        ocean: terrain(OCEAN, water),
+        coast: terrain(COAST, water),
+        lakes: terrain(LAKES, water),
+        mountain: terrain(MOUNTAIN, land),
+        snow: terrain(SNOW, land),
+        tundra: terrain(TUNDRA, land),
+        plains: terrain(PLAINS, land),
+        grassland: terrain(GRASSLAND, land),
+        desert: terrain(DESERT, land),
+        ice: terrain(ICE, feature),
+        marsh: terrain(MARSH, feature),
+        oasis: terrain(OASIS, feature),
+        forest: terrain(FOREST, feature),
+        jungle: terrain(JUNGLE, feature),
+        horses: resource(HORSES),
+        iron: resource(IRON),
+        cattle: resource(CATTLE),
     }
 }
 
