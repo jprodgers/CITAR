@@ -29,7 +29,6 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::base::fmt::PyFloat;
 use crate::base::ids::{
     BaseUnitId, BuildingId, CityId, CityStateTypeId, DifficultyId, NationId, PlayerId, QuestKindId,
     ReligionId, ResourceId, RuinId, TechId, TerrainId, TextId, TileIdx, Turn, UniqueId,
@@ -320,11 +319,11 @@ impl SeatOverrides {
             Some(other) => {
                 return Err(SeatError(format!(
                     "handicap must be 'human' or 'ai', not {}.",
-                    py_repr(other)
+                    crate::base::py::repr(other)
                 )));
             }
         }
-        let Some(auto) = auto.filter(|v| py_truthy(v)) else { return Ok(out) };
+        let Some(auto) = auto.filter(|v| crate::base::py::truthy(v)) else { return Ok(out) };
         let keys_ok = auto
             .as_object()
             .is_some_and(|m| m.keys().all(|k| AutoDecision::from_name(k).is_some()));
@@ -349,60 +348,6 @@ impl SeatOverrides {
             }
         }
         Ok(out)
-    }
-}
-
-/// Python's truth value of a JSON value: null, false, zero and empty are false.
-fn py_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|x| x != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
-
-/// Python's `repr` of a JSON value, for messages that quote a bad setting back.
-fn py_repr(v: &Value) -> String {
-    match v {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => match (n.as_i64(), n.as_f64()) {
-            (Some(i), _) => i.to_string(),
-            (None, Some(f)) => PyFloat(f).to_string(),
-            (None, None) => n.to_string(),
-        },
-        Value::String(s) => {
-            let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
-            let mut out = String::with_capacity(s.len() + 2);
-            out.push(quote);
-            for c in s.chars() {
-                match c {
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    c if c == quote => {
-                        out.push('\\');
-                        out.push(c);
-                    }
-                    c => out.push(c),
-                }
-            }
-            out.push(quote);
-            out
-        }
-        Value::Array(a) => format!("[{}]", a.iter().map(py_repr).collect::<Vec<_>>().join(", ")),
-        Value::Object(o) => format!(
-            "{{{}}}",
-            o.iter()
-                .map(|(k, v)| format!("{}: {}", py_repr(&Value::String(k.clone())), py_repr(v)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
     }
 }
 
@@ -1228,17 +1173,6 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn repr_quotes_like_python() {
-        assert_eq!(py_repr(&json!("deity")), "'deity'");
-        assert_eq!(py_repr(&json!("it's")), "\"it's\"");
-        assert_eq!(py_repr(&json!(5)), "5");
-        assert_eq!(py_repr(&json!(2.5)), "2.5");
-        assert_eq!(py_repr(&json!(false)), "False");
-        assert_eq!(py_repr(&json!(["a", 1])), "['a', 1]");
-    }
 
     #[test]
     fn colours_parse_as_python_did() {
