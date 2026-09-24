@@ -15,12 +15,14 @@
 pub mod civ;
 pub mod rev;
 
-use core::cell::Ref;
+use core::cell::{Ref, RefCell};
+use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use self::rev::{Memo, Revs};
+use self::rev::{CopyMemo, Memo, Rev, Revs};
 use super::events::NameIndex;
+use super::path::{MoveRules, PathCache, PathScratch, RouteNet, TerrainFloor};
 use super::pending::SightSource;
 use super::vis::Visibility;
 use crate::base::hex::HexGrid;
@@ -50,6 +52,16 @@ pub struct Derived {
     pub(crate) vis: Visibility,
     /// The unique index memos, the resource supply and the unit profiles.
     pub(crate) civ: civ::CivCaches,
+    /// The ruleset's names movement reads (package 1c-02).
+    moves: Arc<MoveRules>,
+    /// The cheapest terrain on the map, for the path search's bound.
+    terrain_floor: CopyMemo<TerrainFloor>,
+    /// How far each tile is from the routes, for the path search's bound.
+    route_net: Memo<RouteNet>,
+    /// The path searches' arrays, reused.
+    path_scratch: RefCell<PathScratch>,
+    /// The paths found at the current revision.
+    path_cache: RefCell<PathCache>,
 }
 
 impl Derived {
@@ -71,6 +83,11 @@ impl Derived {
             names: Memo::new(),
             vis: Visibility::new(rules, st),
             civ: civ::CivCaches::new(rules, st),
+            moves: Arc::new(MoveRules::new(rules)),
+            terrain_floor: CopyMemo::new(),
+            route_net: Memo::new(),
+            path_scratch: RefCell::new(PathScratch::default()),
+            path_cache: RefCell::new(PathCache::default()),
         }
     }
 
@@ -111,6 +128,47 @@ impl Derived {
     #[must_use]
     pub const fn civ(&self) -> &civ::CivCaches {
         &self.civ
+    }
+
+    /// The ruleset's names movement reads.
+    #[must_use]
+    pub fn move_rules(&self) -> &MoveRules {
+        &self.moves
+    }
+
+    /// The path searches' scratch arrays.
+    pub(crate) const fn path_scratch(&self) -> &RefCell<PathScratch> {
+        &self.path_scratch
+    }
+
+    /// The paths found at the current revision.
+    pub(crate) const fn path_cache(&self) -> &RefCell<PathCache> {
+        &self.path_cache
+    }
+
+    /// Forgets the paths found so far: what they read is about to change.
+    pub(crate) fn forget_paths(&mut self) {
+        *self.path_cache.get_mut() = PathCache::default();
+    }
+
+    /// The cheapest terrain on the map (`super::path::terrain_floor`), valid while no tile or
+    /// city moved; `g` is the game these caches are its.
+    #[must_use]
+    pub fn terrain_floor(&self, g: &super::Game) -> TerrainFloor {
+        let revs = &self.revs;
+        let inputs = || revs.cities.max(revs.tile_log.rev());
+        self.terrain_floor.get(revs.now(), inputs, || super::path::terrain_floor(g))
+    }
+
+    /// How far each tile is from the routes (`super::path::route_net`), valid while no route,
+    /// city or civilization's techs moved; `g` is the game these caches are its.
+    pub fn route_net<'a>(&'a self, g: &super::Game) -> Ref<'a, RouteNet> {
+        let revs = &self.revs;
+        let inputs = || {
+            let techs = g.st.players().ids().map(|p| revs.civ(p).index).max().unwrap_or(Rev::START);
+            revs.routes.max(revs.cities).max(techs)
+        };
+        self.route_net.get(revs.now(), inputs, || super::path::route_net(g))
     }
 
     /// What a change means for the caches beyond its revisions: the cities that must recheck
