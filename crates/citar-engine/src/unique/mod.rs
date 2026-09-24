@@ -33,6 +33,7 @@ pub mod generated;
 pub mod index;
 pub mod params;
 pub mod query;
+pub mod record;
 pub mod table;
 pub mod text;
 pub mod trigger;

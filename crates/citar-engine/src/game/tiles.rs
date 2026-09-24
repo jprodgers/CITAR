@@ -22,7 +22,7 @@ use crate::base::ids::{
 };
 use crate::base::stats::{Stat, StatMask, Stats};
 use crate::rules::defs::Route;
-use crate::unique::{CondDeps, Ctx, FilterFacts, TileLeaf, UniqueData, UniqueType, applies, uq};
+use crate::unique::{CondDeps, Ctx, FilterFacts, UniqueData, UniqueType, applies, uq};
 
 /// The yields a city's own tile has at least (`tiles.CITY_CENTER_MIN`, `tiles.py:13`).
 const CITY_CENTER_MIN: [(Stat, f64); 2] = [(Stat::Food, 2.0), (Stat::Production, 1.0)];
@@ -164,46 +164,11 @@ impl super::derive::rev::BitEq for CityMods {
     }
 }
 
-/// What evaluating a tile filter on the tile in context reads: its leaves' classes, and the tile's
-/// territory city's worked tiles for `worked` (`TILE`).
+/// What evaluating a tile filter on the tile in context reads
+/// ([`TileFilter::deps_here`](crate::unique::TileFilter::deps_here)).
 #[must_use]
 pub fn tile_filter_deps(g: &Game, f: TileFilterId) -> CondDeps {
-    let e = &g.rules().uniques().filters().tile(f).full;
-    let mut d = e.deps();
-    if e.leaves().iter().any(|l| matches!(l, TileLeaf::Worked)) {
-        d |= CondDeps::TILE;
-    }
-    d
-}
-
-/// What a tile filter asked of a tile's neighbours reads (`[stats] for each adjacent [tileFilter]`,
-/// `tiles.py:241-248`). A memo of a tile's yield reads its neighbours' own facts already: their
-/// terrain, river, resource and improvement. A filter that reads more of a neighbour (its owner,
-/// whether a city works it, fresh water or the coast beside it, which are two tiles away) reads
-/// the map (`MAP`), as do the local classes of its leaves, which are about the neighbour and not
-/// the tile in context.
-#[must_use]
-pub fn adjacency_deps(f: &crate::unique::TileFilter) -> CondDeps {
-    let e = &f.full;
-    let own = |l: &TileLeaf| {
-        matches!(
-            l,
-            TileLeaf::Terrains(_)
-                | TileLeaf::River
-                | TileLeaf::AnyResource
-                | TileLeaf::Resource(_)
-                | TileLeaf::Unimproved
-                | TileLeaf::Improved
-                | TileLeaf::Pillaged
-                | TileLeaf::Improvement(_)
-        )
-    };
-    let d = e.deps();
-    if e.leaves().into_iter().all(own) && !d.intersects(CondDeps::LOCAL) {
-        d
-    } else {
-        d.difference(CondDeps::LOCAL) | CondDeps::MAP
-    }
+    g.rules().uniques().filters().tile(f).deps_here()
 }
 
 fn target_deps(g: &Game, t: Target) -> CondDeps {
@@ -388,7 +353,7 @@ fn extra_improvement_stats(
     for h in uq::object(v, &def.uniques, UniqueType::ImprovementStatsForAdjacencies, &Ctx::IGNORE) {
         *deps |= h.unique.deps();
         let UniqueData::ImprovementStatsForAdjacencies(x) = h.data() else { continue };
-        *deps |= adjacency_deps(filters.tile(x.tiles));
+        *deps |= filters.tile(x.tiles).deps_around();
         if applies(h.id, ctx, v) {
             let n = g
                 .grid()

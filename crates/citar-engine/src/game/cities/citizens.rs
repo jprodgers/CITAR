@@ -32,7 +32,7 @@ use super::super::derive::rev::CityTouch;
 use super::super::derive::stats as memo;
 use super::super::error::{ActionError, ErrCode};
 use super::stats::{
-    self as cstats, Work, can_convert_food, current_construction, food_to_next_pop, growth_bonus,
+    self as cstats, Work, converts_food, current_construction, food_to_next_pop, growth_bonus,
     max_specialists, production_from_excess_food, slots, specialist_stats,
 };
 use crate::base::ids::{CityId, PlayerId, SpecialistId, TileIdx};
@@ -71,6 +71,8 @@ pub struct RankCtx {
     /// The percentages of `[n]% Food consumption by specialists` that hold, summed with copies.
     specialist_food_pct: f64,
     construction: Option<Constructible>,
+    /// What it builds turns surplus food into production.
+    converts: bool,
     avoid_growth: bool,
     nullifies_growth: bool,
     /// The percentages of `[n]% growth` that hold, summed with copies.
@@ -111,6 +113,7 @@ impl RankCtx {
             focus: city.focus,
             specialist_food_pct,
             construction: current_construction(city),
+            converts: converts_food(g, current_construction(city)),
             avoid_growth: city.avoid_growth,
             nullifies_growth: uq::any(uq::city(&v, c, UniqueType::NullifiesGrowth, &ctx)),
             growth_pct,
@@ -133,14 +136,11 @@ impl RankCtx {
 /// food that ends starvation counts eightfold, growth counts unless it is not wanted, a small
 /// city's science is halved, gold counts double when the treasury shrinks and happiness when the
 /// empire is unhappy, and the focus weighs last.
+///
+/// The rank sums its food's worth (`rank_food`) and the rest (`rank_rest`); only the first reads
+/// the city's food, so citizen assignment weighs the rest of each tile once.
 #[must_use]
-pub fn rank_stats_for_work(
-    g: &Game,
-    rc: &RankCtx,
-    stats: &Stats,
-    specialist: bool,
-    surplus: f64,
-) -> f64 {
+pub fn rank_stats_for_work(rc: &RankCtx, stats: &Stats, specialist: bool, surplus: f64) -> f64 {
     let mut y = *stats;
     if specialist {
         y[Stat::Food] -= rc.specialist_food_pct / 100.0 * 2.0;
@@ -150,21 +150,23 @@ pub fn rank_stats_for_work(
             y[Stat::Science] *= 1.3;
         }
     }
-    let starving = surplus < 0.0;
-    if can_convert_food(g, surplus, rc.construction) {
+    // `cities.can_convert_food`.
+    if surplus > 0.0 && rc.converts {
         y[Stat::Production] += production_from_excess_food(surplus + y[Stat::Food])
             - production_from_excess_food(surplus);
         y[Stat::Food] = 0.0;
     }
-    let feed = if starving { y[Stat::Food].min(-surplus) } else { 0.0 }.max(0.0);
-    let growth = if rc.avoid_growth { 0.0 } else { y[Stat::Food] - feed };
-    for k in Stat::ALL {
-        if k != Stat::Food {
-            y[k] *= WEIGHTS[k.index()];
-        }
-    }
+    rank_rest(rc, &y) + rank_food(rc, y[Stat::Food], surplus)
+}
+
+/// What a tile's or slot's food is worth to a city with `surplus` food: eightfold what ends
+/// starvation, and its growth unless the city avoids growing, less when the empire is very
+/// unhappy or a balanced city already grows well; times the focus on food.
+fn rank_food(rc: &RankCtx, food: f64, surplus: f64) -> f64 {
+    let feed = if surplus < 0.0 { food.min(-surplus) } else { 0.0 }.max(0.0);
+    let growth = if rc.avoid_growth { 0.0 } else { food - feed };
     let food_w = WEIGHTS[Stat::Food.index()];
-    y[Stat::Food] = feed * food_w * 8.0;
+    let mut v = feed * food_w * 8.0;
     let hap = rc.happiness;
     if !rc.nullifies_growth {
         let mut ng = if growth > 0.0 { growth + rc.growth_pct / 100.0 * growth } else { growth };
@@ -187,24 +189,46 @@ pub fn rank_stats_for_work(
         } else {
             1.0
         };
-        y[Stat::Food] += ng * food_w * fmod;
-    }
-    if rc.pop < 10 {
-        y[Stat::Science] /= 2.0;
-    }
-    if rc.broke {
-        y[Stat::Gold] *= 2.0;
-    }
-    if hap < 0 {
-        y[Stat::Happiness] *= 2.0;
-    }
-    if rc.perpetual() {
-        y[Stat::Production] /= 6.0;
+        v += ng * food_w * fmod;
     }
     for &(k, m) in focus_weights(rc.focus) {
-        y[k] *= m;
+        if k == Stat::Food {
+            v *= m;
+        }
     }
-    y.0.iter().sum()
+    v
+}
+
+/// What every yield but food is worth: each by its weight, a small city's science halved, gold
+/// doubled when the treasury shrinks and happiness when the empire is unhappy, production of a
+/// city that builds nothing a sixth, and the focus.
+fn rank_rest(rc: &RankCtx, y: &Stats) -> f64 {
+    let mut w = WEIGHTS;
+    w[Stat::Food.index()] = 0.0;
+    if rc.pop < 10 {
+        w[Stat::Science.index()] /= 2.0;
+    }
+    if rc.broke {
+        w[Stat::Gold.index()] *= 2.0;
+    }
+    if rc.happiness < 0 {
+        w[Stat::Happiness.index()] *= 2.0;
+    }
+    if rc.perpetual() {
+        w[Stat::Production.index()] /= 6.0;
+    }
+    for &(k, m) in focus_weights(rc.focus) {
+        if k != Stat::Food {
+            w[k.index()] *= m;
+        }
+    }
+    let mut v = 0.0;
+    for k in Stat::ALL {
+        if k != Stat::Food {
+            v += y[k] * w[k.index()];
+        }
+    }
+    v
 }
 
 /// The percentage bonus of great person points in a city (`great_people.city_gpp_bonus`,
@@ -258,7 +282,7 @@ fn rank_specialist(
     gpp: i32,
 ) -> f64 {
     let stats = specialist_stats(g, c, s);
-    let mut r = rank_stats_for_work(g, rc, &stats, true, surplus);
+    let mut r = rank_stats_for_work(rc, &stats, true, surplus);
     if let Some(sp) = g.rules().specialists().get(s) {
         let points: i32 = sp.great_person_points.iter().map(|&(_, n)| n).sum();
         r += f64::from(points) * f64::from(100 + gpp) / 100.0;
@@ -315,8 +339,9 @@ pub fn assign(g: &Game, c: CityId, reset: bool) -> Option<Assignment> {
     Some(a)
 }
 
-/// A tile a citizen could take: where it is, what it yields, and its coordinates for ties.
-type Candidate = (TileIdx, Stats, (i32, i32));
+/// A tile a citizen could take: where it is, what it yields, its coordinates for ties, and what
+/// its yields but food are worth ([`rank_rest`]).
+type Candidate = (TileIdx, Stats, (i32, i32), f64);
 
 /// Puts every free citizen somewhere, best first (`cities.auto_assign_population`,
 /// `cities.py:818-872`), or takes the extra ones off (`_unassign_extra`).
@@ -336,16 +361,17 @@ fn auto_assign(
     }
     let owner = city.owner();
     let work = Work { worked: &a.worked, specialists: a.specialists };
-    let parts = cstats::city_parts(g, c, &work);
     // refcheck: happiness-seen-committed
     let happy = rc.happiness >= 0;
-    let stats = cstats::city_stats_from(g, c, &parts, &work, rc.construction, Some(happy));
-    let mut surplus = stats.food();
+    let mut surplus = cstats::food_surplus(g, c, &work, rc.construction, happy);
     let tiles: SmallVec<[Candidate; 32]> = avail
         .iter()
         .copied()
         .filter(|t| !a.worked.contains(t) && !cstats::provides_yield_without_pop(g, *t))
-        .map(|t| (t, memo::tile_yield(g, t, Some(owner), Some(c)), g.xy(t)))
+        .map(|t| {
+            let s = memo::tile_yield(g, t, Some(owner), Some(c));
+            (t, s, g.xy(t), rank_rest(&rc, &s))
+        })
         .collect();
     let spec_food_bonus = specialist_food_bonus(g, c);
     let gpp = if city.manual_specialists || maxs.is_empty() { 0 } else { city_gpp_bonus(g, c) };
@@ -353,16 +379,21 @@ fn auto_assign(
     let mut taken: SmallVec<[bool; 32]> = tiles.iter().map(|_| false).collect();
     for _ in 0..free {
         let mut best: Option<(usize, f64)> = None;
-        for (i, (_, s, (x, y))) in tiles.iter().enumerate() {
+        for (i, &(_, s, (x, y), rest)) in tiles.iter().enumerate() {
             if taken[i] {
                 continue;
             }
-            let v = rank_stats_for_work(g, &rc, s, false, surplus);
+            // Converting food to production makes production read the food: rank it whole.
+            let v = if surplus > 0.0 && rc.converts {
+                rank_stats_for_work(&rc, &s, false, surplus)
+            } else {
+                rest + rank_food(&rc, s[Stat::Food], surplus)
+            };
             let better = match best {
                 None => true,
                 Some((j, bv)) => {
                     let (bx, by) = tiles[j].2;
-                    (v, *x, *y) > (bv, bx, by)
+                    (v, x, y) > (bv, bx, by)
                 }
             };
             if better {
@@ -449,7 +480,6 @@ fn unassign_extra(
                 let key = (
                     a.locked.contains(&t),
                     rank_stats_for_work(
-                        g,
                         rc,
                         &memo::tile_yield(g, t, Some(owner), Some(c)),
                         false,
@@ -533,8 +563,11 @@ impl Game {
             }
         }
         // A city whose own citizens change what its uniques' conditionals and filters read
-        // (the tiles it works, its specialists) looks again, until its assignment stands.
-        let own = crate::unique::CondDeps::CITY | crate::unique::CondDeps::TILE;
+        // (the tiles it works, its specialists) looks again, until its assignment stands. Those
+        // read the tile class besides the city's (a population filter's conditional, a worked
+        // tile's filter), or the map; the city class alone is its capital status, stocks and
+        // size, which no reassignment moves.
+        let own = crate::unique::CondDeps::TILE | crate::unique::CondDeps::MAP;
         if changed && self.dv.stats.deps().citizens.intersects(own) {
             self.pending.flag_city(c);
         }
@@ -607,7 +640,7 @@ fn tile_at(g: &Game, x: i64, y: i64) -> Result<TileIdx, ActionError> {
 // refcheck: citizen-tools-list-tiles-sorted
 fn xys(g: &Game, tiles: &[TileIdx]) -> Value {
     let mut v: SmallVec<[(i32, i32); 16]> = tiles.iter().map(|&t| g.xy(t)).collect();
-    v.sort_unstable();
+    v.sort();
     Value::Array(v.into_iter().map(|(x, y)| json!([x, y])).collect())
 }
 

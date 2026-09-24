@@ -40,8 +40,8 @@ use super::params::{PolicyOrBelief, PopulationFilter, PromotionOrStatus, StatOrR
 use super::table::{Cond, CondDeps, UFlags, UniqueTable};
 use super::world::{CombatAction, CombatCtx, Ctx, EvalWorld};
 use crate::base::ids::{
-    BuildingId, CityId, Id, NationId, PlayerId, SetRef, TileFilterId, TileIdx, Turn, UniqueId,
-    UnitFilterId, UnitId,
+    BuildingId, CityId, Id, IdVec, NationId, PlayerId, SetRef, TileFilterId, TileIdx, Turn,
+    UniqueId, UnitFilterId, UnitId,
 };
 use crate::base::rng::{KeyPart, Purpose, Rng};
 use crate::base::sets::BuildingSet;
@@ -125,11 +125,9 @@ pub fn deps_of(data: &CondData, filters: &Filters) -> CondDeps {
         | C::ConditionalBetweenPopulationFilter(_)
         | C::ConditionalBelowPopulationFilter(_) => D::CITY | D::TILE,
         C::ConditionalCityFilter(x) => D::CITY | D::TILE | filters.city(x.cities).deps(),
-        // The trade network to the capital (`cities.py:1967-2067`): roads, harbours, borders and
-        // techs, and the civilization's own `Forests and Jungles are roads` (`cities.py:1985`).
-        // A civilization's uniques have no class (city-state bonuses follow influence), so it
-        // reads every class.
-        C::ConditionalCityConnected => D::all(),
+        // The trade network to the capital of the city a rule means (`cities.py:1967-2067`),
+        // which the connectivity memo keeps.
+        C::ConditionalCityConnected => D::CITY | D::TILE | D::CONNECTED,
         C::ConditionalWhenGarrisoned => D::CITY | D::TILE | D::UNIT_SET,
         C::ConditionalOurUnit(x) => D::UNIT | units(x.units),
         C::ConditionalOurUnitOnUnit(x) => D::UNIT | units(x.units),
@@ -197,8 +195,45 @@ pub(crate) fn assign_deps(t: &mut UniqueTable) {
         let d = u.conds.ids().fold(CondDeps::empty(), |d, c| d | deps[c.index()]);
         u.set_deps(d);
     }
+    let reads: Vec<CondDeps> =
+        t.uniques.iter().map(|(_, u)| u.deps() | param_reads(t, u)).collect();
+    t.reads = IdVec::from_vec(reads);
     let this_city = t.city_filters.iter().find(|&(_, &text)| t.text(text) == "in this city");
     t.this_city = this_city.map(|(id, _)| id);
+}
+
+/// What the parameters of unique `u` read when a rule evaluates them: the classes of the city,
+/// unit, civilization, fight and tile filters they name (a tile filter asked of the tiles around
+/// the one in context for `[stats] for each adjacent [tileFilter]`), and of their countables; a
+/// city's followers read its religion.
+fn param_reads(t: &UniqueTable, u: &super::table::Unique) -> CondDeps {
+    use super::params::Param;
+    let filters = &t.filters;
+    let around = matches!(u.data, super::generated::UniqueData::ImprovementStatsForAdjacencies(_));
+    let mut d = CondDeps::empty();
+    for p in u.data.params() {
+        d |= match p {
+            Param::CityFilter(f) => filters.city(f).deps(),
+            Param::UnitFilter(f) => filters.unit(f).deps(),
+            Param::CivFilter(f) => filters.civ(f).deps(),
+            Param::CombatantFilter(f) => {
+                let c = filters.combatant(f);
+                c.unit.deps() | c.city.deps()
+            }
+            Param::TileFilter(f) if around => filters.tile(f).deps_around(),
+            Param::TileFilter(f) => filters.tile(f).deps_here(),
+            Param::Object(o) => {
+                t.object(o).tiles.map_or(CondDeps::empty(), |f| filters.tile(f).deps_here())
+            }
+            Param::Countable(c) => c.deps(filters),
+            Param::Population(
+                PopulationFilter::FollowersOfThisReligion
+                | PopulationFilter::FollowersOfTheMajorityReligion,
+            ) => CondDeps::RELIGION_STATE,
+            _ => CondDeps::empty(),
+        };
+    }
+    d
 }
 
 // ---- Whether a unique applies ------------------------------------------------------------------
@@ -212,6 +247,7 @@ pub(crate) fn assign_deps(t: &mut UniqueTable) {
 /// silently.
 pub fn applies<W: EvalWorld>(id: UniqueId, ctx: &Ctx, w: &W) -> bool {
     let t = w.rules().uniques();
+    super::record::note(t, id);
     let u = t.get(id);
     if u.conds.is_empty() || ctx.ignore_conditionals {
         return true;
@@ -228,6 +264,7 @@ pub fn applies<W: EvalWorld>(id: UniqueId, ctx: &Ctx, w: &W) -> bool {
 /// 5.8, hoisting).
 pub fn applies_scoped<W: EvalWorld>(id: UniqueId, ctx: &Ctx, w: &W, mask: CondDeps) -> bool {
     let t = w.rules().uniques();
+    super::record::note(t, id);
     let u = t.get(id);
     if u.conds.is_empty() || ctx.ignore_conditionals {
         return true;

@@ -440,9 +440,7 @@ fn set_player(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
         }
         if let Some(v) = given(o, "golden_age_turns") {
             let n = whole(v, "golden_age_turns")?;
-            if let Some(pl) = g.player_mut(p, PlayerTouch::STOCKS) {
-                pl.econ.golden_age_turns = n;
-            }
+            g.set_golden_age_turns(p, n);
         }
         for key in ["free_policies", "free_techs"] {
             if let Some(v) = given(o, key) {

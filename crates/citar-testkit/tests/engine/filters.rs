@@ -445,13 +445,13 @@ fn civilization_leaves() {
     assert!(cs.eval(&mut |l| l.eval(&m, P2, None)) && !cs.eval(&mut |l| l.eval(&m, P0, None)));
     assert!(filter::civ_filter(r, "Nobody at all").is_err(), "a term that matches nothing");
     // The tests against the viewer read the diplomatic state, and open borders the turn they
-    // end. Friendship also reads a city-state's influence, another civilization's state that no
-    // class names (1a-07 decided): every class.
+    // end. Friendship also reads the turn a declared friendship ends and a city-state's
+    // influence.
     let deps = |text| filter::civ_filter(r, text).expect("compiles").deps();
     assert_eq!(deps("Hostile"), CondDeps::WAR);
     assert_eq!(deps("Known"), CondDeps::WAR);
     assert_eq!(deps("Open Borders"), CondDeps::WAR | CondDeps::TURN);
-    assert_eq!(deps("Friendly"), CondDeps::all());
+    assert_eq!(deps("Friendly"), CondDeps::WAR | CondDeps::TURN | CondDeps::INFLUENCE);
 }
 
 fn unit_world(r: &Ruleset) -> Mock {

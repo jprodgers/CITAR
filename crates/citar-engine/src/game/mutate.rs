@@ -39,6 +39,8 @@
 //! `let _ = ...` is refused by `clippy::let_underscore_must_use`; `_ = ...`, `let _x = ...` and
 //! `drop(...)` get past both lints and are review items.
 
+use smallvec::SmallVec;
+
 use super::Game;
 use super::derive::Derived;
 use super::derive::rev::{CityTouch, DiploTouch, PlayerTouch, UnitTouch, WorldTouch};
@@ -84,11 +86,17 @@ impl Game {
     /// supplies and conditionals, beyond the tiles [`Derived::on`] names (DESIGN.md 6.7): a
     /// city-state's bonuses (contact, war, an ally, its fate), a unit made or lost (the supply),
     /// a resource's tile, a friendship (great person points), a city appearing or changing
-    /// hands, and the turn.
+    /// hands, and the turn: what its conditionals read, and friendships running out.
     fn recheck_civs(&mut self, ch: &Change) {
         let cs = |g: &Self, p: PlayerId| g.st.player(p).is_some_and(Player::is_city_state);
         match *ch {
-            Change::Turn | Change::PlayerAlive(_) => {
+            Change::Turn => {
+                self.recheck_for(CondDeps::TURN | CondDeps::CHANCE, None);
+                if self.dv.stats.deps().friendship {
+                    self.flag_friendships_ended();
+                }
+            }
+            Change::PlayerAlive(_) => {
                 for c in self.st.cities().ids() {
                     self.pending.flag_city(c);
                 }
@@ -417,6 +425,25 @@ impl Game {
         Ok(())
     }
 
+    /// Flags the cities of both sides of each declared friendship that ran out as the turn began:
+    /// their great person points lose its bonus (`great_people.city_gpp_bonus`,
+    /// `great_people.py:24-31`), which their specialists' ranking reads.
+    fn flag_friendships_ended(&mut self) {
+        let turn = self.st.clock().turn;
+        let ended: SmallVec<[(PlayerId, PlayerId); 4]> = self
+            .st
+            .diplo()
+            .relations()
+            .pairs()
+            .filter(|(_, _, r)| r.friendship_until.checked_add(1) == Some(turn))
+            .map(|(a, b, _)| (a, b))
+            .collect();
+        for (a, b) in ended {
+            self.flag_cities_of(a);
+            self.flag_cities_of(b);
+        }
+    }
+
     /// Sets the clock: a [`Change::Turn`] only when the turn number moves.
     pub(crate) fn set_clock(&mut self, clock: TurnClock) {
         let ch = self.st.set_clock(clock);
@@ -435,7 +462,7 @@ impl Game {
         value: f64,
     ) -> Result<(), StateError> {
         let was = self.is_friend_level(cs, major);
-        self.recheck_for(CondDeps::WAR, None);
+        self.recheck_for(CondDeps::INFLUENCE, None);
         let slot = self
             .st
             .players_mut()
@@ -491,8 +518,10 @@ impl Game {
             self.flag_cities_of(owner);
             self.recheck_for(CondDeps::GLOBAL_BUILDINGS | CondDeps::CIV_BUILDINGS, None);
         }
-        if t.contains(CityTouch::STOCKS) {
-            self.recheck_for(CondDeps::CITY, None);
+        // Its stored food and culture, which a conditional about the city reads, and no other
+        // city's ranking: a tile's city conditionals are its working city's.
+        if t.contains(CityTouch::STOCKS) && self.dv.stats.deps().citizens.contains(CondDeps::CITY) {
+            self.pending.flag_city(c);
         }
         self.st.cities_mut().get_mut(c)
     }
@@ -541,16 +570,20 @@ impl Game {
     pub(crate) fn player_mut(&mut self, p: PlayerId, t: PlayerTouch) -> Option<&mut Player> {
         self.st.player(p)?;
         self.dv.revs.touch_player(p, t);
-        // What its cities' yields read: its index (techs, policies, beliefs), its stocks (a
-        // golden age), its capital.
+        // What its cities' yields read: its index (techs, policies, beliefs), a golden age (a
+        // gold more on a tile that has some), its capital. Its gold, culture and faith only
+        // through conditionals that read them.
         if t.intersects(
             PlayerTouch::INDEX
                 | PlayerTouch::POLICIES
                 | PlayerTouch::RELIGION
-                | PlayerTouch::STOCKS
+                | PlayerTouch::GOLDEN_AGE
                 | PlayerTouch::CAPITAL,
         ) {
             self.flag_cities_of(p);
+        }
+        if t.contains(PlayerTouch::STOCKS) {
+            self.recheck_for(CondDeps::STOCKS, Some(p));
         }
         if t.contains(PlayerTouch::RESEARCH) {
             self.recheck_for(CondDeps::RESEARCH_QUEUE, Some(p));
@@ -565,9 +598,24 @@ impl Game {
             self.recheck_for(CondDeps::CITY_COUNT, None);
         }
         if t.contains(PlayerTouch::CITY_STATE) {
-            self.recheck_for(CondDeps::WAR, None);
+            self.recheck_for(CondDeps::INFLUENCE, None);
         }
         self.st.players_mut().get_mut(p)
+    }
+
+    /// Sets how many turns of a golden age a civilization has left: a `GOLDEN_AGE` touch when
+    /// the golden age begins or ends, which tile yields, city stats and citizens read, and a
+    /// `STOCKS` touch for a turn counted down within it.
+    pub(crate) fn set_golden_age_turns(&mut self, p: PlayerId, turns: i32) {
+        let Some(was) = self.st.player(p).map(|x| x.econ.golden_age_turns) else { return };
+        let touch = if (was > 0) == (turns > 0) {
+            PlayerTouch::STOCKS
+        } else {
+            PlayerTouch::STOCKS | PlayerTouch::GOLDEN_AGE
+        };
+        if let Some(x) = self.player_mut(p, touch) {
+            x.econ.golden_age_turns = turns;
+        }
     }
 
     /// A unit's fields, after moving the revisions `t` names; `SIGHT` marks it a dirty vision
@@ -757,8 +805,16 @@ mod tests {
             (
                 CondDeps::GOLDEN_AGE,
                 Ctx::civ(p),
+                Box::new(|g| g.set_golden_age_turns(PlayerId(0), 3)),
+            ),
+            // The connectivity memo's stamp: Rome gets a capital, and a network from it.
+            (
+                CondDeps::CONNECTED,
+                Ctx::civ(p),
                 Box::new(|g| {
-                    g.player_mut(PlayerId(0), PlayerTouch::STOCKS);
+                    if let Some(x) = g.player_mut(PlayerId(0), PlayerTouch::CAPITAL) {
+                        x.capital = Some(cid(1));
+                    }
                 }),
             ),
             // The supply memo's stamp: a Swordsman needs Iron, a line of Rome's supply.
@@ -924,10 +980,10 @@ mod tests {
                     g.city_mut(CityId::FIRST, CityTouch::WORK);
                 }),
             ),
-            // Influence, which the friendly civilization and land leaves read (with every
-            // class), even another major's and below the friend level.
+            // Influence, which the friendly civilization and land leaves read, even another
+            // major's and below the friend level.
             (
-                CondDeps::WAR,
+                CondDeps::INFLUENCE,
                 Ctx::civ(p),
                 Box::new(|g| {
                     let _ok = g.set_influence(PlayerId(2), PlayerId(1), 5.0);
@@ -955,6 +1011,49 @@ mod tests {
         assert_eq!(covered, CondDeps::all());
         assert_eq!(CondDeps::LOCAL | CondDeps::CIV_LEVEL, CondDeps::all());
         assert!(CondDeps::LOCAL.intersection(CondDeps::CIV_LEVEL).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn what_flags_citizens_and_what_does_not() -> Result<(), StateError> {
+        let mut g = testing::duel();
+        let (rome, greece, geneva) = (PlayerId(0), PlayerId(1), PlayerId(2));
+        let roma = testing::city(&mut g, rome, TileIdx(22), "Roma");
+        let athens = testing::city(&mut g, greece, TileIdx(57), "Athens");
+        g.settle();
+        let deps = g.dv.stats.deps().citizens;
+        // The shipped ruleset's ranking reads no influence, treasury or turn: none of these
+        // flags a city.
+        assert!(!deps.intersects(CondDeps::INFLUENCE | CondDeps::STOCKS | CondDeps::TURN));
+        g.set_influence(geneva, rome, 10.0)?;
+        if let Some(x) = g.player_mut(rome, PlayerTouch::STOCKS) {
+            x.econ.gold += 5.0;
+        }
+        let clock = *g.st.clock();
+        g.set_clock(TurnClock { turn: clock.turn + 1, ..clock });
+        assert_eq!(g.pending.take_recheck(), []);
+        // A city's stored food, which conditionals about the city read ("[in capital]" reads
+        // the city class): that city alone.
+        assert!(deps.contains(CondDeps::CITY));
+        if let Some(x) = g.city_mut(athens, CityTouch::STOCKS) {
+            x.food += 1.0;
+        }
+        assert_eq!(g.pending.take_recheck(), [athens]);
+        // A golden age beginning moves the yields of its tiles; a turn of it counted down does not.
+        g.set_golden_age_turns(rome, 5);
+        assert_eq!(g.pending.take_recheck(), [roma]);
+        g.set_golden_age_turns(rome, 4);
+        assert_eq!(g.pending.take_recheck(), []);
+        // A declared friendship running out, where a unique gives great person points for one.
+        g.update_relation(rome, greece, |r| r.friendship_until = clock.turn + 1)?;
+        drop(g.pending.take_recheck());
+        g.set_clock(TurnClock { turn: clock.turn + 2, ..clock });
+        let flagged = g.pending.take_recheck();
+        if g.dv.stats.deps().friendship {
+            assert_eq!(flagged, [roma, athens]);
+        } else {
+            assert_eq!(flagged, []);
+        }
         Ok(())
     }
 
@@ -989,6 +1088,7 @@ mod tests {
         let read = |g: &Game, d: CondDeps, p: PlayerId| g.dv.revs.cond(&g.st, d, &Ctx::civ(p));
         let before = (read(&g, indexes, rome), read(&g, indexes, greece));
         let war = read(&g, CondDeps::WAR, rome);
+        let influence = read(&g, CondDeps::INFLUENCE, rome);
         let turn = read(&g, CondDeps::TURN, rome);
         // Growth, a queue edit, a heal: not the buildings.
         if let Some(c) = g.city_mut(roma, CityTouch::CORE) {
@@ -1003,7 +1103,8 @@ mod tests {
         // Influence below the friend level, whoever's.
         g.set_influence(geneva, rome, 10.0)?;
         g.set_influence(geneva, greece, 20.0)?;
-        assert!(read(&g, CondDeps::WAR, rome) > war, "the friendly leaves read influence");
+        assert_eq!(read(&g, CondDeps::WAR, rome), war, "influence is not war");
+        assert!(read(&g, CondDeps::INFLUENCE, rome) > influence);
         assert_eq!((read(&g, indexes, rome), read(&g, indexes, greece)), before);
         // A tech is Rome's alone; a policy is what every civilization has adopted too.
         g.player_mut(rome, PlayerTouch::INDEX);

@@ -522,6 +522,10 @@ pub fn unit_maintenance(g: &Game, p: PlayerId) -> i32 {
         }
     }
     let skip_garrisons = uq::any(uq::civ(&v, p, UniqueType::UnitsInCitiesNoMaintenance, &ctx));
+    if skip_garrisons {
+        // Where its units stand is read too: a memo of this reads its units' moves.
+        crate::unique::record::note_classes(crate::unique::CondDeps::UNIT);
+    }
     let civ_wide: Vec<(crate::base::ids::UniqueId, u16, i32)> =
         uq::raw(&v, p, UniqueType::UnitMaintenanceDiscount)
             .filter_map(|h| match h.data() {
@@ -974,17 +978,9 @@ pub(crate) fn compute_happiness(g: &Game, p: PlayerId) -> Happiness {
         + f64::from(diff.extra_happiness_per_luxury)
         + sum_nores(UniqueType::BonusHappinessFromLuxury);
     let is_lux = |res: ResourceId| r.resources()[res].kind == ResourceType::Luxury;
-    let (owned_lux, traded): (SmallVec<[ResourceId; 8]>, Vec<ResourceItem>) = match supply(g, p) {
-        Some(s) => (
-            s.totals()
-                .iter()
-                .filter(|&&(res, a)| a > 0 && is_lux(res))
-                .map(|&(res, _)| res)
-                .collect(),
-            s.items().to_vec(),
-        ),
-        None => (SmallVec::new(), Vec::new()),
-    };
+    let owned_lux: SmallVec<[ResourceId; 8]> = supply(g, p).map_or_else(SmallVec::new, |s| {
+        s.totals().iter().filter(|&&(res, a)| a > 0 && is_lux(res)).map(|&(res, _)| res).collect()
+    });
     #[allow(clippy::cast_precision_loss, reason = "a count of luxuries")]
     bd.push((CivSource::LuxuryResources, owned_lux.len() as f64 * per_lux));
     let bonus = sum_nores(UniqueType::CityStateLuxuryHappiness) / 100.0;
@@ -1004,7 +1000,7 @@ pub(crate) fn compute_happiness(g: &Game, p: PlayerId) -> Happiness {
     let retain = sum_nores(UniqueType::RetainHappinessFromLuxury) / 100.0;
     if retain != 0.0 {
         let mut away = ResourceSet::new();
-        for it in &traded {
+        for it in supply(g, p).iter().flat_map(|s| s.items().iter()) {
             if it.origin == Origin::Trade
                 && it.amount < 0
                 && is_lux(it.resource)
@@ -1233,7 +1229,7 @@ pub(crate) fn compute_civ_stats(g: &Game, p: PlayerId) -> CivStats {
         y.add_to(k, -x);
     }
     let mut unit = Yields::default();
-    unit.put(Stat::Gold, -f64::from(unit_maintenance(g, p)));
+    unit.put(Stat::Gold, -f64::from(super::derive::stats::unit_upkeep(g, p)));
     match map.iter_mut().find(|(k, _)| *k == CivSource::UnitUpkeep) {
         Some((_, y)) => y.add_to(Stat::Gold, unit.get(Stat::Gold)),
         None => map.push((CivSource::UnitUpkeep, unit)),

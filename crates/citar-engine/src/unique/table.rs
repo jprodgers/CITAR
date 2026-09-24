@@ -61,18 +61,26 @@ pub enum Role {
 pub struct Unique {
     pub data: UniqueData,
     pub conds: CondSpan,
-    /// The classes of the conditionals ([`CondDeps`], the low 24 bits) and the unique's
-    /// [`UFlags`] (the top 8). Read through [`Unique::deps`] and [`Unique::flags`].
+    /// The classes of the conditionals ([`CondDeps`], the low 26 bits) and the unique's
+    /// [`UFlags`] (the top 6). Read through [`Unique::deps`] and [`Unique::flags`].
     packed: u32,
 }
 
 const _: () = assert!(core::mem::size_of::<UniqueData>() == 16);
 const _: () = assert!(core::mem::size_of::<Unique>() <= 32, "DESIGN.md 5.5");
 const _: () = assert!(core::mem::size_of::<Unique>() == 24);
+const _: () = assert!(CondDeps::all().bits() < 1 << DEPS_BITS, "the classes fit their bits");
+const _: () =
+    assert!((UFlags::all().bits() as u32) < 1 << (32 - DEPS_BITS), "and the flags theirs");
+
+/// How many low bits of [`Unique::packed`] hold the classes.
+const DEPS_BITS: u32 = 26;
+/// The mask of those bits.
+const DEPS_MASK: u32 = (1 << DEPS_BITS) - 1;
 
 impl Unique {
     pub(crate) fn new(data: UniqueData, conds: CondSpan, deps: CondDeps, flags: UFlags) -> Self {
-        Self { data, conds, packed: deps.bits() | (u32::from(flags.bits()) << 24) }
+        Self { data, conds, packed: deps.bits() | (u32::from(flags.bits()) << DEPS_BITS) }
     }
 
     /// What its conditionals read: empty exactly when it has none, so that it always applies
@@ -80,20 +88,20 @@ impl Unique {
     #[must_use]
     #[inline]
     pub const fn deps(&self) -> CondDeps {
-        CondDeps::from_bits_truncate(self.packed & 0x00ff_ffff)
+        CondDeps::from_bits_truncate(self.packed & DEPS_MASK)
     }
 
     /// Replaces what its conditionals read, keeping its flags: the loader's, once the filters the
     /// conditionals read are compiled (`unique::cond::assign_deps`).
     pub(crate) fn set_deps(&mut self, deps: CondDeps) {
-        self.packed = (self.packed & 0xff00_0000) | deps.bits();
+        self.packed = (self.packed & !DEPS_MASK) | deps.bits();
     }
 
     /// The unique's own flags.
     #[must_use]
     #[inline]
     pub const fn flags(&self) -> UFlags {
-        UFlags::from_bits_truncate((self.packed >> 24) as u8)
+        UFlags::from_bits_truncate((self.packed >> DEPS_BITS) as u8)
     }
 }
 
@@ -127,17 +135,17 @@ impl CondSpan {
 
 bitflags! {
     /// What a conditional reads, by class (DESIGN.md 5.8): a memo that evaluates it validates
-    /// against the revisions these map to (`Revs::cond`, DESIGN.md 6.3). 24 bits, so a
-    /// [`Unique`] keeps its [`UFlags`] in the top byte of the same word.
+    /// against the revisions these map to (`Revs::cond`, DESIGN.md 6.3). 26 bits, so a
+    /// [`Unique`] keeps its six [`UFlags`] in the top bits of the same word.
     ///
     /// The civilization-level classes are about the civilization in context, or about every
     /// civilization where they say so. The context-local classes ([`CondDeps::LOCAL`]) are about
     /// the city, unit, tile or fight in context, which a memo keyed by that entity holds. A
     /// conditional whose answer depends on the ids in its context alone (a civilization's nation)
     /// reads `CONFIG`, so that a unique's deps are empty exactly when it has no conditionals.
-    /// Where no class names what a conditional reads (a city-state's influence, a civilization's
-    /// own uniques, and so the trade network to the capital, which reads them), it reads
-    /// [`CondDeps::all`], which is always correct.
+    /// Where no class names what a conditional reads (a civilization's own uniques, which the
+    /// friendly and foreign land leaves ask of the viewer), it reads [`CondDeps::all`], which is
+    /// always correct.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct CondDeps: u32 {
         /// The turn, and what runs out on a turn: open borders, declared friendships.
@@ -149,11 +157,11 @@ bitflags! {
         const STOCKS = 1 << 2;
         /// The civilization's resource supply.
         const RESOURCES = 1 << 3;
-        /// Whether the civilization is in a golden age.
+        /// Whether the civilization is in a golden age: the turns it has left, above 0 or not.
         const GOLDEN_AGE = 1 << 4;
         /// The diplomatic state between every two civilizations: war and peace, who has met whom,
         /// open borders and declared friendships (one revision covers them all). A city-state's
-        /// influence is not in it: the leaves that read influence read [`CondDeps::all`].
+        /// influence is not in it: that is [`CondDeps::INFLUENCE`].
         const WAR = 1 << 5;
         /// The civilization's era.
         const ERA = 1 << 6;
@@ -187,9 +195,12 @@ bitflags! {
         const CONFIG = 1 << 17;
         /// A random draw, keyed by the turn and the context: its answer changes every turn.
         const CHANCE = 1 << 18;
-        /// The city a rule means (`Ctx::rel_city`): its owner, founder, buildings, citizens,
+        /// The city a rule means (`Ctx::rel_city`): its owner, founder, buildings, size,
         /// stored food, health, religion, status (puppet, resisting, razing) and whether it is
-        /// the capital. That is the city in context, else our side's city in a fight, else the
+        /// the capital. Where its citizens work is `TILE`'s (its centre's territory city's worked
+        /// tiles and specialists), which every conditional about its citizens reads besides, so
+        /// a reassignment moves no memo that reads the city alone. That is the city in context,
+        /// else our side's city in a fight, else the
         /// city whose territory the tile in context is, when the civilization in context owns
         /// it: so a memo keyed by a tile or a unit that evaluates a conditional reading `CITY`
         /// validates against the revisions of that territory's city too. Such a conditional
@@ -211,6 +222,14 @@ bitflags! {
         /// to`), which add `TILE` for where they stand. A civilization-level class: it names no
         /// entity in context.
         const MAP = 1 << 23;
+        /// Which cities of a civilization are connected to its capital, and by what (the trade
+        /// network: roads, railroads and harbours, borders, techs and its `Forests and Jungles
+        /// are roads`, `cities.py:1967-2067`), for the civilization in context and the owners
+        /// of the cities of the fight in context. A memo validates it against the connectivity
+        /// memo's stamp (`game::derive::civ::cond`).
+        const CONNECTED = 1 << 24;
+        /// Every city-state's influence with every major: whom a city-state counts a friend.
+        const INFLUENCE = 1 << 25;
     }
 }
 
@@ -569,6 +588,8 @@ pub struct UniqueTable {
     /// The city filter `in this city`, if a unique names it: a one-time effect reads it as the
     /// city in context (`triggers.py:58-61`), though as a filter it selects every city.
     pub(crate) this_city: Option<CityFilterId>,
+    /// What evaluating each unique reads ([`UniqueTable::reads`]).
+    pub(crate) reads: IdVec<UniqueId, CondDeps>,
 }
 
 impl UniqueTable {
@@ -603,6 +624,16 @@ impl UniqueTable {
     #[must_use]
     pub fn meta(&self, id: UniqueId) -> &UniqueMeta {
         &self.meta[id]
+    }
+
+    /// What evaluating the unique `id` reads: its conditionals' classes, and those of the
+    /// filters, countables and population its parameters name (`unique::cond::assign_deps`).
+    /// A memo that records what its computation read (`unique::record`) adds it for every
+    /// unique the computation evaluated; empty for an id the loader has not reached.
+    #[must_use]
+    #[inline]
+    pub fn reads(&self, id: UniqueId) -> CondDeps {
+        self.reads.get(id).copied().unwrap_or_else(CondDeps::empty)
     }
 
     /// The unique's conditionals, in the order the text writes them.
@@ -837,7 +868,7 @@ mod tests {
         assert_eq!(v.deps(), CondDeps::empty());
         assert_eq!(v.flags(), UFlags::all());
         assert_eq!(u.conds.ids().map(|c| c.0).collect::<Vec<_>>(), [7, 8]);
-        assert!(CondDeps::all().bits() < 1 << 24, "the classes fit 24 bits");
+        assert!(CondDeps::all().bits() < 1 << DEPS_BITS, "the classes fit their bits");
         assert!(
             CondDeps::all().contains(CondDeps::MAP) && !CondDeps::LOCAL.contains(CondDeps::MAP)
         );

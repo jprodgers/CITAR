@@ -329,21 +329,22 @@ pub fn workable_tiles(g: &Game, c: CityId) -> Vec<TileIdx> {
     let Some(city) = g.city(c) else { return Vec::new() };
     let owner = city.owner();
     let st = g.state();
-    let range = work_range(g);
+    let grid = g.grid();
+    let (centre, range) = (city.tile(), work_range(g));
     // A sibling works only tiles within its own range, so only one within twice the range of
-    // this city can work one of its tiles.
-    let others: SmallVec<[TileIdx; 32]> = st
-        .cities()
-        .of(owner)
-        .iter()
-        .filter(|&&x| x != c)
-        .filter_map(|&x| st.cities().get(x))
-        .filter(|x| g.grid().distance(x.tile(), city.tile()) <= 2 * range)
-        .flat_map(|x| x.worked.iter().copied())
-        .collect();
+    // this city can work one of its tiles, and of those only the ones in this city's range.
+    let mut others: SmallVec<[TileIdx; 16]> = SmallVec::new();
+    for &x in st.cities().of(owner) {
+        let Some(y) =
+            st.cities().get(x).filter(|y| x != c && grid.distance(y.tile(), centre) <= 2 * range)
+        else {
+            continue;
+        };
+        others.extend(y.worked.iter().copied().filter(|&t| grid.distance(t, centre) <= range));
+    }
     let mut out = Vec::new();
-    for t in g.grid().within(city.tile(), range) {
-        if t == city.tile() || g.tile(t).and_then(crate::state::map::Tile::owner) != Some(owner) {
+    for t in grid.within(centre, range) {
+        if t == centre || g.tile(t).and_then(crate::state::map::Tile::owner) != Some(owner) {
             continue;
         }
         if others.contains(&t) || st.city_at(t).is_some() {
@@ -361,29 +362,47 @@ pub fn workable_tiles(g: &Game, c: CityId) -> Vec<TileIdx> {
 /// (`cities.provides_yield_without_pop`, `cities.py:196-202`).
 #[must_use]
 pub fn provides_yield_without_pop(g: &Game, t: TileIdx) -> bool {
-    let r = g.rules();
-    let ty = UniqueType::TileProvidesYieldWithoutPopulation;
-    if let Some(i) = crate::game::tiles::unpillaged_improvement(g, t)
-        && has_type(r, &r.improvements()[i].uniques, ty)
-    {
-        return true;
+    let (improvements, terrains) = &g.rules().derived().yields_without_pop;
+    if improvements.is_empty() && terrains.is_empty() {
+        return false;
     }
-    crate::game::tiles::all_terrains(g, t).any(|x| has_type(r, &r.terrains()[x].uniques, ty))
+    crate::game::tiles::unpillaged_improvement(g, t).is_some_and(|i| improvements.contains(i))
+        || crate::game::tiles::all_terrains(g, t).any(|x| terrains.contains(x))
 }
 
 /// Every tile that adds to a city's yields: its centre, its worked tiles, and its own tiles that
 /// yield without a citizen (`cities.worked_or_free_tiles`, `cities.py:205-213`).
 #[must_use]
 pub fn worked_or_free_tiles(g: &Game, c: CityId, worked: &[TileIdx]) -> SmallVec<[TileIdx; 24]> {
+    with_free_tiles(g, c, worked, &memo::city_base(g, c).free)
+}
+
+/// A city's own tiles, but its centre, that yield without a citizen, as a Citadel does.
+#[must_use]
+pub fn free_tiles(g: &Game, c: CityId) -> SmallVec<[TileIdx; 4]> {
+    let (improvements, terrains) = &g.rules().derived().yields_without_pop;
+    if improvements.is_empty() && terrains.is_empty() {
+        return SmallVec::new();
+    }
+    let Some(city) = g.city(c) else { return SmallVec::new() };
+    economy::city_tiles(g, c)
+        .into_iter()
+        .filter(|&t| t != city.tile() && provides_yield_without_pop(g, t))
+        .collect()
+}
+
+/// [`worked_or_free_tiles`] with the city's [`free_tiles`] given.
+fn with_free_tiles(
+    g: &Game,
+    c: CityId,
+    worked: &[TileIdx],
+    free: &[TileIdx],
+) -> SmallVec<[TileIdx; 24]> {
     let mut out = SmallVec::new();
     let Some(city) = g.city(c) else { return out };
     out.push(city.tile());
     out.extend(worked.iter().copied());
-    for t in economy::city_tiles(g, c) {
-        if t != city.tile() && !worked.contains(&t) && provides_yield_without_pop(g, t) {
-            out.push(t);
-        }
-    }
+    out.extend(free.iter().copied().filter(|t| !worked.contains(t)));
     out
 }
 
@@ -928,9 +947,13 @@ pub fn production_from_excess_food(food: f64) -> f64 {
 /// (`cities.can_convert_food`, `cities.py:486-492`).
 #[must_use]
 pub fn can_convert_food(g: &Game, food: f64, construction: Option<Constructible>) -> bool {
-    if food <= 0.0 {
-        return false;
-    }
+    food > 0.0 && converts_food(g, construction)
+}
+
+/// Whether what a city builds turns surplus food into production, whatever the food: a unit or
+/// building with `Excess Food converted to Production when under construction`.
+#[must_use]
+pub fn converts_food(g: &Game, construction: Option<Constructible>) -> bool {
     let r = g.rules();
     let ty = UniqueType::ConvertFoodToProductionWhenConstructed;
     match construction {
@@ -944,6 +967,55 @@ pub fn can_convert_food(g: &Game, food: f64, construction: Option<Constructible>
 #[must_use]
 pub fn current_construction(city: &City) -> Option<Constructible> {
     city.queue.first().copied()
+}
+
+/// What a city's yields are made of that does not depend on where its citizens work: its
+/// buildings' yields, its uniques' flat yields by source, and the percentage its food is raised
+/// by. The memo `CityBase` keeps it across reassignments; [`CityParts`] and the food citizen
+/// assignment reads ([`food_surplus`]) start from it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CityBase {
+    /// What its buildings yield.
+    pub buildings: Stats,
+    /// Its uniques' flat stats by source.
+    pub by_source: SmallVec<[(SourceKind, Yields); 4]>,
+    /// The percentage its food is raised by (the food of `pct_bonuses`).
+    pub food_pct: f64,
+    /// Its own tiles that yield without a citizen ([`free_tiles`]).
+    pub free: SmallVec<[TileIdx; 4]>,
+}
+
+impl super::super::derive::rev::BitEq for CityBase {
+    fn bit_eq(&self, other: &Self) -> bool {
+        self.buildings.bit_eq(&other.buildings)
+            && self.food_pct.to_bits() == other.food_pct.to_bits()
+            && self.free == other.free
+            && self.by_source.len() == other.by_source.len()
+            && self
+                .by_source
+                .iter()
+                .zip(&other.by_source)
+                .all(|(a, b)| a.0 == b.0 && a.1.keys == b.1.keys && a.1.stats.bit_eq(&b.1.stats))
+    }
+}
+
+/// City `c`'s [`CityBase`], computed.
+#[must_use]
+pub fn city_base(g: &Game, c: CityId) -> CityBase {
+    let Some(city) = g.city(c) else { return CityBase::default() };
+    let v = g.view();
+    let ctx = Ctx::city(&v, c);
+    let bu = BuildingUniques::stats(&v, c, &ctx);
+    let mut buildings = Stats::ZERO;
+    for b in city.buildings.iter() {
+        buildings += building_stats_with(g, &v, b, &ctx, &bu);
+    }
+    CityBase {
+        buildings,
+        by_source: uniques_by_source(g, c),
+        food_pct: food_percent(g, c),
+        free: free_tiles(g, c),
+    }
 }
 
 /// A city's happiness and the parts of its yields its stats reuse (`cities._city_happiness`,
@@ -994,18 +1066,26 @@ impl CityParts {
 /// A city's parts, with its citizens where `work` puts them.
 #[must_use]
 pub fn city_parts(g: &Game, c: CityId, work: &Work<'_>) -> CityParts {
+    city_parts_on(g, c, work, &worked_or_free_tiles(g, c, work.worked))
+}
+
+/// [`city_parts`] with the tiles that add to its yields given ([`worked_or_free_tiles`] of
+/// `work`): the memo keeps them to validate against.
+#[must_use]
+pub fn city_parts_on(g: &Game, c: CityId, work: &Work<'_>, tiles: &[TileIdx]) -> CityParts {
     let mut out = CityParts::default();
     let Some(city) = g.city(c) else { return out };
     let owner = city.owner();
     let r = g.rules();
-    for t in worked_or_free_tiles(g, c, work.worked) {
+    for &t in tiles {
         out.tiles += memo::tile_yield(g, t, Some(owner), Some(c));
     }
     let v = g.view();
     let ctx = Ctx::city(&v, c);
-    let bu = BuildingUniques::stats(&v, c, &ctx);
-    for b in city.buildings.iter() {
-        out.buildings += building_stats_with(g, &v, b, &ctx, &bu);
+    {
+        let base = memo::city_base(g, c);
+        out.buildings = base.buildings;
+        out.by_source.clone_from(&base.by_source);
     }
     for (i, &n) in work.specialists.iter().enumerate() {
         if n > 0
@@ -1014,7 +1094,6 @@ pub fn city_parts(g: &Game, c: CityId, work: &Work<'_>) -> CityParts {
             out.specialists.add_scaled(&specialist_stats(g, c, s), f64::from(n));
         }
     }
-    out.by_source = uniques_by_source(g, c);
     let Some(p) = g.player(owner) else { return out };
     if !p.is_major() {
         return out;
@@ -1242,6 +1321,127 @@ pub fn city_stats_from(
     out.total = total;
     out.pct = pct;
     out
+}
+
+/// What a city's citizens would leave of its food each turn with them where `work` puts them:
+/// the food column of [`city_stats_from`] alone, as citizen assignment reads it
+/// (`auto_assign_population` reads `city_stats(...)["total"]["food"]`, `cities.py:833-834`).
+/// It takes the steps of the full breakdown in its order, leaving out every other stat: the
+/// production bonuses, maintenance, and each line's other yields. `happy` is whether its owner
+/// is happy enough for We Love The King Day's food.
+#[must_use]
+pub fn food_surplus(
+    g: &Game,
+    c: CityId,
+    work: &Work<'_>,
+    construction: Option<Constructible>,
+    happy: bool,
+) -> f64 {
+    let Some(city) = g.city(c) else { return 0.0 };
+    if city.resistance > 0 {
+        return 0.0;
+    }
+    let owner = city.owner();
+    let food = |s: &Stats| s[Stat::Food];
+    // Each line's food, in the breakdown's order: the population (none), the tiles, the
+    // specialists, the trade route, the buildings, the uniques by the kind of their source.
+    let mut col: SmallVec<[f64; 16]> = SmallVec::new();
+    col.push(0.0);
+    let mut tiles = 0.0;
+    for t in with_free_tiles(g, c, work.worked, &memo::city_base(g, c).free) {
+        tiles += food(&memo::tile_yield(g, t, Some(owner), Some(c)));
+    }
+    col.push(tiles);
+    let mut specialists = Stats::ZERO;
+    for (i, &n) in work.specialists.iter().enumerate() {
+        if n > 0
+            && let Some(s) = u8::try_from(i).ok().map(SpecialistId)
+        {
+            specialists.add_scaled(&specialist_stats(g, c, s), f64::from(n));
+        }
+    }
+    col.push(food(&specialists));
+    col.push(trade_route_stats(g, c).get(Stat::Food));
+    let scale = {
+        let base = memo::city_base(g, c);
+        col.push(food(&base.buildings));
+        for (_, y) in &base.by_source {
+            col.push(y.get(Stat::Food));
+        }
+        1.0 + base.food_pct / 100.0
+    };
+    for x in &mut col[1..] {
+        *x *= scale;
+    }
+    col[0] -= food_eaten(g, c, work);
+    let mut total: f64 = col.iter().sum();
+    if total > 0.0 {
+        for (_, amount) in growth_bonus(g, c, total) {
+            col.push(amount);
+        }
+        if city.wltkd > 0
+            && happy
+            && g.player(owner).is_some_and(crate::state::players::Player::is_major)
+        {
+            col.push(total / 4.0);
+        }
+        total = col.iter().sum();
+    }
+    if can_convert_food(g, total, construction) {
+        col.push(-total);
+    }
+    let v = g.view();
+    if uq::any(uq::city(&v, c, UniqueType::NullifiesGrowth, &Ctx::city(&v, c))) {
+        let cur: f64 = col.iter().sum();
+        if cur > 0.0 {
+            col.push(-cur);
+        }
+    }
+    col.iter().sum()
+}
+
+/// The percentage a city's food is raised by: the food column of [`pct_bonuses`], added in its
+/// order (`[n]% [Food]` uniques, its religion's followers, its buildings').
+fn food_percent(g: &Game, c: CityId) -> f64 {
+    let Some(city) = g.city(c) else { return 0.0 };
+    let filters = g.rules().uniques().filters();
+    let v = g.view();
+    let ctx = Ctx::city(&v, c);
+    let mut pct = 0.0;
+    for h in uq::city(&v, c, UniqueType::StatPercentBonus, &ctx) {
+        if let UniqueData::StatPercentBonus(x) = h.data()
+            && x.stat == Stat::Food
+        {
+            for _ in 0..h.n {
+                pct += f64::from(x.percent);
+            }
+        }
+    }
+    for h in uq::city(&v, c, UniqueType::StatPercentBonusCities, &ctx) {
+        if let UniqueData::StatPercentBonusCities(x) = h.data()
+            && x.stat == Stat::Food
+            && filters.city_matches(x.cities, &v, c, None)
+        {
+            for _ in 0..h.n {
+                pct += f64::from(x.percent);
+            }
+        }
+    }
+    for h in uq::city(&v, c, UniqueType::StatPercentFromReligionFollowers, &ctx) {
+        if let UniqueData::StatPercentFromReligionFollowers(x) = h.data()
+            && x.stat == Stat::Food
+        {
+            let followers = f64::from(religion::followers_of_majority(g, c));
+            for _ in 0..h.n {
+                pct += (f64::from(x.percent) * followers).min(f64::from(x.cap));
+            }
+        }
+    }
+    let bu = BuildingUniques::pct(&v, c, &ctx);
+    for b in city.buildings.iter() {
+        pct += building_pct(g, b, &bu).get(Stat::Food);
+    }
+    pct
 }
 
 /// The food a city needs for its next citizen (`cities.food_to_next_pop`, `cities.py:686-701`):

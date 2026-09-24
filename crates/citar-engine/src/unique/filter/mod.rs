@@ -36,7 +36,7 @@ pub use self::unit::{UnitFacts, UnitLeaf, UnitScope};
 use super::countable::Countable;
 use super::generated::{ParamKind, UniqueType};
 use super::params::Param;
-use super::table::{ObjectFilter, Source, StaticDomain, StaticId, UniqueTable};
+use super::table::{CondDeps, ObjectFilter, Source, StaticDomain, StaticId, UniqueTable};
 use super::world::{FilterFacts, TileFacts};
 use crate::base::collections::DetSet;
 use crate::base::ids::{
@@ -63,6 +63,48 @@ pub struct TileFilter {
     /// Whether map generation can read it: every term known from the terrain alone, through
     /// [`TileFacts`] (DESIGN.md 5.7).
     pub terrain_level: bool,
+}
+
+impl TileFilter {
+    /// What asking it of the tile in context reads: its leaves' classes, and for `worked` the
+    /// worked tiles of the tile's territory city (`TILE`).
+    #[must_use]
+    pub fn deps_here(&self) -> CondDeps {
+        let mut d = self.full.deps();
+        if self.full.leaves().iter().any(|l| matches!(l, TileLeaf::Worked)) {
+            d |= CondDeps::TILE;
+        }
+        d
+    }
+
+    /// What asking it of the tiles around the one in context reads (`[stats] for each adjacent
+    /// [tileFilter]`, `tiles.py:241-248`). A memo of a tile's yield reads its neighbours' own
+    /// facts already: their terrain, river, resource and improvement. A filter that reads more of
+    /// a neighbour (its owner, whether a city works it, fresh water or the coast beside it, which
+    /// are two tiles away) reads the map (`MAP`), as do the local classes of its leaves, which are
+    /// about the neighbour and not the tile in context.
+    #[must_use]
+    pub fn deps_around(&self) -> CondDeps {
+        let own = |l: &TileLeaf| {
+            matches!(
+                l,
+                TileLeaf::Terrains(_)
+                    | TileLeaf::River
+                    | TileLeaf::AnyResource
+                    | TileLeaf::Resource(_)
+                    | TileLeaf::Unimproved
+                    | TileLeaf::Improved
+                    | TileLeaf::Pillaged
+                    | TileLeaf::Improvement(_)
+            )
+        };
+        let d = self.full.deps();
+        if self.full.leaves().into_iter().all(own) && !d.intersects(CondDeps::LOCAL) {
+            d
+        } else {
+            d.difference(CondDeps::LOCAL) | CondDeps::MAP
+        }
+    }
 }
 
 /// A combatant filter: a unit is asked as a unit filter, a city as a city filter in which `City`

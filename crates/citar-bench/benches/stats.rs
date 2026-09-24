@@ -8,10 +8,14 @@
 //!   (`Game::unrelated_change_for_bench`): the first of them validates what they share (the
 //!   cities' tile modifiers, the civilization's indexes and supply) for the rest, and that one
 //!   read alone is printed besides;
-//! - a city's stats recomputed, its tiles' yields cached, at or under 10 µs;
+//! - a city's stats recomputed, its tiles' yields cached, at or under 10 µs: its base (what its
+//!   buildings and uniques give, which a reassignment leaves) with them;
 //! - the citizens of a city of 20 assigned at or under 10 µs;
 //! - a civilization's connectivity on a small map at or under 30 µs;
 //! - a settle with nothing pending at or under 0.5 µs.
+//!
+//! Report-only besides: every major's stats and every city's, read after a unit of another
+//! civilization moved, which reads none of them (DESIGN.md 6.5).
 //!
 //! After Criterion, the run takes the median of its own timings and fails above three times a
 //! budget.
@@ -90,9 +94,10 @@ fn read(g: &Game, s: &Subject) -> f64 {
     query::tile_yield(g, s.tile, Some(s.owner), Some(s.city))[citar_engine::base::stats::Stat::Food]
 }
 
-/// City stats from the city's parts, its tiles' yields cached.
+/// City stats from the city's parts, its tiles' yields cached, its base computed afresh.
 fn city_stats(g: &Game, c: CityId) -> f64 {
     let city = g.city(c).expect("the city");
+    black_box(cstats::city_base(g, c));
     let work = Work::of(city);
     let parts = cstats::city_parts(g, c, &work);
     let s = cstats::city_stats_from(g, c, &parts, &work, cstats::current_construction(city), None);
@@ -224,4 +229,30 @@ fn main() {
         CONNECTIVITY,
     );
     check("settle/nothing_pending", median(31, 10_000, || g.settle_for_bench()), SETTLE);
+
+    // A unit of another civilization steps back and forth; nothing read here reads it.
+    let unit = g.state().units().of(other).first().copied().expect("a unit of another major");
+    let from = g.unit(unit).expect("the unit").tile();
+    let to = g.grid().neighbors(from).next().expect("a neighbour");
+    let mut step = 0u32;
+    let mut times: Vec<Duration> = (0..31)
+        .map(|_| {
+            step += 1;
+            g.move_unit_for_bench(unit, if step.is_multiple_of(2) { from } else { to })
+                .expect("a move");
+            let t = Instant::now();
+            for p in g.majors(true).map(|p| p.id()).collect::<Vec<_>>() {
+                black_box(query::civ_stats(&g, p));
+            }
+            for c in g.state().cities().ids() {
+                black_box(query::city_stats(&g, c));
+            }
+            t.elapsed()
+        })
+        .collect();
+    times.sort();
+    println!(
+        "memos/every_major_and_city_after_another_civilization_moves median: {:?} (report-only)",
+        times[times.len() / 2]
+    );
 }

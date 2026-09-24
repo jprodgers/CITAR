@@ -14,7 +14,7 @@ use crate::base::ids::{
     BaseUnitId, BuildingId, DifficultyId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
     ObjectFilterId, ResourceId, TechId, TerrainId,
 };
-use crate::base::sets::{FeatureSet, TerrainSet};
+use crate::base::sets::{FeatureSet, ImprovementSet, TerrainSet};
 use crate::base::stats::{Stat, StatMask};
 use crate::unique::{SourceUniques, UniqueData, UniqueTable, UniqueType};
 
@@ -170,6 +170,10 @@ pub struct Derived {
     /// `Fresh water` (`tiles._is_fresh_source`, `tiles.py:120-124`), which Python looked up per
     /// tile and cached.
     pub fresh_water: TerrainSet,
+    /// The improvements and terrains that yield with no citizen on them, as a Citadel does
+    /// (`Tile provides yield without assigned population`, `cities.provides_yield_without_pop`,
+    /// `cities.py:196-202`), which Python asked per tile.
+    pub yields_without_pop: (ImprovementSet, TerrainSet),
     /// For each building, the other buildings that count as it in a city
     /// (`cities.contains_building`, `cities.py:107-111`, UnCiv's `containsBuildingOrEquivalent`):
     /// those that replace it, and those that carry its name as a tag, with or without
@@ -195,6 +199,7 @@ impl Derived {
             feature_removals: Vec::new(),
             removal_of: IdVec::new(),
             fresh_water: TerrainSet::new(),
+            yields_without_pop: (ImprovementSet::new(), TerrainSet::new()),
             building_equivalents: IdVec::new(),
             known: Known {
                 hill: FeatureId(0),
@@ -253,6 +258,19 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
             fresh_water.insert(id);
         }
     }
+    let free = UniqueType::TileProvidesYieldWithoutPopulation;
+    let yields_without_pop = (
+        r.improvements
+            .iter()
+            .filter(|(_, i)| has(&r.uniques, &i.uniques, free))
+            .map(|(id, _)| id)
+            .collect(),
+        r.terrains
+            .iter()
+            .filter(|(_, t)| has(&r.uniques, &t.uniques, free))
+            .map(|(id, _)| id)
+            .collect(),
+    );
 
     let improvement_names: Vec<Box<str>> =
         r.improvements.as_slice().iter().map(|i| i.name.clone()).collect();
@@ -410,6 +428,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         feature_removals,
         removal_of,
         fresh_water,
+        yields_without_pop,
         building_equivalents,
         known,
     })

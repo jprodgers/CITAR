@@ -106,7 +106,7 @@ fn specialists_eat_less_where_the_kitchen_sink_says() {
     let food = query::city_stats(&g, c).total[Stat::Food];
     let rc = RankCtx::of(&g, c).expect("a city");
     let merchant = cstats::specialist_stats(&g, c, r.lookup("Merchant").expect("a merchant"));
-    let plain = rank_stats_for_work(&g, &rc, &merchant, true, -1.0);
+    let plain = rank_stats_for_work(&rc, &merchant, true, -1.0);
 
     g.apply_ops(
         &json!([{"op": "set_city", "city": c.get(), "add_buildings": ["Kitchen Sink Works"]}]),
@@ -119,7 +119,7 @@ fn specialists_eat_less_where_the_kitchen_sink_says() {
     assert!((query::city_stats(&g, c).total[Stat::Food] - (food + 1.0)).abs() < 1e-9);
     // A starving city values the food a specialist no longer eats, as a tile's food.
     let rc = RankCtx::of(&g, c).expect("a city");
-    let cheaper = rank_stats_for_work(&g, &rc, &merchant, true, -1.0);
+    let cheaper = rank_stats_for_work(&rc, &merchant, true, -1.0);
     assert!(cheaper > plain, "{cheaper} against {plain}");
     clean(&mut g);
 }

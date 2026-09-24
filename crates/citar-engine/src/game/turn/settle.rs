@@ -84,6 +84,23 @@ impl Game {
         let _touched = self.player_mut(p, crate::game::derive::rev::PlayerTouch::OTHER).is_some();
     }
 
+    /// Moves unit `u` to tile `t` without movement rules and settles, for the benchmark of the
+    /// memos read after a move (DESIGN.md 6.5: a move recomputes none that did not read it).
+    ///
+    /// # Errors
+    /// If there is no such unit or tile.
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    pub fn move_unit_for_bench(
+        &mut self,
+        u: crate::base::ids::UnitId,
+        t: crate::base::ids::TileIdx,
+    ) -> Result<(), crate::state::StateError> {
+        self.relocate_unit(u, t)?;
+        self.settle();
+        Ok(())
+    }
+
     /// Stops a runaway effect queue: a bug, reported as SETTLE-1 where checks run.
     fn runaway(&mut self, why: String) {
         while self.fx.pop().is_some() {}
