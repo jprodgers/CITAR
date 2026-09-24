@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use super::expr::{self, Env};
 use super::matchers::{self, MATCHERS, WITH};
 use super::tiles::Frame;
-use super::{Script, intended_ids, number_as_string, path, rules_dir, setup};
+use super::{Script, intended_ids, map_doc, new_game, number_as_string, path};
 
 /// The kinds of step: each step has exactly one of these keys.
 const KINDS: [&str; 7] = ["op", "ops", "tool", "check", "new_game", "set", "repeat"];
@@ -50,17 +50,7 @@ impl<'s> Runner<'s> {
                 script.name
             ));
         }
-        let file = rules_dir().join("maps").join(format!("{}.json", script.map));
-        #[allow(clippy::disallowed_methods, reason = "the maps are files")]
-        let text =
-            std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-        let mut doc: Value =
-            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
-        let anchors = doc
-            .as_object_mut()
-            .and_then(|m| m.shift_remove("anchors"))
-            .and_then(|a| a.as_object().cloned())
-            .unwrap_or_default();
+        let (doc, anchors) = map_doc(&script.map)?;
         let mut frame = Frame {
             width: doc
                 .get("width")
@@ -437,7 +427,7 @@ fn make_game(
         }
     }
     cfg.insert("map".into(), doc.clone());
-    let mut g = setup::new_game(rules, &cfg)?;
+    let mut g = new_game(rules, &cfg)?;
     g.set_debug_options(DebugOptions::ALL);
     if script.bare {
         testops::apply(&mut g, &json!([{"op": "clear_units", "player": "all"}]))

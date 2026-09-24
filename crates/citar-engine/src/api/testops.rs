@@ -8,8 +8,9 @@
 //! nothing, as [`Game::apply_ops`] runs scenario operations.
 //!
 //! Package 1b-02 ports those that need no later system: `clear_units`, `set_turn`, `unmeet`,
-//! `set_controller`, `set_auto`, `refresh_visibility` and `reload`. The others are listed with
-//! the package that ports what they need, and are refused as not ported until then.
+//! `set_controller`, `set_auto`, `refresh_visibility` and `reload`; package 1b-03 the turn
+//! operations `end_turn`, `end_round` and `force_turn`. The others are listed with the package
+//! that ports what they need, and are refused as not ported until then.
 
 use serde_json::{Map, Value, json};
 
@@ -21,8 +22,8 @@ use crate::game::events::EventBatch;
 use crate::game::pending::SightSource;
 use crate::game::{Game, Porting};
 use crate::save::journal::JournalCursor;
-use crate::state::TurnClock;
 use crate::state::players::{AutoDecision, Controller, SeatOverrides};
+use crate::state::{Phase, TurnClock};
 
 /// A test operation's parameters.
 pub type Params = Map<String, Value>;
@@ -95,19 +96,20 @@ pub static TEST_OPS: &[TestOp] = &[
     TestOp {
         name: "end_round",
         params: "every remaining turn of the round ends, and the round with them",
-        porting: Porting::Pending("1b-03"),
+        porting: Porting::Ported,
         run: end_round,
     },
     TestOp {
         name: "end_turn",
-        params: "the current player's turn ends, and play moves to the next major civilization",
-        porting: Porting::Pending("1b-03"),
+        params: "optional player (the current one by default): that player's turn ends, and play \
+                 moves on to the next major civilization's",
+        porting: Porting::Ported,
         run: end_turn,
     },
     TestOp {
         name: "force_turn",
         params: "player: it is that player's turn now, started",
-        porting: Porting::Pending("1b-03"),
+        porting: Porting::Ported,
         run: force_turn,
     },
     TestOp {
@@ -329,6 +331,39 @@ fn set_auto(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(json!({}))
 }
 
+/// Where the game is in time, as the turn operations report it.
+fn clock(g: &Game) -> Value {
+    json!({"turn": g.turn(), "current": g.current().0})
+}
+
+/// Ends a player's turn, the current one's unless another is named, as the host's `end_turn`
+/// does (`Game.end_turn`): play moves on to the next major civilization.
+fn end_turn(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let p = match o.get("player") {
+        None | Some(Value::Null) => g.current(),
+        v => pid(g, v, false)?,
+    };
+    g.end_turn_now(p)?;
+    Ok(clock(g))
+}
+
+/// Ends every turn left in the round, and the round.
+fn end_round(g: &mut Game, _: &Params) -> Result<Value, ActionError> {
+    let start = g.turn();
+    // Each call moves play on at least one player, and a round has at most 64.
+    while g.phase() == Phase::Playing && g.turn() == start {
+        g.end_turn_now(g.current())?;
+    }
+    Ok(clock(g))
+}
+
+/// Makes it a player's turn now and starts it (`EngineGame.force_turn`).
+fn force_turn(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let p = pid(g, o.get("player"), false)?;
+    g.force_turn_now(p);
+    Ok(clock(g))
+}
+
 /// Brings what every civilization sees up to date, as Python's `visibility.refresh(force=True)`
 /// did: every player's sight is looked at again in the settle that follows.
 fn refresh_visibility(g: &mut Game, _: &Params) -> Result<Value, ActionError> {
@@ -397,18 +432,6 @@ fn close_negotiation(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
 
 fn complete_construction(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::cities::construction"))
-}
-
-fn end_round(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::turn::driver"))
-}
-
-fn end_turn(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::turn::driver"))
-}
-
-fn force_turn(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::turn::driver"))
 }
 
 fn open_negotiation_as(_: &mut Game, _: &Params) -> Result<Value, ActionError> {

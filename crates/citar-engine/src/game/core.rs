@@ -742,10 +742,6 @@ impl Game {
     // ---- Units (game.py:720-804) --------------------------------------------------------------
 
     /// Creates a unit of `base` for `p` on `t` (`game.py:729-742`) and returns its id.
-    #[allow(
-        dead_code,
-        reason = "setup, production, great people and barbarians call it from 1b-07"
-    )]
     pub(crate) fn create_unit(
         &mut self,
         p: PlayerId,

@@ -15,8 +15,8 @@
 //! - `events` (optionally `since`, `type` and `player`, the last keeping what that player hears);
 //! - `find_tiles`: the tiles that pass the filters given, nearest first (see [`find_tiles`]);
 //! - `ops`: the scenario and test operations with their parameters;
-//! - `pending`: what is not ported yet, as the queries, operations and stages that wait for a
-//!   package.
+//! - `pending`: what is not ported yet, as the queries, operations, test operations, turn stages
+//!   and setup stages that wait for a package.
 //!
 //! `negotiation`, `view` and `briefing` wait for the packages that port what they read (1c-05,
 //! 1d-02 and 1d-03), and are refused as not ported until then.
@@ -31,7 +31,8 @@ use crate::base::ids::{CityId, ImprovementId, PlayerId, ResourceId, TerrainId, T
 use crate::base::py;
 use crate::game::diplomacy::relations::{has_pact, is_friends, opinion};
 use crate::game::error::{ActionError, ErrCode};
-use crate::game::{Game, Porting};
+use crate::game::turn::stages;
+use crate::game::{Game, Porting, setup};
 use crate::rules::Named;
 use crate::rules::defs::{Route, TerrainType};
 use crate::state::Phase;
@@ -489,6 +490,13 @@ fn pending() -> Value {
     }
     for (name, pkg) in testops::pending() {
         out.push(json!({"kind": "test_op", "name": name, "package": pkg}));
+    }
+    for (table, s, pkg) in stages::waiting() {
+        let name = format!("{table} {}: {}", s.id, s.name);
+        out.push(json!({"kind": "turn_stage", "name": name, "package": pkg}));
+    }
+    for (s, pkg) in setup::waiting() {
+        out.push(json!({"kind": "setup_stage", "name": s.name, "package": pkg}));
     }
     Value::Array(out)
 }

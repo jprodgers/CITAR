@@ -15,15 +15,12 @@ use citar_engine::game::diplomacy::relations::{WarReason, make_peace, set_war};
 use citar_engine::game::research::{apply_research, plan_research, research_result};
 use citar_engine::rules::Ruleset;
 use citar_engine::state::StateError;
-use citar_testkit::script::{rules_dir, setup};
-use serde_json::{Value, json};
+use citar_testkit::script::{map_doc, new_game};
+use serde_json::json;
 
 /// A bare game on the arena: three benchmark civilizations and a city-state.
 fn arena() -> Game {
-    #[allow(clippy::disallowed_methods, reason = "the map is a file")]
-    let text = std::fs::read_to_string(rules_dir().join("maps/arena.json")).expect("the arena");
-    let mut doc: Value = serde_json::from_str(&text).expect("the arena's JSON");
-    doc.as_object_mut().map(|m| m.shift_remove("anchors"));
+    let (doc, _) = map_doc("arena").expect("the arena");
     let cfg = json!({
         "seed": 5,
         "players": [{"nation": "BenchmarkCiv"}, {"nation": "BenchmarkCiv"}, {"nation": "BenchmarkCiv"}],
@@ -33,7 +30,7 @@ fn arena() -> Game {
         "map": doc,
     });
     let cfg = cfg.as_object().cloned().unwrap_or_default();
-    setup::new_game(Ruleset::shared(), &cfg).unwrap_or_else(|e| panic!("{e}"))
+    new_game(Ruleset::shared(), &cfg).unwrap_or_else(|e| panic!("{e}"))
 }
 
 #[test]
@@ -81,7 +78,7 @@ fn a_failing_list_of_test_ops_changes_nothing_either() {
     .expect_err("the second test op fails");
     assert_eq!(e.message, "Test operation 2 (unmeet): A player cannot forget itself.");
     assert_eq!((g.digest().ok(), g.rev()), before);
-    let e = testops::apply(&mut g, &json!([{"op": "end_turn"}])).expect_err("not ported yet");
+    let e = testops::apply(&mut g, &json!([{"op": "set_unit", "unit": 1}])).expect_err("not yet");
     assert_eq!(e.code, ErrCode::NotPorted);
     let e = g
         .apply_ops(&json!([{"op": "found_city", "player": 0, "x": 5, "y": 5}]))
@@ -122,23 +119,36 @@ fn inspect_reads_and_lists_what_is_pending() {
         .collect();
     for (name, pkg) in [
         ("found_city", "1b-07"),
-        ("add_unit", "1c-02"),
-        ("end_turn", "1b-03"),
+        ("remove_units", "1c-02"),
+        ("ready_unit", "1c-02"),
         ("attack_as", "1c-03"),
         ("negotiation", "1c-05"),
         ("view", "1d-02"),
         ("briefing", "1d-03"),
+        ("player_start S2: research progress", "1b-07"),
+        ("player_end E3: gold and bankruptcy", "1b-05"),
+        ("round_end R0: eliminations", "1c-08"),
+        ("starting units", "1c-02"),
+        ("map: a generated map", "1b-04"),
     ] {
         assert!(listed.contains(&(name.to_owned(), pkg.to_owned())), "{name} waits for {pkg}");
     }
-    assert_eq!(
-        listed.len(),
-        3 + 6 + 15,
-        "three queries, six scenario ops and fifteen test ops wait"
-    );
     let kinds: Vec<&str> =
         pending.as_array().into_iter().flatten().filter_map(|p| p["kind"].as_str()).collect();
-    assert_eq!(kinds.iter().filter(|&&k| k == "inspect").count(), 3);
+    let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
+    assert_eq!(
+        [count("inspect"), count("scenario_op"), count("test_op")],
+        [3, 5, 12],
+        "three queries, five scenario ops and twelve test ops wait"
+    );
+    assert_eq!([count("turn_stage"), count("setup_stage")], [40, 8], "the stages that wait");
+    assert_eq!(listed.len(), kinds.len());
+    for (name, _) in &listed {
+        assert!(
+            !["end_turn", "end_round", "force_turn", "add_unit"].contains(&name.as_str()),
+            "{name} is ported"
+        );
+    }
     for (what, system) in [
         ("negotiation", "game::diplomacy::negotiation"),
         ("view", "api::views"),
