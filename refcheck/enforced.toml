@@ -27,9 +27,35 @@ group = "uniques"
 [[enforce]]
 group = "state_echo"
 
+# tile_yields (package 1b-06): what every owned tile yields to its owner as its own city works it, and a
+# sample of unowned tiles as nobody and a civilization see them.
+[[enforce]]
+group = "tile_yields"
+
+# city_stats (package 1b-06): each city's stats breakdown with Python's keys, its food to the next citizen,
+# maintenance, health, strength, the tiles it could work, its trade route and the turns to build what it
+# builds. Its religion paths (followers, majority, pressure_in) wait for package 1b-08.
+[[enforce]]
+group = "city_stats"
+paths = [
+  "cities",
+  "cities[*].id",
+  "cities[*].owner",
+  "cities[*].name",
+  "cities[*].stats.**",
+  "cities[*].food_to_next_pop",
+  "cities[*].maintenance",
+  "cities[*].max_health",
+  "cities[*].strength",
+  "cities[*].workable.**",
+  "cities[*].connected_to_capital",
+  "cities[*].current.**",
+]
+
 # civs (package 1b-05): the civilization-level data it ports. Its resources, line by line and net; the unique
-# index by placeholder; unit upkeep and unit supply; and the era the index is built with. The group's other
-# paths wait for their packages (happiness and stats 1b-06; costs and policies 1b-07; score and victory 1c-08).
+# index by placeholder; unit upkeep and unit supply; and the era the index is built with. Package 1b-06 adds
+# happiness, the stats for the next turn by source and in total, and gold per turn. The group's other paths
+# wait for their packages (costs and policies 1b-07; score and victory 1c-08).
 [[enforce]]
 group = "civs"
 paths = [
@@ -39,4 +65,8 @@ paths = [
   "civs[*].unit_maintenance",
   "civs[*].unit_supply",
   "civs[*].era",
+  "civs[*].happiness.**",
+  "civs[*].civ_stats.**",
+  "civs[*].stat_map.**",
+  "civs[*].gold_per_turn.**",
 ]

@@ -9,7 +9,10 @@
 //! - [`uniques`] (package 1a-05), which compares the compiled ruleset once per run;
 //! - [`state_echo`] (package 1a-10), the fixture's own state read back from its conversion;
 //! - [`civs`] (package 1b-05), the civilization-level data: resources, the unique index, unit
-//!   upkeep and supply, and the era.
+//!   upkeep and supply, and the era; with package 1b-06 happiness and the stats for the next
+//!   turn;
+//! - [`tile_yields`] and [`city_stats`] (package 1b-06), what tiles yield and everything the
+//!   engine derives for a city.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -25,8 +28,10 @@ use serde_json::Value;
 use crate::Group;
 use crate::fixture::Fixture;
 
+pub mod city_stats;
 pub mod civs;
 pub mod state_echo;
+pub mod tile_yields;
 pub mod uniques;
 
 /// What an answer module is asked about.
@@ -87,7 +92,13 @@ pub trait Answers: Sync {
 }
 
 /// The engine's answer modules: one entry per ported group, in dependency order.
-static MODULES: &[&dyn AnswerModule] = &[&uniques::Uniques, &state_echo::StateEcho, &civs::Civs];
+static MODULES: &[&dyn AnswerModule] = &[
+    &uniques::Uniques,
+    &state_echo::StateEcho,
+    &tile_yields::TileYields,
+    &city_stats::CityStats,
+    &civs::Civs,
+];
 
 /// The answers of the Rust engine.
 #[derive(Debug, Clone, Copy, Default)]
