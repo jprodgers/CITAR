@@ -57,20 +57,13 @@ pub fn building_unique_in_city(g: &Game, c: CityId, ty: UniqueType) -> bool {
 
 /// Whether the city has a building or its equivalent (`cities.contains_building`,
 /// `cities.py:107-111`, UnCiv's `containsBuildingOrEquivalent`): the building itself, one that
-/// replaces it, or one that carries its name as a tag.
+/// replaces it, or one that carries its name as a tag. The equivalents are resolved at load
+/// (`rules::Derived::building_equivalents`).
 #[must_use]
 pub fn contains_building(g: &Game, c: CityId, b: BuildingId) -> bool {
     let Some(city) = g.city(c) else { return false };
-    if city.buildings.contains(b) {
-        return true;
-    }
-    let r = g.rules();
-    let tag = r.uniques().tag_named(&r.buildings()[b].name);
-    city.buildings.iter().any(|x| {
-        let d = &r.buildings()[x];
-        d.replaces == Some(b)
-            || tag.is_some_and(|t| d.uniques.tags.contains(t) || d.uniques.cond_tags.contains(t))
-    })
+    city.buildings.contains(b)
+        || g.rules().derived().building_equivalents[b].iter().any(|&x| city.buildings.contains(x))
 }
 
 /// Whether a building's uniques include one of type `ty`, conditionals not evaluated

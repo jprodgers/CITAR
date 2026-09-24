@@ -112,6 +112,11 @@ pub struct Derived {
     /// `Fresh water` (`tiles._is_fresh_source`, `tiles.py:120-124`), which Python looked up per
     /// tile and cached.
     pub fresh_water: TerrainSet,
+    /// For each building, the other buildings that count as it in a city
+    /// (`cities.contains_building`, `cities.py:107-111`, UnCiv's `containsBuildingOrEquivalent`):
+    /// those that replace it, and those that carry its name as a tag, with or without
+    /// conditionals. Python compared the names at each ask.
+    pub building_equivalents: IdVec<BuildingId, Box<[BuildingId]>>,
     pub known: Known,
 }
 
@@ -132,6 +137,7 @@ impl Derived {
             feature_removals: Vec::new(),
             removal_of: IdVec::new(),
             fresh_water: TerrainSet::new(),
+            building_equivalents: IdVec::new(),
             known: Known {
                 hill: FeatureId(0),
                 fallout: FeatureId(0),
@@ -257,6 +263,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
 
     let UnitLists { great_person_units, spaceship_parts, builder_classes } = derive_units(r, p);
     derive_buildings(r);
+    let building_equivalents = building_equivalents(r);
 
     let mut tech_order: Vec<TechId> = r.techs.ids().collect();
     tech_order.sort_by(|&a, &b| {
@@ -339,6 +346,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         feature_removals,
         removal_of,
         fresh_water,
+        building_equivalents,
         known,
     })
 }
@@ -477,6 +485,29 @@ fn derive_units(r: &mut Ruleset, p: &mut Problems) -> UnitLists {
         };
     }
     UnitLists { great_person_units: great, spaceship_parts: parts_list, builder_classes: classes }
+}
+
+/// For each building, the others that count as it in a city: see
+/// [`Derived::building_equivalents`].
+fn building_equivalents(r: &Ruleset) -> IdVec<BuildingId, Box<[BuildingId]>> {
+    let table = &r.uniques;
+    r.buildings
+        .iter()
+        .map(|(b, def)| {
+            let tag = table.tag_named(&def.name);
+            r.buildings
+                .iter()
+                .filter(|&(x, d)| {
+                    x != b
+                        && (d.replaces == Some(b)
+                            || tag.is_some_and(|t| {
+                                d.uniques.tags.contains(t) || d.uniques.cond_tags.contains(t)
+                            }))
+                })
+                .map(|(x, _)| x)
+                .collect()
+        })
+        .collect()
 }
 
 /// Wonder flags and the stats each building raises (`rules.py:144-149, 169-180`).
