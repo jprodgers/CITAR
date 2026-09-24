@@ -160,7 +160,43 @@ impl CompareSpec {
         match group {
             // The Rust answer folds action and meta modifiers, so their order is not kept.
             Group::Uniques => spec.keyed("uniques", "id").multiset("uniques[*].modifiers"),
-            Group::StateEcho | Group::FixedPoint => spec,
+            // Lists that became sets compare as multisets (DESIGN.md 4.5); entities by their ids.
+            Group::StateEcho => spec
+                .keyed("tiles", "i")
+                .multiset("tiles[*].features")
+                .keyed("players", "id")
+                .multiset("players[*].techs")
+                .multiset("players[*].policies")
+                .multiset("players[*].natural_wonders")
+                .multiset("players[*].met")
+                .multiset("players[*].protectors")
+                .multiset("players[*].eras_spy_earned")
+                .multiset("players[*].skip_explore")
+                .multiset("players[*].gained")
+                .multiset("players[*].free_stat_buildings")
+                .multiset("players[*].free_specific_buildings")
+                .keyed_pos("players[*].remembered_cities", 0)
+                .keyed("units", "id")
+                .multiset("units[*].promotions")
+                .keyed("cities", "id")
+                .multiset("cities[*].buildings")
+                .multiset("cities[*].free_buildings")
+                .multiset("cities[*].worked")
+                .multiset("cities[*].locked")
+                .keyed("diplomacy.relations", "pair")
+                .multiset("diplomacy.relations[*].embassy")
+                .multiset("diplomacy.opinions")
+                .keyed("diplomacy.deals", "id")
+                .keyed("diplomacy.negotiations", "id")
+                .multiset("world.religions[*].founder_beliefs")
+                .multiset("world.religions[*].follower_beliefs")
+                .multiset("world.un.won")
+                .keyed("world.camps", "id")
+                .keyed("history.events", "id")
+                .multiset("history.events[*].players")
+                .keyed("history.messages", "id")
+                .multiset("history.messages[*].to"),
+            Group::FixedPoint => spec,
             Group::TileYields => spec.keyed("owned", "idx"),
             Group::CityStats => spec.keyed("cities", "id").multiset("cities[*].workable"),
             Group::Civs => spec

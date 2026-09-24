@@ -4,7 +4,8 @@
     "refcheck/fixtures-late"
   ],
   "unexplained": {
-    "uniques": 0
+    "uniques": 0,
+    "state_echo": 0
   },
   "failed": {}
 }

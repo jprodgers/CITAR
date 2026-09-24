@@ -6,20 +6,24 @@
 //! and fills it with Rust calls through `game::query`, so the two answers line up key for key.
 //!
 //! A group without a module reports "not ported" until its module is added to `MODULES`. So far:
-//! - [`uniques`] (package 1a-05), which compares the compiled ruleset once per run.
+//! - [`uniques`] (package 1a-05), which compares the compiled ruleset once per run;
+//! - [`state_echo`] (package 1a-10), the fixture's own state read back from its conversion.
 //!
-//! Package 1a-10 adds the converted game to [`Ctx`], loaded once per fixture through
-//! `Game::from_python`; queries take `&self`, so one load serves every group.
+//! Each fixture's state is converted once (`compat::python`, package 1a-10) and handed to every
+//! group in [`Ctx::converted`]; from 1b-01 the game loads through `Game::from_python`, whose
+//! queries take `&self`, so one load still serves every group.
 
 use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
 
+use citar_engine::compat::python::Converted;
 use serde_json::Value;
 
 use crate::Group;
 use crate::fixture::Fixture;
 
+pub mod state_echo;
 pub mod uniques;
 
 /// What an answer module is asked about.
@@ -29,6 +33,9 @@ pub struct Ctx<'a> {
     pub root: &'a Path,
     /// The fixture, for a fixture-scope group; `None` for a run-scope group.
     pub fixture: Option<&'a Fixture>,
+    /// The fixture's state, converted: the state, its history and what the conversion dropped.
+    /// `None` for a run-scope group.
+    pub converted: Option<&'a Converted>,
 }
 
 /// Why an answer module produced no answer. Reported as an `error` difference at the root of the
@@ -78,7 +85,7 @@ pub trait Answers: Sync {
 }
 
 /// The engine's answer modules: one entry per ported group, in dependency order.
-static MODULES: &[&dyn AnswerModule] = &[&uniques::Uniques];
+static MODULES: &[&dyn AnswerModule] = &[&uniques::Uniques, &state_echo::StateEcho];
 
 /// The answers of the Rust engine.
 #[derive(Debug, Clone, Copy, Default)]

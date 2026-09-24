@@ -16,6 +16,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
+use citar_engine::compat::python::{ConvertReport, state_from_python};
+use citar_engine::rules::Ruleset;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rayon::prelude::*;
 use serde_json::Value;
@@ -183,6 +185,8 @@ pub struct Run {
     pub options: RunOptions,
     pub states: Vec<StateInfo>,
     pub load_failures: Vec<LoadFailure>,
+    /// What converting the fixtures' states dropped, summed over the run (DESIGN.md 4.12).
+    pub dropped: ConvertReport,
     /// Sorted by group (dependency order), then fixture.
     pub subjects: Vec<Subject>,
     /// Each recorded group's `fn` block (the Python functions behind its answer), from the
@@ -223,6 +227,7 @@ struct FixtureResult {
     subjects: Vec<(Group, Outcome)>,
     fns: Vec<(Group, Value)>,
     tally: Tally,
+    dropped: ConvertReport,
 }
 
 /// Runs the checks. An error is a configuration problem or a fixture set that cannot be read
@@ -256,6 +261,7 @@ pub fn run(opts: RunOptions, config: &Config, answers: &dyn Answers) -> Result<R
     let mut tally = Tally::new(config.intended.entries().len());
     let mut states = Vec::new();
     let mut load_failures = Vec::new();
+    let mut dropped = ConvertReport::default();
     let mut per_fixture: Vec<(StateInfo, Vec<(Group, Outcome)>)> = Vec::new();
     let mut fns: Vec<(Group, Value)> = Vec::new();
     for result in results {
@@ -267,6 +273,7 @@ pub fn run(opts: RunOptions, config: &Config, answers: &dyn Answers) -> Result<R
                     }
                 }
                 tally.add(&f.tally);
+                dropped.merge(&f.dropped);
                 states.push(f.state.clone());
                 per_fixture.push((f.state, f.subjects));
             }
@@ -305,7 +312,16 @@ pub fn run(opts: RunOptions, config: &Config, answers: &dyn Answers) -> Result<R
         .map(|(i, e)| EntryUse { id: e.id.clone(), used: tally.used[i], covered: tally.covered[i] })
         .collect();
     let summaries = summarize(&opts, config, answers, &subjects);
-    Ok(Run { options: opts, states, load_failures, subjects, fns, intended: uses, summaries })
+    Ok(Run {
+        options: opts,
+        states,
+        load_failures,
+        dropped,
+        subjects,
+        fns,
+        intended: uses,
+        summaries,
+    })
 }
 
 fn globs(patterns: &[String]) -> Result<Option<GlobSet>> {
@@ -326,9 +342,19 @@ fn check_fixture(
     answers: &dyn Answers,
     config: &Config,
 ) -> std::result::Result<FixtureResult, LoadFailure> {
-    let fixture = Fixture::load(r, &opts.sets)
-        .map_err(|e| LoadFailure { name: r.name.clone(), error: e.to_string() })?;
-    let cx = Ctx { root: &opts.root, fixture: Some(&fixture) };
+    let fail = |error: String| LoadFailure { name: r.name.clone(), error };
+    let fixture = Fixture::load(r, &opts.sets).map_err(|e| fail(e.to_string()))?;
+    // Converted once for every group (DESIGN.md 9.2); a state that does not convert is a load
+    // failure. With no fixture group to answer, there is nothing to convert for.
+    let converted = if groups.is_empty() {
+        None
+    } else {
+        let state = state_from_python(fixture.state.get().as_bytes(), Ruleset::shared())
+            .map_err(|e| fail(format!("{}: the state does not convert: {e}", r.path.display())))?;
+        Some(state)
+    };
+    let dropped = converted.as_ref().map(|c| c.report.clone()).unwrap_or_default();
+    let cx = Ctx { root: &opts.root, fixture: Some(&fixture), converted: converted.as_ref() };
     let mut tally = Tally::new(config.intended.entries().len());
     let mut subjects = Vec::with_capacity(groups.len());
     let mut fns = Vec::new();
@@ -352,6 +378,7 @@ fn check_fixture(
         subjects,
         fns,
         tally,
+        dropped,
     })
 }
 
@@ -365,7 +392,7 @@ fn check_run_group(
     match answers.module(group) {
         None => Outcome::NotPorted,
         Some(m) => {
-            let cx = Ctx { root: &opts.root, fixture: None };
+            let cx = Ctx { root: &opts.root, fixture: None, converted: None };
             let found = answer_and_compare(m, &cx, None, opts.with_bot);
             judge(config, group, Group::RUN_CASE, found, opts.with_bot, tally)
         }

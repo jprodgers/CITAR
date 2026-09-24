@@ -21,3 +21,7 @@
 # uniques (package 1a-05): every unique text of the ruleset compiles as Python read it.
 [[enforce]]
 group = "uniques"
+
+# state_echo (package 1a-10): each fixture's state reads back whole from its conversion.
+[[enforce]]
+group = "state_echo"

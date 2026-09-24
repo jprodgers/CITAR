@@ -148,7 +148,11 @@ the Rust side replays the inputs and never has to copy Python's sampling.
 ## Checking the Rust engine
 
 `crates/citar-refcheck` is the Rust side (design: `crates/citar-engine/DESIGN.md` section 9.2). For each fixture
-it loads the state, asks each group's answer module the recorded questions, and compares the two answers.
+it converts the state with the engine's strict Python-state converter (`compat::python`, DESIGN.md 4.12), asks
+each group's answer module the recorded questions, and compares the two answers. A state that does not convert
+(an unknown key, name or event type) is a load failure, and the report lists, as information, what the
+conversions dropped by design: the dead fields, the barbarians' explored tiles and the city-states' memories,
+which nothing read, and the order of lists that are sets.
 
 ```
 cargo refcheck run                                   # fixtures-mini and fixtures-late, every group
@@ -167,8 +171,9 @@ cargo refcheck list                                    # the fixtures, and each 
 ports what the group checks. It rebuilds the skeleton of Python's answer from the recorded inputs and fills it
 with Rust calls, so a difference is never about sampling. A group without a module is reported as `not ported`.
 Three groups are synthetic rather than recorded: `uniques` (every unique text compiles, checked once per run),
-`state_echo` (the state reads back as it was written) and `fixed_point` (the settle on load changes no explored
-tile and no contact). The `uniques` group reads `refcheck/uniques.json.gz`, how the Python engine read each unique
+`state_echo` (the state reads back as it was written: a projection of the fixture's state, in Python's names, against
+the same projection built from the converted state's public reads) and `fixed_point` (the settle on load changes
+no explored tile and no contact). The `uniques` group reads `refcheck/uniques.json.gz`, how the Python engine read each unique
 text (`PYTHONHASHSEED=0 python scripts/refcheck/uniques_dump.py`; record it again after any change to `citar/data`),
 and compares it with what the Rust compiler made of the same text: type, parameters, locality, timer and modifiers.
 A group whose Python answer crashed while recording is `python-crashed`: information,

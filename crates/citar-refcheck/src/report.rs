@@ -167,6 +167,11 @@ pub fn human(run: &Run, limit: usize) -> String {
         out.push_str(&format!(", {} stale ({severity}): {}\n", stale.len(), stale.join(", ")));
     }
 
+    if !run.dropped.is_empty() {
+        out.push_str("\nconverter dropped (information, DESIGN.md 4.12):\n");
+        out.push_str(&indent(&run.dropped.to_string(), "  "));
+    }
+
     if !run.load_failures.is_empty() {
         out.push_str("\nload failures:\n");
         for f in &run.load_failures {
@@ -290,6 +295,7 @@ pub fn json(run: &Run) -> String {
             "with_bot": run.options.with_bot,
         },
         "load_failures": run.load_failures.iter().map(|f| json!({"name": f.name, "error": f.error})).collect::<Vec<_>>(),
+        "dropped": run.dropped.dropped().map(|(d, n)| json!({"field": d.field(), "reason": d.reason(), "count": n})).collect::<Vec<_>>(),
         "groups": groups,
         "intended": run.intended.iter().map(|u| json!({"id": u.id, "used": u.used, "covered": u.covered, "stale": u.stale()})).collect::<Vec<_>>(),
         "exit": run.exit_code(),
