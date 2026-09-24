@@ -593,7 +593,7 @@ proptest! {
         }
         prop_assert_eq!(cursor, JournalCursor::at_end(&chron));
         let (back, complete) =
-            journal::rebuild(r, &mut chunks.iter().map(Vec::as_slice), &heads, &host);
+            journal::rebuild(r, &mut chunks.iter().map(Vec::as_slice), &heads, &host, true);
         prop_assert!(complete, "the rebuilt history agrees with its heads");
         prop_assert!(back == chron, "the rebuilt history is the history");
         if !chunks.is_empty() {
@@ -603,6 +603,7 @@ proptest! {
                 &mut chunks.iter().skip(1).map(Vec::as_slice),
                 &heads,
                 &host,
+                true,
             );
             prop_assert!(!complete);
         }
@@ -614,17 +615,27 @@ proptest! {
         let frames = frame_sequence(seed, n);
         let mut writer = FrameWriter::new();
         let mut decoder = FrameDecoder::new();
-        let mut keys = 0;
+        let mut records = Vec::with_capacity(n);
         for (i, f) in frames.iter().enumerate() {
             let rec = writer.push(f);
-            keys += usize::from(rec.keyframe);
             if i == 0 {
                 prop_assert!(rec.keyframe, "the first frame is a keyframe");
             }
             let back = decoder.apply(&rec).map_err(|e| TestCaseError::fail(e.to_string()))?;
             prop_assert_eq!(&back, f);
+            records.push(rec);
         }
+        let keys = records.iter().filter(|r| r.keyframe).count();
         prop_assert!(keys >= n.div_ceil(64), "a keyframe at least every 64 frames");
+        // With one delta lost, the delta after it is refused rather than decoded wrong.
+        let deltas = |k: &usize| !records[*k].keyframe && !records[k + 1].keyframe;
+        if let Some(k) = (1..n.saturating_sub(1)).find(deltas) {
+            let mut short = FrameDecoder::new();
+            for rec in &records[..k] {
+                short.apply(rec).map_err(|e| TestCaseError::fail(e.to_string()))?;
+            }
+            prop_assert!(short.apply(&records[k + 1]).is_err(), "delta {} without {k}", k + 1);
+        }
     }
 }
 
@@ -636,6 +647,7 @@ fn frame_sequence(seed: u64, n: usize) -> Vec<FullFrame> {
     let palette = FramePalette {
         improvement: vec!["Farm".into(), "Mine".into(), "Ñandú Pen".into()],
         feature: vec!["Forest".into(), "Jungle".into()],
+        unit: vec!["Warrior".into(), "Settler".into(), "Ñandú Rider".into(), "Galleass".into()],
     };
     let mut f = FullFrame {
         turn: 1,
@@ -677,7 +689,7 @@ fn frame_sequence(seed: u64, n: usize) -> Vec<FullFrame> {
             .collect();
         f.units = (0..g.idx(20))
             .map(|_| journal::FrameUnit {
-                base: g.below(127) as u16,
+                base: g.below(4) as u16,
                 owner: g.below(3) as u8,
                 hp: g.below(101) as u8,
                 tile: g.below(tiles as u64) as u32,
@@ -718,6 +730,102 @@ fn frames_capture_a_state_and_are_smaller_as_deltas() {
 }
 
 #[test]
+fn frames_name_their_unit_types_and_deltas_their_base() {
+    let st = states::build(rules(), 31, &Shape::DUEL);
+    let frame = FullFrame::capture(rules(), &st, (0, 10));
+    // Unit types are palette positions, and the palette is names, as for improvements.
+    assert_eq!(frame.palette.unit.len(), rules().base_units().len());
+    for (u, fu) in st.units().iter().zip(&frame.units) {
+        let name = &frame.palette.unit[usize::from(fu.base)];
+        assert_eq!(Some(&**name), rules().name(u.base));
+    }
+    let mut w = FrameWriter::new();
+    let key = w.push(&frame);
+    let mut second = frame.clone();
+    second.turn += 1;
+    second.owner[0] = 1;
+    let d1 = w.push(&second);
+    let mut third = second.clone();
+    third.turn += 1;
+    third.owner[1] = 1;
+    let d2 = w.push(&third);
+    assert!(key.keyframe && !d1.keyframe && !d2.keyframe);
+    let mut dec = FrameDecoder::new();
+    for (rec, f) in [(&key, &frame), (&d1, &second), (&d2, &third)] {
+        assert_eq!(dec.apply(rec).as_ref(), Ok(f));
+    }
+    // The delta before it lost: refused.
+    let mut lost = FrameDecoder::new();
+    lost.apply(&key).expect("a keyframe");
+    assert!(lost.apply(&d2).is_err(), "a delta whose base was lost");
+    // Another run's frame of the same turn as its base: refused too.
+    let mut other = second.clone();
+    other.owner[5] = other.owner[5].wrapping_add(1);
+    let mut elsewhere = FrameDecoder::new();
+    elsewhere.apply(&FrameWriter::new().push(&other)).expect("a keyframe");
+    assert!(elsewhere.apply(&d2).is_err(), "a delta taken from another frame of that turn");
+    // A unit type past the palette does not decode.
+    let mut past = frame.clone();
+    past.units[0].base = u16::try_from(frame.palette.unit.len()).expect("fits");
+    assert!(FrameDecoder::new().apply(&FrameWriter::new().push(&past)).is_err());
+    // A new palette (a changed ruleset) makes a keyframe.
+    let mut fourth = third.clone();
+    fourth.turn += 1;
+    fourth.palette.unit.reverse();
+    assert!(w.push(&fourth).keyframe);
+}
+
+#[test]
+fn a_chunk_that_does_not_encode_leaves_its_entries_for_the_next() {
+    use citar_engine::state::chronicle::{EngineEvent, Event, EventData, EventType};
+
+    let r = rules();
+    let smaller = Ruleset::leak(&files_of(&without_building("Mud Pyramid Mosque")))
+        .expect("the ruleset loads without it");
+    assert_eq!(smaller.buildings().len() + 1, r.buildings().len());
+    let last = BuildingId(u16::try_from(r.buildings().len() - 1).expect("fits"));
+    // The game's own chronicle and heads, recorded through `Record::of`.
+    let mut parts = states::build(r, 59, &Shape::TINY).into_parts();
+    parts.chronicle = ChronicleHeads::default();
+    parts.host.0 = HostHeads::default();
+    let mut st = State::from_parts(parts).expect("fits");
+    let mut chron = Chronicle::new();
+    let mut rec = journal::Record::of(&mut st, &mut chron);
+    let id = rec.take_event_id().expect("an id");
+    rec.event(Event {
+        id,
+        turn: 3,
+        kind: EventType::Engine(EngineEvent::ALL[0]),
+        text: "A building fell.".into(),
+        audience: None,
+        tile: None,
+        data: Some(Box::new(EventData { building: Some(last), ..EventData::default() })),
+        refs: Default::default(),
+    })
+    .expect("finite");
+    assert_eq!((st.chronicle().engine_events, st.host().next_event_id), (1, id.get() + 1));
+    let mut cursor = JournalCursor::default();
+    let mut host = st.host().0.clone();
+    // Under a ruleset without that building the chunk does not encode, and nothing moves.
+    assert!(journal::take_chunk(smaller, &chron, &mut cursor, &mut host).is_err());
+    assert_eq!(cursor, JournalCursor::default());
+    assert_eq!(host.journal_seq, 0);
+    // The next take carries the entry.
+    let chunk =
+        journal::take_chunk(r, &chron, &mut cursor, &mut host).expect("encodes").expect("a chunk");
+    assert_eq!(chunk.seq, 0);
+    assert_eq!(cursor, JournalCursor::at_end(&chron));
+    let (_, entries) = journal::decode_chunk(r, &chunk.json).expect("decodes");
+    assert_eq!(entries.len(), 1);
+    let mut parts = st.into_parts();
+    parts.host.0 = host;
+    let bytes = saved(&State::from_parts(parts).expect("fits"));
+    let got = save::load(r, &bytes, &mut std::iter::once(chunk.json.as_slice())).expect("loads");
+    assert!(!got.report.chronicle_incomplete);
+    assert_eq!(got.chronicle, chron);
+}
+
+#[test]
 fn a_loaded_game_rebuilds_its_history_from_its_chunks() {
     let r = rules();
     let mut chron = Chronicle::new();
@@ -745,6 +853,37 @@ fn a_loaded_game_rebuilds_its_history_from_its_chunks() {
         .expect("a short history still loads");
     assert!(short.report.chronicle_incomplete);
     assert_eq!(short.state, st, "and the game is the same");
+}
+
+#[test]
+fn a_history_rebuilds_whole_under_a_reordered_ruleset() {
+    // Events name techs, which the running hash folded in by their old ids.
+    let r = rules();
+    let other = Ruleset::leak(&files_of(&reversed(&[("techs", Some("techs"))])))
+        .expect("the reordered ruleset loads");
+    let mut chron = Chronicle::new();
+    let mut heads = ChronicleHeads::default();
+    let mut host = HostHeads::default();
+    let mut cursor = JournalCursor::default();
+    let mut chunks = Vec::new();
+    for i in 0..3 {
+        states::history(r, 100 + i, 20, &mut heads, &mut host, &mut chron);
+        chunks.extend(journal::take_chunk(r, &chron, &mut cursor, &mut host).expect("saves"));
+    }
+    assert!(chron.events().iter().any(|e| e.data.as_ref().is_some_and(|d| d.tech.is_some())));
+    let mut parts = states::build(r, 37, &Shape::TINY).into_parts();
+    parts.chronicle = heads;
+    parts.host.0 = host;
+    let bytes = saved(&State::from_parts(parts).expect("fits"));
+    let got = save::load(other, &bytes, &mut chunks.iter().map(|c| c.json.as_slice()))
+        .expect("loads under the reordered ruleset");
+    assert!(got.report.rules_changed.is_some());
+    assert!(!got.report.chronicle_incomplete, "every chunk is there");
+    assert_eq!(got.chronicle.events().len(), chron.events().len());
+    assert_eq!(got.chronicle.order(), chron.order());
+    let short = save::load(other, &bytes, &mut chunks.iter().skip(1).map(|c| c.json.as_slice()))
+        .expect("a short history still loads");
+    assert!(short.report.chronicle_incomplete, "a missing chunk is still seen");
 }
 
 // ---- Snapshots -------------------------------------------------------------------------------

@@ -620,6 +620,11 @@ impl State {
         &mut self.host.0
     }
 
+    /// Both history heads at once, for `save::journal::Record`, which moves them together.
+    pub(crate) fn heads_mut(&mut self) -> (&mut ChronicleHeads, &mut HostHeads) {
+        (&mut self.chronicle, &mut self.host.0)
+    }
+
     // ---- Writes that span containers or change what caches key on ------------------------------
 
     fn player_mut_of(&mut self, p: PlayerId) -> Result<&mut Player, StateError> {

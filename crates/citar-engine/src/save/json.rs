@@ -489,7 +489,9 @@ pub fn load(
     chunks: &mut dyn Iterator<Item = &[u8]>,
 ) -> Result<Loaded, LoadError> {
     let (state, mut report) = read_state(rules, state_json)?;
-    let (chronicle, complete) = journal::rebuild(rules, chunks, state.chronicle(), state.host());
+    let same_rules = report.rules_changed.is_none();
+    let (chronicle, complete) =
+        journal::rebuild(rules, chunks, state.chronicle(), state.host(), same_rules);
     report.chronicle_incomplete = !complete;
     Ok(Loaded { state, chronicle, report })
 }

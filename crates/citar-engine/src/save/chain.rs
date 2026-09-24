@@ -8,7 +8,8 @@
 //! `chain_0 = blake3("CITAR-CHAIN" ‖ spec_hash)`, then
 //! `chain_t = blake3(chain_{t-1} ‖ turn_le ‖ digest_t)`, `turn_le` being the turn as 4
 //! little-endian bytes. Digests are taken at the end of each round, after `end_round` and before
-//! the next `begin_turn`, when a game opts in (jobs and tests).
+//! the next `begin_turn`, when a game opts in (jobs and tests). The host keeps the chain's head
+//! and length beside a save, and [`DigestChain::resume`] carries it on after the load.
 //!
 //! Replaces nothing in Python, which had no digest.
 
@@ -75,6 +76,18 @@ impl DigestChain {
         Self { head: Digest::from(h.finalize()), rounds: 0 }
     }
 
+    /// A chain carried on after a load: the [`head`](Self::head) and [`rounds`](Self::rounds) it
+    /// had when the game was saved.
+    ///
+    /// The chain covers states, so no state holds it. A host that chains (a proof-of-work job)
+    /// keeps the head and the count beside its save (from Phase 2, in the `.citar` container's
+    /// session record), and resumes from them, so a job saved and loaded every round chains as
+    /// the uninterrupted run does.
+    #[must_use]
+    pub const fn resume(head: Digest, rounds: u32) -> Self {
+        Self { head, rounds }
+    }
+
     /// Folds in the digest of the round that ended on `turn`, and returns the new head.
     pub fn push(&mut self, turn: Turn, digest: &Digest) -> Digest {
         let mut h = blake3::Hasher::new();
@@ -120,5 +133,25 @@ mod tests {
         assert_eq!(one, Digest::from(h.finalize()));
         assert_eq!(c.rounds(), 1);
         assert_ne!(DigestChain::new(b"spec").push(4, &d), one, "the turn is chained");
+    }
+
+    #[test]
+    fn a_resumed_chain_carries_on_as_the_uninterrupted_one() {
+        let digests: Vec<Digest> = (0..6u8).map(|i| Digest([i; 32])).collect();
+        let mut whole = DigestChain::new(b"job");
+        for (turn, d) in (1..).zip(&digests) {
+            whole.push(turn, d);
+        }
+        let mut first = DigestChain::new(b"job");
+        for (turn, d) in (1..).zip(&digests[..4]) {
+            first.push(turn, d);
+        }
+        // What a host kept beside its save.
+        let (head, rounds) = (first.head().to_hex(), first.rounds());
+        let mut resumed = DigestChain::resume(Digest::from_hex(&head).expect("hex"), rounds);
+        for (turn, d) in (5..).zip(&digests[4..]) {
+            resumed.push(turn, d);
+        }
+        assert_eq!(resumed, whole);
     }
 }

@@ -990,8 +990,9 @@ pub fn build(r: &'static Ruleset, seed: u64, shape: &Shape) -> State {
     st
 }
 
-/// A history to journal: `n` entries of every kind, in a mixed order, with their events' ids
-/// taken from `host` and the engine's entries folded into `heads` as the engine does.
+/// A history to journal: `n` entries of every kind, in a mixed order, appended through a
+/// `save::journal::Record` as the engine appends them: events' ids taken from `host`, the
+/// engine's entries folded into `heads`, the host's counted in `host`.
 pub fn history(
     r: &'static Ruleset,
     seed: u64,
@@ -1000,9 +1001,8 @@ pub fn history(
     host: &mut HostHeads,
     chron: &mut citar_engine::state::chronicle::Chronicle,
 ) {
-    use citar_engine::save::canon;
-    use citar_engine::state::chronicle::EntryKind;
-
+    let mut next_message = heads.messages + 1;
+    let mut rec = citar_engine::save::journal::Record::new(heads, host, chron);
     let mut g = Gen::new(seed);
     let t = Tables::of(r);
     let players: Vec<PlayerId> = (0..4).map(PlayerId).collect();
@@ -1010,7 +1010,7 @@ pub fn history(
         let turn = g.int(1, 400) as i32;
         match g.below(6) {
             0 => {
-                let Some(id) = host.take_event_id() else { return };
+                let Some(id) = rec.take_event_id() else { return };
                 let engine = g.chance(85);
                 let kind = if engine {
                     EventType::Engine(g.pick(EngineEvent::ALL))
@@ -1051,32 +1051,26 @@ pub fn history(
                         Default::default()
                     },
                 };
-                if engine {
-                    heads.absorb(EntryKind::Event, &canon::event_entry(&e).expect("finite"));
-                } else {
-                    host.host_events += 1;
-                }
-                chron.push_event(e);
+                rec.event(e).expect("finite");
             }
             1 => {
                 let m = Message {
-                    id: MessageId::new(heads.messages + 1).unwrap_or(MessageId::FIRST),
+                    id: MessageId::new(next_message).unwrap_or(MessageId::FIRST),
                     turn,
                     from: g.pick(&players),
                     to: players.iter().copied().filter(|_| g.chance(50)).collect(),
                     text: g.text(),
                 };
-                heads.absorb(EntryKind::Message, &canon::message_entry(&m).expect("finite"));
-                chron.push_message(m);
+                next_message += 1;
+                rec.message(m).expect("finite");
             }
             2 => {
-                chron.push_thought(Thought {
+                rec.thought(Thought {
                     turn,
                     player: g.pick(&players),
                     text: g.text(),
                     kind: opt(&mut g, 50, Gen::text),
                 });
-                host.thoughts += 1;
             }
             3 => {
                 let s = StatsRow {
@@ -1103,23 +1097,19 @@ pub fn history(
                         golden_age: false,
                     }],
                 };
-                heads.absorb(EntryKind::Stats, &canon::stats_entry(&s).expect("finite"));
-                heads.last_stats = Some(s.clone());
-                chron.push_stats(s);
+                rec.stats(s).expect("finite");
             }
             4 => {
-                chron.push_action(ActionRecord {
+                rec.action(ActionRecord {
                     turn,
                     player: g.pick(&players),
                     tool: "move_unit".into(),
                     args: r#"{"unit":3,"x":4}"#.into(),
                 });
-                host.actions += 1;
             }
             _ => {
                 let bytes: Vec<u8> = (0..g.below(30)).map(|_| g.word() as u8).collect();
-                chron.push_frame(FrameRecord { turn, keyframe: g.chance(20), bytes: bytes.into() });
-                host.frames += 1;
+                rec.frame(FrameRecord { turn, keyframe: g.chance(20), bytes: bytes.into() });
             }
         }
     }

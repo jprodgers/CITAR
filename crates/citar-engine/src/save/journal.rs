@@ -11,10 +11,15 @@
 //!  "entries": [{"event": {...}}, {"message": {...}}, {"stats": {...}}, {"frame": {...}}, ...]}
 //! ```
 //!
-//! **Rebuilding.** [`rebuild`] reads the chunks back in order into a [`Chronicle`], recomputing
-//! the engine's running hash and every count as it goes, and says whether the result agrees with
-//! the heads the state holds. A missing, unreadable or disagreeing chunk leaves the history short
-//! (`LoadReport::chronicle_incomplete`); it never stops the game.
+//! **Recording.** The game appends to its chronicle through a [`Record`], which folds each engine
+//! entry into the running hash and counts each host one as it appends it, so the heads always
+//! describe the history in the order it was written.
+//!
+//! **Rebuilding.** [`rebuild`] reads the chunks back in order through a [`Record`] into a
+//! [`Chronicle`], recomputing the engine's running hash and every count as it goes, and says
+//! whether the result agrees with the heads the state holds. A missing, unreadable or
+//! disagreeing chunk leaves the history short (`LoadReport::chronicle_incomplete`); it never stops
+//! the game.
 //!
 //! **Frames.** Python recorded the whole dynamic map every round (`victory.record_frame`), 88%
 //! of every save. A [`FrameWriter`] records a [`FullFrame`] as a keyframe on the first frame
@@ -22,20 +27,25 @@
 //! records back into full frames. A frame is binary, little-endian:
 //!
 //! - a header: `CF`, the format version (1), `K` or `D`, and the turn (`i32`);
-//! - a keyframe: the tile count (`u32`); the palettes of improvement and feature names (each a
-//!   `u16` count of `u16`-length strings); the owner, improvement, route and feature layers (one
-//!   byte per tile); each major's explored tiles (a `u8` count of majors, each its id, a `u32`
-//!   word count and the `u64` words);
-//! - a delta: the changed tiles as 8-byte records (`u32` tile, then owner, improvement, route and
-//!   feature); each major's newly explored tiles, as a `u32` count and LEB128 gaps (the first
-//!   index, then each index less the previous one, less one);
+//! - a keyframe: the tile count (`u32`); the palettes of improvement, feature and unit type names
+//!   (each a `u16` count of `u16`-length strings); the owner, improvement, route and feature
+//!   layers (one byte per tile); each major's explored tiles (a `u8` count of majors, each its id,
+//!   a `u32` word count and the `u64` words);
+//! - a delta: the frame it was taken from, as its turn (`i32`) and 8 bytes of a hash of its
+//!   palettes, layers and explored sets, which the decoder must be at; the changed tiles as 8-byte
+//!   records (`u32` tile, then owner, improvement, route and feature); each major's newly explored
+//!   tiles, as a `u32` count and LEB128 gaps (the first index, then each index less the previous
+//!   one, less one);
 //! - both, last: the cities in full (`u32` count; id `u32`, owner `u8`, tile `u32`, pop `u16`,
-//!   capital `u8`, a `u16`-length name), the units packed at 8 bytes each (`u32` count; base unit
+//!   capital `u8`, a `u16`-length name), the units packed at 8 bytes each (`u32` count; unit type
 //!   `u16`, owner `u8`, hp `u8`, tile `u32`), and the range of event ids (`u32`, `u32`).
 //!
 //! The layers are Python's: owner 255 for none (254 at most), an improvement or top non-hill
 //! feature as its palette position plus 1, the route level plus 4 when pillaged
-//! (`victory.py:466-472`).
+//! (`victory.py:466-472`). Improvements, features and unit types are palette positions, and
+//! the palettes are names (Python's frames named the unit type), so frames recorded before a
+//! change of ruleset still read after it. A change of palette makes the next frame a keyframe,
+//! and a decoder refuses a position past its palette.
 //!
 //! Replaces `victory.record_frame` (`citar/engine/victory.py:458-485`) and the history parts of
 //! `GameState.to_dict` (`state.py:352-356`).
@@ -45,7 +55,8 @@ use serde::{Deserialize, Serialize};
 use super::SaveError;
 use super::canon;
 use super::ctx::with_rules;
-use crate::base::ids::{PlayerId, Turn};
+use crate::base::digest::CanonError;
+use crate::base::ids::{EventId, PlayerId, Turn};
 use crate::base::sets::BitSet;
 use crate::rules::Ruleset;
 use crate::state::State;
@@ -185,6 +196,9 @@ fn entries_since<'a>(chron: &'a Chronicle, cursor: &mut JournalCursor) -> Vec<En
 
 /// The chunk of everything appended to `chron` since `cursor`, numbered `host.journal_seq`,
 /// which it then counts; `None` if nothing was appended.
+///
+/// A chunk that does not encode moves neither the cursor nor the count, so the next take
+/// carries its entries.
 pub fn take_chunk(
     rules: &'static Ruleset,
     chron: &Chronicle,
@@ -195,10 +209,16 @@ pub fn take_chunk(
         return Ok(None);
     }
     let seq = host.journal_seq;
-    let doc =
-        ChunkRef { format: FORMAT, version: VERSION, seq, entries: entries_since(chron, cursor) };
+    let mut next = *cursor;
+    let doc = ChunkRef {
+        format: FORMAT,
+        version: VERSION,
+        seq,
+        entries: entries_since(chron, &mut next),
+    };
     let json = with_rules(rules, || serde_json::to_vec(&doc))
         .map_err(|e| SaveError::Json(e.to_string()))?;
+    *cursor = next;
     host.journal_seq = seq.saturating_add(1);
     Ok(Some(JournalChunk { seq, json }))
 }
@@ -217,108 +237,160 @@ pub fn decode_chunk(
     Ok((doc.seq, doc.entries))
 }
 
-/// The heads of host activity a rebuilt history counts, to compare with the state's.
-#[derive(Default, PartialEq, Eq)]
-struct HostCounts {
-    host_events: u32,
-    thoughts: u32,
-    actions: u32,
-    frames: u32,
-    chunks: u32,
+// ---- Recording --------------------------------------------------------------------------------
+
+/// A history and its heads, borrowed together, so that every entry is appended and counted in one
+/// step (DESIGN.md 4.7, 4.11).
+///
+/// The engine's running hash folds events, messages and stats rows in the order they are
+/// appended, and the host's heads count everything else. [`rebuild`] replays a journal through a
+/// `Record` and compares the heads it ends with, so the game appends through one too: an entry
+/// pushed to the chronicle but not folded into the heads, or folded in another order, would leave
+/// every later load reporting the history incomplete.
+pub struct Record<'a> {
+    heads: &'a mut ChronicleHeads,
+    host: &'a mut HostHeads,
+    chron: &'a mut Chronicle,
 }
 
+impl<'a> Record<'a> {
+    /// A record into `chron`, counted in `heads` and `host`.
+    pub const fn new(
+        heads: &'a mut ChronicleHeads,
+        host: &'a mut HostHeads,
+        chron: &'a mut Chronicle,
+    ) -> Self {
+        Self { heads, host, chron }
+    }
+
+    /// A record into the game's `chron`, counted in `st`'s heads.
+    pub fn of(st: &'a mut State, chron: &'a mut Chronicle) -> Self {
+        let (heads, host) = st.heads_mut();
+        Self { heads, host, chron }
+    }
+
+    /// The next event id, from the feed engine and host events share
+    /// (`HostHeads::take_event_id`); `None` once `u32` is spent.
+    pub fn take_event_id(&mut self) -> Option<EventId> {
+        self.host.take_event_id()
+    }
+
+    /// Appends an event: an engine event folded into the running hash (all of it but its id), a
+    /// host event counted among the host's. Nothing is appended if it has no canonical form.
+    pub fn event(&mut self, ev: Event) -> Result<(), CanonError> {
+        if matches!(ev.kind, EventType::Engine(_)) {
+            let bytes = canon::event_entry(&ev)?;
+            self.heads.absorb(EntryKind::Event, &bytes);
+        } else {
+            self.host.host_events = self.host.host_events.saturating_add(1);
+        }
+        self.chron.push_event(ev);
+        Ok(())
+    }
+
+    /// Appends a message, folded into the running hash.
+    pub fn message(&mut self, m: Message) -> Result<(), CanonError> {
+        let bytes = canon::message_entry(&m)?;
+        self.heads.absorb(EntryKind::Message, &bytes);
+        self.chron.push_message(m);
+        Ok(())
+    }
+
+    /// Appends a stats row, folded into the running hash, and keeps it as the newest
+    /// (`ChronicleHeads::last_stats`, which `save::summary` reads).
+    pub fn stats(&mut self, s: StatsRow) -> Result<(), CanonError> {
+        let bytes = canon::stats_entry(&s)?;
+        self.heads.absorb(EntryKind::Stats, &bytes);
+        self.heads.last_stats = Some(s.clone());
+        self.chron.push_stats(s);
+        Ok(())
+    }
+
+    /// Appends a thought, counted as host activity.
+    pub fn thought(&mut self, t: Thought) {
+        self.host.thoughts = self.host.thoughts.saturating_add(1);
+        self.chron.push_thought(t);
+    }
+
+    /// Appends an action record, counted as host activity.
+    pub fn action(&mut self, a: ActionRecord) {
+        self.host.actions = self.host.actions.saturating_add(1);
+        self.chron.push_action(a);
+    }
+
+    /// Appends a replay frame (from [`FrameWriter::push`]), counted as host activity.
+    pub fn frame(&mut self, f: FrameRecord) {
+        self.host.frames = self.host.frames.saturating_add(1);
+        self.chron.push_frame(f);
+    }
+
+    /// Appends an entry read back from a chunk, as its own method would.
+    pub fn append(&mut self, e: JournalEntry) -> Result<(), CanonError> {
+        match e {
+            JournalEntry::Event(ev) => self.event(ev),
+            JournalEntry::Message(m) => self.message(m),
+            JournalEntry::Stats(s) => self.stats(s),
+            JournalEntry::Thought(t) => {
+                self.thought(t);
+                Ok(())
+            }
+            JournalEntry::Action(a) => {
+                self.action(a);
+                Ok(())
+            }
+            JournalEntry::Frame(f) => {
+                self.frame(f);
+                Ok(())
+            }
+        }
+    }
+}
+
+// ---- Rebuilding -------------------------------------------------------------------------------
+
 /// The chronicle `chunks` rebuild, oldest first, and whether it is the whole history `heads`
-/// and `host` count: the same number of chunks in sequence, of each kind of entry, and the same
-/// running hash.
+/// and `host` count: the same number of chunks in sequence, the same counts of each kind of
+/// entry, the same newest stats row, and the same running hash.
+///
+/// The running hash folded in rule ids as numbers, which a save loaded under another ruleset
+/// (`same_rules` false) may name differently, so it is compared only under the same ruleset;
+/// the counts and the sequence still find a missing or unreadable chunk.
 pub fn rebuild(
     rules: &'static Ruleset,
     chunks: &mut dyn Iterator<Item = &[u8]>,
     heads: &ChronicleHeads,
     host: &HostHeads,
+    same_rules: bool,
 ) -> (Chronicle, bool) {
     let mut chron = Chronicle::new();
     let mut hashed = ChronicleHeads::default();
-    let mut counts = HostCounts::default();
+    let mut counted = HostHeads::default();
     let mut complete = true;
     for bytes in chunks {
         let Ok((seq, entries)) = decode_chunk(rules, bytes) else {
             complete = false;
             continue;
         };
-        if seq != counts.chunks {
+        if seq != counted.journal_seq {
             complete = false;
         }
-        counts.chunks = seq.saturating_add(1);
+        counted.journal_seq = seq.saturating_add(1);
+        let mut rec = Record::new(&mut hashed, &mut counted, &mut chron);
         for e in entries {
-            complete &= absorb(&mut chron, &mut hashed, &mut counts, e);
+            complete &= rec.append(e).is_ok();
         }
     }
     complete &= hashed.engine_events == heads.engine_events
         && hashed.messages == heads.messages
         && hashed.stats == heads.stats
-        && hashed.hash == heads.hash
+        && (hashed.hash == heads.hash || !same_rules)
         && hashed.last_stats == heads.last_stats
-        && counts
-            == HostCounts {
-                host_events: host.host_events,
-                thoughts: host.thoughts,
-                actions: host.actions,
-                frames: host.frames,
-                chunks: host.journal_seq,
-            };
+        && counted.host_events == host.host_events
+        && counted.thoughts == host.thoughts
+        && counted.actions == host.actions
+        && counted.frames == host.frames
+        && counted.journal_seq == host.journal_seq;
     (chron, complete)
-}
-
-/// Appends one entry, folding it into the heads as the engine did; false if its canonical bytes
-/// could not be taken.
-fn absorb(
-    chron: &mut Chronicle,
-    heads: &mut ChronicleHeads,
-    counts: &mut HostCounts,
-    e: JournalEntry,
-) -> bool {
-    let mut ok = true;
-    match e {
-        JournalEntry::Event(ev) => {
-            if matches!(ev.kind, EventType::Engine(_)) {
-                match canon::event_entry(&ev) {
-                    Ok(bytes) => heads.absorb(EntryKind::Event, &bytes),
-                    Err(_) => ok = false,
-                }
-            } else {
-                counts.host_events = counts.host_events.saturating_add(1);
-            }
-            chron.push_event(ev);
-        }
-        JournalEntry::Message(m) => {
-            match canon::message_entry(&m) {
-                Ok(bytes) => heads.absorb(EntryKind::Message, &bytes),
-                Err(_) => ok = false,
-            }
-            chron.push_message(m);
-        }
-        JournalEntry::Stats(s) => {
-            match canon::stats_entry(&s) {
-                Ok(bytes) => heads.absorb(EntryKind::Stats, &bytes),
-                Err(_) => ok = false,
-            }
-            heads.last_stats = Some(s.clone());
-            chron.push_stats(s);
-        }
-        JournalEntry::Thought(t) => {
-            counts.thoughts = counts.thoughts.saturating_add(1);
-            chron.push_thought(t);
-        }
-        JournalEntry::Action(a) => {
-            counts.actions = counts.actions.saturating_add(1);
-            chron.push_action(a);
-        }
-        JournalEntry::Frame(f) => {
-            counts.frames = counts.frames.saturating_add(1);
-            chron.push_frame(f);
-        }
-    }
-    ok
 }
 
 // ---- Frames -----------------------------------------------------------------------------------
@@ -326,11 +398,16 @@ fn absorb(
 /// Frames between keyframes.
 pub const KEYFRAME_EVERY: u32 = 64;
 
-/// The names a frame's improvement and feature layers number from 1.
+/// The names a frame's numbers stand for, so that frames recorded under one ruleset still read
+/// after a change of ruleset has renumbered its objects.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FramePalette {
+    /// The improvement layer's, numbered from 1.
     pub improvement: Vec<Box<str>>,
+    /// The feature layer's, numbered from 1.
     pub feature: Vec<Box<str>>,
+    /// The units' types, numbered from 0 ([`FrameUnit::base`]).
+    pub unit: Vec<Box<str>>,
 }
 
 /// A city as a frame shows it.
@@ -347,6 +424,7 @@ pub struct FrameCity {
 /// A unit as a frame shows it: 8 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FrameUnit {
+    /// Its type: a position in the palette's `unit` names.
     pub base: u16,
     pub owner: u8,
     pub hp: u8,
@@ -387,6 +465,7 @@ impl FullFrame {
         let palette = FramePalette {
             improvement: rules.improvements().as_slice().iter().map(|i| i.name.clone()).collect(),
             feature: names(&mut features.as_slice().iter().copied()),
+            unit: rules.base_units().as_slice().iter().map(|u| u.name.clone()).collect(),
         };
         let tiles = st.tiles().as_slice();
         let mut owner = Vec::with_capacity(tiles.len());
@@ -488,7 +567,12 @@ impl FrameWriter {
         out.push(if key { b'K' } else { b'D' });
         out.extend_from_slice(&frame.turn.to_le_bytes());
         match (&self.last, key) {
-            (Some(last), false) => write_delta(&mut out, last, frame),
+            (Some(last), false) => {
+                // The frame it was taken from, which a decoder must be at to apply it.
+                out.extend_from_slice(&last.turn.to_le_bytes());
+                out.extend_from_slice(&base_check(last));
+                write_delta(&mut out, last, frame);
+            }
             _ => write_key(&mut out, frame),
         }
         write_tail(&mut out, frame);
@@ -496,6 +580,37 @@ impl FrameWriter {
         self.last = Some(frame.clone());
         FrameRecord { turn: frame.turn, keyframe: key, bytes: out.into_boxed_slice() }
     }
+}
+
+/// What a delta is taken from, in 8 bytes: the start of a blake3 hash of the palettes, the tile
+/// layers and the explored sets, everything a delta changes or leaves as it was. A delta carries
+/// its base's, so one applied to any other frame (a chunk lost between them, a keyframe of
+/// another run at the same turn) is refused instead of decoding wrong.
+fn base_check(f: &FullFrame) -> [u8; 8] {
+    let mut h = blake3::Hasher::new();
+    for list in [&f.palette.improvement, &f.palette.feature, &f.palette.unit] {
+        h.update(&len32(list.len()).to_le_bytes());
+        for name in list {
+            h.update(&len32(name.len()).to_le_bytes());
+            h.update(name.as_bytes());
+        }
+    }
+    for layer in [&f.owner, &f.improvement, &f.route, &f.feature] {
+        h.update(&len32(layer.len()).to_le_bytes());
+        h.update(layer);
+    }
+    h.update(&len32(f.explored.len()).to_le_bytes());
+    for (p, set) in &f.explored {
+        h.update(&[p.0]);
+        let words = set.words();
+        h.update(&len32(words.len()).to_le_bytes());
+        for w in words {
+            h.update(&w.to_le_bytes());
+        }
+    }
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&h.finalize().as_bytes()[..8]);
+    out
 }
 
 fn put_u16(out: &mut Vec<u8>, v: u16) {
@@ -528,7 +643,7 @@ fn put_varint(out: &mut Vec<u8>, mut v: u32) {
 
 fn write_key(out: &mut Vec<u8>, f: &FullFrame) {
     put_u32(out, len32(f.owner.len()));
-    for list in [&f.palette.improvement, &f.palette.feature] {
+    for list in [&f.palette.improvement, &f.palette.feature, &f.palette.unit] {
         put_u16(out, u16::try_from(list.len()).unwrap_or(u16::MAX));
         for name in list.iter().take(usize::from(u16::MAX)) {
             put_str(out, name);
@@ -698,6 +813,15 @@ impl FrameDecoder {
                 .last
                 .as_ref()
                 .ok_or_else(|| FrameError("a delta before any keyframe".into()))?;
+            let base_turn = r.u32()? as i32;
+            let check = r.take(8)?;
+            if base_turn != last.turn || check != base_check(last) {
+                return Err(FrameError(format!(
+                    "a delta taken from the frame of turn {base_turn}, applied to another \
+                     (the decoder is at turn {})",
+                    last.turn
+                )));
+            }
             read_delta(&mut r, last)?
         };
         f.turn = turn;
@@ -705,15 +829,34 @@ impl FrameDecoder {
         if r.at != r.bytes.len() {
             return Err(FrameError("bytes left after the frame".into()));
         }
+        check_palette(&f)?;
         self.last = Some(f.clone());
         Ok(f)
     }
 }
 
+/// Every improvement, feature and unit type of a decoded frame is in its palette, so a reader
+/// can look each one up.
+fn check_palette(f: &FullFrame) -> Result<(), FrameError> {
+    let layers = [
+        ("improvement", &f.improvement, f.palette.improvement.len()),
+        ("feature", &f.feature, f.palette.feature.len()),
+    ];
+    for (what, layer, len) in layers {
+        if let Some(t) = layer.iter().position(|&x| usize::from(x) > len) {
+            return Err(FrameError(format!("tile {t}: {what} {} is past its palette", layer[t])));
+        }
+    }
+    if let Some(u) = f.units.iter().find(|u| usize::from(u.base) >= f.palette.unit.len()) {
+        return Err(FrameError(format!("unit type {} is past its palette", u.base)));
+    }
+    Ok(())
+}
+
 fn read_key(r: &mut Reader<'_>) -> Result<FullFrame, FrameError> {
     let n = r.count(4)?;
     let mut f = FullFrame::default();
-    for list in [&mut f.palette.improvement, &mut f.palette.feature] {
+    for list in [&mut f.palette.improvement, &mut f.palette.feature, &mut f.palette.unit] {
         let k = usize::from(r.u16()?);
         for _ in 0..k {
             list.push(r.str()?);

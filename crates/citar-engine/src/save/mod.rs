@@ -90,8 +90,9 @@ pub struct LoadReport {
     /// names. Every name still resolved, so it loaded; proof-of-work verification, which needs
     /// the exact ruleset, would refuse it.
     pub rules_changed: Option<(RulesetId, String)>,
-    /// The journal chunks did not rebuild the whole history the state's heads count, or it
-    /// hashes differently. The game plays on; only history views are short.
+    /// The journal chunks did not rebuild the whole history the state's heads count, in
+    /// sequence, or (under the save's own ruleset, whose ids the running hash folded in) it hashes
+    /// differently. The game plays on; only history views are short.
     pub chronicle_incomplete: bool,
     /// The engine version the save names (`0.1.6+<build>`).
     pub engine: String,
