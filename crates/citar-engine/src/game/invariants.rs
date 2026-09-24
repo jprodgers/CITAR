@@ -335,9 +335,11 @@ fn tiles(g: &Game, out: &mut Out) {
     }
 }
 
-fn finite(what: &str, v: f64, out: &mut Out) {
+/// Reports `v` if it is not finite. What it is gets written only then: the check runs at every
+/// settle over every stock, progress, influence and opinion.
+fn finite(v: f64, what: impl FnOnce() -> String, out: &mut Out) {
     if !v.is_finite() {
-        out.push(Code::Player1, format!("{what} is {v}"));
+        out.push(Code::Player1, format!("{} is {v}", what()));
     }
 }
 
@@ -353,7 +355,7 @@ fn players(g: &Game, out: &mut Out) {
             ("last gold rate", e.last_gold_rate),
             ("research overflow", pl.tech.overflow),
         ] {
-            finite(&format!("player {p}'s {name}"), v, out);
+            finite(v, || format!("player {p}'s {name}"), out);
         }
         for (name, v) in
             [("culture", e.culture), ("faith", e.faith), ("golden age points", e.golden_age_points)]
@@ -363,14 +365,14 @@ fn players(g: &Game, out: &mut Out) {
             }
         }
         for (&t, &v) in &pl.tech.progress {
-            finite(&format!("player {p}'s progress on tech {t:?}"), v, out);
+            finite(v, || format!("player {p}'s progress on tech {t:?}"), out);
         }
         for (&u, &v) in pl.gp.points.iter().chain(&pl.gp.combat_points) {
-            finite(&format!("player {p}'s great person points toward {u:?}"), v, out);
+            finite(v, || format!("player {p}'s great person points toward {u:?}"), out);
         }
         if let Some(cs) = pl.city_state.as_deref() {
             for (q, &v) in cs.influence.iter() {
-                finite(&format!("player {p}'s influence with {q}"), v, out);
+                finite(v, || format!("player {p}'s influence with {q}"), out);
             }
         }
         let cities = st.cities().of(p);
@@ -398,15 +400,15 @@ fn players(g: &Game, out: &mut Out) {
     }
     for c in st.cities().iter() {
         for (name, v) in [("food", c.food), ("culture", c.culture), ("overflow", c.overflow)] {
-            finite(&format!("city {}'s {name}", c.id()), v, out);
+            finite(v, || format!("city {}'s {name}", c.id()), out);
         }
         for (item, &v) in &c.progress {
-            finite(&format!("city {}'s progress on {item:?}", c.id()), v, out);
+            finite(v, || format!("city {}'s progress on {item:?}", c.id()), out);
         }
     }
     for ((holder, about), values) in st.diplo().opinions.iter() {
         for &v in values {
-            finite(&format!("{holder}'s opinion of {about}"), v, out);
+            finite(v, || format!("{holder}'s opinion of {about}"), out);
         }
     }
 }
