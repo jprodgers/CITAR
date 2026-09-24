@@ -7,7 +7,7 @@
 //! defensive pacts and city-state allies drawn in, and the peace treaty. The consequences that
 //! belong to other systems are marked where Python had them: open negotiations are cancelled
 //! (package 1c-05), a city-state attacked or protected reacts (1c-06), units in a new friend's
-//! land go home (1c-02), and the war and peace triggers fire (1b-08).
+//! land go home, and the war and peace triggers fire (1b-08).
 //!
 //! A write the state refuses (two ids that are no pair, a city-state that is none) is an engine
 //! bug. The rules return it rather than stop quietly halfway, so a scenario operation reports it
@@ -212,9 +212,8 @@ pub fn make_peace(g: &mut Game, a: PlayerId, b: PlayerId) -> Result<(), StateErr
     };
     g.update_relation(a, b, peace)?;
     for (side_p, other) in [(a, b), (b, a)] {
-        // Units standing in the other side's land go to their nearest own tile
-        // (movement.teleport_to_closest).
-        pending(Porting::Pending("1c-02"));
+        // Units standing in the other side's land go to the nearest tile they may be on.
+        crate::game::movement::send_home(g, side_p, other);
         let side_major = g.player(side_p).is_some_and(Player::is_major);
         for cs in players_where(g, |p| p.is_city_state() && p.alive()) {
             let ally = g.player(cs).and_then(|p| p.city_state.as_deref()).and_then(|d| d.ally());
