@@ -143,6 +143,9 @@ impl Derived {
                     .units()
                     .get(u)
                     .is_some_and(|x| rules.base_units().get(x.base).is_some_and(|b| b.military));
+                // A blockade begins or ends as the unit comes or goes, and the cities in range
+                // look again at once.
+                // refcheck: citizens-follow-a-blockade-at-once
                 if military {
                     for t in [from, Some(to)].into_iter().flatten() {
                         self.flag_blockade(st, range, by, t, &mut out);

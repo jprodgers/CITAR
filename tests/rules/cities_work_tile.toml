@@ -1,0 +1,139 @@
+about = """
+work_tile locks one of a city's citizens onto a tile it could work, or releases the lock, and
+says where the city's citizens then work: the same tiles the city shows afterwards. A tile the
+city cannot work is refused, and a lock survives the citizens' next placement.
+
+The Rust engine keeps a city's locks as a set, one citizen each, and refuses another lock while
+every citizen is locked, where Python dropped the oldest lock
+(intended: work-tile-refuses-a-lock-past-the-citizens).
+"""
+from = "citar/engine/tools.py: work_tile"
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma", pop = 2, claim_radius = 2 }
+as = "roma"
+
+[[step]]
+set = { city = "=roma.city_id" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 2
+
+[[step]]
+tool = "work_tile"
+args = { city_id = "=city", at = "F" }
+as = "locked"
+
+[[step]]
+check = "locked"
+path = "locked_tiles"
+eq = [[3, 5]]
+
+[[step]]
+note = "the lock is worked, and the call's answer is where the city's citizens work after it"
+check = { what = "city", city = "=city" }
+subset = { locked = [[3, 5]], pop = 2 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+contains = [3, 5]
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 2
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+contains = "=locked.worked_tiles[0]"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+contains = "=locked.worked_tiles[1]"
+
+[[step]]
+note = "the city centre is never one of its workable tiles, nor a tile out of its borders"
+tool = "work_tile"
+args = { city_id = "=city", at = "A" }
+error = "That tile is not workable by this city."
+
+[[step]]
+tool = "work_tile"
+args = { city_id = "=city", x = 12, y = 5 }
+error = "That tile is not workable by this city."
+
+[[step]]
+tool = "work_tile"
+args = { city_id = 99, at = "F" }
+error = "You have no city with id 99."
+
+[[step]]
+note = "a lock outlives the next placement of the city's citizens"
+op = "set_city"
+args = { city = "=city", pop = 3 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { locked = [[3, 5]], pop = 3 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+contains = [3, 5]
+
+[[step]]
+tool = "work_tile"
+args = { city_id = "=city", at = "H" }
+
+[[step]]
+tool = "work_tile"
+args = { city_id = "=city", at = "M>ne" }
+as = "three"
+
+[[step]]
+check = "three"
+path = "locked_tiles"
+len = 3
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 3
+
+[[step]]
+note = "every citizen is locked: a fourth lock waits for one to be released"
+tool = "work_tile"
+args = { city_id = "=city", at = "L" }
+error = "All 3 citizens of Roma are locked to tiles: unlock one first."
+intended = "work-tile-refuses-a-lock-past-the-citizens"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "locked"
+contains = [3, 5]
+
+[[step]]
+tool = "work_tile"
+args = { city_id = "=city", at = "F", locked = false }
+as = "released"
+
+[[step]]
+check = "released"
+path = "locked_tiles"
+not_contains = [3, 5]
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "locked"
+not_contains = [3, 5]
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 3
