@@ -329,16 +329,20 @@ pub fn workable_tiles(g: &Game, c: CityId) -> Vec<TileIdx> {
     let Some(city) = g.city(c) else { return Vec::new() };
     let owner = city.owner();
     let st = g.state();
+    let range = work_range(g);
+    // A sibling works only tiles within its own range, so only one within twice the range of
+    // this city can work one of its tiles.
     let others: SmallVec<[TileIdx; 32]> = st
         .cities()
         .of(owner)
         .iter()
         .filter(|&&x| x != c)
         .filter_map(|&x| st.cities().get(x))
+        .filter(|x| g.grid().distance(x.tile(), city.tile()) <= 2 * range)
         .flat_map(|x| x.worked.iter().copied())
         .collect();
     let mut out = Vec::new();
-    for t in g.grid().within(city.tile(), work_range(g)) {
+    for t in g.grid().within(city.tile(), range) {
         if t == city.tile() || g.tile(t).and_then(crate::state::map::Tile::owner) != Some(owner) {
             continue;
         }
@@ -443,35 +447,80 @@ fn object_names_building(g: &Game, o: crate::base::ids::ObjectFilterId, b: Build
     t.object(o).buildings.is_some_and(|s| t.in_set(s, b))
 }
 
+/// The uniques of a city that add to what each of its buildings gives, gathered once for all of
+/// them, in the order the city's queries give them: `[stats] from every [object]` and `[stats]
+/// from all [buildings] buildings` for its yields, `[n]% [stat] from every [object]` and `[n]%
+/// Yield from every [object]` for its percentages.
+#[derive(Clone, Debug, Default)]
+struct BuildingUniques {
+    stats_from_object: SmallVec<[(UniqueData, u16); 4]>,
+    stats_from_buildings: SmallVec<[(UniqueData, u16); 4]>,
+    pct_from_object: SmallVec<[(UniqueData, u16); 4]>,
+    all_pct_from_object: SmallVec<[(UniqueData, u16); 4]>,
+}
+
+impl BuildingUniques {
+    /// Those of the yields.
+    fn stats(v: &crate::game::EvalView<'_>, c: CityId, ctx: &Ctx) -> Self {
+        let of = |ty| uq::city(v, c, ty, ctx).map(|h| (*h.data(), h.n)).collect();
+        Self {
+            stats_from_object: of(UniqueType::StatsFromObject),
+            stats_from_buildings: of(UniqueType::StatsFromBuildings),
+            ..Self::default()
+        }
+    }
+
+    /// Those of the percentages.
+    fn pct(v: &crate::game::EvalView<'_>, c: CityId, ctx: &Ctx) -> Self {
+        let of = |ty| uq::city(v, c, ty, ctx).map(|h| (*h.data(), h.n)).collect();
+        Self {
+            pct_from_object: of(UniqueType::StatPercentFromObject),
+            all_pct_from_object: of(UniqueType::AllStatsPercentFromObject),
+            ..Self::default()
+        }
+    }
+}
+
 /// The flat yields a building gives in this city (`cities.building_stats`, `cities.py:246-266`):
 /// its own, `[stats] from every [building]`, its `Stats` uniques that hold, and, unless it is a
 /// wonder, `[stats] from all [buildings] buildings`.
 #[must_use]
 pub fn building_stats(g: &Game, c: CityId, b: BuildingId) -> Stats {
-    let r = g.rules();
-    let t = r.uniques();
     let v = g.view();
     let ctx = Ctx::city(&v, c);
+    building_stats_with(g, &v, b, &ctx, &BuildingUniques::stats(&v, c, &ctx))
+}
+
+/// [`building_stats`] with the city's uniques gathered.
+fn building_stats_with(
+    g: &Game,
+    v: &crate::game::EvalView<'_>,
+    b: BuildingId,
+    ctx: &Ctx,
+    bu: &BuildingUniques,
+) -> Stats {
+    let r = g.rules();
+    let t = r.uniques();
     let bd = &r.buildings()[b];
     let mut s = bd.stats;
-    for h in uq::city(&v, c, UniqueType::StatsFromObject, &ctx) {
-        if let UniqueData::StatsFromObject(x) = h.data()
+    for &(d, n) in &bu.stats_from_object {
+        if let UniqueData::StatsFromObject(x) = d
             && object_names_building(g, x.object, b)
         {
-            s.add_scaled(t.stats(x.stats), f64::from(h.n));
+            s.add_scaled(t.stats(x.stats), f64::from(n));
         }
     }
-    for h in uq::object(&v, &bd.uniques, UniqueType::Stats, &ctx) {
+    for h in uq::object(v, &bd.uniques, UniqueType::Stats, ctx) {
         if let UniqueData::Stats(x) = h.data() {
             s += *t.stats(x.stats);
         }
     }
     if !bd.is_wonder {
-        for h in uq::city(&v, c, UniqueType::StatsFromBuildings, &ctx) {
-            if let UniqueData::StatsFromBuildings(x) = h.data()
+        for &(d, n) in &bu.stats_from_buildings {
+            if let UniqueData::StatsFromBuildings(x) = d
                 && t.in_set(x.buildings, b)
             {
-                s.add_scaled(t.stats(x.stats), f64::from(h.n));
+                s.add_scaled(t.stats(x.stats), f64::from(n));
             }
         }
     }
@@ -480,26 +529,25 @@ pub fn building_stats(g: &Game, c: CityId, b: BuildingId) -> Stats {
 
 /// The percentage bonuses a building gives in this city (`cities.building_pct`,
 /// `cities.py:269-282`): its own, and `[n]% [stat] from every [building]`, `[n]% Yield from
-/// every [building]`.
-fn building_pct(g: &Game, c: CityId, b: BuildingId, ctx: &Ctx) -> Yields {
+/// every [building]`, from the city's uniques gathered.
+fn building_pct(g: &Game, b: BuildingId, bu: &BuildingUniques) -> Yields {
     let r = g.rules();
-    let v = g.view();
     let mut s = Yields::default();
     s.add(&r.buildings()[b].percent_stat_bonus, 1.0);
-    for h in uq::city(&v, c, UniqueType::StatPercentFromObject, ctx) {
-        if let UniqueData::StatPercentFromObject(x) = h.data()
+    for &(d, n) in &bu.pct_from_object {
+        if let UniqueData::StatPercentFromObject(x) = d
             && object_names_building(g, x.object, b)
         {
-            for _ in 0..h.n {
+            for _ in 0..n {
                 s.add_to(x.stat, f64::from(x.percent));
             }
         }
     }
-    for h in uq::city(&v, c, UniqueType::AllStatsPercentFromObject, ctx) {
-        if let UniqueData::AllStatsPercentFromObject(x) = h.data()
+    for &(d, n) in &bu.all_pct_from_object {
+        if let UniqueData::AllStatsPercentFromObject(x) = d
             && object_names_building(g, x.object, b)
         {
-            for _ in 0..h.n {
+            for _ in 0..n {
                 for k in Stat::ALL {
                     s.add_to(k, f64::from(x.percent));
                 }
@@ -790,8 +838,9 @@ fn pct_bonuses(g: &Game, c: CityId, construction: Option<Constructible>) -> Yiel
             }
         }
     }
+    let bu = BuildingUniques::pct(&v, c, &ctx);
     for b in city.buildings.iter() {
-        let bp = building_pct(g, c, b, &ctx);
+        let bp = building_pct(g, b, &bu);
         pct.add(&bp.stats, 1.0);
         pct.keys |= bp.keys;
     }
@@ -952,8 +1001,11 @@ pub fn city_parts(g: &Game, c: CityId, work: &Work<'_>) -> CityParts {
     for t in worked_or_free_tiles(g, c, work.worked) {
         out.tiles += memo::tile_yield(g, t, Some(owner), Some(c));
     }
+    let v = g.view();
+    let ctx = Ctx::city(&v, c);
+    let bu = BuildingUniques::stats(&v, c, &ctx);
     for b in city.buildings.iter() {
-        out.buildings += building_stats(g, c, b);
+        out.buildings += building_stats_with(g, &v, b, &ctx, &bu);
     }
     for (i, &n) in work.specialists.iter().enumerate() {
         if n > 0
@@ -968,7 +1020,6 @@ pub fn city_parts(g: &Game, c: CityId, work: &Work<'_>) -> CityParts {
         return out;
     }
     // _city_happiness (cities.py:534-587).
-    let v = g.view();
     let t = r.uniques();
     let filters = t.filters();
     let mut unhap = r.difficulties()[g.difficulty(Some(owner))].unhappiness_modifier;
@@ -989,7 +1040,6 @@ pub fn city_parts(g: &Game, c: CityId, work: &Work<'_>) -> CityParts {
     let mut hl: SmallVec<[(HappinessSource, f64); 8]> = SmallVec::new();
     hl.push((HappinessSource::Cities, from_city * unhap * (1.0 + umod / 100.0)));
     let mut citizens = f64::from(city.pop);
-    let ctx = Ctx::city(&v, c);
     for h in uq::city(&v, c, UniqueType::UnhappinessFromPopulationTypePercentageChange, &ctx) {
         if let UniqueData::UnhappinessFromPopulationTypePercentageChange(x) = h.data()
             && filters.city_matches(x.cities, &v, c, None)

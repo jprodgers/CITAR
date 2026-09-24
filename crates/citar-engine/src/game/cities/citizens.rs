@@ -245,13 +245,21 @@ pub fn city_gpp_bonus(g: &Game, c: CityId) -> i32 {
 }
 
 /// A specialist slot scored, with the great person points it earns
-/// (`cities.rank_specialist`, `cities.py:791-800`).
-fn rank_specialist(g: &Game, rc: &RankCtx, c: CityId, s: SpecialistId, surplus: f64) -> f64 {
+/// (`cities.rank_specialist`, `cities.py:791-800`); `gpp` is the city's [`city_gpp_bonus`],
+/// the same for every slot.
+fn rank_specialist(
+    g: &Game,
+    rc: &RankCtx,
+    c: CityId,
+    s: SpecialistId,
+    surplus: f64,
+    gpp: i32,
+) -> f64 {
     let stats = specialist_stats(g, c, s);
     let mut r = rank_stats_for_work(g, rc, &stats, true, surplus);
     if let Some(sp) = g.rules().specialists().get(s) {
         let points: i32 = sp.great_person_points.iter().map(|&(_, n)| n).sum();
-        r += f64::from(points) * f64::from(100 + city_gpp_bonus(g, c)) / 100.0;
+        r += f64::from(points) * f64::from(100 + gpp) / 100.0;
     }
     r
 }
@@ -338,6 +346,7 @@ fn auto_assign(
         .map(|t| (t, memo::tile_yield(g, t, Some(owner), Some(c)), g.xy(t)))
         .collect();
     let spec_food_bonus = specialist_food_bonus(g, c);
+    let gpp = if city.manual_specialists || maxs.is_empty() { 0 } else { city_gpp_bonus(g, c) };
     let mut spec_cache: SmallVec<[(SpecialistId, f64); 4]> = SmallVec::new();
     let mut taken: SmallVec<[bool; 32]> = tiles.iter().map(|_| false).collect();
     for _ in 0..free {
@@ -367,7 +376,7 @@ fn auto_assign(
                 let v = match spec_cache.iter().find(|(x, _)| *x == s) {
                     Some(&(_, v)) => v,
                     None => {
-                        let v = rank_specialist(g, &rc, c, s, surplus);
+                        let v = rank_specialist(g, &rc, c, s, surplus, gpp);
                         spec_cache.push((s, v));
                         v
                     }

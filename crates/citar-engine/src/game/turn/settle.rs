@@ -67,6 +67,23 @@ impl Game {
         self.run_checks();
     }
 
+    /// A settle on its own, for the benchmark of one with nothing pending (DESIGN.md 10): the
+    /// engine settles only inside its own calls.
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    pub fn settle_for_bench(&mut self) {
+        self.settle();
+    }
+
+    /// A write that moves the game's revision and nothing any cache reads (a touch of player
+    /// `p`'s `OTHER` fields), for the benchmark of a first read after an unrelated change
+    /// (DESIGN.md 10).
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    pub fn unrelated_change_for_bench(&mut self, p: crate::base::ids::PlayerId) {
+        let _touched = self.player_mut(p, crate::game::derive::rev::PlayerTouch::OTHER).is_some();
+    }
+
     /// Stops a runaway effect queue: a bug, reported as SETTLE-1 where checks run.
     fn runaway(&mut self, why: String) {
         while self.fx.pop().is_some() {}

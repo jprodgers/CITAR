@@ -74,7 +74,7 @@ fn taken(g: &Game, name: &str) -> bool {
 
 /// The name of a new city (`cities.new_city_name`, `cities.py:2101-2128`): the one asked for,
 /// numbered if it is taken; else the next of the nation's list, another nation's for a
-/// civilization that borrows them, a prefixed one; else "<civilization> City <n>". The second
+/// civilization that borrows them, a prefixed one; else `"<civilization> City <n>"`. The second
 /// value says whether the civilization's city counter was used.
 #[must_use]
 pub fn new_city_name(g: &Game, p: PlayerId, asked: Option<&str>) -> (String, bool) {
