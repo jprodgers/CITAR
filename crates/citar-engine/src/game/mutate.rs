@@ -374,7 +374,7 @@ impl Game {
         Ok(())
     }
 
-    /// Records that two players have met, and nothing more: [`Game::meet`] is the rule.
+    /// Records that two players have met, and nothing more: [`Game::make_contact`] is the rule.
     pub(crate) fn set_met(&mut self, a: PlayerId, b: PlayerId) -> Result<(), StateError> {
         let chs = self.st.diplo_mut().meet(a, b)?;
         self.changed_all(chs);

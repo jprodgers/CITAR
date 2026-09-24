@@ -710,7 +710,7 @@ impl Game {
     /// Records that two players have met, with what follows a first contact (`game.py:694-701`):
     /// the city-states' greeting and the `first_contact` event. Nothing happens for a player and
     /// itself, the barbarians, or two who have met.
-    pub(crate) fn meet(&mut self, a: PlayerId, b: PlayerId) {
+    pub(crate) fn make_contact(&mut self, a: PlayerId, b: PlayerId) {
         if a == b || self.is_barbarian(a) || self.is_barbarian(b) || self.has_met(a, b) {
             return;
         }

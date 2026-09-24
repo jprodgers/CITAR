@@ -88,7 +88,7 @@ impl Game {
     /// Applies one effect, which may raise more work.
     fn apply_effect(&mut self, e: Effect) {
         match e {
-            Effect::Meet { a, b } => self.meet(a, b),
+            Effect::Meet { a, b } => self.make_contact(a, b),
         }
     }
 
