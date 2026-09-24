@@ -69,13 +69,14 @@ city-states' nations differently, so scripts refer to a city-state by id and nev
 ## Steps
 
 Each step is a `[[step]]` table with exactly one of `op`, `ops`, `tool`, `check`, `new_game`, `set`
-or `repeat`, and any of these:
+or `repeat`, its kind's own keys, and any of these that its kind takes (the runners refuse any
+other key, so a misplaced one never passes unread):
 
 | Key | |
 |---|---|
 | `note` | a comment the runners ignore |
-| `as = "name"` | binds the step's result (an op's or tool's return value, a check's subject at its path) |
-| `error = "text"` | the op, tool or new game must be refused with `text` in its message; `error = true`: refused with any message |
+| `as = "name"` | `op`, `ops`, `tool` and `check` only: binds the step's result (an op's or tool's return value, a check's subject at its path) |
+| `error = "text"` | `op`, `ops`, `tool` and `new_game` only: the step must be refused with `text` in its message; `error = true`: refused with any message |
 | `must_fail = true` or `"text"` | the step itself must fail (for the self-test): a check that does not hold, an unexpected error, a refused script |
 | `intended = "id"` | the expected value is the Rust engine's, which differs from Python's on purpose: the Python runner skips the step. The id is listed in `refcheck/intended.toml` or `tests/rules/intended.toml` |
 | `coerce = true` | the step types numbers as strings on purpose (see [Numbers](#numbers)) |

@@ -17,8 +17,9 @@ use super::{Script, intended_ids, number_as_string, path, rules_dir, setup};
 
 /// The kinds of step: each step has exactly one of these keys.
 const KINDS: [&str; 7] = ["op", "ops", "tool", "check", "new_game", "set", "repeat"];
-/// Keys any step may have.
-const COMMON: [&str; 6] = ["note", "as", "error", "must_fail", "intended", "coerce"];
+/// Keys any step may have. `as` and `error` belong to the kinds that use them, so a check that
+/// says `error` is refused rather than passing without looking.
+const COMMON: [&str; 4] = ["note", "must_fail", "intended", "coerce"];
 
 /// Plays a script; the error says which step failed and why.
 pub fn run(script: &Script) -> Result<(), String> {
@@ -115,9 +116,11 @@ impl<'s> Runner<'s> {
             return Err(format!("{label}: a step has exactly one of {}", KINDS.join(", ")));
         };
         let own: &[&str] = match kind {
-            "op" => &["args"],
-            "tool" => &["player", "args"],
-            "check" => &["path"],
+            "op" => &["args", "as", "error"],
+            "ops" => &["as", "error"],
+            "tool" => &["player", "args", "as", "error"],
+            "check" => &["path", "as"],
+            "new_game" => &["error"],
             "repeat" => &["steps"],
             _ => &[],
         };

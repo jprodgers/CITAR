@@ -19,11 +19,14 @@ ROOT = RULES.parent.parent
 
 TOP = ("about", "from", "map", "start", "config", "step")
 KINDS = ("op", "ops", "tool", "check", "new_game", "set", "repeat")
-COMMON = ("note", "as", "error", "must_fail", "intended", "coerce")
+# `as` and `error` belong to the kinds that use them, so a check that says `error` is refused rather than passing
+# without looking.
+COMMON = ("note", "must_fail", "intended", "coerce")
 MATCHERS = ("absent", "is_null", "eq", "ne", "gt", "ge", "lt", "le", "approx", "contains", "not_contains", "len",
             "matches", "any", "none", "subset")
 WITH = ("tol",)
-OWN = {"op": ("args",), "tool": ("player", "args"), "check": ("path",), "repeat": ("steps",)}
+OWN = {"op": ("args", "as", "error"), "ops": ("as", "error"), "tool": ("player", "args", "as", "error"),
+       "check": ("path", "as"), "new_game": ("error",), "repeat": ("steps",)}
 
 
 class ScriptError(Exception):

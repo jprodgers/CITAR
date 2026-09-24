@@ -507,6 +507,26 @@ equals = 3
 must_fail = "has no key"
 
 [[step]]
+note = "A check is never refused, so an error it expected would pass unread: only op, ops, tool and new_game take error."
+check = { what = "game" }
+path = "turn"
+ge = 0
+error = "anything"
+must_fail = 'a check step has no key "error"'
+
+[[step]]
+set = { spare = 1 }
+error = true
+must_fail = 'a set step has no key "error"'
+
+[[step]]
+note = "Only op, ops, tool and check have a result to bind."
+repeat = 1
+steps = []
+as = "nothing"
+must_fail = 'a repeat step has no key "as"'
+
+[[step]]
 check = "count"
 eq = 3
 intended = "no-such-difference"
