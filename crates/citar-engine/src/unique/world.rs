@@ -24,6 +24,7 @@
 
 use core::cell::Ref;
 use core::ops::Deref;
+use std::sync::Arc;
 
 use super::filter::Combatant;
 use super::index::Csr;
@@ -192,13 +193,17 @@ pub enum IndexLayer {
 }
 
 /// A unique index a world hands out: borrowed from a table, or from a memo that validated itself
-/// before it lent it (DESIGN.md 6.3). Either way it reads as a [`Csr`].
+/// before it lent it (DESIGN.md 6.3), or shared out of a table that only grows, as the unit
+/// profiles are. Either way it reads as a [`Csr`].
 #[derive(Debug)]
 pub enum IndexRef<'a> {
     /// An index held plainly, as a mock world or a one-off table holds it.
     Plain(&'a Csr),
     /// An index held in a memo.
     Memo(Ref<'a, Csr>),
+    /// An index of a table that only grows (DESIGN.md 5.12): a pure function of its key, shared,
+    /// so that the table may grow while it is read.
+    Shared(Arc<Csr>),
 }
 
 impl Deref for IndexRef<'_> {
@@ -208,6 +213,7 @@ impl Deref for IndexRef<'_> {
         match self {
             Self::Plain(c) => c,
             Self::Memo(r) => r,
+            Self::Shared(a) => a,
         }
     }
 }

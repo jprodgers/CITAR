@@ -80,6 +80,50 @@ impl Csr {
     pub fn has(&self, ty: UniqueType) -> bool {
         !self.get(ty).is_empty()
     }
+
+    /// The two indexes as one: every entry of both, by type and then id, the copies of a unique
+    /// in both added up. What a civilization's index with its resource layer is
+    /// (`economy.civ_umaps`, `economy.py:77-88`), made without gathering its sources again.
+    #[must_use]
+    pub fn merged(&self, other: &Self) -> Self {
+        if other.is_empty() {
+            return self.clone();
+        }
+        let mut start = vec![0u16; UniqueType::COUNT + 1];
+        let mut entries = Vec::with_capacity(self.entries.len() + other.entries.len());
+        fn run(c: &Csr, t: usize) -> &[Entry] {
+            &c.entries[usize::from(c.start[t])..usize::from(c.start[t + 1])]
+        }
+        for t in 0..UniqueType::COUNT {
+            let (a, b) = (run(self, t), run(other, t));
+            let (mut i, mut j) = (0, 0);
+            while i < a.len() || j < b.len() {
+                let next = match (a.get(i), b.get(j)) {
+                    (Some(x), Some(y)) if x.id == y.id => {
+                        i += 1;
+                        j += 1;
+                        Entry { id: x.id, n: x.n.saturating_add(y.n) }
+                    }
+                    (Some(x), Some(y)) if x.id < y.id => {
+                        i += 1;
+                        *x
+                    }
+                    (Some(x), None) => {
+                        i += 1;
+                        *x
+                    }
+                    (_, Some(y)) => {
+                        j += 1;
+                        *y
+                    }
+                    (None, None) => break,
+                };
+                entries.push(next);
+            }
+            start[t + 1] = u16::try_from(entries.len()).unwrap_or(u16::MAX);
+        }
+        Self { start: start.into(), entries }
+    }
 }
 
 /// The type a unique is indexed at: its trigger's, if it has one, otherwise its own. A tag of no
@@ -257,6 +301,79 @@ impl CivIndex {
     }
 }
 
+/// The resource layer of a civilization's index (`economy.resource_umap`, `economy.py:323-336`):
+/// the uniques of the resources it has that hold wherever it counts. Their uniques that hold in
+/// one city alone go to the index of each city that has the improved resource instead
+/// ([`city_local`]).
+#[must_use]
+pub fn resource_layer(rules: &Ruleset, resources: &ResourceSet) -> Csr {
+    let mut b = Builder::new(rules);
+    for r in resources.iter() {
+        b.source(&rules.resources()[r].uniques, 1, false);
+    }
+    b.finish()
+}
+
+/// The uniques of a civilization's sources that Python's `civ_umaps` held and its [`CivIndex`]
+/// leaves out, with their copies: what happens once when the source is gained, unit actions,
+/// the AI's weights, map generation's, requirements and inert uniques, tags of no type, and a
+/// resource's uniques that hold in one city ([`city_local`] holds them). A building's that hold
+/// in its own city Python left out too (`economy.py:103-108`). For the reference checks, which
+/// count Python's lists (`economy.civ_index`, `economy.py:135-147`) by placeholder.
+#[must_use]
+pub fn unindexed(rules: &Ruleset, src: &CivSources) -> Vec<(UniqueId, u16)> {
+    let t = rules.uniques();
+    let mut out = Vec::new();
+    // `taken` holds what the index took of the source; `skip_local` drops what Python dropped.
+    let mut add = |s: &SourceUniques, n: u16, local_split: bool, skip_local: bool| {
+        for id in s.ids() {
+            let local = t.get(id).flags().contains(UFlags::LOCAL);
+            if skip_local && local {
+                continue;
+            }
+            let taken = if local_split {
+                !local && (s.civ.contains(&id) || s.triggered.contains(&id))
+            } else {
+                s.civ.contains(&id) || s.triggered.contains(&id)
+            };
+            if !taken || slot(t, id).is_none() {
+                out.push((id, n));
+            }
+        }
+    };
+    add(&rules.nations()[src.nation].uniques, 1, false, false);
+    for &(building, n) in &src.buildings {
+        add(&rules.buildings()[building].uniques, n, true, true);
+    }
+    for p in src.policies.iter() {
+        add(&rules.policies()[p].uniques, 1, false, false);
+    }
+    for tech in src.techs.iter() {
+        add(&rules.techs()[tech].uniques, 1, false, false);
+    }
+    // The temporary uniques are indexed whole, but a tag's variant, which no index holds.
+    let temporary: Vec<UniqueId> =
+        src.temporary.iter().copied().filter(|&id| slot(t, id).is_none()).collect();
+    add(&rules.eras()[src.era].uniques, 1, false, false);
+    for &(cs, bonus) in &src.city_states {
+        let def = &rules.city_state_types()[cs];
+        let s = match bonus {
+            CityStateBonus::Friend => &def.friend,
+            CityStateBonus::Ally => &def.ally,
+        };
+        add(s, 1, false, false);
+    }
+    for &belief in &src.founder_beliefs {
+        add(&rules.beliefs()[belief].uniques, 1, false, false);
+    }
+    for r in src.resources.iter() {
+        add(&rules.resources()[r].uniques, 1, true, false);
+    }
+    add(rules.global_uniques(), 1, false, false);
+    out.extend(temporary.into_iter().map(|id| (id, 1)));
+    out
+}
+
 /// The index of what holds in one city alone (`cities.local_umaps` without the religion, which
 /// is [`follower`]'s): its buildings' local uniques, and those of the resources on the improved
 /// tiles it owns (the Marble decision, DESIGN.md 5.12).
@@ -326,5 +443,34 @@ mod tests {
         let c = Csr::default();
         assert!(UniqueType::ALL.into_iter().all(|t| c.get(t).is_empty()));
         assert!(c.is_empty());
+        assert_eq!(c.merged(&c), c);
+    }
+
+    fn csr(entries: &[(UniqueType, u16, u16)]) -> Csr {
+        let mut raw: Vec<(u16, UniqueId, u16)> =
+            entries.iter().map(|&(t, id, n)| (t as u16, UniqueId(id), n)).collect();
+        raw.sort_by_key(|&(t, id, _)| (t, id));
+        let mut start = vec![0u16; UniqueType::COUNT + 1];
+        for &(t, _, _) in &raw {
+            start[usize::from(t) + 1] += 1;
+        }
+        for t in 1..start.len() {
+            start[t] += start[t - 1];
+        }
+        Csr {
+            start: start.into(),
+            entries: raw.into_iter().map(|(_, id, n)| Entry { id, n }).collect(),
+        }
+    }
+
+    #[test]
+    fn a_merge_keeps_the_order_and_adds_the_copies() {
+        let (s, f) = (UniqueType::Stats, UniqueType::StatPercentBonus);
+        let a = csr(&[(s, 3, 1), (s, 9, 2), (f, 4, 1)]);
+        let b = csr(&[(s, 5, 1), (s, 9, 1), (f, 1, 1)]);
+        let m = a.merged(&b);
+        assert_eq!(m, csr(&[(s, 3, 1), (s, 5, 1), (s, 9, 3), (f, 1, 1), (f, 4, 1)]));
+        assert_eq!(m, b.merged(&a));
+        assert_eq!(a.merged(&Csr::default()), a);
     }
 }

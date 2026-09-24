@@ -149,6 +149,17 @@ pub fn city<'w, W: EvalWorld>(w: &'w W, c: CityId, ty: UniqueType, ctx: &Ctx) ->
     hits.index(w.civ_index(w.city_owner(c), IndexLayer::Full))
 }
 
+/// The uniques of type `ty` that hold in a city alone (`cities.local_uniques`,
+/// `cities.py:69-78`): its local ones, then its majority religion's follower beliefs', without
+/// its owner's.
+pub fn local<'w, W: EvalWorld>(w: &'w W, c: CityId, ty: UniqueType, ctx: &Ctx) -> Hits<'w, W> {
+    let hits = Hits::new(w, ty, ctx).index(w.city_local(c));
+    match w.city_majority_religion(c) {
+        Some(r) => hits.index(w.follower(r)),
+        None => hits,
+    }
+}
+
 /// The uniques of type `ty` of a unit's profile that hold (`units.unit_uniques`).
 pub fn unit<'w, W: EvalWorld>(w: &'w W, u: UnitId, ty: UniqueType, ctx: &Ctx) -> Hits<'w, W> {
     Hits::new(w, ty, ctx).index(w.unit_index(u))
