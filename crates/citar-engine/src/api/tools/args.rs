@@ -1,14 +1,14 @@
 //! The argument specs of the player tools: each tool's parameters, their JSON types, and which
 //! are required (the `properties` and `required` of `tools.tool`, `tools.py:55-68`).
 //!
-//! [`normalize`](super::normalize) coerces a call's arguments by its tool's spec, and later the
+//! [`normalize`](super::normalize()) coerces a call's arguments by its tool's spec, and later the
 //! JSON registry (package 1d-01) builds each tool's schema from it and the property tests build
 //! arguments from it (DESIGN.md 9.5). The specs land with the typed actions: each system package
 //! adds its tools' entries to [`TOOLS`] together with their `Action` variants, with the
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
 //! the coercion; no action is ported yet, so the table is empty.
 
-/// A parameter's JSON type, which says how [`normalize`](super::normalize) coerces it.
+/// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ArgType {
     /// Coerced with Python's `int()`.
