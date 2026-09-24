@@ -12,7 +12,10 @@ fn golden_sets_match_the_committed_files() {
     let names: Vec<&str> = reports.iter().map(|r| r.name).collect();
     assert_eq!(
         names,
-        ["rng", "libm", "pyfmt", "ruleset", "uniques", "filters", "gen", "states", "convert"]
+        [
+            "rng", "libm", "pyfmt", "ruleset", "uniques", "filters", "gen", "states", "convert",
+            "turns"
+        ]
     );
     let problems: Vec<String> = reports
         .iter()
@@ -35,4 +38,26 @@ fn blessing_reproduces_the_committed_files() {
         // Git may check text out with CRLF on Windows.
         assert_eq!(on_disk.replace("\r\n", "\n"), text, "{file} differs from a fresh bless");
     }
+}
+
+#[test]
+fn a_set_that_depends_on_pending_stages_is_computed_but_never_blessed() {
+    // Package 1b-03's gate 4: `golden bless` refuses while the stages a set depends on are
+    // pending. The turns set depends on every stage of setup and of a turn.
+    let waiting = golden::turns::waiting();
+    assert!(!waiting.is_empty(), "stages are pending until package 1c-10");
+    let refused = golden::bless_refusals();
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].0, "turns.json");
+    assert!(refused[0].1.contains("pending"), "{}", refused[0].1);
+    assert!(
+        golden::blessed_files().iter().all(|(file, _)| *file != "turns.json"),
+        "bless leaves the set out"
+    );
+    let report = golden::turns::check_turns();
+    assert_eq!(report.waiting, waiting);
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_eq!(report.computed.len(), 64, "the set is computed all the same");
+    // The same answers twice: the game is a function of its settings.
+    assert_eq!(golden::turns::check_turns().computed, report.computed);
 }
