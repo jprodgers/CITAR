@@ -398,6 +398,15 @@ impl AdvisorParams {
     pub fn auto_production() -> Self {
         Self { aggression: 0.25, ..Self::default() }
     }
+
+    /// The aggression the advisor reads: [`aggression`](Self::aggression) held to 0 to 1, as
+    /// `BasicBot.__init__` held it (`max(0.0, min(1.0, aggression))`, `basic.py:675`), NaN
+    /// counting as 1 there too.
+    #[must_use]
+    pub fn aggr(&self) -> f64 {
+        let a = if self.aggression < 1.0 { self.aggression } else { 1.0 };
+        if a > 0.0 { a } else { 0.0 }
+    }
 }
 
 // ---- The civilization's situation (basic.py:777-873) ------------------------------------------
@@ -524,7 +533,7 @@ fn situation(g: &Game, p: PlayerId, pp: &AdvisorParams) -> Situation {
         f64::from(u32::try_from(threat.iter().filter(|&&t| t > 0.0).count()).unwrap_or(0));
     let war_extra = if wars { n * pp.army_war_per_city + pp.army_war_extra } else { 0.0 };
     let army_target = num::trunc_i32(
-        n * (pp.army_per_city + pp.army_per_city_aggr * pp.aggression)
+        n * (pp.army_per_city + pp.army_per_city_aggr * pp.aggr())
             + pp.army_base
             + war_extra
             + pp.army_per_threatened_city * threatened,
@@ -1230,7 +1239,7 @@ fn choose_unciv(
             modifier *= pp.mil_war_mult;
         }
         if s.offense && k.army < s.army_target {
-            modifier *= pp.u_offense * (pp.mil_offense_aggr_base + pp.aggression);
+            modifier *= pp.u_offense * (pp.mil_offense_aggr_base + pp.aggr());
         }
         if s.barbarians_near {
             modifier = modifier.max(pp.mil_barbarian_min);
@@ -1325,9 +1334,9 @@ fn choose_classic(
             let attacker = pick_military(g, c, s, &units, pp).unwrap_or(d);
             let shortfall = 1.0 - f64::from(k.army) / f64::from(target.max(1));
             let base = if s.offense {
-                pp.c_army_offense + pp.c_army_offense_aggr * pp.aggression
+                pp.c_army_offense + pp.c_army_offense_aggr * pp.aggr()
             } else {
-                pp.c_army_peace + pp.c_army_peace_aggr * pp.aggression
+                pp.c_army_peace + pp.c_army_peace_aggr * pp.aggr()
             };
             add(base * (pp.c_army_short_base + pp.c_army_short_scale * shortfall), attacker);
         }

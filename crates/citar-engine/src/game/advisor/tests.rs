@@ -279,3 +279,26 @@ fn the_advisor_answers_alike_whatever_its_memos_hold() {
     assert_eq!(warm, again);
     assert!(warm.iter().all(|(x, y)| x.is_some() && y.is_some()), "{warm:?}");
 }
+
+#[test]
+fn aggression_is_held_to_zero_to_one() {
+    // As `BasicBot.__init__` held it: an aggression above 1 asks as 1, one below 0 as 0.
+    let mut g = testing::duel();
+    let a = city(&mut g, TileIdx(22), "Roma", 4);
+    let b = city(&mut g, TileIdx(26), "Antium", 2);
+    every_tech(&mut g);
+    for mode in [ProductionMode::Unciv, ProductionMode::Classic] {
+        let at =
+            |x: f64| AdvisorParams { aggression: x, prod_mode: mode, ..AdvisorParams::default() };
+        for (wild, held) in [(5.0, 1.0_f64), (-1.0, 0.0), (f64::NAN, 1.0), (f64::INFINITY, 1.0)] {
+            assert_eq!(at(wild).aggr().to_bits(), held.to_bits(), "{wild}");
+            let (x, y) = (situation(&g, ROME, &at(wild)), situation(&g, ROME, &at(held)));
+            assert_eq!(x.army_target, y.army_target, "{wild}");
+            for c in [a, b] {
+                let wild_pick = advise_production(&g, ROME, c, &at(wild));
+                assert_eq!(wild_pick, advise_production(&g, ROME, c, &at(held)), "{wild}");
+            }
+        }
+        assert_eq!(at(0.25).aggr().to_bits(), 0.25_f64.to_bits());
+    }
+}
