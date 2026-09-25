@@ -72,7 +72,8 @@ pub trait SeatDriver: Send {
     /// Answers negotiation `nid`, which waits on `pid`, whoever's turn it is: through
     /// [`Game::act`] with `respond_negotiation`, which may be used at any time. `mem` is as for
     /// [`play_turn`](Self::play_turn). A driver that leaves it unanswered (a hybrid seat's bot
-    /// leaving a question to its language model) is not asked again until the chat moves.
+    /// leaving a question to its language model) is not asked again in the same drive until the
+    /// chat moves.
     fn respond(
         &mut self,
         g: &mut Game,
@@ -159,9 +160,9 @@ impl DriveOptions {
 }
 
 /// The most rounds of answers one step of [`Game::drive`] asks for. Each answer either adds an
-/// entry to its chat, whose message cap closes it, or is not asked for again until the chat
-/// moves, so the rounds run out on their own; this only bounds a pair of drivers that talk to
-/// each other forever under a very large cap.
+/// entry to its chat, whose message cap closes it, or is not asked for again in the drive until
+/// the chat moves, so the rounds run out on their own; this only bounds a pair of drivers that
+/// talk to each other forever under a very large cap.
 const ANSWER_ROUNDS: usize = 64;
 
 /// The memory a seat's driver starts from when the seat has kept none: kind 0, which no driver
@@ -186,6 +187,8 @@ impl Game {
         self.ensure_not_driving()?;
         let first = self.st.host().next_event_id;
         let mut ended: u32 = 0;
+        // The negotiations put to a driver in this call, each with the entries it had.
+        let mut asked: Vec<(NegotiationId, usize)> = Vec::new();
         let stop = loop {
             if self.phase() != Phase::Playing || self.majors(true).next().is_none() {
                 // With no major civilization left there is nobody to drive: a game whose last
@@ -205,7 +208,7 @@ impl Game {
                 self.settle();
                 continue;
             }
-            self.answer_waiting(d)?;
+            self.answer_waiting(d, &mut asked)?;
             if self.phase() != Phase::Playing || self.current() != pid {
                 continue;
             }
@@ -270,10 +273,13 @@ impl Game {
 
     /// Puts every open negotiation that waits on a driven seat to that seat's driver, round
     /// after round while the answers bring more, as Python's `resolve_negotiations` did
-    /// (`bots/headless.py:14-22`). A chat is put to a driver once for each entry it has: one
-    /// the driver leaves unanswered is not asked again until it moves.
-    fn answer_waiting(&mut self, d: &mut Drivers<'_>) -> Result<(), ActionError> {
-        let mut asked: Vec<(NegotiationId, usize)> = Vec::new();
+    /// (`bots/headless.py:14-22`). A chat is put to a driver once in a drive for each entry it
+    /// has (`asked`): one the driver leaves unanswered is not asked again until it moves.
+    fn answer_waiting(
+        &mut self,
+        d: &mut Drivers<'_>,
+        asked: &mut Vec<(NegotiationId, usize)>,
+    ) -> Result<(), ActionError> {
         for _ in 0..ANSWER_ROUNDS {
             let waiting: Vec<(NegotiationId, PlayerId, usize)> = self
                 .st

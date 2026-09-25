@@ -372,11 +372,10 @@ def _debug(g: Game, o: dict):
     return {}
 
 
-def _drive_answers(g: Game, drivers: set, answer):
+def _drive_answers(g: Game, drivers: set, answer, asked: set):
     """Put every open negotiation waiting on a driven seat to its driver, round after round while the answers bring
-    more; a negotiation is put to a driver once for each entry it has."""
+    more; a negotiation is put to a driver once in a drive for each entry it has (``asked``)."""
     from . import tools
-    asked = set()
     for _ in range(64):
         waiting = [(n["id"], n["awaiting"], len(n["history"])) for n in g.s.negotiations
                    if n["status"] == "open" and n["awaiting"] in drivers
@@ -424,6 +423,7 @@ def _drive(g: Game, o: dict):
     if limit < 0:
         raise ActionError("seat_limit must be a whole number, 0 or more.")
     ended = 0
+    asked = set()
 
     def stop(name, player=None, nids=()):
         """What the operation reports."""
@@ -440,7 +440,7 @@ def _drive(g: Game, o: dict):
         if p.kind != "major" or not p.alive:
             g.end_turn(pid)
             continue
-        _drive_answers(g, drivers, answer)
+        _drive_answers(g, drivers, answer, asked)
         if g.s.phase != "playing" or g.s.current != pid:
             continue
         if pid not in drivers:
