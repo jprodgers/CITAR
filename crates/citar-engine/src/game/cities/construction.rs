@@ -37,6 +37,7 @@ use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::cities::{Constructible, Perpetual};
 use crate::unique::cond::ProblemKind;
 use crate::unique::filter::{Expr, UnitLeaf};
+use crate::unique::trigger::{TriggerEvent, TriggerSite};
 use crate::unique::{Ctx, UniqueData, UniqueType, uq};
 
 /// The most items a city's production queue holds (`cities.py:23`).
@@ -1278,8 +1279,10 @@ pub fn complete_construction(
 }
 
 /// A unit made in a city (`units.add_unit_in_city`, `units.py:113-136`): a ship in a city off the
-/// coast goes to the civilization's first coastal city; placed on its city's tile or near it.
-fn add_unit_in_city(g: &mut Game, c: CityId, u: BaseUnitId) -> Option<UnitId> {
+/// coast goes to the civilization's first coastal city; placed on its city's tile or near it; a
+/// religious unit carries its city's religion (or its founder's), and `upon gaining a [unit]`
+/// fires.
+pub(crate) fn add_unit_in_city(g: &mut Game, c: CityId, u: BaseUnitId) -> Option<UnitId> {
     let r = g.rules();
     let city = g.city(c)?;
     let owner = city.owner();
@@ -1297,9 +1300,9 @@ fn add_unit_in_city(g: &mut Game, c: CityId, u: BaseUnitId) -> Option<UnitId> {
     if let Some(x) = g.unit_mut(id, UnitTouch::CORE) {
         x.origin_city = Some(target);
     }
-    // A religious unit takes its city's majority religion (or its founder's), and `upon gaining
-    // a [unit]` fires (units.py:127-135).
-    pending(Porting::Pending("1b-08"));
+    crate::game::religion::on_unit_made(g, id, target);
+    let site = TriggerSite { civ: owner, city: None, unit: Some(id), tile: None };
+    crate::game::triggers::fire(g, &site, &TriggerEvent::GainingUnit(u), true, None);
     Some(id)
 }
 
@@ -1387,7 +1390,7 @@ pub fn placement(g: &Game, p: PlayerId, u: BaseUnitId, at: TileIdx) -> Option<Ti
 }
 
 /// Places a new unit on or near a tile ([`placement`]).
-fn place_near(g: &mut Game, p: PlayerId, u: BaseUnitId, at: TileIdx) -> Option<UnitId> {
+pub(crate) fn place_near(g: &mut Game, p: PlayerId, u: BaseUnitId, at: TileIdx) -> Option<UnitId> {
     let spot = placement(g, p, u, at)?;
     g.create_unit(p, u, spot, 0).ok()
 }
@@ -1410,7 +1413,7 @@ pub fn unit_placement(g: &Game, c: CityId, u: BaseUnitId) -> Option<TileIdx> {
 
 /// The experience and promotions a city gives the units it makes
 /// (`units.add_construction_bonuses`, `units.py:139-155`).
-fn add_construction_bonuses(g: &mut Game, id: UnitId, c: CityId) {
+pub(crate) fn add_construction_bonuses(g: &mut Game, id: UnitId, c: CityId) {
     let r = g.rules();
     let t = r.uniques();
     let Some(unit) = g.unit(id) else { return };
@@ -1439,21 +1442,11 @@ fn add_construction_bonuses(g: &mut Game, id: UnitId, c: CityId) {
         }
         (xp, promotions)
     };
-    let skip: SmallVec<[bool; 2]> = promotions
-        .iter()
-        .map(|&pr| has_type(r, &r.promotions()[pr].uniques, UniqueType::SkipPromotion))
-        .collect();
     if let Some(x) = g.unit_mut(id, UnitTouch::CORE) {
         x.xp = xp;
-        for (&pr, &skip) in promotions.iter().zip(&skip) {
-            if !skip {
-                x.promotions.insert(pr);
-            }
-        }
     }
-    if !promotions.is_empty() {
-        // What a free promotion does at once (`units.add_promotion`, units.py:240-245).
-        pending(Porting::Pending("1b-08"));
+    for pr in promotions {
+        crate::game::triggers::promote_free(g, id, pr);
     }
 }
 

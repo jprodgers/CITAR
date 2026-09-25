@@ -36,6 +36,9 @@ const RIVER: &str = "River";
 const CITY_RUINS: &str = "City ruins";
 const ANCIENT_RUINS: &str = "Ancient ruins";
 const BARBARIAN_CAMP: &str = "Barbarian encampment";
+/// The great people an AI takes free, most wanted first (`great_people.py:214`).
+const PREFERRED_GREAT_PEOPLE: [&str; 5] =
+    ["Great Scientist", "Great Engineer", "Great Merchant", "Great Artist", "Great Prophet"];
 
 // The terrains and resources map generation names (`mapgen.py:551-1660`).
 const OCEAN: &str = "Ocean";
@@ -104,6 +107,9 @@ pub struct Known {
     pub the_wheel: Option<TechId>,
     /// River, the terrain whose yields a tile with a river gets (`tiles.py:306-307`).
     pub river: Option<TerrainId>,
+    /// The great people an AI takes free, most wanted first, those the ruleset has
+    /// (`great_people.ai_choose_free`, `great_people.py:214`).
+    pub preferred_great_people: [Option<BaseUnitId>; 5],
     /// The terrains and resources map generation names.
     pub map: KnownMap,
 }
@@ -219,6 +225,7 @@ impl Derived {
                 prince: None,
                 the_wheel: None,
                 river: None,
+                preferred_great_people: [None; 5],
                 map: KnownMap::default(),
             },
         }
@@ -344,6 +351,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         prince: r.difficulties.iter().find(|(_, d)| &*d.name == PRINCE).map(|(id, _)| id),
         the_wheel: r.techs.iter().find(|(_, t)| &*t.name == THE_WHEEL).map(|(id, _)| id),
         river: r.terrains.iter().find(|(_, t)| &*t.name == RIVER).map(|(id, _)| id),
+        preferred_great_people: PREFERRED_GREAT_PEOPLE
+            .map(|name| r.base_units.iter().find(|(_, u)| &*u.name == name).map(|(id, _)| id)),
         map: known_map(r),
     };
 

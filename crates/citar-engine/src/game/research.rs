@@ -31,11 +31,11 @@
 
 use serde_json::{Value, json};
 
+use super::Game;
 use super::action::{OutcomeSpec, Rule};
 use super::core::has_type;
 use super::derive::rev::{CityTouch, PlayerTouch};
 use super::error::{ActionError, ErrCode};
-use super::{Game, Porting, pending};
 use crate::base::ids::{CityId, EraId, PlayerId, TechId};
 use crate::base::num;
 use crate::base::py;
@@ -45,6 +45,7 @@ use crate::rules::Ruleset;
 use crate::rules::defs::PolicyKind;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::cities::Constructible;
+use crate::unique::trigger::{TriggerEvent, TriggerSite};
 use crate::unique::{Ctx, UniqueData, UniqueType, uq};
 
 /// How a civilization came by a tech, which the announcement says (`research.py:302-304`).
@@ -643,7 +644,10 @@ fn learn(g: &mut Game, p: PlayerId, tech: TechId, source: TechSource) {
         g.emit(EngineEvent::Tech, &text, Some(PlayerSet::single(p)), None, data, &[]);
     }
     // The uniques the tech triggers, and `upon discovering [tech]` (research.py:315-321).
-    pending(Porting::Pending("1b-08"));
+    let note = format!("due to researching {}", def.name);
+    let site = TriggerSite::civ(p);
+    super::triggers::on_gain(g, &def.uniques, &site, Some(&note));
+    super::triggers::fire(g, &site, &TriggerEvent::Research(tech), true, Some(&note));
     obsolete_queue(g, p, tech);
     let after = super::derive::civ::era(g, p);
     if after > before {
@@ -790,9 +794,14 @@ pub fn enter_era(g: &mut Game, p: PlayerId, before: EraId, after: EraId) {
             }
         }
     }
-    for _entered in (before.0 + 1)..=after.0 {
-        // The era's uniques, and `upon entering the [era]` (research.py:368-376).
-        pending(Porting::Pending("1b-08"));
+    // The era's uniques, and `upon entering the [era]` (research.py:368-376).
+    for n in (before.0 + 1)..=after.0 {
+        let era = EraId(n);
+        let Some(def) = r.eras().get(era) else { continue };
+        let note = format!("due to entering the {}", def.name);
+        let site = TriggerSite::civ(p);
+        super::triggers::on_gain(g, &def.uniques, &site, Some(&note));
+        super::triggers::fire(g, &site, &TriggerEvent::EnteringEra(era), true, Some(&note));
     }
 }
 

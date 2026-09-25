@@ -7,13 +7,15 @@
 //! caches ([`Derived::on`]). The memos of DESIGN.md 6.5 join it package by package: the unique
 //! index memos, resource supply and unit profiles ([`civ`], 1b-05), tile yields, city and
 //! civilization stats, happiness and connectivity ([`stats`], 1b-06), the buildable lists
-//! ([`buildable`], 1b-07), and the rest with their systems.
+//! ([`buildable`], 1b-07), the grid of cities and each city's religious spread ([`religion`],
+//! 1b-08), and the rest with their systems.
 //!
 //! Replaces the caches of `game.py:100-145` (`_cache`, `_ycache`, `_static`, `_jobcache`,
 //! `_viewcache`, `_names`) and the invalidation of `game.py:565-609`.
 
 pub mod buildable;
 pub mod civ;
+pub mod religion;
 pub mod rev;
 pub mod stats;
 
@@ -56,6 +58,8 @@ pub struct Derived {
     pub(crate) stats: stats::StatsCaches,
     /// What each city can build.
     pub(crate) buildable: buildable::BuildableCaches,
+    /// The grid of cities and each city's religious spread.
+    pub(crate) religion: religion::ReligionCaches,
 }
 
 impl Derived {
@@ -79,6 +83,7 @@ impl Derived {
             civ: civ::CivCaches::new(rules, st),
             stats: stats::StatsCaches::new(rules, st),
             buildable: buildable::BuildableCaches::new(rules, st),
+            religion: religion::ReligionCaches::new(rules, st),
         }
     }
 

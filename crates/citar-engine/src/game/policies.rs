@@ -20,10 +20,10 @@
 
 use serde_json::{Value, json};
 
+use super::Game;
 use super::action::{OutcomeSpec, Rule};
 use super::derive::rev::PlayerTouch;
 use super::error::{ActionError, ErrCode};
-use super::{Game, Porting, pending};
 use crate::base::ids::{EraId, PlayerId, PolicyId};
 use crate::base::num;
 use crate::base::py;
@@ -31,6 +31,7 @@ use crate::base::sets::PlayerSet;
 use crate::rules::defs::PolicyKind;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::unique::params::PolicyOrBelief;
+use crate::unique::trigger::{TriggerEvent, TriggerSite};
 use crate::unique::{CondData, Ctx, UniqueData, UniqueType, uq};
 
 /// The branch a policy belongs to; a branch is its own (`policies.branch_of`,
@@ -264,7 +265,11 @@ pub fn adopt_now(g: &mut Game, p: PlayerId, policy: PolicyId, completion: bool) 
         }
     }
     // What the policy gives at once, and `upon adopting [policy]` (policies.py:139-145).
-    pending(Porting::Pending("1b-08"));
+    let note = format!("due to adopting {}", r.policies()[policy].name);
+    let site = TriggerSite::civ(p);
+    super::triggers::on_gain(g, &r.policies()[policy].uniques, &site, Some(&note));
+    let event = TriggerEvent::Adopting(PolicyOrBelief::Policy(policy));
+    super::triggers::fire(g, &site, &event, true, Some(&note));
     super::cities::free_buildings::try_add_free_buildings(g, p);
     g.flag_cities_of(p);
     let who = g.player(p).map(|x| x.name.clone()).unwrap_or_default();

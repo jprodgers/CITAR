@@ -666,7 +666,7 @@ pub static SETUP: [SetupStage; 15] = [
     SetupStage::game("starting techs, gold and culture", starting_techs),
     SetupStage::later("city-state init", Porting::Pending("1c-06")),
     SetupStage::later("starting units", Porting::Pending("1c-02")),
-    SetupStage::later("starting triggers", Porting::Pending("1b-08")),
+    SetupStage::game("starting triggers", starting_triggers),
     SetupStage::game("relations", relations),
     SetupStage::later("camps", Porting::Pending("1c-06")),
     SetupStage::game("happiness", happiness),
@@ -1030,6 +1030,21 @@ fn relations(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
             .ids()
             .all(|b| a == b || g.is_barbarian(a) || g.is_barbarian(b) || !g.at_war(a, b))
     }));
+    Ok(())
+}
+
+/// starting triggers (`game.py:294-300`): what each major's global and nation uniques give once,
+/// at its start.
+fn starting_triggers(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
+    let majors: Vec<(PlayerId, Option<crate::base::ids::TileIdx>)> =
+        g.st.players()
+            .iter()
+            .filter(|(_, p)| p.is_major())
+            .map(|(id, p)| (id, p.start_tile))
+            .collect();
+    for (p, start) in majors {
+        super::triggers::starting_triggers(g, p, start);
+    }
     Ok(())
 }
 

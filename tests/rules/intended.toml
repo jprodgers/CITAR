@@ -137,3 +137,19 @@ reason = "A city converting its production to gold or science also banked that p
 [[differences]]
 id = "increasing-cost-counts-what-was-built"
 reason = "An item whose cost increases each time it is built counted as built at every start of turn its production was ready, even when the unit could not be placed and waited, so each blocked turn raised its price; Rust counts it when it is finished"
+
+[[differences]]
+id = "timed-uniques-granted-whatever-their-conditionals"
+reason = "Python asked a timed unique's own conditionals when it was granted, so the Autocracy finisher's `[+25]% Strength <when attacking> ... <for [50] turns>` was never granted; Rust grants a timed unique whatever its conditionals, which are its effect's, as UnCiv does"
+
+[[differences]]
+id = "adopt-a-belief-joins-the-religion"
+reason = "Python's `Adopt [belief]` did nothing for a belief; in Rust a belief nobody has taken joins the civilization's religion or pantheon and does what a belief does when taken"
+
+[[differences]]
+id = "adopt-a-policy-whatever-it-requires"
+reason = "Python's `Adopt [policy]` raised out of the trigger for a policy the civilization could not adopt yet (its branch closed, its era not reached), failing whatever caused it; Rust adopts the policy whatever it requires, as UnCiv does"
+
+[[differences]]
+id = "hurry-wonder-construction"
+reason = "Python offered `Can speed up the construction of a wonder` the hurry action and then refused any unit without `Can speed up construction of a building`; in Rust either hurries construction, the first only while the city builds a wonder"

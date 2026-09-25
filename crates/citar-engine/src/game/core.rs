@@ -277,6 +277,7 @@ impl Game {
         out.extend(super::vis::verify(self));
         out.extend(super::derive::stats::verify(self));
         out.extend(super::derive::buildable::verify(self));
+        out.extend(super::derive::religion::verify(self));
         out.extend(super::cities::citizens::verify(self));
         out
     }

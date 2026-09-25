@@ -56,8 +56,7 @@ pub fn add_population(g: &mut Game, c: CityId, n: i32) {
         x.pop = u16::try_from(pop + n).unwrap_or(u16::MAX);
     }
     if g.religion_enabled() {
-        // religion.on_population_change (cities.py:914-916).
-        pending(Porting::Pending("1b-08"));
+        crate::game::religion::on_population_change(g, c, n);
     }
 }
 
@@ -293,8 +292,7 @@ pub fn end_turn(g: &mut Game, c: CityId) {
         grow(g, c, num::round_half_even_i32(total[Stat::Food]));
     }
     if g.religion_enabled() {
-        // religion.city_end_turn (cities.py:2309-2311).
-        pending(Porting::Pending("1b-08"));
+        crate::game::religion::city_end_turn(g, c);
     }
     if g.city(c).is_some() {
         let most = max_health(g, c);
