@@ -23,4 +23,5 @@ mod engine {
     mod uniques;
     mod units;
     mod vis;
+    mod workers;
 }
