@@ -85,3 +85,9 @@ group = "movement"
 # attack now and every interceptor they would meet, with its chance, factor and damage.
 [[enforce]]
 group = "combat_previews"
+
+# deal_checks (package 1c-05): sampled proposals between majors who have met, as the rules read them: the normalised
+# proposal, whether each side can give its items (else the first refusal), how each side's items read, and the
+# research agreement's cost. The fresh bot's valuation (`bot_value`) is Phase 2's, compared only with --with-bot.
+[[enforce]]
+group = "deal_checks"
