@@ -48,6 +48,8 @@ mod tests {
         let text = include_str!("../../check.toml");
         let config = Config::parse(text).expect("xtask/check.toml parses");
         assert!(config.pending.done.iter().any(|p| p == "1a-01"));
+        // Package 1c-10's gate: from here on any Pending stage fails the check.
+        assert!(config.pending.forbid_all, "every stage must be real from 1c-10 on");
     }
 
     #[test]

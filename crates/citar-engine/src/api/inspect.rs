@@ -61,34 +61,45 @@ use crate::state::cities::Constructible;
 use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
-/// The queries, by `what`, sorted, with whether what each reads is ported yet.
-const QUERIES: [(&str, Porting); 26] = [
-    ("briefing", Porting::Pending("1d-03")),
-    ("build_options", Porting::Ported),
-    ("buildable", Porting::Ported),
-    ("camps", Porting::Ported),
-    ("city", Porting::Ported),
-    ("city_state", Porting::Ported),
-    ("costs", Porting::Ported),
-    ("events", Porting::Ported),
-    ("find_tiles", Porting::Ported),
-    ("game", Porting::Ported),
-    ("great_people", Porting::Ported),
-    ("negotiation", Porting::Ported),
-    ("ops", Porting::Ported),
-    ("pending", Porting::Ported),
-    ("player", Porting::Ported),
-    ("preview", Porting::Ported),
-    ("relation", Porting::Ported),
-    ("religion", Porting::Ported),
-    ("spies", Porting::Ported),
-    ("tile", Porting::Ported),
-    ("un", Porting::Ported),
-    ("unit", Porting::Ported),
-    ("unit_actions", Porting::Ported),
-    ("units", Porting::Ported),
-    ("victory", Porting::Ported),
-    ("view", Porting::Pending("1d-02")),
+/// Whether an `inspect` query is answered yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answered {
+    Yes,
+    /// Not until the package named ports what it reads: until then it is refused as not ported,
+    /// by the `not_ported` marker at its arm of [`inspect`], which `cargo xtask check` counts (and
+    /// fails on from package 1e-04). Not a `Pending` stage: no stage of a game waits for it, and
+    /// from package 1c-10 the check fails on any of those.
+    From(&'static str),
+}
+
+/// The queries, by `what`, sorted, with whether each is answered yet.
+const QUERIES: [(&str, Answered); 26] = [
+    ("briefing", Answered::From("1d-03")),
+    ("build_options", Answered::Yes),
+    ("buildable", Answered::Yes),
+    ("camps", Answered::Yes),
+    ("city", Answered::Yes),
+    ("city_state", Answered::Yes),
+    ("costs", Answered::Yes),
+    ("events", Answered::Yes),
+    ("find_tiles", Answered::Yes),
+    ("game", Answered::Yes),
+    ("great_people", Answered::Yes),
+    ("negotiation", Answered::Yes),
+    ("ops", Answered::Yes),
+    ("pending", Answered::Yes),
+    ("player", Answered::Yes),
+    ("preview", Answered::Yes),
+    ("relation", Answered::Yes),
+    ("religion", Answered::Yes),
+    ("spies", Answered::Yes),
+    ("tile", Answered::Yes),
+    ("un", Answered::Yes),
+    ("unit", Answered::Yes),
+    ("unit_actions", Answered::Yes),
+    ("units", Answered::Yes),
+    ("victory", Answered::Yes),
+    ("view", Answered::From("1d-02")),
 ];
 
 /// Answers one query.
@@ -864,8 +875,8 @@ pub fn find_tiles(g: &Game, o: &Map<String, Value>) -> Result<Value, ActionError
 /// `pending`: every query, operation, test operation and stage still waiting for its package.
 fn pending() -> Value {
     let mut out = Vec::new();
-    for (name, porting) in QUERIES {
-        if let Porting::Pending(pkg) = porting {
+    for (name, answered) in QUERIES {
+        if let Answered::From(pkg) = answered {
             out.push(json!({"kind": "inspect", "name": name, "package": pkg}));
         }
     }
