@@ -371,14 +371,18 @@ def _debug(g: Game, o: dict):
     return {}
 
 
-def _drive_answers(g: Game, drivers: set, answer, asked: set):
+def _drive_answers(g: Game, drivers: set, deferring: set, answer, asked: dict):
     """Put every open negotiation waiting on a driven seat to its driver, round after round while the answers bring
-    more; a negotiation is put to a driver once in a drive for each entry it has (``asked``)."""
+    more. ``asked`` holds, by negotiation, the entries it had when last put to a driver, the seat it waited on, and
+    whether that driver left it to the host: a negotiation is put to a driver once in a drive for each entry it has,
+    and one that has closed is forgotten."""
     from . import tools
+    for nid in [k for k in asked if g.s.negotiations[k - 1]["status"] != "open"]:
+        del asked[nid]
     for _ in range(64):
         waiting = [(n["id"], n["awaiting"], len(n["history"])) for n in g.s.negotiations
                    if n["status"] == "open" and n["awaiting"] in drivers
-                   and (n["id"], len(n["history"])) not in asked]
+                   and asked.get(n["id"], (None, None, False))[:2] != (len(n["history"]), n["awaiting"])]
         if not waiting:
             return
         for nid, who, length in waiting:
@@ -387,8 +391,8 @@ def _drive_answers(g: Game, drivers: set, answer, asked: set):
             n = g.s.negotiations[nid - 1]
             if n["status"] != "open" or n["awaiting"] != who or len(n["history"]) != length:
                 continue
-            asked.add((nid, length))
-            if answer is None:
+            asked[nid] = (length, who, who in deferring)
+            if who in deferring or answer is None:
                 continue
             try:
                 tools.execute(g, who, "respond_negotiation",
@@ -397,19 +401,33 @@ def _drive_answers(g: Game, drivers: set, answer, asked: set):
                 pass
 
 
+def _left_to_host(n: dict, asked: dict) -> bool:
+    """Whether the driver of the seat negotiation ``n`` waits on left it to the host, and it has not moved since."""
+    a = asked.get(n["id"])
+    return a is not None and a[2] and a[0] == len(n["history"]) and a[1] == n["awaiting"]
+
+
 @op("drive", "drivers (the players a test driver plays: it does nothing with its turns); optional answer (what the "
              "driver answers a negotiation waiting on it: reject by default, accept, reply, or none to leave it), "
-             "seat_limit: the host drives the game until it has something to do; why it stopped")
+             "defer (drivers that leave what waits on them to the host, as a hybrid seat's bot leaves it to its "
+             "model), seat_limit: the host drives the game until it has something to do; why it stopped")
 def _drive(g: Game, o: dict):
     """The Rust engine's Game::drive with a test driver at each seat named, which Python never had: the host plays
-    the driven seats' turns until it has something to do. A driver plays nothing and answers what waits on it; the
-    game stops at a seat with no driver (external), after a hybrid seat's driver has played (hybrid_diplomat), when
-    the seat whose driver has played is in a negotiation waiting on a seat with no driver (awaiting_reply), after
-    seat_limit driven turns (seat_limit), and when the game is over (game_over). Where a stop inside a turn left the
-    game is kept on the game object, so the next drive goes on from there."""
+    the driven seats' turns until it has something to do. A driver plays nothing and answers what waits on it, or
+    leaves it to the host (``defer``); the game stops at a seat with no driver (external), after a hybrid seat's
+    driver has played (hybrid_diplomat), when the seat whose driver has played is in a negotiation waiting on the
+    host, on a seat with no driver or one whose driver left it to the host (awaiting_reply), after seat_limit driven
+    turns (seat_limit), and when the game is over (game_over). Where a stop inside a turn left the game is kept on
+    the game object, and carried across a ``reload`` (EngineGame.test_ops), so the next drive goes on from there."""
     from .scenario import _pid
-    v = o.get("drivers")
-    drivers = set() if v is None else set(_pid(g, x, majors_only=True) for x in (v if isinstance(v, list) else [v]))
+
+    def seats(key):
+        """The players named under ``key``."""
+        v = o.get(key)
+        return set() if v is None else set(_pid(g, x, majors_only=True) for x in (v if isinstance(v, list) else [v]))
+
+    drivers = seats("drivers")
+    deferring = seats("defer") & drivers
     answer = o.get("answer", "reject")
     if answer == "none":
         answer = None
@@ -422,7 +440,7 @@ def _drive(g: Game, o: dict):
     if limit < 0:
         raise ActionError("seat_limit must be a whole number, 0 or more.")
     ended = 0
-    asked = set()
+    asked = {}
 
     def stop(name, player=None, nids=()):
         """What the operation reports."""
@@ -439,7 +457,7 @@ def _drive(g: Game, o: dict):
         if p.kind != "major" or not p.alive:
             g.end_turn(pid)
             continue
-        _drive_answers(g, drivers, answer, asked)
+        _drive_answers(g, drivers, deferring, answer, asked)
         if g.s.phase != "playing" or g.s.current != pid:
             continue
         if pid not in drivers:
@@ -454,7 +472,8 @@ def _drive(g: Game, o: dict):
             g._drive_mark = (g.turn, pid, True)
             return stop("hybrid_diplomat", pid)
         nids = [n["id"] for n in g.s.negotiations if n["status"] == "open" and pid in (n["initiator"], n["responder"])
-                and n["awaiting"] is not None and n["awaiting"] != pid and n["awaiting"] not in drivers]
+                and n["awaiting"] is not None
+                and ((n["awaiting"] != pid and n["awaiting"] not in drivers) or _left_to_host(n, asked))]
         if nids:
             return stop("awaiting_reply", pid, nids)
         g._drive_mark = None

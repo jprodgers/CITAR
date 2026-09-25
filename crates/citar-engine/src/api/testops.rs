@@ -149,8 +149,9 @@ pub static TEST_OPS: &[TestOp] = &[
         name: "drive",
         params: "drivers (the players a test driver plays: it does nothing with its turns); \
                  optional answer (what the driver answers a negotiation waiting on it: reject by \
-                 default, accept, reply, or none to leave it), seat_limit: the host drives the \
-                 game until it has something to do; why it stopped",
+                 default, accept, reply, or none to leave it), defer (drivers that leave what waits \
+                 on them to the host, as a hybrid seat's bot leaves it to its model), seat_limit: \
+                 the host drives the game until it has something to do; why it stopped",
         porting: Porting::Ported,
         run: drive,
     },
@@ -539,9 +540,11 @@ fn debug(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
 }
 
 /// The driver of the `drive` operation: it does nothing with its turns, and answers a
-/// negotiation that waits on it with `answer`, or leaves it (`None`).
+/// negotiation that waits on it with `answer`, or leaves it (`None`), or leaves it to the host
+/// (`defer`, as a hybrid seat's bot leaves it to the seat's model).
 struct TestDriver {
     answer: Option<&'static str>,
+    defer: bool,
 }
 
 impl SeatDriver for TestDriver {
@@ -556,6 +559,9 @@ impl SeatDriver for TestDriver {
         nid: NegotiationId,
         _: &mut DriverMemory,
     ) -> DriverOutcome {
+        if self.defer {
+            return DriverOutcome::Deferred;
+        }
         if let Some(action) = self.answer {
             let a = RespondNegotiation {
                 negotiation_id: i64::from(nid.get()),
@@ -571,24 +577,35 @@ impl SeatDriver for TestDriver {
     }
 }
 
-/// The host drives the game (`Game::drive`), a test driver at each seat named, until it stops:
+/// The host drives the game (`Game::drive`), a test driver at each seat named (one that defers
+/// what waits on it to the host for those under `defer`, as `citar/engine/testops.py` mirrors
+/// it), until it stops:
 /// `stop` (`external`, `hybrid_diplomat`, `awaiting_reply`, `seat_limit`, `game_over`), the
 /// `player` it names (or null), the `negotiations` it waits on, and where the game is in time.
 fn drive(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
-    let seats: Vec<PlayerId> = match o.get("drivers") {
-        None | Some(Value::Null) => Vec::new(),
-        v => players(g, v, true)?,
-    };
-    let answer = match o.get("answer").and_then(Value::as_str) {
-        None | Some("reject") => Some("reject"),
-        Some("accept") => Some("accept"),
-        Some("reply") => Some("reply"),
-        Some("none") => None,
-        Some(other) => {
-            return Err(bad(format!(
-                "answer must be reject, accept, reply or none, not '{other}'."
-            )));
+    let named = |key: &str| -> Result<Vec<PlayerId>, ActionError> {
+        match o.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            v => players(g, v, true),
         }
+    };
+    let seats = named("drivers")?;
+    let deferring = named("defer")?;
+    // As Python reads it: absent is reject, and anything but those four names is refused.
+    let answer = match o.get("answer") {
+        None => Some("reject"),
+        Some(v) => match v.as_str() {
+            Some("reject") => Some("reject"),
+            Some("accept") => Some("accept"),
+            Some("reply") => Some("reply"),
+            Some("none") => None,
+            _ => {
+                return Err(bad(format!(
+                    "answer must be reject, accept, reply or none, not '{}'.",
+                    py::str_of(v)
+                )));
+            }
+        },
     };
     let limit = match o.get("seat_limit") {
         None | Some(Value::Null) => 0,
@@ -596,8 +613,10 @@ fn drive(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
             .and_then(|n| u32::try_from(n).ok())
             .ok_or_else(|| bad("seat_limit must be a whole number, 0 or more."))?,
     };
-    let mut agents: Vec<(PlayerId, TestDriver)> =
-        seats.into_iter().map(|p| (p, TestDriver { answer })).collect();
+    let mut agents: Vec<(PlayerId, TestDriver)> = seats
+        .into_iter()
+        .map(|p| (p, TestDriver { answer, defer: deferring.contains(&p) }))
+        .collect();
     let mut d = Drivers::none(g.state().players().len());
     for (p, a) in &mut agents {
         d = d.with(*p, a);
