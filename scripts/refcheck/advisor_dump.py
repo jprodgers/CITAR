@@ -122,7 +122,7 @@ def main():
         "states": rows,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    out.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     print(f"wrote {out}: {sum(len(s['cities']) for s in rows)} cities in {len(rows)} states")
 
 

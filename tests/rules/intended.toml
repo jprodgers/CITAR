@@ -229,3 +229,7 @@ reason = "The production advisor's one random choice, whether a city prefers a r
 [[differences]]
 id = "advisor-counts-a-free-unit-as-costing-one"
 reason = "The production advisor divided a military unit's strength by a power of its cost, so a unit costing nothing raised a division by zero and the city picked nothing; Rust values it as if it cost one"
+
+[[differences]]
+id = "advisor-what-if-leaves-no-trace"
+reason = "The production advisor valued a building by adding it to the city, swapping two of the game's caches away and restoring them; what was computed with the building stayed in the caches it did not swap, so an answer depended on what had been asked before (a city advised a Monument after its puppet's pick was weighed, a Stadium on a fresh load). Rust's what-if reads the game with the building and writes nothing, so the same game always gives the same answer"

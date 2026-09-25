@@ -2,8 +2,10 @@
 //! (`bots/basic.py:1491-1505`, `BasicBot._simulate`, UnCiv's `getStatDifferenceFromBuilding`;
 //! DESIGN.md 6.11).
 //!
-//! Python appended the building to the city, threw every cache away, asked the city's stats and
-//! happiness afresh, and took the building out again. Here nothing is written, neither the state
+//! Python appended the building to the city, swapped two of the game's caches away, asked the
+//! city's stats and happiness afresh, and took the building out again; what was computed with the
+//! building stayed in the caches it did not swap, and moved the next answer asked of the game
+//! (`advisor-what-if-leaves-no-trace`). Here nothing is written, neither the state
 //! nor a memo: the game is read through an [`Overlay`] (`EvalView::what_if`), which adds the
 //! building to the city's set and to the indexes it reaches (the city's own, `CityLocal`, and its
 //! owner's, `CivIndex`, each with the building's uniques added, which is what a rebuild with it
@@ -357,6 +359,7 @@ impl<'g> CityWhatIf<'g> {
 
     /// The city's stats with building `b` added, beside its stats now: `None` for one it has.
     /// Reads only: the state, the memos and the digest are as they were.
+    // refcheck: advisor-what-if-leaves-no-trace
     #[must_use]
     pub fn with(&self, b: BuildingId) -> Option<StatsDelta> {
         let (g, c) = (self.g, self.c);
