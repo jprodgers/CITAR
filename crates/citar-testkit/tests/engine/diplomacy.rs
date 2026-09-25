@@ -311,6 +311,49 @@ fn open_borders_a_city_a_map_and_a_war_change_hands() {
     clean(&mut g);
 }
 
+/// A war one side of a deal would declare on a civilization with a defensive pact with the other
+/// side is refused, proposed or accepted: the pact would put the deal's parties at war with the
+/// deal in force and close the chat being accepted (`deal-war-on-a-partners-pact-refused`).
+#[test]
+fn a_deal_may_not_declare_war_on_the_other_sides_pact_partner() {
+    let mut g = shipped(3);
+    ops(
+        &mut g,
+        &json!([
+            {"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Roma"},
+            {"op": "found_city", "player": 1, "x": 18, "y": 10, "name": "Veii"},
+            {"op": "found_city", "player": 2, "x": 18, "y": 4, "name": "Capua"},
+            {"op": "meet", "a": 0, "b": "all"},
+            {"op": "meet", "a": 1, "b": 2},
+            {"op": "set_player", "player": 1, "gold": 50},
+        ]),
+    );
+    let war_on_capua = || json!([{"type": "declare_war", "target": 2}]);
+    // Proposed while Veii and Capua have a pact.
+    ops(&mut g, &json!([{"op": "set_relation", "a": 1, "b": 2, "defensive_pact": true}]));
+    let refusal = refused(&mut g, ME, open(YOU, war_on_capua(), json!([])));
+    assert_eq!(refusal, "Civilization 2 has a defensive pact with Civilization 3.");
+    // Proposed before the pact, accepted after it.
+    ops(&mut g, &json!([{"op": "set_relation", "a": 1, "b": 2, "defensive_pact": false}]));
+    let opened =
+        act(&mut g, ME, open(YOU, war_on_capua(), json!([{"type": "gold", "amount": 20}])));
+    let nid = opened["negotiation_id"].as_i64().expect("an id");
+    ops(&mut g, &json!([{"op": "set_relation", "a": 1, "b": 2, "defensive_pact": true}]));
+    let refusal = refused(&mut g, YOU, answer(nid, "accept"));
+    assert_eq!(refusal, "Civilization 2 has a defensive pact with Civilization 3.");
+    assert!(!g.at_war(ME, THIRD) && !g.at_war(ME, YOU));
+    assert!(g.state().diplo().deals.is_empty());
+    // Without the pact, the war is declared and the deal stands between two at peace.
+    ops(&mut g, &json!([{"op": "set_relation", "a": 1, "b": 2, "defensive_pact": false}]));
+    let done = act(&mut g, YOU, answer(nid, "accept"));
+    assert_eq!(done["status"], "accepted", "{done}");
+    assert!(g.at_war(ME, THIRD) && !g.at_war(ME, YOU));
+    let n = g.negotiation(NegotiationId::new(1).expect("an id")).expect("the chat");
+    assert_eq!(n.status, NegStatus::Accepted);
+    assert!(g.state().diplo().deals.iter().all(|d| d.active));
+    clean(&mut g);
+}
+
 #[test]
 fn a_research_agreement_pays_both_the_smaller_science_the_round_after_it_ends() {
     let mut g = shipped(2);
@@ -729,6 +772,8 @@ fn a_host_opens_for_a_seat_out_of_turn_and_closes_a_negotiation_with_a_note() {
 enum Step {
     Open { by: u8, to: u8, items: u8 },
     Respond { by: u8, nid: u8, action: u8, items: u8 },
+    /// The side a recent open negotiation waits on accepts it: `back` counts from the latest.
+    Accept { back: u8 },
     Close { nid: u8, status: u8 },
     EndTurn,
     HostEndTurn,
@@ -740,9 +785,10 @@ enum Step {
 
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
-        4 => (0u8..3, 0u8..3, 0u8..8).prop_map(|(by, to, items)| Step::Open { by, to, items }),
-        6 => (0u8..3, 1u8..6, 0u8..6, 0u8..8)
+        4 => (0u8..3, 0u8..3, 0u8..POOL).prop_map(|(by, to, items)| Step::Open { by, to, items }),
+        6 => (0u8..3, 1u8..6, 0u8..6, 0u8..POOL)
             .prop_map(|(by, nid, action, items)| Step::Respond { by, nid, action, items }),
+        3 => (0u8..3).prop_map(|back| Step::Accept { back }),
         1 => (1u8..6, 0u8..4).prop_map(|(nid, status)| Step::Close { nid, status }),
         1 => Just(Step::EndTurn),
         1 => Just(Step::HostEndTurn),
@@ -753,7 +799,12 @@ fn step() -> impl Strategy<Value = Step> {
     ]
 }
 
-/// A small pool of deal items, some of which no side can give.
+/// How many deal items [`items`] draws from.
+const POOL: u8 = 9;
+
+/// A small pool of deal items, some of which no side can give: wars on the third civilization
+/// and on the second, whose defensive pact the setup signs, so that a war on one of them would
+/// bring the other in against whoever declared it.
 fn items(n: u8) -> Value {
     match n {
         0 => json!([]),
@@ -763,7 +814,8 @@ fn items(n: u8) -> Value {
         4 => json!([{"type": "declaration_of_friendship"}]),
         5 => json!([{"type": "gold", "amount": 5000}]),
         6 => json!([{"type": "open_borders", "turns": 3}, {"type": "gold", "amount": 5}]),
-        _ => json!([{"type": "declare_war", "target": 2}]),
+        7 => json!([{"type": "declare_war", "target": 2}]),
+        _ => json!([{"type": "declare_war", "target": 1}]),
     }
 }
 
@@ -779,7 +831,7 @@ fn play(g: &mut Game, s: &Step) {
                 to: i64::from(to),
                 message: json!("Talk?"),
                 give: Some(items(i)),
-                receive: Some(items(7 - i)),
+                receive: Some(items(POOL - 1 - i)),
             });
             if p(by) == g.current() {
                 g.act(p(by), a).map(|_| ())
@@ -799,6 +851,17 @@ fn play(g: &mut Game, s: &Step) {
                 }),
             )
             .map(|_| ()),
+        Step::Accept { back } => {
+            let open: Vec<_> =
+                g.negotiations().iter().filter(|n| n.status == NegStatus::Open).collect();
+            let chosen = open.len().checked_sub(1 + usize::from(back)).and_then(|i| open.get(i));
+            match chosen.and_then(|n| n.awaiting.map(|w| (w, n.id))) {
+                Some((who, nid)) => g
+                    .act(who, answer(i64::from(nid.get()), "accept"))
+                    .map(|_| ()),
+                None => Ok(()),
+            }
+        }
         Step::Close { nid, status } => testops::apply(
             g,
             &json!([{"op": "close_negotiation", "negotiation": nid, "status": STATUSES[usize::from(status)], "note": "Out of time."}]),
@@ -838,12 +901,13 @@ fn play(g: &mut Game, s: &Step) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 24, .. ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
 
     /// Gate 4: DIPLO-1 (war and contact symmetric, no treaty at war, the masks right) and NEG-1
     /// (an open negotiation awaits one of its parties, its entries numbered without gaps and
     /// within the cap) hold after every step of random negotiations, with a small cap so chats
-    /// reach it, and every other check with them.
+    /// reach it, and every other check with them; and no deal stays in force between two at
+    /// war.
     #[test]
     fn negotiations_keep_diplomacy_consistent(steps in prop::collection::vec(step(), 1..40)) {
         let (doc, _) = map_doc("arena").expect("the arena");
@@ -863,6 +927,7 @@ proptest! {
             {"op": "meet", "a": 1, "b": 2},
             {"op": "set_player", "player": [0, 1, 2], "gold": 100},
             {"op": "grant_tech", "player": [0, 1, 2], "tech": "Civil Service"},
+            {"op": "set_relation", "a": 1, "b": 2, "friends": true, "defensive_pact": true},
         ]));
         for s in &steps {
             play(&mut g, s);
@@ -874,6 +939,13 @@ proptest! {
                 "after {s:?}: {found:?}"
             );
             prop_assert!(found.is_empty(), "after {s:?}: {found:?}");
+            let at_war = g
+                .state()
+                .diplo()
+                .deals
+                .iter()
+                .find(|d| d.active && g.at_war(d.parties[0], d.parties[1]));
+            prop_assert!(at_war.is_none(), "after {s:?}: a deal in force at war: {at_war:?}");
         }
         prop_assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
     }

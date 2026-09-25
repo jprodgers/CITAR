@@ -401,6 +401,12 @@ pub fn validate_items(
                 if let Some(why) = can_declare_war(g, giver, target) {
                     return refuse(format!("{gn}: {why}"));
                 }
+                // The target's pact would bring the receiver into the war against the giver, the
+                // deal still in force between two at war.
+                // refcheck: deal-war-on-a-partners-pact-refused
+                if has_pact(g, target, receiver) {
+                    return refuse(format!("{rn} has a defensive pact with {}.", name(g, target)));
+                }
             }
             DealItem::City { city_id } => {
                 let Some(c) = g.city(city_id).filter(|c| c.owner() == giver) else {
@@ -506,8 +512,12 @@ fn edit(g: &mut Game, a: PlayerId, b: PlayerId, f: impl FnOnce(&mut Relation)) {
 
 /// Carries out a deal [`plan_deal`] allowed, and records it (`execute_deal`,
 /// `diplomacy.py:540-609`): peace first, then each side's items in order, `a`'s then `b`'s (a
-/// mutual agreement once), then the wars agreed to; the deal is recorded with what recurs and
-/// announced to both. Returns its id.
+/// mutual agreement once), then the wars agreed to; the deal is announced to both. Returns its
+/// id.
+///
+/// The deal is recorded before the wars, where Python appended it after them: should a war it
+/// sets off reach its own parties, which [`validate_items`] refuses, the war ends the deal as
+/// any war between them does.
 pub fn execute_deal(g: &mut Game, a: PlayerId, b: PlayerId, terms: &Terms) -> Option<DealId> {
     let items_a = terms.gives(a).to_vec();
     let items_b = terms.gives(b).to_vec();
@@ -525,23 +535,6 @@ pub fn execute_deal(g: &mut Game, a: PlayerId, b: PlayerId, terms: &Terms) -> Op
             give(g, a, b, giver, receiver, it, turn, &mut ongoing, &mut done);
         }
     }
-    for (giver, receiver, items) in [(a, b, &items_a), (b, a, &items_b)] {
-        for it in items {
-            let DealItem::DeclareWar { target } = *it else { continue };
-            if can_declare_war(g, giver, target).is_some() {
-                continue;
-            }
-            let war = set_war(g, giver, target, WarReason::Deal);
-            debug_assert!(war.is_ok(), "two players of the game go to war: {war:?}");
-            let text = format!(
-                "{} declared war on {} (as agreed with {})!",
-                name(g, giver),
-                name(g, target),
-                name(g, receiver)
-            );
-            g.emit(EngineEvent::WarDeclared, &text, None, None, EventData::default(), &[]);
-        }
-    }
     let summary = format!(
         "{} gives {}; {} gives {}.",
         name(g, a),
@@ -549,6 +542,15 @@ pub fn execute_deal(g: &mut Game, a: PlayerId, b: PlayerId, terms: &Terms) -> Op
         name(g, b),
         describe_items(g, &items_b)
     );
+    let wars: Vec<(PlayerId, PlayerId, PlayerId)> = [(a, b, &items_a), (b, a, &items_b)]
+        .into_iter()
+        .flat_map(|(giver, receiver, items)| {
+            items.iter().filter_map(move |it| match *it {
+                DealItem::DeclareWar { target } => Some((giver, receiver, target)),
+                _ => None,
+            })
+        })
+        .collect();
     g.edit_diplo(DiploTouch::DEALS).deals.push(Deal {
         id,
         turn,
@@ -560,6 +562,20 @@ pub fn execute_deal(g: &mut Game, a: PlayerId, b: PlayerId, terms: &Terms) -> Op
         active: true,
         summary: summary.clone().into(),
     });
+    for (giver, receiver, target) in wars {
+        if can_declare_war(g, giver, target).is_some() {
+            continue;
+        }
+        let war = set_war(g, giver, target, WarReason::Deal);
+        debug_assert!(war.is_ok(), "two players of the game go to war: {war:?}");
+        let text = format!(
+            "{} declared war on {} (as agreed with {})!",
+            name(g, giver),
+            name(g, target),
+            name(g, receiver)
+        );
+        g.emit(EngineEvent::WarDeclared, &text, None, None, EventData::default(), &[]);
+    }
     let text = format!("Deal concluded between {} and {}: {summary}", name(g, a), name(g, b));
     let audience: PlayerSet = [a, b].into_iter().collect();
     let data = EventData { deal: Some(id), ..EventData::default() };

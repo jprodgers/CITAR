@@ -223,3 +223,7 @@ reason = "A message to all a civilization had met went to them in the order they
 [[differences]]
 id = "deal-items-fit-their-fields"
 reason = "A deal item naming a player id or a city id no game can have, or an amount beyond 32 bits, was stored in a proposal and refused only when the deal was accepted, or never for an amount; Rust refuses it when it is proposed"
+
+[[differences]]
+id = "deal-war-on-a-partners-pact-refused"
+reason = "A deal in which one side declared war on a civilization with a defensive pact with the other side was carried out, and the pact then put the deal's two parties at war with the deal still in force and its chat both closed and accepted; Rust refuses such an item when it is proposed or accepted"

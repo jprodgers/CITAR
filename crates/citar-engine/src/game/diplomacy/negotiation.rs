@@ -496,6 +496,16 @@ pub fn respond(g: &mut Game, pid: PlayerId, plan: RespondPlan) -> Value {
             let parties = g.state().diplo().negotiation(nid).map(|n| (n.initiator, n.responder));
             let Some((a, b)) = parties else { return json!({"status": "refused"}) };
             let deal = execute_deal(g, a, b, &terms);
+            let summary =
+                |g: &Game| deal.and_then(|d| g.state().diplo().deal(d)).map(|d| d.summary.to_string());
+            let now = g.state().diplo().negotiation(nid).map(|n| n.status);
+            if let Some(status) = now.filter(|&s| s != NegStatus::Open) {
+                // What the deal set off closed the chat (a war between its parties, which
+                // `validate_items` refuses): the chat keeps the close the game gave it, and no
+                // entry passes it.
+                edit(g, nid, |n| n.deal = deal);
+                return json!({"status": status.name(), "deal": summary(g)});
+            }
             edit(g, nid, |n| {
                 n.status = NegStatus::Accepted;
                 n.deal = deal;
@@ -510,9 +520,7 @@ pub fn respond(g: &mut Game, pid: PlayerId, plan: RespondPlan) -> Value {
                 ..EventData::default()
             };
             g.emit(EngineEvent::Negotiation, &out, Some(pair(pid, other)), None, data, &[]);
-            let summary =
-                deal.and_then(|d| g.state().diplo().deal(d)).map(|d| d.summary.to_string());
-            json!({"status": "accepted", "deal": summary})
+            json!({"status": "accepted", "deal": summary(g)})
         }
         RespondPlan::Reject { nid, other, text } => {
             edit(g, nid, |n| {
