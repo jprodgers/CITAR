@@ -163,7 +163,8 @@ fn remove_unknown_pantheons(g: &mut Game, c: CityId) {
 /// have only so many of goes once it has as many, the old owner moves its capital to its largest
 /// city left, and a new owner with no capital makes this one its capital. Its buildings become
 /// the new owner's own versions, its pantheons that are not the new owner's lose their pressure,
-/// and a civilization that `May not annex cities` keeps it as a puppet.
+/// and a civilization that `May not annex cities` keeps it as a puppet. Its health is held to
+/// what its buildings now allow.
 pub fn move_to_civ(g: &mut Game, c: CityId, new_owner: PlayerId) {
     let Some(old) = g.city(c).map(crate::state::cities::City::owner) else { return };
     let r = g.rules();
@@ -287,6 +288,14 @@ pub fn move_to_civ(g: &mut Game, c: CityId, new_owner: PlayerId) {
         p.founded_city = true;
     }
     try_add_free_buildings(g, new_owner);
+    // The buildings it lost or swapped for its new owner's versions may hold less health than
+    // it has (Python kept the excess).
+    let most = max_health(g, c);
+    if g.city(c).is_some_and(|x| x.health > most)
+        && let Some(x) = g.city_mut(c, CityTouch::CORE)
+    {
+        x.health = most;
+    }
 }
 
 /// What happens to a city whenever it changes hands, whatever becomes of it next

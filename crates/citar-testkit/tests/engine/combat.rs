@@ -21,8 +21,8 @@
 use std::sync::OnceLock;
 
 use citar_engine::base::ids::{
-    BarbarianLevelId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId, PlayerId,
-    SpeedId, TerrainId, TileIdx, UniqueId, UnitId,
+    BarbarianLevelId, BuildingId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId,
+    PlayerId, SpeedId, TerrainId, TileIdx, UniqueId, UnitId,
 };
 use citar_engine::base::sets::PlayerVec;
 use citar_engine::game::combat::{air, combatant, resolve, strength};
@@ -465,6 +465,41 @@ fn a_unit_defeated_stays_dead_whatever_its_defeat_fires() {
     assert_eq!(fired(TriggerKind::Defeat).len(), 2);
     assert!(g.unit(victim).is_none());
     assert!(g.player_units(THEM).next().is_none(), "no unit of theirs came back");
+}
+
+/// A city holds no more health than its buildings allow once one goes: removed by a scenario, or
+/// swapped for its new owner's version when it changes hands (CITY-1; Python kept the excess).
+#[test]
+fn a_city_that_loses_its_walls_loses_their_health() {
+    let r = kitchen_sink();
+    let mut g = game(r);
+    let sinkhold = CityId::FIRST;
+    let health = |g: &Game, c: CityId| g.city(c).map_or(0, |x| x.health);
+    let full = health(&g, sinkhold);
+    assert_eq!(full, citar_engine::game::cities::stats::max_health(&g, sinkhold));
+    ops(&mut g, json!([{"op": "set_city", "city": sinkhold.get(), "add_buildings": ["Walls"]}]));
+    assert_eq!(health(&g, sinkhold), full + 50);
+    ops(&mut g, json!([{"op": "set_city", "city": sinkhold.get(), "remove_buildings": ["Walls"]}]));
+    assert_eq!(health(&g, sinkhold), full);
+    clean(&mut g);
+
+    // Babylon's walls become the Kitchen Sink's plain ones, with half their health.
+    found(&mut g, THEM, at(10, 0), "Firstport");
+    let target = found(&mut g, THEM, at(9, 4), "Target");
+    let babylon: BuildingId = id(r, "Walls of Babylon");
+    let walls: BuildingId = id(r, "Walls");
+    ops(
+        &mut g,
+        json!([{"op": "set_city", "city": target.get(), "add_buildings": ["Walls of Babylon"]}]),
+    );
+    assert_eq!(health(&g, target), 300);
+    conquest::move_to_civ(&mut g, target, ME);
+    // An empty list of operations settles the game, as a capture's call would.
+    ops(&mut g, json!([]));
+    clean(&mut g);
+    let city = g.city(target).expect("the city");
+    assert!(city.buildings.contains(walls) && !city.buildings.contains(babylon));
+    assert_eq!((city.owner(), city.health), (ME, 250));
 }
 
 // ---- The contract of fights -------------------------------------------------------------------
