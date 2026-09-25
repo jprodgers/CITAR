@@ -176,7 +176,7 @@ pub(super) fn clock(cx: &Cx<'_>, top: &Obj<'_>) -> Res<TurnClock> {
         turn_started: top.flag("turn_started", false)?,
         phase,
         winner: cx.opt_player(top.get("winner"), &top.at("winner"))?,
-        victory: cx.opt_named(top.get("victory"), &top.at("victory"))?,
+        victory: cx.opt_victory(top.get("victory"), &top.at("victory"))?,
     })
 }
 

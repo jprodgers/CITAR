@@ -31,7 +31,7 @@ use super::derive::rev::{CityTouch, PlayerTouch};
 use super::diplomacy::relations::{add_opinion, make_peace};
 use super::error::ActionError;
 use super::units::{self, capture::capture_civilian};
-use super::{Game, Porting, movement, pending, triggers};
+use super::{Game, movement, triggers, victory};
 use crate::base::ids::{BuildingId, CityId, PlayerId, UnitId};
 use crate::base::num;
 use crate::base::rng::{KeyPart, Purpose, Rng};
@@ -336,8 +336,7 @@ fn conquer_common(g: &mut Game, c: CityId, conqueror: PlayerId, receiver: Player
         };
     }
     triggers::fire(g, &TriggerSite::civ(old), &TriggerEvent::LosingCity, true, None);
-    // victory.check_elimination(old, by=conqueror) (conquest.py:149).
-    pending(Porting::Pending("1c-08"));
+    victory::eliminate_if_defeated(g, old, Some(conqueror));
     gold
 }
 
@@ -518,8 +517,7 @@ pub fn conquer(g: &mut Game, c: CityId, u: UnitId) -> Option<Capture> {
     g.emit(EngineEvent::CityCaptured, &text, None, Some(at), data, &[]);
     let site = TriggerSite { civ: attacker, city: Some(c), unit: Some(u), tile: None };
     triggers::fire(g, &site, &TriggerEvent::ConqueringCity, true, None);
-    // victory.check_domination (conquest.py:194).
-    pending(Porting::Pending("1c-08"));
+    victory::check_domination(g);
     Some(Capture { city: name, from: old_name, result, gold })
 }
 

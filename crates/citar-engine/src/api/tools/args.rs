@@ -265,6 +265,8 @@ pub static TOOLS: &[ToolArgs] = &[
         required: &["city_id", "specialists"],
     },
     ToolArgs { tool: "stage_coup", params: &[("spy", ArgType::String)], required: &["spy"] },
+    // Package 1c-08 (tools.py:887-897).
+    ToolArgs { tool: "un_vote", params: &[("candidate", ArgType::Any)], required: &["candidate"] },
     ToolArgs {
         tool: "unit_action",
         params: &[

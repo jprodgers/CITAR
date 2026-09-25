@@ -582,6 +582,17 @@ impl FrameWriter {
     }
 }
 
+/// The range of event ids a frame record covers, from its last 8 bytes, which every frame ends
+/// with; `None` for a record too short to be a frame. The next frame's range starts where this
+/// one's ends, so the ranges tile the event feed across a load.
+#[must_use]
+pub fn event_range(rec: &FrameRecord) -> Option<(u32, u32)> {
+    let b = &rec.bytes;
+    let tail = b.get(b.len().checked_sub(8)?..)?;
+    let word = |i: usize| u32::from_le_bytes([tail[i], tail[i + 1], tail[i + 2], tail[i + 3]]);
+    Some((word(0), word(4)))
+}
+
 /// What a delta is taken from, in 8 bytes: the start of a blake3 hash of the palettes, the tile
 /// layers and the explored sets, everything a delta changes or leaves as it was. A delta carries
 /// its base's, so one applied to any other frame (a chunk lost between them, a keyframe of

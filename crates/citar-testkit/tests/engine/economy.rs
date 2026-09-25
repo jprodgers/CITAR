@@ -332,6 +332,12 @@ fn temporary_uniques_run_out_at_the_end_of_their_turns() {
     let mut g =
         game(r, &Setup { temp: vec![TempUnique { unique: temp, turns: 2 }], ..Setup::default() });
     let held = |g: &Game| g.state().player(ME).map_or(0, |p| p.civ.temp_uniques.len());
+    // A unit each, so that neither is eliminated as the round ends.
+    g.apply_ops(&json!([
+        {"op": "add_unit", "player": 0, "unit": "Warrior", "x": 2, "y": 2},
+        {"op": "add_unit", "player": 1, "unit": "Warrior", "x": 9, "y": 7},
+    ]))
+    .expect("units");
     g.end_turn(ME).expect("my turn");
     assert_eq!(held(&g), 1);
     assert_eq!(g.state().player(ME).map(|p| p.civ.temp_uniques[0].turns), Some(1));

@@ -26,6 +26,7 @@ mod engine {
     mod turns;
     mod uniques;
     mod units;
+    mod victory;
     mod vis;
     mod workers;
 }

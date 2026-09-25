@@ -1,0 +1,145 @@
+about = """
+Taking a civilization's last city eliminates it at once: it is gone, and everyone is told. A
+civilization that holds every original capital wins the Domination victory, which ends the game:
+here the second capture, which also eliminates the last rival.
+"""
+from = "tests/test_mechanics.py::CaptureTests::test_capture_city_and_domination; citar/engine/victory.py: check_elimination, check_domination"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "C", name = "Athenai" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "B>w" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "C>w" },
+  { op = "add_unit", player = 1, unit = "Worker", at = "B>e" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+  { op = "set_relation", a = 0, b = 2, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { carthago = "=made[1].city_id", athenai = "=made[2].city_id", w1 = "=made[3].unit_ids[0]", w2 = "=made[4].unit_ids[0]" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 20 }
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "progress.Domination"
+eq = { milestones = [{ milestone = "Capture all capitals", done = false }], total = 1, completed = 0 }
+
+[[step]]
+op = "set_city"
+args = { city = "=carthago", health = 1 }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w1", at = "B" }
+as = "fight"
+
+[[step]]
+check = "fight"
+subset = { captured_city = "Carthago", from = "Civilization 2" }
+
+[[step]]
+note = "its last city gone, the second civilization is eliminated at once, its units with it"
+check = { what = "player", player = 1 }
+subset = { alive = false, cities = [], units = [] }
+
+[[step]]
+check = { what = "events", type = "eliminated" }
+any = { subset = { text = "Civilization 2 has been destroyed!" } }
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "playing", winner = "=null" }
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "achieved"
+is_null = true
+
+[[step]]
+op = "set_city"
+args = { city = "=athenai", health = 1 }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w2", at = "C" }
+as = "fight2"
+
+[[step]]
+check = "fight2"
+subset = { captured_city = "Athenai", from = "Civilization 3" }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "alive"
+eq = false
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over", winner = 0, victory = "Domination" }
+
+[[step]]
+check = { what = "events", type = "victory" }
+any = { subset = { text = "Civilization 1 controls every original capital — Domination Victory!" } }
+
+[[step]]
+check = { what = "events", type = "eliminated" }
+len = 2
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "progress.Domination"
+eq = { milestones = [{ milestone = "Capture all capitals", done = true }], total = 1, completed = 1 }
+
+[[step]]
+note = "the game is over"
+tool = "end_turn"
+error = "The game is over."
+
+[[step]]
+note = "the last civilization standing of several wins too, holding no original capital"
+new_game = { players = [{}, {}] }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 0, at = "D", name = "Ostia" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "C>w" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "C", hp = 1 },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+op = "remove_city"
+args = { city = "=made[0].city_id" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { alive = true, capital = "=made[1].city_id" }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=made[2].unit_ids[0]", at = "C" }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "alive"
+eq = false
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over", winner = 0, victory = "Domination" }
+
+[[step]]
+check = { what = "events", type = "victory" }
+path = "[0].text"
+eq = "Civilization 1 is the last civilization standing — Domination Victory!"

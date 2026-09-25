@@ -69,9 +69,10 @@ city-states' nations differently, so scripts refer to a city-state by id and nev
 seat's turn and announces it (`turn_start`, then `game_start`) before the bare prelude runs: count
 events by type, and never pin an event id at the start of a game.
 
-A civilization, or a city-state, with no unit and no city is eliminated at the end of a round
-(once package 1c-08 ports eliminations in Rust; Python always did). A script that plays across a
-round gives each player a unit first, with the `add_unit` operation.
+A civilization, or a city-state, with no unit and no city is eliminated at the end of a round, and
+one that loses its last city or unit to another's move is eliminated at once; with one civilization
+left of several, it wins the Domination victory. A script that plays across a round gives each
+player a unit first, with the `add_unit` operation.
 
 ## Steps
 
@@ -245,7 +246,7 @@ same from both engines, and every set in it is sorted.
 
 | `what` | Takes | Gives |
 |---|---|---|
-| `game` | | `turn`, `current`, `phase` (`playing`, `over`), `winner`, `victory`, `width`, `height`, `players` (how many), `majors`, `city_states` (ids), `barbarians` (id or null) |
+| `game` | | `turn`, `current`, `phase` (`playing`, `over`), `winner`, `victory` (the victory's name, `Neutral` for `Triggers victory`, or null), `width`, `height`, `players` (how many), `majors`, `city_states` (ids), `barbarians` (id or null) |
 | `player` | `player` | `id`, `kind` (`major`, `city_state`, `barbarian`), `name`, `leader`, `nation`, `alive`, `controller`, `handicap`, `auto` (`un_vote`, `conquest`, `free_picks`), `overrides` (the `handicap` and `auto` keys the seat set explicitly), `difficulty` (the seat's, or a major's the game's), `gold`, `culture`, `faith`, `golden_age_turns`, `free_policies`, `free_techs`, `future_techs`, `techs` (names), `research` (`queue`, `goal`, `progress` (science stored by tech), `overflow`), `policies`, `met` (ids), `capital`, `cities`, `units` (ids), `explored` (how many tiles), `natural_wonders` (the names it has discovered), `notes`, `city_state` (null, or `type`, `ally` and `influence` by major id), `happiness` (now), `happiness_seen` (what its cities and conditionals go by: committed at setup and at the start and end of its turns; Python's is the live figure), `gold_rate` (written at the end of each of its turns; Python never wrote it) |
 | `tile` | `x`, `y` (or `at`) | `x`, `y`, `terrain`, `features`, `wonder`, `resource`, `resource_amount`, `improvement`, `pillaged`, `route` (`Road`, `Railroad` or null), `route_pillaged`, `river` (the edge mask), `owner`, `city`, `units` (ids), `visible` (the ids of the players who see it now) |
 | `relation` | `a`, `b` | `a`, `b`, `met`, `war`, `war_declared_by`, `since`, `treaty_until`, `friendship_until`, `pact_until`, `ra_until`, `embassy` (`[a's with b, b's with a]`), `open_borders_until` (`[a lets b in, b lets a in]`), `opinion` (`[a's of b, b's of a]`), `friends`, `pact` |
@@ -261,6 +262,8 @@ same from both engines, and every set in it is sorted.
 | `negotiation` | `negotiation` (an id); optionally `player` | as kept: `id`, `initiator`, `responder`, `turn`, `status` (`open`, `accepted`, `rejected`, `expired`, `cancelled`), `awaiting` (an id or null), `proposal` (what each side gives, by player id, as deal items, or null), `proposal_by`, `history` (each entry's `seq`, `by` (an id, or null for the game), `action` (`open`, `reply`, `counter`, `accept`, `reject`, `close`), `message`, `proposal`, `turn`, `note` (or null)), `deal_id`. With `player`, as that player sees it (`diplomacy.negotiation_view`): `id`, `with`, `with_name`, `status`, `you_initiated`, `your_move`, `turn`, `messages` (entries but the game's close), `max_messages`, `current_proposal` (`you_give`, `you_receive`, `summary`, or null), `proposal_by_you`, `history` (`seq`, `by` (a name or null), `you`, `action`, `message`, `proposal`, and `note` where there is one) |
 | `camps` | | the barbarian camps, by id: `id`, `x`, `y`, `countdown` (turns to the next spawn, or once destroyed until it is forgotten), `spawned` (from -1), `destroyed`. Camp ids differ between the engines |
 | `city_state` | `player` (a city-state) | `ally` (an id or null), `protectors` (ids), `influence` (by major id, as stored), `relationship` (`Unforgivable`, `Enemy`, `Ally`, `Friend`, `Afraid` or `Neutral`) and `resting_point`, each by the id of a major it has met, `quests` (`name`, `assignee`, `scope`: `individual` or `global`), `war_quests` (the kills it wants of an attacker's units, by the attacker's id), `recently_bullied` (turns it pays no tribute) |
+| `victory` | `player` | `score` (`cities`, `population`, `tiles`, `wonders`, `technologies`, `future_tech` and their `total`), `military_strength`, `progress` (for each enabled victory by name: `milestones`, each `milestone` and whether it is `done`, up to the first not done; `total`; `completed`), `spaceship` (`apollo_program`, `parts` (by name: `added`, `needed`), `complete`), `achieved` (the victory it would win now, a name or null; `Neutral` for `Triggers victory`) |
+| `un` | | the United Nations: `next_vote` (a turn or null), `votes` (the ballots cast, by voter id: a player id, or null to abstain), `results` (the last vote's `turn`, `tally` (`[player, votes]`, most first, equals by id), `votes_needed` and `winner`, or null), `won` (ids), `processed_turn`, `open` (whether voting is open now), `votes_needed`, `owner` (who built the United Nations, or null) |
 | `spies` | `player` | the civilization's spies in order: `name`, `rank`, `city` (an id, or null at the hideout), `action` (`None`, `Moving`, `Establishing Network`, `Observing City`, `Stealing Tech`, `Rigging Elections`, `Coup`, `Counter-intelligence`, `Dead`), `turns`, `progress` |
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
 | `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |

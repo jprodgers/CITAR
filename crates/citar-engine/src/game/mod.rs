@@ -55,6 +55,9 @@
 //! marriage, quests, the city-states' turns and their AI) and the city-state side of
 //! [`espionage`] (elections and coups).
 //!
+//! Victory and defeat (package 1c-08): [`victory`] (score, the United Nations, the milestones,
+//! eliminations, the statistics rows and replay frames each round records) and [`revolts`].
+//!
 //! **Porting markers.** A step whose system a later package ports is written as
 //! `pending(Porting::Pending("<package>"))`, or `pending_or` where it must answer
 //! something meanwhile. `cargo xtask check` counts these by their literal argument and fails
@@ -88,12 +91,14 @@ pub mod policies;
 pub mod query;
 pub mod religion;
 pub mod research;
+pub mod revolts;
 pub mod ruins;
 pub mod setup;
 pub mod tiles;
 pub mod triggers;
 pub mod turn;
 pub mod units;
+pub mod victory;
 pub mod vis;
 pub mod workers;
 

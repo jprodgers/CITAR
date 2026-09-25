@@ -15,7 +15,7 @@ use super::errors::{Problems, RulesetErrorKind};
 use super::moves::MoveRules;
 use crate::base::ids::{
     BaseUnitId, BuildingId, DifficultyId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
-    ObjectFilterId, ResourceId, TechId, TerrainId, UnitTypeId,
+    ObjectFilterId, ResourceId, TechId, TerrainId, UnitTypeId, VictoryId,
 };
 use crate::base::sets::{BaseUnitSet, FeatureSet, ImprovementSet, TerrainSet};
 use crate::base::stats::{Stat, StatMask};
@@ -49,6 +49,12 @@ const PREFERRED_GREAT_PEOPLE: [&str; 5] =
 /// (`city_states.py:1252`).
 const CITY_STATE_BUILDS: [&str; 8] =
     ["Walls", "Monument", "Granary", "Shrine", "Library", "Castle", "Temple", "Market"];
+// The victories Python named (`game.py:46`, `victory.py:60, 305-312, 341-363, 415`).
+const SCIENTIFIC: &str = "Scientific";
+const CULTURAL: &str = "Cultural";
+const DOMINATION: &str = "Domination";
+const DIPLOMATIC: &str = "Diplomatic";
+const TIME: &str = "Time";
 
 // The terrains and resources map generation names (`mapgen.py:551-1660`).
 const OCEAN: &str = "Ocean";
@@ -134,6 +140,23 @@ pub struct Known {
     pub city_state_builds: [Option<BuildingId>; 8],
     /// The terrains and resources map generation names.
     pub map: KnownMap,
+    /// The victories the rules of victory name.
+    pub victories: KnownVictories,
+}
+
+/// The victories Python named (`game.py:46`, `victory.py`), each only if the ruleset has it: the
+/// spaceship's parts are the Scientific victory's (`victory.py:58-60`), a civilization holding
+/// every original capital or left alone wins the Domination victory (`check_domination`), the
+/// world leader is elected while the Diplomatic victory is on (`victory.py:415`), the best score
+/// wins the Time victory at the turn limit (`check_turn_limit`), and each has its own words when
+/// it is won (`VICTORY_TEXT`). A ruleset without one has none of what it names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KnownVictories {
+    pub scientific: Option<VictoryId>,
+    pub cultural: Option<VictoryId>,
+    pub domination: Option<VictoryId>,
+    pub diplomatic: Option<VictoryId>,
+    pub time: Option<VictoryId>,
 }
 
 /// The terrains and resources map generation names (`mapgen.py:551-1660`), each only if the
@@ -259,6 +282,7 @@ impl Derived {
                 scout: None,
                 city_state_builds: [None; 8],
                 map: KnownMap::default(),
+                victories: KnownVictories::default(),
             },
             moves: MoveRules::default(),
             combat: CombatRules::default(),
@@ -394,6 +418,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         city_state_builds: CITY_STATE_BUILDS
             .map(|name| r.buildings.iter().find(|(_, b)| &*b.name == name).map(|(id, _)| id)),
         map: known_map(r),
+        victories: known_victories(r),
     };
 
     let UnitLists { great_person_units, spaceship_parts, builder_classes } = derive_units(r, p);
@@ -525,6 +550,19 @@ fn starting_settler(r: &Ruleset) -> Option<BaseUnitId> {
         })
         .map(|(id, _)| id)
         .or_else(|| unit_named(r, SETTLER))
+}
+
+/// The victories Python named (`game.py:46`, `victory.py`), each where the ruleset has one by
+/// that name.
+fn known_victories(r: &Ruleset) -> KnownVictories {
+    let victory = |name: &str| r.victories.iter().find(|(_, v)| &*v.name == name).map(|(id, _)| id);
+    KnownVictories {
+        scientific: victory(SCIENTIFIC),
+        cultural: victory(CULTURAL),
+        domination: victory(DOMINATION),
+        diplomatic: victory(DIPLOMATIC),
+        time: victory(TIME),
+    }
 }
 
 /// The objects map generation names, each where the ruleset has it as the kind generation uses.
