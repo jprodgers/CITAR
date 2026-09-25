@@ -239,36 +239,62 @@ fn mod_lines(m: &strength::Mods) -> Value {
     Value::Array(m.iter().map(|&(k, v)| Value::String(format!("{k} {v:+}%"))).collect())
 }
 
-/// Predicts a fight without starting one (`combat.preview`, `combat.py:512-538`): the final
-/// strengths to a decimal, both sides' modifiers, whether it is ranged, the damage each side
-/// takes at the lowest and highest roll, and the defender with its hit points.
+/// A fight predicted without starting it (`combat.preview`, `combat.py:512-538`): the fight's
+/// numbers gathered once, and the damage each side takes at the lowest and highest roll.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preview {
+    pub setup: CombatSetup,
+    pub ranged: bool,
+    /// `[lowest roll, highest roll]`.
+    pub damage_to_defender: [i32; 2],
+    pub damage_to_attacker: [i32; 2],
+    pub defender_hp: i32,
+    /// A city with no defences left, which a melee attack takes.
+    pub city_down: bool,
+}
+
+/// Predicts unit `u`'s attack on tile `t` (`combat.preview`): [`validate_attack`]'s checks, then
+/// one [`strength::setup`] and the damage at both ends of the roll, so the numbers bracket what
+/// can happen. Python rebuilt the modifier stacks about six times (`combat.py:512-538`).
+///
+/// # Errors
+/// [`validate_attack`]'s refusals.
+pub fn preview_of(g: &Game, u: UnitId, t: TileIdx) -> Result<Preview, ActionError> {
+    let d = validate_attack(g, u, t)?;
+    let a = Combatant::Unit(u);
+    let setup = strength::setup(g, a, combatant::tile(g, a), d, false);
+    Ok(Preview {
+        ranged: combatant::is_ranged(g, a),
+        damage_to_defender: [setup.damage_to_defender(0.0), setup.damage_to_defender(1.0)],
+        damage_to_attacker: [setup.damage_to_attacker(0.0), setup.damage_to_attacker(1.0)],
+        defender_hp: combatant::hp(g, d),
+        city_down: matches!(d, Combatant::City(_)) && combatant::defeated(g, d),
+        setup,
+    })
+}
+
+/// The preview as the tool and `inspect` report it (`combat.preview`, `combat.py:525-538`): the
+/// final strengths to a decimal, both sides' modifiers, whether it is ranged, the damage each
+/// side takes at the lowest and highest roll, and the defender with its hit points.
 ///
 /// # Errors
 /// [`validate_attack`]'s refusals.
 pub fn preview(g: &Game, u: UnitId, t: TileIdx) -> Result<Value, ActionError> {
-    let d = validate_attack(g, u, t)?;
-    let a = Combatant::Unit(u);
-    let from = combatant::tile(g, a);
-    let s = strength::setup(g, a, from, d, false);
+    let p = preview_of(g, u, t)?;
+    let s = &p.setup;
     let mut out = Map::new();
     out.insert("attacker_strength".into(), json!(num::round_ndigits(s.attack, 1)));
     out.insert("defender_strength".into(), json!(num::round_ndigits(s.defense, 1)));
     out.insert("attacker_modifiers".into(), mod_lines(&s.attack_modifiers));
     out.insert("defender_modifiers".into(), mod_lines(&s.defense_modifiers));
-    out.insert("ranged".into(), json!(combatant::is_ranged(g, a)));
-    out.insert(
-        "damage_to_defender".into(),
-        json!([s.damage_to_defender(0.0), s.damage_to_defender(1.0)]),
-    );
-    out.insert(
-        "damage_to_attacker".into(),
-        json!([s.damage_to_attacker(0.0), s.damage_to_attacker(1.0)]),
-    );
-    out.insert("defender".into(), json!(combatant::name(g, d)));
-    out.insert("defender_hp".into(), json!(combatant::hp(g, d)));
-    if let Combatant::City(_) = d {
+    out.insert("ranged".into(), json!(p.ranged));
+    out.insert("damage_to_defender".into(), json!(p.damage_to_defender));
+    out.insert("damage_to_attacker".into(), json!(p.damage_to_attacker));
+    out.insert("defender".into(), json!(combatant::name(g, s.defender)));
+    out.insert("defender_hp".into(), json!(p.defender_hp));
+    if let Combatant::City(_) = s.defender {
         out.insert("target".into(), json!("city"));
-        if combatant::defeated(g, d) {
+        if p.city_down {
             out.insert(
                 "note".into(),
                 json!("City defenses are down: a melee attack will capture it."),

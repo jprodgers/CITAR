@@ -269,6 +269,9 @@ fn great_general_bonus(
     };
     let mut best: Option<(crate::base::ids::BaseUnitId, i32)> = None;
     for general in g.player_units(owner) {
+        if !rules.aura.may(general.base, &general.promotions) {
+            continue;
+        }
         for h in uq::unit(&v, general.id(), UniqueType::StrengthBonusInRadius, &ctx) {
             let UniqueData::StrengthBonusInRadius(b) = *h.data() else { continue };
             let radius = u32::try_from(b.radius).unwrap_or(0);
@@ -345,9 +348,10 @@ fn general_modifiers(
             }
             let f = r.uniques().filters();
             let mut worst: Option<i32> = None;
+            let adjacent = &r.derived().combat.adjacent;
             for o in adj {
                 let Some(ou) = g.unit(o) else { continue };
-                if !g.at_war(ou.owner(), owner) {
+                if !g.at_war(ou.owner(), owner) || !adjacent.may(ou.base, &ou.promotions) {
                     continue;
                 }
                 let octx = Ctx::unit(&v, o);
@@ -557,9 +561,15 @@ pub fn defense_modifiers(g: &Game, a: Combatant, d: Combatant, from: TileIdx) ->
         return mods;
     }
     let tb = tile_defense_bonus(g, unit.tile(), Some(u));
-    let no_bonus = unit_has(g, u, UniqueType::NoDefensiveTerrainBonus, true);
-    let no_penalty = unit_has(g, u, UniqueType::NoDefensiveTerrainPenalty, true);
-    if (!no_bonus && tb > 0.0) || (!no_penalty && tb < 0.0) {
+    // Only the unique that concerns the bonus's sign is asked.
+    let counts = if tb > 0.0 {
+        !unit_has(g, u, UniqueType::NoDefensiveTerrainBonus, true)
+    } else if tb < 0.0 {
+        !unit_has(g, u, UniqueType::NoDefensiveTerrainPenalty, true)
+    } else {
+        false
+    };
+    if counts {
         put(&mut mods, "Tile", num::round_half_even_i32(tb * 100.0));
     }
     if matches!(unit.activity, Some(Activity::Fortify | Activity::FortifyHeal)) && unit.fortify > 0
@@ -577,10 +587,12 @@ pub fn defense_modifiers(g: &Game, a: Combatant, d: Combatant, from: TileIdx) ->
 #[must_use]
 pub fn wounded_ratio(g: &Game, c: Combatant) -> f64 {
     let Combatant::Unit(u) = c else { return 1.0 };
-    if unit_has(g, u, UniqueType::NoDamagePenaltyWoundedUnits, true) {
+    let hp = combatant::hp(g, c);
+    // An unhurt unit loses nothing either way.
+    if hp >= 100 || unit_has(g, u, UniqueType::NoDamagePenaltyWoundedUnits, true) {
         return 1.0;
     }
-    1.0 - f64::from(100 - combatant::hp(g, c)) / WOUNDED_RATIO
+    1.0 - f64::from(100 - hp) / WOUNDED_RATIO
 }
 
 /// A strength ratio as a damage multiplier (`combat._damage_modifier`, `combat.py:390-401`):
