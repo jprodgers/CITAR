@@ -233,7 +233,7 @@ def _unit(g: Game, u) -> dict:
 def _unit_actions(g: Game, u) -> list:
     """``unit_actions``: what a unit could do now with ``unit_action``, as ``get_unit`` lists it."""
     from .actions import unit_actions
-    return [{k: v for k, v in a.items()} for a in unit_actions(g, u)]
+    return [dict(a) for a in unit_actions(g, u)]
 
 
 def _build_options(g: Game, u) -> list:
