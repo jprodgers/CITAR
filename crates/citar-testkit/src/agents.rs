@@ -55,8 +55,8 @@
 //! good sites, since at random it would stay at a city or two for a whole game. The
 //! whole-game tests and the `random` golden set play it (`tests/engine/whole_game.rs`,
 //! `golden::games`). A noisy agent ([`RandomAgent::noisy`]) also reads the game, saves
-//! it and makes calls it refuses between its moves ([`reads_and_refusals`]), which must change
-//! nothing: the early form of property P8.
+//! it and makes calls it refuses before every action it takes ([`reads_and_refusals`]), which
+//! must change nothing: the early form of property P8.
 
 use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TechId, TileIdx, UnitId};
 use citar_engine::base::rng::{Purpose, Rng};
@@ -369,8 +369,10 @@ pub fn take_tally() -> std::collections::BTreeMap<&'static str, Tried> {
 
 /// Takes an action, and says whether the game carried it out. A refusal is an answer like any
 /// other, which an agent playing at random mostly has no use for; what the action did is the
-/// game's to keep.
+/// game's to keep. A noisy agent's reads and refusals come first ([`noise`]), so that they fall
+/// between any two actions, those of one move included.
 fn play(g: &mut Game, pid: PlayerId, a: Action) -> bool {
+    noise(g, pid);
     let tool = a.tool();
     let taken = g.act(pid, a).is_ok();
     TALLY.with(|t| {
@@ -927,8 +929,9 @@ pub fn free_choices(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
 /// The seat's own words (`set_civ_name`, `write_notes`, `log_thought`, `end_turn`): one time in
 /// a hundred a new name for the civilization, now and then with a new leader (and one time in
 /// ten a name another civilization has, which is refused); one time in twenty a line in its
-/// notebook, appended or replacing it; one time in ten a thought. One time in fifty, while its driver plays it, the
-/// `end_turn` tool, which the game refuses: the drive ends a driven seat's turn.
+/// notebook, appended or replacing it; one time in ten a thought. One time in fifty, while its
+/// driver plays it, the `end_turn` tool, which the game refuses: the drive ends a driven seat's
+/// turn.
 pub fn notes(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     if rng.chance(0.01) {
         let name = if rng.chance(0.1) {
@@ -1109,7 +1112,8 @@ const NO_UNIT: i64 = -7;
 
 /// A call the game refuses, drawn from host commands and tools: an action on a unit or a
 /// negotiation the game does not have, by a player whose turn it is not, or with arguments of
-/// the wrong kind; a turn ended for the wrong player or forced on one that does not exist;
+/// the wrong kind; a turn ended for the wrong player or forced on one that does not exist, or,
+/// while a driver plays, the driven seat's turn ended or forced, which the drive alone may do;
 /// scenario operations that fail halfway, which the game takes back whole.
 ///
 /// # Panics
@@ -1148,11 +1152,18 @@ fn refuse_something(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
             };
             ("an answer to no negotiation", g.act(pid, Action::RespondNegotiation(a)).is_err())
         }
-        5 => match any_of(rng, &others) {
-            Some(q) => ("a turn ended for another", g.end_turn(q).is_err()),
-            None => return,
+        // Inside the drive, the drive's own guard refuses any turn ended or forced before the
+        // player is looked at: there the calls ask for the driven seat's, which only the guard
+        // refuses, and the wrong player and the missing one are asked for outside it.
+        5 => match (g.driving(), any_of(rng, &others)) {
+            (Some(d), _) => ("a driven seat's turn ended by a call", g.end_turn(d).is_err()),
+            (None, Some(q)) => ("a turn ended for another", g.end_turn(q).is_err()),
+            (None, None) => return,
         },
-        6 => ("a turn forced on nobody", g.force_turn(PlayerId(200)).is_err()),
+        6 => match g.driving() {
+            Some(d) => ("a driven seat's turn forced by a call", g.force_turn(d).is_err()),
+            None => ("a turn forced on nobody", g.force_turn(PlayerId(200)).is_err()),
+        },
         7 => {
             let ops = json!([
                 {"op": "set_player", "player": pid.0, "gold": 1},
@@ -1168,10 +1179,11 @@ fn refuse_something(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     assert!(refused, "the game carried out {what}, which it must refuse");
 }
 
-/// What a host does besides: saves the game (the journal's chunk, then a snapshot written as
-/// JSON) and reads the summary back.
-fn save_it(g: &mut Game) {
-    let _chunk = g.take_journal_chunk();
+/// What a host does besides: saves the game (a snapshot written as JSON) and reads the summary
+/// back. It takes no journal chunk: which chunks are taken is the host's cursor, and one taken
+/// here would be missing from the host's own list, whose next load would then find the history
+/// incomplete ([`crate::games::save_and_load`] takes them, before its snapshot).
+fn save_it(g: &Game) {
     if let Ok(bytes) = g.snapshot().to_json() {
         let _summary = citar_engine::save::summary(&bytes);
     }
@@ -1181,6 +1193,7 @@ fn save_it(g: &mut Game) {
 /// actions: property P8 says none of them changes the game (DESIGN.md 9.5). Draws from `rng`
 /// alone, which is not a stream the agent's moves draw from.
 pub fn reads_and_refusals(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    NOISE_CALLS.with(|n| n.set(n.get() + 1));
     for _ in 0..2 {
         read_something(g, pid, rng);
     }
@@ -1192,6 +1205,48 @@ pub fn reads_and_refusals(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     }
 }
 
+std::thread_local! {
+    /// The stream a noisy agent's reads and refusals draw from while it plays a turn or answers,
+    /// which [`play`] draws from before every action; `None` otherwise, and for a quiet agent.
+    static NOISE: core::cell::RefCell<Option<Rng>> = const { core::cell::RefCell::new(None) };
+    /// How many times [`reads_and_refusals`] ran on this thread since the last
+    /// [`take_noise_count`]. Only ever read by tests.
+    static NOISE_CALLS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// How many times [`reads_and_refusals`] ran on this thread since the last call: the noisy
+/// agents' reads and refusals, and those a test made itself.
+#[must_use]
+pub fn take_noise_count() -> u64 {
+    NOISE_CALLS.with(|n| n.replace(0))
+}
+
+/// The noise stream of a noisy agent's turn or answer: set while the scope lives, and what was
+/// there before put back when it is dropped, by a panic too, so that no stream outlives its turn.
+struct NoiseScope(Option<Rng>);
+
+impl NoiseScope {
+    fn set(rng: Option<Rng>) -> Self {
+        Self(NOISE.with(|n| n.replace(rng)))
+    }
+}
+
+impl Drop for NoiseScope {
+    fn drop(&mut self) {
+        let before = self.0.take();
+        NOISE.with(|n| *n.borrow_mut() = before);
+    }
+}
+
+/// A noisy agent's reads and refusals ([`reads_and_refusals`]), from its turn's or answer's
+/// noise stream, when one is set. The stream is out of its slot while they run, so that nothing
+/// they call makes noise of its own.
+fn noise(g: &mut Game, pid: PlayerId) {
+    let Some(mut rng) = NOISE.with(|n| n.borrow_mut().take()) else { return };
+    reads_and_refusals(g, pid, &mut rng);
+    NOISE.with(|n| *n.borrow_mut() = Some(rng));
+}
+
 /// The stream [`reads_and_refusals`] draws from for a seat's turn, or an answer: keyed apart from
 /// every stream the agent's moves and answers draw from.
 fn noise_stream(g: &Game, pid: PlayerId, what: u64) -> Rng {
@@ -1201,7 +1256,7 @@ fn noise_stream(g: &Game, pid: PlayerId, what: u64) -> Rng {
 
 /// A driver that plays at random among the actions the engine has, reproducibly: the same game
 /// and seat give the same moves. A noisy one ([`RandomAgent::noisy`]) also reads and makes
-/// refused calls between its moves, which must change nothing (property P8).
+/// refused calls between its actions, which must change nothing (property P8).
 #[derive(Clone, Debug, Default)]
 pub struct RandomAgent {
     turns: u64,
@@ -1215,9 +1270,10 @@ impl RandomAgent {
         Self { turns: 0, noisy: false }
     }
 
-    /// A new agent that plays as [`new`](Self::new)'s does, and between every two of its moves,
-    /// and before every answer, reads the game and makes calls the game refuses
-    /// ([`reads_and_refusals`]).
+    /// A new agent that plays as [`new`](Self::new)'s does, and before every action it takes,
+    /// after the last of its turn, and before every answer, reads the game and makes calls the
+    /// game refuses ([`reads_and_refusals`]), from a stream of its own: its moves draw as a
+    /// quiet agent's do.
     #[must_use]
     pub const fn noisy() -> Self {
         Self { turns: 0, noisy: true }
@@ -1240,16 +1296,12 @@ impl RandomAgent {
 impl SeatDriver for RandomAgent {
     fn play_turn(&mut self, g: &mut Game, pid: PlayerId, _: &mut DriverMemory) -> DriverOutcome {
         let mut rng = Self::stream(g, pid);
-        let mut noise = self.noisy.then(|| noise_stream(g, pid, 0));
+        let _noise = NoiseScope::set(self.noisy.then(|| noise_stream(g, pid, 0)));
         for m in MOVES {
-            if let Some(n) = noise.as_mut() {
-                reads_and_refusals(g, pid, n);
-            }
             m(g, pid, &mut rng);
         }
-        if let Some(n) = noise.as_mut() {
-            reads_and_refusals(g, pid, n);
-        }
+        // After its last action: what the drive does next, it does after these.
+        noise(g, pid);
         self.turns += 1;
         DriverOutcome::Done
     }
@@ -1261,10 +1313,8 @@ impl SeatDriver for RandomAgent {
         nid: NegotiationId,
         _: &mut DriverMemory,
     ) -> DriverOutcome {
-        if self.noisy {
-            let mut n = noise_stream(g, pid, 1 + u64::from(nid.get()));
-            reads_and_refusals(g, pid, &mut n);
-        }
+        let what = 1 + u64::from(nid.get());
+        let _noise = NoiseScope::set(self.noisy.then(|| noise_stream(g, pid, what)));
         let mut rng = answer_stream(g, pid, nid);
         answer(g, pid, nid, &mut rng);
         DriverOutcome::Done

@@ -16,9 +16,9 @@
 //! Exit codes: 0 all match, 1 something differs or a set named to bless is refused, 2 a usage
 //! or I/O error.
 //!
-//! A set that depends on the engine's stages (`turns`, `pass`, `random`) is blessed only when none of them is
-//! pending (DESIGN.md 9.6): until then `check` computes it without comparing it, and `bless`
-//! leaves it out and says why, or refuses it by name.
+//! A set that depends on the engine's stages (`turns`, `pass`, `random`) is blessed only when
+//! none of them is pending (DESIGN.md 9.6): until then `check` computes it without comparing it,
+//! and `bless` leaves it out and says why, or refuses it by name.
 //!
 //! `pyfmt.json` holds Python's answers and is written only by `scripts/refcheck/pyfmt_vectors.py`;
 //! `bless` leaves it alone. Bless only after a deliberate change (a new `Purpose`, a `libm` or

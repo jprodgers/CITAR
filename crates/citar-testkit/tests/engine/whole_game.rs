@@ -6,23 +6,28 @@
 //!   (gate 2: the time is reported, and fails above the 30-second backstop in any build);
 //! - the chain of round digests with a save and a load at every round equals the uninterrupted
 //!   run's (gate 3), for random games and for a fixture passed;
-//! - reads, saves and refused calls between every two of the agents' moves change no digest
-//!   (the early property P8);
-//! - the agent tries every action a seat has, and the game carries out most of them.
+//! - reads, saves and refused calls between every two of the agents' actions change no digest
+//!   (the early property P8), in a game saved and loaded every round too;
+//! - the agent tries every action a seat has, and the game carries out most of them;
+//! - the whole-game helpers refuse a game whose rounds they cannot count, and drive any driver.
 
 use citar_engine::api::tools::args::TOOLS;
-use citar_engine::game::{DebugOptions, Game};
+use citar_engine::base::ids::{NegotiationId, PlayerId};
+use citar_engine::game::{DebugOptions, DriverOutcome, Game, SeatDriver};
 use citar_engine::state::Phase;
-use citar_testkit::agents::{RandomAgent, take_tally};
+use citar_engine::state::players::DriverMemory;
+use citar_testkit::agents::{RandomAgent, take_noise_count, take_tally};
 use citar_testkit::fixtures::{self, Fixture};
 use citar_testkit::games::{self, Round};
 
-/// The committed fixtures, and the local corpus's when `CITAR_REFCHECK_CORPUS` names it.
-fn every_fixture() -> Vec<Fixture> {
-    let mut all = fixtures::committed().expect("the committed fixtures");
-    assert_eq!(all.len(), 12, "the twelve committed fixtures");
-    all.extend(fixtures::corpus().expect("the corpus folder").unwrap_or_default());
-    all
+/// The committed fixtures, each with `true`, and the local corpus's, each with `false`, when
+/// `CITAR_REFCHECK_CORPUS` names it: tagged by the list each came from, whatever its path says.
+fn every_fixture() -> Vec<(Fixture, bool)> {
+    let committed = fixtures::committed().expect("the committed fixtures");
+    assert_eq!(committed.len(), 12, "the twelve committed fixtures");
+    let corpus = fixtures::corpus().expect("the corpus folder").unwrap_or_default();
+    let tagged = |list: Vec<Fixture>, tag: bool| list.into_iter().map(move |f| (f, tag));
+    tagged(committed, true).chain(tagged(corpus, false)).collect()
 }
 
 /// Plays a random game on generated settings, calling `hook` after every round, and returns
@@ -52,8 +57,7 @@ fn every_fixture_plays_five_pass_rounds_cleanly() {
     // Gate 1. The committed fixtures verify every cache at every settle; the corpus, which is
     // twenty times as many, checks the invariants there and the caches once it has passed.
     let mut failures = Vec::new();
-    for f in every_fixture() {
-        let committed = !f.path.to_string_lossy().contains("corpus");
+    for (f, committed) in every_fixture() {
         let debug = if committed { DebugOptions::ALL } else { DebugOptions::default() };
         let mut g = match games::from_fixture(&f, b"pass", debug) {
             Ok(g) => g,
@@ -214,44 +218,109 @@ fn a_fixture_saved_and_loaded_every_round_passes_as_it_would_have() {
 }
 
 #[test]
-fn reads_saves_and_refusals_between_moves_change_no_digest() {
+fn reads_saves_and_refusals_between_actions_change_no_digest() {
     // The early property P8: a noisy agent reads the game (every inspect query, the views and
-    // the briefing among them), saves it and makes calls it refuses before every move and
-    // every answer; the hook does too after every round. Every round's digest is the quiet
-    // game's.
+    // the briefing among them), saves it and makes calls it refuses before every action it
+    // takes, those of one move included, after its turn's last and before every answer; the
+    // hook does too after every round, outside the drive. Every round's digest is the quiet
+    // game's, and still is when the host also saves the game and plays on from the save after
+    // every round (property P6 with P8).
+    const ROUNDS: u32 = 50;
+    const HOOK_NOISE: u64 = 5;
     let mut quiet = Vec::new();
     let (g, n) = random_game(
         "small",
         "fractal",
         33,
-        50,
+        ROUNDS,
         DebugOptions::default(),
         false,
         &mut games::keep(&mut quiet),
     );
-    assert_eq!(n, 50);
+    assert_eq!(n, ROUNDS);
     let ends = (g.chain().copied(), g.digest().ok());
 
-    let mut noisy = Vec::new();
-    let mut hook = |g: &mut Game, r: Round| {
-        noisy.push(r);
-        let mut rng = citar_engine::base::rng::Rng::keyed(
-            g.state().seed(),
-            citar_engine::base::rng::Purpose::TestAgent,
-            &[u64::MAX, u64::try_from(r.0).unwrap_or(0)],
-        );
-        let p = g.current();
-        for _ in 0..5 {
-            citar_testkit::agents::reads_and_refusals(g, p, &mut rng);
+    for save in [false, true] {
+        let _stale = (take_tally(), take_noise_count());
+        let mut noisy = Vec::new();
+        let mut chunks = Vec::new();
+        let mut hook = |g: &mut Game, r: Round| {
+            noisy.push(r);
+            let mut rng = citar_engine::base::rng::Rng::keyed(
+                g.state().seed(),
+                citar_engine::base::rng::Purpose::TestAgent,
+                &[u64::MAX, u64::try_from(r.0).unwrap_or(0)],
+            );
+            let p = g.current();
+            for _ in 0..HOOK_NOISE {
+                citar_testkit::agents::reads_and_refusals(g, p, &mut rng);
+            }
+            if save { games::save_and_load(g, &mut chunks) } else { Ok(()) }
+        };
+        let (g, n) =
+            random_game("small", "fractal", 33, ROUNDS, DebugOptions::default(), true, &mut hook);
+        assert_eq!(n, ROUNDS);
+        let how = if save { "with a save every round" } else { "played through" };
+        for (a, b) in quiet.iter().zip(&noisy) {
+            assert_eq!(a, b, "{how}: the round of turn {} differs with the noise", a.0);
         }
-        Ok(())
-    };
-    let (g, n) = random_game("small", "fractal", 33, 50, DebugOptions::default(), true, &mut hook);
-    assert_eq!(n, 50);
-    for (a, b) in quiet.iter().zip(&noisy) {
-        assert_eq!(a, b, "the round of turn {} differs with reads between the moves", a.0);
+        assert_eq!((g.chain().copied(), g.digest().ok()), ends, "{how}");
+        // The noise came before every action the agents took, and the hook's after every round.
+        let actions: u64 = take_tally().values().map(|t| u64::from(t.tried)).sum();
+        let noise = take_noise_count();
+        assert!(
+            noise >= actions + HOOK_NOISE * u64::from(ROUNDS),
+            "{how}: noise {noise} times for {actions} actions"
+        );
     }
-    assert_eq!((g.chain().copied(), g.digest().ok()), ends);
+}
+
+/// A driver that does nothing with its turns and leaves every negotiation unanswered.
+struct Idle;
+
+impl SeatDriver for Idle {
+    fn play_turn(&mut self, _: &mut Game, _: PlayerId, _: &mut DriverMemory) -> DriverOutcome {
+        DriverOutcome::Done
+    }
+
+    fn respond(
+        &mut self,
+        _: &mut Game,
+        _: PlayerId,
+        _: NegotiationId,
+        _: &mut DriverMemory,
+    ) -> DriverOutcome {
+        DriverOutcome::Done
+    }
+}
+
+#[test]
+fn the_whole_game_helpers_refuse_a_game_with_no_chain_and_drive_any_driver() {
+    // They count rounds by the game's chain: without one they would see no round end, play on
+    // past their count to the game's end and never call the hook.
+    let settings = games::random_settings("duel", "continents", "wrap_x", 7, 40);
+    let mut g = games::new_game(&settings, b"helpers", DebugOptions::default()).expect("a game");
+    g.set_chain(None);
+    let (turn, digest) = (g.turn(), g.digest().ok());
+    let mut calls = 0;
+    let mut agents = games::agents_for(&g);
+    let played = games::play_random(&mut g, &mut agents, 5, &mut |_, _| {
+        calls += 1;
+        Ok(())
+    });
+    assert!(played.as_ref().is_err_and(|e| e.contains("no chain")), "{played:?}");
+    let passed = games::pass_rounds(&mut g, 5, &mut |_, _| Ok(()));
+    assert!(passed.as_ref().is_err_and(|e| e.contains("no chain")), "{passed:?}");
+    assert_eq!((calls, g.turn(), g.digest().ok()), (0, turn, digest), "nothing was played");
+
+    // With a chain, any driver plays the seats: idle ones pass three rounds.
+    g.set_chain(Some(citar_engine::save::chain::DigestChain::new(b"helpers")));
+    let mut idle: Vec<Idle> = (0..g.state().players().len()).map(|_| Idle).collect();
+    let mut rounds = Vec::new();
+    let played =
+        games::play_random(&mut g, &mut idle, 3, &mut games::keep(&mut rounds)).expect("it plays");
+    assert_eq!((played, rounds.len()), (3, 3));
+    assert_eq!(g.turn(), turn + 3);
 }
 
 #[test]
@@ -279,8 +348,8 @@ fn the_agent_tries_every_action_and_the_game_takes_most() {
     let mut g =
         games::new_game(&settings, b"every-action", DebugOptions::default()).expect("a game");
     // Each civilization founds its capital where its settler stands, with two spearmen of an
-    // era gone by to upgrade (to pikemen, which need no resource); the first seat, a person's, which the engine does not choose for,
-    // has finished Liberty and is owed a great person.
+    // era gone by to upgrade (to pikemen, which need no resource). The first seat, a person's,
+    // for whom the engine makes no free choice, has finished Liberty and is owed a great person.
     let mut ops = vec![
         serde_json::json!({"op": "grant_era", "player": "all", "era": "Industrial era"}),
         serde_json::json!({"op": "set_player", "player": "all", "gold": 3000, "free_techs": 1}),

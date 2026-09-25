@@ -9,7 +9,7 @@
 
 use citar_engine::base::digest::Digest;
 use citar_engine::base::ids::{PlayerId, Turn};
-use citar_engine::game::{DebugOptions, DriveOptions, Drivers, Game, Stop};
+use citar_engine::game::{DebugOptions, DriveOptions, Drivers, Game, SeatDriver, Stop};
 use citar_engine::rules::Ruleset;
 use citar_engine::save::chain::DigestChain;
 use citar_engine::state::Phase;
@@ -95,6 +95,15 @@ fn rounds_taken(g: &Game) -> u32 {
     g.chain().map_or(0, DigestChain::rounds)
 }
 
+/// Refuses a game that keeps no chain of rounds: the helpers count rounds by it, and without
+/// one would see none end, play on past their count and never call the hook.
+fn ensure_chain(g: &Game) -> Result<(), String> {
+    match g.chain() {
+        Some(_) => Ok(()),
+        None => Err(format!("turn {}: the game keeps no chain of rounds to count", g.turn())),
+    }
+}
+
 /// Calls `hook` for the round the chain took, if it took one since `before`.
 fn after_round(g: &mut Game, before: u32, hook: &mut Hook<'_>) -> Result<bool, String> {
     if rounds_taken(g) == before {
@@ -105,18 +114,20 @@ fn after_round(g: &mut Game, before: u32, hook: &mut Hook<'_>) -> Result<bool, S
     Ok(true)
 }
 
-/// Plays `g` with `agents` (one per player, as [`agents_for`] gives) in every major's seat, a
-/// seat at a time, until the game is over or `max_rounds` rounds have ended, calling `hook`
-/// after every round. Returns the rounds played.
+/// Plays `g` with `agents` (one per player, as [`agents_for`] gives, or any other drivers) in
+/// every major's seat, a seat at a time, until the game is over or `max_rounds` rounds have
+/// ended, calling `hook` after every round. Returns the rounds played.
 ///
 /// # Errors
-/// A refusal by the engine, a stop no driven game makes, or the hook's error.
-pub fn play_random(
+/// A game with no chain of rounds (see [`new_game`]), a refusal by the engine, a stop no
+/// driven game makes, or the hook's error.
+pub fn play_random<D: SeatDriver>(
     g: &mut Game,
-    agents: &mut [RandomAgent],
+    agents: &mut [D],
     max_rounds: u32,
     hook: &mut Hook<'_>,
 ) -> Result<u32, String> {
+    ensure_chain(g)?;
     let mut played = 0;
     while played < max_rounds && g.phase() == Phase::Playing {
         let before = rounds_taken(g);
@@ -150,8 +161,10 @@ pub fn play_random(
 /// the rounds played, fewer if the game ends first.
 ///
 /// # Errors
-/// A refusal by the engine, or the hook's error.
+/// A game with no chain of rounds (see [`from_fixture`]), a refusal by the engine, or the
+/// hook's error.
 pub fn pass_rounds(g: &mut Game, rounds: u32, hook: &mut Hook<'_>) -> Result<u32, String> {
+    ensure_chain(g)?;
     let mut played = 0;
     // A round ends after at most every player's turn, and a game whose last major is gone ends.
     let mut guard = (rounds as usize + 1) * (g.state().players().len() + 1);
