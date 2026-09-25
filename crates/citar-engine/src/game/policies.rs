@@ -64,7 +64,8 @@ pub fn finisher(g: &Game, branch: PolicyId) -> Option<PolicyId> {
 /// or its `n`th if given: `25 + (3n)^2.01`, times `[n]% Culture cost of adopting new Policies`
 /// for each, a humanlike seat's difficulty and the speed, and more for each city beyond the first
 /// that is not a puppet (less with `Each city founded increases culture cost of policies [n]%
-/// less than normal`); rounded, then down to a multiple of five.
+/// less than normal`); rounded, then down to a multiple of five, and at least five: discounts a
+/// ruleset stacks to 100% or more would otherwise make policies free or pay for them.
 #[must_use]
 pub fn culture_cost(g: &Game, p: PlayerId, n: Option<i32>) -> i32 {
     let r = g.rules();
@@ -97,7 +98,7 @@ pub fn culture_cost(g: &Game, p: PlayerId, n: Option<i32>) -> i32 {
     }
     cost *= g.speed().culture_cost_modifier;
     let c = num::round_half_even_i32(cost * (1.0 + city_mod));
-    c - c.rem_euclid(5)
+    (c - c.rem_euclid(5)).max(5)
 }
 
 /// Why a civilization cannot adopt a policy or open a branch now, whatever it costs; `None` if it

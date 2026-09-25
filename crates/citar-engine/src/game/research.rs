@@ -194,6 +194,9 @@ pub fn science_modifier(g: &Game, p: PlayerId, t: TechId) -> f64 {
 /// size's multiplier; `[n]% Science cost of researching new Technologies` for each; and more for
 /// each city beyond the first that is not a puppet, less with `Each city founded increases Science
 /// cost of Technologies [n]% less than normal`.
+///
+/// At least 1: discounts a ruleset stacks to 100% or more would make a tech free, and a free
+/// repeatable tech would be learned without end.
 #[must_use]
 pub fn tech_cost(g: &Game, p: PlayerId, t: TechId) -> i32 {
     let r = g.rules;
@@ -227,7 +230,7 @@ pub fn tech_cost(g: &Game, p: PlayerId, t: TechId) -> i32 {
         }
     }
     cost *= 1.0 + city_mod;
-    num::trunc_i32(cost)
+    num::trunc_i32(cost).max(1)
 }
 
 /// The median cost of what a civilization could research now (`research.median_available_cost`,
@@ -462,40 +465,61 @@ pub fn limit_overflow(g: &Game, p: PlayerId, overflow: f64) -> f64 {
 /// Adds science to what a civilization researches, completing it when it is paid for, with the
 /// overflow carried (`research.add_science`, `research.py:206-219`); with no research, it all
 /// waits as overflow.
+///
+/// Python's `add_tech` called `update_research_progress`, which called `add_science` again: one
+/// nested call per tech the overflow paid for. Here each tech is a turn of a loop, so a cheap
+/// repeatable tech, which the overflow may pay for many times over, cannot exhaust the stack.
+/// Each turn spends at least the tech's cost (at least 1) of the overflow, so the loop ends.
 pub fn add_science(g: &mut Game, p: PlayerId, amount: f64) {
-    let Some(cur) = current(g, p) else {
-        if let Some(pl) = g.player_mut(p, PlayerTouch::RESEARCH) {
-            pl.tech.overflow += amount;
+    let mut amount = amount;
+    loop {
+        let Some(cur) = current(g, p) else {
+            if let Some(pl) = g.player_mut(p, PlayerTouch::RESEARCH) {
+                pl.tech.overflow += amount;
+            }
+            return;
+        };
+        let Some(pl) = g.player_mut(p, PlayerTouch::RESEARCH) else { return };
+        let done = pl.tech.progress.entry(cur).or_insert(0.0);
+        *done += amount;
+        let done = *done;
+        let cost = f64::from(tech_cost(g, p, cur));
+        if done < cost {
+            return;
         }
-        return;
-    };
-    let Some(pl) = g.player_mut(p, PlayerTouch::RESEARCH) else { return };
-    let done = pl.tech.progress.entry(cur).or_insert(0.0);
-    *done += amount;
-    let done = *done;
-    let cost = f64::from(tech_cost(g, p, cur));
-    if done < cost {
-        return;
+        let extra = limit_overflow(g, p, done - cost);
+        if let Some(pl) = g.player_mut(p, PlayerTouch::RESEARCH) {
+            pl.tech.overflow += extra;
+        }
+        learn(g, p, cur, TechSource::Research);
+        match take_carried(g, p) {
+            Some(real) => amount = real,
+            None => return,
+        }
     }
-    let extra = limit_overflow(g, p, done - cost);
+}
+
+/// The science carried over, taken from the overflow, if it pays for what the civilization
+/// researches now (`research.py:224-229`).
+fn take_carried(g: &mut Game, p: PlayerId) -> Option<f64> {
+    let cur = current(g, p)?;
+    let pl = g.player(p)?;
+    let real = pl.tech.overflow;
+    let done = pl.tech.progress.get(&cur).copied().unwrap_or(0.0);
+    if done + real < f64::from(tech_cost(g, p, cur)) {
+        return None;
+    }
     if let Some(pl) = g.player_mut(p, PlayerTouch::RESEARCH) {
-        pl.tech.overflow += extra;
+        pl.tech.overflow = 0.0;
     }
-    add_tech(g, p, cur, TechSource::Research);
+    Some(real)
 }
 
 /// Lets the science carried over complete what a civilization researches now, if it pays for
 /// it (`research.update_research_progress`, `research.py:222-231`): after the research or its
 /// cost changed, and at the start of the civilization's turn (stage S2).
 pub fn update_research_progress(g: &mut Game, p: PlayerId) {
-    let Some(cur) = current(g, p) else { return };
-    let Some(pl) = g.player(p) else { return };
-    let real = pl.tech.overflow;
-    let done = pl.tech.progress.get(&cur).copied().unwrap_or(0.0);
-    if done + real >= f64::from(tech_cost(g, p, cur)) {
-        if let Some(pl) = g.player_mut(p, PlayerTouch::RESEARCH) {
-            pl.tech.overflow = 0.0;
-        }
+    if let Some(real) = take_carried(g, p) {
         add_science(g, p, real);
     }
 }
@@ -585,6 +609,12 @@ pub(crate) fn remind(g: &mut Game, p: PlayerId) {
 /// every city looks at its citizens again, and the science carried over may complete the next
 /// research.
 pub fn add_tech(g: &mut Game, p: PlayerId, tech: TechId, source: TechSource) {
+    learn(g, p, tech, source);
+    update_research_progress(g, p);
+}
+
+/// [`add_tech`] but for the science carried over, which its callers spend.
+fn learn(g: &mut Game, p: PlayerId, tech: TechId, source: TechSource) {
     let r = g.rules;
     let Some(def) = r.techs().get(tech) else { return };
     let Some(pl) = g.player(p) else { return };
@@ -622,7 +652,6 @@ pub fn add_tech(g: &mut Game, p: PlayerId, tech: TechId, source: TechSource) {
     // Yields may have changed: every city of the civilization reassigns its citizens
     // (research.py:326-328).
     g.flag_cities_of(p);
-    update_research_progress(g, p);
 }
 
 /// Adds techs with no announcement and nothing a new tech triggers, as setup and the city-states'
