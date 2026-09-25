@@ -34,23 +34,9 @@ group = "tile_yields"
 
 # city_stats (package 1b-06): each city's stats breakdown with Python's keys, its food to the next citizen,
 # maintenance, health, strength, the tiles it could work, its trade route and the turns to build what it
-# builds. Its religion paths (followers, majority, pressure_in) wait for package 1b-08.
+# builds; and (package 1b-08) its religion: followers, majority and the pressure arriving from its surroundings.
 [[enforce]]
 group = "city_stats"
-paths = [
-  "cities",
-  "cities[*].id",
-  "cities[*].owner",
-  "cities[*].name",
-  "cities[*].stats.**",
-  "cities[*].food_to_next_pop",
-  "cities[*].maintenance",
-  "cities[*].max_health",
-  "cities[*].strength",
-  "cities[*].workable.**",
-  "cities[*].connected_to_capital",
-  "cities[*].current.**",
-]
 
 # fixed_point (package 1c-01): the settle on load, which builds every civilization's sight from nothing,
 # explores no new tile and makes no new meeting.
