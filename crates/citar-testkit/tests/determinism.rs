@@ -14,7 +14,7 @@ fn golden_sets_match_the_committed_files() {
         names,
         [
             "rng", "libm", "pyfmt", "ruleset", "uniques", "filters", "gen", "states", "convert",
-            "turns", "maps"
+            "turns", "maps", "newgame"
         ]
     );
     let problems: Vec<String> = reports
@@ -41,23 +41,21 @@ fn blessing_reproduces_the_committed_files() {
 }
 
 #[test]
-fn a_set_that_depends_on_pending_stages_is_computed_but_never_blessed() {
-    // Package 1b-03's gate 4: `golden bless` refuses while the stages a set depends on are
-    // pending. The turns set depends on every stage of setup and of a turn.
-    let waiting = golden::turns::waiting();
-    assert!(!waiting.is_empty(), "stages are pending until package 1c-10");
-    let refused = golden::bless_refusals();
-    assert_eq!(refused.len(), 1);
-    assert_eq!(refused[0].0, "turns.json");
-    assert!(refused[0].1.contains("pending"), "{}", refused[0].1);
+fn the_turns_set_is_blessed_and_checked_once_no_stage_waits() {
+    // Package 1b-03's gate 4: `golden bless` refuses a set while the stages it depends on are
+    // pending. The turns set depends on every stage of setup and of a turn, and since package
+    // 1c-09 none is: it is blessed and checked like any other.
+    assert!(golden::turns::waiting().is_empty(), "no stage of setup or of a turn waits");
+    assert!(golden::turns::refusal().is_none());
+    assert!(golden::bless_refusals().is_empty());
     assert!(
-        golden::blessed_files().iter().all(|(file, _)| *file != "turns.json"),
-        "bless leaves the set out"
+        golden::blessed_files().iter().any(|(file, _)| *file == "turns.json"),
+        "bless writes the set"
     );
     let report = golden::turns::check_turns();
-    assert_eq!(report.waiting, waiting);
+    assert!(report.waiting.is_empty());
     assert!(report.problems.is_empty(), "{:?}", report.problems);
-    assert_eq!(report.computed.len(), 64, "the set is computed all the same");
+    assert_eq!(report.computed.len(), 64);
     // The same answers twice: the game is a function of its settings.
     assert_eq!(golden::turns::check_turns().computed, report.computed);
 }
