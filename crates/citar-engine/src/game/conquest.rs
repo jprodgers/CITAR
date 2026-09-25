@@ -694,3 +694,94 @@ pub fn liberate(g: &mut Game, pid: PlayerId, c: CityId) -> Value {
     g.emit(EngineEvent::Liberated, &text, None, Some(at), EventData::default(), &[]);
     json!({ "liberated": name, "returned_to": player_name(g, founder) })
 }
+
+#[cfg(all(test, feature = "embedded-ruleset"))]
+mod tests {
+    use super::*;
+    use crate::base::ids::TileIdx;
+    use crate::game::core::testing;
+    use crate::game::diplomacy::relations::{WarReason, set_war};
+
+    fn at(x: u32, y: u32) -> TileIdx {
+        TileIdx(y * u32::from(testing::W) + x)
+    }
+
+    fn clean(g: &mut Game) {
+        g.settle_for_test();
+        let v = g.take_violations();
+        assert!(v.is_empty(), "{v:?}");
+        assert!(g.check_invariants().is_empty(), "{:?}", g.check_invariants());
+        assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
+    }
+
+    /// Takes city `c` with a warrior of `by` standing beside it, its defences down.
+    fn take(g: &mut Game, by: PlayerId, c: CityId, from: TileIdx) {
+        let w = testing::unit(g, by, "Warrior", from);
+        if let Some(x) = g.city_mut(c, CityTouch::CORE) {
+            x.health = 1;
+        }
+        let out = conquer(g, c, w);
+        assert!(out.get("captured_city").and_then(Value::as_str).is_some());
+    }
+
+    /// Liberating the last city of a civilization that lost it brings the civilization back, as
+    /// package 1c-08's end of the round will have eliminated it (`conquest.py:262-265`): alive,
+    /// with the city its capital, at peace with its liberator.
+    #[test]
+    fn liberating_a_civilization_s_last_city_revives_it() {
+        let mut g = testing::duel();
+        let (rome, greece) = (PlayerId(0), PlayerId(1));
+        let roma = crate::game::cities::founding::found_city(&mut g, rome, at(3, 3), Some("Roma"))
+            .expect("a city");
+        crate::game::cities::founding::found_city(&mut g, greece, at(8, 3), Some("Athens"))
+            .expect("a city");
+        set_war(&mut g, greece, rome, WarReason::Scenario).expect("war");
+        clean(&mut g);
+        take(&mut g, greece, roma, at(4, 3));
+        clean(&mut g);
+        assert_eq!(g.city(roma).map(crate::state::cities::City::owner), Some(greece));
+        // Rome is eliminated as the round ends, on another's turn.
+        let mut clock = *g.state().clock();
+        clock.current = greece;
+        g.set_clock(clock);
+        g.kill_player(rome).expect("a player with no city is eliminated");
+        clean(&mut g);
+        assert!(!g.player(rome).is_some_and(crate::state::players::Player::alive));
+        plan_liberate(&g, greece, roma).expect("it may be liberated");
+        let out = liberate(&mut g, greece, roma);
+        clean(&mut g);
+        assert_eq!(out["returned_to"], "Rome");
+        let p = g.player(rome).expect("Rome");
+        assert!(p.alive());
+        assert_eq!((p.capital, p.eliminated_turn()), (Some(roma), None));
+        let city = g.city(roma).expect("Roma");
+        assert_eq!((city.owner(), city.puppet, city.resistance), (rome, false, 0));
+        assert!(!g.at_war(rome, greece));
+        assert!(city.buildings.iter().any(|b| {
+            has_type(g.rules(), &g.rules().buildings()[b].uniques, UniqueType::IndicatesCapital)
+        }));
+    }
+
+    /// A liberated city-state makes its liberator its best friend: 105 influence above the best
+    /// any other major has, and at least 60 (`conquest.py:277-282`).
+    #[test]
+    fn a_liberated_city_state_counts_its_liberator_its_best_friend() {
+        let mut g = testing::duel();
+        let (greece, geneva) = (PlayerId(1), PlayerId(2));
+        let town =
+            crate::game::cities::founding::found_city(&mut g, geneva, at(3, 3), Some("Geneva"))
+                .expect("a city");
+        set_war(&mut g, greece, geneva, WarReason::Scenario).expect("war");
+        take(&mut g, greece, town, at(4, 3));
+        clean(&mut g);
+        assert_eq!(g.city(town).map(|x| x.puppet), Some(true));
+        plan_liberate(&g, greece, town).expect("it may be liberated");
+        liberate(&mut g, greece, town);
+        clean(&mut g);
+        assert_eq!(g.city(town).map(crate::state::cities::City::owner), Some(geneva));
+        assert!(!g.at_war(greece, geneva));
+        // Rome, the other major, has no influence; Greece had its floor at war.
+        let got = crate::game::city_states::influence::raw_influence(&g, geneva, greece);
+        assert!((got - 105.0).abs() < 1e-9, "{got}");
+    }
+}

@@ -9,7 +9,26 @@
 use super::units;
 use super::{Game, Porting, pending};
 use crate::base::ids::UniqueId;
+#[cfg(feature = "test-ops")]
+use crate::unique::trigger::TriggerKind;
 use crate::unique::trigger::{OneTimeEffect, TriggerEvent, TriggerSite};
+
+#[cfg(feature = "test-ops")]
+std::thread_local! {
+    /// What fired on this thread since the last [`take_fired_for_test`]: the tests of the sites
+    /// that fire triggers whose effects are not ported yet read it (feature `test-ops`).
+    static FIRED: core::cell::RefCell<Vec<(TriggerKind, UniqueId)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every unique that fired on this thread since the last call, with the kind of its trigger, in
+/// the order they fired (feature `test-ops`): what a test of a site whose effects wait for
+/// another package can observe.
+#[cfg(feature = "test-ops")]
+#[must_use]
+pub fn take_fired_for_test() -> Vec<(TriggerKind, UniqueId)> {
+    FIRED.with(|f| core::mem::take(&mut *f.borrow_mut()))
+}
 
 /// Fires the uniques that wait for `event` at `site` (`triggers.fire`): the civilization's, the
 /// city's local ones and, with `include_unit`, the unit's, each applied in turn. `note` is what
@@ -25,6 +44,8 @@ pub fn fire(
         let v = g.view();
         crate::unique::trigger::fire(&v, site, event, include_unit)
     };
+    #[cfg(feature = "test-ops")]
+    FIRED.with(|f| f.borrow_mut().extend(found.iter().map(|&id| (event.kind(), id))));
     for id in found {
         apply(g, id, site, note);
     }

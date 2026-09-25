@@ -50,7 +50,7 @@
     "interceptRange": 6,
     "cost": 350,
     "requiredTech": "Radar",
-    "uniques": ["[+2] Air Interception Range"],
+    "uniques": ["[+2] Air Interception Range", "[100]% chance to intercept air attacks"],
     "id": "kitchen_sink_interceptor"
   },
   "Kitchen Sink Drone": {
