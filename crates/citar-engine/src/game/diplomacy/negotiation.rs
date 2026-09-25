@@ -180,9 +180,7 @@ fn other_side(n: &Negotiation, pid: PlayerId) -> PlayerId {
 
 /// Edits a negotiation, which exists.
 fn edit(g: &mut Game, nid: NegotiationId, f: impl FnOnce(&mut Negotiation)) {
-    if let Some(n) =
-        g.edit_diplo(DiploTouch::NEGOTIATIONS).negotiations.iter_mut().find(|n| n.id == nid)
-    {
+    if let Some(n) = g.edit_diplo(DiploTouch::NEGOTIATIONS).negotiation_mut(nid) {
         f(n);
     }
 }

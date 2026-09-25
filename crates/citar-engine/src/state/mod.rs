@@ -404,7 +404,15 @@ impl State {
             "negotiation",
             ids.negotiation,
             parts.diplo.negotiations.iter().map(|x| x.id.get()).max(),
-        )
+        )?;
+        // Found by binary search (`Diplomacy::deal`, `Diplomacy::negotiation`), as they are made.
+        if !parts.diplo.deals.windows(2).all(|w| w[0].id < w[1].id) {
+            return bad("the deals are not in ascending id order".to_owned());
+        }
+        if !parts.diplo.negotiations.windows(2).all(|w| w[0].id < w[1].id) {
+            return bad("the negotiations are not in ascending id order".to_owned());
+        }
+        Ok(())
     }
 
     /// Takes the state apart.

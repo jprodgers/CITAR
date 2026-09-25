@@ -700,16 +700,25 @@ pub(crate) fn process_round(g: &mut Game) {
     let turn = g.turn();
     let n = g.state().diplo().deals.len();
     for i in 0..n {
-        let Some(d) = g.state().diplo().deals.get(i).cloned() else { continue };
-        if !d.active {
-            continue;
-        }
+        // The deals list keeps every deal ever made, so a round reads the active ones in place
+        // and copies out only the resource trades still running (an `Ongoing` is `Copy`).
+        let trades: Vec<(usize, Ongoing, ResourceId)> = match g.state().diplo().deals.get(i) {
+            Some(d) if d.active => d
+                .ongoing
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| o.until >= turn)
+                .filter_map(|(j, o)| match o.item {
+                    DealItem::Resource { resource, .. } => Some((j, *o, resource)),
+                    _ => None,
+                })
+                .collect(),
+            _ => continue,
+        };
         // Each trade cut is written at once, as Python's was, so the next reads the supply as
         // it then stands.
-        for j in 0..d.ongoing.len() {
-            let o = d.ongoing[j];
-            let DealItem::Resource { resource, .. } = o.item else { continue };
-            if o.until < turn || economy::resource_amount(g, o.from, resource) >= 0 {
+        for (j, o, resource) in trades {
+            if economy::resource_amount(g, o.from, resource) >= 0 {
                 continue;
             }
             if let Some(x) =
@@ -726,18 +735,19 @@ pub(crate) fn process_round(g: &mut Game) {
             let audience: PlayerSet = [o.from, o.to].into_iter().collect();
             g.emit(EngineEvent::DealCut, &text, Some(audience), None, EventData::default(), &[]);
         }
-        let ongoing = g.state().diplo().deals.get(i).map(|d| d.ongoing.clone()).unwrap_or_default();
-        let expired = !ongoing.is_empty() && ongoing.iter().all(|o| o.until < turn);
-        if (expired || ongoing.is_empty())
-            && let Some(x) = g.edit_diplo(DiploTouch::DEALS).deals.get_mut(i)
-        {
+        let Some((expired, ends, id, [a, b])) = g.state().diplo().deals.get(i).map(|d| {
+            let expired = !d.ongoing.is_empty() && d.ongoing.iter().all(|o| o.until < turn);
+            (expired, expired || d.ongoing.is_empty(), d.id, d.parties)
+        }) else {
+            continue;
+        };
+        if ends && let Some(x) = g.edit_diplo(DiploTouch::DEALS).deals.get_mut(i) {
             x.active = false;
         }
         if expired {
-            let [a, b] = d.parties;
             let text = format!("A deal between {} and {} has expired.", name(g, a), name(g, b));
             let audience: PlayerSet = [a, b].into_iter().collect();
-            let data = EventData { deal: Some(d.id), ..EventData::default() };
+            let data = EventData { deal: Some(id), ..EventData::default() };
             g.emit(EngineEvent::DealExpired, &text, Some(audience), None, data, &[]);
         }
     }

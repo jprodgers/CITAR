@@ -167,11 +167,16 @@ fn parts_that_would_panic_or_collide_later_are_refused() -> Result<(), StateErro
     refused(&st, "the next deal id is 1, but deal 2", |p| p.diplo.deals.push(deal.clone()));
     assert_eq!(
         refusal(&st, |p| {
-            p.diplo.deals.push(deal);
+            p.diplo.deals.push(deal.clone());
             p.ids.deal = 3;
         }),
         None
     );
+    refused(&st, "the deals are not in ascending id order", |p| {
+        let first = Deal { id: DealId::FIRST, ..deal.clone() };
+        p.diplo.deals.extend([deal, first]);
+        p.ids.deal = 3;
+    });
     refused(&st, "the next negotiation id is 1, but negotiation 1", |p| {
         p.diplo.negotiations.push(Negotiation {
             id: NegotiationId::FIRST,
