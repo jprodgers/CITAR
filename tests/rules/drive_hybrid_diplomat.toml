@@ -1,8 +1,8 @@
 about = """
 A hybrid seat's driver plays its turn, then the drive stops so the host can run the seat's language
 model for its diplomacy (plan H1); the turn is still the seat's. Driving on ends it, even from a
-save taken at the stop; so does the host ending it itself. A seat handed to another controller is
-driven by what it has become.
+save taken at the stop; so does the host ending it itself. A turn the host forces away and back is
+begun anew, and played again. A seat handed to another controller is driven by what it has become.
 """
 from = "crates/citar-engine/src/game/turn/drive.rs (plan-0.1.6 6.1: HybridAgent)"
 
@@ -36,6 +36,24 @@ op = "reload"
 
 [[step]]
 note = "Driving on ends the hybrid seat's turn without playing it again; the bot's turn follows, and the hybrid seat's next."
+op = "drive"
+args = { drivers = [0, 1] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "hybrid_diplomat", player = 0, negotiations = [], turn = 2, current = 0 }
+
+[[step]]
+note = "A turn the host forces away and back is begun anew, and its driver plays it again."
+op = "force_turn"
+args = { player = 1 }
+
+[[step]]
+op = "force_turn"
+args = { player = 0 }
+
+[[step]]
 op = "drive"
 args = { drivers = [0, 1] }
 as = "stop"

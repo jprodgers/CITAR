@@ -155,6 +155,8 @@ def _force_turn(g: Game, o: dict):
         g.s.current = pid
         g.s.turn_started = False
         g.begin_turn()
+        # A turn begun anew is its driver's to play again: Rust's begin_turn clears the drive's mark too.
+        g._drive_mark = None
     return _clock(g)
 
 
