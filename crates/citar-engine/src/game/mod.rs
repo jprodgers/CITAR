@@ -38,6 +38,11 @@
 //! gold at the end of a turn, temporary uniques); and the uniques of a city
 //! ([`cities::uniques`]) and of a unit ([`units`]).
 //!
+//! Package 1b-08: [`religion`] (pantheons, religions, beliefs, pressure and great prophets),
+//! [`great_people`] (points, births, free great people, the Maya calendar, golden ages and the
+//! great person actions), [`triggers`] (firing triggers and applying every one-time effect) and
+//! [`ruins`].
+//!
 //! **Porting markers.** A step whose system a later package ports is written as
 //! `pending(Porting::Pending("<package>"))`, or `pending_or` where it must answer
 //! something meanwhile. `cargo xtask check` counts these by their literal argument and fails
@@ -54,6 +59,7 @@ pub mod economy;
 pub mod error;
 pub mod eval;
 pub mod events;
+pub mod great_people;
 pub mod invariants;
 pub mod movement;
 pub mod mutate;
@@ -63,6 +69,7 @@ pub mod policies;
 pub mod query;
 pub mod religion;
 pub mod research;
+pub mod ruins;
 pub mod setup;
 pub mod tiles;
 pub mod triggers;

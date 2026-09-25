@@ -25,7 +25,7 @@ use crate::unique::{Ctx, UniqueData, UniqueType, uq};
 
 /// Records a building as free in a city, so that it costs no maintenance (`cities._add_free`,
 /// `cities.py:1880-1884`).
-fn add_free(g: &mut Game, c: CityId, b: BuildingId) {
+pub(crate) fn add_free(g: &mut Game, c: CityId, b: BuildingId) {
     if g.city(c).is_some_and(|x| !x.free_buildings.contains(b))
         && let Some(x) = g.city_mut(c, CityTouch::CORE)
     {

@@ -27,7 +27,10 @@ use crate::base::ids::PlayerId;
 use crate::base::stats::Stat;
 use crate::game::cities::lifecycle;
 use crate::game::derive::rev::UnitTouch;
-use crate::game::{Game, Porting, economy, pending, policies, research, units};
+use crate::game::triggers;
+use crate::game::{
+    Game, Porting, economy, great_people, pending, policies, religion, research, units,
+};
 use crate::state::Phase;
 use crate::state::TurnClock;
 use crate::state::chronicle::{EngineEvent, EventData};
@@ -170,9 +173,21 @@ pub static PLAYER_START: [Stage; 23] = [
     ),
     Stage::settle("S1", Who::CIVS),
     Stage::run("S2", "research progress", Who::CIVS, HasCities, Step::Player(research::start_turn)),
-    Stage::later("S2", "great people", Who::CIVS, HasCities, Porting::Pending("1b-08")),
-    Stage::later("S2", "religion", Who::CIVS, HasCitiesAndReligion, Porting::Pending("1b-08")),
-    Stage::later("S2", "the Maya long count", Who::CIVS, HasCities, Porting::Pending("1b-08")),
+    Stage::run("S2", "great people", Who::CIVS, HasCities, Step::Player(great_people::start_turn)),
+    Stage::run(
+        "S2",
+        "religion",
+        Who::CIVS,
+        HasCitiesAndReligion,
+        Step::Player(religion::start_turn_stage),
+    ),
+    Stage::run(
+        "S2",
+        "the Maya long count",
+        Who::CIVS,
+        HasCities,
+        Step::Player(great_people::maya_long_count),
+    ),
     Stage::later(
         "S3",
         "city-states' great-person gifts",
@@ -181,7 +196,13 @@ pub static PLAYER_START: [Stage; 23] = [
         Porting::Pending("1c-06"),
     ),
     Stage::later("S3", "revolts", Who::MAJOR, Always, Porting::Pending("1c-08")),
-    Stage::later("S4", "triggers upon turn start", Who::CIVS, Always, Porting::Pending("1b-08")),
+    Stage::run(
+        "S4",
+        "triggers upon turn start",
+        Who::CIVS,
+        Always,
+        Step::Player(triggers::turn_start),
+    ),
     Stage::run(
         "S5",
         "cities start their turn",
@@ -230,7 +251,7 @@ pub static PLAYER_END: [Stage; 25] = [
         Step::Player(units::turn::end_units),
     ),
     Stage::run("E0", "the barbarians' turn ends here", Who::ALL, Always, Step::StopIfBarbarian),
-    Stage::later("E1", "triggers upon turn end", Who::CIVS, Always, Porting::Pending("1b-08")),
+    Stage::run("E1", "triggers upon turn end", Who::CIVS, Always, Step::Player(triggers::turn_end)),
     Stage::run(
         "E1",
         "commit the happiness conditionals see",
@@ -262,9 +283,15 @@ pub static PLAYER_END: [Stage; 25] = [
         Step::Player(economy::end_turn_gold),
     ),
     Stage::run("E3", "science", Who::CIVS, HasCities, Step::Player(science)),
-    Stage::later("E3", "faith", Who::CIVS, Religion, Porting::Pending("1b-08")),
+    Stage::run("E3", "faith", Who::CIVS, Religion, Step::Player(faith)),
     Stage::later("E3", "espionage", Who::MAJOR, Always, Porting::Pending("1c-05")),
-    Stage::later("E3", "great person points", Who::MAJOR, Always, Porting::Pending("1b-08")),
+    Stage::run(
+        "E3",
+        "great person points",
+        Who::MAJOR,
+        Always,
+        Step::Player(great_people::end_turn),
+    ),
     Stage::run(
         "E4",
         "cities end their turn, razing ones first",
@@ -280,7 +307,13 @@ pub static PLAYER_END: [Stage; 25] = [
         Step::Player(economy::expire_temp_uniques),
     ),
     Stage::settle("E5", Who::CIVS),
-    Stage::later("E6", "golden-age progress", Who::MAJOR, Always, Porting::Pending("1b-08")),
+    Stage::run(
+        "E6",
+        "golden-age progress",
+        Who::MAJOR,
+        Always,
+        Step::Player(great_people::golden_age_stage),
+    ),
     Stage::later("E6", "worker builds", Who::CIVS, Always, Porting::Pending("1c-04")),
     Stage::run(
         "E6",
@@ -415,6 +448,12 @@ fn turn_yield(g: &Game, p: PlayerId, stat: Stat) -> f64 {
 fn culture_and_policies(g: &mut Game, p: PlayerId) {
     let culture = turn_yield(g, p, Stat::Culture);
     policies::end_turn(g, p, culture);
+}
+
+/// Stage E3, faith (`religion.end_turn`, `turns.py:98-99`).
+fn faith(g: &mut Game, p: PlayerId) {
+    let faith = turn_yield(g, p, Stat::Faith);
+    religion::end_turn(g, p, faith);
 }
 
 /// Stage E3, science (`research.end_turn`, `turns.py:96-97`).

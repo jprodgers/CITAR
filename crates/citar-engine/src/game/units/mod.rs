@@ -31,9 +31,9 @@ pub mod upgrades;
 
 use smallvec::SmallVec;
 
+use super::Game;
 use super::derive::rev::{PlayerTouch, UnitTouch};
 use super::path::Mover;
-use super::{Game, Porting, pending};
 use crate::base::ids::{BaseUnitId, CityId, EraId, PlayerId, TileIdx, UniqueId, UnitId};
 use crate::rules::defs::{BaseUnitDef, Domain, StartingUnit};
 use crate::unique::filter::UnitScope;
@@ -276,9 +276,7 @@ pub fn add_unit_in_city(g: &mut Game, c: CityId, base: BaseUnitId) -> Option<Uni
     }
     // The religion a religious unit carries: its city's majority, or its founder's own
     // (`units.py:127-133`).
-    if type_has(g, base, UniqueType::ReligiousUnit) && g.religion_enabled() {
-        pending(Porting::Pending("1b-08"));
-    }
+    super::religion::on_unit_made(g, u, target.0);
     let site = TriggerSite { civ: owner, city: None, unit: Some(u), tile: None };
     super::triggers::fire(g, &site, &TriggerEvent::GainingUnit(base), true, None);
     Some(u)

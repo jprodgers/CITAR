@@ -85,6 +85,9 @@ pub struct Game {
     /// The yields stage E2 read for the civilization ending its turn, which the rest of the end
     /// of its turn banks (`turns.py:88-89`); cleared at E4, so never there at a settle point.
     pub(crate) turn_yields: Option<(PlayerId, crate::base::stats::Stats)>,
+    /// How deeply the triggers and one-time effects in progress are nested (`game::triggers`):
+    /// zero between calls, never saved.
+    pub(crate) trigger_depth: u8,
 }
 
 impl Game {
@@ -120,6 +123,7 @@ impl Game {
             chain: None,
             driving: None,
             turn_yields: None,
+            trigger_depth: 0,
         }
     }
 
@@ -277,6 +281,7 @@ impl Game {
         out.extend(super::vis::verify(self));
         out.extend(super::derive::stats::verify(self));
         out.extend(super::derive::buildable::verify(self));
+        out.extend(super::derive::religion::verify(self));
         out.extend(super::cities::citizens::verify(self));
         out.extend(super::path::memo::verify(self));
         if self.dv.terrain_floor(self) != super::path::terrain_floor(self) {

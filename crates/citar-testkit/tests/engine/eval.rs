@@ -2029,7 +2029,8 @@ fn triggers_fire_when_their_event_passes_their_filter() {
     let triggers: BTreeSet<UniqueType> =
         UniqueType::ALL.into_iter().filter(|u| u.role() == Some(Role::Trigger)).collect();
     assert_eq!(kinds, triggers);
-    // A timed triggered unique fires as its grant.
+    // A timed triggered unique fires as its grant, whatever its effect's own conditionals
+    // (`<when attacking>`) say now.
     let timed = fire(&w, &site, &TriggerEvent::BeingDeclaredWarUpon { by: P0 }, true);
     assert_eq!(timed.len(), 1);
     assert!(matches!(

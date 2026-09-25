@@ -246,6 +246,32 @@ def _ready_unit(g: Game, o: dict):
     return {"moves": u.moves}
 
 
+@op("found_religion", "unit, name, beliefs: the great prophet founds a religion where it stands, and is spent")
+def _found_religion(g: Game, o: dict):
+    """A great prophet founds a religion where it stands, as its unit action does."""
+    from . import religion
+    u = _unit(g, o)
+    return religion.found_religion(g, u.owner, u, str(o.get("name") or ""), list(o.get("beliefs") or []))
+
+
+@op("enhance_religion", "unit, beliefs: the great prophet enhances its owner's religion where it stands, and is spent")
+def _enhance_religion(g: Game, o: dict):
+    """A great prophet enhances its owner's religion where it stands, as its unit action does."""
+    from . import religion
+    u = _unit(g, o)
+    return religion.enhance_religion(g, u.owner, u, list(o.get("beliefs") or []))
+
+
+@op("enter_ruins", "unit: the unit explores the ancient ruins it stands on")
+def _enter_ruins(g: Game, o: dict):
+    """A unit explores the ancient ruins it stands on, as moving onto them does."""
+    from . import ruins
+    u = _unit(g, o)
+    if g.s.tiles[u.idx].improvement != ruins.RUINS:
+        raise ActionError("There are no ancient ruins here.")
+    return {"found": bool(ruins.enter(g, u, u.idx))}
+
+
 @op("refresh_visibility", "what every civilization sees is brought up to date")
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""

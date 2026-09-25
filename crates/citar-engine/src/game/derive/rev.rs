@@ -1073,6 +1073,7 @@ bit_eq_by_eq!(
     UnitId,
     TileIdx,
     crate::base::ids::EraId,
+    crate::base::ids::ReligionId,
     Csr,
     crate::base::sets::BitSet,
     crate::base::sets::PlayerSet,

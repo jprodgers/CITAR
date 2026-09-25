@@ -7,7 +7,8 @@
 //! adds its tools' entries to [`TOOLS`] together with their `Action` variants, with the
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
 //! the coercion; package 1b-06 adds the citizen tools, package 1b-07 the tools of production,
-//! purchases, research and policies, and package 1c-02 the unit tools.
+//! purchases, research and policies, package 1b-08 `found_pantheon` and `choose_great_person`,
+//! and package 1c-02 the unit tools.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -101,10 +102,21 @@ pub static TOOLS: &[ToolArgs] = &[
         params: &[("tech", ArgType::String)],
         required: &["tech"],
     },
+    // Package 1b-08 (tools.py:871-884).
+    ToolArgs {
+        tool: "choose_great_person",
+        params: &[("great_person", ArgType::String)],
+        required: &["great_person"],
+    },
     ToolArgs {
         tool: "dequeue_research",
         params: &[("tech", ArgType::String)],
         required: &["tech"],
+    },
+    ToolArgs {
+        tool: "found_pantheon",
+        params: &[("belief", ArgType::String)],
+        required: &["belief"],
     },
     ToolArgs {
         tool: "move_unit",

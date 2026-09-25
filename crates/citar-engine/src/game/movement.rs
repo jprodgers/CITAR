@@ -193,8 +193,7 @@ pub fn on_enter_tile(g: &mut Game, u: UnitId, t: TileIdx) {
     let imp = g.tile(t).and_then(Tile::improvement);
     let major = g.player(owner).is_some_and(crate::state::players::Player::is_major);
     if imp.is_some() && imp == known.ancient_ruins && major {
-        // ruins.enter (ruins.py).
-        pending(Porting::Pending("1b-08"));
+        super::ruins::enter(g, u, t);
     } else if imp.is_some()
         && imp == known.barbarian_camp
         && g.rules().base_units()[base].military

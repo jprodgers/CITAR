@@ -938,6 +938,9 @@ pub struct RuinDef {
     pub key: Option<Box<str>>,
     pub excluded_difficulties: Box<[DifficultyId]>,
     pub uniques: SourceUniques,
+    /// How many times it is put among the rewards the ruins draw from (`ruins.py:49`, UnCiv's
+    /// `RuinReward.weight`): 1 unless the ruleset says, 0 for never.
+    pub weight: u16,
 }
 
 /// An AI leader personality: weights the bot gives each concern, 0 to 10.

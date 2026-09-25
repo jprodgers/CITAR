@@ -4,9 +4,9 @@
 //! the keys Python's dicts held, the total, the happiness list, the tiles' yields and the
 //! percentages), the food to its next citizen, its building maintenance, its most health, its
 //! combat strength, the tiles it could work, its trade route to the capital, and the turns to
-//! build what it builds. Its followers and majority religion are the reads package 1b-08's
-//! religion builds on; the pressure on it from its neighbours (`pressure_in`) is 1b-08's, and
-//! missing here until then.
+//! build what it builds. Package 1b-08 adds its religion: its followers, its majority religion,
+//! and the pressure its surroundings put on it this turn (`pressure_in`,
+//! `religion.pressures_from_surroundings`).
 
 use citar_engine::base::stats::{Stat, StatMask};
 use citar_engine::game::cities::stats::{self as cstats, Yields};
@@ -145,6 +145,13 @@ fn city(g: &Game, c: citar_engine::base::ids::CityId) -> Value {
         e["followers"] = Value::Object(followers);
         e["majority"] =
             religion::majority_religion(g, c).map_or(Value::Null, |m| religion_name(g, m));
+        let pressure_in: Map<String, Value> = religion::pressures_from_surroundings(g, c)
+            .iter()
+            .filter_map(|&(rel, n)| {
+                religion_name(g, rel).as_str().map(|k| (k.to_owned(), json!(n)))
+            })
+            .collect();
+        e["pressure_in"] = Value::Object(pressure_in);
     }
     e
 }

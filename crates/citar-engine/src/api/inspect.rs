@@ -15,6 +15,10 @@
 //! - `buildable` (`city`): what a city can build now and what each costs in production;
 //! - `costs` (`player`): what the techs a civilization could research cost it, its next policy's
 //!   culture, and the policies it could adopt;
+//! - `religion` (`player` or `city`): a civilization's pantheon or religion, its beliefs and what
+//!   the next pantheon and prophet cost it; a city's majority, followers, pressures and holiness;
+//! - `great_people` (`player`): great person points, free great people, golden ages and the
+//!   uniques a civilization holds for some turns;
 //! - `events` (optionally `since`, `type` and `player`, the last keeping what that player hears);
 //! - `find_tiles`: the tiles that pass the filters given, nearest first (see [`find_tiles`]);
 //! - `ops`: the scenario and test operations with their parameters;
@@ -46,7 +50,7 @@ use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
 /// The queries, by `what`, sorted, with whether what each reads is ported yet.
-const QUERIES: [(&str, Porting); 16] = [
+const QUERIES: [(&str, Porting); 18] = [
     ("briefing", Porting::Pending("1d-03")),
     ("buildable", Porting::Ported),
     ("city", Porting::Ported),
@@ -54,11 +58,13 @@ const QUERIES: [(&str, Porting); 16] = [
     ("events", Porting::Ported),
     ("find_tiles", Porting::Ported),
     ("game", Porting::Ported),
+    ("great_people", Porting::Ported),
     ("negotiation", Porting::Pending("1c-05")),
     ("ops", Porting::Ported),
     ("pending", Porting::Ported),
     ("player", Porting::Ported),
     ("relation", Porting::Ported),
+    ("religion", Porting::Ported),
     ("tile", Porting::Ported),
     ("unit", Porting::Ported),
     ("units", Porting::Ported),
@@ -108,6 +114,18 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
             Ok(buildable(g, id))
         }
         "costs" => Ok(costs(g, pid(g, o.get("player"), false)?)),
+        "religion" => match o.get("city") {
+            Some(v) if !v.is_null() => {
+                let id = py::int_of(v)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .and_then(CityId::new)
+                    .filter(|&c| g.city(c).is_some())
+                    .ok_or_else(|| bad("No such city."))?;
+                Ok(city_religion(g, id))
+            }
+            _ => Ok(civ_religion(g, pid(g, o.get("player"), false)?)),
+        },
+        "great_people" => Ok(great_people(g, pid(g, o.get("player"), false)?)),
         "events" => events(g, o),
         "find_tiles" => find_tiles(g, o),
         "ops" => Ok(json!({"scenario": scenario::ops_help(), "test": testops::help()})),
@@ -416,6 +434,83 @@ fn city(g: &Game, c: CityId) -> Value {
         "culture": x.culture,
         "health": x.health,
         "tiles": crate::game::economy::city_tiles(g, c).len(),
+    })
+}
+
+/// `religion` with `player`: a civilization's pantheon or religion, its beliefs and free beliefs,
+/// and what the next pantheon and great prophet cost it.
+fn civ_religion(g: &Game, p: PlayerId) -> Value {
+    use crate::game::religion::{self as rel, prophets};
+    let Some(pl) = g.player(p) else { return Value::Null };
+    let founded = pl.religion.founded;
+    let beliefs = founded.map(|r| rel::all_beliefs(g, r)).unwrap_or_default();
+    let free: Map<String, Value> = crate::rules::defs::BeliefKind::ALL
+        .into_iter()
+        .filter(|&k| pl.religion.free(k) > 0)
+        .map(|k| (k.name().to_owned(), json!(pl.religion.free(k))))
+        .collect();
+    json!({
+        "state": pl.religion.progress.name(),
+        "religion": founded.map(|r| rel::key_name(g, r)),
+        "display": founded.map(|r| rel::display_name(g, r)),
+        "beliefs": sorted_names(g, beliefs),
+        "free_beliefs": free,
+        "pantheon_cost": prophets::faith_for_pantheon(g, 0),
+        "prophet_cost": prophets::faith_for_next_prophet(g, p),
+        "prophets_earned": prophets::prophets_earned(g, p),
+        "holy_city": founded.and_then(|r| rel::holy_city(g, r)).map(CityId::get),
+    })
+}
+
+/// `religion` with `city`: its majority religion, its followers and pressures by religion, and
+/// whose holy city it is.
+fn city_religion(g: &Game, c: CityId) -> Value {
+    use crate::game::religion as rel;
+    let Some(x) = g.city(c) else { return Value::Null };
+    let named = |r: Option<crate::base::ids::ReligionId>| {
+        r.map_or_else(|| "None".to_owned(), |r| rel::key_name(g, r))
+    };
+    let followers: Map<String, Value> =
+        rel::followers(x).iter().map(|&(r, n)| (named(Some(r)), json!(n))).collect();
+    let pressures: Map<String, Value> =
+        x.pressures.iter().map(|&(r, v)| (named(r), json!(v))).collect();
+    json!({
+        "majority": rel::majority_religion(g, c).map(|r| rel::key_name(g, r)),
+        "followers": followers,
+        "pressures": pressures,
+        "holy_city_of": x.holy_city_of.map(|r| rel::key_name(g, r)),
+    })
+}
+
+/// `great_people`: a civilization's great person points, its free great people, its golden ages
+/// and the uniques it holds for some turns (by the timed unique's text).
+fn great_people(g: &Game, p: PlayerId) -> Value {
+    let Some(pl) = g.player(p) else { return Value::Null };
+    let t = g.rules().uniques();
+    let points = sorted_map(
+        pl.gp.points.iter().filter_map(|(&u, &v)| g.rules().name(u).map(|n| (n, json!(v)))),
+    );
+    let temp: Vec<Value> = pl
+        .civ
+        .temp_uniques
+        .iter()
+        .map(|x| {
+            let timed = match t.meta(x.unique).source {
+                crate::unique::table::Source::Temporary(orig) => orig,
+                _ => x.unique,
+            };
+            json!({"text": t.text_of(timed), "turns": x.turns})
+        })
+        .collect();
+    json!({
+        "points": points,
+        "free": pl.gp.free,
+        "earned": pl.gp.earned,
+        "golden_age_points": pl.econ.golden_age_points,
+        "golden_ages": pl.econ.golden_ages,
+        "golden_age_turns": pl.econ.golden_age_turns,
+        "golden_age_needed": crate::game::great_people::happiness_for_golden_age(g, p),
+        "temp_uniques": temp,
     })
 }
 

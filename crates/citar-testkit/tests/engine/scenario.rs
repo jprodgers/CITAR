@@ -125,8 +125,8 @@ fn inspect_reads_and_lists_what_is_pending() {
         ("negotiation", "1c-05"),
         ("view", "1d-02"),
         ("briefing", "1d-03"),
-        ("player_start S2: great people", "1b-08"),
-        ("player_end E3: faith", "1b-08"),
+        ("player_start S3: revolts", "1c-08"),
+        ("player_end E3: espionage", "1c-05"),
         ("round_end R0: eliminations", "1c-08"),
         ("map: starts and ruins a document lacks", "1c-09"),
     ] {
@@ -140,7 +140,7 @@ fn inspect_reads_and_lists_what_is_pending() {
         [3, 0, 9],
         "three queries and nine test ops wait"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [25, 4], "the stages that wait");
+    assert_eq!([count("turn_stage"), count("setup_stage")], [17, 3], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(
@@ -157,6 +157,11 @@ fn inspect_reads_and_lists_what_is_pending() {
                 .contains(&name.as_str())
                 && !name.contains("research")
                 && !name.contains("cities start")
+                && !name.contains("great person")
+                && !name.contains("religion")
+                && !name.contains("faith")
+                && !name.contains("golden")
+                && !name.contains("triggers")
                 && !name.contains("cities end")
                 && !name.contains("culture and policies")
                 && !name.contains("science")

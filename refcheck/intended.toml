@@ -283,48 +283,6 @@ cases = [
 broad = true
 
 [[differences]]
-id = "religion-ties-by-founding-order"
-reason = "Python broke a tie between religions with as many followers in a city by the order the religions reached it, which its dict of pressures kept; Rust keeps a city's pressures sorted and breaks the tie by the order the religions were founded, so a tied city can follow the other religion, with its follower beliefs and its owner's religious yields"
-cases = [
-  "duel-pangaea-normal-s1001/t200",
-  "duel-pangaea-off-s1021/t280",
-  "large-continents-off-s1015/t200",
-  "large-continents-off-s1015/t280",
-  "large-continents-raging-s1035/t280",
-  "large-fractal-off-s1039/t280",
-  "large-inland_sea-off-s1018/t200",
-  "large-inland_sea-off-s1018/t280",
-  "large-inland_sea-raging-s1038/t280",
-  "large-pangaea-normal-s1016/t280",
-  "small-archipelago-normal-s1007/t200",
-  "small-continents-normal-s1025/t200",
-  "small-continents-normal-s1025/t280",
-  "small-fractal-raging-s1029/t200",
-  "small-inland_sea-raging-s1008/t280",
-  "standard-archipelago-off-s1012/t120",
-  "standard-continents-normal-s1010/t120",
-  "standard-continents-normal-s1010/t280",
-  "standard-continents-off-s1030/t200",
-  "standard-continents-off-s1030/t280",
-  "standard-inland_sea-normal-s1013/t200",
-  "standard-inland_sea-normal-s1013/t280",
-  "standard-inland_sea-off-s1033/t280",
-  "standard-pangaea-raging-s1011/t280",
-]
-where = [
-  { group = "city_stats", path = "cities[*].majority" },
-  { group = "city_stats", path = "cities[*].followers.**" },
-  { group = "city_stats", path = "cities[*].stats.**" },
-  { group = "city_stats", path = "cities[*].current.turns" },
-  { group = "buildable", path = "cities[*].costs.*.turns" },
-  { group = "civs", path = "civs[*].happiness.**" },
-  { group = "civs", path = "civs[*].civ_stats.**" },
-  { group = "civs", path = "civs[*].stat_map.**" },
-  { group = "civs", path = "civs[*].gold_per_turn.**" },
-]
-broad = true
-
-[[differences]]
 id = "gold-per-turn-rounds-a-sum-at-a-half"
 reason = "Gold per turn is shown rounded to one place from a sum of floats taken in the order of the cities' worked tiles, which Python kept in the order it placed the citizens and Rust keeps sorted; a sum a hair from a half rounds either way"
 cases = ["small-fractal-off-s1009/t280"]

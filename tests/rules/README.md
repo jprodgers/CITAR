@@ -253,6 +253,9 @@ same from both engines, and every set in it is sorted.
 | `city` | `city` | `id`, `name`, `owner`, `x`, `y`, `pop`, `buildings`, `worked`, `locked` and `workable` (tiles as `[x, y]`), `specialists` (count by name, those it has), `focus`, `avoid_growth`, `food` (stored), `yields` (the city's total of each stat: `food` is the surplus), `queue` (item names, the first being built), `progress` (production stored by item), `overflow`, `culture` (stored toward the next tile), `health`, `tiles` (how many tiles it owns) |
 | `buildable` | `city` | what the city can build now: `units`, `buildings`, `wonders` and `other` (`Gold`, `Science`) as sorted names, and `production`, the production cost of each unit, building and wonder by name |
 | `costs` | `player` | `tech` (what each tech it could research now costs it, by name), `policy` (its next policy's culture), `adoptable` (the policies and branches a major could adopt now, sorted) |
+| `religion` | `player` | `state` (`none`, `pantheon`, `religion`, `enhanced`), `religion` (its pantheon's belief or its religion's name, or null), `display` (the name it is shown under), `beliefs` (sorted), `free_beliefs` (count by kind, those it has), `pantheon_cost` and `prophet_cost` (the faith its next pantheon and great prophet cost), `prophets_earned`, `holy_city` (id or null) |
+| `religion` | `city` | `majority` (a religion's name, or null), `followers` (count by religion), `pressures` (by religion, `None` for no religion), `holy_city_of` (a religion's name, or null) |
+| `great_people` | `player` | `points` (great person points by great person), `free` (free great people to choose), `earned`, `golden_age_points`, `golden_ages`, `golden_age_turns`, `golden_age_needed` (the happiness the next golden age needs), `temp_uniques` (each unique held for some turns: `text`, the timed unique's, and `turns` left) |
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
 | `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |
 | `ops` | | `scenario` and `test`: each operation with its `params` |
@@ -283,6 +286,9 @@ What a script does that no player or editor may. `{ what = "ops" }` lists them.
 | `complete_construction` | `city` | finishes what the city builds now, as its turn would, whatever is stored: a building joins the city, a unit is placed in it or beside it. Refused when the city builds nothing that completes, and when no tile has room for the unit. Gives `completed` (the name) |
 | `set_unit` | `unit`; optionally `hp` (1 to 100), `moves` (move-scale units), `xp`, `x` and `y` (moved there without movement rules, with what it carries), `promotions` (names: the list it then has), `carrier` (an id, or null to leave it) | sets a unit's fields, as a test poked them |
 | `ready_unit` | `unit` | gives a unit its full movement, and no orders, attacks or action this turn. Gives `moves` |
+| `found_religion` | `unit`, `name`, `beliefs` (names) | the great prophet founds a religion in the city it stands in and is spent, as its unit action does (`religion.found_religion`). Gives `founded` (the name shown), `religion` (the ruleset's name), `beliefs`, `holy_city` |
+| `enhance_religion` | `unit`, `beliefs` (names) | the great prophet enhances its owner's religion from the city it stands in and is spent (`religion.enhance_religion`). Gives `enhanced`, `beliefs` |
+| `enter_ruins` | `unit` | the unit explores the ancient ruins it stands on, as moving onto them does (`ruins.enter`). Refused where there are none. Gives `found` (whether a reward was) |
 
 The rest land with their systems: `capture_civilian` and
 `attack_as` (1c-03), `automate` and `progress_builds` (1c-04), `add_spy`, `close_negotiation` and

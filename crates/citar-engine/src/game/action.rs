@@ -21,7 +21,9 @@ use super::cities::purchase::Buy;
 use super::cities::queue::{ChangeQueue, RenameCity, SetAutoProduction, SetProduction};
 use super::error::{ActionError, ErrCode};
 use super::events::EventBatch;
+use super::great_people::ChooseGreatPerson;
 use super::policies::AdoptPolicy;
+use super::religion::found::FoundPantheon;
 use super::research::{ChooseFreeTech, DequeueResearch, SetResearch};
 use crate::base::ids::PlayerId;
 use crate::save::journal::Record;
@@ -102,8 +104,12 @@ pub enum Action {
     ChangeQueue(ChangeQueue),
     /// `choose_free_tech` (package 1b-07).
     ChooseFreeTech(ChooseFreeTech),
+    /// `choose_great_person` (package 1b-08).
+    ChooseGreatPerson(ChooseGreatPerson),
     /// `dequeue_research` (package 1b-07).
     DequeueResearch(DequeueResearch),
+    /// `found_pantheon` (package 1b-08).
+    FoundPantheon(FoundPantheon),
     /// `rename_city` (package 1b-07).
     RenameCity(RenameCity),
     /// `set_auto_production` (package 1b-07).
@@ -136,7 +142,9 @@ impl Action {
             Self::BuyTile(_) => "buy_tile",
             Self::ChangeQueue(_) => "change_queue",
             Self::ChooseFreeTech(_) => "choose_free_tech",
+            Self::ChooseGreatPerson(_) => "choose_great_person",
             Self::DequeueResearch(_) => "dequeue_research",
+            Self::FoundPantheon(_) => "found_pantheon",
             Self::RenameCity(_) => "rename_city",
             Self::SetAutoProduction(_) => "set_auto_production",
             Self::SetProduction(_) => "set_production",
@@ -164,7 +172,9 @@ impl Action {
             | Self::BuyTile(_)
             | Self::ChangeQueue(_)
             | Self::ChooseFreeTech(_)
+            | Self::ChooseGreatPerson(_)
             | Self::DequeueResearch(_)
+            | Self::FoundPantheon(_)
             | Self::SetAutoProduction(_)
             | Self::SetProduction(_)
             | Self::SetResearch(_)
@@ -187,7 +197,9 @@ impl Action {
             Self::BuyTile(x) => run(g, pid, x),
             Self::ChangeQueue(x) => run(g, pid, x),
             Self::ChooseFreeTech(x) => run(g, pid, x),
+            Self::ChooseGreatPerson(x) => run(g, pid, x),
             Self::DequeueResearch(x) => run(g, pid, x),
+            Self::FoundPantheon(x) => run(g, pid, x),
             Self::RenameCity(x) => run(g, pid, x),
             Self::SetAutoProduction(x) => run(g, pid, x),
             Self::SetProduction(x) => run(g, pid, x),

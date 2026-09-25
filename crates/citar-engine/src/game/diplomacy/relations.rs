@@ -20,11 +20,12 @@
 use crate::base::ids::PlayerId;
 use crate::game::city_states::influence::{add_influence, set_influence};
 use crate::game::derive::rev::DiploTouch;
-use crate::game::{Game, Porting, pending};
+use crate::game::{Game, Porting, pending, triggers};
 use crate::state::StateError;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::diplo::{OPINION_LIMIT, OpinionKey, PairError, side};
 use crate::state::players::Player;
+use crate::unique::trigger::{TriggerEvent, TriggerSite};
 
 /// Why a war began, which decides what it drags in (`set_war`'s `reason`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -191,8 +192,15 @@ pub fn set_war(
     // A protector that attacks its city-state withdraws its protection
     // (city_states.withdraw_protection).
     pending(Porting::Pending("1c-06"));
-    // `upon declaring war`, `upon being declared war on` and `upon entering a war`.
-    pending(Porting::Pending("1b-08"));
+    // `upon declaring war`, `upon being declared war on` and `upon entering a war`
+    // (diplomacy.py:234-237).
+    let fire = |g: &mut Game, p: PlayerId, e: TriggerEvent| {
+        triggers::fire(g, &TriggerSite::civ(p), &e, true, None);
+    };
+    fire(g, a, TriggerEvent::DeclaringWar { on: b });
+    fire(g, b, TriggerEvent::BeingDeclaredWarUpon { by: a });
+    fire(g, a, TriggerEvent::EnteringWar { with: b });
+    fire(g, b, TriggerEvent::EnteringWar { with: a });
     Ok(())
 }
 
@@ -234,8 +242,10 @@ pub fn make_peace(g: &mut Game, a: PlayerId, b: PlayerId) -> Result<(), StateErr
         format!("{} and {} signed a peace treaty (until turn {until}).", name(g, a), name(g, b));
     let data = EventData { a: Some(a), b: Some(b), ..EventData::default() };
     g.emit(EngineEvent::Peace, &text, None, None, data, &[]);
-    // `upon signing a peace treaty`.
-    pending(Porting::Pending("1b-08"));
+    // `upon signing a peace treaty` (diplomacy.py:263-264).
+    for (p, with) in [(a, b), (b, a)] {
+        triggers::fire(g, &TriggerSite::civ(p), &TriggerEvent::SigningPeace { with }, true, None);
+    }
     Ok(())
 }
 

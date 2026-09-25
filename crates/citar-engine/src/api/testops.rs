@@ -10,8 +10,10 @@
 //! Package 1b-02 ports those that need no later system: `clear_units`, `set_turn`, `unmeet`,
 //! `set_controller`, `set_auto`, `refresh_visibility` and `reload`; package 1b-03 the turn
 //! operations `end_turn`, `end_round` and `force_turn`; package 1b-07 `complete_construction`;
-//! package 1c-02 `set_unit` and `ready_unit`. The others are listed with the package that ports
-//! what they need, and are refused as not ported until then.
+//! package 1b-08 `found_religion`, `enhance_religion` and `enter_ruins`, which stand in for the
+//! unit actions and the moves of packages 1c-04 and 1c-02; package 1c-02 `set_unit` and
+//! `ready_unit`. The others are listed with the package that ports what they need, and are
+//! refused as not ported until then.
 
 use serde_json::{Map, Value, json};
 
@@ -112,10 +114,30 @@ pub static TEST_OPS: &[TestOp] = &[
         run: end_turn,
     },
     TestOp {
+        name: "enhance_religion",
+        params: "unit, beliefs: the great prophet enhances its owner's religion where it stands, \
+                 and is spent",
+        porting: Porting::Ported,
+        run: enhance_religion,
+    },
+    TestOp {
+        name: "enter_ruins",
+        params: "unit: the unit explores the ancient ruins it stands on",
+        porting: Porting::Ported,
+        run: enter_ruins,
+    },
+    TestOp {
         name: "force_turn",
         params: "player: it is that player's turn now, started",
         porting: Porting::Ported,
         run: force_turn,
+    },
+    TestOp {
+        name: "found_religion",
+        params: "unit, name, beliefs: the great prophet founds a religion where it stands, and is \
+                 spent",
+        porting: Porting::Ported,
+        run: found_religion,
     },
     TestOp {
         name: "open_negotiation_as",
@@ -259,6 +281,85 @@ fn bad(message: impl Into<String>) -> ActionError {
 }
 
 // ---- The ported ones --------------------------------------------------------------------------
+
+/// The unit a test operation names.
+fn unit_of(g: &Game, o: &Params) -> Result<UnitId, ActionError> {
+    o.get("unit")
+        .and_then(py::int_of)
+        .and_then(|n| u32::try_from(n).ok())
+        .and_then(UnitId::new)
+        .filter(|&u| g.unit(u).is_some())
+        .ok_or_else(|| bad("No such unit."))
+}
+
+/// A list of names, as a script gives them.
+fn names_of(v: Option<&Value>) -> Vec<String> {
+    match v {
+        Some(Value::Array(a)) => a.iter().map(py::str_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A great prophet founds or enhances a religion where it stands and is spent, as the unit action
+/// will do (package 1c-04), which checks besides whether the unit may act now.
+fn prophet_acts(
+    g: &mut Game,
+    u: UnitId,
+    enhance: bool,
+    name: &str,
+    beliefs: &[String],
+) -> Result<Value, ActionError> {
+    use crate::game::great_people::consume_unit;
+    use crate::game::religion::found;
+    use crate::unique::UniqueType;
+    let Some((p, at, base)) = g.unit(u).map(|x| (x.owner(), x.tile(), x.base)) else {
+        return Err(ActionError::rule("No such unit."));
+    };
+    let ty = if enhance { UniqueType::MayEnhanceReligion } else { UniqueType::MayFoundReligion };
+    if !construction::unit_has_type(g.rules(), base, ty) {
+        return Err(ActionError::rule(if enhance {
+            "This unit cannot enhance a religion."
+        } else {
+            "This unit cannot found a religion."
+        }));
+    }
+    let spend = move |g: &mut Game| consume_unit(g, u);
+    if enhance {
+        let chosen = found::plan_enhance(g, p, at, beliefs)?;
+        found::apply_enhance(g, p, &chosen, spend);
+        Ok(found::enhance_result(g, p))
+    } else {
+        let plan = found::plan_religion(g, p, at, name, beliefs, None)?;
+        found::apply_religion(g, p, &plan, spend);
+        Ok(found::religion_result(g, p, &plan))
+    }
+}
+
+/// A great prophet founds a religion where it stands (`religion.found_religion`), as its unit
+/// action will (package 1c-04).
+fn found_religion(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let u = unit_of(g, o)?;
+    let name = o.get("name").map(py::str_of).unwrap_or_default();
+    prophet_acts(g, u, false, &name, &names_of(o.get("beliefs")))
+}
+
+/// A great prophet enhances its owner's religion where it stands (`religion.enhance_religion`).
+fn enhance_religion(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let u = unit_of(g, o)?;
+    prophet_acts(g, u, true, "", &names_of(o.get("beliefs")))
+}
+
+/// A unit explores the ancient ruins it stands on (`ruins.enter`), as moving onto them will
+/// (package 1c-02).
+fn enter_ruins(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let u = unit_of(g, o)?;
+    let at = g.unit(u).map(crate::state::units::Unit::tile).ok_or_else(|| bad("No such unit."))?;
+    let ruins = g.rules().derived().known.ancient_ruins;
+    if ruins.is_none() || g.tile(at).and_then(crate::state::map::Tile::improvement) != ruins {
+        return Err(ActionError::rule("There are no ancient ruins here."));
+    }
+    Ok(json!({"found": crate::game::ruins::enter(g, u, at)}))
+}
 
 /// Removes every unit of the players named, in id order.
 fn clear_units(g: &mut Game, o: &Params) -> Result<Value, ActionError> {

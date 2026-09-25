@@ -1,0 +1,96 @@
+about = """
+Ancient ruins: a unit that explores them clears them, and its civilization finds the first reward,
+in a shuffle, that does anything here and was not among the last two it found; each is announced.
+A civilian finds no training, a civilization with no city no survivors, one that knows the era's
+techs no lost technology, and one that has explored the whole map no crude map; so with gold and
+culture left, the first ruins give one of them, the second the other, and the third nothing.
+"""
+from = "citar/engine/ruins.py: enter, _possible; citar/engine/triggers.py: trigger"
+
+[[step]]
+note = "The other civilization keeps a unit, so that the game goes on."
+ops = [
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "grant_era", player = 0, era = "Classical era" },
+  { op = "reveal", player = 0 },
+  { op = "set_tile", at = "D", improvement = "Ancient ruins" },
+  { op = "set_tile", at = "E", improvement = "Ancient ruins" },
+  { op = "set_tile", at = "C", improvement = "Ancient ruins" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "D" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "E" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "C" },
+]
+as = "made"
+
+[[step]]
+check = { what = "player", player = 0 }
+as = "before"
+absent = false
+
+[[step]]
+op = "enter_ruins"
+args = { unit = "=made[6].unit_ids[0]" }
+as = "first"
+
+[[step]]
+check = "first"
+eq = { found = true }
+
+[[step]]
+check = { what = "tile", at = "D" }
+path = "improvement"
+is_null = true
+
+[[step]]
+check = { what = "events", type = "ruins" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "ruins" }
+path = "[0].text"
+matches = "^Civilization 1's Worker explored ancient ruins and found (a stash of gold|discover cultural artifacts)\\.$"
+
+[[step]]
+op = "enter_ruins"
+args = { unit = "=made[7].unit_ids[0]" }
+as = "second"
+
+[[step]]
+check = "second"
+eq = { found = true }
+
+[[step]]
+note = "Both are found now, one each: twenty culture, and between fifty and a hundred gold."
+check = { what = "player", player = 0 }
+as = "after"
+absent = false
+
+[[step]]
+check = "after"
+path = "culture"
+eq = "=before.culture + 20"
+
+[[step]]
+check = "after"
+path = "gold"
+ge = "=before.gold + 50"
+le = "=before.gold + 100"
+
+[[step]]
+op = "enter_ruins"
+args = { unit = "=made[8].unit_ids[0]" }
+as = "third"
+
+[[step]]
+check = "third"
+eq = { found = false }
+
+[[step]]
+check = { what = "events", type = "ruins" }
+path = "[2].text"
+eq = "Civilization 1's Worker explored ancient ruins but found nothing of value."
+
+[[step]]
+op = "enter_ruins"
+args = { unit = "=made[8].unit_ids[0]" }
+error = "There are no ancient ruins here."

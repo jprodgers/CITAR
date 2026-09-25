@@ -12,7 +12,7 @@
 use super::super::Game;
 use super::super::derive::rev::{CityTouch, PlayerTouch};
 use super::super::error::{ActionError, ErrCode};
-use super::super::{Porting, pending};
+use super::super::{Porting, pending, triggers};
 use super::stats::max_health;
 use crate::base::ids::{BuildingId, CityId, PlayerId, TileIdx};
 use crate::game::core::has_type;
@@ -21,6 +21,7 @@ use crate::rules::defs::ReligionProgress;
 use crate::state::TileClaim;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::cities::{City, Constructible};
+use crate::unique::trigger::{TriggerEvent, TriggerSite};
 use crate::unique::{Ctx, UniqueType, uq};
 
 /// Why a city cannot be founded on a tile, if it cannot (`cities.found_check`,
@@ -220,14 +221,7 @@ pub fn found_city(
     if let Some(rel) = pantheon
         && let Some(x) = g.city_mut(id, CityTouch::RELIGION)
     {
-        let add = 200 * i32::from(pop);
-        match x.pressures.iter_mut().find(|(k, _)| *k == Some(rel)) {
-            Some((_, v)) => *v += add,
-            None => {
-                x.pressures.push((Some(rel), add));
-                x.pressures.sort_by_key(|&(k, _)| k);
-            }
-        }
+        x.add_pressure(Some(rel), 200 * i32::from(pop));
     }
     let capital = g.player(p).and_then(|x| x.capital);
     let needs_capital =
@@ -254,8 +248,9 @@ pub fn found_city(
         x.founded_city = true;
     }
     super::free_buildings::try_add_free_buildings(g, p);
-    // triggers.fire(UponFoundingCity) (cities.py:2179-2180).
-    pending(Porting::Pending("1b-08"));
+    // The settler that founds it is the unit action's to pass (package 1c-04).
+    let site = TriggerSite { civ: p, city: Some(id), unit: None, tile: None };
+    triggers::fire(g, &site, &TriggerEvent::FoundingCity, true, Some("due to founding a city"));
     let who = g.player(p).map(|x| x.name.clone()).unwrap_or_default();
     let at = g.fmt_xy(t);
     g.emit(
@@ -295,8 +290,10 @@ pub fn add_building(g: &mut Game, c: CityId, b: BuildingId, try_free: bool) {
     {
         x.capital = Some(c);
     }
-    // The building's one-time triggers (cities.py:1849-1854).
-    pending(Porting::Pending("1b-08"));
+    // What the building gives once (cities.py:1849-1854).
+    let site = TriggerSite { civ: owner, city: Some(c), unit: None, tile: None };
+    let note = format!("due to constructing {}", bd.name);
+    triggers::on_gain(g, &bd.uniques, &site, Some(&note));
     // Korea: a science building in the capital gives half a tech (cities.py:1856-1858).
     if bd.stat_related.contains(crate::base::stats::Stat::Science)
         && super::stats::is_capital(g, c)

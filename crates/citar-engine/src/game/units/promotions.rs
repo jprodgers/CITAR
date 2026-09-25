@@ -4,7 +4,7 @@
 use crate::base::ids::{PromotionId, UnitId};
 use crate::game::derive::rev::UnitTouch;
 use crate::game::error::ActionError;
-use crate::game::{Game, Porting, pending, triggers};
+use crate::game::{Game, triggers};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::unique::trigger::{OneTimeEffect, TriggerEvent, TriggerSite};
 use crate::unique::{Ctx, UniqueData, UniqueType, applies, uq};
@@ -175,7 +175,9 @@ pub fn add_xp(g: &mut Game, u: UnitId, amount: i32, vs_barbarian: bool) {
     if amount <= 0 {
         return;
     }
-    let Some((owner, xp, count)) = g.unit(u).map(|x| (x.owner(), x.xp, x.promotion_count)) else {
+    let Some((owner, base, xp, count)) =
+        g.unit(u).map(|x| (x.owner(), x.base, x.xp, x.promotion_count))
+    else {
         return;
     };
     let mut m = 1.0f64;
@@ -206,8 +208,8 @@ pub fn add_xp(g: &mut Game, u: UnitId, amount: i32, vs_barbarian: bool) {
         x.xp = x.xp.saturating_add(gain);
     }
     if g.player(owner).is_some_and(crate::state::players::Player::is_major) && !vs_barbarian {
-        // great_people.add_combat_points (`great_people.py`).
-        pending(Porting::Pending("1b-08"));
+        // Not capped against the barbarians, so the gain is the whole amount (`units.py:279-280`).
+        crate::game::great_people::add_combat_points(g, owner, base, gain);
     }
     if !before && can_promote(g, u) {
         let name = unit_label(g, u);

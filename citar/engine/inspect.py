@@ -10,8 +10,8 @@ from typing import Any
 from .game import ActionError, Game
 from .state import AUTO_DECISIONS
 
-QUERIES = ("buildable", "city", "costs", "events", "find_tiles", "game", "ops", "pending", "player", "relation", "tile",
-           "unit", "units")
+QUERIES = ("buildable", "city", "costs", "events", "find_tiles", "game", "great_people", "ops", "pending", "player",
+           "relation", "religion", "tile", "unit", "units")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -50,6 +50,15 @@ def inspect(g: Game, q: dict) -> Any:
         return _buildable(g, c)
     if what == "costs":
         return _costs(g, _pid(g, q.get("player"), majors_only=False))
+    if what == "religion":
+        if q.get("city") is not None:
+            c = g.city(_whole(q.get("city")))
+            if c is None:
+                raise ActionError("No such city.")
+            return _city_religion(g, c)
+        return _civ_religion(g, _pid(g, q.get("player"), majors_only=False))
+    if what == "great_people":
+        return _great_people(g, _pid(g, q.get("player"), majors_only=False))
     if what == "events":
         return _events(g, q)
     if what == "find_tiles":
@@ -60,6 +69,38 @@ def inspect(g: Game, q: dict) -> Any:
     if what == "pending":
         return []
     raise ActionError(f"Unknown inspect query {what!r}. Known: {', '.join(QUERIES)}.")
+
+
+def _civ_religion(g: Game, pid: int) -> dict:
+    """``religion`` with ``player``: its pantheon or religion, its beliefs and what the next pantheon and prophet
+    cost it."""
+    from . import religion
+    p = g.player(pid)
+    hc = religion.holy_city(g, p.religion) if p.religion else None
+    return {"state": p.religion_state, "religion": p.religion, "display": religion.display_name(g, p.religion),
+            "beliefs": sorted(religion.all_beliefs(g, p.religion)) if p.religion else [],
+            "free_beliefs": {k: int(v) for k, v in (p.flags.get("free_beliefs") or {}).items() if v},
+            "pantheon_cost": religion.faith_for_pantheon(g, pid), "prophet_cost": religion.faith_for_next_prophet(g, pid),
+            "prophets_earned": religion.prophets_earned(g, pid), "holy_city": hc.id if hc is not None else None}
+
+
+def _city_religion(g: Game, c) -> dict:
+    """``religion`` with ``city``: its majority, followers and pressures by religion, and whose holy city it is."""
+    from . import religion
+    pressures = dict(c.pressures) or {religion.NONE: 100}
+    return {"majority": religion.majority_religion(g, c), "followers": dict(religion.followers(g, c)),
+            "pressures": {k: int(v) for k, v in pressures.items()}, "holy_city_of": c.holy_city_of}
+
+
+def _great_people(g: Game, pid: int) -> dict:
+    """``great_people``: great person points, free great people, golden ages and the uniques held for some turns."""
+    from . import great_people
+    p = g.player(pid)
+    return {"points": {k: float(v) for k, v in sorted(p.gp_points.items())}, "free": int(p.free_great_people),
+            "earned": int(p.great_people_earned), "golden_age_points": float(p.golden_age_points),
+            "golden_ages": int(p.golden_ages), "golden_age_turns": int(p.golden_age_turns),
+            "golden_age_needed": great_people.happiness_for_golden_age(g, pid),
+            "temp_uniques": [{"text": t["text"], "turns": int(t["turns"])} for t in p.temp_uniques]}
 
 
 def _whole(v) -> int:

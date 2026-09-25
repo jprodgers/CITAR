@@ -39,6 +39,9 @@ const ANCIENT_RUINS: &str = "Ancient ruins";
 const BARBARIAN_CAMP: &str = "Barbarian encampment";
 const WORKER: &str = "Worker";
 const SETTLER: &str = "Settler";
+/// The great people an AI takes free, most wanted first (`great_people.py:214`).
+const PREFERRED_GREAT_PEOPLE: [&str; 5] =
+    ["Great Scientist", "Great Engineer", "Great Merchant", "Great Artist", "Great Prophet"];
 
 // The terrains and resources map generation names (`mapgen.py:551-1660`).
 const OCEAN: &str = "Ocean";
@@ -113,6 +116,9 @@ pub struct Known {
     /// The settler civilizations start with (`units.py:164`): the first unit in file order that
     /// founds cities and belongs to no nation, else the one named Settler.
     pub settler: Option<BaseUnitId>,
+    /// The great people an AI takes free, most wanted first, those the ruleset has
+    /// (`great_people.ai_choose_free`, `great_people.py:214`).
+    pub preferred_great_people: [Option<BaseUnitId>; 5],
     /// The terrains and resources map generation names.
     pub map: KnownMap,
 }
@@ -232,6 +238,7 @@ impl Derived {
                 river: None,
                 worker: None,
                 settler: None,
+                preferred_great_people: [None; 5],
                 map: KnownMap::default(),
             },
             moves: MoveRules::default(),
@@ -360,6 +367,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         river: r.terrains.iter().find(|(_, t)| &*t.name == RIVER).map(|(id, _)| id),
         worker: unit_named(r, WORKER),
         settler: starting_settler(r),
+        preferred_great_people: PREFERRED_GREAT_PEOPLE
+            .map(|name| r.base_units.iter().find(|(_, u)| &*u.name == name).map(|(id, _)| id)),
         map: known_map(r),
     };
 
