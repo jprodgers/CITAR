@@ -284,6 +284,8 @@ impl Game {
         out.extend(super::derive::religion::verify(self));
         out.extend(super::cities::citizens::verify(self));
         out.extend(super::path::memo::verify(self));
+        out.extend(super::derive::danger::verify(self));
+        out.extend(super::derive::jobs::verify(self));
         if self.dv.terrain_floor(self) != super::path::terrain_floor(self) {
             out.push(
                 "the cheapest step off the routes differs from a cold look at the map".to_owned(),

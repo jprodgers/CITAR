@@ -7,11 +7,13 @@
 //!   kind;
 //! - `player` (`player`): a civilization's seat, stocks, counters, techs, research, policies,
 //!   contacts, cities and units, and a city-state's type, ally and influence;
-//! - `tile` (`x`, `y`): terrain, features, resource, improvement, route, river, owner, city and
-//!   units;
+//! - `tile` (`x`, `y`): terrain, features, resource, improvement, route, river, owner, city,
+//!   units and the build queue;
 //! - `relation` (`a`, `b`): contact, war and every treaty term, with the two-sided ones as
 //!   `[a's, b's]`;
 //! - `unit` (`unit`), `units` (optionally `player`, `x` and `y`), `city` (`city`);
+//! - `unit_actions` and `build_options` (`unit`): what a unit could do with `unit_action`, and
+//!   start building where it stands;
 //! - `buildable` (`city`): what a city can build now and what each costs in production;
 //! - `costs` (`player`): what the techs a civilization could research cost it, its next policy's
 //!   culture, and the policies it could adopt;
@@ -50,8 +52,9 @@ use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
 /// The queries, by `what`, sorted, with whether what each reads is ported yet.
-const QUERIES: [(&str, Porting); 18] = [
+const QUERIES: [(&str, Porting); 20] = [
     ("briefing", Porting::Pending("1d-03")),
+    ("build_options", Porting::Ported),
     ("buildable", Porting::Ported),
     ("city", Porting::Ported),
     ("costs", Porting::Ported),
@@ -67,6 +70,7 @@ const QUERIES: [(&str, Porting); 18] = [
     ("religion", Porting::Ported),
     ("tile", Porting::Ported),
     ("unit", Porting::Ported),
+    ("unit_actions", Porting::Ported),
     ("units", Porting::Ported),
     ("view", Porting::Pending("1d-02")),
 ];
@@ -97,6 +101,14 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
             Ok(unit(g, id))
         }
         "units" => units(g, o),
+        "unit_actions" | "build_options" => {
+            let id = py::int_of(o.get("unit").unwrap_or(&Value::Null))
+                .and_then(|n| u32::try_from(n).ok())
+                .and_then(UnitId::new)
+                .filter(|&u| g.unit(u).is_some())
+                .ok_or_else(|| bad("No such unit."))?;
+            Ok(if what == "unit_actions" { unit_actions(g, id) } else { build_options(g, id) })
+        }
         "city" => {
             let id = py::int_of(o.get("city").unwrap_or(&Value::Null))
                 .and_then(|n| u32::try_from(n).ok())
@@ -314,7 +326,54 @@ fn tile(g: &Game, t: TileIdx) -> Value {
         "city": x.city().map(CityId::get),
         "units": units,
         "visible": g.derived().vis().seers(t).map(|p| p.0).collect::<Vec<_>>(),
+        "builds": g
+            .state()
+            .tiles()
+            .builds(t)
+            .iter()
+            .map(|s| json!([name(g, Some(s.improvement)), s.turns_left]))
+            .collect::<Vec<_>>(),
     })
+}
+
+/// `unit_actions`: what a unit could do now with `unit_action`, as `get_unit` lists it
+/// (`actions.unit_actions`): each action's `id`, `name`, `available`, and its `reason` and
+/// `params` where it has them.
+fn unit_actions(g: &Game, u: UnitId) -> Value {
+    Value::Array(crate::game::actions::unit_actions(g, u).iter().map(|a| a.to_json()).collect())
+}
+
+/// `build_options`: what a unit could start building where it stands (`workers.build_options`):
+/// each option's `name` and `turns`, with `first_removes` (the feature removed first) and
+/// `replaces` where it has them, and `instant` for what it makes at once.
+fn build_options(g: &Game, u: UnitId) -> Value {
+    use crate::game::workers::{self, Builder};
+    let r = g.rules();
+    let mut out = Vec::new();
+    let (Some(b), Some(t)) = (Builder::unit(g, u), g.unit(u).map(crate::state::units::Unit::tile))
+    else {
+        return Value::Array(out);
+    };
+    for o in workers::build_options(g, &b, t, None) {
+        let mut m = Map::new();
+        m.insert("name".into(), json!(r.improvements()[o.imp].name.to_string()));
+        m.insert("turns".into(), json!(o.turns));
+        if let Some(f) = o.first_removes.and_then(|f| r.derived().features.get(f).copied()) {
+            m.insert("first_removes".into(), json!(name(g, Some(f))));
+        }
+        if let Some(i) = o.replaces {
+            m.insert("replaces".into(), json!(name(g, Some(i))));
+        }
+        out.push(Value::Object(m));
+    }
+    let mut instant = workers::water_options(g, u);
+    instant.extend(workers::great_options(g, u));
+    for o in instant {
+        out.push(
+            json!({"name": r.improvements()[o.imp].name.to_string(), "turns": 0, "instant": true}),
+        );
+    }
+    Value::Array(out)
 }
 
 /// `relation`: two players' relation, the two-sided terms as `[a's, b's]`.

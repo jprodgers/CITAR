@@ -105,8 +105,9 @@ fn a_bare_arena_game_plays_fifty_end_turns_cleanly_and_lists_what_waits() {
         .filter(|p| p["kind"] == "turn_stage")
         .filter_map(|p| p["name"].as_str())
         .collect();
-    assert!(stages.contains(&"player_start S8: standing unit orders"));
-    assert!(stages.contains(&"player_end E6: worker builds"));
+    assert!(stages.contains(&"player_start S8: the city-state's turn"));
+    assert!(!stages.contains(&"player_start S8: standing unit orders"), "ported in 1c-04");
+    assert!(!stages.contains(&"player_end E6: worker builds"), "ported in 1c-04");
     assert!(stages.contains(&"round_end R2: the round's statistics"));
 }
 

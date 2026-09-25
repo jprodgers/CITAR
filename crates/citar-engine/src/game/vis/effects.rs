@@ -271,6 +271,12 @@ impl Game {
             .meetings()
             .chain(found.discover.iter().map(|&(civ, tile)| Effect::Wonder { civ, tile }))
             .collect();
+        let mut sighted: Vec<PlayerId> = net.iter().map(|x| x.civ).collect();
+        sighted.sort();
+        sighted.dedup();
+        for p in sighted {
+            self.dv.revs.touch_sight(p);
+        }
         self.dv.vis.note_seen(net.iter().filter(|x| x.up).map(|x| (x.civ, x.tile)));
         for (p, tiles) in explore {
             if let Some(pl) = self.player_mut(p, PlayerTouch::OTHER) {

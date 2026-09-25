@@ -102,6 +102,9 @@ pub struct CivRevs {
     pub city_state: Rev,
     /// Where its spies are and what they do.
     pub spies: Rev,
+    /// Which tiles it sees: moved by a settle of sight that brought a tile into its sight or took
+    /// one out, which the danger tiles of its civilians read (`derive::danger`).
+    pub sight: Rev,
 }
 
 impl CivRevs {
@@ -121,6 +124,7 @@ impl CivRevs {
             religion: r,
             city_state: r,
             spies: r,
+            sight: r,
         }
     }
 
@@ -142,6 +146,7 @@ impl CivRevs {
             self.religion,
             self.city_state,
             self.spies,
+            self.sight,
         ]
         .into_iter()
         .max()
@@ -907,6 +912,14 @@ impl Revs {
     /// A route or its pillage changed: the connections between cities may have.
     pub(crate) fn touch_routes(&mut self) {
         self.routes = self.next();
+    }
+
+    /// What civilization `p` sees changed: a tile came into its sight or left it.
+    pub(crate) fn touch_sight(&mut self, p: PlayerId) {
+        let r = self.next();
+        if let Some(c) = self.civ_mut(p) {
+            c.sight = r;
+        }
     }
 }
 

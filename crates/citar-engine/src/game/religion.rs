@@ -25,6 +25,7 @@
 
 pub mod found;
 pub mod prophets;
+pub mod spread;
 
 use smallvec::SmallVec;
 

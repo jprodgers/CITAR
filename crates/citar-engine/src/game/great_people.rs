@@ -609,24 +609,14 @@ pub(crate) fn golden_age_stage(g: &mut Game, p: PlayerId) {
 // ---- The great person actions ------------------------------------------------------------------
 
 /// A unit is spent (`units.consume`, `units.py:477-482`): `upon expending a [unit]` fires for its
-/// owner, once, then it leaves the game.
+/// owner, once, then it leaves the game. Python fired it a second time after a great person's
+/// action (`great_people.triggers_expend`); here the one place is [`units::abilities::consume`],
+/// which every action that spends a unit reaches.
+///
+/// [`units::abilities::consume`]: super::units::abilities::consume
 // refcheck: expending-a-unit-fires-once
 pub fn consume_unit(g: &mut Game, u: UnitId) {
-    let Some((owner, base)) = g.unit(u).map(|x| (x.owner(), x.base)) else { return };
-    let facts = UnitFacts::of(&g.view(), u);
-    let what = g.rules().base_units()[base].name.clone();
-    let note = format!("due to expending our {what}");
-    triggers::fire(
-        g,
-        &TriggerSite::civ(owner),
-        &TriggerEvent::ExpendingUnit(facts),
-        false,
-        Some(&note),
-    );
-    if g.unit(u).is_some() {
-        let gone = g.despawn_unit(u);
-        debug_assert!(gone.is_ok(), "a unit the game has is removed: {gone:?}");
-    }
+    super::units::abilities::consume(g, u);
 }
 
 /// A unit's owner and whether its type has a unique of type `ty`.

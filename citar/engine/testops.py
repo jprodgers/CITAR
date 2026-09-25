@@ -272,6 +272,29 @@ def _enter_ruins(g: Game, o: dict):
     return {"found": bool(ruins.enter(g, u, u.idx))}
 
 
+@op("automate", "player: the player's units carry out their standing orders now (moves, exploring, automated workers, "
+                "sleepers waking), as at the start of its turn")
+def _automate(g: Game, o: dict):
+    """A player's units carry out their standing orders now, as at the start of its turn."""
+    from . import automation
+    from .scenario import _pid
+    automation.run_unit_orders(g, _pid(g, o.get("player")))
+    return {}
+
+
+@op("progress_builds", "player; optional turns (1 by default): the player's workers do that many turns of work, as at "
+                       "the end of its turns")
+def _progress_builds(g: Game, o: dict):
+    """A player's workers do some turns of work, as at the end of each of its turns; their movement is left as it is."""
+    from . import workers
+    from .scenario import _pid
+    pid = _pid(g, o.get("player"))
+    turns = _whole(o, "turns") if o.get("turns") is not None else 1
+    for _ in range(max(0, turns)):
+        workers.progress_builds(g, pid)
+    return {}
+
+
 @op("refresh_visibility", "what every civilization sees is brought up to date")
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""

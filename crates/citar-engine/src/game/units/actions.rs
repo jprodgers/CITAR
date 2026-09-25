@@ -4,9 +4,9 @@
 //! Each checks on `&Game` everything Python refused, with Python's messages, before anything is
 //! written; Python refused some after it had started writing (a move with no path had already
 //! cleared the unit's orders, an upgrade it could not place had removed and remade the unit), so
-//! a refusal here leaves the game as it was. The orders whose systems later packages port are
-//! refused as not ported: an aircraft's move (a rebase, package 1c-03), `explore`, `automate`
-//! and `pillage` (package 1c-04).
+//! a refusal here leaves the game as it was. An aircraft's move (a rebase, package 1c-03) is
+//! refused as not ported. The orders `explore`, `automate` and `pillage` run package 1c-04's
+//! `game::automation` and `game::workers`.
 
 use serde_json::{Value, json};
 
@@ -208,6 +208,9 @@ pub enum OrderPlan {
     SetUp(UnitId),
     AlreadySetUp,
     Disband(UnitId),
+    Explore(UnitId),
+    Automate(UnitId),
+    Pillage(UnitId),
 }
 
 impl Rule for UnitOrder {
@@ -232,8 +235,7 @@ impl Rule for UnitOrder {
                 if !def.military && def.domain == Domain::Land {
                     return Err(ActionError::rule("Civilians cannot explore."));
                 }
-                // automation.explore (automation.py).
-                Err(not_ported("game::automation"))
+                Ok(OrderPlan::Explore(u))
             }
             "automate" => {
                 if unit_uniques(g, u, UniqueType::BuildImprovements, false).is_empty() {
@@ -241,11 +243,12 @@ impl Rule for UnitOrder {
                         "Only units that build improvements (Workers) can be automated.",
                     ));
                 }
-                // automation.automate_worker (automation.py).
-                Err(not_ported("game::automation"))
+                Ok(OrderPlan::Automate(u))
             }
-            // workers.pillage (workers.py).
-            "pillage" => Err(not_ported("game::workers")),
+            "pillage" => match crate::game::workers::can_pillage(g, u) {
+                Some(why) => Err(ActionError::rule(why)),
+                None => Ok(OrderPlan::Pillage(u)),
+            },
             "setup" => {
                 if !unit_has(g, u, UniqueType::MustSetUp, false) {
                     return Err(ActionError::rule("This unit does not need to set up."));
@@ -309,6 +312,18 @@ impl Rule for UnitOrder {
                 ok
             }
             OrderPlan::Disband(u) => disband(g, u),
+            OrderPlan::Explore(u) => {
+                if let Some(x) = g.unit_mut(u, UnitTouch::CORE) {
+                    x.goto = None;
+                    x.path.clear();
+                    x.order_wait = 0;
+                }
+                crate::game::automation::explore(g, u)
+            }
+            OrderPlan::Automate(u) => {
+                crate::game::automation::automate_worker(g, u, &mut Default::default())
+            }
+            OrderPlan::Pillage(u) => crate::game::workers::pillage(g, u),
         })
     }
 }

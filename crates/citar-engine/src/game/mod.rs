@@ -49,6 +49,8 @@
 //! once that package is done (DESIGN.md 3.4, rule 3).
 
 pub mod action;
+pub mod actions;
+pub mod automation;
 pub mod cities;
 pub mod city_states;
 pub mod core;
@@ -76,6 +78,7 @@ pub mod triggers;
 pub mod turn;
 pub mod units;
 pub mod vis;
+pub mod workers;
 
 pub use self::action::{Action, Outcome, OutcomeSpec};
 pub use self::core::Game;

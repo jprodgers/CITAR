@@ -12,8 +12,8 @@
 //! operations `end_turn`, `end_round` and `force_turn`; package 1b-07 `complete_construction`;
 //! package 1b-08 `found_religion`, `enhance_religion` and `enter_ruins`, which stand in for the
 //! unit actions and the moves of packages 1c-04 and 1c-02; package 1c-02 `set_unit` and
-//! `ready_unit`. The others are listed with the package that ports what they need, and are
-//! refused as not ported until then.
+//! `ready_unit`; package 1c-04 `automate` and `progress_builds`. The others are listed with the
+//! package that ports what they need, and are refused as not ported until then.
 
 use serde_json::{Map, Value, json};
 
@@ -65,8 +65,9 @@ pub static TEST_OPS: &[TestOp] = &[
     },
     TestOp {
         name: "automate",
-        params: "player: the player's automated units act now",
-        porting: Porting::Pending("1c-04"),
+        params: "player: the player's units carry out their standing orders now (moves, \
+                 exploring, automated workers, sleepers waking), as at the start of its turn",
+        porting: Porting::Ported,
         run: automate,
     },
     TestOp {
@@ -147,8 +148,9 @@ pub static TEST_OPS: &[TestOp] = &[
     },
     TestOp {
         name: "progress_builds",
-        params: "turns: workers' builds advance by that many turns",
-        porting: Porting::Pending("1c-04"),
+        params: "player; optional turns (1 by default): the player's workers do that many turns \
+                 of work, as at the end of its turns",
+        porting: Porting::Ported,
         run: progress_builds,
     },
     TestOp {
@@ -300,8 +302,9 @@ fn names_of(v: Option<&Value>) -> Vec<String> {
     }
 }
 
-/// A great prophet founds or enhances a religion where it stands and is spent, as the unit action
-/// will do (package 1c-04), which checks besides whether the unit may act now.
+/// A great prophet founds or enhances a religion where it stands and is spent, as the unit
+/// actions `found_religion` and `enhance_religion` do (`game::actions`), which check besides
+/// whether the unit may act now.
 fn prophet_acts(
     g: &mut Game,
     u: UnitId,
@@ -336,7 +339,7 @@ fn prophet_acts(
 }
 
 /// A great prophet founds a religion where it stands (`religion.found_religion`), as its unit
-/// action will (package 1c-04).
+/// action does.
 fn found_religion(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let u = unit_of(g, o)?;
     let name = o.get("name").map(py::str_of).unwrap_or_default();
@@ -613,6 +616,28 @@ fn ready_unit(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(json!({"moves": full}))
 }
 
+/// A player's units carry out their standing orders now (`automation.run_unit_orders`), as
+/// stage S8 of its turn has them.
+fn automate(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let p = pid(g, o.get("player"), false)?;
+    crate::game::automation::run_unit_orders(g, p);
+    Ok(json!({}))
+}
+
+/// A player's workers do some turns of work (`workers.progress_builds`), as stage E6 of each of
+/// its turns has them; their movement is left as it is.
+fn progress_builds(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let p = pid(g, o.get("player"), false)?;
+    let turns: u16 = match given(o, "turns") {
+        Some(v) => whole(v, "turns")?,
+        None => 1,
+    };
+    for _ in 0..turns {
+        crate::game::workers::progress_builds(g, p);
+    }
+    Ok(json!({}))
+}
+
 // ---- Those whose systems are not ported yet ----------------------------------------------------
 
 /// The refusal of a test operation whose system is not ported yet: `path` names the system, and
@@ -632,10 +657,6 @@ fn attack_as(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::combat"))
 }
 
-fn automate(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::automation"))
-}
-
 fn barbarian_act(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::barbarians"))
 }
@@ -650,10 +671,6 @@ fn close_negotiation(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
 
 fn open_negotiation_as(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::diplomacy::negotiation"))
-}
-
-fn progress_builds(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::workers"))
 }
 
 fn sack_city(_: &mut Game, _: &Params) -> Result<Value, ActionError> {

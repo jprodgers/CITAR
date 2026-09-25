@@ -137,10 +137,10 @@ fn inspect_reads_and_lists_what_is_pending() {
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [3, 0, 9],
-        "three queries and nine test ops wait"
+        [3, 0, 7],
+        "three queries and seven test ops wait"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [17, 3], "the stages that wait");
+    assert_eq!([count("turn_stage"), count("setup_stage")], [15, 3], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(
@@ -185,7 +185,8 @@ fn inspect_reads_and_lists_what_is_pending() {
     let e = inspect::inspect(&g, &json!({"what": "nothing"})).expect_err("an unknown query");
     assert_eq!(e.code, ErrCode::BadParam);
     assert!(e.message.starts_with(
-        "Unknown inspect query 'nothing'. Known: briefing, buildable, city, costs, events"
+        "Unknown inspect query 'nothing'. Known: briefing, build_options, buildable, city, costs, \
+         events"
     ));
 }
 

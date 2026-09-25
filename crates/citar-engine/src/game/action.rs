@@ -91,6 +91,12 @@ pub enum Action {
     UpgradeUnit(super::units::actions::UpgradeUnit),
     /// Promotes a unit (package 1c-02).
     PromoteUnit(super::units::actions::PromoteUnit),
+    /// `build_improvement` (package 1c-04).
+    BuildImprovement(super::workers::BuildImprovement),
+    /// `found_city` (package 1c-04).
+    FoundCity(super::actions::FoundCity),
+    /// `unit_action` (package 1c-04).
+    UnitAction(super::actions::UnitAction),
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
@@ -135,6 +141,9 @@ impl Action {
             Self::UnitOrder(_) => "unit_order",
             Self::UpgradeUnit(_) => "upgrade_unit",
             Self::PromoteUnit(_) => "promote_unit",
+            Self::BuildImprovement(_) => "build_improvement",
+            Self::FoundCity(_) => "found_city",
+            Self::UnitAction(_) => "unit_action",
             #[cfg(test)]
             Self::Probe(_) => "probe",
             Self::AdoptPolicy(_) => "adopt_policy",
@@ -162,7 +171,10 @@ impl Action {
             Self::MoveUnit(_)
             | Self::UnitOrder(_)
             | Self::UpgradeUnit(_)
-            | Self::PromoteUnit(_) => false,
+            | Self::PromoteUnit(_)
+            | Self::BuildImprovement(_)
+            | Self::FoundCity(_)
+            | Self::UnitAction(_) => false,
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
             // `tools.rename_city` is `any_time` (tools.py:782).
@@ -190,6 +202,9 @@ impl Action {
             Self::UnitOrder(a) => run(g, pid, a),
             Self::UpgradeUnit(a) => run(g, pid, a),
             Self::PromoteUnit(a) => run(g, pid, a),
+            Self::BuildImprovement(a) => run(g, pid, a),
+            Self::FoundCity(a) => run(g, pid, a),
+            Self::UnitAction(a) => run(g, pid, a),
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
             Self::AdoptPolicy(x) => run(g, pid, x),

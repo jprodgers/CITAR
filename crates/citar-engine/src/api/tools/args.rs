@@ -8,7 +8,8 @@
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
 //! the coercion; package 1b-06 adds the citizen tools, package 1b-07 the tools of production,
 //! purchases, research and policies, package 1b-08 `found_pantheon` and `choose_great_person`,
-//! and package 1c-02 the unit tools.
+//! package 1c-02 the unit tools, and package 1c-04 `build_improvement`, `found_city` and
+//! `unit_action`.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -74,6 +75,12 @@ pub static TOOLS: &[ToolArgs] = &[
         params: &[("policy", ArgType::String)],
         required: &["policy"],
     },
+    // Package 1c-04 (tools.py:485-537).
+    ToolArgs {
+        tool: "build_improvement",
+        params: &[("unit_id", ArgType::Integer), ("improvement", ArgType::String)],
+        required: &["unit_id", "improvement"],
+    },
     ToolArgs {
         tool: "buy",
         params: &[
@@ -112,6 +119,11 @@ pub static TOOLS: &[ToolArgs] = &[
         tool: "dequeue_research",
         params: &[("tech", ArgType::String)],
         required: &["tech"],
+    },
+    ToolArgs {
+        tool: "found_city",
+        params: &[("unit_id", ArgType::Integer), ("name", ArgType::String)],
+        required: &["unit_id"],
     },
     ToolArgs {
         tool: "found_pantheon",
@@ -166,6 +178,18 @@ pub static TOOLS: &[ToolArgs] = &[
         tool: "set_specialists",
         params: &[("city_id", ArgType::Integer), ("specialists", ArgType::Object)],
         required: &["city_id", "specialists"],
+    },
+    ToolArgs {
+        tool: "unit_action",
+        params: &[
+            ("unit_id", ArgType::Integer),
+            ("action", ArgType::String),
+            ("name", ArgType::String),
+            ("beliefs", ArgType::Array),
+            ("x", ArgType::Integer),
+            ("y", ArgType::Integer),
+        ],
+        required: &["unit_id", "action"],
     },
     ToolArgs {
         tool: "unit_order",
