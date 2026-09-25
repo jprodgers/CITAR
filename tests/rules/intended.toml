@@ -306,4 +306,4 @@ reason = "The ancient ruins spread on an editor map that had none were drawn fro
 
 [[differences]]
 id = "games-hold-at-most-64-players"
-reason = "A game could hold any number of players; Rust holds at most 64, city-states and barbarians included (a set of players is one machine word), and refuses settings that would make more, such as 24 civilizations with 47 city-states on a map with room for them all"
+reason = "A game could hold any number of players; Rust holds at most 64, city-states and barbarians included (a set of players is one machine word), and refuses settings that would make more, such as 24 civilizations with 40 city-states and the barbarians"
