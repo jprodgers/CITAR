@@ -1,0 +1,70 @@
+about = """
+A city-state pays tribute only to a civilization it fears: the strongest military, with an army near
+its capital that outweighs the capital's own. Paying costs the bully 15 influence, the city-state
+gives 50 gold at the start of a standard game, and it pays nobody again for a while. Demanding a
+worker from a small city-state is refused.
+"""
+from = "citar/engine/city_states.py: tribute_modifiers, tribute_willingness, demand_tribute, _bullied"
+
+[config]
+city_states = 1
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 2, at = "CS" },
+  { op = "meet", a = 0, b = 2 },
+  { op = "set_player", player = 0, gold = 0 },
+  { op = "set_influence", city_state = 2, player = 0, amount = 20 },
+]
+
+[[step]]
+note = "Nothing near its capital: it refuses, and says why."
+tool = "city_state_action"
+args = { player_id = 2, action = "tribute_gold" }
+error = "refuses to pay tribute (willingness"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Swordsman", at = "CS>e>e" },
+  { op = "add_unit", player = 0, unit = "Swordsman", at = "CS>w>w" },
+  { op = "add_unit", player = 0, unit = "Swordsman", at = "CS>ne>ne" },
+]
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "relationship.0"
+eq = "Afraid"
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "tribute_worker" }
+error = "Demanding a Worker from small City-State -300"
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "tribute_gold" }
+as = "paid"
+
+[[step]]
+check = "paid"
+eq = { tribute = "50 gold" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 50
+
+[[step]]
+check = { what = "city_state", player = 2 }
+subset = { recently_bullied = 20 }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "influence.0"
+eq = 5
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "tribute_gold" }
+error = "Very recently paid tribute -300"

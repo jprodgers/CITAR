@@ -4,6 +4,7 @@
 mod engine {
     mod advisor;
     mod cities;
+    mod city_states;
     mod combat;
     mod convert;
     mod diplomacy;

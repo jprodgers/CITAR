@@ -386,6 +386,132 @@ def _open_negotiation_as(g: Game, o: dict):
         g.s.current = saved
 
 
+@op("add_barbarian", "unit, x, y (or at); optional hp: a barbarian unit on the tile, whatever the scenario "
+                     "operations allow; its id")
+def _add_barbarian(g: Game, o: dict):
+    """A barbarian unit on a tile, which ``add_unit`` refuses to make; ``unit_id``."""
+    from .scenario import _idx, _name
+    bid = g.barbarian_id
+    if bid is None:
+        raise ActionError("The game has no barbarians.")
+    u = g.create_unit(bid, _name(g, "unit", o.get("unit")), _idx(g, o))
+    if o.get("hp") is not None:
+        u.hp = max(1, min(100, _whole(o, "hp")))
+    g.invalidate()
+    return {"unit_id": u.id}
+
+
+@op("barbarian_act", "optional unit: the barbarians take a turn now (their units start their turn and act, then "
+                     "their camps); with a unit, only that barbarian acts, with the moves it has")
+def _barbarian_act(g: Game, o: dict):
+    """The barbarians take a turn now, as the start of their turn has them; with a unit, only that barbarian acts
+    (``barbarians._automate``, as the tests poked it), with the moves it has."""
+    from . import barbarians, units, visibility
+    bid = g.barbarian_id
+    if bid is None:
+        raise ActionError("The game has no barbarians.")
+    visibility.refresh(g)
+    if o.get("unit") is not None:
+        u = _unit(g, o)
+        if u.owner != bid:
+            raise ActionError("That is not a barbarian unit.")
+        try:
+            barbarians._automate(g, u)
+        except ActionError:
+            u.moves = 0
+    else:
+        for u in list(g.player_units(bid)):
+            units.start_turn(g, u)
+        barbarians.take_turn(g)
+    visibility.refresh(g)
+    return {}
+
+
+@op("clear_camps", "every barbarian camp is removed, with its improvement")
+def _clear_camps(g: Game, o: dict):
+    """Remove every barbarian camp and its improvement, as a bare game has none; the tiles."""
+    from . import barbarians
+    removed = []
+    for cid, c in sorted(g.s.camps.items()):
+        t = g.s.tiles[c["idx"]]
+        if t.improvement == barbarians.CAMP:
+            t.improvement = None
+        removed.append(list(g.grid.xy(c["idx"])))
+    g.s.camps.clear()
+    g.invalidate()
+    return {"removed": removed}
+
+
+@op("create_camp", "x, y (or at): a barbarian camp on the tile; its id")
+def _create_camp(g: Game, o: dict):
+    """Put a barbarian camp on a tile; its id."""
+    from . import barbarians
+    from .scenario import _idx
+    return barbarians.create_camp(g, _idx(g, o))
+
+
+@op("add_quest", "city_state, player, quest (its name); optional scope (individual or global, the row's by default), "
+                 "target (a player id; a resource, wonder, great person or natural wonder by name; a contest's starting "
+                 "score; the investment percent; for Spread Religion the player whose religion it is), x and y (or "
+                 "at: the camp to clear): the city-state gives the major the quest now, whether or not it fits; its "
+                 "text")
+def _add_quest(g: Game, o: dict):
+    """A city-state gives a major a quest now, as its turn would (``city_states._assign``), whether or not the quest
+    fits the game; ``quest``, its text."""
+    from . import city_states
+    from .scenario import _idx, _name, _pid
+    cs = _pid(g, o.get("city_state"), majors_only=False)
+    if g.player(cs).kind != "city_state":
+        raise ActionError(f"Player {cs} is not a city-state.")
+    major = _pid(g, o.get("player"), majors_only=True)
+    name = o.get("quest")
+    row = g.rules.quests.get(name) if isinstance(name, str) else None
+    if row is None:
+        raise ActionError(f"Unknown quest {name!r}.")
+    scope = o.get("scope")
+    if scope is None:
+        scope = "global" if row.get("type") == "Global" else "individual"
+    elif scope not in ("individual", "global"):
+        raise ActionError(f"scope must be individual or global, not '{scope}'.")
+    t = o.get("target")
+    if name == "Clear Barbarian Camp":
+        data = _idx(g, o)
+    elif name == "Connect Resource":
+        data = _name(g, "resource", t)
+    elif name == "Construct Wonder":
+        data = _name(g, "building", t)
+    elif name == "Acquire Great Person":
+        data = _name(g, "unit", t)
+    elif name == "Find Natural Wonder":
+        data = _name(g, "terrain", t)
+    elif name in ("Conquer City State", "Bully City State", "Find Player", "Give Gold", "Pledge to Protect",
+                  "Denounce Civilization"):
+        data = _pid(g, t, majors_only=False)
+    elif name == "Spread Religion":
+        founder = _pid(g, t, majors_only=False)
+        data = g.player(founder).religion
+        if not data:
+            raise ActionError(f"Player {founder} has founded no religion.")
+    elif name in ("Contest Culture", "Contest Faith", "Contest Technologies"):
+        data = 0 if t is None else _whole(o, "target")
+    elif name == "Invest":
+        data = int(row.get("params", [50])[0]) if t is None else _whole(o, "target")
+    else:
+        data = ""
+    city_states._assign(g, cs, name, major, (data, ""), scope)
+    return {"quest": city_states.quest_text(g, g.player(cs).quests[-1])}
+
+
+@op("sack_city", "city: the barbarians sack it; what they took")
+def _sack_city(g: Game, o: dict):
+    """The barbarians sack a city; what they took, as an attack reports it."""
+    from . import barbarians
+    c = g.city(_whole(o, "city"))
+    if c is None:
+        raise ActionError("No such city.")
+    return barbarians.sack_city(g, c)
+
+
 def apply_one(g: Game, n: int, o) -> dict:
     """Run the ``n``-th test operation of a list; the error names it, as apply_ops' does."""
     if not isinstance(o, dict) or o.get("op") not in OPS:

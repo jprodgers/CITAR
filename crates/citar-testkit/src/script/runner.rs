@@ -401,7 +401,7 @@ fn error_expected(s: &Map<String, Value>) -> bool {
 }
 
 /// A game from the script's settings over the runner's defaults, with `overrides` on top; the
-/// bare prelude clears every unit.
+/// bare prelude clears every unit and every barbarian camp.
 fn make_game(
     script: &Script,
     rules: &'static Ruleset,
@@ -430,8 +430,11 @@ fn make_game(
     let mut g = new_game(rules, &cfg)?;
     g.set_debug_options(DebugOptions::ALL);
     if script.bare {
-        testops::apply(&mut g, &json!([{"op": "clear_units", "player": "all"}]))
-            .map_err(|e| e.message)?;
+        testops::apply(
+            &mut g,
+            &json!([{"op": "clear_units", "player": "all"}, {"op": "clear_camps"}]),
+        )
+        .map_err(|e| e.message)?;
     }
     let broken = g.check_invariants();
     if !broken.is_empty() {

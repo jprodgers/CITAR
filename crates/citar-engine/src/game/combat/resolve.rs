@@ -26,7 +26,7 @@ use crate::base::stats::Stat;
 use crate::game::derive::rev::{CityTouch, PlayerTouch, UnitTouch};
 use crate::game::error::ActionError;
 use crate::game::units::{self, health, promotions, unit_has};
-use crate::game::{Game, Porting, movement, pending, triggers, vis};
+use crate::game::{Game, Porting, barbarians, city_states, movement, pending, triggers, vis};
 use crate::rules::defs::Domain;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::units::Activity;
@@ -618,8 +618,21 @@ fn earn_from_killing(g: &mut Game, killer: Combatant, dead: &Victim) {
             g.add_stat(owner, into, f64::from(amount));
         }
     }
-    // city_states.barbarian_killed_near and on_military_unit_killed (combat.py:639-643).
-    pending(Porting::Pending("1c-06"));
+    kill_thanks(g, owner, dead);
+}
+
+/// What city-states make of a kill (`combat._earn_from_killing`, `combat.py:639-643`): a major
+/// that kills a barbarian near one earns its thanks, and a kill counts toward the war quests of
+/// the city-states the victim's owner attacked.
+fn kill_thanks(g: &mut Game, killer: PlayerId, dead: &Victim) {
+    let Some(facts) = dead.facts else { return };
+    let victim = facts.owner;
+    if g.is_barbarian(victim)
+        && g.player(killer).is_some_and(crate::state::players::Player::is_major)
+    {
+        city_states::turn::barbarian_killed_near(g, killer, dead.tile);
+    }
+    city_states::turn::on_military_unit_killed(g, killer, victim);
 }
 
 /// Healing for a unit that has just killed (`combat._heal_after_kill`, `combat.py:646-652`).
@@ -1031,8 +1044,7 @@ pub fn resolve(g: &mut Game, a: Combatant, d: Combatant) -> Value {
         && camp.is_some()
         && g.tile(at).and_then(crate::state::map::Tile::improvement) == camp
     {
-        // barbarians.camp_attacked (combat.py:867-869).
-        pending(Porting::Pending("1c-06"));
+        barbarians::camp_attacked(g, at);
     }
     g.settle_sight();
     Value::Object(res)

@@ -8,7 +8,7 @@ use super::resolve::{contains_attackable_enemy, resolve};
 use crate::base::ids::{CityId, TileIdx};
 use crate::game::error::ActionError;
 use crate::game::units::unit_has;
-use crate::game::{Game, Porting, conquest, pending};
+use crate::game::{Game, barbarians, conquest};
 use crate::unique::{Combatant, UniqueType};
 
 /// How far a city bombards (`game.json` `base_city_bombard_range`).
@@ -79,6 +79,8 @@ pub fn city_bombard(g: &mut Game, c: CityId, d: Combatant) -> Value {
 pub enum CityOutcome {
     /// It changed hands ([`conquest::conquer`]).
     Captured(conquest::Capture),
+    /// The barbarians sacked it ([`barbarians::sack_city`]).
+    Sacked(barbarians::Sack),
 }
 
 impl CityOutcome {
@@ -86,14 +88,14 @@ impl CityOutcome {
     pub fn write(&self, out: &mut Map<String, Value>) {
         match self {
             Self::Captured(c) => c.write(out),
+            Self::Sacked(s) => s.write(out),
         }
     }
 }
 
 /// A city brought to the brink is taken by the melee unit that beat it
-/// (`combat._handle_city_defeated`, `combat.py:874-887`): the barbarians sack it instead
-/// (package 1c-06), and a unit that `Cannot capture cities` leaves it. What became of it, if
-/// anything did.
+/// (`combat._handle_city_defeated`, `combat.py:874-887`): the barbarians sack it instead, and a
+/// unit that `Cannot capture cities` leaves it. What became of it, if anything did.
 pub(crate) fn handle_city_defeated(
     g: &mut Game,
     a: Combatant,
@@ -104,9 +106,7 @@ pub(crate) fn handle_city_defeated(
         return None;
     }
     if g.is_barbarian(combatant::owner(g, a)) {
-        // barbarians.sack_city: the barbarians sack a city rather than take it.
-        pending(Porting::Pending("1c-06"));
-        return None;
+        return Some(CityOutcome::Sacked(barbarians::sack_city(g, c)));
     }
     if unit_has(g, u, UniqueType::CannotCaptureCities, true) {
         return None;

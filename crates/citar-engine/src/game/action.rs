@@ -19,12 +19,13 @@ use super::cities::borders::BuyTile;
 use super::cities::citizens::{SetCityFocus, SetSpecialists, WorkTile};
 use super::cities::purchase::Buy;
 use super::cities::queue::{ChangeQueue, RenameCity, SetAutoProduction, SetProduction};
+use super::city_states::CityStateAction;
 use super::combat::actions::{AirSweep, Attack, CityAttack, CityStatus, ReturnCivilian};
 use super::diplomacy::actions::{
     DeclareWar, Denounce, EndTurn, OpenNegotiation, RespondNegotiation, SendMessage,
 };
 use super::error::{ActionError, ErrCode};
-use super::espionage::MoveSpy;
+use super::espionage::{MoveSpy, StageCoup};
 use super::events::EventBatch;
 use super::great_people::ChooseGreatPerson;
 use super::policies::AdoptPolicy;
@@ -120,6 +121,10 @@ pub enum Action {
     MoveSpy(MoveSpy),
     /// `end_turn` (package 1c-05), refused while a negotiation of the player's is open.
     EndTurn(EndTurn),
+    /// `city_state_action` (package 1c-06).
+    CityStateAction(CityStateAction),
+    /// `stage_coup` (package 1c-06).
+    StageCoup(StageCoup),
     /// `build_improvement` (package 1c-04).
     BuildImprovement(super::workers::BuildImprovement),
     /// `found_city` (package 1c-04).
@@ -182,6 +187,8 @@ impl Action {
             Self::Denounce(_) => "denounce",
             Self::MoveSpy(_) => "move_spy",
             Self::EndTurn(_) => "end_turn",
+            Self::CityStateAction(_) => "city_state_action",
+            Self::StageCoup(_) => "stage_coup",
             Self::BuildImprovement(_) => "build_improvement",
             Self::FoundCity(_) => "found_city",
             Self::UnitAction(_) => "unit_action",
@@ -223,6 +230,8 @@ impl Action {
             | Self::Denounce(_)
             | Self::MoveSpy(_)
             | Self::EndTurn(_)
+            | Self::CityStateAction(_)
+            | Self::StageCoup(_)
             | Self::BuildImprovement(_)
             | Self::FoundCity(_)
             | Self::UnitAction(_) => false,
@@ -266,6 +275,8 @@ impl Action {
             Self::Denounce(a) => run(g, pid, a),
             Self::MoveSpy(a) => run(g, pid, a),
             Self::EndTurn(a) => run(g, pid, a),
+            Self::CityStateAction(a) => run(g, pid, a),
+            Self::StageCoup(a) => run(g, pid, a),
             Self::BuildImprovement(a) => run(g, pid, a),
             Self::FoundCity(a) => run(g, pid, a),
             Self::UnitAction(a) => run(g, pid, a),

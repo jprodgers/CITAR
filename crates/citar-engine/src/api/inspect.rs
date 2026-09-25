@@ -26,6 +26,8 @@
 //! - `negotiation` (`negotiation`, optionally `player`): a negotiation as it is kept, or as that
 //!   player sees it (`diplomacy.negotiation_view`);
 //! - `spies` (`player`): a civilization's spies;
+//! - `camps`: the barbarian camps; `city_state` (`player`): a city-state's standing with the
+//!   majors, its protectors and its quests;
 //! - `events` (optionally `since`, `type` and `player`, the last keeping what that player hears);
 //! - `find_tiles`: the tiles that pass the filters given, nearest first (see [`find_tiles`]);
 //! - `ops`: the scenario and test operations with their parameters;
@@ -58,11 +60,13 @@ use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
 /// The queries, by `what`, sorted, with whether what each reads is ported yet.
-const QUERIES: [(&str, Porting); 22] = [
+const QUERIES: [(&str, Porting); 24] = [
     ("briefing", Porting::Pending("1d-03")),
     ("build_options", Porting::Ported),
     ("buildable", Porting::Ported),
+    ("camps", Porting::Ported),
     ("city", Porting::Ported),
+    ("city_state", Porting::Ported),
     ("costs", Porting::Ported),
     ("events", Porting::Ported),
     ("find_tiles", Porting::Ported),
@@ -171,6 +175,8 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
             }
         }
         "spies" => Ok(crate::game::espionage::spies_json(g, any_player(g, o.get("player"))?)),
+        "camps" => Ok(crate::game::barbarians::camps_json(g)),
+        "city_state" => city_state(g, any_player(g, o.get("player"))?),
         "view" => Err(not_ported("api::views")),
         "briefing" => Err(not_ported("api::briefing")),
         _ => {
@@ -182,6 +188,45 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
             )))
         }
     }
+}
+
+/// `city_state`: a city-state's ally and protectors, each major's influence, the relationship
+/// and resting point with each major it has met, its quests (`name`, `assignee`, `scope`), its war
+/// quests (the kills it wants of each attacker's units) and the turns it will not pay tribute.
+fn city_state(g: &Game, cs: PlayerId) -> Result<Value, ActionError> {
+    use crate::game::city_states::influence as csi;
+    let Some(d) = csi::data(g, cs) else {
+        return Err(bad(format!("Player {} is not a city-state.", cs.0)));
+    };
+    let majors: Vec<PlayerId> = g.majors(false).map(Player::id).collect();
+    let met: Vec<PlayerId> = majors.iter().copied().filter(|&m| g.has_met(cs, m)).collect();
+    let by = |ids: &[PlayerId], f: &dyn Fn(PlayerId) -> Value| -> Map<String, Value> {
+        ids.iter().map(|&m| (m.0.to_string(), f(m))).collect()
+    };
+    let r = g.rules();
+    let quests: Vec<Value> = d
+        .quests
+        .iter()
+        .map(|q| {
+            let scope = match q.scope {
+                crate::rules::defs::QuestScope::Individual => "individual",
+                crate::rules::defs::QuestScope::Global => "global",
+            };
+            json!({"name": &*r.quests()[q.kind].name, "assignee": q.assignee.0, "scope": scope})
+        })
+        .collect();
+    let wars: Map<String, Value> =
+        d.war_quests.iter().map(|(p, w)| (p.0.to_string(), json!(w.needed))).collect();
+    Ok(json!({
+        "ally": d.ally().map(|p| p.0),
+        "protectors": d.protectors.iter().map(|p| p.0).collect::<Vec<_>>(),
+        "influence": by(&majors, &|m| json!(csi::raw_influence(g, cs, m))),
+        "relationship": by(&met, &|m| json!(csi::relationship(g, cs, m).name())),
+        "resting_point": by(&met, &|m| json!(csi::resting_point(g, cs, m))),
+        "quests": quests,
+        "war_quests": wars,
+        "recently_bullied": d.recently_bullied,
+    }))
 }
 
 fn bad(message: impl Into<String>) -> ActionError {

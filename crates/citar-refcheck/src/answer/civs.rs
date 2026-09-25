@@ -15,13 +15,16 @@
 //! Package 1b-07 answers `tech_cost` (what each tech the civilization could research costs it),
 //! `policy_cost` and, for a major, `adoptable_policies`.
 //!
+//! Package 1c-06 answers `military_strength` for a major (`victory.military_strength`), which a
+//! city-state's fear of it reads (`city_states.tribute_modifiers`).
+//!
 //! The group's other paths (score, victory, the world) are answered by the packages that port
 //! them; until then they are missing here, and counted in the ratchet.
 
 use citar_engine::base::ids::PlayerId;
 use citar_engine::base::num;
 use citar_engine::game::economy::ResourceItem;
-use citar_engine::game::{Game, economy, policies, query, research};
+use citar_engine::game::{Game, city_states, economy, policies, query, research};
 use citar_engine::rules::Ruleset;
 use citar_engine::state::players::PlayerKind;
 use serde_json::{Map, Value, json};
@@ -106,6 +109,7 @@ fn civs(g: &Game) -> Vec<Value> {
                 .map(|q| &*r.policies()[q].name)
                 .collect();
             e["adoptable_policies"] = json!(adoptable);
+            e["military_strength"] = json!(city_states::actions::military_strength(g, p));
         }
         out.push(e);
     }

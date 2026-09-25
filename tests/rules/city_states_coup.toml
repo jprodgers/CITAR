@@ -1,0 +1,94 @@
+about = """
+A spy in a city-state's capital rigs its elections once its network is set up, and may then stage a
+coup against the city-state's ally at the end of its civilization's turn. The chance falls with the
+gap between the ally's influence and its own: against an ally at 100, from -60, it is nil, and the
+spy is caught and killed.
+"""
+from = "citar/engine/espionage.py: can_coup, coup_chance, stage_coup, _initiate_coup, spy_end_turn"
+
+[config]
+city_states = 1
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "CS" },
+  { op = "meet", a = 0, b = "all" },
+  { op = "meet", a = 1, b = "all" },
+  { op = "reveal", player = 1 },
+  { op = "set_influence", city_state = 2, player = 0, amount = 100 },
+  { op = "set_influence", city_state = 2, player = 1, amount = -60 },
+]
+as = "made"
+
+[[step]]
+set = { cap = "=made[2].city_id" }
+
+[[step]]
+op = "add_spy"
+args = { player = 1 }
+as = "spy"
+
+[[step]]
+op = "end_turn"
+
+[[step]]
+tool = "move_spy"
+player = 1
+args = { spy = "=spy.spy", city_id = "=cap" }
+
+[[step]]
+tool = "stage_coup"
+player = 1
+args = { spy = "=spy.spy" }
+error = "A coup needs a set-up spy in the capital of a city-state that is not allied with you."
+
+[[step]]
+note = "A turn to arrive and three to set up its network: then it rigs the elections."
+repeat = 4
+steps = [
+  { op = "end_turn", args = { player = 1 } },
+  { op = "end_turn", args = { player = 0 } },
+]
+
+[[step]]
+check = { what = "spies", player = 1 }
+path = "[0]"
+subset = { city = "=cap", action = "Rigging Elections" }
+
+[[step]]
+tool = "stage_coup"
+player = 1
+args = { spy = "=spy.spy" }
+as = "staged"
+
+[[step]]
+check = "staged"
+eq = { spy = "=spy.spy", coup_at_end_of_turn = true, estimated_success_chance = 0 }
+
+[[step]]
+check = { what = "spies", player = 1 }
+path = "[0].action"
+eq = "Coup"
+
+[[step]]
+op = "end_turn"
+args = { player = 1 }
+
+[[step]]
+check = { what = "spies", player = 1 }
+path = "[0]"
+subset = { city = "=null", action = "Dead" }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+subset = { ally = 0 }
+
+[[step]]
+check = { what = "events", type = "spy", player = 1 }
+any = { path = "text", matches = "failed to stage a coup" }
+
+[[step]]
+check = { what = "events", type = "spy", player = 0 }
+any = { path = "text", matches = "failed to stage a coup in our ally" }

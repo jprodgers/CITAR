@@ -1,0 +1,98 @@
+about = """
+A city-state allies with the civilization with the most influence, at 60 or more, and joins its
+ally's wars. A civilization may pledge to protect a city-state, which raises its resting influence
+by 10, and may not withdraw the pledge for 10 turns. Attacking a city-state angers its protectors
+and its ally, and it asks the civilizations at peace with it to kill the attacker's units.
+"""
+from = "citar/engine/city_states.py: update_ally, pledge, withdraw_protection, on_attacked; citar/engine/diplomacy.py: set_war"
+
+[config]
+players = [{}, {}, {}]
+city_states = 1
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "C", name = "Athenae" },
+  { op = "found_city", player = 3, at = "CS" },
+  { op = "meet", a = 0, b = "all" },
+  { op = "meet", a = 1, b = "all" },
+  { op = "meet", a = 2, b = "all" },
+  { op = "set_influence", city_state = 3, player = 0, amount = 70 },
+]
+
+[[step]]
+check = { what = "city_state", player = 3 }
+subset = { ally = 0, protectors = [] }
+
+[[step]]
+check = { what = "city_state", player = 3 }
+path = "relationship.0"
+eq = "Ally"
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 3, action = "pledge" }
+as = "pledged"
+
+[[step]]
+check = { what = "city_state", player = 3 }
+subset = { protectors = [0] }
+
+[[step]]
+check = { what = "city_state", player = 3 }
+path = "resting_point.0"
+eq = 10
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 3, action = "pledge" }
+error = "You already protect them."
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 3, action = "withdraw" }
+error = "You pledged recently and cannot withdraw for 10 more turns."
+
+[[step]]
+note = "The ally goes to war: its city-state joins it."
+tool = "declare_war"
+args = { player_id = 2 }
+
+[[step]]
+check = { what = "relation", a = 2, b = 3 }
+path = "war"
+eq = true
+
+[[step]]
+note = "Another attacks the city-state."
+op = "end_turn"
+
+[[step]]
+tool = "declare_war"
+player = 1
+args = { player_id = 3 }
+
+[[step]]
+check = { what = "city_state", player = 3 }
+subset = { war_quests = { "1" = 3 } }
+
+[[step]]
+check = { what = "city_state", player = 3 }
+path = "influence.1"
+eq = -60
+
+[[step]]
+note = "Its protector and ally thinks less of the attacker: -20 as a protector, -10 as an ally, -5 for the war."
+check = { what = "relation", a = 0, b = 1 }
+path = "opinion[0]"
+eq = -35
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 0 }
+any = { path = "text", matches = "is being attacked by" }
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 2 }
+none = { path = "text", matches = "is being attacked by" }

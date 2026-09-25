@@ -9,8 +9,8 @@
 //! the coercion; package 1b-06 adds the citizen tools, package 1b-07 the tools of production,
 //! purchases, research and policies, package 1b-08 `found_pantheon` and `choose_great_person`,
 //! package 1c-02 the unit tools, package 1c-03 the tools of combat and conquest, package 1c-04
-//! `build_improvement`, `found_city` and `unit_action`, and package 1c-05 those of diplomacy and
-//! espionage, with `end_turn`.
+//! `build_improvement`, `found_city` and `unit_action`, package 1c-05 those of diplomacy and
+//! espionage, with `end_turn`, and package 1c-06 `city_state_action` and `stage_coup`.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -131,6 +131,17 @@ pub static TOOLS: &[ToolArgs] = &[
         tool: "city_attack",
         params: &[("city_id", ArgType::Integer), ("x", ArgType::Integer), ("y", ArgType::Integer)],
         required: &["city_id", "x", "y"],
+    },
+    // Package 1c-06 (tools.py:998-1033, 1047-1052).
+    ToolArgs {
+        tool: "city_state_action",
+        params: &[
+            ("player_id", ArgType::Integer),
+            ("action", ArgType::String),
+            ("amount", ArgType::Integer),
+            ("unit_id", ArgType::Integer),
+        ],
+        required: &["player_id", "action"],
     },
     ToolArgs {
         tool: "city_status",
@@ -253,6 +264,7 @@ pub static TOOLS: &[ToolArgs] = &[
         params: &[("city_id", ArgType::Integer), ("specialists", ArgType::Object)],
         required: &["city_id", "specialists"],
     },
+    ToolArgs { tool: "stage_coup", params: &[("spy", ArgType::String)], required: &["spy"] },
     ToolArgs {
         tool: "unit_action",
         params: &[

@@ -6,14 +6,14 @@
 //! boost.
 //!
 //! What waits for the packages that port the rest, each marked where it happens: the one-time
-//! triggers of founding and of a building (1b-08), and clearing a barbarian camp in the new
-//! borders (1c-06). The settler's action that founds a city is `game::actions`' (1c-04), through
-//! [`found_city_by`].
+//! triggers of founding and of a building (1b-08). A barbarian camp in the new borders goes
+//! (`barbarians::remove_camp`). The settler's action that founds a city is `game::actions`'
+//! (1c-04), through [`found_city_by`].
 
 use super::super::Game;
 use super::super::derive::rev::{CityTouch, PlayerTouch};
 use super::super::error::{ActionError, ErrCode};
-use super::super::{Porting, pending, triggers};
+use super::super::triggers;
 use super::stats::max_health;
 use crate::base::ids::{BuildingId, CityId, PlayerId, TileIdx};
 use crate::game::core::has_type;
@@ -221,8 +221,10 @@ pub fn found_city_by(
         if nt.city().is_some() || nt.owner().is_some_and(|o| o != p) {
             continue;
         }
-        // barbarians.remove_camp on a camp in the new borders (cities.py:2156-2158).
-        pending(Porting::Pending("1c-06"));
+        // A camp in the new borders goes (cities.py:2156-2158).
+        if crate::game::barbarians::is_camp_tile(g, n) {
+            crate::game::barbarians::remove_camp(g, n);
+        }
         g.set_tile_owner(n, TileClaim::city(p, id)).map_err(refused)?;
     }
     let era = &r.eras()[g.state().config().starting_era];

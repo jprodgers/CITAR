@@ -9,7 +9,8 @@ publish.workspace = true
 
 [dependencies]
 # test-ops: Game::step_unit_for_test, a unit's step (package 1c-01), Game::settle_for_bench, the
-# settle with nothing pending (package 1b-06), and jobs::rebuild_for_bench (package 1c-04).
+# settle with nothing pending (package 1b-06, and the barbarian round's settle, 1c-06), and
+# jobs::rebuild_for_bench (package 1c-04).
 citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
 # The synthetic states the save and digest benchmarks time.
 citar-testkit.workspace = true
@@ -87,6 +88,12 @@ harness = false
 # 200 us (report-only), failing above three times.
 [[bench]]
 name = "jobs"
+harness = false
+
+# A barbarian round (package 1c-06): stage S0 on a small map with raging barbarians at 2 ms
+# (report-only: the run warns above it).
+[[bench]]
+name = "barbarians"
 harness = false
 
 [lints]

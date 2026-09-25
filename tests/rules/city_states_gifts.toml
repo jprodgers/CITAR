@@ -1,0 +1,95 @@
+about = """
+A civilization buys influence with a city-state with gifts: gold (250 gold buys 25 influence at the
+start of a standard game, less later on), or a military unit standing in the city-state's land (5
+influence; the unit changes hands). Civilians, units elsewhere, and gifts to an enemy are refused.
+"""
+from = "citar/engine/city_states.py: gift_gold, influence_from_gold, gift_unit; citar/engine/tools.py: city_state_action"
+
+[config]
+city_states = 1
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 2, at = "CS" },
+  { op = "meet", a = 0, b = 2 },
+  { op = "set_player", player = 0, gold = 1000 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "CS>e" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "CS>w" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e" },
+]
+as = "made"
+
+[[step]]
+set = { warrior = "=made[4].unit_ids[0]", worker = "=made[5].unit_ids[0]", home = "=made[6].unit_ids[0]" }
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "gift_gold", amount = 250 }
+as = "gift"
+
+[[step]]
+check = "gift"
+subset = { gold = 250, influence_gained = 25, influence = 25.0 }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 750
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "gift_gold", amount = 5000 }
+error = "You only have 750 gold."
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "gift_gold" }
+error = "Give an amount of gold."
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 0, action = "gift_gold", amount = 100 }
+error = "Player 0 is not a city-state."
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "bribe" }
+error = "action must be gift_gold, gift_unit, pledge, withdraw, tribute_gold, tribute_worker, make_peace or marry."
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "gift_unit", unit_id = "=worker" }
+error = "City-states only accept military units (or units your civilization may gift)."
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "gift_unit", unit_id = "=home" }
+error = "Move the unit into a city-state's territory to gift it."
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "gift_unit", unit_id = "=warrior" }
+as = "given"
+
+[[step]]
+check = "given"
+subset = { gifted = "Warrior", influence_gained = 5 }
+
+[[step]]
+check = { what = "unit", unit = "=warrior" }
+subset = { owner = 2 }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "influence.0"
+eq = 30
+
+[[step]]
+op = "set_relation"
+args = { a = 0, b = 2, state = "war" }
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "gift_gold", amount = 100 }
+error = "You cannot give gifts to a city-state you are at war with."

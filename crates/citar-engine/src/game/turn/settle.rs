@@ -196,9 +196,14 @@ mod tests {
         assert!(g.pending.is_empty() && g.fx.is_empty());
         assert!(g.has_met(PlayerId(0), PlayerId(1)) && g.has_met(PlayerId(0), PlayerId(2)));
         let texts: Vec<_> = g.chronicle().events().iter().map(|e| &*e.text).collect();
+        // Meeting the city-state brings its greeting first (`game.py:700-702`).
         assert_eq!(
             texts,
-            ["Rome and Greece have made contact.", "Rome and Geneva have made contact."]
+            [
+                "Rome and Greece have made contact.",
+                "Geneva gave you 30 gold as a token of goodwill.",
+                "Rome and Geneva have made contact."
+            ]
         );
         assert_eq!(g.take_violations(), []);
     }

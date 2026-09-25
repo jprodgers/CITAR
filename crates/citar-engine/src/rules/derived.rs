@@ -45,6 +45,10 @@ const SCOUT: &str = "Scout";
 /// The great people an AI takes free, most wanted first (`great_people.py:214`).
 const PREFERRED_GREAT_PEOPLE: [&str; 5] =
     ["Great Scientist", "Great Engineer", "Great Merchant", "Great Artist", "Great Prophet"];
+/// The buildings a city-state builds first, when it can afford their upkeep, most wanted first
+/// (`city_states.py:1252`).
+const CITY_STATE_BUILDS: [&str; 8] =
+    ["Walls", "Monument", "Granary", "Shrine", "Library", "Castle", "Temple", "Market"];
 
 // The terrains and resources map generation names (`mapgen.py:551-1660`).
 const OCEAN: &str = "Ocean";
@@ -125,6 +129,9 @@ pub struct Known {
     /// The Scout unit type (`automation.py:178`): an explorer of this type keeps out of danger
     /// whatever its health, as a civilian does.
     pub scout: Option<UnitTypeId>,
+    /// The buildings a city-state builds first, most wanted first, those the ruleset has
+    /// (`city_states.take_turn`, `city_states.py:1252`).
+    pub city_state_builds: [Option<BuildingId>; 8],
     /// The terrains and resources map generation names.
     pub map: KnownMap,
 }
@@ -250,6 +257,7 @@ impl Derived {
                 settler: None,
                 preferred_great_people: [None; 5],
                 scout: None,
+                city_state_builds: [None; 8],
                 map: KnownMap::default(),
             },
             moves: MoveRules::default(),
@@ -383,6 +391,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         preferred_great_people: PREFERRED_GREAT_PEOPLE
             .map(|name| r.base_units.iter().find(|(_, u)| &*u.name == name).map(|(id, _)| id)),
         scout: r.unit_types.iter().find(|(_, t)| &*t.name == SCOUT).map(|(id, _)| id),
+        city_state_builds: CITY_STATE_BUILDS
+            .map(|name| r.buildings.iter().find(|(_, b)| &*b.name == name).map(|(id, _)| id)),
         map: known_map(r),
     };
 

@@ -8,15 +8,15 @@
 //! ([`within_order`]).
 //!
 //! Foreign units that may not stay in the new territory are moved out
-//! (`movement::teleport_to_closest`). What waits for another package, marked where it happens: a
-//! barbarian camp on a claimed tile is destroyed (1c-06).
+//! (`movement::teleport_to_closest`), and a barbarian camp on a claimed tile goes
+//! (`barbarians::remove_camp`).
 
 use serde_json::json;
 
+use super::super::Game;
 use super::super::action::{OutcomeSpec, Rule};
 use super::super::derive::rev::{CityTouch, PlayerTouch};
 use super::super::error::ActionError;
-use super::super::{Game, Porting, pending};
 use super::citizens::{own_city, tile_at};
 use super::stats::work_range;
 use crate::base::hex::Cube;
@@ -176,8 +176,7 @@ pub fn take_ownership(g: &mut Game, c: CityId, t: TileIdx) {
     }
     let camp = g.rules().derived().known.barbarian_camp;
     if camp.is_some() && tile.improvement() == camp {
-        // barbarians.remove_camp (cities.py:1019-1021).
-        pending(Porting::Pending("1c-06"));
+        crate::game::barbarians::remove_camp(g, t);
     }
     if let Err(e) = g.set_tile_owner(t, TileClaim::city(owner, c)) {
         debug_assert!(false, "a tile of the map could not be claimed: {e}");

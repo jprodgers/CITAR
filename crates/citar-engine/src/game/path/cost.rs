@@ -256,6 +256,31 @@ pub(crate) fn route_at(
     own
 }
 
+/// Whether a tile has a road or railroad `p` may use, outside a search (`movement.has_connection`,
+/// `movement.py:302-309`): a route ([`route_at`]), or its own forest or jungle (the top feature
+/// but a hill, as [`Mover::connected`] reads it) when `Forests and Jungles are roads` counts them.
+/// The route quest and the combat bonus of a connected tile read it, so movement, combat and the
+/// quests agree on which tiles are connected.
+pub(crate) fn has_connection(
+    g: &crate::game::Game,
+    p: crate::base::ids::PlayerId,
+    t: TileIdx,
+) -> bool {
+    let rules = &g.rules().derived().moves;
+    if route_at(g, rules, t).is_some() {
+        return true;
+    }
+    let Some(tile) = g.tile(t) else { return false };
+    tile.owner() == Some(p)
+        && top_non_hill(tile, rules.hill)
+            .is_some_and(|f| Some(f) == rules.forest || Some(f) == rules.jungle)
+        && crate::game::diplomacy::relations::civ_has(
+            g,
+            p,
+            crate::unique::UniqueType::ForestsAndJunglesAreRoads,
+        )
+}
+
 /// Whether a river runs along the edge between two neighbours (`movement.river_between`,
 /// `movement.py:277-285`): both tiles have rivers, and `a`'s lies on the edge toward `b`.
 #[must_use]

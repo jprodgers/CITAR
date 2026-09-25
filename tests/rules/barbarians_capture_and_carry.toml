@@ -1,0 +1,66 @@
+about = """
+A barbarian takes a civilian it reaches, and the captive walks to the nearest barbarian camp.
+"""
+from = "tests/test_barbarians.py::CivilianCaptureTests::test_capture_and_carry_to_camp"
+
+[config]
+barbarians = "normal"
+barbarian_aggression = 85
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "(5,3)" },
+]
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "(6,2)" }
+as = "raider"
+
+[[step]]
+set = { b = "=raider.unit_id" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 200 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=b" }
+
+[[step]]
+op = "barbarian_act"
+args = { unit = "=b" }
+
+[[step]]
+check = { what = "units", player = 0 }
+len = 0
+
+[[step]]
+check = { what = "units", player = 2 }
+path = "[type=Worker]"
+subset = { owner = 2 }
+as = "captive"
+
+[[step]]
+note = "A camp four tiles off: the captive heads there."
+op = "create_camp"
+args = { at = "(10,3)" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=captive.id" }
+
+[[step]]
+op = "barbarian_act"
+args = { unit = "=captive.id" }
+
+[[step]]
+check = { what = "unit", unit = "=captive.id" }
+subset = { owner = 2 }
+as = "moved"
+
+[[step]]
+check = { what = "find_tiles", at = "(10,3)", radius = 3 }
+any = { subset = { x = "=moved.x", y = "=moved.y" } }
