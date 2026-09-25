@@ -399,10 +399,11 @@ def _arith(a, b, op: str):
         raise ScriptError(f"cannot compute {show(a)} {op} {show(b)}")
     if op in ("/", "//", "%") and b == 0:
         raise ScriptError("division by zero")
+    ops = {"+": lambda x, y: x + y, "-": lambda x, y: x - y, "*": lambda x, y: x * y, "/": lambda x, y: x / y,
+           "//": lambda x, y: x // y, "%": lambda x, y: x % y}
     if isinstance(a, int) and isinstance(b, int) and op != "/":
-        return {"+": a + b, "-": a - b, "*": a * b, "//": a // b, "%": a % b}[op]
-    a, b = float(a), float(b)
-    return {"+": a + b, "-": a - b, "*": a * b, "/": a / b, "//": a // b, "%": a % b}[op]
+        return ops[op](a, b)
+    return ops[op](float(a), float(b))
 
 
 # ------------------------------------------------------------------------------------------------ tiles
