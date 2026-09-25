@@ -30,5 +30,6 @@ mod engine {
     mod units;
     mod victory;
     mod vis;
+    mod whole_game;
     mod workers;
 }
