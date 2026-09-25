@@ -21,6 +21,8 @@
 //!   step costs.
 //! - [`combat_previews`] (package 1c-03): sampled fights' strengths, modifiers and damage, the
 //!   preview, and aircraft's interceptors.
+//! - [`deal_checks`] (package 1c-05): sampled proposals, whether each side can give its items,
+//!   how they read, and the research agreement's cost.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -40,6 +42,7 @@ pub mod buildable;
 pub mod city_stats;
 pub mod civs;
 pub mod combat_previews;
+pub mod deal_checks;
 pub mod fixed_point;
 pub mod movement;
 pub mod state_echo;
@@ -116,6 +119,7 @@ static MODULES: &[&dyn AnswerModule] = &[
     &movement::Movement,
     &visible::Visible,
     &combat_previews::CombatPreviews,
+    &deal_checks::DealChecks,
 ];
 
 /// The answers of the Rust engine.

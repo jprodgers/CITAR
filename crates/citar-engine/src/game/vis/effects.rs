@@ -483,7 +483,6 @@ impl Game {
     /// Marks tiles explored for `p`, as a map trade, a ruin or an embassy does
     /// (`visibility.reveal_tiles`, `visibility.py:232-243`); a major remembers those it does not
     /// see as they look now. Returns how many were not explored before.
-    #[allow(dead_code, reason = "map trades, ruins and embassies call it from 1b-08 and 1c-05")]
     pub(crate) fn reveal_tiles(&mut self, p: PlayerId, tiles: &[TileIdx]) -> u32 {
         self.sync_sight();
         let Some(pl) = self.player(p) else { return 0 };

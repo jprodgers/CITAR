@@ -377,6 +377,19 @@ impl Game {
         self.st.ids_mut().next_combat()
     }
 
+    // ---- Diplomacy --------------------------------------------------------------------------
+
+    /// The id of the next deal, counted: persisted and digested, and read by no cache. `None`
+    /// once `u32` is spent.
+    pub(crate) fn next_deal_id(&mut self) -> Option<crate::base::ids::DealId> {
+        self.st.ids_mut().next_deal()
+    }
+
+    /// The id of the next negotiation, counted, as [`Game::next_deal_id`].
+    pub(crate) fn next_negotiation_id(&mut self) -> Option<crate::base::ids::NegotiationId> {
+        self.st.ids_mut().next_negotiation()
+    }
+
     // ---- Players ----------------------------------------------------------------------------
 
     /// Eliminates a player that holds no cities (`victory.py:380-392`).

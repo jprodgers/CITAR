@@ -14,9 +14,10 @@
 
 use citar_engine::api::{ErrCode, inspect, testops};
 use citar_engine::base::ids::{NationId, NegotiationId, PlayerId, TechId};
+use citar_engine::game::diplomacy::actions::EndTurn;
 use citar_engine::game::setup::config_from_value;
 use citar_engine::game::{
-    DebugOptions, DriveOptions, DriverOutcome, Drivers, EngineError, Game, SeatDriver, Stop,
+    Action, DebugOptions, DriveOptions, DriverOutcome, Drivers, EngineError, Game, SeatDriver, Stop,
 };
 use citar_engine::rules::Ruleset;
 use citar_engine::save::chain::DigestChain;
@@ -429,6 +430,8 @@ impl SeatDriver for Ender {
                 g.end_turn(pid).map(|_| ()),
                 g.force_turn(other).map(|_| ()),
                 g.drive(&mut Drivers::none(n), DriveOptions::default()).map(|_| ()),
+                // The `end_turn` tool too (package 1c-05).
+                g.act(pid, Action::EndTurn(EndTurn {})).map(|_| ()),
             ];
             for r in refusals {
                 let e = r.expect_err("drive ends a driver's turn");
@@ -467,7 +470,7 @@ fn a_driver_does_not_end_its_own_turn_so_the_chain_is_the_same_whoever_asks() {
         assert_eq!(stop, Stop::GameOver);
         clean(&mut g);
         let refused = x.refused + y.refused;
-        assert_eq!(refused, if ends { 3 * (x.turns + y.turns) } else { 0 });
+        assert_eq!(refused, if ends { 4 * (x.turns + y.turns) } else { 0 });
         (g.chain().copied(), g.digest().ok(), g.turn(), x.turns + y.turns)
     };
     let quiet = play(false);

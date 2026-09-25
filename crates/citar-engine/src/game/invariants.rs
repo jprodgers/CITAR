@@ -24,7 +24,8 @@ use crate::state::diplo::NegStatus;
 /// An invariant of DESIGN.md 9.4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Code {
-    /// Ids are unique and every live id is below its counter.
+    /// Ids are unique and every live id is below its counter; deals and negotiations are kept in
+    /// ascending id order.
     Id1,
     /// The occupancy and owner indexes match the units; carried units share their carrier's tile.
     Occ1,
@@ -169,15 +170,12 @@ fn ids(g: &Game, out: &mut Out) {
             out.push(Code::Id1, format!("city {} is not stored under its id", c.id()));
         }
     }
-    let unique = |mut v: Vec<u32>| {
-        v.sort();
-        v.windows(2).all(|w| w[0] != w[1])
-    };
-    if !unique(st.diplo().deals.iter().map(|d| d.id.get()).collect()) {
-        out.push(Code::Id1, "two deals share an id".to_owned());
+    // Ascending, so no two share an id and a lookup may search them.
+    if !st.diplo().deals.windows(2).all(|w| w[0].id < w[1].id) {
+        out.push(Code::Id1, "the deals are not in ascending id order".to_owned());
     }
-    if !unique(st.diplo().negotiations.iter().map(|n| n.id.get()).collect()) {
-        out.push(Code::Id1, "two negotiations share an id".to_owned());
+    if !st.diplo().negotiations.windows(2).all(|w| w[0].id < w[1].id) {
+        out.push(Code::Id1, "the negotiations are not in ascending id order".to_owned());
     }
     let next_event = st.host().next_event_id;
     if let Some(e) = g.chron.events().last()

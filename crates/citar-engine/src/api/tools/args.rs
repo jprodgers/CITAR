@@ -8,7 +8,8 @@
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
 //! the coercion; package 1b-06 adds the citizen tools, package 1b-07 the tools of production,
 //! purchases, research and policies, package 1b-08 `found_pantheon` and `choose_great_person`,
-//! package 1c-02 the unit tools, and package 1c-03 the tools of combat and conquest.
+//! package 1c-02 the unit tools, package 1c-03 the tools of combat and conquest, and package
+//! 1c-05 those of diplomacy and espionage, with `end_turn`.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -129,20 +130,48 @@ pub static TOOLS: &[ToolArgs] = &[
         params: &[("city_id", ArgType::Integer), ("status", ArgType::String)],
         required: &["city_id", "status"],
     },
+    // Package 1c-05 (tools.py:931-995, 1037-1044, 1092-1109).
+    ToolArgs {
+        tool: "declare_war",
+        params: &[("player_id", ArgType::Integer), ("message", ArgType::String)],
+        required: &["player_id"],
+    },
+    ToolArgs {
+        tool: "denounce",
+        params: &[("player_id", ArgType::Integer)],
+        required: &["player_id"],
+    },
     ToolArgs {
         tool: "dequeue_research",
         params: &[("tech", ArgType::String)],
         required: &["tech"],
     },
+    ToolArgs { tool: "end_turn", params: &[], required: &[] },
     ToolArgs {
         tool: "found_pantheon",
         params: &[("belief", ArgType::String)],
         required: &["belief"],
     },
+    // `city_id` is an integer or a string ("hideout"), which no coercion touches.
+    ToolArgs {
+        tool: "move_spy",
+        params: &[("spy", ArgType::String), ("city_id", ArgType::Any)],
+        required: &["spy", "city_id"],
+    },
     ToolArgs {
         tool: "move_unit",
         params: &[("unit_id", ArgType::Integer), ("x", ArgType::Integer), ("y", ArgType::Integer)],
         required: &["unit_id", "x", "y"],
+    },
+    ToolArgs {
+        tool: "open_negotiation",
+        params: &[
+            ("to", ArgType::Integer),
+            ("message", ArgType::String),
+            ("give", ArgType::Array),
+            ("receive", ArgType::Array),
+        ],
+        required: &["to", "message"],
     },
     ToolArgs {
         tool: "promote_unit",
@@ -154,10 +183,29 @@ pub static TOOLS: &[ToolArgs] = &[
         params: &[("city_id", ArgType::Integer), ("name", ArgType::String)],
         required: &["city_id", "name"],
     },
+    // `message` is not required on purpose: the engine's refusal names the negotiation, which
+    // the missing-parameter refusal cannot (tools.py:971-973).
+    ToolArgs {
+        tool: "respond_negotiation",
+        params: &[
+            ("negotiation_id", ArgType::Integer),
+            ("action", ArgType::String),
+            ("message", ArgType::String),
+            ("give", ArgType::Array),
+            ("receive", ArgType::Array),
+        ],
+        required: &["negotiation_id", "action"],
+    },
     ToolArgs {
         tool: "return_civilian",
         params: &[("unit_id", ArgType::Integer), ("keep", ArgType::Boolean)],
         required: &["unit_id"],
+    },
+    // `to` is a player id, a list of them or "all", which no coercion touches.
+    ToolArgs {
+        tool: "send_message",
+        params: &[("to", ArgType::Any), ("text", ArgType::String)],
+        required: &["to", "text"],
     },
     ToolArgs {
         tool: "set_auto_production",

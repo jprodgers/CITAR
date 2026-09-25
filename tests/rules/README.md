@@ -257,11 +257,13 @@ same from both engines, and every set in it is sorted.
 | `religion` | `player` | `state` (`none`, `pantheon`, `religion`, `enhanced`), `religion` (its pantheon's belief or its religion's name, or null), `display` (the name it is shown under), `beliefs` (sorted), `free_beliefs` (count by kind, those it has), `pantheon_cost` and `prophet_cost` (the faith its next pantheon and great prophet cost), `prophets_earned`, `holy_city` (id or null) |
 | `religion` | `city` | `majority` (a religion's name, or null), `followers` (count by religion), `pressures` (by religion, `None` for no religion), `holy_city_of` (a religion's name, or null) |
 | `great_people` | `player` | `points` (great person points by great person), `free` (free great people to choose), `earned`, `golden_age_points`, `golden_ages`, `golden_age_turns`, `golden_age_needed` (the happiness the next golden age needs), `temp_uniques` (each unique held for some turns: `text`, the timed unique's, and `turns` left) |
+| `negotiation` | `negotiation` (an id); optionally `player` | as kept: `id`, `initiator`, `responder`, `turn`, `status` (`open`, `accepted`, `rejected`, `expired`, `cancelled`), `awaiting` (an id or null), `proposal` (what each side gives, by player id, as deal items, or null), `proposal_by`, `history` (each entry's `seq`, `by` (an id, or null for the game), `action` (`open`, `reply`, `counter`, `accept`, `reject`, `close`), `message`, `proposal`, `turn`, `note` (or null)), `deal_id`. With `player`, as that player sees it (`diplomacy.negotiation_view`): `id`, `with`, `with_name`, `status`, `you_initiated`, `your_move`, `turn`, `messages` (entries but the game's close), `max_messages`, `current_proposal` (`you_give`, `you_receive`, `summary`, or null), `proposal_by_you`, `history` (`seq`, `by` (a name or null), `you`, `action`, `message`, `proposal`, and `note` where there is one) |
+| `spies` | `player` | the civilization's spies in order: `name`, `rank`, `city` (an id, or null at the hideout), `action` (`None`, `Moving`, `Establishing Network`, `Observing City`, `Stealing Tech`, `Rigging Elections`, `Coup`, `Counter-intelligence`, `Dead`), `turns`, `progress` |
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
 | `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |
 | `ops` | | `scenario` and `test`: each operation with its `params` |
 | `pending` | | what the Rust engine has not ported yet: `kind` (`inspect`, `scenario_op`, `test_op`, `turn_stage`, `setup_stage`), `name`, `package` (Python: nothing). A turn stage is named by its table and stage, `player_start S2: research progress` |
-| `negotiation`, `view`, `briefing` | | not yet: they come with packages 1c-05, 1d-02 and 1d-03, and the Rust engine refuses them as not ported until then |
+| `view`, `briefing` | | not yet: they come with packages 1d-02 and 1d-03, and the Rust engine refuses them as not ported until then |
 
 `find_tiles` filters: `x` and `y` (or `at`), the place distances are counted from; `radius`, the
 farthest a tile may be; `terrain`, `feature`, `resource`, `improvement`, names the tile must have;
@@ -292,9 +294,12 @@ What a script does that no player or editor may. `{ what = "ops" }` lists them.
 | `enter_ruins` | `unit` | the unit explores the ancient ruins it stands on, as moving onto them does (`ruins.enter`). Refused where there are none. Gives `found` (whether a reward was) |
 | `attack_as` | `unit`, `x`, `y` (or `at`) | the unit attacks the tile as the `attack` tool would, whoever's turn it is: a nuclear weapon detonates, an aircraft strikes, anything else attacks. Gives what the attack reports |
 | `capture_civilian` | `unit`, or `player` (the barbarians included); `x`, `y` (or `at`) | the unit's owner, or the player, takes the civilian on the tile, as a unit moving onto it would: a settler becomes a worker, a great person or religious unit is destroyed, one taken back from the barbarians comes with an offer to return it. Gives `unit`, the captured unit's new id, or null |
+| `add_spy` | `player` (a major civilization) | a new spy in its hideout, at its starting rank, whether or not espionage is on (`espionage.add_spy`). Gives `spy`, its name |
+| `close_negotiation` | `negotiation`, `status` (`rejected`, `expired` or `cancelled`), `note`; optionally `by` (the player it is closed for) | closes an open negotiation from outside it, as a host's timeout does (`diplomacy.close_negotiation`): its history ends with a close entry and the note, and both sides are told. Gives the negotiation as `inspect` does |
+| `open_negotiation_as` | `player`, `to`, `message`; optionally `give`, `receive` (deal items) | opens a negotiation for a player whether or not it is its turn (`EngineGame.open_negotiation_as`). Gives what `open_negotiation` does |
 
-The rest land with their systems: `automate` and `progress_builds` (1c-04), `add_spy`,
-`close_negotiation` and `open_negotiation_as` (1c-05), `barbarian_act` and `sack_city` (1c-06).
+The rest land with their systems: `automate` and `progress_builds` (1c-04), `barbarian_act` and
+`sack_city` (1c-06).
 
 ## Maps
 

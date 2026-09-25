@@ -1,13 +1,15 @@
-//! War and peace, pacts, embassies and opinions between two players (`diplomacy.py:60-296`).
+//! War and peace, pacts, embassies, denouncements and opinions between two players
+//! (`diplomacy.py:60-296`).
 //!
-//! Package 1b-02 ports what a scenario's `set_relation` needs: the reads (`diplomacy.py:84-125`),
+//! Package 1b-02 ported what a scenario's `set_relation` needs: the reads (`diplomacy.py:84-125`),
 //! opinions (`diplomacy.py:76-96`), and war and peace with the consequences that belong to the
 //! relation itself (`set_war`, `diplomacy.py:171-237`; `make_peace`, `diplomacy.py:240-264`):
 //! the treaty terms, lapsed deals, open borders and pacts, betrayal and warmonger opinions,
-//! defensive pacts and city-state allies drawn in, and the peace treaty. The consequences that
-//! belong to other systems are marked where Python had them: open negotiations are cancelled
-//! (package 1c-05), a city-state attacked or protected reacts (1c-06), units in a new friend's
-//! land go home, and the war and peace triggers fire (1b-08).
+//! defensive pacts and city-state allies drawn in, and the peace treaty. Package 1c-05 adds
+//! declaring war as a player does (`can_declare_war` and `declare_war`, `diplomacy.py:134-168`),
+//! denouncing (`diplomacy.py:283-300`), peace with a city-state (`diplomacy.py:267-280`), the
+//! embassy requirement (`diplomacy.py:103-110`), and the negotiations a war cancels. The
+//! consequences that belong to the city-states are marked where Python had them (1c-06).
 //!
 //! A write the state refuses (two ids that are no pair, a city-state that is none) is an engine
 //! bug. The rules return it rather than stop quietly halfway, so a scenario operation reports it
@@ -17,15 +19,20 @@
 //! reason keeps. Python kept it under a key (`"a>b"`) that `opinion()` never read, so a scenario
 //! could not move what a bot thought (refcheck: scenario-opinion-counts).
 
+use serde_json::{Value, json};
+
 use crate::base::ids::PlayerId;
+use crate::base::text::truncate_chars;
 use crate::game::city_states::influence::{add_influence, set_influence};
 use crate::game::derive::rev::DiploTouch;
+use crate::game::error::ActionError;
 use crate::game::{Game, Porting, pending, triggers};
 use crate::state::StateError;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::diplo::{OPINION_LIMIT, OpinionKey, PairError, side};
 use crate::state::players::Player;
 use crate::unique::trigger::{TriggerEvent, TriggerSite};
+use crate::unique::{Ctx, UniqueType, uq};
 
 /// Why a war began, which decides what it drags in (`set_war`'s `reason`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -38,6 +45,8 @@ pub enum WarReason {
     CityStateAlliance,
     /// A scenario set it.
     Scenario,
+    /// A deal's `declare_war` item: the giver joins a war it agreed to (Python's `"join"`).
+    Deal,
 }
 
 /// Whether a defensive pact between `a` and `b` is in force: not expired, and not at war with
@@ -160,8 +169,8 @@ pub fn set_war(
             }
         }
     }
-    // Open negotiations between the two are cancelled (diplomacy.close_negotiation).
-    pending(Porting::Pending("1c-05"));
+    // Open negotiations between the two are cancelled (diplomacy.py:212-214).
+    super::negotiation::cancel_between(g, a, b);
     for (side_p, other) in [(a, b), (b, a)] {
         if !g.player(side_p).is_some_and(Player::is_major) {
             continue;
@@ -249,7 +258,178 @@ pub fn make_peace(g: &mut Game, a: PlayerId, b: PlayerId) -> Result<(), StateErr
     Ok(())
 }
 
+/// Whether `by` has denounced `target`, and the denunciation still stands
+/// (`diplomacy.py:125-128`).
+#[must_use]
+pub fn denounced(g: &Game, by: PlayerId, target: PlayerId) -> bool {
+    g.relation(by, target).is_some_and(|r| r.denounced_until[side(by, target)] >= g.turn())
+}
+
+/// Whether each has an embassy with the other (`diplomacy.py:103-105`).
+#[must_use]
+pub fn shared_embassies(g: &Game, a: PlayerId, b: PlayerId) -> bool {
+    has_embassy(g, a, b) && has_embassy(g, b, a)
+}
+
+/// Whether a civilization-wide unique of this type holds for `p` (`Game.civ_has`).
+pub(crate) fn civ_has(g: &Game, p: PlayerId, ty: UniqueType) -> bool {
+    let v = g.view();
+    uq::any(uq::civ(&v, p, ty, &Ctx::civ(p)))
+}
+
+/// Whether diplomacy is open to `a` with `b`: a civilization that needs embassies first has them
+/// both ways (`meets_embassy_requirement`, `diplomacy.py:108-110`).
+#[must_use]
+pub fn meets_embassy_requirement(g: &Game, a: PlayerId, b: PlayerId) -> bool {
+    !civ_has(g, a, UniqueType::RequiresEmbassiesForDiplomacy) || shared_embassies(g, a, b)
+}
+
+/// Why `pid` cannot declare war on `target`, or `None` if it can (`can_declare_war`,
+/// `diplomacy.py:134-146`): only on a living civilization or city-state it has met, not at war
+/// with it already, and with no peace treaty still holding.
+#[must_use]
+pub fn can_declare_war(g: &Game, pid: PlayerId, target: PlayerId) -> Option<String> {
+    let Some(tp) = g.player(target) else { return Some("Invalid target.".to_owned()) };
+    if target == pid || tp.is_barbarian() || !tp.alive() {
+        return Some("Invalid target.".to_owned());
+    }
+    if !g.has_met(pid, target) {
+        return Some(format!("You have not met {}.", tp.name));
+    }
+    let rel = g.relation(pid, target)?;
+    if rel.war {
+        return Some(format!("You are already at war with {}.", tp.name));
+    }
+    if rel.treaty_until >= g.turn() {
+        return Some(format!(
+            "Your peace treaty with {} lasts until turn {}.",
+            tp.name, rel.treaty_until
+        ));
+    }
+    None
+}
+
+/// Checks a declaration of war on the player with id `target`, as the tool gives it
+/// (`declare_war`, `diplomacy.py:149-160`).
+///
+/// # Errors
+/// An id that is no player, and [`can_declare_war`]'s refusal.
+pub fn plan_declare_war(g: &Game, pid: PlayerId, target: i64) -> Result<PlayerId, ActionError> {
+    let target = u8::try_from(target)
+        .ok()
+        .map(PlayerId)
+        .filter(|&t| g.player(t).is_some())
+        .ok_or_else(|| ActionError::rule("Invalid target."))?;
+    match can_declare_war(g, pid, target) {
+        Some(why) => Err(ActionError::rule(why)),
+        None => Ok(target),
+    }
+}
+
+/// `pid` declares war on `target`, which [`plan_declare_war`] allowed, with everything that
+/// follows (`declare_war`, `diplomacy.py:149-168`): the war itself, then the declaration, with
+/// what the declarer had to say, which the target also receives as a message.
+pub fn declare_war(g: &mut Game, pid: PlayerId, target: PlayerId, message: Option<&str>) -> Value {
+    let war = set_war(g, pid, target, WarReason::Direct);
+    debug_assert!(war.is_ok(), "two players of the game go to war: {war:?}");
+    let mut text = format!("{} declared war on {}!", name(g, pid), name(g, target));
+    if let Some(m) = message.filter(|m| !m.is_empty()) {
+        text.push_str(&format!(" \"{}\"", truncate_chars(m, 300)));
+        super::negotiation::add_message(g, pid, &[target], m);
+    }
+    let data = EventData { attacker: Some(pid), defender: Some(target), ..EventData::default() };
+    g.emit(EngineEvent::WarDeclared, &text, None, None, data, &[]);
+    json!({"war_declared_on": name(g, target)})
+}
+
+/// Checks that `pid` may denounce the player with id `target` (`denounce`,
+/// `diplomacy.py:283-292`): a major civilization it has met, at peace with it, and not
+/// denounced already. Python's `g.player` raised on an id that is no player; it is refused here
+/// like any other.
+///
+/// # Errors
+/// Why it may not.
+pub fn plan_denounce(g: &Game, pid: PlayerId, target: i64) -> Result<PlayerId, ActionError> {
+    let target = u8::try_from(target)
+        .ok()
+        .map(PlayerId)
+        .filter(|&t| g.player(t).is_some_and(Player::is_major) && t != pid && g.has_met(pid, t))
+        .ok_or_else(|| ActionError::rule("You can only denounce civilizations you have met."))?;
+    if g.relation(pid, target).is_some_and(|r| r.war) {
+        return Err(ActionError::rule("You are at war with them already."));
+    }
+    if denounced(g, pid, target) {
+        return Err(ActionError::rule(format!("You have already denounced {}.", name(g, target))));
+    }
+    Ok(target)
+}
+
+/// `pid` denounces `target` for thirty turns, which ends their friendship; `target` thinks less
+/// of `pid`, as does everyone who counts `target` a friend (`denounce`, `diplomacy.py:293-300`).
+pub fn denounce(g: &mut Game, pid: PlayerId, target: PlayerId) -> Value {
+    let until = g.turn() + 30;
+    let set = g.update_relation(pid, target, |r| {
+        r.denounced_until[side(pid, target)] = until;
+        r.friendship_until = 0;
+    });
+    debug_assert!(set.is_ok(), "two players of the game: {set:?}");
+    add_opinion(g, target, pid, OpinionKey::Denounced, -35.0);
+    let others =
+        players_where(g, |p| p.is_major() && p.alive() && p.id() != pid && p.id() != target);
+    for q in others {
+        if is_friends(g, q, target) {
+            add_opinion(g, q, pid, OpinionKey::DenouncedFriend, -15.0);
+        }
+    }
+    let text = format!("{} denounced {}!", name(g, pid), name(g, target));
+    let data = EventData { a: Some(pid), b: Some(target), ..EventData::default() };
+    g.emit(EngineEvent::Denounce, &text, None, None, data, &[]);
+    json!({"denounced": name(g, target)})
+}
+
+/// Checks that a major may make peace with city-state `cs` directly, as UnCiv lets it
+/// (`make_peace_with_city_state`, `diplomacy.py:267-278`): at war with it, not while its ally
+/// fights the major, and not before the shortest war is over. The `city_state_action` tool
+/// (package 1c-06) reads it.
+///
+/// # Errors
+/// Why it may not.
+pub fn plan_peace_with_city_state(
+    g: &Game,
+    pid: PlayerId,
+    cs: PlayerId,
+) -> Result<(), ActionError> {
+    let Some(data) = g.player(cs).and_then(|p| p.city_state.as_deref()) else {
+        return Err(ActionError::rule("That is not a city-state."));
+    };
+    if !g.at_war(pid, cs) {
+        return Err(ActionError::rule("You are not at war with them."));
+    }
+    if let Some(al) = data.ally()
+        && g.at_war(pid, al)
+    {
+        return Err(ActionError::rule(format!(
+            "{} is allied with {}, who is at war with you.",
+            name(g, cs),
+            name(g, al)
+        )));
+    }
+    let least = g.rules().constants().formulas.minimum_war_duration;
+    if g.relation(pid, cs).is_some_and(|r| r.since + least > g.turn()) {
+        return Err(ActionError::rule(format!("Wars last at least {least} turns.")));
+    }
+    Ok(())
+}
+
+/// A major makes peace with a city-state, which [`plan_peace_with_city_state`] allowed
+/// (`diplomacy.py:279-280`).
+pub fn peace_with_city_state(g: &mut Game, pid: PlayerId, cs: PlayerId) -> Value {
+    let peace = make_peace(g, pid, cs);
+    debug_assert!(peace.is_ok(), "two players of the game make peace: {peace:?}");
+    json!({"peace": name(g, cs)})
+}
+
 /// A player's name, for messages.
-fn name(g: &Game, p: PlayerId) -> String {
+pub(crate) fn name(g: &Game, p: PlayerId) -> String {
     g.player(p).map(|x| x.name.to_string()).unwrap_or_default()
 }

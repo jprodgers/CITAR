@@ -235,6 +235,21 @@ impl Game {
         self.record(EventType::Engine(kind), text, audience, tile, data, mentions)
     }
 
+    /// Records a message between civilizations (`diplomacy.add_message`,
+    /// `diplomacy.py:306-310`): numbered after the last, as Python's position in the list was,
+    /// folded into the running hash. `None` if the ids are spent.
+    pub(crate) fn record_message(
+        &mut self,
+        from: PlayerId,
+        to: PlayerSet,
+        text: &str,
+    ) -> Option<crate::base::ids::MessageId> {
+        let id = crate::base::ids::MessageId::new(self.st.chronicle().messages.checked_add(1)?)?;
+        let turn = self.st.clock().turn;
+        let m = crate::state::chronicle::Message { id, turn, from, to, text: text.into() };
+        Record::of(&mut self.st, &mut self.chron).message(m).ok().map(|()| id)
+    }
+
     /// Records a host's event: counted in the host heads, never digested.
     pub(crate) fn emit_host_event(
         &mut self,

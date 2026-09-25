@@ -1,0 +1,44 @@
+about = """
+A negotiation is closed from outside only as rejected, expired or cancelled: any other status is
+refused, naming those three, and the negotiation stays open.
+"""
+from = "tests/test_negotiation_chat.py::CloseNegotiationTests::test_only_closed_statuses_are_allowed"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = 1, status = "accepted", note = "no" }
+error = "A negotiation closes as rejected, expired, cancelled, not 'accepted'."
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = 1, status = "open", note = "no" }
+error = "not 'open'."
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "open", awaiting = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history"
+len = 1
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = 1, status = "cancelled", note = "Called off." }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+path = "[1].text"
+eq = "Negotiation #1 between Civilization 1 and Civilization 2 was cancelled. Called off."

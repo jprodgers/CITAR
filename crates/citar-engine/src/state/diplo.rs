@@ -979,13 +979,22 @@ impl Diplomacy {
     /// A deal by id.
     #[must_use]
     pub fn deal(&self, id: DealId) -> Option<&Deal> {
-        self.deals.iter().find(|d| d.id == id)
+        // Kept in ascending id order (checked when a state is assembled, and by ID-1).
+        let i = self.deals.binary_search_by_key(&id, |d| d.id).ok()?;
+        self.deals.get(i)
     }
 
     /// A negotiation by id.
     #[must_use]
     pub fn negotiation(&self, id: NegotiationId) -> Option<&Negotiation> {
-        self.negotiations.iter().find(|n| n.id == id)
+        let i = self.negotiations.binary_search_by_key(&id, |n| n.id).ok()?;
+        self.negotiations.get(i)
+    }
+
+    /// A negotiation by id, to edit.
+    pub fn negotiation_mut(&mut self, id: NegotiationId) -> Option<&mut Negotiation> {
+        let i = self.negotiations.binary_search_by_key(&id, |n| n.id).ok()?;
+        self.negotiations.get_mut(i)
     }
 }
 

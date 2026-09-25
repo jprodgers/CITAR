@@ -12,7 +12,7 @@
 //!   reported it captured), and a fight reports a capture only when a melee unit took the
 //!   civilian (`civilians-under-fire`);
 //! - `upon being defeated` fires for the unit that dies, which Python never fired (DESIGN.md
-//!   5.9); what fires applies to its civilization once it is gone ([`kill_unit`]).
+//!   5.9); what fires applies to its civilization once it is gone (`kill_unit`).
 
 use serde_json::{Map, Value, json};
 use smallvec::SmallVec;

@@ -47,6 +47,9 @@
 //! bombardment, aircraft and nuclear weapons) and [`conquest`] (a city taken, and what its
 //! conqueror decides).
 //!
+//! Diplomacy and espionage (package 1c-05): the rest of [`diplomacy`] (deals, negotiations,
+//! messages, declaring war and denouncing) and [`espionage`] (spies and stealing technology).
+//!
 //! **Porting markers.** A step whose system a later package ports is written as
 //! `pending(Porting::Pending("<package>"))`, or `pending_or` where it must answer
 //! something meanwhile. `cargo xtask check` counts these by their literal argument and fails
@@ -63,6 +66,7 @@ pub mod derive;
 pub mod diplomacy;
 pub mod economy;
 pub mod error;
+pub mod espionage;
 pub mod eval;
 pub mod events;
 pub mod great_people;

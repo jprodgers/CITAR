@@ -5,6 +5,7 @@ mod engine {
     mod cities;
     mod combat;
     mod convert;
+    mod diplomacy;
     mod economy;
     mod eval;
     mod filters;

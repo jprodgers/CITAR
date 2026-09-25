@@ -1,0 +1,107 @@
+about = """
+Free text to one civilization met, a list of them, or all met; nothing said is binding, and a message
+may be sent out of turn. The recipients must be major civilizations met, and the text must say
+something. To all, the Rust engine writes to the civilizations met in player-id order, where Python
+kept the order they were met (intended: met-lists-in-player-id-order).
+"""
+from = "citar/engine/diplomacy.py: send_message"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+note = "Met the third before the second."
+ops = [
+  { op = "meet", a = 0, b = 2 },
+  { op = "meet", a = 0, b = 1 },
+]
+
+[[step]]
+tool = "send_message"
+args = { to = 1, text = "Hello" }
+as = "sent"
+
+[[step]]
+check = "sent"
+eq = { sent_to = "Civilization 2", message_id = 1 }
+
+[[step]]
+check = { what = "events", type = "message" }
+path = "[0]"
+subset = { text = "Civilization 1 → Civilization 2: Hello", audience = [0, 1] }
+
+[[step]]
+tool = "send_message"
+args = { to = "all", text = "Hello, all." }
+as = "all"
+
+[[step]]
+check = "all"
+path = "message_id"
+eq = 2
+
+[[step]]
+check = "all"
+path = "sent_to"
+eq = "Civilization 2, Civilization 3"
+intended = "met-lists-in-player-id-order"
+
+[[step]]
+check = { what = "events", type = "message" }
+path = "[1].audience"
+eq = [0, 1, 2]
+
+[[step]]
+tool = "send_message"
+args = { to = [2, 1], text = "In that order." }
+as = "listed"
+
+[[step]]
+check = "listed"
+eq = { sent_to = "Civilization 3, Civilization 2", message_id = 3 }
+
+[[step]]
+note = "Out of turn."
+tool = "send_message"
+player = 1
+args = { to = 0, text = "Hi back." }
+
+[[step]]
+tool = "send_message"
+args = { to = 1, text = "   " }
+error = "Message text is empty."
+
+[[step]]
+tool = "send_message"
+args = { to = 5, text = "Anyone?" }
+error = "Invalid recipient 5 (messages go to major civilizations)."
+
+[[step]]
+tool = "send_message"
+args = { to = 0, text = "Myself?" }
+error = "Invalid recipient 0 (messages go to major civilizations)."
+
+[[step]]
+tool = "send_message"
+args = { to = "everyone", text = "Anyone?" }
+error = "Invalid recipient 'everyone'. Use player ids (numbers) or 'all'."
+
+[[step]]
+op = "unmeet"
+args = { a = 1, b = 2 }
+
+[[step]]
+tool = "send_message"
+player = 1
+args = { to = [0, 2], text = "Both of you." }
+error = "You have not met Civilization 3 yet."
+
+[[step]]
+op = "unmeet"
+args = { a = 1, b = 0 }
+
+[[step]]
+tool = "send_message"
+player = 1
+args = { to = "all", text = "Anyone?" }
+error = "You have not met any other civilization yet."
