@@ -552,7 +552,8 @@ fn starting_settler(r: &Ruleset) -> Option<BaseUnitId> {
         .or_else(|| unit_named(r, SETTLER))
 }
 
-/// The objects map generation names, each where the ruleset has it as the kind generation uses.
+/// The victories Python named (`game.py:46`, `victory.py`), each where the ruleset has one by
+/// that name.
 fn known_victories(r: &Ruleset) -> KnownVictories {
     let victory = |name: &str| r.victories.iter().find(|(_, v)| &*v.name == name).map(|(id, _)| id);
     KnownVictories {
@@ -564,6 +565,7 @@ fn known_victories(r: &Ruleset) -> KnownVictories {
     }
 }
 
+/// The objects map generation names, each where the ruleset has it as the kind generation uses.
 fn known_map(r: &Ruleset) -> KnownMap {
     let terrain = |name: &str, kind: TerrainType| {
         r.terrains.iter().find(|(_, t)| &*t.name == name && t.kind == kind).map(|(id, _)| id)
