@@ -202,6 +202,30 @@ impl Filters {
         &self.cities[id]
     }
 
+    /// What asking city filter `id` of the city in context reads: its leaves' classes, and the
+    /// city's own (`CITY`) where a leaf reads the city's buildings ([`CityLeaf::reads_buildings`]).
+    /// A memo keyed by the city validates that against the city's revisions whatever it recorded;
+    /// what reads only the classes a memo recorded (the production advisor's what-if) needs it
+    /// named.
+    #[must_use]
+    pub fn city_deps_here(&self, id: CityFilterId) -> CondDeps {
+        let mut d = CondDeps::empty();
+        for l in self.cities[id].leaves() {
+            d |= l.deps();
+            if l.reads_buildings() {
+                d |= CondDeps::CITY;
+            }
+        }
+        d
+    }
+
+    /// Whether city filter `id` reads the buildings of the city it is asked of
+    /// ([`CityLeaf::reads_buildings`]).
+    #[must_use]
+    pub fn city_reads_buildings(&self, id: CityFilterId) -> bool {
+        self.cities[id].leaves().into_iter().any(CityLeaf::reads_buildings)
+    }
+
     /// A civilization filter's tree.
     #[must_use]
     pub fn civ(&self, id: CivFilterId) -> &Expr<CivLeaf> {
@@ -861,6 +885,33 @@ mod tests {
         assert!(f.gen_matches(GenFilter::new(TileFilterId(0)), &Rivers, TileIdx(0)));
         let f = one(TileLeaf::FreshWater, true);
         assert!(!f.gen_matches(GenFilter::new(TileFilterId(0)), &Rivers, TileIdx(0)));
+    }
+
+    #[test]
+    fn a_city_filter_that_reads_the_citys_buildings_names_the_city() {
+        // `in all cities with a world wonder` and `Non-occupied` read the buildings of the city
+        // they are asked of, which their classes leave out; asked of the city in context, they
+        // read the city's class. Their negations do too.
+        let wonders: crate::base::sets::BuildingSet =
+            std::iter::once(crate::base::ids::BuildingId(3)).collect();
+        let has = Expr::Leaf(CityLeaf::Has(wonders));
+        let cities = vec![
+            has.clone(),
+            Expr::Not(Box::new(has)),
+            Expr::Leaf(CityLeaf::NonOccupied),
+            Expr::Leaf(CityLeaf::Coastal),
+            Expr::Leaf(CityLeaf::Garrisoned),
+        ];
+        let f = Filters { cities: IdVec::from_vec(cities), ..Filters::default() };
+        let id = CityFilterId;
+        for i in 0..3 {
+            assert!(f.city_reads_buildings(id(i)));
+            assert!(f.city(id(i)).deps().is_empty());
+            assert_eq!(f.city_deps_here(id(i)), CondDeps::CITY);
+        }
+        assert!(!f.city_reads_buildings(id(3)));
+        assert!(f.city_deps_here(id(3)).is_empty());
+        assert_eq!(f.city_deps_here(id(4)), CondDeps::UNIT_SET);
     }
 
     #[test]

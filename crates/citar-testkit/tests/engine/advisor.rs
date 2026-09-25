@@ -453,6 +453,68 @@ mod sink {
         assert!(picked.is_some() && picked != Some(Constructible::Building(wonder)), "{picked:?}");
     }
 
+    /// Sinkhold, of four, with `building` built: a city on the arena for the what-if of the
+    /// Kitchen Sink Wonder, which `[in all cities with a world wonder]` then names.
+    fn sinkhold_with(r: &'static Ruleset, building: &str, warriors: u32) -> (Game, CityId) {
+        let mut g = arena(r);
+        let out = ops(
+            &mut g,
+            &json!([
+                {"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Sinkhold", "pop": 4},
+                {"op": "set_city", "x": 5, "y": 5, "add_buildings": [building]},
+            ]),
+        );
+        if warriors > 0 {
+            ops(
+                &mut g,
+                &json!([{"op": "add_unit", "player": 0, "unit": "Warrior", "x": 6, "y": 6,
+                         "count": warriors}]),
+            );
+        }
+        (g, founded(&out[0]))
+    }
+
+    #[test]
+    fn a_tile_modifier_of_cities_with_a_wonder_comes_with_the_wonder() {
+        // `[stats] from [tiles] tiles [in all cities with a world wonder]` reads the buildings of
+        // the city through its city filter, which names no class: the what-if of a wonder
+        // gathers the city's tile modifiers again, as building it does.
+        let r = sink_with_buildings(&json!({"Wonder Gardens": {
+            "name": "Wonder Gardens", "cost": 60, "maintenance": 1,
+            "uniques": [
+                "[+2 Culture] from [Land] tiles [in all cities with a world wonder]",
+                "[+1 Gold] from [Land] tiles without [Forest] [in all cities with a world wonder]",
+            ],
+            "id": "wonder_gardens",
+        }}));
+        let (mut g, c) = sinkhold_with(r, "Wonder Gardens", 0);
+        let wonder = r.lookup::<BuildingId>("Kitchen Sink Wonder").expect("the wonder");
+        let d = agrees(&mut g, c, wonder);
+        // The wonder's own 3 culture, and 2 more from each land tile the city works.
+        assert!(d[Stat::Culture] >= 5.0 && d[Stat::Gold] > 0.0, "{d:?}");
+        assert!(g.take_violations().is_empty());
+    }
+
+    #[test]
+    fn unit_supply_of_cities_with_a_wonder_comes_with_the_wonder() {
+        // `[n] Unit Supply per [k] population [in all cities with a world wonder]` reads the
+        // buildings of each city of its owner: the what-if of a wonder asks the unit supply again,
+        // and the penalty of a civilization over it lifts, as building it does.
+        let r = sink_with_buildings(&json!({"Wonder Barracks": {
+            "name": "Wonder Barracks", "cost": 60, "maintenance": 1,
+            "uniques": ["[+2] Unit Supply per [1] population [in all cities with a world wonder]"],
+            "id": "wonder_barracks",
+        }}));
+        let (mut g, c) = sinkhold_with(r, "Wonder Barracks", 20);
+        let wonder = r.lookup::<BuildingId>("Kitchen Sink Wonder").expect("the wonder");
+        let reach = reach_for_test(&g, c, wonder).expect("a what-if");
+        assert!(reach.deficit, "{reach:?}");
+        let d = agrees(&mut g, c, wonder);
+        assert!(d[Stat::Production] > 0.0, "{d:?}");
+        assert!(g.take_violations().is_empty());
+        assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
+    }
+
     #[test]
     fn a_building_that_adds_unit_supply_lifts_the_penalty_in_the_what_if() {
         // A civilization over its unit supply loses production in every city; a building that

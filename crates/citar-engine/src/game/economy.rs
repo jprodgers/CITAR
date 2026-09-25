@@ -45,7 +45,9 @@ use crate::rules::Ruleset;
 use crate::rules::defs::{ResourceType, Route};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::diplo::DealItem;
-use crate::unique::{Ctx, EvalWorld, FilterFacts, Source, UniqueData, UniqueType, applies, uq};
+use crate::unique::{
+    CondDeps, Ctx, EvalWorld, FilterFacts, Source, UniqueData, UniqueType, applies, record, uq,
+};
 
 // ---- The resource supply (economy.py:186-358) --------------------------------------------------
 
@@ -684,6 +686,12 @@ fn unit_supply_in(v: &EvalView<'_>, p: PlayerId) -> i32 {
     let filters = r.uniques().filters();
     for h in uq::civ(&v, p, UniqueType::UnitSupplyPerPop, &ctx) {
         let UniqueData::UnitSupplyPerPop(x) = h.data() else { continue };
+        if filters.city_reads_buildings(x.cities) {
+            // The filter reads the buildings of each of the civilization's cities, which its
+            // classes leave out: the what-if of a building asks the supply again only where
+            // what the supply read moves.
+            record::note_classes(CondDeps::CIV_BUILDINGS);
+        }
         let per = i64::from(x.per.max(1));
         let counted: i64 = cities
             .iter()

@@ -241,7 +241,9 @@ pub(crate) fn city_mods_in(v: &EvalView<'_>, c: CityId) -> CityMods {
                 }
             }
             if let Some(cf) = city_filter {
-                out.deps |= filters.city(cf).deps();
+                // The city's own class where the filter reads its buildings: the what-if of a
+                // building reads the modifiers from this memo unless they read what it moves.
+                out.deps |= filters.city_deps_here(cf);
                 if !filters.city_matches(cf, v, c, None) {
                     continue;
                 }

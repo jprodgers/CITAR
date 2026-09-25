@@ -102,6 +102,15 @@ impl Leaf for CityLeaf {
 }
 
 impl CityLeaf {
+    /// Whether it reads the buildings of the city it is asked of: a building of a set, or
+    /// `Non-occupied`, which a building that removes annexation unhappiness (a Courthouse) makes
+    /// hold. Its classes ([`Leaf::deps`]) leave that out, as they leave out every fact of the city
+    /// itself, which a memo keyed by the city validates against the city's revisions.
+    #[must_use]
+    pub const fn reads_buildings(&self) -> bool {
+        matches!(self, Self::Has(_) | Self::NonOccupied)
+    }
+
     /// Whether city `c` passes, seen by `viewer`: the city's owner when `None`.
     pub fn eval<W: FilterFacts>(&self, w: &W, c: CityId, viewer: Option<PlayerId>) -> bool {
         let owner = w.city_owner(c);
