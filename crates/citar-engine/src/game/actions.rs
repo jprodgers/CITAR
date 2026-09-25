@@ -34,6 +34,7 @@ use super::units::actions::{own_unit, tile_at};
 use super::units::type_has;
 use super::workers::{self, InstantOption};
 use super::{great_people, policies, research, triggers};
+use crate::base::fmt::PyFloat;
 use crate::base::ids::{CityId, ImprovementId, PlayerId, TileIdx, UniqueId, UnitId};
 use crate::base::py;
 use crate::rules::defs::ReligionProgress;
@@ -294,6 +295,8 @@ pub fn unit_actions(g: &Game, u: UnitId) -> Vec<UnitActionEntry> {
             _ => (String::new(), 0),
         };
         let full = x.moves >= super::movement::max_moves(g, u);
+        // Python wrote the range as the float its unique held.
+        let range = PyFloat(f64::from(range));
         out.push(UnitActionEntry {
             params: &[("x", "target column"), ("y", "target row")],
             ..entry(
@@ -688,7 +691,7 @@ pub fn paradrop_problem(g: &Game, u: UnitId, to: TileIdx) -> Option<String> {
         return Some("The unit is already there.".into());
     }
     if i64::from(g.grid().distance(x.tile(), to)) > i64::from(d.range) {
-        return Some(format!("Paradrops reach at most {} tiles.", d.range));
+        return Some(format!("Paradrops reach at most {} tiles.", PyFloat(f64::from(d.range))));
     }
     if !g.player(x.owner()).is_some_and(|p| p.explored.contains(to.0)) {
         return Some("You cannot paradrop into unexplored territory.".into());

@@ -205,6 +205,15 @@ pub fn enemy_near(g: &Game, u: UnitId, radius: u32) -> bool {
         .any(|t| g.units_at(t).any(|o| hostile_military(g, p, o)))
 }
 
+/// The tiles within `radius` of `t` in Python's order (`hexmap.within`): by distance, then as it
+/// enumerated them. Where the first of equal tiles wins, or sums run over the tiles, Python's
+/// order keeps the answer Python's.
+fn within_py(g: &Game, t: TileIdx, radius: u32) -> Vec<TileIdx> {
+    let mut v = g.grid().within(t, radius);
+    v.sort_by_key(|&n| super::cities::borders::within_order(g, t, n));
+    v
+}
+
 // ---- City sites (automation.py:100-143) -------------------------------------------------------------
 
 /// How good a city site tile `t` is for civilization `p`, or `None` where no city can go
@@ -218,7 +227,7 @@ pub fn city_site_score(g: &Game, p: PlayerId, t: TileIdx) -> Option<f64> {
         return None;
     }
     let camp = g.rules().derived().known.barbarian_camp;
-    let near = g.grid().within(t, 2);
+    let near = within_py(g, t, 2);
     if camp.is_some() && near.iter().any(|&n| g.tile(n).and_then(Tile::improvement) == camp) {
         return None;
     }
@@ -265,9 +274,7 @@ pub fn suggest_city_sites(
     radius: u32,
     count: usize,
 ) -> Vec<(TileIdx, f64)> {
-    let mut scored: Vec<(TileIdx, f64)> = g
-        .grid()
-        .within(center, radius)
+    let mut scored: Vec<(TileIdx, f64)> = within_py(g, center, radius)
         .into_iter()
         .filter_map(|t| {
             let s = city_site_score(g, p, t)?;
@@ -353,7 +360,7 @@ pub fn explore_target(
     let mut best: Option<TileIdx> = None;
     let mut best_v = 0.0;
     let at = x.tile();
-    for t in grid.within(at, radius) {
+    for t in within_py(g, at, radius) {
         if t == at || !pl.explored.contains(t.0) || is_danger(t) {
             continue;
         }

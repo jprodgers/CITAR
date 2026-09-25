@@ -1,0 +1,127 @@
+about = """
+A settler founds a city where it stands with the found_city tool, and is used up; the result names
+the city and says what it can build. Refused: a settler with no movement left, a tile too close to a
+city, a tile on water, a unit that cannot found cities, and a city-state's seat, which takes no
+tools.
+"""
+from = "tests/test_engine.py::TurnTests::test_found_city_and_production, test_city_min_distance"
+
+[config]
+city_states = 1
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Settler", at = "A" },
+  { op = "add_unit", player = 0, unit = "Settler", at = "A>e>e" },
+  { op = "add_unit", player = 0, unit = "Settler", at = "W" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>w" },
+  { op = "add_unit", player = 1, unit = "Settler", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { first = "=made[0].unit_ids[0]", near = "=made[1].unit_ids[0]", wet = "=made[2].unit_ids[0]", warrior = "=made[3].unit_ids[0]" }
+
+[[step]]
+op = "set_unit"
+args = { unit = "=first", moves = 0 }
+
+[[step]]
+tool = "found_city"
+args = { unit_id = "=first", name = "Roma" }
+error = "No movement left this turn."
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=first" }
+
+[[step]]
+check = { what = "unit_actions", unit = "=first" }
+eq = [{ id = "found_city", name = "Found a city here", available = true, params = { name = "optional city name" } }]
+
+[[step]]
+tool = "found_city"
+args = { unit_id = "=first", name = "Roma" }
+as = "roma"
+
+[[step]]
+check = "roma"
+subset = { name = "Roma", production = "nothing (use set_production)" }
+
+[[step]]
+check = "roma"
+path = "can_build.units"
+contains = "Warrior"
+
+[[step]]
+intended = "unit-results-give-tiles"
+check = "roma"
+path = "at"
+eq = { x = "=x('A')", y = "=y('A')" }
+
+[[step]]
+check = { what = "city", city = "=roma.city_id" }
+subset = { name = "Roma", owner = 0, x = "=x('A')", y = "=y('A')" }
+
+[[step]]
+note = "The settler is used up."
+check = { what = "units", player = 0 }
+none = { path = "id", eq = "=first" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=near" }
+
+[[step]]
+tool = "found_city"
+args = { unit_id = "=near" }
+error = "Too close to Roma (at least 3 tiles must lie between cities)."
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=wet" }
+
+[[step]]
+check = { what = "unit", unit = "=wet" }
+path = "embarked"
+eq = true
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=wet", action = "found_city" }
+error = "Cities must be founded on land (not mountains, ice or natural wonders)."
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=warrior" }
+
+[[step]]
+tool = "found_city"
+args = { unit_id = "=warrior" }
+error = "Warrior has no action 'found_city'. Its actions: none."
+
+[[step]]
+note = "A city-state's seat takes no tools, its settler's included."
+check = { what = "game" }
+path = "city_states"
+eq = [2]
+
+[[step]]
+op = "add_unit"
+args = { player = 2, unit = "Settler", at = "CS" }
+as = "cs"
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=cs.unit_ids[0]" }
+
+[[step]]
+tool = "found_city"
+player = 2
+args = { unit_id = "=cs.unit_ids[0]" }
+error = "Invalid player."
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "cities"
+len = 0
