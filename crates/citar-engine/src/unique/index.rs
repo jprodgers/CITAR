@@ -124,6 +124,51 @@ impl Csr {
         }
         Self { start: start.into(), entries }
     }
+
+    /// The index with the entries of `x` added: what [`merged`](Self::merged) with an index of
+    /// them gives, made by putting the few entries in their places rather than walking every
+    /// type's run.
+    #[must_use]
+    pub fn plus(&self, x: &Extra) -> Self {
+        let mut entries = self.entries.clone();
+        let mut start = self.start.clone();
+        for &(t, e) in &*x.0 {
+            let t = usize::from(t);
+            let (lo, hi) = (usize::from(start[t]), usize::from(start[t + 1]));
+            match entries[lo..hi].binary_search_by_key(&e.id, |y| y.id) {
+                Ok(i) => {
+                    let y = &mut entries[lo + i];
+                    y.n = y.n.saturating_add(e.n);
+                }
+                Err(i) => {
+                    entries.insert(lo + i, e);
+                    for s in &mut start[t + 1..] {
+                        *s = s.saturating_add(1);
+                    }
+                }
+            }
+        }
+        Self { start, entries }
+    }
+}
+
+/// A few entries to add to an index, each with the type it is indexed at, by type and then id:
+/// what one more copy of a source gives ([`building_extra`]), for [`Csr::plus`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Extra(Box<[(u16, Entry)]>);
+
+impl Extra {
+    /// Whether it adds nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether it adds an entry of type `ty`.
+    #[must_use]
+    pub fn has(&self, ty: UniqueType) -> bool {
+        self.0.iter().any(|&(t, _)| t == ty as u16)
+    }
 }
 
 /// The type a unique is indexed at: its trigger's, if it has one, otherwise its own. A tag of no
@@ -179,7 +224,9 @@ impl<'r> Builder<'r> {
         }
     }
 
-    fn finish(mut self) -> Csr {
+    /// The entries by type and then id, a unique met more than once counted once with its
+    /// copies, with the type of each.
+    fn sorted(mut self) -> (Vec<Entry>, Vec<u16>) {
         self.raw.sort_by_key(|&(ty, id, _)| (ty, id));
         let mut entries: Vec<Entry> = Vec::with_capacity(self.raw.len());
         let mut types: Vec<u16> = Vec::with_capacity(self.raw.len());
@@ -192,6 +239,16 @@ impl<'r> Builder<'r> {
                 }
             }
         }
+        (entries, types)
+    }
+
+    fn extra(self) -> Extra {
+        let (entries, types) = self.sorted();
+        Extra(types.into_iter().zip(entries).collect())
+    }
+
+    fn finish(self) -> Csr {
+        let (entries, types) = self.sorted();
         let mut start = vec![0u16; UniqueType::COUNT + 1];
         for &ty in &types {
             start[usize::from(ty) + 1] += 1;
@@ -389,6 +446,17 @@ pub fn city_local(rules: &Ruleset, buildings: &BuildingSet, resources: &Resource
     b.finish()
 }
 
+/// What one more copy of building `b` adds to an index: to its city's own ([`city_local`]) with
+/// `local`, else to its owner's ([`CivIndex`]). Added ([`Csr::plus`]) to the index a city or
+/// civilization has, it gives the index with the building, as a rebuild would, since an index is
+/// the same whatever order its sources come in and counts the copies of each unique.
+#[must_use]
+pub fn building_extra(rules: &Ruleset, b: BuildingId, local: bool) -> Extra {
+    let mut out = Builder::new(rules);
+    out.source(&rules.buildings()[b].uniques, 1, local);
+    out.extra()
+}
+
 /// The index of what a religion gives the cities that follow it: its follower beliefs'
 /// (`religion.follower_umap`). Beliefs may come in any order.
 #[must_use]
@@ -472,5 +540,22 @@ mod tests {
         assert_eq!(m, csr(&[(s, 3, 1), (s, 5, 1), (s, 9, 3), (f, 1, 1), (f, 4, 1)]));
         assert_eq!(m, b.merged(&a));
         assert_eq!(a.merged(&Csr::default()), a);
+    }
+
+    #[test]
+    fn a_few_entries_added_give_what_a_merge_gives() {
+        let (s, f, g) = (UniqueType::Stats, UniqueType::StatPercentBonus, UniqueType::FoundCity);
+        let a = csr(&[(s, 3, 1), (s, 9, 2), (f, 4, 1)]);
+        let x = Extra(Box::new([
+            (s as u16, Entry { id: UniqueId(1), n: 1 }),
+            (s as u16, Entry { id: UniqueId(9), n: 2 }),
+            (f as u16, Entry { id: UniqueId(7), n: 1 }),
+            (g as u16, Entry { id: UniqueId(2), n: 1 }),
+        ]));
+        let b = csr(&[(s, 1, 1), (s, 9, 2), (f, 7, 1), (g, 2, 1)]);
+        assert_eq!(a.plus(&x), a.merged(&b));
+        assert_eq!(Csr::default().plus(&x), b);
+        assert_eq!(a.plus(&Extra::default()), a);
+        assert!(x.has(g) && !x.has(UniqueType::Strength) && !x.is_empty());
     }
 }
