@@ -26,8 +26,8 @@
 //! - `_seek` builds one [`PathTree`] and reads every candidate's path from it, where Python
 //!   searched once per candidate, and the unit follows the path it found;
 //! - the random draws are keyed by ids and the turn: the camp placement by the next camp id
-//!   (Python counted the camps), a spawned unit's type by the camp (Python counted the units), a
-//!   sack by the city (Python counted the events);
+//!   (Python counted the camps), a spawned unit's type by the camp and its tile (Python counted
+//!   the units), a sack by the city (Python counted the events);
 //! - the barbarians know every tile without an explored set to fill (`_know_the_land`): the
 //!   searches read them as knowing the map (DESIGN.md 6.10).
 
@@ -427,12 +427,15 @@ pub fn unit_options(g: &Game, naval: bool) -> Vec<BaseUnitId> {
 }
 
 /// A unit type for a camp to spawn, weighted by its force (`_choose_unit`), drawn from
-/// `Purpose::BarbUnit` keyed by the turn and the camp (Python counted the units).
-fn choose_unit(g: &Game, naval: bool, key: u64) -> Option<BaseUnitId> {
+/// `Purpose::BarbUnit` keyed by the turn, the camp and its tile (Python counted the units). A camp
+/// with no record (an improvement a scenario placed) keys as none, so its tile never stands in
+/// for a camp id.
+fn choose_unit(g: &Game, naval: bool, camp: Option<CampId>, t: TileIdx) -> Option<BaseUnitId> {
     let opts = unit_options(g, naval);
     let weights: Vec<f64> =
         opts.iter().map(|&u| f64::from(force_evaluation(g, u).max(1))).collect();
-    let mut rng = Rng::keyed(g.state().seed(), Purpose::BarbUnit, &[g.turn().key(), key]);
+    let mut rng =
+        Rng::keyed(g.state().seed(), Purpose::BarbUnit, &[g.turn().key(), camp.key(), t.key()]);
     rng.weighted(&weights).and_then(|i| opts.get(i).copied())
 }
 
@@ -448,10 +451,9 @@ pub fn spawn_barbarian(
 ) -> Option<UnitId> {
     let bid = g.barbarian_id();
     let owner = allegiance.or(bid)?;
-    let key = camp.map_or(u64::from(t.0), |c| u64::from(c.get()));
     if Some(owner) == bid {
         if g.military_at(t).is_none() {
-            return spawn(g, t, false, owner, key);
+            return spawn(g, camp, t, false, owner);
         }
         if g.turn() < 10 || barbs_near(g, t, 4) > max_near_camp(g) {
             return None;
@@ -473,13 +475,19 @@ pub fn spawn_barbarian(
     let mut rng = Rng::keyed(g.state().seed(), Purpose::BarbSpawn, &[g.turn().key(), t.key()]);
     let &side = rng.pick(&valid)?;
     let naval = g.is_water(side);
-    spawn(g, t, naval, owner, key)
+    spawn(g, camp, t, naval, owner)
 }
 
 /// Makes a camp's unit near its tile (`_spawn`).
-fn spawn(g: &mut Game, t: TileIdx, naval: bool, owner: PlayerId, key: u64) -> Option<UnitId> {
+fn spawn(
+    g: &mut Game,
+    camp: Option<CampId>,
+    t: TileIdx,
+    naval: bool,
+    owner: PlayerId,
+) -> Option<UnitId> {
     update_barbarian_techs(g);
-    let base = choose_unit(g, naval, key)?;
+    let base = choose_unit(g, naval, camp, t)?;
     place_unit_near(g, owner, base, t)
 }
 
