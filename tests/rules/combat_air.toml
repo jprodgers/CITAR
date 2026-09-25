@@ -2,8 +2,9 @@ about = """
 Aircraft: a bomber striking a tile meets the defender's likeliest interceptor first (an
 anti-aircraft gun always fires, and damages it), then fights. A fighter's air sweep draws the
 interceptors over a tile: a ground interceptor fires, misses and is spent for the turn, so a bomber
-following meets none; a sweep of a tile no one guards meets nothing. An aircraft moves by rebasing
-to another city of its owner, if it has not acted this turn.
+following meets none; a sweep of a tile no one guards meets nothing; an enemy fighter the sweep
+meets fights the sweeper, and each earns 5 experience. An aircraft moves by rebasing to another
+city of its owner, if it has not acted this turn.
 """
 from = "citar/engine/combat.py: try_intercept, air_strike, air_sweep, rebase"
 
@@ -118,3 +119,42 @@ eq = { rebased_to = { x = 5, y = 11 }, carrier = "=null" }
 [[step]]
 check = { what = "unit", unit = "=f3" }
 subset = { x = 5, y = 11, moves = 0 }
+
+[[step]]
+note = "a sweep an enemy fighter meets: they fight, and each earns 5 experience"
+ops = [
+  { op = "found_city", player = 1, at = "A>e>e>e>e>e>e>e>e>e", name = "Hangar" },
+  { op = "add_unit", player = 1, unit = "Fighter", at = "A>e>e>e>e>e>e>e>e>e" },
+  { op = "add_unit", player = 0, unit = "Fighter", at = "A" },
+]
+as = "made2"
+
+[[step]]
+set = { theirs = "=made2[1].unit_ids[0]", f4 = "=made2[2].unit_ids[0]" }
+
+[[step]]
+note = "their fighter has its movement, as at the start of its owner's turn"
+op = "ready_unit"
+args = { unit = "=theirs" }
+
+[[step]]
+tool = "air_sweep"
+args = { unit_id = "=f4", at = "A>e>e>e>e>e>e" }
+as = "sweep3"
+
+[[step]]
+check = "sweep3"
+subset = { air_sweep = "Fighter" }
+
+[[step]]
+check = "sweep3"
+path = "damage_to_interceptor"
+gt = 0
+
+[[step]]
+check = { what = "unit", unit = "=f4" }
+subset = { xp = 5, hp = "=100 - sweep3.damage_to_attacker" }
+
+[[step]]
+check = { what = "unit", unit = "=theirs" }
+subset = { xp = 5, hp = "=100 - sweep3.damage_to_interceptor" }
