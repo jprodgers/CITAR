@@ -10,25 +10,30 @@
 //!   what is pillaged, its river, owner, a repair or build with no build time at the front of its
 //!   queue, which neighbours are fresh water or coast, and, when a filter a job reads asks,
 //!   whether a city works it and its route. A road, citizens moving, or a turn of work on its
-//!   queue, changes no job and recomputes nothing;
+//!   queue, changes no job and recomputes nothing. A tile with no job keeps with it a bound on
+//!   what any improvement is worth there, so that when only its improvement changes the bound
+//!   moves by the difference in what the two cost, and the tile keeps no job while nothing can
+//!   rise above the threshold (`kept_without_job`);
 //! - **the civilization** (`CivJobs`): which improvements it has the tech for and which are
 //!   obsolete, how long each takes its builders, which resources it sees and which luxuries it
 //!   has, the removals it knows, the resources its improvements consume. A change recomputes only
-//!   the tiles it can reach: those with the resource, those whose job it was, and those where an
+//!   the tiles it can reach: those with the resource, those whose job it was, those where an
 //!   improvement it changed could stand and now beat the job (its value on the tile, at its new
-//!   build time, above the job's);
+//!   build time, above the job's), and, weighing every improvement, those with a feature whose
+//!   removal the civilization learned or forgot and those whose standing improvement changed
+//!   (an `Irremovable` that no longer holds). The tiles it does not reach raise their bound;
 //! - **its territory**: tiles joining are worked out, tiles leaving dropped.
 //!
 //! A tile's job is worked out as [`best_job`] works it out, with what the civilization settles for
 //! every tile (an improvement barred, named by the class, bound to the borders, and the rest of
 //! `Plan`) answered once per look at the civilization, which takes a whole map's rebuild from
-//! four times the budget of DESIGN.md 10 to under it; the cache oracle compares every tile
-//! with `best_job` itself. A ruleset whose relevant uniques have conditionals that read a tile's
+//! four times the budget of DESIGN.md 10 to under it; the cache oracle compares every tile with
+//! `best_job` itself. A ruleset whose relevant uniques have conditionals that read a tile's
 //! surroundings, a city or the whole map (or an improvement that must be next to something) asks
-//! `best_job` on each tile, and recomputes every tile of a map when any tile, owner or city
-//! changed: correct, and never the shipped ruleset's case. With the
-//! `stats` feature, the maps count the tiles they recompute and those that came out as they were,
-//! the redundancy DESIGN.md 10 bounds.
+//! `best_job` on each tile, keeps no bounds, and recomputes every tile of a map when any tile,
+//! owner or city changed: correct, and never the shipped ruleset's case. With the `stats`
+//! feature, the maps count the tiles they recompute and those that came out as they were, the
+//! redundancy DESIGN.md 10 bounds.
 
 use core::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,7 +48,7 @@ use crate::base::ids::{
 };
 use crate::base::sets::{FeatureSet, ImprovementSet, ResourceSet};
 use crate::game::Game;
-use crate::game::automation::{best_job, improvement_value, luxury_owned};
+use crate::game::automation::{best_job, improvement_value, luxury_owned, weighted};
 use crate::game::workers::{self, Builder};
 use crate::rules::Ruleset;
 use crate::rules::defs::{BuilderClass, ImprovementDef, ImprovementKind, Route};
@@ -141,37 +146,83 @@ impl TileSig {
     }
 }
 
-/// Whether a tile with no job still has none after its improvement changed from what `old`
-/// saw to what `new` sees, and nothing else did: every value a job is weighed by is the
-/// improvement's yield gain less what the improvement standing there yields and one, so a
-/// standing improvement that yields no less than the one before (or than none) can only lower
-/// them; one it replaces cannot be built again, and an irremovable one allows less. Not when the
-/// improvement before was a great one, over which nothing was weighed, nor when a filter a job
+/// Whether tile `t`, which had no job, still has none after it changed from what `old` saw to
+/// what `new` sees, and if so its new [`Entry::top`]; `None` if it must be worked out again.
+///
+/// A tile under a great improvement ([`under_great`]) has no job whatever changed, and keeps its
+/// bound only if nothing but the improvement did. Otherwise only its improvement may have
+/// changed. The bound is on the improvements weighed as though nothing stood in the way (over a
+/// great or an irremovable improvement none is taken). Every value a job is weighed by is an
+/// improvement's gain on the tile less what the improvement standing there yields and one, so the
+/// values of the improvements weighed before move by the difference between the two standing
+/// improvements' costs, and none of them can be the new one; the improvement taken away may be
+/// built again, at its gain less the new one's cost (at its own build time, which a removal only
+/// lengthens). The tile keeps no job while both stay at or below the threshold. With no bound
+/// known, only a standing improvement that costs no less than the one before keeps it, the one
+/// before neither great nor irremovable (nothing was weighed over it). Never when a filter a job
 /// reads asks about improvements.
-fn still_no_job(g: &Game, old: Option<&TileSig>, new: Option<&TileSig>) -> bool {
-    let (Some(old), Some(new)) = (old, new) else { return false };
-    if under_great(g, new) {
-        return true;
-    }
-    if g.dv.jobs.reads_improvement || old.pillaged || new.pillaged {
-        return false;
-    }
-    let same_but_improvement = TileSig { improvement: new.improvement, ..*old } == *new;
+#[allow(clippy::too_many_arguments, reason = "a tile's entry and both sides of its change")]
+fn kept_without_job(
+    g: &Game,
+    p: PlayerId,
+    t: TileIdx,
+    key: &CivJobs,
+    old: Option<&TileSig>,
+    new: Option<&TileSig>,
+    top: Option<f64>,
+) -> Option<Option<f64>> {
+    let (Some(old), Some(new)) = (old, new) else { return None };
     let r = g.rules();
-    let penalty = |i: Option<ImprovementId>| {
-        i.map_or(0.0, |i| crate::game::automation::weighted(&r.improvements()[i].stats) + 1.0)
-    };
-    same_but_improvement
-        && old.improvement.is_none_or(|i| !r.improvements()[i].great)
-        && penalty(new.improvement) >= penalty(old.improvement)
+    let same_but_improvement = TileSig { improvement: new.improvement, ..*old } == *new;
+    let moves =
+        (same_but_improvement && !g.dv.jobs.reads_improvement && !old.pillaged && !new.pillaged)
+            .then(|| {
+                let cost = |i: Option<ImprovementId>| {
+                    i.map_or(0.0, |i| weighted(&r.improvements()[i].stats) + 1.0)
+                };
+                let returning = old
+                    .improvement
+                    .filter(|&i| {
+                        let d = &r.improvements()[i];
+                        d.kind == ImprovementKind::Normal && !d.great && key.only.contains(i)
+                    })
+                    .map_or(f64::NEG_INFINITY, |i| {
+                        let turns = key.turns.get(usize::from(i.0)).copied().unwrap_or(1);
+                        improvement_value(g, p, t, i) - f64::from(turns) * 0.15
+                    });
+                (cost(old.improvement) - cost(new.improvement), returning)
+            });
+    let moved = moves.zip(top).map(|((shift, returning), top)| (top + shift).max(returning));
+    if under_great(g, new) {
+        return Some(moved);
+    }
+    let (shift, returning) = moves?;
+    if moved.is_some_and(|m| m > 0.5) || returning > 0.5 {
+        return None;
+    }
+    if top.is_some() {
+        return Some(moved);
+    }
+    let irremovable = old.improvement.is_some_and(|i| {
+        let t = r.uniques();
+        r.improvements()[i].great
+            || r.improvements()[i]
+                .uniques
+                .ids()
+                .any(|id| t.meta(id).ty == Some(UniqueType::Irremovable))
+    });
+    (shift <= 0.0 && !irremovable).then_some(None)
 }
 
-/// Whether a tile holds a great improvement, whole, on a whole route (or none): no job is weighed
-/// over it, and a repair has nothing to mend, so it has no job whatever else changes.
+/// Whether a tile holds a great improvement, whole, on a whole route (or none), with no fallout:
+/// no job is weighed over it, a repair has nothing to mend and there is no fallout to clear, so
+/// it has no job whatever else changes.
 fn under_great(g: &Game, sig: &TileSig) -> bool {
+    let r = g.rules();
     !sig.pillaged
         && !sig.route_pillaged
-        && sig.improvement.is_some_and(|i| g.rules().improvements()[i].great)
+        && !sig.features.contains(r.derived().known.fallout)
+        && sig.improvement.is_some_and(|i| r.improvements()[i].great)
 }
 
 /// Whether improvement `imp` could be built on tile `t` for civilization `p`, all else allowing:
@@ -419,7 +470,9 @@ impl Plan {
 /// [`best_job`] for a builder class, with what the civilization settles for every tile read from
 /// `plan`: the same job, as the cache oracle checks, for a sixth of the work (DESIGN.md 10 budgets
 /// a whole map at 200 us). The steps are `workers::build_options`' and `best_job`'s, in their
-/// order.
+/// order. Besides the job, the highest value weighed ([`Entry::top`]), where the tile's own
+/// improvement did not rule out weighing any (a great one does not: the improvements are weighed
+/// over it for the bound, and none is taken).
 fn planned_job(
     g: &Game,
     p: PlayerId,
@@ -427,11 +480,11 @@ fn planned_job(
     plan: &Plan,
     key: &CivJobs,
     b: &Builder,
-) -> Option<(ImprovementId, f64)> {
+) -> (Option<(ImprovementId, f64)>, Option<f64>) {
     let r = g.rules();
-    let tile = g.tile(t)?;
+    let Some(tile) = g.tile(t) else { return (None, None) };
     if !plan.builds {
-        return None;
+        return (None, Some(f64::NEG_INFINITY));
     }
     let known = &r.derived().known;
     let enemy = workers::is_enemy_territory(g, t, p);
@@ -440,17 +493,18 @@ fn planned_job(
         && workers::repairable(tile)
         && !enemy
     {
-        return Some((repair, 30.0));
+        return (Some((repair, 30.0)), None);
     }
     let front = g.state().tiles().builds(t).first().map(|s| s.improvement);
     let repairing = known.repair.is_some() && front == known.repair;
     let over_great = tile.improvement().is_some_and(|i| r.improvements()[i].great);
     let removal_of = |f| r.derived().removal_of.get(f).copied().flatten();
     let mut best: Option<(ImprovementId, f64)> = None;
-    // Nothing goes on a city, over an irremovable improvement, or over a great one.
-    let open = !over_great
-        && g.city_at(t).is_none()
-        && tile.improvement().is_none_or(|i| !plan.irremovable.contains(i));
+    let mut top = f64::NEG_INFINITY;
+    // Nothing goes on a city, over an irremovable improvement, or over a great one; over a great
+    // one the improvements are still weighed, for the bound the tile keeps.
+    let open =
+        g.city_at(t).is_none() && tile.improvement().is_none_or(|i| !plan.irremovable.contains(i));
     if open {
         let v = g.view();
         let tf = r.uniques().filters();
@@ -483,11 +537,13 @@ fn planned_job(
                     turns.saturating_add(key.turns.get(usize::from(rem.0)).copied().unwrap_or(1));
             }
             let value = improvement_value(g, p, t, w.imp) - f64::from(turns) * 0.15;
-            if value > 0.5 && best.is_none_or(|(_, bv)| value > bv) {
+            top = top.max(value);
+            if !over_great && value > 0.5 && best.is_none_or(|(_, bv)| value > bv) {
                 best = Some((w.imp, value));
             }
         }
     }
+    let top = open.then_some(top);
     // refcheck: fallout-removal-is-a-job
     if best.is_none()
         && tile.features().contains(known.fallout)
@@ -496,9 +552,9 @@ fn planned_job(
         && workers::unit_can_build(g, b, rem, t)
         && workers::no_problems(g, b, t, rem)
     {
-        return Some((rem, 8.0));
+        return (Some((rem, 8.0)), top);
     }
-    best
+    (best, top)
 }
 
 /// Whether improvement `w` may stand on tile `t` for civilization `p`, the tile's own
@@ -586,6 +642,11 @@ fn stands(
 struct Entry {
     sig: Option<TileSig>,
     job: Option<(ImprovementId, f64)>,
+    /// At least the value of every improvement that could be weighed on the tile as it stands
+    /// (as though no great or irremovable improvement stood in the way), job or not, when known
+    /// ([`planned_job`] finds it): what lets a tile with no job keep none when only its
+    /// improvement changes ([`kept_without_job`]).
+    top: Option<f64>,
     /// Whether the job has been worked out at all.
     known: bool,
     dirty: bool,
@@ -764,6 +825,9 @@ struct Diff {
     imps: ImprovementSet,
     res: ResourceSet,
     removal_turns: bool,
+    /// The features whose removal the civilization learned or forgot: what may stand on a tile
+    /// with one changes whatever the improvement.
+    unlocked: FeatureSet,
 }
 
 impl Diff {
@@ -797,6 +861,13 @@ impl Diff {
             for imp in caches.removers.iter() {
                 d.imps.insert(imp);
             }
+            for (f, rem) in r.derived().removal_of.iter() {
+                if let Some(i) = *rem
+                    && old.removals.contains(i) != new.removals.contains(i)
+                {
+                    d.unlocked.insert(f);
+                }
+            }
         }
         for (i, set) in caches.consumers.iter().enumerate() {
             if old.amounts.get(i) != new.amounts.get(i) {
@@ -814,56 +885,77 @@ impl Diff {
     }
 
     fn is_empty(&self) -> bool {
-        self.imps.is_empty() && self.res.is_empty() && !self.removal_turns
+        self.imps.is_empty()
+            && self.res.is_empty()
+            && !self.removal_turns
+            && self.unlocked.is_empty()
     }
 
-    /// Whether the change can move the job on tile `t`, whose entry is `e`.
-    fn reaches(&self, g: &Game, p: PlayerId, t: TileIdx, e: &Entry, key: &CivJobs) -> bool {
+    /// Whether the change can move the job on tile `t`, whose entry is `e`: `None` if it can,
+    /// else at least what the improvements it changed are worth on the tile now, for
+    /// [`Entry::top`] (`NEG_INFINITY` for none).
+    fn reach(&self, g: &Game, p: PlayerId, t: TileIdx, e: &Entry, key: &CivJobs) -> Option<f64> {
         let r = g.rules();
-        let Some(tile) = g.tile(t) else { return true };
-        if e.sig.as_ref().is_some_and(|s| under_great(g, s)) {
-            return false;
-        }
+        let tile = g.tile(t)?;
+        // Under a great improvement the job cannot move, but the bound can.
+        let great = e.sig.as_ref().is_some_and(|s| under_great(g, s));
         if tile.resource().is_some_and(|res| self.res.contains(res)) {
-            return true;
+            return great.then_some(f64::INFINITY);
         }
         // A removal that takes another time changes what every improvement it clears the way for
-        // takes on a tile with such a feature.
+        // takes on a tile with such a feature, and one learned or forgotten what may stand there;
+        // a change to the improvement standing on the tile (an `Irremovable` that holds no more)
+        // may let any other be built over it.
         let removal = |f| r.derived().removal_of.get(f).copied().flatten().is_some();
-        let cleared = self.removal_turns && tile.features().iter().any(removal);
+        let cleared = (self.removal_turns && tile.features().iter().any(removal))
+            || tile.features().iter().any(|f| self.unlocked.contains(f))
+            || tile.improvement().is_some_and(|i| self.imps.contains(i));
         let fallout = r.derived().known.fallout;
         let fallout_removal = r.derived().removal_of.get(fallout).copied().flatten();
         let (value, best) = match e.job {
-            Some((imp, _)) if self.imps.contains(imp) => return true,
+            Some((imp, _)) if self.imps.contains(imp) => return None,
             Some((imp, v)) if r.improvements()[imp].kind == ImprovementKind::Normal => {
                 (v, Some(imp))
             }
             // A repair comes first, whatever else a tile offers.
             Some((imp, _)) if r.improvements()[imp].kind == ImprovementKind::Repair => {
-                return false;
+                return Some(f64::NEG_INFINITY);
             }
+            _ if great => (f64::INFINITY, None),
             _ => (0.5, None),
         };
         if tile.features().contains(fallout)
             && fallout_removal.is_some_and(|x| self.imps.contains(x))
         {
-            return true;
+            return None;
         }
         let changed = if cleared { &key.only } else { &self.imps };
-        changed.iter().any(|i| {
+        let mut raised = f64::NEG_INFINITY;
+        for i in changed.iter() {
             let d = &r.improvements()[i];
             if d.kind != ImprovementKind::Normal || d.great || !key.only.contains(i) {
-                return false;
+                continue;
             }
             if !could_stand(g, p, t, i) {
-                return false;
+                continue;
             }
-            let turns = key.turns.get(usize::from(i.0)).copied().unwrap_or(1);
+            // Its build time with the removal it needs first, as a job is weighed.
+            let turns_of = |x: ImprovementId| key.turns.get(usize::from(x.0)).copied().unwrap_or(1);
+            let mut turns = turns_of(i);
+            if let Some(f) = workers::needed_removal(g, t, i)
+                && let Some(rem) = r.derived().removal_of.get(f).copied().flatten()
+            {
+                turns = turns.saturating_add(turns_of(rem));
+            }
             let ub = improvement_value(g, p, t, i) - f64::from(turns) * 0.15;
             // An equal value takes the job when it comes first in the ruleset, as the first of
             // the best does.
-            ub > value || (ub.total_cmp(&value).is_eq() && best.is_some_and(|b| i < b))
-        })
+            if ub > value || (ub.total_cmp(&value).is_eq() && best.is_some_and(|b| i < b)) {
+                return None;
+            }
+            raised = raised.max(ub);
+        }
+        Some(raised)
     }
 }
 
@@ -904,7 +996,13 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
         let now_tiles = candidates(g, p);
         m.tiles.retain(|t, _| now_tiles.contains(t));
         for t in now_tiles {
-            m.tiles.entry(t).or_insert(Entry { sig: None, job: None, known: false, dirty: true });
+            m.tiles.entry(t).or_insert(Entry {
+                sig: None,
+                job: None,
+                top: None,
+                known: false,
+                dirty: true,
+            });
         }
     }
     let logged: Option<BTreeSet<TileIdx>> =
@@ -924,21 +1022,32 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
         Some(s) => s.iter().copied().filter(|t| m.tiles.contains_key(t)).collect(),
         None => m.tiles.keys().copied().collect(),
     };
+    let Some(key) = m.key.clone() else { return };
     for t in check {
         let sig = TileSig::of(g, t);
         if let Some(e) = m.tiles.get_mut(&t)
             && e.sig != sig
         {
-            let kept = e.known && e.job.is_none() && still_no_job(g, e.sig.as_ref(), sig.as_ref());
+            let kept = if e.known && e.job.is_none() {
+                kept_without_job(g, p, t, &key, e.sig.as_ref(), sig.as_ref(), e.top)
+            } else {
+                None
+            };
+            match kept {
+                Some(top) => e.top = top,
+                None => e.dirty = true,
+            }
             e.sig = sig;
-            e.dirty |= !kept;
         }
     }
-    let Some(key) = m.key.clone() else { return };
     if !diff.is_empty() {
         for (&t, e) in &mut m.tiles {
-            if !e.dirty && diff.reaches(g, p, t, e, &key) {
-                e.dirty = true;
+            if e.dirty {
+                continue;
+            }
+            match diff.reach(g, p, t, e, &key) {
+                None => e.dirty = true,
+                Some(raised) => e.top = e.top.map(|top| top.max(raised)),
             }
         }
     }
@@ -952,9 +1061,9 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
         if e.sig.is_none() {
             e.sig = TileSig::of(g, t);
         }
-        let job = match &m.plan {
+        let (job, top) = match &m.plan {
             Some(plan) => planned_job(g, p, t, plan, &key, &b),
-            None => best_job(g, &b, t, Some(&key.only)),
+            None => (best_job(g, &b, t, Some(&key.only)), None),
         };
         #[cfg(feature = "stats")]
         {
@@ -968,6 +1077,7 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
             }
         }
         e.job = job;
+        e.top = top;
         e.known = true;
         e.dirty = false;
     }

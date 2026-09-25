@@ -25,6 +25,7 @@ use citar_engine::game::{
     Action, DebugOptions, DriveOptions, Drivers, Game, Stop, religion, units,
 };
 use citar_engine::rules::Ruleset;
+use citar_engine::rules::defs::BuilderClass;
 use citar_testkit::agents::RandomAgent;
 use citar_testkit::fixtures::{self, Fixture};
 use citar_testkit::rulesets::kitchen_sink;
@@ -339,6 +340,95 @@ fn random_agents_found_build_automate_and_act_for_eighty_turns_cleanly() {
         let redundant = n.unchanged as f64 / n.recomputed as f64;
         assert!(redundant < 0.05, "{:.1}% of recomputes changed nothing: {n:?}", redundant * 100.0);
     }
+}
+
+// ---- What reaches a job map ------------------------------------------------------------------------
+
+/// A shipped-ruleset game with a city of player 0 at (5, 5), and the Worker's builder class.
+fn job_game(list: &Value) -> (Game, BuilderClass) {
+    let seats = [json!({"nation": "BenchmarkCiv"}), json!({"nation": "BenchmarkCiv"})];
+    let mut g = arena(Ruleset::shared(), &seats, &json!({}));
+    ops(&mut g, &json!([{"op": "found_city", "player": 0, "x": 5, "y": 5}]));
+    ops(&mut g, list);
+    let r = g.rules();
+    let worker: BaseUnitId = r.lookup("Worker").expect("the Worker");
+    let class = r.base_units()[worker].builder.expect("a builder class");
+    (g, class)
+}
+
+#[test]
+fn a_removal_learned_opens_the_tiles_of_its_feature() {
+    // Wheat under a forest: a farm needs the forest gone, which Mining teaches.
+    let (mut g, class) = job_game(
+        &json!([{"op": "set_tile", "x": 6, "y": 5, "features": ["Forest"], "resource": "Wheat"}]),
+    );
+    let t = tile(&g, 6, 5);
+    assert_eq!(jobs::job(&g, ME, class, t), None);
+    ops(&mut g, &json!([{"op": "grant_tech", "player": 0, "techs": ["Mining"]}]));
+    assert_eq!(jobs::job(&g, ME, class, t).map(|(i, _)| i), Some(imp(&g, "Farm")));
+    clean(&mut g);
+}
+
+#[test]
+fn a_luxury_improvement_replaced_is_a_job_again() {
+    // Two sugar plantations, so the luxury stays owned when one goes: nothing better than a
+    // plantation, then a trading post, which costs as much, standing where it stood.
+    let (mut g, class) = job_game(&json!([
+        {"op": "grant_tech", "player": 0, "techs": ["Calendar", "Guilds"]},
+        {"op": "set_tile", "x": 6, "y": 5, "resource": "Sugar", "improvement": "Plantation"},
+        {"op": "set_tile", "x": 4, "y": 5, "resource": "Sugar", "improvement": "Plantation"},
+    ]));
+    let t = tile(&g, 6, 5);
+    assert_eq!(jobs::job(&g, ME, class, t), None);
+    ops(&mut g, &json!([{"op": "set_tile", "x": 6, "y": 5, "improvement": "Trading post"}]));
+    assert_eq!(jobs::job(&g, ME, class, t).map(|(i, _)| i), Some(imp(&g, "Plantation")));
+    clean(&mut g);
+}
+
+#[test]
+fn a_tile_whose_improvement_costs_less_keeps_no_job_while_nothing_rises_above_it() {
+    // A farm is the best of this grassland; a fort in its place costs less, so every value on the
+    // tile rises by the difference, and the farm could come back: still no job.
+    let (mut g, class) = job_game(&json!([
+        {"op": "grant_tech", "player": 0, "techs": ["Engineering"]},
+        {"op": "set_tile", "x": 6, "y": 5, "improvement": "Farm"},
+    ]));
+    let t = tile(&g, 6, 5);
+    assert_eq!(jobs::job(&g, ME, class, t), None);
+    #[cfg(feature = "stats")]
+    let before = jobs::counts(&g);
+    ops(&mut g, &json!([{"op": "set_tile", "x": 6, "y": 5, "improvement": "Fort"}]));
+    assert_eq!(jobs::job(&g, ME, class, t), None);
+    ops(&mut g, &json!([{"op": "set_tile", "x": 6, "y": 5, "improvement": null}]));
+    assert_eq!(jobs::job(&g, ME, class, t), None);
+    // Worked out from the bound the tile kept, not again.
+    #[cfg(feature = "stats")]
+    assert_eq!(jobs::counts(&g).recomputed, before.recomputed);
+    clean(&mut g);
+}
+
+#[test]
+fn fallout_on_a_great_improvement_is_a_job_and_a_great_one_replaced_keeps_its_bound() {
+    let (mut g, class) = job_game(&json!([
+        {"op": "grant_tech", "player": 0, "techs": ["Engineering"]},
+        {"op": "set_tile", "x": 6, "y": 5, "improvement": "Academy"},
+        {"op": "set_tile", "x": 4, "y": 5, "improvement": "Academy"},
+    ]));
+    let (t, u) = (tile(&g, 6, 5), tile(&g, 4, 5));
+    assert_eq!((jobs::job(&g, ME, class, t), jobs::job(&g, ME, class, u)), (None, None));
+    // Nothing is built over a great improvement, but fallout on it is cleared.
+    ops(&mut g, &json!([{"op": "set_tile", "x": 6, "y": 5, "features": ["Fallout"]}]));
+    let clear = g.rules().derived().removal_of[g.rules().derived().known.fallout];
+    assert_eq!(jobs::job(&g, ME, class, t), clear.map(|i| (i, 8.0)));
+    // A fort in a great improvement's place: the improvements weighed under it rise by the
+    // difference, and still none is worth a job.
+    #[cfg(feature = "stats")]
+    let before = jobs::counts(&g);
+    ops(&mut g, &json!([{"op": "set_tile", "x": 4, "y": 5, "improvement": "Fort"}]));
+    assert_eq!(jobs::job(&g, ME, class, u), None);
+    #[cfg(feature = "stats")]
+    assert_eq!(jobs::counts(&g).recomputed, before.recomputed);
+    clean(&mut g);
 }
 
 // ---- The kitchen sink ------------------------------------------------------------------------------
