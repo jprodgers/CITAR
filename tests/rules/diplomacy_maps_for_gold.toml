@@ -1,0 +1,135 @@
+about = """
+A negotiation that ends in a deal: the opener offers gold for the other side's map; the opener may not
+accept its own proposal; the other side counters with more gold; the opener accepts, and the gold
+changes hands. The deal is recorded, and both sides are told what each gave.
+"""
+from = "tests/test_engine.py::DiplomacyTests::test_negotiation_and_deal"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 100 },
+  { op = "set_player", player = 1, gold = 50 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Maps for gold?", give = [{ type = "gold", amount = 30 }], receive = [{ type = "share_map" }] }
+as = "opened"
+
+[[step]]
+check = "opened"
+eq = { negotiation_id = 1, status = "open", awaiting = "Civilization 2" }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+path = "[0]"
+subset = { text = "Civilization 1 opened negotiations with Civilization 2: \"Maps for gold?\" Proposal: Civilization 1 gives 30 gold; Civilization 2 gives their world map.", audience = [0, 1] }
+
+[[step]]
+note = "It is the other side's move, and the proposal is the opener's own."
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "accept", message = "Fine." }
+error = "It is Civilization 2's move"
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "counter", message = "Forty, then.", give = [{ type = "share_map" }], receive = [{ type = "gold", amount = 40 }] }
+as = "countered"
+
+[[step]]
+check = "countered"
+eq = { status = "open", awaiting = "Civilization 1" }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "accept", message = "Fine." }
+error = "It is Civilization 1's move"
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "accept", message = "Fine." }
+as = "accepted"
+
+[[step]]
+check = "accepted"
+eq = { status = "accepted", deal = "Civilization 1 gives 40 gold; Civilization 2 gives their world map." }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 60
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "gold"
+eq = 90
+
+[[step]]
+check = { what = "events", type = "deal" }
+path = "[0]"
+subset = { text = "Deal concluded between Civilization 1 and Civilization 2: Civilization 1 gives 40 gold; Civilization 2 gives their world map.", audience = [0, 1] }
+
+[[step]]
+note = "Gold a side does not have is refused to whoever offers it."
+tool = "open_negotiation"
+args = { to = 1, message = "More?", give = [{ type = "gold", amount = 70 }] }
+error = "Civilization 1 only has 60 gold."
+
+[[step]]
+note = "A lump sum is capped, and must be positive."
+tool = "open_negotiation"
+args = { to = 1, message = "More?", give = [{ type = "gold", amount = 20000 }] }
+error = "At most 10000 gold per deal."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "More?", give = [{ type = "gold", amount = -5 }] }
+error = "Gold amounts must be positive."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "More?", give = [{ type = "magic" }] }
+error = "Invalid deal item {'type': 'magic'}. Valid types: gold, gold_per_turn, resource, open_borders, embassy, peace_treaty, declaration_of_friendship, research_agreement, defensive_pact, declare_war, city, share_map, tech."
+
+[[step]]
+note = "The item is quoted back as it was read; the Rust runner reads a script's tables with their keys sorted, so this one is written so."
+tool = "open_negotiation"
+args = { to = 1, message = "More?", give = [{ amount = "lots", type = "gold" }] }
+error = "Malformed deal item {'amount': 'lots', 'type': 'gold'}."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "More?", give = [{ type = "resource", resource = "Wheat" }] }
+error = "'Wheat' is not a tradeable strategic or luxury resource."
+
+[[step]]
+note = "A city id no game can have is refused when it is proposed, where Python stored it and refused the deal when it was accepted."
+tool = "open_negotiation"
+args = { to = 1, message = "Your city?", receive = [{ type = "city", city_id = 0 }] }
+error = "Civilization 2 does not own city 0."
+intended = "deal-items-fit-their-fields"
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Your war?", receive = [{ type = "declare_war", target = 300 }] }
+error = "Invalid war target."
+intended = "deal-items-fit-their-fields"
+
+[[step]]
+note = "What the other side would give is checked when it is accepted."
+tool = "open_negotiation"
+args = { to = 1, message = "More?", receive = [{ type = "gold", amount = 500 }] }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 2, action = "accept", message = "Sure." }
+error = "Civilization 2 only has 90 gold."
+
+[[step]]
+check = { what = "negotiation", negotiation = 2 }
+path = "status"
+eq = "open"

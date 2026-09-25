@@ -1,0 +1,112 @@
+about = """
+War declared with a message, and peace made in a deal. War may be declared only on a living player met,
+not already at war, and not while a peace treaty holds. While at war, open borders cannot be traded and
+a deal must include a peace treaty; one that does ends the war, and the treaty then holds for the
+speed's peace duration.
+"""
+from = "tests/test_engine.py::DiplomacyTests::test_war_and_peace; citar/engine/diplomacy.py: can_declare_war, declare_war"
+
+[[step]]
+ops = [
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "declare_war"
+args = { player_id = 1 }
+error = "You have not met Civilization 2."
+
+[[step]]
+op = "meet"
+args = { a = 0, b = 1 }
+
+[[step]]
+tool = "declare_war"
+args = { player_id = 0 }
+error = "Invalid target."
+
+[[step]]
+tool = "declare_war"
+args = { player_id = 9 }
+error = "Invalid target."
+
+[[step]]
+tool = "declare_war"
+args = { player_id = 1, message = "For glory!" }
+as = "war"
+
+[[step]]
+check = "war"
+eq = { war_declared_on = "Civilization 2" }
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+subset = { war = true, war_declared_by = 0, since = 1 }
+
+[[step]]
+check = { what = "events", type = "war_declared" }
+path = "[0]"
+subset = { text = "Civilization 1 declared war on Civilization 2! \"For glory!\"", audience = "=null" }
+
+[[step]]
+tool = "declare_war"
+args = { player_id = 1 }
+error = "You are already at war with Civilization 2."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Borders?", give = [{ type = "open_borders" }] }
+error = "Open borders cannot be exchanged while at war (without a peace treaty)."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Gold?", give = [{ type = "gold", amount = 10 }] }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "accept", message = "Agreed." }
+error = "While at war, a deal must include a peace treaty."
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reject", message = "No." }
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Peace?", give = [{ type = "peace_treaty" }] }
+
+[[step]]
+check = { what = "negotiation", negotiation = 2 }
+path = "proposal"
+eq = { "0" = [{ type = "peace_treaty" }], "1" = [{ type = "peace_treaty" }] }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 2, action = "accept", message = "Agreed." }
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+subset = { war = false, treaty_until = 11 }
+
+[[step]]
+check = { what = "events", type = "peace" }
+path = "[0].text"
+eq = "Civilization 1 and Civilization 2 signed a peace treaty (until turn 11)."
+
+[[step]]
+tool = "declare_war"
+args = { player_id = 1 }
+error = "Your peace treaty with Civilization 2 lasts until turn 11."
+
+[[step]]
+op = "set_turn"
+args = { turn = 2 }
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Peace again?", give = [{ type = "peace_treaty" }] }
+error = "Civilization 1 and Civilization 2 are not at war."
