@@ -17,9 +17,7 @@
 //!
 //! What differs from Python, on purpose:
 //! - a tile another city of the same owner works is not workable (`cities-never-share-a-tile`);
-//!   Python refused only the tiles the tile's own city worked, so two cities could work one;
-//! - a city's pressures are kept sorted (see `game::religion`), so a tie between religions is
-//!   broken by that order.
+//!   Python refused only the tiles the tile's own city worked, so two cities could work one.
 
 use smallvec::SmallVec;
 

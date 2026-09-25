@@ -206,8 +206,8 @@ fn city(cx: &mut Cx<'_>, id: u32, v: &serde_json::Value, p: &Path<'_>) -> Res<Ci
         // Python seeded this on the first read of the city's religion; nothing had read it yet.
         pressures.push((None, NO_RELIGION_PRESSURE));
     }
-    pressures.sort_by_key(|&(r, _)| r);
-    if pressures.windows(2).any(|w| w[0].0 == w[1].0) {
+    // In the order Python's dict kept them, which ties of followers go by.
+    if pressures.iter().enumerate().any(|(i, x)| pressures[..i].iter().any(|y| y.0 == x.0)) {
         return Err(o.at("pressures").err("a religion is listed twice"));
     }
     c.pressures = pressures.into_iter().collect();

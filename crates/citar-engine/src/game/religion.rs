@@ -6,11 +6,9 @@
 //! (`cities.local_umaps`, `cities.py:48-66`), and so is `[n]% [stat] from every follower`.
 //! Package 1b-08 ports the rest of the system: pressure, spreading, founding and enhancing.
 //!
-//! What differs from Python: a city's pressures are kept sorted, no religion first, then by
-//! religion in the order they were founded, where Python kept them in the order each religion
-//! first reached the city, and broke two ties by that order: which religion a citizen left over
-//! after the division goes to, and which of two religions with as many followers is the
-//! majority. Both go by the order of founding here (`religion-ties-by-founding-order`).
+//! A city's pressures are kept in the order each religion first reached it, as Python's dict kept
+//! them, and ties go by that order: which religion a citizen left over after the division goes to,
+//! and which of two religions with as many followers is the majority.
 
 use smallvec::SmallVec;
 
@@ -79,12 +77,10 @@ pub fn majority_religion(g: &Game, c: CityId) -> Option<ReligionId> {
     majority_of(city)
 }
 
-/// The majority of a city's own followers, whether or not religion is in play. Religions with as
-/// many followers are told apart by the order they were founded in
-/// (`religion-ties-by-founding-order`).
+/// The majority of a city's own followers, whether or not religion is in play: of two religions
+/// with as many followers, the one that reached the city first.
 fn majority_of(city: &City) -> Option<ReligionId> {
     let f = followers(city);
-    // refcheck: religion-ties-by-founding-order
     let mut best: Option<(ReligionId, i32)> = None;
     for &(r, n) in &f {
         if best.is_none_or(|(_, m)| n > m) {
@@ -160,5 +156,18 @@ mod tests {
         assert_eq!(majority_of(&c), Some(ReligionId(1)), "one of two is half");
         assert_eq!(majority_of(&city(3, &[(None, 200), (Some(0), 100)])), None);
         assert!(followers(&city(1, &[])).is_empty(), "nobody follows nothing");
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_religion_that_arrived_first() {
+        // Two religions with two followers each: the one first in the city's list wins, whatever
+        // their ids.
+        let c = city(4, &[(None, 0), (Some(3), 200), (Some(1), 200)]);
+        assert_eq!(majority_of(&c), Some(ReligionId(3)));
+        let c = city(4, &[(None, 0), (Some(1), 200), (Some(3), 200)]);
+        assert_eq!(majority_of(&c), Some(ReligionId(1)));
+        // A citizen left over goes to the first of the largest remainders.
+        let c = city(3, &[(Some(2), 100), (None, 100), (Some(0), 100)]);
+        assert_eq!(followers(&c).to_vec(), [(ReligionId(2), 1), (ReligionId(0), 1)]);
     }
 }

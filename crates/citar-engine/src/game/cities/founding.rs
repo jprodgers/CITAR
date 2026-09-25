@@ -220,14 +220,7 @@ pub fn found_city(
     if let Some(rel) = pantheon
         && let Some(x) = g.city_mut(id, CityTouch::RELIGION)
     {
-        let add = 200 * i32::from(pop);
-        match x.pressures.iter_mut().find(|(k, _)| *k == Some(rel)) {
-            Some((_, v)) => *v += add,
-            None => {
-                x.pressures.push((Some(rel), add));
-                x.pressures.sort_by_key(|&(k, _)| k);
-            }
-        }
+        x.add_pressure(Some(rel), 200 * i32::from(pop));
     }
     let capital = g.player(p).and_then(|x| x.capital);
     let needs_capital =

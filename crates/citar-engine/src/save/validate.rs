@@ -160,6 +160,13 @@ impl Check<'_> {
         }
     }
 
+    /// A list kept in the order its items arrived: each item once.
+    fn distinct<T: PartialEq + fmt::Debug>(&mut self, path: &str, items: &[T]) {
+        if items.iter().enumerate().any(|(i, x)| items[..i].contains(x)) {
+            self.err(path, "lists an item twice");
+        }
+    }
+
     fn constructible(&mut self, path: &str, c: Constructible) {
         match c {
             Constructible::Building(b) => self.rule(path, b, self.r.buildings().len()),
@@ -525,7 +532,7 @@ impl Check<'_> {
                 self.err(format!("{path}.specialists"), "counts a specialist the ruleset lacks");
             }
             let keys: Vec<_> = c.pressures.iter().map(|(k, _)| *k).collect();
-            self.sorted(&format!("{path}.pressures"), &keys);
+            self.distinct(&format!("{path}.pressures"), &keys);
             for x in keys.into_iter().flatten().chain(c.religions_adopted.iter().copied()) {
                 self.religion(&path, x);
             }

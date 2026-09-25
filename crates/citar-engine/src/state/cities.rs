@@ -8,7 +8,8 @@
 //! Changed from Python:
 //! - `free_buildings` moved here from `Player.free_buildings[str(city id)]`;
 //! - buildings are a set, and the religious pressures are seeded when the city is created, not on
-//!   first read (`religion.py:105-109`), so a read never writes;
+//!   first read (`religion.py:105-109`), so a read never writes; they are kept in the order each
+//!   religion first reached the city, as Python's dict kept them, since ties go by that order;
 //! - `spaceship_parts`, which nothing read, is dropped;
 //! - [`citizens_settled`](City::citizens_settled) is new (DESIGN.md 6.8).
 
@@ -196,7 +197,8 @@ pub struct City {
     /// Turns of resistance left.
     pub resistance: i16,
     pub razing: bool,
-    /// Religious pressure by religion, `None` being no religion, sorted.
+    /// Religious pressure by religion, `None` being no religion, in the order each first reached
+    /// the city (`religion.py:105-109`): which religion a tie of followers goes to follows it.
     pub pressures: SmallVec<[(Option<ReligionId>, i32); 4]>,
     pub religions_adopted: SmallVec<[ReligionId; 2]>,
     pub holy_city_of: Option<ReligionId>,
@@ -334,16 +336,19 @@ impl City {
         self.pressures.iter().find(|(k, _)| *k == r).map_or(0, |&(_, v)| v)
     }
 
-    /// Sets the pressure toward a religion, keeping the list sorted; 0 removes the entry.
+    /// Sets the pressure toward a religion: in its place, or after the others for a religion new
+    /// to the city. An entry that falls to 0 keeps its place, as Python's dict kept the key.
     pub fn set_pressure(&mut self, r: Option<ReligionId>, v: i32) {
-        match self.pressures.binary_search_by_key(&r, |&(k, _)| k) {
-            Ok(i) if v == 0 => {
-                self.pressures.remove(i);
-            }
-            Ok(i) => self.pressures[i].1 = v,
-            Err(_) if v == 0 => {}
-            Err(i) => self.pressures.insert(i, (r, v)),
+        match self.pressures.iter_mut().find(|(k, _)| *k == r) {
+            Some((_, x)) => *x = v,
+            None => self.pressures.push((r, v)),
         }
+    }
+
+    /// Adds to the pressure toward a religion ([`set_pressure`](Self::set_pressure)).
+    pub fn add_pressure(&mut self, r: Option<ReligionId>, v: i32) {
+        let now = self.pressure(r);
+        self.set_pressure(r, now.saturating_add(v));
     }
 }
 
@@ -558,18 +563,19 @@ mod tests {
     }
 
     #[test]
-    fn pressures_stay_sorted_and_drop_zeros() {
+    fn pressures_keep_the_order_they_arrived_in() {
         let mut c = city(1, 0);
         c.set_pressure(Some(ReligionId(3)), 50);
-        c.set_pressure(Some(ReligionId(1)), 20);
+        c.add_pressure(Some(ReligionId(1)), 20);
+        c.add_pressure(Some(ReligionId(3)), 5);
         assert_eq!(
             c.pressures.as_slice(),
-            &[(None, 100), (Some(ReligionId(1)), 20), (Some(ReligionId(3)), 50)]
+            &[(None, 100), (Some(ReligionId(3)), 55), (Some(ReligionId(1)), 20)]
         );
         c.set_pressure(None, 0);
-        c.set_pressure(Some(ReligionId(9)), 0);
-        assert_eq!(c.pressures.len(), 2);
-        assert_eq!(c.pressure(Some(ReligionId(3))), 50);
+        assert_eq!(c.pressures.len(), 3, "a pressure at 0 keeps its place");
+        assert_eq!(c.pressure(None), 0);
+        assert_eq!(c.pressure(Some(ReligionId(9))), 0);
     }
 
     #[test]
