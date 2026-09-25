@@ -89,9 +89,10 @@ pub struct MoveRules {
     /// `movement.py:288-299`). A route that needs no tech is had by everyone.
     pub road_tech: Option<TechId>,
     pub rail_tech: Option<TechId>,
-    /// The least movement points a tile's governing terrain may cost to enter, at most one (a
-    /// city's tile costs one): the least of every terrain's cost, since any terrain may govern a
-    /// tile. What the path search's bound assumes of a step off the routes.
+    /// The least movement points any terrain costs to enter, at most one (a city's tile costs
+    /// one). At one, a step off the routes costs at least a point wherever it goes; below, the
+    /// path search's bound asks the map whether a tile is governed by such a terrain (the shipped
+    /// River, a feature that costs nothing, governs none unless an editor puts it on a tile).
     pub terrain_floor: i32,
     /// What the conditionals of the uniques of [`PROFILE_TYPES`] and of [`CIV_TYPES`] read,
     /// anywhere in the ruleset: what the memos of a unit's profile and a civilization's rules

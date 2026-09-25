@@ -30,7 +30,11 @@
 //! greater bound than the tile, so it is out of the heap before the target is; the walk back
 //! chooses the least `(key, tile)` among them. Two routes with the same label but different step
 //! costs (a hill or a meadow, when the step takes the last move either way) are therefore told
-//! apart as Python told them apart.
+//! apart as Python told them apart. A step that costs nothing (a terrain of cost 0, which no
+//! generated map has) keeps the label, and Python's order among such tiles is no longer `(key,
+//! tile)`: where no earlier tile steps to one, the walk back follows the tiles that gave each its
+//! label, which the search records. That path has Python's labels and turns, and may take other
+//! free steps than Python's.
 
 use core::cell::RefCell;
 
@@ -302,6 +306,8 @@ struct Cell {
     pass: bool,
     /// The hex distance to the search's target, 0 with none.
     dist: u16,
+    /// The tile that gave it its label, [`NO_TILE`](crate::base::hex::NO_TILE) at the start.
+    parent: u32,
     key: u64,
     facts: Facts,
 }
@@ -373,10 +379,18 @@ impl PathScratch {
     }
 
     #[inline]
-    fn set(&mut self, t: TileIdx, k: u64) {
+    fn set(&mut self, t: TileIdx, k: u64, parent: u32) {
         let c = self.cell(t);
         c.flags |= LABELLED;
         c.key = k;
+        c.parent = parent;
+    }
+
+    /// The tile that gave tile `t` its label, if this search labelled it from another.
+    fn parent(&self, t: TileIdx) -> Option<TileIdx> {
+        self.this(t)
+            .filter(|c| c.flags & LABELLED != 0 && c.parent != crate::base::hex::NO_TILE)
+            .map(|c| TileIdx(c.parent))
     }
 
     #[inline]
@@ -511,7 +525,7 @@ impl Mover<'_> {
         let mut off = if self.prof.all_1 || self.prof.ignores_terrain {
             sc
         } else {
-            let t = self.rules.terrain_floor.saturating_mul(sc);
+            let t = self.g.derived().terrain_floor(self.g).saturating_mul(sc);
             if self.prof.doubles.is_empty() { t } else { t / 2 }
         };
         // Embarking or disembarking comes before everything else a step checks.
@@ -572,7 +586,7 @@ impl Mover<'_> {
         let grid = g.grid();
         sc.begin(g.state().map().size() as usize, target);
         let first = Label { turns: 0, left: s.moves.max(0) };
-        sc.set(s.tile, first.key());
+        sc.set(s.tile, first.key(), crate::base::hex::NO_TILE);
         let _ = sc.look(self, s.tile);
         let d0 = sc.dist(s.tile);
         sc.heap.push(Open::entry(heur.key(first, s.tile, d0), first.key(), s.tile));
@@ -637,7 +651,7 @@ impl Mover<'_> {
                 if target.is_some() && (np >> 32) > u64::from(max_turns) + 1 {
                     continue;
                 }
-                sc.set(nb, nk);
+                sc.set(nb, nk, v.0);
                 sc.heap.push(Open::entry(np, nk, nb));
             }
         }
@@ -658,8 +672,8 @@ impl Mover<'_> {
         let grid = g.grid();
         let mut path = vec![target];
         let (mut v, mut vk) = (target, end);
-        // Each step back goes to a strictly earlier (key, tile), so this ends; the bound is a
-        // guard against a bug.
+        // Each step back goes to a strictly earlier (key, tile), but from the target, which is
+        // no candidate; the bound is a guard against a bug.
         let mut guard = g.state().map().size();
         while v != s.tile && guard > 0 {
             guard -= 1;
@@ -671,7 +685,7 @@ impl Mover<'_> {
                 }
                 let Some(uk) = sc.label(u) else { continue };
                 let lu = Label::from_key(uk);
-                if lu.turns > max_turns || (uk, u.0) >= (vk, v.0) {
+                if lu.turns > max_turns || (v != target && (uk, u.0) >= (vk, v.0)) {
                     continue;
                 }
                 let Some(d) = grid.neighbor_table(u).iter().position(|&n| n == v.0) else {
@@ -685,7 +699,17 @@ impl Mover<'_> {
                     best = Some((uk, u));
                 }
             }
-            let Some((uk, u)) = best else { break };
+            let Some((uk, u)) = best else {
+                // Free steps: back along the tiles that gave each its label.
+                let mut at = v;
+                while at != s.tile && guard > 0 {
+                    guard -= 1;
+                    let Some(p) = sc.parent(at) else { break };
+                    path.push(p);
+                    at = p;
+                }
+                break;
+            };
             path.push(u);
             v = u;
             vk = uk;
@@ -709,7 +733,7 @@ impl Mover<'_> {
             sc.begin(g.state().map().size() as usize, None);
             // Keys here are movement left alone: more is better, so the heap pops the most.
             let key = |l: i32| u64::from(u32::MAX - u32::try_from(l.max(0)).unwrap_or(0));
-            sc.set(s.tile, key(s.moves));
+            sc.set(s.tile, key(s.moves), crate::base::hex::NO_TILE);
             sc.heap.push(Open::entry(key(s.moves), 0, s.tile));
             let mut out = Vec::new();
             while let Some(e) = sc.heap.pop() {
@@ -745,7 +769,7 @@ impl Mover<'_> {
                     if sc.label(nb).is_some_and(|old| old <= nk) {
                         continue;
                     }
-                    sc.set(nb, nk);
+                    sc.set(nb, nk, cur.0);
                     sc.heap.push(Open::entry(nk, 0, nb));
                 }
             }
@@ -791,12 +815,17 @@ impl Mover<'_> {
     }
 
     /// Runs a bounded search from `s` with no target, labelling every tile within `max_turns`
-    /// turns, for a [`super::tree::PathTree`]; returns the labels by tile.
-    pub(crate) fn labels_within(&self, s: Start, max_turns: u32) -> Vec<(TileIdx, u64)> {
+    /// turns, for a [`super::tree::PathTree`]; returns each tile's label and the tile that gave
+    /// it.
+    pub(crate) fn labels_within(
+        &self,
+        s: Start,
+        max_turns: u32,
+    ) -> Vec<(TileIdx, u64, Option<TileIdx>)> {
         let g = self.g;
         with_scratch(g.derived().path_scratch(), |sc| {
             let _found = self.search(sc, s, None, max_turns, &Heur::none(s.full));
-            sc.closed.iter().filter_map(|&t| Some((t, sc.label(t)?))).collect()
+            sc.closed.iter().filter_map(|&t| Some((t, sc.label(t)?, sc.parent(t)))).collect()
         })
     }
 }

@@ -1,6 +1,11 @@
 //! The gates of package 1c-02 for paths, on random worlds: the search gives the path Python's
 //! Dijkstra gave (gate 2), a step costs what a direct port of `enter_cost` says (gate 3), and a
-//! unit whose moves exceed its full moves gets a correct path (gate 4).
+//! unit whose moves exceed its full moves gets a correct path (gate 4). The worlds draw terrain,
+//! features (the River that costs nothing in one world in four), rivers, routes, cities and
+//! their land, units, wars, fog, the techs that change moving (embarking, the ocean, roads,
+//! railroads, faster roads, roads across rivers), the nations whose uniques change it, a Great
+//! General gained and the Great Wall. The game's route net is compared with a cold look after
+//! random changes.
 
 use std::collections::BTreeMap;
 
@@ -37,8 +42,10 @@ fn feature(name: &str) -> FeatureId {
 }
 
 const BASES: [&str; 7] = ["Grassland", "Plains", "Desert", "Tundra", "Coast", "Ocean", "Mountain"];
-const FEATURES: [Option<&str>; 5] =
-    [None, Some("Hill"), Some("Forest"), Some("Jungle"), Some("Marsh")];
+/// The features a land tile may have. River, which the ruleset makes a feature that costs
+/// nothing, governs no tile the map generator makes, but an editor may put it on one.
+const FEATURES: [Option<&str>; 6] =
+    [None, Some("Hill"), Some("Forest"), Some("Jungle"), Some("Marsh"), Some("River")];
 const UNITS: [&str; 12] = [
     "Warrior",
     "Scout",
@@ -83,12 +90,15 @@ struct World {
     nations: (u8, u8),
     generals: (bool, bool),
     great_wall: Option<u8>,
+    /// Whether the River feature, which costs nothing to enter, may be put on tiles (a world
+    /// in four): steps that cost nothing.
+    free: bool,
 }
 
 fn world() -> impl Strategy<Value = World> {
     (
         (
-            proptest::collection::vec((0u8..7, 0u8..5), 80),
+            proptest::collection::vec((0u8..7, 0u8..6), 80),
             proptest::collection::vec((0u16..80, 0u8..64), 0..10),
             proptest::collection::vec((0u16..80, 0u8..4), 0..24),
             proptest::collection::vec((0u8..3, 0u16..80), 0..4),
@@ -103,12 +113,13 @@ fn world() -> impl Strategy<Value = World> {
             (0u8..6, 0u8..6),
             (any::<bool>(), any::<bool>()),
             proptest::option::of(0u8..4),
+            proptest::bool::weighted(0.25),
         ),
     )
         .prop_map(
             |(
                 (ground, rivers, routes, cities, claims, units, wars),
-                (explored, techs, woodsmen, nations, generals, great_wall),
+                (explored, techs, woodsmen, nations, generals, great_wall, free),
             )| World {
                 ground,
                 rivers,
@@ -123,6 +134,7 @@ fn world() -> impl Strategy<Value = World> {
                 nations,
                 generals,
                 great_wall,
+                free,
             },
         )
 }
@@ -151,6 +163,7 @@ fn build(w: &World) -> Game {
         let mut fs = FeatureSet::EMPTY;
         if !water
             && b != 6
+            && (w.free || f != 5)
             && let Some(name) = FEATURES[usize::from(f)]
         {
             fs.insert(feature(name));
@@ -476,6 +489,22 @@ fn enter_cost_direct(g: &Game, u: UnitId, a: TileIdx, b: TileIdx) -> i32 {
 
 // ---- The gates -------------------------------------------------------------------------------------
 
+/// The label a path gives at its end, stepping from `s`; `None` for a path that does not start
+/// where the unit stands or takes a step between tiles that are not neighbours.
+fn labels_along(m: &Mover<'_>, s: Start, path: &[TileIdx]) -> Option<Label> {
+    if path.first() != Some(&s.tile) {
+        return None;
+    }
+    let mut l = Label { turns: 0, left: s.moves.max(0) };
+    for w in path.windows(2) {
+        if m.game().grid().distance(w[0], w[1]) != 1 {
+            return None;
+        }
+        l = l.step(m.edge_cost(w[0], w[1]), s.full);
+    }
+    Some(l)
+}
+
 /// Every unit of the world that walks, with its search start.
 fn movers(g: &Game) -> Vec<UnitId> {
     g.state().units().iter().map(crate::state::units::Unit::id).collect()
@@ -485,7 +514,9 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
 
     /// Gate 2: on random terrain, routes, rivers, borders, wars, fog and units, the search finds
-    /// exactly the path Python's Dijkstra found, to every tile of the map.
+    /// exactly the path Python's Dijkstra found, to every tile of the map. Where steps may cost
+    /// nothing, a path that arrives with Python's label, in Python's turns (see `astar`'s module
+    /// doc).
     #[test]
     fn the_search_finds_pythons_path(w in world()) {
         let g = build(&w);
@@ -496,7 +527,12 @@ proptest! {
                 let t = TileIdx(i);
                 let fast = m.find_path_from(s, t, 40);
                 let slow = dijkstra(&m, s, t, 40);
-                prop_assert_eq!(&fast, &slow, "unit {:?} from {:?} to {:?}", u, s.tile, t);
+                if w.free && fast.is_some() && slow.is_some() {
+                    let (f, p) = (fast.clone().unwrap_or_default(), slow.clone().unwrap_or_default());
+                    prop_assert_eq!(labels_along(&m, s, &f), labels_along(&m, s, &p), "unit {:?} to {:?}: {:?} {:?}", u, t, f, p);
+                } else {
+                    prop_assert_eq!(&fast, &slow, "unit {:?} from {:?} to {:?}", u, s.tile, t);
+                }
                 if let Some(p) = fast {
                     prop_assert_eq!(m.path_turns_from(s, &p), m.path_turns_from(s, &slow.unwrap_or_default()));
                 }
@@ -545,16 +581,24 @@ proptest! {
         }
     }
 
-    /// A tree answers every path as the search does with its turn limit.
+    /// A tree answers every path as the search does with its turn limit; where steps may cost
+    /// nothing, a path with the same labels.
     #[test]
     fn a_tree_answers_as_the_search(w in world(), limit in 1u32..6) {
         let g = build(&w);
         for u in movers(&g) {
             let Some(m) = Mover::unit(&g, u) else { continue };
+            let Some(s) = m.start() else { continue };
             let Some(tree) = super::PathTree::build(&m, limit) else { continue };
             for i in 0..80u32 {
                 let t = TileIdx(i);
-                prop_assert_eq!(tree.path_to(&m, t), m.find_path(t, limit), "unit {:?} to {:?}", u, t);
+                let (a, b) = (tree.path_to(&m, t), m.find_path(t, limit));
+                if w.free && a.is_some() && b.is_some() {
+                    let (a, b) = (a.unwrap_or_default(), b.unwrap_or_default());
+                    prop_assert_eq!(labels_along(&m, s, &a), labels_along(&m, s, &b), "unit {:?} to {:?}", u, t);
+                } else {
+                    prop_assert_eq!(a, b, "unit {:?} to {:?}", u, t);
+                }
             }
         }
     }
@@ -728,4 +772,37 @@ fn the_route_net_is_built_afresh_only_for_what_it_reads() {
     assert_eq!(read(&g), first + 2, "a route's tech");
     let _ = testing::city(&mut g, PlayerId(1), TileIdx(58), "Athens");
     assert_eq!(read(&g), first + 3, "a city founded");
+}
+
+/// A path across tiles that cost nothing to enter (the River feature, which an editor may put on
+/// a tile) still runs from the unit to the target, arriving as Python's did, and a tree finds the
+/// same; the bound then assumes nothing of a step off the routes.
+#[test]
+fn free_steps_still_make_a_whole_path() {
+    let mut g = testing::duel();
+    let river = feature("River");
+    let mut fs = FeatureSet::EMPTY;
+    fs.insert(river);
+    for t in [2, 3, 4, 12, 13, 14, 22, 23] {
+        g.set_features(TileIdx(t), fs).expect("a tile");
+    }
+    let u = testing::unit(&mut g, PlayerId(0), "Warrior", TileIdx(1));
+    for i in 0..80u32 {
+        if let Some(pl) = g.player_mut(PlayerId(0), PlayerTouch::OTHER) {
+            pl.explored.insert(i);
+        }
+    }
+    g.settle();
+    assert_eq!(g.derived().terrain_floor(&g), 0);
+    let m = Mover::unit(&g, u).expect("a unit");
+    let s = m.start().expect("a start");
+    let tree = super::PathTree::build(&m, 40).expect("a tree");
+    for t in [TileIdx(5), TileIdx(24), TileIdx(33), TileIdx(79)] {
+        let p = m.find_path(t, 40).expect("a path");
+        let py = dijkstra(&m, s, t, 40).expect("Python's path");
+        assert_eq!((p.first(), p.last()), (Some(&s.tile), Some(&t)));
+        assert_eq!(labels_along(&m, s, &p), labels_along(&m, s, &py), "to {t:?}: {p:?} {py:?}");
+        let from_tree = tree.path_to(&m, t).expect("a path from the tree");
+        assert_eq!(labels_along(&m, s, &from_tree), labels_along(&m, s, &p));
+    }
 }

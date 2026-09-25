@@ -3,8 +3,9 @@
 //! standing orders and the rest are `game::movement`'s.
 //!
 //! - [`class`]: what decides how a unit moves: its profile ([`Profile`], `movement.profile`), its
-//!   civilization's movement rules ([`CivMove`]) and the ruleset's names ([`MoveRules`]), taken
-//!   once per search into a [`Mover`];
+//!   civilization's movement rules ([`CivMove`]) and the ruleset's names ([`MoveRules`], resolved
+//!   at load), taken once per search into a [`Mover`];
+//! - `memo`: the game's memos those are taken from, each checked against what it reads;
 //! - [`node`]: whether it may pass through a tile, end its move there, or route through it, with
 //!   Python's reasons ([`Blocked`]);
 //! - [`cost`]: what one step costs (`movement.enter_cost`), with routes, rivers and zones of
@@ -14,12 +15,14 @@
 //! - [`tree`]: one bounded search that answers paths to many tiles ([`PathTree`]).
 //!
 //! **What is cached, and what is not.** A mover takes a unit's profile, its civilization's rules,
-//! whom it is at war with, whose land it may enter and the zones of control once, for one search;
-//! the tiles themselves are read as they are, each a handful of loads, so nothing per tile has to
-//! follow the map's changes. The ruleset holds the names movement reads ([`MoveRules`], with the
-//! least a terrain may cost); the game keeps how far each tile is from the routes ([`RouteNet`]),
-//! which the search's bound reads, and the search's scratch arrays (`PathScratch`), which a
-//! generation stamp resets without clearing.
+//! whom it is at war with, whose land it may enter and the zones of control once, for one search,
+//! from memos that are checked against the revisions of what they read (`memo`); the tiles
+//! themselves are read as they are, each a handful of loads, so nothing per tile has to follow
+//! the map's changes. The search's bound reads two facts of the map the game keeps up to date
+//! from the tile log and the routes: whether a tile costs nothing to enter
+//! (`TerrainFloorMemo`, looked at only when the ruleset has such a terrain), and how far each
+//! tile is from the routes ([`RouteNet`]). The search's scratch arrays (`PathScratch`) are reused,
+//! a generation stamp resetting them without clearing.
 
 pub mod astar;
 pub mod class;
@@ -101,7 +104,7 @@ impl RouteNet {
 }
 
 /// Where the routes run and how far each tile is from them, as [`RouteNet`] says: a cold look at
-/// the map, which the cache oracle compares the game's [`RouteNetMemo`] with.
+/// the map, which the cache oracle compares the game's `RouteNetMemo` with.
 #[must_use]
 pub fn route_net(g: &Game) -> RouteNet {
     let routes = routes_of(g);
@@ -132,6 +135,80 @@ fn spread(grid: &HexGrid, dist: &mut [u16], mut queue: Vec<TileIdx>) {
             }
         }
     }
+}
+
+/// Whether any tile of the map is governed by a terrain that costs nothing to enter, kept up to
+/// date from the tile log: what the search's bound assumes of a step off the routes, when the
+/// ruleset has such a terrain ([`MoveRules::terrain_floor`] below one). A tile written is looked
+/// at again alone; nothing else moves it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TerrainFloorMemo {
+    /// The revision it was last brought up to date at; [`Rev::NEVER`] before its first look.
+    at: Rev,
+    /// Per tile, whether its governing terrain costs nothing.
+    free: Vec<bool>,
+    /// How many tiles are.
+    count: u32,
+}
+
+impl TerrainFloorMemo {
+    /// The least movement points a step off the routes may cost: 0 if a tile costs nothing to
+    /// enter, else 1.
+    pub(crate) const fn floor(&self) -> i32 {
+        if self.count > 0 { 0 } else { 1 }
+    }
+
+    /// Whether it was brought up to date at revision `now`, and needs no look.
+    pub(crate) fn current(&self, now: Rev) -> bool {
+        self.at == now && now != Rev::NEVER
+    }
+
+    /// Brings it up to date with game `g`, whose revision is `now`.
+    pub(crate) fn update(&mut self, g: &Game, now: Rev) {
+        let n = g.state().map().size() as usize;
+        let changed = if self.at == Rev::NEVER || self.free.len() != n {
+            None
+        } else {
+            g.derived().revs().tile_log.since(self.at)
+        };
+        match changed {
+            Some(tiles) => {
+                for t in tiles {
+                    let now_free = costs_nothing(g, t);
+                    if let Some(was) = self.free.get_mut(t.0 as usize)
+                        && *was != now_free
+                    {
+                        *was = now_free;
+                        self.count = if now_free { self.count + 1 } else { self.count - 1 };
+                    }
+                }
+            }
+            None => {
+                self.free =
+                    (0..g.state().map().size()).map(|i| costs_nothing(g, TileIdx(i))).collect();
+                self.count = self.free.iter().map(|&f| u32::from(f)).sum();
+            }
+        }
+        self.at = now;
+    }
+}
+
+/// The least movement points a step off the routes may cost on game `g`'s map, as
+/// `TerrainFloorMemo` says: a cold look at the map, which the cache oracle compares with.
+#[must_use]
+pub fn terrain_floor(g: &Game) -> i32 {
+    let rules = &g.rules().derived().moves;
+    if rules.terrain_floor >= 1
+        || !(0..g.state().map().size()).any(|i| costs_nothing(g, TileIdx(i)))
+    {
+        return 1;
+    }
+    0
+}
+
+/// Whether tile `t`'s governing terrain costs nothing to enter.
+fn costs_nothing(g: &Game, t: TileIdx) -> bool {
+    g.tile(t).is_some_and(|x| g.rules().terrains()[node::governing(g, x)].movement_cost <= 0)
 }
 
 /// The game's [`RouteNet`], kept up to date as the routes change (DESIGN.md 6.10). The net reads

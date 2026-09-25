@@ -21,7 +21,7 @@ use smallvec::SmallVec;
 
 use self::rev::{Memo, Revs};
 use super::events::NameIndex;
-use super::path::{PathCache, PathScratch, RouteNet, RouteNetMemo};
+use super::path::{PathCache, PathScratch, RouteNet, RouteNetMemo, TerrainFloorMemo};
 use super::pending::SightSource;
 use super::vis::Visibility;
 use crate::base::hex::HexGrid;
@@ -53,6 +53,8 @@ pub struct Derived {
     pub(crate) civ: civ::CivCaches,
     /// The memos a path search's mover is built from.
     pub(crate) moves: super::path::memo::MoveCaches,
+    /// Whether a tile costs nothing to enter, for the path search's bound.
+    terrain_floor: RefCell<TerrainFloorMemo>,
     /// How far each tile is from the routes, for the path search's bound.
     route_net: RefCell<RouteNetMemo>,
     /// The path searches' arrays, reused.
@@ -81,6 +83,7 @@ impl Derived {
             vis: Visibility::new(rules, st),
             civ: civ::CivCaches::new(rules, st),
             moves: super::path::memo::MoveCaches::new(st),
+            terrain_floor: RefCell::new(TerrainFloorMemo::default()),
             route_net: RefCell::new(RouteNetMemo::default()),
             path_scratch: RefCell::new(PathScratch::default()),
             path_cache: RefCell::new(PathCache::default()),
@@ -155,6 +158,22 @@ impl Derived {
             self.route_net.borrow_mut().update(g, now);
         }
         Ref::map(self.route_net.borrow(), RouteNetMemo::net)
+    }
+
+    /// The least movement points a step off the routes may cost (`super::path::terrain_floor`):
+    /// one, unless the ruleset has a terrain that costs nothing and a tile of the map is governed
+    /// by one (`TerrainFloorMemo`, which follows the tile log); `g` is the game these caches are
+    /// its.
+    #[must_use]
+    pub fn terrain_floor(&self, g: &super::Game) -> i32 {
+        if g.rules().derived().moves.terrain_floor >= 1 {
+            return 1;
+        }
+        let now = self.revs.now();
+        if !self.terrain_floor.borrow().current(now) {
+            self.terrain_floor.borrow_mut().update(g, now);
+        }
+        self.terrain_floor.borrow().floor()
     }
 
     /// How many times the route net was built afresh rather than brought up to date.

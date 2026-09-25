@@ -13,12 +13,12 @@ use super::class::Mover;
 use crate::base::collections::LookupMap;
 use crate::base::ids::TileIdx;
 
-/// The labels of one bounded search from a unit.
+/// The labels of one bounded search from a unit, with the tile that gave each its label.
 #[derive(Clone, Debug)]
 pub struct PathTree {
     start: Start,
     max_turns: u32,
-    labels: LookupMap<TileIdx, u64>,
+    labels: LookupMap<TileIdx, (u64, Option<TileIdx>)>,
     len: usize,
 }
 
@@ -31,8 +31,8 @@ impl PathTree {
         let found = if m.is_air() { Vec::new() } else { m.labels_within(start, max_turns) };
         let len = found.len();
         let mut labels = LookupMap::new();
-        for (t, k) in found {
-            labels.insert(t, k);
+        for (t, k, parent) in found {
+            labels.insert(t, (k, parent));
         }
         Some(Self { start, max_turns, labels, len })
     }
@@ -52,7 +52,7 @@ impl PathTree {
     /// Where the search stood on a tile on its way elsewhere.
     #[must_use]
     pub fn label(&self, t: TileIdx) -> Option<Label> {
-        self.labels.get(&t).map(|&k| Label::from_key(k))
+        self.labels.get(&t).map(|&(k, _)| Label::from_key(k))
     }
 
     /// The best path to `target`, as [`Mover::find_path`] finds it with the tree's turn limit;
@@ -73,7 +73,10 @@ impl PathTree {
         }
         // The target's label: the best its expanded neighbours step to.
         let expanded = |u: TileIdx| {
-            self.labels.get(&u).copied().filter(|&k| Label::from_key(k).turns <= self.max_turns)
+            self.labels
+                .get(&u)
+                .map(|&(k, _)| k)
+                .filter(|&k| Label::from_key(k).turns <= self.max_turns)
         };
         let end = g
             .grid()
@@ -94,7 +97,8 @@ impl PathTree {
                     continue;
                 }
                 let Some(uk) = expanded(u) else { continue };
-                if (uk, u.0) >= (vk, v.0) {
+                // From the target, which is no candidate, any earlier label may do.
+                if v != target && (uk, u.0) >= (vk, v.0) {
                     continue;
                 }
                 if Label::from_key(uk).step(m.edge_cost(u, v), s.full).key() != vk {
@@ -104,12 +108,22 @@ impl PathTree {
                     best = Some((uk, u));
                 }
             }
-            let (uk, u) = best?;
+            let Some((uk, u)) = best else {
+                // Free steps: back along the tiles that gave each its label (see
+                // `astar`'s module doc).
+                let mut at = v;
+                while at != s.tile && guard > 0 {
+                    guard -= 1;
+                    at = self.labels.get(&at).and_then(|&(_, p)| p)?;
+                    path.push(at);
+                }
+                break;
+            };
             path.push(u);
             v = u;
             vk = uk;
         }
         path.reverse();
-        Some(path)
+        (path.first() == Some(&s.tile)).then_some(path)
     }
 }
