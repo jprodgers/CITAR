@@ -6,7 +6,7 @@
 //! reads, so a game plays the same with the checks on or off.
 //!
 //! Python had no invariants; a few of these catch states its bugs produced (DESIGN.md 4.4-4.6).
-//! A city's maximum health waits for the system that defines it (package 1c-03). Two bounds of
+//! Two bounds of
 //! DESIGN.md 9.4 do not hold in play, Python's or this engine's, and are left out (package 1c-02):
 //! a unit's movement may exceed its allowance (movement gained from a unique, or transferred by a
 //! unit it has since left), so it is held to a sanity cap instead; and units stack where a move
@@ -15,7 +15,7 @@
 
 use core::fmt;
 
-use super::{Game, Porting, pending};
+use super::Game;
 use crate::base::ids::{CityId, TileIdx};
 use crate::state::Phase;
 use crate::state::cities::{City, Constructible};
@@ -265,6 +265,10 @@ fn cities(g: &Game, out: &mut Out) {
         if c.health <= 0 {
             out.push(Code::City1, format!("city {id} has {} health", c.health));
         }
+        let most = super::cities::stats::max_health(g, id);
+        if c.health > most {
+            out.push(Code::City1, format!("city {id} has {} health of {most} at most", c.health));
+        }
         for item in &c.queue {
             let known = match *item {
                 Constructible::Building(b) => r.buildings().get(b).is_some(),
@@ -320,8 +324,6 @@ fn cities(g: &Game, out: &mut Out) {
             }
         }
     }
-    // The upper bound on health (combat's max_health).
-    pending(Porting::Pending("1c-03"));
 }
 
 fn strictly_sorted(v: &[TileIdx]) -> bool {

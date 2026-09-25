@@ -34,7 +34,7 @@ use crate::game::core::has_type;
 use crate::game::economy;
 use crate::state::cities::{City, Constructible, Perpetual};
 use crate::unique::world::CombatAction;
-use crate::unique::{CombatCtx, Combatant, Ctx, Source, UniqueData, UniqueType, uq};
+use crate::unique::{Ctx, Source, UniqueData, UniqueType, uq};
 
 // ---- Stats as Python's dicts held them ----------------------------------------------------------
 
@@ -1473,62 +1473,12 @@ pub fn max_health(g: &Game, c: CityId) -> i32 {
     200 + city.buildings.iter().map(|b| g.rules().buildings()[b].city_health).sum::<i32>()
 }
 
-/// A city's combat strength as it defends (`combat.city_strength`, `combat.py:149-174`): its
-/// base, its population, its terrain, its owner's share of the techs, its garrison, its
-/// buildings (times the owner's `[n]% Strength for cities`) and `[n] Strength`.
+/// A city's combat strength as it defends against no one in particular (`combat.city_strength`,
+/// `combat.py:149-174`), as the city's view and refcheck ask it; a fight asks
+/// [`crate::game::combat::strength::city_strength`] with the other side.
 #[must_use]
 pub fn city_strength(g: &Game, c: CityId) -> i32 {
-    let Some(city) = g.city(c) else { return 0 };
-    let r = g.rules();
-    let k = &r.constants().formulas;
-    let v = g.view();
-    let mut s = k.city_strength_base + f64::from(city.pop) * k.city_strength_per_pop;
-    for h in uq::terrains(&v, city.tile(), UniqueType::GrantsCityStrength, &Ctx::IGNORE) {
-        if let UniqueData::GrantsCityStrength(x) = h.data() {
-            s += f64::from(x.strength);
-        }
-    }
-    let n_techs = r.techs().len();
-    #[allow(clippy::cast_precision_loss, reason = "tech counts are far below 2^52")]
-    let pct = if n_techs == 0 {
-        0.5
-    } else {
-        g.player(city.owner()).map_or(0, |p| p.tech.known.len()) as f64 / n_techs as f64
-    };
-    s += num::pow(pct * k.city_strength_from_techs_multiplier, k.city_strength_from_techs_exponent)
-        * k.city_strength_from_techs_full_multiplier;
-    if let Some(m) = g.military_at(city.tile()) {
-        s += f64::from(r.base_units()[m.base].strength)
-            * (f64::from(m.hp) / 100.0)
-            * k.city_strength_from_garrison;
-    }
-    let mut bs: f64 = city.buildings.iter().map(|b| r.buildings()[b].city_strength).sum();
-    let ctx = Ctx {
-        civ: Some(city.owner()),
-        city: Some(c),
-        tile: Some(city.tile()),
-        combat: Some(CombatCtx {
-            our: Combatant::City(c),
-            their: None,
-            attacked_tile: None,
-            action: Some(CombatAction::Defend),
-        }),
-        ..Ctx::default()
-    };
-    for h in uq::civ(&v, city.owner(), UniqueType::BetterDefensiveBuildings, &ctx) {
-        if let UniqueData::BetterDefensiveBuildings(x) = h.data() {
-            for _ in 0..h.n {
-                bs *= 1.0 + f64::from(x.percent) / 100.0;
-            }
-        }
-    }
-    s += bs;
-    for h in uq::city(&v, c, UniqueType::StrengthAmount, &ctx) {
-        if let UniqueData::StrengthAmount(x) = h.data() {
-            s += f64::from(x.strength) * f64::from(h.n);
-        }
-    }
-    num::trunc_i32(num::round_half_even(s))
+    crate::game::combat::strength::city_strength(g, c, None, CombatAction::Defend)
 }
 
 /// What something costs to build, in production (`cities.production_cost`,

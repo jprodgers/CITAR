@@ -38,6 +38,10 @@
 //! gold at the end of a turn, temporary uniques); and the uniques of a city
 //! ([`cities::uniques`]) and of a unit ([`units`]).
 //!
+//! Combat and conquest (package 1c-03): [`combat`] (strengths and modifiers, fights, cities'
+//! bombardment, aircraft and nuclear weapons) and [`conquest`] (a city taken, and what its
+//! conqueror decides).
+//!
 //! **Porting markers.** A step whose system a later package ports is written as
 //! `pending(Porting::Pending("<package>"))`, or `pending_or` where it must answer
 //! something meanwhile. `cargo xtask check` counts these by their literal argument and fails
@@ -46,6 +50,8 @@
 pub mod action;
 pub mod cities;
 pub mod city_states;
+pub mod combat;
+pub mod conquest;
 pub mod core;
 pub mod debug;
 pub mod derive;
