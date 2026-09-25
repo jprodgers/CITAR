@@ -117,6 +117,7 @@ pub(crate) const fn pending(_: Porting) {}
 /// Marks a value whose system a later package ports, and gives `meanwhile` until then. Write the
 /// marker as a literal, `pending_or(Porting::Pending("1b-06"), 0)`.
 #[inline]
+#[allow(dead_code, reason = "no value waits for a package now; a later port may mark one again")]
 pub(crate) fn pending_or<T>(_: Porting, meanwhile: T) -> T {
     meanwhile
 }

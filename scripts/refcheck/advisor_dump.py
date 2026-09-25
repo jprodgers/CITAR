@@ -18,8 +18,7 @@ Each state is loaded afresh, and for every city of a living major civilization i
 A refusal inside the advisor, which ``auto_pick_production`` swallowed, is recorded as null. Each question is asked
 from cleared caches (see ``guarded``). The Rust test
 (crates/citar-testkit/tests/engine/advisor.rs) asks its advisor the same and reports the share that agree. It is not a
-gate: the ranged-or-melee draw, the order units are read in and ties differ on purpose (tests/rules/intended.toml),
-and until package 1c-04 scores city sites the Rust advisor chooses no settler.
+gate: the ranged-or-melee draw, the order units are read in and ties differ on purpose (tests/rules/intended.toml).
 """
 from __future__ import annotations
 

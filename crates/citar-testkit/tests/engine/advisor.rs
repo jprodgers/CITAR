@@ -270,8 +270,8 @@ struct DumpCity {
 struct Agreement {
     agree: usize,
     asked: usize,
-    /// Of those that differ, where Python founds a city: the sites a settler would go to wait
-    /// for package 1c-04's scoring.
+    /// Of those that differ, where Python founds a city: the sites a settler would go to, which
+    /// package 1c-04's `automation::city_site_score` scores.
     settler: usize,
 }
 
@@ -338,8 +338,7 @@ fn report(what: &str, n: [Agreement; 4]) {
 #[allow(clippy::disallowed_methods, reason = "the dumps are files, the corpus a test's switch")]
 fn the_advisors_agreement_with_python_is_reported() {
     // Informational (gate 4): the share of cities where the Rust advisor picks what Python's did.
-    // It differs on purpose where the draw, the order of units and ties differ, and picks no
-    // settler until city sites are scored (package 1c-04).
+    // It differs on purpose where the draw, the order of units and ties differ.
     let path = fixtures::repo_root().join("crates/citar-testkit/data/advisor.json");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let dump: Dump = serde_json::from_str(&text).expect("the dump");

@@ -30,8 +30,7 @@
 //! What a civilization's turn looks like to production, what it has and where it would found
 //! cities are gathered once in an [`Advisor`], which the bot keeps for a civilization's turn and
 //! asks for each city; the sites are asked only when a city could start a settler otherwise.
-//! The sites wait for the scoring of city sites (package 1c-04, `automation.city_site_score`):
-//! until it lands no site scores, so no settler is chosen.
+//! A site is scored by package 1c-04's `automation::city_site_score`.
 
 use core::cell::OnceCell;
 
@@ -44,7 +43,6 @@ use super::cities::founding::found_check;
 use super::cities::stats::{city_strength, max_health, remaining_work};
 use super::cities::what_if::{CityWhatIf, StatsDelta};
 use super::derive::{civ, stats as memo};
-use super::{Porting, pending_or};
 use crate::base::ids::{BaseUnitId, BuildingId, CityId, PlayerId, TileIdx, UnitId};
 use crate::base::num;
 use crate::base::rng::{Purpose, Rng};
@@ -719,9 +717,9 @@ fn counts(g: &Game, s: &Situation) -> Counts {
 // ---- Expansion (basic.py:1069-1111, 1210-1219, 1890-1894) ---------------------------------------
 
 /// How good a site tile `t` is for a city of `p` (`automation.city_site_score`), or `None` where
-/// no city can go: package 1c-04's.
-fn site_score(_g: &Game, _p: PlayerId, _t: TileIdx) -> Option<f64> {
-    pending_or(Porting::Pending("1c-04"), None)
+/// no city can go.
+fn site_score(g: &Game, p: PlayerId, t: TileIdx) -> Option<f64> {
+    super::automation::city_site_score(g, p, t)
 }
 
 /// Where a civilization would found its next cities, best first (`BasicBot.expansion_sites`,
