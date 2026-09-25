@@ -461,7 +461,7 @@ fn answer_stream(g: &Game, pid: PlayerId, nid: NegotiationId) -> Rng {
 const EXCHANGES: usize = 4;
 
 /// Plays out a chat just opened: the side it waits on answers, as its driver's `respond` would,
-/// until it closes or [`EXCHANGES`] answers have passed.
+/// until it closes or four answers (`EXCHANGES`) have passed.
 pub fn converse(g: &mut Game, nid: NegotiationId) {
     for _ in 0..EXCHANGES {
         let open = g.negotiation(nid).filter(|n| n.status == NegStatus::Open);

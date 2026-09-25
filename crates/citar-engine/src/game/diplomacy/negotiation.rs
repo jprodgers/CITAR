@@ -9,7 +9,7 @@
 //! open chat never holds more than the cap (invariant NEG-1). Neither side may end its turn while
 //! a negotiation it is in is open ([`end_turn_refusal`], which the `end_turn` action reads);
 //! `Game::end_turn` keeps Python's safety net, expiring the negotiations the player opened
-//! ([`expire_for`], stage E0). A war cancels the negotiations of its two sides.
+//! (`expire_for`, stage E0). A war cancels the negotiations of its two sides.
 //!
 //! Each step is split as the action pipeline runs it: a `plan_*` that only reads and refuses,
 //! and an apply that cannot fail. The actions read a proposal as a caller writes it, in JSON;

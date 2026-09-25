@@ -12,7 +12,7 @@
 //!   [`ra_cost`] are Python's.
 //! - [`plan_deal`] and [`execute_deal`] split `execute_deal` (`diplomacy.py:530-609`) into the
 //!   checks, which only read, and the transfer, which cannot fail.
-//! - [`process_round`] is the round's end for deals and agreements (`diplomacy.py:644-677`): cut
+//! - `process_round` is the round's end for deals and agreements (`diplomacy.py:644-677`): cut
 //!   trades, expired deals and open borders, and research agreements paying out.
 //!
 //! What differs, on purpose (tests/rules/intended.toml, `deal-items-fit-their-fields`): an item
