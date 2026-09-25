@@ -28,6 +28,8 @@
 //! - `spies` (`player`): a civilization's spies;
 //! - `camps`: the barbarian camps; `city_state` (`player`): a city-state's standing with the
 //!   majors, its protectors and its quests;
+//! - `victory` (`player`): a civilization's score, military strength, progress toward each
+//!   victory, spaceship and the victory it would win now; `un`: the United Nations' vote;
 //! - `events` (optionally `since`, `type` and `player`, the last keeping what that player hears);
 //! - `find_tiles`: the tiles that pass the filters given, nearest first (see [`find_tiles`]);
 //! - `ops`: the scenario and test operations with their parameters;
@@ -60,7 +62,7 @@ use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
 /// The queries, by `what`, sorted, with whether what each reads is ported yet.
-const QUERIES: [(&str, Porting); 24] = [
+const QUERIES: [(&str, Porting); 26] = [
     ("briefing", Porting::Pending("1d-03")),
     ("build_options", Porting::Ported),
     ("buildable", Porting::Ported),
@@ -81,9 +83,11 @@ const QUERIES: [(&str, Porting); 24] = [
     ("religion", Porting::Ported),
     ("spies", Porting::Ported),
     ("tile", Porting::Ported),
+    ("un", Porting::Ported),
     ("unit", Porting::Ported),
     ("unit_actions", Porting::Ported),
     ("units", Porting::Ported),
+    ("victory", Porting::Ported),
     ("view", Porting::Pending("1d-02")),
 ];
 
@@ -177,6 +181,8 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
         "spies" => Ok(crate::game::espionage::spies_json(g, any_player(g, o.get("player"))?)),
         "camps" => Ok(crate::game::barbarians::camps_json(g)),
         "city_state" => city_state(g, any_player(g, o.get("player"))?),
+        "victory" => Ok(victory(g, any_player(g, o.get("player"))?)),
+        "un" => Ok(crate::game::victory::un::un_json(g)),
         "view" => Err(not_ported("api::views")),
         "briefing" => Err(not_ported("api::briefing")),
         _ => {
@@ -285,13 +291,27 @@ fn game(g: &Game) -> Value {
         "current": clock.current.0,
         "phase": match clock.phase { Phase::Playing => "playing", Phase::Over => "over" },
         "winner": clock.winner.map(|p| p.0),
-        "victory": clock.victory.and_then(|v| g.rules().name(v)),
+        "victory": crate::game::victory::won_by(g).map(|w| w.name(g.rules())),
         "width": st.map().width,
         "height": st.map().height,
         "players": st.players().len(),
         "majors": by(Player::is_major),
         "city_states": by(Player::is_city_state),
         "barbarians": by(Player::is_barbarian).first(),
+    })
+}
+
+/// `victory`: a civilization's `score` (Python's parts and total), `military_strength`, `progress`
+/// toward each enabled victory (`victory.victory_progress`), `spaceship`
+/// (`victory.spaceship_status`) and the victory it would win now (`achieved`, a name or null).
+fn victory(g: &Game, p: PlayerId) -> Value {
+    use crate::game::victory as v;
+    json!({
+        "score": v::score(g, p).to_json(),
+        "military_strength": v::military_strength(g, p),
+        "progress": v::victory_progress(g, p),
+        "spaceship": v::spaceship_status(g, p).to_json(g),
+        "achieved": v::victory_achieved(g, p).map(|w| w.name(g.rules())),
     })
 }
 

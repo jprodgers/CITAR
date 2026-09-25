@@ -12,7 +12,7 @@ from .state import AUTO_DECISIONS
 
 QUERIES = ("build_options", "buildable", "camps", "city", "city_state", "costs", "events", "find_tiles", "game",
            "great_people", "negotiation", "ops", "pending", "player", "preview", "relation", "religion", "spies", "tile",
-           "unit", "unit_actions", "units")
+           "un", "unit", "unit_actions", "units", "victory")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -92,6 +92,10 @@ def inspect(g: Game, q: dict) -> Any:
                 for cid, c in sorted(g.s.camps.items())]
     if what == "city_state":
         return _city_state(g, _any_pid(g, q.get("player")))
+    if what == "victory":
+        return _victory(g, _any_pid(g, q.get("player")))
+    if what == "un":
+        return _un(g)
     if what == "events":
         return _events(g, q)
     if what == "find_tiles":
@@ -102,6 +106,33 @@ def inspect(g: Game, q: dict) -> Any:
     if what == "pending":
         return []
     raise ActionError(f"Unknown inspect query {what!r}. Known: {', '.join(QUERIES)}.")
+
+
+def _victory(g: Game, pid: int) -> dict:
+    """``victory``: a civilization's score, military strength, progress toward each victory, spaceship, and the
+    victory it would win now."""
+    from . import victory as V
+    return {"score": V.score(g, pid), "military_strength": V.military_strength(g, pid),
+            "progress": V.victory_progress(g, pid), "spaceship": V.spaceship_status(g, pid),
+            "achieved": V.victory_achieved(g, pid)}
+
+
+def _un(g: Game) -> dict:
+    """``un``: the United Nations' vote, read without creating its state as ``victory._un`` does. The last result's
+    tally is by player id, most votes first and equals by id, as the Rust engine keeps it."""
+    from . import victory as V
+    un = g.s.un or {}
+    nv = un.get("next_vote")
+    res = un.get("results")
+    if res:
+        ids = {p.name: p.id for p in g.s.players}
+        tally = sorted(([ids.get(n), v] for n, v in res["tally"].items()), key=lambda x: (-x[1], x[0]))
+        res = {"turn": res["turn"], "tally": tally, "votes_needed": res["votes_needed"], "winner": res["winner"]}
+    votes = un.get("votes") or {}
+    return {"next_vote": nv, "votes": {str(k): votes[k] for k in sorted(votes, key=int)}, "results": res,
+            "won": sorted(un.get("won") or []), "processed_turn": un.get("processed_turn"),
+            "open": nv is not None and g.turn >= nv - 1 and un.get("processed_turn") != g.turn,
+            "votes_needed": V.votes_needed(g), "owner": V.un_owner(g)}
 
 
 def _city_state(g: Game, cs: int) -> dict:

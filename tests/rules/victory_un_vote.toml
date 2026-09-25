@@ -1,0 +1,141 @@
+about = """
+Building the United Nations schedules a vote for world leader fifteen turns on. Voting opens the
+turn before, out of turn too; a civilization votes for a living major civilization or abstains, and
+the United Nations' builder counts twice. The vote is counted as its round ends: a candidate short
+of the votes needed is not elected, and the next vote comes fifteen turns later. Elected, a
+civilization that built the United Nations wins the Diplomatic victory.
+"""
+from = "citar/engine/victory.py: schedule_vote, cast_vote, votes_needed, hold_vote, un_owner; citar/engine/tools.py: un_vote"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", buildings = ["United Nations"] },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "C", name = "Athenai" },
+]
+
+[[step]]
+check = { what = "events", type = "un_vote" }
+path = "[0].text"
+eq = "The United Nations will hold a vote for world leader on turn 16."
+
+[[step]]
+note = "three voters and the builder's second vote: four, of which three win"
+check = { what = "un" }
+eq = { next_vote = 16, votes = {}, results = "=null", won = [], processed_turn = "=null", open = false, votes_needed = 3, owner = 0 }
+
+[[step]]
+tool = "un_vote"
+args = { candidate = 0 }
+error = "Voting opens on turn 15."
+
+[[step]]
+op = "set_turn"
+args = { turn = 15 }
+
+[[step]]
+check = { what = "un" }
+path = "open"
+eq = true
+
+[[step]]
+tool = "un_vote"
+args = { candidate = 1 }
+as = "vote"
+
+[[step]]
+check = "vote"
+eq = { voted_for = "Civilization 2" }
+
+[[step]]
+note = "out of turn"
+tool = "un_vote"
+player = 1
+args = { candidate = 0 }
+
+[[step]]
+tool = "un_vote"
+player = 2
+args = { candidate = "abstain" }
+as = "abstained"
+
+[[step]]
+check = "abstained"
+eq = { voted_for = "abstain" }
+
+[[step]]
+tool = "un_vote"
+player = 2
+args = { candidate = 9 }
+error = "You can only vote for a living major civilization."
+intended = "un-vote-for-no-player-refused"
+
+[[step]]
+check = { what = "un" }
+path = "votes"
+eq = { "0" = 1, "1" = 0, "2" = "=null" }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+note = "two votes (the builder's) and one: short of three"
+check = { what = "un" }
+subset = { next_vote = 31, votes = {}, won = [], processed_turn = 16, open = false }
+
+[[step]]
+check = { what = "un" }
+path = "results"
+eq = { turn = 16, tally = [[1, 2], [0, 1]], votes_needed = 3, winner = "=null" }
+
+[[step]]
+check = { what = "events", type = "un_vote" }
+path = "[1].text"
+eq = "United Nations vote: No world leader was elected (minimum 3 votes; best 2)."
+
+[[step]]
+check = { what = "game" }
+path = "phase"
+eq = "playing"
+
+[[step]]
+op = "set_turn"
+args = { turn = 30 }
+
+[[step]]
+tool = "un_vote"
+args = { candidate = 0 }
+
+[[step]]
+tool = "un_vote"
+player = 1
+args = { candidate = 0 }
+
+[[step]]
+tool = "un_vote"
+player = 2
+args = { candidate = "none" }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "events", type = "un_vote" }
+path = "[2].text"
+eq = "United Nations vote: Civilization 1 has been elected world leader with 3 votes!"
+
+[[step]]
+check = { what = "un" }
+subset = { won = [0], processed_turn = 31, next_vote = 46 }
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over", winner = 0, victory = "Diplomatic" }
+
+[[step]]
+check = { what = "events", type = "victory" }
+path = "[0].text"
+eq = "Civilization 1 was elected world leader by the United Nations — Diplomatic Victory!"

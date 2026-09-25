@@ -2,8 +2,8 @@ about = """
 A civilization that took another's only city gives it back: the city returns to its founder, who is
 alive again with the city as its capital, no puppet and no resistance. The two make peace, the
 founder thinks better of its liberator and opens its borders to it, and the liberator's units in the
-city leave it. (Python eliminated the founder when it lost its last city and revived it here; the
-Rust engine eliminates players at the end of the round, package 1c-08.)
+city leave it. (Python eliminated the founder when it lost its last city, on its own turn here, and
+revived it; the Rust engine eliminates the player whose turn it is as the round ends.)
 """
 from = "citar/engine/conquest.py: liberate, conquer"
 
