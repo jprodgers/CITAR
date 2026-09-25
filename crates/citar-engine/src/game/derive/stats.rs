@@ -972,7 +972,7 @@ fn deficit_changed(g: &Game, p: PlayerId) -> Rev {
 /// The production penalty of units over the supply, in percent (`economy.unit_supply_penalty`).
 #[must_use]
 pub fn unit_supply_penalty(g: &Game, p: PlayerId) -> f64 {
-    -(f64::from(unit_supply_deficit(g, p)) * 10.0).min(70.0)
+    economy::supply_penalty(unit_supply_deficit(g, p))
 }
 
 // ---- The cache oracle (DESIGN.md 9.4) ----------------------------------------------------------

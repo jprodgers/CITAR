@@ -723,7 +723,14 @@ pub(crate) fn unit_supply_deficit_in(v: &EvalView<'_>, p: PlayerId) -> i32 {
 /// (`economy.unit_supply_penalty`, `economy.py:597-599`).
 #[must_use]
 pub fn unit_supply_penalty(g: &Game, p: PlayerId) -> f64 {
-    -(f64::from(unit_supply_deficit(g, p)) * 10.0).min(70.0)
+    supply_penalty(unit_supply_deficit(g, p))
+}
+
+/// The production penalty, in percent, of being `deficit` units over the supply: 10 a unit, at
+/// most 70 (`economy.py:597-599`). What a city's stats and both [`unit_supply_penalty`]s read.
+#[must_use]
+pub fn supply_penalty(deficit: i32) -> f64 {
+    -(f64::from(deficit) * 10.0).min(70.0)
 }
 
 // ---- The end of a turn (economy.py:731-746, turns.py:120-131) ----------------------------------

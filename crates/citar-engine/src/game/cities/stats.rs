@@ -800,7 +800,7 @@ fn pct_bonuses(v: &EvalView<'_>, c: CityId, construction: Option<Constructible>)
     }
     let deficit = if p.is_major() { v.supply_deficit(owner) } else { 0 };
     if deficit > 0 {
-        pct.add_to(Stat::Production, -(f64::from(deficit) * 10.0).min(70.0));
+        pct.add_to(Stat::Production, economy::supply_penalty(deficit));
     }
     let ctx = Ctx::city(&v, c);
     for h in uq::city(&v, c, UniqueType::StatPercentBonus, &ctx) {
