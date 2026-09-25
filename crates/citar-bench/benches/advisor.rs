@@ -4,9 +4,10 @@
 //! corpus, when `CITAR_REFCHECK_CORPUS` names it), else the same game at turn 280, the latest
 //! committed fixture; loaded through the Python converter. `advisor/call_per_city` asks the
 //! advisor what each city of a living major would build (`advisor::advise_production`, at
-//! automatic production's parameters) in turn, the time of one call; `advisor/what_if` asks the
-//! what-if of each building each of them could build (`cities::what_if::what_if_building`), the
-//! time of one. Budget (DESIGN.md 10, report-only): a call at or under 50 µs. After Criterion,
+//! automatic production's parameters) in turn, the time of one call; `advisor/every_city_kept`
+//! asks the same through one `advisor::Advisor` a civilization, as the bot keeps one for a
+//! civilization's turn; `advisor/what_if` asks the what-if of each building each of them could
+//! build (`cities::what_if::what_if_building`), the time of one. Budget (DESIGN.md 10, report-only): a call at or under 50 µs. After Criterion,
 //! the run takes the median of its own timings and warns above it.
 //!
 //! ```text
@@ -91,6 +92,17 @@ fn main() {
             black_box(advisor::advise_production(black_box(&g), p, c, &pp));
         }
     };
+    let every_city_kept = || {
+        let mut i = 0;
+        while i < all.len() {
+            let p = all[i].0;
+            let adv = advisor::Advisor::new(black_box(&g), p, &pp);
+            while i < all.len() && all[i].0 == p {
+                black_box(adv.advise(black_box(&g), all[i].1));
+                i += 1;
+            }
+        }
+    };
     let every_building = || {
         for &(c, b) in &asks {
             black_box(what_if_building(black_box(&g), c, b));
@@ -99,6 +111,7 @@ fn main() {
 
     let mut cr = Criterion::default().configure_from_args();
     cr.bench_function("advisor/every_city", |b| b.iter(every_city));
+    cr.bench_function("advisor/every_city_kept", |b| b.iter(every_city_kept));
     cr.bench_function("advisor/every_what_if", |b| b.iter(every_building));
     cr.final_summary();
 
@@ -107,6 +120,10 @@ fn main() {
     if call > CALL {
         println!("warning: advisor/call_per_city is over its {CALL:?} budget (report-only)");
     }
+    let kept = median(11, 3, calls, every_city_kept);
+    println!(
+        "advisor/call_per_city with one Advisor a civilization median: {kept:?} (report-only)"
+    );
     let what_if = median(11, 3, whatifs, every_building);
     println!("advisor/what_if median: {what_if:?} (report-only)");
 }

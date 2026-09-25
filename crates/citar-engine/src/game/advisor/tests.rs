@@ -302,3 +302,58 @@ fn aggression_is_held_to_zero_to_one() {
         assert_eq!(at(0.25).aggr().to_bits(), 0.25_f64.to_bits());
     }
 }
+
+#[test]
+fn the_sites_are_asked_only_when_a_city_could_start_a_settler() {
+    // Scoring the sites walks the `site_radius` of every city: the advisor asks them only when
+    // the cheap conditions of a settler hold, and keeps them for its turn.
+    let mut g = testing::duel();
+    let small = city(&mut g, TileIdx(22), "Roma", 1);
+    every_tech(&mut g);
+    let pp = AdvisorParams::default();
+    let settler = g.rules().lookup::<BaseUnitId>("Settler").expect("a settler");
+    // A city of one cannot build a settler.
+    assert!(!buildable_items(&g, small).units.contains(settler));
+    let adv = Advisor::new(&g, ROME, &pp);
+    assert!(adv.advise(&g, small).is_some());
+    assert!(adv.sites.get().is_none(), "asked for a city of one");
+    if let Some(x) = g.city_mut(small, CityTouch::CORE) {
+        x.pop = 4;
+    }
+    g.settle();
+    assert!(buildable_items(&g, small).units.contains(settler));
+    let mut adv = Advisor::new(&g, ROME, &pp);
+    assert!(adv.s.hap >= pp.settler_min_hap_small, "happiness {}", adv.s.hap);
+    assert!(adv.advise(&g, small).is_some());
+    assert!(adv.sites.get().is_some(), "not asked for a city that could start one");
+    // A settler started elsewhere this turn fills the settler cap: the next city's choice sees
+    // it, as `manage_cities` counted it.
+    let before = adv.k.settler;
+    adv.started(&g, Constructible::Unit(settler));
+    assert_eq!(adv.k.settler, before + 1);
+    let fresh = {
+        let mut x = Advisor::new(&g, ROME, &pp);
+        x.started(&g, Constructible::Unit(settler));
+        x
+    };
+    assert!(fresh.advise(&g, small).is_some());
+    assert!(fresh.sites.get().is_none(), "asked with the settler cap full");
+    // What each started is counted by kind; a building counts as nothing.
+    let mut k = Advisor::new(&g, ROME, &pp);
+    let (worker, warrior) = (
+        g.rules().lookup::<BaseUnitId>("Worker").expect("a worker"),
+        g.rules().lookup::<BaseUnitId>("Warrior").expect("a warrior"),
+    );
+    let (w, a) = (k.k.worker, k.k.army);
+    k.started(&g, Constructible::Unit(worker));
+    k.started(&g, Constructible::Unit(warrior));
+    k.started(&g, Constructible::Perpetual(Perpetual::Gold));
+    assert_eq!((k.k.worker, k.k.army), (w + 1, a + 1));
+    // An advisor kept for the turn answers as a fresh one does.
+    let kept = Advisor::new(&g, ROME, &pp);
+    for mode in [ProductionMode::Unciv, ProductionMode::Classic] {
+        let pp = AdvisorParams { prod_mode: mode, ..pp.clone() };
+        let kept = Advisor { pp: pp.clone(), ..kept.clone() };
+        assert_eq!(kept.advise(&g, small), advise_production(&g, ROME, small, &pp));
+    }
+}

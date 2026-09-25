@@ -27,14 +27,20 @@
 //! - a military unit that costs nothing is valued as if it cost one, where Python divided by
 //!   zero and the city picked nothing.
 //!
-//! The sites a settler would go to wait for the scoring of city sites (package 1c-04,
-//! `automation.city_site_score`): until it lands no site scores, so no settler is chosen.
+//! What a civilization's turn looks like to production, what it has and where it would found
+//! cities are gathered once in an [`Advisor`], which the bot keeps for a civilization's turn and
+//! asks for each city; the sites are asked only when a city could start a settler otherwise.
+//! The sites wait for the scoring of city sites (package 1c-04, `automation.city_site_score`):
+//! until it lands no site scores, so no settler is chosen.
+
+use core::cell::OnceCell;
 
 use smallvec::SmallVec;
 
 use super::Game;
 use super::cities::borders::within_order;
 use super::cities::construction::buildable_items;
+use super::cities::founding::found_check;
 use super::cities::stats::{city_strength, max_health, remaining_work};
 use super::cities::what_if::{CityWhatIf, StatsDelta};
 use super::derive::{civ, stats as memo};
@@ -801,26 +807,24 @@ fn knows_rival_city(g: &Game, p: PlayerId) -> bool {
     })
 }
 
-/// Whether a city may start a settler (`BasicBot._may_build_settler`, `basic.py:1210-1219`): a
-/// site in range, room under the city and settler caps, a big enough city, enough happiness.
-fn may_build_settler(
-    g: &Game,
-    c: CityId,
-    s: &Situation,
-    k: &Counts,
-    sites: &[TileIdx],
-    check_size: bool,
-    pp: &AdvisorParams,
-) -> bool {
+/// Whether a city may start a settler (`BasicBot._may_build_settler`, `basic.py:1210-1219`):
+/// room under the city and settler caps, a big enough city, enough happiness, and a site in
+/// range. The sites are asked last, and only then (Python asked them first, for every choice):
+/// scoring them walks the `site_radius` of every city.
+fn may_build_settler(adv: &Advisor, g: &Game, c: CityId, check_size: bool) -> bool {
+    let (s, k, pp) = (&adv.s, &adv.k, &adv.pp);
     let Some(city) = g.city(c) else { return false };
     let n = i32::try_from(s.cities.len()).unwrap_or(i32::MAX);
     let cap = if pp.target_cities == 0 { 99 } else { pp.target_cities };
-    sites.iter().any(|&x| g.grid().distance(x, city.tile()) <= pp.settler_site_range)
-        && n + k.settler < cap
+    n + k.settler < cap
         && k.settler < (n.div_euclid(pp.settler_per_cities.max(1))).max(1)
         && (!check_size || i32::from(city.pop) >= pp.settler_min_pop)
         && (s.hap >= pp.settler_min_hap
             || (s.hap >= pp.settler_min_hap_small && n < pp.settler_small_empire))
+        && adv.sites(g).iter().any(|&x| {
+            g.grid().distance(x, city.tile()) <= pp.settler_site_range
+                && found_check(g, adv.p, x).is_none()
+        })
 }
 
 // ---- Units (basic.py:1325-1336, 1543-1575) ---------------------------------------------------
@@ -1134,15 +1138,8 @@ fn seek(g: &Game, s: &Situation, k: &Counts, met: bool, turn: i32, pp: &AdvisorP
 /// building.
 // refcheck: advisor-ties-by-id
 #[allow(clippy::too_many_lines, reason = "one choice, in Python's order")]
-fn choose_unciv(
-    g: &Game,
-    p: PlayerId,
-    c: CityId,
-    s: &Situation,
-    k: &Counts,
-    danger: bool,
-    pp: &AdvisorParams,
-) -> Option<Constructible> {
+fn choose_unciv(adv: &Advisor, g: &Game, c: CityId, danger: bool) -> Option<Constructible> {
+    let (p, s, k, pp) = (adv.p, &adv.s, &adv.k, &adv.pp);
     let r = g.rules();
     let a = &r.derived().advisor;
     let city = g.city(c)?;
@@ -1181,8 +1178,7 @@ fn choose_unciv(
     };
     let unit = |u: Option<BaseUnitId>| u.map(Constructible::Unit);
     let settler = first(&units, |u| a.founders.contains(u));
-    let sites = expansion_sites(g, p, s, pp);
-    if settler.is_some() && may_build_settler(g, c, s, k, &sites, true, pp) {
+    if settler.is_some() && may_build_settler(adv, g, c, true) {
         add(unit(settler), pp.u_settler);
     }
     let met = knows_rival_city(g, p);
@@ -1295,15 +1291,8 @@ fn best(choices: &[Choice]) -> Option<Constructible> {
 /// boats; then buildings by value per turn, and spaceship parts. The first of equal priorities
 /// wins, as Python's stable sort kept them.
 #[allow(clippy::too_many_lines, reason = "one choice, in Python's order")]
-fn choose_classic(
-    g: &Game,
-    p: PlayerId,
-    c: CityId,
-    s: &Situation,
-    k: &Counts,
-    danger: bool,
-    pp: &AdvisorParams,
-) -> Option<Constructible> {
+fn choose_classic(adv: &Advisor, g: &Game, c: CityId, danger: bool) -> Option<Constructible> {
+    let (p, s, k, pp) = (adv.p, &adv.s, &adv.k, &adv.pp);
     let r = g.rules();
     let a = &r.derived().advisor;
     let city = g.city(c)?;
@@ -1342,10 +1331,9 @@ fn choose_classic(
         }
     }
     let settler = first(&units, |u| a.founders.contains(u));
-    let sites = expansion_sites(g, p, s, pp);
     if let Some(x) = settler
         && !danger
-        && may_build_settler(g, c, s, k, &sites, false, pp)
+        && may_build_settler(adv, g, c, false)
     {
         let prio =
             if turn < pp.settler_prio_until { pp.settler_prio } else { pp.settler_prio_late };
@@ -1429,9 +1417,75 @@ fn choose_classic(
     Some(top.item)
 }
 
+/// The production advisor for one civilization's turn: what it gathers once and reads for each
+/// of its cities (`BasicBot.context`, `_counts` and the cached `expansion_sites`, as
+/// `manage_cities` shared them, `basic.py:1152-1180`). The bot of Phase 2 keeps one for a
+/// civilization's turn, asks it for each city ([`advise`](Self::advise)) and tells it what each
+/// started ([`started`](Self::started)); [`advise_production`] asks a fresh one, as automatic
+/// production does for each pick (a fresh `BasicBot`, `cities.py:1699`).
+///
+/// It holds no game: the game it is asked with may have moved since it was made, as Python's
+/// context did while the bot set production.
+#[derive(Clone, Debug)]
+pub struct Advisor {
+    p: PlayerId,
+    pp: AdvisorParams,
+    s: Situation,
+    k: Counts,
+    /// Where the civilization would found its next cities, asked the first time a city could
+    /// start a settler, then kept for the advisor's turn (`_sites_cache`, `site_cache_turns`);
+    /// each read drops a site a city can no longer be founded on, as Python's cache did.
+    sites: OnceCell<Vec<TileIdx>>,
+}
+
+impl Advisor {
+    /// The advisor for civilization `p`'s turn as the game is now, with parameters `pp`.
+    #[must_use]
+    pub fn new(g: &Game, p: PlayerId, pp: &AdvisorParams) -> Self {
+        let s = situation(g, p, pp);
+        let k = counts(g, &s);
+        Self { p, pp: pp.clone(), s, k, sites: OnceCell::new() }
+    }
+
+    /// What city `c` should build next (`BasicBot._choose_production`, `basic.py:1204-1208`),
+    /// in danger when the enemies near it outweigh its defence: `None` when it would build
+    /// nothing. Reads only.
+    #[must_use]
+    pub fn advise(&self, g: &Game, c: CityId) -> Option<Constructible> {
+        g.city(c)?;
+        let danger = in_danger(g, c, &self.s, &self.pp);
+        match self.pp.prod_mode {
+            ProductionMode::Unciv => choose_unciv(self, g, c, danger),
+            ProductionMode::Classic => choose_classic(self, g, c, danger),
+        }
+    }
+
+    /// Counts `item` as started by one of its cities (`manage_cities`, `basic.py:1166-1179`): the
+    /// next city's choice sees one more settler, worker, work boat, scout or military unit.
+    pub fn started(&mut self, g: &Game, item: Constructible) {
+        let Constructible::Unit(u) = item else { return };
+        let k = &mut self.k;
+        match kind(g, u) {
+            Some(Kind::Settler) => k.settler += 1,
+            Some(Kind::Worker) => k.worker += 1,
+            Some(Kind::Boat) => k.boat += 1,
+            Some(Kind::Recon) => k.recon += 1,
+            Some(Kind::Army) => k.army += 1,
+            None => {}
+        }
+    }
+
+    /// Where the civilization would found its next cities ([`expansion_sites`]), computed the
+    /// first time they are asked.
+    fn sites(&self, g: &Game) -> &[TileIdx] {
+        self.sites.get_or_init(|| expansion_sites(g, self.p, &self.s, &self.pp))
+    }
+}
+
 /// What city `c` of civilization `p` would build next by the live bot's production
 /// (`BasicBot.advise_production`, `basic.py:1146-1150`): `None` when it would build nothing.
-/// Reads only.
+/// Reads only. It gathers what [`Advisor`] keeps afresh: asking for several cities of a
+/// civilization in one turn, keep an `Advisor`.
 #[must_use]
 pub fn advise_production(
     g: &Game,
@@ -1440,13 +1494,7 @@ pub fn advise_production(
     pp: &AdvisorParams,
 ) -> Option<Constructible> {
     g.city(c)?;
-    let s = situation(g, p, pp);
-    let k = counts(g, &s);
-    let danger = in_danger(g, c, &s, pp);
-    match pp.prod_mode {
-        ProductionMode::Unciv => choose_unciv(g, p, c, &s, &k, danger, pp),
-        ProductionMode::Classic => choose_classic(g, p, c, &s, &k, danger, pp),
-    }
+    Advisor::new(g, p, pp).advise(g, c)
 }
 
 /// What a city whose queue ran empty starts on its own (`cities.auto_pick_production`,
