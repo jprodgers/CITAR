@@ -565,6 +565,66 @@ fn a_spy_steals_technology_and_the_same_game_steals_the_same() {
     clean(&mut g);
 }
 
+/// The roll a theft by the first spy of `ME` in the city on `at` would make this turn: its
+/// keyed stream draws the tech first, then the roll below 300 (`espionage::steal_tech`).
+fn theft_roll(g: &Game, at: citar_engine::base::ids::TileIdx) -> i32 {
+    use citar_engine::base::rng::{KeyPart, Purpose, Rng};
+    let keys = [0, ME.key(), at.key(), g.turn().key()];
+    let mut rng = Rng::keyed(g.state().seed(), Purpose::Spy, &keys);
+    let options = espionage::techs_to_steal(g, ME, YOU).len();
+    let _tech = rng.below(u64::try_from(options).expect("a few"));
+    i32::try_from(rng.below(300)).expect("below 300")
+}
+
+/// A spy of the highest rank steals from Veii, each round it steals moved to a turn whose roll
+/// falls within `band` once its skill is taken off; what each side hears of the theft.
+fn theft_in_band(band: std::ops::Range<i32>) -> (Vec<String>, Vec<String>) {
+    let (mut g, veii) = spy_in_veii();
+    espionage::level_up(&mut g, ME, 0, 2);
+    let at = g.city(veii).map(|c| c.tile()).expect("Veii");
+    let heard = |g: &Game, p: PlayerId| -> Vec<String> {
+        events_of(g, "spy")
+            .into_iter()
+            .filter(|e| e["audience"].as_array().is_some_and(|a| a.contains(&json!(p.0))))
+            .filter_map(|e| e["text"].as_str().map(str::to_owned))
+            .filter(|t| t.contains("stole") || t.contains("killed"))
+            .collect()
+    };
+    for _ in 0..60 {
+        let s = espionage::spies(&g, ME)[0].clone();
+        if s.action == SpyAction::StealingTech {
+            let skill = espionage::skill_percent(&g, ME, &s);
+            let mut turn = g.turn();
+            while !band.contains(&(theft_roll(&g, at) - skill)) {
+                turn += 1;
+                test_ops(&mut g, &json!([{"op": "set_turn", "turn": turn}]));
+            }
+        }
+        let known = g.player(ME).map(|x| x.tech.known.len()).unwrap_or(0);
+        end_round(&mut g);
+        if g.player(ME).map(|x| x.tech.known.len()).unwrap_or(0) > known {
+            clean(&mut g);
+            return (heard(&g, ME), heard(&g, YOU));
+        }
+    }
+    panic!("no theft within sixty rounds");
+}
+
+/// A theft whose roll falls below the spy's skill goes unnoticed: the thief gets the tech and
+/// the victim hears nothing (`espionage.py:238`, `0 <= result < 100`); within a hundred of it,
+/// the victim learns of the theft but not the thief.
+#[test]
+fn a_theft_below_the_spys_skill_goes_unnoticed() {
+    let (mine, theirs) = theft_in_band(-300..0);
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert!(mine[0].starts_with("Your spy Agent 1 stole the technology"), "{mine:?}");
+    assert!(theirs.is_empty(), "the victim heard {theirs:?}");
+    let (mine, theirs) = theft_in_band(0..100);
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(theirs.len(), 1, "{theirs:?}");
+    assert!(theirs[0].starts_with("An unidentified spy stole the technology"), "{theirs:?}");
+}
+
 #[test]
 fn a_constabulary_slows_the_spies_of_others_in_its_city() {
     let (mut g, veii) = spy_in_veii();

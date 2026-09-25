@@ -331,7 +331,9 @@ fn steal_progress(g: &mut Game, p: PlayerId, i: usize, c: CityId) -> i16 {
     let Some(owner) = g.city(c).map(crate::state::cities::City::owner) else { return 0 };
     let f = g.rules().constants().formulas.clone();
     let mut prog = crate::game::derive::stats::city_stats(g, c).total[Stat::Science];
-    prog *= f64::from(i32::from(s.rank) * f.spy_rank_steal_percent_bonus + 75) / 100.0;
+    // In floats, as Python's numbers were: a ruleset's bonus is not bounded, and no product of
+    // it may overflow.
+    prog *= (f64::from(s.rank) * f64::from(f.spy_rank_steal_percent_bonus) + 75.0) / 100.0;
     prog *= efficiency(g, p, &s);
     let progress = s.progress.saturating_add(num::trunc_i32(prog));
     if let Some(x) = spy_mut(g, p, i) {
@@ -353,8 +355,9 @@ fn steal_progress(g: &mut Game, p: PlayerId, i: usize, c: CityId) -> i16 {
 
 /// A theft completes, and the spy may be caught (`_steal_tech`, `espionage.py:222-255`): a tech
 /// is drawn among those it could take, and a roll below 300 less its skill (plus a defending
-/// spy's) decides: under 100 unseen, under 200 seen, else killed. Seen or killed, the victim
-/// thinks less of the thief.
+/// spy's) decides: below 0 the theft goes unnoticed, under 100 the victim learns of it but not
+/// who, under 200 who, else the spy is killed. Seen or killed, the victim thinks less of the
+/// thief.
 fn steal_tech(g: &mut Game, p: PlayerId, i: usize, c: CityId) {
     let Some(s) = spy(g, p, i).cloned() else { return };
     let Some((other, at, city)) = g.city(c).map(|x| (x.owner(), x.tile(), x.name.to_string()))
@@ -377,10 +380,10 @@ fn steal_tech(g: &mut Game, p: PlayerId, i: usize, c: CityId) {
         let text =
             format!("A spy from {me} was found and killed trying to steal technology in {city}!");
         tell(g, other, &text, Some(at));
-    } else if stolen.is_some() && result < 100 {
+    } else if stolen.is_some() && (0..100).contains(&result) {
         let text = format!("An unidentified spy stole the technology {tech} from {city}!");
         tell(g, other, &text, Some(at));
-    } else if stolen.is_some() {
+    } else if stolen.is_some() && result >= 100 {
         let text = format!("A spy from {me} stole the technology {tech} from {city}!");
         tell(g, other, &text, Some(at));
     }
