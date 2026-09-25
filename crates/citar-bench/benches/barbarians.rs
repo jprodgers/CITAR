@@ -105,7 +105,7 @@ fn main() {
     let took = median_round(&g, bid, 31);
     println!("barbarians/round median: {took:?} (budget {ROUND:?}, report-only)");
     // Its parts, for the tuning of package 1e-03: the camps' turn alone, and the units' start.
-    let camps = median_of(&g, 31, |g| barbarians::update_camps(g));
+    let camps = median_of(&g, 31, barbarians::update_camps);
     println!("barbarians/camps median: {camps:?} (report-only)");
     let start = median_of(&g, 31, |g| units::turn::start_units(g, bid));
     println!("barbarians/units_start median: {start:?} (report-only)");
