@@ -257,6 +257,17 @@ pub fn free_upgrade(g: &mut Game, u: UnitId, special: bool) -> bool {
     false
 }
 
+/// Whether [`free_upgrade`] would upgrade unit `u` now: its first target it may have, and a
+/// spot for the new unit.
+#[must_use]
+pub fn can_free_upgrade(g: &Game, u: UnitId, special: bool) -> bool {
+    let Some((owner, tile)) = g.unit(u).map(|x| (x.owner(), x.tile())) else { return false };
+    upgrade_targets(g, u, special)
+        .into_iter()
+        .find(|&t| blockers(g, u, t, true, true).is_none())
+        .is_some_and(|t| spawn_spot(g, owner, t, tile, 10, Some(u)).is_some())
+}
+
 /// The gold a disbanded unit refunds inside its owner's borders (`units.disband_gold`,
 /// `units.py:763-766`): a twentieth of its purchase cost.
 #[must_use]

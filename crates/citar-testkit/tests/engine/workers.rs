@@ -22,10 +22,11 @@ use citar_engine::game::automation::{best_job, worker_jobs, worker_jobs_with};
 use citar_engine::game::derive::jobs;
 use citar_engine::game::workers::{self, Builder, Problem};
 use citar_engine::game::{
-    Action, DebugOptions, DriveOptions, Drivers, Game, Stop, actions, religion, units,
+    Action, DebugOptions, DriveOptions, Drivers, Game, Stop, actions, religion, triggers, units,
 };
 use citar_engine::rules::Ruleset;
 use citar_engine::rules::defs::BuilderClass;
+use citar_engine::unique::trigger::{OneTimeEffect, TriggerSite};
 use citar_testkit::agents::RandomAgent;
 use citar_testkit::fixtures::{self, Fixture};
 use citar_testkit::rulesets::{self, kitchen_sink};
@@ -606,6 +607,37 @@ fn a_city_state_with_a_city_founds_no_other() {
     };
     assert_eq!(e.message, refused);
     clean(&mut g);
+}
+
+#[test]
+fn a_units_one_time_effect_would_apply_exactly_when_it_applies() {
+    // Every one-time effect of the kitchen sink and the shipped ruleset, asked on the game as a
+    // unit's action asks it and tried on a copy: with a city and a unit at full health, and with
+    // no city and a wounded unit.
+    let mut seen = BTreeSet::new();
+    for (city, hp) in [(true, 100), (false, 40)] {
+        let mut g = sink_game();
+        let mut list = vec![
+            json!({"op": "add_unit", "player": 0, "unit": "Warrior", "x": 6, "y": 5, "hp": hp}),
+        ];
+        if city {
+            list.insert(0, json!({"op": "found_city", "player": 0, "x": 5, "y": 5}));
+        }
+        let out = ops(&mut g, &Value::Array(list));
+        let u = first_unit(out.last().expect("the warrior"));
+        let site = TriggerSite { civ: ME, city: None, unit: Some(u), tile: Some(tile(&g, 6, 5)) };
+        let r = g.rules();
+        for (id, _) in r.uniques().iter() {
+            let Some(effect) = OneTimeEffect::decode(r, id) else { continue };
+            let would = triggers::would_apply(&g, id, &site);
+            let did = triggers::apply(&mut g.clone(), id, &site, None);
+            assert_eq!(would, did, "{}: {}", effect.kind_name(), r.uniques().text_of(id));
+            seen.insert((effect.kind_name(), did));
+        }
+    }
+    // Both answers came up, over most kinds.
+    assert!(seen.iter().any(|&(_, d)| d) && seen.iter().any(|&(_, d)| !d), "{seen:?}");
+    assert!(seen.len() > 25, "{seen:?}");
 }
 
 // ---- The kitchen sink ------------------------------------------------------------------------------

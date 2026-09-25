@@ -13,11 +13,13 @@
 //! `workers`, `triggers`), and a unit spent by one fires `upon expending a [unit]` once
 //! (`expending-a-unit-fires-once`: Python fired it again after a great person's action).
 //!
-//! A one-time effect a unit carries is tried on a copy of the game before it is taken: one that
-//! would do nothing is refused, as Python refused it, and the pipeline refuses before it writes.
-//! Adding a spaceship part is refused as not ported until package 1c-08 ports victory. The results
-//! of founding a city and of a paradrop give their tiles as `{x, y}`, where Python listed the keys
-//! of the coordinates (`unit-results-give-tiles`).
+//! A one-time effect a unit carries is asked whether it would do anything before it is taken
+//! (`triggers::would_apply`, on `&Game`): one that would do nothing is refused, as Python refused
+//! it, and the pipeline refuses before it writes. Adding a spaceship part is refused as not ported
+//! until package 1c-08 ports victory. The results of founding a city and of a paradrop give their
+//! tiles as `{x, y}`, where Python listed the keys of the coordinates (`unit-results-give-tiles`).
+//! A city-state that has a city founds no other (`city-states-found-one-city`), where Python let
+//! its settler found cities as a major's did.
 
 use serde_json::{Map, Value, json};
 
@@ -473,11 +475,23 @@ pub fn plan_action(
         // victory.add_to_spaceship (victory.py).
         ActionKind::AddToSpaceship => return Err(not_ported("game::victory")),
         ActionKind::Trigger(id) => {
-            // Tried on a copy first: an effect that does nothing is refused unwritten.
-            let mut probe = g.clone();
+            // An effect that would do nothing is refused unwritten.
             let site = TriggerSite { civ: p, city: None, unit: Some(u), tile: Some(at) };
-            let note = trigger_note(g, u);
-            if !triggers::apply(&mut probe, *id, &site, Some(&note)) {
+            let acts = triggers::would_apply(g, *id, &site);
+            #[cfg(debug_assertions)]
+            {
+                // What the effect does on a copy of the game, which the answer on `&Game` must
+                // be.
+                let mut probe = g.clone();
+                let did = triggers::apply(&mut probe, *id, &site, Some(&trigger_note(g, u)));
+                debug_assert_eq!(
+                    acts,
+                    did,
+                    "would_apply and apply disagree on {:?}",
+                    g.rules().uniques().text_of(*id)
+                );
+            }
+            if !acts {
                 return Err(ActionError::rule(
                     "That had no effect right now; the unit was not used.",
                 ));

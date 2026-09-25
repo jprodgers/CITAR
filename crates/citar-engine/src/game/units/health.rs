@@ -245,6 +245,23 @@ pub fn terrain_damage(g: &Game, t: TileIdx) -> i32 {
     )
 }
 
+/// Whether [`apply_unit_effect`] would do anything to unit `u` now, without doing it: all but
+/// healing a unit at full health and an upgrade with no target or no room do.
+#[must_use]
+pub fn unit_effect_would_apply(g: &Game, u: UnitId, e: UnitEffect) -> bool {
+    let Some(hp) = g.unit(u).map(|x| x.hp) else { return false };
+    match e {
+        UnitEffect::Heal(_) => hp < 100,
+        UnitEffect::Upgrade => super::upgrades::can_free_upgrade(g, u, false),
+        UnitEffect::SpecialUpgrade => super::upgrades::can_free_upgrade(g, u, true),
+        UnitEffect::Damage(_)
+        | UnitEffect::GainXp(_)
+        | UnitEffect::GainPromotion(_)
+        | UnitEffect::Movement(_)
+        | UnitEffect::Destroyed => true,
+    }
+}
+
 /// A one-time effect on a unit (`triggers.py:339-367`): healing (no doubling), damage,
 /// experience, a free upgrade, a promotion, movement gained or lost, or its end. Whether
 /// anything happened. `note` is what caused it, for the announcement of experience gained.
