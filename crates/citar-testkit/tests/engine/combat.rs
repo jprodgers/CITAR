@@ -494,3 +494,60 @@ fn a_fight_s_modifiers_come_from_one_setup() {
         json!([s.damage_to_attacker(0.0), s.damage_to_attacker(1.0)])
     );
 }
+
+// ---- Random agents at war ------------------------------------------------------------------------
+
+/// Two `RandomAgent`s at war on the arena, each with two cities and an army at the other's door
+/// (and one city under siege, its defences down), play forty turns: they attack, bombard, take a
+/// city and decide its fate, with every check (the cache oracle among them) clean at every settle.
+#[test]
+fn random_agents_at_war_fight_cleanly() {
+    use citar_engine::game::{DriveOptions, Drivers, Stop};
+    use citar_testkit::agents::RandomAgent;
+    use citar_testkit::script::{map_doc, new_game};
+    let r = Ruleset::shared();
+    let (doc, _) = map_doc("arena").expect("the arena");
+    let cfg = json!({
+        "seed": 3,
+        "players": [{"nation": "BenchmarkCiv"}, {"nation": "BenchmarkCiv"}],
+        "city_states": 0,
+        "barbarians": "off",
+        "ruins": false,
+        "turn_limit": 40,
+        "map": doc,
+    });
+    let mut g = new_game(r, cfg.as_object().expect("an object")).unwrap_or_else(|e| panic!("{e}"));
+    g.set_debug_options(DebugOptions::ALL);
+    test_ops(&mut g, json!([{"op": "clear_units", "player": "all"}]));
+    let mut list = vec![
+        json!({"op": "found_city", "player": 0, "x": 8, "y": 8, "name": "Roma"}),
+        json!({"op": "found_city", "player": 1, "x": 13, "y": 8, "name": "Athens"}),
+        json!({"op": "found_city", "player": 0, "x": 4, "y": 4, "name": "Antium"}),
+        json!({"op": "found_city", "player": 1, "x": 18, "y": 12, "name": "Sparta"}),
+        json!({"op": "set_relation", "a": 0, "b": 1, "state": "war"}),
+    ];
+    for (p, x) in [(0, 10), (1, 11)] {
+        for (unit, y) in [("Warrior", 7), ("Archer", 8), ("Spearman", 9), ("Horseman", 10)] {
+            list.push(json!({"op": "add_unit", "player": p, "unit": unit, "x": x, "y": y}));
+        }
+    }
+    ops(&mut g, Value::Array(list));
+    // Athens with its defences down and an army beside it, so that it falls.
+    let athens = g.city_at(TileIdx(8 * 24 + 13)).map(|c| c.id().get()).expect("Athens");
+    let mut siege = vec![json!({"op": "set_city", "city": athens, "health": 1})];
+    for (x, y) in [(12, 7), (13, 7), (12, 9), (13, 9)] {
+        siege.push(json!({"op": "add_unit", "player": 0, "unit": "Swordsman", "x": x, "y": y}));
+    }
+    ops(&mut g, Value::Array(siege));
+    let (mut a, mut b) = (RandomAgent::new(), RandomAgent::new());
+    let mut d = Drivers::none(g.state().players().len())
+        .with(PlayerId(0), &mut a)
+        .with(PlayerId(1), &mut b);
+    let (stop, batch) = g.drive(&mut d, DriveOptions::default()).expect("a live game");
+    assert_eq!(stop, Stop::GameOver);
+    clean(&mut g);
+    let kinds = |k: &str| batch.events().iter().filter(|e| e.kind.name() == k).count();
+    assert!(kinds("combat") + kinds("unit_killed") > 0, "they fought");
+    assert!(kinds("city_captured") > 0, "Athens fell");
+    assert!(g.state().ids().combat_seq > 0);
+}
