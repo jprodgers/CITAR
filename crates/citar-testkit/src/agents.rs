@@ -44,28 +44,49 @@
 //! until the host answers or closes it (rule T3). The agent answered at once for the other side
 //! until then (`converse`, gone), drawing from the stream `respond` draws from, so the deals it
 //! strikes are the same kind: carried out, and running their course as rounds end.
+//!
+//! Package 1c-10 completes it across every action a seat has (DESIGN.md 9.5): it sets its
+//! cities' focus, locks and releases their citizens' tiles and places specialists by hand
+//! ([`citizens`]), takes the great people it is owed free and founds a pantheon when it may
+//! ([`free_choices`]), and renames its civilization, keeps notes and logs thoughts ([`notes`]),
+//! where now and then it also asks for its own turn to end, which a driven seat is refused; and
+//! now and then it tries an action whose moment has not come ([`untimely`]), so that a short
+//! game tries every action. It trains settlers when it is short of cities, and sends them to
+//! good sites, since at random it would stay at a city or two for a whole game. The
+//! whole-game tests and the `random` golden set play it (`tests/engine/whole_game.rs`,
+//! `golden::games`). A noisy agent ([`RandomAgent::noisy`]) also reads the game, saves
+//! it and makes calls it refuses between its moves ([`reads_and_refusals`]), which must change
+//! nothing: the early form of property P8.
 
 use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TechId, TileIdx, UnitId};
 use citar_engine::base::rng::{Purpose, Rng};
 use citar_engine::game::actions::{ActionKind, FoundCity, UnitAction, unit_actions};
+use citar_engine::game::automation::suggest_city_sites;
 use citar_engine::game::cities::borders::{BuyTile, can_buy_tile};
+use citar_engine::game::cities::citizens::{SetCityFocus, SetSpecialists, WorkTile};
 use citar_engine::game::cities::construction::{buildable_items, item_name};
 use citar_engine::game::cities::purchase::Buy;
 use citar_engine::game::cities::queue::{
     ChangeQueue, QueueEdit, RenameCity, SetAutoProduction, SetProduction,
 };
+use citar_engine::game::cities::stats::{max_specialists, workable_tiles};
 use citar_engine::game::city_states::CityStateAction;
 use citar_engine::game::combat::actions::{
     AirSweep, Attack, CityAttack, CityStatus, ReturnCivilian, plan_attack,
 };
 use citar_engine::game::combat::{city, combatant_at, resolve};
 use citar_engine::game::diplomacy::actions::{
-    DeclareWar, Denounce, OpenNegotiation, RespondNegotiation, SendMessage,
+    DeclareWar, Denounce, EndTurn, OpenNegotiation, RespondNegotiation, SendMessage,
 };
 use citar_engine::game::espionage::{MoveSpy, StageCoup, spies as spies_of};
+use citar_engine::game::great_people::{ChooseGreatPerson, great_people_types};
+use citar_engine::game::meta::{LogThought, SetCivName, WriteNotes};
 use citar_engine::game::path::Mover;
 use citar_engine::game::policies::{AdoptPolicy, adoptable_policies, can_adopt_any};
-use citar_engine::game::religion::found::{ai_choose_beliefs, beliefs_to_choose};
+use citar_engine::game::religion::beliefs_available;
+use citar_engine::game::religion::found::{
+    FoundPantheon, ai_choose_beliefs, beliefs_to_choose, can_found_pantheon,
+};
 use citar_engine::game::research::{
     ChooseFreeTech, DequeueResearch, SetResearch, available_techs, is_unresearchable,
 };
@@ -74,7 +95,8 @@ use citar_engine::game::units::{promotions, upgrades};
 use citar_engine::game::victory::UnVote;
 use citar_engine::game::workers::{self, BuildImprovement, Builder};
 use citar_engine::game::{Action, DriverOutcome, Game, SeatDriver};
-use citar_engine::state::cities::{City, Constructible, Perpetual};
+use citar_engine::rules::defs::{BeliefKind, BeliefType};
+use citar_engine::state::cities::{City, CityFocus, Constructible, Perpetual};
 use citar_engine::state::diplo::{NegStatus, Negotiation};
 use citar_engine::state::players::DriverMemory;
 use citar_engine::state::players::Player;
@@ -95,7 +117,13 @@ pub type Move = fn(&mut Game, PlayerId, &mut Rng);
 /// - Package 1c-05: [`spies`] and [`diplomacy`], the chats last, which the drive answers once
 ///   the agent has done everything else.
 /// - Package 1c-06: [`city_states`], and coups among its spies' moves.
-/// - Package 1c-08: [`un_vote`], last, so that the moves before it draw as they did.
+/// - Package 1c-08: [`un_vote`], so that the moves before it draw as they did.
+/// - Package 1c-10 completes it with the actions no package had taught it, after the rest for
+///   the same reason: [`citizens`] (1b-06's `set_city_focus`, `work_tile` and
+///   `set_specialists`), [`free_choices`] (1b-08's `choose_great_person` and `found_pantheon`)
+///   and [`notes`] (1c-09's `set_civ_name`, `write_notes` and `log_thought`, and the `end_turn`
+///   tool, which a driven seat is refused); and [`untimely`], the actions whose moment has not
+///   come, which a short game would otherwise never try.
 pub const MOVES: &[Move] = &[
     research,
     production,
@@ -115,6 +143,10 @@ pub const MOVES: &[Move] = &[
     city_states,
     diplomacy,
     un_vote,
+    citizens,
+    free_choices,
+    notes,
+    untimely,
 ];
 
 /// Picks one of `v` from the turn's stream.
@@ -138,7 +170,7 @@ fn research(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
         && let Some(t) = pick(rng, &available_techs(g, pid))
     {
         let tech = json!(tech_name(g, t));
-        let _refused = g.act(pid, Action::ChooseFreeTech(ChooseFreeTech { tech }));
+        play(g, pid, Action::ChooseFreeTech(ChooseFreeTech { tech }));
     }
     let far = || -> Vec<TechId> {
         g.rules()
@@ -151,16 +183,16 @@ fn research(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
         let options = if rng.below(4) == 0 { far() } else { available_techs(g, pid) };
         let Some(t) = pick(rng, &options) else { return };
         let tech = json!(tech_name(g, t));
-        let _refused = g.act(pid, Action::SetResearch(SetResearch { tech, append: None }));
+        play(g, pid, Action::SetResearch(SetResearch { tech, append: None }));
     } else if rng.below(8) == 0 {
         let Some(t) = pick(rng, &far()) else { return };
         let a = SetResearch { tech: json!(tech_name(g, t)), append: Some(json!(true)) };
-        let _refused = g.act(pid, Action::SetResearch(a));
+        play(g, pid, Action::SetResearch(a));
     } else if rng.below(16) == 0
         && let Some(t) = pick(rng, &queue)
     {
         let tech = json!(tech_name(g, t));
-        let _refused = g.act(pid, Action::DequeueResearch(DequeueResearch { tech }));
+        play(g, pid, Action::DequeueResearch(DequeueResearch { tech }));
     }
 }
 
@@ -191,15 +223,39 @@ fn production(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
                 .map(|(_, k)| Constructible::Perpetual(k))
                 .collect();
         }
-        let Some(item) = pick(rng, &all) else { continue };
+        // A civilization short of cities trains a settler a third of the time it may: at random
+        // among everything, it would so rarely that a game stays at a city or two.
+        let settler = g.rules().derived().known.settler.map(Constructible::Unit);
+        let item = match settler.filter(|s| !append && wants_settlers(g, pid) && all.contains(s)) {
+            Some(s) if rng.chance(1.0 / 3.0) => s,
+            _ => {
+                let Some(item) = pick(rng, &all) else { continue };
+                item
+            }
+        };
         let name = item_name(g.rules(), item).to_owned();
         let a = SetProduction {
             city_id: i64::from(c.get()),
             item: json!(name),
             append: append.then(|| json!(true)),
         };
-        let _refused = g.act(pid, Action::SetProduction(a));
+        play(g, pid, Action::SetProduction(a));
     }
+}
+
+/// Whether a civilization wants more settlers: its cities and settlers together are fewer than
+/// three, and one more every forty turns, up to eight.
+fn wants_settlers(g: &Game, pid: PlayerId) -> bool {
+    let settler = g.rules().derived().known.settler;
+    let cities = g.player_cities(pid).count();
+    let settlers = g.player_units(pid).filter(|u| Some(u.base) == settler).count();
+    let goal = (3 + usize::try_from(g.turn()).unwrap_or(0) / 40).min(8);
+    cities + settlers < goal
+}
+
+/// Whether unit `u` could found a city, somewhere.
+fn founds_cities(g: &Game, u: UnitId) -> bool {
+    unit_actions(g, u).iter().any(|a| a.id == "found_city")
 }
 
 /// Now and then edits a city's queue (moves or removes an entry, or clears it), and switches a
@@ -223,12 +279,12 @@ fn queues(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
             action: json!(edit.name()),
             index: Some(index),
         };
-        let _refused = g.act(pid, Action::ChangeQueue(a));
+        play(g, pid, Action::ChangeQueue(a));
     }
     if rng.below(20) == 0 {
         let on = g.city(c).is_some_and(|x| !x.auto_production);
         let a = SetAutoProduction { city_id: i64::from(c.get()), enabled: json!(on) };
-        let _refused = g.act(pid, Action::SetAutoProduction(a));
+        play(g, pid, Action::SetAutoProduction(a));
     }
 }
 
@@ -239,7 +295,7 @@ fn policies(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     }
     let Some(q) = pick(rng, &adoptable_policies(g, pid)) else { return };
     let name = g.rules().name(q).unwrap_or_default().to_owned();
-    let _refused = g.act(pid, Action::AdoptPolicy(AdoptPolicy { policy: json!(name) }));
+    play(g, pid, Action::AdoptPolicy(AdoptPolicy { policy: json!(name) }));
 }
 
 /// Now and then buys what a city builds, and a tile beside a city's borders.
@@ -252,7 +308,7 @@ fn purchases(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     {
         let name = item_name(g.rules(), item).to_owned();
         let a = Buy { city_id: i64::from(c.get()), item: json!(name), currency: None };
-        let _refused = g.act(pid, Action::Buy(a));
+        play(g, pid, Action::Buy(a));
     }
     if rng.below(8) == 0
         && let Some(centre) = g.city(c).map(citar_engine::state::cities::City::tile)
@@ -266,7 +322,7 @@ fn purchases(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
         if let Some(t) = pick(rng, &near) {
             let (x, y) = g.xy(t);
             let a = BuyTile { city_id: i64::from(c.get()), x: i64::from(x), y: i64::from(y) };
-            let _refused = g.act(pid, Action::BuyTile(a));
+            play(g, pid, Action::BuyTile(a));
         }
     }
 }
@@ -279,10 +335,7 @@ fn names(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
     let Some(c) = pick(rng, &cities) else { return };
     let name = format!("Town {} {}", pid.0, rng.below(1000));
-    let _refused = g.act(
-        pid,
-        Action::RenameCity(RenameCity { city_id: i64::from(c.get()), name: json!(name) }),
-    );
+    play(g, pid, Action::RenameCity(RenameCity { city_id: i64::from(c.get()), name: json!(name) }));
 }
 
 /// The player's units, in id order: what each unit move goes through. An action may use one up,
@@ -291,10 +344,42 @@ fn units_of(g: &Game, pid: PlayerId) -> Vec<UnitId> {
     g.player_units(pid).map(|u| u.id()).collect()
 }
 
-/// Takes an action. A refusal is an answer like any other, which an agent playing at random has
-/// no use for; what the action did is the game's to keep.
-fn play(g: &mut Game, pid: PlayerId, a: Action) {
-    let _refused = g.act(pid, a).is_err();
+/// How often the agents on this thread have tried each tool, and how often the game took it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tried {
+    /// Calls made.
+    pub tried: u32,
+    /// Calls the game carried out: the rest it refused.
+    pub taken: u32,
+}
+
+std::thread_local! {
+    /// The tools this thread's agents have tried, by name. Only ever read by tests, to see that
+    /// the agent reaches every action: nothing in its play reads it.
+    static TALLY: core::cell::RefCell<std::collections::BTreeMap<&'static str, Tried>> =
+        const { core::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// The tools the agents on this thread have tried since the last [`take_tally`], by name, and
+/// how many times the game took each.
+#[must_use]
+pub fn take_tally() -> std::collections::BTreeMap<&'static str, Tried> {
+    TALLY.with(|t| core::mem::take(&mut *t.borrow_mut()))
+}
+
+/// Takes an action, and says whether the game carried it out. A refusal is an answer like any
+/// other, which an agent playing at random mostly has no use for; what the action did is the
+/// game's to keep.
+fn play(g: &mut Game, pid: PlayerId, a: Action) -> bool {
+    let tool = a.tool();
+    let taken = g.act(pid, a).is_ok();
+    TALLY.with(|t| {
+        let mut t = t.borrow_mut();
+        let e = t.entry(tool).or_default();
+        e.tried += 1;
+        e.taken += u32::from(taken);
+    });
+    taken
 }
 
 /// A unit's id as the tools take it.
@@ -449,8 +534,9 @@ pub fn special_actions(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
 
 /// Moves each unit with movement left (`move_unit`): half the time to a tile it reaches this
 /// turn, otherwise toward any tile up to eight away, which leaves a standing goto when the path
-/// takes more than this turn (or a refusal, when there is none). A unit at work (building,
-/// automated, exploring) is left to it, nine times in ten.
+/// takes more than this turn (or a refusal, when there is none). A unit that founds cities heads
+/// three times in four for one of the best city sites within six instead. A unit at work
+/// (building, automated, exploring) is left to it, nine times in ten.
 pub fn move_units(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     for u in units_of(g, pid) {
         let working = g.unit(u).is_some_and(|x| {
@@ -460,7 +546,16 @@ pub fn move_units(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
             continue;
         }
         let Some(from) = g.unit(u).filter(|x| x.moves > 0).map(|x| x.tile()) else { continue };
-        let target = if rng.chance(0.5) {
+        let site = if founds_cities(g, u) && rng.chance(0.75) {
+            let sites: Vec<TileIdx> =
+                suggest_city_sites(g, pid, from, 6, 3).into_iter().map(|(t, _)| t).collect();
+            rng.pick(&sites).copied()
+        } else {
+            None
+        };
+        let target = if site.is_some() {
+            site
+        } else if rng.chance(0.5) {
             let reach: Vec<TileIdx> = Mover::unit(g, u)
                 .map(|m| m.reachable().into_iter().map(|(t, _)| t).collect())
                 .unwrap_or_default();
@@ -614,7 +709,7 @@ fn answer(g: &mut Game, pid: PlayerId, nid: NegotiationId, rng: &mut Rng) {
         give,
         receive,
     };
-    if g.act(pid, Action::RespondNegotiation(a)).is_err() {
+    if !play(g, pid, Action::RespondNegotiation(a)) {
         let a = RespondNegotiation {
             negotiation_id: i64::from(nid.get()),
             action: json!("reject"),
@@ -757,18 +852,375 @@ pub fn un_vote(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     play(g, pid, Action::UnVote(UnVote { candidate }));
 }
 
+/// A tile's coordinates, as the tools take them.
+fn xy_of(g: &Game, t: TileIdx) -> (i64, i64) {
+    let (x, y) = g.grid().xy(t);
+    (i64::from(x), i64::from(y))
+}
+
+/// The citizens (`set_city_focus`, `work_tile`, `set_specialists`), for each city: one time in
+/// twenty a focus drawn from every focus, a quarter of those with growth avoided or not; one
+/// time in twenty-five a citizen locked onto a tile it may work, or one lock released; one time
+/// in forty specialists by hand, a count up to the slots of a kind the city has, or back to
+/// automatic. Now and then a count past the slots, which is refused.
+pub fn citizens(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
+    for c in cities {
+        let city_id = i64::from(c.get());
+        if rng.chance(0.05) {
+            let Some(focus) = pick(rng, &CityFocus::ALL) else { continue };
+            let avoid_growth = rng.chance(0.25).then(|| json!(rng.chance(0.5)));
+            let a = SetCityFocus { city_id, focus: Some(json!(focus.name())), avoid_growth };
+            play(g, pid, Action::SetCityFocus(a));
+        }
+        if rng.chance(0.04) {
+            let locked: Vec<TileIdx> = g.city(c).map(|x| x.locked.to_vec()).unwrap_or_default();
+            let (t, lock) = if !locked.is_empty() && rng.chance(0.5) {
+                (pick(rng, &locked), false)
+            } else {
+                (pick(rng, &workable_tiles(g, c)), true)
+            };
+            if let Some(t) = t {
+                let (x, y) = xy_of(g, t);
+                let a = WorkTile { city_id, x, y, locked: Some(json!(lock)) };
+                play(g, pid, Action::WorkTile(a));
+            }
+        }
+        if rng.chance(0.025) {
+            let slots = max_specialists(g, c);
+            let mut asked = serde_json::Map::new();
+            if !slots.is_empty() && rng.chance(0.75) {
+                let Some(&(s, n)) = rng.pick(&slots) else { continue };
+                let most = u64::try_from(n).unwrap_or(0) + u64::from(rng.chance(0.05));
+                let name = g.rules().specialists().get(s).map_or("?", |d| &*d.name).to_owned();
+                asked.insert(name, json!(rng.below(most + 1)));
+            }
+            let a = SetSpecialists { city_id, specialists: serde_json::Value::Object(asked) };
+            play(g, pid, Action::SetSpecialists(a));
+        }
+    }
+}
+
+/// The free choices (`choose_great_person`, `found_pantheon`): a great person of a kind the
+/// civilization can have for each one it is owed; and, when it may found a pantheon, one time in
+/// two a pantheon belief nobody has taken. Now and then a name that is neither, which is refused.
+pub fn free_choices(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    let owed = g.player(pid).map_or(0, |p| p.gp.free);
+    for _ in 0..owed.clamp(0, 4) {
+        let kinds = great_people_types(g, pid);
+        let name = match pick(rng, &kinds) {
+            Some(u) if !rng.chance(0.05) => g.rules().name(u).unwrap_or_default().to_owned(),
+            _ => "No Such Person".to_owned(),
+        };
+        play(g, pid, Action::ChooseGreatPerson(ChooseGreatPerson { great_person: json!(name) }));
+    }
+    if can_found_pantheon(g, pid).is_none() && rng.chance(0.5) {
+        let open = beliefs_available(g, BeliefKind::Type(BeliefType::Pantheon));
+        let name = match pick(rng, &open) {
+            Some(b) if !rng.chance(0.05) => g.rules().name(b).unwrap_or_default().to_owned(),
+            _ => "No Such Belief".to_owned(),
+        };
+        play(g, pid, Action::FoundPantheon(FoundPantheon { belief: json!(name) }));
+    }
+}
+
+/// The seat's own words (`set_civ_name`, `write_notes`, `log_thought`, `end_turn`): one time in
+/// a hundred a new name for the civilization, now and then with a new leader (and one time in
+/// ten a name another civilization has, which is refused); one time in twenty a line in its
+/// notebook, appended or replacing it; one time in ten a thought. One time in fifty, while its driver plays it, the
+/// `end_turn` tool, which the game refuses: the drive ends a driven seat's turn.
+pub fn notes(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    if rng.chance(0.01) {
+        let name = if rng.chance(0.1) {
+            let others: Vec<PlayerId> = g.majors(false).map(Player::id).collect();
+            pick(rng, &others)
+                .and_then(|q| g.player(q))
+                .map_or_else(String::new, |p| p.name.to_string())
+        } else {
+            format!("Realm {} {}", pid.0, rng.below(1000))
+        };
+        let leader = rng.chance(0.3).then(|| json!(format!("Leader {}", rng.below(100))));
+        play(g, pid, Action::SetCivName(SetCivName { name: json!(name), leader }));
+    }
+    if rng.chance(0.05) {
+        let mode = rng.chance(0.7).then(|| json!("append"));
+        let text = json!(format!("Turn {}: note {}.", g.turn(), rng.below(100)));
+        play(g, pid, Action::WriteNotes(WriteNotes { text, mode }));
+    }
+    if rng.chance(0.1) {
+        let text = json!(format!("Thinking about turn {}.", g.turn()));
+        play(g, pid, Action::LogThought(LogThought { text }));
+    }
+    if g.driving() == Some(pid) && rng.chance(0.02) {
+        let refused = !play(g, pid, Action::EndTurn(EndTurn {}));
+        debug_assert!(refused, "a driven seat does not end its own turn");
+    }
+}
+
+/// One time in ten, an action whose moment may not have come, which the game refuses unless it
+/// has: a free tech or great person the civilization may not be owed, a vote while voting may be
+/// closed, a fate for one of its cities that may be neither a puppet nor burning, an upgrade or
+/// an air sweep by any of its units, and a spy it may not have, moved or sent to stage a coup.
+/// The other moves try these only when they may succeed, which a short game or an early era
+/// never offers; a refusal is part of the play.
+pub fn untimely(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    if !rng.chance(0.1) {
+        return;
+    }
+    let units = units_of(g, pid);
+    let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
+    let a = match rng.below(8) {
+        0 => {
+            let tech = pick(rng, &available_techs(g, pid)).map(|t| tech_name(g, t));
+            Action::ChooseFreeTech(ChooseFreeTech { tech: json!(tech.unwrap_or_default()) })
+        }
+        1 => {
+            let kind = pick(rng, &great_people_types(g, pid));
+            let name = kind.and_then(|u| g.rules().name(u)).unwrap_or_default();
+            Action::ChooseGreatPerson(ChooseGreatPerson { great_person: json!(name) })
+        }
+        2 => Action::UnVote(UnVote { candidate: json!(pid.0) }),
+        3 => {
+            let (Some(c), Some(fate)) = (pick(rng, &cities), pick(rng, &FATES)) else { return };
+            Action::CityStatus(CityStatus { city_id: i64::from(c.get()), status: json!(fate) })
+        }
+        4 => {
+            let Some(u) = pick(rng, &units) else { return };
+            Action::UpgradeUnit(UpgradeUnit { unit_id: tool_id(u) })
+        }
+        5 => {
+            let Some(u) = pick(rng, &units) else { return };
+            let Some(at) = g.unit(u).map(|x| x.tile()) else { return };
+            let Some(t) = pick(rng, &g.grid().within(at, 2)) else { return };
+            let (x, y) = xy_of(g, t);
+            Action::AirSweep(AirSweep { unit_id: tool_id(u), x, y })
+        }
+        6 => Action::MoveSpy(MoveSpy { spy: json!("Nobody"), city_id: json!("hideout") }),
+        _ => Action::StageCoup(StageCoup { spy: json!("Nobody") }),
+    };
+    play(g, pid, a);
+}
+
+// ---- Reads and refusals (property P8) -----------------------------------------------------------
+
+/// One of anything a game has of a kind, by a draw: `None` when it has none.
+fn any_of<T: Copy>(rng: &mut Rng, v: &[T]) -> Option<T> {
+    rng.pick(v).copied()
+}
+
+/// An `inspect` query of a kind drawn from every kind there is, about things drawn from the game:
+/// its players, units, cities, tiles and negotiations (some of which do not exist, which the
+/// query refuses).
+fn some_query(g: &Game, pid: PlayerId, rng: &mut Rng) -> serde_json::Value {
+    let players: Vec<u8> = g.state().players().ids().map(|p| p.0).collect();
+    let q = any_of(rng, &players).unwrap_or(pid.0);
+    let units: Vec<u32> = g.state().units().iter().map(|u| u.id().get()).collect();
+    let u = any_of(rng, &units).unwrap_or(1);
+    let cities: Vec<u32> = g.state().cities().iter().map(|c| c.id().get()).collect();
+    let c = any_of(rng, &cities).unwrap_or(1);
+    let nids: Vec<u32> = g.negotiations().iter().map(|n| n.id.get()).collect();
+    let nid = any_of(rng, &nids).unwrap_or(1);
+    let t = TileIdx(u32::try_from(rng.below(g.grid().size() as u64)).unwrap_or(0));
+    let (x, y) = g.grid().xy(t);
+    match rng.below(27) {
+        0 => json!({"what": "briefing", "player": pid.0}),
+        1 => json!({"what": "build_options", "unit": u}),
+        2 => json!({"what": "buildable", "city": c}),
+        3 => json!({"what": "camps"}),
+        4 => json!({"what": "city", "city": c}),
+        5 => json!({"what": "city_state", "player": q}),
+        6 => json!({"what": "costs", "player": q}),
+        7 => json!({"what": "events", "since": rng.below(50), "player": q}),
+        8 => json!({"what": "find_tiles", "x": x, "y": y, "radius": 2}),
+        9 => json!({"what": "game"}),
+        10 => json!({"what": "great_people", "player": q}),
+        11 => json!({"what": "negotiation", "negotiation": nid, "player": q}),
+        12 => json!({"what": "ops"}),
+        13 => json!({"what": "pending"}),
+        14 => json!({"what": "player", "player": q}),
+        15 => json!({"what": "preview", "unit": u, "x": x, "y": y}),
+        16 => json!({"what": "relation", "a": pid.0, "b": q}),
+        17 => json!({"what": "religion", "player": q}),
+        18 => json!({"what": "religion", "city": c}),
+        19 => json!({"what": "spies", "player": q}),
+        20 => json!({"what": "tile", "x": x, "y": y}),
+        21 => json!({"what": "un"}),
+        22 => json!({"what": "unit", "unit": u}),
+        23 => json!({"what": "unit_actions", "unit": u}),
+        24 => json!({"what": "units", "player": q}),
+        25 => json!({"what": "victory", "player": q}),
+        _ => json!({"what": "view", "player": pid.0}),
+    }
+}
+
+/// Reads a game as a host or a model would between two actions: `inspect` queries (the views
+/// and the briefing among them, refused until they are ported), what the tools read (a unit's
+/// reach, a preview, a city's list, the advisor's pick), the chronicle, and the digest.
+fn read_something(g: &Game, pid: PlayerId, rng: &mut Rng) {
+    let q = some_query(g, pid, rng);
+    let _answer = citar_engine::api::inspect::inspect(g, &q);
+    let units = units_of(g, pid);
+    let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
+    match rng.below(6) {
+        0 => {
+            if let Some(u) = any_of(rng, &units)
+                && let Some(m) = Mover::unit(g, u)
+            {
+                let _reach = m.reachable();
+            }
+        }
+        1 => {
+            if let Some(u) = any_of(rng, &units)
+                && let Some(t) = g.unit(u).map(|x| x.tile())
+            {
+                let near = g.grid().within(t, 2);
+                if let Some(to) = any_of(rng, &near) {
+                    let _preview = resolve::preview(g, u, to);
+                    let _plan = plan_attack(g, u, to);
+                }
+            }
+        }
+        2 => {
+            if let Some(c) = any_of(rng, &cities) {
+                let _items = buildable_items(g, c);
+                let params = citar_engine::game::advisor::AdvisorParams::default();
+                let _pick = citar_engine::game::advisor::advise_production(g, pid, c, &params);
+            }
+        }
+        3 => {
+            let _rows = g.stats(Some(5));
+            let _events = g.events(0, 50);
+            let _thoughts = g.thoughts(Some(pid), 0);
+            let _refusal = g.end_turn_refusal(pid);
+        }
+        4 => {
+            for n in g.negotiations().iter().filter(|n| n.status == NegStatus::Open) {
+                let _view = g.negotiation_view(n.id, pid);
+            }
+        }
+        _ => {
+            let _digest = g.digest();
+        }
+    }
+}
+
+/// A unit id no game hands out.
+const NO_UNIT: i64 = -7;
+
+/// A call the game refuses, drawn from host commands and tools: an action on a unit or a
+/// negotiation the game does not have, by a player whose turn it is not, or with arguments of
+/// the wrong kind; a turn ended for the wrong player or forced on one that does not exist;
+/// scenario operations that fail halfway, which the game takes back whole.
+///
+/// # Panics
+/// If the game carries out a call this means it to refuse: that is the bug property P8 is after.
+fn refuse_something(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    let others: Vec<PlayerId> = g.state().players().ids().filter(|&q| q != g.current()).collect();
+    let own = units_of(g, pid);
+    let (what, refused) = match rng.below(9) {
+        0 => {
+            let a = MoveUnit { unit_id: NO_UNIT, x: 0, y: 0 };
+            ("a move of no unit", g.act(pid, Action::MoveUnit(a)).is_err())
+        }
+        1 => match (any_of(rng, &others), own.first()) {
+            (Some(q), Some(&u)) => {
+                let (x, y) = g.unit(u).map_or((0, 0), |x| g.grid().xy(x.tile()));
+                let a = MoveUnit { unit_id: tool_id(u), x: i64::from(x), y: i64::from(y) };
+                ("a move out of turn", g.act(q, Action::MoveUnit(a)).is_err())
+            }
+            _ => return,
+        },
+        2 => {
+            let a = SetResearch { tech: json!("No Such Tech"), append: None };
+            ("research of no tech", g.act(pid, Action::SetResearch(a)).is_err())
+        }
+        3 => {
+            let a = AdoptPolicy { policy: json!(17) };
+            ("a policy given as a number", g.act(pid, Action::AdoptPolicy(a)).is_err())
+        }
+        4 => {
+            let a = RespondNegotiation {
+                negotiation_id: 999_999,
+                action: json!("accept"),
+                message: None,
+                give: None,
+                receive: None,
+            };
+            ("an answer to no negotiation", g.act(pid, Action::RespondNegotiation(a)).is_err())
+        }
+        5 => match any_of(rng, &others) {
+            Some(q) => ("a turn ended for another", g.end_turn(q).is_err()),
+            None => return,
+        },
+        6 => ("a turn forced on nobody", g.force_turn(PlayerId(200)).is_err()),
+        7 => {
+            let ops = json!([
+                {"op": "set_player", "player": pid.0, "gold": 1},
+                {"op": "remove_city", "city": 999_999},
+            ]);
+            ("operations that fail halfway", g.apply_ops(&ops).is_err())
+        }
+        _ => {
+            let a = BuildImprovement { unit_id: NO_UNIT, improvement: "Farm".into() };
+            ("a build by no unit", g.act(pid, Action::BuildImprovement(a)).is_err())
+        }
+    };
+    assert!(refused, "the game carried out {what}, which it must refuse");
+}
+
+/// What a host does besides: saves the game (the journal's chunk, then a snapshot written as
+/// JSON) and reads the summary back.
+fn save_it(g: &mut Game) {
+    let _chunk = g.take_journal_chunk();
+    if let Ok(bytes) = g.snapshot().to_json() {
+        let _summary = citar_engine::save::summary(&bytes);
+    }
+}
+
+/// Reads, refused calls and a save now and then, as many hosts and models make between two
+/// actions: property P8 says none of them changes the game (DESIGN.md 9.5). Draws from `rng`
+/// alone, which is not a stream the agent's moves draw from.
+pub fn reads_and_refusals(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    for _ in 0..2 {
+        read_something(g, pid, rng);
+    }
+    if rng.chance(0.5) {
+        refuse_something(g, pid, rng);
+    }
+    if rng.chance(0.02) {
+        save_it(g);
+    }
+}
+
+/// The stream [`reads_and_refusals`] draws from for a seat's turn, or an answer: keyed apart from
+/// every stream the agent's moves and answers draw from.
+fn noise_stream(g: &Game, pid: PlayerId, what: u64) -> Rng {
+    let turn = u64::try_from(g.turn()).unwrap_or(0);
+    Rng::keyed(g.state().seed(), Purpose::TestAgent, &[u64::from(pid.0), turn, u64::MAX, what])
+}
+
 /// A driver that plays at random among the actions the engine has, reproducibly: the same game
-/// and seat give the same moves.
+/// and seat give the same moves. A noisy one ([`RandomAgent::noisy`]) also reads and makes
+/// refused calls between its moves, which must change nothing (property P8).
 #[derive(Clone, Debug, Default)]
 pub struct RandomAgent {
     turns: u64,
+    noisy: bool,
 }
 
 impl RandomAgent {
     /// A new agent.
     #[must_use]
     pub const fn new() -> Self {
-        Self { turns: 0 }
+        Self { turns: 0, noisy: false }
+    }
+
+    /// A new agent that plays as [`new`](Self::new)'s does, and between every two of its moves,
+    /// and before every answer, reads the game and makes calls the game refuses
+    /// ([`reads_and_refusals`]).
+    #[must_use]
+    pub const fn noisy() -> Self {
+        Self { turns: 0, noisy: true }
     }
 
     /// How many turns it has played.
@@ -788,8 +1240,15 @@ impl RandomAgent {
 impl SeatDriver for RandomAgent {
     fn play_turn(&mut self, g: &mut Game, pid: PlayerId, _: &mut DriverMemory) -> DriverOutcome {
         let mut rng = Self::stream(g, pid);
+        let mut noise = self.noisy.then(|| noise_stream(g, pid, 0));
         for m in MOVES {
+            if let Some(n) = noise.as_mut() {
+                reads_and_refusals(g, pid, n);
+            }
             m(g, pid, &mut rng);
+        }
+        if let Some(n) = noise.as_mut() {
+            reads_and_refusals(g, pid, n);
         }
         self.turns += 1;
         DriverOutcome::Done
@@ -802,6 +1261,10 @@ impl SeatDriver for RandomAgent {
         nid: NegotiationId,
         _: &mut DriverMemory,
     ) -> DriverOutcome {
+        if self.noisy {
+            let mut n = noise_stream(g, pid, 1 + u64::from(nid.get()));
+            reads_and_refusals(g, pid, &mut n);
+        }
         let mut rng = answer_stream(g, pid, nid);
         answer(g, pid, nid, &mut rng);
         DriverOutcome::Done

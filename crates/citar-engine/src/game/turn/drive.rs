@@ -404,6 +404,13 @@ impl Game {
         Ok(outcome)
     }
 
+    /// The seat whose driver is playing its turn or answering a negotiation inside
+    /// [`Game::drive`], if any: while there is one, the game ends, forces and drives no turn.
+    #[must_use]
+    pub const fn driving(&self) -> Option<PlayerId> {
+        self.driving
+    }
+
     /// Refuses to end, force or drive a turn while a seat's driver plays inside [`Game::drive`]:
     /// `drive` ends that turn once the driver has returned and the seat has its memory back.
     pub(crate) fn ensure_not_driving(&self) -> Result<(), ActionError> {
