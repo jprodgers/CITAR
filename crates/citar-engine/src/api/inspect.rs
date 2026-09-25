@@ -12,6 +12,8 @@
 //! - `relation` (`a`, `b`): contact, war and every treaty term, with the two-sided ones as
 //!   `[a's, b's]`;
 //! - `unit` (`unit`), `units` (optionally `player`, `x` and `y`), `city` (`city`);
+//! - `preview` (`unit`, `x`, `y`): the attack preview (`combat.preview`), or its refusal as
+//!   `{"error": ...}`;
 //! - `buildable` (`city`): what a city can build now and what each costs in production;
 //! - `costs` (`player`): what the techs a civilization could research cost it, its next policy's
 //!   culture, and the policies it could adopt;
@@ -46,7 +48,7 @@ use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
 /// The queries, by `what`, sorted, with whether what each reads is ported yet.
-const QUERIES: [(&str, Porting); 16] = [
+const QUERIES: [(&str, Porting); 17] = [
     ("briefing", Porting::Pending("1d-03")),
     ("buildable", Porting::Ported),
     ("city", Porting::Ported),
@@ -58,6 +60,7 @@ const QUERIES: [(&str, Porting); 16] = [
     ("ops", Porting::Ported),
     ("pending", Porting::Ported),
     ("player", Porting::Ported),
+    ("preview", Porting::Ported),
     ("relation", Porting::Ported),
     ("tile", Porting::Ported),
     ("unit", Porting::Ported),
@@ -91,6 +94,16 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
             Ok(unit(g, id))
         }
         "units" => units(g, o),
+        "preview" => {
+            let id = py::int_of(o.get("unit").unwrap_or(&Value::Null))
+                .and_then(|n| u32::try_from(n).ok())
+                .and_then(UnitId::new)
+                .filter(|&u| g.unit(u).is_some())
+                .ok_or_else(|| bad("No such unit."))?;
+            let t = scenario::tile(g, o)?;
+            Ok(crate::game::combat::resolve::preview(g, id, t)
+                .unwrap_or_else(|e| json!({"error": e.message})))
+        }
         "city" => {
             let id = py::int_of(o.get("city").unwrap_or(&Value::Null))
                 .and_then(|n| u32::try_from(n).ok())
@@ -415,7 +428,15 @@ fn city(g: &Game, c: CityId) -> Value {
         "overflow": x.overflow,
         "culture": x.culture,
         "health": x.health,
+        "max_health": crate::game::cities::stats::max_health(g, c),
         "tiles": crate::game::economy::city_tiles(g, c).len(),
+        "founder": x.founder.0,
+        "previous_owner": x.previous_owner.map(|p| p.0),
+        "original_capital": x.original_capital,
+        "puppet": x.puppet,
+        "razing": x.razing,
+        "resistance": x.resistance,
+        "attacked": x.attacked,
     })
 }
 

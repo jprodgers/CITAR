@@ -246,6 +246,39 @@ def _ready_unit(g: Game, o: dict):
     return {"moves": u.moves}
 
 
+@op("attack_as", "unit, x, y: the unit attacks the tile, whoever's turn it is")
+def _attack_as(g: Game, o: dict):
+    """A unit attacks a tile as the ``attack`` tool would have it, whoever's turn it is: a nuclear weapon detonates,
+    an aircraft strikes, anything else attacks."""
+    from . import combat
+    from . import unique_types as U
+    from .scenario import _idx
+    u = _unit(g, o)
+    idx = _idx(g, o)
+    ud = g.udef(u)
+    if ud["_umap"].get(U.NuclearWeapon):
+        return combat.nuke(g, u, idx)
+    if ud["_domain"] == "Air":
+        return combat.air_strike(g, u, idx)
+    return combat.attack(g, u, idx)
+
+
+@op("capture_civilian", "unit, x, y: the unit takes the civilian on the tile")
+def _capture_civilian(g: Game, o: dict):
+    """A unit takes the civilian on a tile, as the tests poked it: the captured unit's new id, or None when it was
+    destroyed instead."""
+    from . import units
+    from .scenario import _idx
+    u = _unit(g, o)
+    v = g.civilian_at(_idx(g, o))
+    if v is None:
+        raise ActionError("There is no civilian there.")
+    before = {x.id for x in g.player_units(u.owner)}
+    units.capture_civilian(g, u, v)
+    new = sorted(x.id for x in g.player_units(u.owner) if x.id not in before)
+    return {"unit": new[0] if new else None}
+
+
 @op("refresh_visibility", "what every civilization sees is brought up to date")
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""
