@@ -235,8 +235,7 @@ fn the_frames_of_a_hundred_turns_decode_to_what_each_round_captured() {
         &json!({"seed": 21, "city_states": 1, "barbarians": "normal", "turn_limit": 100}),
         true,
     );
-    // What earlier games on this thread recorded is not this game's.
-    records::take_frames_for_test().clear();
+    records::capture_frames_for_test(true);
     let mut agents = [RandomAgent::new(), RandomAgent::new(), RandomAgent::new()];
     let mut reloaded = false;
     while g.phase() == Phase::Playing {
@@ -253,6 +252,7 @@ fn the_frames_of_a_hundred_turns_decode_to_what_each_round_captured() {
     }
     clean(&mut g);
     let captured = records::take_frames_for_test();
+    records::capture_frames_for_test(false);
     let recs = &g.chronicle().frames().frames;
     assert_eq!(recs.len(), captured.len(), "every frame recorded is in the chronicle");
     assert!(recs.len() >= 99, "a frame a round: {}", recs.len());

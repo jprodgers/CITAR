@@ -69,14 +69,25 @@ pub(crate) fn record_stats(g: &mut Game) {
 
 #[cfg(feature = "test-ops")]
 std::thread_local! {
-    /// The frames recorded on this thread as they were captured, before encoding (feature
+    /// Whether the frames recorded on this thread are kept as captured (feature `test-ops`).
+    static CAPTURING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// The frames recorded on this thread while capturing, before encoding (feature
     /// `test-ops`), for the test that decodes the chronicle's frames against them.
     static CAPTURED: core::cell::RefCell<Vec<FullFrame>> =
         const { core::cell::RefCell::new(Vec::new()) };
 }
 
-/// Every frame recorded on this thread since the last call, as captured before it was encoded
-/// (feature `test-ops`).
+/// Keeps the frames recorded on this thread from now on as they are captured, or stops, and
+/// forgets those kept (feature `test-ops`). Off by default, so that a long game in a test build
+/// keeps nothing.
+#[cfg(feature = "test-ops")]
+pub fn capture_frames_for_test(on: bool) {
+    CAPTURING.with(|c| c.set(on));
+    CAPTURED.with(|f| f.borrow_mut().clear());
+}
+
+/// Every frame recorded on this thread while capturing since the last call, as captured before
+/// it was encoded (feature `test-ops`).
 #[cfg(feature = "test-ops")]
 #[must_use]
 pub fn take_frames_for_test() -> Vec<FullFrame> {
@@ -92,6 +103,8 @@ pub(crate) fn record_frame(g: &mut Game) {
     let frame = FullFrame::capture(g.rules, &g.st, (from, to));
     let rec = g.frames.push(&frame);
     #[cfg(feature = "test-ops")]
-    CAPTURED.with(|f| f.borrow_mut().push(frame));
+    if CAPTURING.with(core::cell::Cell::get) {
+        CAPTURED.with(|f| f.borrow_mut().push(frame));
+    }
     Record::of(&mut g.st, &mut g.chron).frame(rec);
 }
