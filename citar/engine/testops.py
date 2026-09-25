@@ -336,7 +336,6 @@ def _progress_builds(g: Game, o: dict):
     return {}
 
 
-@op("refresh_visibility", "what every civilization sees is brought up to date")
 @op("set_difficulty", "player, difficulty (a level's name): the seat's own difficulty, as the host sets it; ok is "
                       "false, and nothing changes, for a name that is no level")
 def _set_difficulty(g: Game, o: dict):
@@ -463,6 +462,7 @@ def _drive(g: Game, o: dict):
         ended += 1
 
 
+@op("refresh_visibility", "what every civilization sees is brought up to date")
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""
     from . import visibility

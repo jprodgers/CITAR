@@ -53,6 +53,20 @@ path = "explored"
 eq = 384
 
 [[step]]
+note = "What everyone sees brought up to date (the refresh_visibility test operation, on both engines): the map stays explored."
+op = "refresh_visibility"
+as = "refreshed"
+
+[[step]]
+check = "refreshed"
+eq = {}
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "explored"
+eq = 384
+
+[[step]]
 op = "debug"
 args = { action = "win" }
 error = "Unknown debug action."
