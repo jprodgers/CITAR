@@ -227,3 +227,21 @@ reason = "A deal item naming a player id or a city id no game can have, or an am
 [[differences]]
 id = "deal-war-on-a-partners-pact-refused"
 reason = "A deal in which one side declared war on a civilization with a defensive pact with the other side was carried out, and the pact then put the deal's two parties at war with the deal still in force and its chat both closed and accepted; Rust refuses such an item when it is proposed or accepted"
+
+# Package 1c-07: the production advisor.
+
+[[differences]]
+id = "advisor-ties-by-id"
+reason = "The production advisor read the units a city could build from a set of names, so the first settler, worker or scout and the best of equally strong units were whichever the set gave first, and of equally valued choices it took the name last in code point order; Rust reads them in the ruleset's order and takes the largest id of equally valued choices"
+
+[[differences]]
+id = "advisor-draws-by-city-and-turn"
+reason = "The production advisor's one random choice, whether a city prefers a ranged unit, drew from a bot seeded with the city's id and made afresh for each pick, so a city drew the same every turn; Rust draws from a stream of its own keyed by the city and the turn"
+
+[[differences]]
+id = "advisor-counts-a-free-unit-as-costing-one"
+reason = "The production advisor divided a military unit's strength by a power of its cost, so a unit costing nothing raised a division by zero and the city picked nothing; Rust values it as if it cost one"
+
+[[differences]]
+id = "advisor-what-if-leaves-no-trace"
+reason = "The production advisor valued a building by adding it to the city, swapping two of the game's caches away and restoring them; what was computed with the building stayed in the caches it did not swap, so an answer depended on what had been asked before (a city advised a Monument after its puppet's pick was weighed, a Stadium on a fresh load). Rust's what-if reads the game with the building and writes nothing, so the same game always gives the same answer"

@@ -21,9 +21,9 @@
 
 use smallvec::SmallVec;
 
-use super::super::Game;
 use super::super::derive::stats as memo;
 use super::super::religion;
+use super::super::{EvalView, Game};
 use crate::base::ids::{BuildingId, CityId, PlayerId, SpecialistId, TileIdx};
 use crate::base::num;
 use crate::base::sets::MAX_SPECIALISTS;
@@ -32,7 +32,7 @@ use crate::game::core::has_type;
 use crate::game::economy;
 use crate::state::cities::{City, Constructible, Perpetual};
 use crate::unique::world::CombatAction;
-use crate::unique::{Ctx, Source, UniqueData, UniqueType, uq};
+use crate::unique::{Ctx, FilterFacts as _, Source, UniqueData, UniqueType, uq};
 
 // ---- Stats as Python's dicts held them ----------------------------------------------------------
 
@@ -434,9 +434,15 @@ pub fn slots(max: &[(SpecialistId, i32)], s: SpecialistId) -> i32 {
 /// `[stats] from every [specialist]` naming it.
 #[must_use]
 pub fn specialist_stats(g: &Game, c: CityId, s: SpecialistId) -> Stats {
-    let r = g.rules();
+    specialist_stats_in(&g.view(), c, s)
+}
+
+/// [`specialist_stats`] as view `v` reads the game.
+#[must_use]
+pub(crate) fn specialist_stats_in(v: &EvalView<'_>, c: CityId, s: SpecialistId) -> Stats {
+    let v = *v;
+    let r = v.game().rules();
     let Some(sp) = r.specialists().get(s) else { return Stats::ZERO };
-    let v = g.view();
     let ctx = Ctx::city(&v, c);
     let t = r.uniques();
     let filters = t.filters();
@@ -580,10 +586,17 @@ fn building_pct(g: &Game, b: BuildingId, bu: &BuildingUniques) -> Yields {
 /// `aiBuildingMaintenanceModifier`.
 #[must_use]
 pub fn maintenance(g: &Game, c: CityId) -> f64 {
+    maintenance_in(&g.view(), c)
+}
+
+/// [`maintenance`] as view `v` reads the game: its buildings are the view's.
+#[must_use]
+pub(crate) fn maintenance_in(v: &EvalView<'_>, c: CityId) -> f64 {
+    let v = *v;
+    let g = v.game();
     let Some(city) = g.city(c) else { return 0.0 };
     let r = g.rules();
     let t = r.uniques();
-    let v = g.view();
     let ctx = Ctx::city(&v, c);
     let filters = t.filters();
     let mus: SmallVec<[(crate::base::ids::SetRef, i32, u16); 4]> =
@@ -598,7 +611,7 @@ pub fn maintenance(g: &Game, c: CityId) -> f64 {
             })
             .collect();
     let mut total = 0.0;
-    for b in city.buildings.iter() {
+    for b in v.city_buildings(c).iter() {
         if city.free_buildings.contains(b) {
             continue;
         }
@@ -631,18 +644,19 @@ pub fn is_capital(g: &Game, c: CityId) -> bool {
 
 /// The yields of a city's trade route to its capital, if it has one (`cities.trade_route_stats`,
 /// `cities.py:332-351`).
-fn trade_route_stats(g: &Game, c: CityId) -> Yields {
+fn trade_route_stats(v: &EvalView<'_>, c: CityId) -> Yields {
+    let v = *v;
+    let g = v.game();
     let mut s = Yields::default();
     let Some(city) = g.city(c) else { return s };
     let Some(cap) = g.player(city.owner()).and_then(|p| p.capital).and_then(|x| g.city(x)) else {
         return s;
     };
-    if cap.id() == c || !memo::connected_to_capital(g, c) {
+    if cap.id() == c || !v.city_connected_to_capital(c) {
         return s;
     }
     s.put(Stat::Gold, f64::from(cap.pop) * 0.15 + f64::from(city.pop) * 1.1 - 1.0);
     let t = g.rules().uniques();
-    let v = g.view();
     let ctx = Ctx::city(&v, c);
     for h in uq::city(&v, c, UniqueType::StatsFromTradeRoute, &ctx) {
         if let UniqueData::StatsFromTradeRoute(x) = h.data() {
@@ -685,13 +699,14 @@ fn population_amount(
 /// (`cities._uniques_by_source`, `cities.py:354-384`): `[stats] [cities]`, `[stats] per [n]
 /// population [cities]`, `[stats] in cities on [terrain] tiles`; a city-state's bonus times its
 /// owner's `[n]% [stat] from City-States`.
-fn uniques_by_source(g: &Game, c: CityId) -> SmallVec<[(SourceKind, Yields); 4]> {
+fn uniques_by_source(v: &EvalView<'_>, c: CityId) -> SmallVec<[(SourceKind, Yields); 4]> {
+    let v = *v;
+    let g = v.game();
     let mut out: SmallVec<[(SourceKind, Yields); 4]> = SmallVec::new();
     let Some(city) = g.city(c) else { return out };
     let r = g.rules();
     let t = r.uniques();
     let filters = t.filters();
-    let v = g.view();
     let owner = city.owner();
     let ctx = Ctx::city(&v, c);
     let cs_mults: SmallVec<[(Stat, i32, u16); 2]> =
@@ -761,13 +776,14 @@ fn uniques_by_source(g: &Game, c: CityId) -> SmallVec<[(SourceKind, Yields); 4]>
 /// golden age, the railroad to the capital, a puppet's penalty, the production penalty of units
 /// over the supply, the `[n]% [stat]` uniques, those of what it builds now, its religion's
 /// followers, and its buildings'.
-fn pct_bonuses(g: &Game, c: CityId, construction: Option<Constructible>) -> Yields {
+fn pct_bonuses(v: &EvalView<'_>, c: CityId, construction: Option<Constructible>) -> Yields {
+    let v = *v;
+    let g = v.game();
     let mut pct = Yields::default();
     let Some(city) = g.city(c) else { return pct };
     let r = g.rules();
     let t = r.uniques();
     let filters = t.filters();
-    let v = g.view();
     let owner = city.owner();
     let Some(p) = g.player(owner) else { return pct };
     if p.econ.golden_age_turns > 0 {
@@ -775,15 +791,16 @@ fn pct_bonuses(g: &Game, c: CityId, construction: Option<Constructible>) -> Yiel
         pct.add_to(Stat::Culture, 20.0);
     }
     let rail_tech = r.improvements()[r.derived().known.railroad].tech_required;
-    if g.has_tech(owner, rail_tech) && (is_capital(g, c) || memo::connected_by_rail(g, c)) {
+    if g.has_tech(owner, rail_tech) && (is_capital(g, c) || v.rail_to_capital(c)) {
         pct.add_to(Stat::Production, 25.0);
     }
     if city.puppet {
         pct.add_to(Stat::Science, -25.0);
         pct.add_to(Stat::Culture, -25.0);
     }
-    if p.is_major() && memo::unit_supply_deficit(g, owner) > 0 {
-        pct.add_to(Stat::Production, memo::unit_supply_penalty(g, owner));
+    let deficit = if p.is_major() { v.supply_deficit(owner) } else { 0 };
+    if deficit > 0 {
+        pct.add_to(Stat::Production, economy::supply_penalty(deficit));
     }
     let ctx = Ctx::city(&v, c);
     for h in uq::city(&v, c, UniqueType::StatPercentBonus, &ctx) {
@@ -834,8 +851,7 @@ fn pct_bonuses(g: &Game, c: CityId, construction: Option<Constructible>) -> Yiel
                     }
                 }
             }
-            let cap = p.capital.and_then(|x| g.city(x));
-            if cap.is_some_and(|x| x.buildings.contains(b)) {
+            if p.capital.is_some_and(|x| v.city_buildings(x).contains(b)) {
                 for h in uq::city(&v, c, UniqueType::PercentProductionBuildingsInCapital, &ctx) {
                     if let UniqueData::PercentProductionBuildingsInCapital(x) = h.data() {
                         for _ in 0..h.n {
@@ -856,7 +872,7 @@ fn pct_bonuses(g: &Game, c: CityId, construction: Option<Constructible>) -> Yiel
         }
     }
     let bu = BuildingUniques::pct(&v, c, &ctx);
-    for b in city.buildings.iter() {
+    for b in v.city_buildings(c).iter() {
         let bp = building_pct(g, b, &bu);
         pct.add(&bp.stats, 1.0);
         pct.keys |= bp.keys;
@@ -869,10 +885,16 @@ fn pct_bonuses(g: &Game, c: CityId, construction: Option<Constructible>) -> Yiel
 /// `[n]% Food consumption by [population] [cities]` of those it counts.
 #[must_use]
 pub fn food_eaten(g: &Game, c: CityId, work: &Work<'_>) -> f64 {
+    food_eaten_in(&g.view(), c, work)
+}
+
+/// [`food_eaten`] as view `v` reads the game.
+fn food_eaten_in(v: &EvalView<'_>, c: CityId, work: &Work<'_>) -> f64 {
+    let v = *v;
+    let g = v.game();
     let Some(city) = g.city(c) else { return 0.0 };
     let t = g.rules().uniques();
     let filters = t.filters();
-    let v = g.view();
     let ctx = Ctx::city(&v, c);
     let specs = f64::from(work.specialists_total());
     let mut by_specialists = 2.0 * specs;
@@ -904,10 +926,20 @@ pub fn food_eaten(g: &Game, c: CityId, work: &Work<'_>) -> f64 {
 /// (`cities.growth_bonus`, `cities.py:462-468`).
 #[must_use]
 pub fn growth_bonus(g: &Game, c: CityId, total_food: f64) -> SmallVec<[(SourceKind, f64); 2]> {
+    growth_bonus_in(&g.view(), c, total_food)
+}
+
+/// [`growth_bonus`] as view `v` reads the game.
+fn growth_bonus_in(
+    v: &EvalView<'_>,
+    c: CityId,
+    total_food: f64,
+) -> SmallVec<[(SourceKind, f64); 2]> {
+    let v = *v;
+    let g = v.game();
     let mut out: SmallVec<[(SourceKind, f64); 2]> = SmallVec::new();
     let t = g.rules().uniques();
     let filters = t.filters();
-    let v = g.view();
     let ctx = Ctx::city(&v, c);
     for h in uq::city(&v, c, UniqueType::GrowthPercentBonus, &ctx) {
         if let UniqueData::GrowthPercentBonus(x) = h.data()
@@ -1000,18 +1032,26 @@ impl super::super::derive::rev::BitEq for CityBase {
 /// City `c`'s [`CityBase`], computed.
 #[must_use]
 pub fn city_base(g: &Game, c: CityId) -> CityBase {
-    let Some(city) = g.city(c) else { return CityBase::default() };
-    let v = g.view();
-    let ctx = Ctx::city(&v, c);
-    let bu = BuildingUniques::stats(&v, c, &ctx);
+    city_base_in(&g.view(), c)
+}
+
+/// [`city_base`] as view `v` reads the game: its buildings are the view's.
+#[must_use]
+pub(crate) fn city_base_in(v: &EvalView<'_>, c: CityId) -> CityBase {
+    let g = v.game();
+    if g.city(c).is_none() {
+        return CityBase::default();
+    }
+    let ctx = Ctx::city(v, c);
+    let bu = BuildingUniques::stats(v, c, &ctx);
     let mut buildings = Stats::ZERO;
-    for b in city.buildings.iter() {
-        buildings += building_stats_with(g, &v, b, &ctx, &bu);
+    for b in v.city_buildings(c).iter() {
+        buildings += building_stats_with(g, v, b, &ctx, &bu);
     }
     CityBase {
         buildings,
-        by_source: uniques_by_source(g, c),
-        food_pct: food_percent(g, c),
+        by_source: uniques_by_source(v, c),
+        food_pct: food_percent(v, c),
         free: free_tiles(g, c),
     }
 }
@@ -1071,25 +1111,44 @@ pub fn city_parts(g: &Game, c: CityId, work: &Work<'_>) -> CityParts {
 /// `work`): the memo keeps them to validate against.
 #[must_use]
 pub fn city_parts_on(g: &Game, c: CityId, work: &Work<'_>, tiles: &[TileIdx]) -> CityParts {
+    let Some(owner) = g.city(c).map(City::owner) else { return CityParts::default() };
+    let mut sum = Stats::ZERO;
+    for &t in tiles {
+        sum += memo::tile_yield(g, t, Some(owner), Some(c));
+    }
+    let (buildings, by_source) = {
+        let base = memo::city_base(g, c);
+        (base.buildings, base.by_source.clone())
+    };
+    city_parts_from(&g.view(), c, work, sum, buildings, by_source)
+}
+
+/// [`city_parts_on`] from what its tiles yield together and its base's buildings' yields and
+/// uniques by source, as view `v` reads the game: a what-if gives its own.
+#[must_use]
+pub(crate) fn city_parts_from(
+    v: &EvalView<'_>,
+    c: CityId,
+    work: &Work<'_>,
+    tiles: Stats,
+    buildings: Stats,
+    by_source: SmallVec<[(SourceKind, Yields); 4]>,
+) -> CityParts {
+    let v = *v;
+    let g = v.game();
     let mut out = CityParts::default();
     let Some(city) = g.city(c) else { return out };
     let owner = city.owner();
     let r = g.rules();
-    for &t in tiles {
-        out.tiles += memo::tile_yield(g, t, Some(owner), Some(c));
-    }
-    let v = g.view();
+    out.tiles = tiles;
     let ctx = Ctx::city(&v, c);
-    {
-        let base = memo::city_base(g, c);
-        out.buildings = base.buildings;
-        out.by_source.clone_from(&base.by_source);
-    }
+    out.buildings = buildings;
+    out.by_source = by_source;
     for (i, &n) in work.specialists.iter().enumerate() {
         if n > 0
             && let Some(s) = u8::try_from(i).ok().map(SpecialistId)
         {
-            out.specialists.add_scaled(&specialist_stats(g, c, s), f64::from(n));
+            out.specialists.add_scaled(&specialist_stats_in(&v, c, s), f64::from(n));
         }
     }
     let Some(p) = g.player(owner) else { return out };
@@ -1103,7 +1162,7 @@ pub fn city_parts_on(g: &Game, c: CityId, work: &Work<'_>, tiles: &[TileIdx]) ->
     if !g.is_humanlike(owner) {
         unhap *= r.difficulties()[g.seat_difficulty(Some(owner))].ai_unhappiness_modifier;
     }
-    let annex = v_annexed(g, c);
+    let annex = v.city_annex_unhappiness(c);
     let from_city = -3.0 - if annex { 2.0 } else { 0.0 };
     let umod: f64 =
         uq::civ(&v, owner, UniqueType::UnhappinessFromCitiesPercentage, &Ctx::civ(owner))
@@ -1153,12 +1212,6 @@ pub fn city_parts_on(g: &Game, c: CityId, work: &Work<'_>, tiles: &[TileIdx]) ->
     }
     out.happiness = hl;
     out
-}
-
-/// Whether the city carries a conquered city's unhappiness (`cities.has_annex_unhappiness`).
-fn v_annexed(g: &Game, c: CityId) -> bool {
-    use crate::unique::FilterFacts as _;
-    g.view().city_annex_unhappiness(c)
 }
 
 /// A city's full stats (`cities._compute_city_stats`, `cities.py:589-678`): the breakdown by
@@ -1213,6 +1266,22 @@ pub fn city_stats_from(
     construction: Option<Constructible>,
     happy: Option<bool>,
 ) -> CityStats {
+    city_stats_from_in(&g.view(), c, parts, work, construction, happy)
+}
+
+/// [`city_stats_from`] as view `v` reads the game: a what-if gives its own view, and whether
+/// its owner would be happy.
+#[must_use]
+pub(crate) fn city_stats_from_in(
+    v: &EvalView<'_>,
+    c: CityId,
+    parts: &CityParts,
+    work: &Work<'_>,
+    construction: Option<Constructible>,
+    happy: Option<bool>,
+) -> CityStats {
+    let v = *v;
+    let g = v.game();
     let mut out = CityStats::default();
     let Some(city) = g.city(c) else { return out };
     let owner = city.owner();
@@ -1224,7 +1293,7 @@ pub fn city_stats_from(
     fin.push((StatSource::Population, pop));
     fin.push((StatSource::TileYields, Yields::all(parts.tiles)));
     fin.push((StatSource::Specialists, Yields::all(parts.specialists)));
-    fin.push((StatSource::TradeRoutes, trade_route_stats(g, c)));
+    fin.push((StatSource::TradeRoutes, trade_route_stats(&v, c)));
     fin.push((StatSource::Buildings, Yields::all(parts.buildings)));
     for (kind, s) in &parts.by_source {
         let key = StatSource::Uniques(*kind);
@@ -1239,7 +1308,7 @@ pub fn city_stats_from(
     for (_, s) in &mut fin {
         s.remove(Stat::Happiness);
     }
-    let pct = pct_bonuses(g, c, construction);
+    let pct = pct_bonuses(&v, c, construction);
     for (_, s) in &mut fin {
         s.scale(Stat::Production, 1.0 + pct.get(Stat::Production) / 100.0);
     }
@@ -1259,11 +1328,11 @@ pub fn city_stats_from(
     for (_, s) in &mut fin {
         s.scale(Stat::Science, 1.0 + pct.get(Stat::Science) / 100.0);
     }
-    let eaten = food_eaten(g, c, work);
+    let eaten = food_eaten_in(&v, c, work);
     fin[0].1.add_to(Stat::Food, -eaten);
     let mut total_food: f64 = fin.iter().map(|(_, s)| s.get(Stat::Food)).sum();
     if total_food > 0.0 {
-        for (kind, amount) in growth_bonus(g, c, total_food) {
+        for (kind, amount) in growth_bonus_in(&v, c, total_food) {
             let key = StatSource::Growth(kind);
             match fin.iter_mut().find(|(k, _)| *k == key) {
                 Some((_, d)) => d.add_to(Stat::Food, amount),
@@ -1285,7 +1354,7 @@ pub fn city_stats_from(
         total_food = fin.iter().map(|(_, s)| s.get(Stat::Food)).sum();
     }
     let mut m = Yields::default();
-    m.put(Stat::Gold, -maintenance(g, c).trunc());
+    m.put(Stat::Gold, -maintenance_in(&v, c).trunc());
     fin.push((StatSource::Maintenance, m));
     if can_convert_food(g, total_food, construction) {
         let mut y = Yields::default();
@@ -1293,7 +1362,6 @@ pub fn city_stats_from(
         y.put(Stat::Food, -total_food);
         fin.push((StatSource::ExcessFood, y));
     }
-    let v = g.view();
     if uq::any(uq::city(&v, c, UniqueType::NullifiesGrowth, &Ctx::city(&v, c))) {
         let cur: f64 = fin.iter().map(|(_, s)| s.get(Stat::Food)).sum();
         if cur > 0.0 {
@@ -1359,7 +1427,7 @@ pub fn food_surplus(
         }
     }
     col.push(food(&specialists));
-    col.push(trade_route_stats(g, c).get(Stat::Food));
+    col.push(trade_route_stats(&g.view(), c).get(Stat::Food));
     let scale = {
         let base = memo::city_base(g, c);
         col.push(food(&base.buildings));
@@ -1400,10 +1468,13 @@ pub fn food_surplus(
 
 /// The percentage a city's food is raised by: the food column of [`pct_bonuses`], added in its
 /// order (`[n]% [Food]` uniques, its religion's followers, its buildings').
-fn food_percent(g: &Game, c: CityId) -> f64 {
-    let Some(city) = g.city(c) else { return 0.0 };
+fn food_percent(v: &EvalView<'_>, c: CityId) -> f64 {
+    let v = *v;
+    let g = v.game();
+    if g.city(c).is_none() {
+        return 0.0;
+    }
     let filters = g.rules().uniques().filters();
-    let v = g.view();
     let ctx = Ctx::city(&v, c);
     let mut pct = 0.0;
     for h in uq::city(&v, c, UniqueType::StatPercentBonus, &ctx) {
@@ -1436,7 +1507,7 @@ fn food_percent(g: &Game, c: CityId) -> f64 {
         }
     }
     let bu = BuildingUniques::pct(&v, c, &ctx);
-    for b in city.buildings.iter() {
+    for b in v.city_buildings(c).iter() {
         pct += building_pct(g, b, &bu).get(Stat::Food);
     }
     pct

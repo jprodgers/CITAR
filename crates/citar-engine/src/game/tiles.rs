@@ -190,7 +190,13 @@ fn target_deps(g: &Game, t: Target) -> CondDeps {
 /// `_tile_percentages` read them, `tiles.py:291-311, 352-373`).
 #[must_use]
 pub fn city_mods(g: &Game, c: CityId) -> CityMods {
-    let v = g.view();
+    city_mods_in(&g.view(), c)
+}
+
+/// [`city_mods`] as view `v` reads the game: a what-if's city with one more building.
+#[must_use]
+pub(crate) fn city_mods_in(v: &EvalView<'_>, c: CityId) -> CityMods {
+    let g = v.game();
     let mut out = CityMods::default();
     let Some(city) = g.city(c) else { return out };
     let t = g.rules().uniques();
@@ -205,7 +211,7 @@ pub fn city_mods(g: &Game, c: CityId) -> CityMods {
         UniqueType::AllStatsPercentFromObject,
     ];
     for ty in types {
-        for h in uq::city(&v, c, ty, &Ctx::IGNORE) {
+        for h in uq::city(v, c, ty, &Ctx::IGNORE) {
             let (kind, target, city_filter) = match *h.data() {
                 UniqueData::StatsFromTiles(x) => {
                     (ModKind::Flat(x.stats), Target::Tiles(x.tiles), Some(x.cities))
@@ -230,13 +236,15 @@ pub fn city_mods(g: &Game, c: CityId) -> CityMods {
             let per_tile = conds.intersects(CondDeps::TILE);
             if !per_tile {
                 out.deps |= conds;
-                if !applies(h.id, &ctx, &v) {
+                if !applies(h.id, &ctx, v) {
                     continue;
                 }
             }
             if let Some(cf) = city_filter {
-                out.deps |= filters.city(cf).deps();
-                if !filters.city_matches(cf, &v, c, None) {
+                // The city's own class where the filter reads its buildings: the what-if of a
+                // building reads the modifiers from this memo unless they read what it moves.
+                out.deps |= filters.city_deps_here(cf);
+                if !filters.city_matches(cf, v, c, None) {
                     continue;
                 }
             }
@@ -430,7 +438,21 @@ pub fn compute_tile_yield(
     mods: Option<&CityMods>,
     deps: &mut CondDeps,
 ) -> Stats {
-    let v = g.view();
+    compute_tile_yield_in(&g.view(), t, viewer, city, mods, deps)
+}
+
+/// [`compute_tile_yield`] as view `v` reads the game: a what-if's city with one more building.
+#[must_use]
+pub(crate) fn compute_tile_yield_in(
+    v: &EvalView<'_>,
+    t: TileIdx,
+    viewer: Option<PlayerId>,
+    city: Option<CityId>,
+    mods: Option<&CityMods>,
+    deps: &mut CondDeps,
+) -> Stats {
+    let v = *v;
+    let g = v.game();
     let r = g.rules();
     let table = r.uniques();
     let Some(tile) = g.tile(t) else { return Stats::ZERO };

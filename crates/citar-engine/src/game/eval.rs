@@ -28,6 +28,7 @@ use crate::base::ids::{
 use crate::base::sets::{BeliefSet, BuildingSet, PolicySet, PromotionSet, TechSet, TerrainSet};
 use crate::base::stats::Stat;
 use crate::game::Game;
+use crate::game::cities::what_if::Overlay;
 use crate::game::derive::civ;
 use crate::rules::Ruleset;
 use crate::rules::defs::{BeliefType, Domain, NationKind, PolicyKind, ReligionProgress, Route};
@@ -45,13 +46,67 @@ pub struct EvalView<'a> {
     g: &'a Game,
     /// The view the resource supply is computed in: no resource layer, no resources.
     supply: bool,
+    /// One building added to one city, which the production advisor's what-if reads the game
+    /// with (`cities::what_if`); `None` for the game as it is.
+    over: Option<&'a Overlay>,
 }
 
 impl<'a> EvalView<'a> {
     /// The view of `g`.
     #[must_use]
     pub const fn new(g: &'a Game) -> Self {
-        Self { g, supply: false }
+        Self { g, supply: false, over: None }
+    }
+
+    /// The view of `g` with the building of `over` added to its city (`cities::what_if`).
+    #[must_use]
+    pub(crate) const fn what_if(g: &'a Game, over: &'a Overlay) -> Self {
+        Self { g, supply: false, over: Some(over) }
+    }
+
+    /// The same view as the resource supply is computed in: its overlay kept.
+    #[must_use]
+    pub(crate) const fn supply_side(self) -> Self {
+        Self { supply: true, ..self }
+    }
+
+    /// Whether city `c` is linked to its capital by railroad (`connected_to_capital(rail=True)`):
+    /// the `Connectivity` memo, or the overlay's trade network where the building changed it.
+    #[must_use]
+    pub(crate) fn rail_to_capital(&self, c: CityId) -> bool {
+        let owner = self.city_owner(c);
+        match self.over.filter(|o| o.owner == owner).and_then(|o| o.connectivity.as_ref()) {
+            Some(conn) => {
+                self.st().cities().of(owner).len() >= 2
+                    && conn.media(c).is_some_and(|m| {
+                        m.contains(crate::game::cities::connections::Media::RAILROAD)
+                    })
+            }
+            None => crate::game::derive::stats::connected_by_rail(self.g, c),
+        }
+    }
+
+    /// How far over its unit supply civilization `p` is: the memo, or the overlay's where the
+    /// building changed it.
+    #[must_use]
+    pub(crate) fn supply_deficit(&self, p: PlayerId) -> i32 {
+        match self.over.filter(|o| o.owner == p).and_then(|o| o.deficit) {
+            Some(d) => d,
+            None => crate::game::derive::stats::unit_supply_deficit(self.g, p),
+        }
+    }
+
+    /// Civilization `p`'s resources as this view has them: the overlay's where the building
+    /// changed them, else the memo's (`None` for a player the game does not have).
+    pub(crate) fn with_supply<T>(
+        &self,
+        p: PlayerId,
+        f: impl FnOnce(Option<&crate::game::economy::ResourceSupply>) -> T,
+    ) -> T {
+        match self.over.filter(|o| o.owner == p).and_then(|o| o.supply.as_ref()) {
+            Some(s) => f(Some(s)),
+            None => f(crate::game::economy::supply(self.g, p).as_deref()),
+        }
     }
 
     /// Whether unit `u` would be embarked standing on `t` (`movement.is_embarked`,
@@ -75,7 +130,7 @@ impl<'a> EvalView<'a> {
     /// city-states from depending on each other.
     #[must_use]
     pub(crate) const fn for_supply(g: &'a Game) -> Self {
-        Self { g, supply: true }
+        Self { g, supply: true, over: None }
     }
 
     /// The game it views.
@@ -292,6 +347,9 @@ impl FilterFacts for EvalView<'_> {
     }
 
     fn city_buildings(&self, c: CityId) -> BuildingSet {
+        if let Some(o) = self.over.filter(|o| o.city == c) {
+            return o.buildings;
+        }
         self.city_at(c).map_or_else(BuildingSet::new, |x| x.buildings)
     }
 
@@ -313,7 +371,7 @@ impl FilterFacts for EvalView<'_> {
         }
         let ctx = Ctx::city(self, c);
         let buildings = self.r().buildings();
-        !x.buildings.iter().any(|b| {
+        !self.city_buildings(c).iter().any(|b| {
             buildings.get(b).is_some_and(|d| {
                 uq::any(uq::object(self, &d.uniques, UniqueType::RemovesAnnexUnhappiness, &ctx))
             })
@@ -328,10 +386,15 @@ impl FilterFacts for EvalView<'_> {
     /// supply's view the links computed afresh, since the memo reads the index the supply
     /// feeds.
     fn city_connected_to_capital(&self, c: CityId) -> bool {
+        let owner = self.city_owner(c);
         if !self.supply {
+            if let Some(conn) =
+                self.over.filter(|o| o.owner == owner).and_then(|o| o.connectivity.as_ref())
+            {
+                return self.st().cities().of(owner).len() >= 2 && conn.media(c).is_some();
+            }
             return crate::game::derive::stats::connected_to_capital(self.g, c);
         }
-        let owner = self.city_owner(c);
         self.st().cities().of(owner).len() >= 2
             && crate::game::cities::connections::connected_cities_in(self, owner).media(c).is_some()
     }
@@ -443,7 +506,10 @@ impl EvalWorld for EvalView<'_> {
     /// `economy.resource_amount` (`economy.py:356-358`): the `ResourceSupply` memo; none while a
     /// supply is being computed.
     fn civ_resource(&self, p: PlayerId, r: ResourceId) -> i32 {
-        if self.supply { 0 } else { crate::game::economy::resource_amount(self.g, p, r) }
+        if self.supply {
+            return 0;
+        }
+        self.with_supply(p, |s| s.map_or(0, |s| s.amount(r)))
     }
 
     /// `research.player_era` (`research.py:254-275`): the civilization's era memo.
@@ -574,16 +640,32 @@ impl EvalWorld for EvalView<'_> {
     /// `economy.civ_umaps` and `civ_umaps_no_resources` (`economy.py:77-129`): the `CivIndex`
     /// and `CivIndexFull` memos; without the resource layer while a supply is being computed.
     fn civ_index(&self, p: PlayerId, layer: IndexLayer) -> IndexRef<'_> {
-        match layer {
-            IndexLayer::Full if !self.supply => civ::civ_index_full(self.g, p),
-            _ => civ::civ_index(self.g, p),
+        let full = layer == IndexLayer::Full && !self.supply;
+        if let Some(o) = self.over.filter(|o| o.owner == p) {
+            let x = if full { o.civ_full.as_ref() } else { o.civ.as_ref() };
+            if let Some(x) = x {
+                return IndexRef::Plain(x);
+            }
         }
+        if full { civ::civ_index_full(self.g, p) } else { civ::civ_index(self.g, p) }
     }
 
     /// `cities.local_umaps` without the religion (`cities.py:48-66`): the `CityLocalFull`
     /// memo, with the uniques that hold in the city alone of the resources it gives its owner
     /// (the Marble decision, DESIGN.md 5.12); in the supply's view `CityLocal`, without them.
     fn city_local(&self, c: CityId) -> IndexRef<'_> {
+        if let Some(o) = self.over {
+            let x = if o.city == c {
+                if self.supply { o.local.as_ref() } else { o.local_full.as_ref() }
+            } else if self.supply {
+                None
+            } else {
+                o.others.iter().find(|(x, _)| *x == c).map(|(_, x)| x)
+            };
+            if let Some(x) = x {
+                return IndexRef::Plain(x);
+            }
+        }
         if self.supply { civ::city_local(self.g, c) } else { civ::city_local_full(self.g, c) }
     }
 

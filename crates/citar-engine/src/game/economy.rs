@@ -33,7 +33,7 @@ use core::cell::Ref;
 use smallvec::SmallVec;
 
 use super::Game;
-use super::cities::stats::{HappinessSource, SourceKind, StatSource, Yields};
+use super::cities::stats::{CityParts, HappinessSource, SourceKind, StatSource, Yields};
 use super::derive::civ;
 use super::derive::rev::PlayerTouch;
 use super::eval::EvalView;
@@ -45,7 +45,9 @@ use crate::rules::Ruleset;
 use crate::rules::defs::{ResourceType, Route};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::diplo::DealItem;
-use crate::unique::{Ctx, EvalWorld, FilterFacts, Source, UniqueData, UniqueType, applies, uq};
+use crate::unique::{
+    CondDeps, Ctx, EvalWorld, FilterFacts, Source, UniqueData, UniqueType, applies, record, uq,
+};
 
 // ---- The resource supply (economy.py:186-358) --------------------------------------------------
 
@@ -206,7 +208,14 @@ pub fn resource_amount(g: &Game, p: PlayerId, r: ResourceId) -> i32 {
 /// no resources (DESIGN.md 6.6): the uniques of the resources a civilization has depend on this
 /// supply.
 pub(crate) fn compute_supply(g: &Game, p: PlayerId) -> ResourceSupply {
-    let v = EvalView::for_supply(g);
+    compute_supply_in(&EvalView::for_supply(g), p)
+}
+
+/// [`compute_supply`] in view `v`, the supply's side of a view (`EvalView::supply_side`): a
+/// what-if's city with one more building.
+pub(crate) fn compute_supply_in(v: &EvalView<'_>, p: PlayerId) -> ResourceSupply {
+    let v = v.supply_side();
+    let g = v.game();
     let r = g.rules;
     let mut items = Vec::new();
     for &c in g.state().cities().of(p) {
@@ -372,7 +381,8 @@ fn city_resources(v: &EvalView<'_>, c: CityId, out: &mut Vec<ResourceItem>) {
     let mods = resource_modifiers(v, c);
     let modded = |res: ResourceId, a: i32| trunc_i32(f64::from(a) * mods[res.index()]);
     let buildings = r.buildings();
-    let extra_lux = city.buildings.iter().any(|b| {
+    let here = v.city_buildings(c);
+    let extra_lux = here.iter().any(|b| {
         super::core::has_type(
             r,
             &buildings[b].uniques,
@@ -402,7 +412,7 @@ fn city_resources(v: &EvalView<'_>, c: CityId, out: &mut Vec<ResourceItem>) {
     for (res, a) in from_tiles {
         out.push(ResourceItem { resource: res, origin: Origin::Tiles, amount: modded(res, a) });
     }
-    for b in city.buildings.iter() {
+    for b in here.iter() {
         if city.free_buildings.contains(b) {
             continue;
         }
@@ -418,7 +428,7 @@ fn city_resources(v: &EvalView<'_>, c: CityId, out: &mut Vec<ResourceItem>) {
         out.push(ResourceItem { resource: res, origin: Origin::MercantileCityState, amount: 1 });
     }
     let ctx = Ctx::city(v, c);
-    for b in city.buildings.iter() {
+    for b in here.iter() {
         for h in uq::object(v, &buildings[b].uniques, UniqueType::ProvidesResources, &ctx) {
             if let UniqueData::ProvidesResources(x) = h.data() {
                 out.push(ResourceItem {
@@ -581,7 +591,13 @@ pub fn unit_maintenance(g: &Game, p: PlayerId) -> i32 {
 /// civilization owns ([`owned_tiles`]), not the map.
 #[must_use]
 pub fn transport_upkeep(g: &Game, p: PlayerId) -> Stats {
-    let v = g.view();
+    transport_upkeep_in(&g.view(), p)
+}
+
+/// [`transport_upkeep`] as view `v` reads the game.
+fn transport_upkeep_in(v: &EvalView<'_>, p: PlayerId) -> Stats {
+    let v = *v;
+    let g = v.game();
     let r = g.rules;
     let filters = r.uniques().filters();
     let ignored: Vec<_> =
@@ -636,7 +652,13 @@ pub fn transport_upkeep(g: &Game, p: PlayerId) -> Stats {
 /// `aiUnitSupplyModifier` more.
 #[must_use]
 pub fn unit_supply(g: &Game, p: PlayerId) -> i32 {
-    let v = g.view();
+    unit_supply_in(&g.view(), p)
+}
+
+/// [`unit_supply`] as view `v` reads the game.
+fn unit_supply_in(v: &EvalView<'_>, p: PlayerId) -> i32 {
+    let v = *v;
+    let g = v.game();
     let r = g.rules;
     let ctx = Ctx::civ(p);
     let diff = &r.difficulties()[g.difficulty(Some(p))];
@@ -664,6 +686,12 @@ pub fn unit_supply(g: &Game, p: PlayerId) -> i32 {
     let filters = r.uniques().filters();
     for h in uq::civ(&v, p, UniqueType::UnitSupplyPerPop, &ctx) {
         let UniqueData::UnitSupplyPerPop(x) = h.data() else { continue };
+        if filters.city_reads_buildings(x.cities) {
+            // The filter reads the buildings of each of the civilization's cities, which its
+            // classes leave out: the what-if of a building asks the supply again only where
+            // what the supply read moves.
+            record::note_classes(CondDeps::CIV_BUILDINGS);
+        }
         let per = i64::from(x.per.max(1));
         let counted: i64 = cities
             .iter()
@@ -690,15 +718,27 @@ pub fn unit_supply(g: &Game, p: PlayerId) -> i32 {
 /// `economy.py:587-594`).
 #[must_use]
 pub fn unit_supply_deficit(g: &Game, p: PlayerId) -> i32 {
-    let units = i32::try_from(g.state().units().of(p).len()).unwrap_or(i32::MAX);
-    (units - unit_supply(g, p)).max(0)
+    unit_supply_deficit_in(&g.view(), p)
+}
+
+/// [`unit_supply_deficit`] as view `v` reads the game: a what-if's city with one more building.
+pub(crate) fn unit_supply_deficit_in(v: &EvalView<'_>, p: PlayerId) -> i32 {
+    let units = i32::try_from(v.game().state().units().of(p).len()).unwrap_or(i32::MAX);
+    (units - unit_supply_in(v, p)).max(0)
 }
 
 /// The production penalty for units over the supply, in percent: 10 a unit, at most 70
 /// (`economy.unit_supply_penalty`, `economy.py:597-599`).
 #[must_use]
 pub fn unit_supply_penalty(g: &Game, p: PlayerId) -> f64 {
-    -(f64::from(unit_supply_deficit(g, p)) * 10.0).min(70.0)
+    supply_penalty(unit_supply_deficit(g, p))
+}
+
+/// The production penalty, in percent, of being `deficit` units over the supply: 10 a unit, at
+/// most 70 (`economy.py:597-599`). What a city's stats and both [`unit_supply_penalty`]s read.
+#[must_use]
+pub fn supply_penalty(deficit: i32) -> f64 {
+    -(f64::from(deficit) * 10.0).min(70.0)
 }
 
 // ---- The end of a turn (economy.py:731-746, turns.py:120-131) ----------------------------------
@@ -959,6 +999,18 @@ fn whole(total: f64) -> i32 {
 /// away, where its uniques count them), each city's happiness, route upkeep, and its empire-wide
 /// uniques. The memo `Happiness` holds it (DESIGN.md 6.5).
 pub(crate) fn compute_happiness(g: &Game, p: PlayerId) -> Happiness {
+    compute_happiness_in(&g.view(), p, |c| super::derive::stats::city_parts(g, c))
+}
+
+/// [`compute_happiness`] as view `v` reads the game, with each of its cities' parts from
+/// `parts`: a what-if gives its own view, and its city's parts.
+pub(crate) fn compute_happiness_in<R: core::ops::Deref<Target = CityParts>>(
+    v: &EvalView<'_>,
+    p: PlayerId,
+    parts: impl Fn(CityId) -> R,
+) -> Happiness {
+    let v = *v;
+    let g = v.game();
     let mut out = Happiness::default();
     let Some(player) = g.player(p) else { return out };
     if !player.is_major() {
@@ -966,7 +1018,6 @@ pub(crate) fn compute_happiness(g: &Game, p: PlayerId) -> Happiness {
     }
     out.major = true;
     let r = g.rules();
-    let v = g.view();
     let ctx = Ctx::civ(p);
     let diff = &r.difficulties()[g.difficulty(Some(p))];
     let mut bd: SmallVec<[(CivSource, f64); 16]> = SmallVec::new();
@@ -988,14 +1039,20 @@ pub(crate) fn compute_happiness(g: &Game, p: PlayerId) -> Happiness {
         + f64::from(diff.extra_happiness_per_luxury)
         + sum_nores(UniqueType::BonusHappinessFromLuxury);
     let is_lux = |res: ResourceId| r.resources()[res].kind == ResourceType::Luxury;
-    let owned_lux: SmallVec<[ResourceId; 8]> = supply(g, p).map_or_else(SmallVec::new, |s| {
-        s.totals().iter().filter(|&&(res, a)| a > 0 && is_lux(res)).map(|&(res, _)| res).collect()
+    let owned_lux: SmallVec<[ResourceId; 8]> = v.with_supply(p, |s| {
+        s.map_or_else(SmallVec::new, |s| {
+            s.totals()
+                .iter()
+                .filter(|&&(res, a)| a > 0 && is_lux(res))
+                .map(|&(res, _)| res)
+                .collect()
+        })
     });
     #[allow(clippy::cast_precision_loss, reason = "a count of luxuries")]
     bd.push((CivSource::LuxuryResources, owned_lux.len() as f64 * per_lux));
     let bonus = sum_nores(UniqueType::CityStateLuxuryHappiness) / 100.0;
     if bonus != 0.0 {
-        let sv = EvalView::for_supply(g);
+        let sv = v.supply_side();
         let mut cs_lux = ResourceSet::new();
         for cs in allied_city_states(g, p) {
             for (res, a) in resources_for_ally(&sv, cs) {
@@ -1010,29 +1067,31 @@ pub(crate) fn compute_happiness(g: &Game, p: PlayerId) -> Happiness {
     let retain = sum_nores(UniqueType::RetainHappinessFromLuxury) / 100.0;
     if retain != 0.0 {
         let mut away = ResourceSet::new();
-        for it in supply(g, p).iter().flat_map(|s| s.items().iter()) {
-            if it.origin == Origin::Trade
-                && it.amount < 0
-                && is_lux(it.resource)
-                && !owned_lux.contains(&it.resource)
-            {
-                away.insert(it.resource);
+        v.with_supply(p, |s| {
+            for it in s.iter().flat_map(|s| s.items().iter()) {
+                if it.origin == Origin::Trade
+                    && it.amount < 0
+                    && is_lux(it.resource)
+                    && !owned_lux.contains(&it.resource)
+                {
+                    away.insert(it.resource);
+                }
             }
-        }
+        });
         #[allow(clippy::cast_precision_loss, reason = "a count of luxuries")]
         bd.push((CivSource::TradedLuxuries, away.len() as f64 * per_lux * retain));
     }
     for &c in g.state().cities().of(p) {
-        let parts = super::derive::stats::city_parts(g, c);
+        let parts = parts(c);
         for &(k, x) in &parts.happiness {
             add_entry(&mut bd, k.into(), x);
         }
     }
-    let up = transport_upkeep(g, p);
+    let up = transport_upkeep_in(&v, p);
     if up[Stat::Happiness] != 0.0 {
         add_entry(&mut bd, CivSource::RouteUnhappiness, -up[Stat::Happiness]);
     }
-    for (k, s) in global_stats_from_uniques(g, p) {
+    for (k, s) in global_stats_from_uniques_in(&v, p) {
         if s.get(Stat::Happiness) != 0.0 {
             add_entry(&mut bd, k, s.get(Stat::Happiness));
         }
@@ -1072,11 +1131,17 @@ fn add_source(out: &mut StatMap, src: CivSource, stats: &Stats, mult: f64) {
 /// City-States`), and its natural wonders.
 #[must_use]
 pub fn global_stats_from_uniques(g: &Game, p: PlayerId) -> StatMap {
+    global_stats_from_uniques_in(&g.view(), p)
+}
+
+/// [`global_stats_from_uniques`] as view `v` reads the game.
+fn global_stats_from_uniques_in(v: &EvalView<'_>, p: PlayerId) -> StatMap {
+    let v = *v;
+    let g = v.game();
     let mut out = StatMap::new();
     let Some(player) = g.player(p) else { return out };
     let r = g.rules();
     let t = r.uniques();
-    let v = g.view();
     let ctx = Ctx::civ(p);
     if let Some(rel) = player.religion.founded
         && v.religion_is_major(rel)

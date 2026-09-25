@@ -460,6 +460,30 @@ pub fn tile_yield(g: &Game, t: TileIdx, viewer: Option<PlayerId>, city: Option<C
     tile_yield_full(g, t, viewer, city).0
 }
 
+/// [`tile_yield`], and the classes its last computation read: what a what-if of one more
+/// building asks before it reuses the yield (`cities::what_if`).
+#[must_use]
+pub(crate) fn tile_yield_read(
+    g: &Game,
+    t: TileIdx,
+    viewer: Option<PlayerId>,
+    city: Option<CityId>,
+) -> (Stats, CondDeps) {
+    let (s, _) = tile_yield_full(g, t, viewer, city);
+    let caches = &g.dv.stats;
+    let Some(tile) = g.tile(t) else { return (s, CondDeps::empty()) };
+    if city.is_some_and(|c| g.city(c).map(crate::state::cities::City::owner) != viewer) {
+        return compute_tile(g, t, viewer, city);
+    }
+    if (viewer, city) == (tile.owner(), tile.city())
+        && let Some(deps) = caches.owned_deps.get(t.0 as usize)
+    {
+        return (s, deps.get());
+    }
+    let deps = caches.other.borrow().get(&(t, viewer, city)).map_or(CondDeps::all(), |e| e.deps);
+    (s, deps)
+}
+
 // ---- Cities -------------------------------------------------------------------------------------
 
 /// What a city's yields read of the city itself: its buildings, population, status and queue,
@@ -492,6 +516,30 @@ pub(crate) fn city_mods(g: &Game, c: CityId) -> Option<Ref<'_, CityMods>> {
         x
     };
     Some(m.mods.get(revs.now(), inputs, compute))
+}
+
+/// The classes the last computation of city `c`'s tile modifiers read, validated now.
+pub(crate) fn city_mods_deps(g: &Game, c: CityId) -> CondDeps {
+    drop(city_mods(g, c));
+    g.dv.stats.cities.get(&c).map_or(CondDeps::all(), |m| m.mods_deps.get())
+}
+
+/// Every class the memos of city `c`'s yields and happiness read, validated now: its tile
+/// modifiers', base's, parts' and stats' own, and those of the tiles its parts added. A what-if of
+/// a building elsewhere reuses its parts when none of these moves.
+pub(crate) fn city_reads(g: &Game, c: CityId) -> CondDeps {
+    drop(city_stats(g, c));
+    let Some(m) = g.dv.stats.cities.get(&c) else { return CondDeps::all() };
+    let Some(owner) = g.city(c).map(crate::state::cities::City::owner) else {
+        return CondDeps::all();
+    };
+    let mut out =
+        city_mods_deps(g, c) | m.base_deps.get() | m.parts_deps.get() | m.stats_deps.get();
+    let tiles = m.parts_tiles.borrow().clone();
+    for t in tiles {
+        out |= tile_yield_read(g, t, Some(owner), Some(c)).1;
+    }
+    out
 }
 
 /// When city `c`'s tile modifiers last changed, validated now.
@@ -840,6 +888,19 @@ pub(crate) fn connectivity(g: &Game, p: PlayerId) -> Ref<'_, Connectivity> {
     m.connectivity.get(g.dv.revs.now(), inputs, compute)
 }
 
+/// The classes the last computation of civilization `p`'s connectivity read, validated now.
+pub(crate) fn connectivity_deps(g: &Game, p: PlayerId) -> CondDeps {
+    drop(connectivity(g, p));
+    g.dv.stats.civs.get(p).map_or(CondDeps::all(), |m| m.connectivity_deps.get())
+}
+
+/// The classes the last computation of civilization `p`'s unit supply deficit read, validated
+/// now.
+pub(crate) fn deficit_deps(g: &Game, p: PlayerId) -> CondDeps {
+    let (_, _) = deficit(g, p);
+    g.dv.stats.civs.get(p).map_or(CondDeps::all(), |m| m.deficit_deps.get())
+}
+
 /// When civilization `p`'s connectivity last changed, validated now: what the class `CONNECTED`
 /// reads ([`civ::cond`]).
 pub(crate) fn connectivity_changed(g: &Game, p: PlayerId) -> Rev {
@@ -911,7 +972,7 @@ fn deficit_changed(g: &Game, p: PlayerId) -> Rev {
 /// The production penalty of units over the supply, in percent (`economy.unit_supply_penalty`).
 #[must_use]
 pub fn unit_supply_penalty(g: &Game, p: PlayerId) -> f64 {
-    -(f64::from(unit_supply_deficit(g, p)) * 10.0).min(70.0)
+    economy::supply_penalty(unit_supply_deficit(g, p))
 }
 
 // ---- The cache oracle (DESIGN.md 9.4) ----------------------------------------------------------

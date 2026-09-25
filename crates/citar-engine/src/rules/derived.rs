@@ -8,6 +8,7 @@
 //! compiler, which names features by them (`feature_layers`).
 
 use super::Ruleset;
+use super::advisor::AdvisorRules;
 use super::combat::CombatRules;
 use super::defs::{BuilderClass, Domain, ImprovementKind, NationKind, Route, TerrainType};
 use super::errors::{Problems, RulesetErrorKind};
@@ -203,6 +204,8 @@ pub struct Derived {
     pub moves: MoveRules,
     /// The texts combat reads (package 1c-03).
     pub combat: CombatRules,
+    /// The names and uniques the production advisor reads (package 1c-07).
+    pub advisor: AdvisorRules,
 }
 
 impl Derived {
@@ -246,6 +249,7 @@ impl Derived {
             },
             moves: MoveRules::default(),
             combat: CombatRules::default(),
+            advisor: AdvisorRules::default(),
         }
     }
 }
@@ -438,6 +442,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
 
     let moves = MoveRules::new(r, &known);
     let combat = CombatRules::new(r);
+    let advisor = AdvisorRules::new(r);
 
     let mut major_nations = Vec::new();
     let mut city_state_nations = Vec::new();
@@ -472,6 +477,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         known,
         moves,
         combat,
+        advisor,
     })
 }
 

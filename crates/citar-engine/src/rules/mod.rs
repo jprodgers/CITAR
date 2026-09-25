@@ -10,6 +10,7 @@
 //! - `raw`: the files as written, read strictly;
 //! - [`defs`]: the typed tables, every name resolved to an id;
 //! - [`derived`]: the tables computed at load;
+//! - [`advisor`]: the names and uniques the production advisor reads, resolved at load;
 //! - [`combat`]: the texts combat reads, resolved at load;
 //! - [`moves`]: the names movement reads, resolved at load;
 //! - [`gen_tables`]: what map generation, the AI and victory read of the uniques;
@@ -18,6 +19,7 @@
 //! - `client`: the ruleset as the browser reads it;
 //! - [`errors`]: what can be wrong with a ruleset.
 
+pub mod advisor;
 pub mod combat;
 pub mod constants;
 pub mod defs;

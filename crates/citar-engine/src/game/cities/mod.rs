@@ -20,3 +20,4 @@ pub mod purchase;
 pub mod queue;
 pub mod stats;
 pub mod uniques;
+pub mod what_if;

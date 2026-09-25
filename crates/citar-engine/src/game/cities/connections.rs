@@ -80,13 +80,13 @@ pub fn can_enter_borders(g: &Game, p: PlayerId, other: PlayerId) -> bool {
 
 /// Whether a city has a harbour, which links it to other harbours over water
 /// (`connected_cities`' `harbor`, `cities.py:2010-2012`).
-fn harbor(g: &Game, c: CityId) -> bool {
-    let r = g.rules();
-    g.city(c).is_some_and(|x| {
-        x.buildings
+fn harbor(v: &crate::game::EvalView<'_>, c: CityId) -> bool {
+    use crate::unique::FilterFacts as _;
+    let r = v.game().rules();
+    v.game().city(c).is_some()
+        && v.city_buildings(c)
             .iter()
             .any(|b| has_type(r, &r.buildings()[b].uniques, UniqueType::ConnectTradeRoutes))
-    })
 }
 
 /// The tiles each medium may pass, besides cities.
@@ -256,10 +256,10 @@ pub fn connected_cities_in(v: &crate::game::EvalView<'_>, p: PlayerId) -> Connec
         let (c, _) = media[done];
         done += 1;
         let Some(tile) = g.city(c).map(crate::state::cities::City::tile) else { continue };
-        if harbor(g, c) {
+        if harbor(v, c) {
             water.from(&m, tile, &mut reached);
             for x in reached.drain(..) {
-                if g.city(x).is_some_and(|y| y.owner() == p) && harbor(g, x) {
+                if g.city(x).is_some_and(|y| y.owner() == p) && harbor(v, x) {
                     add(&mut media, x, Media::HARBOR);
                 }
             }
@@ -333,7 +333,7 @@ pub fn connected_cities_naive(g: &Game, p: PlayerId) -> Connectivity {
             let meds = media.iter().find(|(x, _)| *x == c).map_or(Media::empty(), |&(_, m)| m);
             let Some(tile) = g.city(c).map(crate::state::cities::City::tile) else { continue };
             let mut checks: Vec<(Media, Medium, bool)> = Vec::new();
-            if harbor(g, c) {
+            if harbor(&g.view(), c) {
                 checks.push((Media::HARBOR, Medium::Water, true));
             }
             if rail_ok && meds.intersects(Media::START | Media::RAILROAD) {
@@ -352,7 +352,8 @@ pub fn connected_cities_naive(g: &Game, p: PlayerId) -> Connectivity {
                     if !reached.contains(&t) {
                         continue;
                     }
-                    if harbours_only && !(g.city(x).is_some_and(|y| y.owner() == p) && harbor(g, x))
+                    if harbours_only
+                        && !(g.city(x).is_some_and(|y| y.owner() == p) && harbor(&g.view(), x))
                     {
                         continue;
                     }

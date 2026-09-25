@@ -77,5 +77,11 @@ harness = false
 name = "combat"
 harness = false
 
+# The production advisor (package 1c-07): a call per city on a small map at turn 200 at 50 us
+# (report-only: the run warns above it).
+[[bench]]
+name = "advisor"
+harness = false
+
 [lints]
 workspace = true
