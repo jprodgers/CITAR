@@ -8,6 +8,7 @@
 //! compiler, which names features by them (`feature_layers`).
 
 use super::Ruleset;
+use super::combat::CombatRules;
 use super::defs::{BuilderClass, Domain, ImprovementKind, NationKind, Route, TerrainType};
 use super::errors::{Problems, RulesetErrorKind};
 use super::moves::MoveRules;
@@ -194,6 +195,8 @@ pub struct Derived {
     pub known: Known,
     /// The names movement reads (package 1c-02).
     pub moves: MoveRules,
+    /// The texts combat reads (package 1c-03).
+    pub combat: CombatRules,
 }
 
 impl Derived {
@@ -235,6 +238,7 @@ impl Derived {
                 map: KnownMap::default(),
             },
             moves: MoveRules::default(),
+            combat: CombatRules::default(),
         }
     }
 }
@@ -424,6 +428,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
     }
 
     let moves = MoveRules::new(r, &known);
+    let combat = CombatRules::new(r);
 
     let mut major_nations = Vec::new();
     let mut city_state_nations = Vec::new();
@@ -457,6 +462,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         building_equivalents,
         known,
         moves,
+        combat,
     })
 }
 
