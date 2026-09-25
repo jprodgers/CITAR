@@ -43,8 +43,7 @@ use smallvec::SmallVec;
 use super::civ::{civ_index_full_changed, cond, supply_changed};
 use super::rev::Rev;
 use crate::base::ids::{
-    FeatureId, ImprovementId, ObjectFilterId, PlayerId, ResourceId, TerrainId, TileFilterId,
-    TileIdx, UniqueId,
+    ImprovementId, ObjectFilterId, PlayerId, ResourceId, TerrainId, TileFilterId, TileIdx, UniqueId,
 };
 use crate::base::sets::{FeatureSet, ImprovementSet, ResourceSet};
 use crate::game::Game;
@@ -529,13 +528,7 @@ fn planned_job(
             if !stands(g, p, t, tile, w, key, None) {
                 continue;
             }
-            let mut turns = key.turns.get(usize::from(w.imp.0)).copied().unwrap_or(1);
-            if let Some(f) = workers::needed_removal(g, t, w.imp)
-                && let Some(rem) = removal_of(f)
-            {
-                turns =
-                    turns.saturating_add(key.turns.get(usize::from(rem.0)).copied().unwrap_or(1));
-            }
+            let turns = with_removals(g, t, w.imp, key);
             let value = improvement_value(g, p, t, w.imp) - f64::from(turns) * 0.15;
             top = top.max(value);
             if !over_great && value > 0.5 && best.is_none_or(|(_, bv)| value > bv) {
@@ -583,23 +576,18 @@ fn stands(
     {
         last = wonder;
     }
+    // The feature on top cleared, then the one under it looked at in turn.
     // refcheck: improvements-over-removable-features
     if r.terrains()[last].unbuildable && !workers::allowed_on_feature(g, imp, last) {
-        if key.removals.is_empty() {
+        let Some(top) = feats.top().filter(|&f| feature_terrain(f) == Some(last)) else {
             return false;
-        }
-        let removal = |f| r.derived().removal_of.get(f).copied().flatten();
-        let rem: SmallVec<[FeatureId; 3]> =
-            feats.iter().filter(|&f| removal(f).is_some()).collect();
-        if rem.is_empty()
-            || rem.iter().any(|&f| removal(f).is_none_or(|i| !key.removals.contains(i)))
-        {
+        };
+        let removal = r.derived().removal_of.get(top).copied().flatten();
+        if removal.is_none_or(|i| !key.removals.contains(i)) {
             return false;
         }
         let mut left = feats;
-        for f in rem {
-            left.remove(f);
-        }
+        left.remove(top);
         return stands(g, p, t, tile, w, key, Some(left));
     }
     let tu = r.uniques();
@@ -635,6 +623,17 @@ fn stands(
         || (g.is_water(t) && d.on_water)
         || (w.fresh_water && workers::fresh_water(g, t))
         || (improves_res && workers::domain_ok(g, t, imp))
+}
+
+/// How long civilization `key`'s builders take to build `imp` on tile `t`, with the removals it
+/// needs first ([`workers::needed_removals`]), as `workers::build_options` counts them.
+fn with_removals(g: &Game, t: TileIdx, imp: ImprovementId, key: &CivJobs) -> i32 {
+    let turns_of = |x: ImprovementId| key.turns.get(usize::from(x.0)).copied().unwrap_or(1);
+    let removal_of = &g.rules().derived().removal_of;
+    workers::needed_removals(g, t, imp)
+        .into_iter()
+        .filter_map(|f| removal_of.get(f).copied().flatten())
+        .fold(turns_of(imp), |turns, rem| turns.saturating_add(turns_of(rem)))
 }
 
 /// One tile's entry: what its job was worked out from, and the job.
@@ -939,14 +938,8 @@ impl Diff {
             if !could_stand(g, p, t, i) {
                 continue;
             }
-            // Its build time with the removal it needs first, as a job is weighed.
-            let turns_of = |x: ImprovementId| key.turns.get(usize::from(x.0)).copied().unwrap_or(1);
-            let mut turns = turns_of(i);
-            if let Some(f) = workers::needed_removal(g, t, i)
-                && let Some(rem) = r.derived().removal_of.get(f).copied().flatten()
-            {
-                turns = turns.saturating_add(turns_of(rem));
-            }
+            // Its build time with the removals it needs first, as a job is weighed.
+            let turns = with_removals(g, t, i, key);
             let ub = improvement_value(g, p, t, i) - f64::from(turns) * 0.15;
             // An equal value takes the job when it comes first in the ruleset, as the first of
             // the best does.

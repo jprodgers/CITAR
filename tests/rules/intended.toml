@@ -204,7 +204,7 @@ reason = "One-time effects that fed themselves (`Free [Warrior] appears <upon ga
 
 [[differences]]
 id = "improvements-over-removable-features"
-reason = "An improvement was refused on a tile whose feature it may not stand on (a farm on a forest) unless it removed features itself, so the removal it would have queued first never was; Rust offers it once the civilization knows how to remove the feature, and queues the removal first, as the tool says and UnCiv does"
+reason = "An improvement was refused on a tile whose feature it may not stand on (a farm on a forest) unless it removed features itself, so the removal it would have queued first never was; Rust offers it once the civilization knows how to remove each feature in its way, and queues the removals first, top down (fallout, then the forest under it), as the tool says and UnCiv does"
 
 [[differences]]
 id = "unit-results-give-tiles"

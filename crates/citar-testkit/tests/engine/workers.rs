@@ -431,6 +431,80 @@ fn fallout_on_a_great_improvement_is_a_job_and_a_great_one_replaced_keeps_its_bo
     clean(&mut g);
 }
 
+// ---- Removals, and what may be finished --------------------------------------------------------------
+
+/// Player 0's first unit.
+fn my_unit(g: &Game) -> UnitId {
+    g.player_units(ME).map(|u| u.id()).next().expect("a unit")
+}
+
+#[test]
+fn a_farm_under_fallout_and_forest_clears_both_first_and_stands_on_bare_ground() {
+    // Wheat under a forest under fallout: a farm may stand on neither, so both removals are
+    // queued, the fallout's first, and the options and the job map count all three steps.
+    let (mut g, class) = job_game(&json!([
+        {"op": "grant_tech", "player": 0, "techs": ["Mining"]},
+        {"op": "set_tile", "x": 6, "y": 5, "terrain": "Grassland", "features": ["Forest", "Fallout"], "resource": "Wheat"},
+        {"op": "add_unit", "player": 0, "unit": "Worker", "x": 6, "y": 5},
+    ]));
+    let (t, farm, worker) = (tile(&g, 6, 5), imp(&g, "Farm"), my_unit(&g));
+    let b = Builder::unit(&g, worker).expect("the worker");
+    let steps = ["Remove Fallout", "Remove Forest", "Farm"];
+    let turns: i32 = steps.iter().map(|&n| workers::turns_to_build(&g, &b, imp(&g, n), t)).sum();
+    let offered = workers::build_options(&g, &b, t, None)
+        .into_iter()
+        .find(|o| o.imp == farm)
+        .expect("a farm is offered");
+    let fallout = g.rules().derived().known.fallout;
+    assert_eq!((offered.turns, offered.first_removes), (turns, Some(fallout)));
+    // The farm is worth 2.4 (its food and the wheat's) less 0.15 a turn: over its three steps, 13
+    // turns, not the 0.5 a job needs, so clearing the fallout is the job; counted with the top
+    // removal alone, 11 turns, the farm was.
+    let clear = g.rules().derived().removal_of[fallout];
+    assert_eq!(jobs::job(&g, ME, class, t), clear.map(|i| (i, 8.0)));
+    let order = tool(
+        &mut g,
+        ME,
+        "build_improvement",
+        &json!({"unit_id": worker.get(), "improvement": "Farm"}),
+    )
+    .expect("a farm");
+    assert_eq!(order, json!({"building": "Farm", "turns": turns, "queue": steps}));
+    test_ops(&mut g, &json!([{"op": "progress_builds", "player": 0, "turns": turns}]));
+    let done = g.tile(t).copied().expect("a tile");
+    assert_eq!((done.improvement(), done.features().iter().count()), (Some(farm), 0));
+    clean(&mut g);
+}
+
+#[test]
+fn an_improvement_is_not_finished_over_a_feature_it_may_not_stand_on() {
+    // A farm under way on open grassland when a forest grows over it: the forest could be
+    // cleared, but nothing was queued to clear it, so the farm is not set on the forest.
+    let (mut g, _) = job_game(&json!([
+        {"op": "grant_tech", "player": 0, "techs": ["Mining"]},
+        {"op": "set_tile", "x": 6, "y": 5, "terrain": "Grassland", "features": []},
+        {"op": "add_unit", "player": 0, "unit": "Worker", "x": 6, "y": 5},
+    ]));
+    let (t, worker) = (tile(&g, 6, 5), my_unit(&g));
+    let order = tool(
+        &mut g,
+        ME,
+        "build_improvement",
+        &json!({"unit_id": worker.get(), "improvement": "Farm"}),
+    )
+    .expect("a farm");
+    assert_eq!(order["queue"], json!(["Farm"]));
+    ops(&mut g, &json!([{"op": "set_tile", "x": 6, "y": 5, "features": ["Forest"]}]));
+    let turns = order["turns"].as_i64().expect("turns");
+    test_ops(&mut g, &json!([{"op": "progress_builds", "player": 0, "turns": turns}]));
+    let done = g.tile(t).copied().expect("a tile");
+    let forest = g.rules().lookup::<citar_engine::base::ids::TerrainId>("Forest").expect("Forest");
+    let forest = g.rules().terrains()[forest].feature.expect("a feature");
+    assert_eq!((done.improvement(), done.features().contains(forest)), (None, true));
+    assert!(g.state().tiles().builds(t).is_empty(), "the farm left the queue");
+    clean(&mut g);
+}
+
 // ---- The kitchen sink ------------------------------------------------------------------------------
 
 #[test]

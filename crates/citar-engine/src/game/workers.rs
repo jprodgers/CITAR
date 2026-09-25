@@ -152,6 +152,11 @@ fn feature_terrain(g: &Game, f: FeatureId) -> Option<TerrainId> {
     g.rules().derived().features.get(f).copied()
 }
 
+/// The improvement that removes a feature (`Remove Forest`), if the ruleset has one.
+fn removal_of(g: &Game, f: FeatureId) -> Option<ImprovementId> {
+    g.rules().derived().removal_of.get(f).copied().flatten()
+}
+
 /// How highly a route ranks: none, a road, a railroad (`workers.ROAD_RANK`).
 const fn route_rank(r: Option<Route>) -> u8 {
     match r {
@@ -201,10 +206,11 @@ fn known_removals(g: &Game, p: PlayerId) -> ImprovementSet {
 /// Whether improvement `imp` may be built on tile `t` (`TileImprovementFunctions.
 /// canImprovementBeBuiltHere`, `workers._built_here_ok`, `workers.py:60-117`): not what is there
 /// already, not on a city; a route over less of one; a removal of what is there; nothing over an
-/// irremovable improvement; over an unbuildable feature only what may stand on it, or anything
-/// once the civilization knows how to remove the feature; what the tile's terrains restrict it to, the
-/// improvement's own requirements of the tile and its neighbours, a resource to improve where it
-/// only improves one; then its terrains, land or water, fresh water, or the resource it improves.
+/// irremovable improvement; over an unbuildable feature only what may stand on it, or what may
+/// stand under it once the civilization knows how to remove it; what the tile's terrains
+/// restrict it to, the improvement's own requirements of the tile and its neighbours, a resource
+/// to improve where it only improves one; then its terrains, land or water, fresh water, or the
+/// resource it improves.
 /// `features` stands in for the tile's (the recursion after a removal); `known` is the removals
 /// the civilization knows, `None` where Python passed none.
 #[allow(clippy::too_many_arguments, reason = "Python's signature, one argument a concern")]
@@ -248,22 +254,23 @@ fn built_here_ok(
         return false;
     }
     // An unbuildable feature it may not stand on is no obstacle once the civilization knows how
-    // to remove it (UnCiv's `canImprovementBeBuiltHere`): the removal is queued first
-    // ([`needed_removal`]). Python allowed it only for an improvement that removes features
-    // itself, so a farm was never offered on a forest and never queued the forest's removal.
+    // to remove it (UnCiv's `canImprovementBeBuiltHere`): the feature on top is cleared, and the
+    // one under it looked at in turn, each removal queued first ([`needed_removals`]). Python
+    // allowed it only for an improvement that removes features itself, so a farm was never
+    // offered on a forest and never queued the forest's removal.
     // refcheck: improvements-over-removable-features
     if r.terrains()[last].unbuildable && !allowed_on_feature(g, imp, last) {
         let Some(known) = known.filter(|k| !k.is_empty()) else { return false };
-        let removal = |f: FeatureId| r.derived().removal_of.get(f).copied().flatten();
-        let rem: SmallVec<[FeatureId; 3]> =
-            feats.iter().filter(|&f| removal(f).is_some()).collect();
-        if rem.is_empty() || rem.iter().any(|&f| removal(f).is_none_or(|i| !known.contains(i))) {
+        // The top layer is what stands in the way; a natural wonder, or an unbuildable base
+        // terrain, is no feature and cannot be cleared.
+        let Some(top) = feats.top().filter(|&f| feature_terrain(g, f) == Some(last)) else {
+            return false;
+        };
+        if removal_of(g, top).is_none_or(|i| !known.contains(i)) {
             return false;
         }
         let mut left = feats;
-        for f in rem {
-            left.remove(f);
-        }
+        left.remove(top);
         return built_here_ok(g, t, imp, p, ctx, Some(left), Some(known));
     }
     let v = g.view();
@@ -437,6 +444,20 @@ pub fn building_problems(
     ignore_tech: bool,
     first: bool,
 ) -> Vec<Problem> {
+    problems(g, b, t, imp, ignore_tech, first, true)
+}
+
+/// [`building_problems`], with the features the civilization knows how to remove counted as
+/// removable (`clearing`) or as they stand.
+fn problems(
+    g: &Game,
+    b: &Builder,
+    t: TileIdx,
+    imp: ImprovementId,
+    ignore_tech: bool,
+    first: bool,
+    clearing: bool,
+) -> Vec<Problem> {
     let r = g.rules();
     let def = &r.improvements()[imp];
     let p = b.owner;
@@ -497,8 +518,8 @@ pub fn building_problems(
             push!(Problem::Borders { just_outside: just });
         }
     }
-    let known = known_removals(g, p);
-    if !built_here_ok(g, t, imp, p, &ctx, None, Some(&known)) {
+    let known = clearing.then(|| known_removals(g, p));
+    if !built_here_ok(g, t, imp, p, &ctx, None, known.as_ref()) {
         push!(Problem::Tile);
     }
     out
@@ -508,6 +529,27 @@ pub fn building_problems(
 #[must_use]
 pub fn no_problems(g: &Game, b: &Builder, t: TileIdx, imp: ImprovementId) -> bool {
     building_problems(g, b, t, imp, false, true).is_empty()
+}
+
+/// Why `b` cannot set `imp` on `t` now, with nothing queued before it: [`building_problems`]
+/// with the tile as it stands, so that nothing is set on a feature it may not stand on, but for
+/// an improvement that removes features itself, which clears them as it is built. What an
+/// improvement finished (`workers.py:505-510`) or made at once is checked by.
+fn problems_now(
+    g: &Game,
+    b: &Builder,
+    t: TileIdx,
+    imp: ImprovementId,
+    first: bool,
+) -> Vec<Problem> {
+    let clears = carries(g, imp, UniqueType::RemovesFeaturesIfBuilt);
+    problems(g, b, t, imp, false, first, clears)
+}
+
+/// Whether `b` may finish `imp` on `t` now, the removals queued before it done
+/// ([`problems_now`]).
+fn can_finish(g: &Game, b: &Builder, t: TileIdx, imp: ImprovementId) -> bool {
+    problems_now(g, b, t, imp, true).is_empty()
 }
 
 // ---- What a builder may build (workers.py:182-231) -----------------------------------------------
@@ -669,9 +711,9 @@ pub fn repair_turns(g: &Game, b: &Builder, t: TileIdx) -> i32 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuildOption {
     pub imp: ImprovementId,
-    /// Turns, with a removal it needs first.
+    /// Turns, with the removals it needs first.
     pub turns: i32,
-    /// The feature to remove first.
+    /// The feature to remove first, the top one of [`needed_removals`].
     pub first_removes: Option<FeatureId>,
     /// The improvement it would replace.
     pub replaces: Option<ImprovementId>,
@@ -725,12 +767,11 @@ pub fn build_options(
             continue;
         }
         let mut turns = turns_to_build(g, b, imp, t);
-        let first_removes = needed_removal(g, t, imp);
-        if let Some(f) = first_removes
-            && let Some(rem) = r.derived().removal_of.get(f).copied().flatten()
-        {
+        let removals = needed_removals(g, t, imp);
+        for rem in removals.iter().filter_map(|&f| removal_of(g, f)) {
             turns = turns.saturating_add(turns_to_build(g, b, rem, t));
         }
+        let first_removes = removals.first().copied();
         let replaces = tile
             .improvement()
             .filter(|_| matches!(def.kind, ImprovementKind::Normal | ImprovementKind::Repair));
@@ -739,13 +780,17 @@ pub fn build_options(
     out
 }
 
-/// The feature to remove before `imp` can be built on `t` (`workers._needed_removal`,
-/// `workers.py:269-278`): the highest unbuildable feature it may not stand on, which a removal
-/// improvement exists for; none for a route, a removal, or what removes features itself.
+/// The features to remove, top first, before `imp` can be built on `t` (`workers._needed_removal`,
+/// `workers.py:269-278`): every unbuildable feature it may not stand on that a removal
+/// improvement exists for; none for a route, a removal, or what removes features itself. They
+/// are those `built_here_ok` clears its way through from the top, and any under a feature the
+/// improvement may stand on (fallout under flood plains). Python queued the highest of them
+/// alone, which was all there was to clear on the tiles it let an improvement over a feature.
 #[must_use]
-pub fn needed_removal(g: &Game, t: TileIdx, imp: ImprovementId) -> Option<FeatureId> {
+pub fn needed_removals(g: &Game, t: TileIdx, imp: ImprovementId) -> SmallVec<[FeatureId; 3]> {
     let r = g.rules();
     let def = &r.improvements()[imp];
+    let Some(tile) = g.tile(t) else { return SmallVec::new() };
     if matches!(
         def.kind,
         ImprovementKind::Route(_)
@@ -754,16 +799,16 @@ pub fn needed_removal(g: &Game, t: TileIdx, imp: ImprovementId) -> Option<Featur
             | ImprovementKind::RemoveImprovement(_)
     ) || carries(g, imp, UniqueType::RemovesFeaturesIfBuilt)
     {
-        return None;
+        return SmallVec::new();
     }
-    let feats = g.tile(t)?.features();
-    let mut ids: SmallVec<[FeatureId; 3]> = feats.iter().collect();
+    let mut ids: SmallVec<[FeatureId; 3]> = tile.features().iter().collect();
     ids.reverse();
-    ids.into_iter().find(|&f| {
-        r.derived().removal_of.get(f).copied().flatten().is_some()
+    ids.retain(|&mut f| {
+        removal_of(g, f).is_some()
             && feature_terrain(g, f)
                 .is_some_and(|ft| r.terrains()[ft].unbuildable && !allowed_on_feature(g, imp, ft))
-    })
+    });
+    ids
 }
 
 /// An improvement a unit makes at once: a great person's (`workers.great_improvement_options`,
@@ -792,7 +837,10 @@ pub fn water_options(g: &Game, u: UnitId) -> Vec<InstantOption> {
     let r = g.rules();
     r.improvements()
         .ids()
-        .find(|&imp| super::tiles::resource_improved_by(g, res, imp) && no_problems(g, &b, t, imp))
+        .find(|&imp| {
+            super::tiles::resource_improved_by(g, res, imp)
+                && problems_now(g, &b, t, imp, true).is_empty()
+        })
         .map(|imp| vec![InstantOption { imp, action: None, blocked: Vec::new() }])
         .unwrap_or_default()
 }
@@ -813,7 +861,7 @@ pub fn great_options(g: &Game, u: UnitId) -> Vec<InstantOption> {
             if !tu.in_set(x.improvements, imp) {
                 continue;
             }
-            let blocked = building_problems(g, &b, t, imp, false, false);
+            let blocked = problems_now(g, &b, t, imp, false);
             if blocked.iter().any(Problem::rules_out_offer) {
                 continue;
             }
@@ -835,7 +883,7 @@ pub fn check_instant(g: &Game, u: UnitId, o: &InstantOption) -> Result<(), Actio
     }
     if o.action.is_some() {
         let b = Builder::unit(g, u).ok_or_else(|| ActionError::rule("No such unit."))?;
-        let probs = building_problems(g, &b, x.tile(), o.imp, false, false);
+        let probs = problems_now(g, &b, x.tile(), o.imp, false);
         if !probs.is_empty() {
             return Err(ActionError::rule(problems_text(g, o.imp, &probs)));
         }
@@ -875,7 +923,7 @@ pub enum BuildPlan {
     Cancel(UnitId, TileIdx),
     /// Make an improvement at once.
     Instant(UnitId, InstantOption),
-    /// Queue it (with a removal first, if one is needed) unless it is queued last already.
+    /// Queue it (with the removals it needs first) unless it is queued last already.
     Queue { unit: UnitId, tile: TileIdx, imp: ImprovementId },
 }
 
@@ -949,14 +997,17 @@ pub fn apply_build(g: &mut Game, plan: BuildPlan) -> Value {
             if current != Some(imp) {
                 let mut queue = BuildQueue::new();
                 let repair = Some(imp) == r.derived().known.repair;
-                if !repair
-                    && let Some(f) = needed_removal(g, tile, imp)
-                    && let Some(rem) = r.derived().removal_of.get(f).copied().flatten()
-                {
-                    queue.push(BuildStep {
-                        improvement: rem,
-                        turns_left: turns16(turns_to_build(g, &b, rem, tile)),
-                    });
+                // Each feature in the way, from the top down, so that nothing is left standing
+                // under the improvement.
+                if !repair {
+                    for rem in
+                        needed_removals(g, tile, imp).into_iter().filter_map(|f| removal_of(g, f))
+                    {
+                        queue.push(BuildStep {
+                            improvement: rem,
+                            turns_left: turns16(turns_to_build(g, &b, rem, tile)),
+                        });
+                    }
                 }
                 let turns = if repair {
                     repair_turns(g, &b, tile)
@@ -986,8 +1037,8 @@ fn turns16(n: i32) -> i16 {
     i16::try_from(n).unwrap_or(i16::MAX)
 }
 
-/// `build_improvement`: orders a worker to build on its tile, a removal queued first where one is
-/// needed (`tools.build_improvement`, `tools.py:528-537`).
+/// `build_improvement`: orders a worker to build on its tile, the removals it needs queued first
+/// (`tools.build_improvement`, `tools.py:528-537`).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BuildImprovement {
     pub unit_id: i64,
@@ -1213,8 +1264,9 @@ fn nearest_city(g: &Game, p: PlayerId, t: TileIdx) -> Option<(crate::base::ids::
 /// Stage E6, worker builds (`workers.progress_builds`, `UnitTurnManager.endTurn` ->
 /// `Tile.doWorkerTurn`, `workers.py:487-514`): each unit of the civilization with movement left
 /// that stands on a tile being improved, and may build what is at the front of its queue, does a
-/// turn of work; what is finished is built, unless it can no longer be (the borders moved), and
-/// announced. A builder whose tile has nothing left to build drops its order.
+/// turn of work; what is finished is built, unless it can no longer be (the borders moved, or a
+/// feature it may not stand on is still there: [`can_finish`]), and announced. A builder whose
+/// tile has nothing left to build drops its order.
 pub(crate) fn progress_builds(g: &mut Game, p: PlayerId) {
     let ids: Vec<UnitId> = g.player_units(p).map(crate::state::units::Unit::id).collect();
     for u in ids {
@@ -1252,7 +1304,7 @@ pub(crate) fn progress_builds(g: &mut Game, p: PlayerId) {
         let imp = step.improvement;
         let kind = g.rules().improvements()[imp].kind;
         let checked = matches!(kind, ImprovementKind::Normal | ImprovementKind::Cancel);
-        if checked && !no_problems(g, &b, t, imp) {
+        if checked && !can_finish(g, &b, t, imp) {
             let text = format!("{} could not be completed.", imp_name(g, imp));
             g.emit(
                 EngineEvent::BuildFailed,
