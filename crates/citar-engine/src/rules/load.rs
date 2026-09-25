@@ -998,6 +998,18 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
     let mut ruins = IdVec::with_capacity(raw.ruins.len());
     for (name, r) in &raw.ruins {
         l.at("ruleset/ruins.json", name);
+        let weight = r.weight.unwrap_or(1);
+        // A reward is put among the others this many times: never fewer than none, and no more
+        // than a draw can hold.
+        let weight = u16::try_from(weight).unwrap_or_else(|_| {
+            l.p.push(
+                RulesetErrorKind::Invalid,
+                "ruleset/ruins.json",
+                name,
+                format!("weight {weight} is outside 0 to {}", u16::MAX),
+            );
+            1
+        });
         push(
             &mut ruins,
             RuinDef {
@@ -1009,6 +1021,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                     &r.excluded_difficulties,
                 ),
                 uniques: SourceUniques::default(),
+                weight,
             },
         );
     }

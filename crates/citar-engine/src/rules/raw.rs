@@ -847,6 +847,10 @@ pub(crate) struct RawRuin {
     pub excluded_difficulties: Vec<String>,
     #[serde(default)]
     pub uniques: Vec<String>,
+    /// How many times it is put among the rewards drawn from (UnCiv's `RuinReward.weight`);
+    /// 1 when left out.
+    #[serde(default)]
+    pub weight: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -20,7 +20,7 @@ name. `citar_testkit::rulesets::kitchen_sink()` loads the result, and
 | `terrains.json` | Kitchen Sink Spire, Kitchen Sink Lookout | a natural wonder on the largest landmass; a feature whose `[+1] Sight` lifts the units on it |
 | `beliefs.json` | Kitchen Sink Faith | buying units and buildings with faith |
 | `city_state_types.json` | Kitchen Sink | city-state gifts |
-| `ruins.json` | four ruins | one-time effects on the unit that enters them |
+| `ruins.json` | four ruins | one-time effects on the unit that enters them, and a reward's weight |
 
 When a type joins `unique_supported.toml`, add a use of it here. The coverage test fails until some
 ruleset uses it.

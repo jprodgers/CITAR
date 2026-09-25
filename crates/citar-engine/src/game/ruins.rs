@@ -3,9 +3,12 @@
 //!
 //! [`enter`] ports `ruins.enter` (`ruins.py:38-67`): the rewards the civilization may find here
 //! (not the last two it found, not one the game's difficulty excludes, and those whose
-//! `Unavailable` and `Only available` allow it) are shuffled, drawn from `Purpose::Ruins` keyed by
-//! the tile and the civilization, and the first that does anything is the one found. Movement
-//! (package 1c-02) calls it when a unit steps onto ruins.
+//! `Unavailable` and `Only available` allow it), each as many times as its `weight`, are
+//! shuffled, drawn from `Purpose::Ruins` keyed by the tile and the civilization, and the first
+//! that does anything is the one found. Movement (package 1c-02) calls it when a unit steps onto
+//! ruins.
+
+use smallvec::SmallVec;
 
 use super::derive::rev::PlayerTouch;
 use super::{Game, triggers};
@@ -44,12 +47,24 @@ pub fn enter(g: &mut Game, u: UnitId, t: TileIdx) -> bool {
         debug_assert!(false, "a tile of the map lost no ruins: {e}");
     }
     let r = g.rules();
-    let mut candidates: Vec<RuinId> =
-        r.ruins().ids().filter(|&ruin| possible(g, p, u, t, ruin)).collect();
+    // Each reward is put in as many times as it weighs, so that the shuffle draws the heavier
+    // ones first more often (`ruins.py:49`).
+    let mut candidates: Vec<RuinId> = r
+        .ruins()
+        .ids()
+        .filter(|&ruin| possible(g, p, u, t, ruin))
+        .flat_map(|ruin| core::iter::repeat_n(ruin, usize::from(r.ruins()[ruin].weight)))
+        .collect();
     Rng::keyed(g.state().seed(), Purpose::Ruins, &[t.key(), p.key()]).shuffle(&mut candidates);
     let who = g.player(p).map(|x| x.name.to_string()).unwrap_or_default();
     let what = r.base_units()[base].name.to_string();
+    let mut tried: SmallVec<[RuinId; 8]> = SmallVec::new();
     for ruin in candidates {
+        // A reward that did nothing does nothing again: Python tried it at each of its places.
+        if tried.contains(&ruin) {
+            continue;
+        }
+        tried.push(ruin);
         let def = &r.ruins()[ruin];
         let note = format!("from the ruins ({})", def.name);
         let mut found = false;
