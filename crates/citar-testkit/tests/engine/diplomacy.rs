@@ -8,8 +8,10 @@
 //!   fire for both parties of such a deal, `[n]% spy effectiveness [cities]` speeds its spies, and
 //!   `Spies in [cities] cities act as though they have [n] levels for [action]` raises a spy's
 //!   rank where it applies, and nowhere else;
-//! - spies: stealing technology, reproducibly, spies fleeing a captured city, a dead spy
-//!   replaced;
+//! - spies: stealing technology, reproducibly, a theft unnoticed below the spy's skill, spies
+//!   fleeing a captured city, a dead spy replaced;
+//! - a war on the other side's pact partner refused in a deal;
+//! - random agents striking deals through `drive`, which run their course;
 //! - the host's `close_negotiation` and `open_negotiation_as`, and the negotiation view;
 //! - the invariants DIPLO-1 and NEG-1 under random negotiation sequences (gate 4).
 
@@ -763,6 +765,53 @@ fn a_host_opens_for_a_seat_out_of_turn_and_closes_a_negotiation_with_a_note() {
     act(&mut g, ME, Action::EndTurn(EndTurn {}));
     assert_eq!(g.current(), YOU);
     clean(&mut g);
+}
+
+// ---- Random agents ---------------------------------------------------------------------------------
+
+/// Three `RandomAgent`s who have met play a hundred turns through `drive`: the chats they open are
+/// answered at once, so deals are struck and carried out, and what they leave runs out as rounds
+/// end, with every check clean at every settle.
+#[test]
+fn random_agents_strike_deals_that_run_their_course() {
+    use citar_engine::game::{DriveOptions, Drivers, Stop};
+    use citar_testkit::agents::RandomAgent;
+    let (doc, _) = map_doc("arena").expect("the arena");
+    let cfg = json!({
+        "seed": 5,
+        "players": [{"nation": "BenchmarkCiv"}, {"nation": "BenchmarkCiv"}, {"nation": "BenchmarkCiv"}],
+        "city_states": 0, "barbarians": "off", "ruins": false, "turn_limit": 100, "map": doc,
+    });
+    let mut g = new_game(Ruleset::shared(), cfg.as_object().expect("an object")).expect("a game");
+    g.set_debug_options(DebugOptions::ALL);
+    ops(
+        &mut g,
+        &json!([
+            {"op": "found_city", "player": 0, "x": 5, "y": 5},
+            {"op": "found_city", "player": 1, "x": 18, "y": 10},
+            {"op": "found_city", "player": 2, "x": 18, "y": 4},
+            {"op": "meet", "a": 0, "b": "all"},
+            {"op": "meet", "a": 1, "b": 2},
+            {"op": "set_player", "player": [0, 1, 2], "gold": 300},
+            {"op": "grant_tech", "player": [0, 1, 2], "techs": ["Civil Service", "Education"]},
+            {"op": "set_relation", "a": 0, "b": 1, "embassies": true},
+            {"op": "set_relation", "a": 0, "b": 2, "embassies": true},
+        ]),
+    );
+    let (mut a, mut b, mut c) = (RandomAgent::new(), RandomAgent::new(), RandomAgent::new());
+    let mut d = Drivers::none(g.state().players().len())
+        .with(ME, &mut a)
+        .with(YOU, &mut b)
+        .with(THIRD, &mut c);
+    let (stop, batch) = g.drive(&mut d, DriveOptions::default()).expect("a live game");
+    assert_eq!(stop, Stop::GameOver);
+    clean(&mut g);
+    let deals = &g.state().diplo().deals;
+    assert!(!deals.is_empty(), "no deal in a hundred turns");
+    assert!(deals.iter().any(|d| !d.active), "a deal ran its course");
+    let kinds = |k: &str| batch.events().iter().filter(|e| e.kind.name() == k).count();
+    assert_eq!(kinds("deal"), deals.len());
+    assert!(g.negotiations().iter().all(|n| n.status != NegStatus::Open), "none left open");
 }
 
 // ---- Gate 4: the invariants under random negotiations ----------------------------------------------

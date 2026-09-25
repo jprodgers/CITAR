@@ -25,6 +25,11 @@
 //! turn 50 rarely to declare war; before it returns it withdraws what it opened and still waits on
 //! an answer, as the `end_turn` rule would have it. Its spies go now and then to a city it has
 //! explored, or home. [`RandomAgent`] answers a negotiation it is asked about the same way.
+//!
+//! Until package 1c-09's `drive` dispatches [`SeatDriver::respond`], nothing would answer a chat
+//! the agent opens before it withdraws it, so the other side answers at once ([`converse`]), as
+//! its own `respond` would: the deals the agent strikes are carried out, and what they leave
+//! runs its course when rounds end.
 
 use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TechId, TileIdx, UnitId};
 use citar_engine::base::rng::{Purpose, Rng};
@@ -438,11 +443,37 @@ fn deal_items(rng: &mut Rng) -> serde_json::Value {
     rng.pick(&pool).cloned().unwrap_or_default()
 }
 
-/// The responses the agent picks from.
-const RESPONSES: [&str; 5] = ["accept", "counter", "reply", "reject", "withdraw"];
+/// The responses the agent picks from, accepting twice as often as it does anything else, so
+/// that the deals it can carry out are struck.
+const RESPONSES: [&str; 6] = ["accept", "accept", "counter", "reply", "reject", "withdraw"];
+
+/// The stream an answer by `pid` in negotiation `nid` draws from: keyed by the negotiation and
+/// its length too, so that an answer out of turn draws nothing a turn's moves would, and each
+/// answer in a chat draws afresh.
+fn answer_stream(g: &Game, pid: PlayerId, nid: NegotiationId) -> Rng {
+    let turn = u64::try_from(g.turn()).unwrap_or(0);
+    let entries = g.negotiation(nid).map_or(0, |n| u64::try_from(n.history.len()).unwrap_or(0));
+    let keys = [u64::from(pid.0), turn, u64::from(nid.get()), entries];
+    Rng::keyed(g.state().seed(), Purpose::TestAgent, &keys)
+}
+
+/// The most answers [`converse`] plays in one chat.
+const EXCHANGES: usize = 4;
+
+/// Plays out a chat just opened: the side it waits on answers, as its driver's `respond` would,
+/// until it closes or [`EXCHANGES`] answers have passed.
+pub fn converse(g: &mut Game, nid: NegotiationId) {
+    for _ in 0..EXCHANGES {
+        let open = g.negotiation(nid).filter(|n| n.status == NegStatus::Open);
+        let Some(who) = open.and_then(|n| n.awaiting) else { return };
+        let mut rng = answer_stream(g, who, nid);
+        answer(g, who, nid, &mut rng);
+    }
+}
 
 /// Answers negotiation `nid` at random: accept, counter with a proposal from the pool, reply or
-/// reject (`respond_negotiation`).
+/// reject (`respond_negotiation`). An answer the game refuses (a deal a side cannot carry out, a
+/// counter it cannot give) ends the chat instead, rather than leave it waiting.
 fn answer(g: &mut Game, pid: PlayerId, nid: NegotiationId, rng: &mut Rng) {
     let Some(&response) = rng.pick(&RESPONSES) else { return };
     let counter = response == "counter";
@@ -455,7 +486,16 @@ fn answer(g: &mut Game, pid: PlayerId, nid: NegotiationId, rng: &mut Rng) {
         give,
         receive,
     };
-    play(g, pid, Action::RespondNegotiation(a));
+    if g.act(pid, Action::RespondNegotiation(a)).is_err() {
+        let a = RespondNegotiation {
+            negotiation_id: i64::from(nid.get()),
+            action: json!("reject"),
+            message: Some(json!("Never mind.")),
+            give: None,
+            receive: None,
+        };
+        play(g, pid, Action::RespondNegotiation(a));
+    }
 }
 
 /// The negotiations still open that `pid` is part of and that `f` picks.
@@ -471,9 +511,9 @@ fn open_ones(g: &Game, pid: PlayerId, f: impl Fn(&Negotiation) -> bool) -> Vec<N
 
 /// Diplomacy (`respond_negotiation`, `send_message`, `open_negotiation`, `denounce`,
 /// `declare_war`): answers what waits on it; one time in ten sends a message to a civilization it
-/// has met; one time in fifty opens a negotiation with one of them; one time in two hundred
-/// denounces one; after turn 50 declares war on one one time in two hundred; and withdraws what
-/// it opened and still waits on an answer.
+/// has met; one time in ten opens a negotiation with one of them, which plays out at once
+/// ([`converse`]); one time in two hundred denounces one; after turn 50 declares war on one one
+/// time in two hundred; and withdraws what it opened and still waits on an answer.
 pub fn diplomacy(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     for nid in open_ones(g, pid, |n| n.awaiting == Some(pid)) {
         answer(g, pid, nid, rng);
@@ -485,7 +525,7 @@ pub fn diplomacy(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
             let a = SendMessage { to: json!(to.0), text: json!("Greetings.") };
             play(g, pid, Action::SendMessage(a));
         }
-        if rng.chance(0.02) {
+        if rng.chance(0.1) {
             let give = deal_items(rng);
             let receive = deal_items(rng);
             let a = OpenNegotiation {
@@ -494,7 +534,12 @@ pub fn diplomacy(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
                 give: Some(give),
                 receive: Some(receive),
             };
-            play(g, pid, Action::OpenNegotiation(a));
+            if let Ok((out, _)) = g.act(pid, Action::OpenNegotiation(a)) {
+                let nid = out["negotiation_id"].as_u64().and_then(|n| u32::try_from(n).ok());
+                if let Some(nid) = nid.and_then(NegotiationId::new) {
+                    converse(g, nid);
+                }
+            }
         }
         if rng.chance(0.005) {
             play(g, pid, Action::Denounce(Denounce { player_id: i64::from(to.0) }));
@@ -586,11 +631,7 @@ impl SeatDriver for RandomAgent {
         nid: NegotiationId,
         _: &mut DriverMemory,
     ) -> DriverOutcome {
-        // A stream of its own, keyed by the negotiation too, so that an answer out of turn draws
-        // nothing a turn's moves would.
-        let turn = u64::try_from(g.turn()).unwrap_or(0);
-        let keys = [u64::from(pid.0), turn, u64::from(nid.get())];
-        let mut rng = Rng::keyed(g.state().seed(), Purpose::TestAgent, &keys);
+        let mut rng = answer_stream(g, pid, nid);
         answer(g, pid, nid, &mut rng);
         DriverOutcome::Done
     }
