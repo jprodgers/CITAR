@@ -355,15 +355,16 @@ pub fn quest_text(g: &Game, q: &Quest) -> String {
 }
 
 /// Gives a major a quest (`_assign`, `city_states.py:1055-1062`), with its row's influence (40
-/// by default) and its duration scaled by the speed.
-fn assign(
+/// by default) and its duration scaled by the speed, and tells it; the quest given. The test
+/// operation `add_quest` gives one through it.
+pub(crate) fn assign(
     g: &mut Game,
     cs: PlayerId,
     k: QuestKindId,
     major: PlayerId,
     target: QuestTarget,
     scope: QuestScope,
-) {
+) -> Quest {
     let def = &g.rules().quests()[k];
     let q = Quest {
         kind: k,
@@ -379,6 +380,7 @@ fn assign(
         d.quests.push(q);
     }
     tell(g, cs, major, &text);
+    q
 }
 
 /// Whether a quest has run out of time (`_expired`).

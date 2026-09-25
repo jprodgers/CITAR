@@ -14,8 +14,9 @@
 //! unit actions and the moves of packages 1c-04 and 1c-02; package 1c-02 `set_unit` and
 //! `ready_unit`; package 1c-03 `attack_as` and `capture_civilian`; package 1c-04 `automate` and
 //! `progress_builds`; package 1c-05 `add_spy`, `close_negotiation` and `open_negotiation_as`;
-//! package 1c-06 `add_barbarian`, `barbarian_act`, `clear_camps` (which the bare prelude of the
-//! rule scripts runs), `create_camp` and `sack_city`. Every test operation is ported.
+//! package 1c-06 `add_barbarian`, `add_quest`, `barbarian_act`, `clear_camps` (which the bare
+//! prelude of the rule scripts runs), `create_camp` and `sack_city`. Every test operation is
+//! ported.
 
 use serde_json::{Map, Value, json};
 
@@ -59,6 +60,17 @@ pub static TEST_OPS: &[TestOp] = &[
                  scenario operations allow; its id",
         porting: Porting::Ported,
         run: add_barbarian,
+    },
+    TestOp {
+        name: "add_quest",
+        params: "city_state, player, quest (its name); optional scope (individual or global, the \
+                 row's by default), target (a player id; a resource, wonder, great person or \
+                 natural wonder by name; a contest's starting score; the investment percent; for \
+                 Spread Religion the player whose religion it is), x and y (or at: the camp to \
+                 clear): the city-state gives the major the quest now, whether or not it fits; its \
+                 text",
+        porting: Porting::Ported,
+        run: add_quest,
     },
     TestOp {
         name: "add_spy",
@@ -807,6 +819,65 @@ fn create_camp(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let id = crate::game::barbarians::create_camp(g, t)
         .ok_or_else(|| ActionError::rule("The ruleset has no barbarian camp."))?;
     Ok(json!(id.get()))
+}
+
+// ---- City-states (package 1c-06) ----------------------------------------------------------------
+
+/// A city-state gives a major a quest now, as its turn would (`city_states._assign`), whether or
+/// not the quest fits the game: its row's scope unless `scope` says otherwise, and the target its
+/// row takes, from `target` or, for a camp, from `x` and `y`. A contest starts from 0 and an
+/// investment at the row's percent unless `target` says otherwise. `quest`, its text.
+fn add_quest(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    use crate::rules::defs::{QuestScope, QuestTargetKind};
+    use crate::state::players::QuestTarget;
+    let cs = pid(g, o.get("city_state"), false)?;
+    if !g.is_city_state(cs) {
+        return Err(bad(format!("Player {} is not a city-state.", cs.0)));
+    }
+    let major = pid(g, o.get("player"), true)?;
+    let raw = o.get("quest").unwrap_or(&Value::Null);
+    let name = raw.as_str().unwrap_or_default();
+    let (k, def) = g
+        .rules()
+        .quests()
+        .iter()
+        .find(|(_, d)| &*d.name == name)
+        .ok_or_else(|| bad(format!("Unknown quest {}.", py::repr(raw))))?;
+    let scope = match given(o, "scope").map(py::str_of).as_deref() {
+        None => def.scope,
+        Some("individual") => QuestScope::Individual,
+        Some("global") => QuestScope::Global,
+        Some(other) => {
+            return Err(bad(format!("scope must be individual or global, not '{other}'.")));
+        }
+    };
+    let t = given(o, "target");
+    let target = match def.target {
+        QuestTargetKind::None => QuestTarget::None,
+        QuestTargetKind::Tile => QuestTarget::Tile(tile(g, o)?),
+        QuestTargetKind::Resource => QuestTarget::Resource(resolve(g, t)?),
+        QuestTargetKind::Building => QuestTarget::Building(resolve(g, t)?),
+        QuestTargetKind::UnitType => QuestTarget::UnitType(resolve(g, t)?),
+        QuestTargetKind::NaturalWonder => QuestTarget::NaturalWonder(resolve(g, t)?),
+        QuestTargetKind::Player => QuestTarget::Player(pid(g, t, false)?),
+        QuestTargetKind::Religion => {
+            let founder = pid(g, t, false)?;
+            let founded = g.player(founder).and_then(|p| p.religion.founded);
+            QuestTarget::Religion(founded.ok_or_else(|| {
+                ActionError::rule(format!("Player {} has founded no religion.", founder.0))
+            })?)
+        }
+        QuestTargetKind::Baseline => {
+            QuestTarget::Baseline(t.map_or(Ok(0), |v| whole(v, "target"))?)
+        }
+        QuestTargetKind::Percent => {
+            let row = def.params.first().copied().unwrap_or(50.0);
+            let row = i16::try_from(crate::base::num::trunc_i64(row)).unwrap_or(50);
+            QuestTarget::Percent(t.map_or(Ok(row), |v| whole(v, "target"))?)
+        }
+    };
+    let q = crate::game::city_states::quests::assign(g, cs, k, major, target, scope);
+    Ok(json!({"quest": crate::game::city_states::quests::quest_text(g, &q)}))
 }
 
 /// The barbarians sack a city (`barbarians.sack_city`); what they took, as an attack reports it.
