@@ -289,3 +289,11 @@ reason = "A world leader vote for a player id the game did not have raised an er
 [[differences]]
 id = "un-city-state-votes-for-a-living-ally"
 reason = "A city-state voted in the world leader election for its ally even after that civilization was eliminated, a vote that could elect no one; Rust's city-state votes for its ally only while it lives"
+
+[[differences]]
+id = "victories-python-named-are-the-rulesets"
+reason = "The United Nations' world leader vote, the Domination win and the Time victory at the turn limit were on unless a game turned them off, even with a ruleset that had no Diplomatic, Domination or Time victory; Rust has each only when the ruleset has that victory and the game leaves it on, so such a ruleset holds no vote and ends at its turn limit with no winner"
+
+[[differences]]
+id = "deal-war-names-both-sides"
+reason = "A war declared as agreed in a deal was announced without saying who declared war on whom, so statistics counting wars by their attacker (the baseline's wars declared) missed it; Rust's names the attacker and the defender, as every other declaration of war does"

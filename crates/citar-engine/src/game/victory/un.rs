@@ -271,6 +271,7 @@ pub(crate) fn hold_vote(g: &mut Game) {
 /// set for, or the first one after, while the Diplomatic victory is on.
 pub(crate) fn vote_stage(g: &mut Game) {
     let due = g.state().world().un.next_vote.is_some_and(|v| g.turn() >= v);
+    // refcheck: victories-python-named-are-the-rulesets
     let on = g.rules().derived().known.victories.diplomatic.is_some_and(|v| g.victory_enabled(v));
     if due && on {
         hold_vote(g);

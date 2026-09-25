@@ -28,9 +28,10 @@ use citar_engine::state::chronicle::{CivStats, EngineEvent};
 use citar_engine::state::diplo::{DealItem, Side, Terms};
 use citar_engine::state::players::DriverMemory;
 use citar_testkit::agents::RandomAgent;
-use citar_testkit::rulesets::kitchen_sink;
+use citar_testkit::rulesets::{files_of, kitchen_sink, overlay};
 use citar_testkit::script::{map_doc, new_game};
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 
 const ME: PlayerId = PlayerId(0);
 const YOU: PlayerId = PlayerId(1);
@@ -190,6 +191,7 @@ fn every_war_declared_and_city_captured_names_both_sides() {
     let declare = Action::DeclareWar(DeclareWar { player_id: 1, message: None });
     g.act(ME, declare).expect("war");
     // A war agreed to in a deal: the second side declares it on the third.
+    // refcheck: deal-war-names-both-sides
     let terms = Terms {
         sides: [
             Side { giver: ME, items: vec![] },
@@ -425,6 +427,69 @@ fn the_vote_counts_everyone_as_its_seat_decides() {
     assert!(first.tally.iter().any(|&(p, n)| p == THIRD && n >= 1), "{first:?}");
     assert!(first.tally.iter().all(|&(p, _)| p != YOU), "nobody votes for the second: {first:?}");
     assert_eq!(first.winner, None, "two votes, where four win");
+}
+
+// ---- The victories Python named ----------------------------------------------------------------------
+
+/// The shipped ruleset without its Diplomatic, Domination and Time victories, its United Nations
+/// available whichever victories are on.
+fn without_named_victories() -> &'static Ruleset {
+    static RULES: OnceLock<&'static Ruleset> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let victories = json!({"Diplomatic": null, "Domination": null, "Time": null}).to_string();
+        let buildings = json!({"United Nations": {"uniques": [
+            "Triggers voting for the Diplomatic Victory",
+            "Triggers a global alert upon completion",
+        ]}})
+        .to_string();
+        let patches =
+            [("ruleset/victories.json", &*victories), ("ruleset/buildings.json", &*buildings)];
+        let files = overlay(&patches).expect("the patches apply");
+        Ruleset::leak(&files_of(&files)).expect("the ruleset loads")
+    })
+}
+
+/// A ruleset without the Diplomatic, Domination or Time victory has none of what Python did in
+/// their names: the United Nations it builds holds no vote, the last civilization standing wins
+/// nothing, and the turn limit ends the game with no winner.
+#[test]
+fn a_ruleset_without_the_victories_python_named_has_none_of_them() {
+    // refcheck: victories-python-named-are-the-rulesets
+    let r = without_named_victories();
+    let known = r.derived().known.victories;
+    assert!(known.diplomatic.is_none() && known.domination.is_none() && known.time.is_none());
+    assert!(known.scientific.is_some() && known.cultural.is_some());
+    let mut g = arena_with(r, &json!({"turn_limit": 20}), false);
+    let out = ops(
+        &mut g,
+        &json!([
+            {"op": "found_city", "player": 0, "x": 5, "y": 5, "buildings": ["United Nations"]},
+            {"op": "found_city", "player": 1, "x": 18, "y": 10},
+            {"op": "found_city", "player": 2, "x": 18, "y": 4},
+        ]),
+    );
+    assert_eq!(g.state().world().un.next_vote, Some(16), "the United Nations schedules it");
+    test_ops(&mut g, &json!([{"op": "set_turn", "turn": 16}]));
+    end_round(&mut g);
+    assert_eq!(g.state().world().un.results, None, "no vote is counted");
+    assert!(events(&g, EngineEvent::UnVote).iter().all(|t| !t.starts_with("United Nations vote:")));
+    ops(
+        &mut g,
+        &json!([
+            {"op": "remove_city", "city": out[1]["city_id"]},
+            {"op": "remove_city", "city": out[2]["city_id"]},
+        ]),
+    );
+    assert!(!alive(&g, YOU) && !alive(&g, THIRD));
+    assert_eq!(g.phase(), Phase::Playing, "the last one standing wins no Domination victory");
+    test_ops(&mut g, &json!([{"op": "set_turn", "turn": 20}]));
+    end_round(&mut g);
+    assert_eq!(g.phase(), Phase::Over, "the turn limit is past");
+    let c = *g.state().clock();
+    assert_eq!((c.winner, c.victory), (None, None), "no Time victory: no winner");
+    assert_eq!(events(&g, EngineEvent::GameOver).len(), 1);
+    assert!(events(&g, EngineEvent::Victory).is_empty());
+    clean(&mut g);
 }
 
 // ---- Revolts ----------------------------------------------------------------------------------------------

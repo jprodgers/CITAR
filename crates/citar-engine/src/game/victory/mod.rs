@@ -24,8 +24,8 @@
 //!   with a winner and no victory type, which `inspect` names `Neutral` as Python did.
 //! - **The victories Python named** (Scientific's spaceship, the Domination win of a civilization
 //!   left alone, the Diplomatic vote and the Time victory) are the ruleset's own
-//!   (`rules::derived::KnownVictories`): a ruleset without one has none of them, where Python
-//!   acted as if they were on.
+//!   (`rules::derived::KnownVictories`, `victories-python-named-are-the-rulesets`): a ruleset
+//!   without one has none of them, where Python acted as if they were on.
 
 pub mod milestones;
 pub mod records;
@@ -147,6 +147,7 @@ pub fn check_victory(g: &mut Game, p: Option<PlayerId>) -> bool {
 /// first living major civilization holding every original capital, or by the last one standing
 /// of several.
 pub(crate) fn check_domination(g: &mut Game) {
+    // refcheck: victories-python-named-are-the-rulesets
     let Some(d) = g.rules().derived().known.victories.domination else { return };
     if !g.victory_enabled(d) {
         return;
@@ -175,6 +176,7 @@ pub(crate) fn check_turn_limit(g: &mut Game) {
         return;
     }
     let Some(best) = score::best_score(g) else { return };
+    // refcheck: victories-python-named-are-the-rulesets
     let time = g.rules().derived().known.victories.time.filter(|&t| g.victory_enabled(t));
     if let Some(t) = time {
         let name = g.player(best).map(|x| x.name.to_string()).unwrap_or_default();

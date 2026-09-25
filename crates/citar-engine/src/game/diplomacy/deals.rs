@@ -19,7 +19,9 @@
 //! whose player id, city id or amount no game can hold is refused when it is proposed, where
 //! Python stored it and refused the deal only when it was accepted (or never, for an amount).
 //! Keys an item does not have are dropped, where Python kept them in the stored item. Mutual
-//! agreements are added in [`DealItemKind::ALL`] order where Python followed a set's.
+//! agreements are added in [`DealItemKind::ALL`] order where Python followed a set's. A war
+//! agreed in a deal names its attacker and defender, which Python's did not
+//! (`deal-war-names-both-sides`).
 
 use serde_json::{Map, Value};
 
@@ -668,6 +670,7 @@ pub fn execute_deal(g: &mut Game, a: PlayerId, b: PlayerId, terms: &Terms) -> Op
         );
         // Python's event said nothing of who declared war on whom; every war declared carries
         // both, which the statistics of a game count (DESIGN.md 4.7).
+        // refcheck: deal-war-names-both-sides
         let data =
             EventData { attacker: Some(giver), defender: Some(target), ..EventData::default() };
         g.emit(EngineEvent::WarDeclared, &text, None, None, data, &[]);
