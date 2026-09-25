@@ -158,12 +158,17 @@ pub fn unit_actions(g: &Game, u: UnitId) -> Vec<UnitActionEntry> {
         UnitActionEntry { id, name, reason, params: &[], kind }
     };
     if usable_action(g, u, UniqueType::FoundCity).is_some() {
+        // A city-state keeps to one city, whatever settler it holds (its starting one, one given
+        // or captured): it trains none either (`NoSettlerForOneCityPlayers`).
+        // refcheck: city-states-found-one-city
+        let one_city = (g.is_city_state(p) && g.player_cities(p).next().is_some())
+            .then(|| "A city-state cannot found more cities.".to_owned());
         out.push(UnitActionEntry {
             params: &[("name", "optional city name")],
             ..entry(
                 "found_city".into(),
                 "Found a city here".into(),
-                no_moves.clone().or_else(|| found_check(g, p, at)),
+                no_moves.clone().or(one_city).or_else(|| found_check(g, p, at)),
                 ActionKind::FoundCity,
             )
         });

@@ -2,7 +2,7 @@ about = """
 A settler founds a city where it stands with the found_city tool, and is used up; the result names
 the city and says what it can build. Refused: a settler with no movement left, a tile too close to a
 city, a tile on water, a unit that cannot found cities, and a city-state's seat, which takes no
-tools.
+tools; and a city-state's settler once the city-state has a city, whoever asks it (Rust).
 """
 from = "tests/test_engine.py::TurnTests::test_found_city_and_production, test_city_min_distance"
 
@@ -125,3 +125,13 @@ error = "Invalid player."
 check = { what = "player", player = 2 }
 path = "cities"
 len = 0
+
+[[step]]
+note = "A city-state keeps to one city: once it has one, its settler's action is refused where the engine lists it, for the engine's own city-state play as for anyone."
+op = "found_city"
+args = { player = 2, at = "E", name = "Tyre" }
+
+[[step]]
+intended = "city-states-found-one-city"
+check = { what = "unit_actions", unit = "=cs.unit_ids[0]" }
+eq = [{ id = "found_city", name = "Found a city here", available = false, reason = "A city-state cannot found more cities.", params = { name = "optional city name" } }]

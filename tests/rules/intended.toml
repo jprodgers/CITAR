@@ -207,6 +207,10 @@ id = "improvements-over-removable-features"
 reason = "An improvement was refused on a tile whose feature it may not stand on (a farm on a forest) unless it removed features itself, so the removal it would have queued first never was; Rust offers it once the civilization knows how to remove each feature in its way, and queues the removals first, top down (fallout, then the forest under it), as the tool says and UnCiv does"
 
 [[differences]]
+id = "city-states-found-one-city"
+reason = "A city-state's settler founded cities as a major's did, so a city-state that kept its starting settler, was given one or captured one grew past its single city; Rust refuses the settler's action to a city-state that has a city, as city-states train no settlers either"
+
+[[differences]]
 id = "unit-results-give-tiles"
 reason = "The results of founding a city with a unit and of a paradrop gave each tile as the keys of its coordinates (['x', 'y']); Rust gives where it is, as {x, y}"
 

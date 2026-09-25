@@ -22,7 +22,7 @@ use citar_engine::game::automation::{best_job, worker_jobs, worker_jobs_with};
 use citar_engine::game::derive::jobs;
 use citar_engine::game::workers::{self, Builder, Problem};
 use citar_engine::game::{
-    Action, DebugOptions, DriveOptions, Drivers, Game, Stop, religion, units,
+    Action, DebugOptions, DriveOptions, Drivers, Game, Stop, actions, religion, units,
 };
 use citar_engine::rules::Ruleset;
 use citar_engine::rules::defs::BuilderClass;
@@ -572,6 +572,39 @@ fn a_map_whose_build_times_read_the_tile_or_its_city_follows_the_civilization_an
     religion::add_pressure(&mut g, roma, Some(yours), 1000);
     test_ops(&mut g, &json!([]));
     assert_eq!(now(&g), [Some(farm), Some(mine), Some(mill)]);
+    clean(&mut g);
+}
+
+// ---- Unit actions ------------------------------------------------------------------------------------
+
+#[test]
+fn a_city_state_with_a_city_founds_no_other() {
+    let mut g =
+        arena(Ruleset::shared(), &[json!({"nation": "BenchmarkCiv"})], &json!({"city_states": 1}));
+    let cs = g.state().players().ids().find(|&p| g.is_city_state(p)).expect("a city-state");
+    let out = ops(
+        &mut g,
+        &json!([{"op": "add_unit", "player": cs.0, "unit": "Settler", "x": 11, "y": 7}]),
+    );
+    let settler = first_unit(&out[0]);
+    test_ops(&mut g, &json!([{"op": "ready_unit", "unit": settler.get()}]));
+    let why = |g: &Game| {
+        actions::unit_actions(g, settler)
+            .into_iter()
+            .find(|a| a.id == "found_city")
+            .expect("a settler founds cities")
+            .reason
+    };
+    // Its first city, as its starting settler founds it.
+    assert_eq!(why(&g), None);
+    ops(&mut g, &json!([{"op": "found_city", "player": cs.0, "x": 11, "y": 13}]));
+    let refused = "A city-state cannot found more cities.";
+    assert_eq!(why(&g).as_deref(), Some(refused));
+    // Where its own play would ask, as where anyone would.
+    let Err(e) = actions::plan_action(&g, settler, "found_city", None, &[], None) else {
+        panic!("a second city founded")
+    };
+    assert_eq!(e.message, refused);
     clean(&mut g);
 }
 
