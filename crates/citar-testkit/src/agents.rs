@@ -17,6 +17,14 @@
 //! preview promises more than it costs (and now and then regardless), to bombard from its cities,
 //! to sweep with its fighters, to decide what becomes of the cities it has taken, and to answer
 //! the offers to return the civilians it took back from the barbarians.
+//!
+//! Package 1c-05 teaches it diplomacy ([`diplomacy`]) and espionage ([`spies`]): to answer the
+//! negotiations that wait on it (accept, counter, reply or reject, at random), now and then to
+//! message a civilization it has met, to open a negotiation with a proposal drawn from a small
+//! pool (some of which it cannot give, which is part of the play), rarely to denounce, and after
+//! turn 50 rarely to declare war; before it returns it withdraws what it opened and still waits on
+//! an answer, as the `end_turn` rule would have it. Its spies go now and then to a city it has
+//! explored, or home. [`RandomAgent`] answers a negotiation it is asked about the same way.
 
 use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TechId, TileIdx, UnitId};
 use citar_engine::base::rng::{Purpose, Rng};
@@ -30,6 +38,10 @@ use citar_engine::game::combat::actions::{
     AirSweep, Attack, CityAttack, CityStatus, ReturnCivilian, plan_attack,
 };
 use citar_engine::game::combat::{city, combatant_at, resolve};
+use citar_engine::game::diplomacy::actions::{
+    DeclareWar, Denounce, OpenNegotiation, RespondNegotiation, SendMessage,
+};
+use citar_engine::game::espionage::{MoveSpy, spies as spies_of};
 use citar_engine::game::path::Mover;
 use citar_engine::game::policies::{AdoptPolicy, adoptable_policies, can_adopt_any};
 use citar_engine::game::research::{
@@ -38,8 +50,10 @@ use citar_engine::game::research::{
 use citar_engine::game::units::actions::{MoveUnit, PromoteUnit, UnitOrder, UpgradeUnit};
 use citar_engine::game::units::{promotions, upgrades};
 use citar_engine::game::{Action, DriverOutcome, Game, SeatDriver};
-use citar_engine::state::cities::{Constructible, Perpetual};
+use citar_engine::state::cities::{City, Constructible, Perpetual};
+use citar_engine::state::diplo::{NegStatus, Negotiation};
 use citar_engine::state::players::DriverMemory;
+use citar_engine::state::players::Player;
 use serde_json::json;
 
 /// One kind of move: what the agent may do with its turn, drawing from the turn's stream.
@@ -51,6 +65,8 @@ pub type Move = fn(&mut Game, PlayerId, &mut Rng);
 /// - Package 1b-07: `research`, `production`, `queues`, `policies`, `purchases` and `names`.
 /// - Package 1c-02: [`promote_units`], [`upgrade_units`], [`order_units`] and [`move_units`].
 /// - Package 1c-03: [`fight`], before the units move, so that those beside an enemy attack it.
+/// - Package 1c-05: [`spies`] and [`diplomacy`], the chats last, so that it withdraws what it
+///   opened once it has done everything else.
 pub const MOVES: &[Move] = &[
     research,
     production,
@@ -63,6 +79,8 @@ pub const MOVES: &[Move] = &[
     order_units,
     fight,
     move_units,
+    spies,
+    diplomacy,
 ];
 
 /// Picks one of `v` from the turn's stream.
@@ -404,6 +422,125 @@ pub fn fight(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     }
 }
 
+/// A small pool of deal items, some of which no side can give, as the agent proposes them.
+fn deal_items(rng: &mut Rng) -> serde_json::Value {
+    let pool = [
+        json!([]),
+        json!([{"type": "gold", "amount": 10 + rng.below(40)}]),
+        json!([{"type": "gold_per_turn", "amount": 1 + rng.below(3), "turns": 10}]),
+        json!([{"type": "share_map"}]),
+        json!([{"type": "embassy"}]),
+        json!([{"type": "open_borders", "turns": 10 + rng.below(20)}]),
+        json!([{"type": "declaration_of_friendship"}]),
+        json!([{"type": "peace_treaty"}]),
+        json!([{"type": "research_agreement"}]),
+    ];
+    rng.pick(&pool).cloned().unwrap_or_default()
+}
+
+/// The responses the agent picks from.
+const RESPONSES: [&str; 5] = ["accept", "counter", "reply", "reject", "withdraw"];
+
+/// Answers negotiation `nid` at random: accept, counter with a proposal from the pool, reply or
+/// reject (`respond_negotiation`).
+fn answer(g: &mut Game, pid: PlayerId, nid: NegotiationId, rng: &mut Rng) {
+    let Some(&response) = rng.pick(&RESPONSES) else { return };
+    let counter = response == "counter";
+    let give = counter.then(|| deal_items(rng));
+    let receive = counter.then(|| deal_items(rng));
+    let a = RespondNegotiation {
+        negotiation_id: i64::from(nid.get()),
+        action: json!(response),
+        message: Some(json!(format!("{response}, from {}", pid.0))),
+        give,
+        receive,
+    };
+    play(g, pid, Action::RespondNegotiation(a));
+}
+
+/// The negotiations still open that `pid` is part of and that `f` picks.
+fn open_ones(g: &Game, pid: PlayerId, f: impl Fn(&Negotiation) -> bool) -> Vec<NegotiationId> {
+    g.negotiations()
+        .iter()
+        .filter(|n| {
+            n.status == NegStatus::Open && (n.initiator == pid || n.responder == pid) && f(n)
+        })
+        .map(|n| n.id)
+        .collect()
+}
+
+/// Diplomacy (`respond_negotiation`, `send_message`, `open_negotiation`, `denounce`,
+/// `declare_war`): answers what waits on it; one time in ten sends a message to a civilization it
+/// has met; one time in fifty opens a negotiation with one of them; one time in two hundred
+/// denounces one; after turn 50 declares war on one one time in two hundred; and withdraws what
+/// it opened and still waits on an answer.
+pub fn diplomacy(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    for nid in open_ones(g, pid, |n| n.awaiting == Some(pid)) {
+        answer(g, pid, nid, rng);
+    }
+    let met: Vec<PlayerId> =
+        g.majors(true).map(Player::id).filter(|&q| q != pid && g.has_met(pid, q)).collect();
+    if let Some(&to) = rng.pick(&met) {
+        if rng.chance(0.1) {
+            let a = SendMessage { to: json!(to.0), text: json!("Greetings.") };
+            play(g, pid, Action::SendMessage(a));
+        }
+        if rng.chance(0.02) {
+            let give = deal_items(rng);
+            let receive = deal_items(rng);
+            let a = OpenNegotiation {
+                to: i64::from(to.0),
+                message: json!("Shall we deal?"),
+                give: Some(give),
+                receive: Some(receive),
+            };
+            play(g, pid, Action::OpenNegotiation(a));
+        }
+        if rng.chance(0.005) {
+            play(g, pid, Action::Denounce(Denounce { player_id: i64::from(to.0) }));
+        }
+        if g.turn() > 50 && rng.chance(0.005) {
+            let a = DeclareWar { player_id: i64::from(to.0), message: Some(json!("War!")) };
+            play(g, pid, Action::DeclareWar(a));
+        }
+    }
+    for nid in open_ones(g, pid, |n| n.awaiting != Some(pid)) {
+        let a = RespondNegotiation {
+            negotiation_id: i64::from(nid.get()),
+            action: json!("withdraw"),
+            message: Some(json!("Another time.")),
+            give: None,
+            receive: None,
+        };
+        play(g, pid, Action::RespondNegotiation(a));
+    }
+}
+
+/// Espionage (`move_spy`): one time in ten, each spy goes to a city its civilization has
+/// explored, or home one time in four of those.
+pub fn spies(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    let names: Vec<String> = spies_of(g, pid).iter().map(|s| s.name.to_string()).collect();
+    for name in names {
+        if !rng.chance(0.1) {
+            continue;
+        }
+        let city_id = if rng.below(4) == 0 {
+            json!("hideout")
+        } else {
+            let explored: Vec<CityId> = g
+                .state()
+                .cities()
+                .iter()
+                .filter(|c| g.player(pid).is_some_and(|p| p.explored.contains(c.tile().0)))
+                .map(City::id)
+                .collect();
+            let Some(c) = pick(rng, &explored) else { continue };
+            json!(c.get())
+        };
+        play(g, pid, Action::MoveSpy(MoveSpy { spy: json!(name), city_id }));
+    }
+}
+
 /// A driver that plays at random among the actions the engine has, reproducibly: the same game
 /// and seat give the same moves.
 #[derive(Clone, Debug, Default)]
@@ -444,12 +581,17 @@ impl SeatDriver for RandomAgent {
 
     fn respond(
         &mut self,
-        _: &mut Game,
-        _: PlayerId,
-        _: NegotiationId,
+        g: &mut Game,
+        pid: PlayerId,
+        nid: NegotiationId,
         _: &mut DriverMemory,
     ) -> DriverOutcome {
-        // It opens no negotiation and answers none until package 1c-05 teaches it.
+        // A stream of its own, keyed by the negotiation too, so that an answer out of turn draws
+        // nothing a turn's moves would.
+        let turn = u64::try_from(g.turn()).unwrap_or(0);
+        let keys = [u64::from(pid.0), turn, u64::from(nid.get())];
+        let mut rng = Rng::keyed(g.state().seed(), Purpose::TestAgent, &keys);
+        answer(g, pid, nid, &mut rng);
         DriverOutcome::Done
     }
 }
