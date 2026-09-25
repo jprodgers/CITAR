@@ -281,7 +281,7 @@ fn event_data(cx: &mut Cx<'_>, v: &Value, p: &Path<'_>) -> Res<Option<EventData>
     };
     d.religion = cx.opt_religion(o.get("religion"), &o.at("religion"))?;
     d.reward = cx.opt_named(o.get("reward"), &o.at("reward"))?;
-    d.victory = cx.opt_named(o.get("victory"), &o.at("victory"))?;
+    d.victory = cx.opt_victory(o.get("victory"), &o.at("victory"))?;
     d.status = match o.opt_text("status")? {
         None => None,
         Some(s) => Some(

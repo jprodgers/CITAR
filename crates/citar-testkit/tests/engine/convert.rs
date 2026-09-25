@@ -18,6 +18,7 @@ use citar_engine::base::ids::{CityId, PlayerId};
 use citar_engine::compat::python::{ConvertReport, Converted, Dropped, state_from_python};
 use citar_engine::rules::Ruleset;
 use citar_engine::save::{self, journal, json};
+use citar_engine::state::Phase;
 use citar_engine::state::chronicle::Chronicle;
 use citar_testkit::fixtures::{self, Fixture};
 use serde_json::{Value, json};
@@ -279,4 +280,22 @@ fn a_city_the_player_holds_gets_its_free_buildings() {
         }
     }
     assert!(moved > 0, "the late fixture has free buildings");
+}
+
+/// Python's `Neutral`, the win of `Triggers victory`, is no victory of the ruleset: a game won so
+/// converts with its winner and no victory, which the engine names `Neutral` again.
+#[test]
+fn a_neutral_victory_converts_to_a_winner_with_no_victory() {
+    let f = fixtures::committed()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("a fixture"));
+    let (_, mut py) = state_json(&f);
+    py["phase"] = json!("over");
+    py["winner"] = json!(0);
+    py["victory"] = json!("Neutral");
+    let got = convert(&f.name, py.to_string().as_bytes());
+    let c = got.state.clock();
+    assert_eq!((c.phase, c.winner, c.victory), (Phase::Over, Some(PlayerId(0)), None));
 }

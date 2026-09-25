@@ -819,7 +819,13 @@ pub fn rust(r: &Ruleset, g: &Game) -> Value {
     json!({
         "clock": {"turn": clock.turn, "current": clock.current.0, "turn_started": clock.turn_started,
                   "phase": match clock.phase { citar_engine::state::Phase::Playing => "playing", citar_engine::state::Phase::Over => "over" },
-                  "winner": clock.winner.map(|p| p.0), "victory": clock.victory.map(|v| n.of(v)),
+                  "winner": clock.winner.map(|p| p.0),
+                  "victory": match (clock.winner, clock.victory) {
+                      (_, Some(v)) => json!(n.of(v)),
+                      // The win of `Triggers victory`, no victory of the ruleset.
+                      (Some(_), None) => json!("Neutral"),
+                      (None, None) => Value::Null,
+                  },
                   "next_id": next_id},
         "map": rs_map(st),
         "settings": rs_settings(&n),
@@ -1530,6 +1536,10 @@ fn rs_event_data(n: &Names<'_>, d: Option<&EventData>) -> Value {
     put("religion", opt(d.religion, |x| n.religion(x)));
     put("reward", opt(d.reward, |x| n.ruin(x)));
     put("victory", opt(d.victory, |x| n.of(x)));
+    if d.victory.is_none() && d.winner.is_some() {
+        // A victory event of `Triggers victory`, no victory of the ruleset.
+        put("victory", json!("Neutral"));
+    }
     put("status", json!(d.status.map(|x| x.name())));
     put("gold", json!(d.gold));
     put("citizen_killed", json!(d.citizen_killed));

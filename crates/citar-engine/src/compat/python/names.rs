@@ -92,6 +92,16 @@ impl Cx<'_> {
         }
     }
 
+    /// A game's or a victory event's victory: `Neutral`, the win of `Triggers victory`
+    /// (`victory.py:300-301`), is no victory of the ruleset, and is kept as a winner with none
+    /// (`game::victory::Won`); any other name is the ruleset's.
+    pub(super) fn opt_victory(&self, v: Option<&Value>, p: &Path<'_>) -> Res<Option<VictoryId>> {
+        match v {
+            Some(Value::String(s)) if s == "Neutral" => Ok(None),
+            v => self.opt_named(v, p),
+        }
+    }
+
     /// A set of rule objects from a list of names. The list's order is dropped, and counted if
     /// it was not the ruleset's; a name listed twice is an error, since Python counted the list.
     pub(super) fn id_set<I: PyName, const W: usize>(
