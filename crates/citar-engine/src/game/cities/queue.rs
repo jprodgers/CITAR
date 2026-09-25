@@ -110,7 +110,7 @@ fn queue_names(g: &Game, c: CityId) -> Vec<&str> {
 }
 
 /// Writes a city's queue.
-fn write_queue(g: &mut Game, c: CityId, q: SmallVec<[Constructible; 4]>) {
+pub(crate) fn write_queue(g: &mut Game, c: CityId, q: SmallVec<[Constructible; 4]>) {
     if let Some(x) = g.city_mut(c, CityTouch::CORE) {
         x.queue = q;
     }

@@ -8,8 +8,14 @@
 //! rigs elections in a city-state's, or guards its own city. A set-up spy sees its city and the
 //! ring around it (`game::vis`), which the `SPIES` touch marks dirty.
 //!
-//! The city-state side (elections, rigging's payoff, coups and `stage_coup`) is package 1c-06's:
-//! a spy told to stage a coup waits for it.
+//! The city-state side is package 1c-06's (`espionage.py:265-328, 393-441, 491-498`): each
+//! city-state holds an election every so many turns ([`city_state_election_tick`]), won by one of
+//! the spies rigging it in its capital (weighted by their civilizations' influence and the spies'
+//! skill) or by nobody; a spy there may stage a coup ([`StageCoup`]) against the city-state's
+//! ally, which makes its civilization the ally or gets the spy killed. The first election's delay
+//! is drawn from `Purpose::ElectionDelay` keyed by the city-state, the winner from
+//! `Purpose::Election` keyed by the city-state and the turn, and a coup's roll from the spy's own
+//! stream.
 
 use serde_json::{Value, json};
 
@@ -18,12 +24,13 @@ use crate::base::rng::{KeyPart, Purpose, Rng};
 use crate::base::sets::PlayerSet;
 use crate::base::stats::Stat;
 use crate::base::{num, py};
+use crate::game::Game;
 use crate::game::action::{OutcomeSpec, Rule};
+use crate::game::city_states::influence::{self as cs_influence, data as cs_data};
 use crate::game::derive::rev::PlayerTouch;
 use crate::game::diplomacy::relations::{add_opinion, name};
 use crate::game::error::ActionError;
 use crate::game::research::{self, TechSource};
-use crate::game::{Game, Porting, pending};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::diplo::OpinionKey;
 use crate::state::players::{Player, Spy, SpyAction};
@@ -523,8 +530,7 @@ fn work(g: &mut Game, p: PlayerId, i: usize, a: SpyAction, c: CityId, owner: Pla
                 x.turns = turns;
             }
         }
-        // The coup itself, with its chance and its fallout, is the city-states' (1c-06).
-        SpyAction::Coup => pending(Porting::Pending("1c-06")),
+        SpyAction::Coup => initiate_coup(g, p, i),
         SpyAction::CounterIntelligence => {
             if let Some(x) = spy_mut(g, p, i) {
                 x.turns = x.turns.saturating_sub(1);
@@ -542,6 +548,201 @@ pub(crate) fn end_turn(g: &mut Game, p: PlayerId) {
     }
     for i in 0..spies(g, p).len() {
         spy_end_turn(g, p, i);
+    }
+}
+
+// ---- Elections and coups (espionage.py:265-328, 393-441) --------------------------------------
+
+/// Whether a spy is in a position to stage a coup (`can_coup`, `espionage.py:265-269`): set up in
+/// a city-state's city, which is not its civilization's ally.
+#[must_use]
+pub fn can_coup(g: &Game, p: PlayerId, s: &Spy) -> bool {
+    let Some(owner) = spy_city(g, s).and_then(|c| g.city(c)).map(crate::state::cities::City::owner)
+    else {
+        return false;
+    };
+    g.is_city_state(owner)
+        && s.action.is_set_up()
+        && cs_data(g, owner).and_then(crate::state::players::CityStateData::ally) != Some(p)
+}
+
+/// The chance a coup succeeds, 0 to 0.85 (`coup_chance`, `espionage.py:272-283`): half the gap
+/// between the ally's influence (60 without an ally) and the spy's civilization's, off 50%, and
+/// half the gap in skill with the ally's spy there, which the spy's owner does not see
+/// (`include_unknown` false).
+#[must_use]
+pub fn coup_chance(g: &Game, p: PlayerId, s: &Spy, include_unknown: bool) -> f64 {
+    let Some((c, cs)) = spy_city(g, s).and_then(|c| g.city(c)).map(|x| (x.id(), x.owner())) else {
+        return 0.0;
+    };
+    let ally = cs_data(g, cs).and_then(crate::state::players::CityStateData::ally);
+    let mut diff = ally.map_or(60.0, |a| cs_influence::influence(g, cs, a));
+    diff -= cs_influence::influence(g, cs, p);
+    let mut pct = 50.0 - diff / 2.0;
+    let defender = ally
+        .filter(|_| include_unknown)
+        .and_then(|a| spy_in_city(g, a, c).and_then(|d| spy(g, a, d).map(|x| (a, x.clone()))));
+    let ranks = skill_percent(g, p, s) - defender.map_or(0, |(a, d)| skill_percent(g, a, &d));
+    pct += f64::from(ranks) / 2.0;
+    pct.clamp(0.0, 85.0) / 100.0
+}
+
+/// A coup is resolved at the end of its spy's turn (`_initiate_coup`, `espionage.py:286-323`):
+/// on success the spy's civilization takes the ally's influence (80 without an ally), the old
+/// ally loses 20 and the others who know the city-state 10, and the spy goes back to rigging; on
+/// failure its civilization loses 20 influence and the spy is killed. A spy no longer placed to
+/// stage one goes back to rigging.
+fn initiate_coup(g: &mut Game, p: PlayerId, i: usize) {
+    let Some(s) = spy(g, p, i).cloned() else { return };
+    if !can_coup(g, p, &s) {
+        set(g, p, i, SpyAction::RiggingElections, 10);
+        return;
+    }
+    let Some((c, cs, at)) =
+        spy_city(g, &s).and_then(|c| g.city(c)).map(|x| (x.id(), x.owner(), x.tile()))
+    else {
+        return;
+    };
+    let ally = cs_data(g, cs).and_then(crate::state::players::CityStateData::ally);
+    let chance = coup_chance(g, p, &s, true);
+    let mut rng =
+        Rng::keyed(g.state().seed(), Purpose::Spy, &[i as u64, p.key(), at.key(), g.turn().key()]);
+    let (me, csn) = (name(g, p), name(g, cs));
+    let refused = |r: Result<(), crate::state::StateError>| {
+        debug_assert!(r.is_ok(), "a city-state's influence refused: {r:?}");
+    };
+    if rng.unit() <= chance {
+        let prev = ally.map_or(80.0, |a| cs_influence::influence(g, cs, a));
+        refused(cs_influence::set_influence(g, cs, p, prev));
+        tell(g, p, &format!("Your spy {} successfully staged a coup in {csn}!", s.name), Some(at));
+        if let Some(a) = ally {
+            refused(cs_influence::add_influence(g, cs, a, -20.0));
+            let text =
+                format!("A spy from {me} successfully staged a coup in our former ally {csn}!");
+            tell(g, a, &text, Some(at));
+            add_opinion(g, a, p, OpinionKey::SpiedOnUs, -15.0);
+        }
+        let others: Vec<PlayerId> = g
+            .majors(true)
+            .map(Player::id)
+            .filter(|&q| Some(q) != ally && q != p && g.has_met(q, cs))
+            .collect();
+        for q in others {
+            tell(g, q, &format!("A spy from {me} successfully staged a coup in {csn}!"), Some(at));
+            refused(cs_influence::add_influence(g, cs, q, -10.0));
+        }
+        set(g, p, i, SpyAction::RiggingElections, 10);
+        refused(cs_influence::update_ally(g, cs));
+    } else {
+        let defender = ally.and_then(|a| spy_in_city(g, a, c).map(|d| (a, d)));
+        refused(cs_influence::add_influence(g, cs, p, -20.0));
+        if let Some(a) = ally {
+            let text =
+                format!("A spy from {me} failed to stage a coup in our ally {csn} and was killed!");
+            tell(g, a, &text, Some(at));
+            add_opinion(g, a, p, OpinionKey::SpiedOnUs, -10.0);
+        }
+        let text = format!("Our spy {} failed to stage a coup in {csn} and was killed!", s.name);
+        tell(g, p, &text, Some(at));
+        kill(g, p, i);
+        if let Some((a, d)) = defender {
+            level_up(g, a, d, 1);
+        }
+    }
+}
+
+/// A city-state's election countdown, at the end of its turn (`city_state_election_tick`,
+/// `espionage.py:393-402`): the first is drawn up to the ruleset's interval away, then it counts
+/// down and holds the election at 0.
+pub fn city_state_election_tick(g: &mut Game, cs: PlayerId) {
+    let n = g.rules().constants().formulas.city_state_election_turns;
+    let Some(left) = cs_data(g, cs).map(|d| d.election_in) else { return };
+    let next = match left {
+        None => {
+            let mut rng = Rng::keyed(g.state().seed(), Purpose::ElectionDelay, &[cs.key()]);
+            let first = rng.below(u64::try_from(n.max(0)).unwrap_or(0) + 1);
+            i16::try_from(first).unwrap_or(i16::MAX)
+        }
+        Some(x) => x - 1,
+    };
+    if let Some(d) = cs_influence::data_mut(g, cs) {
+        d.election_in = Some(next);
+    }
+    if left.is_some() && next <= 0 {
+        hold_elections(g, cs);
+    }
+}
+
+/// A city-state's election (`hold_elections`, `espionage.py:405-441`): among the spies rigging it
+/// in its capital, and nobody (weight 20), weighted by half the civilization's influence plus the
+/// spy's skill by its efficiency. The winner gains 20 influence and every other major that knows
+/// the city-state loses 5; if nobody wins, the riggers lose 5.
+pub fn hold_elections(g: &mut Game, cs: PlayerId) {
+    let n = g.rules().constants().formulas.city_state_election_turns;
+    if let Some(d) = cs_influence::data_mut(g, cs) {
+        d.election_in = Some(i16::try_from(n).unwrap_or(i16::MAX));
+    }
+    let Some((cap, cap_name, at)) = g
+        .player(cs)
+        .and_then(|p| p.capital)
+        .and_then(|c| g.city(c))
+        .map(|c| (c.id(), c.name.to_string(), c.tile()))
+    else {
+        return;
+    };
+    let riggers: Vec<(PlayerId, usize)> = spies_in_city(g, cap)
+        .into_iter()
+        .filter(|&(p, i)| spy(g, p, i).is_some_and(|s| s.action == SpyAction::RiggingElections))
+        .collect();
+    if riggers.is_empty() {
+        return;
+    }
+    let mut weights: Vec<f64> = riggers
+        .iter()
+        .map(|&(p, i)| {
+            let s = spy(g, p, i).cloned();
+            s.map_or(0.0, |s| {
+                f64::max(
+                    0.0,
+                    cs_influence::influence(g, cs, p) / 2.0
+                        + f64::from(skill_percent(g, p, &s)) * efficiency(g, p, &s),
+                )
+            })
+        })
+        .collect();
+    weights.push(20.0);
+    let mut rng = Rng::keyed(g.state().seed(), Purpose::Election, &[cs.key(), g.turn().key()]);
+    let winner = if weights.iter().sum::<f64>() > 0.0 {
+        rng.weighted(&weights).and_then(|w| riggers.get(w)).map(|&(p, _)| p)
+    } else {
+        None
+    };
+    let refused = |r: Result<(), crate::state::StateError>| {
+        debug_assert!(r.is_ok(), "a city-state's influence refused: {r:?}");
+    };
+    let Some(winner) = winner else {
+        for &(p, _) in &riggers {
+            refused(cs_influence::add_influence(g, cs, p, -5.0));
+            tell(g, p, &format!("Your spy lost the election in {cap_name}!"), Some(at));
+        }
+        return;
+    };
+    let ally = cs_data(g, cs).and_then(crate::state::players::CityStateData::ally);
+    let csn = name(g, cs);
+    let wn = name(g, winner);
+    let majors: Vec<PlayerId> = g.majors(true).map(Player::id).collect();
+    for q in majors {
+        if !g.has_met(cs, q) {
+            continue;
+        }
+        refused(cs_influence::add_influence(g, cs, q, if q == winner { 20.0 } else { -5.0 }));
+        if q == winner {
+            tell(g, q, &format!("Your spy successfully rigged the election in {csn}!"), Some(at));
+        } else if riggers.iter().any(|&(p, _)| p == q) {
+            tell(g, q, &format!("Your spy lost the election in {csn} to {wn}!"), Some(at));
+        } else if Some(q) == ally {
+            tell(g, q, &format!("The election in {csn} was rigged by {wn}!"), Some(at));
+        }
     }
 }
 
@@ -630,6 +831,39 @@ impl Rule for MoveSpy {
                 json!({"spy": spy_name(g, i), "moving_to": city_name(g, c), "arrives_in_turns": 1})
             }
         })
+    }
+}
+
+/// `stage_coup`: a spy in a city-state's capital stages a coup at the end of its civilization's
+/// turn (`tools.stage_coup`, `espionage.stage_coup`, `espionage.py:491-498`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StageCoup {
+    pub spy: Value,
+}
+
+impl Rule for StageCoup {
+    type Plan = usize;
+
+    fn check(&self, g: &Game, pid: PlayerId) -> Result<usize, ActionError> {
+        let i = find_spy(g, pid, &self.spy)?;
+        if !can_coup(g, pid, &spies(g, pid)[i]) {
+            return Err(ActionError::rule(
+                "A coup needs a set-up spy in the capital of a city-state that is not allied with \
+                 you.",
+            ));
+        }
+        Ok(i)
+    }
+
+    fn apply(self, g: &mut Game, pid: PlayerId, i: usize) -> OutcomeSpec {
+        let chance = spy(g, pid, i).map_or(0.0, |s| coup_chance(g, pid, s, false));
+        set(g, pid, i, SpyAction::Coup, 0);
+        let name = spy(g, pid, i).map(|s| s.name.to_string());
+        OutcomeSpec::value(json!({
+            "spy": name,
+            "coup_at_end_of_turn": true,
+            "estimated_success_chance": num::round_half_even_i64(chance * 100.0),
+        }))
     }
 }
 

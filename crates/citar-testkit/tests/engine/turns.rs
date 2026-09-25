@@ -106,7 +106,7 @@ fn a_bare_arena_game_plays_fifty_end_turns_cleanly_and_lists_what_waits() {
         .filter(|p| p["kind"] == "turn_stage")
         .filter_map(|p| p["name"].as_str())
         .collect();
-    assert!(stages.contains(&"player_start S8: the city-state's turn"));
+    assert!(!stages.contains(&"player_start S8: the city-state's turn"), "ported in 1c-06");
     assert!(!stages.contains(&"player_start S8: standing unit orders"), "ported in 1c-04");
     assert!(!stages.contains(&"player_end E6: worker builds"), "ported in 1c-04");
     assert!(stages.contains(&"round_end R2: the round's statistics"));
@@ -205,7 +205,8 @@ fn a_new_game_on_the_arena_starts_at_the_first_players_turn() {
     for p in 0..4 {
         assert!(g.has_tech(PlayerId(p), agriculture), "player {p}");
     }
-    assert!(!g.has_tech(PlayerId(4), agriculture), "the barbarians know nothing");
+    // The barbarians know what every civilization knows, set as their first camps are placed.
+    assert!(g.has_tech(PlayerId(4), agriculture), "the barbarians keep up");
     let seat = g.player(PlayerId(0)).map(|p| p.seat().difficulty());
     assert_eq!(seat, Some(Some(g.state().config().difficulty)));
     // The host's own settings are kept, and so are the seats as the lobby sent them.
@@ -270,12 +271,14 @@ fn city_states_and_barbarians_play_inside_a_major_civilizations_end_turn() {
     let before = g.chronicle().events().len();
     let batch = g.end_turn(PlayerId(1)).expect("its turn");
     // The city-state and the barbarians played, the round ended, and the first major's turn
-    // began: they announce nothing of their own.
+    // began: they announce no turn of their own. The city-state founded its city with its
+    // settler (`city_states._found_with_settlers`).
     assert_eq!((g.turn(), g.current()), (2, PlayerId(0)));
     let kinds: Vec<&str> = batch.events().iter().map(|e| e.kind.name()).collect();
-    assert_eq!(kinds, ["turn_end", "turn_start"]);
-    assert_eq!(g.chronicle().events().len(), before + 2);
-    assert_eq!(&*batch.events()[1].text, "Turn 2 (3960 BC): Civilization 1's turn.");
+    assert_eq!(kinds, ["turn_end", "city_founded", "turn_start"]);
+    assert_eq!(g.chronicle().events().len(), before + 3);
+    assert_eq!(&*batch.events()[2].text, "Turn 2 (3960 BC): Civilization 1's turn.");
+    assert_eq!(g.player_cities(PlayerId(2)).count(), 1);
     clean(&mut g);
 }
 

@@ -664,15 +664,37 @@ pub static SETUP: [SetupStage; 15] = [
     SetupStage::later("map: starts and ruins a document lacks", Porting::Pending("1c-09")),
     SetupStage::draft("players", make_players),
     SetupStage::game("starting techs, gold and culture", starting_techs),
-    SetupStage::later("city-state init", Porting::Pending("1c-06")),
+    SetupStage::game("city-state init", init_city_states),
     SetupStage::game("starting units", starting_units),
     SetupStage::game("starting triggers", starting_triggers),
     SetupStage::game("relations", relations),
-    SetupStage::later("camps", Porting::Pending("1c-06")),
+    SetupStage::game("camps", camps),
     SetupStage::game("happiness", happiness),
     SetupStage::game("visibility", visibility),
     SetupStage::game("begin", begin),
 ];
+
+/// city-state init: each city-state's personality, unique luxury and gifted unit, the majors'
+/// nations kept from its choice of unit (`game.py:275-278`).
+fn init_city_states(g: &mut Game, d: &Draft<'_>) -> Result<(), EngineError> {
+    let used: crate::base::sets::NationSet = d.nations.iter().copied().collect();
+    let css: Vec<PlayerId> =
+        g.state().players().iter().filter(|(_, p)| p.is_city_state()).map(|(id, _)| id).collect();
+    for cs in css {
+        super::city_states::turn::init_city_state(g, cs, &used);
+    }
+    Ok(())
+}
+
+/// camps: the barbarians' first camps, in a game with barbarians (`game.py:309-310`). What
+/// everyone sees is settled first, so no camp appears in sight.
+fn camps(g: &mut Game, _: &Draft<'_>) -> Result<(), EngineError> {
+    if g.barbarian_id().is_some() {
+        g.settle_sight();
+        super::barbarians::place_initial_camps(g);
+    }
+    Ok(())
+}
 
 /// Commits every civilization's happiness once, so the conditionals of the first turn see it
 /// (DESIGN.md 6.6, 6.14).

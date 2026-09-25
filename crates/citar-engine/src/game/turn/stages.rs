@@ -30,8 +30,8 @@ use crate::game::derive::rev::UnitTouch;
 use crate::game::diplomacy::{deals, negotiation};
 use crate::game::triggers;
 use crate::game::{
-    Game, Porting, automation, economy, espionage, great_people, pending, policies, religion,
-    research, units, workers,
+    Game, Porting, automation, barbarians, city_states, economy, espionage, great_people, pending,
+    policies, religion, research, units, workers,
 };
 use crate::state::Phase;
 use crate::state::TurnClock;
@@ -163,7 +163,13 @@ pub static PLAYER_START: [Stage; 23] = [
         Always,
         Step::Player(units::turn::start_units),
     ),
-    Stage::later("S0", "the barbarians act", Who::BARBARIAN, Always, Porting::Pending("1c-06")),
+    Stage::run(
+        "S0",
+        "the barbarians act",
+        Who::BARBARIAN,
+        Always,
+        Step::Player(barbarians::take_turn_stage),
+    ),
     Stage::settle("S0", Who::BARBARIAN),
     Stage::run("S0", "the barbarians' turn ends here", Who::ALL, Always, Step::StopIfBarbarian),
     Stage::run(
@@ -190,12 +196,12 @@ pub static PLAYER_START: [Stage; 23] = [
         HasCities,
         Step::Player(great_people::maya_long_count),
     ),
-    Stage::later(
+    Stage::run(
         "S3",
         "city-states' great-person gifts",
         Who::MAJOR,
         Always,
-        Porting::Pending("1c-06"),
+        Step::Player(city_states::turn::great_person_gift_stage),
     ),
     Stage::later("S3", "revolts", Who::MAJOR, Always, Porting::Pending("1c-08")),
     Stage::run(
@@ -220,7 +226,13 @@ pub static PLAYER_START: [Stage; 23] = [
         Step::Player(units::turn::start_units),
     ),
     Stage::settle("S7", Who::CIVS),
-    Stage::later("S8", "the city-state's turn", Who::CITY_STATE, Always, Porting::Pending("1c-06")),
+    Stage::run(
+        "S8",
+        "the city-state's turn",
+        Who::CITY_STATE,
+        Always,
+        Step::Player(city_states::ai::take_turn_stage),
+    ),
     Stage::run(
         "S8",
         "standing unit orders",
@@ -276,12 +288,12 @@ pub static PLAYER_END: [Stage; 25] = [
         Step::Player(economy::end_turn_rates),
     ),
     Stage::run("E3", "culture and policies", Who::CIVS, Always, Step::Player(culture_and_policies)),
-    Stage::later(
+    Stage::run(
         "E3",
         "the city-state's own end of turn",
         Who::CITY_STATE,
         Always,
-        Porting::Pending("1c-06"),
+        Step::Player(city_states::turn::end_turn_stage),
     ),
     Stage::run(
         "E3",

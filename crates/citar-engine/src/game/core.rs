@@ -23,7 +23,6 @@ use super::error::ActionError;
 use super::events::{EventBatch, Mention};
 use super::invariants::Violation;
 use super::pending::{EffectQueue, PendingWork};
-use super::{Porting, pending};
 use crate::base::digest::{CanonError, Digest};
 use crate::base::hex::HexGrid;
 use crate::base::ids::{
@@ -46,8 +45,7 @@ use crate::state::units::Unit;
 use crate::state::{Phase, State};
 use crate::unique::{SourceUniques, UniqueType};
 
-/// The influence at which a city-state counts a civilization a friend (`city_states.py:16`).
-pub const FRIEND_INFLUENCE: f64 = 30.0;
+pub use super::city_states::influence::FRIEND_INFLUENCE;
 
 /// A game in progress: the state, everything derived from it, its history, and the work the next
 /// settle will do (DESIGN.md 6.1).
@@ -777,8 +775,8 @@ impl Game {
         if self.set_met(a, b).is_err() {
             return;
         }
-        // city_states.on_meet: the gift and the greeting (city_states.py).
-        pending(Porting::Pending("1c-06"));
+        // city_states.on_meet: the gift and the greeting (game.py:700-702).
+        super::city_states::turn::on_meet(self, a, b);
         let audience = [a, b].into_iter().collect();
         let data = EventData { a: Some(a), b: Some(b), ..EventData::default() };
         self.emit(
@@ -825,7 +823,6 @@ impl Game {
 
     /// Hands a unit to another player, clearing the orders that were the old owner's
     /// (`game.py:796-804`).
-    #[allow(dead_code, reason = "city-states' unit gifts and annexation call it from 1c-06")]
     pub(crate) fn change_unit_owner(
         &mut self,
         u: UnitId,

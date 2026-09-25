@@ -1,4 +1,4 @@
-//! Influence and allies (`city_states.py:65-153`).
+//! Influence and allies, and the relationship they make (`city_states.py:65-247`).
 //!
 //! A major's influence with a city-state is stored per pair; at war it reads as the floor, so
 //! influence built before a war does not quietly last through it. The ally is the met major with
@@ -8,14 +8,20 @@
 //!
 //! A write the state refuses (a player that is no city-state, or no major) is an engine bug; the
 //! rules return it rather than stop quietly halfway.
+//!
+//! Package 1c-06 adds the named relationship ([`relationship`]), the resting point influence
+//! drifts toward ([`resting_point`]) and how fast it drifts ([`degrade`], [`recovery`]), and
+//! whether a civilization has attacked city-states ([`is_aggressor`], [`is_warmonger`]).
 
 use crate::base::ids::PlayerId;
 use crate::base::sets::PlayerSet;
-use crate::game::Game;
 use crate::game::derive::rev::PlayerTouch;
-use crate::game::diplomacy::relations::{WarReason, set_war};
+use crate::game::diplomacy::relations::{WarReason, civ_has, set_war};
+use crate::game::{Game, religion};
+use crate::rules::defs::CityStatePersonality;
 use crate::state::StateError;
 use crate::state::chronicle::{EngineEvent, EventData};
+use crate::state::players::{CityStateData, CsPair};
 use crate::unique::{Ctx, UniqueData, UniqueType, uq};
 
 /// The lowest influence a major can have with a city-state (`city_states.py:14`).
@@ -23,6 +29,206 @@ pub const MIN_INFLUENCE: f64 = -60.0;
 
 /// The influence at which a city-state may take a major as its ally (`city_states.py:15`).
 pub const ALLY_INFLUENCE: f64 = 60.0;
+
+/// The influence at which a city-state counts a major a friend (`city_states.py:16`).
+pub const FRIEND_INFLUENCE: f64 = 30.0;
+
+/// A city-state's data, if `cs` is one.
+#[must_use]
+pub fn data(g: &Game, cs: PlayerId) -> Option<&CityStateData> {
+    g.player(cs).and_then(|p| p.city_state.as_deref())
+}
+
+/// A city-state's standing with a major (`_pair`, `city_states.py:25-31`): every pair is kept.
+#[must_use]
+pub fn pair(g: &Game, cs: PlayerId, major: PlayerId) -> CsPair {
+    data(g, cs).map(|d| d.pair(major)).unwrap_or_default()
+}
+
+/// Edits a city-state's standing with a major. Nothing a cache reads.
+pub(crate) fn pair_mut(g: &mut Game, cs: PlayerId, major: PlayerId) -> Option<&mut CsPair> {
+    g.player_mut(cs, PlayerTouch::CITY_STATE)?.city_state.as_deref_mut()?.pairs.get_mut(major)
+}
+
+/// A city-state's data to edit. Nothing a cache reads but its influence and ally, which change
+/// through [`set_influence`] and [`update_ally`].
+pub(crate) fn data_mut(g: &mut Game, cs: PlayerId) -> Option<&mut CityStateData> {
+    g.player_mut(cs, PlayerTouch::CITY_STATE)?.city_state.as_deref_mut()
+}
+
+/// The named relationship between a city-state and a major (`relationship`,
+/// `city_states.py:96-110`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Relationship {
+    /// Influence at -30 or below.
+    Unforgivable,
+    /// Influence below 0.
+    Enemy,
+    /// Its ally.
+    Ally,
+    /// Influence at the friend level.
+    Friend,
+    /// It would pay the major tribute.
+    Afraid,
+    Neutral,
+}
+
+impl Relationship {
+    /// Python's name: `Friend`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unforgivable => "Unforgivable",
+            Self::Enemy => "Enemy",
+            Self::Ally => "Ally",
+            Self::Friend => "Friend",
+            Self::Afraid => "Afraid",
+            Self::Neutral => "Neutral",
+        }
+    }
+
+    /// A friend or an ally.
+    #[must_use]
+    pub const fn friendly(self) -> bool {
+        matches!(self, Self::Friend | Self::Ally)
+    }
+}
+
+/// The relationship at the current influence (`relationship`, `city_states.py:96-110`): at -30 or
+/// below unforgivable, below 0 an enemy, its ally at the ally level, a friend at the friend
+/// level, afraid when it would pay tribute, else neutral.
+#[must_use]
+pub fn relationship(g: &Game, cs: PlayerId, major: PlayerId) -> Relationship {
+    let inf = influence(g, cs, major);
+    if inf <= -30.0 {
+        return Relationship::Unforgivable;
+    }
+    if inf < 0.0 {
+        return Relationship::Enemy;
+    }
+    if inf >= ALLY_INFLUENCE && data(g, cs).and_then(CityStateData::ally) == Some(major) {
+        return Relationship::Ally;
+    }
+    if inf >= FRIEND_INFLUENCE {
+        return Relationship::Friend;
+    }
+    if super::actions::tribute_willingness(g, cs, major, false) > 0 {
+        return Relationship::Afraid;
+    }
+    Relationship::Neutral
+}
+
+/// Whether a major has attacked a city-state at all (`is_aggressor`, `city_states.py:240-242`).
+#[must_use]
+pub fn is_aggressor(g: &Game, major: PlayerId) -> bool {
+    g.player(major).and_then(|p| p.major.as_deref()).is_some_and(|m| m.cs_attacks >= 1)
+}
+
+/// Whether it has done so often enough for every city-state to hold it against it
+/// (`is_warmonger`, `city_states.py:245-247`).
+#[must_use]
+pub fn is_warmonger(g: &Game, major: PlayerId) -> bool {
+    g.player(major).and_then(|p| p.major.as_deref()).is_some_and(|m| m.cs_attacks >= 3)
+}
+
+/// Whether a city-state's capital follows the religion `major` founded.
+fn follows_major(g: &Game, cs: PlayerId, major: PlayerId) -> bool {
+    let founded = g.player(major).and_then(|p| p.religion.founded);
+    let cap = g.player(cs).and_then(|p| p.capital).filter(|&c| g.city(c).is_some());
+    founded.is_some() && cap.is_some_and(|c| religion::majority_religion(g, c) == founded)
+}
+
+/// The influence a relationship drifts toward (`resting_point`, `city_states.py:187-207`): 0,
+/// raised by the major's `Resting point for Influence with City-States is increased by [n]`,
+/// and by `... following this religion [n]` where the capital follows its religion; 10 more for
+/// a protector, 20 less where the city-state has grown wary of it.
+#[must_use]
+pub fn resting_point(g: &Game, cs: PlayerId, major: PlayerId) -> f64 {
+    let v = g.view();
+    let ctx = Ctx::civ(major);
+    let mut rp =
+        f64::from(uq::sum_i32(uq::civ(&v, major, UniqueType::CityStateRestingPoint, &ctx), |d| {
+            match d {
+                UniqueData::CityStateRestingPoint(x) => Some(x.influence),
+                _ => None,
+            }
+        }));
+    if follows_major(g, cs, major) {
+        rp += f64::from(uq::sum_i32(
+            uq::civ(&v, major, UniqueType::RestingPointOfCityStatesFollowingReligionChange, &ctx),
+            |d| match d {
+                UniqueData::RestingPointOfCityStatesFollowingReligionChange(x) => Some(x.influence),
+                _ => None,
+            },
+        ));
+    }
+    if data(g, cs).is_some_and(|d| d.protectors.contains(major)) {
+        rp += 10.0;
+    }
+    if pair(g, cs, major).wary {
+        rp -= 20.0;
+    }
+    rp
+}
+
+/// The influence lost this turn above the resting point (`_degrade`, `city_states.py:210-224`):
+/// 1, 1.5 for a hostile city-state, 2 for an aggressor; changed by the major's `[n]% City-State
+/// Influence degradation`, 25% less where the capital follows its religion, and more for every
+/// other major's `City-State Influence degrades [n]% faster ...`.
+#[must_use]
+pub fn degrade(g: &Game, cs: PlayerId, major: PlayerId) -> f64 {
+    if influence(g, cs, major) <= resting_point(g, cs, major) {
+        return 0.0;
+    }
+    let hostile = data(g, cs).and_then(|d| d.personality) == Some(CityStatePersonality::Hostile);
+    let dec = if hostile {
+        1.5
+    } else if is_aggressor(g, major) {
+        2.0
+    } else {
+        1.0
+    };
+    let v = g.view();
+    let mut pct = f64::from(uq::sum_i32(
+        uq::civ(&v, major, UniqueType::CityStateInfluenceDegradation, &Ctx::civ(major)),
+        |d| match d {
+            UniqueData::CityStateInfluenceDegradation(x) => Some(x.percent),
+            _ => None,
+        },
+    ));
+    if follows_major(g, cs, major) {
+        pct -= 25.0;
+    }
+    for q in g.majors(true).map(crate::state::players::Player::id).filter(|&q| q != major) {
+        pct += f64::from(uq::sum_i32(
+            uq::civ(&v, q, UniqueType::OtherCivsCityStateRelationsDegradeFaster, &Ctx::civ(q)),
+            |d| match d {
+                UniqueData::OtherCivsCityStateRelationsDegradeFaster(x) => Some(x.percent),
+                _ => None,
+            },
+        ));
+    }
+    f64::max(0.0, dec) * (1.0 + pct.max(-100.0) / 100.0)
+}
+
+/// The influence regained this turn below the resting point (`_recovery`,
+/// `city_states.py:227-237`): 1, twice that with `City-State Influence recovers at twice the
+/// normal rate`, and half again where the capital follows the major's religion.
+#[must_use]
+pub fn recovery(g: &Game, cs: PlayerId, major: PlayerId) -> f64 {
+    if influence(g, cs, major) >= resting_point(g, cs, major) {
+        return 0.0;
+    }
+    let mut pct = if civ_has(g, major, UniqueType::CityStateInfluenceRecoversTwiceNormalRate) {
+        100.0
+    } else {
+        0.0
+    };
+    if follows_major(g, cs, major) {
+        pct += 50.0;
+    }
+    1.0 + f64::max(0.0, pct) / 100.0
+}
 
 /// A major's influence with a city-state: the stored value, or the floor while they are at war
 /// (`city_states.influence`, `city_states.py:65-74`).

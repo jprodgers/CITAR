@@ -8,8 +8,9 @@
 //! defensive pacts and city-state allies drawn in, and the peace treaty. Package 1c-05 adds
 //! declaring war as a player does (`can_declare_war` and `declare_war`, `diplomacy.py:134-168`),
 //! denouncing (`diplomacy.py:283-300`), peace with a city-state (`diplomacy.py:267-280`), the
-//! embassy requirement (`diplomacy.py:103-110`), and the negotiations a war cancels. The
-//! consequences that belong to the city-states are marked where Python had them (1c-06).
+//! embassy requirement (`diplomacy.py:103-110`), and the negotiations a war cancels. Package
+//! 1c-06 adds the city-states' reactions: an attacked city-state's (`city_states.on_attacked`)
+//! and a protector's broken pledge.
 //!
 //! A write the state refuses (two ids that are no pair, a city-state that is none) is an engine
 //! bug. The rules return it rather than stop quietly halfway, so a scenario operation reports it
@@ -26,7 +27,7 @@ use crate::base::text::truncate_chars;
 use crate::game::city_states::influence::{add_influence, set_influence};
 use crate::game::derive::rev::DiploTouch;
 use crate::game::error::ActionError;
-use crate::game::{Game, Porting, pending, triggers};
+use crate::game::{Game, triggers};
 use crate::state::StateError;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::diplo::{OPINION_LIMIT, OpinionKey, PairError, side};
@@ -114,8 +115,7 @@ pub fn set_war(
         // Attacking a city-state drops the attacker's influence to the floor, and its ally's far
         // below it (diplomacy.py:177-181).
         set_influence(g, b, a, -60.0)?;
-        // city_states.on_attacked: the attacked city-state's friends and quests react.
-        pending(Porting::Pending("1c-06"));
+        crate::game::city_states::turn::on_attacked(g, b, a);
         let ally = g.player(b).and_then(|p| p.city_state.as_deref()).and_then(|d| d.ally());
         if ally == Some(a) {
             set_influence(g, b, a, -120.0)?;
@@ -198,9 +198,11 @@ pub fn set_war(
             }
         }
     }
-    // A protector that attacks its city-state withdraws its protection
-    // (city_states.withdraw_protection).
-    pending(Porting::Pending("1c-06"));
+    // A protector that attacks its city-state breaks its pledge (city_states.withdraw_protection,
+    // diplomacy.py:231-232).
+    if g.player(b).and_then(|p| p.city_state.as_deref()).is_some_and(|d| d.protectors.contains(a)) {
+        crate::game::city_states::actions::withdraw(g, a, b);
+    }
     // `upon declaring war`, `upon being declared war on` and `upon entering a war`
     // (diplomacy.py:234-237).
     let fire = |g: &mut Game, p: PlayerId, e: TriggerEvent| {
@@ -390,7 +392,7 @@ pub fn denounce(g: &mut Game, pid: PlayerId, target: PlayerId) -> Value {
 /// Checks that a major may make peace with city-state `cs` directly, as UnCiv lets it
 /// (`make_peace_with_city_state`, `diplomacy.py:267-278`): at war with it, not while its ally
 /// fights the major, and not before the shortest war is over. The `city_state_action` tool
-/// (package 1c-06) reads it.
+/// reads it.
 ///
 /// # Errors
 /// Why it may not.

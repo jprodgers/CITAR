@@ -25,8 +25,9 @@
 //!   stopped, where Python recursed until it raised and failed whatever caused the first.
 //!
 //! A few effects reach systems later packages port, and are carried out here with the least of
-//! them: the next world leader vote scheduled (1c-08) and the city-states' first great-person
-//! gift brought forward (1c-06). A spy recruited or promoted is `espionage`'s. What a one-time
+//! them: the next world leader vote scheduled (1c-08). The city-states' first great-person gift
+//! brought forward is timed by `city_states::turn`, and a spy recruited or promoted is
+//! `espionage`'s. What a one-time
 //! effect does to a unit is package 1c-02's `units::health::apply_unit_effect`, and a promotion
 //! given free is its `units::promotions::add_promotion`.
 
@@ -512,7 +513,7 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
             !chosen.is_empty()
         }
         OneTimeEffect::CityStateGreatPersonGift => {
-            let gift = turns_for_gp_gift(g, p) / 2;
+            let gift = super::city_states::turn::turns_for_gp_gift(g, p) / 2;
             let Some(m) = g.player_mut(p, PlayerTouch::OTHER).and_then(|x| x.major.as_deref_mut())
             else {
                 return false;
@@ -894,11 +895,4 @@ fn schedule_vote(g: &mut Game) {
         EventData::default(),
         &[],
     );
-}
-
-/// How long until a city-state's great-person gift (`city_states.turns_for_gp_gift`,
-/// `city_states.py:354-357`): 37 to 43 turns, scaled by speed.
-fn turns_for_gp_gift(g: &Game, major: PlayerId) -> i32 {
-    let mut rng = Rng::keyed(g.state().seed(), Purpose::CsGp, &[major.key(), g.turn().key()]);
-    num::trunc_i32(f64::from(37 + i32::try_from(rng.below(7)).unwrap_or(0)) * g.speed().modifier)
 }

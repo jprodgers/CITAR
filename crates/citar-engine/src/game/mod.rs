@@ -50,6 +50,11 @@
 //! Diplomacy and espionage (package 1c-05): the rest of [`diplomacy`] (deals, negotiations,
 //! messages, declaring war and denouncing) and [`espionage`] (spies and stealing technology).
 //!
+//! Barbarians and city-states (package 1c-06): [`barbarians`] (camps, spawning, sacking and the
+//! raiders' AI), the rest of [`city_states`] (setup, relationships, gifts, protection, tribute,
+//! marriage, quests, the city-states' turns and their AI) and the city-state side of
+//! [`espionage`] (elections and coups).
+//!
 //! **Porting markers.** A step whose system a later package ports is written as
 //! `pending(Porting::Pending("<package>"))`, or `pending_or` where it must answer
 //! something meanwhile. `cargo xtask check` counts these by their literal argument and fails
@@ -59,6 +64,7 @@ pub mod action;
 pub mod actions;
 pub mod advisor;
 pub mod automation;
+pub mod barbarians;
 pub mod cities;
 pub mod city_states;
 pub mod combat;

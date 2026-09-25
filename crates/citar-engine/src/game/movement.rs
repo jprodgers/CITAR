@@ -16,11 +16,11 @@
 
 use serde_json::{Value, json};
 
+use super::Game;
 use super::derive::rev::UnitTouch;
 use super::error::{ActionError, ErrCode};
 use super::path::{Blocked, Mover, PathKey, stack_reason};
 use super::units::{self, promotions::add_promotion, remove_unit};
-use super::{Game, Porting, pending};
 use crate::base::ids::{PlayerId, TileIdx, UnitId};
 use crate::rules::defs::Domain;
 use crate::state::map::Tile;
@@ -206,8 +206,7 @@ pub fn on_enter_tile(g: &mut Game, u: UnitId, t: TileIdx) {
         && g.rules().base_units()[base].military
         && !g.is_barbarian(owner)
     {
-        // barbarians.clear_camp (barbarians.py).
-        pending(Porting::Pending("1c-06"));
+        super::barbarians::clear_camp(g, t, owner);
     }
     if g.unit(u).is_some() {
         terrain_promotions(g, u);
