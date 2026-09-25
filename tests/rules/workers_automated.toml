@@ -1,0 +1,135 @@
+about = """
+An automated worker goes to the best job among its cities' tiles and starts it when it arrives: a
+luxury its civilization lacks comes first. Its order stays automated, it keeps at a job it has
+started, and once the job is done it looks for the next: with nothing worth building it idles, and a
+city not linked to the capital makes a road toward it a job. Only units that build improvements can
+be automated, and a civilian cannot explore.
+"""
+from = "citar/engine/automation.py: automate_worker, worker_jobs, _best_job"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+  { op = "grant_tech", player = 0, tech = "Calendar" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "A" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", worker = "=made[3].unit_ids[0]", warrior = "=made[4].unit_ids[0]" }
+
+[[step]]
+note = "Roma's borders reach the cotton two tiles north."
+op = "set_city"
+args = { city = "=roma", claim_radius = 2 }
+
+[[step]]
+check = { what = "tile", at = "L" }
+subset = { resource = "Cotton", owner = 0, improvement = "=null" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=worker" }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=warrior", order = "automate" }
+error = "Only units that build improvements (Workers) can be automated."
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=worker", order = "explore" }
+error = "Civilians cannot explore."
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=worker", order = "automate" }
+as = "first"
+
+[[step]]
+check = "first"
+eq = { status = "working", tile = { x = "=x('L')", y = "=y('L')" }, job = "Plantation" }
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+subset = { x = "=x('L')", y = "=y('L')", activity = "automate" }
+
+[[step]]
+check = { what = "tile", at = "L" }
+path = "builds[0][0]"
+eq = "Plantation"
+
+[[step]]
+note = "At the start of the next turn it keeps at it."
+op = "automate"
+args = { player = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+subset = { x = "=x('L')", y = "=y('L')", activity = "automate" }
+
+[[step]]
+check = { what = "tile", at = "L" }
+path = "builds[0][1]"
+ge = 1
+as = "left"
+
+[[step]]
+note = "Movement back, its order kept, for the work at the end of its turns."
+op = "set_unit"
+args = { unit = "=worker", moves = 120 }
+
+[[step]]
+op = "progress_builds"
+args = { player = 0, turns = "=left" }
+
+[[step]]
+check = { what = "tile", at = "L" }
+subset = { improvement = "Plantation", builds = [] }
+
+[[step]]
+note = "Built by an automated worker, the job leaves its order as it was."
+check = { what = "unit", unit = "=worker" }
+path = "activity"
+eq = "automate"
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=worker" }
+
+[[step]]
+note = "Readying cleared the order. Automated again, it finds nothing worth building."
+tool = "unit_order"
+args = { unit_id = "=worker", order = "automate" }
+as = "second"
+
+[[step]]
+check = "second"
+eq = { status = "idle" }
+
+[[step]]
+note = "A second city not linked to the capital: a road toward it is a job."
+ops = [
+  { op = "found_city", player = 0, at = "(10,5)", name = "Cumae" },
+  { op = "grant_tech", player = 0, tech = "The Wheel" },
+]
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=worker" }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=worker", order = "automate" }
+as = "third"
+
+[[step]]
+check = "third"
+subset = { status = "working", job = "Road" }
+
+[[step]]
+check = { what = "unit", unit = "=worker" }
+path = "activity"
+eq = "automate"

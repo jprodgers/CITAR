@@ -18,6 +18,12 @@
 //! to sweep with its fighters, to decide what becomes of the cities it has taken, and to answer
 //! the offers to return the civilians it took back from the barbarians.
 //!
+//! Package 1c-04 teaches it to found cities (`found_city`, and now and then through
+//! `unit_action`), to set its workers building (`build_improvement`, a repair, a cancellation or
+//! an instant improvement among the choices) or automated, to explore and pillage, and to take
+//! its units' special actions (`unit_action`: religions founded, enhanced and spread, great
+//! people spent, paradrops, the one-time effects a unit carries).
+//!
 //! Package 1c-05 teaches it diplomacy ([`diplomacy`]) and espionage ([`spies`]): to answer the
 //! negotiations that wait on it (accept, counter, reply or reject, at random), now and then to
 //! message a civilization it has met, to open a negotiation with a proposal drawn from a small
@@ -33,6 +39,7 @@
 
 use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TechId, TileIdx, UnitId};
 use citar_engine::base::rng::{Purpose, Rng};
+use citar_engine::game::actions::{ActionKind, FoundCity, UnitAction, unit_actions};
 use citar_engine::game::cities::borders::{BuyTile, can_buy_tile};
 use citar_engine::game::cities::construction::{buildable_items, item_name};
 use citar_engine::game::cities::purchase::Buy;
@@ -49,16 +56,19 @@ use citar_engine::game::diplomacy::actions::{
 use citar_engine::game::espionage::{MoveSpy, spies as spies_of};
 use citar_engine::game::path::Mover;
 use citar_engine::game::policies::{AdoptPolicy, adoptable_policies, can_adopt_any};
+use citar_engine::game::religion::found::{ai_choose_beliefs, beliefs_to_choose};
 use citar_engine::game::research::{
     ChooseFreeTech, DequeueResearch, SetResearch, available_techs, is_unresearchable,
 };
 use citar_engine::game::units::actions::{MoveUnit, PromoteUnit, UnitOrder, UpgradeUnit};
 use citar_engine::game::units::{promotions, upgrades};
+use citar_engine::game::workers::{self, BuildImprovement, Builder};
 use citar_engine::game::{Action, DriverOutcome, Game, SeatDriver};
 use citar_engine::state::cities::{City, Constructible, Perpetual};
 use citar_engine::state::diplo::{NegStatus, Negotiation};
 use citar_engine::state::players::DriverMemory;
 use citar_engine::state::players::Player;
+use citar_engine::state::units::Activity;
 use serde_json::json;
 
 /// One kind of move: what the agent may do with its turn, drawing from the turn's stream.
@@ -70,6 +80,8 @@ pub type Move = fn(&mut Game, PlayerId, &mut Rng);
 /// - Package 1b-07: `research`, `production`, `queues`, `policies`, `purchases` and `names`.
 /// - Package 1c-02: [`promote_units`], [`upgrade_units`], [`order_units`] and [`move_units`].
 /// - Package 1c-03: [`fight`], before the units move, so that those beside an enemy attack it.
+/// - Package 1c-04: [`found_cities`], [`build_improvements`] and [`special_actions`], and the
+///   orders `explore`, `automate` and `pillage` among [`order_units`]'.
 /// - Package 1c-05: [`spies`] and [`diplomacy`], the chats last, so that it withdraws what it
 ///   opened once it has done everything else.
 pub const MOVES: &[Move] = &[
@@ -79,6 +91,9 @@ pub const MOVES: &[Move] = &[
     policies,
     purchases,
     names,
+    found_cities,
+    build_improvements,
+    special_actions,
     promote_units,
     upgrade_units,
     order_units,
@@ -296,9 +311,9 @@ pub fn upgrade_units(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     }
 }
 
-/// The standing orders the agent gives: those that neither end the unit nor wait on a system not
-/// ported yet.
-const ORDERS: [&str; 5] = ["fortify", "sleep", "heal", "skip", "wake"];
+/// The standing orders the agent gives: those that do not end the unit.
+const ORDERS: [&str; 8] =
+    ["fortify", "sleep", "heal", "skip", "wake", "explore", "automate", "pillage"];
 
 /// Gives one unit in ten a standing order at random (`unit_order`); a civilian told to fortify
 /// is refused, which is part of the play.
@@ -312,11 +327,124 @@ pub fn order_units(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     }
 }
 
+/// Founds a city with each settler that may found one where it stands, half the time, now and
+/// then through `unit_action` rather than `found_city`.
+pub fn found_cities(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    for u in units_of(g, pid) {
+        let can = unit_actions(g, u).iter().any(|a| a.id == "found_city" && a.available());
+        if !can || !rng.chance(0.5) {
+            continue;
+        }
+        let a = if rng.chance(0.2) {
+            Action::UnitAction(UnitAction {
+                unit_id: tool_id(u),
+                action: "found_city".into(),
+                name: None,
+                beliefs: None,
+                x: None,
+                y: None,
+            })
+        } else {
+            Action::FoundCity(FoundCity { unit_id: tool_id(u), name: None })
+        };
+        play(g, pid, a);
+    }
+}
+
+/// Sets a third of the units that can build to work where they stand (`build_improvement`): one of
+/// the improvements they could start or make at once, now and then a cancellation or a name no
+/// improvement has, which is refused.
+pub fn build_improvements(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    for u in units_of(g, pid) {
+        let Some((b, t)) = Builder::unit(g, u).zip(g.unit(u).map(|x| x.tile())) else { continue };
+        let mut names: Vec<String> = workers::build_options(g, &b, t, None)
+            .into_iter()
+            .filter_map(|o| g.rules().name(o.imp).map(str::to_owned))
+            .collect();
+        names.extend(
+            workers::water_options(g, u)
+                .into_iter()
+                .chain(workers::great_options(g, u))
+                .filter_map(|o| g.rules().name(o.imp).map(str::to_owned)),
+        );
+        if names.is_empty() || !rng.chance(0.35) {
+            continue;
+        }
+        let pick = if rng.chance(0.05) {
+            Some("cancel".to_owned())
+        } else if rng.chance(0.05) {
+            Some("No Such Improvement".to_owned())
+        } else {
+            rng.pick(&names).cloned()
+        };
+        let Some(improvement) = pick else { continue };
+        play(
+            g,
+            pid,
+            Action::BuildImprovement(BuildImprovement { unit_id: tool_id(u), improvement }),
+        );
+    }
+}
+
+/// Takes one of each unit's special actions a fifth of the time (`unit_action`): a religion is
+/// founded or enhanced with the beliefs an AI would choose, a paradrop aims at a tile within five,
+/// the rest need nothing more. Refusals (a spread into a city of the religion, a hurry with
+/// nothing built) are part of the play.
+pub fn special_actions(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    for u in units_of(g, pid) {
+        let list = unit_actions(g, u);
+        let open: Vec<usize> = (0..list.len())
+            .filter(|&i| list[i].available() && list[i].id != "found_city")
+            .collect();
+        if open.is_empty() || !rng.chance(0.2) {
+            continue;
+        }
+        let Some(&i) = rng.pick(&open) else { continue };
+        let entry = &list[i];
+        let mut a = UnitAction {
+            unit_id: tool_id(u),
+            action: entry.id.clone(),
+            name: None,
+            beliefs: None,
+            x: None,
+            y: None,
+        };
+        match entry.kind {
+            ActionKind::FoundReligion(_) | ActionKind::EnhanceReligion(_) => {
+                let enhancing = matches!(entry.kind, ActionKind::EnhanceReligion(_));
+                let needed = beliefs_to_choose(g, pid, enhancing);
+                let beliefs: Vec<serde_json::Value> = ai_choose_beliefs(g, pid, &needed)
+                    .into_iter()
+                    .filter_map(|b| g.rules().name(b).map(|n| json!(n)))
+                    .collect();
+                a.beliefs = Some(serde_json::Value::Array(beliefs));
+                a.name = Some(json!(format!("Faith of {}", pid.0)));
+            }
+            ActionKind::Paradrop(_) => {
+                let Some(at) = g.unit(u).map(|x| x.tile()) else { continue };
+                let Some(&t) = rng.pick(&g.grid().within(at, 5)) else { continue };
+                let (x, y) = g.grid().xy(t);
+                a.x = Some(i64::from(x));
+                a.y = Some(i64::from(y));
+            }
+            _ => {}
+        }
+        play(g, pid, Action::UnitAction(a));
+    }
+}
+
 /// Moves each unit with movement left (`move_unit`): half the time to a tile it reaches this
 /// turn, otherwise toward any tile up to eight away, which leaves a standing goto when the path
-/// takes more than this turn (or a refusal, when there is none).
+/// takes more than this turn (or a refusal, when there is none). A unit at work (building,
+/// automated, exploring) is left to it, nine times in ten.
 pub fn move_units(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     for u in units_of(g, pid) {
+        let working = g.unit(u).is_some_and(|x| {
+            matches!(x.activity, Some(Activity::Build | Activity::Automate | Activity::Explore))
+        });
+        if working && rng.chance(0.9) {
+            continue;
+        }
         let Some(from) = g.unit(u).filter(|x| x.moves > 0).map(|x| x.tile()) else { continue };
         let target = if rng.chance(0.5) {
             let reach: Vec<TileIdx> = Mover::unit(g, u)

@@ -294,7 +294,7 @@ fn belief_triggers(g: &mut Game, p: PlayerId, beliefs: &[BeliefId]) {
 /// or follower belief joins a pantheon or a religion; a founder belief only a religion without
 /// one, and an enhancer belief only an enhanced religion without one, so that a pantheon never
 /// becomes a religion by a belief and no religion holds two beliefs of either kind.
-fn may_adopt_belief(g: &Game, p: PlayerId, b: BeliefId) -> Option<ReligionId> {
+pub(crate) fn may_adopt_belief(g: &Game, p: PlayerId, b: BeliefId) -> Option<ReligionId> {
     if !g.religion_enabled() || beliefs_taken(g).contains(b) {
         return None;
     }

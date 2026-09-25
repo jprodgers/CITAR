@@ -474,15 +474,22 @@ pub fn follower(rules: &Ruleset, beliefs: &[BeliefId]) -> Csr {
 }
 
 /// The index of a unit's profile (`units.unit_umap`): its base unit's uniques, its unit type's
-/// (which Python copied onto each unit, `rules.py:116-118`) and its promotions'.
+/// (which Python copied onto each unit, `rules.py:116-118`) and its promotions', their unit
+/// actions included, which a unit's action uniques are found among (`units.usable_action`).
 #[must_use]
 pub fn unit_profile(rules: &Ruleset, base: BaseUnitId, promotions: &PromotionSet) -> Csr {
     let mut b = Builder::new(rules);
     let def = &rules.base_units()[base];
-    b.whole(&def.uniques, 1);
-    b.whole(&rules.unit_types()[def.unit_type].uniques, 1);
+    let mut add = |s: &SourceUniques| {
+        b.whole(s, 1);
+        for &id in s.actions.iter() {
+            b.add(id, 1);
+        }
+    };
+    add(&def.uniques);
+    add(&rules.unit_types()[def.unit_type].uniques);
     for p in promotions.iter() {
-        b.whole(&rules.promotions()[p].uniques, 1);
+        add(&rules.promotions()[p].uniques);
     }
     b.finish()
 }

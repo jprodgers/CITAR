@@ -1,0 +1,61 @@
+about = """
+A paratrooper standing in its own land with its full movement drops onto an explored land tile up
+to five tiles away, and lands with no movement left. A drop farther than its range, onto water, or
+without its full movement is refused, as is one with no target.
+"""
+from = "tests/test_mechanics.py::RuleGapTests::test_paratrooper_paradrop"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+  { op = "grant_tech", player = 0, tech = "Radar" },
+  { op = "reveal", player = 0 },
+  { op = "add_unit", player = 0, unit = "Paratrooper", at = "A" },
+]
+as = "made"
+
+[[step]]
+set = { para = "=made[4].unit_ids[0]" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=para" }
+
+[[step]]
+check = { what = "unit_actions", unit = "=para" }
+any = { subset = { id = "paradrop", name = "Paradrop to a [Land] tile up to 5.0 tiles away", available = true, params = { x = "target column", y = "target row" } } }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=para", action = "paradrop" }
+error = "Give the target tile (x, y) for the paradrop."
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=para", action = "paradrop", x = 11, y = 5 }
+error = "Paradrops reach at most 5.0 tiles."
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=para", action = "paradrop", x = 2, y = 5 }
+error = "The target must be a [Land] tile."
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=para", action = "paradrop", x = 10, y = 5 }
+as = "dropped"
+
+[[step]]
+intended = "unit-results-give-tiles"
+check = "dropped"
+eq = { from = { x = 5, y = 5 }, to = { x = 10, y = 5 } }
+
+[[step]]
+check = { what = "unit", unit = "=para" }
+subset = { x = 10, y = 5, moves = 0 }
+
+[[step]]
+note = "Outside its land, with no movement, it cannot drop again."
+check = { what = "unit_actions", unit = "=para" }
+none = { path = "id", eq = "paradrop" }

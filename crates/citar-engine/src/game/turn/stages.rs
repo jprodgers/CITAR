@@ -30,7 +30,8 @@ use crate::game::derive::rev::UnitTouch;
 use crate::game::diplomacy::{deals, negotiation};
 use crate::game::triggers;
 use crate::game::{
-    Game, Porting, economy, espionage, great_people, pending, policies, religion, research, units,
+    Game, Porting, automation, economy, espionage, great_people, pending, policies, religion,
+    research, units, workers,
 };
 use crate::state::Phase;
 use crate::state::TurnClock;
@@ -220,7 +221,13 @@ pub static PLAYER_START: [Stage; 23] = [
     ),
     Stage::settle("S7", Who::CIVS),
     Stage::later("S8", "the city-state's turn", Who::CITY_STATE, Always, Porting::Pending("1c-06")),
-    Stage::later("S8", "standing unit orders", Who::MAJOR, Always, Porting::Pending("1c-04")),
+    Stage::run(
+        "S8",
+        "standing unit orders",
+        Who::MAJOR,
+        Always,
+        Step::Player(automation::run_unit_orders),
+    ),
     Stage::settle("S9", Who::CIVS),
     Stage::later("S9", "victory", Who::CIVS, Always, Porting::Pending("1c-08")),
     Stage::run("S9", "a research reminder", Who::MAJOR, Always, Step::Player(research::remind)),
@@ -315,7 +322,7 @@ pub static PLAYER_END: [Stage; 25] = [
         Always,
         Step::Player(great_people::golden_age_stage),
     ),
-    Stage::later("E6", "worker builds", Who::CIVS, Always, Porting::Pending("1c-04")),
+    Stage::run("E6", "worker builds", Who::CIVS, Always, Step::Player(workers::progress_builds)),
     Stage::run(
         "E6",
         "units end their turn",

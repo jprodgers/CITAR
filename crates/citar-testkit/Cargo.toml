@@ -19,6 +19,10 @@ flate2.workspace = true
 toml.workspace = true
 regex.workspace = true
 
+[features]
+# The engine's memo counters, which the soak slices read (DESIGN.md 10).
+stats = ["citar-engine/stats"]
+
 [dev-dependencies]
 proptest.workspace = true
 # One trial per rule script, so that nextest lists each (tests/rules.rs).

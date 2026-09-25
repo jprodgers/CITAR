@@ -15,7 +15,7 @@ use super::errors::{Problems, RulesetErrorKind};
 use super::moves::MoveRules;
 use crate::base::ids::{
     BaseUnitId, BuildingId, DifficultyId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
-    ObjectFilterId, ResourceId, TechId, TerrainId,
+    ObjectFilterId, ResourceId, TechId, TerrainId, UnitTypeId,
 };
 use crate::base::sets::{BaseUnitSet, FeatureSet, ImprovementSet, TerrainSet};
 use crate::base::stats::{Stat, StatMask};
@@ -41,6 +41,7 @@ const ANCIENT_RUINS: &str = "Ancient ruins";
 const BARBARIAN_CAMP: &str = "Barbarian encampment";
 const WORKER: &str = "Worker";
 const SETTLER: &str = "Settler";
+const SCOUT: &str = "Scout";
 /// The great people an AI takes free, most wanted first (`great_people.py:214`).
 const PREFERRED_GREAT_PEOPLE: [&str; 5] =
     ["Great Scientist", "Great Engineer", "Great Merchant", "Great Artist", "Great Prophet"];
@@ -121,6 +122,9 @@ pub struct Known {
     /// The great people an AI takes free, most wanted first, those the ruleset has
     /// (`great_people.ai_choose_free`, `great_people.py:214`).
     pub preferred_great_people: [Option<BaseUnitId>; 5],
+    /// The Scout unit type (`automation.py:178`): an explorer of this type keeps out of danger
+    /// whatever its health, as a civilian does.
+    pub scout: Option<UnitTypeId>,
     /// The terrains and resources map generation names.
     pub map: KnownMap,
 }
@@ -245,6 +249,7 @@ impl Derived {
                 worker: None,
                 settler: None,
                 preferred_great_people: [None; 5],
+                scout: None,
                 map: KnownMap::default(),
             },
             moves: MoveRules::default(),
@@ -377,6 +382,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         settler: starting_settler(r),
         preferred_great_people: PREFERRED_GREAT_PEOPLE
             .map(|name| r.base_units.iter().find(|(_, u)| &*u.name == name).map(|(id, _)| id)),
+        scout: r.unit_types.iter().find(|(_, t)| &*t.name == SCOUT).map(|(id, _)| id),
         map: known_map(r),
     };
 

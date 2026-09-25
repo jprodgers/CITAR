@@ -43,7 +43,10 @@ use super::invariants::{Code, Violation};
 use super::research::{self, TechSource};
 use super::units::{add_unit_in_city, place_unit_near};
 use super::{Game, espionage, great_people, policies, religion, units};
-use crate::base::ids::{BaseUnitId, CityId, PlayerId, TileIdx, UniqueId, UnitId};
+use crate::base::ids::{
+    BaseUnitId, CityId, PlayerId, PromotionId, SetRef, TechId, TileFilterId, TileIdx, UniqueId,
+    UnitFilterId, UnitId,
+};
 use crate::base::num;
 use crate::base::rng::{KeyPart, Purpose, Rng};
 use crate::base::sets::PlayerSet;
@@ -330,14 +333,7 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
             true
         }
         OneTimeEffect::FreeTechsFromEras { count, eras } => {
-            let t = g.rules().uniques();
-            let mut cands: Vec<_> = g
-                .rules()
-                .techs()
-                .iter()
-                .filter(|&(tech, d)| t.in_set(eras, d.era) && research::can_research(g, p, tech))
-                .map(|(tech, _)| tech)
-                .collect();
+            let mut cands = era_techs(g, p, eras);
             if cands.is_empty() {
                 return false;
             }
@@ -393,8 +389,7 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
             if religion::prophets::prophet_unit(g, p).is_none() {
                 return false;
             }
-            let cost = f64::from(religion::prophets::faith_for_next_prophet(g, p));
-            let amount = num::trunc_i32(cost * f64::from(percent) / 100.0);
+            let amount = prophet_faith(g, p, percent);
             gain_faith(g, p, amount, tile, &suffix)
         }
         OneTimeEffect::GainTechPercent { percent, tech } => {
@@ -423,18 +418,7 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
         }
         OneTimeEffect::RevealTiles { count, tiles, radius } => {
             let Some(t) = tile else { return false };
-            let explored = g.player(p).map(|x| x.explored.clone()).unwrap_or_default();
-            let mut cands: Vec<TileIdx> = {
-                let v = g.view();
-                let filters = g.rules().uniques().filters();
-                g.grid()
-                    .within(t, u32::try_from(radius).unwrap_or(0))
-                    .into_iter()
-                    .filter(|&i| {
-                        !explored.contains(i.0) && filters.tile_matches(tiles, &v, i, None)
-                    })
-                    .collect()
-            };
+            let mut cands = unexplored_within(g, p, t, tiles, radius);
             if cands.is_empty() {
                 return false;
             }
@@ -449,13 +433,7 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
         }
         OneTimeEffect::RevealCrudeMap { distance, radius, percent } => {
             let Some(t) = tile else { return false };
-            let explored = g.player(p).map(|x| x.explored.clone()).unwrap_or_default();
-            let ring: Vec<TileIdx> = g
-                .grid()
-                .ring(t, u32::try_from(distance).unwrap_or(0))
-                .into_iter()
-                .filter(|&i| !explored.contains(i.0))
-                .collect();
+            let ring = unexplored_ring(g, p, t, distance);
             let Some(&centre) = rng.pick(&ring) else { return false };
             let chance = f64::from(percent) / 100.0;
             let shown: Vec<TileIdx> = g
@@ -527,21 +505,7 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
             true
         }
         OneTimeEffect::PromoteUnits { units, promotion } => {
-            let r = g.rules();
-            let types = &r.promotions()[promotion].unit_types;
-            let chosen: Vec<UnitId> = {
-                let v = g.view();
-                let filters = r.uniques().filters();
-                g.player_units(p)
-                    .filter(|x| {
-                        filters.unit_matches(units, &v, x.id(), Default::default())
-                            && (types.is_empty()
-                                || types.contains(&r.base_units()[x.base].unit_type))
-                            && !x.promotions.contains(promotion)
-                    })
-                    .map(crate::state::units::Unit::id)
-                    .collect()
-            };
+            let chosen = promotable(g, p, units, promotion);
             for &u in &chosen {
                 units::promotions::add_promotion(g, u, promotion, true);
             }
@@ -562,6 +526,200 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
     }
 }
 
+/// Whether [`apply`] would do anything for the one-time unique `id` at `site` now, answered on
+/// `&Game`: what a unit's action carrying the effect is refused by when it would do nothing
+/// (`actions.py:175-179`), with no copy of the game to try it on (DESIGN.md 6.11). Each arm
+/// answers what the arm of `apply_one_time` returns; most effects always act.
+#[must_use]
+pub fn would_apply(g: &Game, id: UniqueId, site: &TriggerSite) -> bool {
+    if g.trigger_depth >= TRIGGER_DEPTH {
+        return false;
+    }
+    let Some(effect) = OneTimeEffect::decode(g.rules(), id) else { return false };
+    let p = site.civ;
+    let Some(pl) = g.player(p) else { return false };
+    let site = locate(g, site);
+    let (city, tile) = (site.city, site.tile);
+    match effect {
+        OneTimeEffect::Timed { .. }
+        | OneTimeEffect::FreePolicies { .. }
+        | OneTimeEffect::GoldenAge { .. }
+        | OneTimeEffect::FreeGreatPerson
+        | OneTimeEffect::FreeTechs { .. }
+        | OneTimeEffect::RevealEntireMap
+        | OneTimeEffect::FreeBelief(_)
+        | OneTimeEffect::TriggerVoting
+        | OneTimeEffect::TakeOverTilesInCity { .. }
+        | OneTimeEffect::FreeStatBuildings { .. }
+        | OneTimeEffect::FreeSpecificBuildings { .. } => true,
+        OneTimeEffect::FreeUnits { unit, count, near_tile } => free_unit_count(g, p, unit, count)
+            .is_some_and(|(name, n)| {
+                n > 0
+                    && free_unit_place(g, p, &site, near_tile).is_some_and(|at| match at {
+                        Place::City(c) => units::spot_in_city(g, c, name).is_some(),
+                        Place::Near(t) => units::spawn_spot(g, p, name, t, 10, None).is_some(),
+                    })
+            }),
+        OneTimeEffect::Adopt(PolicyOrBelief::Policy(policy)) => !pl.policy.adopted.contains(policy),
+        OneTimeEffect::Adopt(PolicyOrBelief::Belief(b)) => {
+            religion::found::may_adopt_belief(g, p, b).is_some()
+        }
+        OneTimeEffect::GainPopulation { cities, .. }
+        | OneTimeEffect::FreeBuilding { cities, .. } => !cities_for(g, p, city, cities).is_empty(),
+        OneTimeEffect::GainPopulationRandomCity { .. } => g.player_cities(p).next().is_some(),
+        OneTimeEffect::DiscoverTech(tech) | OneTimeEffect::GainTechPercent { tech, .. } => {
+            !g.has_tech(p, Some(tech))
+        }
+        OneTimeEffect::FreeTechsFromEras { eras, .. } => !era_techs(g, p, eras).is_empty(),
+        OneTimeEffect::GainStat { stat, .. } => !matches!(stat, Stat::Food | Stat::Production),
+        OneTimeEffect::GainPantheon => {
+            pl.religion.progress == crate::rules::defs::ReligionProgress::None
+                && religion::prophets::faith_for_pantheon(g, 2) > 0
+        }
+        OneTimeEffect::GainProphet { percent } => {
+            religion::prophets::prophet_unit(g, p).is_some() && prophet_faith(g, p, percent) > 0
+        }
+        OneTimeEffect::TakeOverTilesInRadius { tiles, radius } => {
+            tile.is_some_and(|t| !take_over_candidates(g, p, t, tiles, radius).is_empty())
+        }
+        OneTimeEffect::RevealTiles { tiles, radius, .. } => {
+            tile.is_some_and(|t| !unexplored_within(g, p, t, tiles, radius).is_empty())
+        }
+        OneTimeEffect::RevealCrudeMap { distance, .. } => {
+            tile.is_some_and(|t| !unexplored_ring(g, p, t, distance).is_empty())
+        }
+        OneTimeEffect::GlobalSpiesWhenEnteringEra
+        | OneTimeEffect::SpiesLevelUp { .. }
+        | OneTimeEffect::GainSpy => espionage::spies_play(g, p),
+        OneTimeEffect::PromoteUnits { units, promotion } => {
+            !promotable(g, p, units, promotion).is_empty()
+        }
+        OneTimeEffect::CityStateGreatPersonGift => pl.major.is_some(),
+        OneTimeEffect::Unit(e) => {
+            site.unit.is_some_and(|u| units::health::unit_effect_would_apply(g, u, e))
+        }
+    }
+}
+
+/// The techs of eras `eras` civilization `p` could research now, in the ruleset's order.
+fn era_techs(g: &Game, p: PlayerId, eras: SetRef) -> Vec<TechId> {
+    let t = g.rules().uniques();
+    g.rules()
+        .techs()
+        .iter()
+        .filter(|&(tech, d)| t.in_set(eras, d.era) && research::can_research(g, p, tech))
+        .map(|(tech, _)| tech)
+        .collect()
+}
+
+/// The tiles within `radius` of `t` that pass `tiles` and civilization `p` has not explored.
+fn unexplored_within(
+    g: &Game,
+    p: PlayerId,
+    t: TileIdx,
+    tiles: TileFilterId,
+    radius: i32,
+) -> Vec<TileIdx> {
+    let Some(pl) = g.player(p) else { return Vec::new() };
+    let v = g.view();
+    let filters = g.rules().uniques().filters();
+    g.grid()
+        .within(t, u32::try_from(radius).unwrap_or(0))
+        .into_iter()
+        .filter(|&i| !pl.explored.contains(i.0) && filters.tile_matches(tiles, &v, i, None))
+        .collect()
+}
+
+/// The tiles `distance` from `t` civilization `p` has not explored.
+fn unexplored_ring(g: &Game, p: PlayerId, t: TileIdx, distance: i32) -> Vec<TileIdx> {
+    let Some(pl) = g.player(p) else { return Vec::new() };
+    g.grid()
+        .ring(t, u32::try_from(distance).unwrap_or(0))
+        .into_iter()
+        .filter(|&i| !pl.explored.contains(i.0))
+        .collect()
+}
+
+/// Civilization `p`'s units that pass `units`, may take `promotion` and do not have it yet.
+fn promotable(g: &Game, p: PlayerId, units: UnitFilterId, promotion: PromotionId) -> Vec<UnitId> {
+    let r = g.rules();
+    let types = &r.promotions()[promotion].unit_types;
+    let v = g.view();
+    let filters = r.uniques().filters();
+    g.player_units(p)
+        .filter(|x| {
+            filters.unit_matches(units, &v, x.id(), Default::default())
+                && (types.is_empty() || types.contains(&r.base_units()[x.base].unit_type))
+                && !x.promotions.contains(promotion)
+        })
+        .map(crate::state::units::Unit::id)
+        .collect()
+}
+
+/// The faith `[n]%` of civilization `p`'s next great prophet costs.
+fn prophet_faith(g: &Game, p: PlayerId, percent: i32) -> i32 {
+    let cost = f64::from(religion::prophets::faith_for_next_prophet(g, p));
+    num::trunc_i32(cost * f64::from(percent) / 100.0)
+}
+
+/// The unit a free-unit effect gives civilization `p` (its own of the kind) and how many of it
+/// its limit leaves room for; none of a city-founder for a city-state.
+fn free_unit_count(
+    g: &Game,
+    p: PlayerId,
+    unit: BaseUnitId,
+    count: i32,
+) -> Option<(BaseUnitId, i32)> {
+    let r = g.rules();
+    let t = r.uniques();
+    let name = super::cities::construction::equivalent_unit(g, p, unit);
+    if g.is_city_state(p)
+        && super::cities::construction::unit_has_type(r, name, UniqueType::FoundCity)
+    {
+        return None;
+    }
+    let least = r.base_units()[name]
+        .uniques
+        .ids()
+        .filter_map(|id| match t.get(id).data {
+            UniqueData::MaxNumberBuildable(x) => Some(x.limit),
+            _ => None,
+        })
+        .min();
+    let mut count = count;
+    if let Some(least) = least {
+        let have =
+            i32::try_from(g.player_units(p).filter(|x| x.base == name).count()).unwrap_or(i32::MAX);
+        count = count.min(least - have);
+    }
+    Some((name, count))
+}
+
+/// Where a free unit is made.
+enum Place {
+    /// In the city, as a city makes a unit.
+    City(CityId),
+    /// Near the tile.
+    Near(TileIdx),
+}
+
+/// Where the next free unit goes: near the tile in context (the ruins' always), or else near
+/// the city in context or the capital; in the city in context, or the capital when there is no
+/// tile; near the tile; near the civilization's first unit.
+fn free_unit_place(g: &Game, p: PlayerId, site: &TriggerSite, near_tile: bool) -> Option<Place> {
+    let capital = g.player(p).and_then(|x| x.capital).filter(|&c| g.city(c).is_some());
+    let chosen = site.city.or(capital);
+    if near_tile {
+        site.tile.or_else(|| chosen.and_then(|c| g.city(c).map(City::tile))).map(Place::Near)
+    } else if let Some(c) = chosen.filter(|_| site.city.is_some() || site.tile.is_none()) {
+        Some(Place::City(c))
+    } else if let Some(at) = site.tile {
+        Some(Place::Near(at))
+    } else {
+        g.player_units(p).next().map(|x| Place::Near(x.tile()))
+    }
+}
+
 /// `Free [unit] appears`, `[n] free [unit] units appear` and `Free [unit] found in the ruins`
 /// (`triggers.py:99-129`): the civilization's own unit of the kind, as many as its limit leaves
 /// room for (none of a city-founder for a city-state), in the city in context or the capital,
@@ -575,43 +733,14 @@ fn free_units(
     near_tile: bool,
     suffix: &str,
 ) -> bool {
-    let r = g.rules();
-    let t = r.uniques();
-    let name = super::cities::construction::equivalent_unit(g, p, unit);
-    let def = &r.base_units()[name];
-    if g.is_city_state(p)
-        && super::cities::construction::unit_has_type(r, name, UniqueType::FoundCity)
-    {
-        return false;
-    }
-    let limits: Vec<i32> = def
-        .uniques
-        .ids()
-        .filter_map(|id| match t.get(id).data {
-            UniqueData::MaxNumberBuildable(x) => Some(x.limit),
-            _ => None,
-        })
-        .collect();
-    let mut count = count;
-    if let Some(&least) = limits.iter().min() {
-        let have =
-            i32::try_from(g.player_units(p).filter(|x| x.base == name).count()).unwrap_or(i32::MAX);
-        count = count.min(least - have);
-    }
-    let capital = g.player(p).and_then(|x| x.capital).filter(|&c| g.city(c).is_some());
-    let chosen = site.city.or(capital);
+    let Some((name, count)) = free_unit_count(g, p, unit, count) else { return false };
+    let def = &g.rules().base_units()[name];
     let mut placed = 0;
     for _ in 0..count.max(0) {
-        let made = if near_tile {
-            let at = site.tile.or_else(|| chosen.and_then(|c| g.city(c).map(City::tile)));
-            at.and_then(|at| place_unit_near(g, p, name, at))
-        } else if let Some(c) = chosen.filter(|_| site.city.is_some() || site.tile.is_none()) {
-            add_unit_in_city(g, c, name)
-        } else if let Some(at) = site.tile {
-            place_unit_near(g, p, name, at)
-        } else {
-            let first = g.player_units(p).next().map(crate::state::units::Unit::tile);
-            first.and_then(|at| place_unit_near(g, p, name, at))
+        let made = match free_unit_place(g, p, site, near_tile) {
+            Some(Place::City(c)) => add_unit_in_city(g, c, name),
+            Some(Place::Near(at)) => place_unit_near(g, p, name, at),
+            None => None,
         };
         if made.is_some() {
             placed += 1;
@@ -681,26 +810,11 @@ fn take_over_tiles(
     g: &mut Game,
     p: PlayerId,
     tile: Option<TileIdx>,
-    filter: crate::base::ids::TileFilterId,
+    filter: TileFilterId,
     radius: i32,
 ) -> bool {
     let Some(t) = tile else { return false };
-    if g.player_cities(p).next().is_none() {
-        return false;
-    }
-    let tiles: Vec<TileIdx> = {
-        let v = g.view();
-        let filters = g.rules().uniques().filters();
-        g.grid()
-            .within(t, u32::try_from(radius).unwrap_or(0))
-            .into_iter()
-            .filter(|&i| {
-                g.city_at(i).is_none()
-                    && filters.tile_matches(filter, &v, i, None)
-                    && g.tile(i).and_then(crate::state::map::Tile::owner) != Some(p)
-            })
-            .collect()
-    };
+    let tiles = take_over_candidates(g, p, t, filter, radius);
     if tiles.is_empty() {
         return false;
     }
@@ -737,6 +851,32 @@ fn take_over_tiles(
         take_ownership(g, target, i);
     }
     true
+}
+
+/// The tiles within `radius` of `t` a `Gain control over [tiles] tiles` effect takes for
+/// civilization `p`: no city on them, passing the filter, not its own; none while it has no city
+/// to take them.
+fn take_over_candidates(
+    g: &Game,
+    p: PlayerId,
+    t: TileIdx,
+    filter: TileFilterId,
+    radius: i32,
+) -> Vec<TileIdx> {
+    if g.player_cities(p).next().is_none() {
+        return Vec::new();
+    }
+    let v = g.view();
+    let filters = g.rules().uniques().filters();
+    g.grid()
+        .within(t, u32::try_from(radius).unwrap_or(0))
+        .into_iter()
+        .filter(|&i| {
+            g.city_at(i).is_none()
+                && filters.tile_matches(filter, &v, i, None)
+                && g.tile(i).and_then(crate::state::map::Tile::owner) != Some(p)
+        })
+        .collect()
 }
 
 /// The next world leader vote is held in fifteen turns, scaled by speed

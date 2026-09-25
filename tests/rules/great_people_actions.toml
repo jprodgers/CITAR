@@ -1,0 +1,146 @@
+about = """
+Great people act through unit_action, by the ids their unit lists: a great scientist hurries
+research and is spent; a great artist's golden age is a one-time effect it carries (trigger:0); a
+great engineer hurries the building its city builds; a great person's improvement is made at once
+on a tile that takes it, and not on a city's own. An action the unit does not have is refused with
+the list of those it has.
+"""
+from = "tests/test_mechanics.py::GreatPeopleTests::test_scientist_and_artist"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+  { op = "add_unit", player = 0, unit = "Great Scientist", at = "A" },
+  { op = "add_unit", player = 0, unit = "Great Artist", at = "A" },
+  { op = "add_unit", player = 0, unit = "Great Engineer", at = "A" },
+  { op = "add_unit", player = 0, unit = "Great Scientist", at = "A>e" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", sci = "=made[2].unit_ids[0]", art = "=made[3].unit_ids[0]", eng = "=made[4].unit_ids[0]", sci2 = "=made[5].unit_ids[0]" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=sci" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=art" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=eng" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=sci2" }
+
+[[step]]
+note = "The scientist in Roma lists its hurry and its academy, which Roma's tile does not take."
+check = { what = "unit_actions", unit = "=sci" }
+eq = [
+  { id = "hurry_research", name = "Hurry research (+0 science)", available = false, reason = "Choose a technology first." },
+  { id = "create:Academy", name = "Create Academy here", available = false, reason = "Academy cannot be built on this tile." },
+]
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=sci", action = "found_city" }
+error = "Great Scientist has no action 'found_city'. Its actions: hurry_research, create:Academy."
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=sci", action = "hurry_research" }
+error = "Choose a technology first."
+
+[[step]]
+tool = "set_research"
+args = { tech = "Writing" }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=sci", action = "hurry_research" }
+as = "hurried"
+
+[[step]]
+check = "hurried"
+subset = { science_added = 0, researching = "Pottery" }
+
+[[step]]
+note = "The scientist is spent."
+check = { what = "units", player = 0 }
+none = { path = "id", eq = "=sci" }
+
+[[step]]
+check = { what = "unit_actions", unit = "=art" }
+any = { subset = { id = "trigger:0", name = "Empire enters a [8]-turn Golden Age", available = true } }
+
+[[step]]
+check = { what = "great_people", player = 0 }
+path = "golden_age_turns"
+eq = 0
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=art", action = "trigger:0" }
+as = "golden"
+
+[[step]]
+check = "golden"
+eq = { done = "Empire enters a [8]-turn Golden Age" }
+
+[[step]]
+check = { what = "great_people", player = 0 }
+path = "golden_age_turns"
+gt = 0
+
+[[step]]
+check = { what = "units", player = 0 }
+none = { path = "id", eq = "=art" }
+
+[[step]]
+note = "The engineer hurries a building, not nothing."
+tool = "unit_action"
+args = { unit_id = "=eng", action = "hurry_construction" }
+error = "Roma must be building a building or wonder to hurry it."
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=roma", item = "Monument" }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=eng", action = "hurry_construction" }
+as = "built"
+
+[[step]]
+check = "built"
+subset = { city = "Roma", item = "Monument" }
+
+[[step]]
+check = { what = "units", player = 0 }
+none = { path = "id", eq = "=eng" }
+
+[[step]]
+note = "Beside Roma, the second scientist makes its academy at once."
+check = { what = "unit_actions", unit = "=sci2" }
+any = { subset = { id = "create:Academy", available = true } }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=sci2", action = "create:Academy" }
+as = "created"
+
+[[step]]
+check = "created"
+eq = { created = "Academy" }
+
+[[step]]
+check = { what = "tile", at = "A>e" }
+subset = { improvement = "Academy", pillaged = false }
+
+[[step]]
+check = { what = "units", player = 0 }
+len = 0

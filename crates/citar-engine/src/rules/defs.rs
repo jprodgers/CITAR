@@ -787,6 +787,11 @@ pub struct ImprovementDef {
     /// The terrains it can be built on: its `terrainsCanBeBuiltOn` filters, each read as
     /// `terrain_matches` reads one (`workers.py:44-46`).
     pub terrains_can_be_built_on: TerrainSet,
+    /// Whether that list names `Land` itself (`workers.py:108`): then any land tile will do,
+    /// under a feature too, where the set holds the base land terrains alone.
+    pub on_land: bool,
+    /// Whether it names `Water` itself (`workers.py:110`).
+    pub on_water: bool,
     pub turns_to_build: Option<i32>,
     pub tech_required: Option<TechId>,
     pub unique_to: Option<NationId>,

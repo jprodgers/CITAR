@@ -228,6 +228,32 @@ reason = "A deal item naming a player id or a city id no game can have, or an am
 id = "deal-war-on-a-partners-pact-refused"
 reason = "A deal in which one side declared war on a civilization with a defensive pact with the other side was carried out, and the pact then put the deal's two parties at war with the deal still in force and its chat both closed and accepted; Rust refuses such an item when it is proposed or accepted"
 
+# Package 1c-04: workers, unit actions and automation.
+
+[[differences]]
+id = "improvements-over-removable-features"
+reason = "An improvement was refused on a tile whose feature it may not stand on (a farm on a forest) unless it removed features itself, so the removal it would have queued first never was; Rust offers it once the civilization knows how to remove each feature in its way, and queues the removals first, top down (fallout, then the forest under it), as the tool says and UnCiv does"
+
+[[differences]]
+id = "city-states-found-one-city"
+reason = "A city-state's settler founded cities as a major's did, so a city-state that kept its starting settler, was given one or captured one grew past its single city; Rust refuses the settler's action to a city-state that has a city, as city-states train no settlers either"
+
+[[differences]]
+id = "unit-results-give-tiles"
+reason = "The results of founding a city with a unit and of a paradrop gave each tile as the keys of its coordinates (['x', 'y']); Rust gives where it is, as {x, y}"
+
+[[differences]]
+id = "jobs-by-builder-class"
+reason = "An automated worker's job on a tile was judged for the first worker of its type to ask in a turn, with that unit's promotions and conditionals, and kept for every other; Rust judges it for the builder class and its civilization, whichever unit asks"
+
+[[differences]]
+id = "jobs-tie-by-ruleset-order"
+reason = "Two worker jobs of the same priority on the same tile went to the improvement whose name sorted last; Rust takes the one later in the ruleset"
+
+[[differences]]
+id = "fallout-removal-is-a-job"
+reason = "An automated worker cleared fallout only where a tile's fallout flag was set, which no nuke did, so it never cleared any; Rust reads the tile's Fallout feature, and clearing it is a job where nothing better is"
+
 # Package 1c-07: the production advisor.
 
 [[differences]]

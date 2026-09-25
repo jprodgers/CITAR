@@ -261,15 +261,7 @@ pub fn place_unit_near(g: &mut Game, p: PlayerId, base: BaseUnitId, t: TileIdx) 
 /// the owner's first coastal city if this one is not; placed on or near the city; the city
 /// recorded as its origin; and `upon gaining a [unit]` fires.
 pub fn add_unit_in_city(g: &mut Game, c: CityId, base: BaseUnitId) -> Option<UnitId> {
-    let (owner, tile) = g.city(c).map(|x| (x.owner(), x.tile()))?;
-    let mut target = (c, tile);
-    let naval = g.rules().base_units().get(base)?.domain == Domain::Water;
-    if naval && !(g.is_water(tile) || super::path::node::next_to_coast(g, tile)) {
-        target = g
-            .player_cities(owner)
-            .find(|x| super::path::node::next_to_coast(g, x.tile()))
-            .map(|x| (x.id(), x.tile()))?;
-    }
+    let (owner, target) = city_for(g, c, base)?;
     let u = place_unit_near(g, owner, base, target.1)?;
     if let Some(x) = g.unit_mut(u, UnitTouch::CORE) {
         x.origin_city = Some(target.0);
@@ -280,6 +272,28 @@ pub fn add_unit_in_city(g: &mut Game, c: CityId, base: BaseUnitId) -> Option<Uni
     let site = TriggerSite { civ: owner, city: None, unit: Some(u), tile: None };
     super::triggers::fire(g, &site, &TriggerEvent::GainingUnit(base), true, None);
     Some(u)
+}
+
+/// The city a unit of `base` made in city `c` comes from, and its tile, with the city's owner:
+/// `c`, or for a naval unit the owner's first coastal city if `c` is not.
+fn city_for(g: &Game, c: CityId, base: BaseUnitId) -> Option<(PlayerId, (CityId, TileIdx))> {
+    let (owner, tile) = g.city(c).map(|x| (x.owner(), x.tile()))?;
+    let naval = g.rules().base_units().get(base)?.domain == Domain::Water;
+    if naval && !(g.is_water(tile) || super::path::node::next_to_coast(g, tile)) {
+        let coastal = g
+            .player_cities(owner)
+            .find(|x| super::path::node::next_to_coast(g, x.tile()))
+            .map(|x| (x.id(), x.tile()))?;
+        return Some((owner, coastal));
+    }
+    Some((owner, (c, tile)))
+}
+
+/// Where [`add_unit_in_city`] would place a unit of `base` made in city `c`, without making it.
+#[must_use]
+pub fn spot_in_city(g: &Game, c: CityId, base: BaseUnitId) -> Option<TileIdx> {
+    let (owner, target) = city_for(g, c, base)?;
+    spawn_spot(g, owner, base, target.1, 10, None)
 }
 
 /// The experience and promotions a city gives the units it trains (`units.add_construction_bonuses`,

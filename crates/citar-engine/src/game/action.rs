@@ -120,6 +120,12 @@ pub enum Action {
     MoveSpy(MoveSpy),
     /// `end_turn` (package 1c-05), refused while a negotiation of the player's is open.
     EndTurn(EndTurn),
+    /// `build_improvement` (package 1c-04).
+    BuildImprovement(super::workers::BuildImprovement),
+    /// `found_city` (package 1c-04).
+    FoundCity(super::actions::FoundCity),
+    /// `unit_action` (package 1c-04).
+    UnitAction(super::actions::UnitAction),
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
@@ -176,6 +182,9 @@ impl Action {
             Self::Denounce(_) => "denounce",
             Self::MoveSpy(_) => "move_spy",
             Self::EndTurn(_) => "end_turn",
+            Self::BuildImprovement(_) => "build_improvement",
+            Self::FoundCity(_) => "found_city",
+            Self::UnitAction(_) => "unit_action",
             #[cfg(test)]
             Self::Probe(_) => "probe",
             Self::AdoptPolicy(_) => "adopt_policy",
@@ -213,7 +222,10 @@ impl Action {
             | Self::DeclareWar(_)
             | Self::Denounce(_)
             | Self::MoveSpy(_)
-            | Self::EndTurn(_) => false,
+            | Self::EndTurn(_)
+            | Self::BuildImprovement(_)
+            | Self::FoundCity(_)
+            | Self::UnitAction(_) => false,
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
             // `tools.rename_city` is `any_time` (tools.py:782), and so are a message and an
@@ -254,6 +266,9 @@ impl Action {
             Self::Denounce(a) => run(g, pid, a),
             Self::MoveSpy(a) => run(g, pid, a),
             Self::EndTurn(a) => run(g, pid, a),
+            Self::BuildImprovement(a) => run(g, pid, a),
+            Self::FoundCity(a) => run(g, pid, a),
+            Self::UnitAction(a) => run(g, pid, a),
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
             Self::AdoptPolicy(x) => run(g, pid, x),

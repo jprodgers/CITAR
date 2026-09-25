@@ -791,6 +791,8 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
                 stats: i.stats(),
                 // Stage 9 reads the filters, which need the derived tables.
                 terrains_can_be_built_on: TerrainSet::new(),
+                on_land: i.terrains_can_be_built_on.iter().any(|f| f == "Land"),
+                on_water: i.terrains_can_be_built_on.iter().any(|f| f == "Water"),
                 turns_to_build: i.turns_to_build,
                 tech_required: l.opt("techRequired", Tab::Techs, i.tech_required.as_ref()),
                 unique_to: l.opt("uniqueTo", Tab::Nations, i.unique_to.as_ref()),

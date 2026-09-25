@@ -10,8 +10,9 @@ from typing import Any
 from .game import ActionError, Game
 from .state import AUTO_DECISIONS
 
-QUERIES = ("buildable", "city", "costs", "events", "find_tiles", "game", "great_people", "negotiation", "ops", "pending",
-           "player", "preview", "relation", "religion", "spies", "tile", "unit", "units")
+QUERIES = ("build_options", "buildable", "city", "costs", "events", "find_tiles", "game", "great_people", "negotiation",
+           "ops", "pending", "player", "preview", "relation", "religion", "spies", "tile", "unit", "unit_actions",
+           "units")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -49,6 +50,11 @@ def inspect(g: Game, q: dict) -> Any:
             return combat.preview(g, u, idx)
         except ActionError as e:
             return {"error": str(e)}
+    if what in ("unit_actions", "build_options"):
+        u = g.unit(_whole(q.get("unit")))
+        if u is None:
+            raise ActionError("No such unit.")
+        return _unit_actions(g, u) if what == "unit_actions" else _build_options(g, u)
     if what == "city":
         c = g.city(_whole(q.get("city")))
         if c is None:
@@ -212,7 +218,8 @@ def _tile(g: Game, idx: int) -> dict:
             "resource": t.resource, "resource_amount": int(t.resource_amount or 0) if t.resource else 0,
             "improvement": t.improvement, "pillaged": bool(t.pillaged), "route": t.route,
             "route_pillaged": bool(t.route_pillaged), "river": int(t.river or 0), "owner": t.owner, "city": t.city,
-            "units": sorted(u.id for u in g.units_at(idx)), "visible": _seen_by(g, idx)}
+            "units": sorted(u.id for u in g.units_at(idx)), "visible": _seen_by(g, idx),
+            "builds": [[name, int(turns)] for name, turns in (t.build or [])]}
 
 
 def _seen_by(g: Game, idx: int) -> list:
@@ -253,6 +260,28 @@ def _unit(g: Game, u) -> dict:
             "activity": u.activity, "goto": g.xy(u.goto) if u.goto is not None else None,
             "fortify": u.fortify, "embarked": is_embarked(g, u), "carried_by": u.carried_by,
             "set_up": "Set Up" in u.status, "original_owner": u.original_owner, "return_offer": u.return_offer}
+
+
+def _unit_actions(g: Game, u) -> list:
+    """``unit_actions``: what a unit could do now with ``unit_action``, as ``get_unit`` lists it."""
+    from .actions import unit_actions
+    return [dict(a) for a in unit_actions(g, u)]
+
+
+def _build_options(g: Game, u) -> list:
+    """``build_options``: what a unit could start building where it stands, and what it makes at once."""
+    from .workers import build_options
+    out = []
+    for o in build_options(g, u):
+        d = {"name": o["name"], "turns": o["turns"]}
+        if o.get("first_removes"):
+            d["first_removes"] = o["first_removes"]
+        if o.get("replaces"):
+            d["replaces"] = o["replaces"]
+        if o.get("instant"):
+            d = {"name": o["name"], "turns": 0, "instant": True}
+        out.append(d)
+    return out
 
 
 def _units(g: Game, q: dict) -> list:

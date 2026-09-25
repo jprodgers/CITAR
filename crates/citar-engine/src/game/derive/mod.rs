@@ -8,13 +8,16 @@
 //! index memos, resource supply and unit profiles ([`civ`], 1b-05), tile yields, city and
 //! civilization stats, happiness and connectivity ([`stats`], 1b-06), the buildable lists
 //! ([`buildable`], 1b-07), the grid of cities and each city's religious spread ([`religion`],
-//! 1b-08), and the rest with their systems.
+//! 1b-08), the danger tiles and the job maps of automation ([`danger`], [`jobs`], 1c-04), and the
+//! rest with their systems.
 //!
 //! Replaces the caches of `game.py:100-145` (`_cache`, `_ycache`, `_static`, `_jobcache`,
 //! `_viewcache`, `_names`) and the invalidation of `game.py:565-609`.
 
 pub mod buildable;
 pub mod civ;
+pub mod danger;
+pub mod jobs;
 pub mod religion;
 pub mod rev;
 pub mod stats;
@@ -71,6 +74,10 @@ pub struct Derived {
     path_cache: RefCell<PathCache>,
     /// The grid of cities and each city's religious spread.
     pub(crate) religion: religion::ReligionCaches,
+    /// Where each civilization's civilians should not go.
+    pub(crate) danger: danger::DangerCaches,
+    /// The best job on each tile for each civilization's builders.
+    pub(crate) jobs: jobs::JobCaches,
 }
 
 impl Derived {
@@ -100,6 +107,8 @@ impl Derived {
             path_scratch: RefCell::new(PathScratch::default()),
             path_cache: RefCell::new(PathCache::default()),
             religion: religion::ReligionCaches::new(rules, st),
+            danger: danger::DangerCaches::new(st),
+            jobs: jobs::JobCaches::new(rules),
         }
     }
 

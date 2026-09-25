@@ -7,7 +7,8 @@
 //!
 //! What waits for the packages that port the rest, each marked where it happens: the one-time
 //! triggers of founding and of a building (1b-08), and clearing a barbarian camp in the new
-//! borders (1c-06). The unit action that founds a city is 1c-04's.
+//! borders (1c-06). The settler's action that founds a city is `game::actions`' (1c-04), through
+//! [`found_city_by`].
 
 use super::super::Game;
 use super::super::derive::rev::{CityTouch, PlayerTouch};
@@ -160,6 +161,22 @@ pub fn found_city(
     t: TileIdx,
     name: Option<&str>,
 ) -> Result<CityId, ActionError> {
+    found_city_by(g, p, t, name, None)
+}
+
+/// [`found_city`] by a unit, a settler: `upon founding a city` fires with it in context, then it
+/// leaves the game (`cities.py:2180-2182`), used up with no `upon expending` of its own, as
+/// Python removed it.
+///
+/// # Errors
+/// As [`found_city`].
+pub fn found_city_by(
+    g: &mut Game,
+    p: PlayerId,
+    t: TileIdx,
+    name: Option<&str>,
+    unit: Option<crate::base::ids::UnitId>,
+) -> Result<CityId, ActionError> {
     if let Some(reason) = found_check(g, p, t) {
         return Err(ActionError::new(ErrCode::Rule, reason));
     }
@@ -248,9 +265,11 @@ pub fn found_city(
         x.founded_city = true;
     }
     super::free_buildings::try_add_free_buildings(g, p);
-    // The settler that founds it is the unit action's to pass (package 1c-04).
-    let site = TriggerSite { civ: p, city: Some(id), unit: None, tile: None };
+    let site = TriggerSite { civ: p, city: Some(id), unit, tile: None };
     triggers::fire(g, &site, &TriggerEvent::FoundingCity, true, Some("due to founding a city"));
+    if let Some(u) = unit {
+        crate::game::units::remove_unit(g, u);
+    }
     let who = g.player(p).map(|x| x.name.clone()).unwrap_or_default();
     let at = g.fmt_xy(t);
     g.emit(
