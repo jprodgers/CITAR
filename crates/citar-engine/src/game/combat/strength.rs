@@ -23,11 +23,12 @@
 use smallvec::SmallVec;
 
 use super::combatant;
-use crate::base::ids::{BaseUnitId, CityId, PlayerId, TileIdx, UniqueId, UnitId};
+use crate::base::ids::{BaseUnitId, CityId, TileIdx, UniqueId, UnitId};
 use crate::base::num;
 use crate::game::Game;
 use crate::game::economy;
 use crate::game::movement::is_embarked_at;
+use crate::game::path::cost::has_connection;
 use crate::game::units::{self, unit_has};
 use crate::rules::Ruleset;
 use crate::rules::defs::Domain;
@@ -523,20 +524,6 @@ fn general_modifiers(
     mods
 }
 
-/// Whether a tile has a road or railroad `p` may use (`movement.has_connection`,
-/// `movement.py:302-309`): a route, or its own forest or jungle when those count as roads.
-fn connected(g: &Game, p: PlayerId, t: TileIdx) -> bool {
-    let rules = &g.rules().derived().moves;
-    if crate::game::path::cost::route_at(g, rules, t).is_some() {
-        return true;
-    }
-    let Some(tile) = g.tile(t) else { return false };
-    tile.owner() == Some(p)
-        && crate::game::path::cost::top_non_hill(tile, rules.hill)
-            .is_some_and(|f| Some(f) == rules.forest || Some(f) == rules.jungle)
-        && uq::any(uq::civ(&g.view(), p, UniqueType::ForestsAndJunglesAreRoads, &Ctx::civ(p)))
-}
-
 /// Every modifier of an attack from tile `from` (`combat.attack_modifiers`, `combat.py:281-322`):
 /// the shared ones, then for a unit landing and boarding, a river crossed, an air sweep and
 /// flanking. `sweeping` is an air sweep's attack (Python set the unit's activity to say so).
@@ -587,8 +574,8 @@ pub fn attack_modifiers(
         let v = g.view();
         if river
             && !unit_has(g, u, UniqueType::AttackAcrossRiver, false)
-            && !(connected(g, owner, from)
-                && connected(g, owner, dt)
+            && !(has_connection(g, owner, from)
+                && has_connection(g, owner, dt)
                 && uq::any(uq::civ(
                     &v,
                     owner,

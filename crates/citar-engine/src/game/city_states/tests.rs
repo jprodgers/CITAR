@@ -11,8 +11,8 @@ use super::actions::{
     tribute_modifiers, tribute_willingness,
 };
 use super::influence::{
-    Relationship, data, data_mut, pair, pair_mut, raw_influence, relationship, resting_point,
-    set_influence,
+    Relationship, data, data_mut, friendship, pair, pair_mut, raw_influence, relationship,
+    resting_point, set_influence,
 };
 use super::quests::{camp_cleared, complete_quests, quest_target, quests_end_turn};
 use super::turn::{
@@ -524,5 +524,99 @@ fn the_barbarians_are_no_common_enemy() {
     assert!(!super::turn::common_enemy(&g, ROME, GENEVA));
     set_war(&mut g, GENEVA, GREECE, WarReason::Scenario).expect("two players");
     assert!(super::turn::common_enemy(&g, ROME, GENEVA));
+    clean(&mut g);
+}
+
+#[test]
+fn friendship_is_the_friendly_part_of_the_relationship() {
+    let mut g = game("Cultured");
+    let cases = [
+        (0.0, -40.0),
+        (0.0, -10.0),
+        (0.0, 0.0),
+        (0.0, 29.5),
+        (0.0, 30.0),
+        (0.0, 60.0),
+        (90.0, 60.0),
+        (90.0, 100.0),
+    ];
+    let same = |g: &Game, what: &str| {
+        let full = relationship(g, GENEVA, ROME);
+        assert_eq!(friendship(g, GENEVA, ROME), full.friendly().then_some(full), "{what}");
+    };
+    for (greece, rome) in cases {
+        set_influence(&mut g, GENEVA, GREECE, greece).expect("a city-state");
+        set_influence(&mut g, GENEVA, ROME, rome).expect("a city-state");
+        same(&g, &format!("Rome at {rome}, Greece at {greece}"));
+    }
+    // Afraid is neither a friend nor an ally.
+    set_influence(&mut g, GENEVA, ROME, 0.0).expect("a city-state");
+    for t in [33, 35, 44, 25] {
+        testing::unit(&mut g, ROME, "Swordsman", TileIdx(t));
+    }
+    assert_eq!(relationship(&g, GENEVA, ROME), Relationship::Afraid);
+    same(&g, "afraid");
+    clean(&mut g);
+}
+
+#[test]
+fn a_countdown_loaded_at_its_floor_runs_out_without_overflowing() {
+    // A save may hold any i16 in a countdown: the lowest runs out as 0 would.
+    let mut g = game("Cultured");
+    if let Some(d) = data_mut(&mut g, GENEVA) {
+        d.election_in = Some(i16::MIN);
+    }
+    city_state_election_tick(&mut g, GENEVA);
+    let n = g.rules().constants().formulas.city_state_election_turns;
+    assert_eq!(
+        data(&g, GENEVA).and_then(|d| d.election_in),
+        i16::try_from(n).ok(),
+        "an election was held"
+    );
+    set_influence(&mut g, GENEVA, ROME, 100.0).expect("a city-state");
+    if let Some(m) = g.player_mut(ROME, PlayerTouch::OTHER).and_then(|p| p.major.as_deref_mut()) {
+        m.cs_gp_gift = Some(i16::MIN);
+    }
+    let before = g.player_units(ROME).count();
+    great_person_gift_tick(&mut g, ROME);
+    assert_eq!(g.player_units(ROME).count(), before + 1, "the great person was given");
+    let next = g.player(ROME).and_then(|p| p.major.as_deref()).and_then(|m| m.cs_gp_gift);
+    assert!(next.is_some_and(|n| (37..=43).contains(&n)), "{next:?}");
+    clean(&mut g);
+}
+
+#[test]
+fn the_route_quest_reads_the_roads_movement_reads() {
+    use crate::rules::defs::Route;
+    let mut g = game("Cultured");
+    let route = quest(&g, QuestKind::Route, ROME, QuestTarget::None);
+    if let Some(d) = data_mut(&mut g, GENEVA) {
+        d.quests = vec![route];
+    }
+    set_turn(&mut g, 5);
+    quests_end_turn(&mut g, GENEVA);
+    assert_eq!(data(&g, GENEVA).map(|d| d.quests.len()), Some(1), "no road yet");
+    // A road from Rome's capital to Geneva's, its first tile pillaged.
+    let to = TileIdx(34);
+    let (mut cur, mut road) = (TileIdx(11), Vec::new());
+    while g.grid().distance(cur, to) > 1 {
+        cur = g
+            .grid()
+            .neighbors(cur)
+            .min_by_key(|&n| (g.grid().distance(n, to), n.0))
+            .expect("a neighbour");
+        road.push(cur);
+    }
+    for &t in &road {
+        g.set_route(t, Some(Route::Road)).expect("a tile");
+    }
+    g.set_pillaged(road[0], true, false).expect("a tile");
+    assert!(!crate::game::path::cost::has_connection(&g, ROME, road[0]));
+    quests_end_turn(&mut g, GENEVA);
+    assert_eq!(data(&g, GENEVA).map(|d| d.quests.len()), Some(1), "a pillaged road breaks it");
+    g.set_pillaged(road[0], false, false).expect("a tile");
+    quests_end_turn(&mut g, GENEVA);
+    assert!(data(&g, GENEVA).is_some_and(|d| d.quests.is_empty()), "the road is done");
+    assert_eq!(raw_influence(&g, GENEVA, ROME), f64::from(route.influence));
     clean(&mut g);
 }

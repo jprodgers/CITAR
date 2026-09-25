@@ -9,7 +9,8 @@
 //! A write the state refuses (a player that is no city-state, or no major) is an engine bug; the
 //! rules return it rather than stop quietly halfway.
 //!
-//! Package 1c-06 adds the named relationship ([`relationship`]), the resting point influence
+//! Package 1c-06 adds the named relationship ([`relationship`], and [`friendship`] where only
+//! friends and allies matter), the resting point influence
 //! drifts toward ([`resting_point`]) and how fast it drifts ([`degrade`], [`recovery`]), and
 //! whether a civilization has attacked city-states ([`is_aggressor`], [`is_warmonger`]).
 
@@ -106,16 +107,26 @@ pub fn relationship(g: &Game, cs: PlayerId, major: PlayerId) -> Relationship {
     if inf < 0.0 {
         return Relationship::Enemy;
     }
-    if inf >= ALLY_INFLUENCE && data(g, cs).and_then(CityStateData::ally) == Some(major) {
-        return Relationship::Ally;
-    }
-    if inf >= FRIEND_INFLUENCE {
-        return Relationship::Friend;
+    if let Some(level) = friendship(g, cs, major) {
+        return level;
     }
     if super::actions::tribute_willingness(g, cs, major, false) > 0 {
         return Relationship::Afraid;
     }
     Relationship::Neutral
+}
+
+/// A city-state's ally or friend, or neither: the part of [`relationship`] that reads influence
+/// alone. The end of its turn, its unit gifts and its border tension ask only this, and skip the
+/// tribute test (every major's military, the capital's strength) that tells the afraid from the
+/// neutral.
+#[must_use]
+pub fn friendship(g: &Game, cs: PlayerId, major: PlayerId) -> Option<Relationship> {
+    let inf = influence(g, cs, major);
+    if inf >= ALLY_INFLUENCE && data(g, cs).and_then(CityStateData::ally) == Some(major) {
+        return Some(Relationship::Ally);
+    }
+    (inf >= FRIEND_INFLUENCE).then_some(Relationship::Friend)
 }
 
 /// Whether a major has attacked a city-state at all (`is_aggressor`, `city_states.py:240-242`).

@@ -23,6 +23,7 @@ use crate::base::rng::{KeyPart, Purpose, Rng};
 use crate::base::sets::{PlayerSet, ResourceSet, TerrainSet};
 use crate::game::barbarians::is_camp_tile;
 use crate::game::diplomacy::relations::name;
+use crate::game::path::cost::has_connection;
 use crate::game::{Game, great_people, query, religion, workers};
 use crate::rules::defs::{QuestKind, QuestScope, ResourceType};
 use crate::state::chronicle::{EngineEvent, EventData};
@@ -65,43 +66,12 @@ fn resources_of(g: &Game, p: PlayerId) -> ResourceSet {
     query::detailed_resources(g, p).iter().filter(|x| x.amount > 0).map(|x| x.resource).collect()
 }
 
-/// Whether a tile has a road or railroad `p` may use (`movement.has_connection`,
-/// `movement.py:288-309`): its route unless pillaged, a city centre whose owner knows the road,
-/// or its own forest or jungle with `Forests and Jungles are roads`.
-fn has_connection(g: &Game, p: PlayerId, t: TileIdx, forest_roads: bool) -> bool {
-    let Some(tile) = g.tile(t) else { return false };
-    if tile.route().is_some() && !tile.route_pillaged() {
-        return true;
-    }
-    let r = g.rules();
-    let known = &r.derived().known;
-    if let Some(c) = g.city_at(t) {
-        let imps = r.improvements();
-        if g.has_tech(c.owner(), imps[known.railroad].tech_required)
-            || g.has_tech(c.owner(), imps[known.road].tech_required)
-        {
-            return true;
-        }
-    }
-    forest_roads
-        && tile.owner() == Some(p)
-        && tile.features().iter().any(|f| {
-            let t = r.derived().features.get(f).copied();
-            t.is_some() && (t == known.map.forest || t == known.map.jungle)
-        })
-}
-
 /// Whether a major's capital reaches a city-state's capital by road (`_route_connected`,
 /// `city_states.py:918-937`).
 fn route_connected(g: &Game, major: PlayerId, cs_cap: TileIdx) -> bool {
     let Some(cap) = g.player(major).and_then(|p| p.capital).and_then(|c| g.city(c)) else {
         return false;
     };
-    let forest_roads = crate::game::diplomacy::relations::civ_has(
-        g,
-        major,
-        crate::unique::UniqueType::ForestsAndJunglesAreRoads,
-    );
     let mut seen = crate::base::sets::BitSet::new();
     seen.insert(cap.tile().0);
     let mut stack = vec![cap.tile()];
@@ -113,7 +83,7 @@ fn route_connected(g: &Game, major: PlayerId, cs_cap: TileIdx) -> bool {
             if seen.contains(n.0) {
                 continue;
             }
-            if n == cs_cap || has_connection(g, major, n, forest_roads) {
+            if n == cs_cap || has_connection(g, major, n) {
                 seen.insert(n.0);
                 stack.push(n);
             }

@@ -11,8 +11,8 @@
 
 use super::actions::refused;
 use super::influence::{
-    add_influence, data, data_mut, is_aggressor, is_warmonger, pair, pair_mut, raw_influence,
-    relationship, resting_point, set_influence,
+    Relationship, add_influence, data, data_mut, friendship, is_aggressor, is_warmonger, pair,
+    pair_mut, raw_influence, resting_point, set_influence,
 };
 use super::quests::{quest_event, quests_end_turn};
 use crate::base::ids::{BaseUnitId, NationId, PlayerId, StatsId, TileIdx, UnitId};
@@ -108,7 +108,7 @@ pub fn end_turn(g: &mut Game, cs: PlayerId) {
         if !g.has_met(cs, q) {
             continue;
         }
-        let before = relationship(g, cs, q);
+        let before = friendship(g, cs, q).is_some();
         let rp = resting_point(g, cs, q);
         let cur = raw_influence(g, cs, q);
         if cur > rp {
@@ -118,8 +118,8 @@ pub fn end_turn(g: &mut Game, cs: PlayerId) {
             let to = rp.min(cur + super::influence::recovery(g, cs, q));
             refused(set_influence(g, cs, q, to));
         }
-        let after = relationship(g, cs, q);
-        if before.friendly() && !after.friendly() {
+        let after = friendship(g, cs, q).is_some();
+        if before && !after {
             let text = format!("Your relationship with {} degraded.", name(g, cs));
             let data = EventData { player: Some(cs), ..EventData::default() };
             let audience = Some(PlayerSet::single(q));
@@ -187,16 +187,15 @@ pub(crate) fn common_enemy(g: &Game, major: PlayerId, cs: PlayerId) -> bool {
 /// level sets a countdown of n, give or take a turn, which runs faster by the major's
 /// `Militaristic City-States grant units [n] times as fast ...` while they fight a common enemy.
 fn military_unit_gift(g: &mut Game, cs: PlayerId, major: PlayerId) {
-    let lvl = relationship(g, cs, major);
     let clear = |g: &mut Game| {
         if let Some(p) = pair_mut(g, cs, major) {
             p.unit_timer = None;
         }
     };
-    if !lvl.friendly() {
+    let Some(lvl) = friendship(g, cs, major) else {
         clear(g);
         return;
-    }
+    };
     let Some(ct) = data(g, cs).and_then(|d| d.cs_type) else {
         clear(g);
         return;
@@ -204,8 +203,7 @@ fn military_unit_gift(g: &mut Game, cs: PlayerId, major: PlayerId) {
     let turns: Vec<i32> = {
         let r = g.rules();
         let def = &r.city_state_types()[ct];
-        let uniques =
-            if lvl == super::influence::Relationship::Ally { &def.ally } else { &def.friend };
+        let uniques = if lvl == Relationship::Ally { &def.ally } else { &def.friend };
         let v = g.view();
         uq::object(&v, uniques, UniqueType::CityStateMilitaryUnits, &Ctx::civ(major))
             .filter_map(|h| match *h.data() {
@@ -233,7 +231,7 @@ fn military_unit_gift(g: &mut Game, cs: PlayerId, major: PlayerId) {
         for h in uq::civ(&v, major, UniqueType::CityStateMoreGiftedUnits, &Ctx::civ(major)) {
             if let UniqueData::CityStateMoreGiftedUnits(x) = *h.data() {
                 for _ in 0..h.n {
-                    left -= x.times - 1;
+                    left = left.saturating_sub(x.times.saturating_sub(1));
                 }
             }
         }
@@ -346,7 +344,8 @@ pub fn great_person_gift_tick(g: &mut Game, major: PlayerId) {
     if allies.is_empty() {
         return;
     }
-    left -= 1;
+    // A loaded counter may be anything an i16 holds.
+    left = left.saturating_sub(1);
     let set = |g: &mut Game, v: i32| {
         if let Some(m) =
             g.player_mut(major, PlayerTouch::OTHER).and_then(|p| p.major.as_deref_mut())
@@ -433,7 +432,7 @@ fn update_border_intrusion(g: &mut Game, cs: PlayerId) {
             r.base_units()[u.base].military
                 && g.tile(u.tile()).and_then(crate::state::map::Tile::owner) == Some(cs)
         });
-        if inside && !relationship(g, cs, q).friendly() {
+        if inside && friendship(g, cs, q).is_none() {
             refused(add_influence(g, cs, q, -10.0));
             if pair(g, cs, q).border_conflict == 0 {
                 if let Some(p) = pair_mut(g, cs, q) {

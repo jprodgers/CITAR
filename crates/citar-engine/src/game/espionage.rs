@@ -663,7 +663,8 @@ pub fn city_state_election_tick(g: &mut Game, cs: PlayerId) {
             let first = rng.below(u64::try_from(n.max(0)).unwrap_or(0) + 1);
             i16::try_from(first).unwrap_or(i16::MAX)
         }
-        Some(x) => x - 1,
+        // A loaded counter may be anything an i16 holds.
+        Some(x) => x.saturating_sub(1),
     };
     if let Some(d) = cs_influence::data_mut(g, cs) {
         d.election_in = Some(next);
