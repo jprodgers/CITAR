@@ -899,8 +899,10 @@ fn automate(g: &mut Game, u: UnitId) -> Result<(), Refused> {
 /// Attacks or pillages within reach this turn, whichever is worth more (`_act_here`,
 /// `barbarians.py:528-541`). Whether the unit did something.
 fn act_here(g: &mut Game, u: UnitId) -> Result<bool, Refused> {
-    let atk = best_attack(g, u, false);
-    let pil = best_pillage(g, u, false);
+    // What it reaches this turn, searched once for both.
+    let reach = movement::reachable_this_turn(g, u);
+    let atk = best_attack(g, u, Some(&reach));
+    let pil = best_pillage(g, u, Some(&reach));
     let pv = pil.map(|(v, _)| f64::from(v) * 15.0 * pillage_weight(g));
     let pillage_first = matches!((atk, pv), (Some(t), Some(pv)) if pv > t.score);
     let tries = if pillage_first { [false, true] } else { [true, false] };
@@ -958,9 +960,10 @@ struct Target {
 /// `barbarians.py:565-627`): the damage dealt less the damage taken, weighted by how much the
 /// barbarians mind it; a civilian a free capture (150), a city with its defences down a sack
 /// (1000, for a melee unit), a city under siege worth more for each other barbarian round it, a
-/// kill twice its damage. Melee units may move next to a target first; a certain death for
+/// kill twice its damage. Melee units may move next to a target first, from the tiles `reach`
+/// holds (what it reaches this turn); without it, only from where it stands. A certain death for
 /// nothing is left out unless they are bold.
-fn attack_targets(g: &Game, u: UnitId) -> Vec<Target> {
+fn attack_targets(g: &Game, u: UnitId, reach: Option<&[(TileIdx, i32)]>) -> Vec<Target> {
     let Some(x) = g.unit(u) else { return Vec::new() };
     if resolve::can_attack_now(g, u).is_some() {
         return Vec::new();
@@ -970,7 +973,7 @@ fn attack_targets(g: &Game, u: UnitId) -> Vec<Target> {
     let range =
         if ranged { u32::try_from(units::health::attack_range(g, u)).unwrap_or(0) } else { 1 };
     let Some(m) = Mover::unit(g, u) else { return Vec::new() };
-    let mut reach = m.reachable();
+    let mut reach: Vec<(TileIdx, i32)> = reach.map_or_else(Vec::new, <[_]>::to_vec);
     if !reach.iter().any(|&(t, _)| t == here) {
         reach.push((here, x.moves));
         reach.sort_by_key(|&(t, _)| t);
@@ -1023,16 +1026,13 @@ fn attack_targets(g: &Game, u: UnitId) -> Vec<Target> {
     out
 }
 
-/// The attack the unit should make now, if any is worth it at this aggression (`_best_attack`,
+/// The attack the unit should make now, from a tile of `reach` or, without it, from where it
+/// stands (`stay`), if any is worth it at this aggression (`_best_attack`,
 /// `barbarians.py:630-652`): a sack or any ranged shot; otherwise better than the bar, and not a
 /// healthy city before enough others have gathered round it. The best score, then the lowest
 /// tile, then the lowest tile to attack from.
-fn best_attack(g: &Game, u: UnitId, stay: bool) -> Option<Target> {
-    let here = g.unit(u)?.tile();
-    let mut targets = attack_targets(g, u);
-    if stay {
-        targets.retain(|t| t.from == here);
-    }
+fn best_attack(g: &Game, u: UnitId, reach: Option<&[(TileIdx, i32)]>) -> Option<Target> {
+    let targets = attack_targets(g, u, reach);
     let ranged = g.unit(u).is_some_and(|x| g.rules().base_units()[x.base].ranged);
     let bar = attack_bar(g);
     let need = siege_size(g);
@@ -1067,9 +1067,11 @@ fn do_attack(g: &mut Game, u: UnitId, t: Target) -> Result<bool, Refused> {
     Ok(true)
 }
 
-/// Attacks something in reach if it is worth attacking (`_try_attack`).
+/// Attacks something in reach, or from where it stands with `stay`, if it is worth attacking
+/// (`_try_attack`).
 fn try_attack(g: &mut Game, u: UnitId, stay: bool) -> Result<bool, Refused> {
-    match best_attack(g, u, stay) {
+    let reach = if stay { None } else { Some(movement::reachable_this_turn(g, u)) };
+    match best_attack(g, u, reach.as_deref()) {
         Some(t) => do_attack(g, u, t),
         None => Ok(false),
     }
@@ -1098,8 +1100,9 @@ pub fn pillage_value(g: &Game, p: PlayerId, t: TileIdx) -> i32 {
 
 /// The most valuable thing to pillage this turn, nearest first among equals, then the lowest
 /// tile (`_best_pillage`, `barbarians.py:693-713`): `(value, tile)`. Only a land unit that may
-/// pillage and has moves; only where it stands with `only_here`.
-fn best_pillage(g: &Game, u: UnitId, only_here: bool) -> Option<(i32, TileIdx)> {
+/// pillage and has moves; among the tiles of `reach` it can reach with moves to spare, or only
+/// where it stands without it.
+fn best_pillage(g: &Game, u: UnitId, reach: Option<&[(TileIdx, i32)]>) -> Option<(i32, TileIdx)> {
     let x = g.unit(u)?;
     if g.rules().base_units()[x.base].domain != Domain::Land || x.moves <= 0 {
         return None;
@@ -1109,10 +1112,8 @@ fn best_pillage(g: &Game, u: UnitId, only_here: bool) -> Option<(i32, TileIdx)> 
     }
     let here = x.tile();
     let mut tiles: SmallVec<[TileIdx; 32]> = SmallVec::new();
-    if !only_here {
-        tiles.extend(
-            movement::reachable_this_turn(g, u).into_iter().filter(|&(_, l)| l > 0).map(|(t, _)| t),
-        );
+    if let Some(reach) = reach {
+        tiles.extend(reach.iter().filter(|&&(_, l)| l > 0).map(|&(t, _)| t));
     }
     tiles.push(here);
     let mut best: Option<((i32, i64, i64), TileIdx)> = None;
@@ -1149,7 +1150,8 @@ fn do_pillage(g: &mut Game, u: UnitId, t: TileIdx) -> Result<bool, Refused> {
 
 /// Pillages the most valuable thing here or within reach (`_try_pillage`).
 fn try_pillage(g: &mut Game, u: UnitId, only_here: bool) -> Result<bool, Refused> {
-    match best_pillage(g, u, only_here) {
+    let reach = if only_here { None } else { Some(movement::reachable_this_turn(g, u)) };
+    match best_pillage(g, u, reach.as_deref()) {
         Some((_, t)) => do_pillage(g, u, t),
         None => Ok(false),
     }

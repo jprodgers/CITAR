@@ -63,6 +63,22 @@ fn median_round(g: &Game, bid: PlayerId, n: usize) -> Duration {
     times[n / 2]
 }
 
+/// The median of `n` runs of `f`, each on a fresh copy of the game (the copy is not timed).
+fn median_of(g: &Game, n: usize, f: impl Fn(&mut Game)) -> Duration {
+    let mut times: Vec<Duration> = (0..n)
+        .map(|_| {
+            let mut copy = g.clone();
+            let t = Instant::now();
+            f(&mut copy);
+            let took = t.elapsed();
+            black_box(copy);
+            took
+        })
+        .collect();
+    times.sort();
+    times[n / 2]
+}
+
 fn main() {
     let (g, name) = fixture();
     let bid = g.barbarian_id().expect("the barbarians");
@@ -88,6 +104,11 @@ fn main() {
 
     let took = median_round(&g, bid, 31);
     println!("barbarians/round median: {took:?} (budget {ROUND:?}, report-only)");
+    // Its parts, for the tuning of package 1e-03: the camps' turn alone, and the units' start.
+    let camps = median_of(&g, 31, |g| barbarians::update_camps(g));
+    println!("barbarians/camps median: {camps:?} (report-only)");
+    let start = median_of(&g, 31, |g| units::turn::start_units(g, bid));
+    println!("barbarians/units_start median: {start:?} (report-only)");
     if took > ROUND {
         println!("warning: barbarians/round is over its {ROUND:?} budget (report-only)");
     }
