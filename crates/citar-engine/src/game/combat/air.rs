@@ -47,14 +47,22 @@ pub fn intercept_chance(g: &Game, u: UnitId) -> i32 {
 /// `combat.py:943-956`): it has a chance to, an aircraft has movement left, it has interceptions
 /// left this turn, and the tile is within its interception range with its own and its
 /// civilization's `[n] Air Interception Range`.
+///
+/// Asked of every unit of a side, or of the game for an air sweep, so the unique queries come
+/// last: a unit whose profile carries no chance to intercept (`CombatRules::intercept`, nearly
+/// all of them) is out at once.
 #[must_use]
 pub fn can_intercept(g: &Game, u: UnitId, t: TileIdx) -> bool {
     let Some(x) = g.unit(u) else { return false };
-    if intercept_chance(g, u) == 0 {
+    let r = g.rules();
+    if !r.derived().combat.intercept.may(x.base, &x.promotions) {
         return false;
     }
-    let def = &g.rules().base_units()[x.base];
+    let def = &r.base_units()[x.base];
     if def.domain == Domain::Air && x.moves <= 0 {
+        return false;
+    }
+    if intercept_chance(g, u) == 0 {
         return false;
     }
     let most = 1i32.saturating_add(own_sum(g, u, UniqueType::ExtraInterceptionsPerTurn, false));

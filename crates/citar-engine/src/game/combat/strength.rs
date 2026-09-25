@@ -6,20 +6,33 @@
 //! rebuilt the modifier stacks at every call, about six times for one preview
 //! (`combat.py:512-538`), and again for each of the two rolls of a fight.
 //!
-//! A modifier is keyed by the name of what grants it (`_src`, `combat.py:141-143`): the object a
-//! unique came from, or one of the fixed names ("Flanking", "Tile", ...), and kept in the order
-//! it was first given, as the preview lists them.
+//! **Where the attacker stands.** [`setup`] takes the tile the attacker attacks from, and every
+//! read of the attacker's position is of that tile: its fight context, its distance to its
+//! capital, the enemies beside it, the generals near it, whether it is embarked, landing,
+//! boarding or crossing a river, and whether the defender has it beside it. So a fight can be
+//! weighed from a tile the unit could move to without moving it: Python rewrote the unit's tile
+//! for that (`barbarians.py:596-604`). Only the conditionals that look through the world for the
+//! unit's own position (`when adjacent to a [unit]`, `when stacked with a [unit]`) still see
+//! where it stands.
+//!
+//! A modifier is keyed by what grants it ([`ModKey`], Python's `_src`, `combat.py:141-143`): the
+//! object a unique came from, the great general whose aura it is, or one of the fixed rules
+//! ("Flanking", "Tile", ...), and kept in the order it was first given, as the preview lists
+//! them. The names are the preview's ([`named`]).
 
 use smallvec::SmallVec;
 
 use super::combatant;
-use crate::base::ids::{CityId, PlayerId, TileIdx, UniqueId, UnitId};
+use crate::base::ids::{BaseUnitId, CityId, PlayerId, TileIdx, UniqueId, UnitId};
 use crate::base::num;
 use crate::game::Game;
 use crate::game::economy;
+use crate::game::movement::is_embarked_at;
 use crate::game::units::{self, unit_has};
+use crate::rules::Ruleset;
 use crate::rules::defs::Domain;
-use crate::state::units::Activity;
+use crate::state::units::{Activity, Unit};
+use crate::unique::table::Source;
 use crate::unique::world::CombatAction;
 use crate::unique::{CombatCtx, Combatant, Ctx, UniqueData, UniqueType, uq};
 
@@ -41,12 +54,60 @@ pub const WOUNDED_RATIO: f64 = 300.0;
 /// What a civilian takes from any attack (`combat.DAMAGE_TO_CIVILIAN`).
 pub const DAMAGE_TO_CIVILIAN: i32 = 40;
 
-/// Every modifier of one side of a fight, in percent, keyed by the name of what grants it, in the
-/// order each was first given (Python's dict).
-pub type Mods = SmallVec<[(&'static str, i32); 8]>;
+/// What grants a modifier, which keys it (`combat._src`, `combat.py:141-143`). Python keyed its
+/// modifiers by the name alone; the name is only the preview's ([`ModKey::name`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ModKey {
+    /// The object a unique came from.
+    Source(Source),
+    /// The aura of a great general of this type.
+    General(BaseUnitId),
+    /// `Adjacent enemy units`: the worst malus of the enemies beside the fighter.
+    AdjacentEnemies,
+    /// `Missing resource`.
+    MissingResource,
+    /// `Difficulty`: the barbarians' bonus against their enemies.
+    Difficulty,
+    /// `Landing`: attacking land from the water.
+    Landing,
+    /// `Boarding`: attacking a ship from the shore.
+    Boarding,
+    /// `Across river`.
+    AcrossRiver,
+    /// `Flanking`.
+    Flanking,
+    /// `Tile`: the defender's terrain.
+    Tile,
+    /// `Fortification`.
+    Fortification,
+}
+
+impl ModKey {
+    /// The name the preview gives the modifier (`combat._src`, or the fixed name).
+    #[must_use]
+    pub fn name(self, r: &'static Ruleset) -> &'static str {
+        match self {
+            Self::Source(s) => economy::source_name(r, s),
+            Self::General(b) => r.name(b).unwrap_or(""),
+            Self::AdjacentEnemies => "Adjacent enemy units",
+            Self::MissingResource => "Missing resource",
+            Self::Difficulty => "Difficulty",
+            Self::Landing => "Landing",
+            Self::Boarding => "Boarding",
+            Self::AcrossRiver => "Across river",
+            Self::Flanking => "Flanking",
+            Self::Tile => "Tile",
+            Self::Fortification => "Fortification",
+        }
+    }
+}
+
+/// Every modifier of one side of a fight, in percent, keyed by what grants it, in the order each
+/// was first given (Python's dict).
+pub type Mods = SmallVec<[(ModKey, i32); 8]>;
 
 /// Adds to a modifier (`mods[k] = mods.get(k, 0) + v`).
-fn add(m: &mut Mods, k: &'static str, v: i32) {
+fn add(m: &mut Mods, k: ModKey, v: i32) {
     match m.iter_mut().find(|(n, _)| *n == k) {
         Some(e) => e.1 = e.1.saturating_add(v),
         None => m.push((k, v)),
@@ -54,7 +115,7 @@ fn add(m: &mut Mods, k: &'static str, v: i32) {
 }
 
 /// Sets a modifier, in its first place if it was given before (`mods[k] = v`).
-fn put(m: &mut Mods, k: &'static str, v: i32) {
+fn put(m: &mut Mods, k: ModKey, v: i32) {
     match m.iter_mut().find(|(n, _)| *n == k) {
         Some(e) => e.1 = v,
         None => m.push((k, v)),
@@ -73,10 +134,25 @@ pub fn multiplier(m: &Mods) -> f64 {
     1.0 + f64::from(total(m)) / 100.0
 }
 
-/// The name of what granted a unique, which keys its modifier (`combat._src`).
-fn src(g: &Game, id: UniqueId) -> &'static str {
-    let r = g.rules();
-    economy::source_name(r, r.uniques().meta(id).source)
+/// A side's modifiers by name, as the preview lists them: modifiers whose sources share a name
+/// are one line with their sum (Python's dict held one entry per name), in the order each name
+/// was first given. The lines add up to [`total`].
+#[must_use]
+pub fn named(r: &'static Ruleset, m: &Mods) -> SmallVec<[(&'static str, i32); 8]> {
+    let mut out: SmallVec<[(&'static str, i32); 8]> = SmallVec::new();
+    for &(k, v) in m {
+        let name = k.name(r);
+        match out.iter_mut().find(|(n, _)| *n == name) {
+            Some(e) => e.1 = e.1.saturating_add(v),
+            None => out.push((name, v)),
+        }
+    }
+    out
+}
+
+/// What granted a unique, which keys its modifier (`combat._src`).
+fn src(g: &Game, id: UniqueId) -> ModKey {
+    ModKey::Source(g.rules().uniques().meta(id).source)
 }
 
 /// The context a unique is asked in for this fight, from one side (`combat._ctx`,
@@ -90,9 +166,22 @@ pub fn fight_ctx(
     action: CombatAction,
     attacked: Option<TileIdx>,
 ) -> Ctx {
-    let at = attacked.or_else(|| match action {
+    fight_ctx_at(g, ours, combatant::tile(g, ours), theirs, action, attacked)
+}
+
+/// [`fight_ctx`] with our side on tile `at`, where it stands or where it would attack from.
+#[must_use]
+pub fn fight_ctx_at(
+    g: &Game,
+    ours: Combatant,
+    at: TileIdx,
+    theirs: Option<Combatant>,
+    action: CombatAction,
+    attacked: Option<TileIdx>,
+) -> Ctx {
+    let attacked = attacked.or_else(|| match action {
         CombatAction::Attack => theirs.map(|t| combatant::tile(g, t)),
-        CombatAction::Defend => Some(combatant::tile(g, ours)),
+        CombatAction::Defend => Some(at),
     });
     let (city, unit) = match ours {
         Combatant::City(c) => (Some(c), None),
@@ -102,11 +191,11 @@ pub fn fight_ctx(
         civ: Some(combatant::owner(g, ours)),
         city,
         unit,
-        tile: Some(combatant::tile(g, ours)),
+        tile: Some(at),
         combat: Some(CombatCtx {
             our: ours,
             their: theirs,
-            attacked_tile: at,
+            attacked_tile: attacked,
             action: Some(action),
         }),
         ignore_conditionals: false,
@@ -188,6 +277,12 @@ fn strength_amount(g: &Game, u: UnitId, ctx: &Ctx) -> i32 {
 /// Strength` against a defender.
 #[must_use]
 pub fn base_attack(g: &Game, a: Combatant, d: Option<Combatant>) -> f64 {
+    base_attack_from(g, a, combatant::tile(g, a), d)
+}
+
+/// [`base_attack`] with the attacker on tile `from`.
+#[must_use]
+pub fn base_attack_from(g: &Game, a: Combatant, from: TileIdx, d: Option<Combatant>) -> f64 {
     match a {
         Combatant::City(c) => {
             num::round_half_even(f64::from(city_strength(g, c, d, CombatAction::Attack)) * 0.75)
@@ -196,7 +291,9 @@ pub fn base_attack(g: &Game, a: Combatant, d: Option<Combatant>) -> f64 {
             let Some(x) = g.unit(u) else { return 0.0 };
             let def = &g.rules().base_units()[x.base];
             let extra = match d {
-                Some(_) => strength_amount(g, u, &fight_ctx(g, a, d, CombatAction::Attack, None)),
+                Some(_) => {
+                    strength_amount(g, u, &fight_ctx_at(g, a, from, d, CombatAction::Attack, None))
+                }
                 None => 0,
             };
             let base = if def.ranged { def.ranged_strength } else { def.strength };
@@ -241,20 +338,27 @@ pub fn base_defense(g: &Game, d: Combatant, a: Option<Combatant>) -> f64 {
 
 // ---- Modifiers ------------------------------------------------------------------------------
 
-/// The best great general's bonus in range of a unit, with the name of the general's type
-/// (`combat._great_general_bonus`, `combat.py:205-230`): only the best applies, and it doubles
+/// The best great general's bonus in range of unit `ours` on tile `at`, with the general's type
+/// (`combat._great_general_bonus`, `combat.py:205-230`): only the best applies, the lowest id
+/// among equals (Python asked the side's units in id order and kept the first), and it doubles
 /// for a unit whose civilization has `Great General provides double combat bonus` when the
 /// general is a great person of war.
+///
+/// Only the units that may carry an aura are asked, and only those within the ruleset's widest
+/// aura of `at`, found on the tiles that near, or among the side's units when those are fewer.
 fn great_general_bonus(
     g: &Game,
     ours: UnitId,
+    at: TileIdx,
     enemy: Combatant,
     action: CombatAction,
-) -> Option<(&'static str, i32)> {
-    let x = g.unit(ours)?;
-    let (owner, at) = (x.owner(), x.tile());
+) -> Option<(BaseUnitId, i32)> {
+    let owner = g.unit(ours)?.owner();
     let r = g.rules();
     let rules = &r.derived().combat;
+    if rules.aura.units.is_empty() && rules.aura.promotions.is_empty() {
+        return None;
+    }
     let v = g.view();
     let ctx = Ctx {
         civ: Some(owner),
@@ -267,10 +371,11 @@ fn great_general_bonus(
         }),
         ..Ctx::default()
     };
-    let mut best: Option<(crate::base::ids::BaseUnitId, i32)> = None;
-    for general in g.player_units(owner) {
-        if !rules.aura.may(general.base, &general.promotions) {
-            continue;
+    // (the general, its type, its bonus)
+    let mut best: Option<(UnitId, BaseUnitId, i32)> = None;
+    let mut consider = |general: &Unit| {
+        if general.owner() != owner || !rules.aura.may(general.base, &general.promotions) {
+            return;
         }
         for h in uq::unit(&v, general.id(), UniqueType::StrengthBonusInRadius, &ctx) {
             let UniqueData::StrengthBonusInRadius(b) = *h.data() else { continue };
@@ -281,38 +386,55 @@ fn great_general_bonus(
             if !rules.is_military_filter(b.units) && !units::unit_matches(g, ours, b.units) {
                 continue;
             }
-            if b.percent > best.map_or(0, |(_, n)| n) {
-                best = Some((general.base, b.percent));
+            let better = match best {
+                None => b.percent > 0,
+                Some((id, _, n)) => b.percent > n || (b.percent == n && general.id() < id),
+            };
+            if better {
+                best = Some((general.id(), general.base, b.percent));
             }
         }
+    };
+    let radius = rules.aura_radius;
+    let area = 1 + 3 * u64::from(radius) * (u64::from(radius) + 1);
+    let side = g.state().units().of(owner).len();
+    if area < u64::try_from(side).unwrap_or(u64::MAX) {
+        // A wrapping map may show a tile twice, which the choice above does not mind.
+        g.grid().any_within(at, radius, |t| {
+            g.units_at(t).for_each(&mut consider);
+            false
+        });
+    } else {
+        g.player_units(owner).for_each(&mut consider);
     }
-    let (general, mut bonus) = best?;
+    let (_, general, mut bonus) = best?;
     if unit_has(g, ours, UniqueType::GreatGeneralProvidesDoubleCombatBonus, true)
         && rules.war_generals.contains(general)
     {
         bonus = bonus.saturating_mul(2);
     }
-    Some((r.name(general).unwrap_or(""), bonus))
+    Some((general, bonus))
 }
 
 /// The modifiers that apply alike to either side (`combat._general_modifiers`,
-/// `combat.py:233-278`).
+/// `combat.py:233-278`): `ours` on tile `at` against `enemy` on tile `enemy_at`, each where it
+/// stands or, for the attacker, where it attacks from.
 fn general_modifiers(
     g: &Game,
     ours: Combatant,
+    at: TileIdx,
     enemy: Combatant,
+    enemy_at: TileIdx,
     action: CombatAction,
-    from: TileIdx,
 ) -> Mods {
     let mut mods = Mods::new();
-    let ctx = fight_ctx(g, ours, Some(enemy), action, None);
+    let ctx = fight_ctx_at(g, ours, at, Some(enemy), action, None);
     let v = g.view();
     let r = g.rules();
     let owner = combatant::owner(g, ours);
     match ours {
         Combatant::Unit(u) => {
             let Some(unit) = g.unit(u) else { return mods };
-            let at = unit.tile();
             // refcheck: combat-modifiers-in-ruleset-order (a unit's promotions are a set, so
             // their modifiers come in the ruleset's order, not the order it gained them)
             for h in uq::unit_and_civ(&v, u, UniqueType::Strength, &ctx) {
@@ -336,15 +458,19 @@ fn general_modifiers(
                     }
                 }
             }
-            // The enemies beside it, and a unit attacking it from beside it from afar.
-            let mut adj: SmallVec<[UnitId; 8]> =
-                g.grid().neighbors(at).flat_map(|n| g.units_at(n).map(|o| o.id())).collect();
-            if let Combatant::Unit(e) = enemy {
-                let et = combatant::tile(g, enemy);
-                let next_to = |t: TileIdx| g.grid().neighbors(at).any(|n| n == t);
-                if !next_to(et) && next_to(from) {
-                    adj.push(e);
-                }
+            // The units beside it; the enemy counts where it fights from, beside it or not
+            // (a unit shooting from afar is not beside it, one attacking from beside it is).
+            let mut adj: SmallVec<[UnitId; 8]> = g
+                .grid()
+                .neighbors(at)
+                .flat_map(|n| g.units_at(n))
+                .filter(|o| Combatant::Unit(o.id()) != enemy)
+                .map(Unit::id)
+                .collect();
+            if let Combatant::Unit(e) = enemy
+                && g.grid().neighbors(at).any(|n| n == enemy_at)
+            {
+                adj.push(e);
             }
             let f = r.uniques().filters();
             let mut worst: Option<i32> = None;
@@ -366,18 +492,18 @@ fn general_modifiers(
                 }
             }
             if let Some(w) = worst {
-                put(&mut mods, "Adjacent enemy units", w);
+                put(&mut mods, ModKey::AdjacentEnemies, w);
             }
             if !g.is_barbarian(owner)
                 && let Some(res) = r.base_units()[unit.base].required_resource
                 && economy::resource_amount(g, owner, res) < 0
             {
-                put(&mut mods, "Missing resource", MISSING_RESOURCE_MALUS);
+                put(&mut mods, ModKey::MissingResource, MISSING_RESOURCE_MALUS);
             }
-            if let Some((name, bonus)) = great_general_bonus(g, u, enemy, action)
+            if let Some((general, bonus)) = great_general_bonus(g, u, at, enemy, action)
                 && bonus != 0
             {
-                put(&mut mods, name, bonus);
+                put(&mut mods, ModKey::General(general), bonus);
             }
         }
         Combatant::City(c) => {
@@ -392,7 +518,7 @@ fn general_modifiers(
     }
     if g.is_barbarian(combatant::owner(g, enemy)) {
         let level = &r.difficulties()[g.state().config().barbarian_difficulty];
-        put(&mut mods, "Difficulty", num::trunc_i32(level.barbarian_bonus * 100.0));
+        put(&mut mods, ModKey::Difficulty, num::trunc_i32(level.barbarian_bonus * 100.0));
     }
     mods
 }
@@ -411,9 +537,9 @@ fn connected(g: &Game, p: PlayerId, t: TileIdx) -> bool {
         && uq::any(uq::civ(&g.view(), p, UniqueType::ForestsAndJunglesAreRoads, &Ctx::civ(p)))
 }
 
-/// Every modifier of an attack (`combat.attack_modifiers`, `combat.py:281-322`): the shared ones,
-/// then for a unit landing and boarding, a river crossed, an air sweep and flanking. `sweeping`
-/// is an air sweep's attack (Python set the unit's activity to say so).
+/// Every modifier of an attack from tile `from` (`combat.attack_modifiers`, `combat.py:281-322`):
+/// the shared ones, then for a unit landing and boarding, a river crossed, an air sweep and
+/// flanking. `sweeping` is an air sweep's attack (Python set the unit's activity to say so).
 #[must_use]
 pub fn attack_modifiers(
     g: &Game,
@@ -422,16 +548,16 @@ pub fn attack_modifiers(
     from: TileIdx,
     sweeping: bool,
 ) -> Mods {
-    let mut mods = general_modifiers(g, a, d, CombatAction::Attack, from);
+    let dt = combatant::tile(g, d);
+    let mut mods = general_modifiers(g, a, from, d, dt, CombatAction::Attack);
     let Combatant::Unit(u) = a else { return mods };
     let Some(unit) = g.unit(u) else { return mods };
     let owner = unit.owner();
-    let dt = combatant::tile(g, d);
     let melee = combatant::is_melee(g, a);
     let land_target = g.is_land(dt);
     let across_coast = unit_has(g, u, UniqueType::AttackAcrossCoast, false);
-    if crate::game::movement::is_embarked(g, u) && land_target && !across_coast {
-        put(&mut mods, "Landing", LANDING_MALUS);
+    if is_embarked_at(g, u, from) && land_target && !across_coast {
+        put(&mut mods, ModKey::Landing, LANDING_MALUS);
     }
     if combatant::is_land(g, a)
         && !g.is_water(from)
@@ -440,7 +566,7 @@ pub fn attack_modifiers(
         && !across_coast
         && g.city_at(dt).is_none()
     {
-        put(&mut mods, "Boarding", BOARDING_MALUS);
+        put(&mut mods, ModKey::Boarding, BOARDING_MALUS);
     }
     if !combatant::is_air(g, a)
         && melee
@@ -449,7 +575,7 @@ pub fn attack_modifiers(
         && !across_coast
         && !matches!(d, Combatant::City(_))
     {
-        put(&mut mods, "Landing", LANDING_MALUS);
+        put(&mut mods, ModKey::Landing, LANDING_MALUS);
     }
     if melee && g.grid().distance(from, dt) == 1 {
         let river = match (g.tile(from), g.tile(dt)) {
@@ -470,12 +596,12 @@ pub fn attack_modifiers(
                     &Ctx::civ(owner),
                 )))
         {
-            put(&mut mods, "Across river", RIVER_MALUS);
+            put(&mut mods, ModKey::AcrossRiver, RIVER_MALUS);
         }
     }
     if sweeping || unit.activity == Some(Activity::AirSweep) {
         let v = g.view();
-        let ctx = Ctx::unit(&v, u);
+        let ctx = Ctx { unit: Some(u), tile: Some(from), ..Ctx::default() }.resolve(&v);
         for h in uq::unit(&v, u, UniqueType::StrengthWhenAirsweep, &ctx) {
             if let UniqueData::StrengthWhenAirsweep(x) = h.data() {
                 for _ in 0..h.n {
@@ -497,7 +623,7 @@ pub fn attack_modifiers(
             .count();
         if n > 0 {
             let v = g.view();
-            let ctx = fight_ctx(g, a, Some(d), CombatAction::Attack, None);
+            let ctx = fight_ctx_at(g, a, from, Some(d), CombatAction::Attack, None);
             let mut fb = FLANKING;
             for h in uq::unit_and_civ(&v, u, UniqueType::FlankAttackBonus, &ctx) {
                 if let UniqueData::FlankAttackBonus(x) = h.data() {
@@ -508,7 +634,7 @@ pub fn attack_modifiers(
             }
             #[allow(clippy::cast_precision_loss, reason = "a tile has six neighbours")]
             let flank = num::trunc_i32(fb * n as f64);
-            put(&mut mods, "Flanking", flank);
+            put(&mut mods, ModKey::Flanking, flank);
         }
     }
     mods
@@ -549,12 +675,13 @@ pub fn tile_defense_bonus(g: &Game, t: TileIdx, unit: Option<UnitId>) -> f64 {
     bonus
 }
 
-/// Every modifier of a defence (`combat.defense_modifiers`, `combat.py:344-358`): the shared
-/// ones, then for a unit not at sea its terrain (a bonus unless it may not have one, a penalty
-/// unless it ignores them) and its fortification.
+/// Every modifier of a defence against `a` attacking from tile `from`
+/// (`combat.defense_modifiers`, `combat.py:344-358`): the shared ones, then for a unit not at sea
+/// its terrain (a bonus unless it may not have one, a penalty unless it ignores them) and its
+/// fortification.
 #[must_use]
 pub fn defense_modifiers(g: &Game, a: Combatant, d: Combatant, from: TileIdx) -> Mods {
-    let mut mods = general_modifiers(g, d, a, CombatAction::Defend, from);
+    let mut mods = general_modifiers(g, d, combatant::tile(g, d), a, from, CombatAction::Defend);
     let Combatant::Unit(u) = d else { return mods };
     let Some(unit) = g.unit(u) else { return mods };
     if crate::game::movement::is_embarked(g, u) {
@@ -570,11 +697,11 @@ pub fn defense_modifiers(g: &Game, a: Combatant, d: Combatant, from: TileIdx) ->
         false
     };
     if counts {
-        put(&mut mods, "Tile", num::round_half_even_i32(tb * 100.0));
+        put(&mut mods, ModKey::Tile, num::round_half_even_i32(tb * 100.0));
     }
     if matches!(unit.activity, Some(Activity::Fortify | Activity::FortifyHeal)) && unit.fortify > 0
     {
-        put(&mut mods, "Fortification", FORTIFICATION * i32::from(unit.fortify.min(2)));
+        put(&mut mods, ModKey::Fortification, FORTIFICATION * i32::from(unit.fortify.min(2)));
     }
     mods
 }
@@ -649,15 +776,46 @@ impl CombatSetup {
         let ratio = self.attack / self.defense;
         num::round_half_even_i32(damage_modifier(ratio, true, rnd) * self.defender_wounds)
     }
+
+    /// A setup of two units with no modifiers and the numbers given, for tests of the damage
+    /// (feature `test-ops`): the final strengths (at least one, as a fight's are), the share of
+    /// its damage each side deals for its wounds, whether the defender is a civilian and whether
+    /// the attack is a ranged one that takes nothing back.
+    #[cfg(feature = "test-ops")]
+    #[must_use]
+    pub fn for_test(
+        attack: f64,
+        defense: f64,
+        attacker_wounds: f64,
+        defender_wounds: f64,
+        civilian: bool,
+        ranged: bool,
+    ) -> Self {
+        Self {
+            attacker: Combatant::Unit(UnitId::FIRST),
+            defender: Combatant::Unit(UnitId::FIRST),
+            from: TileIdx(0),
+            attack_modifiers: Mods::new(),
+            defense_modifiers: Mods::new(),
+            attack: attack.max(1.0),
+            defense: defense.max(1.0),
+            attacker_wounds,
+            defender_wounds,
+            civilian,
+            ranged,
+        }
+    }
 }
 
-/// Gathers a fight's numbers: `a` attacking `d` from `from` (`combat.attacking_strength`,
-/// `defending_strength` and the damage functions' shared reads). `sweeping` is an air sweep's.
+/// Gathers a fight's numbers: `a` attacking `d` from tile `from`, where it stands or where it
+/// could move to (`combat.attacking_strength`, `defending_strength` and the damage functions'
+/// shared reads). `sweeping` is an air sweep's. Every read of the attacker's position is of
+/// `from` (see the module's notes).
 #[must_use]
 pub fn setup(g: &Game, a: Combatant, from: TileIdx, d: Combatant, sweeping: bool) -> CombatSetup {
     let attack_modifiers = attack_modifiers(g, a, d, from, sweeping);
     let defense_modifiers = defense_modifiers(g, a, d, from);
-    let attack = (base_attack(g, a, Some(d)) * multiplier(&attack_modifiers)).max(1.0);
+    let attack = (base_attack_from(g, a, from, Some(d)) * multiplier(&attack_modifiers)).max(1.0);
     let defense = (base_defense(g, d, Some(a)) * multiplier(&defense_modifiers)).max(1.0);
     CombatSetup {
         attacker: a,

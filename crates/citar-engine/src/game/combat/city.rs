@@ -74,15 +74,31 @@ pub fn city_bombard(g: &mut Game, c: CityId, d: Combatant) -> Value {
     resolve(g, Combatant::City(c), d)
 }
 
+/// What became of a city a melee unit beat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CityOutcome {
+    /// It changed hands ([`conquest::conquer`]).
+    Captured(conquest::Capture),
+}
+
+impl CityOutcome {
+    /// Adds what happened to an attack's result.
+    pub fn write(&self, out: &mut Map<String, Value>) {
+        match self {
+            Self::Captured(c) => c.write(out),
+        }
+    }
+}
+
 /// A city brought to the brink is taken by the melee unit that beat it
 /// (`combat._handle_city_defeated`, `combat.py:874-887`): the barbarians sack it instead
-/// (package 1c-06), and a unit that `Cannot capture cities` leaves it. What the capture reports,
-/// if one happened.
+/// (package 1c-06), and a unit that `Cannot capture cities` leaves it. What became of it, if
+/// anything did.
 pub(crate) fn handle_city_defeated(
     g: &mut Game,
     a: Combatant,
     d: Combatant,
-) -> Option<Map<String, Value>> {
+) -> Option<CityOutcome> {
     let (Combatant::City(c), Combatant::Unit(u)) = (d, a) else { return None };
     if !combatant::defeated(g, d) || !combatant::is_melee(g, a) || g.unit(u).is_none() {
         return None;
@@ -95,5 +111,5 @@ pub(crate) fn handle_city_defeated(
     if unit_has(g, u, UniqueType::CannotCaptureCities, true) {
         return None;
     }
-    Some(conquest::conquer(g, c, u))
+    conquest::conquer(g, c, u).map(CityOutcome::Captured)
 }

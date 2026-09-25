@@ -21,10 +21,11 @@
 use std::sync::OnceLock;
 
 use citar_engine::base::ids::{
-    BarbarianLevelId, BuildingId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId,
-    PlayerId, SpeedId, TerrainId, TileIdx, UniqueId, UnitId,
+    BarbarianLevelId, BaseUnitId, BuildingId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId,
+    NationId, PlayerId, PromotionId, SpeedId, TerrainId, TileIdx, UniqueId, UnitId,
 };
 use citar_engine::base::sets::PlayerVec;
+use citar_engine::game::combat::strength::{CombatSetup, ModKey};
 use citar_engine::game::combat::{air, combatant, resolve, strength};
 use citar_engine::game::conquest::{self, CityFate};
 use citar_engine::game::{DebugOptions, Game, triggers};
@@ -35,6 +36,7 @@ use citar_engine::state::config::{GameConfig, MapEdges, MapSource};
 use citar_engine::state::map::{MapInfo, Tile, Tiles};
 use citar_engine::state::players::{Controller, Player, PlayerKind, Rgb, Seat, SeatOverrides};
 use citar_engine::state::{State, TileClaim};
+use citar_engine::unique::table::Source;
 use citar_engine::unique::trigger::TriggerKind;
 use citar_engine::unique::{Combatant, UniqueType};
 use citar_testkit::rulesets::{KITCHEN_SINK, files_of, kitchen_sink, overlay};
@@ -243,8 +245,8 @@ fn a_unit_with_no_terrain_penalty_defends_a_marsh_in_full() {
     let a = Combatant::Unit(mine);
     let raider_mods = strength::defense_modifiers(&g, a, Combatant::Unit(raider), at(6, 4));
     let warrior_mods = strength::defense_modifiers(&g, a, Combatant::Unit(warrior), at(6, 4));
-    assert!(raider_mods.iter().all(|&(k, _)| k != "Tile"), "{raider_mods:?}");
-    assert_eq!(warrior_mods.iter().find(|&&(k, _)| k == "Tile"), Some(&("Tile", -15)));
+    assert!(raider_mods.iter().all(|&(k, _)| k != ModKey::Tile), "{raider_mods:?}");
+    assert_eq!(warrior_mods.iter().find(|&&(k, _)| k == ModKey::Tile), Some(&(ModKey::Tile, -15)));
 }
 
 #[test]
@@ -467,6 +469,73 @@ fn a_unit_defeated_stays_dead_whatever_its_defeat_fires() {
     assert!(g.player_units(THEM).next().is_none(), "no unit of theirs came back");
 }
 
+/// A fight weighed from a tile the attacker could move to is the fight it would have there
+/// (DESIGN.md 6.11): the setup from that tile equals the setup once the unit stands on it, with
+/// its capital's nearness, the enemy beside it, the general in range, and the enemy it now
+/// stands beside all read there; and a ranged preview measures its range from there.
+#[test]
+fn a_fight_weighed_from_another_tile_is_the_fight_from_there() {
+    let r = kitchen_sink();
+    let mut g = game(r);
+    // Our warrior far off at (10,7); the tile it could attack from, (7,4), is two from our
+    // capital, beside the enemy warrior at (8,4), beside a Haka warrior of theirs at (6,3), and
+    // within reach of our general at (6,5).
+    let (far, from, target) = (at(10, 7), at(7, 4), at(8, 4));
+    let w = add(&mut g, ME, "Warrior", far);
+    let d = add(&mut g, THEM, "Warrior", target);
+    let haka = add(&mut g, THEM, "Warrior", at(6, 3));
+    add(&mut g, ME, "Great General", at(6, 5));
+    war(&mut g);
+    test_ops(
+        &mut g,
+        json!([
+            {"op": "set_unit", "unit": w.get(), "promotions": ["Home Sweet Home", "Haka War Dance"]},
+            {"op": "set_unit", "unit": haka.get(), "promotions": ["Haka War Dance"]},
+        ]),
+    );
+    clean(&mut g);
+    let grid = g.grid();
+    assert_eq!((grid.distance(from, at(5, 4)), grid.distance(from, target)), (2, 1));
+    assert_eq!(grid.distance(from, at(6, 3)), 1);
+    assert!(grid.distance(far, at(6, 5)) > 2 && grid.distance(from, at(6, 5)) <= 2);
+    assert!(grid.distance(far, target) > 1 && grid.distance(far, at(6, 3)) > 1);
+
+    let (a, dc) = (Combatant::Unit(w), Combatant::Unit(d));
+    let weighed = strength::setup(&g, a, from, dc, false);
+    let mut moved = g.clone();
+    let (x, y) = moved.grid().xy(from);
+    test_ops(&mut moved, json!([{"op": "set_unit", "unit": w.get(), "x": x, "y": y}]));
+    clean(&mut moved);
+    assert_eq!(weighed, strength::setup(&moved, a, from, dc, false));
+    // And what it read there.
+    let home: PromotionId = id(r, "Home Sweet Home");
+    let gg: BaseUnitId = id(r, "Great General");
+    let has = |m: &strength::Mods, k: ModKey, v: i32| m.contains(&(k, v));
+    assert!(has(&weighed.attack_modifiers, ModKey::Source(Source::Promotion(home)), 30 - 2 * 3));
+    assert!(has(&weighed.attack_modifiers, ModKey::AdjacentEnemies, -10));
+    assert!(has(&weighed.attack_modifiers, ModKey::General(gg), 15));
+    assert!(has(&weighed.defense_modifiers, ModKey::AdjacentEnemies, -10));
+    let here = strength::setup(&g, a, far, dc, false);
+    assert!(!has(&here.attack_modifiers, ModKey::AdjacentEnemies, -10));
+    assert!(here.attack_modifiers.iter().all(|&(k, _)| k != ModKey::General(gg)));
+    assert!(here.defense_modifiers.iter().all(|&(k, _)| k != ModKey::AdjacentEnemies));
+
+    // An archer out of range where it stands is in range from (8,6), two tiles off.
+    let archer = add(&mut g, ME, "Archer", at(11, 0));
+    test_ops(&mut g, json!([{"op": "ready_unit", "unit": archer.get()}]));
+    clean(&mut g);
+    let shoot_from = at(8, 6);
+    assert_eq!(g.grid().distance(shoot_from, target), 2);
+    let e = resolve::preview(&g, archer, target).expect_err("out of range");
+    assert!(e.message.ends_with("range is 2."), "{}", e.message);
+    let weighed = resolve::preview_from(&g, archer, shoot_from, target).expect("in range");
+    let mut moved = g.clone();
+    let (x, y) = moved.grid().xy(shoot_from);
+    test_ops(&mut moved, json!([{"op": "set_unit", "unit": archer.get(), "x": x, "y": y}]));
+    clean(&mut moved);
+    assert_eq!(weighed, resolve::preview(&moved, archer, target).expect("in range"));
+}
+
 /// A city holds no more health than its buildings allow once one goes: removed by a scenario, or
 /// swapped for its new owner's version when it changes hands (CITY-1; Python kept the excess).
 #[test]
@@ -506,23 +575,59 @@ fn a_city_that_loses_its_walls_loses_their_health() {
 
 proptest! {
     /// Gate 2: the damage a defender takes never falls as the attacker grows stronger, and the
-    /// damage the attacker takes back never rises, at any roll and any wounds.
+    /// damage the attacker takes back never rises, at any roll, any wounds on either side, and
+    /// whether the defender is a civilian or the attack a ranged one; asked of the fight's own
+    /// damage functions.
     #[test]
     fn damage_grows_with_the_attacker_s_strength(
-        a in 1.0f64..400.0,
+        a in 0.0f64..400.0,
         more in 0.0f64..400.0,
-        d in 1.0f64..400.0,
+        d in 0.0f64..400.0,
         rnd in 0.0f64..=1.0,
-        wounds in 0.67f64..=1.0,
+        attacker_wounds in 0.67f64..=1.0,
+        defender_wounds in 0.67f64..=1.0,
+        civilian in any::<bool>(),
+        ranged in any::<bool>(),
     ) {
-        let hit = |s: f64, to_attacker| {
-            citar_engine::base::num::round_half_even(
-                strength::damage_modifier(s / d, to_attacker, rnd) * wounds,
-            )
+        let fight = |s: f64| {
+            CombatSetup::for_test(s, d, attacker_wounds, defender_wounds, civilian, ranged)
         };
-        prop_assert!(hit(a, false) <= hit(a + more, false));
-        prop_assert!(hit(a, true) >= hit(a + more, true));
+        let (weak, strong) = (fight(a), fight(a + more));
+        prop_assert!(weak.damage_to_defender(rnd) <= strong.damage_to_defender(rnd));
+        prop_assert!(weak.damage_to_attacker(rnd) >= strong.damage_to_attacker(rnd));
     }
+}
+
+/// Gate 2 on real fights: a warrior made stronger by `[+2] Strength` deals no less and takes no
+/// more, at every roll, whatever either side's wounds.
+#[test]
+fn damage_grows_with_a_real_attacker_s_strength() {
+    let r = kitchen_sink();
+    let mut g = game(r);
+    let mine = add(&mut g, ME, "Warrior", at(6, 4));
+    let theirs = add(&mut g, THEM, "Warrior", at(7, 4));
+    war(&mut g);
+    let (a, d) = (Combatant::Unit(mine), Combatant::Unit(theirs));
+    for (ah, dh) in [(100, 100), (100, 10), (10, 100), (55, 70), (1, 1)] {
+        test_ops(
+            &mut g,
+            json!([
+                {"op": "set_unit", "unit": mine.get(), "hp": ah, "promotions": []},
+                {"op": "set_unit", "unit": theirs.get(), "hp": dh},
+            ]),
+        );
+        let weak = strength::setup(&g, a, at(6, 4), d, false);
+        let veteran =
+            json!([{"op": "set_unit", "unit": mine.get(), "promotions": ["Kitchen Sink Veteran"]}]);
+        test_ops(&mut g, veteran);
+        let strong = strength::setup(&g, a, at(6, 4), d, false);
+        assert!(strong.attack > weak.attack, "{ah} {dh}");
+        for rnd in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert!(weak.damage_to_defender(rnd) <= strong.damage_to_defender(rnd), "{ah} {dh}");
+            assert!(weak.damage_to_attacker(rnd) >= strong.damage_to_attacker(rnd), "{ah} {dh}");
+        }
+    }
+    clean(&mut g);
 }
 
 /// The combat counter as the state holds it.
@@ -554,7 +659,111 @@ fn every_combat_event_takes_one_number() {
     let out = attack(&mut g, bomber, at(7, 3));
     assert!(out.get("intercepted").is_some(), "{out}");
     assert_eq!(seq(&g), 4, "an interception and a fight");
+    // An air sweep that nothing meets draws nothing: the interceptor is spent for the turn.
+    let fighter = add(&mut g, ME, "Fighter", at(5, 4));
+    test_ops(&mut g, json!([{"op": "ready_unit", "unit": fighter.get()}]));
+    let out = sweep(&mut g, fighter, at(8, 4));
+    assert_eq!(out["air_sweep"], "Nothing tried to intercept.");
+    assert_eq!(seq(&g), 4, "an air sweep that meets no one");
+    // One that meets an enemy fighter: one number, for the order and the fight.
+    let theirs = add(&mut g, THEM, "Fighter", at(10, 4));
+    test_ops(
+        &mut g,
+        json!([{"op": "ready_unit", "unit": fighter.get()}, {"op": "ready_unit", "unit": theirs.get()}]),
+    );
+    let out = sweep(&mut g, fighter, at(8, 4));
+    assert_eq!(out["air_sweep"], "Fighter");
+    assert_eq!(seq(&g), 5, "an air sweep");
+    // A detonation that no interceptor meets: both of theirs are spent.
+    ops(&mut g, json!([{"op": "reveal", "player": 0}]));
+    let missile = add(&mut g, ME, "Nuclear Missile", at(5, 4));
+    test_ops(&mut g, json!([{"op": "ready_unit", "unit": missile.get()}]));
+    let out = attack(&mut g, missile, at(8, 7));
+    assert!(out.get("nuke").is_none_or(|n| n != "intercepted"), "{out}");
+    assert_eq!(seq(&g), 6, "a detonation");
     clean(&mut g);
+}
+
+/// A fighter sweeps a tile as `air_sweep` would, whoever's turn it is; what the sweep reports.
+fn sweep(g: &mut Game, u: UnitId, t: TileIdx) -> Value {
+    let (x, y) = g.grid().xy(t);
+    let a = citar_engine::game::combat::actions::AirSweep {
+        unit_id: i64::from(u.get()),
+        x: i64::from(x),
+        y: i64::from(y),
+    };
+    let owner = g.unit(u).map(citar_engine::state::units::Unit::owner).expect("the fighter");
+    g.act(owner, citar_engine::game::Action::AirSweep(a)).expect("the sweep").0
+}
+
+/// A fighter's air sweep meets an enemy fighter and fights it (`combat.air_sweep`): with
+/// `[+33]% Strength when performing Air Sweep`, each deals the damage its sweeping fight gives at
+/// some roll, both earn 5 experience, the interceptor spends its interception; and a side
+/// brought to no health is shot down.
+#[test]
+fn an_air_sweep_fights_the_enemy_fighter() {
+    let r = kitchen_sink();
+    let mut base = game(r);
+    found(&mut base, THEM, at(10, 4), "Hangar");
+    let mine = add(&mut base, ME, "Fighter", at(5, 4));
+    let theirs = add(&mut base, THEM, "Fighter", at(10, 4));
+    war(&mut base);
+    test_ops(
+        &mut base,
+        json!([
+            {"op": "set_unit", "unit": mine.get(), "promotions": ["Dogfighting I"]},
+            {"op": "ready_unit", "unit": mine.get()},
+            {"op": "ready_unit", "unit": theirs.get()},
+        ]),
+    );
+    clean(&mut base);
+    let (a, d) = (Combatant::Unit(mine), Combatant::Unit(theirs));
+    let dogfight: PromotionId = id(r, "Dogfighting I");
+    let key = ModKey::Source(Source::Promotion(dogfight));
+    let sweeping = strength::setup(&base, a, at(5, 4), d, true);
+    assert!(sweeping.attack_modifiers.contains(&(key, 33)));
+    let plain = strength::setup(&base, a, at(5, 4), d, false);
+    assert!(plain.attack_modifiers.iter().all(|&(k, _)| k != key), "only when sweeping");
+
+    let mut g = base.clone();
+    let out = sweep(&mut g, mine, at(8, 4));
+    clean(&mut g);
+    assert_eq!(out["air_sweep"], "Fighter");
+    assert!(out.get("interceptor_killed").is_none() && out.get("attacker_killed").is_none());
+    let dealt = |k: &str| i32::try_from(out[k].as_i64().expect("a number")).expect("small");
+    let (dd, da) = (dealt("damage_to_interceptor"), dealt("damage_to_attacker"));
+    // Neither side can fall, so every blow the rolls gave lands.
+    let within = |n: i32, f: &dyn Fn(f64) -> i32| f(0.0) <= n && n <= f(1.0);
+    assert!(within(dd, &|x| sweeping.damage_to_defender(x)), "{dd}");
+    assert!(within(da, &|x| sweeping.damage_to_attacker(x)), "{da}");
+    let (ours, foe) = (g.unit(mine).expect("ours"), g.unit(theirs).expect("theirs"));
+    assert_eq!((i32::from(ours.hp), i32::from(foe.hp)), (100 - da, 100 - dd));
+    assert_eq!((ours.xp, foe.xp), (5, 5));
+    assert_eq!((ours.attacks, foe.interceptions), (1, 1));
+
+    // Their fighter at 1 health falls at the first blow.
+    let mut g = base.clone();
+    test_ops(&mut g, json!([{"op": "set_unit", "unit": theirs.get(), "hp": 1}]));
+    let out = sweep(&mut g, mine, at(8, 4));
+    clean(&mut g);
+    assert_eq!(
+        (out["interceptor_killed"].as_bool(), out["damage_to_interceptor"].as_i64()),
+        (Some(true), Some(1))
+    );
+    assert!(g.unit(theirs).is_none());
+
+    // Ours at 1 health falls at the first blow theirs lands, which cannot fall before it.
+    let mut g = base.clone();
+    test_ops(&mut g, json!([{"op": "set_unit", "unit": mine.get(), "hp": 1}]));
+    let out = sweep(&mut g, mine, at(8, 4));
+    clean(&mut g);
+    assert_eq!(
+        (out["attacker_killed"].as_bool(), out["damage_to_attacker"].as_i64()),
+        (Some(true), Some(1))
+    );
+    assert!(g.unit(mine).is_none());
+    let dd = out["damage_to_interceptor"].as_i64().expect("a number");
+    assert_eq!(g.unit(theirs).map(|x| i64::from(x.hp)), Some(100 - dd));
 }
 
 #[test]

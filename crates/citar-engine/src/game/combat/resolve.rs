@@ -4,7 +4,7 @@
 //! **One stream per fight.** Python drew a fight's rolls from the game's saved Mersenne Twister
 //! (`g.rng`), so a fight's outcome depended on every draw before it. Here each combat event takes
 //! the next `combat_seq` and draws from its own stream, keyed by the turn, that number and both
-//! sides (DESIGN.md 7.2): the two rolls, the blows, a withdrawal's tile and a capture's chance,
+//! sides (DESIGN.md 7.2): a withdrawal's tile, the two rolls, the blows and a capture's chance,
 //! in that order.
 //!
 //! **Deliberate differences** (`tests/rules/intended.toml`):
@@ -88,9 +88,21 @@ fn civ_can_embark(g: &Game, p: PlayerId) -> bool {
 /// attack [...] tiles`.
 #[must_use]
 pub fn contains_attackable_enemy(g: &Game, t: TileIdx, att: Combatant) -> Option<String> {
+    contains_attackable_enemy_from(g, t, att, combatant::tile(g, att))
+}
+
+/// [`contains_attackable_enemy`] for `att` attacking from tile `from`, where it stands or where
+/// it could move to: whether it is embarked is asked there.
+#[must_use]
+pub fn contains_attackable_enemy_from(
+    g: &Game,
+    t: TileIdx,
+    att: Combatant,
+    from: TileIdx,
+) -> Option<String> {
     let owner = combatant::owner(g, att);
     if let Combatant::Unit(u) = att
-        && movement::is_embarked(g, u)
+        && movement::is_embarked_at(g, u, from)
         && !unit_has(g, u, UniqueType::AttackOnSea, false)
         && (g.is_water(t) || combatant::is_ranged(g, att))
     {
@@ -173,6 +185,25 @@ pub fn contains_attackable_enemy(g: &Game, t: TileIdx, att: Combatant) -> Option
 /// set up has no movement to, a melee unit is not beside the target, or a city with no defences
 /// left meets a unit that cannot take it.
 pub fn validate_attack(g: &Game, u: UnitId, t: TileIdx) -> Result<Combatant, ActionError> {
+    match g.unit(u) {
+        Some(x) => validate_attack_from(g, u, x.tile(), t),
+        None => Err(ActionError::rule("No such unit.")),
+    }
+}
+
+/// [`validate_attack`] for unit `u` attacking from tile `from`, where it stands or where it
+/// could move to (what the barbarians' choice of target weighs, `barbarians.py:596-604`): the
+/// range, the line of sight and whether it is embarked are measured from `from`; its movement
+/// and attacks left are as they are now.
+///
+/// # Errors
+/// [`validate_attack`]'s refusals.
+pub fn validate_attack_from(
+    g: &Game,
+    u: UnitId,
+    from: TileIdx,
+    t: TileIdx,
+) -> Result<Combatant, ActionError> {
     if let Some(why) = can_attack_now(g, u) {
         return Err(ActionError::rule(why));
     }
@@ -186,10 +217,10 @@ pub fn validate_attack(g: &Game, u: UnitId, t: TileIdx) -> Result<Combatant, Act
         return Err(ActionError::rule("You cannot see that tile."));
     }
     let a = Combatant::Unit(u);
-    if let Some(why) = contains_attackable_enemy(g, t, a) {
+    if let Some(why) = contains_attackable_enemy_from(g, t, a, from) {
         return Err(ActionError::rule(why));
     }
-    let dist = g.grid().distance(x.tile(), t);
+    let dist = g.grid().distance(from, t);
     if def.ranged {
         let range = health::attack_range(g, u);
         if i64::from(dist) > i64::from(range) {
@@ -197,9 +228,7 @@ pub fn validate_attack(g: &Game, u: UnitId, t: TileIdx) -> Result<Combatant, Act
                 "Target is {dist} tiles away; range is {range}."
             )));
         }
-        if dist > 1
-            && !unit_has(g, u, UniqueType::IndirectFire, true)
-            && !vis::has_los(g, x.tile(), t)
+        if dist > 1 && !unit_has(g, u, UniqueType::IndirectFire, true) && !vis::has_los(g, from, t)
         {
             return Err(ActionError::rule(
                 "No line of sight to the target (hills, forest, jungle or mountains in the way).",
@@ -234,9 +263,10 @@ pub fn validate_attack(g: &Game, u: UnitId, t: TileIdx) -> Result<Combatant, Act
     Ok(d)
 }
 
-/// A modifier as the preview lists it: `Flanking +20%`.
-fn mod_lines(m: &strength::Mods) -> Value {
-    Value::Array(m.iter().map(|&(k, v)| Value::String(format!("{k} {v:+}%"))).collect())
+/// A side's modifiers as the preview lists them: `Flanking +20%`.
+fn mod_lines(g: &Game, m: &strength::Mods) -> Value {
+    let lines = strength::named(g.rules(), m);
+    Value::Array(lines.iter().map(|&(k, v)| Value::String(format!("{k} {v:+}%"))).collect())
 }
 
 /// A fight predicted without starting it (`combat.preview`, `combat.py:512-538`): the fight's
@@ -260,9 +290,26 @@ pub struct Preview {
 /// # Errors
 /// [`validate_attack`]'s refusals.
 pub fn preview_of(g: &Game, u: UnitId, t: TileIdx) -> Result<Preview, ActionError> {
-    let d = validate_attack(g, u, t)?;
+    match g.unit(u) {
+        Some(x) => preview_of_from(g, u, x.tile(), t),
+        None => Err(ActionError::rule("No such unit.")),
+    }
+}
+
+/// [`preview_of`] for unit `u` attacking from tile `from`, where it stands or where it could move
+/// to: [`validate_attack_from`]'s checks and one [`strength::setup`] from `from`.
+///
+/// # Errors
+/// [`validate_attack_from`]'s refusals.
+pub fn preview_of_from(
+    g: &Game,
+    u: UnitId,
+    from: TileIdx,
+    t: TileIdx,
+) -> Result<Preview, ActionError> {
+    let d = validate_attack_from(g, u, from, t)?;
     let a = Combatant::Unit(u);
-    let setup = strength::setup(g, a, combatant::tile(g, a), d, false);
+    let setup = strength::setup(g, a, from, d, false);
     Ok(Preview {
         ranged: combatant::is_ranged(g, a),
         damage_to_defender: [setup.damage_to_defender(0.0), setup.damage_to_defender(1.0)],
@@ -280,13 +327,26 @@ pub fn preview_of(g: &Game, u: UnitId, t: TileIdx) -> Result<Preview, ActionErro
 /// # Errors
 /// [`validate_attack`]'s refusals.
 pub fn preview(g: &Game, u: UnitId, t: TileIdx) -> Result<Value, ActionError> {
-    let p = preview_of(g, u, t)?;
+    Ok(render_preview(g, &preview_of(g, u, t)?))
+}
+
+/// [`preview`] for unit `u` attacking from tile `from`, where it stands or where it could move
+/// to ([`preview_of_from`]).
+///
+/// # Errors
+/// [`validate_attack_from`]'s refusals.
+pub fn preview_from(g: &Game, u: UnitId, from: TileIdx, t: TileIdx) -> Result<Value, ActionError> {
+    Ok(render_preview(g, &preview_of_from(g, u, from, t)?))
+}
+
+/// A preview's numbers as the tool reports them.
+fn render_preview(g: &Game, p: &Preview) -> Value {
     let s = &p.setup;
     let mut out = Map::new();
     out.insert("attacker_strength".into(), json!(num::round_ndigits(s.attack, 1)));
     out.insert("defender_strength".into(), json!(num::round_ndigits(s.defense, 1)));
-    out.insert("attacker_modifiers".into(), mod_lines(&s.attack_modifiers));
-    out.insert("defender_modifiers".into(), mod_lines(&s.defense_modifiers));
+    out.insert("attacker_modifiers".into(), mod_lines(g, &s.attack_modifiers));
+    out.insert("defender_modifiers".into(), mod_lines(g, &s.defense_modifiers));
     out.insert("ranged".into(), json!(p.ranged));
     out.insert("damage_to_defender".into(), json!(p.damage_to_defender));
     out.insert("damage_to_attacker".into(), json!(p.damage_to_attacker));
@@ -303,7 +363,7 @@ pub fn preview(g: &Game, u: UnitId, t: TileIdx) -> Result<Value, ActionError> {
     } else {
         out.insert("target".into(), json!("unit"));
     }
-    Ok(Value::Object(out))
+    Value::Object(out)
 }
 
 // ---- A fight (combat.py:544-871) -------------------------------------------------------------
@@ -355,8 +415,10 @@ fn wound(g: &mut Game, c: Combatant, to: i32) {
 /// The blows of a fight (`combat._take_damage`, `combat.py:553-582`): the damage both ways at two
 /// rolls; then a melee attack on a civilian captures it, a ranged attack (not an aircraft's)
 /// deals its damage, and anything else trades blows one point at a time, each to the side the
-/// roll picks in proportion to what it has left to take, until one side is done for. Returns
-/// the damage dealt to the defender and to the attacker, and whether a civilian was captured.
+/// roll picks in proportion to what it has left to take, until one side is done for. The hit
+/// points are written once; a unit brought to 0 stays until its caller removes it
+/// ([`kill_unit`]). Returns the damage dealt to the defender (none for a captured civilian) and
+/// to the attacker.
 pub(crate) fn blows(
     g: &mut Game,
     rng: &mut Rng,
@@ -905,9 +967,9 @@ pub fn resolve(g: &mut Game, a: Combatant, d: Combatant) -> Value {
         g.emit(EngineEvent::Combat, &text, Some(audience), Some(at), EventData::default(), &[]);
     }
     let city_taken = super::city::handle_city_defeated(g, a, d);
-    let captured_city = city_taken.as_ref().is_some_and(|m| m.contains_key("captured_city"));
-    if let Some(m) = city_taken {
-        res.extend(m);
+    let captured_city = matches!(city_taken, Some(super::city::CityOutcome::Captured(_)));
+    if let Some(o) = &city_taken {
+        o.write(&mut res);
     }
     if defender_dead {
         earn_from_killing(g, a, &defender);

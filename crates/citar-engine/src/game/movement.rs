@@ -39,6 +39,13 @@ pub fn is_embarked(g: &Game, u: UnitId) -> bool {
     g.view().unit_embarked(u)
 }
 
+/// Whether a land unit would be at sea standing on `t`, wherever it stands now: what a fight
+/// asked from another tile reads.
+#[must_use]
+pub fn is_embarked_at(g: &Game, u: UnitId, t: TileIdx) -> bool {
+    g.view().unit_embarked_on(u, t)
+}
+
 /// Whether a unit of `base` for `p` could end its move on `t` (`movement.can_stand`); with a
 /// unit, that unit where it stands.
 #[must_use]

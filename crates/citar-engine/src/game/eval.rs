@@ -54,6 +54,18 @@ impl<'a> EvalView<'a> {
         Self { g, supply: false }
     }
 
+    /// Whether unit `u` would be embarked standing on `t` (`movement.is_embarked`,
+    /// `movement.py:99-107`): a land unit on water with no city, that may not move on water. A
+    /// fight asked from another tile than the unit's reads it there.
+    #[must_use]
+    pub fn unit_embarked_on(&self, u: UnitId, t: TileIdx) -> bool {
+        let Some(x) = self.unit_at(u) else { return false };
+        let land = self.r().base_units().get(x.base).is_some_and(|b| b.domain == Domain::Land);
+        land && self.g.is_water(t)
+            && self.st().city_at(t).is_none()
+            && !uq::any(uq::unit(self, u, UniqueType::CanMoveOnWater, &Ctx::IGNORE))
+    }
+
     /// The view a civilization's resource supply is computed in (DESIGN.md 6.6): every
     /// civilization's index without its resource layer (`_civ_uniques_nores`,
     /// `economy.py:314-320`), every city's own index without its resources' uniques (Python's
@@ -264,11 +276,7 @@ impl FilterFacts for EvalView<'_> {
     /// `movement.is_embarked` (`movement.py:99-107`): a land unit on water outside a city,
     /// unless its profile lets it move on water.
     fn unit_embarked(&self, u: UnitId) -> bool {
-        let Some(x) = self.unit_at(u) else { return false };
-        let land = self.r().base_units().get(x.base).is_some_and(|b| b.domain == Domain::Land);
-        land && self.g.is_water(x.tile())
-            && self.st().city_at(x.tile()).is_none()
-            && !uq::any(uq::unit(self, u, UniqueType::CanMoveOnWater, &Ctx::IGNORE))
+        self.unit_at(u).is_some_and(|x| self.unit_embarked_on(u, x.tile()))
     }
 
     fn unit_set_up(&self, u: UnitId) -> bool {

@@ -77,9 +77,10 @@ fn num(e: &Value, key: &str) -> Option<u32> {
     e.get(key).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok())
 }
 
-/// A side's modifiers, keyed by source.
-fn mods(m: &strength::Mods) -> Value {
-    Value::Object(m.iter().map(|&(k, v)| (k.to_owned(), json!(v))).collect::<Map<_, _>>())
+/// A side's modifiers, keyed by the name of their source, as Python's dict held them.
+fn mods(g: &Game, m: &strength::Mods) -> Value {
+    let lines = strength::named(g.rules(), m);
+    Value::Object(lines.iter().map(|&(k, v)| (k.to_owned(), json!(v))).collect::<Map<_, _>>())
 }
 
 /// The rolls every fight's damage is asked at (`queries.ROLLS`).
@@ -121,8 +122,8 @@ fn fight(g: &Game, e: &Value) -> Value {
     let s = strength::setup(g, a, from, d, false);
     out.insert("attacker_strength".into(), json!(s.attack));
     out.insert("defender_strength".into(), json!(s.defense));
-    out.insert("attack_modifiers".into(), mods(&s.attack_modifiers));
-    out.insert("defense_modifiers".into(), mods(&s.defense_modifiers));
+    out.insert("attack_modifiers".into(), mods(g, &s.attack_modifiers));
+    out.insert("defense_modifiers".into(), mods(g, &s.defense_modifiers));
     out.insert("damage_to_defender".into(), json!(ROLLS.map(|r| s.damage_to_defender(r))));
     out.insert("damage_to_attacker".into(), json!(ROLLS.map(|r| s.damage_to_attacker(r))));
     if let Combatant::Unit(u) = a {

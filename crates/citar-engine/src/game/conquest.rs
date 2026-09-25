@@ -367,18 +367,68 @@ fn on_city_captured(g: &mut Game, attacker: PlayerId, old: PlayerId, c: CityId) 
     }
 }
 
+/// What became of a city its conqueror took, as the attack reports it (`conquest.conquer`'s
+/// `result`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CaptureResult {
+    /// An original capital back with its founder.
+    Recaptured,
+    /// Kept as a puppet.
+    Puppet,
+    /// Annexed at once by the seat's automatic decisions.
+    Annexed,
+    /// Razed at once by the seat's automatic decisions.
+    Razing,
+}
+
+impl CaptureResult {
+    /// The result's name in the attack's report.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Recaptured => "recaptured",
+            Self::Puppet => "puppet",
+            Self::Annexed => "annexed",
+            Self::Razing => "razing",
+        }
+    }
+}
+
+/// A city a melee unit took ([`conquer`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capture {
+    /// The city's name.
+    pub city: String,
+    /// Its old owner's name.
+    pub from: String,
+    pub result: CaptureResult,
+    /// The gold its conqueror plundered.
+    pub gold: i32,
+}
+
+impl Capture {
+    /// Adds the capture to an attack's result: `captured_city`, `from`, `result` and
+    /// `gold_plundered`.
+    pub fn write(&self, out: &mut Map<String, Value>) {
+        out.insert("captured_city".into(), json!(self.city));
+        out.insert("from".into(), json!(self.from));
+        out.insert("result".into(), json!(self.result.name()));
+        out.insert("gold_plundered".into(), json!(self.gold));
+    }
+}
+
 /// A melee unit takes a city with no defences left (`conquest.conquer`, `conquest.py:153-195`):
 /// the other side's military units and aircraft in it are lost and its civilians captured; the
 /// unit's `Upon capturing a city, receive [n] times its [stat] production as [stat]`; the unit
 /// moves in; opinions move; then the city changes hands: an original capital back to its
 /// founder, anything else as a puppet, or as the conqueror's automatic decisions have it. `upon
-/// conquering a city` fires for the conqueror. What happened, for the attack's result.
-pub fn conquer(g: &mut Game, c: CityId, u: UnitId) -> Map<String, Value> {
-    let mut result = Map::new();
+/// conquering a city` fires for the conqueror. What happened, or `None` if the unit or the city
+/// is not in the game.
+pub fn conquer(g: &mut Game, c: CityId, u: UnitId) -> Option<Capture> {
     let (Some(attacker), Some((old, at))) =
         (g.unit(u).map(crate::state::units::Unit::owner), g.city(c).map(|x| (x.owner(), x.tile())))
     else {
-        return result;
+        return None;
     };
     let old_name = player_name(g, old);
     let r = g.rules();
@@ -431,32 +481,29 @@ pub fn conquer(g: &mut Game, c: CityId, u: UnitId) -> Map<String, Value> {
     debug_assert!(moved.is_ok(), "the conqueror moves into the city: {moved:?}");
     on_city_captured(g, attacker, old, c);
     let name = city_name(g, c);
-    result.insert("captured_city".into(), json!(name));
-    result.insert("from".into(), json!(old_name));
     let (original, founder) = g.city(c).map_or((false, old), |x| (x.original_capital, x.founder));
     let gold = conquer_common(g, c, attacker, attacker);
-    if original && founder == attacker {
+    let result = if original && founder == attacker {
         if let Some(x) = g.city_mut(c, CityTouch::CORE) {
             x.puppet = false;
         }
-        result.insert("result".into(), json!("recaptured"));
+        CaptureResult::Recaptured
     } else {
         if let Some(x) = g.city_mut(c, CityTouch::CORE) {
             x.puppet = true;
             x.queue.clear();
         }
-        result.insert("result".into(), json!("puppet"));
         if g.player(attacker).is_some_and(|p| p.seat().auto().conquest) {
             auto_conquer(g, attacker, c);
-            let how = match g.city(c) {
-                Some(x) if x.razing => "razing",
-                Some(x) if !x.puppet => "annexed",
-                _ => "puppet",
-            };
-            result.insert("result".into(), json!(how));
+            match g.city(c) {
+                Some(x) if x.razing => CaptureResult::Razing,
+                Some(x) if !x.puppet => CaptureResult::Annexed,
+                _ => CaptureResult::Puppet,
+            }
+        } else {
+            CaptureResult::Puppet
         }
-    }
-    result.insert("gold_plundered".into(), json!(gold));
+    };
     let text = format!(
         "{} captured {name} from {old_name}! ({gold} gold plundered)",
         player_name(g, attacker)
@@ -472,7 +519,7 @@ pub fn conquer(g: &mut Game, c: CityId, u: UnitId) -> Map<String, Value> {
     triggers::fire(g, &site, &TriggerEvent::ConqueringCity, true, None);
     // victory.check_domination (conquest.py:194).
     pending(Porting::Pending("1c-08"));
-    result
+    Some(Capture { city: name, from: old_name, result, gold })
 }
 
 /// The decision UnCiv's AI takes over a city it has just taken (`conquest._auto_conquer`,
@@ -729,8 +776,8 @@ mod tests {
         if let Some(x) = g.city_mut(c, CityTouch::CORE) {
             x.health = 1;
         }
-        let out = conquer(g, c, w);
-        assert!(out.get("captured_city").and_then(Value::as_str).is_some());
+        let out = conquer(g, c, w).expect("a capture");
+        assert_eq!(Some(out.city.as_str()), g.city(c).map(|x| &*x.name));
     }
 
     /// Liberating the last city of a civilization that lost it brings the civilization back, as

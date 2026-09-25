@@ -27,9 +27,16 @@ pub struct CombatRules {
     /// aura is looked for only on units that could have one, where Python asked every unit of
     /// the side.
     pub aura: Carriers,
+    /// The widest radius of any great general's aura in the ruleset: a fighter looks for
+    /// generals only on the tiles that near, or among its side's units when those are fewer.
+    pub aura_radius: u32,
     /// What may carry `[n]% Strength for enemy [units] units in adjacent [tiles] tiles`, looked
     /// for only on the enemies beside a fighter that could have it.
     pub adjacent: Carriers,
+    /// What may carry `[n]% chance to intercept air attacks`, which an interceptor has on its
+    /// own profile alone (`combat.intercept_chance`): the units of a side or of the whole game
+    /// that could intercept are the few that carry it.
+    pub intercept: Carriers,
 }
 
 /// The base units (with their unit type's uniques) and the promotions that carry a unique type,
@@ -71,12 +78,13 @@ impl CombatRules {
     pub(crate) fn new(r: &Ruleset) -> Self {
         let t = r.uniques();
         let mut military = SmallVec::new();
+        let mut aura_radius = 0u32;
         for (_, u) in t.iter() {
-            if let UniqueData::StrengthBonusInRadius(x) = u.data
-                && t.unit_filter(x.units) == "Military"
-                && !military.contains(&x.units)
-            {
-                military.push(x.units);
+            if let UniqueData::StrengthBonusInRadius(x) = u.data {
+                aura_radius = aura_radius.max(u32::try_from(x.radius).unwrap_or(0));
+                if t.unit_filter(x.units) == "Military" && !military.contains(&x.units) {
+                    military.push(x.units);
+                }
             }
         }
         let mut war_generals = BaseUnitSet::new();
@@ -94,7 +102,9 @@ impl CombatRules {
             military,
             war_generals,
             aura: Carriers::of(r, UniqueType::StrengthBonusInRadius),
+            aura_radius,
             adjacent: Carriers::of(r, UniqueType::StrengthForAdjacentEnemies),
+            intercept: Carriers::of(r, UniqueType::ChanceInterceptAirAttacks),
         }
     }
 
