@@ -31,7 +31,8 @@
 //! `best_job` itself. A ruleset whose relevant uniques have conditionals that read a tile's
 //! surroundings, a city or the whole map (or an improvement that must be next to something) asks
 //! `best_job` on each tile, keeps no bounds, and recomputes every tile of a map when any tile,
-//! owner or city changed: correct, and never the shipped ruleset's case. With the `stats`
+//! owner, city or anything of the civilization a job reads changed: correct, and never the
+//! shipped ruleset's case. With the `stats`
 //! feature, the maps count the tiles they recompute and those that came out as they were, the
 //! redundancy DESIGN.md 10 bounds.
 
@@ -687,9 +688,12 @@ pub(crate) struct JobCaches {
     civ_deps: CondDeps,
     /// The improvements with such a unique: changed whenever those classes move.
     cond_imps: ImprovementSet,
-    /// Some relevant unique reads beyond a tile and its neighbours: every change of the map
-    /// recomputes every tile.
+    /// Some relevant unique reads beyond a tile and its neighbours, or beyond the civilization
+    /// with its conditionals: every change of the map, of the civilization's cities or of the
+    /// civilization recomputes every tile.
     local: bool,
+    /// The context-local and map classes the relevant uniques read.
+    local_deps: CondDeps,
     /// The resources improvements consume.
     consumed: Vec<ResourceId>,
     /// The improvements that consume each of them.
@@ -715,15 +719,17 @@ impl JobCaches {
         let mut civ_deps = CondDeps::empty();
         let mut cond_imps = ImprovementSet::new();
         let mut local = false;
+        let mut local_deps = CondDeps::empty();
         let mut consumed: Vec<ResourceId> = Vec::new();
         let mut consumers: Vec<ImprovementSet> = Vec::new();
         let mut removers = ImprovementSet::new();
         let (mut reads_worked, mut reads_route, mut reads_improvement) = (false, false, false);
-        let note = |id: UniqueId, civ_deps: &mut CondDeps, local: &mut bool| -> bool {
+        let mut note = |id: UniqueId, civ_deps: &mut CondDeps, local: &mut bool| -> bool {
             let u = t.get(id);
             let conds = u.deps();
             let reads = t.reads(id);
             *civ_deps |= (conds | reads).difference(local_classes);
+            local_deps |= (conds | reads).intersection(local_classes);
             if conds.intersects(local_classes)
                 || reads.intersects(local_classes.difference(CondDeps::TILE))
             {
@@ -792,6 +798,7 @@ impl JobCaches {
             civ_deps,
             cond_imps,
             local,
+            local_deps,
             consumed,
             consumers,
             removers,
@@ -972,6 +979,10 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
     if first || civ_rev > m.verified {
         let key = CivJobs::of(g, p, class);
         match &m.key {
+            // What a change of the civilization does to a tile is known only by asking on the
+            // tile when a relevant unique reads it with its conditionals (a build time `<in
+            // [Grassland] tiles>` `CivJobs` asks with no tile): every tile is worked out again.
+            _ if caches.local => all_dirty = true,
             None => all_dirty = true,
             Some(old) if *old != key => diff = Diff::of(g, old, &key),
             Some(_) => {}
@@ -979,10 +990,25 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
         m.plan = (!caches.local).then(|| Plan::of(g, p, class, &key));
         m.key = Some(key);
     }
-    let map_rev =
-        revs.tile_log.rev().max(revs.owners).max(revs.worked).max(revs.cities).max(revs.city_core);
-    if caches.local && map_rev > m.verified {
-        all_dirty = true;
+    if caches.local {
+        let mut map_rev = revs
+            .tile_log
+            .rev()
+            .max(revs.owners)
+            .max(revs.routes)
+            .max(revs.worked)
+            .max(revs.cities)
+            .max(revs.city_core);
+        // A city conditional asked on a tile reads the city whose territory it is: whatever of
+        // the civilization's cities it reads, their stocks and religion included.
+        if caches.local_deps.contains(CondDeps::CITY) {
+            for c in g.player_cities(p) {
+                map_rev = map_rev.max(revs.city(c.id()).max());
+            }
+        }
+        if map_rev > m.verified {
+            all_dirty = true;
+        }
     }
     let territory = first || revs.civ(p).cities > m.verified;
     if territory {

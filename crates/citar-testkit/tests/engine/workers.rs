@@ -28,7 +28,7 @@ use citar_engine::rules::Ruleset;
 use citar_engine::rules::defs::BuilderClass;
 use citar_testkit::agents::RandomAgent;
 use citar_testkit::fixtures::{self, Fixture};
-use citar_testkit::rulesets::kitchen_sink;
+use citar_testkit::rulesets::{self, kitchen_sink};
 use citar_testkit::script::{map_doc, new_game};
 use serde_json::{Value, json};
 
@@ -502,6 +502,76 @@ fn an_improvement_is_not_finished_over_a_feature_it_may_not_stand_on() {
     let forest = g.rules().terrains()[forest].feature.expect("a feature");
     assert_eq!((done.improvement(), done.features().contains(forest)), (None, true));
     assert!(g.state().tiles().builds(t).is_empty(), "the farm left the queue");
+    clean(&mut g);
+}
+
+// ---- A job map whose uniques read the tile or the city ------------------------------------------
+
+/// The shipped ruleset with build times whose conditionals read the tile and the city, which puts
+/// every job map in local mode: a farm's halved on grassland once Pottery is known, a mine's in a
+/// city with a monument, a lumber mill's in a city with a major religion.
+fn local_rules() -> &'static Ruleset {
+    let patch = json!({"techs": {
+        "Agriculture": {"uniques": [
+            "Starting tech",
+            "[-50]% construction time for [Mine] improvements <in cities with a [Monument]>",
+            "[-50]% construction time for [Lumber mill] improvements <in [in all cities in which the majority religion is a major religion] cities>",
+        ]},
+        "Pottery": {"uniques": [
+            "[+100]% weight to this choice for AI decisions",
+            "[-50]% construction time for [Farm] improvements <in [Grassland] tiles>",
+        ]},
+    }})
+    .to_string();
+    let files = rulesets::overlay(&[("ruleset/techs.json", &patch)]).expect("the patch applies");
+    Ruleset::leak(&rulesets::files_of(&files)).unwrap_or_else(|e| panic!("the ruleset loads:\n{e}"))
+}
+
+#[test]
+fn a_map_whose_build_times_read_the_tile_or_its_city_follows_the_civilization_and_the_city() {
+    let seats = [json!({"nation": "BenchmarkCiv"}), json!({"nation": "BenchmarkCiv"})];
+    let mut g = arena(local_rules(), &seats, &json!({}));
+    let out = ops(
+        &mut g,
+        &json!([
+            {"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Roma", "claim_radius": 2},
+            {"op": "found_city", "player": 1, "x": 18, "y": 10, "name": "Antium"},
+            {"op": "grant_tech", "player": 0, "techs": ["Mining", "Construction"]},
+            {"op": "set_tile", "x": 6, "y": 5, "terrain": "Grassland", "features": []},
+            {"op": "set_tile", "x": 4, "y": 5, "terrain": "Plains", "features": ["Hill"]},
+            {"op": "set_tile", "x": 5, "y": 4, "terrain": "Plains", "features": ["Forest"]},
+            {"op": "set_player", "player": 1, "faith": 25},
+            {"op": "add_unit", "player": 1, "unit": "Great Prophet", "x": 18, "y": 10},
+        ]),
+    );
+    let (roma, prophet) = (founded(&out[0]), first_unit(&out[7]));
+    // Player 1's religion, for Roma to take up.
+    test_ops(&mut g, &json!([{"op": "force_turn", "player": 1}]));
+    tool(&mut g, YOU, "found_pantheon", &json!({"belief": "God of War"})).expect("a pantheon");
+    tool(&mut g, YOU, "unit_action", &json!({"unit_id": prophet.get(), "action": "found_religion", "name": "Yours", "beliefs": ["Church Property", "Asceticism"]}))
+        .expect("a religion");
+    test_ops(&mut g, &json!([{"op": "force_turn", "player": 0}]));
+    let yours = g.player(YOU).and_then(|p| p.religion.founded).expect("a religion");
+    let worker: BaseUnitId = g.rules().lookup("Worker").expect("the Worker");
+    let class = g.rules().base_units()[worker].builder.expect("a builder class");
+    let (grass, hill, forest) = (tile(&g, 6, 5), tile(&g, 4, 5), tile(&g, 5, 4));
+    let (farm, mine, mill) = (imp(&g, "Farm"), imp(&g, "Mine"), imp(&g, "Lumber mill"));
+    let now = |g: &Game| [grass, hill, forest].map(|t| jobs::job(g, ME, class, t).map(|(i, _)| i));
+    assert_eq!(now(&g), [None, None, None], "nothing is worth its time yet");
+    clean(&mut g);
+    // Pottery halves a farm's time on grassland, which the civilization's build times, asked
+    // with no tile, do not show.
+    ops(&mut g, &json!([{"op": "grant_tech", "player": 0, "techs": ["Pottery"]}]));
+    assert_eq!(now(&g), [Some(farm), None, None]);
+    clean(&mut g);
+    // A monument in Roma halves a mine's time on Roma's land.
+    ops(&mut g, &json!([{"op": "set_city", "city": roma.get(), "add_buildings": ["Monument"]}]));
+    assert_eq!(now(&g), [Some(farm), Some(mine), None]);
+    clean(&mut g);
+    // Roma takes up player 1's religion, a lumber mill's time halves: only Roma's religion moved.
+    religion::add_pressure(&mut g, roma, Some(yours), 1000);
+    test_ops(&mut g, &json!([]));
+    assert_eq!(now(&g), [Some(farm), Some(mine), Some(mill)]);
     clean(&mut g);
 }
 
