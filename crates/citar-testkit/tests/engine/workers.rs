@@ -6,6 +6,10 @@
 //! - a soak slice of `RandomAgent`s founding, building, automating, exploring and taking their
 //!   units' actions, every check (the job maps' and danger maps' oracles among them) clean at every
 //!   settle, and with `stats` the job maps' redundant recomputes under 5% (gate 3);
+//! - what reaches a job map, the removals queued under an improvement and what may be finished,
+//!   a map whose uniques read the tile or the city with their conditionals;
+//! - a city-state that has a city founding no other, and a unit's one-time effect refused exactly
+//!   when applying it would do nothing;
 //! - the kitchen sink's extras of these systems: `[n]% construction time for [improvements]`
 //!   (the Walker), `Pillaging this improvement yields [stats]`, `Destroyed when pillaged` and
 //!   `Obsolete with [tech]` (the Outpost), `[n]% Health from pillaging tiles` and `[n]% Yield from
