@@ -42,7 +42,6 @@
 use smallvec::SmallVec;
 
 use super::Game;
-use super::derive::Derived;
 use super::derive::rev::{CityTouch, DiploTouch, PlayerTouch, UnitTouch, WorldTouch};
 use super::pending::SightSource;
 use crate::base::ids::{
@@ -51,22 +50,17 @@ use crate::base::ids::{
 use crate::base::sets::FeatureSet;
 use crate::rules::defs::Route;
 use crate::state::cities::City;
-use crate::state::config::GameConfig;
 use crate::state::diplo::{Diplomacy, Relation};
-use crate::state::map::{BuildQueue, BuildStep};
-use crate::state::players::{AutoDecision, AutoOverrides, Controller, Handicap, Player};
+use crate::state::map::BuildQueue;
+use crate::state::players::{AutoOverrides, Controller, Handicap, Player};
 use crate::state::units::Unit;
 use crate::state::world::World;
 use crate::state::{Change, Changes, StateError, TileClaim, TurnClock};
 use crate::unique::CondDeps;
 
-#[allow(
-    dead_code,
-    reason = "every write the rule systems make goes through here; they land from 1b-02 to 1c-10"
-)]
 impl Game {
     /// Hands one change to the caches (DESIGN.md 6.4): moves the revisions of what it touched,
-    /// then asks the derived layer what it means ([`Derived::on`], which only reads) and queues
+    /// then asks the derived layer what it means ([`Derived::on`](super::derive::Derived::on), which only reads) and queues
     /// that work for the next settle.
     pub(crate) fn changed(&mut self, ch: Change) {
         self.dv.revs.on_change(&self.st, &ch);
@@ -91,7 +85,7 @@ impl Game {
     }
 
     /// Flags for a citizen recheck the cities a change concerns through their owners' indexes,
-    /// supplies and conditionals, beyond the tiles [`Derived::on`] names (DESIGN.md 6.7): a
+    /// supplies and conditionals, beyond the tiles [`Derived::on`](super::derive::Derived::on) names (DESIGN.md 6.7): a
     /// city-state's bonuses (contact, war, an ally, its fate), a unit made or lost (the supply),
     /// a resource's tile, a friendship (great person points), a city appearing or changing
     /// hands, and the turn: what its conditionals read, and friendships running out.
@@ -278,20 +272,6 @@ impl Game {
         Ok(())
     }
 
-    /// Appends a step to a tile's build queue.
-    pub(crate) fn push_build(&mut self, t: TileIdx, step: BuildStep) -> Result<(), StateError> {
-        let ch = self.st.tiles_mut().push_build(t, step)?;
-        self.changed(ch);
-        Ok(())
-    }
-
-    /// Takes the front step off a tile's build queue.
-    pub(crate) fn pop_build(&mut self, t: TileIdx) -> Result<Option<BuildStep>, StateError> {
-        let (step, ch) = self.st.tiles_mut().pop_build(t)?;
-        self.changed(ch);
-        Ok(step)
-    }
-
     /// Replaces a tile's build queue.
     pub(crate) fn set_builds(&mut self, t: TileIdx, queue: BuildQueue) -> Result<(), StateError> {
         let ch = self.st.tiles_mut().set_builds(t, queue)?;
@@ -420,11 +400,13 @@ impl Game {
         Ok(())
     }
 
-    /// Changes one automatic decision of a seat for now.
+    /// Changes one automatic decision of a seat for now. Only the test operation `set_auto` changes
+    /// one alone: a host sets a seat's overrides with its controller ([`Game::set_seat_controller`]).
+    #[cfg(feature = "test-ops")]
     pub(crate) fn set_auto_decision(
         &mut self,
         p: PlayerId,
-        d: AutoDecision,
+        d: crate::state::players::AutoDecision,
         on: bool,
     ) -> Result<(), StateError> {
         let ch = self.st.set_auto_decision(p, d, on)?;
@@ -703,14 +685,16 @@ impl Game {
     /// settings edit is a scenario's, never a turn's. What follows from them does too: yields
     /// and citizen weights read the difficulty, the speed and the rules switched on, so every
     /// city rechecks its citizens and every player's sight is brought up to date at the next
-    /// settle, as a seat change does for one player.
-    pub(crate) fn edit_config(&mut self, f: impl FnOnce(&mut GameConfig)) {
+    /// settle, as a seat change does for one player. Only tests edit the settings of a game
+    /// under way: no action, operation or host call does.
+    #[cfg(all(test, feature = "embedded-ruleset"))]
+    pub(crate) fn edit_config(&mut self, f: impl FnOnce(&mut crate::state::config::GameConfig)) {
         f(self.st.config_mut());
         let now = self.dv.revs.now();
         // What each civilization sees is kept, so that the settle compares the sight the new
         // settings give with the old: a tile that goes out of sight is remembered.
         let vis = core::mem::take(&mut self.dv.vis);
-        self.dv = Derived::new(self.rules, &self.st);
+        self.dv = super::derive::Derived::new(self.rules, &self.st);
         self.dv.vis = vis;
         // Revisions never go back: a host's ETag, and anything keyed on a revision, must see
         // every input move on.

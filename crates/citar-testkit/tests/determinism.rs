@@ -14,7 +14,7 @@ fn golden_sets_match_the_committed_files() {
         names,
         [
             "rng", "libm", "pyfmt", "ruleset", "uniques", "filters", "gen", "states", "convert",
-            "turns", "maps", "newgame"
+            "turns", "maps", "newgame", "load", "pass", "random"
         ]
     );
     let problems: Vec<String> = reports
@@ -38,6 +38,18 @@ fn blessing_reproduces_the_committed_files() {
         // Git may check text out with CRLF on Windows.
         assert_eq!(on_disk.replace("\r\n", "\n"), text, "{file} differs from a fresh bless");
     }
+}
+
+#[test]
+fn the_whole_game_sets_are_blessed_and_checked_with_no_stage_waiting() {
+    // Package 1c-10's gate 4: the load, pass and random sets are blessed and checked like any
+    // other (the determinism workflow compares what the targets compute).
+    assert!(golden::games::refusals().is_empty(), "no stage waits");
+    let files: Vec<&str> = golden::blessed_files().iter().map(|(file, _)| *file).collect();
+    for file in ["load.json", "pass.json", "random.json"] {
+        assert!(files.contains(&file), "bless writes {file}");
+    }
+    // `golden_sets_match_the_committed_files` compares what they compute with the files.
 }
 
 #[test]

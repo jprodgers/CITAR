@@ -5,9 +5,9 @@
 //!                                   --out writes a report for the cross-target comparison
 //! cargo golden bless [SET]          rewrite rng.json, libm.json, ruleset.json, uniques.json,
 //!                                   filters.json, gen.json, states.json, convert.json,
-//!                                   turns.json, maps.json and newgame.json from this build, or
-//!                                   only SET's file; a set that
-//!                                   depends on a stage still pending is refused
+//!                                   turns.json, maps.json, newgame.json, load.json, pass.json
+//!                                   and random.json from this build, or only SET's file; a set
+//!                                   that depends on a stage still pending is refused
 //! cargo golden states               rewrite the checked-in states of testdata/states/ from the
 //!                                   generator (then bless); only when the save format changes
 //! cargo golden diff A B             compare two --out reports
@@ -16,9 +16,9 @@
 //! Exit codes: 0 all match, 1 something differs or a set named to bless is refused, 2 a usage
 //! or I/O error.
 //!
-//! A set that depends on the engine's stages (`turns`) is blessed only when none of them is
-//! pending (DESIGN.md 9.6): until then `check` computes it without comparing it, and `bless`
-//! leaves it out and says why, or refuses it by name.
+//! A set that depends on the engine's stages (`turns`, `pass`, `random`) is blessed only when
+//! none of them is pending (DESIGN.md 9.6): until then `check` computes it without comparing it,
+//! and `bless` leaves it out and says why, or refuses it by name.
 //!
 //! `pyfmt.json` holds Python's answers and is written only by `scripts/refcheck/pyfmt_vectors.py`;
 //! `bless` leaves it alone. Bless only after a deliberate change (a new `Purpose`, a `libm` or
@@ -90,7 +90,7 @@ fn check(out: Option<&str>) -> ExitCode {
         println!(
             "golden: a set differs from its committed file. If this build is right, `cargo golden \
              bless` (rng, libm, ruleset, uniques, filters, gen, states, convert, turns, maps, \
-             newgame) or \
+             newgame, load, pass, random) or \
              scripts/refcheck/pyfmt_vectors.py (pyfmt), and say why."
         );
         ExitCode::from(1)

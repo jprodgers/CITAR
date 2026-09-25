@@ -15,7 +15,9 @@
 # 1a-06 every compiled filter (filters) and the map-generation, AI and victory tables (gen),
 # 1a-09 the digests of three checked-in states (states), 1a-10 the digests of the twelve
 # committed refcheck fixtures as the Python-state converter reads them (convert), 1b-03 a game on
-# the arena played to its turn limit (turns), and 1b-04 ten generated maps (maps).
+# the arena played to its turn limit (turns), 1b-04 ten generated maps (maps), 1c-09 twelve new
+# games (newgame), and 1c-10 the fixtures after the settle on load (load), twenty rounds passed
+# from three of them (pass) and six RandomAgent games on generated maps (random).
 name: determinism
 
 on:

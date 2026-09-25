@@ -577,38 +577,33 @@ impl State {
     // `&mut` without a revision bump: only game/mutate.rs, save/ and compat/ may call these, which
     // `cargo xtask check` enforces. Everything else writes through Game's setters or a Touch.
 
-    #[allow(dead_code, reason = "called by game::mutate (1b-01), save (1a-09) and compat (1a-10)")]
     pub(crate) fn tiles_mut(&mut self) -> &mut Tiles {
         &mut self.tiles
     }
 
-    #[allow(dead_code, reason = "called by game::mutate (1b-01), save (1a-09) and compat (1a-10)")]
     pub(crate) fn units_mut(&mut self) -> &mut Units {
         &mut self.units
     }
 
-    #[allow(dead_code, reason = "called by game::mutate (1b-01), save (1a-09) and compat (1a-10)")]
     pub(crate) fn cities_mut(&mut self) -> &mut Cities {
         &mut self.cities
     }
 
-    #[allow(dead_code, reason = "called by game::mutate (1b-01), save (1a-09) and compat (1a-10)")]
     pub(crate) fn players_mut(&mut self) -> &mut PlayerVec<Player> {
         &mut self.players
     }
 
-    #[allow(dead_code, reason = "called by game::mutate (1b-01), save (1a-09) and compat (1a-10)")]
     pub(crate) fn diplo_mut(&mut self) -> &mut Diplomacy {
         &mut self.diplo
     }
 
-    #[allow(dead_code, reason = "called by game::mutate (1b-01), save (1a-09) and compat (1a-10)")]
     pub(crate) fn world_mut(&mut self) -> &mut World {
         &mut self.world
     }
 
-    /// The settings feed nearly every cache, so they are restricted like the containers.
-    #[allow(dead_code, reason = "called by game::mutate (1b-01), save (1a-09) and compat (1a-10)")]
+    /// The settings feed nearly every cache, so they are restricted like the containers. Only
+    /// tests edit them once a game exists (`Game::edit_config`).
+    #[cfg(all(test, feature = "embedded-ruleset"))]
     pub(crate) fn config_mut(&mut self) -> &mut GameConfig {
         &mut self.config
     }
@@ -617,19 +612,11 @@ impl State {
     // them.
 
     /// The id counters.
-    #[allow(dead_code, reason = "called by the rule systems from 1b-01 on")]
     pub(crate) fn ids_mut(&mut self) -> &mut IdCounters {
         &mut self.ids
     }
 
-    /// The engine's history heads.
-    #[allow(dead_code, reason = "called by game::events (1b-01)")]
-    pub(crate) fn chronicle_mut(&mut self) -> &mut ChronicleHeads {
-        &mut self.chronicle
-    }
-
     /// The host's heads.
-    #[allow(dead_code, reason = "called by game::events and save::journal (1a-09, 1b-01)")]
     pub(crate) fn host_mut(&mut self) -> &mut HostHeads {
         &mut self.host.0
     }
