@@ -6,12 +6,11 @@
 //! The production cost of an item (`production_cost`, `cities.py:1091-1128`) is package 1b-06's,
 //! in `cities::stats`, which the city's stats read too.
 //!
+//! A new unit is made, placed and given its construction bonuses by package 1c-02's
+//! `units::add_unit_in_city` and `units::add_construction_bonuses`, which stand it by the real
+//! `can_stand` ([`placement`]).
+//!
 //! What differs from Python:
-//! - a new unit is placed on its city's tile or near it by the rules of standing there that a
-//!   new unit meets: land on land and water on water or in a coastal city, no foreign city or
-//!   territory it may not enter, and no unit of its kind already there. Package 1c-02 ports the
-//!   rest of movement (embarking, the ocean), and a unit made on its owner's turn gets its moves
-//!   from it too;
 //! - `Must be next to [Fresh water]` and `[River]` are read by the tile filter alone, which
 //!   already answers both for the city's own tile, as Python's extra tests did.
 
@@ -21,16 +20,16 @@ use smallvec::SmallVec;
 
 use super::super::Game;
 use super::super::derive::rev::{CityTouch, PlayerTouch, UnitTouch, WorldTouch};
-use super::super::{Porting, pending};
 use super::founding::{add_building, equivalent_building};
 use super::stats::{self as cstats, current_construction, production_cost};
 use super::uniques::contains_building;
-use crate::base::ids::{BaseUnitId, BuildingId, CityId, PlayerId, TileIdx, UniqueId, UnitId};
+use crate::base::ids::{BaseUnitId, BuildingId, CityId, PlayerId, TileIdx, UniqueId};
 use crate::base::num;
 use crate::base::sets::{BaseUnitSet, BuildingSet, PlayerSet};
 use crate::base::stats::Stat;
 use crate::game::core::has_type;
 use crate::game::economy;
+use crate::game::units::{add_construction_bonuses, add_unit_in_city};
 use crate::rules::Ruleset;
 use crate::rules::defs::Domain;
 use crate::state::chronicle::{EngineEvent, EventData};
@@ -1277,119 +1276,12 @@ pub fn complete_construction(
     true
 }
 
-/// A unit made in a city (`units.add_unit_in_city`, `units.py:113-136`): a ship in a city off the
-/// coast goes to the civilization's first coastal city; placed on its city's tile or near it.
-fn add_unit_in_city(g: &mut Game, c: CityId, u: BaseUnitId) -> Option<UnitId> {
-    let r = g.rules();
-    let city = g.city(c)?;
-    let owner = city.owner();
-    let mut target = c;
-    if r.base_units()[u].domain == Domain::Water
-        && !(g.is_water(city.tile()) || crate::game::tiles::adjacent_to_coast(g, city.tile()))
-    {
-        target = g
-            .player_cities(owner)
-            .find(|x| crate::game::tiles::adjacent_to_coast(g, x.tile()))
-            .map(crate::state::cities::City::id)?;
-    }
-    let at = g.city(target)?.tile();
-    let id = place_near(g, owner, u, at)?;
-    if let Some(x) = g.unit_mut(id, UnitTouch::CORE) {
-        x.origin_city = Some(target);
-    }
-    // A religious unit takes its city's majority religion (or its founder's), and `upon gaining
-    // a [unit]` fires (units.py:127-135).
-    pending(Porting::Pending("1b-08"));
-    Some(id)
-}
-
-/// Whether a new unit of `u` could stand on `t` for `p`: a simplified `movement.can_stand`
-/// (`movement.py:260-271`) for a unit that has just been made, which never embarks.
-fn stands(g: &Game, p: PlayerId, u: BaseUnitId, t: TileIdx) -> bool {
-    let r = g.rules();
-    let d = &r.base_units()[u];
-    let city = g.city_at(t);
-    if d.domain == Domain::Air {
-        return city.is_some_and(|x| x.owner() == p && air_capacity_ok(g, x.id()));
-    }
-    if city.is_some_and(|x| x.owner() != p) {
-        return false;
-    }
-    if !passes(g, p, u, t) {
-        return false;
-    }
-    if d.domain == Domain::Water
-        && city.is_some()
-        && !(g.is_water(t) || crate::game::tiles::adjacent_to_coast(g, t))
-    {
-        return false;
-    }
-    // stack_reason (movement.py:208-236): no foreign unit, and none of its own kind.
-    !g.units_at(t).any(|o| {
-        let od = &r.base_units()[o.base];
-        od.domain != Domain::Air && (o.owner() != p || od.military == d.military)
-    })
-}
-
-/// Whether a new unit of `u` could pass through `t` for `p`: its terrain for the unit's domain
-/// (land on land, water on water, a city for either), and a territory it may enter.
-fn passes(g: &Game, p: PlayerId, u: BaseUnitId, t: TileIdx) -> bool {
-    let d = &g.rules().base_units()[u];
-    let city = g.city_at(t).is_some();
-    if !city && crate::game::tiles::is_impassable(g, t) {
-        return false;
-    }
-    let water = g.is_water(t);
-    let terrain_ok = match d.domain {
-        Domain::Land => !water || city,
-        Domain::Water => water || city,
-        Domain::Air => true,
-    };
-    let owner = g.tile(t).and_then(crate::state::map::Tile::owner);
-    terrain_ok && owner.is_none_or(|o| o == p || g.can_enter_territory(p, t))
-}
-
 /// Where a new unit of `u` would be placed for `p`, on or near `at` (`units.place_unit_near`,
-/// `units.py:86-110`): the tile itself, else the nearest ring by ring through tiles it could pass,
-/// land before water for a land unit, ten rings at most; `None` if there is no room. Reads only.
+/// `units.py:86-110`): `units::spawn_spot`, ten rings at most, by the real `can_stand`; `None` if
+/// there is no room. Reads only.
 #[must_use]
 pub fn placement(g: &Game, p: PlayerId, u: BaseUnitId, at: TileIdx) -> Option<TileIdx> {
-    // movement.can_stand and can_pass_through in full (embarking, the ocean).
-    pending(Porting::Pending("1c-02"));
-    if stands(g, p, u, at) {
-        return Some(at);
-    }
-    let land = g.rules().base_units()[u].domain == Domain::Land;
-    let mut checked: Vec<TileIdx> = vec![at];
-    let mut frontier: Vec<TileIdx> =
-        g.grid().neighbors(at).filter(|&n| passes(g, p, u, n)).collect();
-    for _ in 0..10 {
-        let first = frontier.iter().copied().filter(|&x| !land || g.is_land(x));
-        let second = frontier.iter().copied().filter(|&x| land && !g.is_land(x));
-        if let Some(spot) = first.chain(second).find(|&x| stands(g, p, u, x)) {
-            return Some(spot);
-        }
-        checked.extend(frontier.iter().copied());
-        let mut next: Vec<TileIdx> = Vec::new();
-        for &x in &frontier {
-            for n in g.grid().neighbors(x) {
-                if !checked.contains(&n) && !next.contains(&n) && passes(g, p, u, n) {
-                    next.push(n);
-                }
-            }
-        }
-        frontier = next;
-        if frontier.is_empty() {
-            break;
-        }
-    }
-    None
-}
-
-/// Places a new unit on or near a tile ([`placement`]).
-fn place_near(g: &mut Game, p: PlayerId, u: BaseUnitId, at: TileIdx) -> Option<UnitId> {
-    let spot = placement(g, p, u, at)?;
-    g.create_unit(p, u, spot, 0).ok()
+    crate::game::units::spawn_spot(g, p, u, at, 10, None)
 }
 
 /// Where a unit bought or finished in city `c` would be placed, if anywhere: a ship in a city off
@@ -1406,55 +1298,6 @@ pub fn unit_placement(g: &Game, c: CityId, u: BaseUnitId) -> Option<TileIdx> {
         city.tile()
     };
     placement(g, owner, u, at)
-}
-
-/// The experience and promotions a city gives the units it makes
-/// (`units.add_construction_bonuses`, `units.py:139-155`).
-fn add_construction_bonuses(g: &mut Game, id: UnitId, c: CityId) {
-    let r = g.rules();
-    let t = r.uniques();
-    let Some(unit) = g.unit(id) else { return };
-    let base = unit.base;
-    let (xp, promotions) = {
-        let v = g.view();
-        let ctx = Ctx::city(&v, c);
-        let filters = t.filters();
-        let mut xp = 0;
-        for h in uq::city(&v, c, UniqueType::UnitStartingExperience, &ctx) {
-            if let UniqueData::UnitStartingExperience(x) = h.data()
-                && t.in_set(x.units, base)
-                && filters.city_matches(x.cities, &v, c, None)
-            {
-                xp += x.xp * i32::from(h.n);
-            }
-        }
-        let mut promotions: SmallVec<[crate::base::ids::PromotionId; 2]> = SmallVec::new();
-        for h in uq::city(&v, c, UniqueType::UnitStartingPromotions, &ctx) {
-            if let UniqueData::UnitStartingPromotions(x) = h.data()
-                && filters.city_matches(x.cities, &v, c, None)
-                && t.in_set(x.units, base)
-            {
-                promotions.push(x.promotion);
-            }
-        }
-        (xp, promotions)
-    };
-    let skip: SmallVec<[bool; 2]> = promotions
-        .iter()
-        .map(|&pr| has_type(r, &r.promotions()[pr].uniques, UniqueType::SkipPromotion))
-        .collect();
-    if let Some(x) = g.unit_mut(id, UnitTouch::CORE) {
-        x.xp = xp;
-        for (&pr, &skip) in promotions.iter().zip(&skip) {
-            if !skip {
-                x.promotions.insert(pr);
-            }
-        }
-    }
-    if !promotions.is_empty() {
-        // What a free promotion does at once (`units.add_promotion`, units.py:240-245).
-        pending(Porting::Pending("1b-08"));
-    }
 }
 
 /// A stat that goes to a city (`cities.add_city_stat`, `cities.py:2380-2391`): production into

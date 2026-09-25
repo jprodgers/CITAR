@@ -257,7 +257,8 @@ pub(crate) fn civ_index_full(g: &Game, p: PlayerId) -> IndexRef<'_> {
     IndexRef::Memo(m.full.get(g.dv.revs.now(), inputs, compute))
 }
 
-/// When civilization `p`'s index with its resource layer last changed, validated now.
+/// When civilization `p`'s index with its resource layer last changed, validated now: what a memo
+/// that asks its uniques validates against, beside their conditionals' [`cond`].
 pub(crate) fn civ_index_full_changed(g: &Game, p: PlayerId) -> Rev {
     drop(civ_index_full(g, p));
     g.dv.civ.civs.get(p).map_or(Rev::START, |m| m.full.changed())

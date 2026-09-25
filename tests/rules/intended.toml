@@ -137,3 +137,19 @@ reason = "A city converting its production to gold or science also banked that p
 [[differences]]
 id = "increasing-cost-counts-what-was-built"
 reason = "An item whose cost increases each time it is built counted as built at every start of turn its production was ready, even when the unit could not be placed and waited, so each blocked turn raised its price; Rust counts it when it is finished"
+
+[[differences]]
+id = "promotion-needs-its-experience"
+reason = "A promotion bought while a free one was on offer went through without the experience, which Python then took anyway, leaving the unit's experience below zero; Rust refuses a paid promotion without the experience or a free pick of its own, and a unit's experience never goes below zero"
+
+[[differences]]
+id = "upgrade-places-before-removing"
+reason = "An upgrade whose new unit had nowhere to stand removed the unit and put a copy back (a new id, without its name, religion, used abilities or original owner), then refused; Rust finds where the new unit will stand before the old one goes, so such an upgrade, bought or free, changes nothing"
+
+[[differences]]
+id = "units-gained-recorded"
+reason = "Python never recorded the units a civilization gained, so Carthage's `Land units may cross [Mountain] tiles after the first [Great General] is earned` never held; Rust records each unit a civilization gains, and Carthage's land units cross mountains once it has had a Great General"
+
+[[differences]]
+id = "unit-refusals-change-nothing"
+reason = "A move_unit that was refused (no path, or its first step refused) had already woken the unit from its sleep, fortification or other order, and cleared its standing move order when the step was refused; Rust refuses the move with the unit as it was"

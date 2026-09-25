@@ -10,6 +10,7 @@
 use super::Ruleset;
 use super::defs::{BuilderClass, Domain, ImprovementKind, NationKind, Route, TerrainType};
 use super::errors::{Problems, RulesetErrorKind};
+use super::moves::MoveRules;
 use crate::base::ids::{
     BaseUnitId, BuildingId, DifficultyId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
     ObjectFilterId, ResourceId, TechId, TerrainId,
@@ -36,6 +37,8 @@ const RIVER: &str = "River";
 const CITY_RUINS: &str = "City ruins";
 const ANCIENT_RUINS: &str = "Ancient ruins";
 const BARBARIAN_CAMP: &str = "Barbarian encampment";
+const WORKER: &str = "Worker";
+const SETTLER: &str = "Settler";
 
 // The terrains and resources map generation names (`mapgen.py:551-1660`).
 const OCEAN: &str = "Ocean";
@@ -104,6 +107,12 @@ pub struct Known {
     pub the_wheel: Option<TechId>,
     /// River, the terrain whose yields a tile with a river gets (`tiles.py:306-307`).
     pub river: Option<TerrainId>,
+    /// The Worker (`units.py:165, 623`): the workers a civilization starts with, and what a
+    /// captured settler becomes. Python skipped both without one.
+    pub worker: Option<BaseUnitId>,
+    /// The settler civilizations start with (`units.py:164`): the first unit in file order that
+    /// founds cities and belongs to no nation, else the one named Settler.
+    pub settler: Option<BaseUnitId>,
     /// The terrains and resources map generation names.
     pub map: KnownMap,
 }
@@ -183,6 +192,8 @@ pub struct Derived {
     /// conditionals. Python compared the names at each ask.
     pub building_equivalents: IdVec<BuildingId, Box<[BuildingId]>>,
     pub known: Known,
+    /// The names movement reads (package 1c-02).
+    pub moves: MoveRules,
 }
 
 impl Derived {
@@ -219,8 +230,11 @@ impl Derived {
                 prince: None,
                 the_wheel: None,
                 river: None,
+                worker: None,
+                settler: None,
                 map: KnownMap::default(),
             },
+            moves: MoveRules::default(),
         }
     }
 }
@@ -344,6 +358,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         prince: r.difficulties.iter().find(|(_, d)| &*d.name == PRINCE).map(|(id, _)| id),
         the_wheel: r.techs.iter().find(|(_, t)| &*t.name == THE_WHEEL).map(|(id, _)| id),
         river: r.terrains.iter().find(|(_, t)| &*t.name == RIVER).map(|(id, _)| id),
+        worker: unit_named(r, WORKER),
+        settler: starting_settler(r),
         map: known_map(r),
     };
 
@@ -407,6 +423,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         }
     }
 
+    let moves = MoveRules::new(r, &known);
+
     let mut major_nations = Vec::new();
     let mut city_state_nations = Vec::new();
     for (id, n) in r.nations.iter() {
@@ -438,6 +456,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         yields_without_pop,
         building_equivalents,
         known,
+        moves,
     })
 }
 
@@ -448,6 +467,27 @@ fn put<K: PartialEq, V>(map: &mut Vec<(K, V)>, key: K, value: V) {
         Some(slot) => slot.1 = value,
         None => map.push((key, value)),
     }
+}
+
+/// The base unit called `name`, if the ruleset has one.
+fn unit_named(r: &Ruleset, name: &str) -> Option<BaseUnitId> {
+    r.base_units.iter().find(|(_, u)| &*u.name == name).map(|(id, _)| id)
+}
+
+/// The settler every civilization starts with (`units.starting_units`, `units.py:164`): the
+/// first unit that founds cities, its type's uniques included, and is unique to no nation; the
+/// one named Settler when none does.
+fn starting_settler(r: &Ruleset) -> Option<BaseUnitId> {
+    let t = &r.uniques;
+    r.base_units
+        .iter()
+        .find(|(_, u)| {
+            u.unique_to.is_none()
+                && (has(t, &u.uniques, UniqueType::FoundCity)
+                    || has(t, &r.unit_types[u.unit_type].uniques, UniqueType::FoundCity))
+        })
+        .map(|(id, _)| id)
+        .or_else(|| unit_named(r, SETTLER))
 }
 
 /// The objects map generation names, each where the ruleset has it as the kind generation uses.

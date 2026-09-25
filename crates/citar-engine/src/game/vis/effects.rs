@@ -189,6 +189,9 @@ impl Game {
             return;
         }
         let todo = self.pending.take_sight();
+        // A path found before the sight caught up read the units it saw then; what it sees may
+        // change here without a write, so the paths found at this revision are forgotten.
+        self.dv.forget_paths();
         let mut work = Work::default();
         // The heights and the line-of-sight cache followed each terrain change as it happened
         // (`Game::changed`); what is left is to look again at what those tiles hold.

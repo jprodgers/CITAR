@@ -78,7 +78,8 @@ fn a_failing_list_of_test_ops_changes_nothing_either() {
     .expect_err("the second test op fails");
     assert_eq!(e.message, "Test operation 2 (unmeet): A player cannot forget itself.");
     assert_eq!((g.digest().ok(), g.rev()), before);
-    let e = testops::apply(&mut g, &json!([{"op": "set_unit", "unit": 1}])).expect_err("not yet");
+    let e = testops::apply(&mut g, &json!([{"op": "capture_civilian", "unit": 1}]))
+        .expect_err("not yet");
     assert_eq!(e.code, ErrCode::NotPorted);
     let e = g
         .apply_ops(
@@ -120,7 +121,6 @@ fn inspect_reads_and_lists_what_is_pending() {
         })
         .collect();
     for (name, pkg) in [
-        ("ready_unit", "1c-02"),
         ("attack_as", "1c-03"),
         ("negotiation", "1c-05"),
         ("view", "1d-02"),
@@ -128,7 +128,6 @@ fn inspect_reads_and_lists_what_is_pending() {
         ("player_start S2: great people", "1b-08"),
         ("player_end E3: faith", "1b-08"),
         ("round_end R0: eliminations", "1c-08"),
-        ("starting units", "1c-02"),
         ("map: starts and ruins a document lacks", "1c-09"),
     ] {
         assert!(listed.contains(&(name.to_owned(), pkg.to_owned())), "{name} waits for {pkg}");
@@ -138,10 +137,10 @@ fn inspect_reads_and_lists_what_is_pending() {
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [3, 0, 11],
-        "three queries and eleven test ops wait"
+        [3, 0, 9],
+        "three queries and nine test ops wait"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [29, 5], "the stages that wait");
+    assert_eq!([count("turn_stage"), count("setup_stage")], [25, 4], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(

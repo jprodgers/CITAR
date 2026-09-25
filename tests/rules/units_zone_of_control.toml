@@ -1,0 +1,43 @@
+about = """
+A step between two tiles that are both next to an enemy military unit costs all the movement a
+unit has left (a zone of control); at peace the same step costs its terrain.
+"""
+from = "citar/engine/movement.py: zoc_between, enter_cost"
+
+[[step]]
+note = "Our warrior at (6,11); theirs at (7,10), next to both (6,11) and (7,11)."
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "(6,11)" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "(7,10)" },
+]
+as = "added"
+
+[[step]]
+set = { w = "=added[0].unit_ids[0]" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=w", x = 7, y = 11 }
+as = "peace"
+
+[[step]]
+check = "peace"
+subset = { to = { x = 7, y = 11 }, arrived = true, moves_left = 1 }
+
+[[step]]
+note = "Back where it was, with full moves, and now at war."
+op = "set_unit"
+args = { unit = "=w", at = "(6,11)", moves = 120 }
+
+[[step]]
+op = "set_relation"
+args = { a = 0, b = 1, state = "war" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=w", x = 7, y = 11 }
+as = "war"
+
+[[step]]
+check = "war"
+subset = { to = { x = 7, y = 11 }, arrived = true, moves_left = 0 }

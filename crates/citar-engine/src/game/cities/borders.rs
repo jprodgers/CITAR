@@ -7,9 +7,9 @@
 //! `within` goes ring by ring (DESIGN.md 4.3), so the choice takes Python's order explicitly
 //! ([`within_order`]).
 //!
-//! What waits for other packages, marked where it happens: a barbarian camp on a claimed tile is
-//! destroyed (1c-06), and foreign units that may not stay in the new territory are moved out
-//! (1c-02).
+//! Foreign units that may not stay in the new territory are moved out
+//! (`movement::teleport_to_closest`). What waits for another package, marked where it happens: a
+//! barbarian camp on a claimed tile is destroyed (1c-06).
 
 use serde_json::json;
 
@@ -20,7 +20,7 @@ use super::super::{Game, Porting, pending};
 use super::citizens::{own_city, tile_at};
 use super::stats::work_range;
 use crate::base::hex::Cube;
-use crate::base::ids::{CityId, PlayerId, ResourceId, TileIdx};
+use crate::base::ids::{CityId, PlayerId, ResourceId, TileIdx, UnitId};
 use crate::base::num;
 use crate::game::economy;
 use crate::rules::defs::ResourceType;
@@ -182,9 +182,14 @@ pub fn take_ownership(g: &mut Game, c: CityId, t: TileIdx) {
     if let Err(e) = g.set_tile_owner(t, TileClaim::city(owner, c)) {
         debug_assert!(false, "a tile of the map could not be claimed: {e}");
     }
-    if g.units_at(t).any(|u| u.owner() != owner && !g.can_enter_territory(u.owner(), t)) {
-        // movement.teleport_to_closest for the units that may not stay (cities.py:1025-1028).
-        pending(Porting::Pending("1c-02"));
+    // The units that may not stay are sent to the nearest tile they may be on (cities.py:1025-1028).
+    let evicted: Vec<UnitId> = g
+        .units_at(t)
+        .filter(|u| u.owner() != owner && !g.can_enter_territory(u.owner(), t))
+        .map(crate::state::units::Unit::id)
+        .collect();
+    for u in evicted {
+        crate::game::movement::teleport_to_closest(g, u);
     }
 }
 

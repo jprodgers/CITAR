@@ -40,8 +40,8 @@ use super::table::{CondDeps, ObjectFilter, Source, StaticDomain, StaticId, Uniqu
 use super::world::{FilterFacts, TileFacts};
 use crate::base::collections::DetSet;
 use crate::base::ids::{
-    CityFilterId, CityId, CivFilterId, CombatantFilterId, IdVec, ObjectFilterId, PlayerId, SetRef,
-    TileFilterId, TileIdx, UniqueId, UnitFilterId, UnitId,
+    BaseUnitId, CityFilterId, CityId, CivFilterId, CombatantFilterId, IdVec, ObjectFilterId,
+    PlayerId, SetRef, TileFilterId, TileIdx, UniqueId, UnitFilterId, UnitId,
 };
 use crate::base::sets::{BitSet, ImprovementSet, TerrainSet};
 use crate::rules::Ruleset;
@@ -223,6 +223,16 @@ impl Filters {
         scope: UnitScope,
     ) -> bool {
         self.units[id].eval(&mut |l| l.eval(w, u, scope))
+    }
+
+    /// Whether a unit type passes the filter with no unit behind it (`base_unit_matches`,
+    /// `uniques.py:477-525`): only what its row says, its name, type, era, role and tags; a test
+    /// of a unit's owner, promotions or state fails.
+    pub fn base_unit_matches(&self, id: UnitFilterId, base: BaseUnitId) -> bool {
+        self.units[id].eval(&mut |l| match l {
+            UnitLeaf::Base(s) => s.contains(base),
+            _ => false,
+        })
     }
 
     /// Whether a unit with these facts passes the filter, matched with nothing in context and

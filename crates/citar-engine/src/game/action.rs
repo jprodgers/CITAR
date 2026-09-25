@@ -81,6 +81,14 @@ fn run<R: Rule>(g: &mut Game, pid: PlayerId, r: R) -> Result<OutcomeSpec, Action
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum Action {
+    /// Moves a unit toward a tile (package 1c-02).
+    MoveUnit(super::units::actions::MoveUnit),
+    /// Gives a unit a standing order (package 1c-02).
+    UnitOrder(super::units::actions::UnitOrder),
+    /// Upgrades a unit (package 1c-02).
+    UpgradeUnit(super::units::actions::UpgradeUnit),
+    /// Promotes a unit (package 1c-02).
+    PromoteUnit(super::units::actions::PromoteUnit),
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
@@ -117,6 +125,10 @@ impl Action {
     #[must_use]
     pub const fn tool(&self) -> &'static str {
         match *self {
+            Self::MoveUnit(_) => "move_unit",
+            Self::UnitOrder(_) => "unit_order",
+            Self::UpgradeUnit(_) => "upgrade_unit",
+            Self::PromoteUnit(_) => "promote_unit",
             #[cfg(test)]
             Self::Probe(_) => "probe",
             Self::AdoptPolicy(_) => "adopt_policy",
@@ -139,6 +151,10 @@ impl Action {
     #[must_use]
     pub const fn any_time(&self) -> bool {
         match *self {
+            Self::MoveUnit(_)
+            | Self::UnitOrder(_)
+            | Self::UpgradeUnit(_)
+            | Self::PromoteUnit(_) => false,
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
             // `tools.rename_city` is `any_time` (tools.py:782).
@@ -160,6 +176,10 @@ impl Action {
 
     fn run(self, g: &mut Game, pid: PlayerId) -> Result<OutcomeSpec, ActionError> {
         match self {
+            Self::MoveUnit(a) => run(g, pid, a),
+            Self::UnitOrder(a) => run(g, pid, a),
+            Self::UpgradeUnit(a) => run(g, pid, a),
+            Self::PromoteUnit(a) => run(g, pid, a),
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
             Self::AdoptPolicy(x) => run(g, pid, x),

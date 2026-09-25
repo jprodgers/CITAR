@@ -278,6 +278,15 @@ impl Game {
         out.extend(super::derive::stats::verify(self));
         out.extend(super::derive::buildable::verify(self));
         out.extend(super::cities::citizens::verify(self));
+        out.extend(super::path::memo::verify(self));
+        if self.dv.terrain_floor(self) != super::path::terrain_floor(self) {
+            out.push(
+                "the cheapest step off the routes differs from a cold look at the map".to_owned(),
+            );
+        }
+        if *self.dv.route_net(self) != super::path::route_net(self) {
+            out.push("where routes run differs from a cold look at the map".to_owned());
+        }
         out
     }
 
@@ -724,16 +733,19 @@ impl Game {
     /// Whether a player's units may be on a tile at all (`game.py:708-718`).
     #[must_use]
     pub fn can_enter_territory(&self, p: PlayerId, t: TileIdx) -> bool {
-        let owner = self.tile(t).and_then(Tile::owner);
-        if self.is_barbarian(p)
-            && let Some(o) = owner
-            && !self.is_barbarian(o)
-        {
+        self.tile(t).and_then(Tile::owner).is_none_or(|o| self.can_enter_owner(p, o))
+    }
+
+    /// Whether a player's units may be on land `owner` owns (`game.py:708-718`): its own; the
+    /// barbarians' once the barbarian level lets them past borders; anyone's at war with it, the
+    /// barbarians' and a city-state's; and anyone's with open borders.
+    #[must_use]
+    pub fn can_enter_owner(&self, p: PlayerId, owner: PlayerId) -> bool {
+        if self.is_barbarian(p) && !self.is_barbarian(owner) {
             let level = &self.rules.difficulties()[self.st.config().barbarian_difficulty];
             // Python's `turn - 1 >= n`.
             return self.turn() > level.turn_barbarians_can_enter_player_tiles;
         }
-        let Some(owner) = owner else { return true };
         if owner == p || self.is_barbarian(p) || self.is_barbarian(owner) || self.at_war(p, owner) {
             return true;
         }
@@ -793,10 +805,14 @@ impl Game {
             u.religious_strength = i16::try_from(def.religious_strength).unwrap_or(i16::MAX);
         }
         self.spawn_unit(u)?;
-        // units.on_created (units.py:70-83): the original owner, and the unit's base promotions
-        // and those its civilization grants; then movement.max_moves for a unit made on its
-        // owner's turn. Until they are ported the unit starts with no moves.
-        pending(Porting::Pending("1c-02"));
+        super::units::on_created(self, id);
+        // A unit made on its owner's turn can move at once (`game.py:747`).
+        if self.current() == p {
+            let full = super::units::health::max_moves(self, id);
+            if let Some(x) = self.unit_mut(id, super::derive::rev::UnitTouch::MOVES) {
+                x.moves = full;
+            }
+        }
         Ok(id)
     }
 

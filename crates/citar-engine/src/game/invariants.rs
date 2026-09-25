@@ -6,8 +6,12 @@
 //! reads, so a game plays the same with the checks on or off.
 //!
 //! Python had no invariants; a few of these catch states its bugs produced (DESIGN.md 4.4-4.6).
-//! Two bounds wait for the systems that define them: a unit's maximum moves and the stacking
-//! rules (package 1c-02), and a city's maximum health (package 1c-03).
+//! A city's maximum health waits for the system that defines it (package 1c-03). Two bounds of
+//! DESIGN.md 9.4 do not hold in play, Python's or this engine's, and are left out (package 1c-02):
+//! a unit's movement may exceed its allowance (movement gained from a unique, or transferred by a
+//! unit it has since left), so it is held to a sanity cap instead; and units stack where a move
+//! that passes through its own units stops on one (an enemy comes into view), where a great
+//! person is born in a garrisoned city, and where the editor puts them.
 
 use core::fmt;
 
@@ -215,9 +219,19 @@ fn units(g: &Game, out: &mut Out) {
             out.push(Code::Unit1, format!("unit {id} has {} experience", u.xp));
         }
     }
-    // The upper bound on moves and the stacking rules (movement.max_moves, stack_reason).
-    pending(Porting::Pending("1c-02"));
+    // Movement: no unit holds more than a hundred movement points. A unit's allowance is no
+    // bound, since movement gained from a unique, or taken from a unit it has since left, may put
+    // it above it (DESIGN.md 6.10); this catches movement nothing in the rules could give.
+    let cap = g.rules().constants().move_scale.saturating_mul(MOVES_CAP);
+    for u in st.units().iter() {
+        if u.moves > cap {
+            out.push(Code::Unit1, format!("unit {} has {} moves", u.id(), u.moves));
+        }
+    }
 }
+
+/// The most movement points a unit may hold (UNIT-1).
+const MOVES_CAP: i32 = 100;
 
 fn cities(g: &Game, out: &mut Out) {
     let st = &g.st;

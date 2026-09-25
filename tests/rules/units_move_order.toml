@@ -1,0 +1,60 @@
+about = """
+A move goes as far as the unit's moves take it this turn, and keeps the destination as a standing
+order: the unit is marked as going there, and a second move on the same turn is refused with the
+reason. Readying the unit clears the order.
+"""
+from = "tests/test_ui_support.py::MoveOrderTests; tests/test_engine.py::test_move_without_moves_is_an_error"
+
+[[step]]
+note = "A warrior with two movement points on open grassland, six tiles west of where it is sent."
+op = "add_unit"
+args = { player = 0, unit = "Warrior", at = "D" }
+as = "added"
+
+[[step]]
+set = { w = "=added.unit_ids[0]" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=w", x = 11, y = 11 }
+as = "moved"
+
+[[step]]
+check = "moved"
+subset = { from = { x = 5, y = 11 }, to = { x = 7, y = 11 }, arrived = false, moves_left = 0, stopped = "out of moves", order_kept = true, gave_up = false }
+
+[[step]]
+note = "Four tiles are left: two turns of two steps each after this one."
+check = "moved"
+path = "turns_remaining"
+eq = 3
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { x = 7, y = 11, moves = 0, activity = "goto", goto = { x = 11, y = 11 } }
+
+[[step]]
+note = "No moves are left, and the refusal says what spent them."
+tool = "move_unit"
+args = { unit_id = "=w", x = 6, y = 11 }
+error = "has no moves left this turn (its standing move order already moved it this turn)"
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=w" }
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { moves = 120, max_moves = 120, activity = "=null", goto = "=null" }
+
+[[step]]
+note = "A tile it stands on is no move at all."
+tool = "move_unit"
+args = { unit_id = "=w", x = 7, y = 11 }
+error = "is already at (7,11)."
+
+[[step]]
+note = "A unit that is not the caller's."
+tool = "move_unit"
+args = { unit_id = 999, x = 7, y = 11 }
+error = "You have no unit with id 999"

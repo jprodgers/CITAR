@@ -174,9 +174,13 @@ def _relation(g: Game, a: int, b: int) -> dict:
 
 def _unit(g: Game, u) -> dict:
     """``unit``: one unit."""
+    from .movement import is_embarked, max_moves
     x, y = g.grid.xy(u.idx)
     return {"id": u.id, "owner": u.owner, "type": u.type, "x": x, "y": y, "hp": u.hp, "xp": u.xp,
-            "promotions": sorted(u.promotions)}
+            "promotions": sorted(u.promotions), "moves": u.moves, "max_moves": max_moves(g, u),
+            "activity": u.activity, "goto": g.xy(u.goto) if u.goto is not None else None,
+            "fortify": u.fortify, "embarked": is_embarked(g, u), "carried_by": u.carried_by,
+            "set_up": "Set Up" in u.status}
 
 
 def _units(g: Game, q: dict) -> list:

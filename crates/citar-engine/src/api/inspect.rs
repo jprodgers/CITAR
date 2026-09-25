@@ -335,6 +335,14 @@ fn unit(g: &Game, u: UnitId) -> Value {
         "hp": x.hp,
         "xp": x.xp,
         "promotions": sorted_names(g, x.promotions.iter()),
+        "moves": x.moves,
+        "max_moves": crate::game::movement::max_moves(g, u),
+        "activity": x.activity.map(|a| a.name()),
+        "goto": x.goto.map(|t| { let (gx, gy) = g.xy(t); json!({"x": gx, "y": gy}) }),
+        "fortify": x.fortify,
+        "embarked": crate::game::movement::is_embarked(g, u),
+        "carried_by": x.carried_by().map(UnitId::get),
+        "set_up": x.set_up,
     })
 }
 

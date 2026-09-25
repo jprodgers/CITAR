@@ -25,6 +25,15 @@ use crate::game::pending::{Effect, EffectQueue};
 /// How many citizen passes one settle may take (DESIGN.md 6.7).
 pub const SETTLE_PASSES: u32 = 8;
 
+#[cfg(feature = "test-ops")]
+impl Game {
+    /// Settles the game, as the end of a public call does: for tests that call the rules
+    /// directly, between their steps.
+    pub fn settle_for_test(&mut self) {
+        self.settle();
+    }
+}
+
 impl Game {
     /// Settles the game: sight and its effects, then citizens, then the checks (DESIGN.md 6.7).
     /// Pending work is empty afterwards.

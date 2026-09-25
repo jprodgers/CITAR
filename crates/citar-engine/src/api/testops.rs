@@ -9,15 +9,18 @@
 //!
 //! Package 1b-02 ports those that need no later system: `clear_units`, `set_turn`, `unmeet`,
 //! `set_controller`, `set_auto`, `refresh_visibility` and `reload`; package 1b-03 the turn
-//! operations `end_turn`, `end_round` and `force_turn`; package 1b-07 `complete_construction`. The others are listed with the package
-//! that ports what they need, and are refused as not ported until then.
+//! operations `end_turn`, `end_round` and `force_turn`; package 1b-07 `complete_construction`;
+//! package 1c-02 `set_unit` and `ready_unit`. The others are listed with the package that ports
+//! what they need, and are refused as not ported until then.
 
 use serde_json::{Map, Value, json};
 
-use super::scenario::{pid, players};
-use crate::base::ids::{CityId, PlayerId, UnitId};
+use super::scenario::{given, pid, players, resolve, tile, whole};
+use crate::base::ids::{CityId, PlayerId, PromotionId, UnitId};
 use crate::base::py;
+use crate::base::sets::PromotionSet;
 use crate::game::cities::construction;
+use crate::game::derive::rev::UnitTouch;
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::events::EventBatch;
 use crate::game::pending::SightSource;
@@ -129,7 +132,7 @@ pub static TEST_OPS: &[TestOp] = &[
     TestOp {
         name: "ready_unit",
         params: "unit: full moves and no orders",
-        porting: Porting::Pending("1c-02"),
+        porting: Porting::Ported,
         run: ready_unit,
     },
     TestOp {
@@ -171,8 +174,9 @@ pub static TEST_OPS: &[TestOp] = &[
     },
     TestOp {
         name: "set_unit",
-        params: "unit; any of hp, moves, xp, x, y, promotions",
-        porting: Porting::Pending("1c-02"),
+        params: "unit; any of hp, moves, xp, x and y, promotions (the list it then has), carrier \
+                 (a unit on its tile that carries it, or null)",
+        porting: Porting::Ported,
         run: set_unit,
     },
     TestOp {
@@ -421,6 +425,93 @@ fn reload(g: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Ok(json!({}))
 }
 
+/// The unit an operation names by `unit`.
+fn unit_param(g: &Game, o: &Params) -> Result<UnitId, ActionError> {
+    let n: u32 = whole(o.get("unit").unwrap_or(&Value::Null), "unit")?;
+    UnitId::new(n)
+        .filter(|&u| g.unit(u).is_some())
+        .ok_or_else(|| ActionError::new(ErrCode::NoSuchUnit, "No such unit."))
+}
+
+/// Sets a unit's fields, as a test poked them: health (1 to 100), movement in move-scale units,
+/// experience, its tile (moved without movement rules, what it carries with it), its promotions
+/// (the list it then has), and the unit carrying it on its tile, or none.
+fn set_unit(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let u = unit_param(g, o)?;
+    let hp = match given(o, "hp") {
+        Some(v) => Some(i16::try_from(whole::<i64>(v, "hp")?.clamp(1, 100)).unwrap_or(100)),
+        None => None,
+    };
+    let moves = match given(o, "moves") {
+        Some(v) => Some(whole::<i32>(v, "moves")?.max(0)),
+        None => None,
+    };
+    let xp = match given(o, "xp") {
+        Some(v) => Some(whole::<i32>(v, "xp")?.max(0)),
+        None => None,
+    };
+    let at = if o.contains_key("x") || o.contains_key("y") { Some(tile(g, o)?) } else { None };
+    let promotions = match given(o, "promotions") {
+        None => None,
+        Some(Value::Array(names)) => {
+            let mut set = PromotionSet::new();
+            for n in names {
+                set.insert(resolve::<PromotionId>(g, Some(n))?);
+            }
+            Some(set)
+        }
+        Some(_) => return Err(bad("promotions must be a list of promotion names.")),
+    };
+    let refused =
+        |e: &dyn core::fmt::Display| ActionError::rule(format!("The game refused ({e})."));
+    if let Some(t) = at {
+        g.relocate_unit(u, t).map_err(|e| refused(&e))?;
+    }
+    if o.contains_key("carrier") {
+        match given(o, "carrier") {
+            None => g.unboard_unit(u).map_err(|e| refused(&e))?,
+            Some(v) => {
+                let n: u32 = whole(v, "carrier")?;
+                let c = UnitId::new(n)
+                    .filter(|&c| g.unit(c).is_some())
+                    .ok_or_else(|| ActionError::new(ErrCode::NoSuchUnit, "No such carrier."))?;
+                g.board_unit(u, c).map_err(|e| refused(&e))?;
+            }
+        }
+    }
+    if let Some(x) = g.unit_mut(u, UnitTouch::CORE | UnitTouch::MOVES) {
+        if let Some(h) = hp {
+            x.hp = h;
+        }
+        if let Some(m) = moves {
+            x.moves = m;
+        }
+        if let Some(v) = xp {
+            x.xp = v;
+        }
+        if let Some(p) = promotions {
+            x.promotions = p;
+        }
+    }
+    Ok(json!({}))
+}
+
+/// Readies a unit to act: its full movement, and no orders, attacks or action this turn.
+fn ready_unit(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let u = unit_param(g, o)?;
+    let full = crate::game::movement::max_moves(g, u);
+    if let Some(x) = g.unit_mut(u, UnitTouch::CORE | UnitTouch::MOVES) {
+        x.moves = full;
+        x.activity = None;
+        x.goto = None;
+        x.path.clear();
+        x.order_wait = 0;
+        x.attacks = 0;
+        x.acted = false;
+    }
+    Ok(json!({"moves": full}))
+}
+
 // ---- Those whose systems are not ported yet ----------------------------------------------------
 
 /// The refusal of a test operation whose system is not ported yet: `path` names the system, and
@@ -464,14 +555,28 @@ fn progress_builds(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::workers"))
 }
 
-fn ready_unit(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::units"))
-}
-
 fn sack_city(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::barbarians"))
 }
 
-fn set_unit(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::units"))
+#[cfg(test)]
+mod tests {
+    use super::TEST_OPS;
+
+    /// The operations are sorted, which `op` searches by, and each is described in one line as
+    /// Python's `testops.py` describes it, with no run of spaces a broken literal would leave.
+    #[test]
+    fn the_operations_are_sorted_and_described_in_one_line() {
+        for w in TEST_OPS.windows(2) {
+            assert!(w[0].name < w[1].name, "{} before {}", w[0].name, w[1].name);
+        }
+        for o in TEST_OPS {
+            assert!(
+                !o.params.contains("  ") && !o.params.contains('\n'),
+                "{}: {:?}",
+                o.name,
+                o.params
+            );
+        }
+    }
 }

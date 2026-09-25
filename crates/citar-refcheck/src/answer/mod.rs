@@ -17,6 +17,8 @@
 //!   and no meeting, and what each major sees;
 //! - [`buildable`] (package 1b-07), what each major's cities can build, and what it costs; with
 //!   it, `civs` answers the tech and policy costs and the policies a civilization could adopt.
+//! - [`movement`] (package 1c-02): where units can get this turn, and paths with their turns and
+//!   step costs.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -36,6 +38,7 @@ pub mod buildable;
 pub mod city_stats;
 pub mod civs;
 pub mod fixed_point;
+pub mod movement;
 pub mod state_echo;
 pub mod tile_yields;
 pub mod uniques;
@@ -107,6 +110,7 @@ static MODULES: &[&dyn AnswerModule] = &[
     &city_stats::CityStats,
     &civs::Civs,
     &buildable::Buildable,
+    &movement::Movement,
     &visible::Visible,
 ];
 

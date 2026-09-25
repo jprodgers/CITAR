@@ -88,3 +88,8 @@ group = "visible"
 # production cost, the turns it takes, and whether and for how much it can be bought with gold and with faith.
 [[enforce]]
 group = "buildable"
+
+# movement (package 1c-02): where units can get this turn, with the movement they would have left,
+# and the sampled paths with their turns and step costs.
+[[enforce]]
+group = "movement"

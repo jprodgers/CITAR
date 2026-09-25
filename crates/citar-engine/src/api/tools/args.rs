@@ -6,8 +6,8 @@
 //! arguments from it (DESIGN.md 9.5). The specs land with the typed actions: each system package
 //! adds its tools' entries to [`TOOLS`] together with their `Action` variants, with the
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
-//! the coercion; package 1b-06 adds the citizen tools, and package 1b-07 the tools of production,
-//! purchases, research and policies.
+//! the coercion; package 1b-06 adds the citizen tools, package 1b-07 the tools of production,
+//! purchases, research and policies, and package 1c-02 the unit tools.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -107,6 +107,16 @@ pub static TOOLS: &[ToolArgs] = &[
         required: &["tech"],
     },
     ToolArgs {
+        tool: "move_unit",
+        params: &[("unit_id", ArgType::Integer), ("x", ArgType::Integer), ("y", ArgType::Integer)],
+        required: &["unit_id", "x", "y"],
+    },
+    ToolArgs {
+        tool: "promote_unit",
+        params: &[("unit_id", ArgType::Integer), ("promotion", ArgType::String)],
+        required: &["unit_id", "promotion"],
+    },
+    ToolArgs {
         tool: "rename_city",
         params: &[("city_id", ArgType::Integer), ("name", ArgType::String)],
         required: &["city_id", "name"],
@@ -144,6 +154,16 @@ pub static TOOLS: &[ToolArgs] = &[
         tool: "set_specialists",
         params: &[("city_id", ArgType::Integer), ("specialists", ArgType::Object)],
         required: &["city_id", "specialists"],
+    },
+    ToolArgs {
+        tool: "unit_order",
+        params: &[("unit_id", ArgType::Integer), ("order", ArgType::String)],
+        required: &["unit_id", "order"],
+    },
+    ToolArgs {
+        tool: "upgrade_unit",
+        params: &[("unit_id", ArgType::Integer)],
+        required: &["unit_id"],
     },
     ToolArgs {
         tool: "work_tile",

@@ -176,6 +176,76 @@ def _complete_construction(g: Game, o: dict):
     return {"completed": name}
 
 
+def _unit(g: Game, o: dict):
+    """The unit an operation names by ``unit``."""
+    try:
+        u = g.unit(int(o.get("unit")))
+    except (TypeError, ValueError):
+        u = None
+    if u is None:
+        raise ActionError("No such unit.")
+    return u
+
+
+def _whole(o: dict, key: str) -> int:
+    """A whole-number parameter, refused with the Rust engine's sentence."""
+    try:
+        return int(o[key])
+    except (TypeError, ValueError):
+        raise ActionError(f"{key} must be a whole number in range, not {o[key]!r}.")
+
+
+@op("set_unit", "unit; any of hp, moves, xp, x and y, promotions (the list it then has), carrier (a unit on its "
+                "tile that carries it, or null)")
+def _set_unit(g: Game, o: dict):
+    """Set a unit's fields, as the tests poked them: health, movement (move-scale units), experience, its tile,
+    its promotions and the unit that carries it."""
+    from .scenario import _idx, _name
+    u = _unit(g, o)
+    hp = max(1, min(100, _whole(o, "hp"))) if o.get("hp") is not None else None
+    moves = max(0, _whole(o, "moves")) if o.get("moves") is not None else None
+    xp = max(0, _whole(o, "xp")) if o.get("xp") is not None else None
+    at = _idx(g, o) if ("x" in o or "y" in o) else None
+    promos = None
+    if o.get("promotions") is not None:
+        if not isinstance(o["promotions"], list):
+            raise ActionError("promotions must be a list of promotion names.")
+        promos = [_name(g, "promotion", p) for p in o["promotions"]]
+    if at is not None:
+        g.place_unit(u, at)
+    if "carrier" in o:
+        if o["carrier"] is None:
+            u.carried_by = None
+        else:
+            c = g.unit(_whole(o, "carrier"))
+            if c is None:
+                raise ActionError("No such carrier.")
+            if c.idx != u.idx:
+                raise ActionError(f"The game refused (unit {u.id} is on tile {u.idx}, its carrier {c.id} on another).")
+            u.carried_by = c.id
+    if hp is not None:
+        u.hp = hp
+    if moves is not None:
+        u.moves = moves
+    if xp is not None:
+        u.xp = xp
+    if promos is not None:
+        u.promotions = list(dict.fromkeys(promos))
+    g.invalidate()
+    return {}
+
+
+@op("ready_unit", "unit: full moves and no orders")
+def _ready_unit(g: Game, o: dict):
+    """Ready a unit to act: its full movement, and no orders, attacks or action this turn."""
+    from .movement import max_moves
+    u = _unit(g, o)
+    u.moves = max_moves(g, u)
+    u.activity, u.goto, u.path, u.order_wait, u.attacks, u.acted = None, None, None, 0, 0, False
+    g.invalidate()
+    return {"moves": u.moves}
+
+
 @op("refresh_visibility", "what every civilization sees is brought up to date")
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""
