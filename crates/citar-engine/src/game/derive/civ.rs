@@ -275,6 +275,12 @@ pub(crate) fn supply(g: &Game, p: PlayerId) -> Option<Ref<'_, ResourceSupply>> {
     ))
 }
 
+/// What the conditionals of the uniques every supply evaluates read, but resources: the
+/// ruleset's, fixed at load.
+pub(crate) fn supply_reads(g: &Game) -> CondDeps {
+    g.dv.civ.supply_deps
+}
+
 /// When civilization `p`'s supply last changed, validated now.
 pub(crate) fn supply_changed(g: &Game, p: PlayerId) -> Rev {
     drop(supply(g, p));
