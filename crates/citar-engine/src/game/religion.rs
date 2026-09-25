@@ -468,7 +468,13 @@ pub fn pressures_from_surroundings(g: &Game, c: CityId) -> SmallVec<[(ReligionId
     let at = city.tile();
     let reach = super::derive::religion::reach(g);
     for other in super::derive::religion::cities_within(g, at, reach) {
-        if other == c {
+        // Most cities follow no major religion: they are passed over before their spread's memo
+        // is validated.
+        if other == c
+            || !g.city(other).is_some_and(|x| {
+                has_religious_pressure(x) && majority_of(x).is_some_and(|r| is_major(g, r))
+            })
+        {
             continue;
         }
         let Some(src) = super::derive::religion::spread_source(g, other) else { continue };
@@ -487,8 +493,14 @@ pub fn city_end_turn(g: &mut Game, c: CityId) {
         return;
     }
     let before = majority_religion(g, c);
-    for (r, n) in pressures_from_surroundings(g, c) {
-        push_pressure(g, c, Some(r), n);
+    let arriving = pressures_from_surroundings(g, c);
+    if arriving.is_empty() {
+        return;
+    }
+    if let Some(x) = g.city_mut(c, CityTouch::RELIGION) {
+        for (r, n) in arriving {
+            x.add_pressure(Some(r), n);
+        }
     }
     after_update(g, c, before);
 }

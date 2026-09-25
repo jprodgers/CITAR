@@ -58,5 +58,11 @@ harness = false
 name = "buildable"
 harness = false
 
+# Religious pressure (package 1b-08): one round of it on a gargantuan map at 1 ms (report-only),
+# failing above three times.
+[[bench]]
+name = "religion"
+harness = false
+
 [lints]
 workspace = true

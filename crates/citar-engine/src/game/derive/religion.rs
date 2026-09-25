@@ -9,15 +9,19 @@
 //! - **A city's spread** ([`spread_source`]) is its majority religion when that is a major one,
 //!   how far it reaches (`religion._spread_range`) and the multipliers of its natural pressure
 //!   (`religion._pressure_to`), with the cities each holds for. It is a memo per city, with the
-//!   classes its computation recorded (`unique::record`), valid while the city's pressures,
-//!   population and buildings, its owner's and its majority's founder's indexes, the religions and
-//!   the settings stand. So a round asks each city's uniques about once, and applying pressure to
-//!   one city recomputes that city's spread alone.
+//!   classes its computation recorded (`unique::record`), valid while the major religion the city
+//!   follows, its buildings, its owner's and that religion's founder's indexes, the religions and
+//!   the settings stand. Pressure arrives in most cities every turn, but rarely changes which
+//!   religion they follow, so the pressures and the population are not read beside the majority
+//!   (their conditionals are, through the recorded classes). The indexes' resource layers are
+//!   read only for a ruleset whose resources carry a unique a spread reads; without them the
+//!   indexes validate on the civilization's `index` and the city's `buildings` revisions alone.
 //! - **The reach** ([`reach`]): how far any city's religion could reach, which the grid is asked
 //!   for: ten tiles, and the most `Religion naturally spreads to cities [n] tiles away` could add,
 //!   whatever its conditionals (the most any civilization's index and any religion's followers
 //!   hold, twice the first for the city's owner and its religion's founder, and every building's
-//!   and resource's own). A ruleset without the unique never asks.
+//!   and resource's own). A ruleset without the unique never asks; otherwise it is a memo on the
+//!   civilizations' `index` revisions and the religions.
 //!
 //! [`verify`] is the cache oracle for both.
 
@@ -26,7 +30,7 @@ use core::cell::{Cell, Ref};
 use smallvec::SmallVec;
 
 use super::civ;
-use super::rev::{BitEq, Memo};
+use super::rev::{BitEq, CopyMemo, Memo};
 use crate::base::collections::LookupMap;
 use crate::base::ids::{CityFilterId, CityId, PlayerId, ReligionId, TileIdx};
 use crate::game::{Game, religion};
@@ -85,11 +89,13 @@ impl BitEq for CityGrid {
 struct SourceMemo {
     source: Memo<Option<SpreadSource>>,
     deps: Cell<CondDeps>,
+    /// The major religion its last computation found the city following, if any.
+    last: Cell<Option<ReligionId>>,
 }
 
 impl Default for SourceMemo {
     fn default() -> Self {
-        Self { source: Memo::new(), deps: Cell::new(CondDeps::empty()) }
+        Self { source: Memo::new(), deps: Cell::new(CondDeps::empty()), last: Cell::new(None) }
     }
 }
 
@@ -97,11 +103,16 @@ impl Default for SourceMemo {
 #[derive(Clone, Debug)]
 pub struct ReligionCaches {
     grid: Memo<CityGrid>,
+    /// How far any city's religion could reach, for a ruleset with `Religion naturally spreads to
+    /// cities [n] tiles away` and none on a resource.
+    reach: CopyMemo<i32>,
     sources: LookupMap<CityId, SourceMemo>,
     /// The most a building's or a resource's own `Religion naturally spreads to cities [n] tiles
     /// away` adds, and whether the ruleset has the unique at all.
     local_bonus: i32,
     has_distance: bool,
+    /// Whether a resource carries a unique a spread reads, so that its layer must be validated.
+    resource_spread: bool,
 }
 
 impl ReligionCaches {
@@ -127,7 +138,25 @@ impl ReligionCaches {
             .flat_map(|s| s.local.iter().copied())
             .map(positive)
             .fold(0i32, i32::saturating_add);
-        Self { grid: Memo::new(), sources, local_bonus, has_distance }
+        let spread = |id| {
+            matches!(
+                t.get(id).data,
+                UniqueData::ReligionSpreadDistance(_)
+                    | UniqueData::NaturalReligionSpreadStrength(_)
+            )
+        };
+        let resource_spread = rules
+            .resources()
+            .iter()
+            .any(|(_, r)| r.uniques.civ.iter().chain(r.uniques.local.iter()).any(|&id| spread(id)));
+        Self {
+            grid: Memo::new(),
+            reach: CopyMemo::new(),
+            sources,
+            local_bonus,
+            has_distance,
+            resource_spread,
+        }
     }
 
     /// Keeps one spread per city of the state as cities come and go.
@@ -232,21 +261,39 @@ pub fn reach(g: &Game) -> i32 {
             })
             .fold(0, i32::saturating_add)
     };
-    let civ_most =
-        g.st.players()
-            .ids()
-            .map(|p: PlayerId| run_bonus(civ::civ_index_full(g, p)))
+    // Without the unique on a resource, the indexes without their resource layers hold every
+    // copy of it, and validate on the civilizations' `index` alone.
+    let full = caches.resource_spread;
+    let compute = || {
+        let civ_most =
+            g.st.players()
+                .ids()
+                .map(|p: PlayerId| {
+                    run_bonus(if full { civ::civ_index_full(g, p) } else { civ::civ_index(g, p) })
+                })
+                .max()
+                .unwrap_or(0);
+        let follower_most = (0..g.st.world().religions.len())
+            .filter_map(|i| u8::try_from(i).ok())
+            .map(|i| run_bonus(civ::follower(g, ReligionId(i))))
             .max()
             .unwrap_or(0);
-    let follower_most = (0..g.st.world().religions.len())
-        .filter_map(|i| u8::try_from(i).ok())
-        .map(|i| run_bonus(civ::follower(g, ReligionId(i))))
-        .max()
-        .unwrap_or(0);
-    BASE_REACH
-        .saturating_add(civ_most.saturating_mul(2))
-        .saturating_add(follower_most)
-        .saturating_add(caches.local_bonus)
+        BASE_REACH
+            .saturating_add(civ_most.saturating_mul(2))
+            .saturating_add(follower_most)
+            .saturating_add(caches.local_bonus)
+    };
+    if full {
+        return compute();
+    }
+    let revs = &g.dv.revs;
+    let inputs = || {
+        g.st.players()
+            .ids()
+            .map(|p| revs.civ(p).index)
+            .fold(revs.religions.max(revs.config), |a, b| a.max(b))
+    };
+    caches.reach.get(revs.now(), inputs, compute)
 }
 
 /// How city `c`'s religion spreads, computed afresh.
@@ -274,32 +321,41 @@ pub fn spread_source(g: &Game, c: CityId) -> Option<SpreadSource> {
         let Some(city) = g.city(c) else { return revs.now() };
         let owner = city.owner();
         let cr = revs.city(c);
-        let v = g.view();
         let deps = m.deps.get();
-        let mut r = cr
-            .core
-            .max(cr.religion)
-            .max(cr.buildings)
-            .max(revs.civ(owner).index)
-            .max(civ::civ_index_full_changed(g, owner))
-            .max(civ::city_local_full_changed(g, c))
-            .max(revs.religions)
-            .max(revs.config)
-            .max(civ::cond(g, deps, &Ctx::city(&v, c)));
-        if let Some(founder) = religion::majority_religion(g, c)
-            .and_then(|x| religion::religion(g, x))
-            .map(|x| x.founder)
-        {
+        // Pressure arrives in a city every turn and moves its religion's revision, but its spread
+        // depends on the major religion it follows, which it rarely changes: that is compared
+        // itself, and the city's pressures and population are not read.
+        let major = religion::majority_religion(g, c).filter(|&r| religion::is_major(g, r));
+        if major != m.last.get() {
+            return revs.now();
+        }
+        // The indexes without their resource layers validate on the civilization's `index` and
+        // the city's `buildings` alone; a ruleset whose resources carry no unique a spread reads
+        // leaves the layers out, since the runs a spread reads are the same without them.
+        let mut r = cr.buildings.max(revs.civ(owner).index).max(revs.religions).max(revs.config);
+        if caches.resource_spread {
             r = r
-                .max(revs.civ(founder).index)
-                .max(civ::civ_index_full_changed(g, founder))
-                .max(civ::cond(g, deps, &Ctx::civ(founder)));
+                .max(civ::civ_index_full_changed(g, owner))
+                .max(civ::city_local_full_changed(g, c));
+        }
+        if !deps.is_empty() {
+            r = r.max(civ::cond(g, deps, &Ctx::city(&g.view(), c)));
+        }
+        if let Some(founder) = major.and_then(|x| religion::religion(g, x)).map(|x| x.founder) {
+            r = r.max(revs.civ(founder).index);
+            if caches.resource_spread {
+                r = r.max(civ::civ_index_full_changed(g, founder));
+            }
+            if !deps.is_empty() {
+                r = r.max(civ::cond(g, deps, &Ctx::civ(founder)));
+            }
         }
         r
     };
     let compute = || {
         let (v, d) = record::recorded(|| compute_source(g, c));
         m.deps.set(d);
+        m.last.set(v.as_ref().map(|x| x.religion));
         v
     };
     m.source.get(revs.now(), inputs, compute).clone()
