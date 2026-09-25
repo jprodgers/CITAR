@@ -6,7 +6,7 @@
 //! city's stats and happiness afresh, and took the building out again; what was computed with the
 //! building stayed in the caches it did not swap, and moved the next answer asked of the game
 //! (`advisor-what-if-leaves-no-trace`). Here nothing is written, neither the state
-//! nor a memo: the game is read through an [`Overlay`] (`EvalView::what_if`), which adds the
+//! nor a memo: the game is read through an `Overlay` (`EvalView::what_if`), which adds the
 //! building to the city's set and to the indexes it reaches (the city's own, `CityLocal`, and its
 //! owner's, `CivIndex`, each with the building's uniques added, which is what a rebuild with it
 //! would give), and holds what the building changes further out: its owner's resources (a
@@ -85,6 +85,9 @@ pub(crate) struct Overlay {
     pub(crate) connectivity: Option<Connectivity>,
     /// How far over its unit supply its owner is, when the building could change it.
     pub(crate) deficit: Option<i32>,
+    /// Whether what the building adds to its owner's index may move another city's yields or
+    /// happiness (`AdvisorRules::widens`).
+    widens: bool,
     /// What the building adds to the city's own index, and to its owner's.
     adds_local: &'static Extra,
     adds_civ: &'static Extra,
@@ -148,6 +151,7 @@ impl Overlay {
             layer: false,
             connectivity: None,
             deficit: None,
+            widens: a.widens.contains(b),
             adds_local: a.adds_local.get(b)?,
             adds_civ: a.adds_civ.get(b)?,
         };
@@ -393,7 +397,7 @@ pub fn what_if_building(g: &Game, c: CityId, b: BuildingId) -> Option<StatsDelta
 /// reaches nothing it read.
 fn happiness_total(v: &EvalView<'_>, o: &Overlay, parts: &CityParts) -> i32 {
     let g = v.game();
-    let wide = o.civ_full.is_some() || o.supply.is_some();
+    let wide = reaches_others(o);
     // Another city's own buildings are as they were.
     let others = o.moved().difference(CondDeps::CITY);
     economy::compute_happiness_in(v, o.owner, |x| -> Cow<'_, CityParts> {
@@ -407,6 +411,14 @@ fn happiness_total(v: &EvalView<'_>, o: &Overlay, parts: &CityParts) -> i32 {
         Cow::Owned(read.and_then(|r| parts_in(v, o, x, &r)).unwrap_or_default())
     })
     .total
+}
+
+/// Whether the building may move every other city of its owner, whatever their memos read: its
+/// owner's resources change, or it adds to its owner's index a unique a city's yields or
+/// happiness may read. A building that adds only what they do not (a Monument's `Destroyed when
+/// the city is captured`) moves another city only through what its memos read.
+fn reaches_others(o: &Overlay) -> bool {
+    o.supply.is_some() || o.widens
 }
 
 /// How far a what-if of building `b` in city `c` reaches: which of what the overlay can hold it
@@ -427,6 +439,8 @@ pub struct Reach {
     pub deficit: bool,
     /// The city is in We Love The King Day, and its owner's happiness is asked.
     pub happiness: bool,
+    /// Its owner's happiness is asked, and every other city of its owner computed again.
+    pub others: bool,
 }
 
 /// The [`Reach`] of a what-if of building `b` in city `c` (feature `test-ops`).
@@ -436,6 +450,7 @@ pub fn reach_for_test(g: &Game, c: CityId, b: BuildingId) -> Option<Reach> {
     let o = Overlay::new(g, c, b)?;
     let city = g.city(c)?;
     let major = g.player(o.owner).is_some_and(crate::state::players::Player::is_major);
+    let happiness = city.wltkd > 0 && major;
     Some(Reach {
         local: o.local.is_some(),
         civ: o.civ.is_some(),
@@ -443,7 +458,8 @@ pub fn reach_for_test(g: &Game, c: CityId, b: BuildingId) -> Option<Reach> {
         resource_layer: o.layer,
         network: o.connectivity.is_some(),
         deficit: o.deficit.is_some(),
-        happiness: city.wltkd > 0 && major,
+        happiness,
+        others: happiness && reaches_others(&o),
     })
 }
 

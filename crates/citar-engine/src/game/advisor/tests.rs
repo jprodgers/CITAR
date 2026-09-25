@@ -123,6 +123,29 @@ fn a_city_in_we_love_the_king_day_asks_whether_the_building_makes_its_owner_happ
     // The celebration's food comes with it: a quarter more of the surplus.
     let d = w.delta();
     assert!(d[Stat::Food] > 0.0 && d[Stat::Happiness] > 0.0, "{d:?}");
+    // Antium is computed again only for a building that adds to Rome's index what a city's
+    // yields or happiness may read; a Monument adds only `Destroyed when the city is captured`.
+    let rules: &'static crate::rules::Ruleset = g.rules;
+    let adv = &rules.derived().advisor;
+    let monument = rules.lookup::<BuildingId>("Monument").expect("a monument");
+    let reach = reach_for_test(&g, a, monument).expect("a what-if");
+    assert!(reach.civ && reach.happiness && !reach.others, "{reach:?}");
+    let lacks = |x: BuildingId| g.city(a).is_some_and(|y| !y.buildings.contains(x));
+    let wide = rules.buildings().ids().find(|&x| adv.widens.contains(x) && lacks(x));
+    let reach = reach_for_test(&g, a, wide.expect("a building that widens")).expect("a what-if");
+    assert!(reach.others, "{reach:?}");
+    let adds = rules.buildings().ids().filter(|&x| !adv.adds_civ[x].is_empty()).count();
+    assert!(adv.widens.len() < adds, "{} of {adds} widen", adv.widens.len());
+    // What only conquest, construction or combat read widens nothing: `Destroyed when the city
+    // is captured`, `Cost increases by [n] per owned city`, a city's strength; what adds to every
+    // city's yields does.
+    let widens = |name: &str| adv.widens.contains(rules.lookup::<BuildingId>(name).expect(name));
+    for name in ["Monument", "Walls", "Courthouse", "Circus Maximus", "Statue of Zeus"] {
+        assert!(!widens(name), "{name}");
+    }
+    for name in ["Temple of Artemis", "Sistine Chapel", "Bazaar", "Harbor"] {
+        assert!(widens(name), "{name}");
+    }
     // Every other building agrees too, the unhappy ones included.
     let all: Vec<BuildingId> = g.rules().buildings().ids().collect();
     for x in all {

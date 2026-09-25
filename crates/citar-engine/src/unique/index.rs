@@ -169,6 +169,11 @@ impl Extra {
     pub fn has(&self, ty: UniqueType) -> bool {
         self.0.iter().any(|&(t, _)| t == ty as u16)
     }
+
+    /// The types it adds entries at, in order, once per entry.
+    pub fn types(&self) -> impl Iterator<Item = UniqueType> + '_ {
+        self.0.iter().filter_map(|&(t, _)| UniqueType::ALL.get(usize::from(t)).copied())
+    }
 }
 
 /// The type a unique is indexed at: its trigger's, if it has one, otherwise its own. A tag of no
