@@ -4,6 +4,7 @@ end of the city's turn, and the item is finished at the start of a later one whe
 pays for it. A finished unit stands in its city, or beside it when a unit of its kind is already
 there, and is told to its owner alone; a finished building joins the city. A city with nothing to
 build says so to its human owner. set_city's production fills the queue as set_production does.
+A conversion of production to gold keeps none of the production for the next item.
 """
 from = "citar/engine/cities.py: end_turn_production, construct_if_enough, complete_construction"
 
@@ -145,3 +146,33 @@ args = { city = "=city", production = "Scout" }
 check = { what = "city", city = "=city" }
 path = "queue"
 eq = ["Scout"]
+
+[[step]]
+note = "Converting production to gold: the city's stats pay the gold, and the production is spent."
+op = "grant_tech"
+args = { player = 0, tech = "Guilds" }
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=city", item = "Gold" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "overflow"
+ge = 0
+as = "banked"
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "queue"
+eq = ["Gold", "Scout"]
+
+[[step]]
+note = "Python banked the turn's production as overflow too, which the Scout would have taken whole."
+check = { what = "city", city = "=city" }
+path = "overflow"
+eq = "=banked"
+intended = "perpetual-production-is-not-banked"
