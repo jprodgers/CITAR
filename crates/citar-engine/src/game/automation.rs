@@ -33,7 +33,7 @@ use super::movement::{self, Stop};
 use super::path::Mover;
 use super::workers::{self, Builder};
 use crate::base::ids::{ImprovementId, PlayerId, ResourceId, TileIdx, UnitId};
-use crate::base::sets::{ImprovementSet, PlayerSet};
+use crate::base::sets::{BitSet, ImprovementSet, PlayerSet};
 use crate::base::stats::{Stat, Stats};
 use crate::rules::defs::{Domain, ImprovementKind, ResourceType};
 use crate::state::chronicle::{EngineEvent, EventData};
@@ -75,7 +75,6 @@ pub(crate) fn run_unit_orders(g: &mut Game, p: PlayerId) {
         let Some((t, activity, goto)) = g.unit(u).map(|x| (x.tile(), x.activity, x.goto)) else {
             continue;
         };
-        let label = unit_label(g, u);
         if activity == Some(Activity::Build)
             && let Some(last) = g.state().tiles().builds(t).last().map(|s| s.improvement)
             && civilian_in_danger(g, u)
@@ -84,7 +83,7 @@ pub(crate) fn run_unit_orders(g: &mut Game, p: PlayerId) {
                 x.activity = None;
             }
             let what = g.rules().improvements()[last].name.clone();
-            let text = format!("{label} stopped building {what}: enemies nearby.");
+            let text = format!("{} stopped building {what}: enemies nearby.", unit_label(g, u));
             let data = EventData { unit: Some(u), ..EventData::default() };
             g.emit(EngineEvent::UnitWoke, &text, Some(PlayerSet::single(p)), Some(t), data, &[]);
         }
@@ -103,8 +102,11 @@ pub(crate) fn run_unit_orders(g: &mut Game, p: PlayerId) {
                             if let Some(n) = res.stalled {
                                 why.push_str(&format!(", no progress for {n} turns"));
                             }
-                            let text =
-                                format!("{label} stopped its move to {}: {why}.", g.fmt_xy(dest));
+                            let text = format!(
+                                "{} stopped its move to {}: {why}.",
+                                unit_label(g, u),
+                                g.fmt_xy(dest)
+                            );
                             let data = EventData { unit: Some(u), ..EventData::default() };
                             let audience = Some(PlayerSet::single(p));
                             g.emit(
@@ -140,7 +142,7 @@ pub(crate) fn run_unit_orders(g: &mut Game, p: PlayerId) {
                     x.activity = None;
                 }
                 let at = g.unit(u).map_or(t, Unit::tile);
-                let text = format!("{label} woke up: enemies nearby.");
+                let text = format!("{} woke up: enemies nearby.", unit_label(g, u));
                 let data = EventData { unit: Some(u), ..EventData::default() };
                 g.emit(
                     EngineEvent::UnitWoke,
@@ -162,6 +164,16 @@ fn unit_label(g: &Game, u: UnitId) -> String {
     g.unit(u).map_or_else(String::new, |x| {
         format!("{} #{}", g.rules().base_units()[x.base].name, u.get())
     })
+}
+
+/// Gives unit `u` the standing order `a`, writing (and moving what reads a unit's orders) only
+/// when it had another: a unit that carries on with its order every turn changes nothing.
+fn keep_activity(g: &mut Game, u: UnitId, a: Activity) {
+    if g.unit(u).is_some_and(|x| x.activity != Some(a))
+        && let Some(x) = g.unit_mut(u, UnitTouch::CORE)
+    {
+        x.activity = Some(a);
+    }
 }
 
 /// Whether an unescorted civilian could be taken next turn (`automation._civilian_in_danger`,
@@ -347,7 +359,7 @@ pub fn explore_target(
     let def = &r.base_units()[x.base];
     let scout = r.derived().known.scout;
     let fighter = def.military && Some(def.unit_type) != scout && x.hp >= 60;
-    let danger_tiles = if fighter { None } else { danger(g, p).map(|d| d.clone()) };
+    let danger_tiles = if fighter { None } else { danger(g, p) };
     let is_danger =
         |t: TileIdx| exclude.contains(&t) || danger_tiles.as_ref().is_some_and(|d| d.contains(t.0));
     let land_unit = def.domain == Domain::Land;
@@ -404,8 +416,8 @@ fn far_frontier(
     let pl = g.player(p)?;
     let land_unit = g.rules().base_units()[x.base].domain == Domain::Land;
     let grid = g.grid();
-    let mut seen: BTreeSet<TileIdx> = BTreeSet::new();
-    seen.insert(x.tile());
+    let mut seen = BitSet::with_capacity(grid.size());
+    seen.insert(x.tile().0);
     let mut frontier = vec![x.tile()];
     let mut depth = 0;
     while !frontier.is_empty() && depth < limit {
@@ -413,10 +425,9 @@ fn far_frontier(
         let mut next = Vec::new();
         for cur in frontier {
             for nb in grid.neighbors(cur) {
-                if seen.contains(&nb) || !pl.explored.contains(nb.0) {
+                if !pl.explored.contains(nb.0) || !seen.insert(nb.0) {
                     continue;
                 }
-                seen.insert(nb);
                 if !passable(m, nb) || off_limits(g, p, nb) || is_danger(nb) {
                     continue;
                 }
@@ -505,9 +516,10 @@ pub fn explore(g: &mut Game, u: UnitId) -> Value {
         }
     }
     if let Some(at) = g.unit(u).map(Unit::tile) {
+        keep_activity(g, u, Activity::Explore);
         let give_up = {
-            let Some(x) = g.unit_mut(u, UnitTouch::CORE) else { return json!({}) };
-            x.activity = Some(Activity::Explore);
+            // Where it has been and where it heads, which no derived value reads.
+            let Some(x) = g.unit_mut(u, UnitTouch::empty()) else { return json!({}) };
             let recent = &mut x.explore.recent;
             recent.push(at);
             while recent.len() > 4 {
@@ -667,14 +679,15 @@ pub fn worker_jobs_with(
     let r = g.rules();
     let grid = g.grid();
     let range = super::cities::stats::work_range(g);
-    let danger_tiles = danger(g, p).map(|d| d.clone()).unwrap_or_default();
+    let danger_tiles = danger(g, p);
+    let in_danger = |t: TileIdx| danger_tiles.as_ref().is_some_and(|d| d.contains(t.0));
     let mut candidates: Vec<Candidate> = Vec::new();
     let cities: Vec<(crate::base::ids::CityId, TileIdx)> =
         g.player_cities(p).map(|c| (c.id(), c.tile())).collect();
     for &(c, centre) in &cities {
-        let worked: Vec<TileIdx> = g.city(c).map(|x| x.worked.clone()).unwrap_or_default();
+        let worked: &[TileIdx] = g.city(c).map_or(&[], |x| &x.worked);
         for t in super::economy::city_tiles(g, c) {
-            if t == centre || claimed.contains(&t) || danger_tiles.contains(t.0) {
+            if t == centre || claimed.contains(&t) || in_danger(t) {
                 continue;
             }
             let Some(tile) = g.tile(t) else { continue };
@@ -719,7 +732,7 @@ pub fn worker_jobs_with(
                         break;
                     }
                     if claimed.contains(&t)
-                        || danger_tiles.contains(t.0)
+                        || in_danger(t)
                         || (tile.route().is_some() && !tile.route_pillaged())
                     {
                         continue;
@@ -746,9 +759,7 @@ pub fn worker_jobs_with(
 /// there, and starts it once it arrives.
 pub fn automate_worker(g: &mut Game, u: UnitId, claimed: &mut BTreeSet<TileIdx>) -> Value {
     let Some((p, at)) = g.unit(u).map(|x| (x.owner(), x.tile())) else { return Value::Null };
-    if let Some(x) = g.unit_mut(u, UnitTouch::CORE) {
-        x.activity = Some(Activity::Automate);
-    }
+    keep_activity(g, u, Activity::Automate);
     if civilian_in_danger(g, u) || (g.city_at(at).is_some() && enemy_near(g, u, 2)) {
         let mut safe: Option<(u32, TileIdx)> = None;
         for c in g.player_cities(p) {
@@ -785,9 +796,7 @@ pub fn automate_worker(g: &mut Game, u: UnitId, claimed: &mut BTreeSet<TileIdx>)
         if let Ok(plan) = workers::plan_build(g, u, &name) {
             workers::apply_build(g, plan);
         }
-        if let Some(x) = g.unit_mut(u, UnitTouch::CORE) {
-            x.activity = Some(Activity::Automate);
-        }
+        keep_activity(g, u, Activity::Automate);
     }
     let (x, y) = g.xy(t);
     let job = g.rules().improvements()[imp].name.to_string();
