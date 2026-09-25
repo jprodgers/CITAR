@@ -32,6 +32,10 @@
 //! an answer, as the `end_turn` rule would have it. Its spies go now and then to a city it has
 //! explored, or home. [`RandomAgent`] answers a negotiation it is asked about the same way.
 //!
+//! Package 1c-06 teaches it to deal with the city-states it has met ([`city_states`]: gifts of
+//! gold and units, protection pledged and withdrawn, tribute demanded, peace, marriage), and its
+//! spies to stage coups now and then.
+//!
 //! Until package 1c-09's `drive` dispatches [`SeatDriver::respond`], nothing would answer a chat
 //! the agent opens before it withdraws it, so the other side answers at once ([`converse`]), as
 //! its own `respond` would: the deals the agent strikes are carried out, and what they leave
@@ -46,6 +50,7 @@ use citar_engine::game::cities::purchase::Buy;
 use citar_engine::game::cities::queue::{
     ChangeQueue, QueueEdit, RenameCity, SetAutoProduction, SetProduction,
 };
+use citar_engine::game::city_states::CityStateAction;
 use citar_engine::game::combat::actions::{
     AirSweep, Attack, CityAttack, CityStatus, ReturnCivilian, plan_attack,
 };
@@ -53,7 +58,7 @@ use citar_engine::game::combat::{city, combatant_at, resolve};
 use citar_engine::game::diplomacy::actions::{
     DeclareWar, Denounce, OpenNegotiation, RespondNegotiation, SendMessage,
 };
-use citar_engine::game::espionage::{MoveSpy, spies as spies_of};
+use citar_engine::game::espionage::{MoveSpy, StageCoup, spies as spies_of};
 use citar_engine::game::path::Mover;
 use citar_engine::game::policies::{AdoptPolicy, adoptable_policies, can_adopt_any};
 use citar_engine::game::religion::found::{ai_choose_beliefs, beliefs_to_choose};
@@ -84,6 +89,7 @@ pub type Move = fn(&mut Game, PlayerId, &mut Rng);
 ///   orders `explore`, `automate` and `pillage` among [`order_units`]'.
 /// - Package 1c-05: [`spies`] and [`diplomacy`], the chats last, so that it withdraws what it
 ///   opened once it has done everything else.
+/// - Package 1c-06: [`city_states`], and coups among its spies' moves.
 pub const MOVES: &[Move] = &[
     research,
     production,
@@ -100,6 +106,7 @@ pub const MOVES: &[Move] = &[
     fight,
     move_units,
     spies,
+    city_states,
     diplomacy,
 ];
 
@@ -689,11 +696,16 @@ pub fn diplomacy(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     }
 }
 
-/// Espionage (`move_spy`): one time in ten, each spy goes to a city its civilization has
-/// explored, or home one time in four of those.
+/// Espionage (`move_spy`, `stage_coup`): one time in ten, each spy goes to a city its
+/// civilization has explored, or home one time in four of those; one time in twenty it stages a
+/// coup, which is refused unless it is set up in a city-state's capital.
 pub fn spies(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     let names: Vec<String> = spies_of(g, pid).iter().map(|s| s.name.to_string()).collect();
     for name in names {
+        if rng.chance(0.05) {
+            play(g, pid, Action::StageCoup(StageCoup { spy: json!(name) }));
+            continue;
+        }
         if !rng.chance(0.1) {
             continue;
         }
@@ -712,6 +724,40 @@ pub fn spies(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
         };
         play(g, pid, Action::MoveSpy(MoveSpy { spy: json!(name), city_id }));
     }
+}
+
+/// City-states (`city_state_action`): one time in five, with a city-state it has met drawn at
+/// random, an action drawn from the tool's eight: gold (a gift of up to 300), one of its units
+/// (which is refused unless it stands in a city-state's land), a pledge, a withdrawal, tribute in
+/// gold or a worker, peace, or marriage. Most are refused, which is part of the play.
+pub fn city_states(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    if !rng.chance(0.2) {
+        return;
+    }
+    let met: Vec<PlayerId> =
+        g.city_states(true).map(Player::id).filter(|&q| g.has_met(pid, q)).collect();
+    let Some(cs) = pick(rng, &met) else { return };
+    let actions = [
+        "gift_gold",
+        "gift_unit",
+        "pledge",
+        "withdraw",
+        "tribute_gold",
+        "tribute_worker",
+        "make_peace",
+        "marry",
+    ];
+    let Some(action) = pick(rng, &actions) else { return };
+    let amount = (action == "gift_gold").then(|| i64::try_from(rng.below(300)).unwrap_or(0) + 1);
+    let unit_id = if action == "gift_unit" {
+        let mine = units_of(g, pid);
+        let Some(u) = pick(rng, &mine) else { return };
+        Some(tool_id(u))
+    } else {
+        None
+    };
+    let a = CityStateAction { player_id: i64::from(cs.0), action: json!(action), amount, unit_id };
+    play(g, pid, Action::CityStateAction(a));
 }
 
 /// A driver that plays at random among the actions the engine has, reproducibly: the same game
