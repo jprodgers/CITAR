@@ -683,6 +683,9 @@ pub struct HostHeads {
     pub frames: u32,
     /// Journal chunks taken.
     pub journal_seq: u32,
+    /// Where `Game::drive` stopped inside a turn, if it did. Absent from saves made before it.
+    #[serde(default)]
+    pub drive: Option<DriveMark>,
 }
 
 impl Default for HostHeads {
@@ -694,8 +697,25 @@ impl Default for HostHeads {
             actions: 0,
             frames: 0,
             journal_seq: 0,
+            drive: None,
         }
     }
+}
+
+/// Where `Game::drive` stopped inside a turn (DESIGN.md 6.12): the seat whose driver has played
+/// the turn, which drive has not ended yet, so that the next drive does not play it again, and
+/// whether the seat's diplomat has had its stop since. It is the host's progress through a turn,
+/// not the game's: saved, so that a game saved at such a stop resumes there, and never digested.
+/// Beginning or ending a turn clears it, so a round's digest is taken without it whoever drove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriveMark {
+    /// The turn it was played in.
+    pub turn: Turn,
+    /// The seat whose driver played it.
+    pub player: PlayerId,
+    /// Whether drive has stopped for the seat's diplomat (`Stop::HybridDiplomat`).
+    pub diplomat: bool,
 }
 
 impl HostHeads {
