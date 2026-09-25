@@ -80,9 +80,13 @@ fn a_failing_list_of_test_ops_changes_nothing_either() {
     assert_eq!((g.digest().ok(), g.rev()), before);
     let e = testops::apply(&mut g, &json!([{"op": "set_unit", "unit": 1}])).expect_err("not yet");
     assert_eq!(e.code, ErrCode::NotPorted);
-    let e = g.apply_ops(&json!([{"op": "remove_city", "x": 5, "y": 5}])).expect_err("not yet");
-    assert_eq!(e.code, ErrCode::NotPorted);
-    assert!(e.message.starts_with("Operation 1 (remove_city): This operation is not ported"));
+    let e = g
+        .apply_ops(
+            &json!([{"op": "remove_units", "x": 5, "y": 5}, {"op": "remove_city", "x": 5, "y": 5}]),
+        )
+        .expect_err("no city there");
+    assert_eq!(e.code, ErrCode::NoSuchCity);
+    assert_eq!(e.message, "Operation 2 (remove_city): No such city.");
     assert_eq!((g.digest().ok(), g.rev()), before);
 }
 
@@ -116,14 +120,13 @@ fn inspect_reads_and_lists_what_is_pending() {
         })
         .collect();
     for (name, pkg) in [
-        ("remove_city", "1b-07"),
         ("ready_unit", "1c-02"),
         ("attack_as", "1c-03"),
         ("negotiation", "1c-05"),
         ("view", "1d-02"),
         ("briefing", "1d-03"),
-        ("player_start S2: research progress", "1b-07"),
-        ("player_end E3: science", "1b-07"),
+        ("player_start S2: great people", "1b-08"),
+        ("player_end E3: faith", "1b-08"),
         ("round_end R0: eliminations", "1c-08"),
         ("starting units", "1c-02"),
         ("map: starts and ruins a document lacks", "1c-09"),
@@ -135,16 +138,29 @@ fn inspect_reads_and_lists_what_is_pending() {
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [3, 2, 12],
-        "three queries, two scenario ops and twelve test ops wait"
+        [3, 0, 11],
+        "three queries and eleven test ops wait"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [35, 5], "the stages that wait");
+    assert_eq!([count("turn_stage"), count("setup_stage")], [29, 5], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(
             !["end_turn", "end_round", "force_turn", "add_unit", "remove_units"]
                 .contains(&name.as_str())
-                && !["found_city", "set_city", "happiness"].contains(&name.as_str())
+                && ![
+                    "found_city",
+                    "set_city",
+                    "happiness",
+                    "remove_city",
+                    "adopt_policy",
+                    "complete_construction",
+                ]
+                .contains(&name.as_str())
+                && !name.contains("research")
+                && !name.contains("cities start")
+                && !name.contains("cities end")
+                && !name.contains("culture and policies")
+                && !name.contains("science")
                 && !name.contains("gold and bankruptcy")
                 && !name.contains("temporary uniques")
                 && !name.contains("commit the happiness")
@@ -164,9 +180,9 @@ fn inspect_reads_and_lists_what_is_pending() {
     }
     let e = inspect::inspect(&g, &json!({"what": "nothing"})).expect_err("an unknown query");
     assert_eq!(e.code, ErrCode::BadParam);
-    assert!(
-        e.message.starts_with("Unknown inspect query 'nothing'. Known: briefing, city, events")
-    );
+    assert!(e.message.starts_with(
+        "Unknown inspect query 'nothing'. Known: briefing, buildable, city, costs, events"
+    ));
 }
 
 #[test]

@@ -9,19 +9,21 @@
 //!
 //! Package 1b-02 ports those that need no later system: `clear_units`, `set_turn`, `unmeet`,
 //! `set_controller`, `set_auto`, `refresh_visibility` and `reload`; package 1b-03 the turn
-//! operations `end_turn`, `end_round` and `force_turn`. The others are listed with the package
+//! operations `end_turn`, `end_round` and `force_turn`; package 1b-07 `complete_construction`. The others are listed with the package
 //! that ports what they need, and are refused as not ported until then.
 
 use serde_json::{Map, Value, json};
 
 use super::scenario::{pid, players};
-use crate::base::ids::{PlayerId, UnitId};
+use crate::base::ids::{CityId, PlayerId, UnitId};
 use crate::base::py;
+use crate::game::cities::construction;
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::events::EventBatch;
 use crate::game::pending::SightSource;
 use crate::game::{Game, Porting};
 use crate::save::journal::JournalCursor;
+use crate::state::cities::Constructible;
 use crate::state::players::{AutoDecision, Controller, SeatOverrides};
 use crate::state::{Phase, TurnClock};
 
@@ -90,7 +92,7 @@ pub static TEST_OPS: &[TestOp] = &[
     TestOp {
         name: "complete_construction",
         params: "city: what it is building completes now",
-        porting: Porting::Pending("1b-07"),
+        porting: Porting::Ported,
         run: complete_construction,
     },
     TestOp {
@@ -365,6 +367,29 @@ fn force_turn(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(clock(g))
 }
 
+/// Finishes what a city builds now, whatever production it has stored, as its turn would
+/// (`cities.complete_construction`).
+fn complete_construction(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let c = py::int_of(o.get("city").unwrap_or(&Value::Null))
+        .and_then(|n| u32::try_from(n).ok())
+        .and_then(CityId::new)
+        .filter(|&c| g.city(c).is_some())
+        .ok_or_else(|| ActionError::new(ErrCode::NoSuchCity, "No such city."))?;
+    let Some(city) = g.city(c) else { return Err(bad("No such city.")) };
+    let Some(item) =
+        city.queue.first().copied().filter(|x| !matches!(x, Constructible::Perpetual(_)))
+    else {
+        return Err(ActionError::rule(format!(
+            "{} is building nothing that completes.",
+            city.name
+        )));
+    };
+    if !construction::complete_construction(g, c, item, None) {
+        return Err(ActionError::rule("No room to place the unit."));
+    }
+    Ok(json!({"completed": construction::item_name(g.rules(), item)}))
+}
+
 /// Brings what every civilization sees up to date, as Python's `visibility.refresh(force=True)`
 /// did: every player's sight is looked at again in the settle that follows.
 fn refresh_visibility(g: &mut Game, _: &Params) -> Result<Value, ActionError> {
@@ -429,10 +454,6 @@ fn capture_civilian(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
 
 fn close_negotiation(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::diplomacy::negotiation"))
-}
-
-fn complete_construction(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::cities::construction"))
 }
 
 fn open_negotiation_as(_: &mut Game, _: &Params) -> Result<Value, ActionError> {

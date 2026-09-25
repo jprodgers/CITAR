@@ -601,7 +601,7 @@ pub fn verify(g: &Game) -> Vec<String> {
 
 /// One of the player's cities (`tools._own_city`, `tools.py:169-175`), or the refusal that lists
 /// the real ones.
-fn own_city(g: &Game, pid: PlayerId, city_id: i64) -> Result<CityId, ActionError> {
+pub(crate) fn own_city(g: &Game, pid: PlayerId, city_id: i64) -> Result<CityId, ActionError> {
     let found = u32::try_from(city_id)
         .ok()
         .and_then(CityId::new)
@@ -624,7 +624,7 @@ fn no_city(c: CityId) -> ActionError {
 
 /// A tile by its coordinates (`tools._idx`, `tools.py:143-151`), or the refusal that names the
 /// map's size.
-fn tile_at(g: &Game, x: i64, y: i64) -> Result<TileIdx, ActionError> {
+pub(crate) fn tile_at(g: &Game, x: i64, y: i64) -> Result<TileIdx, ActionError> {
     let fits = |n: i64| i32::try_from(n).ok();
     fits(x).zip(fits(y)).and_then(|(x, y)| g.grid().idx(x, y)).ok_or_else(|| {
         let m = g.state().map();
@@ -638,7 +638,7 @@ fn tile_at(g: &Game, x: i64, y: i64) -> Result<TileIdx, ActionError> {
 /// Tiles as `[x, y]` pairs, by column and then row, as `inspect` lists a city's: a tool's result
 /// is what the city shows after the call.
 // refcheck: citizen-tools-list-tiles-sorted
-fn xys(g: &Game, tiles: &[TileIdx]) -> Value {
+pub(crate) fn xys(g: &Game, tiles: &[TileIdx]) -> Value {
     let mut v: SmallVec<[(i32, i32); 16]> = tiles.iter().map(|&t| g.xy(t)).collect();
     v.sort();
     Value::Array(v.into_iter().map(|(x, y)| json!([x, y])).collect())

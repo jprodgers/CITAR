@@ -241,6 +241,9 @@ pub fn requirement_problems<W: EvalWorld>(
             Some(UniqueType::CanOnlyBeBuiltWhen) => true,
             _ => continue,
         };
+        // Its conditionals are read here rather than through `applies`: a memo recording what it
+        // read must see them all the same.
+        super::record::note(t, id);
         for c in t.conds(t.get(id)) {
             if holds(c, id, ctx, w) {
                 continue;

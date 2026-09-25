@@ -8,13 +8,13 @@
 //! compiler, which names features by them (`feature_layers`).
 
 use super::Ruleset;
-use super::defs::{BuilderClass, ImprovementKind, NationKind, Route, TerrainType};
+use super::defs::{BuilderClass, Domain, ImprovementKind, NationKind, Route, TerrainType};
 use super::errors::{Problems, RulesetErrorKind};
 use crate::base::ids::{
     BaseUnitId, BuildingId, DifficultyId, EraId, FeatureId, Id, IdVec, ImprovementId, NationId,
     ObjectFilterId, ResourceId, TechId, TerrainId,
 };
-use crate::base::sets::{FeatureSet, ImprovementSet, TerrainSet};
+use crate::base::sets::{BaseUnitSet, FeatureSet, ImprovementSet, TerrainSet};
 use crate::base::stats::{Stat, StatMask};
 use crate::unique::{SourceUniques, UniqueData, UniqueTable, UniqueType};
 
@@ -155,6 +155,9 @@ pub struct Derived {
     pub great_person_units: Vec<BaseUnitId>,
     /// One entry per unit that is a spaceship part.
     pub spaceship_parts: Vec<BaseUnitId>,
+    /// Every aircraft: the base units of the air domain, the set the `Air` unit filter names
+    /// (`Can carry [n] extra [Air] units` adds to a city's hangar, `units.air_capacity_ok`).
+    pub aircraft: BaseUnitSet,
     /// The terrain features in layer order, Hill lowest and Fallout highest, the rest in file
     /// order: `FeatureId` is a position here, so a `FeatureSet`'s top bit is the top feature.
     pub features: IdVec<FeatureId, TerrainId>,
@@ -194,6 +197,7 @@ impl Derived {
             city_state_nations: Vec::new(),
             great_person_units: Vec::new(),
             spaceship_parts: Vec::new(),
+            aircraft: BaseUnitSet::new(),
             features: IdVec::new(),
             builder_classes: Vec::new(),
             feature_removals: Vec::new(),
@@ -344,6 +348,8 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
     };
 
     let UnitLists { great_person_units, spaceship_parts, builder_classes } = derive_units(r, p);
+    let aircraft: BaseUnitSet =
+        r.base_units.iter().filter(|(_, u)| u.domain == Domain::Air).map(|(id, _)| id).collect();
     derive_buildings(r);
     let building_equivalents = building_equivalents(r);
 
@@ -423,6 +429,7 @@ pub(crate) fn derive(r: &mut Ruleset, layers: Layers, p: &mut Problems) -> Optio
         city_state_nations,
         great_person_units,
         spaceship_parts,
+        aircraft,
         features,
         builder_classes,
         feature_removals,

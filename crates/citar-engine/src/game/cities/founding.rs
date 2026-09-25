@@ -1,12 +1,13 @@
-//! Founding a city and giving it buildings (`cities.py:1837-1869, 2073-2206`), as far as a city's
-//! stats and citizens need one to exist: the scenario operations `found_city` and `set_city`
-//! found and build them, and the rule scripts of package 1b-06 play on them.
+//! Founding a city and giving it buildings (`cities.py:1837-1869, 2073-2206`): where a city may
+//! be founded, its name, its first tiles, citizens and buildings (a palace for a civilization
+//! with no capital, the era's settler buildings, the free buildings it is owed), adding and
+//! removing buildings, and renaming a city. Package 1b-06 ported what a city's stats needed;
+//! package 1b-07 the settler buildings, the free buildings and a science building's research
+//! boost.
 //!
-//! What waits for the packages that port the rest, each marked where it happens: the free
-//! buildings a civilization's uniques give, the settler buildings of a later era (their
-//! rejection rules) and a science building's research boost (1b-07), the one-time triggers of
-//! founding and of a building (1b-08), and clearing a barbarian camp in the new borders (1c-06).
-//! The unit action that founds a city is 1c-04's.
+//! What waits for the packages that port the rest, each marked where it happens: the one-time
+//! triggers of founding and of a building (1b-08), and clearing a barbarian camp in the new
+//! borders (1c-06). The unit action that founds a city is 1c-04's.
 
 use super::super::Game;
 use super::super::derive::rev::{CityTouch, PlayerTouch};
@@ -19,7 +20,7 @@ use crate::rules::defs::NationKind;
 use crate::rules::defs::ReligionProgress;
 use crate::state::TileClaim;
 use crate::state::chronicle::{EngineEvent, EventData};
-use crate::state::cities::City;
+use crate::state::cities::{City, Constructible};
 use crate::unique::{Ctx, UniqueType, uq};
 
 /// Why a city cannot be founded on a tile, if it cannot (`cities.found_check`,
@@ -136,6 +137,10 @@ pub fn equivalent_building(g: &Game, p: PlayerId, b: BuildingId) -> BuildingId {
     let r = g.rules();
     let base = r.buildings()[b].replaces.unwrap_or(b);
     let Some(nation) = g.player(p).map(|x| x.nation) else { return base };
+    // The nation's short list rules out most buildings without a scan of the ruleset.
+    if !r.derived().nation_uniques[nation].buildings.iter().any(|&(k, x)| k == base && x != base) {
+        return base;
+    }
     r.buildings()
         .iter()
         .find(|(_, x)| x.replaces == Some(base) && x.unique_to == Some(nation))
@@ -238,13 +243,17 @@ pub fn found_city(
             }
         }
     }
-    // The era's settler buildings, each unless the city could not build it (rejection_reasons).
-    pending(Porting::Pending("1b-07"));
+    // The era's settler buildings, each unless the city could not build it (cities.py:2172-2175).
+    for &b in era.settler_buildings.iter() {
+        let eb = equivalent_building(g, p, b);
+        if super::construction::is_buildable(g, id, Constructible::Building(eb)) {
+            add_building(g, id, eb, false);
+        }
+    }
     if let Some(x) = g.player_mut(p, PlayerTouch::OTHER) {
         x.founded_city = true;
     }
-    // try_add_free_buildings (cities.py:2178).
-    pending(Porting::Pending("1b-07"));
+    super::free_buildings::try_add_free_buildings(g, p);
     // triggers.fire(UponFoundingCity) (cities.py:2179-2180).
     pending(Porting::Pending("1b-08"));
     let who = g.player(p).map(|x| x.name.clone()).unwrap_or_default();
@@ -288,12 +297,20 @@ pub fn add_building(g: &mut Game, c: CityId, b: BuildingId, try_free: bool) {
     }
     // The building's one-time triggers (cities.py:1849-1854).
     pending(Porting::Pending("1b-08"));
-    // A science building in the capital with `TechBoostWhenScientificBuildingsBuiltInCapital`
-    // (cities.py:1856-1858).
-    pending(Porting::Pending("1b-07"));
+    // Korea: a science building in the capital gives half a tech (cities.py:1856-1858).
+    if bd.stat_related.contains(crate::base::stats::Stat::Science)
+        && super::stats::is_capital(g, c)
+        && uq::any(uq::civ(
+            &g.view(),
+            owner,
+            UniqueType::TechBoostWhenScientificBuildingsBuiltInCapital,
+            &Ctx::civ(owner),
+        ))
+    {
+        crate::game::research::research_agreement_boost(g, owner);
+    }
     if try_free {
-        // try_add_free_buildings (cities.py:1860-1861).
-        pending(Porting::Pending("1b-07"));
+        super::free_buildings::try_add_free_buildings(g, owner);
     }
 }
 
@@ -306,11 +323,12 @@ pub fn remove_building(g: &mut Game, c: CityId, b: BuildingId) {
     }
 }
 
-/// Renames a city (`cities.rename_city`, `cities.py:2196-2205`), after cleaning the name.
+/// The name a city would be renamed to (`cities.rename_city`, `cities.py:2196-2203`): the name
+/// cleaned. Reads only.
 ///
 /// # Errors
 /// A name with no letters, or one another city has.
-pub fn rename_city(g: &mut Game, c: CityId, name: &str) -> Result<String, ActionError> {
+pub fn plan_rename(g: &Game, c: CityId, name: &str) -> Result<String, ActionError> {
     let name = clean_name(name, 40);
     if name.is_empty() {
         return Err(ActionError::new(ErrCode::BadParam, "City names must contain letters."));
@@ -322,8 +340,22 @@ pub fn rename_city(g: &mut Game, c: CityId, name: &str) -> Result<String, Action
             format!("There is already a city called {name}."),
         ));
     }
+    Ok(name)
+}
+
+/// Writes a city's name.
+pub(crate) fn write_name(g: &mut Game, c: CityId, name: &str) {
     if let Some(x) = g.city_mut(c, CityTouch::NAME) {
-        x.name = name.clone().into();
+        x.name = name.into();
     }
+}
+
+/// Renames a city (`cities.rename_city`, `cities.py:2196-2205`), after cleaning the name.
+///
+/// # Errors
+/// A name with no letters, or one another city has.
+pub fn rename_city(g: &mut Game, c: CityId, name: &str) -> Result<String, ActionError> {
+    let name = plan_rename(g, c, name)?;
+    write_name(g, c, &name);
     Ok(name)
 }

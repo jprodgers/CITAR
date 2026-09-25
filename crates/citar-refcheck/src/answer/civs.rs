@@ -12,13 +12,16 @@
 //! Package 1b-06 answers `happiness`, `civ_stats`, `stat_map` and `gold_per_turn`: the memos
 //! `Happiness` and `CivStats`, with Python's keys.
 //!
-//! The group's other paths (costs, score, victory, the world) are answered by the packages that
-//! port them; until then they are missing here, and counted in the ratchet.
+//! Package 1b-07 answers `tech_cost` (what each tech the civilization could research costs it),
+//! `policy_cost` and, for a major, `adoptable_policies`.
+//!
+//! The group's other paths (score, victory, the world) are answered by the packages that port
+//! them; until then they are missing here, and counted in the ratchet.
 
 use citar_engine::base::ids::PlayerId;
 use citar_engine::base::num;
 use citar_engine::game::economy::ResourceItem;
-use citar_engine::game::{Game, economy, query};
+use citar_engine::game::{Game, economy, policies, query, research};
 use citar_engine::rules::Ruleset;
 use citar_engine::state::players::PlayerKind;
 use serde_json::{Map, Value, json};
@@ -70,7 +73,11 @@ fn civs(g: &Game) -> Vec<Value> {
         let stat_map: Map<String, Value> =
             cs.map.iter().map(|(src, y)| (src.name().to_owned(), named(y))).collect();
         let gpt = economy::gold_per_turn(g, p);
-        out.push(json!({
+        let tech_cost: Map<String, Value> = research::available_techs(g, p)
+            .into_iter()
+            .map(|t| (r.techs()[t].name.to_string(), json!(research::tech_cost(g, p, t))))
+            .collect();
+        let mut e = json!({
             "pid": p.0,
             "kind": kind,
             "happiness": happiness(g, p),
@@ -90,7 +97,17 @@ fn civs(g: &Game) -> Vec<Value> {
             "unit_maintenance": economy::unit_maintenance(g, p),
             "unit_supply": economy::unit_supply(g, p),
             "era": query::era(g, p).0,
-        }));
+            "tech_cost": tech_cost,
+            "policy_cost": policies::culture_cost(g, p, None),
+        });
+        if player.is_major() {
+            let adoptable: Vec<&str> = policies::adoptable_policies(g, p)
+                .into_iter()
+                .map(|q| &*r.policies()[q].name)
+                .collect();
+            e["adoptable_policies"] = json!(adoptable);
+        }
+        out.push(e);
     }
     out
 }

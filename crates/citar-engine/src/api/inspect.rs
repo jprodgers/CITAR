@@ -12,6 +12,9 @@
 //! - `relation` (`a`, `b`): contact, war and every treaty term, with the two-sided ones as
 //!   `[a's, b's]`;
 //! - `unit` (`unit`), `units` (optionally `player`, `x` and `y`), `city` (`city`);
+//! - `buildable` (`city`): what a city can build now and what each costs in production;
+//! - `costs` (`player`): what the techs a civilization could research cost it, its next policy's
+//!   culture, and the policies it could adopt;
 //! - `events` (optionally `since`, `type` and `player`, the last keeping what that player hears);
 //! - `find_tiles`: the tiles that pass the filters given, nearest first (see [`find_tiles`]);
 //! - `ops`: the scenario and test operations with their parameters;
@@ -29,20 +32,25 @@ use super::scenario::{self, pid, resolve};
 use super::testops;
 use crate::base::ids::{CityId, ImprovementId, PlayerId, ResourceId, TerrainId, TileIdx, UnitId};
 use crate::base::py;
+use crate::game::cities::{construction, stats as cstats};
 use crate::game::diplomacy::relations::{has_pact, is_friends, opinion};
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::turn::stages;
 use crate::game::{Game, Porting, setup};
+use crate::game::{policies, research};
 use crate::rules::Named;
 use crate::rules::defs::{Route, TerrainType};
 use crate::state::Phase;
+use crate::state::cities::Constructible;
 use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
 /// The queries, by `what`, sorted, with whether what each reads is ported yet.
-const QUERIES: [(&str, Porting); 14] = [
+const QUERIES: [(&str, Porting); 16] = [
     ("briefing", Porting::Pending("1d-03")),
+    ("buildable", Porting::Ported),
     ("city", Porting::Ported),
+    ("costs", Porting::Ported),
     ("events", Porting::Ported),
     ("find_tiles", Porting::Ported),
     ("game", Porting::Ported),
@@ -91,6 +99,15 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
                 .ok_or_else(|| bad("No such city."))?;
             Ok(city(g, id))
         }
+        "buildable" => {
+            let id = py::int_of(o.get("city").unwrap_or(&Value::Null))
+                .and_then(|n| u32::try_from(n).ok())
+                .and_then(CityId::new)
+                .filter(|&c| g.city(c).is_some())
+                .ok_or_else(|| bad("No such city."))?;
+            Ok(buildable(g, id))
+        }
+        "costs" => Ok(costs(g, pid(g, o.get("player"), false)?)),
         "events" => events(g, o),
         "find_tiles" => find_tiles(g, o),
         "ops" => Ok(json!({"scenario": scenario::ops_help(), "test": testops::help()})),
@@ -234,6 +251,10 @@ fn player(g: &Game, p: PlayerId) -> Value {
         "research": {
             "queue": pl.tech.queue.iter().filter_map(|&t| g.rules().name(t)).collect::<Vec<_>>(),
             "goal": name(g, pl.tech.goal),
+            "progress": sorted_map(pl.tech.progress.iter().filter_map(|(&t, &v)| {
+                g.rules().name(t).map(|n| (n, json!(v)))
+            })),
+            "overflow": pl.tech.overflow,
         },
         "policies": sorted_names(g, pl.policy.adopted.iter()),
         "met": met,
@@ -379,7 +400,70 @@ fn city(g: &Game, c: CityId) -> Value {
         "avoid_growth": x.avoid_growth,
         "food": x.food,
         "yields": yields,
+        "queue": x.queue.iter().map(|&i| construction::item_name(r, i)).collect::<Vec<_>>(),
+        "progress": sorted_map(
+            x.progress.iter().map(|(&i, &v)| (construction::item_name(r, i), json!(v))),
+        ),
+        "overflow": x.overflow,
+        "culture": x.culture,
+        "health": x.health,
+        "tiles": crate::game::economy::city_tiles(g, c).len(),
     })
+}
+
+/// A map from names, sorted by name.
+fn sorted_map<'a>(entries: impl Iterator<Item = (&'a str, Value)>) -> Value {
+    let mut v: Vec<(&str, Value)> = entries.collect();
+    v.sort_by(|a, b| a.0.cmp(b.0));
+    Value::Object(v.into_iter().map(|(k, x)| (k.to_owned(), x)).collect())
+}
+
+/// `buildable`: what a city can build now, by kind, each list sorted, and what each unit,
+/// building and wonder costs it in production.
+fn buildable(g: &Game, c: CityId) -> Value {
+    let r = g.rules();
+    let items = construction::buildable_items(g, c);
+    let owner = g.city(c).map(crate::state::cities::City::owner).unwrap_or(PlayerId(0));
+    let units = sorted_names(g, items.units.iter());
+    let buildings = sorted_names(g, items.buildings.iter());
+    let wonders = sorted_names(g, items.wonders.iter());
+    let mut other = Vec::new();
+    if items.gold {
+        other.push("Gold");
+    }
+    if items.science {
+        other.push("Science");
+    }
+    let things = items
+        .units
+        .iter()
+        .map(Constructible::Unit)
+        .chain(items.buildings.iter().chain(items.wonders.iter()).map(Constructible::Building));
+    let production = sorted_map(things.map(|i| {
+        (construction::item_name(r, i), json!(cstats::production_cost(g, owner, i, Some(c))))
+    }));
+    json!({
+        "units": units,
+        "buildings": buildings,
+        "wonders": wonders,
+        "other": other,
+        "production": production,
+    })
+}
+
+/// `costs`: what each tech a civilization could research now costs it, its next policy's
+/// culture, and (a major's) the policies and branches it could adopt, sorted.
+fn costs(g: &Game, p: PlayerId) -> Value {
+    let r = g.rules();
+    let techs = sorted_map(
+        research::available_techs(g, p)
+            .into_iter()
+            .filter_map(|t| r.name(t).map(|n| (n, json!(research::tech_cost(g, p, t))))),
+    );
+    let major = g.player(p).is_some_and(Player::is_major);
+    let adoptable =
+        if major { sorted_names(g, policies::adoptable_policies(g, p)) } else { json!([]) };
+    json!({"tech": techs, "policy": policies::culture_cost(g, p, None), "adoptable": adoptable})
 }
 
 /// `events`: the events after id `since`, oldest first; only those of a `type`, and only those

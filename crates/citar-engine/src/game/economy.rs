@@ -32,11 +32,11 @@ use core::cell::Ref;
 
 use smallvec::SmallVec;
 
+use super::Game;
 use super::cities::stats::{HappinessSource, SourceKind, StatSource, Yields};
 use super::derive::civ;
 use super::derive::rev::PlayerTouch;
 use super::eval::EvalView;
-use super::{Game, Porting, pending_or};
 use crate::base::ids::{BuildingId, CityId, Id, PlayerId, ResourceId, TileIdx, UnitId};
 use crate::base::num::{self, trunc_i32};
 use crate::base::sets::{PlayerSet, ResourceSet};
@@ -754,14 +754,24 @@ fn gold_after_disbanding(g: &Game, p: PlayerId) -> f64 {
     super::derive::stats::civ_stats(g, p).total[Stat::Gold]
 }
 
+/// The gold disbanding a unit inside its owner's borders refunds: a twentieth of its gold price
+/// (`units.disband_gold`, `units.py:763-766`).
+#[must_use]
+pub fn disband_gold(g: &Game, u: UnitId) -> i64 {
+    let Some(unit) = g.unit(u) else { return 0 };
+    let item = crate::state::cities::Constructible::Unit(unit.base);
+    let price = super::cities::purchase::base_gold_cost(g, unit.owner(), item, None);
+    num::floor_div(num::trunc_i64(price), 20)
+}
+
 /// Disbands a unit (`units.disband`, `units.py:769-776`): what it carries goes with it. Inside
-/// its own borders it refunds a twentieth of its purchase price, which needs the purchase costs
-/// (package 1b-07).
+/// its own borders it refunds a twentieth of its gold price.
 fn disband(g: &mut Game, u: UnitId) {
     let Some(unit) = g.unit(u) else { return };
     let (owner, at) = (unit.owner(), unit.tile());
+    #[allow(clippy::cast_precision_loss, reason = "a refund is far below 2^52")]
     let refund = if g.tile(at).and_then(crate::state::map::Tile::owner) == Some(owner) {
-        pending_or(Porting::Pending("1b-07"), 0.0)
+        disband_gold(g, u) as f64
     } else {
         0.0
     };
@@ -1360,6 +1370,7 @@ pub(crate) fn commit_happiness_stage(g: &mut Game, p: PlayerId) {
 // refcheck: last-gold-rate-written
 pub(crate) fn end_turn_rates(g: &mut Game, p: PlayerId) {
     let total = super::derive::stats::civ_stats(g, p).total;
+    g.turn_yields = Some((p, total));
     let Some(was) = g.player(p).map(|x| x.econ.last_gold_rate) else { return };
     let gold = total[Stat::Gold];
     if let Some(x) = g.player_mut(p, PlayerTouch::GOLD_RATE) {

@@ -72,6 +72,7 @@ impl Game {
         self.dv.revs.on_change(&self.st, &ch);
         self.dv.civ.track(&ch);
         self.dv.stats.track(&ch);
+        self.dv.buildable.track(&ch);
         // Line of sight follows the terrain at once, so that an attack between a terrain change
         // and the next settle sees what stands there now (DESIGN.md 6.5); the units near it are
         // looked at again at the sync.

@@ -386,8 +386,10 @@ pub(crate) fn city_local(g: &Game, c: CityId) -> IndexRef<'_> {
 /// City `c`'s own index with its resources (`CityLocalFull`): `CityLocal`, and the uniques that
 /// hold in it alone of the resources its improved tiles give its owner, of those its owner's
 /// supply has some of (the Marble decision, DESIGN.md 5.12). A resource traded away, or all used
-/// up, gives its uniques nowhere, as Python's resource layer held only what the supply had.
+/// up, gives its uniques nowhere, as Python's resource layer held only what the supply had. The
+/// turns a city's list shows for a wonder follow from it.
 // refcheck: marble-bonus-in-its-own-city
+// refcheck: marble-bonus-in-its-own-city-wonder-turns
 pub(crate) fn city_local_full(g: &Game, c: CityId) -> IndexRef<'_> {
     let caches = &g.dv.civ;
     let (Some(m), Some(city)) = (caches.cities.get(&c), g.st.cities().get(c)) else {

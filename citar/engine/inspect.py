@@ -10,7 +10,8 @@ from typing import Any
 from .game import ActionError, Game
 from .state import AUTO_DECISIONS
 
-QUERIES = ("city", "events", "find_tiles", "game", "ops", "pending", "player", "relation", "tile", "unit", "units")
+QUERIES = ("buildable", "city", "costs", "events", "find_tiles", "game", "ops", "pending", "player", "relation", "tile",
+           "unit", "units")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -42,6 +43,13 @@ def inspect(g: Game, q: dict) -> Any:
         if c is None:
             raise ActionError("No such city.")
         return _city(g, c)
+    if what == "buildable":
+        c = g.city(_whole(q.get("city")))
+        if c is None:
+            raise ActionError("No such city.")
+        return _buildable(g, c)
+    if what == "costs":
+        return _costs(g, _pid(g, q.get("player"), majors_only=False))
     if what == "events":
         return _events(g, q)
     if what == "find_tiles":
@@ -108,7 +116,10 @@ def _player(g: Game, pid: int) -> dict:
         "gold": float(p.gold), "culture": float(p.culture), "faith": float(p.faith),
         "golden_age_turns": int(p.golden_age_turns), "free_policies": int(p.free_policies),
         "free_techs": int(p.free_techs), "future_techs": int(p.future_techs),
-        "techs": sorted(p.techs), "research": {"queue": list(p.research_queue), "goal": p.research_goal},
+        "techs": sorted(p.techs),
+        "research": {"queue": list(p.research_queue), "goal": p.research_goal,
+                     "progress": {t: float(v) for t, v in sorted(p.research_progress.items())},
+                     "overflow": float(p.overflow_science)},
         "policies": sorted(p.policies), "met": sorted(q for q in p.met if q != pid), "capital": p.capital,
         "cities": sorted(c.id for c in g.player_cities(pid)), "units": sorted(u.id for u in g.player_units(pid)),
         "explored": sum(1 for b in p.explored if b), "natural_wonders": sorted(p.natural_wonders),
@@ -196,7 +207,30 @@ def _city(g: Game, c) -> dict:
             "workable": xys(C.workable_tiles(g, c)),
             "specialists": {k: int(v) for k, v in sorted(c.specialists.items()) if v > 0},
             "focus": c.focus, "avoid_growth": bool(c.avoid_growth), "food": float(c.food),
-            "yields": {k: float(total.get(k, 0.0)) for k in C.STATS}}
+            "yields": {k: float(total.get(k, 0.0)) for k in C.STATS},
+            "queue": list(c.queue), "progress": {k: float(v) for k, v in sorted(c.progress.items())},
+            "overflow": float(c.overflow), "culture": float(c.culture), "health": int(c.health),
+            "tiles": len(C.city_tiles(g, c))}
+
+
+def _buildable(g: Game, c) -> dict:
+    """``buildable``: what a city can build now, by kind, each list sorted, and what each unit, building and wonder
+    costs in production."""
+    from . import cities as C
+    items = C.buildable_items(g, c)
+    out = {k: sorted(v) for k, v in items.items()}
+    out["production"] = {n: C.production_cost(g, c.owner, n, c)
+                         for k in ("units", "buildings", "wonders") for n in sorted(items[k])}
+    return out
+
+
+def _costs(g: Game, pid: int) -> dict:
+    """``costs``: what each tech a civilization could research now costs it, its next policy's culture, and (a major's)
+    the policies and branches it could adopt, sorted."""
+    from . import policies, research
+    return {"tech": {t: research.tech_cost(g, pid, t) for t in sorted(research.available_techs(g, pid))},
+            "policy": policies.culture_cost(g, pid),
+            "adoptable": sorted(policies.adoptable_policies(g, pid)) if g.player(pid).kind == "major" else []}
 
 
 def _events(g: Game, q: dict) -> list:

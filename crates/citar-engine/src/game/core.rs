@@ -82,6 +82,9 @@ pub struct Game {
     /// The seat whose driver is playing inside [`Game::drive`], which alone ends its turn;
     /// never saved.
     pub(crate) driving: Option<PlayerId>,
+    /// The yields stage E2 read for the civilization ending its turn, which the rest of the end
+    /// of its turn banks (`turns.py:88-89`); cleared at E4, so never there at a settle point.
+    pub(crate) turn_yields: Option<(PlayerId, crate::base::stats::Stats)>,
 }
 
 impl Game {
@@ -116,6 +119,7 @@ impl Game {
             violations: Vec::new(),
             chain: None,
             driving: None,
+            turn_yields: None,
         }
     }
 
@@ -272,6 +276,7 @@ impl Game {
         out.extend(super::derive::civ::verify(self));
         out.extend(super::vis::verify(self));
         out.extend(super::derive::stats::verify(self));
+        out.extend(super::derive::buildable::verify(self));
         out.extend(super::cities::citizens::verify(self));
         out
     }

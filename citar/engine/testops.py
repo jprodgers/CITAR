@@ -158,6 +158,24 @@ def _force_turn(g: Game, o: dict):
     return _clock(g)
 
 
+@op("complete_construction", "city: what it is building completes now")
+def _complete_construction(g: Game, o: dict):
+    """Finish what a city builds now, whatever production it has stored, as its turn would."""
+    from . import cities
+    try:
+        c = g.city(int(o.get("city")))
+    except (TypeError, ValueError):
+        c = None
+    if c is None:
+        raise ActionError("No such city.")
+    name = cities.current_construction(c)
+    if name is None or name in cities.PERPETUAL:
+        raise ActionError(f"{c.name} is building nothing that completes.")
+    if not cities.complete_construction(g, c, name):
+        raise ActionError("No room to place the unit.")
+    return {"completed": name}
+
+
 @op("refresh_visibility", "what every civilization sees is brought up to date")
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""

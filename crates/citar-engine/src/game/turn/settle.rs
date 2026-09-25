@@ -93,6 +93,15 @@ impl Game {
         let _touched = self.player_mut(p, crate::game::derive::rev::PlayerTouch::OTHER).is_some();
     }
 
+    /// A write that moves city `c`'s `core` revision, as a heal, a growth or a queue edit does,
+    /// and changes nothing, for the benchmark of the lists its sibling cities read after it
+    /// (DESIGN.md 10).
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    pub fn city_change_for_bench(&mut self, c: crate::base::ids::CityId) {
+        let _touched = self.city_mut(c, crate::game::derive::rev::CityTouch::CORE).is_some();
+    }
+
     /// Moves unit `u` to tile `t` without movement rules and settles, for the benchmark of the
     /// memos read after a move (DESIGN.md 6.5: a move recomputes none that did not read it).
     ///
