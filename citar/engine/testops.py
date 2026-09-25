@@ -337,6 +337,132 @@ def _progress_builds(g: Game, o: dict):
 
 
 @op("refresh_visibility", "what every civilization sees is brought up to date")
+@op("set_difficulty", "player, difficulty (a level's name): the seat's own difficulty, as the host sets it; ok is "
+                      "false, and nothing changes, for a name that is no level")
+def _set_difficulty(g: Game, o: dict):
+    """Give a seat its own difficulty, as EngineGame.set_difficulty does."""
+    from .scenario import _pid
+    pid = _pid(g, o.get("player"), majors_only=False)
+    level = g.rules.resolve("difficulty", str(o.get("difficulty")))
+    if not level:
+        return {"ok": False}
+    g.player(pid).difficulty = level
+    g.invalidate()
+    return {"ok": True}
+
+
+@op("debug", "action (meet_all, reveal or gold): the host's developer shortcut")
+def _debug(g: Game, o: dict):
+    """A developer shortcut, as EngineGame.debug takes it."""
+    from . import visibility
+    action = o.get("action")
+    if action == "meet_all":
+        for a in g.majors():
+            for b in g.majors():
+                g.meet(a.id, b.id)
+    elif action == "reveal":
+        for p in g.majors():
+            visibility.reveal_tiles(g, p.id, range(g.grid.size))
+    elif action == "gold":
+        for p in g.majors():
+            p.gold += 500
+    else:
+        raise ActionError("Unknown debug action.")
+    g.invalidate()
+    return {}
+
+
+def _drive_answers(g: Game, drivers: set, answer):
+    """Put every open negotiation waiting on a driven seat to its driver, round after round while the answers bring
+    more; a negotiation is put to a driver once for each entry it has."""
+    from . import tools
+    asked = set()
+    for _ in range(64):
+        waiting = [(n["id"], n["awaiting"], len(n["history"])) for n in g.s.negotiations
+                   if n["status"] == "open" and n["awaiting"] in drivers
+                   and (n["id"], len(n["history"])) not in asked]
+        if not waiting:
+            return
+        for nid, who, length in waiting:
+            if g.s.phase != "playing":
+                return
+            n = g.s.negotiations[nid - 1]
+            if n["status"] != "open" or n["awaiting"] != who or len(n["history"]) != length:
+                continue
+            asked.add((nid, length))
+            if answer is None:
+                continue
+            try:
+                tools.execute(g, who, "respond_negotiation",
+                              {"negotiation_id": nid, "action": answer, "message": "(test driver)"})
+            except ActionError:
+                pass
+
+
+@op("drive", "drivers (the players a test driver plays: it does nothing with its turns); optional answer (what the "
+             "driver answers a negotiation waiting on it: reject by default, accept, reply, or none to leave it), "
+             "seat_limit: the host drives the game until it has something to do; why it stopped")
+def _drive(g: Game, o: dict):
+    """The Rust engine's Game::drive with a test driver at each seat named, which Python never had: the host plays
+    the driven seats' turns until it has something to do. A driver plays nothing and answers what waits on it; the
+    game stops at a seat with no driver (external), after a hybrid seat's driver has played (hybrid_diplomat), when
+    the seat whose driver has played is in a negotiation waiting on a seat with no driver (awaiting_reply), after
+    seat_limit driven turns (seat_limit), and when the game is over (game_over). Where a stop inside a turn left the
+    game is kept on the game object, so the next drive goes on from there."""
+    from .scenario import _pid
+    v = o.get("drivers")
+    drivers = set() if v is None else set(_pid(g, x, majors_only=True) for x in (v if isinstance(v, list) else [v]))
+    answer = o.get("answer", "reject")
+    if answer == "none":
+        answer = None
+    elif answer not in ("reject", "accept", "reply"):
+        raise ActionError(f"answer must be reject, accept, reply or none, not '{answer}'.")
+    try:
+        limit = int(o.get("seat_limit") or 0)
+    except (TypeError, ValueError):
+        limit = -1
+    if limit < 0:
+        raise ActionError("seat_limit must be a whole number, 0 or more.")
+    ended = 0
+
+    def stop(name, player=None, nids=()):
+        """What the operation reports."""
+        return {"stop": name, "player": player, "negotiations": list(nids), "turn": g.turn, "current": g.s.current}
+
+    while True:
+        if g.s.phase != "playing" or not g.majors():
+            return stop("game_over")
+        pid = g.s.current
+        if not g.s.turn_started:
+            g.begin_turn()
+            continue
+        p = g.player(pid)
+        if p.kind != "major" or not p.alive:
+            g.end_turn(pid)
+            continue
+        _drive_answers(g, drivers, answer)
+        if g.s.phase != "playing" or g.s.current != pid:
+            continue
+        if pid not in drivers:
+            return stop("external", pid)
+        mark = getattr(g, "_drive_mark", None)
+        if not (mark and mark[0] == g.turn and mark[1] == pid):
+            if limit and ended >= limit:
+                return stop("seat_limit")
+            g._drive_mark = (g.turn, pid, False)
+            continue
+        if p.controller == "hybrid" and not mark[2]:
+            g._drive_mark = (g.turn, pid, True)
+            return stop("hybrid_diplomat", pid)
+        nids = [n["id"] for n in g.s.negotiations if n["status"] == "open" and pid in (n["initiator"], n["responder"])
+                and n["awaiting"] is not None and n["awaiting"] != pid and n["awaiting"] not in drivers]
+        if nids:
+            return stop("awaiting_reply", pid, nids)
+        g._drive_mark = None
+        g.end_turn(pid)
+        ended += 1
+
+
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""
     from . import visibility

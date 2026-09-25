@@ -1,0 +1,58 @@
+about = """
+The host's developer shortcuts: every living civilization meets every other, sees the whole map
+explored, or gets 500 gold. Anything else is refused.
+"""
+from = "citar/engine_api.py: EngineGame.debug"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+check = { what = "relation", a = 0, b = 2 }
+subset = { met = false }
+
+[[step]]
+op = "debug"
+args = { action = "meet_all" }
+
+[[step]]
+check = { what = "relation", a = 0, b = 2 }
+subset = { met = true }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "met"
+eq = [0, 2]
+
+[[step]]
+check = { what = "events", type = "first_contact" }
+len = 3
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+as = "gold"
+absent = false
+
+[[step]]
+op = "debug"
+args = { action = "gold" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = "=gold + 500"
+
+[[step]]
+op = "debug"
+args = { action = "reveal" }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "explored"
+eq = 384
+
+[[step]]
+op = "debug"
+args = { action = "win" }
+error = "Unknown debug action."

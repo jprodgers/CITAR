@@ -63,11 +63,16 @@ map, the players, their starting techs, gold and culture, and nothing else.
 Player ids are the seats in order, then the city-states, then the barbarians. The engines draw
 city-states' nations differently, so scripts refer to a city-state by id and never by name.
 
-`start = "full"` keeps the starting units and camps. The Rust runner refuses it until package
-1c-09 ports the rest of setup. Both runners set games up through the engine's own setup
-(`EngineGame.new`, and `Game::config_from_json` with `Game::new` in Rust), which begins the first
-seat's turn and announces it (`turn_start`, then `game_start`) before the bare prelude runs: count
-events by type, and never pin an event id at the start of a game.
+`start = "full"` keeps the starting units and camps. Barbarian camps and the ruins an editor map
+lacks are placed at random, differently in each engine, so a full script that looks at units or
+tiles turns them off (`barbarians = "off"`, `ruins = false`). Both runners set games up through
+the engine's own setup (`EngineGame.new`, and `Game::config_from_json` with `Game::new` in Rust),
+which begins the first seat's turn and announces it (`turn_start`, then `game_start`) before the
+bare prelude runs: count events by type, and never pin an event id at the start of a game.
+
+A game with more civilizations than the map gives starts, or more city-states than it gives sites,
+has the rest chosen (`maps.prepare`): the arena's sixth start is (11,3), and its second and third
+city-state sites (13,12) and (14,5).
 
 A civilization, or a city-state, with no unit and no city is eliminated at the end of a round, and
 one that loses its last city or unit to another's move is eliminated at once; with one civilization
@@ -286,6 +291,9 @@ What a script does that no player or editor may. `{ what = "ops" }` lists them.
 | `set_turn` | `turn` | sets the turn number |
 | `unmeet` | `a`, `b` | the two no longer know each other |
 | `set_controller` | `player`, `controller`; optionally `handicap`, `auto` | hands the seat to another driver, as a host does |
+| `set_difficulty` | `player`, `difficulty` (a level's name, read loosely) | gives the seat its own difficulty, as the host's `set_difficulty` does. Gives `ok`: false, with nothing changed, for a name that is no level |
+| `debug` | `action` (`meet_all`, `reveal` or `gold`) | the host's developer shortcut (`EngineGame.debug`): every living civilization meets every other, has the whole map explored, or gets 500 gold. Refused for anything else |
+| `drive` | `drivers` (the players a test driver plays); optionally `answer` (`reject` by default, `accept`, `reply`, or `none`), `seat_limit` | the host drives the game (`Game::drive`, which Python never had; `citar/engine/testops.py` plays the same machine): each driven seat's turn is played (the test driver does nothing with it) and ended, and a negotiation that waits on a driven seat gets its driver's `answer`, whoever's turn it is. It stops at the turn of a seat with no driver (`external`), after a hybrid seat's driver has played (`hybrid_diplomat`; the next drive ends the turn), while the seat whose driver has played is in a negotiation that waits on a seat with no driver (`awaiting_reply`, naming them), after `seat_limit` driven turns (`seat_limit`), and when the game is over (`game_over`). Gives `stop`, `player` (or null), `negotiations`, `turn` and `current` |
 | `set_auto` | `player`, `decision`, `on` | the engine takes one decision for the civilization, or not, until its controller changes |
 | `refresh_visibility` | | brings what everyone sees up to date |
 | `reload` | | saves the game and loads the save |

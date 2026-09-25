@@ -1,0 +1,118 @@
+about = """
+A civilization names itself and its leader, keeps a private notebook and logs its reasoning, at
+any time. Names are plain text, at most 48 characters, and unique whatever their case; a name that
+changes nothing is refused. The notebook keeps its last 8,000 characters.
+"""
+from = "citar/engine/tools.py: set_civ_name, write_notes, log_thought"
+
+[config]
+players = [{}, { name = "Rome" }]
+
+[[step]]
+tool = "set_civ_name"
+player = 0
+args = { name = "  The <b>Free</b> Cities ", leader = "Ada" }
+as = "named"
+
+[[step]]
+check = "named"
+eq = { name = "The", leader = "Ada" }
+
+[[step]]
+note = "Out of turn, a new name without markup."
+tool = "set_civ_name"
+player = 1
+args = { name = "Carthage   Reborn" }
+as = "named"
+
+[[step]]
+check = "named"
+subset = { name = "Carthage Reborn" }
+
+[[step]]
+check = { what = "player", player = 1 }
+subset = { name = "Carthage Reborn" }
+
+[[step]]
+check = { what = "events", type = "civ_renamed" }
+len = 2
+any = { path = "text", eq = "Rome is now known as Carthage Reborn, led by Benchmark Leader." }
+
+[[step]]
+tool = "set_civ_name"
+player = 0
+args = { name = "carthage reborn" }
+error = "Another civilization already uses that name."
+
+[[step]]
+tool = "set_civ_name"
+player = 0
+args = { name = "The", leader = "Ada" }
+error = "Your civilization is already named The."
+
+[[step]]
+note = "The same name with a new leader is a change."
+tool = "set_civ_name"
+player = 0
+args = { name = "The", leader = "Grace" }
+as = "named"
+
+[[step]]
+check = "named"
+eq = { name = "The", leader = "Grace" }
+
+[[step]]
+check = { what = "events", type = "civ_renamed" }
+len = 2
+
+[[step]]
+tool = "set_civ_name"
+player = 0
+args = { name = "<script>" }
+error = "Name cannot be empty (plain text only)."
+
+[[step]]
+tool = "write_notes"
+player = 0
+args = { text = "Expand east." }
+as = "noted"
+
+[[step]]
+check = "noted"
+eq = { notes_length = 12 }
+
+[[step]]
+tool = "write_notes"
+player = 0
+args = { text = "Then south.", mode = "append" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "notes"
+eq = "Expand east.\nThen south."
+
+[[step]]
+tool = "write_notes"
+player = 0
+args = { text = "Start over." }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "notes"
+eq = "Start over."
+
+[[step]]
+note = "Other players' notebooks are their own."
+check = { what = "player", player = 1 }
+path = "notes"
+eq = ""
+
+[[step]]
+tool = "log_thought"
+player = 1
+args = { text = "Nobody reads this but the spectators." }
+as = "thought"
+
+[[step]]
+check = "thought"
+eq = { ok = true }
