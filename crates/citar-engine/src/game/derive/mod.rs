@@ -177,7 +177,7 @@ impl Derived {
     }
 
     /// How many times the route net was built afresh rather than brought up to date.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "embedded-ruleset"))]
     pub(crate) fn route_net_builds(&self) -> u32 {
         self.route_net.borrow().builds()
     }

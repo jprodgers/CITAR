@@ -245,7 +245,7 @@ impl RouteNetMemo {
     }
 
     /// How many times the net was built afresh.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "embedded-ruleset"))]
     pub(crate) const fn builds(&self) -> u32 {
         self.builds
     }
