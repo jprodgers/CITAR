@@ -217,3 +217,7 @@ reason = "An automated worker's job on a tile was judged for the first worker of
 [[differences]]
 id = "jobs-tie-by-ruleset-order"
 reason = "Two worker jobs of the same priority on the same tile went to the improvement whose name sorted last; Rust takes the one later in the ruleset"
+
+[[differences]]
+id = "fallout-removal-is-a-job"
+reason = "An automated worker cleared fallout only where a tile's fallout flag was set, which no nuke did, so it never cleared any; Rust reads the tile's Fallout feature, and clearing it is a job where nothing better is"

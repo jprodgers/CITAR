@@ -7,15 +7,16 @@
 //! recomputed every tile each turn. A map here keeps each tile's job with what it was worked out
 //! from, and recomputes a tile only when something its job reads has changed:
 //! - **the tile** ([`TileSig`]): its terrain, features, natural wonder, resource, improvement and
-//!   what is pillaged, its river, owner, whether a city works it, a repair or build with no build
-//!   time at the front of its queue, and its neighbours' terrains and rivers (fresh water, the
-//!   coast). A road, or a turn of work on its queue, changes no job and recomputes nothing;
+//!   what is pillaged, its river, owner, a repair or build with no build time at the front of its
+//!   queue, which neighbours are fresh water or coast, and, when a filter a job reads asks,
+//!   whether a city works it and its route. A road, citizens moving, or a turn of work on its
+//!   queue, changes no job and recomputes nothing;
 //! - **the civilization** ([`CivJobs`]): which improvements it has the tech for and which are
 //!   obsolete, how long each takes its builders, which resources it sees and which luxuries it
 //!   has, the removals it knows, the resources its improvements consume. A change recomputes only
 //!   the tiles it can reach: those with the resource, those whose job it was, and those where an
-//!   improvement it changed could now beat the job (its value on the tile, at its new build time,
-//!   above the job's);
+//!   improvement it changed could stand and now beat the job (its value on the tile, at its new
+//!   build time, above the job's);
 //! - **its territory**: tiles joining are worked out, tiles leaving dropped.
 //!
 //! A ruleset whose relevant uniques have conditionals that read a tile's surroundings, a city or
@@ -35,7 +36,8 @@ use crate::game::Game;
 use crate::game::automation::{best_job, improvement_value, luxury_owned};
 use crate::game::workers::{self, Builder};
 use crate::rules::Ruleset;
-use crate::rules::defs::{BuilderClass, ImprovementKind};
+use crate::rules::defs::{BuilderClass, ImprovementKind, Route};
+use crate::unique::filter::TileLeaf;
 use crate::unique::{CondDeps, Ctx, UniqueData, UniqueType, uq};
 
 /// The improvement unique types a job reads, with their conditionals asked on the tile.
@@ -57,15 +59,6 @@ const READ: [UniqueType; 15] = [
     UniqueType::NoFeatureRemovalNeeded,
 ];
 
-/// A neighbour as a tile's job reads it: what is fresh water or coast beside the tile.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Around {
-    terrain: TerrainId,
-    wonder: Option<TerrainId>,
-    features: FeatureSet,
-    river: u8,
-}
-
 /// What a tile's job reads of the tile and its neighbours.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TileSig {
@@ -75,34 +68,47 @@ struct TileSig {
     resource: Option<ResourceId>,
     improvement: Option<ImprovementId>,
     pillaged: bool,
+    /// A route, and whether it is pillaged (a repair reads the second).
+    route: Option<Route>,
     route_pillaged: bool,
     river: u8,
     owner: Option<PlayerId>,
+    /// Whether a city works it, when a filter a job reads asks.
     worked: bool,
     /// A repair, or a build with no build time, at the front of its queue: what a builder may
     /// only go on with.
     front: Option<ImprovementId>,
-    around: [Option<Around>; 6],
+    /// Which neighbours are a source of fresh water, and which are coast: all a job reads of
+    /// them (`Fresh water`, `Coastal`).
+    fresh_around: u8,
+    coast_around: u8,
 }
 
 impl TileSig {
     fn of(g: &Game, t: TileIdx) -> Option<Self> {
         let tile = g.tile(t)?;
         let r = g.rules();
+        let caches = &g.dv.jobs;
         let front = g.state().tiles().builds(t).first().map(|s| s.improvement).filter(|&i| {
             let d = &r.improvements()[i];
             d.kind == ImprovementKind::Repair || d.turns_to_build.is_none()
         });
-        let worked = tile.city().and_then(|c| g.city(c)).is_some_and(|c| c.worked.contains(&t));
-        let mut around = [None; 6];
-        for (slot, n) in around.iter_mut().zip(g.grid().neighbors(t)) {
-            if let Some(x) = g.tile(n) {
-                *slot = Some(Around {
-                    terrain: x.terrain(),
-                    wonder: x.wonder(),
-                    features: x.features(),
-                    river: x.river_mask(),
-                });
+        let worked = caches.reads_worked
+            && tile.city().and_then(|c| g.city(c)).is_some_and(|c| c.worked.contains(&t));
+        let coast = r.derived().known.map.coast;
+        let fresh = &r.derived().fresh_water;
+        let (mut fresh_around, mut coast_around) = (0u8, 0u8);
+        for (i, n) in g.grid().neighbors(t).enumerate() {
+            let Some(x) = g.tile(n) else { continue };
+            let bit = 1u8 << i;
+            let terrains = core::iter::once(x.terrain())
+                .chain(x.wonder())
+                .chain(x.features().iter().filter_map(|f| r.derived().features.get(f).copied()));
+            if terrains.into_iter().any(|tt| fresh.contains(tt)) {
+                fresh_around |= bit;
+            }
+            if coast.is_some() && Some(x.terrain()) == coast {
+                coast_around |= bit;
             }
         }
         Some(Self {
@@ -112,14 +118,94 @@ impl TileSig {
             resource: tile.resource(),
             improvement: tile.improvement(),
             pillaged: tile.improvement_pillaged(),
+            route: tile.route().filter(|_| caches.reads_route),
             route_pillaged: tile.route().is_some() && tile.route_pillaged(),
             river: tile.river_mask(),
             owner: tile.owner(),
             worked,
             front,
-            around,
+            fresh_around,
+            coast_around,
         })
     }
+}
+
+/// Whether a tile with no job still has none after its improvement changed from what `old`
+/// saw to what `new` sees, and nothing else did: every value a job is weighed by is the
+/// improvement's yield gain less what the improvement standing there yields and one, so a
+/// standing improvement that yields no less than the one before (or than none) can only lower
+/// them; one it replaces cannot be built again, and an irremovable one allows less. Not when the
+/// improvement before was a great one, over which nothing was weighed, nor when a filter a job
+/// reads asks about improvements.
+fn still_no_job(g: &Game, old: Option<&TileSig>, new: Option<&TileSig>) -> bool {
+    let (Some(old), Some(new)) = (old, new) else { return false };
+    if under_great(g, new) {
+        return true;
+    }
+    if g.dv.jobs.reads_improvement || old.pillaged || new.pillaged {
+        return false;
+    }
+    let same_but_improvement = TileSig { improvement: new.improvement, ..*old } == *new;
+    let r = g.rules();
+    let penalty = |i: Option<ImprovementId>| {
+        i.map_or(0.0, |i| crate::game::automation::weighted(&r.improvements()[i].stats) + 1.0)
+    };
+    same_but_improvement
+        && old.improvement.is_none_or(|i| !r.improvements()[i].great)
+        && penalty(new.improvement) >= penalty(old.improvement)
+}
+
+/// Whether a tile holds a great improvement, whole, on a whole route (or none): no job is weighed
+/// over it, and a repair has nothing to mend, so it has no job whatever else changes.
+fn under_great(g: &Game, sig: &TileSig) -> bool {
+    !sig.pillaged
+        && !sig.route_pillaged
+        && sig.improvement.is_some_and(|i| g.rules().improvements()[i].great)
+}
+
+/// Whether improvement `imp` could be built on tile `t` for civilization `p`, all else allowing:
+/// it is not there already; the tiles its unconditional `Can only be built on [...] tiles` and
+/// `Cannot be built on [...] tiles` name allow it; and one of the tile's terrains takes it, land
+/// or water does, fresh water does, or it improves the tile's resource. What [`workers`]'
+/// placement rules allow is a subset of this.
+fn could_stand(g: &Game, p: PlayerId, t: TileIdx, imp: ImprovementId) -> bool {
+    let r = g.rules();
+    let Some(tile) = g.tile(t) else { return false };
+    if tile.improvement() == Some(imp) {
+        return false;
+    }
+    let d = &r.improvements()[imp];
+    let tu = r.uniques();
+    let v = g.view();
+    let refused = d.uniques.ids().any(|id| {
+        let u = tu.get(id);
+        if !u.conds.is_empty() {
+            return false;
+        }
+        match u.data {
+            UniqueData::CanOnlyBeBuiltOnTile(x) => {
+                !tu.filters().tile_matches(x.tiles, &v, t, Some(p))
+            }
+            UniqueData::CannotBuildOnTile(x) => tu.filters().tile_matches(x.tiles, &v, t, Some(p)),
+            _ => false,
+        }
+    });
+    if refused {
+        return false;
+    }
+    let features = &r.derived().features;
+    let mut terrains = core::iter::once(tile.terrain())
+        .chain(tile.wonder())
+        .chain(tile.features().iter().filter_map(|f| features.get(f).copied()));
+    let water = g.is_water(t);
+    terrains.any(|tt| workers::allowed_on_feature(g, imp, tt))
+        || (d.on_land && !water)
+        || (d.on_water && water)
+        || r.improvements()[imp]
+            .uniques
+            .ids()
+            .any(|id| r.uniques().meta(id).ty == Some(UniqueType::ImprovementBuildableByFreshWater))
+        || tile.resource().is_some_and(|res| crate::game::tiles::resource_improved_by(g, res, imp))
 }
 
 /// What a civilization's jobs read of it (see the module doc).
@@ -262,6 +348,13 @@ pub(crate) struct JobCaches {
     consumers: Vec<ImprovementSet>,
     /// The improvements that remove features when built, which the removals known decide.
     removers: ImprovementSet,
+    /// Whether a filter a job reads asks whether a city works the tile (`worked`).
+    reads_worked: bool,
+    /// Whether one asks what route the tile has (`Improvement` or `pillaged` leaves).
+    reads_route: bool,
+    /// Whether one asks about the tile's improvement (`Improvement`, `improved`, `unimproved`,
+    /// `pillaged`).
+    reads_improvement: bool,
     #[cfg(feature = "stats")]
     counts: core::cell::Cell<JobCounts>,
 }
@@ -277,6 +370,7 @@ impl JobCaches {
         let mut consumed: Vec<ResourceId> = Vec::new();
         let mut consumers: Vec<ImprovementSet> = Vec::new();
         let mut removers = ImprovementSet::new();
+        let (mut reads_worked, mut reads_route, mut reads_improvement) = (false, false, false);
         let note = |id: UniqueId, civ_deps: &mut CondDeps, local: &mut bool| -> bool {
             let u = t.get(id);
             let conds = u.deps();
@@ -297,6 +391,25 @@ impl JobCaches {
                 }
                 if note(id, &mut civ_deps, &mut local) {
                     cond_imps.insert(imp);
+                }
+                let tiles = match t.get(id).data {
+                    UniqueData::MustBeNextTo(x) => Some(x.tiles),
+                    UniqueData::CannotBuildOnTile(x) => Some(x.tiles),
+                    UniqueData::CanOnlyBeBuiltOnTile(x) => Some(x.tiles),
+                    _ => None,
+                };
+                if let Some(f) = tiles {
+                    for leaf in t.filters().tile(f).full.leaves() {
+                        match leaf {
+                            TileLeaf::Worked => reads_worked = true,
+                            TileLeaf::Improvement(_) | TileLeaf::Pillaged => {
+                                reads_route = true;
+                                reads_improvement = true;
+                            }
+                            TileLeaf::Improved | TileLeaf::Unimproved => reads_improvement = true,
+                            _ => {}
+                        }
+                    }
                 }
                 match t.get(id).data {
                     UniqueData::MustBeNextTo(_) => local = true,
@@ -334,6 +447,9 @@ impl JobCaches {
             consumed,
             consumers,
             removers,
+            reads_worked,
+            reads_route,
+            reads_improvement,
             #[cfg(feature = "stats")]
             counts: core::cell::Cell::new(JobCounts::default()),
         }
@@ -417,12 +533,16 @@ impl Diff {
     fn reaches(&self, g: &Game, p: PlayerId, t: TileIdx, e: &Entry, key: &CivJobs) -> bool {
         let r = g.rules();
         let Some(tile) = g.tile(t) else { return true };
+        if e.sig.as_ref().is_some_and(|s| under_great(g, s)) {
+            return false;
+        }
         if tile.resource().is_some_and(|res| self.res.contains(res)) {
             return true;
         }
-        if self.removal_turns && !tile.features().is_empty() {
-            return true;
-        }
+        // A removal that takes another time changes what every improvement it clears the way for
+        // takes on a tile with such a feature.
+        let removal = |f| r.derived().removal_of.get(f).copied().flatten().is_some();
+        let cleared = self.removal_turns && tile.features().iter().any(removal);
         let fallout = r.derived().known.fallout;
         let fallout_removal = r.derived().removal_of.get(fallout).copied().flatten();
         let (value, best) = match e.job {
@@ -441,9 +561,13 @@ impl Diff {
         {
             return true;
         }
-        self.imps.iter().any(|i| {
+        let changed = if cleared { &key.only } else { &self.imps };
+        changed.iter().any(|i| {
             let d = &r.improvements()[i];
             if d.kind != ImprovementKind::Normal || d.great || !key.only.contains(i) {
+                return false;
+            }
+            if !could_stand(g, p, t, i) {
                 return false;
             }
             let turns = key.turns.get(usize::from(i.0)).copied().unwrap_or(1);
@@ -494,18 +618,19 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
             m.tiles.entry(t).or_insert(Entry { sig: None, job: None, known: false, dirty: true });
         }
     }
-    let logged: Option<BTreeSet<TileIdx>> = if territory || revs.worked > m.verified {
-        None
-    } else {
-        revs.tile_log.since(m.verified).map(|it| {
-            let mut s = BTreeSet::new();
-            for t in it {
-                s.insert(t);
-                s.extend(g.grid().neighbors(t));
-            }
-            s
-        })
-    };
+    let logged: Option<BTreeSet<TileIdx>> =
+        if territory || (caches.reads_worked && revs.worked > m.verified) {
+            None
+        } else {
+            revs.tile_log.since(m.verified).map(|it| {
+                let mut s = BTreeSet::new();
+                for t in it {
+                    s.insert(t);
+                    s.extend(g.grid().neighbors(t));
+                }
+                s
+            })
+        };
     let check: Vec<TileIdx> = match &logged {
         Some(s) => s.iter().copied().filter(|t| m.tiles.contains_key(t)).collect(),
         None => m.tiles.keys().copied().collect(),
@@ -515,8 +640,9 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
         if let Some(e) = m.tiles.get_mut(&t)
             && e.sig != sig
         {
+            let kept = e.known && e.job.is_none() && still_no_job(g, e.sig.as_ref(), sig.as_ref());
             e.sig = sig;
-            e.dirty = true;
+            e.dirty |= !kept;
         }
     }
     let Some(key) = m.key.clone() else { return };
@@ -534,14 +660,13 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
         if !(e.dirty || all_dirty) {
             continue;
         }
-        let fresh = !e.known;
         if e.sig.is_none() {
             e.sig = TileSig::of(g, t);
         }
         let job = best_job(g, &b, t, Some(&key.only));
         #[cfg(feature = "stats")]
         {
-            if fresh {
+            if !e.known {
                 counts.fresh += 1;
             } else {
                 counts.recomputed += 1;

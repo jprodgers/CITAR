@@ -53,7 +53,7 @@ pub const YIELD_WEIGHTS: [(Stat, f64); 7] = [
 ];
 
 /// Stats as an automated worker weighs them.
-fn weighted(s: &Stats) -> f64 {
+pub(crate) fn weighted(s: &Stats) -> f64 {
     YIELD_WEIGHTS.iter().fold(0.0, |acc, &(k, w)| acc + s[k] * w)
 }
 
@@ -610,6 +610,9 @@ pub fn best_job(
         }
     }
     let known = &r.derived().known;
+    // Fallout is a feature. Python read a fallout flag on the tile that no nuke set, so its
+    // workers never cleared fallout.
+    // refcheck: fallout-removal-is-a-job
     if best.is_none() && tile.features().contains(known.fallout) {
         let removal = r.derived().removal_of.get(known.fallout).copied().flatten();
         if let Some(rem) = removal
