@@ -78,7 +78,7 @@ fn a_failing_list_of_test_ops_changes_nothing_either() {
     .expect_err("the second test op fails");
     assert_eq!(e.message, "Test operation 2 (unmeet): A player cannot forget itself.");
     assert_eq!((g.digest().ok(), g.rev()), before);
-    let e = testops::apply(&mut g, &json!([{"op": "add_spy", "player": 0}])).expect_err("not yet");
+    let e = testops::apply(&mut g, &json!([{"op": "barbarian_act"}])).expect_err("not yet");
     assert_eq!(e.code, ErrCode::NotPorted);
     let e = g
         .apply_ops(
@@ -121,11 +121,10 @@ fn inspect_reads_and_lists_what_is_pending() {
         .collect();
     for (name, pkg) in [
         ("automate", "1c-04"),
-        ("negotiation", "1c-05"),
         ("view", "1d-02"),
         ("briefing", "1d-03"),
         ("player_start S3: revolts", "1c-08"),
-        ("player_end E3: espionage", "1c-05"),
+        ("player_end E3: the city-state's own end of turn", "1c-06"),
         ("round_end R0: eliminations", "1c-08"),
         ("map: starts and ruins a document lacks", "1c-09"),
     ] {
@@ -136,14 +135,14 @@ fn inspect_reads_and_lists_what_is_pending() {
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [3, 0, 7],
-        "three queries and seven test ops wait"
+        [2, 0, 4],
+        "two queries and four test ops wait"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [17, 3], "the stages that wait");
+    assert_eq!([count("turn_stage"), count("setup_stage")], [14, 3], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(
-            !["end_turn", "end_round", "force_turn", "add_unit", "remove_units"]
+            !["end_turn", "end_round", "force_turn", "add_unit", "remove_units", "negotiation"]
                 .contains(&name.as_str())
                 && ![
                     "found_city",
@@ -171,11 +170,7 @@ fn inspect_reads_and_lists_what_is_pending() {
             "{name} is ported"
         );
     }
-    for (what, system) in [
-        ("negotiation", "game::diplomacy::negotiation"),
-        ("view", "api::views"),
-        ("briefing", "api::briefing"),
-    ] {
+    for (what, system) in [("view", "api::views"), ("briefing", "api::briefing")] {
         let e = inspect::inspect(&g, &json!({"what": what, "player": 0}))
             .expect_err("a query that waits for its package");
         assert_eq!(e.code, ErrCode::NotPorted, "{what}");

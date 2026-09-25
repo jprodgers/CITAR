@@ -224,8 +224,9 @@ pub fn move_to_civ(g: &mut Game, c: CityId, new_owner: PlayerId) {
             }
         }
     }
-    // espionage.city_removed: the spies in it flee home (conquest.py:94).
-    pending(Porting::Pending("1c-05"));
+    // The spies in it flee home (conquest.py:94).
+    let name = city_name(g, c);
+    crate::game::espionage::city_removed(g, c, &name);
     if was_capital {
         if let Some(p) = g.player_mut(old, PlayerTouch::CAPITAL) {
             p.capital = None;

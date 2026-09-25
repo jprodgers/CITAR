@@ -5,16 +5,21 @@
 //! `scenario.py:471-487`), `meet` (`engine_api.meet`), `set_controller` and `set_difficulty`
 //! (`engine_api.py:648-667`). Package 1b-03 adds `end_turn` (`Game.end_turn`,
 //! `game.py:1012-1037`) and `force_turn` (`engine_api.force_turn`); `Game::new`,
-//! `Game::config_from_json` and `Game::drive` are in `game::setup` and `game::turn::drive`. The
-//! rest land with the packages that port what they do.
+//! `Game::config_from_json` and `Game::drive` are in `game::setup` and `game::turn::drive`.
+//! Package 1c-05 adds the diplomacy reads and commands of the facade (`engine_api.py:539-613`):
+//! `negotiation`, `negotiations`, `negotiation_view`, `end_turn_refusal`, `close_negotiation`,
+//! `open_negotiation_as`, `max_chat_messages`, `deal`, `describe_items` and `validate_items`.
+//! The rest land with the packages that port what they do.
 
 use serde_json::Value;
 
 use super::scenario;
-use crate::base::ids::PlayerId;
+use crate::base::ids::{DealId, NegotiationId, PlayerId};
 use crate::game::Game;
+use crate::game::diplomacy::{deals, negotiation};
 use crate::game::error::{ActionError, EngineError, ErrCode};
 use crate::game::events::EventBatch;
+use crate::state::diplo::{Deal, NegStatus, Negotiation, Terms};
 use crate::state::players::{AutoOverrides, Controller, Handicap};
 
 impl Game {
@@ -113,5 +118,125 @@ impl Game {
         }
         self.settle();
         true
+    }
+    // ---- Diplomacy (engine_api.py:539-613) ----------------------------------------------------
+
+    /// A negotiation by id (`EngineGame.negotiation`).
+    #[must_use]
+    pub fn negotiation(&self, nid: NegotiationId) -> Option<&Negotiation> {
+        self.state().diplo().negotiation(nid)
+    }
+
+    /// Every negotiation of the game, settled ones included, oldest first
+    /// (`EngineGame.negotiations`).
+    #[must_use]
+    pub fn negotiations(&self) -> &[Negotiation] {
+        &self.state().diplo().negotiations
+    }
+
+    /// A negotiation as one side sees it, the proposal in its own terms
+    /// (`EngineGame.negotiation_view`, `diplomacy.negotiation_view`).
+    ///
+    /// # Errors
+    /// No negotiation has that id.
+    pub fn negotiation_view(
+        &self,
+        nid: NegotiationId,
+        pid: PlayerId,
+    ) -> Result<Value, ActionError> {
+        let n = negotiation::get(self, i64::from(nid.get()))?;
+        Ok(negotiation::negotiation_view(self, n, pid))
+    }
+
+    /// Why the `end_turn` tool would refuse `pid` because of an open negotiation, or `None`
+    /// (`EngineGame.end_turn_refusal`).
+    #[must_use]
+    pub fn end_turn_refusal(&self, pid: PlayerId) -> Option<String> {
+        negotiation::end_turn_refusal(self, pid)
+    }
+
+    /// How many messages a negotiation may hold in this game (`EngineGame.max_chat_messages`).
+    #[must_use]
+    pub fn max_chat_messages(&self) -> u32 {
+        negotiation::max_chat_messages(self)
+    }
+
+    /// A concluded deal by id (`EngineGame.deal`).
+    #[must_use]
+    pub fn deal(&self, id: DealId) -> Option<&Deal> {
+        self.state().diplo().deal(id)
+    }
+
+    /// Deal items as a sentence (`EngineGame.describe_items`).
+    #[must_use]
+    pub fn describe_items(&self, items: &[crate::state::diplo::DealItem]) -> String {
+        deals::describe_items(self, items)
+    }
+
+    /// Whether `giver` can give `items` to `receiver` under `proposal`
+    /// (`EngineGame.validate_items`).
+    ///
+    /// # Errors
+    /// The first item it cannot give.
+    pub fn validate_items(
+        &self,
+        giver: PlayerId,
+        receiver: PlayerId,
+        items: &[crate::state::diplo::DealItem],
+        proposal: &Terms,
+    ) -> Result<(), ActionError> {
+        deals::validate_items(self, giver, receiver, items, proposal)
+    }
+
+    /// Closes an open negotiation from outside it, a timeout or a forced close, with a note both
+    /// sides are told (`EngineGame.close_negotiation`); returns it as it now stands. Refused for
+    /// a status that is not a closed one, an unknown id, and a negotiation not open.
+    pub fn close_negotiation(
+        &mut self,
+        nid: NegotiationId,
+        status: NegStatus,
+        note: &str,
+        by: Option<PlayerId>,
+    ) -> Result<(Negotiation, EventBatch), ActionError> {
+        self.ensure_live()?;
+        let (id, status) = negotiation::plan_close(self, i64::from(nid.get()), status.name())?;
+        self.begin_call();
+        negotiation::close(self, id, status, note, by);
+        self.settle();
+        let n = self
+            .negotiation(id)
+            .cloned()
+            .ok_or_else(|| ActionError::rule("No such negotiation."))?;
+        Ok((n, self.take_batch()))
+    }
+
+    /// Opens a negotiation for `pid` whether or not it is its turn (`EngineGame.open_negotiation_as`:
+    /// a probe's scripted counterparty), with `give` and `receive` as a caller writes deal items;
+    /// returns what the tool would. Python lent the opener the turn for the call; the rule does
+    /// not read whose turn it is, so nothing is lent here.
+    pub fn open_negotiation_as(
+        &mut self,
+        pid: PlayerId,
+        to: PlayerId,
+        message: &str,
+        give: Option<&Value>,
+        receive: Option<&Value>,
+    ) -> Result<(Value, EventBatch), ActionError> {
+        self.ensure_live()?;
+        if !self.player(pid).is_some_and(|p| p.is_major() && p.alive()) {
+            return Err(ActionError::new(ErrCode::InvalidPlayer, "Invalid player."));
+        }
+        let plan = negotiation::plan_open(
+            self,
+            pid,
+            i64::from(to.0),
+            &Value::from(message),
+            give,
+            receive,
+        )?;
+        self.begin_call();
+        let out = negotiation::open(self, pid, plan);
+        self.settle();
+        Ok((out, self.take_batch()))
     }
 }

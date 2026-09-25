@@ -321,6 +321,48 @@ def _refresh_visibility(g: Game, o: dict):
     return {}
 
 
+@op("add_spy", "player: a new spy in the hideout")
+def _add_spy(g: Game, o: dict):
+    """Give a major civilization a new spy in its hideout, whether or not espionage is on."""
+    from . import espionage
+    from .scenario import _pid
+    pid = _pid(g, o.get("player"), majors_only=False)
+    if g.player(pid).kind != "major":
+        raise ActionError("Only a major civilization has spies.")
+    return {"spy": espionage.add_spy(g, pid)["name"]}
+
+
+@op("close_negotiation", "negotiation, status, note; optional by: closes it from outside")
+def _close_negotiation(g: Game, o: dict):
+    """Close a negotiation from outside it, as a host's timeout does; the negotiation as inspect gives it."""
+    from . import diplomacy
+    from .inspect import _negotiation, _whole
+    from .scenario import _pid
+    by = _pid(g, o.get("by"), majors_only=False) if o.get("by") is not None else None
+    n = diplomacy.close_negotiation(g, _whole(o.get("negotiation")), str(o.get("status")), str(o.get("note") or ""),
+                                    by)
+    return _negotiation(n)
+
+
+@op("open_negotiation_as", "player, to, message; optional give, receive: opens a negotiation out of turn")
+def _open_negotiation_as(g: Game, o: dict):
+    """Open a negotiation for a player whether or not it is its turn (EngineGame.open_negotiation_as); what the tool
+    reports."""
+    from . import diplomacy
+    from .scenario import _pid
+    pid = _pid(g, o.get("player"), majors_only=True)
+    try:
+        to = int(o.get("to"))
+    except (TypeError, ValueError):
+        raise ActionError("'to' must be a player id.")
+    saved = g.s.current
+    g.s.current = pid
+    try:
+        return diplomacy.open_negotiation(g, pid, to, o.get("message"), o.get("give"), o.get("receive"))
+    finally:
+        g.s.current = saved
+
+
 def apply_one(g: Game, n: int, o) -> dict:
     """Run the ``n``-th test operation of a list; the error names it, as apply_ops' does."""
     if not isinstance(o, dict) or o.get("op") not in OPS:

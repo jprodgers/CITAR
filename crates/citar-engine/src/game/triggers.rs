@@ -25,8 +25,8 @@
 //!   stopped, where Python recursed until it raised and failed whatever caused the first.
 //!
 //! A few effects reach systems later packages port, and are carried out here with the least of
-//! them: a spy recruited or promoted (espionage, 1c-05), the next world leader vote scheduled
-//! (1c-08) and the city-states' first great-person gift brought forward (1c-06). What a one-time
+//! them: the next world leader vote scheduled (1c-08) and the city-states' first great-person
+//! gift brought forward (1c-06). A spy recruited or promoted is `espionage`'s. What a one-time
 //! effect does to a unit is package 1c-02's `units::health::apply_unit_effect`, and a promotion
 //! given free is its `units::promotions::add_promotion`.
 
@@ -42,7 +42,7 @@ use super::derive::rev::{PlayerTouch, WorldTouch};
 use super::invariants::{Code, Violation};
 use super::research::{self, TechSource};
 use super::units::{add_unit_in_city, place_unit_near};
-use super::{Game, great_people, policies, religion, units};
+use super::{Game, espionage, great_people, policies, religion, units};
 use crate::base::ids::{BaseUnitId, CityId, PlayerId, TileIdx, UniqueId, UnitId};
 use crate::base::num;
 use crate::base::rng::{KeyPart, Purpose, Rng};
@@ -50,12 +50,11 @@ use crate::base::sets::PlayerSet;
 use crate::base::stats::Stat;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::cities::{City, Constructible};
-use crate::state::players::{Spy, SpyAction};
 use crate::unique::params::PolicyOrBelief;
 #[cfg(feature = "test-ops")]
 use crate::unique::trigger::TriggerKind;
 use crate::unique::trigger::{CityScope, OneTimeEffect, TriggerEvent, TriggerSite};
-use crate::unique::{Ctx, SourceUniques, UniqueData, UniqueType, applies, uq};
+use crate::unique::{SourceUniques, UniqueData, UniqueType, applies};
 
 #[cfg(feature = "test-ops")]
 std::thread_local! {
@@ -469,7 +468,7 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
             true
         }
         OneTimeEffect::GlobalSpiesWhenEnteringEra => {
-            if !spies_play(g, p) {
+            if !espionage::spies_play(g, p) {
                 return false;
             }
             let era = super::derive::civ::era(g, p);
@@ -486,26 +485,26 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
                     {
                         m.spy_eras_earned.insert(era);
                     }
-                    add_spy(g, q);
+                    espionage::add_spy(g, q);
                 }
             }
             true
         }
         OneTimeEffect::SpiesLevelUp { times } => {
-            if !spies_play(g, p) {
+            if !espionage::spies_play(g, p) {
                 return false;
             }
-            let n = g.player(p).and_then(|x| x.major.as_deref()).map_or(0, |m| m.spies.len());
+            let n = espionage::spies(g, p).len();
             for i in 0..n {
-                level_up_spy(g, p, i, times);
+                espionage::level_up(g, p, i, times);
             }
             true
         }
         OneTimeEffect::GainSpy => {
-            if !spies_play(g, p) {
+            if !espionage::spies_play(g, p) {
                 return false;
             }
-            add_spy(g, p);
+            espionage::add_spy(g, p);
             true
         }
         OneTimeEffect::FreeBuilding { building, cities } => {
@@ -762,77 +761,4 @@ fn schedule_vote(g: &mut Game) {
 fn turns_for_gp_gift(g: &Game, major: PlayerId) -> i32 {
     let mut rng = Rng::keyed(g.state().seed(), Purpose::CsGp, &[major.key(), g.turn().key()]);
     num::trunc_i32(f64::from(37 + i32::try_from(rng.below(7)).unwrap_or(0)) * g.speed().modifier)
-}
-
-/// Whether a civilization takes part in espionage: a major, in a game with espionage
-/// (`espionage.py:61-63`).
-fn spies_play(g: &Game, p: PlayerId) -> bool {
-    g.espionage_enabled() && g.player(p).is_some_and(crate::state::players::Player::is_major)
-}
-
-/// A new spy for a civilization, at its starting rank, in its hideout (`espionage.add_spy`,
-/// `espionage.py:47-54`).
-fn add_spy(g: &mut Game, p: PlayerId) {
-    let rank = {
-        let v = g.view();
-        let bonus =
-            uq::sum_i32(uq::civ(&v, p, UniqueType::SpyStartingLevel, &Ctx::civ(p)), |d| match d {
-                UniqueData::SpyStartingLevel(x) => Some(x.levels),
-                _ => None,
-            });
-        u8::try_from(1i32.saturating_add(bonus).clamp(0, 255)).unwrap_or(1)
-    };
-    let Some(m) = g.player_mut(p, PlayerTouch::SPIES).and_then(|x| x.major.as_deref_mut()) else {
-        return;
-    };
-    // The first `Agent n` no spy is called (`espionage._spy_name`): the numbers taken, read once.
-    let mut taken: Vec<u32> = m
-        .spies
-        .iter()
-        .filter_map(|s| s.name.strip_prefix("Agent "))
-        .filter(|n| !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit()))
-        .filter_map(|n| n.parse().ok())
-        .collect();
-    taken.sort();
-    let mut n = 1u32;
-    for &t in &taken {
-        if t == n {
-            n += 1;
-        } else if t > n {
-            break;
-        }
-    }
-    let name = format!("Agent {n}");
-    m.spies.push(Spy {
-        name: name.clone().into(),
-        rank,
-        city: None,
-        action: SpyAction::None,
-        turns: 0,
-        progress: 0,
-    });
-    let text = format!("We have recruited {name} as a spy!");
-    g.emit(EngineEvent::Spy, &text, Some(PlayerSet::single(p)), None, EventData::default(), &[]);
-}
-
-/// A spy's rank rises by `amount`, to the ruleset's highest at most (`espionage.level_up`,
-/// `espionage.py:81-89`).
-fn level_up_spy(g: &mut Game, p: PlayerId, i: usize, amount: i32) {
-    let most = g.rules().constants().formulas.max_spy_rank;
-    let Some(m) = g.player_mut(p, PlayerTouch::SPIES).and_then(|x| x.major.as_deref_mut()) else {
-        return;
-    };
-    let Some(spy) = m.spies.get_mut(i) else { return };
-    let rank = i32::from(spy.rank);
-    if rank >= most {
-        return;
-    }
-    let n = amount.min(most - rank);
-    spy.rank = u8::try_from(rank + n).unwrap_or(spy.rank);
-    let text = if n == 1 {
-        format!("Your spy {} has leveled up!", spy.name)
-    } else {
-        format!("Your spy {} has leveled up {n} times!", spy.name)
-    };
-    g.emit(EngineEvent::Spy, &text, Some(PlayerSet::single(p)), None, EventData::default(), &[]);
 }

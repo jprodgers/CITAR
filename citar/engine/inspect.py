@@ -10,8 +10,8 @@ from typing import Any
 from .game import ActionError, Game
 from .state import AUTO_DECISIONS
 
-QUERIES = ("buildable", "city", "costs", "events", "find_tiles", "game", "great_people", "ops", "pending", "player",
-           "preview", "relation", "religion", "tile", "unit", "units")
+QUERIES = ("buildable", "city", "costs", "events", "find_tiles", "game", "great_people", "negotiation", "ops", "pending",
+           "player", "preview", "relation", "religion", "spies", "tile", "unit", "units")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -70,6 +70,16 @@ def inspect(g: Game, q: dict) -> Any:
         return _civ_religion(g, _pid(g, q.get("player"), majors_only=False))
     if what == "great_people":
         return _great_people(g, _pid(g, q.get("player"), majors_only=False))
+    if what == "negotiation":
+        from . import diplomacy
+        n = diplomacy.get_negotiation(g, _whole(q.get("negotiation")))
+        if q.get("player") is not None:
+            return diplomacy.negotiation_view(g, n, _any_pid(g, q.get("player")))
+        return _negotiation(n)
+    if what == "spies":
+        return [{"name": s["name"], "rank": int(s["rank"]), "city": s.get("city"), "action": s["action"],
+                 "turns": int(s.get("turns") or 0), "progress": int(s.get("progress") or 0)}
+                for s in g.player(_any_pid(g, q.get("player"))).spies]
     if what == "events":
         return _events(g, q)
     if what == "find_tiles":
@@ -80,6 +90,16 @@ def inspect(g: Game, q: dict) -> Any:
     if what == "pending":
         return []
     raise ActionError(f"Unknown inspect query {what!r}. Known: {', '.join(QUERIES)}.")
+
+
+def _negotiation(n: dict) -> dict:
+    """``negotiation``: one negotiation as it is kept, every entry with its ``note`` (null when it has none)."""
+    return {"id": n["id"], "initiator": n["initiator"], "responder": n["responder"], "turn": n["turn"],
+            "status": n["status"], "awaiting": n["awaiting"], "proposal": n["proposal"],
+            "proposal_by": n["proposal_by"],
+            "history": [{"seq": h["seq"], "by": h["by"], "action": h["action"], "message": h["message"],
+                         "proposal": h["proposal"], "turn": h["turn"], "note": h.get("note")} for h in n["history"]],
+            "deal_id": n.get("deal_id")}
 
 
 def _civ_religion(g: Game, pid: int) -> dict:

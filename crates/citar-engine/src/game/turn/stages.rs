@@ -27,9 +27,10 @@ use crate::base::ids::PlayerId;
 use crate::base::stats::Stat;
 use crate::game::cities::lifecycle;
 use crate::game::derive::rev::UnitTouch;
+use crate::game::diplomacy::{deals, negotiation};
 use crate::game::triggers;
 use crate::game::{
-    Game, Porting, economy, great_people, pending, policies, religion, research, units,
+    Game, Porting, economy, espionage, great_people, pending, policies, religion, research, units,
 };
 use crate::state::Phase;
 use crate::state::TurnClock;
@@ -228,12 +229,12 @@ pub static PLAYER_START: [Stage; 23] = [
 
 /// A player's turn ends (`turns.end_player_turn`, `turns.py:70-118`).
 pub static PLAYER_END: [Stage; 25] = [
-    Stage::later(
+    Stage::run(
         "E0",
         "the player's negotiations expire",
         Who::MAJOR,
         Always,
-        Porting::Pending("1c-05"),
+        Step::Player(negotiation::expire_stage),
     ),
     Stage::run(
         "E0",
@@ -284,7 +285,7 @@ pub static PLAYER_END: [Stage; 25] = [
     ),
     Stage::run("E3", "science", Who::CIVS, HasCities, Step::Player(science)),
     Stage::run("E3", "faith", Who::CIVS, Religion, Step::Player(faith)),
-    Stage::later("E3", "espionage", Who::MAJOR, Always, Porting::Pending("1c-05")),
+    Stage::run("E3", "espionage", Who::MAJOR, Always, Step::Player(espionage::end_turn)),
     Stage::run(
         "E3",
         "great person points",
@@ -331,7 +332,7 @@ pub static PLAYER_END: [Stage; 25] = [
 pub static ROUND_END: [Stage; 11] = [
     Stage::later("R0", "eliminations", Who::ALL, Always, Porting::Pending("1c-08")),
     Stage::run("R0", "a game that is over skips to the close", Who::ALL, Always, Step::SkipIfOver),
-    Stage::later("R1", "diplomacy's round", Who::ALL, Always, Porting::Pending("1c-05")),
+    Stage::run("R1", "diplomacy's round", Who::ALL, Always, Step::Round(deals::process_round)),
     Stage::later("R2", "the round's statistics", Who::ALL, Always, Porting::Pending("1c-08")),
     Stage::later("R3", "the replay frame", Who::ALL, Always, Porting::Pending("1c-08")),
     Stage::run("R4", "the next turn", Who::ALL, Always, Step::Round(next_turn)),

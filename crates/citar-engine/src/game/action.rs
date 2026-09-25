@@ -20,7 +20,11 @@ use super::cities::citizens::{SetCityFocus, SetSpecialists, WorkTile};
 use super::cities::purchase::Buy;
 use super::cities::queue::{ChangeQueue, RenameCity, SetAutoProduction, SetProduction};
 use super::combat::actions::{AirSweep, Attack, CityAttack, CityStatus, ReturnCivilian};
+use super::diplomacy::actions::{
+    DeclareWar, Denounce, EndTurn, OpenNegotiation, RespondNegotiation, SendMessage,
+};
 use super::error::{ActionError, ErrCode};
+use super::espionage::MoveSpy;
 use super::events::EventBatch;
 use super::great_people::ChooseGreatPerson;
 use super::policies::AdoptPolicy;
@@ -102,6 +106,20 @@ pub enum Action {
     CityStatus(CityStatus),
     /// `return_civilian` (package 1c-03).
     ReturnCivilian(ReturnCivilian),
+    /// `send_message` (package 1c-05).
+    SendMessage(SendMessage),
+    /// `open_negotiation` (package 1c-05).
+    OpenNegotiation(OpenNegotiation),
+    /// `respond_negotiation` (package 1c-05).
+    RespondNegotiation(RespondNegotiation),
+    /// `declare_war` (package 1c-05).
+    DeclareWar(DeclareWar),
+    /// `denounce` (package 1c-05).
+    Denounce(Denounce),
+    /// `move_spy` (package 1c-05).
+    MoveSpy(MoveSpy),
+    /// `end_turn` (package 1c-05), refused while a negotiation of the player's is open.
+    EndTurn(EndTurn),
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
@@ -151,6 +169,13 @@ impl Action {
             Self::CityAttack(_) => "city_attack",
             Self::CityStatus(_) => "city_status",
             Self::ReturnCivilian(_) => "return_civilian",
+            Self::SendMessage(_) => "send_message",
+            Self::OpenNegotiation(_) => "open_negotiation",
+            Self::RespondNegotiation(_) => "respond_negotiation",
+            Self::DeclareWar(_) => "declare_war",
+            Self::Denounce(_) => "denounce",
+            Self::MoveSpy(_) => "move_spy",
+            Self::EndTurn(_) => "end_turn",
             #[cfg(test)]
             Self::Probe(_) => "probe",
             Self::AdoptPolicy(_) => "adopt_policy",
@@ -183,11 +208,17 @@ impl Action {
             | Self::AirSweep(_)
             | Self::CityAttack(_)
             | Self::CityStatus(_)
-            | Self::ReturnCivilian(_) => false,
+            | Self::ReturnCivilian(_)
+            | Self::OpenNegotiation(_)
+            | Self::DeclareWar(_)
+            | Self::Denounce(_)
+            | Self::MoveSpy(_)
+            | Self::EndTurn(_) => false,
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
-            // `tools.rename_city` is `any_time` (tools.py:782).
-            Self::RenameCity(_) => true,
+            // `tools.rename_city` is `any_time` (tools.py:782), and so are a message and an
+            // answer in a negotiation (tools.py:931-964).
+            Self::RenameCity(_) | Self::SendMessage(_) | Self::RespondNegotiation(_) => true,
             Self::AdoptPolicy(_)
             | Self::Buy(_)
             | Self::BuyTile(_)
@@ -216,6 +247,13 @@ impl Action {
             Self::CityAttack(a) => run(g, pid, a),
             Self::CityStatus(a) => run(g, pid, a),
             Self::ReturnCivilian(a) => run(g, pid, a),
+            Self::SendMessage(a) => run(g, pid, a),
+            Self::OpenNegotiation(a) => run(g, pid, a),
+            Self::RespondNegotiation(a) => run(g, pid, a),
+            Self::DeclareWar(a) => run(g, pid, a),
+            Self::Denounce(a) => run(g, pid, a),
+            Self::MoveSpy(a) => run(g, pid, a),
+            Self::EndTurn(a) => run(g, pid, a),
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
             Self::AdoptPolicy(x) => run(g, pid, x),

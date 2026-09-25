@@ -266,6 +266,15 @@ pub fn char_offset(text: &str, byte: usize) -> usize {
     text.char_indices().take_while(|&(i, _)| i < byte).count()
 }
 
+/// The first `n` code points of `text`: Python's `text[:n]`.
+#[must_use]
+pub fn truncate_chars(text: &str, n: usize) -> &str {
+    match text.char_indices().nth(n) {
+        Some((i, _)) => &text[..i],
+        None => text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +286,13 @@ mod tests {
         assert_eq!(norm("Kraków 2"), "krakw2");
         assert_eq!(norm("\u{212A}elvin \u{130}"), "kelvini");
         assert_eq!(norm(""), "");
+    }
+
+    #[test]
+    fn truncation_counts_code_points() {
+        assert_eq!(truncate_chars("Kraków", 5), "Krakó");
+        assert_eq!(truncate_chars("ab", 5), "ab");
+        assert_eq!(truncate_chars("ab", 0), "");
     }
 
     #[test]

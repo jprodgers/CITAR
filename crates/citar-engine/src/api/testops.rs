@@ -12,8 +12,9 @@
 //! operations `end_turn`, `end_round` and `force_turn`; package 1b-07 `complete_construction`;
 //! package 1b-08 `found_religion`, `enhance_religion` and `enter_ruins`, which stand in for the
 //! unit actions and the moves of packages 1c-04 and 1c-02; package 1c-02 `set_unit` and
-//! `ready_unit`; package 1c-03 `attack_as` and `capture_civilian`. The others are listed with the
-//! package that ports what they need, and are refused as not ported until then.
+//! `ready_unit`; package 1c-03 `attack_as` and `capture_civilian`; package 1c-05 `add_spy`,
+//! `close_negotiation` and `open_negotiation_as`. The others are listed with the package that
+//! ports what they need, and are refused as not ported until then.
 
 use serde_json::{Map, Value, json};
 
@@ -54,7 +55,7 @@ pub static TEST_OPS: &[TestOp] = &[
     TestOp {
         name: "add_spy",
         params: "player: a new spy in the hideout",
-        porting: Porting::Pending("1c-05"),
+        porting: Porting::Ported,
         run: add_spy,
     },
     TestOp {
@@ -92,7 +93,7 @@ pub static TEST_OPS: &[TestOp] = &[
     TestOp {
         name: "close_negotiation",
         params: "negotiation, status, note; optional by: closes it from outside",
-        porting: Porting::Pending("1c-05"),
+        porting: Porting::Ported,
         run: close_negotiation,
     },
     TestOp {
@@ -143,7 +144,7 @@ pub static TEST_OPS: &[TestOp] = &[
     TestOp {
         name: "open_negotiation_as",
         params: "player, to, message; optional give, receive: opens a negotiation out of turn",
-        porting: Porting::Pending("1c-05"),
+        porting: Porting::Ported,
         run: open_negotiation_as,
     },
     TestOp {
@@ -646,6 +647,48 @@ fn capture_civilian(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(json!({"unit": taken.map(UnitId::get)}))
 }
 
+// ---- Diplomacy and espionage (package 1c-05) -----------------------------------------------------
+
+/// Gives a major civilization a new spy in its hideout (`espionage.add_spy`), whether or not
+/// espionage is on; the spy's name.
+fn add_spy(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let p = pid(g, o.get("player"), false)?;
+    if !g.player(p).is_some_and(crate::state::players::Player::is_major) {
+        return Err(bad("Only a major civilization has spies."));
+    }
+    let i = crate::game::espionage::add_spy(g, p).ok_or_else(|| bad("No spy was added."))?;
+    let name = crate::game::espionage::spies(g, p).get(i).map(|s| s.name.to_string());
+    Ok(json!({"spy": name}))
+}
+
+/// Closes a negotiation from outside it, as a host's timeout does
+/// (`diplomacy.close_negotiation`); the negotiation as `inspect` gives it.
+fn close_negotiation(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    use crate::game::diplomacy::negotiation;
+    let nid = o.get("negotiation").and_then(py::int_of).unwrap_or(-1);
+    let status = o.get("status").map(py::str_of).unwrap_or_default();
+    let note = o.get("note").filter(|v| py::truthy(v)).map(py::str_of).unwrap_or_default();
+    let by = match given(o, "by") {
+        None => None,
+        v => Some(pid(g, v, false)?),
+    };
+    let (id, status) = negotiation::plan_close(g, nid, &status)?;
+    negotiation::close(g, id, status, &note, by);
+    let n = g.state().diplo().negotiation(id).ok_or_else(|| bad("No such negotiation."))?;
+    Ok(negotiation::negotiation_json(g, n))
+}
+
+/// Opens a negotiation for a player whether or not it is its turn (`open_negotiation_as`); what
+/// the tool reports.
+fn open_negotiation_as(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    use crate::game::diplomacy::negotiation;
+    let p = pid(g, o.get("player"), true)?;
+    let to = o.get("to").and_then(py::int_of).ok_or_else(|| bad("'to' must be a player id."))?;
+    let message = o.get("message").cloned().unwrap_or(Value::Null);
+    let plan = negotiation::plan_open(g, p, to, &message, o.get("give"), o.get("receive"))?;
+    Ok(negotiation::open(g, p, plan))
+}
+
 // ---- Those whose systems are not ported yet ----------------------------------------------------
 
 /// The refusal of a test operation whose system is not ported yet: `path` names the system, and
@@ -657,24 +700,12 @@ fn not_ported(path: &str) -> ActionError {
     )
 }
 
-fn add_spy(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::espionage"))
-}
-
 fn automate(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::automation"))
 }
 
 fn barbarian_act(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::barbarians"))
-}
-
-fn close_negotiation(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::diplomacy::negotiation"))
-}
-
-fn open_negotiation_as(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::diplomacy::negotiation"))
 }
 
 fn progress_builds(_: &mut Game, _: &Params) -> Result<Value, ActionError> {

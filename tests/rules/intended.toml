@@ -215,3 +215,11 @@ reason = "A ranged attack that brought a civilian to 0 health left it on the map
 [[differences]]
 id = "may-not-annex-refuses-annexing"
 reason = "A civilization that `May not annex cities` had the cities it captured made puppets, then could annex them at will; Rust refuses it annex"
+
+[[differences]]
+id = "met-lists-in-player-id-order"
+reason = "A message to all a civilization had met went to them in the order they were met; Rust sends it to them in player-id order, as every other list of players is kept"
+
+[[differences]]
+id = "deal-items-fit-their-fields"
+reason = "A deal item naming a player id or a city id no game can have, or an amount beyond 32 bits, was stored in a proposal and refused only when the deal was accepted, or never for an amount; Rust refuses it when it is proposed"

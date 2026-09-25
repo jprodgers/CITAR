@@ -4,9 +4,8 @@
 //! starvation, razing, healing), and a city destroyed.
 //!
 //! Citizens are placed again by the settle that follows (DESIGN.md 6.7), where Python placed
-//! them at once. What waits for other packages, marked where it happens: religion's end of a
-//! city's turn and a population change's followers (1b-08), a spy's city gone (1c-05), and the
-//! elimination a destroyed city may bring (1c-08).
+//! them at once. What waits for other packages, marked where it happens: the elimination a
+//! destroyed city may bring (1c-08). The spies in a destroyed city go home (package 1c-05).
 
 use smallvec::SmallVec;
 
@@ -386,8 +385,8 @@ pub fn destroy_city(g: &mut Game, c: CityId) {
         debug_assert!(false, "a city of the game could not be removed: {e}");
         return;
     }
-    // espionage.city_removed: the spies in it go home (cities.py:2364-2365).
-    pending(Porting::Pending("1c-05"));
+    // The spies in it go home (cities.py:2364-2365).
+    crate::game::espionage::city_removed(g, c, &name);
     if g.player(owner).is_some_and(|x| x.capital == Some(c)) {
         if let Some(x) = g.player_mut(owner, PlayerTouch::CAPITAL) {
             x.capital = None;

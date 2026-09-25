@@ -21,14 +21,17 @@
 //!   the next pantheon and prophet cost it; a city's majority, followers, pressures and holiness;
 //! - `great_people` (`player`): great person points, free great people, golden ages and the
 //!   uniques a civilization holds for some turns;
+//! - `negotiation` (`negotiation`, optionally `player`): a negotiation as it is kept, or as that
+//!   player sees it (`diplomacy.negotiation_view`);
+//! - `spies` (`player`): a civilization's spies;
 //! - `events` (optionally `since`, `type` and `player`, the last keeping what that player hears);
 //! - `find_tiles`: the tiles that pass the filters given, nearest first (see [`find_tiles`]);
 //! - `ops`: the scenario and test operations with their parameters;
 //! - `pending`: what is not ported yet, as the queries, operations, test operations, turn stages
 //!   and setup stages that wait for a package.
 //!
-//! `negotiation`, `view` and `briefing` wait for the packages that port what they read (1c-05,
-//! 1d-02 and 1d-03), and are refused as not ported until then.
+//! `view` and `briefing` wait for the packages that port what they read (1d-02 and 1d-03), and
+//! are refused as not ported until then.
 //!
 //! Reads only: a query never changes the game or its digest.
 
@@ -39,6 +42,7 @@ use super::testops;
 use crate::base::ids::{CityId, ImprovementId, PlayerId, ResourceId, TerrainId, TileIdx, UnitId};
 use crate::base::py;
 use crate::game::cities::{construction, stats as cstats};
+use crate::game::diplomacy::negotiation;
 use crate::game::diplomacy::relations::{has_pact, is_friends, opinion};
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::turn::stages;
@@ -52,7 +56,7 @@ use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
 /// The queries, by `what`, sorted, with whether what each reads is ported yet.
-const QUERIES: [(&str, Porting); 19] = [
+const QUERIES: [(&str, Porting); 20] = [
     ("briefing", Porting::Pending("1d-03")),
     ("buildable", Porting::Ported),
     ("city", Porting::Ported),
@@ -61,13 +65,14 @@ const QUERIES: [(&str, Porting); 19] = [
     ("find_tiles", Porting::Ported),
     ("game", Porting::Ported),
     ("great_people", Porting::Ported),
-    ("negotiation", Porting::Pending("1c-05")),
+    ("negotiation", Porting::Ported),
     ("ops", Porting::Ported),
     ("pending", Porting::Ported),
     ("player", Porting::Ported),
     ("preview", Porting::Ported),
     ("relation", Porting::Ported),
     ("religion", Porting::Ported),
+    ("spies", Porting::Ported),
     ("tile", Porting::Ported),
     ("unit", Porting::Ported),
     ("units", Porting::Ported),
@@ -143,7 +148,17 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
         "find_tiles" => find_tiles(g, o),
         "ops" => Ok(json!({"scenario": scenario::ops_help(), "test": testops::help()})),
         "pending" => Ok(pending()),
-        "negotiation" => Err(not_ported("game::diplomacy::negotiation")),
+        "negotiation" => {
+            let id = o.get("negotiation").and_then(py::int_of).unwrap_or(-1);
+            let n = negotiation::get(g, id)?;
+            match o.get("player") {
+                Some(v) if !v.is_null() => {
+                    Ok(negotiation::negotiation_view(g, n, any_player(g, Some(v))?))
+                }
+                _ => Ok(negotiation::negotiation_json(g, n)),
+            }
+        }
+        "spies" => Ok(crate::game::espionage::spies_json(g, any_player(g, o.get("player"))?)),
         "view" => Err(not_ported("api::views")),
         "briefing" => Err(not_ported("api::briefing")),
         _ => {
