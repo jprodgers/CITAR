@@ -22,6 +22,7 @@ use citar_engine::game::diplomacy::actions::{
 };
 use citar_engine::game::diplomacy::category::{Category, proposal_categories};
 use citar_engine::game::diplomacy::deals;
+use citar_engine::game::diplomacy::negotiation::{self, RespondPlan, Response};
 use citar_engine::game::espionage::{self, MoveSpy};
 use citar_engine::game::invariants::Code;
 use citar_engine::game::{Action, DebugOptions, ErrCode, Game, economy};
@@ -461,6 +462,81 @@ fn deal_items_are_read_as_callers_write_them_and_categorised() {
     );
 }
 
+/// Typed items, as a bot or the host holds them, are checked as the same items written would
+/// be: the same proposal, the same refusals, terms held to 1..100 turns.
+#[test]
+fn typed_deal_items_are_checked_as_written_ones() {
+    let mut g = shipped(2);
+    ops(
+        &mut g,
+        &json!([{"op": "meet", "a": 0, "b": 1}, {"op": "set_player", "player": 1, "gold": 50}]),
+    );
+    let iron = id(g.rules(), "Iron");
+    let written = deals::make_proposal(
+        &g,
+        ME,
+        YOU,
+        Some(&json!([{"type": "gold", "amount": 25}, {"type": "defensive_pact"}])),
+        Some(&json!([{"type": "resource", "resource": "Iron", "amount": 0, "turns": 500}])),
+    )
+    .expect("it reads");
+    let typed = deals::proposal_of(
+        &g,
+        ME,
+        YOU,
+        &[DealItem::Gold { amount: 25 }, DealItem::DefensivePact],
+        &[DealItem::Resource { resource: iron, amount: 0, turns: 500 }],
+    )
+    .expect("it reads");
+    assert_eq!(typed, written);
+    assert_eq!(
+        typed.as_ref().map(|t| t.gives(YOU)[0]),
+        Some(DealItem::Resource { resource: iron, amount: 1, turns: 100 })
+    );
+    let refusal = |item: DealItem| deals::fit_item(&g, item).expect_err("refused").message;
+    assert_eq!(refusal(DealItem::Gold { amount: 0 }), "Gold amounts must be positive.");
+    assert_eq!(
+        refusal(DealItem::GoldPerTurn { amount: -3, turns: 5 }),
+        "Gold amounts must be positive."
+    );
+    let most = g.rules().constants().formulas.max_gold_trade_offer;
+    assert_eq!(
+        refusal(DealItem::Gold { amount: most + 1 }),
+        format!("At most {most} gold per deal.")
+    );
+    let wheat = id(g.rules(), "Wheat");
+    assert_eq!(
+        refusal(DealItem::Resource { resource: wheat, amount: 1, turns: 5 }),
+        "'Wheat' is not a tradeable strategic or luxury resource."
+    );
+    assert!(deals::proposal_of(&g, ME, YOU, &[], &[]).expect("it reads").is_none());
+    // Opened and countered with typed items, as the actions do with written ones.
+    let (opened, _) = g
+        .open_negotiation_as(YOU, ME, "Gold?", &[DealItem::Gold { amount: 20 }], &[])
+        .expect("opened");
+    let nid = NegotiationId::new(1).expect("an id");
+    assert_eq!(opened["negotiation_id"], 1);
+    let e = g
+        .open_negotiation_as(ME, YOU, "More?", &[DealItem::Gold { amount: -1 }], &[])
+        .expect_err("refused");
+    assert!(e.message.starts_with("There is already an open negotiation"), "{}", e.message);
+    let counter = |give: &[DealItem], receive: &[DealItem]| {
+        negotiation::plan_respond_terms(&g, ME, nid, Response::Counter, "Less.", give, receive)
+    };
+    let e = counter(&[], &[]).expect_err("nothing offered");
+    assert_eq!(
+        e.message,
+        "A counter-offer needs at least one item; use reply to send only a message."
+    );
+    let plan = counter(&[], &[DealItem::Gold { amount: 10 }]).expect("a counter");
+    let RespondPlan::Deliver { proposal: Some(t), .. } = plan else { panic!("{plan:?}") };
+    assert_eq!(t.gives(YOU), [DealItem::Gold { amount: 10 }]);
+    let e = negotiation::plan_respond_terms(&g, YOU, nid, Response::Accept, "Mine.", &[], &[])
+        .expect_err("its own proposal");
+    assert!(e.message.starts_with("It is Civilization 1's move"), "{}", e.message);
+    clean(&mut g);
+}
+
 // ---- The kitchen sink ------------------------------------------------------------------------------
 
 #[test]
@@ -727,13 +803,7 @@ fn a_host_opens_for_a_seat_out_of_turn_and_closes_a_negotiation_with_a_note() {
         &json!([{"op": "meet", "a": 0, "b": 1}, {"op": "set_player", "player": 1, "gold": 50}]),
     );
     let (opened, batch) = g
-        .open_negotiation_as(
-            YOU,
-            ME,
-            "Peace and gold?",
-            Some(&json!([{"type": "gold", "amount": 20}])),
-            None,
-        )
+        .open_negotiation_as(YOU, ME, "Peace and gold?", &[DealItem::Gold { amount: 20 }], &[])
         .expect("opened out of turn");
     assert_eq!(
         opened,
@@ -819,16 +889,39 @@ fn random_agents_strike_deals_that_run_their_course() {
 /// One thing a player may do in a negotiation, or around one.
 #[derive(Clone, Debug)]
 enum Step {
-    Open { by: u8, to: u8, items: u8 },
-    Respond { by: u8, nid: u8, action: u8, items: u8 },
+    Open {
+        by: u8,
+        to: u8,
+        items: u8,
+    },
+    Respond {
+        by: u8,
+        nid: u8,
+        action: u8,
+        items: u8,
+    },
     /// The side a recent open negotiation waits on accepts it: `back` counts from the latest.
-    Accept { back: u8 },
-    Close { nid: u8, status: u8 },
+    Accept {
+        back: u8,
+    },
+    Close {
+        nid: u8,
+        status: u8,
+    },
     EndTurn,
     HostEndTurn,
-    War { by: u8, on: u8 },
-    Denounce { by: u8, on: u8 },
-    Message { by: u8, to: u8 },
+    War {
+        by: u8,
+        on: u8,
+    },
+    Denounce {
+        by: u8,
+        on: u8,
+    },
+    Message {
+        by: u8,
+        to: u8,
+    },
     NextTurn,
 }
 
@@ -885,7 +978,8 @@ fn play(g: &mut Game, s: &Step) {
             if p(by) == g.current() {
                 g.act(p(by), a).map(|_| ())
             } else {
-                g.open_negotiation_as(p(by), p(to), "Talk?", Some(&items(i)), None).map(|_| ())
+                let op = json!([{"op": "open_negotiation_as", "player": by, "to": to, "message": "Talk?", "give": items(i)}]);
+                testops::apply(g, &op).map(|_| ())
             }
         }
         Step::Respond { by, nid, action, items: i } => g

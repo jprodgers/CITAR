@@ -4,7 +4,9 @@
 //! - [`normalize_items`] and [`make_proposal`] read the items a caller writes as Python's
 //!   `_normalize_items` and `_make_proposal` did (`diplomacy.py:343-383, 732-749`): leniently,
 //!   numbers through Python's `int()` and names through the ruleset's loose lookup, into typed
-//!   [`DealItem`]s. Mutual agreements go on both sides.
+//!   [`DealItem`]s. Mutual agreements go on both sides. A caller that holds typed items (a bot,
+//!   the host) goes through [`fit_item`] and [`proposal_of`] instead, which check them as
+//!   reading written ones would.
 //! - [`validate_items`] refuses what a side cannot give (`diplomacy.py:400-492`), at proposal
 //!   time, so an impossible deal is refused to whoever proposes it; [`describe_items`] and
 //!   [`ra_cost`] are Python's.
@@ -66,6 +68,28 @@ fn name_text(v: Option<&Value>) -> Result<Option<String>, ()> {
     }
 }
 
+/// Refuses a gold amount that is not positive, and a lump sum above the ruleset's most.
+fn check_gold(g: &Game, kind: DealItemKind, n: i64) -> Result<(), ActionError> {
+    if n <= 0 {
+        return Err(ActionError::rule("Gold amounts must be positive."));
+    }
+    let most = g.rules().constants().formulas.max_gold_trade_offer;
+    if kind == DealItemKind::Gold && n > i64::from(most) {
+        return Err(ActionError::rule(format!("At most {most} gold per deal.")));
+    }
+    Ok(())
+}
+
+/// Whether a resource of the ruleset can be traded: a strategic or luxury one.
+fn tradeable(g: &Game, id: ResourceId) -> bool {
+    g.rules().resources().get(id).is_some_and(|d| d.kind != ResourceType::Bonus)
+}
+
+/// The turns a recurring term runs, held to 1..100 as Python held them.
+fn held(turns: i64) -> i64 {
+    turns.clamp(1, 100)
+}
+
 /// Reads one item a caller wrote (`_normalize_items`, `diplomacy.py:351-382`). `giver` names
 /// the side that gives it, for the refusal of a city id no game can hold.
 fn normalize_item(g: &Game, giver: PlayerId, raw: &Value) -> Result<DealItem, ActionError> {
@@ -93,13 +117,7 @@ fn normalize_item(g: &Game, giver: PlayerId, raw: &Value) -> Result<DealItem, Ac
     if matches!(kind, DealItemKind::Gold | DealItemKind::GoldPerTurn) {
         let n = int_field(&it, "amount", Some(0)).ok_or_else(|| malformed(&it))?;
         it.insert("amount".to_owned(), n.into());
-        if n <= 0 {
-            return Err(ActionError::rule("Gold amounts must be positive."));
-        }
-        let most = r.constants().formulas.max_gold_trade_offer;
-        if kind == DealItemKind::Gold && n > i64::from(most) {
-            return Err(ActionError::rule(format!("At most {most} gold per deal.")));
-        }
+        check_gold(g, kind, n)?;
         amount = fit(n, &it)?;
     }
     let mut turns = 0i32;
@@ -108,7 +126,7 @@ fn normalize_item(g: &Game, giver: PlayerId, raw: &Value) -> Result<DealItem, Ac
         DealItemKind::GoldPerTurn | DealItemKind::Resource | DealItemKind::OpenBorders
     ) {
         let dd = i64::from(g.speed().deal_duration);
-        let n = int_field(&it, "turns", Some(dd)).ok_or_else(|| malformed(&it))?.clamp(1, 100);
+        let n = int_field(&it, "turns", Some(dd)).ok_or_else(|| malformed(&it)).map(held)?;
         it.insert("turns".to_owned(), n.into());
         turns = fit(n, &it)?;
     }
@@ -123,7 +141,7 @@ fn normalize_item(g: &Game, giver: PlayerId, raw: &Value) -> Result<DealItem, Ac
             let resource = text
                 .as_deref()
                 .and_then(|t| r.resolve::<ResourceId>(t))
-                .filter(|&id| r.resources()[id].kind != ResourceType::Bonus);
+                .filter(|&id| tradeable(g, id));
             let Some(resource) = resource else {
                 let shown = it.get("resource").map_or_else(|| "None".to_owned(), py::str_of);
                 return Err(ActionError::rule(format!(
@@ -201,12 +219,86 @@ pub fn make_proposal(
     if absent(give) && absent(receive) {
         return Ok(None);
     }
-    let mut sides = [
+    Ok(complete_mutual([
         Side { giver: speaker, items: normalize_items(g, speaker, give)? },
         Side { giver: other, items: normalize_items(g, other, receive)? },
-    ];
+    ]))
+}
+
+/// A typed item checked and settled as [`normalize_items`] reads a written one: gold amounts
+/// positive and a lump sum within the ruleset's most, recurring terms held to 1..100 turns, a
+/// resource amount of at least one of a tradeable resource, a tech the ruleset has.
+///
+/// # Errors
+/// What reading the same item written would refuse.
+pub fn fit_item(g: &Game, item: DealItem) -> Result<DealItem, ActionError> {
+    // An i32 held to 1..100 fits an i32.
+    let turns = |t: i32| i32::try_from(held(i64::from(t))).unwrap_or(1);
+    Ok(match item {
+        DealItem::Gold { amount } => {
+            check_gold(g, DealItemKind::Gold, i64::from(amount))?;
+            item
+        }
+        DealItem::GoldPerTurn { amount, turns: t } => {
+            check_gold(g, DealItemKind::GoldPerTurn, i64::from(amount))?;
+            DealItem::GoldPerTurn { amount, turns: turns(t) }
+        }
+        DealItem::Resource { resource, amount, turns: t } => {
+            if !tradeable(g, resource) {
+                let shown =
+                    g.rules().name(resource).map_or_else(|| resource.0.to_string(), str::to_owned);
+                return Err(ActionError::rule(format!(
+                    "'{shown}' is not a tradeable strategic or luxury resource."
+                )));
+            }
+            DealItem::Resource { resource, amount: amount.max(1), turns: turns(t) }
+        }
+        DealItem::OpenBorders { turns: t } => DealItem::OpenBorders { turns: turns(t) },
+        DealItem::Tech { tech } => {
+            if g.rules().techs().get(tech).is_none() {
+                return Err(ActionError::rule(format!("Unknown tech '{}'.", tech.0)));
+            }
+            item
+        }
+        DealItem::Embassy
+        | DealItem::PeaceTreaty
+        | DealItem::DeclarationOfFriendship
+        | DealItem::ResearchAgreement
+        | DealItem::DefensivePact
+        | DealItem::DeclareWar { .. }
+        | DealItem::City { .. }
+        | DealItem::ShareMap => item,
+    })
+}
+
+/// A proposal from typed items: what `speaker` would give, and what it would receive from
+/// `other`, each checked by [`fit_item`]; `None` when neither side gives anything, as
+/// [`make_proposal`].
+///
+/// # Errors
+/// The first item [`fit_item`] refuses.
+pub fn proposal_of(
+    g: &Game,
+    speaker: PlayerId,
+    other: PlayerId,
+    give: &[DealItem],
+    receive: &[DealItem],
+) -> Result<Option<Terms>, ActionError> {
+    let fit =
+        |items: &[DealItem]| items.iter().map(|&it| fit_item(g, it)).collect::<Result<Vec<_>, _>>();
+    Ok(complete_mutual([
+        Side { giver: speaker, items: fit(give)? },
+        Side { giver: other, items: fit(receive)? },
+    ]))
+}
+
+/// The two sides as a proposal, or `None` when neither gives anything; a mutual agreement on
+/// either side goes on both, in [`DealItemKind::ALL`] order (`_make_proposal`,
+/// `diplomacy.py:740-749`).
+#[must_use]
+pub fn complete_mutual(mut sides: [Side; 2]) -> Option<Terms> {
     if sides.iter().all(|s| s.items.is_empty()) {
-        return Ok(None);
+        return None;
     }
     for kind in DealItemKind::ALL.into_iter().filter(|k| k.is_mutual()) {
         if sides.iter().any(|s| s.items.iter().any(|i| i.kind() == kind)) {
@@ -217,7 +309,7 @@ pub fn make_proposal(
             }
         }
     }
-    Ok(Some(Terms { sides }))
+    Some(Terms { sides })
 }
 
 /// The item of a mutual agreement's kind.

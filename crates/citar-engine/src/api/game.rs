@@ -199,41 +199,35 @@ impl Game {
         by: Option<PlayerId>,
     ) -> Result<(Negotiation, EventBatch), ActionError> {
         self.ensure_live()?;
-        let (id, status) = negotiation::plan_close(self, i64::from(nid.get()), status.name())?;
+        negotiation::plan_close(self, nid, status)?;
         self.begin_call();
-        negotiation::close(self, id, status, note, by);
+        negotiation::close(self, nid, status, note, by);
         self.settle();
         let n = self
-            .negotiation(id)
+            .negotiation(nid)
             .cloned()
             .ok_or_else(|| ActionError::rule("No such negotiation."))?;
         Ok((n, self.take_batch()))
     }
 
     /// Opens a negotiation for `pid` whether or not it is its turn (`EngineGame.open_negotiation_as`:
-    /// a probe's scripted counterparty), with `give` and `receive` as a caller writes deal items;
-    /// returns what the tool would. Python lent the opener the turn for the call; the rule does
-    /// not read whose turn it is, so nothing is lent here.
+    /// a probe's scripted counterparty), `pid` giving `give` for `receive`; returns what the tool
+    /// would. Python lent the opener the turn for the call; the rule does not read whose turn it
+    /// is, so nothing is lent here. A host holding items as a caller writes them reads them with
+    /// `deals::normalize_items` first.
     pub fn open_negotiation_as(
         &mut self,
         pid: PlayerId,
         to: PlayerId,
         message: &str,
-        give: Option<&Value>,
-        receive: Option<&Value>,
+        give: &[crate::state::diplo::DealItem],
+        receive: &[crate::state::diplo::DealItem],
     ) -> Result<(Value, EventBatch), ActionError> {
         self.ensure_live()?;
         if !self.player(pid).is_some_and(|p| p.is_major() && p.alive()) {
             return Err(ActionError::new(ErrCode::InvalidPlayer, "Invalid player."));
         }
-        let plan = negotiation::plan_open(
-            self,
-            pid,
-            i64::from(to.0),
-            &Value::from(message),
-            give,
-            receive,
-        )?;
+        let plan = negotiation::plan_open_terms(self, pid, to, message, give, receive)?;
         self.begin_call();
         let out = negotiation::open(self, pid, plan);
         self.settle();

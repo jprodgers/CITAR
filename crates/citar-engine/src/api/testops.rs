@@ -672,7 +672,9 @@ fn close_negotiation(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
         None => None,
         v => Some(pid(g, v, false)?),
     };
-    let (id, status) = negotiation::plan_close(g, nid, &status)?;
+    let status = negotiation::close_status(&status)?;
+    let id = negotiation::get(g, nid)?.id;
+    negotiation::plan_close(g, id, status)?;
     negotiation::close(g, id, status, &note, by);
     let n = g.state().diplo().negotiation(id).ok_or_else(|| bad("No such negotiation."))?;
     Ok(negotiation::negotiation_json(g, n))

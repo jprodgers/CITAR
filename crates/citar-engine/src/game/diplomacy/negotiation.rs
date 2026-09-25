@@ -12,7 +12,8 @@
 //! ([`expire_for`], stage E0). A war cancels the negotiations of its two sides.
 //!
 //! Each step is split as the action pipeline runs it: a `plan_*` that only reads and refuses,
-//! and an apply that cannot fail.
+//! and an apply that cannot fail. The actions read a proposal as a caller writes it, in JSON;
+//! [`plan_open_terms`] and [`plan_respond_terms`] take typed items, for bots and the host.
 //!
 //! What differs, on purpose (tests/rules/intended.toml): a message to "all" goes to the
 //! civilizations met in player-id order, where Python kept the order they were met
@@ -20,7 +21,9 @@
 
 use serde_json::{Value, json};
 
-use super::deals::{describe_items, execute_deal, make_proposal, plan_deal, validate_items};
+use super::deals::{
+    describe_items, execute_deal, make_proposal, plan_deal, proposal_of, validate_items,
+};
 use super::relations::name;
 use crate::base::ids::{MessageId, NegotiationId, PlayerId};
 use crate::base::py;
@@ -30,7 +33,7 @@ use crate::game::Game;
 use crate::game::derive::rev::DiploTouch;
 use crate::game::error::{ActionError, ErrCode};
 use crate::state::chronicle::{EngineEvent, EventData};
-use crate::state::diplo::{NegAction, NegEntry, NegStatus, Negotiation, Terms};
+use crate::state::diplo::{DealItem, NegAction, NegEntry, NegStatus, Negotiation, Terms};
 use crate::state::players::Player;
 
 /// The longest message kept, in code points (`diplomacy.py:308, 780`).
@@ -232,9 +235,9 @@ pub struct OpenPlan {
 
 /// Checks a negotiation `pid` would open with `to` (`open_negotiation`, `diplomacy.py:758-779`):
 /// a living major it has met, a message, no negotiation of the two still open, no more than the
-/// ruleset's number opened with them this turn, and a proposal whose items `pid` can give. That
-/// it is `pid`'s turn is the action's guard; a host's `open_negotiation_as` lends the turn, as
-/// Python's did.
+/// ruleset's number opened with them this turn, and a proposal whose items `pid` can give, read
+/// as a caller writes them. That it is `pid`'s turn is the action's guard; a host's
+/// `open_negotiation_as` lends the turn, as Python's did.
 ///
 /// # Errors
 /// Why it may not.
@@ -246,6 +249,38 @@ pub fn plan_open(
     give: Option<&Value>,
     receive: Option<&Value>,
 ) -> Result<OpenPlan, ActionError> {
+    let (to, text) = check_open(g, pid, to, message)?;
+    let proposal = make_proposal(g, pid, to, give, receive)?;
+    finish_open(g, pid, to, text, proposal)
+}
+
+/// [`plan_open`] with typed items: `give` what `pid` would give, `receive` what it would get,
+/// each checked as reading it written would ([`proposal_of`]).
+///
+/// # Errors
+/// Why it may not.
+pub fn plan_open_terms(
+    g: &Game,
+    pid: PlayerId,
+    to: PlayerId,
+    message: &str,
+    give: &[DealItem],
+    receive: &[DealItem],
+) -> Result<OpenPlan, ActionError> {
+    let (to, text) = check_open(g, pid, i64::from(to.0), &Value::from(message))?;
+    let proposal = proposal_of(g, pid, to, give, receive)?;
+    finish_open(g, pid, to, text, proposal)
+}
+
+/// What opening a negotiation checks before its proposal: the partner, the message, no chat
+/// of the two still open and the ruleset's number per turn. The partner, and the message as it
+/// is kept.
+fn check_open(
+    g: &Game,
+    pid: PlayerId,
+    to: i64,
+    message: &Value,
+) -> Result<(PlayerId, String), ActionError> {
     let partner = u8::try_from(to)
         .ok()
         .map(PlayerId)
@@ -286,11 +321,21 @@ pub fn plan_open(
             name(g, to)
         )));
     }
-    let proposal = make_proposal(g, pid, to, give, receive)?;
+    Ok((to, truncate_chars(&text, MESSAGE_LIMIT).to_owned()))
+}
+
+/// A negotiation's proposal checked: `pid` can give what it would give.
+fn finish_open(
+    g: &Game,
+    pid: PlayerId,
+    to: PlayerId,
+    text: String,
+    proposal: Option<Terms>,
+) -> Result<OpenPlan, ActionError> {
     if let Some(t) = &proposal {
         validate_items(g, pid, to, t.gives(pid), t)?;
     }
-    Ok(OpenPlan { to, text: truncate_chars(&text, MESSAGE_LIMIT).to_owned(), proposal })
+    Ok(OpenPlan { to, text, proposal })
 }
 
 /// Opens a negotiation [`plan_open`] checked, which awaits the other side, and tells both
@@ -409,14 +454,7 @@ pub fn plan_respond(
     receive: Option<&Value>,
 ) -> Result<RespondPlan, ActionError> {
     let n = get(g, nid)?;
-    let id = n.id.get();
-    if n.status != NegStatus::Open {
-        return Err(refuse(format!("Negotiation #{id} is {}.", n.status.name())));
-    }
-    if pid != n.initiator && pid != n.responder {
-        return Err(refuse(format!("You are not part of negotiation #{id}.")));
-    }
-    let other = other_side(n, pid);
+    check_party(n, pid)?;
     let act =
         if py::truthy(action) { py::strip(&py::str_of(action)).to_owned() } else { String::new() };
     let Some(response) = Response::read(&act) else {
@@ -425,6 +463,63 @@ pub fn plan_respond(
              also mean reject).",
         ));
     };
+    let raw = message.filter(|m| py::truthy(m)).map(py::str_of).unwrap_or_default();
+    check_response(g, pid, n, response, &raw, |other| {
+        // Python's `give or []`: what is not given, or is empty, is no items.
+        let empty = Value::Array(Vec::new());
+        let or_empty = |v: Option<&Value>| match v {
+            Some(v) if py::truthy(v) => v.clone(),
+            _ => empty.clone(),
+        };
+        let (give, receive) = (or_empty(give), or_empty(receive));
+        make_proposal(g, pid, other, Some(&give), Some(&receive))
+    })
+}
+
+/// [`plan_respond`] with the response and a counter-offer's items typed: `give` what `pid` would
+/// give and `receive` what it would get, read only for a counter-offer and checked as reading
+/// them written would ([`proposal_of`]).
+///
+/// # Errors
+/// Why it may not.
+pub fn plan_respond_terms(
+    g: &Game,
+    pid: PlayerId,
+    nid: NegotiationId,
+    response: Response,
+    message: &str,
+    give: &[DealItem],
+    receive: &[DealItem],
+) -> Result<RespondPlan, ActionError> {
+    let n = get(g, i64::from(nid.get()))?;
+    check_party(n, pid)?;
+    check_response(g, pid, n, response, message, |other| proposal_of(g, pid, other, give, receive))
+}
+
+/// A response may be made only in an open negotiation, by one of its parties.
+fn check_party(n: &Negotiation, pid: PlayerId) -> Result<(), ActionError> {
+    let id = n.id.get();
+    if n.status != NegStatus::Open {
+        return Err(refuse(format!("Negotiation #{id} is {}.", n.status.name())));
+    }
+    if pid != n.initiator && pid != n.responder {
+        return Err(refuse(format!("You are not part of negotiation #{id}.")));
+    }
+    Ok(())
+}
+
+/// The rest of [`plan_respond`], once the response is read: whose move it is, the message, and
+/// what the response needs. `counter` builds a counter-offer's proposal toward the other side.
+fn check_response(
+    g: &Game,
+    pid: PlayerId,
+    n: &Negotiation,
+    response: Response,
+    raw: &str,
+    counter: impl FnOnce(PlayerId) -> Result<Option<Terms>, ActionError>,
+) -> Result<RespondPlan, ActionError> {
+    let id = n.id.get();
+    let other = other_side(n, pid);
     if n.awaiting != Some(pid) && response != Response::Reject {
         let whose = n.awaiting.map(|p| name(g, p)).unwrap_or_default();
         return Err(refuse(format!(
@@ -432,8 +527,7 @@ pub fn plan_respond(
              action 'reject'."
         )));
     }
-    let raw = message.filter(|m| py::truthy(m)).map(py::str_of).unwrap_or_default();
-    let text = truncate_chars(py::strip(&raw), MESSAGE_LIMIT).to_owned();
+    let text = truncate_chars(py::strip(raw), MESSAGE_LIMIT).to_owned();
     if text.is_empty() {
         return Err(refuse(format!(
             "Every response in a negotiation carries a message, and your {} in negotiation \
@@ -461,13 +555,7 @@ pub fn plan_respond(
         Response::Counter | Response::Reply => {
             let mut proposal = None;
             if response == Response::Counter {
-                let empty = Value::Array(Vec::new());
-                let or_empty = |v: Option<&Value>| match v {
-                    Some(v) if py::truthy(v) => v.clone(),
-                    _ => empty.clone(),
-                };
-                let (give, receive) = (or_empty(give), or_empty(receive));
-                let Some(t) = make_proposal(g, pid, other, Some(&give), Some(&receive))? else {
+                let Some(t) = counter(other)? else {
                     return Err(refuse(
                         "A counter-offer needs at least one item; use reply to send only a \
                          message.",
@@ -494,8 +582,9 @@ pub fn respond(g: &mut Game, pid: PlayerId, plan: RespondPlan) -> Value {
             let parties = g.state().diplo().negotiation(nid).map(|n| (n.initiator, n.responder));
             let Some((a, b)) = parties else { return json!({"status": "refused"}) };
             let deal = execute_deal(g, a, b, &terms);
-            let summary =
-                |g: &Game| deal.and_then(|d| g.state().diplo().deal(d)).map(|d| d.summary.to_string());
+            let summary = |g: &Game| {
+                deal.and_then(|d| g.state().diplo().deal(d)).map(|d| d.summary.to_string())
+            };
             let now = g.state().diplo().negotiation(nid).map(|n| n.status);
             if let Some(status) = now.filter(|&s| s != NegStatus::Open) {
                 // What the deal set off closed the chat (a war between its parties, which
@@ -582,25 +671,36 @@ pub fn respond(g: &mut Game, pid: PlayerId, plan: RespondPlan) -> Value {
 pub const CLOSED_STATUSES: [NegStatus; 3] =
     [NegStatus::Rejected, NegStatus::Expired, NegStatus::Cancelled];
 
-/// Checks that negotiation `nid` may be closed from outside with the status named `status`
-/// (`close_negotiation`, `diplomacy.py:882-886`).
+/// The refusal of a status a negotiation cannot be closed with from outside.
+fn not_a_close(name: &str) -> ActionError {
+    refuse(format!("A negotiation closes as rejected, expired, cancelled, not '{name}'."))
+}
+
+/// The status named `name`, if a negotiation may be closed with it from outside
+/// (`close_negotiation`, `diplomacy.py:882-883`).
+///
+/// # Errors
+/// A name that is no status, or not a closed one.
+pub fn close_status(name: &str) -> Result<NegStatus, ActionError> {
+    NegStatus::from_name(name)
+        .filter(|s| CLOSED_STATUSES.contains(s))
+        .ok_or_else(|| not_a_close(name))
+}
+
+/// Checks that negotiation `nid` may be closed from outside with `status` (`close_negotiation`,
+/// `diplomacy.py:882-886`).
 ///
 /// # Errors
 /// A status that is not a closed one, no such negotiation, or one not open.
-pub fn plan_close(
-    g: &Game,
-    nid: i64,
-    status: &str,
-) -> Result<(NegotiationId, NegStatus), ActionError> {
-    let status =
-        NegStatus::from_name(status).filter(|s| CLOSED_STATUSES.contains(s)).ok_or_else(|| {
-            refuse(format!("A negotiation closes as rejected, expired, cancelled, not '{status}'."))
-        })?;
-    let n = get(g, nid)?;
+pub fn plan_close(g: &Game, nid: NegotiationId, status: NegStatus) -> Result<(), ActionError> {
+    if !CLOSED_STATUSES.contains(&status) {
+        return Err(not_a_close(status.name()));
+    }
+    let n = get(g, i64::from(nid.get()))?;
     if n.status != NegStatus::Open {
         return Err(refuse(format!("Negotiation #{} is already {}.", n.id.get(), n.status.name())));
     }
-    Ok((n.id, status))
+    Ok(())
 }
 
 /// Closes an open negotiation from outside the conversation (`close_negotiation`,
