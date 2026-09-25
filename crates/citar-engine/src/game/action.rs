@@ -28,6 +28,7 @@ use super::error::{ActionError, ErrCode};
 use super::espionage::{MoveSpy, StageCoup};
 use super::events::EventBatch;
 use super::great_people::ChooseGreatPerson;
+use super::meta::{LogThought, SetCivName, WriteNotes};
 use super::policies::AdoptPolicy;
 use super::religion::found::FoundPantheon;
 use super::research::{ChooseFreeTech, DequeueResearch, SetResearch};
@@ -134,6 +135,12 @@ pub enum Action {
     UnitAction(super::actions::UnitAction),
     /// `un_vote` (package 1c-08).
     UnVote(UnVote),
+    /// `set_civ_name` (package 1c-09).
+    SetCivName(SetCivName),
+    /// `write_notes` (package 1c-09).
+    WriteNotes(WriteNotes),
+    /// `log_thought` (package 1c-09).
+    LogThought(LogThought),
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
@@ -196,6 +203,9 @@ impl Action {
             Self::FoundCity(_) => "found_city",
             Self::UnitAction(_) => "unit_action",
             Self::UnVote(_) => "un_vote",
+            Self::SetCivName(_) => "set_civ_name",
+            Self::WriteNotes(_) => "write_notes",
+            Self::LogThought(_) => "log_thought",
             #[cfg(test)]
             Self::Probe(_) => "probe",
             Self::AdoptPolicy(_) => "adopt_policy",
@@ -242,11 +252,15 @@ impl Action {
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
             // `tools.rename_city` is `any_time` (tools.py:782), and so are a message and an
-            // answer in a negotiation (tools.py:931-964) and a vote (tools.py:887-889).
+            // answer in a negotiation (tools.py:931-964), a vote (tools.py:887-889), and a
+            // civilization's name, notes and thoughts (tools.py:900, 1057, 1076).
             Self::RenameCity(_)
             | Self::SendMessage(_)
             | Self::RespondNegotiation(_)
-            | Self::UnVote(_) => true,
+            | Self::UnVote(_)
+            | Self::SetCivName(_)
+            | Self::WriteNotes(_)
+            | Self::LogThought(_) => true,
             Self::AdoptPolicy(_)
             | Self::Buy(_)
             | Self::BuyTile(_)
@@ -288,6 +302,9 @@ impl Action {
             Self::FoundCity(a) => run(g, pid, a),
             Self::UnitAction(a) => run(g, pid, a),
             Self::UnVote(a) => run(g, pid, a),
+            Self::SetCivName(a) => run(g, pid, a),
+            Self::WriteNotes(a) => run(g, pid, a),
+            Self::LogThought(a) => run(g, pid, a),
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
             Self::AdoptPolicy(x) => run(g, pid, x),

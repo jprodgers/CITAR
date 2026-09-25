@@ -5,8 +5,8 @@
 //!                                   --out writes a report for the cross-target comparison
 //! cargo golden bless [SET]          rewrite rng.json, libm.json, ruleset.json, uniques.json,
 //!                                   filters.json, gen.json, states.json, convert.json,
-//!                                   turns.json and maps.json from this build, or only SET's
-//!                                   file; a set that
+//!                                   turns.json, maps.json and newgame.json from this build, or
+//!                                   only SET's file; a set that
 //!                                   depends on a stage still pending is refused
 //! cargo golden states               rewrite the checked-in states of testdata/states/ from the
 //!                                   generator (then bless); only when the save format changes
@@ -89,7 +89,8 @@ fn check(out: Option<&str>) -> ExitCode {
     if failed {
         println!(
             "golden: a set differs from its committed file. If this build is right, `cargo golden \
-             bless` (rng, libm, ruleset, uniques, filters, gen, states, convert, turns, maps) or \
+             bless` (rng, libm, ruleset, uniques, filters, gen, states, convert, turns, maps, \
+             newgame) or \
              scripts/refcheck/pyfmt_vectors.py (pyfmt), and say why."
         );
         ExitCode::from(1)

@@ -797,7 +797,12 @@ class EngineGame:
         out = []
         for n, o in enumerate(ops or [], start=1):
             if isinstance(o, dict) and o.get("op") == "reload":
+                # The drive test operation's stop inside a turn is kept on the game object, where Rust saves it
+                # in the host heads: carried across, so a drive after a reload goes on from it on both engines.
+                mark = getattr(self._g, "_drive_mark", None)
                 self._g = EngineGame.from_save(self.to_save())._g
+                if mark is not None:
+                    self._g._drive_mark = mark
                 out.append({})
             else:
                 out.append(_plain(testops.apply_one(self._g, n, o)))

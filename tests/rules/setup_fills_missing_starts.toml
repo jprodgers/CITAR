@@ -1,0 +1,44 @@
+about = """
+A game on an editor map with more civilizations than the map gives start positions chooses the
+rest as the map generator chooses starts: the most fertile tiles, spread out from the starts the
+map gives. Each civilization's starting units stand on its start.
+"""
+from = "citar/engine/maps.py: prepare, _fill_starts"
+start = "full"
+
+[config]
+players = [{}, {}, {}, {}, {}, {}]
+barbarians = "off"
+ruins = false
+city_states = 0
+
+[[step]]
+check = { what = "game" }
+subset = { majors = [0, 1, 2, 3, 4, 5], city_states = [] }
+
+[[step]]
+note = "The arena gives five starts, the first five seats': A, B, C, D and E."
+check = { what = "tile", at = "A" }
+path = "units"
+len = 2
+
+[[step]]
+check = { what = "tile", at = "E" }
+path = "units"
+len = 2
+
+[[step]]
+note = "The sixth start is chosen: the best tile at least seven from the others, north of the city-state site."
+check = { what = "player", player = 5 }
+path = "units[0]"
+as = "settler"
+absent = false
+
+[[step]]
+check = { what = "unit", unit = "=settler" }
+subset = { owner = 5, type = "Settler", x = 11, y = 3 }
+
+[[step]]
+check = { what = "tile", x = 11, y = 3 }
+path = "units"
+len = 2

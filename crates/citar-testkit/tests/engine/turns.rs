@@ -252,11 +252,11 @@ fn a_civilization_that_starts_with_a_tech_has_it() {
 }
 
 #[test]
-fn what_setup_cannot_do_yet_is_refused_as_not_ported() {
+fn what_setup_cannot_do_is_refused_readably() {
     let r = Ruleset::shared();
-    // The arena gives five starts: a sixth seat needs start filling (package 1c-09).
-    let six = new_game(r, &json!({"players": [{}, {}, {}, {}, {}, {}]}));
-    assert!(matches!(six, Err(EngineError::Action(e)) if e.code == ErrCode::NotPorted));
+    // The arena gives five starts: a sixth is chosen (package 1c-09).
+    let (six, _) = new_game(r, &json!({"players": [{}, {}, {}, {}, {}, {}]})).expect("six fit");
+    assert_eq!(six.majors(true).count(), 6);
     // A document the engine cannot read.
     let (mut doc, _) = map_doc("arena").expect("the arena");
     doc["tiles"][0][0] = json!("Nowhere");

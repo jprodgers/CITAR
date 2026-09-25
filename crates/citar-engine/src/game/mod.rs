@@ -83,6 +83,7 @@ pub mod eval;
 pub mod events;
 pub mod great_people;
 pub mod invariants;
+pub mod meta;
 pub mod movement;
 pub mod mutate;
 pub mod path;
@@ -123,6 +124,7 @@ pub enum Porting {
 /// Marks a step whose system a later package ports: a no-op until then. Write the argument as a
 /// literal, `pending(Porting::Pending("1c-02"))`, so `cargo xtask check` counts it.
 #[inline]
+#[allow(dead_code, reason = "no step waits for a package now; a later port may mark one again")]
 pub(crate) const fn pending(_: Porting) {}
 
 /// Marks a value whose system a later package ports, and gives `meanwhile` until then. Write the

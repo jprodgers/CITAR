@@ -15,24 +15,27 @@
 //! `ready_unit`; package 1c-03 `attack_as` and `capture_civilian`; package 1c-04 `automate` and
 //! `progress_builds`; package 1c-05 `add_spy`, `close_negotiation` and `open_negotiation_as`;
 //! package 1c-06 `add_barbarian`, `add_quest`, `barbarian_act`, `clear_camps` (which the bare
-//! prelude of the rule scripts runs), `create_camp` and `sack_city`. Every test operation is
-//! ported.
+//! prelude of the rule scripts runs), `create_camp` and `sack_city`; package 1c-09 `debug` and
+//! `set_difficulty`, the host's commands of those names, and `drive`, the host's drive with a
+//! test driver at the seats named. Every test operation is ported.
 
 use serde_json::{Map, Value, json};
 
+use super::game::DebugAction;
 use super::scenario::{given, pid, players, resolve, tile, whole};
-use crate::base::ids::{CityId, PlayerId, PromotionId, UnitId};
+use crate::base::ids::{CityId, DifficultyId, NegotiationId, PlayerId, PromotionId, UnitId};
 use crate::base::py;
 use crate::base::sets::PromotionSet;
 use crate::game::cities::construction;
 use crate::game::derive::rev::UnitTouch;
+use crate::game::diplomacy::actions::RespondNegotiation;
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::events::EventBatch;
 use crate::game::pending::SightSource;
-use crate::game::{Game, Porting};
+use crate::game::{Action, DriveOptions, DriverOutcome, Drivers, Game, Porting, SeatDriver, Stop};
 use crate::save::journal::JournalCursor;
 use crate::state::cities::Constructible;
-use crate::state::players::{AutoDecision, Controller, SeatOverrides};
+use crate::state::players::{AutoDecision, Controller, DriverMemory, SeatOverrides};
 use crate::state::{Phase, TurnClock};
 
 /// A test operation's parameters.
@@ -137,6 +140,22 @@ pub static TEST_OPS: &[TestOp] = &[
         run: create_camp,
     },
     TestOp {
+        name: "debug",
+        params: "action (meet_all, reveal or gold): the host's developer shortcut",
+        porting: Porting::Ported,
+        run: debug,
+    },
+    TestOp {
+        name: "drive",
+        params: "drivers (the players a test driver plays: it does nothing with its turns); \
+                 optional answer (what the driver answers a negotiation waiting on it: reject by \
+                 default, accept, reply, or none to leave it), defer (drivers that leave what waits \
+                 on them to the host, as a hybrid seat's bot leaves it to its model), seat_limit: \
+                 the host drives the game until it has something to do; why it stopped",
+        porting: Porting::Ported,
+        run: drive,
+    },
+    TestOp {
         name: "end_round",
         params: "every remaining turn of the round ends, and the round with them",
         porting: Porting::Ported,
@@ -224,6 +243,13 @@ pub static TEST_OPS: &[TestOp] = &[
         params: "player, controller; optional handicap, auto: hands the seat to another driver",
         porting: Porting::Ported,
         run: set_controller,
+    },
+    TestOp {
+        name: "set_difficulty",
+        params: "player, difficulty (a level's name): the seat's own difficulty, as the host sets \
+                 it; ok is false, and nothing changes, for a name that is no level",
+        porting: Porting::Ported,
+        run: set_difficulty,
     },
     TestOp {
         name: "set_turn",
@@ -500,6 +526,132 @@ fn end_round(g: &mut Game, _: &Params) -> Result<Value, ActionError> {
         g.end_turn_now(g.current())?;
     }
     Ok(clock(g))
+}
+
+/// A developer shortcut of the host's (`EngineGame.debug`): meet_all, reveal or gold.
+fn debug(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let raw = o.get("action").unwrap_or(&Value::Null);
+    let action = raw
+        .as_str()
+        .and_then(DebugAction::from_name)
+        .ok_or_else(|| bad("Unknown debug action."))?;
+    g.debug_now(action);
+    Ok(json!({}))
+}
+
+/// The driver of the `drive` operation: it does nothing with its turns, and answers a
+/// negotiation that waits on it with `answer`, or leaves it (`None`), or leaves it to the host
+/// (`defer`, as a hybrid seat's bot leaves it to the seat's model).
+struct TestDriver {
+    answer: Option<&'static str>,
+    defer: bool,
+}
+
+impl SeatDriver for TestDriver {
+    fn play_turn(&mut self, _: &mut Game, _: PlayerId, _: &mut DriverMemory) -> DriverOutcome {
+        DriverOutcome::Done
+    }
+
+    fn respond(
+        &mut self,
+        g: &mut Game,
+        pid: PlayerId,
+        nid: NegotiationId,
+        _: &mut DriverMemory,
+    ) -> DriverOutcome {
+        if self.defer {
+            return DriverOutcome::Deferred;
+        }
+        if let Some(action) = self.answer {
+            let a = RespondNegotiation {
+                negotiation_id: i64::from(nid.get()),
+                action: json!(action),
+                message: Some(json!("(test driver)")),
+                give: None,
+                receive: None,
+            };
+            // A refused answer leaves the negotiation as it was, which is an answer too.
+            let _refused = g.act(pid, Action::RespondNegotiation(a));
+        }
+        DriverOutcome::Done
+    }
+}
+
+/// The host drives the game (`Game::drive`), a test driver at each seat named (one that defers
+/// what waits on it to the host for those under `defer`, as `citar/engine/testops.py` mirrors
+/// it), until it stops:
+/// `stop` (`external`, `hybrid_diplomat`, `awaiting_reply`, `seat_limit`, `game_over`), the
+/// `player` it names (or null), the `negotiations` it waits on, and where the game is in time.
+fn drive(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let named = |key: &str| -> Result<Vec<PlayerId>, ActionError> {
+        match o.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            v => players(g, v, true),
+        }
+    };
+    let seats = named("drivers")?;
+    let deferring = named("defer")?;
+    // As Python reads it: absent is reject, and anything but those four names is refused.
+    let answer = match o.get("answer") {
+        None => Some("reject"),
+        Some(v) => match v.as_str() {
+            Some("reject") => Some("reject"),
+            Some("accept") => Some("accept"),
+            Some("reply") => Some("reply"),
+            Some("none") => None,
+            _ => {
+                return Err(bad(format!(
+                    "answer must be reject, accept, reply or none, not '{}'.",
+                    py::str_of(v)
+                )));
+            }
+        },
+    };
+    let limit = match o.get("seat_limit") {
+        None | Some(Value::Null) => 0,
+        Some(v) => py::int_of(v)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| bad("seat_limit must be a whole number, 0 or more."))?,
+    };
+    let mut agents: Vec<(PlayerId, TestDriver)> = seats
+        .into_iter()
+        .map(|p| (p, TestDriver { answer, defer: deferring.contains(&p) }))
+        .collect();
+    let mut d = Drivers::none(g.state().players().len());
+    for (p, a) in &mut agents {
+        d = d.with(*p, a);
+    }
+    let (stop, _) = g.drive(&mut d, DriveOptions::default().with_seat_limit(limit))?;
+    let (name, player, nids): (&str, Option<PlayerId>, Vec<u32>) = match stop {
+        Stop::External(p) => ("external", Some(p), Vec::new()),
+        Stop::HybridDiplomat(p) => ("hybrid_diplomat", Some(p), Vec::new()),
+        Stop::AwaitingReply { pid, nids } => {
+            ("awaiting_reply", Some(pid), nids.iter().map(|n| n.get()).collect())
+        }
+        Stop::SeatLimit => ("seat_limit", None, Vec::new()),
+        _ => ("game_over", None, Vec::new()),
+    };
+    Ok(json!({
+        "stop": name,
+        "player": player.map(|p| p.0),
+        "negotiations": nids,
+        "turn": g.turn(),
+        "current": g.current().0,
+    }))
+}
+
+/// Gives a seat its own difficulty, named loosely, as the host's `set_difficulty` does
+/// (`EngineGame.set_difficulty`): `ok` is false, and nothing changes, for a name that is no
+/// level.
+fn set_difficulty(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let p = pid(g, o.get("player"), false)?;
+    let name = o.get("difficulty").map(py::str_of).unwrap_or_default();
+    let Some(level) = g.rules().resolve::<DifficultyId>(&name) else {
+        return Ok(json!({"ok": false}));
+    };
+    g.set_seat_difficulty(p, Some(level))
+        .map_err(|e| ActionError::rule(format!("The game refused ({e}).")))?;
+    Ok(json!({"ok": true}))
 }
 
 /// Makes it a player's turn now and starts it (`EngineGame.force_turn`): refused, as the host's

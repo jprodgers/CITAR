@@ -9,13 +9,15 @@
 //! Package 1c-05 adds the diplomacy reads and commands of the facade (`engine_api.py:539-613`):
 //! `negotiation`, `negotiations`, `negotiation_view`, `end_turn_refusal`, `close_negotiation`,
 //! `open_negotiation_as`, `max_chat_messages`, `deal`, `describe_items` and `validate_items`.
-//! The rest land with the packages that port what they do.
+//! Package 1c-09 adds `debug` (`engine_api.debug`, `engine_api.py:764-782`), the developer
+//! shortcuts [`DebugAction`]. The rest land with the packages that port what they do.
 
 use serde_json::Value;
 
 use super::scenario;
-use crate::base::ids::{DealId, NegotiationId, PlayerId};
+use crate::base::ids::{DealId, NegotiationId, PlayerId, TileIdx};
 use crate::game::Game;
+use crate::game::derive::rev::PlayerTouch;
 use crate::game::diplomacy::{deals, negotiation};
 use crate::game::error::{ActionError, EngineError, ErrCode};
 use crate::game::events::EventBatch;
@@ -80,6 +82,43 @@ impl Game {
         self.make_contact(a, b);
         self.settle();
         Ok(self.take_batch())
+    }
+
+    /// A developer shortcut (`engine_api.debug`, `engine_api.py:764-782`): every living major
+    /// civilization meets every other, sees the whole map explored, or gets 500 gold.
+    pub fn debug(&mut self, action: DebugAction) -> Result<EventBatch, ActionError> {
+        self.ensure_live()?;
+        self.begin_call();
+        self.debug_now(action);
+        self.settle();
+        Ok(self.take_batch())
+    }
+
+    /// What [`Game::debug`] does, for a caller that settles.
+    pub(crate) fn debug_now(&mut self, action: DebugAction) {
+        let majors: Vec<PlayerId> = self.majors(true).map(|p| p.id()).collect();
+        match action {
+            DebugAction::MeetAll => {
+                for &a in &majors {
+                    for &b in &majors {
+                        self.make_contact(a, b);
+                    }
+                }
+            }
+            DebugAction::Reveal => {
+                let all: Vec<TileIdx> = (0..self.grid().size()).map(TileIdx).collect();
+                for &p in &majors {
+                    self.reveal_tiles(p, &all);
+                }
+            }
+            DebugAction::Gold => {
+                for &p in &majors {
+                    if let Some(pl) = self.player_mut(p, PlayerTouch::STOCKS) {
+                        pl.econ.gold += 500.0;
+                    }
+                }
+            }
+        }
     }
 
     /// Hands a civilization to another turn driver (`engine_api.set_controller`,
@@ -232,5 +271,37 @@ impl Game {
         let out = negotiation::open(self, pid, plan);
         self.settle();
         Ok((out, self.take_batch()))
+    }
+}
+
+/// A developer shortcut of the host's (`DEBUG_ACTIONS`, `engine_api.py:362`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DebugAction {
+    /// Every living major civilization meets every other.
+    MeetAll,
+    /// Every living major civilization has the whole map explored.
+    Reveal,
+    /// Every living major civilization gets 500 gold.
+    Gold,
+}
+
+impl DebugAction {
+    /// Every shortcut, in Python's order.
+    pub const ALL: [Self; 3] = [Self::MeetAll, Self::Reveal, Self::Gold];
+
+    /// Its name, as the host sends it: `meet_all`, `reveal`, `gold`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MeetAll => "meet_all",
+            Self::Reveal => "reveal",
+            Self::Gold => "gold",
+        }
+    }
+
+    /// The shortcut called `name`, exactly.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == name)
     }
 }

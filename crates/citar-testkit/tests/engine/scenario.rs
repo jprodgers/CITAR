@@ -120,11 +120,7 @@ fn inspect_reads_and_lists_what_is_pending() {
             )
         })
         .collect();
-    for (name, pkg) in [
-        ("view", "1d-02"),
-        ("briefing", "1d-03"),
-        ("map: starts and ruins a document lacks", "1c-09"),
-    ] {
+    for (name, pkg) in [("view", "1d-02"), ("briefing", "1d-03")] {
         assert!(listed.contains(&(name.to_owned(), pkg.to_owned())), "{name} waits for {pkg}");
     }
     let kinds: Vec<&str> =
@@ -135,7 +131,8 @@ fn inspect_reads_and_lists_what_is_pending() {
         [2, 0, 0],
         "two queries wait, and no test op"
     );
-    assert_eq!([count("turn_stage"), count("setup_stage")], [0, 1], "the stages that wait");
+    // Gate 1 of package 1c-09: no stage of a turn or of setup waits.
+    assert_eq!([count("turn_stage"), count("setup_stage")], [0, 0], "no stage waits");
     assert_eq!(listed.len(), kinds.len());
     for (name, _) in &listed {
         assert!(

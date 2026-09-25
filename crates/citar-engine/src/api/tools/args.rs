@@ -10,7 +10,8 @@
 //! purchases, research and policies, package 1b-08 `found_pantheon` and `choose_great_person`,
 //! package 1c-02 the unit tools, package 1c-03 the tools of combat and conquest, package 1c-04
 //! `build_improvement`, `found_city` and `unit_action`, package 1c-05 those of diplomacy and
-//! espionage, with `end_turn`, and package 1c-06 `city_state_action` and `stage_coup`.
+//! espionage, with `end_turn`, package 1c-06 `city_state_action` and `stage_coup`, package 1c-08
+//! `un_vote`, and package 1c-09 `set_civ_name`, `write_notes` and `log_thought`, the last.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -175,6 +176,8 @@ pub static TOOLS: &[ToolArgs] = &[
         params: &[("belief", ArgType::String)],
         required: &["belief"],
     },
+    // Package 1c-09 (tools.py:900-925, 1057-1087).
+    ToolArgs { tool: "log_thought", params: &[("text", ArgType::String)], required: &["text"] },
     // `city_id` is an integer or a string ("hideout"), which no coercion touches.
     ToolArgs {
         tool: "move_spy",
@@ -246,6 +249,11 @@ pub static TOOLS: &[ToolArgs] = &[
         required: &["city_id"],
     },
     ToolArgs {
+        tool: "set_civ_name",
+        params: &[("name", ArgType::String), ("leader", ArgType::String)],
+        required: &["name"],
+    },
+    ToolArgs {
         tool: "set_production",
         params: &[
             ("city_id", ArgType::Integer),
@@ -298,6 +306,11 @@ pub static TOOLS: &[ToolArgs] = &[
             ("locked", ArgType::Boolean),
         ],
         required: &["city_id", "x", "y"],
+    },
+    ToolArgs {
+        tool: "write_notes",
+        params: &[("text", ArgType::String), ("mode", ArgType::String)],
+        required: &["text"],
     },
 ];
 

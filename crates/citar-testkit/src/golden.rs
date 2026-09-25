@@ -46,6 +46,12 @@
 //! - **`maps.json`**: ten generated maps, duel to huge, every map type, each a blake3 of its
 //!   tiles, landmasses and starts. Written by `golden bless`.
 //!
+//! Package 1c-09 adds, in [`newgame`]:
+//! - **`newgame.json`**: ten new games, duel to huge, every map type, and one on an editor map
+//!   whose starts, city-state sites and ruins setup fills in, each the state's digest right after
+//!   `Game::new`. Written by `golden bless`. With every setup stage ported, nothing `turns.json`
+//!   depends on is pending, so `golden bless` writes it too from here on.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -88,6 +94,7 @@ pub struct SetReport {
 pub mod convert;
 pub mod filters;
 pub mod maps;
+pub mod newgame;
 pub mod states;
 pub mod turns;
 
@@ -106,6 +113,7 @@ pub fn check_all() -> Vec<SetReport> {
         convert::check_convert(),
         turns::check_turns(),
         maps::check_maps(),
+        newgame::check_newgame(),
     ]
 }
 
@@ -154,6 +162,7 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
     .chain(convert::blessed())
     .chain(turns::blessed())
     .chain(maps::blessed())
+    .chain(newgame::blessed())
     .collect()
 }
 

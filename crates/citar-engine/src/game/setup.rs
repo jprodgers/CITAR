@@ -7,6 +7,8 @@
 //! nations, the players, the relations and the first turn, games on an editor map that gives
 //! its start positions, and the starting techs, gold and culture that rule scripts rely on.
 //! Package 1b-04 ports games on a generated map (`mapgen::generate`, `game.py:218-221`).
+//! Package 1c-09 ports the last stage, the start positions and ruins an editor map lacks
+//! (`maps.prepare`, `maps.py:323-365`), so every stage is ported.
 //!
 //! What differs from Python, on purpose (`tests/rules/intended.toml`):
 //! - the engine draws nothing and reads no file: the settings must carry a seed, and an editor
@@ -20,16 +22,20 @@
 //!   (`mapgen.py:62-63`) (`config-refuses-unknown-names`);
 //! - the nations are shuffled on their own stream, `Purpose::NationShuffle`, where Python drew
 //!   them from the stream the map was then drawn from, so tuning map generation never
-//!   reshuffles the nations (DESIGN.md 6.14).
+//!   reshuffles the nations (DESIGN.md 6.14). The ruins an editor map lacks are spread from
+//!   `Purpose::MapPrepare` for the same reason (`map-prepare-draws-its-own-stream`);
+//! - a game holds at most 64 players, city-states and barbarians included (a `PlayerSet` is one
+//!   word), and a setup that would make more is refused; Python had no limit
+//!   (`games-hold-at-most-64-players`).
 
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
 use super::derive::rev::PlayerTouch;
-use super::error::{ActionError, EngineError, ErrCode};
+use super::error::EngineError;
 use super::events::EventBatch;
-use super::{Game, Porting, pending, research};
+use super::{Game, Porting, research};
 use crate::base::hex::HexGrid;
 use crate::base::ids::{
     BarbarianLevelId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId, PlayerId, SpeedId,
@@ -37,7 +43,7 @@ use crate::base::ids::{
 };
 use crate::base::py;
 use crate::base::rng::{Purpose, Rng};
-use crate::base::sets::PlayerVec;
+use crate::base::sets::{PlayerSet, PlayerVec};
 use crate::mapgen::continents;
 use crate::mapgen::document::{self, MapDocument};
 use crate::mapgen::options::{self, MapOptions, MapType};
@@ -648,10 +654,6 @@ impl SetupStage {
     ) -> Self {
         Self { name, step: SetupStep::Game(f), porting: Porting::Ported }
     }
-
-    const fn later(name: &'static str, porting: Porting) -> Self {
-        Self { name, step: SetupStep::Pending, porting }
-    }
 }
 
 /// The stages of a new game, in order (DESIGN.md 6.14): those that make the state, then those
@@ -661,7 +663,7 @@ pub static SETUP: [SetupStage; 15] = [
     SetupStage::draft("nations", choose_nations),
     SetupStage::draft("map: an editor document", read_map),
     SetupStage::draft("map: a generated map", generate_map),
-    SetupStage::later("map: starts and ruins a document lacks", Porting::Pending("1c-09")),
+    SetupStage::draft("map: starts and ruins a document lacks", prepare_map),
     SetupStage::draft("players", make_players),
     SetupStage::game("starting techs, gold and culture", starting_techs),
     SetupStage::game("city-state init", init_city_states),
@@ -756,15 +758,6 @@ fn no_map() -> EngineError {
     config("The map stage of setup made no map.")
 }
 
-/// The refusal of a setup that needs a system not ported yet (DESIGN.md 3.4, rule 4).
-fn not_ported(path: &str, what: &str) -> EngineError {
-    ActionError::new(
-        ErrCode::NotPorted,
-        format!("{what} is not ported to the new engine yet ({path})."),
-    )
-    .into()
-}
-
 /// config: the seats of the settings, checked again, since a host may build a [`NewGame`]
 /// itself; a game whose settings name none gets the default number (`game.py:190-191`).
 fn read_seats(d: &mut Draft<'_>) -> Result<(), EngineError> {
@@ -811,49 +804,65 @@ fn choose_nations(d: &mut Draft<'_>) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// map: the editor's document read and cleaned (`maps.prepare`, `maps.py:323-346`), its
-/// continents, and the start positions it gives. Settings without a document generate the map
-/// in the next stage.
+/// map: the editor's document read and cleaned (`maps.prepare`, `maps.py:326-332`), and its
+/// continents. Settings without a document generate the map in the next stage; the start
+/// positions a document gives, and those it lacks, are the stage after.
 fn read_map(d: &mut Draft<'_>) -> Result<(), EngineError> {
     let Some(doc) = d.setup.map_doc() else { return Ok(()) };
     let map = document::read(d.rules, &doc.body).map_err(|e| EngineError::Map(e.0))?;
     let grid = map.grid().map_err(|e| EngineError::Map(e.0))?;
     d.continents = continents::assign(d.rules, &grid, &map.tiles);
-    let n = d.seats.len();
-    if map.starts.len() < n {
-        // maps._fill_starts chooses the rest (package 1c-09).
-        return Err(not_ported(
-            "mapgen::prepare",
-            &format!(
-                "This map gives {} start positions for {n} civilizations; choosing the rest",
-                map.starts.len()
-            ),
-        ));
+    d.map = Some(map);
+    Ok(())
+}
+
+/// map: the start positions and ruins an editor map lacks (`maps.prepare`, `maps.py:333-345`).
+/// The civilizations take the document's starts in seat order, and those it lacks are chosen as
+/// the generator chooses them, the most fertile tiles spread out from the others
+/// (`maps._fill_starts`); a map with no room for them all is refused. The city-states take the
+/// document's sites at least three tiles from every civilization, then as many more as there is
+/// room for, four apart and six from the civilizations; one with no site is left out of the
+/// game. Ruins are spread on a map that has none when the settings want them, from
+/// `Purpose::MapPrepare`. A generated map has all of these already.
+fn prepare_map(d: &mut Draft<'_>) -> Result<(), EngineError> {
+    if d.setup.map_doc().is_none() {
+        return Ok(());
     }
-    let starts = map.starts[..n].to_vec();
-    let cs_starts: Vec<TileIdx> = map
+    let r = d.rules;
+    let (n, n_cs) = (d.seats.len(), d.cs_nations.len());
+    let (seed, ruins_wanted) = (d.config().seed, d.config().ruins);
+    let map = d.map.as_mut().ok_or_else(no_map)?;
+    let map_error = |e: mapgen::MapError| EngineError::Map(e.0);
+    let grid = map.grid().map_err(map_error)?;
+    let mut starts: Vec<TileIdx> = map.starts.iter().copied().take(n).collect();
+    if starts.len() < n {
+        starts = mapgen::fill_starts_on(r, map, &starts, n, 7, &[], 0).map_err(map_error)?;
+        if starts.len() < n {
+            return Err(EngineError::Map(format!(
+                "This map has room for only {} civilizations (asked for {n}).",
+                starts.len()
+            )));
+        }
+    }
+    let mut cs: Vec<TileIdx> = map
         .cs_starts
         .iter()
         .copied()
         .filter(|&s| starts.iter().all(|&x| grid.distance(s, x) >= 3))
-        .take(d.cs_nations.len())
+        .take(n_cs)
         .collect();
-    if cs_starts.len() < d.cs_nations.len() {
-        return Err(not_ported(
-            "mapgen::prepare",
-            &format!(
-                "This map gives {} city-state start positions for {} city-states; choosing the \
-                 rest",
-                cs_starts.len(),
-                d.cs_nations.len()
-            ),
-        ));
+    if cs.len() < n_cs {
+        cs = mapgen::fill_starts_on(r, map, &cs, n_cs, 4, &starts, 6).map_err(map_error)?;
     }
-    // Ruins for a map that has none, when the settings want them (maps.py:344-345).
-    pending(Porting::Pending("1c-09"));
+    let ruins = r.derived().known.ancient_ruins;
+    let has_ruins = ruins.is_some_and(|x| map.tiles.iter().any(|t| t.improvement() == Some(x)));
+    if ruins_wanted && !has_ruins {
+        // refcheck: map-prepare-draws-its-own-stream
+        let mut rng = Rng::keyed(seed, Purpose::MapPrepare, &[0]);
+        mapgen::ruins_on(r, map, &mut rng, &starts, &cs).map_err(map_error)?;
+    }
     d.starts = starts;
-    d.cs_starts = cs_starts;
-    d.map = Some(map);
+    d.cs_starts = cs;
     Ok(())
 }
 
@@ -909,6 +918,17 @@ fn make_players(d: &mut Draft<'_>) -> Result<(), EngineError> {
     let cfg = d.setup.config();
     let map = d.map.as_ref().ok_or_else(no_map)?;
     let cells = u32::from(map.width) * u32::from(map.height);
+    // refcheck: games-hold-at-most-64-players
+    let barbarians_on = r.constants().barbarian_levels[cfg.barbarians].level.is_some();
+    let total =
+        d.seats.len() + d.cs_nations.len().min(d.cs_starts.len()) + usize::from(barbarians_on);
+    if total > PlayerSet::CAPACITY {
+        return Err(config(format!(
+            "A game holds at most {} players, city-states and barbarians included; these \
+             settings make {total}.",
+            PlayerSet::CAPACITY
+        )));
+    }
     let id = |i: usize| {
         u8::try_from(i).map(PlayerId).map_err(|_| config("A game holds at most 64 players."))
     };
@@ -952,7 +972,6 @@ fn make_players(d: &mut Draft<'_>) -> Result<(), EngineError> {
         p.start_tile = Some(d.cs_starts[j]);
         players.push(p);
     }
-    let barbarians_on = r.constants().barbarian_levels[cfg.barbarians].level.is_some();
     if barbarians_on {
         let nation = r
             .nations()

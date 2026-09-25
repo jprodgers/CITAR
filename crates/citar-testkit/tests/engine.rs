@@ -8,6 +8,7 @@ mod engine {
     mod combat;
     mod convert;
     mod diplomacy;
+    mod drive;
     mod economy;
     mod eval;
     mod filters;
@@ -21,6 +22,7 @@ mod engine {
     mod rules;
     mod save;
     mod scenario;
+    mod setup;
     mod state;
     mod tools;
     mod turns;

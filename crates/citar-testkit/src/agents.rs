@@ -28,9 +28,8 @@
 //! negotiations that wait on it (accept, counter, reply or reject, at random), now and then to
 //! message a civilization it has met, to open a negotiation with a proposal drawn from a small
 //! pool (some of which it cannot give, which is part of the play), rarely to denounce, and after
-//! turn 50 rarely to declare war; before it returns it withdraws what it opened and still waits on
-//! an answer, as the `end_turn` rule would have it. Its spies go now and then to a city it has
-//! explored, or home. [`RandomAgent`] answers a negotiation it is asked about the same way.
+//! turn 50 rarely to declare war. Its spies go now and then to a city it has explored, or home.
+//! [`RandomAgent`] answers a negotiation it is asked about the same way.
 //!
 //! Package 1c-06 teaches it to deal with the city-states it has met ([`city_states`]: gifts of
 //! gold and units, protection pledged and withdrawn, tribute demanded, peace, marriage), and its
@@ -39,10 +38,12 @@
 //! Package 1c-08 teaches it to vote in the United Nations ([`un_vote`]) while voting is open:
 //! for a living civilization it has met, for itself, or to abstain.
 //!
-//! Until package 1c-09's `drive` dispatches [`SeatDriver::respond`], nothing would answer a chat
-//! the agent opens before it withdraws it, so the other side answers at once ([`converse`]), as
-//! its own `respond` would: the deals the agent strikes are carried out, and what they leave
-//! runs its course when rounds end.
+//! Package 1c-09's `drive` puts a negotiation that waits on a driven seat to its driver
+//! ([`SeatDriver::respond`]), so the agent leaves a chat it opens to `drive`: another agent
+//! answers it before the opener's turn ends, and one with a seat the host plays stops the drive
+//! until the host answers or closes it (rule T3). The agent answered at once for the other side
+//! until then (`converse`, gone), drawing from the stream `respond` draws from, so the deals it
+//! strikes are the same kind: carried out, and running their course as rounds end.
 
 use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TechId, TileIdx, UnitId};
 use citar_engine::base::rng::{Purpose, Rng};
@@ -91,8 +92,8 @@ pub type Move = fn(&mut Game, PlayerId, &mut Rng);
 /// - Package 1c-03: [`fight`], before the units move, so that those beside an enemy attack it.
 /// - Package 1c-04: [`found_cities`], [`build_improvements`] and [`special_actions`], and the
 ///   orders `explore`, `automate` and `pillage` among [`order_units`]'.
-/// - Package 1c-05: [`spies`] and [`diplomacy`], the chats last, so that it withdraws what it
-///   opened once it has done everything else.
+/// - Package 1c-05: [`spies`] and [`diplomacy`], the chats last, which the drive answers once
+///   the agent has done everything else.
 /// - Package 1c-06: [`city_states`], and coups among its spies' moves.
 /// - Package 1c-08: [`un_vote`], last, so that the moves before it draw as they did.
 pub const MOVES: &[Move] = &[
@@ -598,20 +599,6 @@ fn answer_stream(g: &Game, pid: PlayerId, nid: NegotiationId) -> Rng {
     Rng::keyed(g.state().seed(), Purpose::TestAgent, &keys)
 }
 
-/// The most answers [`converse`] plays in one chat.
-const EXCHANGES: usize = 4;
-
-/// Plays out a chat just opened: the side it waits on answers, as its driver's `respond` would,
-/// until it closes or four answers (`EXCHANGES`) have passed.
-pub fn converse(g: &mut Game, nid: NegotiationId) {
-    for _ in 0..EXCHANGES {
-        let open = g.negotiation(nid).filter(|n| n.status == NegStatus::Open);
-        let Some(who) = open.and_then(|n| n.awaiting) else { return };
-        let mut rng = answer_stream(g, who, nid);
-        answer(g, who, nid, &mut rng);
-    }
-}
-
 /// Answers negotiation `nid` at random: accept, counter with a proposal from the pool, reply or
 /// reject (`respond_negotiation`). An answer the game refuses (a deal a side cannot carry out, a
 /// counter it cannot give) ends the chat instead, rather than leave it waiting.
@@ -652,9 +639,9 @@ fn open_ones(g: &Game, pid: PlayerId, f: impl Fn(&Negotiation) -> bool) -> Vec<N
 
 /// Diplomacy (`respond_negotiation`, `send_message`, `open_negotiation`, `denounce`,
 /// `declare_war`): answers what waits on it; one time in ten sends a message to a civilization it
-/// has met; one time in ten opens a negotiation with one of them, which plays out at once
-/// ([`converse`]); one time in two hundred denounces one; after turn 50 declares war on one one
-/// time in two hundred; and withdraws what it opened and still waits on an answer.
+/// has met; one time in ten opens a negotiation with one of them, which the drive puts to the
+/// other side once the turn's moves are done; one time in two hundred denounces one; and after
+/// turn 50 declares war on one one time in two hundred.
 pub fn diplomacy(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     for nid in open_ones(g, pid, |n| n.awaiting == Some(pid)) {
         answer(g, pid, nid, rng);
@@ -675,12 +662,7 @@ pub fn diplomacy(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
                 give: Some(give),
                 receive: Some(receive),
             };
-            if let Ok((out, _)) = g.act(pid, Action::OpenNegotiation(a)) {
-                let nid = out["negotiation_id"].as_u64().and_then(|n| u32::try_from(n).ok());
-                if let Some(nid) = nid.and_then(NegotiationId::new) {
-                    converse(g, nid);
-                }
-            }
+            play(g, pid, Action::OpenNegotiation(a));
         }
         if rng.chance(0.005) {
             play(g, pid, Action::Denounce(Denounce { player_id: i64::from(to.0) }));
@@ -689,16 +671,6 @@ pub fn diplomacy(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
             let a = DeclareWar { player_id: i64::from(to.0), message: Some(json!("War!")) };
             play(g, pid, Action::DeclareWar(a));
         }
-    }
-    for nid in open_ones(g, pid, |n| n.awaiting != Some(pid)) {
-        let a = RespondNegotiation {
-            negotiation_id: i64::from(nid.get()),
-            action: json!("withdraw"),
-            message: Some(json!("Another time.")),
-            give: None,
-            receive: None,
-        };
-        play(g, pid, Action::RespondNegotiation(a));
     }
 }
 

@@ -16,6 +16,14 @@ class RuleScripts(unittest.TestCase):
         self.assertIn("_selftest", names)
         self.assertGreater(len(names), 4)
 
+    def test_every_test_operation_runs_its_own_function(self):
+        # Two @op decorators stacked on one function register it under both names, and the other op's function is
+        # lost (refresh_visibility once ran set_difficulty): each op must be the function named after it, once.
+        from citar.engine import testops
+        for name, (fn, _) in testops.OPS.items():
+            self.assertEqual(fn.__name__, f"_{name}", name)
+        self.assertEqual(len({id(fn) for fn, _ in testops.OPS.values()}), len(testops.OPS))
+
     def test_a_script_with_an_unknown_key_is_refused(self):
         with self.assertRaises(rulescript.ScriptError):
             rulescript.Script("bad", {"about": "x", "stepz": []})

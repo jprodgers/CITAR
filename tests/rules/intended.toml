@@ -297,3 +297,13 @@ reason = "The United Nations' world leader vote, the Domination win and the Time
 [[differences]]
 id = "deal-war-names-both-sides"
 reason = "A war declared as agreed in a deal was announced without saying who declared war on whom, so statistics counting wars by their attacker (the baseline's wars declared) missed it; Rust's names the attacker and the defender, as every other declaration of war does"
+
+# Package 1c-09: setup completed, and the drive.
+
+[[differences]]
+id = "map-prepare-draws-its-own-stream"
+reason = "The ancient ruins spread on an editor map that had none were drawn from the game's one random stream, after the nations were shuffled; Rust draws them from a stream of their own, so where they lie differs while how many does not"
+
+[[differences]]
+id = "games-hold-at-most-64-players"
+reason = "A game could hold any number of players; Rust holds at most 64, city-states and barbarians included (a set of players is one machine word), and refuses settings that would make more, such as 24 civilizations with 40 city-states and the barbarians"

@@ -54,6 +54,8 @@ impl Game {
             return;
         }
         self.set_clock(TurnClock { turn_started: true, ..c });
+        // A turn begun anew, as a forced one is, is its driver's to play again.
+        self.clear_drive_mark();
         stages::run_player(self, &PLAYER_START, c.current);
     }
 
@@ -80,6 +82,7 @@ impl Game {
         }
         // A turn ends only once it has begun: the first turn of a round a call stopped before.
         self.begin_turn();
+        self.clear_drive_mark();
         stages::run_player(self, &PLAYER_END, pid);
         let n = self.st.players().len();
         while self.phase() == Phase::Playing {

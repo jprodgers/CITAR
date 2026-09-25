@@ -970,6 +970,7 @@ pub fn build(r: &'static Ruleset, seed: u64, shape: &Shape) -> State {
         actions: g.below(1000) as u32,
         frames: g.below(500) as u32,
         journal_seq: g.below(500) as u32,
+        drive: None,
     };
 
     let parts = StateParts {

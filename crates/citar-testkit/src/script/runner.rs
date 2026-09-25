@@ -43,13 +43,6 @@ struct Runner<'s> {
 
 impl<'s> Runner<'s> {
     fn start(script: &'s Script) -> Result<Self, String> {
-        if !script.bare {
-            return Err(format!(
-                "{}: start = \"full\" needs the setup stages package 1c-09 ports; the Rust \
-                 runner plays bare scripts only until then",
-                script.name
-            ));
-        }
         let (doc, anchors) = map_doc(&script.map)?;
         let mut frame = Frame {
             width: doc

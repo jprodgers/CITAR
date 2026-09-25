@@ -1,0 +1,17 @@
+{"format": 1,
+"games": "[name, seed, [width, height], digest after Game::new, [majors, city-states, barbarians], units, camps, explored tiles (summed over players), events]",
+"ruleset_id": "3b89bbdfb807639c32c28f6c0ad8d1d2935355d61f86d43994fff824e5d8a389",
+"rows": [
+["newgame-duel-continents",1,[44,28],"bee4c356d8cafb720bec495ab2b9a638dc8e5383da3e0c0e3874059d2bf76903",[2,4,1],8,7,126,2],
+["newgame-duel-archipelago",2,[44,28],"3bc493564e695db3e34406775d56b0f7d0250afd8b279190d676732dffc74f8e",[2,4,1],8,4,123,2],
+["newgame-small-pangaea",3,[60,38],"c2f5963a0ad24bc5242a16aecc734ae9e1873263fa94444912c82947dedb63e4",[4,8,1],16,10,241,2],
+["newgame-small-fractal",4,[60,38],"d1719754c012450216bee00284c52797647eecc9fc8de675f9bbcb040d40a99e",[4,8,1],16,10,221,2],
+["newgame-standard-inland_sea",5,[76,48],"dc7cb7184f91a2867b9ee5dfe180b082e637cbf563dee97b6aed1e25be3b7579",[6,12,1],24,22,345,2],
+["newgame-standard-continents",6,[76,48],"75114183cc49f7eb7c3ed91291bf99b029127a5241a10ae56b35df21dad4ad53",[6,12,1],24,14,358,2],
+["newgame-large-archipelago",7,[92,58],"161f48412181e47b552ec25737b5a0e0b620262f6826cbac1fe1598da3cad0c3",[8,16,1],32,12,488,2],
+["newgame-large-fractal",8,[92,58],"333d8c16494b75e23b75e41d7355b715cf4e5d7a374ba2425cb75cdf40254949",[8,16,1],32,18,486,2],
+["newgame-huge-pangaea",9,[112,70],"e52c70e724a0474b0c908c2b80697b3b7aa19462c6b78da91238011612540081",[12,24,1],48,24,686,2],
+["newgame-huge-inland_sea",10,[112,70],"500b2c6a4debfd120355bcdf2644e4bfbff15c4fe1368fd0f4d1c183f1587656",[12,24,1],48,35,702,2],
+["newgame-arena-six-seats",11,[24,16],"5aedc27cced38cc9b7b83a6b9784d44d7d3730225293f9e65081df0068ebf78a",[6,1,1],13,6,133,2],
+["newgame-arena-city-state-sites",12,[24,16],"dab7858693bd0da531fb02b366a0e96232458de682660e262d3e09cc6f94c88a",[2,3,1],7,6,95,2]
+]}
