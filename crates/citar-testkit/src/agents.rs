@@ -6,19 +6,26 @@
 //! they exist (DESIGN.md 3.4, rule 2). In the end it researches, builds, founds cities, fights
 //! when a preview allows it, adopts policies, negotiates, declares war and ends its turn.
 //!
-//! Package 1b-07 teaches it to research, to fill its cities' queues, to adopt policies, and now
-//! and then to buy what a city builds and a tile beside its borders.
+//! Package 1b-07 teaches it every action of its own: to research (now and then a far goal, an
+//! appended tech, a tech dropped from the queue, the free techs it is owed), to fill its cities'
+//! queues (appending now and then, a conversion of production among what it appends), to edit
+//! them, to switch a city's automatic production, to rename a city, to adopt policies, and to buy
+//! what a city builds and a tile beside its borders.
 
-use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TileIdx};
+use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TechId, TileIdx};
 use citar_engine::base::rng::{Purpose, Rng};
 use citar_engine::game::cities::borders::{BuyTile, can_buy_tile};
 use citar_engine::game::cities::construction::{buildable_items, item_name};
 use citar_engine::game::cities::purchase::Buy;
-use citar_engine::game::cities::queue::SetProduction;
+use citar_engine::game::cities::queue::{
+    ChangeQueue, QueueEdit, RenameCity, SetAutoProduction, SetProduction,
+};
 use citar_engine::game::policies::{AdoptPolicy, adoptable_policies, can_adopt_any};
-use citar_engine::game::research::{SetResearch, available_techs};
+use citar_engine::game::research::{
+    ChooseFreeTech, DequeueResearch, SetResearch, available_techs, is_unresearchable,
+};
 use citar_engine::game::{Action, DriverOutcome, Game, SeatDriver};
-use citar_engine::state::cities::Constructible;
+use citar_engine::state::cities::{Constructible, Perpetual};
 use citar_engine::state::players::DriverMemory;
 use serde_json::json;
 
@@ -27,42 +34,120 @@ pub type Move = fn(&mut Game, PlayerId, &mut Rng);
 
 /// Every move the agent knows, in the order it tries them each turn; then it ends its turn, which
 /// [`Game::drive`] does for it once it returns.
-pub const MOVES: &[Move] = &[research, production, policies, purchases];
+pub const MOVES: &[Move] = &[research, production, queues, policies, purchases, names];
 
 /// Picks one of `v` from the turn's stream.
 fn pick<T: Copy>(rng: &mut Rng, v: &[T]) -> Option<T> {
     rng.pick(v).copied()
 }
 
-/// With nothing researched, researches a tech it could research now.
-fn research(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
-    if g.player(pid).is_none_or(|p| !p.tech.queue.is_empty()) {
-        return;
-    }
-    let Some(t) = pick(rng, &available_techs(g, pid)) else { return };
-    let name = g.rules().name(t).unwrap_or_default().to_owned();
-    // A refusal is an answer too: the agent moves on.
-    let _refused = g.act(pid, Action::SetResearch(SetResearch { tech: json!(name), append: None }));
+/// A tech's name, as a player types it.
+fn tech_name(g: &Game, t: TechId) -> String {
+    g.rules().name(t).unwrap_or_default().to_owned()
 }
 
-/// Each city with an empty queue builds something it can build.
+/// Researches: the free techs it is owed, then, with nothing researched, a tech it could research
+/// now or now and then a far one, whose path is queued; with a queue, now and then a tech
+/// appended or one dropped.
+fn research(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    let Some(pl) = g.player(pid) else { return };
+    let (queue, free) = (pl.tech.queue.clone(), pl.tech.free_techs);
+    // A refusal is an answer too: the agent moves on.
+    if free > 0
+        && let Some(t) = pick(rng, &available_techs(g, pid))
+    {
+        let tech = json!(tech_name(g, t));
+        let _refused = g.act(pid, Action::ChooseFreeTech(ChooseFreeTech { tech }));
+    }
+    let far = || -> Vec<TechId> {
+        g.rules()
+            .techs()
+            .ids()
+            .filter(|&t| !g.has_tech(pid, Some(t)) && !is_unresearchable(g, pid, t))
+            .collect()
+    };
+    if queue.is_empty() {
+        let options = if rng.below(4) == 0 { far() } else { available_techs(g, pid) };
+        let Some(t) = pick(rng, &options) else { return };
+        let tech = json!(tech_name(g, t));
+        let _refused = g.act(pid, Action::SetResearch(SetResearch { tech, append: None }));
+    } else if rng.below(8) == 0 {
+        let Some(t) = pick(rng, &far()) else { return };
+        let a = SetResearch { tech: json!(tech_name(g, t)), append: Some(json!(true)) };
+        let _refused = g.act(pid, Action::SetResearch(a));
+    } else if rng.below(16) == 0
+        && let Some(t) = pick(rng, &queue)
+    {
+        let tech = json!(tech_name(g, t));
+        let _refused = g.act(pid, Action::DequeueResearch(DequeueResearch { tech }));
+    }
+}
+
+/// Fills its cities' queues: a city with an empty queue builds something it can build, and one
+/// converting its production now and then builds something again; now and then a city appends
+/// an item to its queue, or a conversion of production when it may.
 fn production(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
     for c in cities {
-        if g.city(c).is_none_or(|x| !x.queue.is_empty()) {
-            continue;
-        }
+        let Some(first) = g.city(c).map(|x| x.queue.first().copied()) else { continue };
+        let append = match first {
+            None => false,
+            Some(Constructible::Perpetual(_)) if rng.below(3) == 0 => false,
+            Some(_) if rng.below(6) == 0 => true,
+            Some(_) => continue,
+        };
         let items = buildable_items(g, c);
-        let all: Vec<Constructible> = items
+        let mut all: Vec<Constructible> = items
             .units
             .iter()
             .map(Constructible::Unit)
             .chain(items.buildings.iter().chain(items.wonders.iter()).map(Constructible::Building))
             .collect();
+        if append && rng.below(4) == 0 {
+            all = [(items.gold, Perpetual::Gold), (items.science, Perpetual::Science)]
+                .into_iter()
+                .filter(|&(ok, _)| ok)
+                .map(|(_, k)| Constructible::Perpetual(k))
+                .collect();
+        }
         let Some(item) = pick(rng, &all) else { continue };
         let name = item_name(g.rules(), item).to_owned();
-        let a = SetProduction { city_id: i64::from(c.get()), item: json!(name), append: None };
+        let a = SetProduction {
+            city_id: i64::from(c.get()),
+            item: json!(name),
+            append: append.then(|| json!(true)),
+        };
         let _refused = g.act(pid, Action::SetProduction(a));
+    }
+}
+
+/// Now and then edits a city's queue (moves or removes an entry, or clears it), and switches a
+/// city's automatic production.
+fn queues(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
+    let Some(c) = pick(rng, &cities) else { return };
+    let len = g.city(c).map_or(0, |x| x.queue.len());
+    if len >= 2 && rng.below(4) == 0 {
+        let edits = [QueueEdit::Up, QueueEdit::Down, QueueEdit::First, QueueEdit::Last];
+        let edit = if rng.below(16) == 0 {
+            QueueEdit::Clear
+        } else if rng.below(4) == 0 {
+            QueueEdit::Remove
+        } else {
+            pick(rng, &edits).unwrap_or(QueueEdit::Up)
+        };
+        let index = i64::try_from(rng.below(len as u64)).unwrap_or(0);
+        let a = ChangeQueue {
+            city_id: i64::from(c.get()),
+            action: json!(edit.name()),
+            index: Some(index),
+        };
+        let _refused = g.act(pid, Action::ChangeQueue(a));
+    }
+    if rng.below(20) == 0 {
+        let on = g.city(c).is_some_and(|x| !x.auto_production);
+        let a = SetAutoProduction { city_id: i64::from(c.get()), enabled: json!(on) };
+        let _refused = g.act(pid, Action::SetAutoProduction(a));
     }
 }
 
@@ -103,6 +188,20 @@ fn purchases(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
             let _refused = g.act(pid, Action::BuyTile(a));
         }
     }
+}
+
+/// Now and then renames a city, which a player may do at any time.
+fn names(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    if rng.below(30) != 0 {
+        return;
+    }
+    let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
+    let Some(c) = pick(rng, &cities) else { return };
+    let name = format!("Town {} {}", pid.0, rng.below(1000));
+    let _refused = g.act(
+        pid,
+        Action::RenameCity(RenameCity { city_id: i64::from(c.get()), name: json!(name) }),
+    );
 }
 
 /// A driver that plays at random among the actions the engine has, reproducibly: the same game
