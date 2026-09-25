@@ -263,19 +263,27 @@ def _attack_as(g: Game, o: dict):
     return combat.attack(g, u, idx)
 
 
-@op("capture_civilian", "unit, x, y: the unit takes the civilian on the tile")
+@op("capture_civilian", "unit (or player, the barbarians included), x, y: the unit, or the player, takes the "
+                        "civilian on the tile")
 def _capture_civilian(g: Game, o: dict):
-    """A unit takes the civilian on a tile, as the tests poked it: the captured unit's new id, or None when it was
-    destroyed instead."""
+    """A unit, or a player (the barbarians among them), takes the civilian on a tile, as the tests poked it: the
+    captured unit's new id, or None when it was destroyed instead. Only the captor's owner decides what becomes of
+    the civilian (units.capture_civilian reads nothing else of the captor)."""
+    from types import SimpleNamespace
     from . import units
     from .scenario import _idx
-    u = _unit(g, o)
+    if o.get("unit") is not None or o.get("player") is None:
+        owner = _unit(g, o).owner
+    else:
+        owner = _whole(o, "player")
+        if not 0 <= owner < len(g.s.players):
+            raise ActionError("No such player.")
     v = g.civilian_at(_idx(g, o))
     if v is None:
         raise ActionError("There is no civilian there.")
-    before = {x.id for x in g.player_units(u.owner)}
-    units.capture_civilian(g, u, v)
-    new = sorted(x.id for x in g.player_units(u.owner) if x.id not in before)
+    before = {x.id for x in g.player_units(owner)}
+    units.capture_civilian(g, SimpleNamespace(owner=owner), v)
+    new = sorted(x.id for x in g.player_units(owner) if x.id not in before)
     return {"unit": new[0] if new else None}
 
 

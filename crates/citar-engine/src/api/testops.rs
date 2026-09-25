@@ -76,7 +76,7 @@ pub static TEST_OPS: &[TestOp] = &[
     },
     TestOp {
         name: "capture_civilian",
-        params: "unit, x, y: the unit takes the civilian on the tile",
+        params: "unit (or player, the barbarians included), x, y: the unit, or the player, takes the                  civilian on the tile",
         porting: Porting::Ported,
         run: capture_civilian,
     },
@@ -522,16 +522,24 @@ fn attack_as(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(crate::game::combat::actions::apply_attack(g, plan))
 }
 
-/// A unit takes the civilian on a tile (`units.capture_civilian`), as the tests poked it; the
-/// captured unit's new id, or null when it was destroyed instead.
+/// A unit, or a player (the barbarians among them), takes the civilian on a tile
+/// (`units.capture_civilian`), as the tests poked it; the captured unit's new id, or null when it
+/// was destroyed instead.
 fn capture_civilian(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
-    let u = unit_param(g, o)?;
+    let captor = match (given(o, "unit"), given(o, "player")) {
+        (None, Some(v)) => {
+            let n: u8 = whole(v, "player")?;
+            Some(PlayerId(n)).filter(|&p| g.player(p).is_some())
+        }
+        _ => g.unit(unit_param(g, o)?).map(crate::state::units::Unit::owner),
+    }
+    .ok_or_else(|| ActionError::new(ErrCode::InvalidPlayer, "No such player."))?;
     let t = tile(g, o)?;
     let victim = g
         .civilian_at(t)
         .map(crate::state::units::Unit::id)
         .ok_or_else(|| ActionError::rule("There is no civilian there."))?;
-    let taken = crate::game::units::capture::capture_civilian(g, u, victim);
+    let taken = crate::game::units::capture::capture_civilian_by(g, captor, victim);
     Ok(json!({"unit": taken.map(UnitId::get)}))
 }
 

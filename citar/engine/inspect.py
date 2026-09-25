@@ -191,7 +191,7 @@ def _unit(g: Game, u) -> dict:
             "promotions": sorted(u.promotions), "moves": u.moves, "max_moves": max_moves(g, u),
             "activity": u.activity, "goto": g.xy(u.goto) if u.goto is not None else None,
             "fortify": u.fortify, "embarked": is_embarked(g, u), "carried_by": u.carried_by,
-            "set_up": "Set Up" in u.status}
+            "set_up": "Set Up" in u.status, "original_owner": u.original_owner, "return_offer": u.return_offer}
 
 
 def _units(g: Game, q: dict) -> list:

@@ -18,6 +18,12 @@ use crate::unique::UniqueType;
 /// The captor's unit takes the civilian `victim`; the new unit, if it was not destroyed.
 pub fn capture_civilian(g: &mut Game, captor: UnitId, victim: UnitId) -> Option<UnitId> {
     let captor_owner = g.unit(captor)?.owner();
+    capture_civilian_by(g, captor_owner, victim)
+}
+
+/// Player `captor_owner` takes the civilian `victim`, as its unit would: only the captor's owner
+/// decides what becomes of it. The new unit, if it was not destroyed.
+pub fn capture_civilian_by(g: &mut Game, captor_owner: PlayerId, victim: UnitId) -> Option<UnitId> {
     let v = g.unit(victim)?.clone();
     let r = g.rules();
     let vd = &r.base_units()[v.base];

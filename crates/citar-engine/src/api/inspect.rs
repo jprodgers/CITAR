@@ -356,6 +356,8 @@ fn unit(g: &Game, u: UnitId) -> Value {
         "embarked": crate::game::movement::is_embarked(g, u),
         "carried_by": x.carried_by().map(UnitId::get),
         "set_up": x.set_up,
+        "original_owner": x.original_owner.map(|p| p.0),
+        "return_offer": x.return_offer.map(|p| p.0),
     })
 }
 
