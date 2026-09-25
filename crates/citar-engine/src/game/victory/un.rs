@@ -175,8 +175,9 @@ impl Rule for UnVote {
 // ---- The count (victory.py:170-221) ------------------------------------------------------------------
 
 /// How a civilization or city-state votes when it has not (`_ai_vote`, `victory.py:170-184`): a
-/// city-state for its ally, while it lives; a civilization that votes for itself abstains; any
-/// other for the civilization it thinks best of among those it has met, one of equals drawn
+/// city-state for its ally, while it lives; a civilization whose player casts its own votes
+/// abstains; one whose seat votes for it (`un_vote` among its automatic decisions) for the
+/// civilization it thinks best of among those it has met, one of equals drawn
 /// from `Purpose::UnVote` keyed by the voter and the turn, unless it thinks badly even of that
 /// one, when it may abstain (always below -80, below -40 by a draw).
 fn ai_vote(g: &Game, p: &Player) -> Ballot {
@@ -213,7 +214,8 @@ fn ai_vote(g: &Game, p: &Player) -> Ballot {
 }
 
 /// Counts the vote (`hold_vote`, `victory.py:187-221`): who has not voted votes as its seat
-/// decides (a civilization that votes for itself and did not abstains), the United Nations'
+/// decides (a civilization whose player casts its own votes and cast none abstains), the United
+/// Nations'
 /// owner's vote counts twice, and the one candidate with the most votes, if they are enough,
 /// is elected world leader, which the Diplomatic victory's `Win diplomatic vote` reads. The next
 /// vote is set, and the ballots are thrown away.

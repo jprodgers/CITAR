@@ -378,7 +378,8 @@ fn an_eliminated_civilizations_deals_end_and_a_city_states_ally_goes() {
 
 /// Everyone who has not voted when the vote is counted votes as its seat decides: a city-state
 /// for its ally, a civilization whose seat votes for it for the civilization it thinks best of
-/// (one of equals, drawn the same every time), a civilization that votes for itself abstains.
+/// (one of equals, drawn the same every time), and one whose player casts its own votes and cast
+/// none abstains.
 #[test]
 fn the_vote_counts_everyone_as_its_seat_decides() {
     let run = || {
@@ -403,11 +404,12 @@ fn the_vote_counts_everyone_as_its_seat_decides() {
             &json!([
                 {"op": "set_auto", "player": 1, "decision": "un_vote", "on": true},
                 {"op": "set_auto", "player": 0, "decision": "un_vote", "on": false},
+                {"op": "set_auto", "player": 2, "decision": "un_vote", "on": false},
                 {"op": "set_turn", "turn": 16},
             ]),
         );
         let votes_needed = un::votes_needed(&g);
-        assert_eq!(votes_needed, 4, "four voters and the builder's second vote: five");
+        assert_eq!(votes_needed, 4, "four voters and the builder's second vote: five, four win");
         end_round(&mut g);
         clean(&mut g);
         g.state().world().un.results.clone().expect("a result")
@@ -415,12 +417,14 @@ fn the_vote_counts_everyone_as_its_seat_decides() {
     let first = run();
     assert_eq!(first, run(), "drawn the same every time");
     assert_eq!(first.turn, 17);
-    // The city-state for its ally, the third; the second for the first or the third; the first
-    // (the builder, whose seat votes for it) abstains; the third's seat votes for it too.
+    // The city-state for its ally, the third; the second, whose seat votes for it, for the first
+    // or the third, whom it thinks as well of; the first and the third, whose players cast their
+    // own votes and cast none, abstain.
     let votes: u16 = first.tally.iter().map(|&(_, n)| n).sum();
+    assert_eq!(votes, 2, "{first:?}");
     assert!(first.tally.iter().any(|&(p, n)| p == THIRD && n >= 1), "{first:?}");
     assert!(first.tally.iter().all(|&(p, _)| p != YOU), "nobody votes for the second: {first:?}");
-    assert!((2..=3).contains(&votes), "{first:?}");
+    assert_eq!(first.winner, None, "two votes, where four win");
 }
 
 // ---- Revolts ----------------------------------------------------------------------------------------------
