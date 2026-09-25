@@ -52,6 +52,13 @@
 //!   `Game::new`. Written by `golden bless`. With every setup stage ported, nothing `turns.json`
 //!   depends on is pending, so `golden bless` writes it too from here on.
 //!
+//! Package 1c-10 adds, in [`games`]:
+//! - **`load.json`**: the twelve committed fixtures after `Game::from_python`'s settle;
+//! - **`pass.json`**: twenty rounds passed from three of them, each round's digest chained;
+//! - **`random.json`**: six games on generated maps with `RandomAgent` in every seat (duel for
+//!   200 turns twice, small for 120 twice, standard for 60, large for 30), each round's digest
+//!   chained. `pass` and `random`, like `turns`, are only blessed with no stage pending.
+//!
 //! Each set's report carries a blake3 of the answers this build computed. The determinism
 //! workflow compares those across targets (a determinism bug if they differ) and the problems
 //! against the committed files (a behaviour change if the targets agree with each other but not
@@ -93,6 +100,7 @@ pub struct SetReport {
 
 pub mod convert;
 pub mod filters;
+pub mod games;
 pub mod maps;
 pub mod newgame;
 pub mod states;
@@ -114,6 +122,9 @@ pub fn check_all() -> Vec<SetReport> {
         turns::check_turns(),
         maps::check_maps(),
         newgame::check_newgame(),
+        games::check_load(),
+        games::check_pass(),
+        games::check_random(),
     ]
 }
 
@@ -121,7 +132,7 @@ pub fn check_all() -> Vec<SetReport> {
 /// still pending (DESIGN.md 3.4, rule 3; 9.6).
 #[must_use]
 pub fn bless_refusals() -> Vec<(&'static str, String)> {
-    turns::refusal().map(|why| ("turns.json", why)).into_iter().collect()
+    turns::refusal().map(|why| ("turns.json", why)).into_iter().chain(games::refusals()).collect()
 }
 
 /// The report `golden check --out` writes: one entry per set.
@@ -163,6 +174,7 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
     .chain(turns::blessed())
     .chain(maps::blessed())
     .chain(newgame::blessed())
+    .chain(games::blessed())
     .collect()
 }
 
