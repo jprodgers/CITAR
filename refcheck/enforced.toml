@@ -93,3 +93,9 @@ group = "buildable"
 # and the sampled paths with their turns and step costs.
 [[enforce]]
 group = "movement"
+
+# combat_previews (package 1c-03): the sampled fights' strengths and modifiers, the damage both ways at the rolls
+# 0, 0.5 and 1, the attack preview (or its refusal) of ground and sea units, and for aircraft whether they can
+# attack now and every interceptor they would meet, with its chance, factor and damage.
+[[enforce]]
+group = "combat_previews"

@@ -153,3 +153,17 @@ reason = "Python never recorded the units a civilization gained, so Carthage's `
 [[differences]]
 id = "unit-refusals-change-nothing"
 reason = "A move_unit that was refused (no path, or its first step refused) had already woken the unit from its sleep, fortification or other order, and cleared its standing move order when the step was refused; Rust refuses the move with the unit as it was"
+
+# Package 1c-03: combat and conquest.
+
+[[differences]]
+id = "vs-units-never-matches-a-city"
+reason = "Python's `vs [x] units` shared `vs [x]`'s test, so a city matched `[All]`, `[City]` or a city filter's word there; Rust asks it about units only (no shipped unique shows it, so no reference state does)"
+
+[[differences]]
+id = "civilians-under-fire"
+reason = "A ranged attack that brought a civilian to 0 health left it on the map at 0, neither dead nor captured, and every attack on a civilian reported it captured; Rust kills a civilian brought to 0 health, and reports a capture only when a melee unit took the civilian"
+
+[[differences]]
+id = "may-not-annex-refuses-annexing"
+reason = "A civilization that `May not annex cities` had the cities it captured made puppets, then could annex them at will; Rust refuses it annex"
