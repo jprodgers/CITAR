@@ -260,6 +260,14 @@ check = "e"
 eq = 3.5
 
 [[step]]
+note = "subtracting nothing is no division by zero"
+set = { z = "=5 - 0 - 0.0" }
+
+[[step]]
+check = "z"
+eq = 5
+
+[[step]]
 check = "f"
 eq = 14
 

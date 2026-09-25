@@ -19,6 +19,8 @@
 //!   it, `civs` answers the tech and policy costs and the policies a civilization could adopt.
 //! - [`movement`] (package 1c-02): where units can get this turn, and paths with their turns and
 //!   step costs.
+//! - [`combat_previews`] (package 1c-03): sampled fights' strengths, modifiers and damage, the
+//!   preview, and aircraft's interceptors.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -37,6 +39,7 @@ use crate::fixture::Fixture;
 pub mod buildable;
 pub mod city_stats;
 pub mod civs;
+pub mod combat_previews;
 pub mod fixed_point;
 pub mod movement;
 pub mod state_echo;
@@ -112,6 +115,7 @@ static MODULES: &[&dyn AnswerModule] = &[
     &buildable::Buildable,
     &movement::Movement,
     &visible::Visible,
+    &combat_previews::CombatPreviews,
 ];
 
 /// The answers of the Rust engine.

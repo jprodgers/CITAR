@@ -1,0 +1,87 @@
+about = """
+A civilization that took another's only city gives it back: the city returns to its founder, who is
+alive again with the city as its capital, no puppet and no resistance. The two make peace, the
+founder thinks better of its liberator and opens its borders to it, and the liberator's units in the
+city leave it. (Python eliminated the founder when it lost its last city and revived it here; the
+Rust engine eliminates players at the end of the round, package 1c-08.)
+"""
+from = "citar/engine/conquest.py: liberate, conquer"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 2 },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "C", name = "Athenai" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "A>e" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", w = "=made[3].unit_ids[0]" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 10 }
+
+[[step]]
+op = "set_city"
+args = { city = "=roma", health = 1 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=w" }
+
+[[step]]
+op = "attack_as"
+args = { unit = "=w", at = "A" }
+as = "fight"
+
+[[step]]
+check = "fight"
+subset = { captured_city = "Roma", from = "Civilization 1", result = "puppet" }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { owner = 1, founder = 0, previous_owner = 0, puppet = true, pop = 1, resistance = 1 }
+
+[[step]]
+op = "force_turn"
+args = { player = 1 }
+
+[[step]]
+tool = "city_status"
+player = 1
+args = { city_id = "=roma", status = "liberate" }
+as = "freed"
+
+[[step]]
+check = "freed"
+eq = { liberated = "Roma", returned_to = "Civilization 1" }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { owner = 0, founder = 0, previous_owner = 1, puppet = false, resistance = 0, pop = 1 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { alive = true, capital = "=roma" }
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+subset = { war = false, opinion = [-80, 0], open_borders_until = [40, 0] }
+
+[[step]]
+check = { what = "units", player = 1, at = "A" }
+len = 0
+
+[[step]]
+check = { what = "units", player = 1 }
+len = 1
+
+[[step]]
+check = { what = "events", type = "liberated" }
+len = 1

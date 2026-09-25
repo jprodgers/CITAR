@@ -78,8 +78,7 @@ fn a_failing_list_of_test_ops_changes_nothing_either() {
     .expect_err("the second test op fails");
     assert_eq!(e.message, "Test operation 2 (unmeet): A player cannot forget itself.");
     assert_eq!((g.digest().ok(), g.rev()), before);
-    let e = testops::apply(&mut g, &json!([{"op": "capture_civilian", "unit": 1}]))
-        .expect_err("not yet");
+    let e = testops::apply(&mut g, &json!([{"op": "add_spy", "player": 0}])).expect_err("not yet");
     assert_eq!(e.code, ErrCode::NotPorted);
     let e = g
         .apply_ops(
@@ -121,7 +120,7 @@ fn inspect_reads_and_lists_what_is_pending() {
         })
         .collect();
     for (name, pkg) in [
-        ("attack_as", "1c-03"),
+        ("automate", "1c-04"),
         ("negotiation", "1c-05"),
         ("view", "1d-02"),
         ("briefing", "1d-03"),
@@ -137,8 +136,8 @@ fn inspect_reads_and_lists_what_is_pending() {
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [3, 0, 9],
-        "three queries and nine test ops wait"
+        [3, 0, 7],
+        "three queries and seven test ops wait"
     );
     assert_eq!([count("turn_stage"), count("setup_stage")], [17, 3], "the stages that wait");
     assert_eq!(listed.len(), kinds.len());

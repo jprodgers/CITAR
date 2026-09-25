@@ -311,12 +311,21 @@ pub fn add_building(g: &mut Game, c: CityId, b: BuildingId, try_free: bool) {
     }
 }
 
-/// Takes a building out of a city (`cities.remove_building`, `cities.py:1865-1869`).
+/// Takes a building out of a city (`cities.remove_building`, `cities.py:1865-1869`), its health
+/// held to its new maximum.
 pub fn remove_building(g: &mut Game, c: CityId, b: BuildingId) {
     if g.city(c).is_some_and(|x| x.buildings.contains(b))
         && let Some(x) = g.city_mut(c, CityTouch::BUILDINGS)
     {
         x.buildings.remove(b);
+    }
+    // A city that loses its walls loses the health they held above its new most (Python kept
+    // it, beyond the city's maximum, which CITY-1 forbids).
+    let most = max_health(g, c);
+    if g.city(c).is_some_and(|x| x.health > most)
+        && let Some(x) = g.city_mut(c, CityTouch::CORE)
+    {
+        x.health = most;
     }
 }
 

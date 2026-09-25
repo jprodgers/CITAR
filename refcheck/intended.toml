@@ -61,15 +61,12 @@ where = [
 broad = true
 
 [[differences]]
-id = "vs-units-never-matches-a-city"
-reason = "Python's `vs [x] units` shared `vs [x]`'s test, so a city matched `[All]`, `[City]` or a city filter's word there; Rust asks it about units only"
-where = [{ group = "combat_previews", path = "fights[*].**" }]
-broad = true
-
-[[differences]]
 id = "civilians-at-zero-health"
 reason = "Python left a civilian that a ranged attack brought to 0 health on the map at 0, neither dead nor captured (combat.py:109, 806); no Rust unit is ever at 0, and one loaded at 0 keeps 1"
-where = [{ group = "state_echo", path = "units[*].hp" }]
+where = [
+  { group = "state_echo", path = "units[*].hp" },
+  { group = "combat_previews", path = "fights[*].preview.defender_hp" },
+]
 python = 0
 rust = 1
 
@@ -288,3 +285,14 @@ reason = "Gold per turn is shown rounded to one place from a sum of floats taken
 cases = ["small-fractal-off-s1009/t280"]
 where = [{ group = "civs", path = "civs[*].gold_per_turn.*" }]
 broad = true
+
+# Package 1c-03: combat and conquest.
+
+[[differences]]
+id = "combat-modifiers-in-ruleset-order"
+reason = "The attack preview listed a unit's promotions' modifiers in the order the unit gained them; Rust keeps a unit's promotions as a set and lists their modifiers in the ruleset's order (the same modifiers, with the same values)"
+where = [
+  { group = "combat_previews", path = "fights[*].preview.attacker_modifiers[*]" },
+  { group = "combat_previews", path = "fights[*].preview.defender_modifiers[*]" },
+]
+cases = ["large-pangaea-normal-s1016/t280"]

@@ -8,7 +8,7 @@
 //! argument names Python's tools had (DESIGN.md 3.4, rule 2). Package 1b-02 lands the form and
 //! the coercion; package 1b-06 adds the citizen tools, package 1b-07 the tools of production,
 //! purchases, research and policies, package 1b-08 `found_pantheon` and `choose_great_person`,
-//! and package 1c-02 the unit tools.
+//! package 1c-02 the unit tools, and package 1c-03 the tools of combat and conquest.
 
 /// A parameter's JSON type, which says how [`normalize`](super::normalize()) coerces it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -74,6 +74,17 @@ pub static TOOLS: &[ToolArgs] = &[
         params: &[("policy", ArgType::String)],
         required: &["policy"],
     },
+    // Package 1c-03 (tools.py:456-491, 772-781, 803-830).
+    ToolArgs {
+        tool: "air_sweep",
+        params: &[("unit_id", ArgType::Integer), ("x", ArgType::Integer), ("y", ArgType::Integer)],
+        required: &["unit_id", "x", "y"],
+    },
+    ToolArgs {
+        tool: "attack",
+        params: &[("unit_id", ArgType::Integer), ("x", ArgType::Integer), ("y", ArgType::Integer)],
+        required: &["unit_id", "x", "y"],
+    },
     ToolArgs {
         tool: "buy",
         params: &[
@@ -109,6 +120,16 @@ pub static TOOLS: &[ToolArgs] = &[
         required: &["great_person"],
     },
     ToolArgs {
+        tool: "city_attack",
+        params: &[("city_id", ArgType::Integer), ("x", ArgType::Integer), ("y", ArgType::Integer)],
+        required: &["city_id", "x", "y"],
+    },
+    ToolArgs {
+        tool: "city_status",
+        params: &[("city_id", ArgType::Integer), ("status", ArgType::String)],
+        required: &["city_id", "status"],
+    },
+    ToolArgs {
         tool: "dequeue_research",
         params: &[("tech", ArgType::String)],
         required: &["tech"],
@@ -132,6 +153,11 @@ pub static TOOLS: &[ToolArgs] = &[
         tool: "rename_city",
         params: &[("city_id", ArgType::Integer), ("name", ArgType::String)],
         required: &["city_id", "name"],
+    },
+    ToolArgs {
+        tool: "return_civilian",
+        params: &[("unit_id", ArgType::Integer), ("keep", ArgType::Boolean)],
+        required: &["unit_id"],
     },
     ToolArgs {
         tool: "set_auto_production",

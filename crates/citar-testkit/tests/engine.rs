@@ -3,6 +3,7 @@
 
 mod engine {
     mod cities;
+    mod combat;
     mod convert;
     mod economy;
     mod eval;

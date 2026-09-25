@@ -30,6 +30,8 @@
 //! effect does to a unit is package 1c-02's `units::health::apply_unit_effect`, and a promotion
 //! given free is its `units::promotions::add_promotion`.
 
+use smallvec::SmallVec;
+
 use super::cities::borders::{expand_borders, take_ownership};
 use super::cities::construction::complete_construction;
 use super::cities::founding::equivalent_building;
@@ -50,8 +52,27 @@ use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::cities::{City, Constructible};
 use crate::state::players::{Spy, SpyAction};
 use crate::unique::params::PolicyOrBelief;
+#[cfg(feature = "test-ops")]
+use crate::unique::trigger::TriggerKind;
 use crate::unique::trigger::{CityScope, OneTimeEffect, TriggerEvent, TriggerSite};
 use crate::unique::{Ctx, SourceUniques, UniqueData, UniqueType, applies, uq};
+
+#[cfg(feature = "test-ops")]
+std::thread_local! {
+    /// What fired on this thread since the last [`take_fired_for_test`]: the tests of the sites
+    /// that fire triggers whose effects are not ported yet read it (feature `test-ops`).
+    static FIRED: core::cell::RefCell<Vec<(TriggerKind, UniqueId)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every unique that fired on this thread since the last call, with the kind of its trigger, in
+/// the order they fired (feature `test-ops`): what a test of a site whose effects wait for
+/// another package can observe.
+#[cfg(feature = "test-ops")]
+#[must_use]
+pub fn take_fired_for_test() -> Vec<(TriggerKind, UniqueId)> {
+    FIRED.with(|f| core::mem::take(&mut *f.borrow_mut()))
+}
 
 /// Fires the uniques that wait for `event` at `site` (`triggers.fire`): the civilization's, the
 /// city's local ones and its religion's, then, with `include_unit`, the unit's; each is applied
@@ -64,11 +85,7 @@ pub fn fire(
     include_unit: bool,
     note: Option<&str>,
 ) {
-    let found = {
-        let v = g.view();
-        crate::unique::trigger::fire(&v, site, event, include_unit)
-    };
-    for id in found {
+    for id in find(g, site, event, include_unit) {
         apply(g, id, site, note);
     }
 }
@@ -84,6 +101,22 @@ pub fn on_gain(g: &mut Game, src: &SourceUniques, site: &TriggerSite, note: Opti
             apply(g, id, site, note);
         }
     }
+}
+
+/// The uniques [`fire`] would apply, found and counted as fired but not applied: for a site
+/// that changes before they apply, as a unit that is found while it stands and gone when its
+/// civilization's effects apply.
+#[must_use]
+pub fn find(
+    g: &Game,
+    site: &TriggerSite,
+    event: &TriggerEvent,
+    include_unit: bool,
+) -> SmallVec<[UniqueId; 4]> {
+    let found = crate::unique::trigger::fire(&g.view(), site, event, include_unit);
+    #[cfg(feature = "test-ops")]
+    FIRED.with(|f| f.borrow_mut().extend(found.iter().map(|&id| (event.kind(), id))));
+    found
 }
 
 /// Whether a unique that happens once holds at `site` now: its conditionals, but for a timed

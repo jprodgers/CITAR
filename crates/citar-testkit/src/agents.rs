@@ -12,6 +12,11 @@
 //! queues (appending now and then, a conversion of production among what it appends), to edit
 //! them, to switch a city's automatic production, to rename a city, to adopt policies, and to buy
 //! what a city builds and a tile beside its borders.
+//!
+//! Package 1c-03 teaches it to fight ([`fight`]): to attack what its units may attack when the
+//! preview promises more than it costs (and now and then regardless), to bombard from its cities,
+//! to sweep with its fighters, to decide what becomes of the cities it has taken, and to answer
+//! the offers to return the civilians it took back from the barbarians.
 
 use citar_engine::base::ids::{CityId, NegotiationId, PlayerId, TechId, TileIdx, UnitId};
 use citar_engine::base::rng::{Purpose, Rng};
@@ -21,6 +26,10 @@ use citar_engine::game::cities::purchase::Buy;
 use citar_engine::game::cities::queue::{
     ChangeQueue, QueueEdit, RenameCity, SetAutoProduction, SetProduction,
 };
+use citar_engine::game::combat::actions::{
+    AirSweep, Attack, CityAttack, CityStatus, ReturnCivilian, plan_attack,
+};
+use citar_engine::game::combat::{city, combatant_at, resolve};
 use citar_engine::game::path::Mover;
 use citar_engine::game::policies::{AdoptPolicy, adoptable_policies, can_adopt_any};
 use citar_engine::game::research::{
@@ -41,6 +50,7 @@ pub type Move = fn(&mut Game, PlayerId, &mut Rng);
 ///
 /// - Package 1b-07: `research`, `production`, `queues`, `policies`, `purchases` and `names`.
 /// - Package 1c-02: [`promote_units`], [`upgrade_units`], [`order_units`] and [`move_units`].
+/// - Package 1c-03: [`fight`], before the units move, so that those beside an enemy attack it.
 pub const MOVES: &[Move] = &[
     research,
     production,
@@ -51,6 +61,7 @@ pub const MOVES: &[Move] = &[
     promote_units,
     upgrade_units,
     order_units,
+    fight,
     move_units,
 ];
 
@@ -296,6 +307,100 @@ pub fn move_units(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
         let (x, y) = g.grid().xy(t);
         let (x, y) = (i64::from(x), i64::from(y));
         play(g, pid, Action::MoveUnit(MoveUnit { unit_id: tool_id(u), x, y }));
+    }
+}
+
+/// The fates the agent picks for a city it has taken, as `city_status` names them.
+const FATES: [&str; 5] = ["annex", "puppet", "raze", "stop_razing", "liberate"];
+
+/// Fights (`attack`, `air_sweep`, `city_attack`, `city_status`, `return_civilian`): each unit
+/// with movement left attacks one of the tiles in its range it may attack, when the preview says
+/// it deals more than it can take back, or one time in four whatever it says (aircraft and
+/// nuclear weapons, which have no preview, one time in four); a fighter sweeps a tile in its
+/// range one time in ten; each city that may bombard fires at one of its targets; each city in
+/// its hands that is a puppet or burning gets a fate one time in five; and each civilian it took
+/// back from the barbarians goes back, or stays, as a coin says.
+pub fn fight(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    for u in units_of(g, pid) {
+        let Some((from, moves)) = g.unit(u).map(|x| (x.tile(), x.moves)) else { continue };
+        if moves <= 0 || !citar_engine::game::units::is_military(g, u) {
+            continue;
+        }
+        let range =
+            u32::try_from(citar_engine::game::units::health::attack_range(g, u)).unwrap_or(0);
+        let targets: Vec<TileIdx> = g
+            .grid()
+            .within(from, range)
+            .into_iter()
+            .filter(|&t| {
+                t != from
+                    && combatant_at(g, t).is_some_and(|d| {
+                        g.at_war(pid, citar_engine::game::combat::combatant::owner(g, d))
+                    })
+                    && plan_attack(g, u, t).is_ok()
+            })
+            .collect();
+        if citar_engine::game::units::unit_has(
+            g,
+            u,
+            citar_engine::unique::UniqueType::CanAirsweep,
+            false,
+        ) && rng.chance(0.1)
+        {
+            let tiles = g.grid().within(from, range);
+            if let Some(&t) = rng.pick(&tiles) {
+                let (x, y) = g.grid().xy(t);
+                let a = AirSweep { unit_id: tool_id(u), x: i64::from(x), y: i64::from(y) };
+                play(g, pid, Action::AirSweep(a));
+            }
+            continue;
+        }
+        let Some(&t) = rng.pick(&targets) else { continue };
+        let worth = resolve::preview(g, u, t).ok().is_some_and(|pv| {
+            let dealt = pv["damage_to_defender"][0].as_i64().unwrap_or(0);
+            let taken = pv["damage_to_attacker"][1].as_i64().unwrap_or(0);
+            dealt > taken
+        });
+        if worth || rng.chance(0.25) {
+            let (x, y) = g.grid().xy(t);
+            play(
+                g,
+                pid,
+                Action::Attack(Attack { unit_id: tool_id(u), x: i64::from(x), y: i64::from(y) }),
+            );
+        }
+    }
+    let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
+    for c in cities {
+        let targets = city::bombard_targets(g, c);
+        if city::can_bombard(g, c).is_none()
+            && let Some(&t) = rng.pick(&targets)
+        {
+            let (x, y) = g.grid().xy(t);
+            let a = CityAttack { city_id: i64::from(c.get()), x: i64::from(x), y: i64::from(y) };
+            play(g, pid, Action::CityAttack(a));
+        }
+        let taken = g.city(c).is_some_and(|x| x.puppet || x.razing);
+        if taken
+            && rng.chance(0.2)
+            && let Some(&fate) = rng.pick(&FATES)
+        {
+            let a = CityStatus { city_id: i64::from(c.get()), status: json!(fate) };
+            play(g, pid, Action::CityStatus(a));
+        }
+    }
+    for u in units_of(g, pid) {
+        if g.unit(u).is_some_and(|x| x.return_offer.is_some()) {
+            let keep = rng.chance(0.5);
+            play(
+                g,
+                pid,
+                Action::ReturnCivilian(ReturnCivilian {
+                    unit_id: tool_id(u),
+                    keep: Some(json!(keep)),
+                }),
+            );
+        }
     }
 }
 

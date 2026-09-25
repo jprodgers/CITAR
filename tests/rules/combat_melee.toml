@@ -1,0 +1,103 @@
+about = """
+A melee attack between two warriors at war: the preview gives both strengths, no modifiers on open
+grassland, and the damage each side takes at the lowest and highest roll; the attack deals damage
+in that range both ways, spends the attacker's attack and movement, and earns experience, 5 for the
+attacker and 4 for the defender. A stronger attacker deals more.
+"""
+from = "tests/test_engine.py::CombatTests::test_stronger_attacker_deals_more; citar/engine/combat.py: preview, resolve"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "A>e" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[0].unit_ids[0]", enemy = "=made[1].unit_ids[0]" }
+
+[[step]]
+note = "at peace, there is nothing to attack"
+tool = "attack"
+args = { unit_id = "=w", at = "A>e" }
+error = "You are not at war with Civilization 2. Declare war first."
+
+[[step]]
+op = "set_relation"
+args = { a = 0, b = 1, state = "war" }
+
+[[step]]
+check = { what = "preview", unit = "=w", at = "A>e" }
+eq = { attacker_strength = 8.0, defender_strength = 8.0, attacker_modifiers = [], defender_modifiers = [], ranged = false, damage_to_defender = [24, 36], damage_to_attacker = [24, 36], defender = "Warrior", defender_hp = 100, target = "unit" }
+
+[[step]]
+note = "a stronger attacker deals more, and takes less (flanked by the warrior, as the warrior now is by it)"
+op = "add_unit"
+args = { player = 0, unit = "Spearman", at = "A>ne" }
+as = "spear_made"
+
+[[step]]
+set = { spear = "=spear_made.unit_ids[0]" }
+
+[[step]]
+check = { what = "preview", unit = "=spear", at = "A>e" }
+path = "damage_to_defender[0]"
+gt = 24
+
+[[step]]
+check = { what = "preview", unit = "=spear", at = "A>e" }
+path = "damage_to_attacker[1]"
+lt = 36
+
+[[step]]
+note = "melee units only attack their neighbours"
+tool = "attack"
+args = { unit_id = "=w", at = "A>e>e" }
+error = "There is nothing to attack there."
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w", at = "A>e" }
+as = "fight"
+
+[[step]]
+check = "fight"
+subset = { attacker = "Warrior", defender = "Warrior", ranged = false }
+
+[[step]]
+check = "fight"
+path = "damage_to_defender"
+ge = 24
+
+[[step]]
+check = "fight"
+path = "damage_to_defender"
+le = 36
+
+[[step]]
+check = "fight"
+path = "damage_to_attacker"
+ge = 24
+
+[[step]]
+check = "fight"
+path = "damage_to_attacker"
+le = 36
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { hp = "=100 - fight.damage_to_attacker", xp = 5, moves = 0, x = 5, y = 5 }
+
+[[step]]
+check = { what = "unit", unit = "=enemy" }
+subset = { hp = "=100 - fight.damage_to_defender", xp = 4 }
+
+[[step]]
+check = { what = "events", type = "combat" }
+len = 1
+
+[[step]]
+note = "its attack is spent for the turn"
+tool = "attack"
+args = { unit_id = "=w", at = "A>e" }
+error = "has no movement left this turn."

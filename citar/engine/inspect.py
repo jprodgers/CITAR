@@ -11,7 +11,7 @@ from .game import ActionError, Game
 from .state import AUTO_DECISIONS
 
 QUERIES = ("buildable", "city", "costs", "events", "find_tiles", "game", "great_people", "ops", "pending", "player",
-           "relation", "religion", "tile", "unit", "units")
+           "preview", "relation", "religion", "tile", "unit", "units")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -38,6 +38,17 @@ def inspect(g: Game, q: dict) -> Any:
         return _unit(g, u)
     if what == "units":
         return _units(g, q)
+    if what == "preview":
+        from . import combat
+        from .scenario import _idx
+        u = g.unit(_whole(q.get("unit")))
+        if u is None:
+            raise ActionError("No such unit.")
+        idx = _idx(g, q)
+        try:
+            return combat.preview(g, u, idx)
+        except ActionError as e:
+            return {"error": str(e)}
     if what == "city":
         c = g.city(_whole(q.get("city")))
         if c is None:
@@ -221,7 +232,7 @@ def _unit(g: Game, u) -> dict:
             "promotions": sorted(u.promotions), "moves": u.moves, "max_moves": max_moves(g, u),
             "activity": u.activity, "goto": g.xy(u.goto) if u.goto is not None else None,
             "fortify": u.fortify, "embarked": is_embarked(g, u), "carried_by": u.carried_by,
-            "set_up": "Set Up" in u.status}
+            "set_up": "Set Up" in u.status, "original_owner": u.original_owner, "return_offer": u.return_offer}
 
 
 def _units(g: Game, q: dict) -> list:
@@ -255,7 +266,10 @@ def _city(g: Game, c) -> dict:
             "yields": {k: float(total.get(k, 0.0)) for k in C.STATS},
             "queue": list(c.queue), "progress": {k: float(v) for k, v in sorted(c.progress.items())},
             "overflow": float(c.overflow), "culture": float(c.culture), "health": int(c.health),
-            "tiles": len(C.city_tiles(g, c))}
+            "max_health": int(C.max_health(g, c)), "tiles": len(C.city_tiles(g, c)), "founder": c.founder,
+            "previous_owner": c.previous_owner, "original_capital": bool(c.original_capital),
+            "puppet": bool(c.puppet), "razing": bool(c.razing), "resistance": int(c.resistance),
+            "attacked": bool(c.attacked)}
 
 
 def _buildable(g: Game, c) -> dict:

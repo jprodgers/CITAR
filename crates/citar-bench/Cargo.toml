@@ -71,5 +71,11 @@ harness = false
 name = "religion"
 harness = false
 
+# Combat (package 1c-03): the attack preview, its checks and the fight's numbers gathered once, at
+# 1 us (report-only).
+[[bench]]
+name = "combat"
+harness = false
+
 [lints]
 workspace = true

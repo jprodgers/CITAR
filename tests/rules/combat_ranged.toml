@@ -1,0 +1,100 @@
+about = """
+A ranged attack: an archer shoots a warrior on the hill two tiles off, which defends with the hill's
++25%; it takes nothing back, and both sides earn 2 experience. A ranged unit needs line of sight: a
+forest hides the tile behind it, even where another unit of its owner sees that tile.
+"""
+from = "citar/engine/combat.py: validate_attack, preview, resolve"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Archer", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "H" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { archer = "=made[0].unit_ids[0]", enemy = "=made[1].unit_ids[0]" }
+
+[[step]]
+check = { what = "preview", unit = "=archer", at = "H" }
+subset = { attacker_strength = 7.0, defender_strength = 10.0, attacker_modifiers = [], defender_modifiers = ["Tile +25%"], ranged = true, damage_to_attacker = [0, 0], defender = "Warrior", target = "unit" }
+as = "pv"
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=archer", at = "H" }
+as = "fight"
+
+[[step]]
+check = "fight"
+subset = { ranged = true, damage_to_attacker = 0 }
+
+[[step]]
+check = "fight"
+path = "damage_to_defender"
+ge = "=pv.damage_to_defender[0]"
+
+[[step]]
+check = "fight"
+path = "damage_to_defender"
+le = "=pv.damage_to_defender[1]"
+
+[[step]]
+check = { what = "unit", unit = "=archer" }
+subset = { hp = 100, xp = 2, moves = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=enemy" }
+subset = { hp = "=100 - fight.damage_to_defender", xp = 2 }
+
+[[step]]
+note = "The forest F hides the coast W from the archer beside it; a warrior of its owner sees W."
+ops = [
+  { op = "add_unit", player = 0, unit = "Archer", at = "F>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "F>nw" },
+  { op = "add_unit", player = 1, unit = "Trireme", at = "W" },
+]
+as = "more"
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=more[0].unit_ids[0]", at = "W" }
+error = "No line of sight to the target (hills, forest, jungle or mountains in the way)."
+
+[[step]]
+note = """
+A ranged attack deals a civilian 40. One brought to no health dies in the Rust engine; Python left
+it on the map at 0 health and reported it captured.
+"""
+ops = [
+  { op = "add_unit", player = 0, unit = "Archer", at = "D" },
+  { op = "add_unit", player = 1, unit = "Worker", at = "D>e>e", hp = 40 },
+]
+as = "last"
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=last[0].unit_ids[0]", at = "D>e>e" }
+as = "shot"
+
+[[step]]
+check = "shot"
+subset = { damage_to_defender = 40, defender_killed = true }
+intended = "civilians-under-fire"
+
+[[step]]
+check = "shot"
+path = "captured"
+absent = true
+intended = "civilians-under-fire"
+
+[[step]]
+check = { what = "units", at = "D>e>e" }
+len = 0
+intended = "civilians-under-fire"
+
+[[step]]
+check = { what = "unit", unit = "=last[0].unit_ids[0]" }
+path = "xp"
+eq = 0

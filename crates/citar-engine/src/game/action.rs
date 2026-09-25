@@ -19,6 +19,7 @@ use super::cities::borders::BuyTile;
 use super::cities::citizens::{SetCityFocus, SetSpecialists, WorkTile};
 use super::cities::purchase::Buy;
 use super::cities::queue::{ChangeQueue, RenameCity, SetAutoProduction, SetProduction};
+use super::combat::actions::{AirSweep, Attack, CityAttack, CityStatus, ReturnCivilian};
 use super::error::{ActionError, ErrCode};
 use super::events::EventBatch;
 use super::great_people::ChooseGreatPerson;
@@ -91,6 +92,16 @@ pub enum Action {
     UpgradeUnit(super::units::actions::UpgradeUnit),
     /// Promotes a unit (package 1c-02).
     PromoteUnit(super::units::actions::PromoteUnit),
+    /// `attack` (package 1c-03).
+    Attack(Attack),
+    /// `air_sweep` (package 1c-03).
+    AirSweep(AirSweep),
+    /// `city_attack` (package 1c-03).
+    CityAttack(CityAttack),
+    /// `city_status` (package 1c-03).
+    CityStatus(CityStatus),
+    /// `return_civilian` (package 1c-03).
+    ReturnCivilian(ReturnCivilian),
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
@@ -135,6 +146,11 @@ impl Action {
             Self::UnitOrder(_) => "unit_order",
             Self::UpgradeUnit(_) => "upgrade_unit",
             Self::PromoteUnit(_) => "promote_unit",
+            Self::Attack(_) => "attack",
+            Self::AirSweep(_) => "air_sweep",
+            Self::CityAttack(_) => "city_attack",
+            Self::CityStatus(_) => "city_status",
+            Self::ReturnCivilian(_) => "return_civilian",
             #[cfg(test)]
             Self::Probe(_) => "probe",
             Self::AdoptPolicy(_) => "adopt_policy",
@@ -162,7 +178,12 @@ impl Action {
             Self::MoveUnit(_)
             | Self::UnitOrder(_)
             | Self::UpgradeUnit(_)
-            | Self::PromoteUnit(_) => false,
+            | Self::PromoteUnit(_)
+            | Self::Attack(_)
+            | Self::AirSweep(_)
+            | Self::CityAttack(_)
+            | Self::CityStatus(_)
+            | Self::ReturnCivilian(_) => false,
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
             // `tools.rename_city` is `any_time` (tools.py:782).
@@ -190,6 +211,11 @@ impl Action {
             Self::UnitOrder(a) => run(g, pid, a),
             Self::UpgradeUnit(a) => run(g, pid, a),
             Self::PromoteUnit(a) => run(g, pid, a),
+            Self::Attack(a) => run(g, pid, a),
+            Self::AirSweep(a) => run(g, pid, a),
+            Self::CityAttack(a) => run(g, pid, a),
+            Self::CityStatus(a) => run(g, pid, a),
+            Self::ReturnCivilian(a) => run(g, pid, a),
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
             Self::AdoptPolicy(x) => run(g, pid, x),

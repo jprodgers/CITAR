@@ -272,6 +272,47 @@ def _enter_ruins(g: Game, o: dict):
     return {"found": bool(ruins.enter(g, u, u.idx))}
 
 
+@op("attack_as", "unit, x, y: the unit attacks the tile, whoever's turn it is")
+def _attack_as(g: Game, o: dict):
+    """A unit attacks a tile as the ``attack`` tool would have it, whoever's turn it is: a nuclear weapon detonates,
+    an aircraft strikes, anything else attacks."""
+    from . import combat
+    from . import unique_types as U
+    from .scenario import _idx
+    u = _unit(g, o)
+    idx = _idx(g, o)
+    ud = g.udef(u)
+    if ud["_umap"].get(U.NuclearWeapon):
+        return combat.nuke(g, u, idx)
+    if ud["_domain"] == "Air":
+        return combat.air_strike(g, u, idx)
+    return combat.attack(g, u, idx)
+
+
+@op("capture_civilian", "unit (or player, the barbarians included), x, y: the unit, or the player, takes the "
+                        "civilian on the tile")
+def _capture_civilian(g: Game, o: dict):
+    """A unit, or a player (the barbarians among them), takes the civilian on a tile, as the tests poked it: the
+    captured unit's new id, or None when it was destroyed instead. Only the captor's owner decides what becomes of
+    the civilian (units.capture_civilian reads nothing else of the captor)."""
+    from types import SimpleNamespace
+    from . import units
+    from .scenario import _idx
+    if o.get("unit") is not None or o.get("player") is None:
+        owner = _unit(g, o).owner
+    else:
+        owner = _whole(o, "player")
+        if not 0 <= owner < len(g.s.players):
+            raise ActionError("No such player.")
+    v = g.civilian_at(_idx(g, o))
+    if v is None:
+        raise ActionError("There is no civilian there.")
+    before = {x.id for x in g.player_units(owner)}
+    units.capture_civilian(g, SimpleNamespace(owner=owner), v)
+    new = sorted(x.id for x in g.player_units(owner) if x.id not in before)
+    return {"unit": new[0] if new else None}
+
+
 @op("refresh_visibility", "what every civilization sees is brought up to date")
 def _refresh_visibility(g: Game, o: dict):
     """Bring what everyone sees up to date."""

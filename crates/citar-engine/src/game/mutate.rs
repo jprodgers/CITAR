@@ -369,6 +369,14 @@ impl Game {
         Ok(())
     }
 
+    // ---- Combat -----------------------------------------------------------------------------
+
+    /// The number of the next combat event, counted (DESIGN.md 7.2): what keys its random
+    /// draws. It is persisted and digested, and no cache reads it.
+    pub(crate) fn next_combat_seq(&mut self) -> u64 {
+        self.st.ids_mut().next_combat()
+    }
+
     // ---- Players ----------------------------------------------------------------------------
 
     /// Eliminates a player that holds no cities (`victory.py:380-392`).

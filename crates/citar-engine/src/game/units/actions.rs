@@ -4,9 +4,9 @@
 //! Each checks on `&Game` everything Python refused, with Python's messages, before anything is
 //! written; Python refused some after it had started writing (a move with no path had already
 //! cleared the unit's orders, an upgrade it could not place had removed and remade the unit), so
-//! a refusal here leaves the game as it was. The orders whose systems later packages port are
-//! refused as not ported: an aircraft's move (a rebase, package 1c-03), `explore`, `automate`
-//! and `pillage` (package 1c-04).
+//! a refusal here leaves the game as it was. An aircraft's move is a rebase
+//! (`combat::air::rebase`, package 1c-03). The orders whose systems later packages port are
+//! refused as not ported: `explore`, `automate` and `pillage` (package 1c-04).
 
 use serde_json::{Value, json};
 
@@ -81,11 +81,11 @@ pub struct MoveUnit {
     pub y: i64,
 }
 
-/// A checked move: the unit, where to, and the path it will follow.
-pub struct MovePlan {
-    unit: UnitId,
-    target: TileIdx,
-    path: Vec<TileIdx>,
+/// A checked move: the unit, where to, and the path it will follow; or an aircraft's rebase,
+/// with the carrier it boards.
+pub enum MovePlan {
+    Walk { unit: UnitId, target: TileIdx, path: Vec<TileIdx> },
+    Rebase { unit: UnitId, target: TileIdx, carrier: Option<UnitId> },
 }
 
 impl Rule for MoveUnit {
@@ -97,8 +97,8 @@ impl Rule for MoveUnit {
         let target = tile_at(g, self.x, self.y)?;
         let x = g.unit(u).ok_or_else(|| ActionError::rule("No such unit."))?;
         if g.rules().base_units()[x.base].domain == Domain::Air {
-            // combat.rebase (combat.py:1044-1075).
-            return Err(not_ported("game::combat::air"));
+            let carrier = crate::game::combat::air::plan_rebase(g, u, target)?;
+            return Ok(MovePlan::Rebase { unit: u, target, carrier });
         }
         let name = unit_label(g, u);
         if target == x.tile() {
@@ -134,16 +134,23 @@ impl Rule for MoveUnit {
                 why.text(g)
             )));
         }
-        Ok(MovePlan { unit: u, target, path })
+        Ok(MovePlan::Walk { unit: u, target, path })
     }
 
     fn apply(self, g: &mut Game, _: PlayerId, plan: MovePlan) -> OutcomeSpec {
-        let u = plan.unit;
+        let (u, target, path) = match plan {
+            MovePlan::Rebase { unit, target, carrier } => {
+                return OutcomeSpec::value(crate::game::combat::air::rebase(
+                    g, unit, target, carrier,
+                ));
+            }
+            MovePlan::Walk { unit, target, path } => (unit, target, path),
+        };
         let name = unit_label(g, u);
         if let Some(x) = g.unit_mut(u, UnitTouch::CORE) {
             x.activity = None;
         }
-        let res = movement::follow(g, u, plan.target, plan.path, true, false);
+        let res = movement::follow(g, u, target, path, true, false);
         let mut out = res.to_json(g);
         if res.to == Some(res.from) && !res.arrived && res.order_kept {
             let stopped = res.stopped.map(|s| s.text(g)).unwrap_or_default();

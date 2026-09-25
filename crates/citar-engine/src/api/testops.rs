@@ -12,8 +12,8 @@
 //! operations `end_turn`, `end_round` and `force_turn`; package 1b-07 `complete_construction`;
 //! package 1b-08 `found_religion`, `enhance_religion` and `enter_ruins`, which stand in for the
 //! unit actions and the moves of packages 1c-04 and 1c-02; package 1c-02 `set_unit` and
-//! `ready_unit`. The others are listed with the package that ports what they need, and are
-//! refused as not ported until then.
+//! `ready_unit`; package 1c-03 `attack_as` and `capture_civilian`. The others are listed with the
+//! package that ports what they need, and are refused as not ported until then.
 
 use serde_json::{Map, Value, json};
 
@@ -60,7 +60,7 @@ pub static TEST_OPS: &[TestOp] = &[
     TestOp {
         name: "attack_as",
         params: "unit, x, y: the unit attacks the tile, whoever's turn it is",
-        porting: Porting::Pending("1c-03"),
+        porting: Porting::Ported,
         run: attack_as,
     },
     TestOp {
@@ -77,8 +77,9 @@ pub static TEST_OPS: &[TestOp] = &[
     },
     TestOp {
         name: "capture_civilian",
-        params: "unit, x, y: the unit takes the civilian on the tile",
-        porting: Porting::Pending("1c-03"),
+        params: "unit (or player, the barbarians included), x, y: the unit, or the player, takes the \
+                 civilian on the tile",
+        porting: Porting::Ported,
         run: capture_civilian,
     },
     TestOp {
@@ -613,6 +614,38 @@ fn ready_unit(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     Ok(json!({"moves": full}))
 }
 
+/// A unit attacks a tile as the `attack` tool would have it, whoever's turn it is: a nuclear
+/// weapon detonates, an aircraft strikes, anything else attacks. What the attack reports.
+fn attack_as(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let u = unit_param(g, o)?;
+    let t = tile(g, o)?;
+    // What the attacker's owner sees, after the operations before it in the list.
+    g.settle_sight();
+    let plan = crate::game::combat::actions::plan_attack(g, u, t)?;
+    Ok(crate::game::combat::actions::apply_attack(g, plan))
+}
+
+/// A unit, or a player (the barbarians among them), takes the civilian on a tile
+/// (`units.capture_civilian`), as the tests poked it; the captured unit's new id, or null when it
+/// was destroyed instead.
+fn capture_civilian(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    let captor = match (given(o, "unit"), given(o, "player")) {
+        (None, Some(v)) => {
+            let n: u8 = whole(v, "player")?;
+            Some(PlayerId(n)).filter(|&p| g.player(p).is_some())
+        }
+        _ => g.unit(unit_param(g, o)?).map(crate::state::units::Unit::owner),
+    }
+    .ok_or_else(|| ActionError::new(ErrCode::InvalidPlayer, "No such player."))?;
+    let t = tile(g, o)?;
+    let victim = g
+        .civilian_at(t)
+        .map(crate::state::units::Unit::id)
+        .ok_or_else(|| ActionError::rule("There is no civilian there."))?;
+    let taken = crate::game::units::capture::capture_civilian_by(g, captor, victim);
+    Ok(json!({"unit": taken.map(UnitId::get)}))
+}
+
 // ---- Those whose systems are not ported yet ----------------------------------------------------
 
 /// The refusal of a test operation whose system is not ported yet: `path` names the system, and
@@ -628,20 +661,12 @@ fn add_spy(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::espionage"))
 }
 
-fn attack_as(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::combat"))
-}
-
 fn automate(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::automation"))
 }
 
 fn barbarian_act(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
     Err(not_ported("game::barbarians"))
-}
-
-fn capture_civilian(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
-    Err(not_ported("game::combat"))
 }
 
 fn close_negotiation(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
