@@ -126,7 +126,7 @@ pub(crate) fn declare_winner(g: &mut Game, p: PlayerId, won: Won, text: Option<S
 
 /// Whether anybody has won, ending the game if so (`check_victory`, `victory.py:326-336`): `p`
 /// alone, or every living major civilization in id order. True in a game that is over.
-pub fn check_victory(g: &mut Game, p: Option<PlayerId>) -> bool {
+pub(crate) fn check_victory(g: &mut Game, p: Option<PlayerId>) -> bool {
     if g.phase() != Phase::Playing {
         return true;
     }
@@ -218,7 +218,10 @@ pub fn is_defeated(g: &Game, p: PlayerId) -> bool {
 /// spies come home; a city-state's destroyer (`by`) answers for it to its protectors and the
 /// city-states that wanted it gone, and it has no ally any more; everyone is told; and a major
 /// civilization's fall may leave another the winner (`check_domination`). Whether it was.
-pub fn check_elimination(g: &mut Game, p: PlayerId, by: Option<PlayerId>) -> bool {
+///
+/// Only stage R0 calls it directly: it would eliminate the player whose turn it is, so every
+/// other site goes through [`eliminate_if_defeated`].
+pub(crate) fn check_elimination(g: &mut Game, p: PlayerId, by: Option<PlayerId>) -> bool {
     if !g.player(p).is_some_and(Player::alive) || !is_defeated(g, p) {
         return false;
     }

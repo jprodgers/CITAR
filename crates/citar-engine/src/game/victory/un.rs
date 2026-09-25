@@ -153,8 +153,9 @@ pub fn plan_vote(g: &Game, candidate: &Value) -> Result<Ballot, ActionError> {
     Ok(Some(id))
 }
 
-/// Records a vote, replacing an earlier one (`victory.py:166-167`).
-pub fn cast_vote(g: &mut Game, pid: PlayerId, ballot: Ballot) -> Value {
+/// Records a vote, replacing an earlier one (`victory.py:166-167`). A host votes through
+/// `Action::UnVote`, so every ballot cast has its action record.
+pub(crate) fn cast_vote(g: &mut Game, pid: PlayerId, ballot: Ballot) -> Value {
     g.edit_world(WorldTouch::UN).un.votes.insert(pid, ballot);
     let name = ballot.and_then(|c| g.player(c)).map_or("abstain", |p| &*p.name);
     json!({"voted_for": name})
