@@ -13,10 +13,11 @@
 //! 1c-04's, built on [`add_pressure`], [`remove_all_except`] and [`protected_by_inquisitor`].
 //!
 //! Pressure from the surroundings (`religion.pressures_from_surroundings`, `religion.py:266-284`)
-//! looked at every city of the world for every city, each turn. Here it asks the cities the
-//! spatial grid (`derive::religion`, `CityNeighbours` in DESIGN.md 6.11) puts within the farthest
-//! any city's religion reaches, and each city's spread (its majority, how far it reaches and how
-//! strongly) is a memo of its own, so a round costs the cities times their neighbours.
+//! looked at every city of the world for every city, each turn. Here each city keeps the cities
+//! the spatial grid (`derive::religion`, `CityNeighbours` in DESIGN.md 6.11) puts within the
+//! farthest any city's religion reaches, and each city's major religion and spread (how far it
+//! reaches and how strongly) are memos of their own, so a round costs the cities times their
+//! neighbours, each a few revision compares.
 //!
 //! A city's pressures are kept in the order each religion first reached it, as Python's dict kept
 //! them, and ties go by that order: which religion a citizen left over after the division goes to,
@@ -354,7 +355,7 @@ pub fn remove_all_except(g: &mut Game, c: CityId, r: ReligionId) {
 pub fn on_population_change(g: &mut Game, c: CityId, delta: i32) {
     if delta > 0 {
         let m = majority_religion(g, c);
-        add_pressure(g, c, m, 100 * delta);
+        add_pressure(g, c, m, delta.saturating_mul(100));
     }
 }
 
@@ -387,16 +388,17 @@ pub fn spread_range(g: &Game, c: CityId) -> i32 {
         UniqueData::ReligionSpreadDistance(x) => Some(x.distance),
         _ => None,
     };
-    let mut range = 10
-        + uq::sum_i32(
-            uq::city(&v, c, UniqueType::ReligionSpreadDistance, &Ctx::city(&v, c)),
-            distance,
-        );
+    // A ruleset's distances are summed without overflowing: a reach past the map is the whole
+    // map.
+    let mut range = 10i32.saturating_add(uq::sum_i32(
+        uq::city(&v, c, UniqueType::ReligionSpreadDistance, &Ctx::city(&v, c)),
+        distance,
+    ));
     if let Some(founder) = majority_religion(g, c).and_then(|m| religion(g, m)).map(|x| x.founder) {
-        range += uq::sum_i32(
+        range = range.saturating_add(uq::sum_i32(
             uq::civ(&v, founder, UniqueType::ReligionSpreadDistance, &Ctx::civ(founder)),
             distance,
-        );
+        ));
     }
     range
 }
@@ -454,35 +456,37 @@ fn pressure_with(g: &Game, factors: &[(f64, CityFilterId)], target: CityId) -> i
 /// cities in id order, as Python walked them.
 #[must_use]
 pub fn pressures_from_surroundings(g: &Game, c: CityId) -> SmallVec<[(ReligionId, i32); 4]> {
+    use super::derive::religion as memo;
     let mut out: SmallVec<[(ReligionId, i32); 4]> = SmallVec::new();
     let Some(city) = g.city(c) else { return out };
-    let mut add = |r: ReligionId, n: i32| match out.iter_mut().find(|(x, _)| *x == r) {
-        Some((_, m)) => *m += n,
+    // Summed without overflowing, whatever a ruleset's pressures.
+    let add = |out: &mut SmallVec<[(ReligionId, i32); 4]>, r: ReligionId, n: i32| match out
+        .iter_mut()
+        .find(|(x, _)| *x == r)
+    {
+        Some((_, m)) => *m = m.saturating_add(n),
         None => out.push((r, n)),
     };
     if let Some(r) = city.holy_city_of
         && !blocked(g, c)
     {
-        add(r, 5 * g.speed().religious_pressure_adjacent_city);
+        add(&mut out, r, g.speed().religious_pressure_adjacent_city.saturating_mul(5));
     }
-    let at = city.tile();
-    let reach = super::derive::religion::reach(g);
-    for other in super::derive::religion::cities_within(g, at, reach) {
-        // Most cities follow no major religion: they are passed over before their spread's memo
-        // is validated.
-        if other == c
-            || !g.city(other).is_some_and(|x| {
-                has_religious_pressure(x) && majority_of(x).is_some_and(|r| is_major(g, r))
-            })
-        {
-            continue;
+    memo::with_near(g, c, |near| {
+        for &(other, distance) in near {
+            // Cities that follow no major religion are passed over before their spread is read.
+            if memo::major_religion(g, other).is_none() {
+                continue;
+            }
+            let arriving = memo::with_spread(g, other, |src| {
+                src.filter(|s| distance <= u32::try_from(s.range).unwrap_or(0))
+                    .map(|s| (s.religion, pressure_with(g, &s.factors, c)))
+            });
+            if let Some((r, n)) = arriving {
+                add(&mut out, r, n);
+            }
         }
-        let Some(src) = super::derive::religion::spread_source(g, other) else { continue };
-        if g.grid().distance(src.tile, at) > u32::try_from(src.range).unwrap_or(0) {
-            continue;
-        }
-        add(src.religion, pressure_with(g, &src.factors, c));
-    }
+    });
     out
 }
 

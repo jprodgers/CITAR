@@ -1,8 +1,11 @@
 //! Religious pressure (package 1b-08, gate 5).
 //!
 //! The state is a gargantuan pangaea of twelve civilizations with a city on every site that
-//! allows one, six of them with a religion founded in their capital, played for twenty rounds of
-//! pressure so that the religions have spread. Budget (DESIGN.md 10, report-only until 1e-03):
+//! allows one, six of them with a religion founded in their capital. Late in a game nearly every
+//! city follows some religion, and each one spreads to the cities around it, which is what a
+//! round costs most: so every city is given a thousand pressure a citizen toward the religion of
+//! the holy city nearest it, and five rounds of pressure are played before anything is timed.
+//! Budget (DESIGN.md 10, report-only until 1e-03):
 //! - one round of pressure, every city's religious turn in id order (`religion::city_end_turn`:
 //!   the pressure of its surroundings added and a new majority taken), at or under 1 ms.
 //!
@@ -20,7 +23,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use citar_engine::api::testops;
-use citar_engine::base::ids::{CityId, PlayerId, TileIdx};
+use citar_engine::base::ids::{CityId, PlayerId, ReligionId, TileIdx};
 use citar_engine::game::Game;
 use citar_engine::game::cities::founding;
 use citar_engine::game::derive::religion::surroundings_for_bench;
@@ -35,7 +38,8 @@ const ROUND: Duration = Duration::from_millis(1);
 const MAJORS: u8 = 12;
 const RELIGIONS: u8 = 6;
 
-/// The gargantuan game: its cities founded, its religions founded and spread.
+/// The gargantuan game: its cities founded, its religions founded and spread to nearly every
+/// city.
 fn gargantuan() -> (Game, Vec<CityId>) {
     let r = Ruleset::shared();
     let seats: Vec<_> = (0..MAJORS).map(|_| json!({"nation": "BenchmarkCiv"})).collect();
@@ -60,6 +64,7 @@ fn gargantuan() -> (Game, Vec<CityId>) {
         }
     }
     g.apply_ops(&json!([{"op": "set_player", "player": "all", "faith": 10_000}])).expect("faith");
+    let mut holy: Vec<(ReligionId, TileIdx)> = Vec::new();
     for p in 0..RELIGIONS {
         let p = PlayerId(p);
         let pantheon = religion::beliefs_available(&g, BeliefKind::Type(BeliefType::Pantheon))[0];
@@ -76,9 +81,19 @@ fn gargantuan() -> (Game, Vec<CityId>) {
         let plan = found::plan_religion(&g, p, at, &format!("Faith {}", p.0), &beliefs, None)
             .expect("a religion");
         found::apply_religion(&mut g, p, &plan, |_| {});
+        holy.push((g.player(p).and_then(|x| x.religion.founded).expect("founded"), at));
     }
     let cities: Vec<CityId> = g.state().cities().iter().map(|c| c.id()).collect();
-    for _ in 0..20 {
+    for &c in &cities {
+        let (at, pop) = g.city(c).map(|x| (x.tile(), i32::from(x.pop))).expect("the city");
+        let nearest = holy
+            .iter()
+            .min_by_key(|&&(r, t)| (g.grid().distance(t, at), r.0))
+            .map(|&(r, _)| r)
+            .expect("a religion");
+        religion::add_pressure(&mut g, c, Some(nearest), 1000 * pop.max(1));
+    }
+    for _ in 0..5 {
         round(&mut g, &cities);
     }
     testops::apply(&mut g, &json!([])).expect("settled");
@@ -129,6 +144,7 @@ fn main() {
         cities.len(),
         following
     );
+    assert!(following * 10 >= cities.len() * 9, "nearly every city follows a religion");
 
     let mut cr = Criterion::default().configure_from_args();
     cr.bench_function("religion/round", |b| {

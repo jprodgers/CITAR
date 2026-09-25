@@ -6,16 +6,26 @@
 //!   of the map (the base reach of a religion), valid while no city is founded, taken or lost
 //!   (`revs.cities`). A city's surroundings are the buckets its reach overlaps, wrapping as the
 //!   map wraps, sorted by city id, as Python walked the cities.
-//! - **A city's spread** ([`spread_source`]) is its majority religion when that is a major one,
-//!   how far it reaches (`religion._spread_range`) and the multipliers of its natural pressure
+//! - **A city's neighbours** ([`with_near`]): the other cities within the farthest any religion
+//!   reaches of it, by id, each with its distance. A memo per city, valid while `revs.cities`
+//!   stands and the reach is what it was found for, so a turn's pressure reads a list, not the
+//!   grid.
+//! - **The major religion a city follows** ([`major_religion`]): its majority, when that is a
+//!   full religion and religion is in play. A memo per city on its `religion` and `core`
+//!   revisions (its pressures and population), the religions and the settings. Pressure arrives
+//!   in nearly every city each turn, so this is recomputed once per city a turn, and read by each
+//!   neighbour the city presses.
+//! - **A city's spread** ([`with_spread`]) is that religion, how far it reaches
+//!   (`religion._spread_range`) and the multipliers of its natural pressure
 //!   (`religion._pressure_to`), with the cities each holds for. It is a memo per city, with the
 //!   classes its computation recorded (`unique::record`), valid while the major religion the city
-//!   follows, its buildings, its owner's and that religion's founder's indexes, the religions and
-//!   the settings stand. Pressure arrives in most cities every turn, but rarely changes which
-//!   religion they follow, so the pressures and the population are not read beside the majority
-//!   (their conditionals are, through the recorded classes). The indexes' resource layers are
-//!   read only for a ruleset whose resources carry a unique a spread reads; without them the
-//!   indexes validate on the civilization's `index` and the city's `buildings` revisions alone.
+//!   follows (the stamp of the memo above), its buildings, its owner's and that religion's
+//!   founder's indexes, the religions and the settings stand. Pressure rarely changes which
+//!   religion a city follows, so the pressures and the population are not read beside that
+//!   religion (their conditionals are, through the recorded classes). The indexes' resource
+//!   layers are read only for a ruleset whose resources carry a unique a spread reads; without
+//!   them the indexes validate on the civilization's `index` and the city's `buildings`
+//!   revisions alone.
 //! - **The reach** ([`reach`]): how far any city's religion could reach, which the grid is asked
 //!   for: ten tiles, and the most `Religion naturally spreads to cities [n] tiles away` could add,
 //!   whatever its conditionals (the most any civilization's index and any religion's followers
@@ -23,7 +33,7 @@
 //!   and resource's own). A ruleset without the unique never asks; otherwise it is a memo on the
 //!   civilizations' `index` revisions and the religions.
 //!
-//! [`verify`] is the cache oracle for both.
+//! [`verify`] is the cache oracle for all of them.
 
 use core::cell::{Cell, Ref};
 
@@ -84,29 +94,52 @@ impl BitEq for CityGrid {
     }
 }
 
-/// One city's spread, with the classes its last computation recorded.
-#[derive(Clone, Debug)]
-struct SourceMemo {
-    source: Memo<Option<SpreadSource>>,
-    deps: Cell<CondDeps>,
-    /// The major religion its last computation found the city following, if any.
-    last: Cell<Option<ReligionId>>,
-}
+/// Cities, by id, each with its distance from some tile.
+pub type Near = SmallVec<[(CityId, u32); 16]>;
 
-impl Default for SourceMemo {
-    fn default() -> Self {
-        Self { source: Memo::new(), deps: Cell::new(CondDeps::empty()), last: Cell::new(None) }
+/// A city's neighbours: the other cities within the reach, by id, with their distances.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NearCities(Near);
+
+impl BitEq for NearCities {
+    fn bit_eq(&self, other: &Self) -> bool {
+        self == other
     }
 }
 
-/// The grid and every city's spread: part of `Derived`.
+/// One city's memos.
+#[derive(Clone, Debug)]
+struct CityMemo {
+    /// The major religion it follows.
+    major: CopyMemo<Option<ReligionId>>,
+    /// Its spread, with the classes its last computation recorded.
+    source: Memo<Option<SpreadSource>>,
+    deps: Cell<CondDeps>,
+    /// Its neighbours, and the reach they were found within.
+    near: Memo<NearCities>,
+    near_radius: Cell<i32>,
+}
+
+impl Default for CityMemo {
+    fn default() -> Self {
+        Self {
+            major: CopyMemo::new(),
+            source: Memo::new(),
+            deps: Cell::new(CondDeps::empty()),
+            near: Memo::new(),
+            near_radius: Cell::new(-1),
+        }
+    }
+}
+
+/// The grid and every city's memos: part of `Derived`.
 #[derive(Clone, Debug)]
 pub struct ReligionCaches {
     grid: Memo<CityGrid>,
     /// How far any city's religion could reach, for a ruleset with `Religion naturally spreads to
     /// cities [n] tiles away` and none on a resource.
     reach: CopyMemo<i32>,
-    sources: LookupMap<CityId, SourceMemo>,
+    cities: LookupMap<CityId, CityMemo>,
     /// The most a building's or a resource's own `Religion naturally spreads to cities [n] tiles
     /// away` adds, and whether the ruleset has the unique at all.
     local_bonus: i32,
@@ -119,9 +152,9 @@ impl ReligionCaches {
     /// The caches of `st`, cold.
     #[must_use]
     pub fn new(rules: &Ruleset, st: &State) -> Self {
-        let mut sources = LookupMap::with_capacity(st.cities().len());
+        let mut cities = LookupMap::with_capacity(st.cities().len());
         for c in st.cities().iter() {
-            sources.insert(c.id(), SourceMemo::default());
+            cities.insert(c.id(), CityMemo::default());
         }
         let t = rules.uniques();
         let positive = |id| match t.get(id).data {
@@ -152,21 +185,21 @@ impl ReligionCaches {
         Self {
             grid: Memo::new(),
             reach: CopyMemo::new(),
-            sources,
+            cities,
             local_bonus,
             has_distance,
             resource_spread,
         }
     }
 
-    /// Keeps one spread per city of the state as cities come and go.
+    /// Keeps one set of memos per city of the state as cities come and go.
     pub(crate) fn track(&mut self, ch: &Change) {
         match *ch {
             Change::CityAdded(c) => {
-                self.sources.get_or_insert_with(c, SourceMemo::default);
+                self.cities.get_or_insert_with(c, CityMemo::default);
             }
             Change::CityRemoved { c, .. } => {
-                self.sources.remove(&c);
+                self.cities.remove(&c);
             }
             _ => {}
         }
@@ -216,18 +249,19 @@ fn bucket_span(from: i32, to: i32, n: i32, side: i32, wraps: bool) -> SmallVec<[
     out
 }
 
-/// The cities within `radius` tiles of `at`, by id (`CityNeighbours`).
-#[must_use]
-pub fn cities_within(g: &Game, at: TileIdx, radius: i32) -> SmallVec<[CityId; 16]> {
+/// The cities within `radius` tiles of `at`, by id, each with its distance.
+fn cities_near(g: &Game, at: TileIdx, radius: i32) -> Near {
     let grid_ = grid(g);
     let hex = g.grid();
     let (x, y) = g.xy(at);
-    let r = radius.max(0);
     let (w, h) = (i32::from(hex.width()), i32::from(hex.height()));
+    // No tile is farther than the map's width and height together: a reach a ruleset makes
+    // larger reaches no further, and the spans below cannot overflow.
+    let r = radius.clamp(0, w + h);
     let cols = bucket_span(x - r, x + r, grid_.cols, w, hex.wrap_x());
     let rows = bucket_span(y - r, y + r, grid_.rows, h, hex.wrap_y());
     let limit = u32::try_from(r).unwrap_or(0);
-    let mut out: SmallVec<[CityId; 16]> = SmallVec::new();
+    let mut out = Near::new();
     for &by in &rows {
         for &bx in &cols {
             let Some(b) =
@@ -235,11 +269,47 @@ pub fn cities_within(g: &Game, at: TileIdx, radius: i32) -> SmallVec<[CityId; 16
             else {
                 continue;
             };
-            out.extend(b.iter().filter(|&&(_, t)| hex.distance(t, at) <= limit).map(|&(c, _)| c));
+            for &(c, t) in b {
+                let d = hex.distance(t, at);
+                if d <= limit {
+                    out.push((c, d));
+                }
+            }
         }
     }
-    out.sort_by_key(|c| c.get());
+    out.sort_by_key(|&(c, _)| c.get());
     out
+}
+
+/// The cities within `radius` tiles of `at`, by id (`CityNeighbours`).
+#[must_use]
+pub fn cities_within(g: &Game, at: TileIdx, radius: i32) -> SmallVec<[CityId; 16]> {
+    cities_near(g, at, radius).into_iter().map(|(c, _)| c).collect()
+}
+
+/// City `c`'s neighbours, found afresh.
+fn compute_near(g: &Game, c: CityId, radius: i32) -> NearCities {
+    let Some(at) = g.city(c).map(crate::state::cities::City::tile) else {
+        return NearCities::default();
+    };
+    let mut near = cities_near(g, at, radius);
+    near.retain(|&mut (o, _)| o != c);
+    NearCities(near)
+}
+
+/// Calls `f` with the other cities within the farthest any religion reaches of city `c`
+/// ([`reach`]), by id, each with its distance (see the module's doc).
+pub fn with_near<R>(g: &Game, c: CityId, f: impl FnOnce(&[(CityId, u32)]) -> R) -> R {
+    let radius = reach(g);
+    let Some(m) = g.dv.religion.cities.get(&c) else { return f(&compute_near(g, c, radius).0) };
+    let revs = &g.dv.revs;
+    let inputs = || if m.near_radius.get() == radius { revs.cities } else { revs.now() };
+    let compute = || {
+        m.near_radius.set(radius);
+        compute_near(g, c, radius)
+    };
+    let near = m.near.get(revs.now(), inputs, compute);
+    f(&near.0)
 }
 
 /// How far any city's religion could reach now (see the module's doc).
@@ -296,12 +366,27 @@ pub fn reach(g: &Game) -> i32 {
     caches.reach.get(revs.now(), inputs, compute)
 }
 
+/// The major religion city `c` follows, computed afresh.
+fn compute_major(g: &Game, c: CityId) -> Option<ReligionId> {
+    religion::majority_religion(g, c).filter(|&r| religion::is_major(g, r))
+}
+
+/// The major religion city `c` follows: its majority, if that is a full religion and religion is
+/// in play (see the module's doc).
+#[must_use]
+pub fn major_religion(g: &Game, c: CityId) -> Option<ReligionId> {
+    let Some(m) = g.dv.religion.cities.get(&c) else { return compute_major(g, c) };
+    let revs = &g.dv.revs;
+    let inputs = || {
+        let cr = revs.city(c);
+        cr.religion.max(cr.core).max(revs.religions).max(revs.config)
+    };
+    m.major.get(revs.now(), inputs, || compute_major(g, c))
+}
+
 /// How city `c`'s religion spreads, computed afresh.
 fn compute_source(g: &Game, c: CityId) -> Option<SpreadSource> {
-    let r = religion::majority_religion(g, c)?;
-    if !religion::is_major(g, r) {
-        return None;
-    }
+    let r = compute_major(g, c)?;
     let tile = g.city(c)?.tile();
     Some(SpreadSource {
         religion: r,
@@ -311,11 +396,11 @@ fn compute_source(g: &Game, c: CityId) -> Option<SpreadSource> {
     })
 }
 
-/// How city `c`'s religion spreads (see the module's doc); `None` if it has no major religion as
-/// its majority.
-pub fn spread_source(g: &Game, c: CityId) -> Option<SpreadSource> {
+/// Calls `f` with how city `c`'s religion spreads (see the module's doc): `None` if it follows no
+/// major religion.
+pub fn with_spread<R>(g: &Game, c: CityId, f: impl FnOnce(Option<&SpreadSource>) -> R) -> R {
     let caches = &g.dv.religion;
-    let Some(m) = caches.sources.get(&c) else { return compute_source(g, c) };
+    let Some(m) = caches.cities.get(&c) else { return f(compute_source(g, c).as_ref()) };
     let revs = &g.dv.revs;
     let inputs = || {
         let Some(city) = g.city(c) else { return revs.now() };
@@ -323,16 +408,19 @@ pub fn spread_source(g: &Game, c: CityId) -> Option<SpreadSource> {
         let cr = revs.city(c);
         let deps = m.deps.get();
         // Pressure arrives in a city every turn and moves its religion's revision, but its spread
-        // depends on the major religion it follows, which it rarely changes: that is compared
-        // itself, and the city's pressures and population are not read.
-        let major = religion::majority_religion(g, c).filter(|&r| religion::is_major(g, r));
-        if major != m.last.get() {
-            return revs.now();
-        }
+        // depends on the major religion it follows, which it rarely changes: that memo's stamp
+        // is read, and the city's pressures and population are not.
+        let major = major_religion(g, c);
+        let mut r = m
+            .major
+            .changed()
+            .max(cr.buildings)
+            .max(revs.civ(owner).index)
+            .max(revs.religions)
+            .max(revs.config);
         // The indexes without their resource layers validate on the civilization's `index` and
         // the city's `buildings` alone; a ruleset whose resources carry no unique a spread reads
         // leaves the layers out, since the runs a spread reads are the same without them.
-        let mut r = cr.buildings.max(revs.civ(owner).index).max(revs.religions).max(revs.config);
         if caches.resource_spread {
             r = r
                 .max(civ::civ_index_full_changed(g, owner))
@@ -355,14 +443,20 @@ pub fn spread_source(g: &Game, c: CityId) -> Option<SpreadSource> {
     let compute = || {
         let (v, d) = record::recorded(|| compute_source(g, c));
         m.deps.set(d);
-        m.last.set(v.as_ref().map(|x| x.religion));
         v
     };
-    m.source.get(revs.now(), inputs, compute).clone()
+    let source = m.source.get(revs.now(), inputs, compute);
+    f(source.as_ref())
 }
 
-/// The grid and every city's spread, validated, against a cold rebuild from the same state: one
-/// line for each that disagrees (the cache oracle, DESIGN.md 9.4).
+/// How city `c`'s religion spreads ([`with_spread`]), as a copy.
+#[must_use]
+pub fn spread_source(g: &Game, c: CityId) -> Option<SpreadSource> {
+    with_spread(g, c, |s| s.cloned())
+}
+
+/// Every city's memos and the grid and reach, validated, against a cold rebuild from the same
+/// state: one line for each that disagrees (the cache oracle, DESIGN.md 9.4).
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
     let cold = Game::assemble(g.rules, g.st.clone(), Chronicle::new(), false);
@@ -370,15 +464,27 @@ pub fn verify(g: &Game) -> Vec<String> {
     if *grid(g) != *grid(&cold) {
         out.push("the religious grid of cities differs from a cold rebuild".to_owned());
     }
+    // The reach bounds every city's search: one too small would miss pressure without a trace.
+    let (warm, fresh) = (reach(g), reach(&cold));
+    if warm != fresh {
+        out.push(format!("the religious reach is {warm}, a cold rebuild's {fresh}"));
+    }
     for city in g.st.cities().iter() {
         let c = city.id();
-        if !g.dv.religion.sources.contains_key(&c) {
-            out.push(format!("city {}: no religious spread", c.get()));
+        if !g.dv.religion.cities.contains_key(&c) {
+            out.push(format!("city {}: no religious memos", c.get()));
             continue;
+        }
+        if major_religion(g, c) != major_religion(&cold, c) {
+            out.push(format!("city {}: its major religion differs from a cold rebuild", c.get()));
         }
         let (warm, fresh) = (spread_source(g, c), spread_source(&cold, c));
         if !warm.bit_eq(&fresh) {
             out.push(format!("city {}: its religious spread differs from a cold rebuild", c.get()));
+        }
+        let same = with_near(g, c, |a| with_near(&cold, c, |b| a == b));
+        if !same {
+            out.push(format!("city {}: its neighbours differ from a cold rebuild", c.get()));
         }
     }
     out
