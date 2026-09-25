@@ -246,7 +246,7 @@ pub fn found_city(
     // The era's settler buildings, each unless the city could not build it (cities.py:2172-2175).
     for &b in era.settler_buildings.iter() {
         let eb = equivalent_building(g, p, b);
-        if super::construction::rejection_reasons(g, id, Constructible::Building(eb)).is_empty() {
+        if super::construction::is_buildable(g, id, Constructible::Building(eb)) {
             add_building(g, id, eb, false);
         }
     }

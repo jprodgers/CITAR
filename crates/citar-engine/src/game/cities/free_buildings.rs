@@ -15,7 +15,7 @@ use smallvec::SmallVec;
 
 use super::super::Game;
 use super::super::derive::rev::{CityTouch, PlayerTouch};
-use super::construction::{complete_construction, rejection_reasons};
+use super::construction::{complete_construction, is_buildable};
 use super::founding::equivalent_building;
 use super::uniques::contains_building;
 use crate::base::ids::{BuildingId, CityId, PlayerId};
@@ -45,7 +45,7 @@ pub fn cheapest_stat_building(g: &Game, c: CityId, stat: Stat) -> Option<Buildin
             continue;
         }
         let item = Constructible::Building(b);
-        if !city.queue.contains(&item) && !rejection_reasons(g, c, item).is_empty() {
+        if !city.queue.contains(&item) && !is_buildable(g, c, item) {
             continue;
         }
         if best.is_none_or(|(_, cost)| d.cost < cost) {

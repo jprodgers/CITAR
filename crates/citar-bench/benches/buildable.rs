@@ -6,7 +6,11 @@
 //! - the `Buildable` memo read at a stable revision (`buildable_items`, which copies the lists and
 //!   checks the hangar for aircraft) at or under 50 ns;
 //! - the lists recomputed, every unit, building and wonder of the ruleset checked
-//!   (`compute_buildable`), at or under 20 µs.
+//!   (`compute_buildable`), at or under 20 µs;
+//! - the lists of the other cities of the civilization with the most read after one of its
+//!   cities changed (a heal, a growth, a queue edit: its `core`), which validate and recompute
+//!   nothing, at or under 10 µs for the 12 others of the late fixture's largest civilization of
+//!   13 (256 µs when every list read its siblings' `core`).
 //!
 //! Report-only besides: the first read after a change to another civilization that the memo does
 //! not read, which validates the memo's inputs.
@@ -23,13 +27,16 @@ use std::time::{Duration, Instant};
 
 use citar_engine::base::ids::CityId;
 use citar_engine::game::Game;
-use citar_engine::game::cities::construction::{Buildable, buildable_items, compute_buildable};
+use citar_engine::game::cities::construction::{
+    Buildable, buildable_items, compute_buildable_for_bench as compute_buildable,
+};
 use citar_engine::rules::Ruleset;
 use citar_testkit::fixtures;
 use criterion::Criterion;
 
 const HIT: Duration = Duration::from_nanos(50);
 const RECOMPUTE: Duration = Duration::from_micros(20);
+const SIBLING: Duration = Duration::from_micros(10);
 
 /// The late fixture's game.
 fn late() -> Game {
@@ -50,6 +57,18 @@ fn subject(g: &Game) -> CityId {
         .max_by_key(|c| (c.pop, std::cmp::Reverse(c.id())))
         .map(citar_engine::state::cities::City::id)
         .expect("a city")
+}
+
+/// One city of the civilization with the most cities, its last, and the others.
+fn largest_civ(g: &Game) -> (CityId, Vec<CityId>) {
+    let owner = g
+        .majors(true)
+        .map(|p| p.id())
+        .max_by_key(|&p| (g.player_cities(p).count(), std::cmp::Reverse(p)))
+        .expect("a major");
+    let mut cities: Vec<CityId> = g.player_cities(owner).map(|c| c.id()).collect();
+    let changed = cities.pop().expect("a city");
+    (changed, cities)
 }
 
 /// How many items a list holds, so that the work is not optimised away.
@@ -107,6 +126,19 @@ fn main() {
             size(&buildable_items(black_box(&g), c))
         });
     });
+    let (changed, siblings) = largest_civ(&g);
+    println!(
+        "the largest civilization: city {} changes, {} others are read",
+        changed.get(),
+        siblings.len()
+    );
+    let read_all = |g: &mut Game| {
+        g.city_change_for_bench(changed);
+        siblings.iter().map(|&x| size(&buildable_items(black_box(g), x))).sum::<usize>()
+    };
+    cr.bench_function("buildable/other_lists_after_a_sibling_changed", |b| {
+        b.iter(|| read_all(&mut g));
+    });
     cr.final_summary();
 
     check(
@@ -128,4 +160,11 @@ fn main() {
         black_box(size(&buildable_items(black_box(&g), c)));
     });
     println!("buildable/first_read_after_unrelated_change median: {first:?} (report-only)");
+    check(
+        "buildable/other_lists_after_a_sibling_changed",
+        median(31, 100, || {
+            black_box(read_all(&mut g));
+        }),
+        SIBLING,
+    );
 }

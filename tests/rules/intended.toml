@@ -129,3 +129,11 @@ reason = "Python let a city work a tile a sibling city of the same owner worked,
 [[differences]]
 id = "scenario-adopt-policy-skips-the-era"
 reason = "The scenario operation adopt_policy skipped the era check, then checked it again inside the adoption and refused a branch of a later era; Rust adopts it whatever the era, as the operation promises"
+
+[[differences]]
+id = "perpetual-production-is-not-banked"
+reason = "A city converting its production to gold or science also banked that production as overflow, which the next item it built took whole, so turns of Gold finished a wonder at once; Rust banks nothing, as UnCiv does, since the conversion already paid out"
+
+[[differences]]
+id = "increasing-cost-counts-what-was-built"
+reason = "An item whose cost increases each time it is built counted as built at every start of turn its production was ready, even when the unit could not be placed and waited, so each blocked turn raised its price; Rust counts it when it is finished"

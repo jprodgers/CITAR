@@ -105,6 +105,12 @@ pub fn count_constructed(
     item: Constructible,
     exclude: Option<CityId>,
 ) -> i32 {
+    count_made(g, p, item).saturating_add(count_queued(g, p, item, exclude))
+}
+
+/// What [`count_constructed`] counts but the queues: the spaceship parts added, the cities with
+/// the building (or its equivalent), the units of the kind.
+fn count_made(g: &Game, p: PlayerId, item: Constructible) -> i32 {
     let in_space = match item {
         Constructible::Unit(u) => g
             .player(p)
@@ -113,19 +119,28 @@ pub fn count_constructed(
             .map_or(0, |&n| i32::from(n)),
         _ => 0,
     };
-    let queued =
-        |c: &crate::state::cities::City| Some(c.id()) != exclude && c.queue.contains(&item);
     let n = match item {
         Constructible::Building(b) => {
-            g.player_cities(p).filter(|c| contains_building(g, c.id(), b) || queued(c)).count()
+            g.player_cities(p).filter(|c| contains_building(g, c.id(), b)).count()
         }
-        Constructible::Unit(u) => {
-            g.player_units(p).filter(|x| x.base == u).count()
-                + g.player_cities(p).filter(|c| queued(c)).count()
-        }
+        Constructible::Unit(u) => g.player_units(p).filter(|x| x.base == u).count(),
         Constructible::Perpetual(_) => 0,
     };
-    in_space + i32::try_from(n).unwrap_or(i32::MAX)
+    in_space.saturating_add(i32::try_from(n).unwrap_or(i32::MAX))
+}
+
+/// The cities of a civilization, other than `exclude`, with an item in their queue: a city that
+/// has the building already counted by [`count_made`] instead.
+fn count_queued(g: &Game, p: PlayerId, item: Constructible, exclude: Option<CityId>) -> i32 {
+    let n = g
+        .player_cities(p)
+        .filter(|c| Some(c.id()) != exclude && c.queue.contains(&item))
+        .filter(|c| match item {
+            Constructible::Building(b) => !contains_building(g, c.id(), b),
+            _ => true,
+        })
+        .count();
+    i32::try_from(n).unwrap_or(i32::MAX)
 }
 
 // ---- Why an item cannot be built (cities.py:1169-1344) --------------------------------------------
@@ -221,23 +236,64 @@ pub struct Rejection {
     pub text: String,
 }
 
-/// Where reasons go: all of them, or only whether there is one (which stops at the first).
-struct Reasons<'a> {
-    all: Option<&'a mut Vec<Rejection>>,
-    found: bool,
+/// What a caller wants of the reasons.
+enum Collect<'a> {
+    /// Whether there is one: the first ends the search.
+    Any,
+    /// Their kinds, in order, with no text written.
+    Kinds(&'a mut SmallVec<[RejectionKind; 4]>),
+    /// Every reason, with its text.
+    All(&'a mut Vec<Rejection>),
 }
 
-impl Reasons<'_> {
+/// Where reasons go, and how much of the game they read.
+struct Reasons<'a> {
+    collect: Collect<'a>,
+    found: bool,
+    /// The reading of the `Buildable` memo: what the owner's other cities are building and the
+    /// room in the city's hangar move all turn, so [`buildable_items`] reads them as it lends the
+    /// list, and the memo does not. A limit on the item is then counted without the queues, and
+    /// [`room`](Self::room) is how many more of it the limits allow.
+    memo: bool,
+    room: Option<i32>,
+}
+
+impl<'a> Reasons<'a> {
+    const fn new(collect: Collect<'a>) -> Self {
+        Self { collect, found: false, memo: false, room: None }
+    }
+
     /// Adds a reason; `Break` when the caller only asked whether there is one.
     fn add(&mut self, kind: RejectionKind, text: impl FnOnce() -> String) -> ControlFlow<()> {
         self.found = true;
-        match self.all.as_deref_mut() {
-            Some(v) => {
+        match &mut self.collect {
+            Collect::Any => ControlFlow::Break(()),
+            Collect::Kinds(v) => {
+                v.push(kind);
+                ControlFlow::Continue(())
+            }
+            Collect::All(v) => {
                 v.push(Rejection { kind, text: text() });
                 ControlFlow::Continue(())
             }
-            None => ControlFlow::Break(()),
         }
+    }
+
+    /// Whether `Limited to [limit] per Civilization` rules the item out (`cities.py:1244-1246,
+    /// 1292-1294`): what the civilization has of it and what its other cities are building,
+    /// against the limit. The memo counts what it has alone, and keeps the room left.
+    fn over_limit(&mut self, g: &Game, c: CityId, item: Constructible, limit: i32) -> bool {
+        let Some(p) = g.city(c).map(crate::state::cities::City::owner) else { return false };
+        if !self.memo {
+            return count_constructed(g, p, item, Some(c)) >= limit;
+        }
+        let made = count_made(g, p, item);
+        if made >= limit {
+            return true;
+        }
+        let room = limit - made;
+        self.room = Some(self.room.map_or(room, |r| r.min(room)));
+        false
     }
 }
 
@@ -246,9 +302,17 @@ impl Reasons<'_> {
 #[must_use]
 pub fn rejection_reasons(g: &Game, c: CityId, item: Constructible) -> Vec<Rejection> {
     let mut all = Vec::new();
-    let mut out = Reasons { all: Some(&mut all), found: false };
-    let _flow = reasons(g, c, item, &mut out);
+    let _flow = reasons(g, c, item, &mut Reasons::new(Collect::All(&mut all)));
     all
+}
+
+/// The kinds of [`rejection_reasons`], in the same order, without writing their text: for the
+/// rules that read what kind of reason there is and never show it.
+#[must_use]
+pub fn rejection_kinds(g: &Game, c: CityId, item: Constructible) -> SmallVec<[RejectionKind; 4]> {
+    let mut kinds = SmallVec::new();
+    let _flow = reasons(g, c, item, &mut Reasons::new(Collect::Kinds(&mut kinds)));
+    kinds
 }
 
 /// Whether city `c` can build `item` now, and if not the first reason why
@@ -262,18 +326,42 @@ pub fn can_build(g: &Game, c: CityId, item: Constructible) -> Option<String> {
 /// a single reason. The quick checks come first, since most items fail on a tech.
 #[must_use]
 pub fn is_buildable(g: &Game, c: CityId, item: Constructible) -> bool {
-    let Some(city) = g.city(c) else { return false };
+    if quick_no(g, c, item) {
+        return false;
+    }
+    let mut out = Reasons::new(Collect::Any);
+    let _flow = reasons(g, c, item, &mut out);
+    !out.found
+}
+
+/// Whether city `c` could build `item` but for what its owner's other cities are building and the
+/// room in its hangar: `Some` with the room its limits leave (`None` for no limit) if so.
+fn buildable_for_memo(g: &Game, c: CityId, item: Constructible) -> Option<Option<i32>> {
+    if quick_no(g, c, item) {
+        return None;
+    }
+    let mut out = Reasons::new(Collect::Any);
+    out.memo = true;
+    let _flow = reasons(g, c, item, &mut out);
+    (!out.found).then_some(out.room)
+}
+
+/// Whether one of the cheap reasons rules `item` out in city `c`. Any one reason answers whether
+/// there is one, so these come first whatever their place in Python's order; `reasons` looks at
+/// the rest.
+fn quick_no(g: &Game, c: CityId, item: Constructible) -> bool {
+    let Some(city) = g.city(c) else { return true };
     let p = city.owner();
     let r = g.rules();
-    // Any one reason answers, so the cheap ones come first whatever their place in Python's
-    // order; `reasons` looks at the rest.
-    let quick_no = match item {
+    match item {
         Constructible::Building(b) => {
             let d = &r.buildings()[b];
             city.buildings.contains(b)
                 || !g.has_tech(p, d.required_tech)
                 || d.unique_to.is_some_and(|n| g.player(p).is_none_or(|x| x.nation != n))
                 || (d.is_wonder && g.state().world().wonders_built.contains_key(&b))
+                // Before its requirements, whose `in all [] cities` reads every city's status.
+                || (d.is_national_wonder && g.player_cities(p).any(|x| x.buildings.contains(b)))
         }
         Constructible::Unit(u) => {
             let d = &r.base_units()[u];
@@ -286,13 +374,7 @@ pub fn is_buildable(g: &Game, c: CityId, item: Constructible) -> bool {
                 })
         }
         Constructible::Perpetual(_) => false,
-    };
-    if quick_no {
-        return false;
     }
-    let mut out = Reasons { all: None, found: false };
-    let _flow = reasons(g, c, item, &mut out);
-    !out.found
 }
 
 /// Adds a reason, and stops when the caller only asked whether there is one.
@@ -333,9 +415,12 @@ fn reasons(g: &Game, c: CityId, item: Constructible, out: &mut Reasons<'_>) -> C
                 reject!(out, K::AlreadyBuilt, format!("{} already has {name}.", city.name));
             }
             for id in bd.uniques.ids() {
-                let ty = t.meta(id).ty;
+                // Python asked every unique whether it applied, and most say nothing about
+                // building; asking only those that may reject keeps what the memo records to
+                // what the answer reads.
+                let Some(ty) = t.meta(id).ty.filter(|&ty| may_reject(ty)) else { continue };
                 let requirement =
-                    matches!(ty, Some(UniqueType::OnlyAvailable | UniqueType::CanOnlyBeBuiltWhen));
+                    matches!(ty, UniqueType::OnlyAvailable | UniqueType::CanOnlyBeBuiltWhen);
                 if !requirement && !crate::unique::applies(id, &ctx, &v) {
                     continue;
                 }
@@ -364,9 +449,9 @@ fn reasons(g: &Game, c: CityId, item: Constructible, out: &mut Reasons<'_>) -> C
                 reject!(out, K::RequiresTech, format!("{name} requires {}.", r.techs()[tech].name));
             }
             if bd.any_wonder {
-                let elsewhere = g
-                    .player_cities(p)
-                    .any(|x| x.id() != c && x.queue.contains(&Constructible::Building(b)));
+                let elsewhere = !out.memo
+                    && g.player_cities(p)
+                        .any(|x| x.id() != c && x.queue.contains(&Constructible::Building(b)));
                 if elsewhere {
                     reject!(
                         out,
@@ -457,6 +542,12 @@ fn reasons(g: &Game, c: CityId, item: Constructible, out: &mut Reasons<'_>) -> C
             for ty in [UniqueType::OnlyAvailable, UniqueType::CanOnlyBeBuiltWhen] {
                 let ids: SmallVec<[UniqueId; 4]> =
                     unit_hits(&v, r, u, ty, &Ctx::IGNORE).map(|h| h.id).collect();
+                if out.memo {
+                    if ids.iter().any(|&id| requirement_fails_for_memo(g, p, id, &ctx)) {
+                        reject!(out, K::ShouldNotBeDisplayed, String::new());
+                    }
+                    continue;
+                }
                 for pr in uq::requirement_problems(&v, ids, &ctx, p) {
                     reject!(out, RejectionKind::of_problem(pr.kind), pr.text);
                 }
@@ -521,7 +612,7 @@ fn reasons(g: &Game, c: CityId, item: Constructible, out: &mut Reasons<'_>) -> C
             }
             for h in unit_hits(&v, r, u, UniqueType::MaxNumberBuildable, &ctx) {
                 if let UniqueData::MaxNumberBuildable(x) = h.data()
-                    && count_constructed(g, p, item, Some(c)) >= x.limit
+                    && out.over_limit(g, c, item, x.limit)
                 {
                     reject!(
                         out,
@@ -571,12 +662,50 @@ fn reasons(g: &Game, c: CityId, item: Constructible, out: &mut Reasons<'_>) -> C
                     );
                 }
             }
-            if ud.domain == Domain::Air && !air_capacity_ok(g, c) {
+            if ud.domain == Domain::Air && !out.memo && !air_capacity_ok(g, c) {
                 reject!(out, K::NoPlaceToPutUnit, "No room for more aircraft in this city.".into());
             }
         }
     }
     ControlFlow::Continue(())
+}
+
+/// Whether requirement `id` (an `Only available` or a `Can only be built`) is not met in a city
+/// of `p`, as the `Buildable` memo reads it (the memo asks only whether there is a reason, so the
+/// kind and text do not matter): its civilization-wide conditionals as the civilization's own memo
+/// answers them, which moves the list only when an answer changes, and the rest asked here,
+/// recording what they read.
+fn requirement_fails_for_memo(g: &Game, p: PlayerId, id: UniqueId, ctx: &Ctx) -> bool {
+    use super::super::derive::buildable::{civ_requirement_fails, is_local};
+    if civ_requirement_fails(g, p, id) {
+        return true;
+    }
+    let t = g.rules().uniques();
+    let v = g.view();
+    t.conds(t.get(id)).iter().filter(|x| is_local(x)).any(|x| {
+        crate::unique::record::note_classes(x.deps);
+        !crate::unique::cond::holds(x, id, ctx, &v)
+    })
+}
+
+/// Whether a building's unique of type `ty` may be a reason it cannot be built: those
+/// [`building_unique`] reads.
+const fn may_reject(ty: UniqueType) -> bool {
+    matches!(
+        ty,
+        UniqueType::Unbuildable
+            | UniqueType::OnlyAvailable
+            | UniqueType::CanOnlyBeBuiltWhen
+            | UniqueType::Unavailable
+            | UniqueType::RequiresPopulation
+            | UniqueType::MustBeOn
+            | UniqueType::MustNotBeOn
+            | UniqueType::MustBeNextTo
+            | UniqueType::MustHaveOwnedWithinTiles
+            | UniqueType::ObsoleteWith
+            | UniqueType::MaxNumberBuildable
+            | UniqueType::SpaceshipPart
+    )
 }
 
 /// One of a building's own uniques that holds (or a requirement, which is asked of its
@@ -603,8 +732,14 @@ fn building_unique(
         }
         Some(UniqueType::OnlyAvailable | UniqueType::CanOnlyBeBuiltWhen) => {
             let ctx = Ctx::city(&v, c);
-            for pr in uq::requirement_problems(&v, [id], &ctx, p) {
-                reject!(out, RejectionKind::of_problem(pr.kind), pr.text);
+            if out.memo {
+                if requirement_fails_for_memo(g, p, id, &ctx) {
+                    reject!(out, K::ShouldNotBeDisplayed, String::new());
+                }
+            } else {
+                for pr in uq::requirement_problems(&v, [id], &ctx, p) {
+                    reject!(out, RejectionKind::of_problem(pr.kind), pr.text);
+                }
             }
         }
         Some(UniqueType::Unavailable) => {
@@ -669,7 +804,7 @@ fn building_unique(
                 reject!(out, K::Obsoleted, format!("{name} is obsolete."));
             }
             UniqueData::MaxNumberBuildable(x)
-                if count_constructed(g, p, Constructible::Building(b), Some(c)) >= x.limit =>
+                if out.over_limit(g, c, Constructible::Building(b), x.limit) =>
             {
                 reject!(out, K::MaxNumberBuildable, format!("{name} is limited to {}.", x.limit));
             }
@@ -690,17 +825,13 @@ fn building_unique(
     ControlFlow::Continue(())
 }
 
-/// The base units the `Air` unit filter names: every aircraft. A `Can carry [n] extra [Air]
-/// units` in a city adds to its hangar (`units.air_capacity_ok` read its filter's text).
+/// The base units the `Air` unit filter names: every aircraft (`rules::Derived::aircraft`). A
+/// `Can carry [n] extra [Air] units` in a city adds to its hangar (`units.air_capacity_ok` read
+/// its filter's text).
 fn names_every_aircraft(g: &Game, f: crate::base::ids::UnitFilterId) -> bool {
     let r = g.rules();
-    let mut air = BaseUnitSet::new();
-    for (id, d) in r.base_units().iter() {
-        if d.domain == Domain::Air {
-            air.insert(id);
-        }
-    }
-    matches!(r.uniques().filters().unit(f), Expr::Leaf(UnitLeaf::Base(s)) if *s == air)
+    let air = &r.derived().aircraft;
+    matches!(r.uniques().filters().unit(f), Expr::Leaf(UnitLeaf::Base(s)) if s == air)
 }
 
 /// Whether a city has room for another aircraft (`units.air_capacity_ok`, `units.py:754-760`):
@@ -736,7 +867,7 @@ fn aircraft_based(g: &Game, c: CityId) -> i32 {
 
 /// What a city can build now, by kind (`cities.buildable_items`, `cities.py:1347-1360`): the
 /// units, the buildings, the wonders (national ones too) and the conversions of production. The
-/// memo `Buildable` keeps it per city (DESIGN.md 6.5).
+/// memo `Buildable` keeps it per city (DESIGN.md 6.5), and [`buildable_items`] lends it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Buildable {
     pub units: BaseUnitSet,
@@ -745,10 +876,12 @@ pub struct Buildable {
     /// Gold, then Science, as they may be built.
     pub gold: bool,
     pub science: bool,
-    /// The room in the city's hangar when the list holds an aircraft, which [`buildable_items`]
-    /// compares with the aircraft based there as it lends the list: the uniques that make it
-    /// are read once per computation rather than on every read.
-    pub air_room: Option<i32>,
+    /// In the memo, the room in the city's hangar when the list holds an aircraft: the uniques
+    /// that make it are read once per computation rather than on every read.
+    pub(crate) air_room: Option<i32>,
+    /// In the memo, each item a limit applies to, with how many more of it the limit allows
+    /// beside those the civilization has; its other cities' queues are counted on each read.
+    pub(crate) limited: SmallVec<[(Constructible, i32); 2]>,
 }
 
 impl super::super::derive::rev::BitEq for Buildable {
@@ -769,78 +902,102 @@ impl Buildable {
             Constructible::Perpetual(Perpetual::Nothing) => false,
         }
     }
+
+    /// Takes an item off the list.
+    fn remove(&mut self, item: Constructible) {
+        match item {
+            Constructible::Unit(u) => {
+                self.units.remove(u);
+            }
+            Constructible::Building(b) => {
+                self.buildings.remove(b);
+                self.wonders.remove(b);
+            }
+            Constructible::Perpetual(_) => {}
+        }
+    }
 }
 
-/// City `c`'s [`Buildable`] list, computed, but for the room aircraft need: that reads where the
-/// civilization's units are, which moves all turn, so [`buildable_items`] asks it of the list.
-#[must_use]
-pub fn compute_buildable(g: &Game, c: CityId) -> Buildable {
+/// City `c`'s [`Buildable`] memo, computed: what it could build but for what the other cities of
+/// its owner are building and the room aircraft need. Those move all turn (a queue edited, a
+/// plane landed), so [`buildable_items`] reads them as it lends the list, and a sibling's queue
+/// recomputes no list.
+pub(crate) fn compute_buildable(g: &Game, c: CityId) -> Buildable {
     let mut out = Buildable::default();
     let r = g.rules();
     let mut aircraft = false;
     for (u, d) in r.base_units().iter() {
         let item = Constructible::Unit(u);
-        if d.domain == Domain::Air {
-            if air_free_buildable(g, c, u) {
-                out.units.insert(u);
-                aircraft = true;
-            }
-        } else if is_buildable(g, c, item) {
-            out.units.insert(u);
+        let Some(room) = buildable_for_memo(g, c, item) else { continue };
+        out.units.insert(u);
+        aircraft |= d.domain == Domain::Air;
+        if let Some(room) = room {
+            out.limited.push((item, room));
         }
     }
     if aircraft {
         out.air_room = Some(air_room(g, c));
     }
     for (b, d) in r.buildings().iter() {
-        if is_buildable(g, c, Constructible::Building(b)) {
-            if d.any_wonder {
-                out.wonders.insert(b);
-            } else {
-                out.buildings.insert(b);
-            }
+        let item = Constructible::Building(b);
+        let Some(room) = buildable_for_memo(g, c, item) else { continue };
+        if d.any_wonder {
+            out.wonders.insert(b);
+        } else {
+            out.buildings.insert(b);
+        }
+        if let Some(room) = room {
+            out.limited.push((item, room));
         }
     }
-    out.gold = is_buildable(g, c, Constructible::Perpetual(Perpetual::Gold));
-    out.science = is_buildable(g, c, Constructible::Perpetual(Perpetual::Science));
+    out.gold = buildable_for_memo(g, c, Constructible::Perpetual(Perpetual::Gold)).is_some();
+    out.science = buildable_for_memo(g, c, Constructible::Perpetual(Perpetual::Science)).is_some();
     out
 }
 
-/// Whether an aircraft could be built but for the room in the city: its only reason, if any, is
-/// the hangar.
-fn air_free_buildable(g: &Game, c: CityId, u: BaseUnitId) -> bool {
-    if !is_buildable_quick(g, c, u) {
-        return false;
-    }
-    rejection_reasons(g, c, Constructible::Unit(u))
-        .iter()
-        .all(|x| x.kind == RejectionKind::NoPlaceToPutUnit)
+/// [`compute_buildable`], for the benchmark of a recomputation (DESIGN.md 10).
+#[cfg(feature = "test-ops")]
+#[doc(hidden)]
+#[must_use]
+pub fn compute_buildable_for_bench(g: &Game, c: CityId) -> Buildable {
+    compute_buildable(g, c)
 }
 
-/// The quick checks of [`is_buildable`] for a unit.
-fn is_buildable_quick(g: &Game, c: CityId, u: BaseUnitId) -> bool {
-    let Some(p) = g.city(c).map(crate::state::cities::City::owner) else { return false };
-    let d = &g.rules().base_units()[u];
-    g.has_tech(p, d.required_tech)
-        && !d.obsolete_tech.is_some_and(|t| g.has_tech(p, Some(t)))
-        && !d.unique_to.is_some_and(|n| g.player(p).is_none_or(|x| x.nation != n))
-}
-
-/// What a city can build now (`cities.buildable_items`): its memo, and the aircraft it has room
-/// for.
+/// What a city can build now (`cities.buildable_items`): its memo, less the aircraft it has no
+/// room for, the wonders another of its owner's cities is building, and the items whose limit
+/// the other cities' queues reach.
 #[must_use]
 pub fn buildable_items(g: &Game, c: CityId) -> Buildable {
     let mut out = super::super::derive::buildable::buildable(g, c).clone();
+    let r = g.rules();
     if let Some(room) = out.air_room
         && aircraft_based(g, c) >= room
     {
-        let r = g.rules();
         let air: SmallVec<[BaseUnitId; 8]> =
             out.units.iter().filter(|&u| r.base_units()[u].domain == Domain::Air).collect();
         for u in air {
             out.units.remove(u);
         }
     }
+    if out.wonders.is_empty() && out.limited.is_empty() {
+        return out;
+    }
+    let Some(p) = g.city(c).map(crate::state::cities::City::owner) else { return out };
+    // A wonder being built in another of its owner's cities (cities.py:1264-1266).
+    for x in g.player_cities(p).filter(|x| x.id() != c) {
+        for item in &x.queue {
+            if let Constructible::Building(b) = *item {
+                out.wonders.remove(b);
+            }
+        }
+    }
+    let limited = core::mem::take(&mut out.limited);
+    for &(item, room) in &limited {
+        if count_queued(g, p, item, Some(c)) >= room {
+            out.remove(item);
+        }
+    }
+    out.limited = limited;
     out
 }
 
@@ -851,7 +1008,7 @@ pub fn buildable_items(g: &Game, c: CityId) -> Buildable {
 pub fn validate_queue(g: &mut Game, c: CityId) {
     let Some(city) = g.city(c) else { return };
     let kept: SmallVec<[Constructible; 4]> =
-        city.queue.iter().copied().filter(|&x| rejection_reasons(g, c, x).is_empty()).collect();
+        city.queue.iter().copied().filter(|&x| is_buildable(g, c, x)).collect();
     if kept != city.queue
         && let Some(x) = g.city_mut(c, CityTouch::CORE)
     {
@@ -878,10 +1035,10 @@ fn validate_progress(g: &mut Game, c: CityId) {
             }
             continue;
         }
-        let rr = rejection_reasons(g, c, item);
+        let rr = rejection_kinds(g, c, item);
         let lost = rr.iter().any(|x| {
             matches!(
-                x.kind,
+                x,
                 K::Obsoleted
                     | K::WonderAlreadyBuilt
                     | K::NationalWonderAlreadyBuilt
@@ -914,12 +1071,12 @@ fn validate_progress(g: &mut Game, c: CityId) {
                 }
             }
             Constructible::Unit(u) => {
-                let obsolete_only = rr.iter().all(|x| x.kind == K::Obsoleted);
+                let obsolete_only = rr.iter().all(|&x| x == K::Obsoleted);
                 if let Some(up) = r.base_units()[u].upgrades_to
                     && obsolete_only
                 {
                     let up = Constructible::Unit(equivalent_unit(g, owner, up));
-                    if rejection_reasons(g, c, up).is_empty()
+                    if is_buildable(g, c, up)
                         && let Some(x) = g.city_mut(c, CityTouch::STOCKS)
                     {
                         #[allow(clippy::cast_precision_loss, reason = "production is small")]
@@ -961,6 +1118,13 @@ pub fn construct_if_enough(g: &mut Game, c: CityId) {
         if let Some(x) = g.city_mut(c, CityTouch::STOCKS) {
             x.overflow = most.min(overflow);
         }
+        // `Cost increases by [n] when built` counts what was finished. Python counted a unit
+        // with no room to stand too, so every turn it waited raised its price.
+        // refcheck: increasing-cost-counts-what-was-built
+        if let Some(x) = g.player_mut(owner, PlayerTouch::OTHER) {
+            let n = x.civ.built_increasing.entry(item).or_insert(0);
+            *n = n.saturating_add(1);
+        }
     } else if let Some(city) = g.city(c) {
         let (name, at) = (city.name.clone(), city.tile());
         g.emit(
@@ -972,26 +1136,26 @@ pub fn construct_if_enough(g: &mut Game, c: CityId) {
             &[],
         );
     }
-    if let Some(x) = g.player_mut(owner, PlayerTouch::OTHER) {
-        *x.civ.built_increasing.entry(item).or_insert(0) += 1;
-    }
 }
 
-/// At the end of a city's turn its production goes into what it builds, with the overflow; a
-/// conversion of production banks it as overflow (`cities.end_turn_production`,
-/// `cities.py:1773-1786`). Something begun is announced if it alerts the world.
+/// At the end of a city's turn its production goes into what it builds, with the overflow
+/// (`cities.end_turn_production`, `cities.py:1773-1786`). Something begun is announced if it
+/// alerts the world.
+///
+/// A conversion of production keeps nothing: the city's stats already turned the turn's
+/// production into gold or science. Python banked it as overflow too, which the next item took
+/// whole, so twenty turns of Gold finished a wonder the turn after; UnCiv's `endTurn` adds
+/// nothing for a perpetual construction.
 pub fn end_turn_production(g: &mut Game, c: CityId, production: f64) {
     validate_queue(g, c);
     validate_progress(g, c);
     let Some(city) = g.city(c) else { return };
     let Some(item) = current_construction(city) else { return };
-    let prod = num::round_half_even(production);
+    // refcheck: perpetual-production-is-not-banked
     if matches!(item, Constructible::Perpetual(_)) {
-        if let Some(x) = g.city_mut(c, CityTouch::STOCKS) {
-            x.overflow += prod;
-        }
         return;
     }
+    let prod = num::round_half_even(production);
     if city.progress.get(&item).copied().unwrap_or(0.0) == 0.0 {
         construction_begun(g, c, item);
     }

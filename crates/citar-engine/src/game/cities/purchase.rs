@@ -17,8 +17,8 @@ use super::super::derive::rev::{CityTouch, PlayerTouch};
 use super::super::error::{ActionError, ErrCode};
 use super::citizens::own_city;
 use super::construction::{
-    RejectionKind, complete_construction, item_name, rejection_reasons, unit_placement,
-    validate_queue,
+    RejectionKind, complete_construction, item_name, rejection_kinds, rejection_reasons,
+    unit_placement, validate_queue,
 };
 use super::queue::resolve_item;
 use super::stats::production_cost;
@@ -231,6 +231,20 @@ fn own_amounts(g: &Game, c: CityId, item: Constructible, stat: Stat) -> SmallVec
 /// faith-bought religious units are, may still be bought.
 #[must_use]
 pub fn can_purchase_with(g: &Game, c: CityId, item: Constructible, stat: Stat) -> bool {
+    purchasable(g, c, item, stat, || {
+        rejection_kinds(g, c, item).iter().any(|&k| k != RejectionKind::Unbuildable)
+    })
+}
+
+/// [`can_purchase_with`], told by `blocked` whether a unit has a reason it cannot be built other
+/// than being unbuildable: [`purchase_check`] has read its reasons already.
+fn purchasable(
+    g: &Game,
+    c: CityId,
+    item: Constructible,
+    stat: Stat,
+    blocked: impl FnOnce() -> bool,
+) -> bool {
     if matches!(item, Constructible::Perpetual(_))
         || matches!(stat, Stat::Production | Stat::Happiness)
     {
@@ -242,7 +256,7 @@ pub fn can_purchase_with(g: &Game, c: CityId, item: Constructible, stat: Stat) -
         return false;
     }
     if let Constructible::Unit(_) = item {
-        if rejection_reasons(g, c, item).iter().any(|x| x.kind != RejectionKind::Unbuildable) {
+        if blocked() {
             return false;
         }
     } else if let Constructible::Building(b) = item
@@ -386,7 +400,8 @@ pub fn purchase_check(
         }
     }
     let refused = || Some(format!("{name} cannot be bought with {}.", stat_name(stat)));
-    if !can_purchase_with(g, c, item, stat) {
+    // Its reasons were read above: none but being unbuildable is left.
+    if !purchasable(g, c, item, stat, || false) {
         return (refused(), None);
     }
     let Some(cost) = buy_cost(g, c, item, stat) else { return (refused(), None) };
@@ -470,7 +485,8 @@ pub fn apply_purchase(g: &mut Game, x: Purchase) {
         })
     };
     if counts && let Some(pl) = g.player_mut(owner, PlayerTouch::OTHER) {
-        *pl.civ.bought_increasing.entry(item).or_insert(0) += 1;
+        let n = pl.civ.bought_increasing.entry(item).or_insert(0);
+        *n = n.saturating_add(1);
     }
     if let Some(x) = g.city_mut(c, CityTouch::CORE) {
         if matches!(item, Constructible::Building(_))
