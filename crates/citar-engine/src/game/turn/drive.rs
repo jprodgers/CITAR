@@ -17,16 +17,20 @@
 //! ([`SeatDriver::respond`]), whoever's turn it is, as Python's `resolve_negotiations`
 //! (`bots/headless.py:14-22`) and the session's responders (`server/session.py:268-301`) did:
 //! at every step of `drive`, so a chat the host's seat opened gets the driver's answer on the
-//! next call, and those a driver opened are answered before its turn ends.
+//! next call, and those a driver opened are answered before its turn ends. A driver may leave a
+//! chat to the host ([`DriverOutcome::Deferred`]), as a hybrid seat's bot leaves a question to
+//! the seat's language model; until the chat moves, it waits on the host as a chat with a seat
+//! the host plays does.
 //!
 //! It stops ([`Stop`]):
 //! - at a seat with no driver (`External`: a person, a model, an MCP client), which the host
 //!   plays and ends;
 //! - after the driver of a hybrid seat has played (`HybridDiplomat`), so that the host runs the
 //!   seat's language model for its diplomacy (plan H1); the next `drive` ends the turn;
-//! - when the seat whose driver has played is in a chat that waits on a seat with no driver
-//!   (`AwaitingReply`, rule T3: ending the turn waits for the answer). The host waits for it,
-//!   closing the chat when its timeout runs out, and drives again;
+//! - when the seat whose driver has played is in a chat that waits on the host: on a seat with
+//!   no driver, or on a seat, itself included, whose driver left it to the host (`AwaitingReply`,
+//!   rule T3: ending the turn waits for the answer). The host has it answered, or closes it when
+//!   its timeout runs out, and drives again;
 //! - once it has ended the turns of as many driven seats as [`DriveOptions::seat_limit`] allows
 //!   (`SeatLimit`), so a server can let go of a large game between seats;
 //! - when the game is over (`GameOver`).
@@ -36,6 +40,7 @@
 //! taken there, goes on from where it stopped rather than playing the turn again.
 
 use core::num::NonZeroU32;
+use std::collections::BTreeMap;
 
 use smallvec::SmallVec;
 
@@ -48,15 +53,25 @@ use crate::game::events::EventBatch;
 use crate::game::invariants::{Code, Violation};
 use crate::state::Phase;
 use crate::state::chronicle::DriveMark;
-use crate::state::diplo::NegStatus;
+use crate::state::diplo::{NegStatus, Negotiation};
 use crate::state::players::{Controller, DriverMemory};
 
 /// What a driver did with its turn, or with a negotiation it was asked to answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DriverOutcome {
-    /// It has played, or answered as it will: [`Game::drive`] goes on.
+    /// It has played, or answered as it will: [`Game::drive`] goes on. A negotiation a driver
+    /// leaves unanswered this way is its answer: the chat waits on the seat until it expires
+    /// with its opener's turn, as in Python's headless loop.
     Done,
+    /// From [`SeatDriver::respond`]: it has left the negotiation to the host, as a hybrid seat's
+    /// bot leaves a question to the seat's language model (plan H1). Until the negotiation moves,
+    /// the drive counts it as waiting on the host (rule T3): a driven seat in it, the deferring
+    /// seat included, does not end its turn but stops the drive with [`Stop::AwaitingReply`].
+    /// The next `drive` asks the driver again, so a host whose wait has run out has the bot
+    /// decide by driving with a driver that answers this time. From
+    /// [`SeatDriver::play_turn`], the same as `Done`.
+    Deferred,
 }
 
 /// Whoever plays a seat for the host: `Send`, since hosts drive games inside
@@ -71,9 +86,9 @@ pub trait SeatDriver: Send {
 
     /// Answers negotiation `nid`, which waits on `pid`, whoever's turn it is: through
     /// [`Game::act`] with `respond_negotiation`, which may be used at any time. `mem` is as for
-    /// [`play_turn`](Self::play_turn). A driver that leaves it unanswered (a hybrid seat's bot
-    /// leaving a question to its language model) is not asked again in the same drive until the
-    /// chat moves.
+    /// [`play_turn`](Self::play_turn). A driver that leaves it unanswered is not asked again in
+    /// the same drive until the chat moves; one that leaves it to the host (a hybrid seat's bot
+    /// leaving a question to its language model) says so, [`DriverOutcome::Deferred`].
     fn respond(
         &mut self,
         g: &mut Game,
@@ -129,10 +144,13 @@ pub enum Stop {
     /// the seat's language model for its diplomacy now, then drives on, which ends the turn
     /// (or ends it itself).
     HybridDiplomat(PlayerId),
-    /// The driven seat `pid`, whose driver has played, is in negotiations `nids` that wait on a
-    /// seat the host plays (rule T3). The host waits for the answer, closing a negotiation whose
-    /// wait runs out ([`Game::close_negotiation`]), then drives on: an answer that comes back to
-    /// `pid` is put to its driver, and the turn ends once nothing waits on the host's seats.
+    /// The driven seat `pid`, whose driver has played, is in negotiations `nids` that wait on the
+    /// host (rule T3): on a seat the host plays, or on a driven seat, `pid` itself included,
+    /// whose driver left them to the host ([`DriverOutcome::Deferred`]; a hybrid seat's
+    /// language model answers them). The host has each answered by whoever plays the seat it
+    /// waits on, or closes one whose wait runs out ([`Game::close_negotiation`]), or has a
+    /// deferring seat's bot decide on the next drive, then drives on: an answer that comes back
+    /// to a driven seat is put to its driver, and the turn ends once nothing waits on the host.
     AwaitingReply { pid: PlayerId, nids: SmallVec<[NegotiationId; 2]> },
     /// It has ended the turns of as many driven seats as the options allow; the game goes on
     /// with the next `drive`.
@@ -171,6 +189,34 @@ fn no_memory() -> DriverMemory {
     DriverMemory::empty(0, 0)
 }
 
+/// What one call of [`Game::drive`] last put to a driver about a negotiation.
+#[derive(Clone, Copy, Debug)]
+struct Asked {
+    /// The entries the negotiation had.
+    len: usize,
+    /// The seat it waited on.
+    seat: PlayerId,
+    /// Whether the driver left it to the host ([`DriverOutcome::Deferred`]).
+    deferred: bool,
+}
+
+impl Asked {
+    /// Whether this is where `n` still stands: it has not moved since.
+    fn stands(&self, n: &Negotiation) -> bool {
+        n.status == NegStatus::Open && n.awaiting == Some(self.seat) && n.history.len() == self.len
+    }
+}
+
+/// The negotiations one call of `drive` has put to drivers, by id: only open ones are kept
+/// (ids are never reused, and a closed negotiation never opens again), so a lookup costs the
+/// logarithm of the open chats however long the call plays.
+type AskedMap = BTreeMap<NegotiationId, Asked>;
+
+/// Whether the driver of the seat `n` waits on has left it to the host, and it has not moved.
+fn left_to_host(asked: &AskedMap, n: &Negotiation) -> bool {
+    asked.get(&n.id).is_some_and(|a| a.deferred && a.stands(n))
+}
+
 impl Game {
     /// Plays the seats that have drivers, turn after turn, until the host has something to do or
     /// the game is over (DESIGN.md 6.12; the stops are [`Stop`]'s). Returns why it stopped, and
@@ -187,8 +233,7 @@ impl Game {
         self.ensure_not_driving()?;
         let first = self.st.host().next_event_id;
         let mut ended: u32 = 0;
-        // The negotiations put to a driver in this call, each with the entries it had.
-        let mut asked: Vec<(NegotiationId, usize)> = Vec::new();
+        let mut asked = AskedMap::new();
         let stop = loop {
             if self.phase() != Phase::Playing || self.majors(true).next().is_none() {
                 // With no major civilization left there is nobody to drive: a game whose last
@@ -238,7 +283,7 @@ impl Game {
                 self.st.host_mut().drive = Some(DriveMark { diplomat: true, ..mark });
                 break Stop::HybridDiplomat(pid);
             }
-            let nids = self.awaiting_the_host(d, pid);
+            let nids = self.awaiting_the_host(d, &asked, pid);
             if !nids.is_empty() {
                 break Stop::AwaitingReply { pid, nids };
             }
@@ -274,54 +319,65 @@ impl Game {
     /// Puts every open negotiation that waits on a driven seat to that seat's driver, round
     /// after round while the answers bring more, as Python's `resolve_negotiations` did
     /// (`bots/headless.py:14-22`). A chat is put to a driver once in a drive for each entry it
-    /// has (`asked`): one the driver leaves unanswered is not asked again until it moves.
+    /// has (`asked`): one the driver leaves unanswered, or leaves to the host, is not asked
+    /// again until it moves.
     fn answer_waiting(
         &mut self,
         d: &mut Drivers<'_>,
-        asked: &mut Vec<(NegotiationId, usize)>,
+        asked: &mut AskedMap,
     ) -> Result<(), ActionError> {
+        asked.retain(|&nid, _| self.negotiation(nid).is_some_and(|n| n.status == NegStatus::Open));
         for _ in 0..ANSWER_ROUNDS {
-            let waiting: Vec<(NegotiationId, PlayerId, usize)> = self
+            let waiting: Vec<(NegotiationId, Asked)> = self
                 .st
                 .diplo()
                 .negotiations
                 .iter()
                 .filter(|n| n.status == NegStatus::Open)
-                .filter_map(|n| n.awaiting.map(|p| (n.id, p, n.history.len())))
-                .filter(|&(nid, p, len)| d.drives(p) && !asked.contains(&(nid, len)))
+                .filter_map(|n| {
+                    let seat = n.awaiting.filter(|&p| d.drives(p))?;
+                    let put = asked.get(&n.id).is_some_and(|a| a.stands(n));
+                    (!put).then_some((n.id, Asked { len: n.history.len(), seat, deferred: false }))
+                })
                 .collect();
             if waiting.is_empty() {
                 break;
             }
-            for (nid, p, len) in waiting {
+            for (nid, now) in waiting {
                 if self.phase() != Phase::Playing {
                     return Ok(());
                 }
                 // An answer earlier in the round may have settled it.
-                let still = self.negotiation(nid).is_some_and(|n| {
-                    n.status == NegStatus::Open && n.awaiting == Some(p) && n.history.len() == len
-                });
-                if !still {
+                if !self.negotiation(nid).is_some_and(|n| now.stands(n)) {
                     continue;
                 }
-                asked.push((nid, len));
+                let p = now.seat;
                 let Some(driver) = d.seats.get_mut(p).and_then(Option::as_mut) else { continue };
-                self.with_driver(p, |g, mem| driver.respond(g, p, nid, mem))?;
+                let outcome = self.with_driver(p, |g, mem| driver.respond(g, p, nid, mem))?;
+                asked.insert(nid, Asked { deferred: outcome == DriverOutcome::Deferred, ..now });
                 self.settle();
             }
         }
         Ok(())
     }
 
-    /// The open negotiations `pid` is in that wait on a seat without a driver: what rule T3
-    /// makes the end of its turn wait for.
-    fn awaiting_the_host(&self, d: &Drivers<'_>, pid: PlayerId) -> SmallVec<[NegotiationId; 2]> {
+    /// The open negotiations `pid` is in that wait on the host, which rule T3 makes the end of
+    /// its turn wait for: on another seat without a driver, or on a seat, `pid` included, whose
+    /// driver left them to the host and that has not moved since.
+    fn awaiting_the_host(
+        &self,
+        d: &Drivers<'_>,
+        asked: &AskedMap,
+        pid: PlayerId,
+    ) -> SmallVec<[NegotiationId; 2]> {
         self.st
             .diplo()
             .negotiations
             .iter()
             .filter(|n| n.status == NegStatus::Open && (n.initiator == pid || n.responder == pid))
-            .filter(|n| n.awaiting.is_some_and(|q| q != pid && !d.drives(q)))
+            .filter(|n| {
+                n.awaiting.is_some_and(|q| (q != pid && !d.drives(q)) || left_to_host(asked, n))
+            })
             .map(|n| n.id)
             .collect()
     }

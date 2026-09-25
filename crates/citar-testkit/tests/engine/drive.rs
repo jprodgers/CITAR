@@ -1,7 +1,9 @@
 //! The host's drive (package 1c-09, DESIGN.md 6.12), gate 3: `Game::drive` stops right for
 //! every mix of seats (driven, the host's, hybrid), including a reply awaited from the host's
-//! seat (rule T3) and a limit on seats; it puts the negotiations that wait on a driven seat to
-//! its driver, whoever's turn it is, with the game refusing to end a turn inside the answer; and
+//! seat (rule T3), or from a driven seat whose driver left the chat to the host (a hybrid seat's
+//! model), in and out of that seat's turn, and a limit on seats; it puts the negotiations that
+//! wait on a driven seat to its driver, whoever's turn it is, with the game refusing to end a
+//! turn inside the answer; and
 //! a driver's memory, written in a turn or in an answer, is digested and survives a save and a
 //! load, as does a stop inside a turn.
 
@@ -61,20 +63,22 @@ fn clean(g: &mut Game) {
     assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
 }
 
-/// A driver that plays nothing, answers what waits on it with `answer` (or leaves it), counts
-/// its turns and answers in the seat's memory (turns, then answers), and checks as it answers
-/// that the game will not end a turn inside it.
+/// A driver that plays nothing, answers what waits on it with `answer` (or leaves it, or with
+/// `defer` leaves it to the host, as a hybrid seat's bot leaves it to its model), counts its
+/// turns and answers in the seat's memory (turns, then answers), and checks as it answers that
+/// the game will not end a turn inside it.
 struct Tester {
     answer: Option<&'static str>,
+    defer: bool,
     turns: u32,
     answers: u32,
-    /// A negotiation to open, with this player, on its first turn.
+    /// A negotiation to open, with this player, on its next turn.
     open_with: Option<PlayerId>,
 }
 
 impl Tester {
     fn new(answer: Option<&'static str>) -> Self {
-        Self { answer, turns: 0, answers: 0, open_with: None }
+        Self { answer, defer: false, turns: 0, answers: 0, open_with: None }
     }
 }
 
@@ -114,6 +118,9 @@ impl SeatDriver for Tester {
         assert_eq!(e.code, ErrCode::Rule);
         self.answers += 1;
         bump(mem, 1);
+        if self.defer {
+            return DriverOutcome::Deferred;
+        }
         if let Some(action) = self.answer {
             let a = RespondNegotiation {
                 negotiation_id: i64::from(nid.get()),
@@ -266,6 +273,95 @@ fn a_driven_seat_waits_for_the_host_seats_answer_and_its_driver_answers_back() {
     drop(d);
     assert_eq!((a.turns, a.answers), (1, 1));
     assert_eq!(memory(&g, PlayerId(0)), [1, 1], "a turn and an answer, in the seat's memory");
+    clean(&mut g);
+}
+
+/// The one stop that names `nid` as awaited by driven seat `pid`, which it waits on as `on`.
+fn awaits(g: &Game, stop: &Stop, pid: PlayerId, nid: NegotiationId, on: PlayerId) {
+    assert!(
+        matches!(stop, Stop::AwaitingReply { pid: p, nids } if *p == pid && nids.as_slice() == [nid]),
+        "{stop:?}"
+    );
+    assert_eq!(g.current(), pid, "its turn waits");
+    let n = g.negotiation(nid).expect("it exists");
+    assert_eq!((n.status, n.awaiting), (NegStatus::Open, Some(on)));
+}
+
+fn answer_as(g: &mut Game, p: PlayerId, nid: NegotiationId, action: &str) {
+    let a = RespondNegotiation {
+        negotiation_id: i64::from(nid.get()),
+        action: json!(action),
+        message: Some(json!("From the model.")),
+        give: None,
+        receive: None,
+    };
+    g.act(p, Action::RespondNegotiation(a)).expect("an answer");
+}
+
+#[test]
+fn a_chat_a_driver_leaves_to_the_host_holds_the_turn_in_and_out_of_the_hybrid_seats_turn() {
+    // Seat 0 is hybrid: its bot leaves every chat to the seat's model (the host). Seat 1 is a
+    // bot that replies to whatever waits on it.
+    let mut g = arena(&json!([{"controller": "hybrid"}, {"controller": "bot"}]), &json!({}));
+    g.meet(PlayerId(0), PlayerId(1)).expect("they meet");
+    let mut a = Tester::new(None);
+    a.defer = true;
+    let mut b = Tester::new(Some("reply"));
+    b.open_with = Some(PlayerId(0));
+    let mut d = Drivers::none(2).with(PlayerId(0), &mut a).with(PlayerId(1), &mut b);
+    let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("live");
+    assert_eq!(stop, Stop::HybridDiplomat(PlayerId(0)));
+    // Out of the hybrid seat's turn: the bot opens a chat with it, its driver leaves the chat to
+    // the model, and the bot's turn waits for the answer instead of ending (and the chat
+    // expiring) before the model has seen it.
+    let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("live");
+    let first = NegotiationId::new(1).expect("the first");
+    awaits(&g, &stop, PlayerId(1), first, PlayerId(0));
+    assert_eq!(g.turn(), 1);
+    // Nothing moved: the next drive asks the hybrid seat's driver again, which leaves it again.
+    let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("live");
+    awaits(&g, &stop, PlayerId(1), first, PlayerId(0));
+    // The model answers; the bot replies to it, and the chat is the model's again.
+    answer_as(&mut g, PlayerId(0), first, "reply");
+    let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("live");
+    awaits(&g, &stop, PlayerId(1), first, PlayerId(0));
+    assert_eq!(g.negotiation(first).map(|n| n.history.len()), Some(3));
+    // The model ends it: the bot's turn ends, and the hybrid seat's next turn is played.
+    answer_as(&mut g, PlayerId(0), first, "reject");
+    let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("live");
+    assert_eq!(stop, Stop::HybridDiplomat(PlayerId(0)));
+    assert_eq!((g.turn(), g.current()), (2, PlayerId(0)));
+    // In its own turn: the model opens a chat with the bot, which replies; the hybrid seat's
+    // driver leaves the reply to the model, and the turn waits on it rather than ending.
+    let open = OpenNegotiation { to: 1, message: json!("Trade?"), give: None, receive: None };
+    g.act(PlayerId(0), Action::OpenNegotiation(open)).expect("the model opens");
+    let second = NegotiationId::new(2).expect("the second");
+    let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("live");
+    awaits(&g, &stop, PlayerId(0), second, PlayerId(0));
+    assert_eq!(g.turn(), 2);
+    drop(d);
+    // The model's wait runs out: the host has the bot decide, driving with a driver that
+    // answers this time, and the turn ends.
+    a.defer = false;
+    a.answer = Some("reject");
+    let mut d = Drivers::none(2).with(PlayerId(0), &mut a).with(PlayerId(1), &mut b);
+    let (stop, _) = g.drive(&mut d, DriveOptions::default().with_seat_limit(1)).expect("live");
+    assert_eq!(stop, Stop::SeatLimit);
+    assert_eq!((g.turn(), g.current()), (2, PlayerId(1)));
+    assert_eq!(g.negotiation(second).map(|n| n.status), Some(NegStatus::Rejected));
+    drop(d);
+    assert_eq!((a.turns, b.turns), (2, 1), "no seat was played twice");
+    // A driver that leaves a chat without deferring it has answered: the turn ends, and the chat
+    // expires with it.
+    a.answer = None;
+    b.open_with = Some(PlayerId(0));
+    let mut d = Drivers::none(2).with(PlayerId(0), &mut a).with(PlayerId(1), &mut b);
+    let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("live");
+    assert_eq!(stop, Stop::HybridDiplomat(PlayerId(0)));
+    assert_eq!(g.turn(), 3);
+    let third = NegotiationId::new(3).expect("the third");
+    assert_eq!(g.negotiation(third).map(|n| n.status), Some(NegStatus::Expired));
+    drop(d);
     clean(&mut g);
 }
 
