@@ -76,7 +76,8 @@ pub static TEST_OPS: &[TestOp] = &[
     },
     TestOp {
         name: "capture_civilian",
-        params: "unit (or player, the barbarians included), x, y: the unit, or the player, takes the                  civilian on the tile",
+        params: "unit (or player, the barbarians included), x, y: the unit, or the player, takes the \
+                 civilian on the tile",
         porting: Porting::Ported,
         run: capture_civilian,
     },
@@ -518,6 +519,8 @@ fn ready_unit(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
 fn attack_as(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let u = unit_param(g, o)?;
     let t = tile(g, o)?;
+    // What the attacker's owner sees, after the operations before it in the list.
+    g.settle_sight();
     let plan = crate::game::combat::actions::plan_attack(g, u, t)?;
     Ok(crate::game::combat::actions::apply_attack(g, plan))
 }

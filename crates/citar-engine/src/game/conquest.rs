@@ -707,7 +707,7 @@ mod tests {
     }
 
     fn clean(g: &mut Game) {
-        g.settle_for_test();
+        g.settle();
         let v = g.take_violations();
         assert!(v.is_empty(), "{v:?}");
         assert!(g.check_invariants().is_empty(), "{:?}", g.check_invariants());

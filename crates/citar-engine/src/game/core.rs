@@ -818,7 +818,7 @@ impl Game {
 
     /// Hands a unit to another player, clearing the orders that were the old owner's
     /// (`game.py:796-804`).
-    #[allow(dead_code, reason = "capture and gifts call it from 1c-03")]
+    #[allow(dead_code, reason = "city-states' unit gifts and annexation call it from 1c-06")]
     pub(crate) fn change_unit_owner(
         &mut self,
         u: UnitId,
