@@ -379,7 +379,6 @@ impl Game {
     /// step after a refresh, stepped, refreshed and compared; so sight is settled and what came
     /// into view earlier (a border that grew in the same stage, a sync an event ran) is dropped
     /// before the step, and sight is settled again after it.
-    #[allow(dead_code, reason = "move_toward steps through it from package 1c-02")]
     pub(crate) fn step_seeing<R>(
         &mut self,
         p: PlayerId,
