@@ -357,3 +357,41 @@ fn the_sites_are_asked_only_when_a_city_could_start_a_settler() {
         assert_eq!(kept.advise(&g, small), advise_production(&g, ROME, small, &pp));
     }
 }
+
+#[test]
+fn a_city_picks_its_production_with_its_citizens_placed() {
+    // Stage S5 places the citizens of a city whose empty queue the advisor fills before it
+    // picks, as Python did (`cities.py:2223-2229`); the settle places everyone else's after.
+    let mut g = testing::duel();
+    let c = city(&mut g, TileIdx(22), "Roma", 4);
+    let _ = city(&mut g, TileIdx(26), "Antium", 12);
+    every_tech(&mut g);
+    let palace = g.rules().lookup::<BuildingId>("Palace").expect("a palace");
+    toggle_building_for_test(&mut g, c, palace, true);
+    if let Some(x) = g.city_mut(c, CityTouch::CORE) {
+        x.auto_production = true;
+        x.queue.clear();
+    }
+    g.settle();
+    let placed = crate::game::cities::citizens::assign(&g, c, false).expect("an assignment");
+    // Its citizens stand where they did before something moved: all of them idle. Where they
+    // stand moves the pick: idle, the city would start the Apollo Program.
+    if let Some(x) = g.city_mut(c, CityTouch::WORK) {
+        x.worked.clear();
+        x.locked.clear();
+    }
+    let city_now = g.city(c).expect("the city");
+    assert_ne!(crate::game::cities::citizens::Assignment::of(city_now), placed);
+    let mut settled =
+        Game::assemble(g.rules, g.st.clone(), crate::state::chronicle::Chronicle::new(), false);
+    settled.reassign(c);
+    let want = auto_pick(&settled, c).expect("a pick");
+    let stale = auto_pick(&g, c).expect("a pick");
+    assert_ne!(stale, want, "where the citizens stand moves nothing");
+    crate::game::cities::lifecycle::start_turn(&mut g, c);
+    let city_now = g.city(c).expect("the city");
+    assert_eq!(crate::game::cities::citizens::Assignment::of(city_now), placed);
+    assert_eq!(city_now.queue.first().copied(), Some(want));
+    g.settle();
+    clean(&mut g);
+}

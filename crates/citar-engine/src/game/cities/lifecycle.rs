@@ -4,7 +4,8 @@
 //! starvation, razing, healing), and a city destroyed.
 //!
 //! Citizens are placed again by the settle that follows (DESIGN.md 6.7), where Python placed
-//! them at once. What waits for other packages, marked where it happens: religion's end of a
+//! them at once; a city whose empty queue the advisor fills has its citizens placed first, as
+//! the advisor reads where they work. What waits for other packages, marked where it happens: religion's end of a
 //! city's turn and a population change's followers (1b-08), a spy's city gone (1c-05), and the
 //! elimination a destroyed city may bring (1c-08).
 
@@ -102,7 +103,15 @@ pub fn start_turn(g: &mut Game, c: CityId) {
     let Some(city) = g.city(c) else { return };
     let (puppet, auto, empty) = (city.puppet, city.auto_production, city.queue.is_empty());
     if empty && g.player(owner).is_some_and(crate::state::players::Player::is_major) {
-        let picked = if puppet || auto { auto_pick_production(g, c) } else { None };
+        let picked = if puppet || auto {
+            // Python placed the city's citizens before it picked (`cities.py:2223-2229`); the
+            // settle would place them only after, and the advisor would weigh what it could build
+            // against where they worked before a building finished or a puppet's focus changed.
+            g.reassign(c);
+            auto_pick_production(g, c)
+        } else {
+            None
+        };
         let name = g.city(c).map(|x| x.name.to_string()).unwrap_or_default();
         match picked {
             Some(item) if !puppet => {
