@@ -6,6 +6,8 @@
 //! promotions, movement, destruction), which promotions and the unit triggers need; the rest of
 //! `triggers.trigger` (`triggers.py:75-338`) is package 1b-08's `apply_one_time`.
 
+use smallvec::SmallVec;
+
 use super::units;
 use super::{Game, Porting, pending};
 use crate::base::ids::UniqueId;
@@ -40,15 +42,25 @@ pub fn fire(
     include_unit: bool,
     note: Option<&str>,
 ) {
-    let found = {
-        let v = g.view();
-        crate::unique::trigger::fire(&v, site, event, include_unit)
-    };
-    #[cfg(feature = "test-ops")]
-    FIRED.with(|f| f.borrow_mut().extend(found.iter().map(|&id| (event.kind(), id))));
-    for id in found {
+    for id in find(g, site, event, include_unit) {
         apply(g, id, site, note);
     }
+}
+
+/// The uniques [`fire`] would apply, found and counted as fired but not applied: for a site
+/// that changes before they apply, as a unit that is found while it stands and gone when its
+/// civilization's effects apply.
+#[must_use]
+pub fn find(
+    g: &Game,
+    site: &TriggerSite,
+    event: &TriggerEvent,
+    include_unit: bool,
+) -> SmallVec<[UniqueId; 4]> {
+    let found = crate::unique::trigger::fire(&g.view(), site, event, include_unit);
+    #[cfg(feature = "test-ops")]
+    FIRED.with(|f| f.borrow_mut().extend(found.iter().map(|&id| (event.kind(), id))));
+    found
 }
 
 /// Applies the one-time effect of the unique `id` at `site` (`triggers.trigger`); `note` is what

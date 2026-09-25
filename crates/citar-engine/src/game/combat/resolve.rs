@@ -12,7 +12,7 @@
 //!   reported it captured), and a fight reports a capture only when a melee unit took the
 //!   civilian (`civilians-under-fire`);
 //! - `upon being defeated` fires for the unit that dies, which Python never fired (DESIGN.md
-//!   5.9).
+//!   5.9); what fires applies to its civilization once it is gone ([`kill_unit`]).
 
 use serde_json::{Map, Value, json};
 use smallvec::SmallVec;
@@ -461,15 +461,24 @@ fn plunder_from_damage(g: &mut Game, a: Combatant, d: Combatant, dmg: i32) {
 }
 
 /// Takes a defeated unit out and tells both sides (`combat._kill_unit`, `combat.py:601-610`):
-/// `upon being defeated` fires for it first, and `upon losing a [unit]` for its owner after.
+/// `upon being defeated` fires for it, and `upon losing a [unit]` for its owner after.
+///
+/// What `upon being defeated` fires is found while the unit stands, since its own uniques are
+/// among those that fire, and applied once it is gone, at its civilization alone: an effect on
+/// the unit itself (an upgrade, a heal, its own destruction) would act on the dead, and a free
+/// upgrade would put a new unit on the tile at no health.
 pub(crate) fn kill_unit(g: &mut Game, victim: UnitId, killer: Option<PlayerId>, text: &str) {
     let Some((owner, at, base)) = g.unit(victim).map(|x| (x.owner(), x.tile(), x.base)) else {
         return;
     };
     let facts = UnitFacts::of(&g.view(), victim);
     let site = TriggerSite { civ: owner, city: None, unit: Some(victim), tile: None };
-    triggers::fire(g, &site, &TriggerEvent::Defeat, true, None);
+    let defeat = triggers::find(g, &site, &TriggerEvent::Defeat, true);
     units::remove_unit(g, victim);
+    let gone = TriggerSite { unit: None, ..site };
+    for id in defeat {
+        triggers::apply(g, id, &gone, None);
+    }
     let audience = core::iter::once(owner).chain(killer).collect();
     let data =
         EventData { unit_type: Some(base), owner: Some(owner), killer, ..EventData::default() };

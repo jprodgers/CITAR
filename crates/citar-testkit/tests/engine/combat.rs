@@ -18,6 +18,8 @@
 //!
 //! Every check, the cache oracle among them, is clean after each step.
 
+use std::sync::OnceLock;
+
 use citar_engine::base::ids::{
     BarbarianLevelId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId, PlayerId,
     SpeedId, TerrainId, TileIdx, UniqueId, UnitId,
@@ -35,7 +37,7 @@ use citar_engine::state::players::{Controller, Player, PlayerKind, Rgb, Seat, Se
 use citar_engine::state::{State, TileClaim};
 use citar_engine::unique::trigger::TriggerKind;
 use citar_engine::unique::{Combatant, UniqueType};
-use citar_testkit::rulesets::kitchen_sink;
+use citar_testkit::rulesets::{KITCHEN_SINK, files_of, kitchen_sink, overlay};
 use proptest::prelude::*;
 use serde_json::{Value, json};
 
@@ -398,6 +400,71 @@ fn losing_a_civilian_is_not_losing_a_military_unit() {
     );
     assert!(g.unit(worker).is_none());
     assert!(fired(TriggerKind::LosingUnit).is_empty(), "the filter is [Military]");
+}
+
+/// The kitchen sink with warriors that upgrade for free, and are destroyed, upon being defeated.
+fn defeat_rules() -> &'static Ruleset {
+    static RULES: OnceLock<&'static Ruleset> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let patch = json!({"Warrior": {"uniques": [
+            "[This Unit] upgrades for free <upon being defeated>",
+            "[This Unit] is destroyed <upon being defeated>",
+        ]}})
+        .to_string();
+        let mut patches = KITCHEN_SINK.to_vec();
+        patches.push(("ruleset/units.json", &patch));
+        let files = overlay(&patches).expect("the patches apply");
+        Ruleset::leak(&files_of(&files)).expect("the ruleset loads")
+    })
+}
+
+/// `upon being defeated` fires for the unit that dies, and applies once it is gone: its own
+/// effects never raise it again, as a free upgrade would have put a new unit on its tile at no
+/// health, whether a fight or a blast killed it.
+#[test]
+fn a_unit_defeated_stays_dead_whatever_its_defeat_fires() {
+    let r = defeat_rules();
+    let upgrade = unique(r, UniqueType::OneTimeUnitUpgrade, "upon being defeated");
+    let destroyed = unique(r, UniqueType::OneTimeUnitDestroyed, "upon being defeated");
+
+    // A swordsman kills a warrior, and moves in.
+    let mut g = game(r);
+    let sword = add(&mut g, ME, "Swordsman", at(6, 4));
+    let victim = add(&mut g, THEM, "Warrior", at(7, 4));
+    war(&mut g);
+    test_ops(
+        &mut g,
+        json!([{"op": "set_unit", "unit": victim.get(), "hp": 1}, {"op": "ready_unit", "unit": sword.get()}]),
+    );
+    triggers::take_fired_for_test().clear();
+    let out = attack(&mut g, sword, at(7, 4));
+    clean(&mut g);
+    assert_eq!(
+        (out["defender_killed"].as_bool(), out["advanced"].as_bool()),
+        (Some(true), Some(true))
+    );
+    let mut defeat = fired(TriggerKind::Defeat);
+    defeat.sort();
+    let mut want = vec![upgrade, destroyed];
+    want.sort();
+    assert_eq!(defeat, want, "both fired");
+    assert!(g.unit(victim).is_none());
+    assert!(g.player_units(THEM).next().is_none(), "no unit of theirs came back");
+    assert_eq!(g.units_at(at(7, 4)).map(|u| u.id()).collect::<Vec<_>>(), [sword]);
+
+    // A nuclear blast kills another.
+    let mut g = game(r);
+    ops(&mut g, json!([{"op": "reveal", "player": 0}]));
+    let victim = add(&mut g, THEM, "Warrior", at(8, 7));
+    let missile = add(&mut g, ME, "Nuclear Missile", at(5, 4));
+    war(&mut g);
+    test_ops(&mut g, json!([{"op": "ready_unit", "unit": missile.get()}]));
+    triggers::take_fired_for_test().clear();
+    attack(&mut g, missile, at(8, 7));
+    clean(&mut g);
+    assert_eq!(fired(TriggerKind::Defeat).len(), 2);
+    assert!(g.unit(victim).is_none());
+    assert!(g.player_units(THEM).next().is_none(), "no unit of theirs came back");
 }
 
 // ---- The contract of fights -------------------------------------------------------------------
