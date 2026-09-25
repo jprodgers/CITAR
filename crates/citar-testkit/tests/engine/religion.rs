@@ -8,7 +8,8 @@
 //!   `May choose [n] additional [kind] beliefs when [founding] a religion` and `Can speed up the
 //!   construction of a wonder`; and a timed unique whose effect has a conditional of its own;
 //! - on overlays of the kitchen sink: a great person born from points firing `upon gaining` once,
-//!   effects that feed themselves stopped, and ruins drawn by weight;
+//!   effects that feed themselves stopped, ruins drawn by weight, and a ruleset's largest amounts
+//!   overflowing nothing;
 //! - which beliefs a civilization may adopt, and a belief listed twice refused;
 //! - religious pressure from the spatial grid equal to Python's walk over every city, on the late
 //!   fixtures and the corpus;
@@ -733,7 +734,7 @@ fn ruins_draw_their_rewards_by_weight() {
 fn naive_pressures(g: &Game, c: CityId) -> Vec<(u8, i32)> {
     let mut out: Vec<(u8, i32)> = Vec::new();
     let mut add = |r: u8, n: i32| match out.iter_mut().find(|(x, _)| *x == r) {
-        Some((_, m)) => *m += n,
+        Some((_, m)) => *m = m.saturating_add(n),
         None => out.push((r, n)),
     };
     let city = g.city(c).expect("the city");
@@ -785,6 +786,50 @@ fn the_grid_finds_the_pressure_pythons_walk_found() {
         }
     }
     assert!(felt > 0, "some city feels pressure");
+}
+
+#[test]
+fn a_rulesets_largest_amounts_overflow_nothing() {
+    // An amount is at most a million, but copies add up: 1,100 of the largest reach take a
+    // city's past what an i32 holds (the city's and its religion's founder's, both this
+    // civilization's), and three of the largest multiplier take one city's pressure past it too.
+    // The search covers the whole map, and ranges and pressures saturate as they add up.
+    let mut uniques =
+        vec![json!("Religion naturally spreads to cities [1000000] tiles away"); 1100];
+    uniques.extend(vec![json!("[1000000]% Natural religion spread [in all cities]"); 3]);
+    let patch = json!({"Kitchen Sink": {"uniques": uniques}});
+    let r = sink_with(&[("ruleset/nations.json", patch.to_string())]);
+    let (mut g, sinkhold) = sink_on(r, 0);
+    let out = ops(
+        &mut g,
+        &json!([
+            {"op": "found_city", "player": 0, "x": 5, "y": 11, "name": "Veii"},
+            {"op": "set_player", "player": 0, "faith": 10},
+        ]),
+    );
+    let veii = city_of(&out[0]);
+    let antium = g.player_cities(YOU).map(|c| c.id()).next().expect("Antium");
+    let (b, pay) = found::plan_pantheon(&g, ME, "Goddess of Love").expect("a pantheon");
+    found::apply_pantheon(&mut g, ME, b, pay);
+    let at = g.city(sinkhold).map(|c| c.tile()).expect("the city");
+    let names: Vec<String> =
+        ["Ceremonial Burial", "Pagodas"].into_iter().map(str::to_owned).collect();
+    let plan = found::plan_religion(&g, ME, at, "Kitchen Faith", &names, None).expect("founded");
+    found::apply_religion(&mut g, ME, &plan, |_| {});
+    settle(&mut g);
+    assert_eq!(citar_engine::game::derive::religion::reach(&g), i32::MAX);
+    // The holy city grows by more citizens than pressure can count.
+    religion::on_population_change(&mut g, sinkhold, i32::MAX);
+    settle(&mut g);
+    let rel = g.player(ME).and_then(|x| x.religion.founded).expect("a religion");
+    for _ in 0..2 {
+        testops::apply(&mut g, &json!([{"op": "end_round"}])).expect("a round");
+    }
+    assert_eq!(religion::majority_religion(&g, veii), Some(rel));
+    let arriving = religion::pressures_from_surroundings(&g, antium);
+    assert_eq!(arriving.to_vec(), [(rel, i32::MAX)], "two holy-city strength sources, saturated");
+    same_pressures(&g, "the largest amounts");
+    clean(&mut g);
 }
 
 #[test]

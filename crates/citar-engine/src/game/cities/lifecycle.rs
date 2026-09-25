@@ -53,7 +53,7 @@ pub fn add_population(g: &mut Game, c: CityId, n: i32) {
     let Some(pop) = g.city(c).map(|x| i32::from(x.pop)) else { return };
     let n = n.max(1 - pop);
     if let Some(x) = g.city_mut(c, CityTouch::CORE) {
-        x.pop = u16::try_from(pop + n).unwrap_or(u16::MAX);
+        x.pop = u16::try_from(pop.saturating_add(n)).unwrap_or(u16::MAX);
     }
     if g.religion_enabled() {
         crate::game::religion::on_population_change(g, c, n);
