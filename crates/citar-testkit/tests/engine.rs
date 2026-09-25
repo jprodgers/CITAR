@@ -13,6 +13,7 @@ mod engine {
     mod kitchen_sink;
     mod mapgen;
     mod production;
+    mod religion;
     mod rules;
     mod save;
     mod scenario;

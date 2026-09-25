@@ -1,0 +1,50 @@
+about = """
+A trigger: Babylon's `Free [Great Scientist] appears <upon discovering [Writing] technology>` fires
+when Babylon learns Writing, and a Great Scientist appears in its capital, as its owner is told.
+Learning another tech fires nothing, and neither does another civilization learning Writing.
+"""
+from = "citar/engine/triggers.py: fire, trigger; citar/engine/research.py: add_tech"
+
+[config]
+players = [{ nation = "Babylon" }, {}]
+
+[[step]]
+note = "The other civilization keeps a unit, so that the game goes on."
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Ur" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+]
+
+[[step]]
+op = "grant_tech"
+args = { player = "all", tech = "Pottery" }
+
+[[step]]
+check = { what = "units" }
+len = 0
+
+[[step]]
+op = "grant_tech"
+args = { player = "all", tech = "Writing" }
+
+[[step]]
+check = { what = "units", player = 0 }
+len = 1
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[0]"
+subset = { owner = 0, type = "Great Scientist", x = 5, y = 5 }
+
+[[step]]
+check = { what = "units", player = 1 }
+len = 0
+
+[[step]]
+check = { what = "events", type = "free_unit" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "free_unit" }
+path = "[0]"
+subset = { text = "Babylon gained 1 Great Scientist (due to researching Writing).", audience = [0] }
