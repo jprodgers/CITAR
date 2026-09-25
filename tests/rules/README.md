@@ -56,7 +56,8 @@ The runner builds the settings from, in order:
    "Civilization 1", "Civilization 2", ... by seat;
 5. the map document, inline.
 
-Then, with `start = "bare"`, every unit is removed (`clear_units` for `all`): a bare game has the
+Then, with `start = "bare"`, every unit is removed (`clear_units` for `all`), and every barbarian
+camp (`clear_camps`, for a script that turns the barbarians on): a bare game has the
 map, the players, their starting techs, gold and culture, and nothing else.
 
 Player ids are the seats in order, then the city-states, then the barbarians. The engines draw
@@ -258,6 +259,8 @@ same from both engines, and every set in it is sorted.
 | `religion` | `city` | `majority` (a religion's name, or null), `followers` (count by religion), `pressures` (by religion, `None` for no religion), `holy_city_of` (a religion's name, or null) |
 | `great_people` | `player` | `points` (great person points by great person), `free` (free great people to choose), `earned`, `golden_age_points`, `golden_ages`, `golden_age_turns`, `golden_age_needed` (the happiness the next golden age needs), `temp_uniques` (each unique held for some turns: `text`, the timed unique's, and `turns` left) |
 | `negotiation` | `negotiation` (an id); optionally `player` | as kept: `id`, `initiator`, `responder`, `turn`, `status` (`open`, `accepted`, `rejected`, `expired`, `cancelled`), `awaiting` (an id or null), `proposal` (what each side gives, by player id, as deal items, or null), `proposal_by`, `history` (each entry's `seq`, `by` (an id, or null for the game), `action` (`open`, `reply`, `counter`, `accept`, `reject`, `close`), `message`, `proposal`, `turn`, `note` (or null)), `deal_id`. With `player`, as that player sees it (`diplomacy.negotiation_view`): `id`, `with`, `with_name`, `status`, `you_initiated`, `your_move`, `turn`, `messages` (entries but the game's close), `max_messages`, `current_proposal` (`you_give`, `you_receive`, `summary`, or null), `proposal_by_you`, `history` (`seq`, `by` (a name or null), `you`, `action`, `message`, `proposal`, and `note` where there is one) |
+| `camps` | | the barbarian camps, by id: `id`, `x`, `y`, `countdown` (turns to the next spawn, or once destroyed until it is forgotten), `spawned` (from -1), `destroyed`. Camp ids differ between the engines |
+| `city_state` | `player` (a city-state) | `ally` (an id or null), `protectors` (ids), `influence` (by major id, as stored), `relationship` (`Unforgivable`, `Enemy`, `Ally`, `Friend`, `Afraid` or `Neutral`) and `resting_point`, each by the id of a major it has met, `quests` (`name`, `assignee`, `scope`: `individual` or `global`), `war_quests` (the kills it wants of an attacker's units, by the attacker's id), `recently_bullied` (turns it pays no tribute) |
 | `spies` | `player` | the civilization's spies in order: `name`, `rank`, `city` (an id, or null at the hideout), `action` (`None`, `Moving`, `Establishing Network`, `Observing City`, `Stealing Tech`, `Rigging Elections`, `Coup`, `Counter-intelligence`, `Dead`), `turns`, `progress` |
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
 | `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |
@@ -298,8 +301,13 @@ What a script does that no player or editor may. `{ what = "ops" }` lists them.
 | `close_negotiation` | `negotiation`, `status` (`rejected`, `expired` or `cancelled`), `note`; optionally `by` (the player it is closed for) | closes an open negotiation from outside it, as a host's timeout does (`diplomacy.close_negotiation`): its history ends with a close entry and the note, and both sides are told. Gives the negotiation as `inspect` does |
 | `open_negotiation_as` | `player`, `to`, `message`; optionally `give`, `receive` (deal items) | opens a negotiation for a player whether or not it is its turn (`EngineGame.open_negotiation_as`). Gives what `open_negotiation` does |
 
-The rest land with their systems: `automate` and `progress_builds` (1c-04), `barbarian_act` and
-`sack_city` (1c-06).
+| `add_barbarian` | `unit`, `x`, `y` (or `at`); optionally `hp` | a barbarian unit on the tile, which `add_unit` refuses to make. Gives `unit_id` |
+| `barbarian_act` | optionally `unit` | the barbarians take a turn now, as the start of their turn has them: their units start their turn and act, then their camps count down, spawn and may appear (`barbarians.take_turn`); with `unit`, only that barbarian acts, with the moves it has (`barbarians._automate`) |
+| `clear_camps` | | removes every barbarian camp and its improvement, as the bare prelude does. Gives `removed` (the tiles as `[x, y]`) |
+| `create_camp` | `x`, `y` (or `at`) | a barbarian camp on the tile, its countdown at 0 (`barbarians.create_camp`). Gives its id |
+| `sack_city` | `city` | the barbarians sack the city (`barbarians.sack_city`). Gives what an attack that sacks it reports: `sacked_city` (its name), `gold_stolen`, `citizen_killed`, `building_destroyed` (a name or null); or `sacked_city` null and a `note` for a city sacked too recently |
+
+`automate` and `progress_builds` (package 1c-04) are described by `{ what = "ops" }`.
 
 ## Maps
 

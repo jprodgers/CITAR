@@ -520,7 +520,7 @@ class Runner:
         cfg["map"] = plain(self.doc)
         g = EngineGame.new(cfg)
         if self.script.bare:
-            g.test_ops([{"op": "clear_units", "player": "all"}])
+            g.test_ops([{"op": "clear_units", "player": "all"}, {"op": "clear_camps"}])
         return g
 
     # ---- steps

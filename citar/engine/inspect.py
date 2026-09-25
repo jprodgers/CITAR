@@ -10,9 +10,9 @@ from typing import Any
 from .game import ActionError, Game
 from .state import AUTO_DECISIONS
 
-QUERIES = ("build_options", "buildable", "city", "costs", "events", "find_tiles", "game", "great_people", "negotiation",
-           "ops", "pending", "player", "preview", "relation", "religion", "spies", "tile", "unit", "unit_actions",
-           "units")
+QUERIES = ("build_options", "buildable", "camps", "city", "city_state", "costs", "events", "find_tiles", "game",
+           "great_people", "negotiation", "ops", "pending", "player", "preview", "relation", "religion", "spies", "tile",
+           "unit", "unit_actions", "units")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -86,6 +86,12 @@ def inspect(g: Game, q: dict) -> Any:
         return [{"name": s["name"], "rank": int(s["rank"]), "city": s.get("city"), "action": s["action"],
                  "turns": int(s.get("turns") or 0), "progress": int(s.get("progress") or 0)}
                 for s in g.player(_any_pid(g, q.get("player"))).spies]
+    if what == "camps":
+        return [{"id": cid, "x": g.grid.xy(c["idx"])[0], "y": g.grid.xy(c["idx"])[1],
+                 "countdown": int(c["countdown"]), "spawned": int(c["spawned"]), "destroyed": bool(c.get("destroyed"))}
+                for cid, c in sorted(g.s.camps.items())]
+    if what == "city_state":
+        return _city_state(g, _any_pid(g, q.get("player")))
     if what == "events":
         return _events(g, q)
     if what == "find_tiles":
@@ -96,6 +102,23 @@ def inspect(g: Game, q: dict) -> Any:
     if what == "pending":
         return []
     raise ActionError(f"Unknown inspect query {what!r}. Known: {', '.join(QUERIES)}.")
+
+
+def _city_state(g: Game, cs: int) -> dict:
+    """``city_state``: a city-state's standing with the majors it has met, its protectors and its quests."""
+    from . import city_states as CS
+    p = g.player(cs)
+    if p.kind != "city_state":
+        raise ActionError(f"Player {cs} is not a city-state.")
+    met = [m.id for m in g.majors(alive_only=False) if g.has_met(cs, m.id)]
+    return {"ally": p.ally, "protectors": sorted(p.protectors),
+            "influence": {str(m.id): float(p.influence.get(str(m.id), 0.0)) for m in g.majors(alive_only=False)},
+            "relationship": {str(m): CS.relationship(g, cs, m) for m in met},
+            "resting_point": {str(m): float(CS.resting_point(g, cs, m)) for m in met},
+            "quests": [{"name": x["name"], "assignee": x["assignee"], "scope": x["kind"]} for x in p.quests],
+            "war_quests": {str(k): int(v["needed"]) for k, v in sorted(p.flags.get("war_quests", {}).items(),
+                                                                         key=lambda kv: int(kv[0]))},
+            "recently_bullied": int(p.flags.get("recently_bullied", 0))}
 
 
 def _negotiation(n: dict) -> dict:
