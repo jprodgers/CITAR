@@ -1,7 +1,7 @@
 //! Standing orders (`automation.py`): multi-turn moves carried out at the start of each turn,
 //! automated exploration, automated workers, and city-site scoring.
 //!
-//! Stage S8 runs [`run_unit_orders`] for every major, a settle after each unit's order: a move
+//! Stage S8 runs `run_unit_orders` for every major, a settle after each unit's order: a move
 //! order walks on (`movement::move_toward` along the route it was given), an explorer heads for
 //! the next unexplored ground, an automated worker for its next job, a sleeper wakes when enemies
 //! come near, and a builder whose tile is threatened stops.

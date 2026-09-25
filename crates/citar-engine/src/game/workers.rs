@@ -7,7 +7,7 @@
 //!
 //! Work in progress lives on the tile (`Tiles::builds`), as Python's `tile.build` did: a worker
 //! standing on the tile with movement left at the end of its turn advances the first entry
-//! (stage E6, [`progress_builds`]).
+//! (stage E6, `progress_builds`).
 //!
 //! **Who builds** is a [`Builder`]: a unit, whose own uniques and conditionals say what it may
 //! build and how fast (the tools, and the direct port of worker automation), or a civilization's
@@ -331,7 +331,7 @@ fn built_here_ok(
 /// Whether an improvement that improves the tile's resource suits the tile's domain
 /// (`TileImprovementFunctions.extendedDomainCheck`, `workers._domain_ok`, `workers.py:120-137`):
 /// the land or water of its terrains, and of the terrains its features occur on.
-fn domain_ok(g: &Game, t: TileIdx, imp: ImprovementId) -> bool {
+pub(crate) fn domain_ok(g: &Game, t: TileIdx, imp: ImprovementId) -> bool {
     let r = g.rules();
     let def = &r.improvements()[imp];
     if def.terrains_can_be_built_on.is_empty() && !def.on_land && !def.on_water {
@@ -680,14 +680,15 @@ pub struct BuildOption {
 }
 
 /// Whether something on `t` is pillaged that a repair would mend.
-fn repairable(tile: &Tile) -> bool {
+pub(crate) fn repairable(tile: &Tile) -> bool {
     (tile.improvement_pillaged() && tile.improvement().is_some())
         || (tile.route().is_some() && tile.route_pillaged())
 }
 
 /// What `b` may start building on tile `t`, repair first, then every improvement it may build
 /// there in the ruleset's order (`workers.build_options`, `workers.py:237-261`), the instant
-/// improvements left out ([`instant_options`]). `only` limits the improvements looked at.
+/// improvements left out ([`water_options`], [`great_options`]). `only` limits the improvements
+/// looked at.
 #[must_use]
 pub fn build_options(
     g: &Game,
