@@ -3,17 +3,17 @@
 //! ([`plan_queue_change`]), and the tools `set_production`, `change_queue`,
 //! `set_auto_production` and `rename_city` (`tools.py:631-662, 782-795`).
 //!
-//! Picking what a city builds when its queue runs empty (`cities.auto_pick_production`,
-//! `cities.py:1696-1717`) is the production advisor's, which package 1c-07 ports into the
-//! engine; until then it picks nothing, and the city says it is idle.
+//! What a city builds when its queue runs empty and the advisor picks for it
+//! ([`auto_pick_production`], `cities.py:1696-1717`) is the production advisor's
+//! (`game::advisor`).
 
 use serde_json::{Value, json};
 use smallvec::SmallVec;
 
+use super::super::Game;
 use super::super::action::{OutcomeSpec, Rule};
 use super::super::derive::rev::CityTouch;
 use super::super::error::{ActionError, ErrCode};
-use super::super::{Game, Porting, pending_or};
 use super::citizens::own_city;
 use super::construction::{QUEUE_MAX, equivalent_unit, item_name, rejection_reasons, turns_for};
 use super::founding::{self, equivalent_building};
@@ -203,11 +203,11 @@ pub fn plan_queue_change(
 }
 
 /// What a city starts when its queue runs empty and the advisor picks for it
-/// (`cities.auto_pick_production`, `cities.py:1696-1717`): the advisor is package 1c-07's, and
-/// picks nothing until then.
+/// (`cities.auto_pick_production`, `cities.py:1696-1717`): a puppet a building or Gold, any other
+/// city what the advisor advises (`advisor::auto_pick`), put at the front of its queue; `None`
+/// when it picks nothing, or what it picked cannot be built.
 pub fn auto_pick_production(g: &mut Game, c: CityId) -> Option<Constructible> {
-    let picked: Option<Constructible> = pending_or(Porting::Pending("1c-07"), None);
-    let item = picked?;
+    let item = super::super::advisor::auto_pick(g, c)?;
     let q = plan_production(g, c, item, false).ok()?;
     write_queue(g, c, q);
     g.city(c).and_then(|x| x.queue.first().copied())

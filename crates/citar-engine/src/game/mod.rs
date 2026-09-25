@@ -53,6 +53,7 @@
 //! once that package is done (DESIGN.md 3.4, rule 3).
 
 pub mod action;
+pub mod advisor;
 pub mod cities;
 pub mod city_states;
 pub mod combat;

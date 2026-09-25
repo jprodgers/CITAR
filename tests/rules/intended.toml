@@ -215,3 +215,17 @@ reason = "A ranged attack that brought a civilian to 0 health left it on the map
 [[differences]]
 id = "may-not-annex-refuses-annexing"
 reason = "A civilization that `May not annex cities` had the cities it captured made puppets, then could annex them at will; Rust refuses it annex"
+
+# Package 1c-07: the production advisor.
+
+[[differences]]
+id = "advisor-ties-by-id"
+reason = "The production advisor read the units a city could build from a set of names, so the first settler, worker or scout and the best of equally strong units were whichever the set gave first, and of equally valued choices it took the name last in code point order; Rust reads them in the ruleset's order and takes the largest id of equally valued choices"
+
+[[differences]]
+id = "advisor-draws-by-city-and-turn"
+reason = "The production advisor's one random choice, whether a city prefers a ranged unit, drew from a bot seeded with the city's id and made afresh for each pick, so a city drew the same every turn; Rust draws from a stream of its own keyed by the city and the turn"
+
+[[differences]]
+id = "advisor-counts-a-free-unit-as-costing-one"
+reason = "The production advisor divided a military unit's strength by a power of its cost, so a unit costing nothing raised a division by zero and the city picked nothing; Rust values it as if it cost one"
