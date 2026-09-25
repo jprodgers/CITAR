@@ -426,7 +426,7 @@ def _drive(g: Game, o: dict):
     def seats(key):
         """The players named under ``key``."""
         v = o.get(key)
-        return set() if v is None else set(_pid(g, x, majors_only=True) for x in (v if isinstance(v, list) else [v]))
+        return set() if v is None else {_pid(g, x, majors_only=True) for x in (v if isinstance(v, list) else [v])}
 
     drivers = seats("drivers")
     deferring = seats("defer") & drivers
