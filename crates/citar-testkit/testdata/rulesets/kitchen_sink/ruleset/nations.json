@@ -28,7 +28,7 @@
       "Gain [50] [Gold] <upon signing a peace treaty with [Major] Civilizations>",
       "Gain [30] [Faith] <upon founding a Pantheon>",
       "Free Great Person <upon adopting [Aristocracy]>",
-      "[+10]% Strength <for [10] turns> <upon being declared war on by [Major] Civilizations>",
+      "[+10]% Strength <when attacking> <for [10] turns> <upon being declared war on by [Major] Civilizations>",
       "Gain [25] [Culture] <upon declaring war on [City-State] Civilizations>",
       "Free [Warrior] appears <upon entering a war with [Major] Civilizations>",
       "Gain [20] [Gold] <upon building a [Farm] improvement>",
@@ -38,6 +38,9 @@
       "Gain [5] [Culture] <upon turn end>",
       "Gain [10] [Gold] <upon losing a [Military] unit>",
       "Gain [10] [Faith] <upon gaining a [Great Prophet] unit>",
+      "Adopt [Swords into Ploughshares] <upon founding a Pantheon>",
+      "Adopt [Tithe] <upon founding a Pantheon>",
+      "Gain [15] [Culture] <upon adopting [Swords into Ploughshares]>",
 
       "[+5]% [Gold] <after adopting [Aristocracy]>",
       "[+5]% [Faith] <after founding a religion>",

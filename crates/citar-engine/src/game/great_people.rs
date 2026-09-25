@@ -1,17 +1,17 @@
 //! Great people and golden ages (`great_people.py`, UnCiv's `GreatPersonManager`,
 //! `GreatPersonPointsBreakdown`, `GoldenAgeManager` and `UnitActionsGreatPerson`).
 //!
-//! - **Points** ([`city_gpp`], stage E3's [`end_turn`]): each city's specialists and buildings
+//! - **Points** ([`city_gpp`], stage E3's `end_turn`): each city's specialists and buildings
 //!   earn points toward great people, raised by `[n]% Great Person generation [cities]`, by
 //!   friendships under `... with declared friendships`, and by `[great person] is earned [n]%
 //!   faster`, each rounded to a whole point in fixed point (`great_people.py:35-62`).
-//! - **Births** ([`start_turn`], stage S2): a great person whose points reach their threshold is
+//! - **Births** (`start_turn`, stage S2): a great person whose points reach their threshold is
 //!   born in the capital; a pool's threshold doubles with each (`great_people.py:65-140`). Combat
 //!   points ([`add_combat_points`], for package 1c-03) have thresholds of their own, rising by 50.
 //! - **Free great people** ([`ChooseGreatPerson`], the tool `choose_great_person`, and
 //!   [`ai_choose_free`]), and **the Maya long count** ([`maya_long_count`], stage S2): a free
 //!   great person at the end of every b'ak'tun once the tech is known, each kind once.
-//! - **Golden ages** ([`enter_golden_age`], stage E6's [`golden_age_stage`]): happiness piles up
+//! - **Golden ages** ([`enter_golden_age`], stage E6's `golden_age_stage`): happiness piles up
 //!   toward the next one, which lasts longer with `[n]% Golden Age length`, and ends counted down.
 //! - **The great person actions** ([`plan_hurry_research`], [`plan_hurry_construction`],
 //!   [`plan_trade_mission`] and their applies), which the unit actions of package 1c-04 wrap, and
@@ -20,6 +20,14 @@
 //! What differs from Python, on purpose:
 //! - a great person spent fires `upon expending a [unit]` once; Python fired it again after the
 //!   unit was consumed (`great_people.py:305, 331, 358`);
+//! - a great person born fires `upon gaining a [unit]` once, as any unit made in a city does;
+//!   Python fired it again, for every such unique whatever unit it named (`great_people.py:140`);
+//! - an AI's free great person is the first preferred kind the Maya calendar allows, where Python
+//!   picked among every kind and took nothing when the calendar refused its pick
+//!   (`great_people.py:209-218`);
+//! - combat experience earns points toward the civilization's own kinds of great person alone,
+//!   where Python credited every one of the ruleset, a Khan beside a general
+//!   (`great_people.py:153-175`);
 //! - either `Can speed up construction of a building` or `Can speed up the construction of a
 //!   wonder` hurries construction, the second only while the city builds a wonder, where Python
 //!   offered the second and then refused it (`actions.py:87`, `great_people.py:313`);
@@ -208,7 +216,9 @@ fn new_great_person(g: &mut Game, p: PlayerId) -> Option<BaseUnitId> {
 }
 
 /// Stage S2, great people born (`great_people.start_turn`, `great_people.py:120-140`): each great
-/// person a major has earned is born in its capital, and `upon gaining a [unit]` fires.
+/// person a major has earned is born in its capital, where `upon gaining a [unit]` fires once, as
+/// for any unit made in a city. Python fired it a second time for a great person, and then every
+/// such unique of the civilization whatever unit it named.
 pub(crate) fn start_turn(g: &mut Game, p: PlayerId) {
     if !g.player(p).is_some_and(crate::state::players::Player::is_major) {
         return;
@@ -218,6 +228,7 @@ pub(crate) fn start_turn(g: &mut Game, p: PlayerId) {
             break;
         };
         let gp = equivalent_unit(g, p, gp);
+        // refcheck: great-person-born-fires-gaining-once
         let Some(u) = add_unit_in_city(g, cap, gp) else { continue };
         if let Some(x) = g.player_mut(p, PlayerTouch::OTHER) {
             x.gp.earned += 1;
@@ -233,8 +244,6 @@ pub(crate) fn start_turn(g: &mut Game, p: PlayerId) {
             data,
             &[],
         );
-        let site = TriggerSite { civ: p, city: None, unit: Some(u), tile: None };
-        triggers::fire(g, &site, &TriggerEvent::GainingUnit(gp), true, None);
     }
 }
 
@@ -267,9 +276,11 @@ pub(crate) fn end_turn(g: &mut Game, p: PlayerId) {
 }
 
 /// Great general and admiral points from experience earned in combat (`great_people.
-/// add_combat_points`, `Battle.addXp`, `great_people.py:153-175`): toward each great person
-/// earned through combat whose `<for [units] units>` the unit that fought passes, raised by
-/// `[great person] is earned [n]% faster`.
+/// add_combat_points`, `Battle.addXp`, `great_people.py:153-175`): toward each of the
+/// civilization's own kinds of great person earned through combat ([`great_people_types`]: the
+/// Mongols' Khan for the great general, nobody else's) whose `<for [units] units>` the unit that
+/// fought passes, raised by `[great person] is earned [n]% faster`. Python credited every such
+/// unit of the ruleset, so any civilization earned Khans beside its generals, as UnCiv does not.
 pub fn add_combat_points(g: &mut Game, p: PlayerId, unit: BaseUnitId, xp: i32) {
     if !g.player(p).is_some_and(crate::state::players::Player::is_major) {
         return;
@@ -277,7 +288,8 @@ pub fn add_combat_points(g: &mut Game, p: PlayerId, unit: BaseUnitId, xp: i32) {
     let r = g.rules();
     let t = r.uniques();
     let mut gains: SmallVec<[(BaseUnitId, i64); 2]> = SmallVec::new();
-    for &gp in &r.derived().great_person_units {
+    // refcheck: combat-points-for-the-civilizations-own-great-people
+    for gp in great_people_types(g, p) {
         for id in r.base_units()[gp].uniques.ids() {
             if t.meta(id).ty != Some(UniqueType::GreatPersonFromCombat) {
                 continue;
@@ -352,12 +364,21 @@ pub fn plan_free_great_person(
     p: PlayerId,
     text: &str,
 ) -> Result<(BaseUnitId, CityId), ActionError> {
+    plan_free_unit(g, p, g.rules().resolve::<BaseUnitId>(text))
+}
+
+/// [`plan_free_great_person`] for a unit the ruleset knows, or none.
+fn plan_free_unit(
+    g: &Game,
+    p: PlayerId,
+    unit: Option<BaseUnitId>,
+) -> Result<(BaseUnitId, CityId), ActionError> {
     let Some(pl) = g.player(p) else { return Err(ActionError::rule("No such player.")) };
     if pl.gp.free <= 0 {
         return Err(ActionError::rule("You have no free Great Person to choose."));
     }
     let opts = free_options(g, p);
-    let name = g.rules().resolve::<BaseUnitId>(text).map(|u| equivalent_unit(g, p, u));
+    let name = unit.map(|u| equivalent_unit(g, p, u));
     let Some(name) = name.filter(|n| opts.contains(n)) else {
         let names: Vec<&str> = opts.iter().filter_map(|&u| g.rules().name(u)).collect();
         return Err(ActionError::rule(format!("Choose one of: {}.", names.join(", "))));
@@ -423,15 +444,17 @@ impl Rule for ChooseGreatPerson {
 
 /// A civilization that lets the engine pick takes its free great people
 /// (`great_people.ai_choose_free`, `great_people.py:209-218`): the first of the scientist,
-/// engineer, merchant, artist and prophet it may choose, else the first kind.
+/// engineer, merchant, artist and prophet it may choose, else the first kind. Python picked among
+/// every kind and took nothing when the Maya calendar refused its pick.
 pub fn ai_choose_free(g: &mut Game, p: PlayerId) {
     while g.player(p).is_some_and(|x| x.gp.free > 0) {
+        // refcheck: ai-free-great-person-within-the-calendar
         let opts = free_options(g, p);
         let known = g.rules().derived().known.preferred_great_people;
         let pick =
             known.iter().flatten().copied().find(|u| opts.contains(u)).or(opts.first().copied());
-        let Some(name) = pick.and_then(|u| g.rules().name(u)).map(str::to_owned) else { break };
-        let Ok((u, cap)) = plan_free_great_person(g, p, &name) else { break };
+        let Some(pick) = pick else { break };
+        let Ok((u, cap)) = plan_free_unit(g, p, Some(pick)) else { break };
         if apply_free_great_person(g, p, u, cap).is_none() {
             break;
         }
@@ -585,7 +608,8 @@ pub(crate) fn golden_age_stage(g: &mut Game, p: PlayerId) {
 // ---- The great person actions ------------------------------------------------------------------
 
 /// A unit is spent (`units.consume`, `units.py:477-482`): `upon expending a [unit]` fires for its
-/// owner, then it leaves the game.
+/// owner, once, then it leaves the game.
+// refcheck: expending-a-unit-fires-once
 pub fn consume_unit(g: &mut Game, u: UnitId) {
     let Some((owner, base)) = g.unit(u).map(|x| (x.owner(), x.base)) else { return };
     let facts = UnitFacts::of(&g.view(), u);

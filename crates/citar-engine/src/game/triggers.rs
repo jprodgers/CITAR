@@ -8,17 +8,21 @@
 //! - [`on_gain`] applies what a source gives once when it is gained: a tech researched, a policy
 //!   adopted, an era entered, a building built, a belief taken (the loops of `research.py:315-319`,
 //!   `policies.py:139-143`, `research.py:368-374`, `cities.py:1849-1854`, `religion.py:525-533`);
-//! - [`starting_triggers`] the global and nation uniques of a new game (`game.py:294-300`), and the
+//! - `starting_triggers`: the global and nation uniques of a new game (`game.py:294-300`), and the
 //!   stages S4 and E1, `upon turn start` and `upon turn end` (`turns.py:49, 86`).
 //!
 //! What differs from Python, on purpose:
 //! - a timed unique is granted whatever its conditionals say, which are its effect's: `[+25]%
 //!   Strength <when attacking> <for [50] turns>` was never granted by Python, whose check at the
-//!   grant asked whether the civilization was attacking (UnCiv lets timed uniques through there);
-//! - `Adopt [belief]` adds the belief to the civilization's religion, where Python did nothing;
+//!   grant asked whether the civilization was attacking (UnCiv lets timed uniques through there),
+//!   whether its source was gained or its trigger fired (`unique::trigger::fire`);
+//! - `Adopt [belief]` adds the belief to the civilization's religion when it fits the religion's
+//!   progress, where Python did nothing;
 //! - `Adopt [policy]` adopts the policy whatever it requires, as UnCiv does, where Python refused
 //!   one the civilization could not adopt by raising out of the trigger with a free policy
-//!   granted.
+//!   granted;
+//! - effects nest [`TRIGGER_DEPTH`] deep at most: a ruleset whose effects feed themselves is
+//!   stopped, where Python recursed until it raised and failed whatever caused the first.
 //!
 //! A few effects reach systems later packages port, and are carried out here with the least of
 //! them: a spy recruited or promoted (espionage, 1c-05), the next world leader vote scheduled
@@ -32,6 +36,7 @@ use super::cities::free_buildings::{self, add_free};
 use super::cities::lifecycle::add_population;
 use super::cities::uniques::contains_building;
 use super::derive::rev::{PlayerTouch, UnitTouch, WorldTouch};
+use super::invariants::{Code, Violation};
 use super::research::{self, TechSource};
 use super::{Game, Porting, great_people, pending_or, policies, religion};
 use crate::base::ids::{BaseUnitId, CityId, PlayerId, PromotionId, TileIdx, UniqueId, UnitId};
@@ -150,11 +155,39 @@ fn civ_name(g: &Game, p: PlayerId) -> String {
     g.player(p).map(|x| x.name.to_string()).unwrap_or_default()
 }
 
+/// How deeply one-time effects may nest: an effect that fires a trigger whose effect fires
+/// another, and so on. The chains real rulesets make are a few deep; a ruleset whose effects feed
+/// themselves (`Free [Warrior] appears <upon gaining a [Warrior] unit>`) is stopped here, where
+/// Python recursed until it raised.
+pub const TRIGGER_DEPTH: u8 = 8;
+
 /// Applies the one-time effect of the unique `id` at `site` (`triggers.trigger`,
 /// `triggers.py:75-367`): `apply_one_time`. `note` is what its announcement says caused it.
 /// Whether anything happened, which ruins read to know a reward was found.
-#[allow(clippy::too_many_lines, reason = "one arm per kind of one-time effect, as Python's")]
+///
+/// An effect nested more than [`TRIGGER_DEPTH`] deep inside others is not applied, and is
+/// reported as SETTLE-1 where the checks run: a chain of effects that does not end.
 pub fn apply(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&str>) -> bool {
+    // refcheck: trigger-chains-stop
+    if g.trigger_depth >= TRIGGER_DEPTH {
+        if g.debug.invariants {
+            let text = g.rules().uniques().text_of(id).to_owned();
+            g.report(Violation::new(
+                Code::Settle1,
+                format!("one-time effects nested {TRIGGER_DEPTH} deep; {text:?} was not applied"),
+            ));
+        }
+        return false;
+    }
+    g.trigger_depth += 1;
+    let happened = apply_one_time(g, id, site, note);
+    g.trigger_depth -= 1;
+    happened
+}
+
+/// [`apply`] within the depth allowed.
+#[allow(clippy::too_many_lines, reason = "one arm per kind of one-time effect, as Python's")]
+fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&str>) -> bool {
     let Some(effect) = OneTimeEffect::decode(g.rules(), id) else { return false };
     let p = site.civ;
     if g.player(p).is_none() {
@@ -718,9 +751,22 @@ fn add_spy(g: &mut Game, p: PlayerId) {
     let Some(m) = g.player_mut(p, PlayerTouch::SPIES).and_then(|x| x.major.as_deref_mut()) else {
         return;
     };
-    let mut n = 1;
-    while m.spies.iter().any(|s| *s.name == *format!("Agent {n}")) {
-        n += 1;
+    // The first `Agent n` no spy is called (`espionage._spy_name`): the numbers taken, read once.
+    let mut taken: Vec<u32> = m
+        .spies
+        .iter()
+        .filter_map(|s| s.name.strip_prefix("Agent "))
+        .filter(|n| !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit()))
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    taken.sort();
+    let mut n = 1u32;
+    for &t in &taken {
+        if t == n {
+            n += 1;
+        } else if t > n {
+            break;
+        }
     }
     let name = format!("Agent {n}");
     m.spies.push(Spy {

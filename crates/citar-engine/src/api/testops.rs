@@ -296,18 +296,53 @@ fn names_of(v: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// A great prophet founds or enhances a religion where it stands and is spent, as the unit action
+/// will do (package 1c-04), which checks besides whether the unit may act now.
+fn prophet_acts(
+    g: &mut Game,
+    u: UnitId,
+    enhance: bool,
+    name: &str,
+    beliefs: &[String],
+) -> Result<Value, ActionError> {
+    use crate::game::great_people::consume_unit;
+    use crate::game::religion::found;
+    use crate::unique::UniqueType;
+    let Some((p, at, base)) = g.unit(u).map(|x| (x.owner(), x.tile(), x.base)) else {
+        return Err(ActionError::rule("No such unit."));
+    };
+    let ty = if enhance { UniqueType::MayEnhanceReligion } else { UniqueType::MayFoundReligion };
+    if !construction::unit_has_type(g.rules(), base, ty) {
+        return Err(ActionError::rule(if enhance {
+            "This unit cannot enhance a religion."
+        } else {
+            "This unit cannot found a religion."
+        }));
+    }
+    let spend = move |g: &mut Game| consume_unit(g, u);
+    if enhance {
+        let chosen = found::plan_enhance(g, p, at, beliefs)?;
+        found::apply_enhance(g, p, &chosen, spend);
+        Ok(found::enhance_result(g, p))
+    } else {
+        let plan = found::plan_religion(g, p, at, name, beliefs, None)?;
+        found::apply_religion(g, p, &plan, spend);
+        Ok(found::religion_result(g, p, &plan))
+    }
+}
+
 /// A great prophet founds a religion where it stands (`religion.found_religion`), as its unit
 /// action will (package 1c-04).
 fn found_religion(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let u = unit_of(g, o)?;
     let name = o.get("name").map(py::str_of).unwrap_or_default();
-    crate::game::religion::found::prophet_acts(g, u, false, &name, &names_of(o.get("beliefs")))
+    prophet_acts(g, u, false, &name, &names_of(o.get("beliefs")))
 }
 
 /// A great prophet enhances its owner's religion where it stands (`religion.enhance_religion`).
 fn enhance_religion(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let u = unit_of(g, o)?;
-    crate::game::religion::found::prophet_acts(g, u, true, "", &names_of(o.get("beliefs")))
+    prophet_acts(g, u, true, "", &names_of(o.get("beliefs")))
 }
 
 /// A unit explores the ancient ruins it stands on (`ruins.enter`), as moving onto them will

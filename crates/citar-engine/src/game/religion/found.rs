@@ -11,8 +11,12 @@
 //! What differs from Python, on purpose:
 //! - the checks write nothing: Python set a civilization's `choose_pantheon_belief` before it
 //!   checked the beliefs chosen, so a refused founding still owed it a pantheon belief;
-//! - `Adopt [belief]` adds the belief to the civilization's religion ([`adopt_belief`]), where
-//!   Python did nothing.
+//! - a belief listed twice is refused ([`validate_choice`]), where Python founded the religion
+//!   with one belief fewer than it owed;
+//! - `Adopt [belief]` adds the belief to the civilization's religion ([`adopt_belief`]) when it
+//!   fits the religion's progress, where Python did nothing;
+//! - an AI breaks a tie between beliefs it weighs the same by the ruleset's order
+//!   ([`ai_choose_beliefs`]), where Python broke it by name.
 
 use serde_json::{Value, json};
 use smallvec::SmallVec;
@@ -20,8 +24,7 @@ use smallvec::SmallVec;
 use super::super::action::{OutcomeSpec, Rule};
 use super::super::derive::rev::{PlayerTouch, UnitTouch, WorldTouch};
 use super::super::error::ActionError;
-use super::super::triggers;
-use super::super::{Game, great_people};
+use super::super::{Game, triggers};
 use super::prophets::{faith_for_pantheon, max_religions, remaining_foundable};
 use super::{
     add_pressure, all_beliefs, beliefs_available, beliefs_taken, display_name, is_holy_city,
@@ -83,7 +86,10 @@ pub fn can_found_pantheon(g: &Game, p: PlayerId) -> Option<String> {
     }
     let enhanced = g.majors(true).any(|q| q.religion.progress == ReligionProgress::Enhanced);
     let started = g.majors(true).filter(|q| q.religion.progress != ReligionProgress::None).count();
-    if enhanced && i32::try_from(started).unwrap_or(i32::MAX) >= max_religions(g) {
+    let first = pl.religion.progress == ReligionProgress::None;
+    if (enhanced && i32::try_from(started).unwrap_or(i32::MAX) >= max_religions(g))
+        || (first && !has_room(g))
+    {
         return Some("No more pantheons can be founded.".into());
     }
     let cost = faith_for_pantheon(g, 0);
@@ -151,6 +157,18 @@ pub fn apply_pantheon(g: &mut Game, p: PlayerId, b: BeliefId, pay: PantheonPayme
     let Some(first) = g.player(p).map(|x| x.religion.progress == ReligionProgress::None) else {
         return;
     };
+    // The pantheon is made before it is paid for, so that nothing is spent on one the game has
+    // no room for ([`can_found_pantheon`] refuses that).
+    let r = if first {
+        let Some(r) = new_religion(g, ReligionName::Pantheon(b), p, None) else { return };
+        if let Some(x) = g.player_mut(p, PlayerTouch::RELIGION) {
+            x.religion.founded = Some(r);
+        }
+        r
+    } else {
+        let Some(r) = g.player(p).and_then(|x| x.religion.founded) else { return };
+        r
+    };
     if let Some(x) = g.player_mut(p, PlayerTouch::STOCKS) {
         match pay {
             PantheonPayment::Free => {
@@ -161,20 +179,12 @@ pub fn apply_pantheon(g: &mut Game, p: PlayerId, b: BeliefId, pay: PantheonPayme
             PantheonPayment::Faith(cost) => x.econ.faith -= f64::from(cost),
         }
     }
-    let r = if first {
-        let Some(r) = new_religion(g, ReligionName::Pantheon(b), p, None) else { return };
-        if let Some(x) = g.player_mut(p, PlayerTouch::RELIGION) {
-            x.religion.founded = Some(r);
-        }
+    if first {
         let cities: Vec<(CityId, u16)> = g.player_cities(p).map(|c| (c.id(), c.pop)).collect();
         for (c, pop) in cities {
             add_pressure(g, c, Some(r), 200 * i32::from(pop));
         }
-        r
-    } else {
-        let Some(r) = g.player(p).and_then(|x| x.religion.founded) else { return };
-        r
-    };
+    }
     add_beliefs(g, r, &[b]);
     if first {
         if let Some(x) = g.player_mut(p, PlayerTouch::RELIGION) {
@@ -220,8 +230,13 @@ impl Rule for FoundPantheon {
 
 // ---- Religions and their beliefs -----------------------------------------------------------------
 
+/// Whether the game has room for one more religion or pantheon: a [`ReligionId`] holds 256.
+fn has_room(g: &Game) -> bool {
+    g.state().world().religions.len() <= usize::from(u8::MAX)
+}
+
 /// A new religion or pantheon (`religion._new_religion`, `religion.py:473-477`), with no belief
-/// yet; `None` past the 256 a game can hold.
+/// yet; `None` past the 256 a game can hold, which the checks refuse first ([`has_room`]).
 fn new_religion(
     g: &mut Game,
     name: ReligionName,
@@ -274,13 +289,36 @@ fn belief_triggers(g: &mut Game, p: PlayerId, beliefs: &[BeliefId]) {
     }
 }
 
-/// `Adopt [belief]`: the belief joins the civilization's religion or pantheon if nobody has taken
-/// it, and does what a belief does when taken. Python adopted policies alone.
-pub fn adopt_belief(g: &mut Game, p: PlayerId, b: BeliefId) -> bool {
-    let Some(r) = g.player(p).and_then(|x| x.religion.founded) else { return false };
-    if beliefs_taken(g).contains(b) {
-        return false;
+/// Whether civilization `p` may take belief `b` outside founding and enhancing: religion is in
+/// play, nobody has taken the belief, and it fits how far the civilization has come. A pantheon
+/// or follower belief joins a pantheon or a religion; a founder belief only a religion without
+/// one, and an enhancer belief only an enhanced religion without one, so that a pantheon never
+/// becomes a religion by a belief and no religion holds two beliefs of either kind.
+fn may_adopt_belief(g: &Game, p: PlayerId, b: BeliefId) -> Option<ReligionId> {
+    if !g.religion_enabled() || beliefs_taken(g).contains(b) {
+        return None;
     }
+    let pl = g.player(p)?;
+    let r = pl.religion.founded?;
+    let fits = match kind_of(g, b) {
+        BeliefType::Pantheon | BeliefType::Follower => {
+            pl.religion.progress >= ReligionProgress::Pantheon
+        }
+        BeliefType::Founder => {
+            pl.religion.progress >= ReligionProgress::Religion && !super::is_major(g, r)
+        }
+        BeliefType::Enhancer => {
+            pl.religion.progress >= ReligionProgress::Enhanced && !super::is_enhanced(g, r)
+        }
+    };
+    fits.then_some(r)
+}
+
+/// `Adopt [belief]`: the belief joins the civilization's religion or pantheon if it may
+/// (`may_adopt_belief`), and does what a belief does when taken. Python adopted policies alone.
+/// Whether it was adopted.
+pub fn adopt_belief(g: &mut Game, p: PlayerId, b: BeliefId) -> bool {
+    let Some(r) = may_adopt_belief(g, p, b) else { return false };
     add_beliefs(g, r, &[b]);
     belief_triggers(g, p, &[b]);
     true
@@ -370,6 +408,12 @@ pub fn validate_choice(
             .rules()
             .resolve::<BeliefId>(text)
             .ok_or_else(|| ActionError::rule(format!("Unknown belief '{text}'.")))?;
+        // A belief is taken once: listed twice, it would fill two slots and join the religion
+        // once.
+        // refcheck: belief-listed-twice-refused
+        if resolved.contains(&b) {
+            return Err(ActionError::rule(format!("{} is listed twice.", belief_name(g, b))));
+        }
         resolved.push(b);
     }
     let taken = beliefs_taken(g);
@@ -425,7 +469,7 @@ pub fn can_found_religion(g: &Game, p: PlayerId) -> Option<String> {
     if !pl.is_major() {
         return Some("Only major civilizations may found religions.".into());
     }
-    if remaining_foundable(g) == 0 {
+    if remaining_foundable(g) == 0 || !has_room(g) {
         return Some("No more religions can be founded.".into());
     }
     None
@@ -493,6 +537,9 @@ pub fn plan_religion(
             (x, shown)
         }
     };
+    // Python owed the pantheon belief by setting `choose_pantheon_belief` here, before the
+    // beliefs were checked; the count reads it without writing.
+    // refcheck: refused-founding-owes-nothing
     let needed = beliefs_to_choose(g, p, false);
     let chosen = validate_choice(g, beliefs, &needed)?;
     Ok(FoundPlan {
@@ -632,43 +679,9 @@ pub fn enhance_result(g: &Game, p: PlayerId) -> Value {
     })
 }
 
-/// A great prophet founds or enhances a religion where it stands and is spent, as the unit action
-/// will do (package 1c-04): the test operations `found_religion` and `enhance_religion`.
-///
-/// # Errors
-/// A unit that cannot, or the rule's refusal.
-pub fn prophet_acts(
-    g: &mut Game,
-    u: UnitId,
-    enhance: bool,
-    name: &str,
-    beliefs: &[String],
-) -> Result<Value, ActionError> {
-    let Some((p, at, base)) = g.unit(u).map(|x| (x.owner(), x.tile(), x.base)) else {
-        return Err(ActionError::rule("No such unit."));
-    };
-    let ty = if enhance { UniqueType::MayEnhanceReligion } else { UniqueType::MayFoundReligion };
-    if !super::super::cities::construction::unit_has_type(g.rules(), base, ty) {
-        return Err(ActionError::rule(if enhance {
-            "This unit cannot enhance a religion."
-        } else {
-            "This unit cannot found a religion."
-        }));
-    }
-    let spend = move |g: &mut Game| great_people::consume_unit(g, u);
-    if enhance {
-        let chosen = plan_enhance(g, p, at, beliefs)?;
-        apply_enhance(g, p, &chosen, spend);
-        Ok(enhance_result(g, p))
-    } else {
-        let plan = plan_religion(g, p, at, name, beliefs, None)?;
-        apply_religion(g, p, &plan, spend);
-        Ok(religion_result(g, p, &plan))
-    }
-}
-
 /// The beliefs an AI picks to meet what is owed (`religion.ai_choose_beliefs`,
-/// `religion.py:778-786`): of each kind, the untaken ones it weighs most, then by name.
+/// `religion.py:778-786`): of each kind, the untaken ones it weighs most, then in the ruleset's
+/// order, where Python took them by name.
 #[must_use]
 pub fn ai_choose_beliefs(g: &Game, p: PlayerId, needed: &BeliefCounts) -> Vec<BeliefId> {
     let mut out: Vec<BeliefId> = Vec::new();
@@ -678,9 +691,8 @@ pub fn ai_choose_beliefs(g: &Game, p: PlayerId, needed: &BeliefCounts) -> Vec<Be
             .filter(|b| !out.contains(b))
             .map(|b| (belief_weight(g, p, b), b))
             .collect();
-        pool.sort_by(|a, b| {
-            b.0.total_cmp(&a.0).then_with(|| belief_name(g, a.1).cmp(belief_name(g, b.1)))
-        });
+        // refcheck: ai-beliefs-tie-by-ruleset-order
+        pool.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         out.extend(pool.into_iter().take(usize::try_from(n).unwrap_or(0)).map(|(_, b)| b));
     }
     out

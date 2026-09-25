@@ -140,11 +140,11 @@ reason = "An item whose cost increases each time it is built counted as built at
 
 [[differences]]
 id = "timed-uniques-granted-whatever-their-conditionals"
-reason = "Python asked a timed unique's own conditionals when it was granted, so the Autocracy finisher's `[+25]% Strength <when attacking> ... <for [50] turns>` was never granted; Rust grants a timed unique whatever its conditionals, which are its effect's, as UnCiv does"
+reason = "Python asked a timed unique's own conditionals when it was granted, so the Autocracy finisher's `[+25]% Strength <when attacking> ... <for [50] turns>` was never granted, nor a triggered one such as `[+10]% Strength <when attacking> <for [10] turns> <upon being declared war on by [Major] Civilizations>`; Rust grants a timed unique whatever its conditionals, which are its effect's, whether its source is gained or its trigger fires, as UnCiv does"
 
 [[differences]]
 id = "adopt-a-belief-joins-the-religion"
-reason = "Python's `Adopt [belief]` did nothing for a belief; in Rust a belief nobody has taken joins the civilization's religion or pantheon and does what a belief does when taken"
+reason = "Python's `Adopt [belief]` did nothing for a belief; in Rust a belief nobody has taken joins the civilization's religion or pantheon when it fits it (a pantheon or follower belief once there is a pantheon, a founder belief only a religion without one, an enhancer belief only an enhanced religion without one) and does what a belief does when taken"
 
 [[differences]]
 id = "adopt-a-policy-whatever-it-requires"
@@ -153,3 +153,35 @@ reason = "Python's `Adopt [policy]` raised out of the trigger for a policy the c
 [[differences]]
 id = "hurry-wonder-construction"
 reason = "Python offered `Can speed up the construction of a wonder` the hurry action and then refused any unit without `Can speed up construction of a building`; in Rust either hurries construction, the first only while the city builds a wonder"
+
+[[differences]]
+id = "great-person-born-fires-gaining-once"
+reason = "A great person born from points fired `upon gaining a [unit]` twice, the second time for every such unique of the civilization whatever unit it named, so `Gain [10] [Faith] <upon gaining a [Great Prophet] unit>` paid 20 for a prophet and 10 for a scientist; Rust fires it once, for the unit it names, as for any unit made in a city"
+
+[[differences]]
+id = "expending-a-unit-fires-once"
+reason = "A great person spent on an action (hurrying research or construction, a trade mission) fired `upon expending a [unit]` twice, once for the action and once as the unit was consumed; Rust fires it once"
+
+[[differences]]
+id = "combat-points-for-the-civilizations-own-great-people"
+reason = "Experience earned in combat credited every great person of the ruleset earned through combat, so any civilization earned a Mongol Khan beside its Great General and had both; Rust credits the civilization's own kinds only (a Khan for the Mongols in place of the general), as UnCiv does"
+
+[[differences]]
+id = "ai-free-great-person-within-the-calendar"
+reason = "A civilization that let the engine pick its free great person picked among every kind, and took nothing when the Maya long count allowed only the kinds it had not taken yet; Rust picks the first preferred kind the calendar allows"
+
+[[differences]]
+id = "refused-founding-owes-nothing"
+reason = "Founding a religion without a pantheon marked the civilization as owing a pantheon belief before the beliefs chosen were checked, so a founding refused for its beliefs still left the mark; Rust's checks write nothing"
+
+[[differences]]
+id = "belief-listed-twice-refused"
+reason = "A belief listed twice when founding or enhancing a religion filled two slots and joined the religion once, founding it with one belief fewer than it was owed; Rust refuses the choice"
+
+[[differences]]
+id = "ai-beliefs-tie-by-ruleset-order"
+reason = "An AI choosing beliefs broke a tie between beliefs it weighed the same by their names; Rust breaks it by the ruleset's order, so no game rule compares text"
+
+[[differences]]
+id = "trigger-chains-stop"
+reason = "One-time effects that fed themselves (`Free [Warrior] appears <upon gaining a [Warrior] unit>`, a promotion that is never kept and gives itself) recursed until Python raised, failing whatever caused the first; Rust stops the chain eight effects deep and reports it where the checks run"

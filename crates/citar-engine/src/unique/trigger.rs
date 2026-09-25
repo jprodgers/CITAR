@@ -362,7 +362,9 @@ impl TriggerSite {
 /// The uniques that fire for `event` at `site` (`fire`, `triggers.py:38-65`), each as many times as
 /// the index holds it, in Python's order: the civilization's, then the city's local ones and its
 /// religion's, then, with `include_unit`, the unit's profile's. A unique fires when its trigger
-/// matches the event and its conditionals hold at the site.
+/// matches the event and its conditionals hold at the site; a timed unique's conditionals are
+/// its effect's, asked while it lasts, so it fires on its trigger alone, as UnCiv lets it
+/// (`Unique.conditionalsApply`), where Python asked them at the grant.
 pub fn fire<W: EvalWorld>(
     w: &W,
     site: &TriggerSite,
@@ -375,10 +377,11 @@ pub fn fire<W: EvalWorld>(
     let mut take = |ix: IndexRef<'_>| {
         let t = w.rules().uniques();
         for e in ix.get(ty) {
-            let fires = t
-                .meta(e.id)
-                .trigger
-                .is_some_and(|tr| tr.matches(event, site.civ, w) && applies(e.id, &ctx, w));
+            let meta = t.meta(e.id);
+            // refcheck: timed-uniques-granted-whatever-their-conditionals
+            let fires = meta.trigger.is_some_and(|tr| {
+                tr.matches(event, site.civ, w) && (meta.timed.is_some() || applies(e.id, &ctx, w))
+            });
             if fires {
                 out.extend(core::iter::repeat_n(e.id, usize::from(e.n)));
             }

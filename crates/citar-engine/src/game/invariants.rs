@@ -53,7 +53,8 @@ pub enum Code {
     Turn1,
     /// Nothing is pending at a settle point.
     Pend1,
-    /// Settle converged within its pass cap.
+    /// Settle converged within its pass cap, and a chain of one-time effects stayed within its
+    /// depth (`game::triggers::TRIGGER_DEPTH`).
     Settle1,
     /// Every cache equals a cold recompute (the cache oracle).
     Cache1,

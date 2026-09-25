@@ -1,10 +1,15 @@
 //! Religion, great people, triggers and ruins (package 1b-08), on the arena:
 //! - every kind of one-time effect applied, each unit effect among them, with every check clean
 //!   after (gate 4);
-//! - the kitchen sink's triggers fired where their events happen: a pantheon, a religion founded
-//!   and enhanced, a golden age, a great prophet gained, a turn's start and end, a policy adopted,
-//!   a city founded, a war declared and peace made; and its `May choose [n] additional [kind]
-//!   beliefs when [founding] a religion` and `Can speed up the construction of a wonder`;
+//! - the kitchen sink's triggers fired where their events happen, each effect asserted exactly: a
+//!   pantheon, a belief adopted (`Adopt [belief]` and `upon adopting [belief]`), a religion
+//!   founded and enhanced, a golden age, a great prophet gained, a turn's start and end, a policy
+//!   adopted, a city founded, war declared on a city-state and by a major, and peace made; its
+//!   `May choose [n] additional [kind] beliefs when [founding] a religion` and `Can speed up the
+//!   construction of a wonder`; and a timed unique whose effect has a conditional of its own;
+//! - on overlays of the kitchen sink: a great person born from points firing `upon gaining` once,
+//!   effects that feed themselves stopped, and ruins drawn by weight;
+//! - which beliefs a civilization may adopt, and a belief listed twice refused;
 //! - religious pressure from the spatial grid equal to Python's walk over every city, on the late
 //!   fixtures and the corpus;
 //! - great prophets faith brings, great person points and births, and the Maya long count.
@@ -12,16 +17,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use citar_engine::api::testops;
-use citar_engine::base::ids::{BaseUnitId, CityId, PlayerId, UniqueId, UnitId};
+use citar_engine::base::ids::{
+    BaseUnitId, BeliefId, CityId, PlayerId, PromotionId, UniqueId, UnitId,
+};
 use citar_engine::base::stats::Stat;
+use citar_engine::game::invariants::Code;
 use citar_engine::game::religion::{self, found, prophets};
-use citar_engine::game::{DebugOptions, Game, great_people, triggers};
+use citar_engine::game::{DebugOptions, Game, great_people, query, triggers};
 use citar_engine::rules::defs::{BeliefKind, BeliefType, ReligionProgress};
 use citar_engine::rules::{Named, Ruleset};
 use citar_engine::state::cities::Constructible;
 use citar_engine::unique::trigger::{OneTimeEffect, TriggerSite, UnitEffect};
 use citar_testkit::fixtures;
-use citar_testkit::rulesets::kitchen_sink;
+use citar_testkit::rulesets::{KITCHEN_SINK, files_of, kitchen_sink, overlay};
 use citar_testkit::script::{map_doc, new_game};
 use serde_json::{Value, json};
 
@@ -32,13 +40,18 @@ fn id<I: Named>(r: &Ruleset, name: &str) -> I {
     r.lookup::<I>(name).unwrap_or_else(|| panic!("the ruleset has {name}"))
 }
 
-/// A bare game on the arena: two majors of no nation's ability, espionage on, no unit.
+/// A bare game on the arena: two majors of these nations, espionage on, no unit.
 fn arena(r: &'static Ruleset, nations: [&str; 2]) -> Game {
+    arena_with(r, nations, 0)
+}
+
+/// [`arena`] with `city_states` city-states, players 2 and on.
+fn arena_with(r: &'static Ruleset, nations: [&str; 2], city_states: u8) -> Game {
     let (doc, _) = map_doc("arena").expect("the arena");
     let cfg = json!({
         "seed": 1,
         "players": [{"nation": nations[0]}, {"nation": nations[1]}],
-        "city_states": 0,
+        "city_states": city_states,
         "barbarians": "off",
         "ruins": false,
         "espionage": true,
@@ -248,8 +261,12 @@ fn every_kind_of_one_time_effect_applies() {
 
 /// A kitchen-sink civilization against a benchmark one, each with a city.
 fn sink() -> (Game, CityId) {
-    let r = kitchen_sink();
-    let mut g = arena(r, ["Kitchen Sink", "BenchmarkCiv"]);
+    sink_on(kitchen_sink(), 0)
+}
+
+/// [`sink`] on ruleset `r`, with `city_states` city-states, each with a city of its own.
+fn sink_on(r: &'static Ruleset, city_states: u8) -> (Game, CityId) {
+    let mut g = arena_with(r, ["Kitchen Sink", "BenchmarkCiv"], city_states);
     let out = ops(
         &mut g,
         &json!([
@@ -257,11 +274,37 @@ fn sink() -> (Game, CityId) {
             {"op": "found_city", "player": 1, "x": 18, "y": 10, "name": "Antium"},
         ]),
     );
+    for i in 0..city_states {
+        let cs = 2 + i;
+        ops(&mut g, &json!([{"op": "found_city", "player": cs, "x": 12, "y": 3 + 6 * i}]));
+    }
     (g, city_of(&out[0]))
+}
+
+/// The kitchen sink with more patches over it.
+fn sink_with(patches: &[(&str, String)]) -> &'static Ruleset {
+    let mut all: Vec<(&str, &str)> = KITCHEN_SINK.to_vec();
+    all.extend(patches.iter().map(|(f, p)| (*f, p.as_str())));
+    let files = overlay(&all).unwrap_or_else(|e| panic!("{e}"));
+    Ruleset::leak(&files_of(&files)).unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn faith(g: &Game, p: PlayerId) -> f64 {
     g.player(p).map_or(0.0, |x| x.econ.faith)
+}
+
+fn culture(g: &Game, p: PlayerId) -> f64 {
+    g.player(p).map_or(0.0, |x| x.econ.culture)
+}
+
+/// Asserts a stock is exactly what it should be: whole amounts, so no rounding is allowed for.
+#[track_caller]
+fn exactly(got: f64, want: f64) {
+    assert!((got - want).abs() < 1e-9, "{got}, not {want}");
+}
+
+fn taken(g: &Game, name: &str) -> bool {
+    religion::beliefs_taken(g).contains(id(g.rules(), name))
 }
 
 #[test]
@@ -272,10 +315,21 @@ fn the_kitchen_sinks_religious_triggers_fire() {
     assert!(g.has_tech(ME, Some(id(r, "Writing"))));
     // `Gain [30] [Faith] <upon founding a Pantheon>`.
     ops(&mut g, &json!([{"op": "set_player", "player": 0, "faith": 10}]));
+    let before = culture(&g, ME);
     let (b, pay) = found::plan_pantheon(&g, ME, "Goddess of Love").expect("a pantheon");
     found::apply_pantheon(&mut g, ME, b, pay);
     settle(&mut g);
     assert!((faith(&g, ME) - 30.0).abs() < 1e-9, "{}", faith(&g, ME));
+    // `Adopt [Swords into Ploughshares] <upon founding a Pantheon>`: a follower belief joins the
+    // pantheon, and `Gain [15] [Culture] <upon adopting [Swords into Ploughshares]>` fires;
+    // `Adopt [Tithe]`, a founder belief, would make the pantheon a religion, and is refused.
+    // refcheck: adopt-a-belief-joins-the-religion
+    let pantheon = g.player(ME).and_then(|x| x.religion.founded).expect("a pantheon");
+    let rel = religion::religion(&g, pantheon).expect("the pantheon");
+    assert!(rel.follower_beliefs.contains(id(r, "Swords into Ploughshares")));
+    assert!(!taken(&g, "Tithe"));
+    assert!(!religion::is_major(&g, pantheon));
+    exactly(culture(&g, ME), before + 15.0);
     // A religion: `May choose [1] additional [Follower] beliefs when [founding] a religion` owes
     // two follower beliefs; `Gain a free [Follower] belief <upon founding a Religion>` owes the
     // next one.
@@ -306,18 +360,89 @@ fn the_kitchen_sinks_religious_triggers_fire() {
     let philosophy = id(r, "Philosophy");
     let progress = g.player(ME).and_then(|x| x.tech.progress.get(&philosophy).copied());
     assert!(progress.is_some_and(|p| p > 0.0), "{progress:?}");
-    // `Gain [10] [Faith] <upon gaining a [Great Prophet] unit>`, when a city makes one.
-    let before = faith(&g, ME);
+    // `Gain [10] [Faith] <upon gaining a [Great Prophet] unit>`, once, when a city makes one.
     let prophet: BaseUnitId = id(r, "Great Prophet");
     assert!(prophets::prophet_unit(&g, ME) == Some(prophet));
     ops(&mut g, &json!([{"op": "set_player", "player": 0, "faith": 5000}]));
     let before_units = g.player_units(ME).count();
+    let cost = prophets::faith_for_next_prophet(&g, ME);
     prophets::start_turn(&mut g, ME);
     settle(&mut g);
     assert_eq!(g.player_units(ME).count(), before_units + 1, "a great prophet appeared");
-    assert!(faith(&g, ME) > 5000.0 - f64::from(prophets::faith_for_next_prophet(&g, ME)) - before);
+    exactly(faith(&g, ME), 5000.0 - f64::from(cost) + 10.0);
     let prophet_now = g.player_units(ME).find(|u| u.base == prophet).expect("the prophet");
     assert_eq!(prophet_now.religion, g.player(ME).and_then(|x| x.religion.founded));
+    clean(&mut g);
+}
+
+#[test]
+fn a_belief_is_adopted_only_where_it_fits() {
+    // refcheck: adopt-a-belief-joins-the-religion
+    let r = kitchen_sink();
+    let (mut g, sinkhold) = sink();
+    let belief = |name: &str| -> BeliefId { id(r, name) };
+    // With no pantheon there is nothing for a belief to join.
+    assert!(!found::adopt_belief(&mut g, ME, belief("Feed the World")));
+    ops(&mut g, &json!([{"op": "set_player", "player": 0, "faith": 10}]));
+    let (b, pay) = found::plan_pantheon(&g, ME, "Goddess of Love").expect("a pantheon");
+    found::apply_pantheon(&mut g, ME, b, pay);
+    // A pantheon takes pantheon and follower beliefs nobody holds; a founder belief would make
+    // it a religion, and an enhancer belief an enhanced one.
+    assert!(found::adopt_belief(&mut g, ME, belief("God of War")));
+    assert!(found::adopt_belief(&mut g, ME, belief("Feed the World")));
+    assert!(!found::adopt_belief(&mut g, ME, belief("Feed the World")), "taken already");
+    assert!(!found::adopt_belief(&mut g, ME, belief("Initiation Rites")));
+    assert!(!found::adopt_belief(&mut g, ME, belief("Messiah")));
+    // A religion holds one founder belief, and an enhancer belief once it is enhanced.
+    let at = g.city(sinkhold).map(|c| c.tile()).expect("the city");
+    let names: Vec<String> =
+        ["Ceremonial Burial", "Pagodas", "Mosques"].into_iter().map(str::to_owned).collect();
+    let plan = found::plan_religion(&g, ME, at, "Kitchen Faith", &names, None).expect("founded");
+    found::apply_religion(&mut g, ME, &plan, |_| {});
+    assert!(!found::adopt_belief(&mut g, ME, belief("Initiation Rites")));
+    assert!(!found::adopt_belief(&mut g, ME, belief("Messiah")));
+    let enhance: Vec<String> = ["Kitchen Sink Faith", "Cathedrals", "Choral Music"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let chosen = found::plan_enhance(&g, ME, at, &enhance).expect("enhanced");
+    found::apply_enhance(&mut g, ME, &chosen, |_| {});
+    assert!(!found::adopt_belief(&mut g, ME, belief("Messiah")));
+    assert!(found::adopt_belief(&mut g, ME, belief("Religious Art")));
+    settle(&mut g);
+    let rel = g.player(ME).and_then(|x| x.religion.founded).expect("a religion");
+    let kinds = |t: BeliefType| {
+        religion::all_beliefs(&g, rel).iter().filter(|&&b| r.beliefs()[b].kind == t).count()
+    };
+    assert_eq!((kinds(BeliefType::Founder), kinds(BeliefType::Enhancer)), (1, 1));
+    assert_eq!(kinds(BeliefType::Pantheon), 2, "Goddess of Love and God of War");
+    clean(&mut g);
+}
+
+#[test]
+fn a_belief_listed_twice_is_refused() {
+    let (mut g, sinkhold) = sink();
+    let at = g.city(sinkhold).map(|c| c.tile()).expect("the city");
+    let names = |n: &[&str]| n.iter().map(|&x| x.to_owned()).collect::<Vec<String>>();
+    // A civilization with no pantheon owes a pantheon belief; a refused founding leaves it owing
+    // nothing.
+    // refcheck: refused-founding-owes-nothing
+    let e = found::plan_religion(&g, ME, at, "Kitchen Faith", &names(&["Tithe"]), None)
+        .expect_err("too few");
+    assert!(e.message.starts_with("Choose 1 Pantheon belief(s)."), "{}", e.message);
+    assert!(g.player(ME).is_some_and(|x| !x.religion.choose_pantheon_belief));
+    ops(&mut g, &json!([{"op": "set_player", "player": 0, "faith": 10}]));
+    let (b, pay) = found::plan_pantheon(&g, ME, "Goddess of Love").expect("a pantheon");
+    found::apply_pantheon(&mut g, ME, b, pay);
+    // A founder and two followers are owed: the same follower twice would fill both slots and
+    // found the religion with one.
+    // refcheck: belief-listed-twice-refused
+    let twice = names(&["Ceremonial Burial", "Pagodas", "Pagodas"]);
+    let e = found::plan_religion(&g, ME, at, "Kitchen Faith", &twice, None).expect_err("twice");
+    assert_eq!(e.message, "Pagodas is listed twice.");
+    let once = names(&["Ceremonial Burial", "Pagodas", "Mosques"]);
+    assert!(found::plan_religion(&g, ME, at, "Kitchen Faith", &once, None).is_ok());
+    settle(&mut g);
     clean(&mut g);
 }
 
@@ -325,14 +450,15 @@ fn the_kitchen_sinks_religious_triggers_fire() {
 fn the_kitchen_sinks_turn_policy_and_golden_age_triggers_fire() {
     let r = kitchen_sink();
     let (mut g, _) = sink();
-    // `Gain [5] [Gold] <upon turn start>` and `Gain [5] [Culture] <upon turn end>`.
-    let (gold, culture) = g.player(ME).map(|x| (x.econ.gold, x.econ.culture)).expect("me");
+    // `Gain [5] [Culture] <upon turn end>`: the end of the turn banks its culture beside it.
+    let before = culture(&g, ME);
+    let yields = query::civ_stats(&g, ME).total;
     testops::apply(&mut g, &json!([{"op": "end_turn"}])).expect("ended");
-    let culture_after = g.player(ME).map(|x| x.econ.culture).expect("me");
-    assert!(culture_after >= culture + 5.0, "{culture} -> {culture_after}");
+    exactly(culture(&g, ME), before + 5.0 + yields[Stat::Culture].trunc());
+    // `Gain [5] [Gold] <upon turn start>`: the start of the next turn adds nothing else.
+    let gold = g.player(ME).map(|x| x.econ.gold).expect("me");
     testops::apply(&mut g, &json!([{"op": "end_turn"}])).expect("the other's turn ended");
-    let gold_after = g.player(ME).map(|x| x.econ.gold).expect("me");
-    assert!(gold_after >= gold + 5.0, "{gold} -> {gold_after}");
+    assert_eq!(g.player(ME).map(|x| x.econ.gold), Some(gold + 5.0));
     // `Free Great Person <upon adopting [Aristocracy]>`.
     ops(&mut g, &json!([{"op": "adopt_policy", "player": 0, "policy": "Aristocracy"}]));
     assert_eq!(g.player(ME).map(|x| x.gp.free), Some(1));
@@ -350,18 +476,27 @@ fn the_kitchen_sinks_turn_policy_and_golden_age_triggers_fire() {
 #[test]
 fn the_kitchen_sinks_war_and_peace_triggers_fire() {
     let r = kitchen_sink();
-    let (mut g, _) = sink();
-    ops(&mut g, &json!([{"op": "meet", "a": 0, "b": 1}]));
-    let units = g.player_units(ME).count();
-    // `Free [Warrior] appears <upon entering a war with [Major] Civilizations>`, and the other side
-    // is declared war upon: `[+10]% Strength <for [10] turns> <upon being declared war on by
-    // [Major] Civilizations>` is not the benchmark's, so it holds nothing new.
+    let (mut g, _) = sink_on(r, 1);
+    let cs = PlayerId(2);
+    assert!(g.is_city_state(cs));
+    ops(&mut g, &json!([{"op": "meet", "a": 0, "b": 1}, {"op": "meet", "a": 0, "b": 2}]));
+    // `Gain [25] [Culture] <upon declaring war on [City-State] Civilizations>`, and no free warrior
+    // for a war with no major civilization.
+    let (before, units) = (culture(&g, ME), g.player_units(ME).count());
+    ops(&mut g, &json!([{"op": "set_relation", "a": 0, "b": 2, "state": "war"}]));
+    exactly(culture(&g, ME), before + 25.0);
+    assert_eq!(g.player_units(ME).count(), units);
+    // `Free [Warrior] appears <upon entering a war with [Major] Civilizations>`, and declared war
+    // upon: `[+10]% Strength <when attacking> <for [10] turns> <upon being declared war on by
+    // [Major] Civilizations>` is granted, although nobody is attacking.
+    // refcheck: timed-uniques-granted-whatever-their-conditionals
     ops(&mut g, &json!([{"op": "set_relation", "a": 1, "b": 0, "state": "war"}]));
     let warrior: BaseUnitId = id(r, "Warrior");
-    assert!(g.player_units(ME).count() > units, "a free warrior");
+    assert_eq!(g.player_units(ME).count(), units + 1, "a free warrior");
     assert!(g.player_units(ME).any(|u| u.base == warrior));
-    let temp = g.player(ME).map(|x| x.civ.temp_uniques.len()).expect("me");
-    assert_eq!(temp, 1, "declared war upon: the timed strength");
+    let temp = g.player(ME).map(|x| x.civ.temp_uniques.clone()).expect("me");
+    assert_eq!(temp.len(), 1, "declared war upon: the timed strength");
+    assert_eq!(temp[0].turns, 10);
     // `Gain [50] [Gold] <upon signing a peace treaty with [Major] Civilizations>`.
     let gold = g.player(ME).map(|x| x.econ.gold).expect("me");
     ops(&mut g, &json!([{"op": "set_relation", "a": 0, "b": 1, "state": "peace"}]));
@@ -489,6 +624,108 @@ fn the_maya_get_a_great_person_when_a_baktun_ends() {
     clean(&mut g);
 }
 
+#[test]
+fn a_great_person_born_from_points_fires_upon_gaining_once() {
+    // refcheck: great-person-born-fires-gaining-once
+    let patch = json!({"Kitchen Sink": {"uniques": [
+        "[1] Free Social Policies <upon gaining a [Great General] unit>"
+    ]}});
+    let r = sink_with(&[("ruleset/nations.json", patch.to_string())]);
+    let (mut g, _) = sink_on(r, 0);
+    let general: BaseUnitId = id(r, "Great General");
+    let warrior: BaseUnitId = id(r, "Warrior");
+    // A land unit's experience earns great general points: 200 reach the first threshold.
+    great_people::add_combat_points(&mut g, ME, warrior, 200);
+    settle(&mut g);
+    testops::apply(&mut g, &json!([{"op": "end_round"}])).expect("a round");
+    let pl = g.player(ME).expect("me");
+    assert_eq!(g.player_units(ME).filter(|u| u.base == general).count(), 1, "born");
+    assert_eq!(pl.gp.earned, 1);
+    assert_eq!(pl.policy.free_policies, 1, "`upon gaining` fired once");
+    clean(&mut g);
+}
+
+#[test]
+fn effects_that_feed_themselves_stop() {
+    // A promotion that is never kept and gives itself: each time it is given, it is given again,
+    // until the effects are nested as deep as they may be; the one that would go deeper is not
+    // applied, and is reported.
+    // refcheck: trigger-chains-stop
+    let echo = "Kitchen Sink Echo";
+    let gives_itself = format!("[This Unit] gains the [{echo}] promotion");
+    let patch = json!({echo: {
+        "name": echo,
+        "unitTypes": ["Sword"],
+        "uniques": ["Doing so will consume this opportunity to choose a Promotion", gives_itself],
+    }});
+    let r = sink_with(&[("ruleset/promotions.json", patch.to_string())]);
+    let t = r.uniques();
+    let unique = t.iter().map(|(u, _)| u).find(|&u| t.text_of(u) == gives_itself).expect("it");
+    let (mut g, _) = sink_on(r, 0);
+    let out =
+        ops(&mut g, &json!([{"op": "add_unit", "player": 0, "unit": "Warrior", "x": 7, "y": 5}]));
+    let w = unit_of(&out[0]);
+    let site = TriggerSite { civ: ME, city: None, unit: Some(w), tile: None };
+    assert!(triggers::apply(&mut g, unique, &site, None));
+    settle(&mut g);
+    let v = g.take_violations();
+    assert_eq!(v.iter().map(|x| x.code).collect::<Vec<_>>(), [Code::Settle1], "{v:?}");
+    let deep = format!("nested {} deep", triggers::TRIGGER_DEPTH);
+    assert!(v[0].message.contains(&deep) && v[0].message.contains(&gives_itself), "{v:?}");
+    let promotion: PromotionId = id(r, echo);
+    assert!(g.unit(w).is_some_and(|u| !u.promotions.contains(promotion)), "never kept");
+    clean(&mut g);
+    // The depth is the call's alone: the next effect applies from the top.
+    assert!(triggers::apply(&mut g, unique, &site, None));
+    assert_eq!(g.take_violations().len(), 1);
+}
+
+// ---- Ruins ---------------------------------------------------------------------------------------
+
+#[test]
+fn ruins_draw_their_rewards_by_weight() {
+    let base = kitchen_sink();
+    // Every reward but the old master's (weight 3 in the kitchen sink) weighs nothing, so it
+    // alone can be found.
+    let master = "an old master trains your unit";
+    let mut patch = serde_json::Map::new();
+    for x in base.ruins().as_slice() {
+        if &*x.name != master {
+            patch.insert(x.name.to_string(), json!({"weight": 0}));
+        }
+    }
+    let r = sink_with(&[("ruleset/ruins.json", Value::Object(patch).to_string())]);
+    let weight = |r: &Ruleset, name: &str| {
+        r.ruins().as_slice().iter().find(|x| &*x.name == name).map(|x| x.weight)
+    };
+    assert_eq!(weight(base, master), Some(3));
+    assert_eq!(weight(base, "your unit is lost in the ruins"), Some(1), "1 unless it says");
+    let mut g = arena(r, ["BenchmarkCiv", "BenchmarkCiv"]);
+    let out = ops(
+        &mut g,
+        &json!([
+            {"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Roma"},
+            {"op": "add_unit", "player": 1, "unit": "Warrior", "x": 18, "y": 10},
+            {"op": "set_tile", "x": 8, "y": 5, "improvement": "Ancient ruins"},
+            {"op": "add_unit", "player": 0, "unit": "Warrior", "x": 8, "y": 5},
+        ]),
+    );
+    let w = unit_of(&out[3]);
+    let (res, _) =
+        testops::apply(&mut g, &json!([{"op": "enter_ruins", "unit": w.get()}])).expect("explored");
+    assert_eq!(res[0]["found"], true);
+    let veteran: PromotionId = id(r, "Kitchen Sink Veteran");
+    assert!(g.unit(w).is_some_and(|u| u.promotions.contains(veteran)));
+    clean(&mut g);
+    // A weight below none does not load.
+    let bad = json!({master: {"weight": -1}}).to_string();
+    let mut all: Vec<(&str, &str)> = KITCHEN_SINK.to_vec();
+    all.push(("ruleset/ruins.json", bad.as_str()));
+    let files = overlay(&all).unwrap_or_else(|e| panic!("{e}"));
+    let e = Ruleset::leak(&files_of(&files)).expect_err("a negative weight");
+    assert!(e.to_string().contains("weight -1 is outside 0 to 65535"), "{e}");
+}
+
 // ---- Religious pressure --------------------------------------------------------------------------
 
 /// Python's walk (`religion.pressures_from_surroundings`, `religion.py:266-284`): every other city
@@ -568,10 +805,13 @@ fn a_round_of_pressure_converts_a_neighbour_and_pays_the_founder() {
     let prophet = unit_of(&out[4]);
     let (b, pay) = found::plan_pantheon(&g, ME, "Ancestor Worship").expect("a pantheon");
     found::apply_pantheon(&mut g, ME, b, pay);
-    let names: Vec<String> =
-        ["Ceremonial Burial", "Pagodas"].into_iter().map(str::to_owned).collect();
-    let v = found::prophet_acts(&mut g, prophet, false, "Test Faith", &names).expect("founded");
-    settle(&mut g);
+    let (out, _) = testops::apply(
+        &mut g,
+        &json!([{"op": "found_religion", "unit": prophet.get(), "name": "Test Faith",
+                 "beliefs": ["Ceremonial Burial", "Pagodas"]}]),
+    )
+    .expect("founded");
+    let v = &out[0];
     let rel = g.player(ME).and_then(|x| x.religion.founded).expect("a religion");
     assert_eq!(v["holy_city"], "Roma");
     assert_eq!(religion::majority_religion(&g, roma), Some(rel));
