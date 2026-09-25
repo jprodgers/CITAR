@@ -31,6 +31,7 @@ use super::great_people::ChooseGreatPerson;
 use super::policies::AdoptPolicy;
 use super::religion::found::FoundPantheon;
 use super::research::{ChooseFreeTech, DequeueResearch, SetResearch};
+use super::victory::UnVote;
 use crate::base::ids::PlayerId;
 use crate::save::journal::Record;
 use crate::state::Phase;
@@ -131,6 +132,8 @@ pub enum Action {
     FoundCity(super::actions::FoundCity),
     /// `unit_action` (package 1c-04).
     UnitAction(super::actions::UnitAction),
+    /// `un_vote` (package 1c-08).
+    UnVote(UnVote),
     /// The pipeline's own test action.
     #[cfg(test)]
     Probe(tests::Probe),
@@ -192,6 +195,7 @@ impl Action {
             Self::BuildImprovement(_) => "build_improvement",
             Self::FoundCity(_) => "found_city",
             Self::UnitAction(_) => "unit_action",
+            Self::UnVote(_) => "un_vote",
             #[cfg(test)]
             Self::Probe(_) => "probe",
             Self::AdoptPolicy(_) => "adopt_policy",
@@ -238,8 +242,11 @@ impl Action {
             #[cfg(test)]
             Self::Probe(ref p) => p.any_time,
             // `tools.rename_city` is `any_time` (tools.py:782), and so are a message and an
-            // answer in a negotiation (tools.py:931-964).
-            Self::RenameCity(_) | Self::SendMessage(_) | Self::RespondNegotiation(_) => true,
+            // answer in a negotiation (tools.py:931-964) and a vote (tools.py:887-889).
+            Self::RenameCity(_)
+            | Self::SendMessage(_)
+            | Self::RespondNegotiation(_)
+            | Self::UnVote(_) => true,
             Self::AdoptPolicy(_)
             | Self::Buy(_)
             | Self::BuyTile(_)
@@ -280,6 +287,7 @@ impl Action {
             Self::BuildImprovement(a) => run(g, pid, a),
             Self::FoundCity(a) => run(g, pid, a),
             Self::UnitAction(a) => run(g, pid, a),
+            Self::UnVote(a) => run(g, pid, a),
             #[cfg(test)]
             Self::Probe(p) => run(g, pid, p),
             Self::AdoptPolicy(x) => run(g, pid, x),

@@ -120,8 +120,8 @@ impl Game {
         let first = self.st.host().next_event_id;
         let stop = loop {
             if self.phase() != Phase::Playing || self.majors(true).next().is_none() {
-                // A game whose last major civilization is gone ends at its eliminations
-                // (package 1c-08); until then there is nobody to drive.
+                // With no major civilization left there is nobody to drive: a game whose last
+                // one is gone ends there, whether or not a victory ended it.
                 break Stop::GameOver;
             }
             let pid = self.current();

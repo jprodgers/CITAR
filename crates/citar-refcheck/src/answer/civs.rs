@@ -18,13 +18,15 @@
 //! Package 1c-06 answers `military_strength` for a major (`victory.military_strength`), which a
 //! city-state's fear of it reads (`city_states.tribute_modifiers`).
 //!
-//! The group's other paths (score, victory, the world) are answered by the packages that port
-//! them; until then they are missing here, and counted in the ratchet.
+//! Package 1c-08 answers the rest: a major's `score` and `victory_progress`, and the `world`
+//! (the world era, the United Nations' owner, the votes a diplomatic victory needs and whether
+//! voting is open).
 
 use citar_engine::base::ids::PlayerId;
 use citar_engine::base::num;
 use citar_engine::game::economy::ResourceItem;
-use citar_engine::game::{Game, city_states, economy, policies, query, research};
+use citar_engine::game::victory::{self, un};
+use citar_engine::game::{Game, economy, policies, query, research};
 use citar_engine::rules::Ruleset;
 use citar_engine::state::players::PlayerKind;
 use serde_json::{Map, Value, json};
@@ -45,7 +47,13 @@ impl AnswerModule for Civs {
 
     fn answer(&self, cx: &Ctx<'_>, _expected: &Value) -> Result<Value, AnswerError> {
         let g = cx.game.ok_or_else(|| AnswerError::new("no loaded game"))?;
-        Ok(json!({ "civs": civs(g) }))
+        let world = json!({
+            "world_era": research::world_era(g).0,
+            "un_owner": un::un_owner(g).map(|p| p.0),
+            "votes_needed": un::votes_needed(g),
+            "vote_open": un::vote_open(g),
+        });
+        Ok(json!({ "civs": civs(g), "world": world }))
     }
 }
 
@@ -109,7 +117,9 @@ fn civs(g: &Game) -> Vec<Value> {
                 .map(|q| &*r.policies()[q].name)
                 .collect();
             e["adoptable_policies"] = json!(adoptable);
-            e["military_strength"] = json!(city_states::actions::military_strength(g, p));
+            e["score"] = victory::score(g, p).to_json();
+            e["military_strength"] = json!(victory::military_strength(g, p));
+            e["victory_progress"] = victory::victory_progress(g, p);
         }
         out.push(e);
     }

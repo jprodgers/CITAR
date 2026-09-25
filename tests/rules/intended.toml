@@ -275,3 +275,17 @@ reason = "The production advisor valued a building by adding it to the city, swa
 [[differences]]
 id = "city-state-gifts-need-a-common-nation"
 reason = "A militaristic city-state gave units faster to a civilization with 'Militaristic City-States grant units [n] times as fast when you are at war with a common nation' in every game with barbarians, since everyone is at war with them; Rust counts only a civilization or city-state both fight"
+
+# Package 1c-08: victory, the United Nations and eliminations.
+
+[[differences]]
+id = "eliminated-on-its-own-turn-at-the-round-end"
+reason = "A civilization that lost its last city or unit on its own turn was eliminated at once and its turn ended for a player the game had removed; Rust eliminates the player whose turn it is when the round ends, and anyone else at once as Python did"
+
+[[differences]]
+id = "un-vote-for-no-player-refused"
+reason = "A world leader vote for a player id the game did not have raised an error the un_vote tool did not catch, or, for a negative id, counted from the end of the list of players; Rust refuses it as it refuses any vote for what is not a living major civilization"
+
+[[differences]]
+id = "un-city-state-votes-for-a-living-ally"
+reason = "A city-state voted in the world leader election for its ally even after that civilization was eliminated, a vote that could elect no one; Rust's city-state votes for its ally only while it lives"

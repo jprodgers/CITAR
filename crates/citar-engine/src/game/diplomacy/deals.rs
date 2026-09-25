@@ -666,7 +666,11 @@ pub fn execute_deal(g: &mut Game, a: PlayerId, b: PlayerId, terms: &Terms) -> Op
             name(g, target),
             name(g, receiver)
         );
-        g.emit(EngineEvent::WarDeclared, &text, None, None, EventData::default(), &[]);
+        // Python's event said nothing of who declared war on whom; every war declared carries
+        // both, which the statistics of a game count (DESIGN.md 4.7).
+        let data =
+            EventData { attacker: Some(giver), defender: Some(target), ..EventData::default() };
+        g.emit(EngineEvent::WarDeclared, &text, None, None, data, &[]);
     }
     let text = format!("Deal concluded between {} and {}: {summary}", name(g, a), name(g, b));
     let audience: PlayerSet = [a, b].into_iter().collect();

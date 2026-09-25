@@ -5,15 +5,14 @@
 //!
 //! Citizens are placed again by the settle that follows (DESIGN.md 6.7), where Python placed
 //! them at once; a city whose empty queue the advisor fills has its citizens placed first, as
-//! the advisor reads where they work. What waits for other packages, marked where it happens:
-//! the elimination a destroyed city may bring (1c-08). The spies in a destroyed city go home
-//! (package 1c-05).
+//! the advisor reads where they work. A destroyed city's owner may be eliminated at once
+//! (`victory::eliminate_if_defeated`), and the spies in it go home.
 
 use smallvec::SmallVec;
 
+use super::super::Game;
 use super::super::derive::rev::{CityTouch, PlayerTouch};
 use super::super::events::Mention;
-use super::super::{Game, Porting, pending};
 use super::borders::{culture_to_next_tile, expand_borders};
 use super::construction::{construct_if_enough, end_turn_production};
 use super::founding::{add_building, capital_indicator};
@@ -426,8 +425,7 @@ pub fn destroy_city(g: &mut Game, c: CityId) {
         data,
         &[Mention::city(&name, owner)],
     );
-    // victory.check_elimination (cities.py:2376-2377).
-    pending(Porting::Pending("1c-08"));
+    crate::game::victory::eliminate_if_defeated(g, owner, None);
 }
 
 /// Stage S5: every city of the civilization starts its turn, in id order (`turns.py:52-54`).

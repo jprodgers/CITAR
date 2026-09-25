@@ -63,8 +63,8 @@ pub struct Game {
     pub(crate) pending: PendingWork,
     /// Follow-ups of derived reactions, applied in settle.
     pub(crate) fx: EffectQueue,
-    /// The last frame, to take the next delta from.
-    #[allow(dead_code, reason = "end_round records a frame each round from package 1c-08")]
+    /// The last frame, to take the next delta from (stage R3); a keyframe comes first after a
+    /// load, since the writer is never saved.
     pub(crate) frames: FrameWriter,
     /// How far into the chronicle the journal has been taken; never saved.
     pub(crate) journal: JournalCursor,
@@ -345,11 +345,13 @@ impl Game {
         &all[all.len().saturating_sub(limit)..]
     }
 
-    /// The stats rows, oldest first; the last `last` if given.
+    /// The stats rows the rounds recorded (stage R2), oldest first: the last `last` of them, or
+    /// all when `last` is none or 0 (`EngineGame.stats`, `engine_api.py:499-503`).
     #[must_use]
     pub fn stats(&self, last: Option<usize>) -> &[StatsRow] {
         let all = self.chron.stats();
-        &all[all.len().saturating_sub(last.unwrap_or(all.len()))..]
+        let n = last.filter(|&n| n > 0).unwrap_or(all.len());
+        &all[all.len().saturating_sub(n)..]
     }
 
     /// The thoughts from position `since` on, oldest first, only `pid`'s if given

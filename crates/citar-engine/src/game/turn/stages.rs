@@ -17,11 +17,8 @@
 //! the ◆ settle points, which replace Python's `g.invalidate()` and `visibility.refresh`
 //! (`turns.py:36-61, 87, 108, 115`).
 //!
-//! What differs from Python, on purpose:
-//! - happiness is committed at S1 and E1 and read as committed (DESIGN.md 6.6), and the gold
-//!   rate is written at E2;
-//! - the game ends at its turn limit with no winner until scores exist (package 1c-08 declares
-//!   the Time victory).
+//! What differs from Python, on purpose: happiness is committed at S1 and E1 and read as
+//! committed (DESIGN.md 6.6), and the gold rate is written at E2.
 
 use crate::base::ids::PlayerId;
 use crate::base::stats::Stat;
@@ -30,8 +27,8 @@ use crate::game::derive::rev::UnitTouch;
 use crate::game::diplomacy::{deals, negotiation};
 use crate::game::triggers;
 use crate::game::{
-    Game, Porting, automation, barbarians, city_states, economy, espionage, great_people, pending,
-    policies, religion, research, units, workers,
+    Game, Porting, automation, barbarians, city_states, economy, espionage, great_people, policies,
+    religion, research, revolts, units, victory, workers,
 };
 use crate::state::Phase;
 use crate::state::TurnClock;
@@ -134,17 +131,6 @@ impl Stage {
         Self { id, name, who, when, step, porting: Porting::Ported }
     }
 
-    /// A row whose system waits for the package `porting` names.
-    const fn later(
-        id: &'static str,
-        name: &'static str,
-        who: Who,
-        when: When,
-        porting: Porting,
-    ) -> Self {
-        Self { id, name, who, when, step: Step::Pending, porting }
-    }
-
     /// A settle point.
     const fn settle(id: &'static str, who: Who) -> Self {
         Self::run(id, "settle", who, When::Always, Step::Settle)
@@ -203,7 +189,7 @@ pub static PLAYER_START: [Stage; 23] = [
         Always,
         Step::Player(city_states::turn::great_person_gift_stage),
     ),
-    Stage::later("S3", "revolts", Who::MAJOR, Always, Porting::Pending("1c-08")),
+    Stage::run("S3", "revolts", Who::MAJOR, Always, Step::Player(revolts::update_revolts)),
     Stage::run(
         "S4",
         "triggers upon turn start",
@@ -241,7 +227,7 @@ pub static PLAYER_START: [Stage; 23] = [
         Step::Player(automation::run_unit_orders),
     ),
     Stage::settle("S9", Who::CIVS),
-    Stage::later("S9", "victory", Who::CIVS, Always, Porting::Pending("1c-08")),
+    Stage::run("S9", "victory", Who::CIVS, Always, Step::Player(victory::victory_stage)),
     Stage::run("S9", "a research reminder", Who::MAJOR, Always, Step::Player(research::remind)),
     Stage::run("S9", "the turn's announcement", Who::MAJOR, Always, Step::Player(announce_start)),
 ];
@@ -343,21 +329,39 @@ pub static PLAYER_END: [Stage; 25] = [
         Step::Player(units::turn::end_units),
     ),
     Stage::settle("E6", Who::CIVS),
-    Stage::later("E6", "victory", Who::CIVS, Always, Porting::Pending("1c-08")),
+    Stage::run("E6", "victory", Who::CIVS, Always, Step::Player(victory::victory_stage)),
     Stage::run("E6", "the turn's close", Who::MAJOR, Always, Step::Player(announce_end)),
 ];
 
 /// Every player has moved: the round ends (`turns.end_round`, `turns.py:190-202`).
 pub static ROUND_END: [Stage; 11] = [
-    Stage::later("R0", "eliminations", Who::ALL, Always, Porting::Pending("1c-08")),
+    Stage::run("R0", "eliminations", Who::ALL, Always, Step::Round(victory::eliminations_stage)),
     Stage::run("R0", "a game that is over skips to the close", Who::ALL, Always, Step::SkipIfOver),
     Stage::run("R1", "diplomacy's round", Who::ALL, Always, Step::Round(deals::process_round)),
-    Stage::later("R2", "the round's statistics", Who::ALL, Always, Porting::Pending("1c-08")),
-    Stage::later("R3", "the replay frame", Who::ALL, Always, Porting::Pending("1c-08")),
+    Stage::run(
+        "R2",
+        "the round's statistics",
+        Who::ALL,
+        Always,
+        Step::Round(victory::records::record_stats),
+    ),
+    Stage::run(
+        "R3",
+        "the replay frame",
+        Who::ALL,
+        Always,
+        Step::Round(victory::records::record_frame),
+    ),
     Stage::run("R4", "the next turn", Who::ALL, Always, Step::Round(next_turn)),
-    Stage::later("R5", "the world leader vote", Who::ALL, Always, Porting::Pending("1c-08")),
-    Stage::later("R5", "victory", Who::ALL, Always, Porting::Pending("1c-08")),
-    Stage::run("R5", "the turn limit", Who::ALL, Always, Step::Round(turn_limit)),
+    Stage::run(
+        "R5",
+        "the world leader vote",
+        Who::ALL,
+        Always,
+        Step::Round(victory::un::vote_stage),
+    ),
+    Stage::run("R5", "victory", Who::ALL, Always, Step::Round(victory::round_victory_stage)),
+    Stage::run("R5", "the turn limit", Who::ALL, Always, Step::Round(victory::check_turn_limit)),
     Stage::run("R6", "settle", Who::ALL, EvenIfOver, Step::Settle),
     Stage::run(
         "R6",
@@ -492,28 +496,6 @@ fn cities_end(g: &mut Game, p: PlayerId) {
 fn next_turn(g: &mut Game) {
     let c = *g.state().clock();
     g.set_clock(TurnClock { turn: c.turn.saturating_add(1), ..c });
-}
-
-/// The game ends once its last turn is past (`victory.check_turn_limit`, `victory.py:352-366`),
-/// if a major civilization is still alive.
-fn turn_limit(g: &mut Game) {
-    if g.phase() != Phase::Playing || g.turn() <= g.total_turns() || g.majors(true).next().is_none()
-    {
-        return;
-    }
-    // With the Time victory on, the best score wins it (`victory.score`); until scores exist, the
-    // game ends with no winner, as it does with the Time victory off.
-    pending(Porting::Pending("1c-08"));
-    let c = *g.state().clock();
-    g.set_clock(TurnClock { phase: Phase::Over, ..c });
-    g.emit(
-        EngineEvent::GameOver,
-        "The turn limit has been reached. The game ends with no winner.",
-        None,
-        None,
-        EventData::default(),
-        &[],
-    );
 }
 
 /// The round's digest, folded into the chain of a game that keeps one (DESIGN.md 4.10).

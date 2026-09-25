@@ -27,7 +27,7 @@ use crate::game::diplomacy::relations::{
 };
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::units::{self, actions::own_unit, place_unit_near};
-use crate::game::{Game, Porting, conquest, pending};
+use crate::game::{Game, conquest, victory};
 use crate::rules::defs::{CityStatePersonality, QuestKind, QuestScope};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::cities::Constructible;
@@ -295,21 +295,6 @@ pub fn withdraw(g: &mut Game, major: PlayerId, cs: PlayerId) -> Value {
 
 // ---- Tribute (city_states.py:588-707) ----------------------------------------------------------------
 
-/// The combined strength of a civilization's army (`victory.military_strength`,
-/// `victory.py:46-52`): each unit's strength, or ranged strength if greater, by its health.
-#[must_use]
-pub fn military_strength(g: &Game, p: PlayerId) -> i32 {
-    let r = g.rules();
-    let total: f64 = g
-        .player_units(p)
-        .map(|u| {
-            let d = &r.base_units()[u.base];
-            f64::from(d.strength.max(d.ranged_strength)) * f64::from(u.hp) / 100.0
-        })
-        .sum();
-    num::trunc_i32(total)
-}
-
 /// A unit's military weight (`_force`, `city_states.py:653-657`).
 fn force(g: &Game, u: &crate::state::units::Unit) -> f64 {
     let d = &g.rules().base_units()[u.base];
@@ -362,7 +347,7 @@ pub fn tribute_modifiers(
         return mods;
     }
     let mut majors: Vec<(i32, PlayerId)> =
-        g.majors(true).map(|q| (military_strength(g, q.id()), q.id())).collect();
+        g.majors(true).map(|q| (victory::military_strength(g, q.id()), q.id())).collect();
     majors.sort_by_key(|&(s, _)| core::cmp::Reverse(s));
     let rank = majors.iter().position(|&(_, q)| q == major).unwrap_or(majors.len());
     let n = majors.len().max(1);
@@ -571,8 +556,8 @@ pub fn marry(g: &mut Game, major: PlayerId, cs: PlayerId, cost: i32) -> Value {
             x.puppet = true;
         }
     }
-    // victory.check_elimination: the city-state, left with nothing, is gone (city_states.py:800).
-    pending(Porting::Pending("1c-08"));
+    // The city-state, left with nothing, is gone (city_states.py:800).
+    crate::game::victory::eliminate_if_defeated(g, cs, None);
     let text = format!("{} married into the ruling family of {}.", name(g, major), name(g, cs));
     g.emit(EngineEvent::CsMarried, &text, None, None, EventData::default(), &[]);
     json!({"annexed": name(g, cs), "gold_spent": cost})

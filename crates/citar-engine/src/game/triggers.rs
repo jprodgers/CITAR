@@ -24,10 +24,9 @@
 //! - effects nest [`TRIGGER_DEPTH`] deep at most: a ruleset whose effects feed themselves is
 //!   stopped, where Python recursed until it raised and failed whatever caused the first.
 //!
-//! A few effects reach systems later packages port, and are carried out here with the least of
-//! them: the next world leader vote scheduled (1c-08). The city-states' first great-person gift
-//! brought forward is timed by `city_states::turn`, and a spy recruited or promoted is
-//! `espionage`'s. What a one-time
+//! A few effects are carried out by their own systems: the next world leader vote is scheduled by
+//! `victory::un`, the city-states' first great-person gift brought forward is timed by
+//! `city_states::turn`, and a spy recruited or promoted is `espionage`'s. What a one-time
 //! effect does to a unit is package 1c-02's `units::health::apply_unit_effect`, and a promotion
 //! given free is its `units::promotions::add_promotion`.
 
@@ -39,7 +38,7 @@ use super::cities::founding::equivalent_building;
 use super::cities::free_buildings::{self, add_free};
 use super::cities::lifecycle::add_population;
 use super::cities::uniques::contains_building;
-use super::derive::rev::{PlayerTouch, WorldTouch};
+use super::derive::rev::PlayerTouch;
 use super::invariants::{Code, Violation};
 use super::research::{self, TechSource};
 use super::units::{add_unit_in_city, place_unit_near};
@@ -357,7 +356,7 @@ fn apply_one_time(g: &mut Game, id: UniqueId, site: &TriggerSite, note: Option<&
             true
         }
         OneTimeEffect::TriggerVoting => {
-            schedule_vote(g);
+            super::victory::un::schedule_vote(g);
             true
         }
         OneTimeEffect::GainStat { stat, min, max, speed } => {
@@ -878,21 +877,4 @@ fn take_over_candidates(
                 && g.tile(i).and_then(crate::state::map::Tile::owner) != Some(p)
         })
         .collect()
-}
-
-/// The next world leader vote is held in fifteen turns, scaled by speed
-/// (`victory.schedule_vote`, `victory.py:107-117`).
-fn schedule_vote(g: &mut Game) {
-    let turn = g.turn().saturating_add(num::trunc_i32(15.0 * g.speed().modifier));
-    let un = &mut g.edit_world(WorldTouch::UN).un;
-    un.next_vote = Some(turn);
-    un.votes.clear();
-    g.emit(
-        EngineEvent::UnVote,
-        &format!("The United Nations will hold a vote for world leader on turn {turn}."),
-        None,
-        None,
-        EventData::default(),
-        &[],
-    );
 }

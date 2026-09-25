@@ -75,7 +75,7 @@ fn readable(text: &str) {
 }
 
 #[test]
-fn a_bare_arena_game_plays_fifty_end_turns_cleanly_and_lists_what_waits() {
+fn a_bare_arena_game_plays_fifty_end_turns_cleanly_and_no_turn_stage_waits() {
     let mut g = game(&json!({
         "players": seats(3),
         "city_states": 0,
@@ -83,6 +83,13 @@ fn a_bare_arena_game_plays_fifty_end_turns_cleanly_and_lists_what_waits() {
         "ruins": false,
     }));
     testops::apply(&mut g, &json!([{"op": "clear_units", "player": "all"}])).expect("bare");
+    // A unit each: a civilization with nothing is eliminated as the round ends.
+    g.apply_ops(&json!([
+        {"op": "add_unit", "player": 0, "unit": "Warrior", "x": 5, "y": 5},
+        {"op": "add_unit", "player": 1, "unit": "Warrior", "x": 18, "y": 10},
+        {"op": "add_unit", "player": 2, "unit": "Warrior", "x": 18, "y": 4},
+    ]))
+    .expect("units");
     clean(&mut g);
     let mut seen = Vec::new();
     for _ in 0..50 {
@@ -106,10 +113,7 @@ fn a_bare_arena_game_plays_fifty_end_turns_cleanly_and_lists_what_waits() {
         .filter(|p| p["kind"] == "turn_stage")
         .filter_map(|p| p["name"].as_str())
         .collect();
-    assert!(!stages.contains(&"player_start S8: the city-state's turn"), "ported in 1c-06");
-    assert!(!stages.contains(&"player_start S8: standing unit orders"), "ported in 1c-04");
-    assert!(!stages.contains(&"player_end E6: worker builds"), "ported in 1c-04");
-    assert!(stages.contains(&"round_end R2: the round's statistics"));
+    assert!(stages.is_empty(), "the last turn stages were ported in 1c-08: {stages:?}");
 }
 
 #[test]
@@ -322,7 +326,18 @@ fn the_game_ends_at_its_turn_limit() {
     }
     assert_eq!(g.turn(), 4);
     let over: Vec<&str> = last.iter().map(|e| e.kind.name()).collect();
+    assert_eq!(over, ["turn_end", "victory"], "the best score wins the Time victory");
+    let time = g.rules().victories().iter().find(|(_, v)| &*v.name == "Time").map(|(id, _)| id);
+    assert!(g.state().clock().winner.is_some() && g.state().clock().victory == time);
+    // With the Time victory off it ends with no winner.
+    let mut off =
+        game(&json!({"players": [{}, {}], "turn_limit": 3, "victories": {"Time": false}}));
+    while off.phase() == Phase::Playing {
+        last = off.end_turn(off.current()).expect("a turn").events().to_vec();
+    }
+    let over: Vec<&str> = last.iter().map(|e| e.kind.name()).collect();
     assert_eq!(over, ["turn_end", "game_over"]);
+    assert_eq!((off.turn(), off.state().clock().winner), (4, None));
     let e = g.end_turn(g.current()).expect_err("over");
     assert_eq!((e.code, e.message.as_str()), (ErrCode::GameOver, "The game is over."));
     // Nor is a turn forced, which Python allowed (refcheck: force-turn-only-for-the-living).

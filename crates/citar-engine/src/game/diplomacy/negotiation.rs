@@ -750,6 +750,14 @@ fn open_where(g: &Game, f: impl Fn(&Negotiation) -> bool) -> Vec<NegotiationId> 
         .collect()
 }
 
+/// An eliminated civilization's open negotiations are cancelled with `note`, for nobody
+/// (`victory.py:392-394`).
+pub(crate) fn cancel_for(g: &mut Game, p: PlayerId, note: &str) {
+    for id in open_where(g, |n| n.initiator == p || n.responder == p) {
+        close(g, id, NegStatus::Cancelled, note, None);
+    }
+}
+
 /// A war between `a` and `b` cancels their open negotiations (`diplomacy.py:212-214`).
 pub(crate) fn cancel_between(g: &mut Game, a: PlayerId, b: PlayerId) {
     let ids = open_where(g, |n| {

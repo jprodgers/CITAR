@@ -26,7 +26,7 @@ use crate::base::stats::Stat;
 use crate::game::derive::rev::{CityTouch, PlayerTouch, UnitTouch};
 use crate::game::error::ActionError;
 use crate::game::units::{self, health, promotions, unit_has};
-use crate::game::{Game, Porting, barbarians, city_states, movement, pending, triggers, vis};
+use crate::game::{Game, barbarians, city_states, movement, triggers, vis};
 use crate::rules::defs::Domain;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::units::Activity;
@@ -546,8 +546,7 @@ pub(crate) fn kill_unit(g: &mut Game, victim: UnitId, killer: Option<PlayerId>, 
         EventData { unit_type: Some(base), owner: Some(owner), killer, ..EventData::default() };
     g.emit(EngineEvent::UnitKilled, text, Some(audience), Some(at), data, &[]);
     triggers::fire(g, &TriggerSite::civ(owner), &TriggerEvent::LosingUnit(facts), false, None);
-    // victory.check_elimination (combat.py:609-610).
-    pending(Porting::Pending("1c-08"));
+    crate::game::victory::eliminate_if_defeated(g, owner, None);
 }
 
 /// Gold, faith or culture earned for a kill, where a unique grants it (`combat._earn_from_killing`,

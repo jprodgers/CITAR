@@ -208,7 +208,7 @@ mod tests {
     use crate::game::core::testing;
     use crate::game::error::ErrCode;
     use crate::save::chain::DigestChain;
-    use crate::state::{Phase, TurnClock};
+    use crate::state::Phase;
 
     #[test]
     fn with_no_major_civilization_alive_a_call_ends_the_round_and_stops_at_the_next() {
@@ -268,16 +268,20 @@ mod tests {
     fn a_round_that_ends_the_game_is_still_closed_and_chained_as_itself()
     -> Result<(), crate::base::digest::CanonError> {
         let mut g = testing::duel();
+        testing::unit(&mut g, PlayerId(0), "Warrior", crate::base::ids::TileIdx(40));
+        let theirs = testing::unit(&mut g, PlayerId(1), "Warrior", crate::base::ids::TileIdx(60));
         g.begin_turn();
         g.set_chain(Some(DigestChain::new(b"test")));
         g.end_round();
         assert_eq!(g.turn(), 2);
         assert_eq!(g.last_round().map(|(t, _)| t), Some(1));
-        // A round whose eliminations end the game (package 1c-08) stops before the next turn,
-        // and is still settled and chained, under its own turn number.
-        let c = *g.state().clock();
-        g.set_clock(TurnClock { phase: Phase::Over, ..c });
+        // A round whose eliminations end the game stops before the next turn, and is still
+        // settled and chained, under its own turn number: the second civilization, left with
+        // nothing, is eliminated, and the first, the last one standing, wins.
+        crate::game::units::remove_unit(&mut g, theirs);
         g.end_round();
+        assert_eq!(g.phase(), Phase::Over);
+        assert_eq!(g.state().clock().winner, Some(PlayerId(0)));
         assert_eq!(g.turn(), 2, "the turn does not move on in a game that is over");
         assert_eq!(g.chain().map(|c| c.rounds()), Some(2));
         assert_eq!(g.last_round(), Some((2, g.digest()?)));

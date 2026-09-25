@@ -348,6 +348,8 @@ fn defeating_a_unit_and_being_defeated_fire_for_each_side() {
     let raider = add(&mut g, ME, "Kitchen Sink Raider", at(6, 4));
     test_ops(&mut g, json!([{"op": "set_unit", "unit": raider.get(), "promotions": ["Blitz"]}]));
     let victim = add(&mut g, THEM, "Warrior", at(7, 4));
+    // A second unit keeps the other side, which has no city, in the game once its warrior dies.
+    add(&mut g, THEM, "Scout", at(10, 7));
     war(&mut g);
     test_ops(
         &mut g,

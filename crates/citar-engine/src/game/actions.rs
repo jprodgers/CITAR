@@ -15,8 +15,8 @@
 //!
 //! A one-time effect a unit carries is asked whether it would do anything before it is taken
 //! (`triggers::would_apply`, on `&Game`): one that would do nothing is refused, as Python refused
-//! it, and the pipeline refuses before it writes. Adding a spaceship part is refused as not ported
-//! until package 1c-08 ports victory. The results of founding a city and of a paradrop give their
+//! it, and the pipeline refuses before it writes. A spaceship part added in the capital is
+//! `victory`'s (`victory.add_to_spaceship`). The results of founding a city and of a paradrop give their
 //! tiles as `{x, y}`, where Python listed the keys of the coordinates (`unit-results-give-tiles`).
 //! A city-state that has a city founds no other (`city-states-found-one-city`), where Python let
 //! its settler found cities as a major's did.
@@ -378,6 +378,7 @@ pub enum ActionPlan {
     Treatise { unit: UnitId, action: UniqueId },
     Create { unit: UnitId, option: InstantOption },
     Paradrop { unit: UnitId, to: TileIdx },
+    AddToSpaceship { unit: UnitId },
     Trigger { unit: UnitId, id: UniqueId },
 }
 
@@ -472,8 +473,8 @@ pub fn plan_action(
             }
             ActionPlan::Paradrop { unit: u, to }
         }
-        // victory.add_to_spaceship (victory.py).
-        ActionKind::AddToSpaceship => return Err(not_ported("game::victory")),
+        // The list has checked the capital and the movement (`victory.py:79-84`).
+        ActionKind::AddToSpaceship => ActionPlan::AddToSpaceship { unit: u },
         ActionKind::Trigger(id) => {
             // An effect that would do nothing is refused unwritten.
             let site = TriggerSite { civ: p, city: None, unit: Some(u), tile: Some(at) };
@@ -499,14 +500,6 @@ pub fn plan_action(
             ActionPlan::Trigger { unit: u, id: *id }
         }
     })
-}
-
-/// The refusal of an action whose system is not ported yet (DESIGN.md 3.4, rule 4).
-fn not_ported(path: &str) -> ActionError {
-    ActionError::new(
-        ErrCode::NotPorted,
-        format!("This action is not ported to the new engine yet ({path})."),
-    )
 }
 
 /// What a unit's one-time effect says caused it (`note=f"by a {u.type}"`).
@@ -570,6 +563,9 @@ pub fn apply_action(g: &mut Game, plan: ActionPlan) -> OutcomeSpec {
             OutcomeSpec::value(workers::apply_instant(g, unit, &option))
         }
         ActionPlan::Paradrop { unit, to } => OutcomeSpec::value(paradrop(g, unit, to)),
+        ActionPlan::AddToSpaceship { unit } => {
+            OutcomeSpec::value(super::victory::milestones::add_to_spaceship(g, unit))
+        }
         ActionPlan::Trigger { unit, id } => {
             let Some((p, at)) = g.unit(unit).map(|x| (x.owner(), x.tile())) else {
                 return OutcomeSpec::value(Value::Null);

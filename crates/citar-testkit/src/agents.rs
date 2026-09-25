@@ -36,6 +36,9 @@
 //! gold and units, protection pledged and withdrawn, tribute demanded, peace, marriage), and its
 //! spies to stage coups now and then.
 //!
+//! Package 1c-08 teaches it to vote in the United Nations ([`un_vote`]) while voting is open:
+//! for a living civilization it has met, for itself, or to abstain.
+//!
 //! Until package 1c-09's `drive` dispatches [`SeatDriver::respond`], nothing would answer a chat
 //! the agent opens before it withdraws it, so the other side answers at once ([`converse`]), as
 //! its own `respond` would: the deals the agent strikes are carried out, and what they leave
@@ -67,6 +70,7 @@ use citar_engine::game::research::{
 };
 use citar_engine::game::units::actions::{MoveUnit, PromoteUnit, UnitOrder, UpgradeUnit};
 use citar_engine::game::units::{promotions, upgrades};
+use citar_engine::game::victory::UnVote;
 use citar_engine::game::workers::{self, BuildImprovement, Builder};
 use citar_engine::game::{Action, DriverOutcome, Game, SeatDriver};
 use citar_engine::state::cities::{City, Constructible, Perpetual};
@@ -90,6 +94,7 @@ pub type Move = fn(&mut Game, PlayerId, &mut Rng);
 /// - Package 1c-05: [`spies`] and [`diplomacy`], the chats last, so that it withdraws what it
 ///   opened once it has done everything else.
 /// - Package 1c-06: [`city_states`], and coups among its spies' moves.
+/// - Package 1c-08: [`un_vote`], last, so that the moves before it draw as they did.
 pub const MOVES: &[Move] = &[
     research,
     production,
@@ -108,6 +113,7 @@ pub const MOVES: &[Move] = &[
     spies,
     city_states,
     diplomacy,
+    un_vote,
 ];
 
 /// Picks one of `v` from the turn's stream.
@@ -758,6 +764,25 @@ pub fn city_states(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     };
     let a = CityStateAction { player_id: i64::from(cs.0), action: json!(action), amount, unit_id };
     play(g, pid, Action::CityStateAction(a));
+}
+
+/// The United Nations (`un_vote`): while voting is open, one time in two, an abstention one time
+/// in four, else a vote for itself, a living major civilization it has met, or now and then a
+/// player the game does not have, which is refused as part of the play.
+pub fn un_vote(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
+    if !citar_engine::game::victory::un::vote_open(g) || !rng.chance(0.5) {
+        return;
+    }
+    let candidate = if rng.below(4) == 0 {
+        json!("abstain")
+    } else {
+        let mut them: Vec<PlayerId> =
+            g.majors(true).map(Player::id).filter(|&q| q == pid || g.has_met(pid, q)).collect();
+        them.push(PlayerId(u8::try_from(g.state().players().len()).unwrap_or(u8::MAX)));
+        let Some(q) = pick(rng, &them) else { return };
+        json!(q.0)
+    };
+    play(g, pid, Action::UnVote(UnVote { candidate }));
 }
 
 /// A driver that plays at random among the actions the engine has, reproducibly: the same game
