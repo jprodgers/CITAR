@@ -3,7 +3,7 @@
 //!   caches agree with a cold rebuild at every settle (gate 1; the local corpus too when
 //!   `CITAR_REFCHECK_CORPUS` names it);
 //! - a small game of `RandomAgent`s reaches its turn limit, 330 turns, in 10 seconds or less
-//!   (gate 2: the time is reported, and fails above 30 seconds in an optimised build);
+//!   (gate 2: the time is reported, and fails above the 30-second backstop in any build);
 //! - the chain of round digests with a save and a load at every round equals the uninterrupted
 //!   run's (gate 3), for random games and for a fixture passed;
 //! - reads, saves and refused calls between every two of the agents' moves change no digest
@@ -83,8 +83,9 @@ fn every_fixture_plays_five_pass_rounds_cleanly() {
 #[test]
 fn a_random_agent_small_game_reaches_its_turn_limit_in_time() {
     // Gate 2 (DESIGN.md 10): an engine-only small game of 330 turns, RandomAgent in every seat,
-    // plays to its turn limit in 10 seconds or less. The time is reported; an optimised build
-    // fails above 30 seconds. The checks are off, as a shipped build runs.
+    // plays to its turn limit in 10 seconds or less. The time is reported, and any build fails
+    // above the 30-second backstop: it takes 1 to 2 s here, in the dev profile as in the ci
+    // one. The checks are off, as a shipped build runs.
     let settings = games::random_settings("small", "continents", "wrap_x", 330, 330);
     let mut g = games::new_game(&settings, b"small-330", DebugOptions::OFF).expect("a game");
     let mut agents = games::agents_for(&g);
@@ -98,14 +99,19 @@ fn a_random_agent_small_game_reaches_its_turn_limit_in_time() {
     let took = start.elapsed();
     #[allow(clippy::disallowed_macros, reason = "the gate's time is reported")]
     {
-        println!("small game: {played} rounds to turn {} in {:.2} s", g.turn(), took.as_secs_f64());
+        let st = g.state();
+        println!(
+            "small game: {played} rounds to turn {} in {:.2} s; {} cities and {} units at the end",
+            g.turn(),
+            took.as_secs_f64(),
+            st.cities().len(),
+            st.units().len()
+        );
     }
     assert_eq!(g.phase(), Phase::Over);
     assert_eq!(played, 330, "it reached its turn limit");
     assert!(g.state().clock().winner.is_some(), "the Time victory has a winner");
-    if !cfg!(debug_assertions) {
-        assert!(took.as_secs_f64() <= 30.0, "330 turns took {took:?}, above the 30 s backstop");
-    }
+    assert!(took.as_secs_f64() <= 30.0, "330 turns took {took:?}, above the 30 s backstop");
     g.set_debug_options(DebugOptions::ALL);
     assert!(g.check_invariants().is_empty(), "{:?}", g.check_invariants());
     assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
