@@ -23,6 +23,7 @@ use crate::base::ids::{CityId, PlayerId, TechId, TileIdx};
 use crate::base::rng::{KeyPart, Purpose, Rng};
 use crate::base::sets::PlayerSet;
 use crate::base::stats::Stat;
+use crate::base::text::echo;
 use crate::base::{num, py};
 use crate::game::Game;
 use crate::game::action::{OutcomeSpec, Rule};
@@ -765,7 +766,11 @@ pub fn find_spy(g: &Game, p: PlayerId, name: &Value) -> Result<usize, ActionErro
     let wanted = py::strip(&raw).to_lowercase();
     list.iter().position(|s| s.name.to_lowercase() == wanted).ok_or_else(|| {
         let names: Vec<&str> = list.iter().map(|s| &*s.name).collect();
-        ActionError::rule(format!("No spy named '{raw}'. Your spies: {}.", names.join(", ")))
+        ActionError::rule(format!(
+            "No spy named '{}'. Your spies: {}.",
+            echo(&raw),
+            names.join(", ")
+        ))
     })
 }
 
@@ -807,7 +812,7 @@ impl Rule for MoveSpy {
             .and_then(CityId::new)
             .filter(|&c| g.city(c).is_some())
             .ok_or_else(|| {
-                ActionError::rule(format!("No city with id {}.", py::str_of(&self.city_id)))
+                ActionError::rule(format!("No city with id {}.", echo(&py::str_of(&self.city_id))))
             })?;
         if let Some(why) = can_move_to(g, pid, s, c) {
             return Err(ActionError::rule(why));

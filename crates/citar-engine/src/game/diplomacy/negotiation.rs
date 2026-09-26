@@ -28,6 +28,7 @@ use super::relations::name;
 use crate::base::ids::{MessageId, NegotiationId, PlayerId};
 use crate::base::py;
 use crate::base::sets::PlayerSet;
+use crate::base::text::echo;
 use crate::base::text::truncate_chars;
 use crate::game::Game;
 use crate::game::derive::rev::DiploTouch;
@@ -103,7 +104,7 @@ pub fn plan_send_message(
                 let Some(n) = py::int_of(q) else {
                     return Err(ActionError::rule(format!(
                         "Invalid recipient '{}'. Use player ids (numbers) or 'all'.",
-                        py::str_of(q)
+                        echo(&py::str_of(q))
                     )));
                 };
                 let p = u8::try_from(n)
@@ -673,7 +674,7 @@ pub const CLOSED_STATUSES: [NegStatus; 3] =
 
 /// The refusal of a status a negotiation cannot be closed with from outside.
 fn not_a_close(name: &str) -> ActionError {
-    refuse(format!("A negotiation closes as rejected, expired, cancelled, not '{name}'."))
+    refuse(format!("A negotiation closes as rejected, expired, cancelled, not '{}'.", echo(name)))
 }
 
 /// The status named `name`, if a negotiation may be closed with it from outside

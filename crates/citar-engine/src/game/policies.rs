@@ -28,6 +28,7 @@ use crate::base::ids::{EraId, PlayerId, PolicyId};
 use crate::base::num;
 use crate::base::py;
 use crate::base::sets::PlayerSet;
+use crate::base::text::echo;
 use crate::rules::defs::PolicyKind;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::unique::params::PolicyOrBelief;
@@ -351,7 +352,10 @@ impl Rule for AdoptPolicy {
         let policy = g.rules().resolve::<PolicyId>(&text).ok_or_else(|| {
             ActionError::new(
                 ErrCode::BadParam,
-                format!("Unknown policy '{text}'. Use names like 'Tradition' or 'Aristocracy'."),
+                format!(
+                    "Unknown policy '{}'. Use names like 'Tradition' or 'Aristocracy'.",
+                    echo(&text)
+                ),
             )
         })?;
         Ok((policy, plan_adopt(g, pid, policy)?))

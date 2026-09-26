@@ -4,6 +4,7 @@
 //! unit tests and doctests; that removes the dev-dependency cycle between the two (DESIGN.md 2.1).
 //!
 //! - [`agents`]: seat drivers for tests, `RandomAgent` among them (DESIGN.md 9.5);
+//! - [`calls`]: tool calls as models make them, right and wrong, for every tool of the registry;
 //! - [`fixtures`]: the Python states refcheck recorded, for the converter's tests and goldens;
 //! - [`games`]: whole games, a `RandomAgent` in every seat or a Python state passed round after
 //!   round, with a hook after every round, for the whole-game tests and golden sets;
@@ -20,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agents;
+pub mod calls;
 pub mod fixtures;
 pub mod games;
 pub mod golden;

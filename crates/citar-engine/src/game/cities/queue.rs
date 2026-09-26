@@ -19,6 +19,7 @@ use super::founding::{self, equivalent_building};
 use crate::base::ids::{BaseUnitId, BuildingId, CityId, PlayerId};
 use crate::base::py;
 use crate::base::sets::PlayerSet;
+use crate::base::text::echo;
 use crate::game::lookup::own_city;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::cities::{Constructible, Perpetual};
@@ -50,7 +51,10 @@ pub fn resolve_item(
     }
     Err(ActionError::new(
         ErrCode::BadParam,
-        format!("Unknown item '{item}'. Use unit or building names like 'Warrior' or 'Granary'."),
+        format!(
+            "Unknown item '{}'. Use unit or building names like 'Warrior' or 'Granary'.",
+            echo(item)
+        ),
     ))
 }
 

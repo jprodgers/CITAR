@@ -15,6 +15,10 @@
 //!
 //! From package 1b-04:
 //! - [`maps`]: `generate_map`, a generated map as the editor's document (`maps.py:80-100`).
+//!
+//! From package 1d-01:
+//! - [`tools`]: the registry of the 61 tools with their schemas, `Game::execute` and
+//!   `Game::execute_query` (`tools.py:15-201`), and the query tools that need no view.
 
 pub mod game;
 pub mod maps;
@@ -26,4 +30,4 @@ pub mod inspect;
 #[cfg(feature = "test-ops")]
 pub mod testops;
 
-pub use crate::game::error::{ActionError, EngineError, ErrCode};
+pub use crate::game::error::{ActionError, EngineError, ErrCode, text_rule_broken};

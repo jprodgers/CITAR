@@ -39,6 +39,7 @@ use super::{great_people, policies, research, triggers};
 use crate::base::fmt::PyFloat;
 use crate::base::ids::{CityId, ImprovementId, PlayerId, TileIdx, UniqueId, UnitId};
 use crate::base::py;
+use crate::base::text::echo;
 use crate::rules::defs::ReligionProgress;
 use crate::state::cities::Constructible;
 use crate::state::map::Tile;
@@ -422,7 +423,8 @@ pub fn plan_action(
         let names = if ids.is_empty() { "none".to_owned() } else { ids.join(", ") };
         let unit = &g.rules().base_units()[x.base].name;
         return Err(ActionError::rule(format!(
-            "{unit} has no action '{action}'. Its actions: {names}."
+            "{unit} has no action '{}'. Its actions: {names}.",
+            echo(action)
         )));
     };
     if let Some(reason) = &a.reason {

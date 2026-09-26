@@ -317,3 +317,7 @@ reason = "The city_state_action tool told models that a unit next to a city-stat
 [[differences]]
 id = "tool-arguments-of-the-wrong-type-refused"
 reason = "A tool given something other than text where it reads a name failed with a Python exception (unit_order's order, get_rules' topic) or read a number as the name '5' (promote_unit's promotion, build_improvement's improvement, unit_action's action); Rust refuses it with a sentence naming the parameter and what it takes"
+
+[[differences]]
+id = "deal-items-name-what-they-trade"
+reason = "A resource or tech deal item that named no resource or tech was refused as \"'None' is not a tradeable strategic or luxury resource\" or \"Unknown tech 'None'\"; Rust says what the item lacks, with an example of one written right"

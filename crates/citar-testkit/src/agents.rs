@@ -371,10 +371,20 @@ pub fn take_tally() -> std::collections::BTreeMap<&'static str, Tried> {
 /// other, which an agent playing at random mostly has no use for; what the action did is the
 /// game's to keep. A noisy agent's reads and refusals come first ([`noise`]), so that they fall
 /// between any two actions, those of one move included.
+///
+/// # Panics
+/// If a refusal breaks the rules a refusal's text keeps (property P5): an agent meets refusals
+/// of every action tool, in every kind of state.
 fn play(g: &mut Game, pid: PlayerId, a: Action) -> bool {
     noise(g, pid);
     let tool = a.tool();
-    let taken = g.act(pid, a).is_ok();
+    let done = g.act(pid, a);
+    if let Err(e) = &done
+        && let Some(why) = citar_engine::api::text_rule_broken(&e.message)
+    {
+        panic!("{tool} was refused with a text a model cannot use ({why}): {}", e.message);
+    }
+    let taken = done.is_ok();
     TALLY.with(|t| {
         let mut t = t.borrow_mut();
         let e = t.entry(tool).or_default();
@@ -1056,12 +1066,35 @@ fn some_query(g: &Game, pid: PlayerId, rng: &mut Rng) -> serde_json::Value {
     }
 }
 
+/// A query tool drawn from the registry's 21, with arguments a model might send it: the
+/// caller's own units and cities or ones it does not have, tiles on and off the map.
+fn some_query_tool(g: &Game, pid: PlayerId, rng: &mut Rng) -> (&'static str, serde_json::Value) {
+    use citar_engine::api::tools::registry::{TOOLS, ToolKind};
+    let queries: Vec<&'static str> =
+        TOOLS.iter().filter(|t| t.kind() == ToolKind::Query).map(|t| t.name()).collect();
+    let tool = any_of(rng, &queries).unwrap_or("read_notes");
+    let units: Vec<u32> = g.player_units(pid).map(|u| u.id().get()).collect();
+    let u = any_of(rng, &units).map_or(json!(NO_UNIT), |u| json!(u));
+    let cities: Vec<u32> = g.player_cities(pid).map(|c| c.id().get()).collect();
+    let c = any_of(rng, &cities).map_or(json!(999_999), |c| json!(c));
+    let t = TileIdx(u32::try_from(rng.below(g.grid().size() as u64)).unwrap_or(0));
+    let (x, y) = g.grid().xy(t);
+    let args = json!({
+        "unit_id": u, "city_id": c, "x": x, "y": y, "since_id": rng.below(50),
+        "topic": "units", "filter": "all", "message_limit": 5, "radius": 3,
+    });
+    (tool, args)
+}
+
 /// Reads a game as a host or a model would between two actions: `inspect` queries (the views
-/// and the briefing among them, refused until they are ported), what the tools read (a unit's
-/// reach, a preview, a city's list, the advisor's pick), the chronicle, and the digest.
+/// and the briefing among them, refused until they are ported), a query tool, what the tools
+/// read (a unit's reach, a preview, a city's list, the advisor's pick), the chronicle, and the
+/// digest.
 fn read_something(g: &Game, pid: PlayerId, rng: &mut Rng) {
     let q = some_query(g, pid, rng);
     let _answer = citar_engine::api::inspect::inspect(g, &q);
+    let (tool, args) = some_query_tool(g, pid, rng);
+    let _told = g.execute_query(pid, tool, &args);
     let units = units_of(g, pid);
     let cities: Vec<CityId> = g.player_cities(pid).map(|c| c.id()).collect();
     match rng.below(6) {
@@ -1121,7 +1154,7 @@ const NO_UNIT: i64 = -7;
 fn refuse_something(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
     let others: Vec<PlayerId> = g.state().players().ids().filter(|&q| q != g.current()).collect();
     let own = units_of(g, pid);
-    let (what, refused) = match rng.below(9) {
+    let (what, refused) = match rng.below(11) {
         0 => {
             let a = MoveUnit { unit_id: NO_UNIT, x: 0, y: 0 };
             ("a move of no unit", g.act(pid, Action::MoveUnit(a)).is_err())
@@ -1171,10 +1204,17 @@ fn refuse_something(g: &mut Game, pid: PlayerId, rng: &mut Rng) {
             ]);
             ("operations that fail halfway", g.apply_ops(&ops).is_err())
         }
-        _ => {
+        8 => {
             let a = BuildImprovement { unit_id: NO_UNIT, improvement: "Farm".into() };
             ("a build by no unit", g.act(pid, Action::BuildImprovement(a)).is_err())
         }
+        // Tools called by name, as a host calls them: arguments a model gets wrong, and a tool
+        // that does not exist.
+        9 => {
+            let args = json!({"unit_id": "first", "x": 0, "y": 0, "why": "because"});
+            ("a move with an id that is no number", g.execute(pid, "move_unit", &args).is_err())
+        }
+        _ => ("a tool that does not exist", g.execute(pid, "fly_to_the_moon", &json!({})).is_err()),
     };
     assert!(refused, "the game carried out {what}, which it must refuse");
 }

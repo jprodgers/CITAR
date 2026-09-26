@@ -408,7 +408,7 @@ pub fn validate_choice(
         let b = g
             .rules()
             .resolve::<BeliefId>(text)
-            .ok_or_else(|| ActionError::rule(format!("Unknown belief '{text}'.")))?;
+            .ok_or_else(|| ActionError::rule(format!("Unknown belief '{}'.", echo(text))))?;
         // A belief is taken once: listed twice, it would fill two slots and join the religion
         // once.
         // refcheck: belief-listed-twice-refused

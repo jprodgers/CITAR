@@ -79,6 +79,32 @@ impl ActionError {
     }
 }
 
+/// The most characters a refusal's text takes (property P5).
+pub const MAX_REFUSAL_CHARS: usize = 600;
+
+/// Which of the rules a refusal's text keeps (property P5, DESIGN.md 8.5) `text` breaks, if
+/// any: it is not empty, it takes at most [`MAX_REFUSAL_CHARS`] characters, it ends a sentence
+/// (`.`, `?` or `)`), and it shows no Rust debug output (`Some(`, `None`, `Idx(`, `::`). A caller's
+/// own words quoted back are the caller's: tests that check this send none of those.
+#[must_use]
+pub fn text_rule_broken(text: &str) -> Option<&'static str> {
+    if text.is_empty() {
+        return Some("it is empty");
+    }
+    if text.chars().count() > MAX_REFUSAL_CHARS {
+        return Some("it is longer than 600 characters");
+    }
+    if !text.ends_with(['.', '?', ')']) {
+        return Some("it does not end in '.', '?' or ')'");
+    }
+    let debug = ["Some(", "Idx(", "::"].iter().any(|d| text.contains(d))
+        || !crate::base::text::find_word(text, "None").is_empty();
+    if debug {
+        return Some("it shows Rust debug output");
+    }
+    None
+}
+
 /// Why a host command failed (DESIGN.md 8.5).
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EngineError {
@@ -103,4 +129,23 @@ pub enum EngineError {
     /// A state operation was refused: a bug in the caller, reported rather than panicking.
     #[error("the state refused a write: {0}")]
     State(#[from] StateError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_reads_as_a_sentence_a_model_can_use() {
+        assert_eq!(text_rule_broken("You have no spies."), None);
+        assert_eq!(text_rule_broken("Is it your turn?"), None);
+        assert_eq!(text_rule_broken("Try again (next turn)"), None);
+        assert!(text_rule_broken("").is_some());
+        assert!(text_rule_broken("Available: Shock I, Drill I").is_some());
+        assert!(text_rule_broken(&format!("{}.", "x".repeat(600))).is_some());
+        assert!(text_rule_broken("The unit is Some(UnitId(3)).").is_some());
+        assert!(text_rule_broken("Found None here.").is_some());
+        assert!(text_rule_broken("Nonesuch is fine.").is_none());
+        assert!(text_rule_broken("See game::units.").is_some());
+    }
 }

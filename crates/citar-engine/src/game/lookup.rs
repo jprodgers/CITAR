@@ -12,10 +12,7 @@
 
 use crate::base::ids::{CityId, PlayerId, TileIdx, UnitId};
 use crate::game::Game;
-use crate::game::error::{ActionError, ErrCode};
-
-/// The most characters a refusal takes (property P5, DESIGN.md 8.5).
-pub const REFUSAL_CHARS: usize = 600;
+use crate::game::error::{ActionError, ErrCode, MAX_REFUSAL_CHARS};
 
 /// A tile by its coordinates (`tools._idx`, `tools.py:143-151`); the refusal names the map's
 /// size, because the usual cause is a caller that has assumed another.
@@ -76,7 +73,7 @@ pub fn own_city(g: &Game, pid: PlayerId, city_id: i64) -> Result<CityId, ActionE
 }
 
 /// `head`, then `entries` joined with commas (`none` if there are none), then `tail`. A text
-/// longer than [`REFUSAL_CHARS`] keeps the entries that fit and says how many more `tool` lists.
+/// longer than [`MAX_REFUSAL_CHARS`] keeps the entries that fit and says how many more `tool` lists.
 // refcheck: refusal-lists-capped
 pub(crate) fn with_list(head: &str, entries: &[String], tail: &str, tool: &str) -> String {
     if entries.is_empty() {
@@ -84,10 +81,10 @@ pub(crate) fn with_list(head: &str, entries: &[String], tail: &str, tool: &str) 
     }
     let whole = format!("{head}{}{tail}", entries.join(", "));
     let chars = |s: &str| s.chars().count();
-    if chars(&whole) <= REFUSAL_CHARS {
+    if chars(&whole) <= MAX_REFUSAL_CHARS {
         return whole;
     }
-    let room = REFUSAL_CHARS.saturating_sub(chars(head) + chars(tail));
+    let room = MAX_REFUSAL_CHARS.saturating_sub(chars(head) + chars(tail));
     // The longest note there could be, so that whatever is kept leaves room for it.
     let note_room = chars(&format!(", and {} more ({tool} lists them all)", entries.len()));
     let mut list = String::new();
@@ -124,11 +121,11 @@ mod tests {
             "Your units: #1 Worker, #2 Worker, #3 Worker."
         );
         // Exactly as long as a refusal may be: kept whole.
-        let exact = vec!["x".repeat(REFUSAL_CHARS - head.len() - 1)];
-        assert_eq!(with_list(head, &exact, ".", "get_units").chars().count(), REFUSAL_CHARS);
+        let exact = vec!["x".repeat(MAX_REFUSAL_CHARS - head.len() - 1)];
+        assert_eq!(with_list(head, &exact, ".", "get_units").chars().count(), MAX_REFUSAL_CHARS);
         let many: Vec<String> = (1..=200).map(|i| format!("#{i} Mechanized Infantry")).collect();
         let text = with_list(head, &many, ".", "get_units");
-        assert!(text.chars().count() <= REFUSAL_CHARS, "{text}");
+        assert!(text.chars().count() <= MAX_REFUSAL_CHARS, "{text}");
         assert!(text.starts_with("Your units: #1 Mechanized Infantry, #2 "), "{text}");
         let kept = text.matches("Mechanized").count();
         let note = format!(", and {} more (get_units lists them all).", 200 - kept);

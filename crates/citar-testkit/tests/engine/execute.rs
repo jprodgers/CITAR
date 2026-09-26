@@ -6,13 +6,20 @@
 //! - unknown keys are dropped, and an action is logged with the arguments it took;
 //! - a query is answered at any time, by any major civilization, and changes nothing;
 //! - a refused call changes nothing (property P2).
+//!
+//! Gate 3: every refusal a model can meet reads as a sentence it can use (property P5): every
+//! tool called with argument sets right and wrong (`citar_testkit::calls`) on every committed
+//! fixture, by the player whose turn it is and by another.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use citar_engine::api::tools::ToolKind;
-use citar_engine::api::{ErrCode, testops};
+use citar_engine::api::{ErrCode, testops, text_rule_broken};
 use citar_engine::base::ids::PlayerId;
-use citar_engine::game::Game;
+use citar_engine::game::{DebugOptions, Game};
 use citar_engine::rules::Ruleset;
 use citar_testkit::script::{map_doc, new_game};
+use citar_testkit::{calls, fixtures, games};
 use serde_json::{Value, json};
 
 /// A game on the arena: two benchmark civilizations with their starting units, no city-state.
@@ -176,4 +183,121 @@ fn an_action_returns_the_events_it_appended() {
     assert_eq!(g.current(), PlayerId(1));
     let (code, _) = refusal(&mut g, 0, "end_turn", &json!({}));
     assert_eq!(code, ErrCode::NotYourTurn);
+}
+
+#[test]
+fn every_refusal_reads_as_a_sentence_and_changes_nothing() {
+    let mut refused: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut taken: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut texts = BTreeSet::new();
+    let mut broken = Vec::new();
+    for f in fixtures::committed().expect("the fixtures") {
+        let base = games::from_fixture(&f, b"refusals", DebugOptions::default()).expect("loads");
+        let current = base.current();
+        let other = base.majors(true).map(|p| p.id()).find(|&p| p != current);
+        // The player whose turn it is, another, and one the game does not have.
+        for pid in [Some(current), other, Some(PlayerId(63))].into_iter().flatten() {
+            let mut g = base.clone();
+            for (tool, args) in calls::battery(&base, pid) {
+                let before = (g.rev(), g.chronicle().events().len());
+                match g.execute(pid, tool, &args) {
+                    Ok(_) => {
+                        *taken.entry(tool).or_default() += 1;
+                        g = base.clone();
+                    }
+                    Err(e) => {
+                        *refused.entry(tool).or_default() += 1;
+                        let after = (g.rev(), g.chronicle().events().len());
+                        assert_eq!(
+                            before, after,
+                            "{}: {tool} {args}: refused, yet changed",
+                            f.name
+                        );
+                        if let Some(why) = text_rule_broken(&e.message) {
+                            broken.push(format!("{tool} {args}: {why}: {}", e.message));
+                        }
+                        texts.insert(e.message);
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(path) = std::env::var("CITAR_REFUSALS_DUMP") {
+        let all: Vec<&String> = texts.iter().collect();
+        #[allow(clippy::disallowed_methods, reason = "a dump asked for by name")]
+        std::fs::write(path, serde_json::to_string_pretty(&all).unwrap_or_default()).expect("dump");
+    }
+    broken.sort();
+    broken.dedup();
+    assert!(
+        broken.is_empty(),
+        "{} refusals break the text rules:
+{}",
+        broken.len(),
+        broken.join(
+            "
+"
+        )
+    );
+    // Every tool was refused somewhere, and the actions were taken somewhere too: the calls reach
+    // past the first check.
+    for spec in &citar_engine::api::tools::registry::TOOLS {
+        assert!(refused.contains_key(spec.name()), "{} was never refused", spec.name());
+    }
+    assert!(taken.len() >= 25, "the calls that were taken: {taken:?}");
+    assert!(texts.len() >= 300, "{} distinct refusals", texts.len());
+}
+
+#[test]
+fn a_name_too_long_is_quoted_back_in_part() {
+    use citar_engine::api::tools::SchemaType;
+    let long = json!("Zanzibar ".repeat(200));
+    let mut broken = Vec::new();
+    let mut quoted = 0;
+    for f in fixtures::committed().expect("the fixtures") {
+        let base = games::from_fixture(&f, b"long-names", DebugOptions::default()).expect("loads");
+        let pid = base.current();
+        // Each tool's first argument set: read in backwards, the first one is the last to land.
+        let first: BTreeMap<&str, Value> = calls::battery(&base, pid).into_iter().rev().collect();
+        let mut g = base.clone();
+        for spec in &citar_engine::api::tools::registry::TOOLS {
+            for p in spec.args.params {
+                if !matches!(p.json, SchemaType::String | SchemaType::IntegerOrString) {
+                    continue;
+                }
+                let mut args = first.get(spec.name()).cloned().unwrap_or_else(|| json!({}));
+                if let Some(m) = args.as_object_mut() {
+                    m.insert(p.name.to_owned(), long.clone());
+                    for r in spec.args.required {
+                        m.entry((*r).to_owned()).or_insert_with(|| json!(1));
+                    }
+                }
+                match g.execute(pid, spec.name(), &args) {
+                    Ok(_) => g = base.clone(),
+                    Err(e) => {
+                        quoted += usize::from(e.message.contains("Zanzibar"));
+                        if let Some(why) = text_rule_broken(&e.message) {
+                            broken.push(format!(
+                                "{} {}: {why}: {}",
+                                spec.name(),
+                                p.name,
+                                e.message
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    broken.sort();
+    broken.dedup();
+    assert!(
+        broken.is_empty(),
+        "{}",
+        broken.join(
+            "
+"
+        )
+    );
+    assert!(quoted > 20, "the refusals quote the name: {quoted}");
 }
