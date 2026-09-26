@@ -14,7 +14,7 @@
 use serde_json::Value;
 
 use super::fmt::PyFloat;
-use super::text::is_space;
+use super::text::{echo, is_space};
 
 /// Python's truth value of a JSON value: null, false, zero and empty are false.
 #[must_use]
@@ -44,6 +44,84 @@ pub fn repr(v: &Value) -> String {
                 .join(", ")
         ),
         other => str_of(other),
+    }
+}
+
+/// About how many characters of a caller's value a refusal quotes back with [`repr_echo`].
+pub const ECHO_REPR_CHARS: usize = 100;
+
+/// Python's `repr` of a caller's value as a refusal quotes it back ("Malformed deal item
+/// {'type': 'gold', 'amount': 'lots'}."): each text in it, keys included, cut as
+/// [`echo`] cuts one, and once the quote has run to [`ECHO_REPR_CHARS`] characters, the rest of
+/// each list or object it is in given as `...` and the brackets closed. The quote stays within
+/// about 340 characters whatever was sent (property P5, DESIGN.md 8.5), and its quotes and
+/// brackets stay balanced, where cutting the whole `repr` would have left them open.
+// refcheck: refusals-quote-at-most-60-characters
+#[must_use]
+pub fn repr_echo(v: &Value) -> String {
+    let mut out = String::new();
+    write_repr_echo(v, &mut out);
+    out
+}
+
+/// Writes `v` for [`repr_echo`]; whether the quote was cut, after which the lists and objects
+/// around it only close.
+fn write_repr_echo(v: &Value, out: &mut String) -> bool {
+    // Checked before each key and each value, so what runs past the mark is one text, about 130
+    // characters with every character escaped, then `...` and a bracket for each list or object
+    // open, at most one per character before the mark.
+    let full = |out: &mut String| {
+        let cut = out.chars().count() >= ECHO_REPR_CHARS;
+        if cut {
+            out.push_str("...");
+        }
+        cut
+    };
+    match v {
+        Value::String(s) => {
+            out.push_str(&repr_str(&echo(s)));
+            false
+        }
+        Value::Array(a) => {
+            out.push('[');
+            let mut cut = false;
+            for (i, x) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                cut = full(out) || write_repr_echo(x, out);
+                if cut {
+                    break;
+                }
+            }
+            out.push(']');
+            cut
+        }
+        Value::Object(o) => {
+            out.push('{');
+            let mut cut = false;
+            for (i, (k, x)) in o.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                if full(out) {
+                    cut = true;
+                    break;
+                }
+                out.push_str(&repr_str(&echo(k)));
+                out.push_str(": ");
+                cut = full(out) || write_repr_echo(x, out);
+                if cut {
+                    break;
+                }
+            }
+            out.push('}');
+            cut
+        }
+        other => {
+            out.push_str(&str_of(other));
+            false
+        }
     }
 }
 
@@ -254,7 +332,7 @@ pub fn strip(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     #[test]
     fn int_reads_strings_as_python_does() {
@@ -339,6 +417,42 @@ mod tests {
         assert_eq!(str_of(&json!("x")), "x");
         assert_eq!(str_of(&json!(null)), "None");
         assert_eq!(str_of(&json!(3.0)), "3.0");
+    }
+
+    #[test]
+    fn a_quoted_value_is_cut_and_closed() {
+        // Short values read as Python's repr.
+        for v in [json!("deity"), json!({"type": "gold", "amount": "lots"}), json!([1, null])] {
+            assert_eq!(repr_echo(&v), repr(&v));
+        }
+        let word = "Zanzibar ".repeat(200);
+        assert_eq!(repr_echo(&json!(word)), format!("'{}...'", &word[..60]));
+        let item = json!({"type": "gold_per_turn", "amount": 9_223_372_036_854_775_807_i64,
+            "turns": 30, "resource": "Iron", "tech": "Writing", "city_id": 12, "target": 3});
+        assert_eq!(
+            repr_echo(&item),
+            "{'type': 'gold_per_turn', 'amount': 9223372036854775807, 'turns': 30, 'resource': \
+             'Iron', 'tech': 'Writing', ...}"
+        );
+        // However it is built, the quote stays short and balanced.
+        let slashes = "\\".repeat(500);
+        let mut deep = json!(word);
+        for _ in 0..120 {
+            deep = json!([deep, {slashes.clone(): slashes.clone()}]);
+        }
+        let wide: Map<String, Value> =
+            (0..50).map(|i| (format!("{i}{slashes}"), json!(slashes))).collect();
+        let mut keyed = json!({slashes.clone(): slashes.clone()});
+        for _ in 0..15 {
+            keyed = json!({"a": keyed});
+        }
+        for v in [deep, Value::Object(wide), keyed, json!([word, word, word, [[[[word]]]]])] {
+            let q = repr_echo(&v);
+            assert!(q.chars().count() <= 340, "{} characters: {q}", q.chars().count());
+            let opened = q.matches(['[', '{']).count();
+            assert_eq!(opened, q.matches([']', '}']).count(), "{q}");
+            assert!(q.ends_with([']', '}']), "{q}");
+        }
     }
 
     #[test]

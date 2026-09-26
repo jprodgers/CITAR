@@ -226,13 +226,9 @@ fn every_refusal_reads_as_a_sentence_and_changes_nothing() {
     broken.dedup();
     assert!(
         broken.is_empty(),
-        "{} refusals break the text rules:
-{}",
+        "{} refusals break the text rules:\n{}",
         broken.len(),
-        broken.join(
-            "
-"
-        )
+        broken.join("\n")
     );
     // Every tool was refused somewhere, and the actions were taken somewhere too: the calls reach
     // past the first check.
@@ -243,42 +239,82 @@ fn every_refusal_reads_as_a_sentence_and_changes_nothing() {
     assert!(texts.len() >= 300, "{} distinct refusals", texts.len());
 }
 
+/// Long values for a parameter of this type: the long name where the tool reads a name, in a
+/// list, as an object's key and value, and in each place of a deal item.
+fn long_values(json: citar_engine::api::tools::SchemaType, name: &str) -> Vec<Value> {
+    use citar_engine::api::tools::SchemaType;
+    let keyed = |k: &str, v: Value| Value::Object([(k.to_owned(), v)].into_iter().collect());
+    match json {
+        SchemaType::String | SchemaType::IntegerOrString | SchemaType::Any => vec![json!(name)],
+        SchemaType::Strings => vec![json!([name, name]), json!(name)],
+        SchemaType::Object => vec![keyed(name, json!(1)), json!({"Scientist": name})],
+        SchemaType::Objects => {
+            let mut deep = json!({"type": name});
+            for _ in 0..40 {
+                deep = json!([deep, keyed(name, json!(name))]);
+            }
+            vec![
+                json!([name]),
+                json!([{"type": name}]),
+                json!([{"type": "resource", "resource": name}]),
+                json!([{"type": "tech", "tech": name}]),
+                json!([{"type": "gold_per_turn", "amount": name, "turns": name}]),
+                json!([{"type": "gold", "amount": "lots", "note": [name, name, {"why": name}]}]),
+                json!([keyed(name, json!(name))]),
+                json!([{"type": "city", "city_id": name}]),
+                json!([deep]),
+            ]
+        }
+        SchemaType::Integer | SchemaType::Number | SchemaType::Boolean => vec![json!(name)],
+    }
+}
+
+/// Why a refusal that quotes a caller's words back reads badly, if it does: a cut quote run
+/// into the full stop (`....`), or a bracket left open.
+fn reads_badly(text: &str) -> Option<&'static str> {
+    if text.contains("....") {
+        return Some("a cut quote runs into the full stop");
+    }
+    for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+        if text.matches(open).count() != text.matches(close).count() {
+            return Some("a bracket is left open");
+        }
+    }
+    None
+}
+
 #[test]
 fn a_name_too_long_is_quoted_back_in_part() {
-    use citar_engine::api::tools::SchemaType;
-    let long = json!("Zanzibar ".repeat(200));
+    let name = "Zanzibar ".repeat(200);
     let mut broken = Vec::new();
     let mut quoted = 0;
+    let mut items = 0;
     for f in fixtures::committed().expect("the fixtures") {
         let base = games::from_fixture(&f, b"long-names", DebugOptions::default()).expect("loads");
         let pid = base.current();
-        // Each tool's first argument set: read in backwards, the first one is the last to land.
-        let first: BTreeMap<&str, Value> = calls::battery(&base, pid).into_iter().rev().collect();
         let mut g = base.clone();
-        for spec in &citar_engine::api::tools::registry::TOOLS {
+        // Every argument set of the battery, with each parameter in turn made long: the other
+        // arguments carry the call past the checks that come before the one quoting it.
+        for (tool, set) in calls::battery(&base, pid) {
+            let Some(spec) = citar_engine::api::tools::registry::tool(tool) else { continue };
             for p in spec.args.params {
-                if !matches!(p.json, SchemaType::String | SchemaType::IntegerOrString) {
-                    continue;
-                }
-                let mut args = first.get(spec.name()).cloned().unwrap_or_else(|| json!({}));
-                if let Some(m) = args.as_object_mut() {
-                    m.insert(p.name.to_owned(), long.clone());
-                    for r in spec.args.required {
-                        m.entry((*r).to_owned()).or_insert_with(|| json!(1));
-                    }
-                }
-                match g.execute(pid, spec.name(), &args) {
-                    Ok(_) => g = base.clone(),
-                    Err(e) => {
-                        quoted += usize::from(e.message.contains("Zanzibar"));
-                        if let Some(why) = text_rule_broken(&e.message) {
-                            broken.push(format!(
-                                "{} {}: {why}: {}",
-                                spec.name(),
-                                p.name,
-                                e.message
-                            ));
+                for long in long_values(p.json, &name) {
+                    let mut args = set.clone();
+                    if let Some(m) = args.as_object_mut() {
+                        m.insert(p.name.to_owned(), long.clone());
+                        for r in spec.args.required {
+                            m.entry((*r).to_owned()).or_insert_with(|| json!(1));
                         }
+                    }
+                    let Err(e) = g.execute(pid, spec.name(), &args) else {
+                        g = base.clone();
+                        continue;
+                    };
+                    quoted += usize::from(e.message.contains("Zanzibar"));
+                    items += usize::from(e.message.contains("deal item"));
+                    let why = text_rule_broken(&e.message).or_else(|| reads_badly(&e.message));
+                    if let Some(why) = why {
+                        broken.push(format!("{} {}: {why}: {}", spec.name(), p.name, e.message));
                     }
                 }
             }
@@ -286,13 +322,7 @@ fn a_name_too_long_is_quoted_back_in_part() {
     }
     broken.sort();
     broken.dedup();
-    assert!(
-        broken.is_empty(),
-        "{}",
-        broken.join(
-            "
-"
-        )
-    );
+    assert!(broken.is_empty(), "{}", broken.join("\n"));
     assert!(quoted > 20, "the refusals quote the name: {quoted}");
+    assert!(items > 0, "no call reached the deal items");
 }

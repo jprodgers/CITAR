@@ -104,15 +104,15 @@ fn normalize_item(g: &Game, giver: PlayerId, raw: &Value) -> Result<DealItem, Ac
     let (Some(kind), Some(orig)) = (kind, raw.as_object()) else {
         return Err(ActionError::rule(format!(
             "Invalid deal item {}. Valid types: {}.",
-            echo(&py::repr(raw)),
+            py::repr_echo(raw),
             type_names()
         )));
     };
     // Python converted the fields of a copy in place, and quoted the copy as it then was.
     let mut it = orig.clone();
     let malformed = |it: &Map<String, Value>| {
-        let shown = py::repr(&Value::Object(it.clone()));
-        ActionError::rule(format!("Malformed deal item {}.", echo(&shown)))
+        let shown = py::repr_echo(&Value::Object(it.clone()));
+        ActionError::rule(format!("Malformed deal item {shown}."))
     };
     let r = g.rules();
     // refcheck: deal-items-fit-their-fields

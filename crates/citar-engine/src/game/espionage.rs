@@ -807,12 +807,17 @@ impl Rule for MoveSpy {
             }
             return Ok(SpyMove::Hideout(i));
         }
-        let c = py::int_of(&self.city_id)
+        let asked = py::int_of(&self.city_id);
+        let c = asked
             .and_then(|n| u32::try_from(n).ok())
             .and_then(CityId::new)
             .filter(|&c| g.city(c).is_some())
             .ok_or_else(|| {
-                ActionError::rule(format!("No city with id {}.", echo(&py::str_of(&self.city_id))))
+                // Python's `int()` raised on what is not a number; it is quoted back, cut and
+                // closed, so no `...` runs into the full stop.
+                // refcheck: refusals-quote-at-most-60-characters
+                let shown = asked.map_or_else(|| py::repr_echo(&self.city_id), |n| n.to_string());
+                ActionError::rule(format!("No city with id {shown}."))
             })?;
         if let Some(why) = can_move_to(g, pid, s, c) {
             return Err(ActionError::rule(why));

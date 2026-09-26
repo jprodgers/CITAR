@@ -40,6 +40,7 @@ use crate::base::ids::{CityId, PlayerId, SpecialistId, TileIdx};
 use crate::base::py;
 use crate::base::sets::MAX_SPECIALISTS;
 use crate::base::stats::{Stat, Stats};
+use crate::base::text::echo_bare;
 use crate::state::cities::{City, CityFocus, Constructible};
 use crate::unique::{Ctx, UniqueData, UniqueType, uq};
 use serde_json::{Map, Value, json};
@@ -778,9 +779,15 @@ impl Rule for SetSpecialists {
         for (k, v) in asked {
             let s = r.resolve::<SpecialistId>(k).filter(|&s| maxs.iter().any(|&(x, _)| x == s));
             let Some(s) = s else {
+                // refcheck: refusals-quote-at-most-60-characters
                 return Err(ActionError::new(
                     ErrCode::BadParam,
-                    format!("{} has no slots for {k}. Available: {}.", city.name, available()),
+                    format!(
+                        "{} has no slots for {}. Available: {}.",
+                        city.name,
+                        echo_bare(k),
+                        available()
+                    ),
                 ));
             };
             let cap = slots(&maxs, s);

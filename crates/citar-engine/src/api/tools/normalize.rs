@@ -26,13 +26,15 @@ use serde_json::{Map, Value};
 
 use super::args::{self, ArgType, ToolArgs};
 use crate::base::py;
+use crate::base::text::echo;
 use crate::game::error::{ActionError, ErrCode};
 
 /// The arguments of a call to `tool`, coerced as `tools.execute` coerced them. An unknown tool is
 /// refused as Python refused it.
 pub fn normalize(tool: &str, args: &Value) -> Result<Map<String, Value>, ActionError> {
-    let spec = args::spec(tool)
-        .ok_or_else(|| ActionError::new(ErrCode::UnknownTool, format!("Unknown tool '{tool}'.")))?;
+    let spec = args::spec(tool).ok_or_else(|| {
+        ActionError::new(ErrCode::UnknownTool, format!("Unknown tool '{}'.", echo(tool)))
+    })?;
     normalize_with(spec, args)
 }
 
