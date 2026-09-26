@@ -42,6 +42,7 @@ use citar_engine::game::cities::construction::compute_buildable_for_bench;
 use citar_engine::game::cities::stats::{self as cstats, Work};
 use citar_engine::game::combat::resolve;
 use citar_engine::game::path::Mover;
+use citar_engine::game::tiles::CityMods;
 use citar_engine::game::vis::{Sight, sight_of};
 use citar_engine::game::{Game, tiles};
 use citar_engine::state::Phase;
@@ -66,6 +67,13 @@ fn late_city() -> (Game, CityId) {
         .map(|c| c.id())
         .expect("a city");
     (g, c)
+}
+
+/// The late fixture's largest city with its tile modifiers.
+fn late_city_mods() -> (Game, CityId, CityMods) {
+    let (g, c) = late_city();
+    let mods = tiles::city_mods(&g, c);
+    (g, c, mods)
 }
 
 /// The late fixture with its largest city grown to 20.
@@ -112,6 +120,11 @@ fn late_walker() -> (Game, UnitId, TileIdx, TileIdx) {
         Some((u.id(), u.tile(), to))
     });
     let (u, a, b) = found.expect("a walker");
+    // Both tiles' surroundings seen once, so that every step the benchmark takes costs the same.
+    let mut g = g;
+    for to in [b, a] {
+        g.step_unit_for_test(u, to).expect("a step");
+    }
     (g, u, a, b)
 }
 
@@ -145,11 +158,14 @@ fn fights() -> (Game, Vec<(UnitId, TileIdx)>) {
     (g, out)
 }
 
+// Each benchmark hands its input back, so that dropping the game is not counted, and repeats
+// work that costs the same each time, so that one repetition more is a tenth more.
+
 #[library_benchmark]
 #[bench::gargantuan(HexGrid::new(160, 100, true, false).expect("a grid"))]
-fn hex(grid: HexGrid) -> usize {
+fn hex(grid: HexGrid) -> (HexGrid, usize) {
     let tiles: Vec<TileIdx> = grid.tiles().step_by(80).collect();
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(64);
     let mut n = 0;
     for _ in 0..REPS {
         for &t in &tiles {
@@ -157,115 +173,124 @@ fn hex(grid: HexGrid) -> usize {
             n += out.len();
         }
     }
-    n
+    (grid, n)
 }
 
 #[library_benchmark]
-#[bench::late(setup = late_city)]
-fn tile_yields(input: (Game, CityId)) -> f64 {
-    let (g, c) = input;
-    let city = g.city(c).expect("the city");
-    let owner = city.owner();
-    let mods = tiles::city_mods(&g, c);
+#[bench::late(setup = late_city_mods)]
+fn tile_yields(input: (Game, CityId, CityMods)) -> ((Game, CityId, CityMods), f64) {
     let mut sum = 0.0;
-    for _ in 0..REPS {
-        for &t in &city.worked {
-            let mut deps = CondDeps::empty();
-            let y = tiles::compute_tile_yield(
-                &g,
-                black_box(t),
-                Some(owner),
-                Some(c),
-                Some(&mods),
-                &mut deps,
-            );
-            sum += y[citar_engine::base::stats::Stat::Food];
+    {
+        let (g, c, mods) = (&input.0, input.1, &input.2);
+        let city = g.city(c).expect("the city");
+        let owner = city.owner();
+        for _ in 0..REPS {
+            for &t in &city.worked {
+                let mut deps = CondDeps::empty();
+                let y = tiles::compute_tile_yield(
+                    g,
+                    black_box(t),
+                    Some(owner),
+                    Some(c),
+                    Some(mods),
+                    &mut deps,
+                );
+                sum += y[citar_engine::base::stats::Stat::Food];
+            }
         }
     }
-    sum
+    (input, sum)
 }
 
 #[library_benchmark]
 #[bench::late(setup = late_city)]
-fn city_stats(input: (Game, CityId)) -> f64 {
-    let (g, c) = input;
-    let city = g.city(c).expect("the city");
-    let work = Work::of(city);
+fn city_stats(input: (Game, CityId)) -> ((Game, CityId), f64) {
     let mut sum = 0.0;
-    for _ in 0..REPS {
-        black_box(cstats::city_base(&g, black_box(c)));
-        let parts = cstats::city_parts(&g, c, &work);
-        let s =
-            cstats::city_stats_from(&g, c, &parts, &work, cstats::current_construction(city), None);
-        sum += s.total[citar_engine::base::stats::Stat::Production];
+    {
+        let (g, c) = (&input.0, input.1);
+        let city = g.city(c).expect("the city");
+        let work = Work::of(city);
+        for _ in 0..REPS {
+            black_box(cstats::city_base(g, black_box(c)));
+            let parts = cstats::city_parts(g, c, &work);
+            let construction = cstats::current_construction(city);
+            let s = cstats::city_stats_from(g, c, &parts, &work, construction, None);
+            sum += s.total[citar_engine::base::stats::Stat::Production];
+        }
     }
-    sum
+    (input, sum)
 }
 
 #[library_benchmark]
 #[bench::late(setup = late_city_of_20)]
-fn assign_citizens(input: (Game, CityId)) -> usize {
-    let (g, c) = input;
-    (0..REPS)
-        .map(|_| black_box(citizens::assign(&g, black_box(c), false)).map_or(0, |a| a.worked.len()))
-        .sum()
+fn assign_citizens(input: (Game, CityId)) -> ((Game, CityId), usize) {
+    let (g, c) = (&input.0, input.1);
+    let n = (0..REPS)
+        .map(|_| black_box(citizens::assign(g, black_box(c), false)).map_or(0, |a| a.worked.len()))
+        .sum();
+    (input, n)
 }
 
 #[library_benchmark]
 #[bench::late(setup = late_paths)]
-fn paths(input: (Game, Vec<(UnitId, TileIdx)>)) -> usize {
-    let (g, pairs) = input;
+fn paths(input: (Game, Vec<(UnitId, TileIdx)>)) -> ((Game, Vec<(UnitId, TileIdx)>), usize) {
     let mut n = 0;
-    for _ in 0..REPS {
-        for &(u, t) in &pairs {
-            n += Mover::unit(&g, u)
-                .and_then(|m| m.find_path(black_box(t), 40))
-                .map_or(0, |p| p.len());
+    {
+        let (g, pairs) = (&input.0, &input.1);
+        for _ in 0..REPS {
+            for &(u, t) in pairs {
+                n += Mover::unit(g, u)
+                    .and_then(|m| m.find_path(black_box(t), 40))
+                    .map_or(0, |p| p.len());
+            }
         }
     }
-    n
+    (input, n)
 }
 
 #[library_benchmark]
 #[bench::late(setup = late_walker)]
-fn sight(input: (Game, UnitId, TileIdx, TileIdx)) -> usize {
+fn sight(input: (Game, UnitId, TileIdx, TileIdx)) -> ((Game, UnitId, TileIdx, TileIdx), usize) {
     let (mut g, u, a, b) = input;
     let mut n = 0;
     for i in 0..REPS {
         let to = if i % 2 == 0 { b } else { a };
         n += g.step_unit_for_test(u, black_box(to)).expect("a step").len();
     }
-    n
+    ((g, u, a, b), n)
 }
 
 #[library_benchmark]
 #[bench::standard(setup = fights)]
-fn combat(input: (Game, Vec<(UnitId, TileIdx)>)) -> usize {
-    let (g, pairs) = input;
+fn combat(input: (Game, Vec<(UnitId, TileIdx)>)) -> ((Game, Vec<(UnitId, TileIdx)>), usize) {
     let mut n = 0;
-    for _ in 0..REPS {
-        for &(u, t) in &pairs {
-            n += usize::from(resolve::preview_of(&g, u, black_box(t)).is_ok());
+    {
+        let (g, pairs) = (&input.0, &input.1);
+        for _ in 0..REPS {
+            for &(u, t) in pairs {
+                n += usize::from(resolve::preview_of(g, u, black_box(t)).is_ok());
+            }
         }
     }
-    n
+    (input, n)
 }
 
 #[library_benchmark]
 #[bench::late(setup = late_city)]
-fn buildable(input: (Game, CityId)) -> usize {
-    let (g, c) = input;
-    (0..REPS)
+fn buildable(input: (Game, CityId)) -> ((Game, CityId), usize) {
+    let (g, c) = (&input.0, input.1);
+    let n = (0..REPS)
         .map(|_| {
-            let b = compute_buildable_for_bench(&g, black_box(c));
+            let b = compute_buildable_for_bench(g, black_box(c));
             b.units.len() + b.buildings.len() + b.wonders.len()
         })
-        .sum()
+        .sum();
+    (input, n)
 }
 
 #[library_benchmark]
 #[bench::late(setup = fixtures::late)]
-fn pass_round(mut g: Game) -> i32 {
+fn pass_round(mut g: Game) -> Game {
     let start = g.turn();
     for _ in 0..=g.state().players().len() + 1 {
         if g.phase() != Phase::Playing || g.turn() != start {
@@ -275,14 +300,15 @@ fn pass_round(mut g: Game) -> i32 {
             break;
         }
     }
-    g.turn()
+    g
 }
 
 #[library_benchmark]
 #[bench::late(setup = fixtures::late)]
-fn view(g: Game) -> usize {
+fn view(g: Game) -> (Game, usize) {
     let pid = g.majors(true).map(|p| p.id()).next().unwrap_or(PlayerId(0));
-    g.view_json(Some(pid), 150).len()
+    let n = g.view_json(Some(pid), 150).len();
+    (g, n)
 }
 
 library_benchmark_group!(
