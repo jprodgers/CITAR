@@ -13,7 +13,8 @@
 //! copy), `astar` (the three small maps' searches of `astar_small_30`), `combat` (every preview of
 //! the standard t120 fixture), `pass_round` (the late fixture, or the state named by a third
 //! argument `<case>/t<turn>` of the committed fixtures or the corpus, each on a fresh copy after
-//! one round), `load` (the late fixture's save loaded), `digest` (its digest).
+//! one round), `load` (the late fixture's save loaded), `digest` (its digest), `vis` (a step of
+//! sight 2 whose line of sight is not cached).
 
 #![allow(clippy::print_stdout, reason = "a tool")]
 
@@ -24,6 +25,7 @@ use citar_engine::base::ids::{PlayerId, TileIdx, UnitId};
 use citar_engine::game::advisor::{self, AdvisorParams};
 use citar_engine::game::combat::resolve;
 use citar_engine::game::path::Mover;
+use citar_engine::game::vis::{Sight, sight_of};
 use citar_engine::game::{Game, barbarians, units};
 use citar_engine::save::Digester;
 use citar_engine::state::Phase;
@@ -172,6 +174,27 @@ fn main() {
             let mut d = Digester::new();
             run(n * 10, || {
                 black_box(d.digest(g.rules(), g.state()).expect("finite"));
+            });
+        }
+        "vis" => {
+            // A unit of sight 2 stepping back and forth, the line-of-sight cache forgotten before
+            // each step, as `vis_step/sight2_fresh` times it.
+            let mut g = fixtures::late();
+            let found = g.state().units().iter().find_map(|u| {
+                if sight_of(&g, u.id()) != Some(Sight::Walk(2)) || g.is_barbarian(u.owner()) {
+                    return None;
+                }
+                let to = g.grid().neighbors(u.tile()).find(|&n| {
+                    g.is_land(n) && g.units_at(n).next().is_none() && g.city_at(n).is_none()
+                })?;
+                Some((u.id(), u.tile(), to))
+            });
+            let (u, a, b) = found.expect("a walker");
+            let mut there = false;
+            run(n * 100, || {
+                there = !there;
+                g.derived().vis().forget_line_of_sight();
+                black_box(g.step_unit_for_test(u, if there { b } else { a }).expect("a step"));
             });
         }
         other => panic!("no part {other}"),

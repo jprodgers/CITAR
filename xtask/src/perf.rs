@@ -140,7 +140,7 @@ fn target_dir(root: &Path) -> Result<PathBuf, String> {
     Ok(m.target_directory)
 }
 
-/// Runs the suites through `cargo bench`, the bench profile (release: fat LTO, overflow checks).
+/// Runs the suites through `cargo bench`, the bench profile (release: fat LTO, one codegen unit).
 fn run_suites(root: &Path, suites: &[&str], extra: &[String]) -> Result<(), String> {
     let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cmd.args(["bench", "--locked", "-p", "citar-bench"]).current_dir(root);

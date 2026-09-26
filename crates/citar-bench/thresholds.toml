@@ -3,7 +3,7 @@
 # hard: a measure above `hard` times its budget fails its suite and `cargo xtask perf`.
 #
 # Figures are for one P-core of the laptop (i5-13420H), the bench profile (release: fat LTO, one
-# codegen unit, overflow checks on), on corpus states where a row names one. Each suite takes the
+# codegen unit, no overflow checks), on corpus states where a row names one. Each suite takes the
 # median of its own timings after Criterion's run and writes it to <target>/perf/<suite>.json;
 # perfgate checks every budget below against those files, and the pass rounds against Python's
 # (refcheck/perf/python-turns.json, from scripts/refcheck/turn_timing.py).

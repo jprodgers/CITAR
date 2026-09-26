@@ -229,8 +229,9 @@ impl Suite {
     }
 }
 
-/// Whether this build checks integer overflow (the profile's `overflow-checks`, which DESIGN.md
-/// 10 keeps on in release unless it costs more than 3%): an addition that overflows panics.
+/// Whether this build checks integer overflow (the profile's `overflow-checks`: off in release
+/// and the bench profile since package 1e-03 measured their cost, on in the ci profile): an
+/// addition that overflows panics.
 #[must_use]
 pub fn overflow_checks() -> bool {
     let hook = std::panic::take_hook();
