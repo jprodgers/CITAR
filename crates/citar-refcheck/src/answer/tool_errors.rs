@@ -6,7 +6,9 @@
 //! side makes the same calls through `Game::execute`. The group's calls change the game when one
 //! unexpectedly succeeds (Python reloaded the state after it), so they run on a copy of the
 //! loaded game, and a call that succeeds is answered with its result and followed by a fresh
-//! copy; a refusal changes nothing (property P2), so the copy serves the next call as it is.
+//! copy; a refusal changes nothing (property P2), so the copy serves the next call as it is. That
+//! is checked on every refusal, by the revision and the state's digest, and a refusal that
+//! changed the game fails the answer with the call named.
 
 use citar_engine::base::ids::PlayerId;
 use citar_engine::game::Game;
@@ -52,12 +54,21 @@ fn call_once(g: &mut Game, call: &Value) -> Result<(Value, bool), AnswerError> {
     out.insert("pid".into(), call["pid"].clone());
     out.insert("tool".into(), json!(tool));
     out.insert("args".into(), args.clone());
+    let before = (g.rev(), g.digest().ok());
     let changed = match g.execute(pid, tool, &args) {
         Ok(done) => {
             out.insert("ok".into(), done.result);
             true
         }
         Err(e) => {
+            // The copy serves the next call only if the refusal left it as it was; one that did
+            // not is named here, rather than showing as differences on the innocent calls after.
+            if (g.rev(), g.digest().ok()) != before {
+                return Err(AnswerError::new(format!(
+                    "a refused call changed the game (property P2): {call}: {}",
+                    e.message
+                )));
+            }
             out.insert("error".into(), json!(e.message));
             false
         }
