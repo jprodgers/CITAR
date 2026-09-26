@@ -8,8 +8,9 @@
 //! - [`SeededBug::MutatesBeforeRefusing`]: `Game::act` takes a gold piece from a player whose
 //!   `buy` its rule refused, as a tool that writes before it finds it must refuse would
 //!   (property P2);
-//! - [`SeededBug::StaleVisibility`]: `Derived::on` forgets to bring a unit's sight up to date
-//!   when the unit is placed, made or moved (property P4, through the cache oracle);
+//! - [`SeededBug::StaleVisibility`]: the settle's sight update skips the units marked dirty, so
+//!   a unit that moves or is made leaves its footprint where it was (property P4, through the
+//!   cache oracle's rebuild of what each civilization sees);
 //! - [`SeededBug::WrongTouch`]: renaming a city touches its `CORE` rather than its `NAME`, so
 //!   the event name index keeps the old name (property P4);
 //! - [`SeededBug::QueryWrites`]: every query tool, after its answer, writes through the
@@ -29,7 +30,7 @@ use crate::game::Game;
 pub enum SeededBug {
     /// A refused `buy` still costs its player a gold piece.
     MutatesBeforeRefusing,
-    /// A unit placed, made or moved leaves its sight where it was.
+    /// A unit marked for a sight update keeps its old footprint.
     StaleVisibility,
     /// Renaming a city touches its `CORE`, not its `NAME`.
     WrongTouch,

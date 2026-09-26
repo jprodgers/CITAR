@@ -7,8 +7,8 @@
 //!   emitted nothing and settled nothing;
 //! - **P3**, the invariants hold after every call that changed the game, and no settle reported
 //!   a violation;
-//! - **P4**, the caches equal a cold rebuild, every [`Options::verify_every`] steps and at the
-//!   end;
+//! - **P4**, the caches equal a cold rebuild, every [`Options::verify_every`] steps and after the
+//!   last;
 //! - **P5**, every refusal reads as a sentence a model can use (`api::text_rule_broken`);
 //! - **P6**, a save and a load, every [`Options::save_every`] steps, give the digest saved, and
 //!   play goes on from the loaded game;
@@ -107,7 +107,8 @@ impl fmt::Display for Breach {
 /// How often the costlier checks run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Options {
-    /// P4 every this many steps (and after the last), 0 for only after the last.
+    /// P4 every this many steps and after the last; 0 for never, which leaves a bug the cache
+    /// oracle would see to the other properties.
     pub verify_every: usize,
     /// P6 every this many steps, 0 for never.
     pub save_every: usize,
@@ -242,7 +243,9 @@ impl Run {
     /// The first property broken.
     pub fn finish(&mut self) -> Result<(), Breach> {
         let at = self.steps;
-        self.caches(at)?;
+        if self.options.verify_every > 0 {
+            self.caches(at)?;
+        }
         no_stall(&self.g).map_err(|e| Breach::new(Property::P7, at, e))
     }
 

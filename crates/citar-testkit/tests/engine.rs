@@ -3,6 +3,7 @@
 
 mod engine {
     mod advisor;
+    mod chaos;
     mod cities;
     mod city_states;
     mod combat;

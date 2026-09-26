@@ -14,7 +14,18 @@
 //! sources come in, on random sources over the kitchen-sink ruleset; its entries are sorted by
 //! (type, id), each once, and count every copy.
 //!
-//! The number of cases follows `PROPTEST_CASES` (proptest's default is 256).
+//! Package 1e-01 adds, in `tests/props/`:
+//! - `games`: properties P1 to P8 on games, with the `ActionSpec` strategy (arguments generated
+//!   from the tool specs, 70% valid, 20% of the wrong type, 10% random JSON), from committed
+//!   fixtures and generated duel and small maps;
+//! - `seeded`: gate 1, bugs planted in the engine found by those properties and shrunk;
+//! - `pure`: the pure-function properties it adds (hex distance against a search, RNG streams
+//!   independent), with where the others live.
+//!
+//! The number of cases follows `PROPTEST_CASES`: proptest's default of 256 for the properties of
+//! the earlier packages, 64 for the game properties, whose cases play whole turns. CI runs 64
+//! (`rust.yml`), the nightly run 10,000. Failures proptest finds are saved under
+//! `proptest-regressions/` and committed with their fix.
 
 use std::collections::BTreeSet;
 
@@ -194,6 +205,15 @@ fn well_formed(c: &Csr) -> Result<(), TestCaseError> {
 }
 
 proptest! {
+    // Failures are kept beside this file, where proptest's default puts them too once it has
+    // looked for a `lib.rs` above it, which an integration test has none of.
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::WithSource(
+            "proptest-regressions",
+        ))),
+        ..ProptestConfig::default()
+    })]
+
     #[test]
     fn bit_set_is_a_set(ops in prop::collection::vec(set_op(), 0..200), probes in prop::collection::vec(0u32..400, 0..50)) {
         let (bits, model) = build(&ops);
@@ -347,4 +367,11 @@ proptest! {
         // Folding again changes nothing more.
         prop_assert_eq!(folded.clone().fold(), folded);
     }
+}
+
+/// The stability properties of package 1e-01 (DESIGN.md 9.5).
+mod props {
+    mod games;
+    mod pure;
+    mod seeded;
 }

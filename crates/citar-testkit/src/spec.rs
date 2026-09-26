@@ -566,11 +566,19 @@ pub fn random_args(spec: &ToolSpec, seed: u32) -> Value {
     Value::Object(m)
 }
 
-/// A JSON value of any type, nested at most `depth` deep.
+/// A JSON value of any type, nested at most `depth` deep. A null only at the top, where it
+/// stands for an argument left out: inside a value a refusal would quote it back as Python's
+/// `None`, which the text rules take for Rust debug output.
 fn random_json(rng: &mut Rng, depth: u32) -> Value {
+    random_value(rng, depth, true)
+}
+
+/// [`random_json`], with or without a null.
+fn random_value(rng: &mut Rng, depth: u32, top: bool) -> Value {
     let n = if depth == 0 { 6 } else { 8 };
     match rng.below(n) {
-        0 => Value::Null,
+        0 if top => Value::Null,
+        0 => json!("null"),
         1 => json!(rng.chance(0.5)),
         2 => json!(rng.range(-5, 40)),
         3 => {
@@ -582,9 +590,11 @@ fn random_json(rng: &mut Rng, depth: u32) -> Value {
             json!(f[usize::try_from(rng.below(5)).unwrap_or(0)])
         }
         5 => json!(random_text(rng)),
-        6 => Value::Array((0..rng.below(4)).map(|_| random_json(rng, depth - 1)).collect()),
+        6 => Value::Array((0..rng.below(4)).map(|_| random_value(rng, depth - 1, false)).collect()),
         _ => Value::Object(
-            (0..rng.below(4)).map(|_| (random_text(rng), random_json(rng, depth - 1))).collect(),
+            (0..rng.below(4))
+                .map(|_| (random_text(rng), random_value(rng, depth - 1, false)))
+                .collect(),
         ),
     }
 }

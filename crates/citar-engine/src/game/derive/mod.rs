@@ -249,9 +249,7 @@ impl Derived {
                 out.sight.push(SightSource::Tile(t));
             }
             Change::UnitPlaced { u, owner: by, from, to } => {
-                if !super::seeded::has(super::seeded::SeededBug::StaleVisibility) {
-                    out.sight.push(SightSource::Unit(u));
-                }
+                out.sight.push(SightSource::Unit(u));
                 let military = st
                     .units()
                     .get(u)

@@ -532,7 +532,11 @@ impl Work {
         for &s in todo {
             match s {
                 SightSource::Unit(u) => {
-                    self.units.insert(u);
+                    // A seeded bug (test builds only, `game::seeded`): the unit's footprint is
+                    // left where it was.
+                    if !crate::game::seeded::has(crate::game::seeded::SeededBug::StaleVisibility) {
+                        self.units.insert(u);
+                    }
                     self.arrived.insert(u);
                 }
                 SightSource::City(c) => {
