@@ -209,6 +209,18 @@ budget = "12 ms"
 row = "God view, gargantuan (the synthetic state)"
 
 [[budget]]
+id = "briefing/small"
+suite = "turns"
+budget = "1 ms"
+row = "Briefing, small T300 (the committed t280)"
+
+[[budget]]
+id = "briefing/turn_progress"
+suite = "turns"
+budget = "1 ms"
+row = "The turn's progress, small T300 (the committed t280), asked after every batch of actions"
+
+[[budget]]
 id = "game/random_small_330"
 suite = "turns"
 budget = "10 s"

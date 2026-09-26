@@ -15,10 +15,16 @@
 //!   20 ms, the plan's floor.
 //! - `view/god_gargantuan`: a spectator's view of the synthetic gargantuan state (24 majors, 32
 //!   city-states, 400 cities, 2,500 units on 160 by 100 tiles). Budget 12 ms.
+//! - `briefing/small`: `Game::briefing` for a civilization of the same small state as
+//!   `view/player`. Budget 1 ms. `briefing/turn_progress`: the turn's progress there, which a
+//!   host asks for after every batch of actions; budget 1 ms. `briefing/large`: the briefing on
+//!   `large-pangaea-normal-s1016/t280` (the corpus), report-only (package 1d-03's bench, folded
+//!   in here).
 //! - `game/random_small_330`: a new small continents game, four `RandomAgent`s, played to its
 //!   turn limit of 330 with the checks off (the Phase 1 gate of DESIGN.md 10). Budget 10 s.
 //!
-//! Every view is taken on a game whose memos are warm, as a host's is between two calls.
+//! Every view and briefing is taken on a game whose memos are warm, as a host's is between two
+//! calls.
 //!
 //! ```text
 //! CITAR_REFCHECK_CORPUS=<absolute path of refcheck/corpus> cargo bench -p citar-bench --bench turns
@@ -122,6 +128,49 @@ fn random_game() -> Duration {
     took
 }
 
+/// The first living major of a game.
+fn first_major(g: &Game) -> PlayerId {
+    g.majors(true).map(|p| p.id()).next().unwrap_or(PlayerId(0))
+}
+
+/// The briefing and the turn's progress on the small late state, and the briefing on the large
+/// one of the corpus.
+fn briefings(s: &mut Suite, c: &mut criterion::Criterion) {
+    let small = fixtures::late();
+    let pid = first_major(&small);
+    let text = small.briefing(pid);
+    println!(
+        "the late fixture: the briefing of {pid:?} is {} lines, {} bytes",
+        text.lines().count(),
+        text.len()
+    );
+    let large = fixtures::corpus_game("large-pangaea-normal-s1016", 280);
+    let large_pid = large.as_ref().map(|(g, _)| first_major(g));
+    if let (Some((g, name)), Some(p)) = (&large, large_pid) {
+        println!("{name}: the briefing of {p:?} is {} bytes", g.briefing(p).len());
+    } else {
+        println!("no corpus (CITAR_REFCHECK_CORPUS): briefing/large is skipped");
+    }
+    c.bench_function("briefing/small", |b| b.iter(|| black_box(small.briefing(pid))));
+    c.bench_function("briefing/turn_progress", |b| {
+        b.iter(|| black_box(small.turn_progress(pid)));
+    });
+    if let (Some((g, _)), Some(p)) = (&large, large_pid) {
+        let mut grp = c.benchmark_group("briefing");
+        grp.sample_size(20);
+        grp.bench_function("large", |b| b.iter(|| black_box(g.briefing(p))));
+        grp.finish();
+    }
+    s.put("briefing/small", citar_bench::median(31, 3, || drop(black_box(small.briefing(pid)))));
+    s.put(
+        "briefing/turn_progress",
+        citar_bench::median(31, 3, || drop(black_box(small.turn_progress(pid)))),
+    );
+    if let (Some((g, _)), Some(p)) = (&large, large_pid) {
+        s.note("briefing/large", citar_bench::median(11, 1, || drop(black_box(g.briefing(p)))));
+    }
+}
+
 fn main() {
     let mut s = Suite::start("turns");
     let mut c = s.criterion();
@@ -191,6 +240,10 @@ fn main() {
             "view/god_gargantuan",
             citar_bench::median(7, 1, || drop(black_box(huge.view_json(None, 150)))),
         );
+    }
+
+    if s.wants("briefing") {
+        briefings(&mut s, &mut c);
     }
 
     if s.wants("game") {
