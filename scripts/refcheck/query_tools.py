@@ -126,13 +126,12 @@ def record(name: str, path: Path) -> dict:
     return {"calls": calls, "god_view": god, "facade": facade}
 
 
-def main() -> int:
-    common.ensure_hash_seed()
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--check", action="store_true", help="re-record and compare with the committed file")
     ap.add_argument("--corpus", help="a corpus folder to record instead of the committed fixtures")
     ap.add_argument("--out", help="where to write (the committed file by default)")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     folders = [Path(a.corpus)] if a.corpus else FIXTURES
     out = {name: record(name, path) for name, path in states(folders)}
     text = json.dumps(out, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
@@ -152,4 +151,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    common.ensure_hash_seed()
     sys.exit(main())

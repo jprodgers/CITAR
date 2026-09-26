@@ -93,7 +93,8 @@ fn possessives_names_outside_ascii_and_coordinates() {
         shown(&g, &ev, Some(ROME)),
         json!({
             "id": id, "turn": 1, "type": "unit_killed",
-            "text": "The Unknown Civilization's Warrior was killed near an unknown city at an unknown location.",
+            "text": "The Unknown Civilization's Warrior was killed near an unknown city at an \
+                     unknown location.",
             "players": null, "idx": null, "data": {"killer": null, "owner": 0},
         })
     );
@@ -132,7 +133,8 @@ fn unmet_city_states_and_capitals_at_a_sentence_start() {
         shown(&g, &ev, Some(ROME)),
         json!({
             "id": ev.id.get(), "turn": 1, "type": "cs_ally",
-            "text": "Greece is now allied with Unknown City-State. Unknown City-State's gift arrives.",
+            "text": "Greece is now allied with Unknown City-State. Unknown City-State's gift \
+                     arrives.",
             "players": [0, 1], "idx": null, "data": {"player": null},
         })
     );

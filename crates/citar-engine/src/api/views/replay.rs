@@ -199,8 +199,13 @@ impl Game {
             .iter()
             .map(|(id, p)| {
                 json!({
-                    "id": id.0, "name": &*p.name, "leader": &*p.leader, "color": p.color.to_hex(),
-                    "kind": kind_name(p.kind), "alive": p.alive(), "eliminated_turn": p.eliminated_turn(),
+                    "id": id.0,
+                    "name": &*p.name,
+                    "leader": &*p.leader,
+                    "color": p.color.to_hex(),
+                    "kind": kind_name(p.kind),
+                    "alive": p.alive(),
+                    "eliminated_turn": p.eliminated_turn(),
                 })
             })
             .collect();
@@ -214,24 +219,15 @@ impl Game {
                 .frames()
                 .frames
                 .iter()
-                .map(|f| json!({"turn": f.turn, "keyframe": f.keyframe, "bytes": b64_encode(&f.bytes)}))
+                .map(|f| {
+                    json!({"turn": f.turn, "keyframe": f.keyframe, "bytes": b64_encode(&f.bytes)})
+                })
                 .collect(),
         };
         let events: Vec<Value> =
             chron.events().iter().map(|e| event_json(g, e, &g.event_view(e, None), None)).collect();
-        let messages: Vec<Value> = chron
-            .messages()
-            .iter()
-            .map(|m| {
-                let to: Vec<u8> = m.to.iter().map(|p| p.0).collect();
-                json!({"id": m.id.get(), "turn": m.turn, "from": m.from.0, "to": to, "text": &*m.text})
-            })
-            .collect();
-        let thoughts: Vec<Value> = chron
-            .thoughts()
-            .iter()
-            .map(|t| json!({"turn": t.turn, "player": t.player.0, "text": &*t.text, "kind": t.kind.as_deref()}))
-            .collect();
+        let messages: Vec<Value> = chron.messages().iter().map(super::message_json).collect();
+        let thoughts: Vec<Value> = chron.thoughts().iter().map(super::thought_json).collect();
         let negotiations: Vec<Value> =
             g.negotiations().iter().map(|n| super::stored_negotiation(g, n)).collect();
         let deals: Vec<Value> = st.diplo().deals.iter().map(|d| deal_json(g, d)).collect();

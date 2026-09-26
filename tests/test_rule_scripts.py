@@ -96,5 +96,20 @@ class ToolList(unittest.TestCase):
         self.assertEqual(status, 0, out.getvalue())
 
 
+class QueryTools(unittest.TestCase):
+    """refcheck/query_tools.json.gz is the Python engine's answers to the view queries on the committed fixtures, which
+    the Rust engine's must equal apart from its listed fixes (scripts/refcheck/query_tools.py;
+    crates/citar-refcheck/tests/query_tools.rs). The recording runs with PYTHONHASHSEED=0, in a process of its own."""
+
+    def test_the_recorded_answers_are_current(self):
+        import os
+        import subprocess
+        import sys
+        script = Path(__file__).resolve().parents[1] / "scripts" / "refcheck" / "query_tools.py"
+        env = dict(os.environ, PYTHONHASHSEED="0")
+        done = subprocess.run([sys.executable, str(script), "--check"], env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

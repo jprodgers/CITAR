@@ -214,7 +214,8 @@ pub fn alert_items(g: &Game, p: PlayerId) -> Vec<Alert> {
                 })
                 .collect();
             let line = format!(
-                "City {} #{} (HP {}) is threatened by {} hostile unit(s): {}. Garrison: {garrison}.",
+                "City {} #{} (HP {}) is threatened by {} hostile unit(s): {}. Garrison: \
+                 {garrison}.",
                 c.name,
                 id.get(),
                 c.health,
@@ -232,7 +233,8 @@ pub fn alert_items(g: &Game, p: PlayerId) -> Vec<Alert> {
                             b.damage
                         ),
                         format!(
-                            "{line} Bombard now: city_attack city_id={} x={x} y={y} (~{} damage{kills}).",
+                            "{line} Bombard now: city_attack city_id={} x={x} y={y} (~{} \
+                             damage{kills}).",
                             id.get(),
                             b.damage
                         ),

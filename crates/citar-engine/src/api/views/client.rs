@@ -2,8 +2,9 @@
 //! `views.py:716-763`), and the route a move order would take (`EngineGame.path_preview`,
 //! `engine_api.py:735-746`).
 //!
-//! [`Game::view_json`] writes the view straight to JSON bytes. Its largest part, the tiles, is typed
-//! rows that serialise without building a value per tile; the rest are the builders' values.
+//! [`Game::view_json`] writes the view straight to JSON bytes. Its largest parts, the tiles, the
+//! units and the cities, are typed, and serialise without building a value for each; the rest
+//! are the builders' values.
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -298,18 +299,17 @@ impl Game {
                     .collect();
                 rest.insert("empires".into(), Value::Object(empires));
                 let thoughts = chron.thoughts();
-                let thoughts: Vec<Value> = thoughts[thoughts.len().saturating_sub(SPECTATOR_FEED)..]
+                let thoughts: Vec<Value> = thoughts
+                    [thoughts.len().saturating_sub(SPECTATOR_FEED)..]
                     .iter()
-                    .map(|t| json!({"turn": t.turn, "player": t.player.0, "text": &*t.text, "kind": t.kind.as_deref()}))
+                    .map(super::thought_json)
                     .collect();
                 rest.insert("thoughts".into(), Value::Array(thoughts));
                 let messages = chron.messages();
-                let messages: Vec<Value> = messages[messages.len().saturating_sub(SPECTATOR_FEED)..]
+                let messages: Vec<Value> = messages
+                    [messages.len().saturating_sub(SPECTATOR_FEED)..]
                     .iter()
-                    .map(|m| {
-                        let to: Vec<u8> = m.to.iter().map(|p| p.0).collect();
-                        json!({"id": m.id.get(), "turn": m.turn, "from": m.from.0, "to": to, "text": &*m.text})
-                    })
+                    .map(super::message_json)
                     .collect();
                 rest.insert("messages".into(), Value::Array(messages));
                 let negs = g.negotiations();

@@ -11,8 +11,10 @@
 //! who sees everything. They read the memos as the rules do and never change the game, its
 //! revision or its digest (property P8). Their answers are `serde_json::Value`s with Python's
 //! keys, and numbers as Python wrote them: yields rounded with `round(x, n)`
-//! ([`num::round_ndigits`]), gold and culture cut to integers. [`Game::view_json`] writes the client
-//! view straight to JSON bytes, its largest part (the tiles) from typed rows.
+//! ([`num::round_ndigits`]), gold and culture cut to integers. A unit's and a city's summary are
+//! typed as well ([`units::UnitView`], [`cities::CityView`]), so that [`Game::view_json`] writes
+//! the client view straight to JSON bytes: its tiles, units and cities, most of it, from typed
+//! values, the rest from the builders' values.
 //!
 //! - [`units`]: `unit_info`, with the owner's detail (`views.py:50-157`);
 //! - [`cities`]: `city_info`, with the owner's detail (`views.py:162-249`);
@@ -102,6 +104,28 @@ pub fn stored_negotiation(g: &Game, n: &crate::state::diplo::Negotiation) -> Val
         }
     }
     v
+}
+
+/// A message between civilizations as Python kept it (`diplomacy.py:306-310`).
+pub(crate) fn message_json(m: &crate::state::chronicle::Message) -> Value {
+    let to: Vec<u8> = m.to.iter().map(|p| p.0).collect();
+    json!({
+        "id": m.id.get(),
+        "turn": m.turn,
+        "from": m.from.0,
+        "to": to,
+        "text": &*m.text,
+    })
+}
+
+/// A seat's recorded thought as Python kept it (`engine_api.py:642-645`).
+pub(crate) fn thought_json(t: &crate::state::chronicle::Thought) -> Value {
+    json!({
+        "turn": t.turn,
+        "player": t.player.0,
+        "text": &*t.text,
+        "kind": t.kind.as_deref(),
+    })
 }
 
 /// A player's name, or `""` for one the game lacks.
