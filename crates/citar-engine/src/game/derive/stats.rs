@@ -1040,9 +1040,11 @@ pub fn verify(g: &Game) -> Vec<String> {
         if unit_upkeep(g, p) != unit_upkeep(&cold, p) {
             out.push(format!("player {}: its unit upkeep differs from a cold rebuild", p.0));
         }
-        if *connectivity(g, p) != *connectivity(&cold, p) {
+        let (warm, fresh) = (connectivity(g, p), connectivity(&cold, p));
+        if *warm != *fresh || warm.water != fresh.water {
             out.push(format!("player {}: its connectivity differs from a cold rebuild", p.0));
         }
+        drop((warm, fresh));
         if unit_supply_deficit(g, p) != unit_supply_deficit(&cold, p) {
             out.push(format!("player {}: its supply deficit differs from a cold rebuild", p.0));
         }

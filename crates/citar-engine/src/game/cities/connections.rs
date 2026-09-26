@@ -43,10 +43,25 @@ bitflags::bitflags! {
 
 /// Which of a civilization's cities are linked to its capital, and by what: its cities that are,
 /// in id order.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Two are equal when their cities and media are: `water` is what the floods walked, which says
+/// nothing more of the cities.
+#[derive(Clone, Debug, Default)]
 pub struct Connectivity {
     pub cities: SmallVec<[(CityId, Media); 8]>,
+    /// The tiles the harbours' water flood reached (water, and the cities it passed through):
+    /// the water a harbour of a linked city already reaches. The production advisor's what-if of
+    /// a harbour reads it (`what_if::Overlay::network`).
+    pub water: BitSet,
 }
+
+impl PartialEq for Connectivity {
+    fn eq(&self, other: &Self) -> bool {
+        self.cities == other.cities
+    }
+}
+
+impl Eq for Connectivity {}
 
 impl Connectivity {
     /// How a city is linked, if it is.
@@ -278,7 +293,62 @@ pub fn connected_cities_in(v: &crate::game::EvalView<'_>, p: PlayerId) -> Connec
     media.retain(|(c, _)| g.city(*c).is_some_and(|x| x.owner() == p));
     media.sort_by_key(|&(c, _)| c);
     out.cities = media.into_iter().collect();
+    out.water = water.seen;
     out
+}
+
+/// The trade network of civilization `p` with one more harbour, in its city `c`, worked out from
+/// the network `now` it has, when that answers without a flood: `Some(None)` when the harbour
+/// changes nothing, `Some(Some(x))` for the network `x` it gives, `None` when only the floods
+/// can tell (the harbour may link a city the network does not, and what that city's roads
+/// reach).
+///
+/// A harbour floods the water its city touches and links the harbours of the owner there
+/// (`connected_cities_in`). The floods' union is symmetric: the flood from a linked harbour
+/// reaches `c` exactly when the flood from `c` reaches it. So:
+/// - `c` is linked and the water it touches was flooded (`now.water` holds its tile): its
+///   harbour floods nothing new, and `c` alone is linked by harbour besides;
+/// - `c` is linked, the water it touches was not flooded, and every harbour city of the owner is
+///   linked: none of them is on that water (its flood would have reached `c`), so again `c`
+///   alone gains the harbour;
+/// - `c` is not linked and the water it touches was not flooded: no linked harbour reaches it,
+///   so nothing changes.
+#[must_use]
+pub(crate) fn with_harbour(
+    v: &crate::game::EvalView<'_>,
+    now: &Connectivity,
+    p: PlayerId,
+    c: CityId,
+) -> Option<Option<Connectivity>> {
+    let g = v.game();
+    let tile = g.city(c)?.tile();
+    let flooded = now.water.contains(tile.0);
+    let linked = |x: CityId| now.media(x).is_some();
+    let gains = |now: &Connectivity| -> Option<Connectivity> {
+        let i = now.cities.binary_search_by_key(&c, |&(x, _)| x).ok()?;
+        if now.cities[i].1.contains(Media::HARBOR) {
+            return None;
+        }
+        let mut x = now.clone();
+        x.cities[i].1 |= Media::HARBOR;
+        Some(x)
+    };
+    match (linked(c), flooded) {
+        (true, true) => Some(gains(now)),
+        (true, false) => {
+            // Every other harbour city of the owner is linked (the harbours as they are, the
+            // new one aside).
+            let all = g
+                .state()
+                .cities()
+                .of(p)
+                .iter()
+                .all(|&x| x == c || linked(x) || !harbor(&g.view(), x));
+            all.then(|| gains(now))
+        }
+        (false, false) => Some(None),
+        (false, true) => None,
+    }
 }
 
 /// A plain port of Python's walk, one search per city and medium: for the property test that

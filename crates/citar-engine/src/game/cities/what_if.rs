@@ -233,20 +233,34 @@ impl Overlay {
 
     /// Its owner's trade network with the building, when the building could change it: a
     /// harbour, a `Forests and Jungles are roads` it adds, or what the network's conditionals
-    /// read.
+    /// read. A harbour that moves nothing else is most often answered from the network as it is
+    /// (`connections::with_harbour`), without its floods.
     fn network(&mut self, g: &Game, b: BuildingId) {
         let r = g.rules();
         let mut reads = MOVED;
         if self.supply.is_some() {
             reads |= CondDeps::RESOURCES;
         }
-        let may = has_type(r, &r.buildings()[b].uniques, UniqueType::ConnectTradeRoutes)
-            || self.civ_moves(g, &[UniqueType::ForestsAndJunglesAreRoads])
+        let harbour = has_type(r, &r.buildings()[b].uniques, UniqueType::ConnectTradeRoutes);
+        let other = self.civ_moves(g, &[UniqueType::ForestsAndJunglesAreRoads])
             || memo::connectivity_deps(g, self.owner).intersects(reads);
-        if !may {
+        if !harbour && !other {
             return;
         }
-        let after = connections::connected_cities_in(&EvalView::what_if(g, self), self.owner);
+        let v = EvalView::what_if(g, self);
+        if !other {
+            let now = memo::connectivity(g, self.owner);
+            if let Some(after) = connections::with_harbour(&v, &now, self.owner, self.city) {
+                debug_assert_eq!(
+                    after.as_ref().unwrap_or(&now).cities,
+                    connections::connected_cities_in(&v, self.owner).cities,
+                    "a harbour's network from the network as it is"
+                );
+                self.connectivity = after;
+                return;
+            }
+        }
+        let after = connections::connected_cities_in(&v, self.owner);
         if after != *memo::connectivity(g, self.owner) {
             self.connectivity = Some(after);
         }
