@@ -150,10 +150,13 @@ jobs:
       - name: Chaos
         # RandomAgent games with tool calls of every kind mixed in, every step checked for the
         # properties P1 to P7 (DESIGN.md 9.5). A minute on every push; a manual run takes the
-        # seconds it is given (600 for 1e-01's gate 2). Each failure leaves a replay file, which
-        # `cargo chaos --replay FILE` plays again.
+        # seconds it is given (600 for 1e-01's gate 2). The binary is the one the Tests step built
+        # for testkit's integration tests: `cargo run` would resolve the features again without
+        # the dev-dependencies and rebuild the engine and testkit. The seed is the run's number,
+        # so that every push plays other games; each failure leaves a replay file, which
+        # `cargo chaos --replay FILE` plays again whatever the seed.
         shell: bash
-        run: cargo run --locked -p citar-testkit --all-features --bin chaos --profile ci -- --seconds "${{ inputs.chaos_seconds || '60' }}" --out chaos-replays
+        run: ./target/ci/chaos --seconds "${{ inputs.chaos_seconds || '60' }}" --seed "${{ github.run_number }}" --out chaos-replays
 
       - name: Keep the chaos replays
         if: failure()
