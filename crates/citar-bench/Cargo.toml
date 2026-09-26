@@ -103,5 +103,11 @@ harness = false
 name = "views"
 harness = false
 
+# The briefing (package 1d-03): a civilization's on a small map late in the game, and the turn's
+# progress, at 1 ms (report-only); on a large map, report-only.
+[[bench]]
+name = "briefing"
+harness = false
+
 [lints]
 workspace = true
