@@ -168,11 +168,17 @@ jobs:
     # Instruction counts (gungraun under valgrind's callgrind) of eight kernels and two macro
     # benchmarks (crates/citar-bench/benches/iai.rs), on the base branch and on the pull request:
     # a benchmark whose instructions rise more than 5% fails the job, unless the pull request
-    # carries the label `perf-accepted` (added after a failed run, re-run the job). Counts are
-    # stable to about 0.1% on shared runners, where wall clock varies 10-20% (DESIGN.md 9.7).
-    # The wall-clock budgets are `cargo xtask perf`'s, on the laptop.
+    # carries the label `perf-accepted` (added after a failed run, then re-run the job: the step
+    # asks for the labels as they are when it ends, since a re-run keeps the event of the first
+    # run, labels and all). Counts are stable to about 0.1% on shared runners, where wall clock
+    # varies 10-20% (DESIGN.md 9.7). The wall-clock budgets are `cargo xtask perf`'s, on the
+    # laptop.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # The labels of the pull request, read when the counts rose.
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -210,9 +216,21 @@ jobs:
           fi
 
       - name: Counts on the pull request, against the base
-        continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'perf-accepted') }}
         env:
           GUNGRAUN_HOME: ${{ github.workspace }}/target/gungraun
-        run: >-
-          cargo bench --locked -p citar-bench --features iai --bench iai --
-          --baseline=base --callgrind-limits='ir=5%'
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -u
+          if cargo bench --locked -p citar-bench --features iai --bench iai -- \
+              --baseline=base --callgrind-limits='ir=5%'; then
+            exit 0
+          fi
+          labels="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')"
+          if printf '%s\n' "$labels" | grep -qx perf-accepted; then
+            echo "::warning::instructions rose more than 5%, accepted by the label perf-accepted"
+            exit 0
+          fi
+          echo "::error::instructions rose more than 5% (or the suite failed); if the rise is" \
+            "accepted, add the label perf-accepted and re-run this job"
+          exit 1
