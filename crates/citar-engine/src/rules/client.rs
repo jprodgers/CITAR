@@ -83,8 +83,8 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
-/// The client JSON of `r`, as text.
-pub(crate) fn build(r: &Ruleset) -> String {
+/// The client JSON of `r`.
+pub(crate) fn build(r: &Ruleset) -> Value {
     let src = &r.client;
     let game = src.doc(GAME).and_then(Value::as_object);
     let from_game = |k: &str| game.and_then(|g| g.get(k)).cloned().unwrap_or(Value::Null);
@@ -202,6 +202,5 @@ pub(crate) fn build(r: &Ruleset) -> String {
     put("barbarian_levels", Value::Object(barbarian_levels));
     put("barbarian_aggression", Value::Object(barbarian_aggression));
 
-    // Serialising a Value cannot fail: its keys are strings and its numbers finite.
-    serde_json::to_string(&Value::Object(out)).unwrap_or_default()
+    Value::Object(out)
 }

@@ -65,7 +65,7 @@ use crate::unique::{SourceUniques, UniqueTable};
 /// changed after its [`RulesetId`], name indexes and derived tables were computed from it. A
 /// variant is made by loading edited files. Games share one through `&'static Ruleset`
 /// ([`Ruleset::leak`], [`Ruleset::shared`]), which is why it is `Sync`: it has no interior
-/// mutability except the client JSON, built once behind a `OnceLock`.
+/// mutability except the client JSON, built once behind a `OnceLock` (as a value and as text).
 ///
 /// Inside the crate the fields are open, for the loader and the unique compiler to fill in.
 pub struct Ruleset {
@@ -102,6 +102,7 @@ pub struct Ruleset {
     pub(crate) gen_tables: GenTables,
     names: [NameIndex; 16],
     client: client::ClientSource,
+    client_value: OnceLock<serde_json::Value>,
     client_json: OnceLock<String>,
 }
 
@@ -458,7 +459,24 @@ impl Ruleset {
     /// first use.
     #[must_use]
     pub fn client_json(&self) -> &str {
-        self.client_json.get_or_init(|| client::build(self))
+        self.client_json.get_or_init(|| {
+            // Serialising a Value cannot fail: its keys are strings and its numbers finite.
+            serde_json::to_string(self.client_value()).unwrap_or_default()
+        })
+    }
+
+    /// [`client_json`](Self::client_json) as a value, which `get_rules` reads its tables from.
+    /// Built on first use.
+    #[must_use]
+    pub fn client_value(&self) -> &serde_json::Value {
+        self.client_value.get_or_init(|| client::build(self))
+    }
+
+    /// A nation's row as its file wrote it, its city names included, which the client JSON
+    /// leaves out: what `get_rules` shows of one nation (`views.rules_lookup`).
+    #[must_use]
+    pub fn nation_source(&self, key: &str) -> Option<&serde_json::Value> {
+        self.client.nations.get(key)
     }
 }
 

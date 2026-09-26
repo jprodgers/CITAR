@@ -273,9 +273,9 @@ same from both engines, and every set in it is sorted.
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
 | `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |
 | `ops` | | `scenario` and `test`: each operation with its `params` |
-| `pending` | | what the Rust engine has not ported yet: `kind` (`inspect`, `scenario_op`, `test_op`, `turn_stage`, `setup_stage`), `name`, `package` (Python: nothing). A turn stage is named by its table and stage, `player_start S2: research progress` |
+| `pending` | | what the Rust engine has not ported yet: `kind` (`scenario_op`, `test_op`, `turn_stage`, `setup_stage`), `name`, `package` (Python: nothing). A turn stage is named by its table and stage, `player_start S2: research progress`. Nothing is pending since package 1d-03 |
 | `view` | optionally `player` (a major; none for a spectator) and `events` (how many, 150 by default) | the client view, what the browser receives (`views.client_view`): `turn`, `year`, `current_player`, `phase`, `winner`, `victory`, `you`, `width`, `height`, `wrap_x`, `wrap_y`, `tiles` (each explored tile as `[idx, terrain, features, natural wonder, river bits, resource, improvement, route, pillaged, route pillaged, owner, visible]`), `units` and `cities` (as `get_units` and `get_cities` show the viewer's, others' as the viewer sees them, remembered cities with `stale`), `players` (as `get_players`), `turn_limit`, `config`, `events` (each as emitted, scrubbed for the viewer); a player's `empire`, `diplomacy`, `notes` and `alerts` (`type`, `text`, and `x`, `y`, `city`, `unit`, `player`, `negotiation` where they apply); a spectator's `stats`, `empires`, `thoughts`, `messages` and `negotiations` |
-| `briefing` | | not yet: it comes with package 1d-03, and the Rust engine refuses it as not ported until then |
+| `briefing` | `player` (a major) | what a model reads to play its turn: `text` (the briefing, `briefing.briefing`), `progress` (the turn's progress, `briefing.turn_progress`) and `alerts` (each problem of the turn with the tool call that deals with it, as the briefing lists them, `briefing.alerts`) |
 
 `find_tiles` filters: `x` and `y` (or `at`), the place distances are counted from; `radius`, the
 farthest a tile may be; `terrain`, `feature`, `resource`, `improvement`, names the tile must have;
@@ -345,3 +345,8 @@ engines without. Grassland, but for an ocean along the west edge (`x` 0 and 1), 
 
 The generator is not kept: edit the file, keep every anchor where it is, and check with
 `maps.validate` that the document is its own clean form.
+
+`maps/arena_wrap.json` is the same arena wrapping east-west and north-south (`map =
+"arena_wrap"`), for what a map that wraps changes: the tiles and anchors are the arena's, so an
+edit to one is made to both. Both runners' tests check that a map `<name>_wrap.json` differs from
+`<name>.json` only in its id, name, description and wrapping.

@@ -16,7 +16,8 @@
     "combat_previews": 0,
     "deal_checks": 0,
     "tool_errors": 0,
-    "views": 0
+    "views": 0,
+    "briefing": 0
   },
   "failed": {}
 }

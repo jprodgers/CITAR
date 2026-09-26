@@ -1,17 +1,30 @@
-//! Maps for the host (DESIGN.md 8.1): a generated map as the editor's document
-//! ([`generate_map`], `maps.generated_map`, `maps.py:80-100`).
+//! Maps for the host and the map editor (DESIGN.md 8.1): the editor's document checked and
+//! cleaned ([`validate_map`], `maps.validate`), made blank ([`blank_map`]) or from the generator
+//! ([`generate_map`], `maps.generated_map`), taken from a game in progress
+//! ([`Game::export_map`], `maps.map_from_game`), and summed up for lists ([`map_summary`])
+//! (`maps.py:30-257`). The files stay in Python: the engine reads and writes no disk.
 //!
 //! The engine draws nothing: `generate_map` takes the seed, which the facade draws when the
 //! lobby leaves it empty, as Python's `generated_map` did itself (`maps.py:92`). The settings
 //! are the lobby's, read as `Game::config_from_json` reads them, so an unknown map size, type or
 //! edge mode is refused the same way (`config-refuses-unknown-names`).
+//!
+//! A document is read as a new game reads it (`mapgen::document`), so what the editor is told
+//! is wrong with a map is what a game on it would drop: which improvements a map may carry is a
+//! rule rather than Python's list (`map-documents-read-by-rule`). What else differs, on purpose:
+//! a map whose name makes no id is `map`, where Python named it after the clock; and a map's
+//! land share counts the tiles whose terrain the ruleset calls water, where Python named Ocean,
+//! Coast and Lakes (`map-summary-reads-water-by-rule`).
 
 use serde_json::{Map, Value, json};
 
-use crate::base::py;
+use crate::base::hex::{MAX_SIDE, MIN_SIDE};
+use crate::base::ids::{TerrainId, TileIdx};
+use crate::base::{num, py};
+use crate::game::Game;
 use crate::game::error::EngineError;
 use crate::game::setup;
-use crate::mapgen::document::tile_row;
+use crate::mapgen::document::{self, tile_row};
 use crate::mapgen::options::{option_number, resource_options};
 use crate::mapgen::{self, GenSpec, MapOptions, MapType};
 use crate::rules::Ruleset;
@@ -111,6 +124,198 @@ pub fn generate_map(rules: &Ruleset, seed: u64, settings: &Value) -> Result<Valu
         "starts": map.starts.iter().map(|t| t.0).collect::<Vec<_>>(),
         "cs_starts": map.cs_starts.iter().map(|t| t.0).collect::<Vec<_>>(),
     }))
+}
+
+/// The most characters a map's name keeps (`maps.py:239`).
+const NAME_CHARS: usize = 80;
+/// The most characters its description keeps.
+const DESCRIPTION_CHARS: usize = 2000;
+/// The keys a document keeps as they are, which the host writes (`maps.py:244-246`).
+const KEPT: [&str; 4] = ["created", "modified", "author", "recommended"];
+
+/// The first `n` characters of `s` (Python's `s[:n]`).
+fn head_chars(s: &str, n: usize) -> &str {
+    s.char_indices().nth(n).map_or(s, |(i, _)| &s[..i])
+}
+
+/// A document's text field as Python's `str()` read it, `""` for none.
+fn text_of(v: Option<&Value>) -> String {
+    match v {
+        None => String::new(),
+        Some(v) if !py::truthy(v) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => py::str_of(v),
+    }
+}
+
+/// An editor map checked against the ruleset and cleaned, with what was wrong
+/// (`maps.validate` with `fix=True`, `maps.py:136-247`): the document as it would be saved, with
+/// what could not stand removed, and the problems, `(x,y) what` each, at most
+/// [`document::MAX_WARNINGS`] of the tiles'. Its id is its own or its name's slug; its name at most
+/// 80 characters, `Untitled map` for none, and its description at most 2,000; `created`,
+/// `modified`, `author` and `recommended` are kept as they are.
+///
+/// # Errors
+/// [`EngineError::Map`] for a document that cannot be a map: not an object, no whole width and
+/// height, a side out of bounds, tiles that do not fill it, a tile that is not a row or whose
+/// base terrain is unknown.
+pub fn validate_map(rules: &Ruleset, doc: &Value) -> Result<(Value, Vec<String>), EngineError> {
+    let read = document::read(rules, doc).map_err(|e| EngineError::Map(e.0))?;
+    let o = doc.as_object();
+    let get = |k: &str| o.and_then(|o| o.get(k));
+    let id = match get("id") {
+        Some(v) if py::truthy(v) => v.clone(),
+        _ => json!(slug(&text_of(get("name")))),
+    };
+    let name = match text_of(get("name")) {
+        n if n.is_empty() => "Untitled map".to_owned(),
+        n => head_chars(&n, NAME_CHARS).to_owned(),
+    };
+    let mut clean = json!({
+        "format": "citar-map",
+        "version": 1,
+        "id": id,
+        "name": name,
+        "description": head_chars(&text_of(get("description")), DESCRIPTION_CHARS),
+        "width": read.width,
+        "height": read.height,
+        "wrap_x": read.wrap_x,
+        "wrap_y": read.wrap_y,
+        "tiles": read.tiles.iter().map(|t| tile_row(rules, t)).collect::<Vec<_>>(),
+        "starts": read.starts.iter().map(|t| t.0).collect::<Vec<_>>(),
+        "cs_starts": read.cs_starts.iter().map(|t| t.0).collect::<Vec<_>>(),
+    });
+    if let Some(m) = clean.as_object_mut() {
+        for k in KEPT {
+            if let Some(v) = get(k) {
+                m.insert(k.to_owned(), v.clone());
+            }
+        }
+    }
+    Ok((clean, read.warnings))
+}
+
+/// An empty map of one base terrain, for the editor to start from (`maps.blank_map` and the
+/// facade's `blank_map`, `maps.py:71-77`, `engine_api.py:213-219`): its id is its name's slug,
+/// or empty for a map with no name, which is `Untitled map`.
+///
+/// # Errors
+/// [`EngineError::Map`] for a terrain that is no base terrain of the ruleset, or a side out of
+/// bounds.
+pub fn blank_map(
+    rules: &Ruleset,
+    width: i64,
+    height: i64,
+    terrain: &str,
+    name: &str,
+) -> Result<Value, EngineError> {
+    use crate::rules::defs::TerrainType;
+    let base = rules
+        .lookup::<TerrainId>(terrain)
+        .filter(|&t| matches!(rules.terrains()[t].kind, TerrainType::Land | TerrainType::Water));
+    if base.is_none() {
+        return Err(EngineError::Map(format!(
+            "Unknown base terrain '{}'.",
+            crate::base::text::echo(terrain)
+        )));
+    }
+    let fits = |n: i64| (i64::from(MIN_SIDE)..=i64::from(MAX_SIDE)).contains(&n);
+    if !fits(width) || !fits(height) {
+        return Err(EngineError::Map(format!(
+            "Maps must be between {MIN_SIDE} and {MAX_SIDE} tiles on each side."
+        )));
+    }
+    // Both sides are within 8..=256.
+    let size = usize::try_from(width * height).unwrap_or(0);
+    let row = json!([terrain, [], null, 0, null, 0, null, null]);
+    Ok(json!({
+        "format": "citar-map",
+        "version": 1,
+        "id": if name.is_empty() { String::new() } else { slug(name) },
+        "name": if name.is_empty() { "Untitled map" } else { name },
+        "description": "",
+        "width": width,
+        "height": height,
+        "tiles": vec![row; size],
+        "starts": [],
+        "cs_starts": [],
+    }))
+}
+
+/// A map's headline facts, for lists (`maps.summary`, `maps.py:250-257`): its id, name and
+/// description, size and wraps, how many starts it has, the share of its tiles that are land (to
+/// three places), and when it was last saved.
+///
+/// # Errors
+/// [`EngineError::Map`] for a document with no width, height or tiles, which Python's lists
+/// skipped.
+// refcheck: map-summary-reads-water-by-rule
+pub fn map_summary(rules: &Ruleset, doc: &Value) -> Result<Value, EngineError> {
+    use crate::rules::defs::TerrainType;
+    let o = doc.as_object();
+    let get = |k: &str| o.and_then(|o| o.get(k));
+    let missing = |k: &str| EngineError::Map(format!("The map has no {k}."));
+    let width = get("width").ok_or_else(|| missing("width"))?;
+    let height = get("height").ok_or_else(|| missing("height"))?;
+    let tiles = get("tiles").and_then(Value::as_array).ok_or_else(|| missing("tiles"))?;
+    let water = |row: &Value| {
+        let terrain = row.get(0).and_then(Value::as_str).and_then(|n| rules.lookup::<TerrainId>(n));
+        terrain.is_some_and(|t| rules.terrains()[t].kind == TerrainType::Water)
+    };
+    let land = tiles.iter().filter(|row| !water(row)).count();
+    #[allow(clippy::cast_precision_loss, reason = "a count of tiles, far below 2^53")]
+    let share = land as f64 / tiles.len().max(1) as f64;
+    let count = |k: &str| get(k).and_then(Value::as_array).map_or(0, Vec::len);
+    Ok(json!({
+        "id": get("id").cloned().unwrap_or(Value::Null),
+        "name": get("name").cloned().unwrap_or(Value::Null),
+        "description": get("description").cloned().unwrap_or_else(|| json!("")),
+        "width": width,
+        "height": height,
+        "wrap_x": get("wrap_x").is_some_and(py::truthy),
+        "wrap_y": get("wrap_y").is_some_and(py::truthy),
+        "starts": count("starts"),
+        "cs_starts": count("cs_starts"),
+        "land_share": num::round_ndigits(share, 3),
+        "modified": get("modified").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+impl Game {
+    /// The game's terrain as a map to play again (`maps.map_from_game`, `maps.py:103-124`): the
+    /// tiles as they are now, without cities, borders, units or the improvements a map may not
+    /// carry, and a start where each civilization and city-state has its capital, or where it
+    /// began if it has none. Its name is `Map from game` unless one is given.
+    #[must_use]
+    pub fn export_map(&self, name: &str) -> Value {
+        let r = self.rules();
+        let mut starts = Vec::new();
+        let mut cs_starts = Vec::new();
+        for (_, p) in self.state().players().iter() {
+            if p.is_barbarian() {
+                continue;
+            }
+            let capital =
+                p.capital.and_then(|c| self.city(c)).map(crate::state::cities::City::tile);
+            let Some(TileIdx(spot)) = capital.or(p.start_tile) else { continue };
+            if p.is_major() { starts.push(spot) } else { cs_starts.push(spot) }
+        }
+        let grid = self.grid();
+        json!({
+            "format": "citar-map",
+            "version": 1,
+            "id": if name.is_empty() { String::new() } else { slug(name) },
+            "name": if name.is_empty() { "Map from game" } else { name },
+            "description": format!("Terrain of game turn {}.", self.turn()),
+            "width": grid.width(),
+            "height": grid.height(),
+            "wrap_x": grid.wrap_x(),
+            "wrap_y": grid.wrap_y(),
+            "tiles": self.state().tiles().iter().map(|(_, t)| tile_row(r, t)).collect::<Vec<_>>(),
+            "starts": starts,
+            "cs_starts": cs_starts,
+        })
+    }
 }
 
 /// A file-safe id from a name (`maps.slug`, `maps.py:43-46`): lower-case letters and digits, the
