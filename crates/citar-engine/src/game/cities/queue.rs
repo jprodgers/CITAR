@@ -14,12 +14,12 @@ use super::super::Game;
 use super::super::action::{OutcomeSpec, Rule};
 use super::super::derive::rev::CityTouch;
 use super::super::error::{ActionError, ErrCode};
-use super::citizens::own_city;
 use super::construction::{QUEUE_MAX, equivalent_unit, item_name, rejection_reasons, turns_for};
 use super::founding::{self, equivalent_building};
 use crate::base::ids::{BaseUnitId, BuildingId, CityId, PlayerId};
 use crate::base::py;
 use crate::base::sets::PlayerSet;
+use crate::game::lookup::own_city;
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::cities::{Constructible, Perpetual};
 

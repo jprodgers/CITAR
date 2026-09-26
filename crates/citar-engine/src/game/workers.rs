@@ -1049,7 +1049,7 @@ impl super::action::Rule for BuildImprovement {
     type Plan = BuildPlan;
 
     fn check(&self, g: &Game, pid: PlayerId) -> Result<BuildPlan, ActionError> {
-        let u = super::units::actions::own_unit(g, pid, self.unit_id)?;
+        let u = super::lookup::own_unit(g, pid, self.unit_id)?;
         plan_build(g, u, &self.improvement)
     }
 

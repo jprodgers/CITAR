@@ -82,5 +82,19 @@ class Normalize(unittest.TestCase):
                 tools.REGISTRY.pop(n, None)
 
 
+class ToolList(unittest.TestCase):
+    """tests/rules/tool_list.json is the Python engine's tool list as it stands, which the Rust registry's schemas
+    must equal apart from its listed fixes (scripts/refcheck/tool_list.py; crates/citar-testkit/tests/engine/tools.rs).
+    """
+
+    def test_the_recorded_tool_list_is_current(self):
+        import contextlib
+        import io
+        import scripts.refcheck.tool_list as recorder
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            status = recorder.main(["--check"])
+        self.assertEqual(status, 0, out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

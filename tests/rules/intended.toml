@@ -307,3 +307,13 @@ reason = "The ancient ruins spread on an editor map that had none were drawn fro
 [[differences]]
 id = "games-hold-at-most-64-players"
 reason = "A game could hold any number of players; Rust holds at most 64, city-states and barbarians included (a set of players is one machine word), and refuses settings that would make more, such as 24 civilizations with 40 city-states and the barbarians"
+
+# Package 1d-01: the tool registry and execute.
+
+[[differences]]
+id = "gift-unit-described-as-ruled"
+reason = "The city_state_action tool told models that a unit next to a city-state's territory could be gifted, which the rule refused; its description now says the unit must stand in the territory with movement left"
+
+[[differences]]
+id = "tool-arguments-of-the-wrong-type-refused"
+reason = "A tool given something other than text where it reads a name failed with a Python exception (unit_order's order, get_rules' topic) or read a number as the name '5' (promote_unit's promotion, build_improvement's improvement, unit_action's action); Rust refuses it with a sentence naming the parameter and what it takes"

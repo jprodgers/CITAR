@@ -18,49 +18,12 @@ use crate::game::Game;
 use crate::game::action::{OutcomeSpec, Rule};
 use crate::game::derive::rev::UnitTouch;
 use crate::game::error::{ActionError, ErrCode};
+use crate::game::lookup::{own_unit, tile_at};
 use crate::game::movement;
 use crate::game::path::{Blocked, Mover, stack_reason};
 use crate::rules::defs::Domain;
 use crate::state::units::{Activity, Unit};
 use crate::unique::UniqueType;
-
-/// One of the caller's own units (`tools._own_unit`, `tools.py:154-166`); the refusal lists the
-/// units they do have.
-pub fn own_unit(g: &Game, pid: PlayerId, unit_id: i64) -> Result<UnitId, ActionError> {
-    let found = u32::try_from(unit_id)
-        .ok()
-        .and_then(UnitId::new)
-        .filter(|&u| g.unit(u).is_some_and(|x| x.owner() == pid));
-    found.ok_or_else(|| {
-        let r = g.rules();
-        let ids: Vec<String> = g
-            .player_units(pid)
-            .map(|x| format!("#{} {}", x.id().get(), r.name(x.base).unwrap_or("")))
-            .collect();
-        let list = if ids.is_empty() { "none".to_owned() } else { ids.join(", ") };
-        ActionError::new(
-            ErrCode::NoSuchUnit,
-            format!(
-                "You have no unit with id {unit_id} (units are used up by some actions and lost \
-                 when killed). Your units now: {list}."
-            ),
-        )
-    })
-}
-
-/// A tile by its coordinates (`tools._idx`, `tools.py:143-151`); the refusal names the map's
-/// size.
-pub fn tile_at(g: &Game, x: i64, y: i64) -> Result<TileIdx, ActionError> {
-    let found =
-        i32::try_from(x).ok().zip(i32::try_from(y).ok()).and_then(|(x, y)| g.grid().idx(x, y));
-    found.ok_or_else(|| {
-        let grid = g.grid();
-        ActionError::new(
-            ErrCode::OffMap,
-            format!("({x},{y}) is off the map (map is {}x{}).", grid.width(), grid.height()),
-        )
-    })
-}
 
 // ---- move_unit -------------------------------------------------------------------------------------
 

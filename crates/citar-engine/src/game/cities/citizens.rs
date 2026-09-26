@@ -31,6 +31,7 @@ use super::super::action::{OutcomeSpec, Rule};
 use super::super::derive::rev::CityTouch;
 use super::super::derive::stats as memo;
 use super::super::error::{ActionError, ErrCode};
+use super::super::lookup::{own_city, tile_at};
 use super::stats::{
     self as cstats, Work, converts_food, current_construction, food_to_next_pop, growth_bonus,
     max_specialists, production_from_excess_food, slots, specialist_stats,
@@ -599,40 +600,9 @@ pub fn verify(g: &Game) -> Vec<String> {
 
 // ---- The tools (tools.py:679-757) ---------------------------------------------------------------
 
-/// One of the player's cities (`tools._own_city`, `tools.py:169-175`), or the refusal that lists
-/// the real ones.
-pub(crate) fn own_city(g: &Game, pid: PlayerId, city_id: i64) -> Result<CityId, ActionError> {
-    let found = u32::try_from(city_id)
-        .ok()
-        .and_then(CityId::new)
-        .filter(|&c| g.city(c).is_some_and(|x| x.owner() == pid));
-    found.ok_or_else(|| {
-        let ids: Vec<String> =
-            g.player_cities(pid).map(|x| format!("#{} {}", x.id().get(), x.name)).collect();
-        let ids = if ids.is_empty() { "none".to_owned() } else { ids.join(", ") };
-        ActionError::new(
-            ErrCode::NoSuchCity,
-            format!("You have no city with id {city_id}. Your cities: {ids}."),
-        )
-    })
-}
-
 /// The refusal of a city that is gone, which [`own_city`] has already ruled out.
 fn no_city(c: CityId) -> ActionError {
     ActionError::new(ErrCode::NoSuchCity, format!("No city {}.", c.get()))
-}
-
-/// A tile by its coordinates (`tools._idx`, `tools.py:143-151`), or the refusal that names the
-/// map's size.
-pub(crate) fn tile_at(g: &Game, x: i64, y: i64) -> Result<TileIdx, ActionError> {
-    let fits = |n: i64| i32::try_from(n).ok();
-    fits(x).zip(fits(y)).and_then(|(x, y)| g.grid().idx(x, y)).ok_or_else(|| {
-        let m = g.state().map();
-        ActionError::new(
-            ErrCode::OffMap,
-            format!("({x},{y}) is off the map (map is {}x{}).", m.width, m.height),
-        )
-    })
 }
 
 /// Tiles as `[x, y]` pairs, by column and then row, as `inspect` lists a city's: a tool's result
