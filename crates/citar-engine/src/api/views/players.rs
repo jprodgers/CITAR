@@ -243,7 +243,8 @@ pub fn trade_options(g: &Game, pid: PlayerId, other: PlayerId) -> Value {
 
 /// The UN's last result as `viewer` may see it: the tally by name, the candidates it has not met
 /// named as unknown as a scrubbed event names them (`game.py:980-988`), and the winner only if it
-/// knows them.
+/// knows them. Python's diplomacy and victory panels gave the result with every name.
+// refcheck: un-results-name-only-known-candidates
 pub(crate) fn un_result(
     g: &Game,
     viewer: Option<PlayerId>,

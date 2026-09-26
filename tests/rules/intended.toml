@@ -339,3 +339,7 @@ reason = "get_great_people read each great person's points under its pool's name
 [[differences]]
 id = "empire-summary-wars-by-id"
 reason = "The empire summary a negotiation answer reads listed the civilizations it was at war with in the order it had met them; Rust lists them by player id"
+
+[[differences]]
+id = "un-results-name-only-known-candidates"
+reason = "get_diplomacy and get_victory_status gave the United Nations' last result with every candidate's name, those of civilizations the caller had not met included; Rust names them as a scrubbed event does, Unknown Civilization or Unknown City-State (numbered from the second), and gives the winner only to a caller who knows it"

@@ -259,6 +259,15 @@ fn views_change_nothing_and_their_bytes_are_the_view() {
             assert!(parsed["empires"].is_object() && parsed["alerts"].is_null());
         }
     }
+    // A player the game does not have sees nothing, and nothing breaks.
+    let nobody: Value =
+        serde_json::from_slice(&g.view_json(Some(PlayerId(60)), 150)).expect("JSON");
+    assert_eq!(nobody["tiles"], json!([]));
+    assert_eq!(nobody["units"], json!([]));
+    assert_eq!(
+        nobody["events"].as_array().map(Vec::len),
+        g.chronicle().events().iter().filter(|e| e.audience.is_none()).count().min(150).into()
+    );
     let _replay = g.replay_data(ReplayFormat::Full);
     let _standings = g.standings();
     let _summary = g.empire_summary(PlayerId(0));

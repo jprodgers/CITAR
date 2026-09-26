@@ -46,6 +46,15 @@ pub fn events_json(g: &Game, viewer: Option<PlayerId>, limit: i64) -> Vec<Value>
     seen[start..].iter().map(|(ev, out)| event_json(g, ev, out, viewer)).collect()
 }
 
+impl Game {
+    /// One event as `viewer` may see it, as Python's dict (`EngineGame.event_view`): what a host
+    /// hands a subscriber or a player's client. A spectator (`None`) sees it as it happened.
+    #[must_use]
+    pub fn event_json(&self, ev: &Event, viewer: Option<PlayerId>) -> Value {
+        event_json(self, ev, &self.event_view(ev, viewer), viewer)
+    }
+}
+
 /// One event as `viewer` sees it, in Python's dict: `ev` as it happened, `out` as scrubbed for
 /// the viewer.
 #[must_use]

@@ -53,7 +53,9 @@ fn emit(
 
 /// The event as `viewer` sees it in a view.
 fn shown(g: &Game, ev: &Event, viewer: Option<PlayerId>) -> Value {
-    event_json(g, ev, &g.event_view(ev, viewer), viewer)
+    let v = event_json(g, ev, &g.event_view(ev, viewer), viewer);
+    assert_eq!(g.event_json(ev, viewer), v, "the host's form is the view's");
+    v
 }
 
 #[test]
