@@ -8,7 +8,9 @@
 //! `empire_summary`, `standings` and `path_preview`. Each recorded call runs through
 //! `Game::execute_query` on the fixture loaded as refcheck loads it, and each answer is compared
 //! with refcheck's comparator; a difference must be one the engine makes on purpose, named by an
-//! id of `refcheck/intended.toml` or `tests/rules/intended.toml` in [`EXPLAINED`].
+//! id of `refcheck/intended.toml` or `tests/rules/intended.toml` in [`EXPLAINED`]. A second pass
+//! tells an int from a float, which the comparator takes as equal: each number must be of the
+//! kind Python's was, but for [`KINDS_EXPLAINED`].
 //!
 //! Set `CITAR_QUERY_TOOLS` to a recording of a corpus (`query_tools.py --corpus <dir> --out
 //! <file>`) and `CITAR_REFCHECK_CORPUS` to that corpus to check it instead.
@@ -114,6 +116,15 @@ const EXPLAINED: &[Why] = &[
         committed: false,
         only: Some(named_unknown),
     },
+];
+
+/// The numbers Rust writes of another kind than Python's on purpose (a float where Python's was
+/// an int), which [`the_query_tools_write_numbers_of_python_s_kind`] finds.
+const KINDS_EXPLAINED: &[Why] = &[
+    // Python's food stored was an int after some resets and a float otherwise.
+    why("city-food-stored-is-a-float", "get_city.ok.food_stored", false),
+    why("city-food-stored-is-a-float", "get_cities.ok[*].food_stored", false),
+    why("city-food-stored-is-a-float", "god_view.cities[*].food_stored", true),
 ];
 
 /// A list of explanations, with which of them explained something.
@@ -345,6 +356,65 @@ fn the_query_tools_answer_as_python_s_did() {
         by_place(&unexplained)
     );
     explained.assert_none_stale();
+}
+
+/// Python's `json.dumps` wrote an int as `4` and a float as `4.0`, and a model reads the text,
+/// while refcheck's comparator takes the two as equal. Each whole float is made a marked text
+/// here, so that compared again the two kinds differ: every number is of the kind Python's was,
+/// but for [`KINDS_EXPLAINED`] (and where its value differs on purpose, [`EXPLAINED`]).
+#[test]
+fn the_query_tools_write_numbers_of_python_s_kind() {
+    let (rec, dirs) = recording();
+    let known = intended_ids();
+    let mut values = Explanations::new(EXPLAINED, &known);
+    let mut kinds = Explanations::new(KINDS_EXPLAINED, &known);
+    let spec = spec();
+    let mut wrong = Vec::new();
+    for (name, state) in rec.as_object().expect("states by name") {
+        let g = load(&dirs, name);
+        for (label, python, rust) in answers(&g, state) {
+            let (py, rs) = (kinds_marked(&python), kinds_marked(&rust));
+            for d in compare::compare(&spec, &py, &rs, &Options::default()) {
+                let of_kind = marked(d.python.as_ref()) || marked(d.rust.as_ref());
+                if of_kind && !values.explain(&d) && !kinds.explain(&d) {
+                    wrong.push(line(name, &label, d));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} numbers of another kind than Python's, the first:\n{}\nby place:\n{}",
+        wrong.len(),
+        wrong.iter().take(40).map(String::as_str).collect::<Vec<_>>().join("\n"),
+        by_place(&wrong)
+    );
+    kinds.assert_none_stale();
+}
+
+/// A whole float as a marked text (`"\u{1}4.0"`), everything else as it is.
+fn kinds_marked(v: &Value) -> Value {
+    match v {
+        Value::Number(n) if n.is_f64() => match n.as_f64() {
+            Some(x) if x.is_finite() && x.fract() == 0.0 => Value::String(format!("\u{1}{x}.0")),
+            _ => v.clone(),
+        },
+        Value::Array(a) => Value::Array(a.iter().map(kinds_marked).collect()),
+        Value::Object(m) => {
+            Value::Object(m.iter().map(|(k, x)| (k.clone(), kinds_marked(x))).collect())
+        }
+        _ => v.clone(),
+    }
+}
+
+/// Whether a value holds a marked whole float.
+fn marked(v: Option<&Value>) -> bool {
+    match v {
+        Some(Value::String(s)) => s.starts_with('\u{1}'),
+        Some(Value::Array(a)) => a.iter().any(|x| marked(Some(x))),
+        Some(Value::Object(m)) => m.values().any(|x| marked(Some(x))),
+        _ => false,
+    }
 }
 
 /// One difference as a line of the report.

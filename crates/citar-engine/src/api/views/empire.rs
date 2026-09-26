@@ -5,12 +5,12 @@
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::{EMPIRE_YIELDS, rounded, tiles::resource_seen};
+use super::{EMPIRE_YIELDS, PyNum, rounded, tiles::resource_seen};
 use crate::base::ids::PlayerId;
 use crate::base::num;
 use crate::base::stats::Stat;
 use crate::game::derive::stats as memo;
-use crate::game::economy::{self, Origin};
+use crate::game::economy::{self, CivSource, Origin};
 use crate::game::victory::{self, milestones};
 use crate::game::{Game, great_people, query, religion, research};
 use crate::rules::defs::ResourceType;
@@ -25,7 +25,11 @@ pub fn happiness_json(g: &Game, p: PlayerId) -> Value {
         .breakdown
         .iter()
         .filter(|&&(_, x)| x != 0.0)
-        .map(|&(k, x)| (k.name().to_owned(), json!(num::round_ndigits(x, 2))))
+        .map(|&(k, x)| {
+            // The luxuries times a whole amount each: an int in Python, the other sources floats.
+            let whole = k == CivSource::LuxuryResources;
+            (k.name().to_owned(), json!(PyNum::int_if(whole, num::round_ndigits(x, 2))))
+        })
         .collect();
     let mut out = json!({"total": h.total, "breakdown": breakdown, "status": h.status()});
     if h.major {

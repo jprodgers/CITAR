@@ -11,10 +11,15 @@
 //! who sees everything. They read the memos as the rules do and never change the game, its
 //! revision or its digest (property P8). Their answers are `serde_json::Value`s with Python's
 //! keys, and numbers as Python wrote them: yields rounded with `round(x, n)`
-//! ([`num::round_ndigits`]), gold and culture cut to integers. A unit's and a city's summary are
-//! typed as well ([`units::UnitView`], [`cities::CityView`]), so that [`Game::view_json`] writes
-//! the client view straight to JSON bytes: its tiles, units and cities, most of it, from typed
-//! values, the rest from the builders' values.
+//! ([`num::round_ndigits`]), gold and culture cut to integers, and each number an int or a
+//! float as Python's was ([`PyNum`] where Python's kind varied). Refcheck's comparator takes 3
+//! and 3.0 as equal, so `crates/citar-refcheck/tests/query_tools.rs` checks the kinds apart. The
+//! one exception is a city's food stored, always a float, where Python's was an int after some
+//! resets and a float otherwise, a history no state keeps.
+//!
+//! A unit's and a city's summary are typed as well ([`units::UnitView`], [`cities::CityView`]),
+//! so that [`Game::view_json`] writes the client view straight to JSON bytes: its tiles, units
+//! and cities, most of it, from typed values, the rest from the builders' values.
 //!
 //! - [`units`]: `unit_info`, with the owner's detail (`views.py:50-157`);
 //! - [`cities`]: `city_info`, with the owner's detail (`views.py:162-249`);
@@ -70,6 +75,50 @@ impl serde_json::ser::Formatter for PyJson {
             return write!(w, "{n}.0");
         }
         write!(w, "{}", crate::base::fmt::PyFloat(x))
+    }
+}
+
+/// A number of the kind Python's value had: `json.dumps` wrote an int as `4` and a float as
+/// `4.0`, and the few answers whose kind was not always the same keep it (a city-state's
+/// happiness, the luxuries' happiness).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PyNum {
+    Int(i64),
+    Float(f64),
+}
+
+impl PyNum {
+    /// `x` as an int when Python's value was one: `whole` says whether its inputs were whole,
+    /// and `x` must be whole and within the integers a float holds exactly.
+    #[must_use]
+    pub fn int_if(whole: bool, x: f64) -> Self {
+        const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
+        if whole && x.fract() == 0.0 && x.abs() < EXACT {
+            #[allow(clippy::cast_possible_truncation, reason = "a whole number below 2^53")]
+            let n = x as i64;
+            Self::Int(n)
+        } else {
+            Self::Float(x)
+        }
+    }
+
+    /// The value, whatever its kind.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, reason = "an int from a float below 2^53")]
+    pub const fn as_f64(self) -> f64 {
+        match self {
+            Self::Int(n) => n as f64,
+            Self::Float(x) => x,
+        }
+    }
+}
+
+impl serde::Serialize for PyNum {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match *self {
+            Self::Int(n) => s.serialize_i64(n),
+            Self::Float(x) => s.serialize_f64(x),
+        }
     }
 }
 

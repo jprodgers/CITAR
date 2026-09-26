@@ -261,4 +261,17 @@ fn views_write_floats_as_python_did() {
         text,
         "[2.0,1e+16,5e-05,0.1,-0.0,3,12.35,123456789012345.0,1000000000000000.0,2.5e-07]"
     );
+    // A number whose kind Python kept: an int only where Python's inputs were whole, and only a
+    // whole value within a float's exact integers.
+    let kinds = [
+        super::PyNum::int_if(true, 4.0),
+        super::PyNum::int_if(false, 4.0),
+        super::PyNum::int_if(true, -0.0),
+        super::PyNum::int_if(true, 2.5),
+        super::PyNum::int_if(true, 1e16),
+    ];
+    let text = String::from_utf8(super::to_py_json(&kinds)).expect("UTF-8");
+    assert_eq!(text, "[4,4.0,0,2.5,1e+16]");
+    let values = [4.0_f64, 4.0, 0.0, 2.5, 1e16];
+    assert!(kinds.iter().zip(values).all(|(k, x)| k.as_f64().to_bits() == x.to_bits()));
 }

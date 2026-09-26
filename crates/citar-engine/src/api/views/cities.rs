@@ -4,7 +4,7 @@
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::{CITY_YIELDS, rounded};
+use super::{CITY_YIELDS, PyNum, rounded};
 use crate::base::ids::{CityId, PlayerId};
 use crate::base::num;
 use crate::base::stats::{Stat, Stats};
@@ -50,7 +50,10 @@ pub struct CityView<'a> {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct OwnCity<'a> {
     pub yields: NameMap<'static, f64>,
-    pub happiness: f64,
+    /// An int for a city with no happiness (a city-state's), whose sum Python took of nothing.
+    pub happiness: PyNum,
+    /// Always a float, where Python's was an int after some resets.
+    // refcheck: city-food-stored-is-a-float
     pub food_stored: f64,
     pub food_to_grow: i32,
     pub turns_to_grow: Option<f64>,
@@ -114,7 +117,11 @@ pub fn city_view(g: &Game, c: CityId, viewer: Option<PlayerId>) -> Option<CityVi
     };
     let own = viewer.is_none_or(|v| v == owner).then(|| {
         let total = memo::city_stats(g, c).total;
-        let happiness = num::py_sum(memo::city_parts(g, c).happiness.iter().map(|&(_, v)| v));
+        let parts = &memo::city_parts(g, c).happiness;
+        let happiness = PyNum::int_if(
+            parts.is_empty(),
+            num::round_ndigits(num::py_sum(parts.iter().map(|&(_, v)| v)), 1),
+        );
         let surplus = total[Stat::Food];
         let need = cstats::food_to_next_pop(g, c);
         // Python's `-(-(need - food) // surplus)`: a ceiling, as a float.
@@ -139,7 +146,7 @@ pub fn city_view(g: &Game, c: CityId, viewer: Option<PlayerId>) -> Option<CityVi
             // rounding error to a tenth's half or across zero.
             // refcheck: city-view-rounds-its-own-sums
             yields: rounded_map(&total, &CITY_YIELDS, 1),
-            happiness: num::round_ndigits(happiness, 1),
+            happiness,
             food_stored: num::round_ndigits(city.food, 1),
             food_to_grow: need,
             turns_to_grow,

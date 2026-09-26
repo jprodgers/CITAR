@@ -347,3 +347,7 @@ reason = "get_diplomacy and get_victory_status gave the United Nations' last res
 [[differences]]
 id = "views-hide-unmet-allies-and-recipients"
 reason = "get_city_states named each city-state's ally, and get_diplomacy each recipient of a message the caller was on, even a civilization the caller had not met, which the player list hid as unknown; Rust names them only to a caller that has met them, and unknown otherwise"
+
+[[differences]]
+id = "city-food-stored-is-a-float"
+reason = "A city's food stored was written as a whole number after a rule set it (a starving city's box emptied, a city avoiding growth held at a full box, a city being razed) and with a decimal point otherwise; Rust always writes it with the decimal point"
