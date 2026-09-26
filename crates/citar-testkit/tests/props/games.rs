@@ -1,7 +1,7 @@
 //! Properties P1 to P8 on games (package 1e-01, DESIGN.md 9.5): sequences of steps (tool calls
 //! from [`ActionSpec`]s bound late, 70% valid, 20% of the wrong type, 10% random JSON; ends of
 //! turn; `RandomAgent` turns) played from committed fixtures or generated duel and small maps,
-//! every step checked by `citar_testkit::stability`.
+//! on the shipped ruleset or the kitchen sink, every step checked by `citar_testkit::stability`.
 //!
 //! The cases follow `PROPTEST_CASES`, 64 when it is unset (as in CI, `rust.yml`); the nightly run
 //! takes them to 10,000. A failure is saved by proptest under `proptest-regressions/props/`, and
@@ -48,6 +48,9 @@ pub enum Start {
     Fixture(usize),
     /// A generated duel (`small` false) or small map, after some rounds of `RandomAgent`s.
     Generated { small: bool, seed: u64, rounds: u8 },
+    /// The same on the kitchen-sink ruleset, the Kitchen Sink nation in the first seat, for the
+    /// unique types only it uses.
+    KitchenSink { small: bool, seed: u64, rounds: u8 },
 }
 
 /// The committed fixtures' count.
@@ -55,9 +58,11 @@ const FIXTURES: usize = 12;
 
 pub fn start() -> impl Strategy<Value = Start> {
     prop_oneof![
-        3 => (0..FIXTURES).prop_map(Start::Fixture),
-        1 => (any::<bool>(), 0u64..10_000, 0u8..12)
+        6 => (0..FIXTURES).prop_map(Start::Fixture),
+        2 => (any::<bool>(), 0u64..10_000, 0u8..12)
             .prop_map(|(small, seed, rounds)| Start::Generated { small, seed, rounds }),
+        1 => (any::<bool>(), 0u64..10_000, 0u8..12)
+            .prop_map(|(small, seed, rounds)| Start::KitchenSink { small, seed, rounds }),
     ]
 }
 
@@ -82,10 +87,15 @@ pub fn build(s: &Start) -> Game {
             })
             .clone()
         }),
-        Start::Generated { small, seed, rounds } => {
+        Start::Generated { small, seed, rounds } | Start::KitchenSink { small, seed, rounds } => {
             let size = if small { "small" } else { "duel" };
-            let settings = games::random_settings(size, "continents", "wrap_x", seed, 200);
-            let mut g = games::new_game(&settings, b"props", DebugOptions::OFF).expect("a game");
+            let mut g = if matches!(s, Start::KitchenSink { .. }) {
+                games::kitchen_sink_game(size, seed, 200, b"props", DebugOptions::OFF)
+            } else {
+                let settings = games::random_settings(size, "continents", "wrap_x", seed, 200);
+                games::new_game(&settings, b"props", DebugOptions::OFF)
+            }
+            .expect("a game");
             let mut agents = vec![RandomAgent::new(); g.state().players().len()];
             games::play_random(&mut g, &mut agents, u32::from(rounds), &mut |_, _| Ok(()))
                 .expect("it plays");

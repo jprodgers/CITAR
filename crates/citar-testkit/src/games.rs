@@ -57,6 +57,29 @@ pub fn new_game(settings: &Value, spec: &[u8], debug: DebugOptions) -> Result<Ga
     Ok(g)
 }
 
+/// A new game on the kitchen-sink ruleset (`rulesets::kitchen_sink`): a generated map of `size`
+/// with the first seat's civilization the Kitchen Sink nation, whose buildings, units,
+/// promotions, beliefs and improvements carry the unique types the shipped ruleset does not
+/// use, keeping a chain of round digests under `spec`.
+///
+/// # Errors
+/// The engine's refusal of the settings.
+pub fn kitchen_sink_game(
+    size: &str,
+    seed: u64,
+    turn_limit: u32,
+    spec: &[u8],
+    debug: DebugOptions,
+) -> Result<Game, String> {
+    let mut settings = random_settings(size, "continents", "wrap_x", seed, turn_limit);
+    settings["players"][0]["nation"] = Value::from("Kitchen Sink");
+    let cfg: Map<String, Value> = settings.as_object().cloned().unwrap_or_default();
+    let mut g = script::new_game(crate::rulesets::kitchen_sink(), &cfg)?;
+    g.set_debug_options(debug);
+    g.set_chain(Some(DigestChain::new(spec)));
+    Ok(g)
+}
+
 /// A committed or corpus fixture loaded as refcheck loads it (`Game::from_python`: converted,
 /// then settled once), keeping a chain of round digests under `spec`.
 ///

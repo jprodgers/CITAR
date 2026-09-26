@@ -8,7 +8,8 @@
 //! the steps are recorded, not drawn, so a replay makes the same calls, and the engine, which
 //! keys every draw from the game's seed, fails at the same step in the same way.
 //!
-//! Games start from generated maps (duel and small, of every map type), or with
+//! Games start from generated maps (duel and small, of every map type, one in four on the
+//! kitchen-sink ruleset with the Kitchen Sink nation among the civilizations), or with
 //! `--from-fixtures` from the committed fixtures (and the local corpus when
 //! `CITAR_REFCHECK_CORPUS` names it), each of whose cities is first flagged for a citizen
 //! recheck, so that the citizen oracle covers every city (DESIGN.md 6.8).
@@ -35,6 +36,9 @@ pub const REPLAY_VERSION: u32 = 1;
 pub enum Start {
     /// A new game on a generated map, from the lobby's settings.
     Generated { size: String, map_type: String, edges: String, seed: u64, turn_limit: u32 },
+    /// A new game on the kitchen-sink ruleset, the Kitchen Sink nation in the first seat
+    /// (`games::kitchen_sink_game`), whose extra unique types the shipped ruleset never meets.
+    KitchenSink { size: String, seed: u64, turn_limit: u32 },
     /// A committed fixture, or one of the local corpus, by name (`<case>/t<turn>`).
     Fixture { name: String },
 }
@@ -51,6 +55,13 @@ impl Start {
                 let settings = games::random_settings(size, map_type, edges, *seed, *turn_limit);
                 games::new_game(&settings, b"chaos", citar_engine::game::DebugOptions::default())
             }
+            Self::KitchenSink { size, seed, turn_limit } => games::kitchen_sink_game(
+                size,
+                *seed,
+                *turn_limit,
+                b"chaos",
+                citar_engine::game::DebugOptions::default(),
+            ),
             Self::Fixture { name } => {
                 let f = find_fixture(name)?;
                 let mut g =
@@ -155,6 +166,14 @@ pub fn start_of(settings: &Settings, n: u64) -> Result<Start, String> {
         return Ok(Start::Fixture { name: f.name.clone() });
     }
     let size = rng.pick(&SIZES).copied().unwrap_or("duel");
+    // One game in four on the kitchen-sink ruleset, for the unique types only it has.
+    if rng.below(4) == 0 {
+        return Ok(Start::KitchenSink {
+            size: size.to_owned(),
+            seed: rng.next_u64() >> 16,
+            turn_limit: settings.rounds + 20,
+        });
+    }
     let map_type = rng.pick(&MAP_TYPES).copied().unwrap_or("continents");
     let edges = rng.pick(&EDGES).copied().unwrap_or("wrap_x");
     Ok(Start::Generated {
