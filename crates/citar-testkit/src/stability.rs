@@ -220,7 +220,7 @@ impl Run {
             }
         };
         if let Some((call, args, text)) = &refused {
-            if let Some(why) = refusal_rule_broken(args, text) {
+            if let Some(why) = refusal_rule_broken(&self.g, args, text) {
                 return Err(Breach::new(Property::P5, at, format!("{call}: {why}: {text}")));
             }
             let after = self.fingerprint(at)?;
@@ -313,19 +313,23 @@ impl Run {
     }
 }
 
-/// P5: which of the text rules (`api::text_rule_broken`, DESIGN.md 8.5) the refusal `text` of a
-/// call with arguments `args` breaks, if any.
+/// P5: which of the text rules (`api::text_rule_broken`, DESIGN.md 8.5) the refusal `text`, which
+/// `g` gave a call with arguments `args`, breaks, if any.
 ///
-/// A null inside an argument's value is the caller's own, and a refusal may quote it back as
-/// Python would, as `None` (`Unknown policy '[None]'.`). For such a call the word `None` is read
-/// as that null, and every other rule, `Some(`, `Idx(` and `::` among them, still holds. A null
-/// as an argument's whole value stands for the argument left out, and earns no such reading.
+/// A null inside an argument's value is the caller's own, and the engine quotes it back as Python
+/// would, as `None`: at once (`Unknown policy '[None]'.`), or later, from a name the game kept (a
+/// civilization named with a list, `You have not met [None, 'x'].`). So the word `None` is read
+/// as the caller's when this call's arguments hold such a null or a name the game keeps holds
+/// the word ([`holds_none`]); every other rule, `Some(`, `Idx(` and `::` among them, still holds.
+/// A null as an argument's whole value stands for the argument left out, and earns no such
+/// reading.
 #[must_use]
-pub fn refusal_rule_broken(args: &Value, text: &str) -> Option<&'static str> {
-    if !null_below_top(args) {
+pub fn refusal_rule_broken(g: &Game, args: &Value, text: &str) -> Option<&'static str> {
+    let words = citar_engine::base::text::find_word(text, "None");
+    // Only a text with the word in it needs a look at the game's names.
+    if words.is_empty() || !(null_below_top(args) || holds_none(g)) {
         return text_rule_broken(text);
     }
-    let words = citar_engine::base::text::find_word(text, "None");
     let mut read = String::with_capacity(text.len());
     let mut from = 0;
     for w in words {
@@ -335,6 +339,19 @@ pub fn refusal_rule_broken(args: &Value, text: &str) -> Option<&'static str> {
     }
     read.push_str(&text[from..]);
     text_rule_broken(&read)
+}
+
+/// Whether a name the game keeps and its refusals quote, which callers may set, holds the word
+/// `None`: a civilization's or its leader's (`set_civ_name`), a city's or a unit's, set from a
+/// value that held a null, as Python's `str` writes it. Names only: the state keeps the word of
+/// its own elsewhere (a spy with nothing to do has the action `None`).
+#[must_use]
+pub fn holds_none(g: &Game) -> bool {
+    let none = |s: &str| !citar_engine::base::text::find_word(s, "None").is_empty();
+    let st = g.state();
+    st.players().iter().any(|(_, p)| none(&p.name) || none(&p.leader))
+        || st.cities().iter().any(|c| none(&c.name))
+        || st.units().iter().any(|u| u.name.as_deref().is_some_and(none))
 }
 
 /// Whether `args` hold a null below their top: inside an argument's value, or anywhere inside
