@@ -12,7 +12,7 @@ from .state import AUTO_DECISIONS
 
 QUERIES = ("build_options", "buildable", "camps", "city", "city_state", "costs", "events", "find_tiles", "game",
            "great_people", "negotiation", "ops", "pending", "player", "preview", "relation", "religion", "spies", "tile",
-           "un", "unit", "unit_actions", "units", "victory")
+           "un", "unit", "unit_actions", "units", "victory", "view")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -103,6 +103,10 @@ def inspect(g: Game, q: dict) -> Any:
     if what == "ops":
         from . import scenario, testops
         return {"scenario": scenario.ops_help(), "test": testops.ops_help()}
+    if what == "view":
+        from .views import client_view
+        pid = None if q.get("player") is None else _pid(g, q.get("player"), majors_only=True)
+        return client_view(g, pid, 150 if q.get("events") is None else _whole(q.get("events")))
     if what == "pending":
         return []
     raise ActionError(f"Unknown inspect query {what!r}. Known: {', '.join(QUERIES)}.")

@@ -25,6 +25,7 @@
 //!   how they read, and the research agreement's cost.
 //! - [`tool_errors`] (package 1d-01): about thirty calls through `Game::execute` that should be
 //!   refused, and what each refusal says.
+//! - [`views`] (package 1d-02): what the browser receives for two civilizations of each state.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -51,6 +52,7 @@ pub mod state_echo;
 pub mod tile_yields;
 pub mod tool_errors;
 pub mod uniques;
+pub mod views;
 pub mod visible;
 
 /// What an answer module is asked about.
@@ -124,6 +126,7 @@ static MODULES: &[&dyn AnswerModule] = &[
     &combat_previews::CombatPreviews,
     &deal_checks::DealChecks,
     &tool_errors::ToolErrors,
+    &views::Views,
 ];
 
 /// The answers of the Rust engine.

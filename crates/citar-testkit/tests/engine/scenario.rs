@@ -95,7 +95,7 @@ fn a_failing_list_of_test_ops_changes_nothing_either() {
 fn inspect_reads_and_lists_what_is_pending() {
     let g = arena();
     let before = (g.digest().ok(), g.rev());
-    for what in ["game", "ops", "pending", "units", "events"] {
+    for what in ["game", "ops", "pending", "units", "events", "view"] {
         inspect::inspect(&g, &json!({"what": what}))
             .unwrap_or_else(|e| panic!("{what}: {}", e.message));
     }
@@ -120,16 +120,15 @@ fn inspect_reads_and_lists_what_is_pending() {
             )
         })
         .collect();
-    for (name, pkg) in [("view", "1d-02"), ("briefing", "1d-03")] {
-        assert!(listed.contains(&(name.to_owned(), pkg.to_owned())), "{name} waits for {pkg}");
-    }
+    assert!(listed.contains(&("briefing".to_owned(), "1d-03".to_owned())), "briefing waits");
+    assert!(!listed.iter().any(|(name, _)| name == "view"), "the view is answered (1d-02)");
     let kinds: Vec<&str> =
         pending.as_array().into_iter().flatten().filter_map(|p| p["kind"].as_str()).collect();
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [2, 0, 0],
-        "two queries wait, and no test op"
+        [1, 0, 0],
+        "one query waits, and no test op"
     );
     // Gate 1 of package 1c-09: no stage of a turn or of setup waits.
     assert_eq!([count("turn_stage"), count("setup_stage")], [0, 0], "no stage waits");
@@ -173,12 +172,17 @@ fn inspect_reads_and_lists_what_is_pending() {
             "{name} is ported"
         );
     }
-    for (what, system) in [("view", "api::views"), ("briefing", "api::briefing")] {
-        let e = inspect::inspect(&g, &json!({"what": what, "player": 0}))
-            .expect_err("a query that waits for its package");
-        assert_eq!(e.code, ErrCode::NotPorted, "{what}");
-        assert!(e.message.contains(system), "{what}: {}", e.message);
-    }
+    let e = inspect::inspect(&g, &json!({"what": "briefing", "player": 0}))
+        .expect_err("a query that waits for its package");
+    assert_eq!(e.code, ErrCode::NotPorted, "briefing");
+    assert!(e.message.contains("api::briefing"), "briefing: {}", e.message);
+    let view = inspect::inspect(&g, &json!({"what": "view", "player": 0})).expect("a view");
+    assert_eq!(view["you"], json!(0));
+    let spectator = inspect::inspect(&g, &json!({"what": "view"})).expect("a spectator's view");
+    assert!(spectator["you"].is_null() && spectator["empires"].is_object());
+    let e = inspect::inspect(&g, &json!({"what": "view", "player": 3}))
+        .expect_err("a city-state has no view");
+    assert_eq!(e.code, ErrCode::BadParam);
     let e = inspect::inspect(&g, &json!({"what": "nothing"})).expect_err("an unknown query");
     assert_eq!(e.code, ErrCode::BadParam);
     assert!(e.message.starts_with(

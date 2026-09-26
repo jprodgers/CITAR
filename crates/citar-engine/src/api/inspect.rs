@@ -36,8 +36,11 @@
 //! - `pending`: what is not ported yet, as the queries, operations, test operations, turn stages
 //!   and setup stages that wait for a package.
 //!
-//! `view` and `briefing` wait for the packages that port what they read (1d-02 and 1d-03), and
-//! are refused as not ported until then.
+//! - `view` (optionally `player`, a major, and `events`, how many): the client view, what the
+//!   browser receives for that player or for a spectator (`views.client_view`).
+//!
+//! `briefing` waits for the package that ports what it reads (1d-03), and is refused as not
+//! ported until then.
 //!
 //! Reads only: a query never changes the game or its digest.
 
@@ -99,7 +102,7 @@ const QUERIES: [(&str, Answered); 26] = [
     ("unit_actions", Answered::Yes),
     ("units", Answered::Yes),
     ("victory", Answered::Yes),
-    ("view", Answered::From("1d-02")),
+    ("view", Answered::Yes),
 ];
 
 /// Answers one query.
@@ -194,7 +197,18 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
         "city_state" => city_state(g, any_player(g, o.get("player"))?),
         "victory" => Ok(victory(g, any_player(g, o.get("player"))?)),
         "un" => Ok(crate::game::victory::un::un_json(g)),
-        "view" => Err(not_ported("api::views")),
+        "view" => {
+            let viewer = match o.get("player") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(pid(g, Some(v), true)?),
+            };
+            let limit = match o.get("events") {
+                None | Some(Value::Null) => 150,
+                Some(v) => py::int_of(v).ok_or_else(|| bad("events must be a whole number."))?,
+            };
+            serde_json::to_value(g.client_view(viewer, limit))
+                .map_err(|e| bad(format!("The view does not serialise ({e}).")))
+        }
         "briefing" => Err(not_ported("api::briefing")),
         _ => {
             let known: Vec<&str> = QUERIES.iter().map(|&(name, _)| name).collect();

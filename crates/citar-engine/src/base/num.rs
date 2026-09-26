@@ -284,6 +284,27 @@ fn increment_decimal(s: &mut String) {
     *s = String::from_utf8(bytes).unwrap_or_default();
 }
 
+// ---- Sums ----------------------------------------------------------------------------------------
+
+/// Python's `sum()` of floats (3.12 and later): Neumaier's compensated summation, which rounds
+/// the exact sum once rather than at every step. `sum([-3.0, -5.95, 4.0, 1.0, 1.0])` is `-2.95`,
+/// where adding in turn gives `-2.9499999999999993`, and the two round to a tenth differently.
+#[must_use]
+pub fn py_sum(xs: impl IntoIterator<Item = f64>) -> f64 {
+    // CPython's `cs_add` and `cs_to_double` (Objects/bltinmodule.c).
+    let (mut hi, mut lo) = (0.0f64, 0.0f64);
+    for x in xs {
+        let t = hi + x;
+        if hi.abs() >= x.abs() {
+            lo += (hi - t) + x;
+        } else {
+            lo += (x - t) + hi;
+        }
+        hi = t;
+    }
+    if lo != 0.0 && lo.is_finite() { hi + lo } else { hi }
+}
+
 // ---- Saturating conversions -------------------------------------------------------------------
 
 macro_rules! float_to_int {
@@ -406,5 +427,26 @@ mod tests {
         assert_eq!(round_ndigits(1.5, 400).to_bits(), 1.5f64.to_bits());
         assert_eq!(round_ndigits(-1.5, -400).to_bits(), (-0.0f64).to_bits());
         assert_eq!(round_ndigits(f64::MAX, -308).to_bits(), f64::MAX.to_bits());
+    }
+
+    #[test]
+    fn sums_round_once_as_python_s_sum_does() {
+        // Values Python 3.12's sum() gives (the first differs from adding in turn).
+        let cases: [(&[f64], f64); 5] = [
+            (&[-3.0, -5.95, 4.0, 0.0, 1.0, 1.0], -2.95),
+            (&[0.1, 0.2, 0.3], 0.6),
+            (&[1e100, 1.0, -1e100], 1.0),
+            (&[], 0.0),
+            (&[-0.0], 0.0),
+        ];
+        for (xs, want) in cases {
+            let got = py_sum(xs.iter().copied());
+            assert_eq!(got.to_bits(), want.to_bits(), "sum({xs:?}) = {got:?}, want {want:?}");
+        }
+        assert_eq!(
+            round_ndigits(py_sum([-3.0, -5.95, 4.0, 0.0, 1.0, 1.0]), 1).to_bits(),
+            (-3.0f64).to_bits()
+        );
+        assert!(py_sum([f64::INFINITY, 1.0]).is_infinite());
     }
 }

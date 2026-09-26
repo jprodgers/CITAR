@@ -66,6 +66,7 @@ reason = "Python left a civilian that a ranged attack brought to 0 health on the
 where = [
   { group = "state_echo", path = "units[*].hp" },
   { group = "combat_previews", path = "fights[*].preview.defender_hp" },
+  { group = "views", path = "civs[*].view.units[*].hp" },
 ]
 python = 0
 rust = 1
@@ -83,6 +84,8 @@ where = [
   { group = "city_stats", path = "cities[*].current.turns" },
   { group = "civs", path = "civs[*].civ_stats.production" },
   { group = "civs", path = "civs[*].stat_map.*.production" },
+  { group = "views", path = "civs[*].view.cities[*].yields.production" },
+  { group = "views", path = "civs[*].view.cities[*].queue[*].turns" },
 ]
 cases = [
   "duel-archipelago-normal-s1022/t120",
@@ -333,3 +336,29 @@ reason = "Refusals that ended with a list (a promotion the unit cannot take, a b
 where = [{ group = "tool_errors", path = "calls[*].error" }]
 python = "re:Available: [^.]*[^.]$"
 rust = 're:Available: .*\.$'
+
+# Package 1d-02: the views.
+
+[[differences]]
+id = "city-view-rounds-its-own-sums"
+reason = "A city's food in the client view is its stats' total rounded to a tenth, and Python's total carried the rounding error of each addition (12.349999999999998 for 12.35, 4.4e-16 for 0), so a total a hair below a half rounded down, a surplus of 4e-16 food showed as 0.0 food growing the city in 5e16 turns, and one of -2e-16 showed the city as starving, with a starving alert; Rust's totals agree with Python's to 1e-6, and the view rounds them as they are"
+where = [
+  { group = "views", path = "civs[*].view.cities[*].yields.food" },
+  { group = "views", path = "civs[*].view.cities[*].turns_to_grow" },
+  { group = "views", path = "civs[*].view.cities[*].starving" },
+  { group = "views", path = "civs[*].view.alerts[*]" },
+]
+# The corpus's states where a food total lies that close to a tenth's half or to zero; no committed
+# fixture has one.
+cases = [
+  "duel-archipelago-raging-s1002/t60",
+  "duel-archipelago-raging-s1002/t200",
+  "duel-inland_sea-raging-s1023/t200",
+  "large-archipelago-normal-s1037/t280",
+  "large-pangaea-normal-s1016/t120",
+  "large-pangaea-normal-s1016/t280",
+  "small-fractal-off-s1009/t280",
+  "small-pangaea-raging-s1026/t200",
+  "standard-continents-normal-s1010/t200",
+  "standard-continents-off-s1030/t280",
+]
