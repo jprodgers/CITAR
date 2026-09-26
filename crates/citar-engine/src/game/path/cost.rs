@@ -61,11 +61,37 @@ impl Mover<'_> {
     /// in Python's order).
     #[inline]
     pub(crate) fn cost_from(&self, a: TileIdx, d: usize, fa: &Facts, fb: &Facts, zoc: bool) -> i32 {
+        self.cost_with(a, d, fa, fb, if zoc { self.zoc_mask() } else { None })
+    }
+
+    /// The tiles whose enemies exert a zone of control on this mover's steps, when any does and
+    /// it minds them: what [`cost_with`](Self::cost_with) reads, taken once for a search.
+    #[inline]
+    pub(crate) fn zoc_mask(&self) -> Option<&crate::base::sets::BitSet> {
+        if self.barbarian || self.prof.ignores_zoc {
+            return None;
+        }
+        self.zoc().map(|z| &*z.tiles)
+    }
+
+    /// [`cost_from`](Self::cost_from) with the zones of control given ([`zoc_mask`](Self::zoc_mask),
+    /// or `None` without them).
+    #[inline]
+    pub(crate) fn cost_with(
+        &self,
+        a: TileIdx,
+        d: usize,
+        fa: &Facts,
+        fb: &Facts,
+        zoc: Option<&crate::base::sets::BitSet>,
+    ) -> i32 {
         let sc = self.rules.scale;
         if self.def.domain == Domain::Land && fa.land != fb.land && !self.prof.on_water {
             return if fb.land { self.prof.disembark } else { self.prof.embark }.unwrap_or(ALL);
         }
-        if zoc && !self.barbarian && !self.prof.ignores_zoc && self.zoc_toward(a, d) {
+        if let Some(z) = zoc
+            && self.zoc_on_step(z, a, d)
+        {
             return ALL;
         }
         if self.prof.all_1 {
@@ -228,12 +254,20 @@ impl Mover<'_> {
     /// tiles next to both ends are `a`'s neighbours on either side of that direction.
     #[inline]
     pub(crate) fn zoc_toward(&self, a: TileIdx, d: usize) -> bool {
-        let Some(zoc) = self.zoc() else { return false };
-        let zoc = &zoc.tiles;
+        self.zoc().is_some_and(|z| self.zoc_on_step(&z.tiles, a, d))
+    }
+
+    /// Whether a tile of `zoc` is one of the two next to both ends of the step from `a` in
+    /// direction `d`.
+    #[inline]
+    fn zoc_on_step(&self, zoc: &crate::base::sets::BitSet, a: TileIdx, d: usize) -> bool {
+        // The directions on either side of `d`: (d + 5) % 6 and (d + 1) % 6.
+        const LEFT: [usize; 6] = [5, 0, 1, 2, 3, 4];
+        const RIGHT: [usize; 6] = [1, 2, 3, 4, 5, 0];
         let nb = self.g.grid().neighbor_table(a);
-        [nb[(d + 5) % 6], nb[(d + 1) % 6]]
-            .into_iter()
-            .any(|n| n != crate::base::hex::NO_TILE && zoc.contains(n))
+        let side = |n: u32| n != crate::base::hex::NO_TILE && zoc.contains(n);
+        let (Some(&l), Some(&r)) = (LEFT.get(d), RIGHT.get(d)) else { return false };
+        side(nb[l]) || side(nb[r])
     }
 }
 

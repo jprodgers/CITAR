@@ -55,10 +55,13 @@ fn state(name: &str) -> Game {
     fixtures::load(&fixtures::find(&all, case, turn).expect("no such state"))
 }
 
-/// Runs `f` once to warm up, then `n` times measured.
+/// Runs `f` once to warm up, then `n` times measured, and prints the wall clock of one.
 fn run(n: usize, mut f: impl FnMut()) {
     f();
+    let t = std::time::Instant::now();
     measured(n, f);
+    let each = t.elapsed() / u32::try_from(n.max(1)).unwrap_or(1);
+    println!("{each:?} a run");
 }
 
 fn main() {

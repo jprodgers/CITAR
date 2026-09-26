@@ -8,6 +8,9 @@
 //!   where a worker's paths bend round bays and its search's bound falls four turns short). On
 //!   each, the land unit of a major with the most land targets 25 to 35 tiles away that it has a
 //!   path to, to 16 of them in turn. Each is printed; the budget holds their mean. Budget 20 µs.
+//!   A search reads what an earlier search of the same unit at the same revision found of each
+//!   tile; `astar_small_30/each_after_a_write` (report-only) times the same searches with a write
+//!   before each, so that none does.
 //! - `astar_garg_fog`: a new gargantuan game (seed 1), whose starting units know only what they
 //!   see: paths of a settler to land targets 50 to 58 tiles away (DESIGN.md 10: 54 tiles),
 //!   through fog, which is passable at its true cost. Budget 150 µs.
@@ -212,6 +215,22 @@ pub fn run(s: &mut Suite, c: &mut Criterion) {
         s.note(&format!("astar_small_30/{case}/t{turn}"), took);
     }
     s.put("astar_small_30", total / 3);
+    // The same searches, each after a write: the revision moves, so no search reads the looks of
+    // the one before it (package 1e-03's reuse of a mover's looks at one revision).
+    let mut cold = Duration::ZERO;
+    for (g, (u, ts)) in smalls.iter().zip(&picked) {
+        let mut g = g.clone();
+        let mine = g.unit(*u).map(citar_engine::state::units::Unit::owner);
+        let other = g.majors(true).map(|p| p.id()).find(|&p| Some(p) != mine).expect("another");
+        let n = u32::try_from(ts.len()).unwrap_or(1).max(1);
+        cold += median(11, 10, || {
+            for &t in ts {
+                g.unrelated_change_for_bench(other);
+                black_box(search(&g, *u, t));
+            }
+        }) / n;
+    }
+    s.note("astar_small_30/each_after_a_write", cold / 3);
     s.put("astar_garg_fog", median(31, 50, &mut search_garg));
     let n = u32::try_from(all_pairs.len()).unwrap_or(1).max(1);
     s.put(
