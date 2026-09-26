@@ -203,7 +203,8 @@ jobs:
           git worktree add --detach ../base "${{ github.event.pull_request.base.sha }}"
           if [ -f ../base/crates/citar-bench/benches/iai.rs ]; then
             cd ../base
-            CARGO_TARGET_DIR="${{ github.workspace }}/target" cargo bench --locked -p citar-bench               --features iai --bench iai -- --save-baseline=base
+            CARGO_TARGET_DIR="${{ github.workspace }}/target" \
+              cargo bench --locked -p citar-bench --features iai --bench iai -- --save-baseline=base
           else
             echo "the base branch has no iai suite: nothing to compare with"
           fi

@@ -259,7 +259,8 @@ fn check_rounds(
         return Ok(vec!["pass rounds: none measured".to_owned()]);
     }
     let mut worst: Option<(f64, &str)> = None;
-    let mut over_target = 0usize;
+    // (name, time, target, times the target) of each round over its target
+    let mut over_target: Vec<(&str, f64, f64, f64)> = Vec::new();
     let mut no_python = 0usize;
     for &(name, ns) in &rounds {
         let Some((case, turn)) = case_turn(name) else { continue };
@@ -295,7 +296,7 @@ fn check_rounds(
             if let Some(budget) = target_at(tg, turn) {
                 let x = ns / budget;
                 if x > 1.0 {
-                    over_target += 1;
+                    over_target.push((name, ns, budget, x));
                 }
                 if x > t.hard {
                     problems.push(format!(
@@ -313,9 +314,12 @@ fn check_rounds(
         rounds.len(),
         if w.corpus { " (the corpus)" } else { " (the committed fixtures; no corpus)" },
         worst.map_or_else(|| "(no Python timings)".to_owned(), |(x, n)| format!("{x:.0}x on {n}")),
-        over_target,
+        over_target.len(),
         t.hard
     );
+    for (name, ns, budget, x) in &over_target {
+        println!("  over its target: {name}: {} against {} ({x:.2}x)", show(*ns), show(*budget));
+    }
     if no_python > 0 {
         println!("pass rounds: {no_python} states have no Python timing");
     }
