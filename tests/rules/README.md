@@ -345,3 +345,7 @@ engines without. Grassland, but for an ocean along the west edge (`x` 0 and 1), 
 
 The generator is not kept: edit the file, keep every anchor where it is, and check with
 `maps.validate` that the document is its own clean form.
+
+`maps/arena_wrap.json` is the same arena wrapping east-west and north-south (`map =
+"arena_wrap"`), for what a map that wraps changes: the tiles and anchors are the arena's, so keep
+the two files' tiles the same.
