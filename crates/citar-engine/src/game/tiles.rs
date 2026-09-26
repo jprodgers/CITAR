@@ -232,7 +232,7 @@ pub(crate) fn city_mods_in(v: &EvalView<'_>, c: CityId) -> CityMods {
                 }
                 _ => continue,
             };
-            let conds = h.unique.deps();
+            let conds = t.cond_deps(h.id);
             let per_tile = conds.intersects(CondDeps::TILE);
             if !per_tile {
                 out.deps |= conds;
@@ -260,6 +260,12 @@ pub(crate) fn city_mods_in(v: &EvalView<'_>, c: CityId) -> CityMods {
 
 // ---- Yields (tiles.py:196-391) --------------------------------------------------------------------
 
+/// What unique `id`'s conditionals read, its city's buildings included (`UniqueTable::cond_deps`):
+/// what a tile's yield records of the uniques it evaluates.
+fn cond_deps(g: &Game, id: crate::base::ids::UniqueId) -> CondDeps {
+    g.rules().uniques().cond_deps(id)
+}
+
 /// A terrain's own yields and its `Stats` uniques that hold (`tiles._single_terrain_stats`,
 /// `tiles.py:199-205`).
 fn single_terrain_stats(
@@ -272,7 +278,7 @@ fn single_terrain_stats(
     let td = &r.terrains()[terrain];
     let mut s = td.stats;
     for h in uq::object(v, &td.uniques, UniqueType::Stats, &Ctx::IGNORE) {
-        *deps |= h.unique.deps();
+        *deps |= cond_deps(v.game(), h.id);
         if let UniqueData::Stats(x) = h.data()
             && applies(h.id, ctx, v)
         {
@@ -286,7 +292,7 @@ fn single_terrain_stats(
 fn nullifies(v: &EvalView<'_>, terrain: TerrainId, ctx: &Ctx, deps: &mut CondDeps) -> bool {
     let td = &v.game().rules().terrains()[terrain];
     uq::object(v, &td.uniques, UniqueType::NullifyYields, &Ctx::IGNORE).any(|h| {
-        *deps |= h.unique.deps();
+        *deps |= cond_deps(v.game(), h.id);
         applies(h.id, ctx, v)
     })
 }
@@ -351,7 +357,7 @@ fn extra_improvement_stats(
     }
     let def = &r.improvements()[imp];
     for h in uq::object(v, &def.uniques, UniqueType::Stats, &Ctx::IGNORE) {
-        *deps |= h.unique.deps();
+        *deps |= cond_deps(v.game(), h.id);
         if let UniqueData::Stats(x) = h.data()
             && applies(h.id, ctx, v)
         {
@@ -359,7 +365,7 @@ fn extra_improvement_stats(
         }
     }
     for h in uq::object(v, &def.uniques, UniqueType::ImprovementStatsForAdjacencies, &Ctx::IGNORE) {
-        *deps |= h.unique.deps();
+        *deps |= cond_deps(v.game(), h.id);
         let UniqueData::ImprovementStatsForAdjacencies(x) = h.data() else { continue };
         *deps |= filters.tile(x.tiles).deps_around();
         if applies(h.id, ctx, v) {
@@ -374,7 +380,7 @@ fn extra_improvement_stats(
     }
     for h in uq::object(v, &def.uniques, UniqueType::ImprovementStatsOnTile, &Ctx::IGNORE) {
         if let UniqueData::ImprovementStatsOnTile(x) = h.data() {
-            *deps |= h.unique.deps() | tile_filter_deps(g, x.tiles);
+            *deps |= cond_deps(v.game(), h.id) | tile_filter_deps(g, x.tiles);
             if applies(h.id, ctx, v) && filters.tile_matches(x.tiles, v, t, Some(viewer)) {
                 s += *table.stats(x.stats);
             }
@@ -509,7 +515,7 @@ pub(crate) fn compute_tile_yield_in(
             imp_s += extra_improvement_stats(&v, t, i, p, &ctx, deps);
             let def = &r.improvements()[i];
             for h in uq::object(&v, &def.uniques, UniqueType::EnsureMinimumStats, &Ctx::IGNORE) {
-                *deps |= h.unique.deps();
+                *deps |= cond_deps(v.game(), h.id);
             }
             if let Some(h) =
                 uq::object(&v, &def.uniques, UniqueType::EnsureMinimumStats, &ctx).next()
@@ -594,7 +600,7 @@ fn percentages(
     {
         for ty in [UniqueType::StatPercentFromObject, UniqueType::AllStatsPercentFromObject] {
             for h in uq::civ(v, p, ty, &Ctx::IGNORE) {
-                *deps |= h.unique.deps();
+                *deps |= cond_deps(v.game(), h.id);
                 let (stat, pct, object) = match *h.data() {
                     UniqueData::StatPercentFromObject(x) => (Some(x.stat), x.percent, x.object),
                     UniqueData::AllStatsPercentFromObject(x) => (None, x.percent, x.object),
@@ -611,6 +617,23 @@ fn percentages(
         }
     }
     (pt, pi, pr)
+}
+
+/// Whether tile modifier `m` could add to tile `t`'s yield, its conditionals aside: its target
+/// lands on the tile, its improvement or its route, with the tile's unpillaged improvement and
+/// route or without them (a terrain that nullifies them). A modifier that cannot is skipped by
+/// [`compute_tile_yield_in`] whatever else holds, so the production advisor's what-if keeps a
+/// tile's yield when no modifier the building moves lands on it.
+pub(crate) fn mod_may_land(
+    v: &EvalView<'_>,
+    m: &TileMod,
+    t: TileIdx,
+    viewer: Option<PlayerId>,
+) -> bool {
+    let g = v.game();
+    let (imp, road) = (unpillaged_improvement(g, t), unpillaged_route(g, t));
+    lands(v, m.target, t, viewer, imp, road).is_some()
+        || lands(v, m.target, t, viewer, None, None).is_some()
 }
 
 /// Food, production and gold of a bare tile, for scoring starts (`tiles.start_yield`,

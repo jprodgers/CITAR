@@ -18,6 +18,8 @@ mod engine {
     mod hex;
     mod kitchen_sink;
     mod mapgen;
+    #[cfg(feature = "stats")]
+    mod memos;
     mod production;
     mod religion;
     mod rules;

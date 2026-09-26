@@ -696,7 +696,7 @@ fn civ_level_cond(g: &Game, deps: CondDeps, p: PlayerId) -> Rev {
     }
     let revs = &g.dv.revs;
     let fight = local.contains(CondDeps::COMBAT);
-    let city = fight || local.contains(CondDeps::CITY);
+    let city = fight || local.intersects(CondDeps::CITY | CondDeps::CITY_BUILDINGS);
     let tile = fight || local.contains(CondDeps::TILE);
     if city || tile {
         r = r.max(revs.cities).max(revs.civ(p).cities);

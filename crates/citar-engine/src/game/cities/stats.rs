@@ -1042,18 +1042,29 @@ pub(crate) fn city_base_in(v: &EvalView<'_>, c: CityId) -> CityBase {
     if g.city(c).is_none() {
         return CityBase::default();
     }
+    let (buildings, by_source) = city_yield_base_in(v, c);
+    CityBase { buildings, by_source, food_pct: food_percent(v, c), free: free_tiles(g, c) }
+}
+
+/// The part of [`city_base_in`] a city's parts read (what its buildings yield and its uniques'
+/// flat stats by source), without the food percentage and the free tiles, which a what-if does
+/// not move and does not read.
+#[must_use]
+pub(crate) fn city_yield_base_in(
+    v: &EvalView<'_>,
+    c: CityId,
+) -> (Stats, SmallVec<[(SourceKind, Yields); 4]>) {
+    let g = v.game();
+    if g.city(c).is_none() {
+        return (Stats::ZERO, SmallVec::new());
+    }
     let ctx = Ctx::city(v, c);
     let bu = BuildingUniques::stats(v, c, &ctx);
     let mut buildings = Stats::ZERO;
     for b in v.city_buildings(c).iter() {
         buildings += building_stats_with(g, v, b, &ctx, &bu);
     }
-    CityBase {
-        buildings,
-        by_source: uniques_by_source(v, c),
-        food_pct: food_percent(v, c),
-        free: free_tiles(g, c),
-    }
+    (buildings, uniques_by_source(v, c))
 }
 
 /// A city's happiness and the parts of its yields its stats reuse (`cities._city_happiness`,

@@ -546,7 +546,7 @@ impl Revs {
     #[must_use]
     pub(crate) fn cond(&self, st: &State, deps: CondDeps, ctx: &Ctx) -> Rev {
         let mut r = self.cond_civ(ctx.civ, deps);
-        if deps.contains(CondDeps::CITY) {
+        if deps.intersects(CondDeps::CITY | CondDeps::CITY_BUILDINGS) {
             // Not where its citizens work: that is `TILE`'s, which a conditional about the
             // citizens reads too.
             if let Some(c) = rel_city(st, ctx) {
@@ -1179,6 +1179,90 @@ impl Clone for Stamp {
     }
 }
 
+/// How the reads of every memo went, by the place that reads it (feature `stats`, DESIGN.md
+/// 6.4, 10): a read is a hit (one compare), a validation that found the inputs unchanged, or a
+/// computation, the first of the memo or a recompute; a recompute whose value came out as it
+/// was is redundant, the sign of a write that moved a revision nothing it reads needed moving
+/// (over-bumping). The place is the function the memo's compute closure is written in
+/// (`core::any::type_name` of the closure), one per memo in practice. Counted per thread, so a
+/// test sees its own game's reads.
+#[cfg(feature = "stats")]
+pub mod tally {
+    use core::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    /// One place's reads.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Tally {
+        pub hits: u64,
+        pub valid: u64,
+        /// Computed for the first time.
+        pub first: u64,
+        /// Computed again after an input moved.
+        pub recomputed: u64,
+        /// Of those, computed again to the value it had.
+        pub unchanged: u64,
+    }
+
+    impl Tally {
+        /// The share of recomputes that changed nothing (DESIGN.md 10 bounds it at 5%).
+        #[must_use]
+        pub fn redundancy(&self) -> f64 {
+            if self.recomputed == 0 {
+                return 0.0;
+            }
+            #[allow(clippy::cast_precision_loss, reason = "counts of reads")]
+            let r = self.unchanged as f64 / self.recomputed as f64;
+            r
+        }
+
+        /// Adds another place's reads.
+        pub fn add(&mut self, o: &Self) {
+            self.hits += o.hits;
+            self.valid += o.valid;
+            self.first += o.first;
+            self.recomputed += o.recomputed;
+            self.unchanged += o.unchanged;
+        }
+    }
+
+    thread_local! {
+        static SITES: RefCell<BTreeMap<&'static str, Tally>> = const { RefCell::new(BTreeMap::new()) };
+    }
+
+    /// Counts a read at `site`.
+    pub(super) fn add(site: &'static str, f: impl FnOnce(&mut Tally)) {
+        SITES.with(|s| f(s.borrow_mut().entry(site).or_default()));
+    }
+
+    /// Counts a computation at the place whose compute closure is `C`.
+    pub(super) fn recomputed<C>(first: bool, differs: bool) {
+        add(core::any::type_name::<C>(), |t| {
+            if first {
+                t.first += 1;
+            } else {
+                t.recomputed += 1;
+                if !differs {
+                    t.unchanged += 1;
+                }
+            }
+        });
+    }
+
+    /// Every place's reads on this thread since the last take, by the function that reads it
+    /// (`::{{closure}}` taken off), and forgets them.
+    #[must_use]
+    pub fn take() -> BTreeMap<String, Tally> {
+        let sites = SITES.with(|s| core::mem::take(&mut *s.borrow_mut()));
+        let mut out: BTreeMap<String, Tally> = BTreeMap::new();
+        for (site, t) in sites {
+            let name = site.replace("::{{closure}}", "");
+            out.entry(name).or_default().add(&t);
+        }
+        out
+    }
+}
+
 /// How often a memo was read, validated and recomputed (feature `stats`).
 #[cfg(feature = "stats")]
 #[derive(Debug, Default)]
@@ -1288,13 +1372,15 @@ impl<T: BitEq + Default> Memo<T> {
     ///
     /// If `inputs` or `compute` reads this memo again: a cycle between memos is a bug, and the
     /// borrow of the value being validated refuses it.
-    pub fn get(
+    pub fn get<I: FnOnce() -> Rev, C: FnOnce() -> T>(
         &self,
         now: Rev,
-        inputs: impl FnOnce() -> Rev,
-        compute: impl FnOnce() -> T,
+        inputs: I,
+        compute: C,
     ) -> Ref<'_, T> {
         if self.stamp.hit(now) {
+            #[cfg(feature = "stats")]
+            tally::add(core::any::type_name::<C>(), |t| t.hits += 1);
             return self.value.borrow();
         }
         // What the memo reads is its own: a computation downstream that records what it reads
@@ -1309,11 +1395,15 @@ impl<T: BitEq + Default> Memo<T> {
                 let first =
                     self.stamp.verified() == Rev::NEVER && self.stamp.changed() == Rev::NEVER;
                 let differs = first || !fresh.bit_eq(&slot);
+                #[cfg(feature = "stats")]
+                tally::recomputed::<C>(first, differs);
                 if differs {
                     *slot = fresh;
                 }
                 self.stamp.settle(now, differs);
             } else {
+                #[cfg(feature = "stats")]
+                tally::add(core::any::type_name::<C>(), |t| t.valid += 1);
                 self.stamp.settle(now, false);
             }
         });
@@ -1379,8 +1469,10 @@ impl<T: Copy + BitEq + Default> CopyMemo<T> {
     /// # Panics
     ///
     /// If `inputs` or `compute` reads this memo again: a cycle between memos.
-    pub fn get(&self, now: Rev, inputs: impl FnOnce() -> Rev, compute: impl FnOnce() -> T) -> T {
+    pub fn get<I: FnOnce() -> Rev, C: FnOnce() -> T>(&self, now: Rev, inputs: I, compute: C) -> T {
         if self.stamp.hit(now) {
+            #[cfg(feature = "stats")]
+            tally::add(core::any::type_name::<C>(), |t| t.hits += 1);
             return self.value.get();
         }
         assert!(!self.busy.get(), "a memo was read while it was being validated: a memo cycle");
@@ -1393,11 +1485,15 @@ impl<T: Copy + BitEq + Default> CopyMemo<T> {
                 let first =
                     self.stamp.verified() == Rev::NEVER && self.stamp.changed() == Rev::NEVER;
                 let differs = first || !fresh.bit_eq(&self.value.get());
+                #[cfg(feature = "stats")]
+                tally::recomputed::<C>(first, differs);
                 if differs {
                     self.value.set(fresh);
                 }
                 self.stamp.settle(now, differs);
             } else {
+                #[cfg(feature = "stats")]
+                tally::add(core::any::type_name::<C>(), |t| t.valid += 1);
                 self.stamp.settle(now, false);
             }
         });

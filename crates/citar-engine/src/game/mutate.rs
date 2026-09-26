@@ -981,6 +981,13 @@ mod tests {
                 }),
             ),
             (
+                CondDeps::CITY_BUILDINGS,
+                ctx_city,
+                Box::new(|g| {
+                    g.city_mut(CityId::FIRST, CityTouch::BUILDINGS);
+                }),
+            ),
+            (
                 CondDeps::UNIT,
                 ctx_unit,
                 Box::new(|g| {

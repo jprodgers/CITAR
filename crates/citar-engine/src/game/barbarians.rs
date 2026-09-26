@@ -934,7 +934,10 @@ fn act_here(g: &mut Game, u: UnitId) -> Result<bool, Refused> {
 }
 
 /// A captured civilian heads for the nearest camp it can reach, else wanders
-/// (`_automate_civilian`, `barbarians.py:544-556`).
+/// (`_automate_civilian`, `barbarians.py:544-556`). Python searched a path to each camp in turn,
+/// nearest first, each search of a camp it could not reach walking everything within 40 turns;
+/// one [`PathTree`] of 40 turns answers each camp as the search would (package 1e-03: most of a
+/// raging round went to those searches).
 fn automate_civilian(g: &mut Game, u: UnitId) -> Result<(), Refused> {
     let Some(at) = g.unit(u).map(crate::state::units::Unit::tile) else { return Ok(()) };
     if is_camp_tile(g, at) {
@@ -944,14 +947,21 @@ fn automate_civilian(g: &mut Game, u: UnitId) -> Result<(), Refused> {
     let mut camps: Vec<TileIdx> =
         g.state().world().camps.values().filter(|c| !c.destroyed).map(|c| c.tile).collect();
     camps.sort_by_key(|&t| (g.grid().distance(at, t), t));
-    for t in camps {
-        if g.civilian_at(t).is_some() {
-            continue;
+    camps.retain(|&t| g.civilian_at(t).is_none());
+    let chosen = match camps.as_slice() {
+        [] => None,
+        // One camp: one search to it, which stops when it gets there.
+        &[t] => movement::find_path(g, u, t, 40).map(|path| (t, path)),
+        _ => {
+            let Some(m) = Mover::unit(g, u) else { return wander(g, u) };
+            PathTree::build(&m, 40).and_then(|tree| {
+                camps.iter().find_map(|&t| tree.path_to(&m, t).map(|path| (t, path)))
+            })
         }
-        if let Some(path) = movement::find_path(g, u, t, 40) {
-            movement::follow(g, u, t, path, false, false);
-            return Ok(());
-        }
+    };
+    if let Some((t, path)) = chosen {
+        movement::follow(g, u, t, path, false, false);
+        return Ok(());
     }
     wander(g, u)
 }

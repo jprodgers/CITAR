@@ -201,11 +201,17 @@ pub fn followers(city: &City) -> SmallVec<[(ReligionId, i32); 4]> {
 /// play (`religion.majority_religion`, `religion.py:136-149`).
 #[must_use]
 pub fn majority_religion(g: &Game, c: CityId) -> Option<ReligionId> {
+    super::derive::religion::majority(g, c).0
+}
+
+/// The religion most of `city`'s citizens follow, if at least half of them do and religion is in
+/// play, with how many follow it: what the memo `derive::religion::majority` keeps.
+pub(crate) fn majority_of_followers(g: &Game, city: &City) -> Option<(ReligionId, i32)> {
     if !g.religion_enabled() {
         return None;
     }
-    let city = g.city(c)?;
-    majority_of(city)
+    let r = majority_of(city)?;
+    followers(city).iter().find(|&&(x, _)| x == r).map(|&(x, n)| (x, n))
 }
 
 /// The majority of a city's own followers, whether or not religion is in play: of two religions
@@ -226,9 +232,7 @@ fn majority_of(city: &City) -> Option<ReligionId> {
 /// `religion.py:152-156`).
 #[must_use]
 pub fn followers_of_majority(g: &Game, c: CityId) -> i32 {
-    let Some(city) = g.city(c) else { return 0 };
-    let Some(m) = majority_religion(g, c) else { return 0 };
-    followers(city).iter().find(|&&(r, _)| r == m).map_or(0, |&(_, n)| n)
+    super::derive::religion::majority(g, c).1
 }
 
 /// How many cities of the world follow religion `r` in the majority (`religion.cities_following`,

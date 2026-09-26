@@ -27,6 +27,8 @@
 
 use std::borrow::Cow;
 
+use smallvec::SmallVec;
+
 use super::super::derive::{civ, stats as memo};
 use super::super::{EvalView, Game, economy, tiles};
 use super::connections::{self, Connectivity};
@@ -36,7 +38,7 @@ use crate::base::sets::{BuildingSet, ResourceSet};
 use crate::base::stats::Stats;
 use crate::game::core::has_type;
 use crate::game::economy::ResourceSupply;
-use crate::game::tiles::CityMods;
+use crate::game::tiles::{CityMods, TileMod};
 use crate::unique::index::Extra;
 use crate::unique::{CondDeps, Csr, UniqueType, index, record};
 
@@ -94,9 +96,11 @@ pub(crate) struct Overlay {
 }
 
 /// The classes a building added to a city moves whatever it is: what reads a city's buildings
-/// (`CITY`, the city in context), a civilization's and the world's.
+/// (`CITY_BUILDINGS`, of the city in context), a civilization's and the world's. The rest of
+/// the city (`CITY`: its population, religion, status) is as it was, so a tile's yield that read
+/// only that is reused.
 const MOVED: CondDeps =
-    CondDeps::CITY.union(CondDeps::CIV_BUILDINGS).union(CondDeps::GLOBAL_BUILDINGS);
+    CondDeps::CITY_BUILDINGS.union(CondDeps::CIV_BUILDINGS).union(CondDeps::GLOBAL_BUILDINGS);
 
 /// The unique types a city's tile modifiers are gathered from (`tiles::city_mods`).
 const TILE_MOD_TYPES: [UniqueType; 5] = [
@@ -323,12 +327,23 @@ fn parts_in(v: &EvalView<'_>, o: &Overlay, x: CityId, read: &CityRead) -> Option
     let owner = city.owner();
     let moved = o.moved();
     let fresh = o.mods_move(g, x, read.mods_read).then(|| tiles::city_mods_in(v, x));
-    // A tile's memo read the modifiers the city has now: its yield holds while they are the
-    // same and nothing else it read moved.
+    // A tile's memo read the modifiers the city has now: its yield holds while nothing else it
+    // read moved and the modifiers are the same, or differ only by some that land on other
+    // tiles, the rest in the same order (so a tile's sums are taken as they were).
     let mods = fresh.as_ref().unwrap_or(&read.mods);
-    let same = fresh.as_ref().is_none_or(|m| *m == read.mods);
+    let changed = match &fresh {
+        Some(m) if *m != read.mods => Some(mods_changed(&m.mods, &read.mods.mods)),
+        _ => None,
+    };
     let mut sum = Stats::ZERO;
     for &(t, s, deps) in &read.tiles {
+        let same = match &changed {
+            None => true,
+            Some(None) => false,
+            Some(Some(diff)) => {
+                !diff.iter().any(|m| m.per_tile || tiles::mod_may_land(v, m, t, Some(owner)))
+            }
+        };
         sum += if same && !deps.intersects(moved) {
             s
         } else {
@@ -336,8 +351,31 @@ fn parts_in(v: &EvalView<'_>, o: &Overlay, x: CityId, read: &CityRead) -> Option
             tiles::compute_tile_yield_in(v, t, Some(owner), Some(x), Some(mods), &mut d)
         };
     }
-    let base = cstats::city_base_in(v, x);
-    Some(cstats::city_parts_from(v, x, &Work::of(city), sum, base.buildings, base.by_source))
+    let (buildings, by_source) = cstats::city_yield_base_in(v, x);
+    Some(cstats::city_parts_from(v, x, &Work::of(city), sum, buildings, by_source))
+}
+
+/// The modifiers one of `a` and `b` holds and the other does not, when those they share come in
+/// the same order in both; `None` when they do not.
+fn mods_changed<'m>(a: &'m [TileMod], b: &'m [TileMod]) -> Option<SmallVec<[&'m TileMod; 4]>> {
+    let mut used = vec![false; b.len()];
+    let mut in_a: SmallVec<[usize; 16]> = SmallVec::new();
+    let mut out: SmallVec<[&TileMod; 4]> = SmallVec::new();
+    for x in a {
+        match (0..b.len()).find(|&j| !used[j] && b[j] == *x) {
+            Some(j) => {
+                used[j] = true;
+                in_a.push(j);
+            }
+            None => out.push(x),
+        }
+    }
+    // The shared ones in `a`'s order must be `b`'s order.
+    if in_a.windows(2).any(|w| w[0] > w[1]) {
+        return None;
+    }
+    out.extend(b.iter().zip(&used).filter(|&(_, &u)| !u).map(|(x, _)| x));
+    Some(out)
 }
 
 /// The what-ifs of one city (`BasicBot._simulate` for each building the advisor weighs): what
@@ -399,7 +437,7 @@ fn happiness_total(v: &EvalView<'_>, o: &Overlay, parts: &CityParts) -> i32 {
     let g = v.game();
     let wide = reaches_others(o);
     // Another city's own buildings are as they were.
-    let others = o.moved().difference(CondDeps::CITY);
+    let others = o.moved().difference(CondDeps::CITY_BUILDINGS);
     economy::compute_happiness_in(v, o.owner, |x| -> Cow<'_, CityParts> {
         if x == o.city {
             return Cow::Borrowed(parts);
