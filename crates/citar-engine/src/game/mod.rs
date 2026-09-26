@@ -25,7 +25,9 @@
 //! - [`events`]: emitting events, their name references, and scrubbing them for a viewer
 //!   (`game.py:806-990`);
 //! - [`action`]: the typed actions and the pipeline every one runs through;
-//! - [`invariants`] and [`debug`]: the checks that run in test builds;
+//! - [`invariants`] and [`debug`]: the checks that run in test builds, with the cache oracle in
+//!   `derive::oracle` (all three completed in package 1e-01); [`seeded`], the bugs a test build
+//!   may plant to show that the stability checks find them;
 //! - [`query`]: the reads refcheck and the views share;
 //! - [`error`]: what a refused call says.
 //!
@@ -95,6 +97,7 @@ pub mod religion;
 pub mod research;
 pub mod revolts;
 pub mod ruins;
+pub mod seeded;
 pub mod setup;
 pub mod tiles;
 pub mod triggers;

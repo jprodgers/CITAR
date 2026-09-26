@@ -707,6 +707,7 @@ pub(crate) fn cold(g: &Game) -> Visibility {
 /// The cache oracle for sight (DESIGN.md 9.4): the counts and sources against a rebuild from the
 /// state, and the met sets and discoveries against Python's rule over what each civilization
 /// sees. One line for each difference.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
     let rebuilt = cold(g);

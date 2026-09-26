@@ -33,7 +33,6 @@ use crate::game::cities::construction::{self, Buildable};
 use crate::rules::Ruleset;
 use crate::state::State;
 use crate::state::change::Change;
-use crate::state::chronicle::Chronicle;
 use crate::unique::filter::TileLeaf;
 use crate::unique::{Cond, CondDeps, Ctx, UniqueData, UniqueType, cond, record};
 
@@ -287,9 +286,10 @@ pub(crate) fn buildable(g: &Game, c: CityId) -> Ref<'_, Buildable> {
 
 /// Every city's list and every civilization's requirements, validated, against a cold rebuild
 /// from the same state: one line for each that disagrees (the cache oracle, DESIGN.md 9.4).
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
-    let cold = Game::assemble(g.rules, g.st.clone(), Chronicle::new(), false);
+    let cold = super::oracle::cold(g);
     let mut out = Vec::new();
     for p in g.st.players().ids() {
         let (warm, fresh) = (civ_requirements(g, p), civ_requirements(&cold, p));

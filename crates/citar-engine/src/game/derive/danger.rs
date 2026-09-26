@@ -127,6 +127,7 @@ pub fn is_dangerous(g: &Game, p: PlayerId, t: TileIdx) -> bool {
 }
 
 /// The cache oracle for this module's memos: each, validated, against a fresh look.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 pub(crate) fn verify(g: &Game) -> Vec<String> {
     let mut out = Vec::new();
     for p in g.state().players().ids() {

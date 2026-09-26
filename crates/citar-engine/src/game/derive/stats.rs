@@ -47,7 +47,6 @@ use crate::game::tiles::{self, CityMods};
 use crate::rules::Ruleset;
 use crate::state::State;
 use crate::state::change::Change;
-use crate::state::chronicle::Chronicle;
 use crate::unique::{CondDeps, Ctx, UniqueType, record};
 
 // ---- What citizen ranking reads (the ruleset's) ---------------------------------------------------
@@ -788,6 +787,16 @@ pub fn happiness_total(g: &Game, p: PlayerId) -> i32 {
     happiness(g, p).total
 }
 
+/// Validates civilization `p`'s happiness and then raises the memo's total by one through its
+/// `RefCell`, stamps unmoved: the seeded bug of a query that writes (`game::seeded`).
+#[cfg(feature = "test-ops")]
+pub(crate) fn raise_happiness_for_seeded_bug(g: &Game, p: PlayerId) {
+    drop(happiness(g, p));
+    if let Some(m) = g.dv.stats.civs.get(p) {
+        m.happiness.poke(|h| h.total += 1);
+    }
+}
+
 fn happiness_changed(g: &Game, p: PlayerId) -> Rev {
     drop(happiness(g, p));
     g.dv.stats.civs.get(p).map_or(Rev::START, |m| m.happiness.changed())
@@ -980,9 +989,10 @@ pub fn unit_supply_penalty(g: &Game, p: PlayerId) -> f64 {
 /// Every memo of this module, validated, against a cold rebuild from the same state: one line
 /// for each that disagrees. The table of yields for other viewers and cities is walked entry by
 /// entry.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
-    let cold = Game::assemble(g.rules, g.st.clone(), Chronicle::new(), false);
+    let cold = super::oracle::cold(g);
     let mut out = Vec::new();
     for (t, tile) in g.st.tiles().iter() {
         let (viewer, city) = (tile.owner(), tile.city());

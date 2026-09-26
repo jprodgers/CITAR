@@ -47,7 +47,6 @@ use crate::game::{Game, religion};
 use crate::rules::Ruleset;
 use crate::state::State;
 use crate::state::change::Change;
-use crate::state::chronicle::Chronicle;
 use crate::unique::{CondDeps, Ctx, IndexRef, UniqueData, UniqueType, record};
 
 /// A religion's base reach, and the size of the grid's buckets (`religion.py:244`).
@@ -457,9 +456,10 @@ pub fn spread_source(g: &Game, c: CityId) -> Option<SpreadSource> {
 
 /// Every city's memos and the grid and reach, validated, against a cold rebuild from the same
 /// state: one line for each that disagrees (the cache oracle, DESIGN.md 9.4).
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
-    let cold = Game::assemble(g.rules, g.st.clone(), Chronicle::new(), false);
+    let cold = super::oracle::cold(g);
     let mut out = Vec::new();
     if *grid(g) != *grid(&cold) {
         out.push("the religious grid of cities differs from a cold rebuild".to_owned());

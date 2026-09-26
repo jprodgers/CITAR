@@ -48,7 +48,6 @@ use crate::game::research;
 use crate::rules::Ruleset;
 use crate::state::State;
 use crate::state::change::Change;
-use crate::state::chronicle::Chronicle;
 use crate::unique::index::{self, CityStateBonus};
 use crate::unique::{CivIndex, CivSources, CondDeps, Csr, Ctx, IndexRef, UniqueType};
 
@@ -513,9 +512,10 @@ fn networks(g: &Game, ctx: &Ctx) -> SmallVec<[PlayerId; 3]> {
 
 /// Every memo and table of this module, validated, against a cold rebuild from the same state:
 /// one line for each that disagrees.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
-    let cold = Game::assemble(g.rules, g.st.clone(), Chronicle::new(), false);
+    let cold = super::oracle::cold(g);
     let mut out = Vec::new();
     for p in g.st.players().ids() {
         if *civ_index(g, p) != *civ_index(&cold, p) {

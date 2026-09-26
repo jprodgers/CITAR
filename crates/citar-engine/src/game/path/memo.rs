@@ -174,6 +174,7 @@ fn profile_inputs(g: &Game, u: UnitId) -> Rev {
 
 /// The cache oracle for this module's memos: each, validated, against a fresh computation. One
 /// line for each that disagrees.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 pub(crate) fn verify(g: &Game) -> Vec<String> {
     let mut out = Vec::new();
     for p in g.state().players().ids() {
