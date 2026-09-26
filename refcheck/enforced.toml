@@ -77,3 +77,9 @@ group = "combat_previews"
 # research agreement's cost. The fresh bot's valuation (`bot_value`) is Phase 2's, compared only with --with-bot.
 [[enforce]]
 group = "deal_checks"
+
+# tool_errors (package 1d-01): about thirty tool calls through `Game::execute` that should be refused, each for a
+# different reason (an unknown tool, a caller who may not act, a missing or mistyped argument, a unit, city, tile or
+# name that is not there, a rule), and the text of each refusal, which is what a model reads.
+[[enforce]]
+group = "tool_errors"

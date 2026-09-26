@@ -296,3 +296,40 @@ where = [
   { group = "combat_previews", path = "fights[*].preview.defender_modifiers[*]" },
 ]
 cases = ["large-pangaea-normal-s1016/t280"]
+
+# Package 1d-01: the tool registry and the refusals models read.
+
+[[differences]]
+id = "refusal-lists-capped"
+reason = "A refusal of a unit or city id that is not the caller's listed every unit or city the caller had, past 600 characters for a large empire; Rust keeps the ones that fit and says how many more get_units or get_cities lists"
+where = [{ group = "tool_errors", path = "calls[*].error" }]
+# The corpus's late states whose empires are that large; no committed fixture has one.
+cases = [
+  "duel-continents-off-s1000/t280",
+  "duel-inland_sea-off-s1003/t200",
+  "duel-inland_sea-off-s1003/t280",
+  "duel-pangaea-normal-s1001/t280",
+  "duel-pangaea-off-s1021/t280",
+  "large-continents-off-s1015/t200",
+  "large-continents-off-s1015/t280",
+  "large-fractal-normal-s1019/t280",
+  "large-pangaea-normal-s1016/t280",
+  "large-pangaea-off-s1036/t280",
+  "small-inland_sea-normal-s1028/t280",
+  "standard-continents-off-s1030/t200",
+  "standard-continents-off-s1030/t280",
+  "standard-inland_sea-normal-s1013/t200",
+  "standard-inland_sea-normal-s1013/t280",
+  "standard-inland_sea-off-s1033/t200",
+  "standard-inland_sea-off-s1033/t280",
+  "standard-pangaea-normal-s1031/t280",
+]
+python = "re:^You have no (unit|city) with id .{560,}$"
+rust = 're:more \((get_units|get_cities) lists them all\)\.$'
+
+[[differences]]
+id = "refusals-end-as-sentences"
+reason = "Refusals that ended with a list (a promotion the unit cannot take, a belief that is not available) had no full stop, and a long one ran past 600 characters; Rust ends them as sentences and keeps them within 600 characters"
+where = [{ group = "tool_errors", path = "calls[*].error" }]
+python = "re:Available: [^.]*[^.]$"
+rust = 're:Available: .*\.$'

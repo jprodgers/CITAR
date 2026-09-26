@@ -23,6 +23,8 @@
 //!   preview, and aircraft's interceptors.
 //! - [`deal_checks`] (package 1c-05): sampled proposals, whether each side can give its items,
 //!   how they read, and the research agreement's cost.
+//! - [`tool_errors`] (package 1d-01): about thirty calls through `Game::execute` that should be
+//!   refused, and what each refusal says.
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -47,6 +49,7 @@ pub mod fixed_point;
 pub mod movement;
 pub mod state_echo;
 pub mod tile_yields;
+pub mod tool_errors;
 pub mod uniques;
 pub mod visible;
 
@@ -120,6 +123,7 @@ static MODULES: &[&dyn AnswerModule] = &[
     &visible::Visible,
     &combat_previews::CombatPreviews,
     &deal_checks::DealChecks,
+    &tool_errors::ToolErrors,
 ];
 
 /// The answers of the Rust engine.

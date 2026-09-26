@@ -34,6 +34,8 @@ use crate::base::ids::{BeliefId, CityId, PlayerId, ReligionId, RulesReligionId, 
 use crate::base::num;
 use crate::base::py;
 use crate::base::sets::BeliefSet;
+use crate::base::text::echo;
+use crate::game::lookup::with_list;
 use crate::rules::defs::{BeliefKind, BeliefType, ReligionProgress};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::world::{Religion, ReligionName};
@@ -59,9 +61,9 @@ fn belief_name(g: &Game, b: BeliefId) -> &str {
     &g.rules().beliefs()[b].name
 }
 
-/// Names, joined as Python joined them.
-fn names(g: &Game, beliefs: &[BeliefId]) -> String {
-    beliefs.iter().map(|&b| belief_name(g, b)).collect::<Vec<_>>().join(", ")
+/// The names of `beliefs`, for a refusal to list.
+fn names(g: &Game, beliefs: &[BeliefId]) -> Vec<String> {
+    beliefs.iter().map(|&b| belief_name(g, b).to_string()).collect()
 }
 
 // ---- Pantheons ---------------------------------------------------------------------------------
@@ -130,10 +132,9 @@ pub fn plan_pantheon(
         .resolve::<BeliefId>(text)
         .filter(|&b| kind_of(g, b) == BeliefType::Pantheon)
         .ok_or_else(|| {
-            ActionError::rule(format!(
-                "'{text}' is not a pantheon belief. Available: {}",
-                names(g, &available)
-            ))
+            // refcheck: refusals-end-as-sentences
+            let head = format!("'{}' is not a pantheon belief. Available: ", echo(text));
+            ActionError::rule(with_list(&head, &names(g, &available), ".", "get_religion"))
         })?;
     if !available.contains(&b) {
         return Err(ActionError::rule(format!(
@@ -432,12 +433,10 @@ pub fn validate_choice(
         if i32::try_from(count(t)).unwrap_or(i32::MAX) < n {
             let available = beliefs_available(g, k);
             let first: Vec<BeliefId> = available.into_iter().take(30).collect();
-            return Err(ActionError::rule(format!(
-                "Choose {n} {} belief(s). Available {} beliefs: {}",
-                t.name(),
-                t.name(),
-                names(g, &first)
-            )));
+            // refcheck: refusals-end-as-sentences
+            let head = format!("Choose {n} {0} belief(s). Available {0} beliefs: ", t.name());
+            let list = with_list(&head, &names(g, &first), ".", "get_religion");
+            return Err(ActionError::rule(list));
         }
     }
     let extra = i32::try_from(resolved.len()).unwrap_or(i32::MAX) - owed;
