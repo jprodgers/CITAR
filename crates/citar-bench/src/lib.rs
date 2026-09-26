@@ -35,6 +35,10 @@ pub use thresholds::Thresholds;
 /// performance core of the laptop, by default); `none` leaves the thread unpinned.
 pub const CORE_ENV: &str = "CITAR_BENCH_CORE";
 
+/// The environment variable perfgate sets to its run's id: each suite writes it into its file, so
+/// perfgate can tell a file this run wrote from one an earlier run left.
+pub const RUN_ENV: &str = "CITAR_PERF_RUN";
+
 /// Pins the calling thread to one logical processor (DESIGN.md 9.7: core 0, a P-core of the
 /// laptop's i5-13420H, unless [`CORE_ENV`] names another). Returns the processor, or `None` when
 /// the platform refused or pinning is off.
@@ -106,6 +110,11 @@ struct Written<'a> {
     corpus: bool,
     /// Whether the build checks integer overflow (the release profile's setting).
     overflow_checks: bool,
+    /// The id of the perfgate run that ran the suite ([`RUN_ENV`]), if one did.
+    run: Option<String>,
+    /// Whether a filter ran only some parts, so the file keeps what an earlier run measured of
+    /// the others.
+    merged: bool,
     measures: &'a BTreeMap<String, Measure>,
 }
 
@@ -113,7 +122,7 @@ struct Written<'a> {
 pub struct Suite {
     name: &'static str,
     core: Option<usize>,
-    filter: Vec<String>,
+    filter: Option<String>,
     thresholds: Thresholds,
     measures: BTreeMap<String, Measure>,
     over: Vec<String>,
@@ -121,17 +130,19 @@ pub struct Suite {
 
 impl Suite {
     /// Starts suite `name`: pins the thread, reads `thresholds.toml` and the filter criterion is
-    /// given on the command line (`cargo bench --bench kernels -- advisor` runs only the parts
-    /// whose name holds `advisor`).
+    /// given on the command line (`cargo bench --bench kernels -- advisor` runs only the advisor's
+    /// part). Criterion takes one filter.
     ///
     /// # Panics
     ///
-    /// If `thresholds.toml` does not read.
+    /// If `thresholds.toml` does not read, or the command line gives more than one filter.
     #[must_use]
     pub fn start(name: &'static str) -> Self {
         let core = pin();
         let thresholds = Thresholds::load().unwrap_or_else(|e| panic!("thresholds.toml: {e}"));
-        let filter = filter_args();
+        let mut filters = filter_args();
+        assert!(filters.len() <= 1, "criterion takes one filter, not {filters:?}");
+        let filter = filters.pop();
         println!(
             "suite {name}: {}, corpus {}",
             core.map_or_else(|| "not pinned".to_owned(), |c| format!("pinned to core {c}")),
@@ -146,12 +157,13 @@ impl Suite {
         Criterion::default().configure_from_args()
     }
 
-    /// Whether the part named `part` runs: no filter was given, or a filter is in its name or
-    /// its name in a filter (`advisor` runs for `advisor/call_per_city` as for `adv`).
+    /// Whether the part named by `word` (a part's name, or a word its measures' ids start with)
+    /// runs: no filter was given, the filter starts with the word (`advisor/call_per_city` runs
+    /// `advisor`), or the word with the filter (`adv` runs `advisor`). A filter in the middle of a
+    /// word runs nothing (`advisor` does not run `vis`).
     #[must_use]
-    pub fn wants(&self, part: &str) -> bool {
-        self.filter.is_empty()
-            || self.filter.iter().any(|f| part.contains(f.as_str()) || f.contains(part))
+    pub fn wants(&self, word: &str) -> bool {
+        wants(self.filter.as_deref(), word)
     }
 
     /// The budgets.
@@ -201,15 +213,17 @@ impl Suite {
         self.measures.insert(id.to_owned(), Measure { ns: took.as_secs_f64() * 1e9, gated: true });
     }
 
-    /// Writes what the suite measured to `<target>/perf/<suite>.json`, merged with what an
-    /// earlier run of other parts wrote there, and fails if a measure is over its hard limit.
+    /// Writes what the suite measured to `<target>/perf/<suite>.json`, and fails if a measure is
+    /// over its hard limit. A filtered run keeps what an earlier run wrote of the parts it did not
+    /// run (and says so, `merged`); a whole run writes only its own.
     ///
     /// # Panics
     ///
     /// On a measure above its hard limit, or if the file cannot be written.
     pub fn finish(self) {
         let path = results_dir().join(format!("{}.json", self.name));
-        let mut all = read_measures(&path);
+        let merged = self.filter.is_some();
+        let mut all = if merged { read_measures(&path) } else { BTreeMap::new() };
         all.extend(self.measures.clone());
         let doc = Written {
             format: 1,
@@ -217,6 +231,8 @@ impl Suite {
             core: self.core,
             corpus: fixtures::has_corpus(),
             overflow_checks: overflow_checks(),
+            run: std::env::var(RUN_ENV).ok().filter(|r| !r.is_empty()),
+            merged,
             measures: &all,
         };
         let text = serde_json::to_string_pretty(&doc).expect("measures serialise");
@@ -268,6 +284,11 @@ pub fn results_dir() -> PathBuf {
     exe.ancestors().nth(3).map_or_else(|| PathBuf::from("perf"), |t| t.join("perf"))
 }
 
+/// Whether filter `filter` runs the part named by `word` ([`Suite::wants`]).
+fn wants(filter: Option<&str>, word: &str) -> bool {
+    filter.is_none_or(|f| f.starts_with(word) || word.starts_with(f))
+}
+
 /// The filters on the command line: the arguments criterion takes as its filter (not an option,
 /// nor an option's value).
 fn filter_args() -> Vec<String> {
@@ -299,4 +320,21 @@ fn filter_args() -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants;
+
+    #[test]
+    fn a_filter_runs_the_parts_it_names_or_starts() {
+        assert!(wants(None, "vis"));
+        assert!(wants(Some("advisor"), "advisor"));
+        assert!(wants(Some("adv"), "advisor"));
+        assert!(wants(Some("advisor/call_per_city"), "advisor"));
+        assert!(wants(Some("vis_step/sight2"), "vis_step"));
+        assert!(!wants(Some("advisor"), "vis"), "a word inside the filter is not the filter");
+        assert!(!wants(Some("path"), "astar"));
+        assert!(!wants(Some("preview"), "combat"));
+    }
 }

@@ -11,8 +11,12 @@
 //!
 //! It prints each measure against its budget, and each pass round with its Python ratio.
 //! `--check` skips the run and checks the files a run left; `--suite <name>` runs one suite (the
-//! check still reads every file); arguments after `--` go to the benches (a criterion filter,
-//! `--quick`). Exit 0 all within, 1 over, 2 could not run.
+//! check still reads every file, and says which an earlier run left); arguments after `--` go to
+//! the benches (one criterion filter, which names a part or starts a measure's id, and options
+//! such as `--quick`). Exit 0 all within, 1 over, 2 could not run: `cargo bench` failed with no
+//! measure over its hard limit to say why, or a suite it ran did not write its file in this run
+//! (each suite stamps its file with the run's id, `CITAR_PERF_RUN`), so nothing is checked
+//! against numbers an earlier build left.
 //!
 //! The file is read with a copy of citar-bench's reader: xtask builds without the engine.
 
@@ -72,8 +76,17 @@ struct Written {
     #[serde(default)]
     overflow_checks: bool,
     core: Option<usize>,
+    /// The perfgate run that wrote it, if one did.
+    #[serde(default)]
+    run: Option<String>,
+    /// Whether a filtered run kept an earlier run's measures of the parts it did not run.
+    #[serde(default)]
+    merged: bool,
     measures: BTreeMap<String, Measure>,
 }
+
+/// The environment variable a suite reads its run's id from (citar-bench's `RUN_ENV`).
+const RUN_ENV: &str = "CITAR_PERF_RUN";
 
 /// A duration as the file writes it, in nanoseconds.
 fn parse_ns(s: &str) -> Option<f64> {
@@ -140,10 +153,54 @@ fn target_dir(root: &Path) -> Result<PathBuf, String> {
     Ok(m.target_directory)
 }
 
-/// Runs the suites through `cargo bench`, the bench profile (release: fat LTO, one codegen unit).
-fn run_suites(root: &Path, suites: &[&str], extra: &[String]) -> Result<(), String> {
+/// The arguments of `extra` criterion takes as its filter: those that are no option, nor an
+/// option's value (citar-bench's `filter_args`).
+fn filters_of(extra: &[String]) -> Vec<&str> {
+    const WITH_VALUE: [&str; 14] = [
+        "--save-baseline",
+        "--baseline",
+        "--baseline-lenient",
+        "--load-baseline",
+        "--sample-size",
+        "--warm-up-time",
+        "--measurement-time",
+        "--nresamples",
+        "--noise-threshold",
+        "--confidence-level",
+        "--significance-level",
+        "--profile-time",
+        "--color",
+        "--format",
+    ];
+    let mut out = Vec::new();
+    let mut skip = false;
+    for a in extra {
+        if skip {
+            skip = false;
+        } else if WITH_VALUE.contains(&a.as_str()) {
+            skip = true;
+        } else if !a.starts_with('-') {
+            out.push(a.as_str());
+        }
+    }
+    out
+}
+
+/// An id for this run, which each suite writes into its file.
+fn run_id() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{now}-{}", std::process::id())
+}
+
+/// Runs the suites through `cargo bench`, the bench profile (release: fat LTO, one codegen unit),
+/// every one of them whatever another does (`--no-fail-fast`); whether `cargo bench` succeeded.
+fn run_suites(root: &Path, suites: &[&str], extra: &[String], run: &str) -> Result<bool, String> {
     let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    cmd.args(["bench", "--locked", "-p", "citar-bench"]).current_dir(root);
+    cmd.args(["bench", "--locked", "--no-fail-fast", "-p", "citar-bench"])
+        .current_dir(root)
+        .env(RUN_ENV, run);
     for s in suites {
         cmd.args(["--bench", s]);
     }
@@ -152,11 +209,25 @@ fn run_suites(root: &Path, suites: &[&str], extra: &[String]) -> Result<(), Stri
     }
     println!("perfgate: running {cmd:?}");
     let status = cmd.status().map_err(|e| format!("cargo bench: {e}"))?;
-    // A suite that finds a measure over its hard limit fails its run; the check below says which.
+    // A suite that finds a measure over its hard limit fails its run after writing its file; the
+    // check below says which.
     if !status.success() {
         println!("perfgate: cargo bench exited with {status}");
     }
-    Ok(())
+    Ok(status.success())
+}
+
+/// The suites of `ran` whose file this run did not write: they failed before writing, or did not
+/// build.
+fn not_written<'a>(
+    results: &BTreeMap<String, Written>,
+    ran: &[&'a str],
+    run: &str,
+) -> Vec<&'a str> {
+    ran.iter()
+        .copied()
+        .filter(|s| results.get(*s).is_none_or(|w| w.run.as_deref() != Some(run)))
+        .collect()
 }
 
 /// Everything the suites wrote, by suite.
@@ -387,19 +458,50 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if !check_only && let Err(e) = run_suites(root, &suites, &extra) {
-        eprintln!("perfgate: {e}");
+    let filters = filters_of(&extra);
+    if filters.len() > 1 {
+        eprintln!("perfgate: criterion takes one filter, not {filters:?}");
         return ExitCode::from(2);
     }
+    let run = run_id();
+    let bench_ok = if check_only {
+        true
+    } else {
+        match run_suites(root, &suites, &extra, &run) {
+            Ok(ok) => ok,
+            Err(e) => {
+                eprintln!("perfgate: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    };
     let results = read_results(&dir);
     for (s, w) in &results {
+        let earlier = !check_only && w.run.as_deref() != Some(run.as_str());
         println!(
-            "perfgate: {s}: {} measures, {}, corpus {}, overflow checks {}",
+            "perfgate: {s}: {} measures, {}, corpus {}, overflow checks {}{}{}",
             w.measures.len(),
             w.core.map_or_else(|| "not pinned".to_owned(), |c| format!("core {c}")),
             if w.corpus { "on" } else { "off" },
-            if w.overflow_checks { "on" } else { "off" }
+            if w.overflow_checks { "on" } else { "off" },
+            if w.merged {
+                ", with an earlier run's measures of the parts it did not run"
+            } else {
+                ""
+            },
+            if earlier { " (left by an earlier run)" } else { "" }
         );
+    }
+    if !check_only {
+        let missing = not_written(&results, &suites, &run);
+        if !missing.is_empty() {
+            eprintln!(
+                "perfgate: {} did not write its results in this run (see cargo bench's output); \
+                 nothing is checked against an earlier run's numbers",
+                missing.join(", ")
+            );
+            return ExitCode::from(2);
+        }
     }
     let python = python_rounds(root);
     let mut problems = match check_budgets(&t, &results) {
@@ -416,7 +518,13 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if problems.is_empty() {
+    if problems.is_empty() && !bench_ok {
+        eprintln!(
+            "\nperfgate: cargo bench failed, and no measure is over its hard limit to say why \
+             (see its output)"
+        );
+        ExitCode::from(2)
+    } else if problems.is_empty() {
         println!("\nperfgate: every budget holds (hard limit {}x)", t.hard);
         ExitCode::SUCCESS
     } else {
@@ -444,6 +552,32 @@ mod tests {
             assert!(parse_ns(&b.budget).is_some(), "{}: {}", b.id, b.budget);
         }
         assert!(t.pass_round.backstop.iter().all(|b| parse_ns(&b.budget).is_some()));
+    }
+
+    #[test]
+    fn only_a_file_this_run_wrote_counts() {
+        let w = |run: Option<&str>| Written {
+            corpus: true,
+            overflow_checks: false,
+            core: Some(0),
+            run: run.map(str::to_owned),
+            merged: false,
+            measures: BTreeMap::new(),
+        };
+        let mut results = BTreeMap::new();
+        results.insert("kernels".to_owned(), w(Some("now")));
+        results.insert("turns".to_owned(), w(Some("before")));
+        results.insert("io".to_owned(), w(None));
+        assert_eq!(not_written(&results, &SUITES, "now"), vec!["turns", "io"]);
+        results.remove("kernels");
+        assert_eq!(not_written(&results, &["kernels"], "now"), vec!["kernels"]);
+    }
+
+    #[test]
+    fn the_filters_are_what_is_no_option() {
+        let args: Vec<String> =
+            ["--quick", "path", "--sample-size", "10", "combat"].map(str::to_owned).to_vec();
+        assert_eq!(filters_of(&args), vec!["path", "combat"]);
     }
 
     #[test]
