@@ -1,6 +1,6 @@
 //! The chaos driver (DESIGN.md 9.5): whole games of `RandomAgent` turns with tool calls of every
 //! kind, right and wrong, mixed in ([`ActionSpec`]s drawn at random), every step checked for
-//! the properties P1 to P7 ([`stability::Run`]), under `catch_unwind`.
+//! the properties P1 to P7 ([`Run`]), under `catch_unwind`.
 //!
 //! Each failure, a broken property or a panic, is kept as a [`Replay`]: how the game started, the
 //! bug planted if any, every step taken up to the one that failed, and what failed. The `chaos`

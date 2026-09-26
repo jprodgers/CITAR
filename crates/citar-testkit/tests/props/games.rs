@@ -167,3 +167,44 @@ proptest! {
         p8(&build(&start), &steps, seed, Options::default())?;
     }
 }
+
+/// Whether a JSON value holds a null below its top.
+fn nested_null(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Array(a) => a.iter().any(|x| x.is_null() || nested_null(x)),
+        serde_json::Value::Object(m) => m.values().any(|x| x.is_null() || nested_null(x)),
+        _ => false,
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// The shapes do what they say: a valid spec sends every required parameter, each
+    /// parameter it sends of the parameter's schema type; a random one sends no null below the
+    /// top, which a refusal would quote back as Python's `None`.
+    #[test]
+    fn a_spec_binds_arguments_of_the_shape_it_names(start in start(), spec in action_spec()) {
+        let g = build(&start);
+        let tool = spec.tool_spec();
+        let valid = ActionSpec { shape: Shape::Valid, ..spec }.bind(&g);
+        prop_assert_eq!(valid.tool, tool.name());
+        let args = valid.args.as_object().cloned().unwrap_or_default();
+        for r in tool.args.required {
+            prop_assert!(args.contains_key(*r), "{}: {} missing from {:?}", tool.name(), r, args);
+        }
+        for p in tool.args.params {
+            if let Some(v) = args.get(p.name) {
+                prop_assert!(p.json.fits(v), "{}: {} = {} is not {}", tool.name(), p.name, v, p.json.what());
+            }
+        }
+        let bound = spec.bind(&g);
+        let values: Vec<&serde_json::Value> = match &bound.args {
+            serde_json::Value::Object(m) => m.values().collect(),
+            other => vec![other],
+        };
+        for v in values {
+            prop_assert!(!nested_null(v), "{}: {}", tool.name(), bound.args);
+        }
+    }
+}
