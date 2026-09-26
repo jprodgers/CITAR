@@ -78,6 +78,11 @@ fn arguments_are_coerced_as_python_coerced_them() {
 const FIXES: &[(&str, &str, &str)] =
     &[("city_state_action", "description", "gift-unit-described-as-ruled")];
 
+/// A value as JSON text, with its objects' keys in their order (`preserve_order`).
+fn json_text(v: &Value) -> String {
+    serde_json::to_string(v).unwrap_or_default()
+}
+
 #[test]
 fn the_schemas_equal_python_s_tool_list() {
     #[allow(clippy::disallowed_methods, reason = "the list is a file")]
@@ -99,7 +104,9 @@ fn the_schemas_equal_python_s_tool_list() {
         let tool = r["name"].as_str().unwrap_or_default();
         for (field, rv) in r {
             let fix = FIXES.iter().find(|&&(t, f, _)| t == tool && f == field);
-            match (rv == &p[field], fix) {
+            // As text, since `Value`'s equality ignores the order of an object's keys: the
+            // parameters' order is the order they are coerced in, and models read the schema.
+            match (json_text(rv) == json_text(&p[field]), fix) {
                 (true, None) => {}
                 (false, Some(&(_, _, id))) => {
                     assert!(listed.contains(id), "{id} is in no intended list");
@@ -111,12 +118,5 @@ fn the_schemas_equal_python_s_tool_list() {
             }
         }
     }
-    assert!(
-        wrong.is_empty(),
-        "{}",
-        wrong.join(
-            "
-"
-        )
-    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
