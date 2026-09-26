@@ -40,7 +40,7 @@ use crate::game::core::has_type;
 use crate::game::economy::ResourceSupply;
 use crate::game::tiles::{CityMods, TileMod};
 use crate::unique::index::Extra;
-use crate::unique::{CondDeps, Csr, UniqueType, index, record};
+use crate::unique::{CondDeps, Csr, FilterFacts as _, UniqueType, index, record};
 
 /// A city's stats with and without one more building (`_simulate`'s answer beside the city's
 /// own): each is the total of its stats (`city_stats(g, c)["total"]`), with its happiness the
@@ -297,6 +297,11 @@ struct CityRead {
     mods: CityMods,
     mods_read: CondDeps,
     tiles: Vec<(TileIdx, Stats, CondDeps)>,
+    /// What each of its buildings yields and its uniques' flat stats by source (its base), and
+    /// what computing them read.
+    each: Vec<(BuildingId, Stats)>,
+    by_source: SmallVec<[(cstats::SourceKind, cstats::Yields); 4]>,
+    base_read: CondDeps,
 }
 
 impl CityRead {
@@ -310,10 +315,17 @@ impl CityRead {
                 (t, s, read)
             })
             .collect();
+        let (each, by_source) = {
+            let base = memo::city_base(g, x);
+            (base.each.clone(), base.by_source.clone())
+        };
         Some(Self {
             mods: memo::city_mods(g, x).map(|m| m.clone()).unwrap_or_default(),
             mods_read: memo::city_mods_deps(g, x),
             tiles,
+            each,
+            by_source,
+            base_read: memo::city_base_deps(g, x),
         })
     }
 }
@@ -351,8 +363,35 @@ fn parts_in(v: &EvalView<'_>, o: &Overlay, x: CityId, read: &CityRead) -> Option
             tiles::compute_tile_yield_in(v, t, Some(owner), Some(x), Some(mods), &mut d)
         };
     }
-    let (buildings, by_source) = cstats::city_yield_base_in(v, x);
+    let (buildings, by_source) = if base_holds(g, o, x, read) {
+        // Every building but the new one yields as it did, and the uniques by source are as
+        // they were: the sum is taken again in the set's order, the new one's in its place.
+        let mut buildings = Stats::ZERO;
+        let mut each = read.each.iter().peekable();
+        for b in v.city_buildings(x).iter() {
+            buildings += match each.next_if(|&&(e, _)| e == b) {
+                Some(&(_, s)) => s,
+                None => cstats::one_building_stats_in(v, x, b),
+            };
+        }
+        (buildings, read.by_source.clone())
+    } else {
+        cstats::city_yield_base_in(v, x)
+    };
     Some(cstats::city_parts_from(v, x, &Work::of(city), sum, buildings, by_source))
+}
+
+/// Whether city `x`'s base (what its buildings yield, its uniques' flat stats by source) is as its
+/// memo has it but for the new building's own yield: the building adds none of the types the base
+/// reads to the city's index or its owner's, the resource layer is as it was, and what computing
+/// the base read is not what the building moves (the city's buildings among them).
+fn base_holds(g: &Game, o: &Overlay, x: CityId, read: &CityRead) -> bool {
+    let local = x != o.city || !cstats::BASE_TYPES.iter().any(|&ty| o.adds_local.has(ty));
+    local
+        && !o.layer
+        && !o.civ_moves(g, &cstats::BASE_TYPES)
+        && !read.base_read.intersects(o.moved())
+        && (x != o.city || read.each.iter().all(|&(b, _)| o.buildings.contains(b)))
 }
 
 /// The modifiers one of `a` and `b` holds and the other does not, when those they share come in

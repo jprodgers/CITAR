@@ -1007,6 +1007,10 @@ pub fn current_construction(city: &City) -> Option<Constructible> {
 pub struct CityBase {
     /// What its buildings yield.
     pub buildings: Stats,
+    /// What each of its buildings yields, in the order `buildings` sums them: the production
+    /// advisor's what-if adds one more building's to them rather than working them all out
+    /// again.
+    pub each: Vec<(BuildingId, Stats)>,
     /// Its uniques' flat stats by source.
     pub by_source: SmallVec<[(SourceKind, Yields); 4]>,
     /// The percentage its food is raised by (the food of `pct_bonuses`).
@@ -1018,6 +1022,8 @@ pub struct CityBase {
 impl super::super::derive::rev::BitEq for CityBase {
     fn bit_eq(&self, other: &Self) -> bool {
         self.buildings.bit_eq(&other.buildings)
+            && self.each.len() == other.each.len()
+            && self.each.iter().zip(&other.each).all(|(a, b)| a.0 == b.0 && a.1.bit_eq(&b.1))
             && self.food_pct.to_bits() == other.food_pct.to_bits()
             && self.free == other.free
             && self.by_source.len() == other.by_source.len()
@@ -1042,8 +1048,40 @@ pub(crate) fn city_base_in(v: &EvalView<'_>, c: CityId) -> CityBase {
     if g.city(c).is_none() {
         return CityBase::default();
     }
-    let (buildings, by_source) = city_yield_base_in(v, c);
-    CityBase { buildings, by_source, food_pct: food_percent(v, c), free: free_tiles(g, c) }
+    let ctx = Ctx::city(v, c);
+    let bu = BuildingUniques::stats(v, c, &ctx);
+    let mut buildings = Stats::ZERO;
+    let mut each = Vec::with_capacity(v.city_buildings(c).len());
+    for b in v.city_buildings(c).iter() {
+        let s = building_stats_with(g, v, b, &ctx, &bu);
+        buildings += s;
+        each.push((b, s));
+    }
+    CityBase {
+        buildings,
+        each,
+        by_source: uniques_by_source(v, c),
+        food_pct: food_percent(v, c),
+        free: free_tiles(g, c),
+    }
+}
+
+/// The unique types a city's base reads (its buildings' yields and its uniques' flat stats by
+/// source), besides each building's own `Stats` uniques.
+pub(crate) const BASE_TYPES: [UniqueType; 6] = [
+    UniqueType::StatsFromObject,
+    UniqueType::StatsFromBuildings,
+    UniqueType::StatsPerCity,
+    UniqueType::StatsPerPopulation,
+    UniqueType::StatsFromCitiesOnSpecificTiles,
+    UniqueType::BonusStatsFromCityStates,
+];
+
+/// What building `b` yields in city `c` read in view `v` (a what-if's), with the city's uniques
+/// gathered in it.
+pub(crate) fn one_building_stats_in(v: &EvalView<'_>, c: CityId, b: BuildingId) -> Stats {
+    let ctx = Ctx::city(v, c);
+    building_stats_with(v.game(), v, b, &ctx, &BuildingUniques::stats(v, c, &ctx))
 }
 
 /// The part of [`city_base_in`] a city's parts read (what its buildings yield and its uniques'

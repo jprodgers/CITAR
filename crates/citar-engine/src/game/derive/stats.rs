@@ -580,6 +580,12 @@ pub(crate) fn city_base(g: &Game, c: CityId) -> Ref<'_, CityBase> {
     m.base.get(revs.now(), inputs, compute)
 }
 
+/// The classes the last computation of city `c`'s base read, validated now.
+pub(crate) fn city_base_deps(g: &Game, c: CityId) -> CondDeps {
+    drop(city_base(g, c));
+    g.dv.stats.cities.get(&c).map_or(CondDeps::all(), |m| m.base_deps.get())
+}
+
 fn base_changed(g: &Game, c: CityId) -> Rev {
     drop(city_base(g, c));
     g.dv.stats.cities.get(&c).map_or(Rev::START, |m| m.base.changed())
