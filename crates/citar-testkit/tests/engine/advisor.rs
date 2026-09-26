@@ -514,6 +514,66 @@ mod sink {
         assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
     }
 
+    /// The shipped ruleset with `patch` over its buildings: unlike the kitchen sink, a city's base
+    /// there reads few classes, so the what-if reuses it where it can.
+    fn shipped_with_buildings(patch: &Value) -> &'static Ruleset {
+        let patch = patch.to_string();
+        let files = overlay(&[("ruleset/buildings.json", &patch)]).expect("the patch applies");
+        Ruleset::leak(&files_of(&files)).expect("the ruleset loads")
+    }
+
+    #[test]
+    fn flat_stats_of_cities_with_a_wonder_come_with_the_wonder() {
+        // `[stats] [in all cities with a world wonder]` and `[stats] per [n] population [...]`
+        // read the city's buildings through their city filter, which names no class of its own:
+        // the what-if of a plain wonder (Stonehenge) must not reuse the city's base, whose flat
+        // stats by source the wonder moves (package 1e-03's fix round).
+        let r = shipped_with_buildings(&json!({
+            "Wonder Treasury": {
+                "name": "Wonder Treasury", "cost": 60, "maintenance": 0,
+                "uniques": ["[+5 Gold] [in all cities with a world wonder]"],
+                "id": "wonder_treasury",
+            },
+            "Wonder Market": {
+                "name": "Wonder Market", "cost": 60, "maintenance": 0,
+                "uniques": ["[+2 Gold] per [1] population [in all cities with a world wonder]"],
+                "id": "wonder_market",
+            },
+        }));
+        let stonehenge = r.lookup::<BuildingId>("Stonehenge").expect("Stonehenge");
+        for (building, gold) in [("Wonder Treasury", 5.0), ("Wonder Market", 8.0)] {
+            let (doc, _) = map_doc("arena").expect("the arena");
+            let cfg = json!({
+                "seed": 1,
+                "players": [{"nation": "Rome"}, {"nation": "Greece"}],
+                "city_states": 0,
+                "barbarians": "off",
+                "ruins": false,
+                "map": doc,
+            });
+            let mut g =
+                new_game(r, cfg.as_object().expect("an object")).unwrap_or_else(|e| panic!("{e}"));
+            g.set_debug_options(DebugOptions::ALL);
+            testops::apply(&mut g, &json!([{"op": "clear_units", "player": "all"}]))
+                .expect("cleared");
+            let out = ops(
+                &mut g,
+                &json!([
+                    {"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Treasury",
+                     "pop": 4},
+                    {"op": "set_city", "x": 5, "y": 5, "add_buildings": [building]},
+                ]),
+            );
+            let c = founded(&out[0]);
+            let d = agrees(&mut g, c, stonehenge);
+            // Stonehenge's own 5 faith, and the gold the wonder turns on.
+            assert!(d[Stat::Faith] >= 5.0, "{building}: {d:?}");
+            assert!(d[Stat::Gold] >= gold, "{building}: {d:?}");
+            assert!(g.take_violations().is_empty());
+            assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
+        }
+    }
+
     #[test]
     fn a_building_that_adds_unit_supply_lifts_the_penalty_in_the_what_if() {
         // A civilization over its unit supply loses production in every city; a building that

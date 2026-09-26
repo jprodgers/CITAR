@@ -32,7 +32,7 @@ use crate::game::core::has_type;
 use crate::game::economy;
 use crate::state::cities::{City, Constructible, Perpetual};
 use crate::unique::world::CombatAction;
-use crate::unique::{Ctx, FilterFacts as _, Source, UniqueData, UniqueType, uq};
+use crate::unique::{Ctx, FilterFacts as _, Source, UniqueData, UniqueType, record, uq};
 
 // ---- Stats as Python's dicts held them ----------------------------------------------------------
 
@@ -741,9 +741,12 @@ fn uniques_by_source(v: &EvalView<'_>, c: CityId) -> SmallVec<[(SourceKind, Yiel
             out[slot].1.keys.insert(k);
         }
     };
+    // A city filter that reads the city's buildings (`in all cities with a world wonder`) names
+    // no class of its own: the city's own is noted, so the production advisor's what-if of a
+    // building computes the base again rather than reusing it.
     for h in uq::city(&v, c, UniqueType::StatsPerCity, &ctx) {
         if let UniqueData::StatsPerCity(x) = h.data()
-            && filters.city_matches(x.cities, &v, c, None)
+            && noted_city_matches(filters, x.cities, &v, c)
         {
             for _ in 0..h.n {
                 add(h.id, t.stats(x.stats), 1.0);
@@ -752,7 +755,7 @@ fn uniques_by_source(v: &EvalView<'_>, c: CityId) -> SmallVec<[(SourceKind, Yiel
     }
     for h in uq::city(&v, c, UniqueType::StatsPerPopulation, &ctx) {
         if let UniqueData::StatsPerPopulation(x) = h.data()
-            && filters.city_matches(x.cities, &v, c, None)
+            && noted_city_matches(filters, x.cities, &v, c)
         {
             let per = i32::from(city.pop).div_euclid(x.per.max(1));
             for _ in 0..h.n {
@@ -770,6 +773,19 @@ fn uniques_by_source(v: &EvalView<'_>, c: CityId) -> SmallVec<[(SourceKind, Yiel
         }
     }
     out
+}
+
+/// Whether city `c` passes city filter `f`, with the classes of the city's own that the filter
+/// reads noted (`Filters::city_deps_here`: `CITY_BUILDINGS` for a building leaf), which the
+/// filter's own classes leave out.
+fn noted_city_matches(
+    filters: &crate::unique::Filters,
+    f: crate::base::ids::CityFilterId,
+    v: &EvalView<'_>,
+    c: CityId,
+) -> bool {
+    record::note_classes(filters.city_deps_here(f));
+    filters.city_matches(f, v, c, None)
 }
 
 /// Every percentage modifier of a city's yields (`cities._pct_bonuses`, `cities.py:387-438`): a
