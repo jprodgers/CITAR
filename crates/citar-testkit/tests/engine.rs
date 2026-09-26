@@ -18,6 +18,7 @@ mod engine {
     mod hex;
     mod kitchen_sink;
     mod mapgen;
+    mod maps;
     mod production;
     mod religion;
     mod rules;

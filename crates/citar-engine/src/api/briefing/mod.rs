@@ -16,7 +16,7 @@
 //!   (`briefing-names-only-known-players`);
 //! - the civilizations it has met are listed by player id, and its policies branch by branch in
 //!   the ruleset's order, where Python kept the order it met them and adopted them in, a history
-//!   no state keeps (`briefing-lists-in-rule-order`).
+//!   no state keeps (`lists-in-rule-order`).
 
 use crate::api::views::alerts::{alert_items, bombard_targets};
 use crate::api::views::empire::strategic_resources;
@@ -129,7 +129,7 @@ fn routine(kind: &EventType) -> bool {
 
 /// The policies a civilization has adopted, the branches' finishers left out: each branch it
 /// opened, then its policies, in the ruleset's order. Python listed them in the order adopted.
-// refcheck: briefing-lists-in-rule-order
+// refcheck: lists-in-rule-order
 fn adopted_policies(g: &Game, pid: PlayerId) -> Vec<&str> {
     let Some(pl) = g.player(pid) else { return Vec::new() };
     let r = g.rules();
@@ -490,7 +490,7 @@ fn diplomacy(g: &Game, pid: PlayerId, out: &mut Vec<String>) {
     let turn = g.turn();
     out.push("\nDIPLOMACY:".to_owned());
     // By player id, where Python kept the order it met them in.
-    // refcheck: briefing-lists-in-rule-order
+    // refcheck: lists-in-rule-order
     let met: Vec<_> = g.majors(true).filter(|q| q.id() != pid && g.has_met(pid, q.id())).collect();
     if met.is_empty() {
         out.push("  You have not met any other civilization yet.".to_owned());

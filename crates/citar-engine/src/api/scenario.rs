@@ -39,6 +39,9 @@
 //! - `adopt_policy` adopts a policy whose branch's era the civilization has not reached, as its
 //!   reference says, where Python's retry checked the era again and failed
 //!   (`scenario-adopt-policy-skips-the-era`, in `game::policies`).
+//!
+//! Package 1d-03 adds what the editor reads of a scenario (`editor`, `scenario.py:503-645`):
+//! [`overview`], [`default_seats`], [`normalize_seats`] and [`scenario_summary`].
 
 use serde_json::{Map, Value, json};
 
@@ -59,6 +62,10 @@ use crate::rules::Named;
 use crate::rules::defs::{PolicyKind, Route, TerrainType};
 use crate::state::diplo::{OpinionKey, side};
 use crate::state::{StateError, TileClaim};
+
+mod editor;
+
+pub use self::editor::{SEAT_TYPES, default_seats, normalize_seats, overview, scenario_summary};
 
 /// An operation's parameters, as the editor sent them.
 pub type Params = Map<String, Value>;
