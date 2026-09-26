@@ -255,13 +255,14 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "unwind"                   # never abort: hosts turn a panic into one poisoned game
-overflow-checks = true             # kept unless the bench report shows > 3% cost
+overflow-checks = false            # 1e-03: they cost 5-9% of a pass round (see 10)
 [profile.ci]
 inherits = "release"
 lto = false
 codegen-units = 16
 incremental = false
 debug-assertions = true
+overflow-checks = true             # every test, golden and chaos run keeps them
 [profile.profiling]
 inherits = "release"
 debug = "line-tables-only"
@@ -2806,7 +2807,7 @@ Figures are for one P-core of the laptop (i5-13420H), release build, criterion, 
 - gungraun +5% per pull request in CI;
 - the `stats` feature counts memo hits and misses, so a soak can assert that redundant recomputes stay under 5% per memo type. Python measured 74-99.5%.
 
-**`overflow-checks = true`** in release stays unless the bench report shows it costs more than 3%.
+**`overflow-checks = true`** in release stays unless the bench report shows it costs more than 3%. As measured in 1e-03 it cost 5-9% of a pass round, so release is built without them and the `ci` profile keeps them (see "As built in 1e-03" below).
 
 ---
 
