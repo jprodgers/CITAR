@@ -345,8 +345,8 @@ pub fn base_defense(g: &Game, d: Combatant, a: Option<Combatant>) -> f64 {
 /// for a unit whose civilization has `Great General provides double combat bonus` when the
 /// general is a great person of war.
 ///
-/// Only the units that may carry an aura are asked, and only those within the ruleset's widest
-/// aura of `at`, found on the tiles that near, or among the side's units when those are fewer.
+/// Only the side's units that may carry an aura are asked (`derive::civ::aura_units`), and only
+/// those within the ruleset's widest aura of `at`.
 fn great_general_bonus(
     g: &Game,
     ours: UnitId,
@@ -396,17 +396,12 @@ fn great_general_bonus(
             }
         }
     };
-    let radius = rules.aura_radius;
-    let area = 1 + 3 * u64::from(radius) * (u64::from(radius) + 1);
-    let side = g.state().units().of(owner).len();
-    if area < u64::try_from(side).unwrap_or(u64::MAX) {
-        // A wrapping map may show a tile twice, which the choice above does not mind.
-        g.grid().any_within(at, radius, |t| {
-            g.units_at(t).for_each(&mut consider);
-            false
-        });
-    } else {
-        g.player_units(owner).for_each(&mut consider);
+    for general in crate::game::derive::civ::aura_units(g, owner) {
+        if let Some(x) = g.unit(general)
+            && g.grid().distance(x.tile(), at) <= rules.aura_radius
+        {
+            consider(x);
+        }
     }
     let (_, general, mut bonus) = best?;
     if unit_has(g, ours, UniqueType::GreatGeneralProvidesDoubleCombatBonus, true)
@@ -713,8 +708,19 @@ pub fn wounded_ratio(g: &Game, c: Combatant) -> f64 {
 /// UnCiv's fourth-power curve, with the roll between 24 and 36.
 #[must_use]
 pub fn damage_modifier(ratio: f64, to_attacker: bool, rnd: f64) -> f64 {
+    damage_modifier_with(ratio, damage_power(ratio), to_attacker, rnd)
+}
+
+/// The part of [`damage_modifier`] that depends on the strength ratio alone, which a preview's
+/// four damages share.
+fn damage_power(ratio: f64) -> f64 {
     let stronger = if ratio >= 1.0 { ratio } else { 1.0 / ratio };
-    let mut rm = (num::pow((stronger + 3.0) / 4.0, 4.0) + 1.0) / 2.0;
+    (num::pow((stronger + 3.0) / 4.0, 4.0) + 1.0) / 2.0
+}
+
+/// [`damage_modifier`] with its [`damage_power`] given.
+fn damage_modifier_with(ratio: f64, power: f64, to_attacker: bool, rnd: f64) -> f64 {
+    let mut rm = power;
     if (to_attacker && ratio > 1.0) || (!to_attacker && ratio < 1.0) {
         rm = 1.0 / rm;
     }
@@ -749,8 +755,7 @@ impl CombatSetup {
         if self.civilian {
             return DAMAGE_TO_CIVILIAN;
         }
-        let ratio = self.attack / self.defense;
-        num::round_half_even_i32(damage_modifier(ratio, false, rnd) * self.attacker_wounds)
+        self.to_defender(rnd, self.power())
     }
 
     /// The damage the attacker takes back at roll `rnd` (`combat.damage_to_attacker`): none for
@@ -760,8 +765,47 @@ impl CombatSetup {
         if self.ranged || self.civilian {
             return 0;
         }
+        self.to_attacker(rnd, self.power())
+    }
+
+    /// The damage each side takes at the lowest roll and at the highest, `([to the defender],
+    /// [to the attacker])`, as [`damage_to_defender`](Self::damage_to_defender) and
+    /// [`damage_to_attacker`](Self::damage_to_attacker) give them, with the power of the
+    /// strength ratio worked out once for the four.
+    #[must_use]
+    pub fn damage_range(&self) -> ([i32; 2], [i32; 2]) {
+        let power = self.power();
+        (
+            [self.to_defender(0.0, power), self.to_defender(1.0, power)],
+            [self.to_attacker(0.0, power), self.to_attacker(1.0, power)],
+        )
+    }
+
+    /// The [`damage_power`] of the strength ratio.
+    fn power(&self) -> f64 {
+        damage_power(self.attack / self.defense)
+    }
+
+    /// [`damage_to_defender`](Self::damage_to_defender) with the ratio's `power` given.
+    fn to_defender(&self, rnd: f64, power: f64) -> i32 {
+        if self.civilian {
+            return DAMAGE_TO_CIVILIAN;
+        }
         let ratio = self.attack / self.defense;
-        num::round_half_even_i32(damage_modifier(ratio, true, rnd) * self.defender_wounds)
+        num::round_half_even_i32(
+            damage_modifier_with(ratio, power, false, rnd) * self.attacker_wounds,
+        )
+    }
+
+    /// [`damage_to_attacker`](Self::damage_to_attacker) with the ratio's `power` given.
+    fn to_attacker(&self, rnd: f64, power: f64) -> i32 {
+        if self.ranged || self.civilian {
+            return 0;
+        }
+        let ratio = self.attack / self.defense;
+        num::round_half_even_i32(
+            damage_modifier_with(ratio, power, true, rnd) * self.defender_wounds,
+        )
     }
 
     /// A setup of two units with no modifiers and the numbers given, for tests of the damage

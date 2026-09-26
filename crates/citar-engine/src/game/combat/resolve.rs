@@ -310,10 +310,11 @@ pub fn preview_of_from(
     let d = validate_attack_from(g, u, from, t)?;
     let a = Combatant::Unit(u);
     let setup = strength::setup(g, a, from, d, false);
+    let (damage_to_defender, damage_to_attacker) = setup.damage_range();
     Ok(Preview {
         ranged: combatant::is_ranged(g, a),
-        damage_to_defender: [setup.damage_to_defender(0.0), setup.damage_to_defender(1.0)],
-        damage_to_attacker: [setup.damage_to_attacker(0.0), setup.damage_to_attacker(1.0)],
+        damage_to_defender,
+        damage_to_attacker,
         defender_hp: combatant::hp(g, d),
         city_down: matches!(d, Combatant::City(_)) && combatant::defeated(g, d),
         setup,

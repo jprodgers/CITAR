@@ -32,9 +32,10 @@ const SAMPLE: u64 = 200;
 /// moves a revision more often than before shows here. A memo whose count falls may have its
 /// line lowered; one newly over a line says which write over-bumps (or, after a rule change that
 /// plays the soak's games differently, that the line should be recorded again).
-const RECORDED: [(&str, u64); 25] = [
+const RECORDED: [(&str, u64); 26] = [
     ("derive::buildable::buildable", 1_030),
     ("derive::buildable::civ_requirements", 1_040),
+    ("derive::civ::aura_units", 1_560),
     ("derive::civ::city_local_full", 2_850),
     ("derive::civ::civ_index", 1_180),
     ("derive::civ::civ_index_full", 540),

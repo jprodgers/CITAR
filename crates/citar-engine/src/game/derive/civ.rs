@@ -18,6 +18,8 @@
 //!   resources the supply has some of ([`Csr::merged`]);
 //! - the era (per civilization, `research.player_era`), which era conditionals read once per
 //!   unique, and the tiles it owns (`economy.owned_tiles`), which route upkeep walks;
+//! - the units of a civilization that may carry a great general's aura (`aura_units`), which
+//!   every fight asks about;
 //! - `CityLocal` (per city): its buildings' uniques that hold in it alone. `CityLocalFull` adds
 //!   those of the resources its improved tiles give, of the ones its owner's supply has some of
 //!   (the Marble decision, DESIGN.md 5.12); the supply's own view reads `CityLocal`, so the
@@ -65,6 +67,8 @@ struct CivMemos {
     era: CopyMemo<Option<EraId>>,
     /// The tiles it owns, in map order.
     owned: Memo<Vec<TileIdx>>,
+    /// Its units that may carry a great general's aura.
+    auras: Memo<Vec<UnitId>>,
 }
 
 /// The memos of one city.
@@ -316,6 +320,28 @@ pub(crate) fn owned_tiles(g: &Game, p: PlayerId) -> Option<Ref<'_, Vec<TileIdx>>
     ))
 }
 
+/// The units of civilization `p` that may carry a great general's aura, in the order of its
+/// units: those whose base unit or promotions the ruleset lets carry `[n]% Strength bonus for
+/// [units] units within [n] tiles` (`CombatRules::aura`). Valid while its `roster` (which units
+/// it has, and of which base unit) stands, and when a promotion may carry an aura the global
+/// `units_core` (any unit's promotions) too. A fighter asks its side's few carriers for their
+/// aura instead of looking on every tile within the widest aura's reach, and most sides have
+/// none (package 1e-03).
+pub(crate) fn aura_units(g: &Game, p: PlayerId) -> SmallVec<[UnitId; 8]> {
+    let aura = &g.rules.derived().combat.aura;
+    let compute = || -> Vec<UnitId> {
+        g.player_units(p).filter(|u| aura.may(u.base, &u.promotions)).map(|u| u.id()).collect()
+    };
+    let Some(m) = g.dv.civ.civs.get(p) else { return compute().into_iter().collect() };
+    let revs = &g.dv.revs;
+    let inputs = || {
+        let roster = revs.civ(p).roster;
+        if aura.promotions.is_empty() { roster } else { roster.max(revs.units_core) }
+    };
+    let units = m.auras.get(revs.now(), inputs, compute);
+    units.iter().copied().collect()
+}
+
 /// The latest revision of what civilization `p`'s supply is computed from, for a memo last
 /// verified at `verified`: its index's inputs (its techs among them, which reveal resources and
 /// allow improvements), the units it has, its cities, their buildings, religions and the tiles
@@ -535,6 +561,12 @@ pub fn verify(g: &Game) -> Vec<String> {
         }
         if owned_tiles(g, p).as_deref() != owned_tiles(&cold, p).as_deref() {
             out.push(format!("player {}: the tiles it owns differ from a cold rebuild", p.0));
+        }
+        if aura_units(g, p) != aura_units(&cold, p) {
+            out.push(format!(
+                "player {}: the units that may carry an aura differ from a cold rebuild",
+                p.0
+            ));
         }
     }
     for city in g.st.cities().iter() {
