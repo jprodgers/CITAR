@@ -251,7 +251,7 @@ pub fn tool(name: &str) -> Option<&'static ToolSpec> {
             .enumerate()
             .map(|(i, t)| (t.name(), u8::try_from(i).unwrap_or(u8::MAX)))
             .collect();
-        v.sort_unstable();
+        v.sort();
         v
     });
     let at = index.binary_search_by(|&(n, _)| n.cmp(name)).ok()?;
@@ -1043,7 +1043,7 @@ mod tests {
         // The queries come first, as tools.py registered them.
         assert!(TOOLS[..21].iter().all(|t| t.kind() == ToolKind::Query));
         let mut names: Vec<&str> = TOOLS.iter().map(ToolSpec::name).collect();
-        names.sort_unstable();
+        names.sort();
         names.dedup();
         assert_eq!(names.len(), 61, "no name twice");
         for t in &TOOLS {

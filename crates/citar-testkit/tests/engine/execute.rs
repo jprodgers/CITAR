@@ -222,11 +222,6 @@ fn every_refusal_reads_as_a_sentence_and_changes_nothing() {
             }
         }
     }
-    if let Ok(path) = std::env::var("CITAR_REFUSALS_DUMP") {
-        let all: Vec<&String> = texts.iter().collect();
-        #[allow(clippy::disallowed_methods, reason = "a dump asked for by name")]
-        std::fs::write(path, serde_json::to_string_pretty(&all).unwrap_or_default()).expect("dump");
-    }
     broken.sort();
     broken.dedup();
     assert!(
