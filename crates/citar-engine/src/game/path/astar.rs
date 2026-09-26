@@ -437,6 +437,20 @@ impl PathScratch {
         self.closed.clear();
     }
 
+    /// Forgets whose looks the cells hold, so that the next search looks at every tile again, as
+    /// the first search after a write does (feature `test-ops`, for the benchmark of a search
+    /// that reads no earlier search's looks).
+    #[cfg(feature = "test-ops")]
+    pub(crate) fn forget_looks(&mut self) {
+        self.look_key = None;
+    }
+
+    /// How many tiles the last search closed (feature `test-ops`).
+    #[cfg(feature = "test-ops")]
+    pub(crate) fn closed_count(&self) -> usize {
+        self.closed.len()
+    }
+
     /// The cell of tile `t`, emptied first if an earlier search wrote it.
     #[inline]
     fn cell(&mut self, t: TileIdx) -> &mut Cell {

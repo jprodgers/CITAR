@@ -10,7 +10,7 @@
 //!
 //! Parts: `advisor` (every city of the small t200 state, else the late fixture), `barbarians`
 //! (stage S0 of the small raging t120 state, else the committed raging t50, each on a fresh
-//! copy), `astar` (the three small maps' searches of `astar_small_30`), `combat` (every preview of
+//! copy), `astar` (the three small maps' searches, each looking at every tile afresh), `combat` (every preview of
 //! the standard t120 fixture), `pass_round` (the late fixture, or the state named by a third
 //! argument `<case>/t<turn>` of the committed fixtures or the corpus, each on a fresh copy after
 //! one round), `load` (the late fixture's save loaded), `digest` (its digest), `vis` (a step of
@@ -129,6 +129,8 @@ fn main() {
             run(n, || {
                 for (i, u, ts) in &jobs {
                     for &t in ts {
+                        // Each search looks at every tile afresh, as `astar_small_30` times it.
+                        games[*i].forget_path_looks_for_bench();
                         black_box(Mover::unit(&games[*i], *u).and_then(|m| m.find_path(t, 40)));
                     }
                 }
