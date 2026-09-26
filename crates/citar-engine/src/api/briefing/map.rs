@@ -131,14 +131,14 @@ fn unit_code(g: &Game, viewer: PlayerId, t: TileIdx) -> Option<u8> {
 }
 
 /// One axis of the window: clamped at an edge, or running across a wrapping seam
-/// (`briefing.py:65-69`).
+/// (`briefing.py:65-69`). The centre is on the map and the radius at most [`MAX_RADIUS`] times
+/// two, but the sums saturate all the same, so no centre a host passes can overflow them.
 const fn span(c: i32, r: i32, n: i32, wraps: bool) -> (i32, i32) {
+    let (lo, hi) = (c.saturating_sub(r), c.saturating_add(r));
     if wraps && 2 * r + 1 < n {
-        (c - r, c + r)
-    } else {
-        let lo = if c - r > 0 { c - r } else { 0 };
-        let hi = if c + r < n - 1 { c + r } else { n - 1 };
         (lo, hi)
+    } else {
+        (if lo > 0 { lo } else { 0 }, if hi < n - 1 { hi } else { n - 1 })
     }
 }
 
@@ -146,8 +146,10 @@ const fn span(c: i32, r: i32, n: i32, wraps: bool) -> (i32, i32) {
 /// window's rows, `radius` above and below the centre and twice as many columns each side, then
 /// what the viewer sees in it: cities, units, natural wonders and resources.
 ///
-/// `centre` is the viewer's anchor when not given; `radius` is held between [`MIN_RADIUS`] and
-/// [`MAX_RADIUS`]. Empty for a player the game lacks.
+/// `centre` is the viewer's anchor when not given or not on the map (where Python drew an empty
+/// window, or failed; `get_map` refuses such a centre before it asks), and a centre past a
+/// wrapping edge is read across it; `radius` is held between [`MIN_RADIUS`] and [`MAX_RADIUS`].
+/// Empty for a player the game lacks.
 #[must_use]
 pub fn ascii_map(g: &Game, pid: PlayerId, centre: Option<(i32, i32)>, radius: i64) -> String {
     let (mut out, entries) = ascii_map_parts(g, pid, centre, radius);
@@ -171,7 +173,8 @@ pub(super) fn ascii_map_parts(
     let r = g.rules();
     let grid = g.grid();
     let vis = g.derived().vis();
-    let (cx, cy) = centre.unwrap_or_else(|| g.xy(anchor(g, pid).unwrap_or(TileIdx(0))));
+    let at = centre.and_then(|(x, y)| grid.wrap(x, y)).or_else(|| anchor(g, pid));
+    let (cx, cy) = g.xy(at.unwrap_or(TileIdx(0)));
     // Within 2..=20, so the casts are exact.
     let radius = i32::try_from(radius.clamp(MIN_RADIUS, MAX_RADIUS)).unwrap_or(8);
     let (w, h) = (i32::from(grid.width()), i32::from(grid.height()));

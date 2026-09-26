@@ -5,6 +5,7 @@
 use serde_json::Value;
 
 use super::map::where_from;
+use crate::api::views::tiles::Known;
 use crate::base::ids::{PlayerId, TechId, UnitId};
 use crate::base::py;
 use crate::game::cities::borders::within_order;
@@ -34,8 +35,8 @@ pub(super) fn needs_orders(g: &Game, u: UnitId) -> bool {
 /// The options of each unit of `units` that needs orders, the first [`UNITS_SHOWN`] of them
 /// (`briefing._unit_options`): the actions it may take, where it could found a city, what it
 /// could build where it stands, what it could attack and at what cost, its promotions, the ruins
-/// and camps near it, and, for a military unit with nothing to attack, how much is unexplored
-/// around it.
+/// and camps near it that the reader knows of, and, for a military unit with nothing to attack,
+/// how much is unexplored around it.
 pub(super) fn unit_options(g: &Game, pid: PlayerId, units: &[UnitId]) -> Vec<String> {
     let idle: Vec<UnitId> = units.iter().copied().filter(|&u| needs_orders(g, u)).collect();
     if idle.is_empty() {
@@ -45,6 +46,7 @@ pub(super) fn unit_options(g: &Game, pid: PlayerId, units: &[UnitId]) -> Vec<Str
     let r = g.rules();
     let known = &r.derived().known;
     let explored = |t: crate::base::ids::TileIdx| pl.explored.contains(t.0);
+    let vis = g.derived().vis();
     let mut out = vec!["\nOPTIONS FOR UNITS NEEDING ORDERS:".to_owned()];
     for u in idle.into_iter().take(UNITS_SHOWN) {
         let Some(x) = g.unit(u) else { continue };
@@ -114,12 +116,17 @@ pub(super) fn unit_options(g: &Game, pid: PlayerId, units: &[UnitId]) -> Vec<Str
         }
         let mut around = g.grid().within(at, 6);
         around.sort_by_key(|&t| within_order(g, at, t));
+        // The ruins and camps as the reader knows them, as its map and points of interest show
+        // them: a camp raised in the fog since it looked is not there for it, and one it saw is
+        // until it looks again. Python read what stood there now.
+        // refcheck: briefing-nearby-reads-what-it-knows
         let near: Vec<String> = around
             .iter()
             .skip(1)
             .filter(|&&t| explored(t))
             .filter_map(|&t| {
-                let imp = g.tile(t)?.improvement()?;
+                let tile = g.tile(t)?;
+                let imp = Known::of(g, t, tile, Some(pid), vis.sees(pid, t)).improvement?;
                 if Some(imp) == known.ancient_ruins {
                     Some(format!("ancient ruins {}", where_from(g, at, t)))
                 } else if Some(imp) == known.barbarian_camp {

@@ -5,12 +5,14 @@
 //! Package 1d-03 answers it with `Game::briefing` and `Game::turn_progress`.
 //!
 //! A briefing is a hundred lines of prose, so both texts, Python's and Rust's, are read into the
-//! same structure before they are compared ([`structure`]): its sections, a city's line by field
-//! (its yields, growth, what it builds and for how many turns), a unit's by field (its orders and
-//! its health), an idle city's options item by item (cost and turns), and the lists a line holds
-//! (the policies, the alerts, what the local map shows, the points of interest, the city-states,
-//! the deals) as lists. A difference is then reported where it is, a number as a number, and an
-//! explanation can name the field it explains. The lists whose order is no rule (the policies, a
+//! same structure before they are compared ([`structure`]): its sections, the line of whose turn
+//! it is by field, a city's line by field (its yields, growth, what it builds and for how many
+//! turns), a unit's by field (its orders and its health), a unit's options (its orders, and the
+//! ruins and camps near it apart), an idle city's options item by item (cost and turns), and the
+//! lists a line holds (the policies, the alerts, what the local map shows with each owner apart,
+//! the points of interest, the city-states by field with the ally apart, the deals) as lists. A
+//! difference is then reported where it is, a number as a number, and an explanation can name
+//! the field it explains, so one that explains a name hides nothing else on its line. The lists whose order is no rule (the policies, a
 //! religion's beliefs, a city's specialists, the civilizations met) compare as sets
 //! (`compare::spec`), and so do the alerts and the points of interest, so that one more or less
 //! is reported as itself. A line that does not read as expected is kept whole where it stands,
@@ -127,10 +129,54 @@ fn option_item() -> &'static Regex {
     })
 }
 
+fn turn_line() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^=== TURN (\d+)/(\d+) \(([^)]*)\) — (.*) \(player (\d+), ([^)]*)\) — (.*?) — (.*) ===$",
+        )
+        .unwrap_or_else(|e| unreachable!("a fixed pattern: {e}"))
+    })
+}
+
 fn unit_entry() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^(unit #\d+ .*) hp (-?\d+)$")
+        Regex::new(r"^(unit #\d+ .* \(-?\d+,-?\d+\)) (.*) hp (-?\d+)$")
+            .unwrap_or_else(|e| unreachable!("a fixed pattern: {e}"))
+    })
+}
+
+fn city_entry() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(city '.*' #\d+ \(-?\d+,-?\d+\)) owner (.*) pop (-?\d+)$")
+            .unwrap_or_else(|e| unreachable!("a fixed pattern: {e}"))
+    })
+}
+
+fn resource_entry() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^(resource .* \(-?\d+,-?\d+\))(?: \((?:owned by (.*?)|(yours))\))?(?:, improved: (.*))?$",
+        )
+        .unwrap_or_else(|e| unreachable!("a fixed pattern: {e}"))
+    })
+}
+
+fn city_state_entry() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(.*) #(\d+) \(([^,]*), ([^,]*), influence (-?\d+)(?:, ally (.*))?\)$")
+            .unwrap_or_else(|e| unreachable!("a fixed pattern: {e}"))
+    })
+}
+
+fn unit_option_line() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^  (\[#\d+\] .* \(-?\d+,-?\d+\)): (.*)$")
             .unwrap_or_else(|e| unreachable!("a fixed pattern: {e}"))
     })
 }
@@ -235,12 +281,84 @@ fn city_option(line: &str) -> Value {
     Value::Object(m)
 }
 
-/// An entry of what the local map shows: a unit's with its health apart.
+/// An entry of what the local map shows, its owner apart: a unit's with its health, a city's
+/// with its size, a resource's with its improvement; a natural wonder's as it is.
 fn window_entry(e: &str) -> Value {
-    match unit_entry().captures(e) {
-        Some(c) => json!({"unit": &c[1], "hp": number(&c[2])}),
-        None => json!(e),
+    if let Some(c) = unit_entry().captures(e) {
+        return json!({"unit": &c[1], "owner": &c[2], "hp": number(&c[3])});
     }
+    if let Some(c) = city_entry().captures(e) {
+        return json!({"city": &c[1], "owner": &c[2], "pop": number(&c[3])});
+    }
+    if let Some(c) = resource_entry().captures(e) {
+        let mut m = Map::new();
+        m.insert("resource".into(), json!(&c[1]));
+        if let Some(owner) = c.get(2).or_else(|| c.get(3)) {
+            m.insert("owner".into(), json!(owner.as_str()));
+        }
+        if let Some(imp) = c.get(4) {
+            m.insert("improved".into(), json!(imp.as_str()));
+        }
+        return Value::Object(m);
+    }
+    json!(e)
+}
+
+/// The line of whose turn it is, by field: the turn, the year, the reader, its era, and whose
+/// turn it is (`YOUR TURN`, or who it waits for); the line itself if it does not read so.
+fn turn(line: &str) -> Value {
+    match turn_line().captures(line) {
+        Some(c) => json!({
+            "turn": number(&c[1]),
+            "total": number(&c[2]),
+            "year": &c[3],
+            "name": &c[4],
+            "player": number(&c[5]),
+            "nation": &c[6],
+            "era": &c[7],
+            "note": &c[8],
+        }),
+        None => json!(line),
+    }
+}
+
+/// A city-state the reader has met, by field: its name and id, type, relationship, influence
+/// and ally, or the entry itself if it does not read so.
+fn city_state(e: &str) -> Value {
+    let Some(c) = city_state_entry().captures(e) else { return json!(e) };
+    let mut m = Map::new();
+    m.insert("name".into(), json!(&c[1]));
+    m.insert("id".into(), number(&c[2]));
+    m.insert("type".into(), json!(&c[3]));
+    m.insert("status".into(), json!(&c[4]));
+    m.insert("influence".into(), number(&c[5]));
+    if let Some(ally) = c.get(6) {
+        m.insert("ally".into(), json!(ally.as_str()));
+    }
+    Value::Object(m)
+}
+
+/// A unit's options: which unit, its orders (each kind of option a model may give it, in
+/// order; none when the line offers only the plain moves) and the ruins and camps near it,
+/// apart; or the line itself if it does not read so.
+fn unit_option(line: &str) -> Value {
+    let Some(c) = unit_option_line().captures(line) else { return json!(line) };
+    let mut m = Map::new();
+    m.insert("unit".into(), json!(&c[1]));
+    let what = &c[2];
+    let mut orders = Vec::new();
+    if what != "move_unit, fortify, sleep or skip" {
+        for bit in what.split(" | ") {
+            match bit.strip_prefix("nearby: ") {
+                Some(near) => {
+                    m.insert("nearby".into(), json!(near));
+                }
+                None => orders.push(json!(bit)),
+            }
+        }
+    }
+    m.insert("orders".into(), Value::Array(orders));
+    Value::Object(m)
 }
 
 /// Pushes `v` onto the list under `key`, making it.
@@ -253,6 +371,10 @@ fn push(m: &mut Map<String, Value>, key: &str, v: Value) {
 /// The head's lines: the empire's line of luxuries, score and policies, and the religion's, by
 /// field; the rest as they are.
 fn head_line(m: &mut Map<String, Value>, line: &str) {
+    if line.starts_with("=== TURN ") && !m.contains_key("turn") {
+        m.insert("turn".into(), turn(line));
+        return;
+    }
     if let Some(rest) = line.strip_prefix("Luxuries: ") {
         let segs: Vec<&str> = rest.split(" · ").collect();
         if let [lux, score, pol] = segs.as_slice()
@@ -278,7 +400,7 @@ fn head_line(m: &mut Map<String, Value>, line: &str) {
 /// A line of the diplomacy section, filed by what it is.
 fn diplomacy_line(m: &mut Map<String, Value>, line: &str) {
     if let Some(cs) = line.strip_prefix("  City-states: ") {
-        m.insert("city_states".into(), parts(cs, "; "));
+        m.insert("city_states".into(), cs.split("; ").map(city_state).collect());
     } else if let Some(d) = line.strip_prefix("  Active deals: ") {
         m.insert("deals".into(), parts(d, " | "));
     } else if line.starts_with("  - player ") || line.starts_with("  You have not met") {
@@ -323,6 +445,7 @@ pub fn structure(text: &str) -> Value {
             }
             Some("cities") => push(&mut m, "cities", city(line)),
             Some("units") => push(&mut m, "units", unit(line)),
+            Some("unit_options") => push(&mut m, "unit_options", unit_option(line)),
             Some("city_options") => push(&mut m, "city_options", city_option(line)),
             Some("map") => {
                 if let Some(rest) = line.strip_prefix("Also in this window: ") {
@@ -360,16 +483,29 @@ mod tests {
             \n\
             UNITS (1) — '*' = needs orders:\n  * [#93] Worker (12,19) moves 2.0/2.0 · automate · hp 0, embarked\n\
             \n\
+            OPTIONS FOR UNITS NEEDING ORDERS:\n  [#93] Worker (12,19): build here: Farm (5t); or unit_order automate | nearby: ancient ruins (13,19) 1 tiles E\n  [#94] Great General (1,2): move_unit, fortify, sleep or skip\n\
+            \n\
             LOCAL MAP (legend: get_map legend=true):\nMap around (12,19), x 2-22, y 14-24:\ny=14   G.\n\
-            Also in this window: city 'Moscow' #16 (12,19) owner Russia pop 5; unit #115 Spearman (13,19) Barbarians hp 100\n\
+            Also in this window: city 'Moscow' #16 (12,19) owner Russia pop 5; unit #115 Spearman (13,19) Barbarians hp 100; resource Iron x2 (14,19) (owned by Unknown Civilization), improved: Mine; resource Wheat (15,19) (yours); resource Deer (16,19); natural wonder Krakatoa (17,19)\n\
             Known points of interest (from your capital/first unit): a; b\n\
             \n\
-            DIPLOMACY:\n  - player 1 Iroquois (Iroquois): peace; score 146; 2 cities\n  City-states: Almaty #2 (Militaristic, Neutral, influence 0)\n\
+            DIPLOMACY:\n  - player 1 Iroquois (Iroquois): peace; score 146; 2 cities\n  City-states: Almaty #2 (Militaristic, Neutral, influence 0); Kabul #3 (Cultured, Friend, influence -5, ally Unknown City-State)\n\
             \n\
             TO DO: this. Call end_turn when finished.\n\
             \n\
             YOUR NOTEBOOK:\nline one\n\nline two";
         let s = structure(text);
+        assert_eq!(
+            s["turn"],
+            json!({"turn": 50, "total": 330, "year": "1060 BC", "name": "Russia", "player": 0,
+                   "nation": "Russia", "era": "Ancient era", "note": "YOUR TURN"})
+        );
+        assert!(s.get("head").is_none(), "the turn's line is read by field");
+        let waiting = turn(
+            "=== TURN 7/330 (3600 BC) — A — B (player 2, Rome) — Ancient era — waiting (Unknown Civilization's turn) ===",
+        );
+        assert_eq!(waiting["name"], json!("A — B"));
+        assert_eq!(waiting["note"], json!("waiting (Unknown Civilization's turn)"));
         assert_eq!(s["empire"]["policies"], json!(["Tradition", "Aristocracy"]));
         assert_eq!(s["empire"]["score"], json!(114));
         assert_eq!(s["religion"]["beliefs"], json!(["A", "B"]));
@@ -385,12 +521,37 @@ mod tests {
         let u = &s["units"][0];
         assert_eq!((u["idle"].clone(), u["hp"].clone()), (json!(true), json!(0)));
         assert_eq!(u["extra"], json!(["embarked"]));
-        assert_eq!(s["window"][1]["hp"], json!(100));
+        assert_eq!(
+            s["unit_options"],
+            json!([
+                {"unit": "[#93] Worker (12,19)", "orders": ["build here: Farm (5t); or unit_order automate"],
+                 "nearby": "ancient ruins (13,19) 1 tiles E"},
+                {"unit": "[#94] Great General (1,2)", "orders": []},
+            ])
+        );
+        assert_eq!(
+            s["window"],
+            json!([
+                {"city": "city 'Moscow' #16 (12,19)", "owner": "Russia", "pop": 5},
+                {"unit": "unit #115 Spearman (13,19)", "owner": "Barbarians", "hp": 100},
+                {"resource": "resource Iron x2 (14,19)", "owner": "Unknown Civilization", "improved": "Mine"},
+                {"resource": "resource Wheat (15,19)", "owner": "yours"},
+                {"resource": "resource Deer (16,19)"},
+                "natural wonder Krakatoa (17,19)",
+            ])
+        );
         assert_eq!(s["poi"], json!(["a", "b"]));
-        assert_eq!(s["city_states"][0], json!("Almaty #2 (Militaristic, Neutral, influence 0)"));
+        assert_eq!(
+            s["city_states"],
+            json!([
+                {"name": "Almaty", "id": 2, "type": "Militaristic", "status": "Neutral", "influence": 0},
+                {"name": "Kabul", "id": 3, "type": "Cultured", "status": "Friend", "influence": -5,
+                 "ally": "Unknown City-State"},
+            ])
+        );
         assert_eq!(s["todo"], json!("TO DO: this. Call end_turn when finished."));
         assert_eq!(s["notebook"], json!(["line one", "", "line two"]));
-        assert_eq!(s["headers"].as_array().map(Vec::len), Some(6));
+        assert_eq!(s["headers"].as_array().map(Vec::len), Some(7));
         let o = city_option(
             "  [#598] Anjar: units: Worker 46/4t | wonders: Statue of Liberty 710/59t | other: Gold, Science",
         );

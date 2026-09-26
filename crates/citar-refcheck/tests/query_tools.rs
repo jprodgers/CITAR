@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use citar_engine::api::{maps, scenario};
-use citar_engine::base::ids::{PlayerId, UnitId};
+use citar_engine::base::ids::{ImprovementId, PlayerId, UnitId};
 use citar_engine::game::Game;
+use citar_engine::mapgen::document;
 use citar_engine::rules::Ruleset;
 use citar_refcheck::Group;
 use citar_refcheck::compare::{self, CompareSpec, Diff, DiffKind, Options, Pattern};
@@ -97,9 +98,17 @@ fn unknown_owners_in_text(d: &Diff) -> bool {
     })
 }
 
-/// A great improvement Python's list let a map carry, which Rust's rule leaves to a scenario.
+/// A great improvement Python's list let a map carry, which Rust's rule leaves to a scenario: a
+/// Farm or a Mine Rust lost stays unexplained.
 fn great_improvement_dropped(d: &Diff) -> bool {
-    d.python.as_ref().is_some_and(Value::is_string) && d.rust.as_ref().is_some_and(Value::is_null)
+    let r = Ruleset::shared();
+    let great = d
+        .python
+        .as_ref()
+        .and_then(Value::as_str)
+        .and_then(|name| r.lookup::<ImprovementId>(name))
+        .is_some_and(|i| r.improvements()[i].great && !document::on_maps(r, i));
+    great && d.rust.as_ref().is_some_and(Value::is_null)
 }
 
 /// An influence Rust lists at zero, where Python's city-state kept none for that civilization

@@ -16,6 +16,9 @@
 //! - the points of interest leave out the cities of civilizations and city-states the reader
 //!   has not met, which it cannot have seen, where Python named them and their owners
 //!   (`briefing-lists-only-cities-it-could-have-seen`);
+//! - the ruins and camps a unit's options say are nearby are those the reader knows of, as its
+//!   map shows them, where Python told it of camps raised in its fog since it looked
+//!   (`briefing-nearby-reads-what-it-knows`);
 //! - the civilizations it has met are listed by player id, and its policies branch by branch,
 //!   a city's specialists and a religion's beliefs in the ruleset's order, where Python kept the
 //!   order they were met, adopted, assigned and chosen in, a history no state keeps
@@ -317,10 +320,11 @@ fn cities(g: &Game, pid: PlayerId, out: &mut Vec<String>) {
         let food = tot[Stat::Food];
         let (x, y) = g.xy(c.tile());
         let grow = if food > 0.0 {
-            // Python's -(-a // b), each side cut to an integer first.
+            // Python's -(-a // b), each side cut to an integer first. The negations saturate:
+            // a save's food store is any finite number, so `need` may be i64::MIN.
             let need = num::trunc_i64(f64::from(food_to_next_pop(g, id)) - c.food);
             let per = num::trunc_i64(food).max(1);
-            format!("grows in {}", -num::floor_div(-need, per))
+            format!("grows in {}", num::floor_div(need.saturating_neg(), per).saturating_neg())
         } else if food < 0.0 {
             "STARVING".to_owned()
         } else {
@@ -572,7 +576,7 @@ fn diplomacy(g: &Game, pid: PlayerId, out: &mut Vec<String>) {
         .chronicle()
         .messages()
         .iter()
-        .filter(|m| m.to.contains(pid) && m.turn >= turn - 1)
+        .filter(|m| m.to.contains(pid) && m.turn >= turn.saturating_sub(1))
         .collect();
     for m in &msgs[msgs.len().saturating_sub(MESSAGES_SHOWN)..] {
         out.push(format!(
