@@ -258,6 +258,7 @@ impl Game {
     #[must_use]
     pub fn empire_summary(&self, pid: PlayerId) -> Option<EmpireSummary> {
         let pl = self.player(pid)?;
+        // refcheck: empire-summary-wars-by-id
         let at_war_with = self
             .state()
             .diplo()

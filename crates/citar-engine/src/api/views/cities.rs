@@ -201,7 +201,13 @@ fn city_detail(g: &Game, c: CityId, m: &mut Map<String, Value>) {
     if !faith_only.is_empty() {
         m.insert("buy_with_faith".into(), Value::Array(faith_only));
     }
-    let tiles: Vec<Value> = economy::city_tiles(g, c)
+    // Python listed a city's tiles, and chose among equally dear ones for sale, in its `within`
+    // order.
+    let in_order = |mut ts: Vec<crate::base::ids::TileIdx>| {
+        ts.sort_by_key(|&t| borders::within_order(g, city.tile(), t));
+        ts
+    };
+    let tiles: Vec<Value> = in_order(economy::city_tiles(g, c))
         .into_iter()
         .map(|t| {
             let (x, y) = g.xy(t);
@@ -215,7 +221,7 @@ fn city_detail(g: &Game, c: CityId, m: &mut Map<String, Value>) {
         })
         .collect();
     m.insert("tiles".into(), Value::Array(tiles));
-    let mut buy: Vec<(i32, Value)> = borders::choosable_tiles(g, c)
+    let mut buy: Vec<(i32, Value)> = in_order(borders::choosable_tiles(g, c))
         .into_iter()
         .filter(|&t| borders::can_buy_tile(g, c, t).is_none())
         .map(|t| {

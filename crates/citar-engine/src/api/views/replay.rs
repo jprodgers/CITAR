@@ -24,7 +24,6 @@ use super::events::event_json;
 use super::players::kind_name;
 use crate::base::codec::b64_encode;
 use crate::game::Game;
-use crate::game::diplomacy::negotiation;
 use crate::rules::Ruleset;
 use crate::save::journal::{FrameDecoder, FullFrame};
 use crate::state::Phase;
@@ -234,7 +233,7 @@ impl Game {
             .map(|t| json!({"turn": t.turn, "player": t.player.0, "text": &*t.text, "kind": t.kind.as_deref()}))
             .collect();
         let negotiations: Vec<Value> =
-            g.negotiations().iter().map(|n| negotiation::negotiation_json(g, n)).collect();
+            g.negotiations().iter().map(|n| super::stored_negotiation(g, n)).collect();
         let deals: Vec<Value> = st.diplo().deals.iter().map(|d| deal_json(g, d)).collect();
         let clock = st.clock();
         let map = st.map();

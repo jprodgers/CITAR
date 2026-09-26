@@ -16,7 +16,6 @@ use super::players::{diplomacy_info, players_overview};
 use super::tiles::{Known, feature_names, resource_seen, route_name};
 use super::units::unit_info;
 use crate::base::ids::{PlayerId, UnitId};
-use crate::game::diplomacy::negotiation;
 use crate::game::vis::sight::unit_visible_to;
 use crate::game::{Game, movement, victory};
 use crate::rules::Ruleset;
@@ -273,7 +272,7 @@ impl Game {
                 let negs = g.negotiations();
                 let negs: Vec<Value> = negs[negs.len().saturating_sub(SPECTATOR_NEGOTIATIONS)..]
                     .iter()
-                    .map(|n| negotiation::negotiation_json(g, n))
+                    .map(|n| super::stored_negotiation(g, n))
                     .collect();
                 rest.insert("negotiations".into(), Value::Array(negs));
             }

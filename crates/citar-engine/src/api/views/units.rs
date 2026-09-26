@@ -6,6 +6,7 @@ use serde_json::{Map, Value, json};
 use super::{rule_text, xy};
 use crate::base::ids::{PlayerId, UnitId};
 use crate::base::num;
+use crate::game::cities::borders;
 use crate::game::combat::resolve;
 use crate::game::units::{self, health, promotions, upgrades};
 use crate::game::{Game, actions, automation, movement, religion, workers};
@@ -270,7 +271,10 @@ fn attack_targets(g: &Game, u: UnitId, d: &BaseUnitDef) -> Vec<Value> {
     let radius = if d.ranged { health::attack_range(g, u) } else { 1 };
     let radius = u32::try_from(radius).unwrap_or(0);
     let mut out = Vec::new();
-    for t in g.grid().within(x.tile(), radius).into_iter().skip(1) {
+    // In Python's `within` order, as it listed them.
+    let mut near = g.grid().within(x.tile(), radius);
+    near.sort_by_key(|&t| borders::within_order(g, x.tile(), t));
+    for t in near.into_iter().skip(1) {
         let Ok(Value::Object(pv)) = resolve::preview(g, u, t) else { continue };
         let (tx, ty) = g.xy(t);
         let mut m = Map::new();

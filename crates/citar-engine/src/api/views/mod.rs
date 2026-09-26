@@ -85,6 +85,25 @@ pub(crate) fn rule_text(g: &Game, u: &SourceUniques) -> Vec<String> {
         .collect()
 }
 
+/// A negotiation as Python kept it in the state (`diplomacy.py:782`), which a spectator's view and
+/// the replay hand out: `negotiation_json`'s keys, with `exchanges` (the entries in its history)
+/// and a history entry's `note` only where it has one.
+#[must_use]
+pub fn stored_negotiation(g: &Game, n: &crate::state::diplo::Negotiation) -> Value {
+    let mut v = crate::game::diplomacy::negotiation::negotiation_json(g, n);
+    if let Some(m) = v.as_object_mut() {
+        m.insert("exchanges".into(), json!(n.history.len()));
+        if let Some(Value::Array(h)) = m.get_mut("history") {
+            for e in h.iter_mut().filter_map(Value::as_object_mut) {
+                if e.get("note").is_some_and(Value::is_null) {
+                    e.shift_remove("note");
+                }
+            }
+        }
+    }
+    v
+}
+
 /// A player's name, or `""` for one the game lacks.
 pub(crate) fn name_of(g: &Game, p: PlayerId) -> &str {
     g.player(p).map_or("", |x| &x.name)
@@ -94,3 +113,6 @@ pub(crate) fn name_of(g: &Game, p: PlayerId) -> &str {
 pub(crate) fn known_name(g: &Game, viewer: PlayerId, p: PlayerId) -> Value {
     if p == viewer || g.has_met(viewer, p) { json!(name_of(g, p)) } else { json!("unknown") }
 }
+
+#[cfg(all(test, feature = "embedded-ruleset"))]
+mod tests;
