@@ -24,6 +24,16 @@
 //! - [`views`]: the game as a player sees it (`views.py`, the view side of `game.py:880-990`):
 //!   `Game::view_json`, the info builders the query tools answer from, `empire_summary`,
 //!   `standings`, `path_preview`, the alerts and `replay_data`.
+//!
+//! From package 1d-03:
+//! - [`briefing`]: what a model reads to play its turn (`briefing.py`): `Game::briefing`,
+//!   `Game::turn_progress`, the alerts as models read them and the ASCII map, which answer
+//!   `get_briefing` and `get_map`;
+//! - [`text`]: the map's legend and the rules in brief (`MAP_LEGEND`, `RULES_OVERVIEW`);
+//! - `views::rules`: the rules as `get_rules` looks them up (`views.rules_lookup`);
+//! - [`maps`]: the map editor's document checked, made blank, summed up, and taken from a game
+//!   (`maps.py:30-257`);
+//! - [`scenario`]: the scenario editor's overview, seats and summaries (`scenario.py:503-645`).
 
 pub mod briefing;
 pub mod game;

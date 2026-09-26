@@ -8,15 +8,23 @@
 //! act (`briefing.py:492-502`). Everything is `&Game`: reading a briefing changes nothing
 //! (property P8).
 //!
-//! What differs from Python, on purpose (each an entry of `tests/rules/intended.toml`, cited
-//! where it is made):
-//! - a player the reader has not met is never named: the owner of a city or a resource on a
-//!   tile it explored long ago, a city-state's ally, whose turn it is. Each is "Unknown
-//!   Civilization" or "Unknown City-State", as the events name them
-//!   (`briefing-names-only-known-players`);
-//! - the civilizations it has met are listed by player id, and its policies branch by branch in
-//!   the ruleset's order, where Python kept the order it met them and adopted them in, a history
-//!   no state keeps (`lists-in-rule-order`).
+//! What differs from Python, on purpose (each an entry of `refcheck/intended.toml` or
+//! `tests/rules/intended.toml`, cited where it is made):
+//! - a player the reader has not met is never named: whose turn it is, a city-state's ally, the
+//!   owner of a resource on a tile it explored long ago. Each is "Unknown Civilization" or
+//!   "Unknown City-State", as the events name them (`briefing-names-only-known-players`);
+//! - the points of interest leave out the cities of civilizations and city-states the reader
+//!   has not met, which it cannot have seen, where Python named them and their owners
+//!   (`briefing-lists-only-cities-it-could-have-seen`);
+//! - the civilizations it has met are listed by player id, and its policies branch by branch,
+//!   a city's specialists and a religion's beliefs in the ruleset's order, where Python kept the
+//!   order they were met, adopted, assigned and chosen in, a history no state keeps
+//!   (`lists-in-rule-order`).
+//!
+//! What the Python engine got from its own numbers, Rust gets from its own: Marble's bonus in
+//! its own city only (`marble-bonus-in-its-own-city`), a city's food as its total is
+//! (`city-view-rounds-its-own-sums`), a civilian at 1 health rather than 0
+//! (`civilians-at-zero-health`); the refcheck group `briefing` explains them where they show.
 
 use crate::api::views::alerts::{alert_items, bombard_targets};
 use crate::api::views::empire::strategic_resources;

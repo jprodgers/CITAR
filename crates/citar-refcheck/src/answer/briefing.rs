@@ -7,12 +7,14 @@
 //! A briefing is a hundred lines of prose, so both texts, Python's and Rust's, are read into the
 //! same structure before they are compared ([`structure`]): its sections, a city's line by field
 //! (its yields, growth, what it builds and for how many turns), a unit's by field (its orders and
-//! its health), and the lists a line holds (the policies, the alerts, what the local map shows,
-//! the points of interest, the civilizations met, the city-states, the deals) as lists. A
-//! difference is then reported where it is, a number as a number, and an explanation can name
-//! the field it explains. The lists whose order is no rule (the policies, a religion's beliefs, a
-//! city's specialists, the civilizations met, the alerts) compare as sets (`compare::spec`).
-//! What does not read as expected is kept as its line, under `other`, so nothing is dropped.
+//! its health), an idle city's options item by item (cost and turns), and the lists a line holds
+//! (the policies, the alerts, what the local map shows, the points of interest, the city-states,
+//! the deals) as lists. A difference is then reported where it is, a number as a number, and an
+//! explanation can name the field it explains. The lists whose order is no rule (the policies, a
+//! religion's beliefs, a city's specialists, the civilizations met) compare as sets
+//! (`compare::spec`), and so do the alerts and the points of interest, so that one more or less
+//! is reported as itself. A line that does not read as expected is kept whole where it stands,
+//! so nothing is dropped.
 
 use std::borrow::Cow;
 use std::sync::OnceLock;
