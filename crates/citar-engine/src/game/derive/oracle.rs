@@ -8,13 +8,13 @@
 //!
 //! | Memo (DESIGN.md 6.5) | Checked by |
 //! |---|---|
-//! | `CivIndex`, `ResourceSupply`, `CivIndexFull`, `CityLocal`, `FollowerIndex` (with the city's full local index, the unit profiles, the era and the owned tiles) | `derive::civ::verify`: a cold game from a clone of the state |
-//! | `CityMods`, `TileYield` (the owners' and every other viewer's), `CityHappiness`, `CityStats`, `Happiness`, `CivStats`, `Connectivity` (with unit upkeep and the supply deficit) | `derive::stats::verify`: a cold game |
+//! | `CivIndex`, `ResourceSupply`, `CivIndexFull`, `CityLocal`, `FollowerIndex` (with the city's full local index, the unit profiles, the era and the owned tiles) | `derive::civ::verify`, against the one cold game `cold` builds from a clone of the state |
+//! | `CityMods`, `TileYield` (the owners' and every other viewer's), `CityHappiness`, `CityStats`, `Happiness`, `CivStats`, `Connectivity` (with unit upkeep and the supply deficit) | `derive::stats::verify`, against the same cold game |
 //! | `SightMods`, `UnitSight`, `LosCache`, and the visibility counts and sources | `vis::verify`: sight rebuilt from the state, each unit's sight against the index, every line of sight kept against a fresh walk; then the met sets and the natural wonders found against Python's rule over what each civilization now sees |
-//! | `Buildable` (with the civilization-wide requirements) | `derive::buildable::verify` |
+//! | `Buildable` (with the civilization-wide requirements) | `derive::buildable::verify`, against the same cold game |
 //! | `JobMap` | `derive::jobs::verify` |
 //! | `DangerMap` | `derive::danger::verify` |
-//! | `CityNeighbours` (the grid of cities) and each city's religious spread | `derive::religion::verify` |
+//! | `CityNeighbours` (the grid of cities) and each city's religious spread | `derive::religion::verify`, against the same cold game |
 //! | `MoveCosts`, `Zoc`, and the unit movement profiles | `path::memo::verify` |
 //! | `RouteLayer`, and the cheapest step off the routes | here: against a cold look at the map |
 //! | the paths found at this revision | here: each against a fresh search |
@@ -34,12 +34,15 @@ impl Game {
     /// the same whether it runs or not.
     #[must_use]
     pub fn verify_caches(&self) -> Vec<String> {
+        // One cold game for every family that compares with one: its memos, computed lazily as the
+        // families ask, serve them all, so the state is cloned and each cold memo built once.
+        let cold = cold(self);
         let mut out = self.dv.verify(self.rules, &self.st);
-        out.extend(super::civ::verify(self));
+        out.extend(super::civ::verify(self, &cold));
         out.extend(crate::game::vis::verify(self));
-        out.extend(super::stats::verify(self));
-        out.extend(super::buildable::verify(self));
-        out.extend(super::religion::verify(self));
+        out.extend(super::stats::verify(self, &cold));
+        out.extend(super::buildable::verify(self, &cold));
+        out.extend(super::religion::verify(self, &cold));
         out.extend(crate::game::cities::citizens::verify(self));
         out.extend(crate::game::path::memo::verify(self));
         out.extend(super::danger::verify(self));
@@ -58,7 +61,8 @@ impl Game {
 }
 
 /// A game over a copy of `g`'s state with every cache cold and no history: what the memo
-/// families compare their validated values with.
+/// families compare their validated values with, built once for each [`Game::verify_caches`]
+/// (and by the families' own tests).
 pub(crate) fn cold(g: &Game) -> Game {
     Game::assemble(g.rules, g.st.clone(), crate::state::chronicle::Chronicle::new(), false)
 }

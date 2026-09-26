@@ -286,13 +286,15 @@ pub(crate) fn buildable(g: &Game, c: CityId) -> Ref<'_, Buildable> {
 
 /// Every city's list and every civilization's requirements, validated, against a cold rebuild
 /// from the same state: one line for each that disagrees (the cache oracle, DESIGN.md 9.4).
+///
+/// `cold` is a game over a copy of `g`'s state with every cache cold, which the oracle builds once
+/// for all the families that compare with one.
 #[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
-pub fn verify(g: &Game) -> Vec<String> {
-    let cold = super::oracle::cold(g);
+pub fn verify(g: &Game, cold: &Game) -> Vec<String> {
     let mut out = Vec::new();
     for p in g.st.players().ids() {
-        let (warm, fresh) = (civ_requirements(g, p), civ_requirements(&cold, p));
+        let (warm, fresh) = (civ_requirements(g, p), civ_requirements(cold, p));
         if warm.as_deref() != fresh.as_deref() {
             out.push(format!(
                 "player {}: its building requirements differ from a cold rebuild",
@@ -306,7 +308,7 @@ pub fn verify(g: &Game) -> Vec<String> {
             out.push(format!("city {}: no buildable list", c.get()));
             continue;
         }
-        if *buildable(g, c) != *buildable(&cold, c) {
+        if *buildable(g, c) != *buildable(cold, c) {
             out.push(format!("city {}: its buildable list differs from a cold rebuild", c.get()));
         }
     }
@@ -359,7 +361,8 @@ mod tests {
         let _touched = g.city_mut(roma, CityTouch::WORK).is_some();
         g.settle();
         assert_eq!(moved(&before, &recomputes(&g)), [antium], "only the city that changed");
-        assert!(verify(&g).is_empty(), "{:?}", verify(&g));
+        let found = verify(&g, &crate::game::derive::oracle::cold(&g));
+        assert!(found.is_empty(), "{found:?}");
         // Rome can build the National Epic but for its Monuments: whether each of its cities has
         // one, and which are puppets, is asked once for Rome rather than by every list.
         let techs: Vec<_> = g.rules.techs().ids().collect();
@@ -376,7 +379,8 @@ mod tests {
         sibling_changes(&mut g);
         g.settle();
         assert_eq!(moved(&before, &recomputes(&g)), [antium], "only the city that changed");
-        assert!(verify(&g).is_empty(), "{:?}", verify(&g));
+        let found = verify(&g, &crate::game::derive::oracle::cold(&g));
+        assert!(found.is_empty(), "{found:?}");
         // Roma has a Monument and Antium becomes a puppet: every city that counts has one now,
         // and Rome's lists move with the answer.
         if let Some(x) = g.city_mut(roma, CityTouch::BUILDINGS) {
@@ -390,7 +394,8 @@ mod tests {
         g.settle();
         assert_eq!(moved(&before, &recomputes(&g)), [roma, antium]);
         assert!(buildable(&g, roma).wonders.contains(epic));
-        assert!(verify(&g).is_empty(), "{:?}", verify(&g));
+        let found = verify(&g, &crate::game::derive::oracle::cold(&g));
+        assert!(found.is_empty(), "{found:?}");
         assert!(g.take_violations().is_empty());
     }
 }

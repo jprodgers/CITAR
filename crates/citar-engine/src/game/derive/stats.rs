@@ -989,21 +989,23 @@ pub fn unit_supply_penalty(g: &Game, p: PlayerId) -> f64 {
 /// Every memo of this module, validated, against a cold rebuild from the same state: one line
 /// for each that disagrees. The table of yields for other viewers and cities is walked entry by
 /// entry.
+///
+/// `cold` is a game over a copy of `g`'s state with every cache cold, which the oracle builds once
+/// for all the families that compare with one.
 #[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
-pub fn verify(g: &Game) -> Vec<String> {
-    let cold = super::oracle::cold(g);
+pub fn verify(g: &Game, cold: &Game) -> Vec<String> {
     let mut out = Vec::new();
     for (t, tile) in g.st.tiles().iter() {
         let (viewer, city) = (tile.owner(), tile.city());
-        let (a, b) = (tile_yield(g, t, viewer, city), tile_yield(&cold, t, viewer, city));
+        let (a, b) = (tile_yield(g, t, viewer, city), tile_yield(cold, t, viewer, city));
         if !a.bit_eq(&b) {
             out.push(format!("tile {t}: its yield {a:?} differs from a cold rebuild {b:?}"));
         }
     }
     let seen: Vec<Viewing> = g.dv.stats.other.borrow().keys().copied().collect();
     for (t, viewer, city) in seen {
-        let (a, b) = (tile_yield(g, t, viewer, city), tile_yield(&cold, t, viewer, city));
+        let (a, b) = (tile_yield(g, t, viewer, city), tile_yield(cold, t, viewer, city));
         if !a.bit_eq(&b) {
             out.push(format!(
                 "tile {t} seen by {viewer:?} worked by {city:?}: its yield {a:?} differs from a \
@@ -1018,36 +1020,36 @@ pub fn verify(g: &Game) -> Vec<String> {
             continue;
         }
         let mods = city_mods(g, c).map(|x| x.clone());
-        if mods != city_mods(&cold, c).map(|x| x.clone()) {
+        if mods != city_mods(cold, c).map(|x| x.clone()) {
             out.push(format!("city {}: its tile modifiers differ from a cold rebuild", c.get()));
         }
-        if !city_base(g, c).bit_eq(&city_base(&cold, c)) {
+        if !city_base(g, c).bit_eq(&city_base(cold, c)) {
             out.push(format!("city {}: its base yields differ from a cold rebuild", c.get()));
         }
-        if !city_parts(g, c).bit_eq(&city_parts(&cold, c)) {
+        if !city_parts(g, c).bit_eq(&city_parts(cold, c)) {
             out.push(format!(
                 "city {}: its happiness and parts differ from a cold rebuild",
                 c.get()
             ));
         }
-        if !city_stats(g, c).bit_eq(&city_stats(&cold, c)) {
+        if !city_stats(g, c).bit_eq(&city_stats(cold, c)) {
             out.push(format!("city {}: its stats differ from a cold rebuild", c.get()));
         }
     }
     for p in g.st.players().ids() {
-        if !happiness(g, p).bit_eq(&happiness(&cold, p)) {
+        if !happiness(g, p).bit_eq(&happiness(cold, p)) {
             out.push(format!("player {}: its happiness differs from a cold rebuild", p.0));
         }
-        if !civ_stats(g, p).bit_eq(&civ_stats(&cold, p)) {
+        if !civ_stats(g, p).bit_eq(&civ_stats(cold, p)) {
             out.push(format!("player {}: its stats differ from a cold rebuild", p.0));
         }
-        if unit_upkeep(g, p) != unit_upkeep(&cold, p) {
+        if unit_upkeep(g, p) != unit_upkeep(cold, p) {
             out.push(format!("player {}: its unit upkeep differs from a cold rebuild", p.0));
         }
-        if *connectivity(g, p) != *connectivity(&cold, p) {
+        if *connectivity(g, p) != *connectivity(cold, p) {
             out.push(format!("player {}: its connectivity differs from a cold rebuild", p.0));
         }
-        if unit_supply_deficit(g, p) != unit_supply_deficit(&cold, p) {
+        if unit_supply_deficit(g, p) != unit_supply_deficit(cold, p) {
             out.push(format!("player {}: its supply deficit differs from a cold rebuild", p.0));
         }
     }
