@@ -343,9 +343,10 @@ pub fn refusal_rule_broken(g: &Game, args: &Value, text: &str) -> Option<&'stati
 
 /// Whether a name the game keeps and its refusals quote, which callers may set, holds the word
 /// `None`: a civilization's or its leader's (`set_civ_name`), a city's, a unit's or a religion's
-/// (`found_religion`'s name, which a unit's actions quote as "Spread <name>"), set from a value
-/// that held a null, as Python's `str` writes it. Names only: the state keeps the word of its
-/// own elsewhere (a spy with nothing to do has the action `None`).
+/// (the name `found_religion` was given, which a refusal to spread the religion where it is
+/// followed already quotes), set from a value that held a null, as Python's `str` writes it.
+/// Names only: the state keeps the word of its own elsewhere (a spy with nothing to do has the
+/// action `None`).
 #[must_use]
 pub fn holds_none(g: &Game) -> bool {
     let none = |s: &str| !citar_engine::base::text::find_word(s, "None").is_empty();
