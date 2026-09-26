@@ -1,9 +1,10 @@
 //! The views (package 1d-02), with every check on.
 //!
 //! - Gate 3: the replay's frames. A hundred-turn arena game played by random agents, saved and
-//!   loaded halfway: `replay_data(Full)` holds, frame by frame, the frames captured from the state
-//!   as each round ended, in Python's shape; its last frame is the map of the state as the game
-//!   ends, rebuilt here as `victory.record_frame` built it; and `replay_data(Delta)`'s records
+//!   loaded halfway: `replay_data(Full)` holds, frame by frame, the map of the state as each round
+//!   recorded its frame, rebuilt here from the state itself as `victory.record_frame` built it
+//!   (through `records::on_frame_for_test`, not the engine's capture), and the frames the engine
+//!   captured; its last frame is the state as the game ends; and `replay_data(Delta)`'s records
 //!   decode back to the captured frames.
 //! - A view is a read: it changes neither the game nor its digest, and the bytes `view_json`
 //!   writes are the view.
@@ -25,6 +26,7 @@ use citar_engine::state::players::DriverMemory;
 use citar_testkit::agents::RandomAgent;
 use citar_testkit::script::{map_doc, new_game};
 use serde_json::{Map, Value, json};
+use std::cell::RefCell;
 
 fn clean(g: &mut Game) {
     let v = g.take_violations();
@@ -94,44 +96,42 @@ fn python_frame(f: &FullFrame, units: &[Box<str>]) -> Value {
     })
 }
 
-/// The last frame checked against the state itself, as `record_frame` read it: each tile's
-/// owner, improvement, route and top feature but hills, by the replay's names; the cities, the
-/// units and what each major has explored.
-fn check_against_the_state(g: &Game, replay: &Value, frame: &Value) {
+/// The map of the state as a frame shows it, read from the state itself as
+/// `victory.record_frame` read it: each tile's owner, improvement, route and top feature but
+/// hills (the improvement and the feature by name), the cities, the units and what each major has
+/// explored, with the id of the last event so far.
+struct StateFrame {
+    turn: i32,
+    owner: Vec<u8>,
+    improvement: Vec<Option<String>>,
+    route: Vec<u8>,
+    feature: Vec<Option<String>>,
+    cities: Value,
+    units: Value,
+    explored: Map<String, Value>,
+    last_event: u32,
+}
+
+std::thread_local! {
+    /// The state's frames as each round recorded one, on this thread.
+    static REBUILT: RefCell<Vec<StateFrame>> = const { RefCell::new(Vec::new()) };
+}
+
+fn state_frame(g: &Game) -> StateFrame {
+    use citar_engine::base::codec::b64_encode;
     let r = g.rules();
-    let names = |key: &str| -> Vec<String> {
-        replay[key]
-            .as_array()
-            .expect("names")
-            .iter()
-            .map(|n| n.as_str().unwrap_or("").to_owned())
-            .collect()
-    };
-    let (imps, feats) = (names("improvement_ids"), names("feature_ids"));
-    let (owner, imp, route, feat) = (
-        b64(&frame["owner"]),
-        b64(&frame["improvement"]),
-        b64(&frame["route"]),
-        b64(&frame["feature"]),
-    );
-    for (t, tile) in g.state().tiles().iter() {
-        let i = t.0 as usize;
-        assert_eq!(owner[i], tile.owner().map_or(255, |p| p.0.min(254)), "tile {i}'s owner");
-        let want_imp = tile
-            .improvement()
-            .and_then(|x| r.name(x))
-            .map_or(0, |n| imps.iter().position(|x| x == n).map_or(0, |p| p + 1));
-        assert_eq!(usize::from(imp[i]), want_imp, "tile {i}'s improvement");
-        let level = tile.route().map_or(0, |x| x as u8) + if tile.route_pillaged() { 4 } else { 0 };
-        assert_eq!(route[i], level, "tile {i}'s route");
-        let hill = r.derived().known.hill;
-        let top = tile.features().iter().filter(|&f| f != hill).last();
-        let want_feat = top
-            .and_then(|f| r.derived().features.get(f))
-            .and_then(|&t| r.name(t))
-            .map_or(0, |n| feats.iter().position(|x| x == n).map_or(0, |p| p + 1));
-        assert_eq!(usize::from(feat[i]), want_feat, "tile {i}'s feature");
-    }
+    let hill = r.derived().known.hill;
+    let tiles = g.state().tiles();
+    let owner = tiles.iter().map(|(_, t)| t.owner().map_or(255, |p| p.0.min(254))).collect();
+    let improvement =
+        tiles.iter().map(|(_, t)| t.improvement().and_then(|x| r.name(x)).map(str::to_owned));
+    let route = tiles
+        .iter()
+        .map(|(_, t)| t.route().map_or(0, |x| x as u8) + if t.route_pillaged() { 4 } else { 0 });
+    let feature = tiles.iter().map(|(_, t)| {
+        let top = t.features().iter().filter(|&f| f != hill).last();
+        top.and_then(|f| r.derived().features.get(f)).and_then(|&x| r.name(x)).map(str::to_owned)
+    });
     let cities: Vec<Value> = g
         .state()
         .cities()
@@ -141,20 +141,74 @@ fn check_against_the_state(g: &Game, replay: &Value, frame: &Value) {
             json!([c.id().get(), &*c.name, c.owner().0, c.tile().0, c.pop, capital])
         })
         .collect();
-    assert_eq!(frame["cities"], json!(cities), "the cities");
     let units: Vec<Value> = g
         .state()
         .units()
         .iter()
         .map(|u| json!([r.name(u.base), u.owner().0, u.tile().0, u.hp]))
         .collect();
-    assert_eq!(frame["units"], json!(units), "the units");
-    for p in g.majors(false) {
-        let bytes = b64(&frame["explored"][p.id().0.to_string()]);
-        let want: Vec<u8> =
-            (0..g.grid().size()).map(|i| u8::from(p.explored.contains(i))).collect();
-        assert_eq!(bytes, want, "what {:?} has explored", p.id());
+    let explored = g
+        .state()
+        .players()
+        .iter()
+        .filter(|(_, p)| p.is_major())
+        .map(|(id, p)| {
+            let bytes: Vec<u8> =
+                (0..g.grid().size()).map(|i| u8::from(p.explored.contains(i))).collect();
+            (id.0.to_string(), json!(b64_encode(&bytes)))
+        })
+        .collect();
+    StateFrame {
+        turn: g.turn(),
+        owner,
+        improvement: improvement.collect(),
+        route: route.collect(),
+        feature: feature.collect(),
+        cities: Value::Array(cities),
+        units: Value::Array(units),
+        explored,
+        last_event: g.chronicle().events().last().map_or(0, |e| e.id.get()),
     }
+}
+
+/// Keeps the state's frame as a round records its own (`records::on_frame_for_test`).
+fn rebuild(g: &Game) {
+    let f = state_frame(g);
+    REBUILT.with(|r| r.borrow_mut().push(f));
+}
+
+/// A state's frame in Python's shape, the improvements and features numbered by the replay's
+/// names from 1, and its events those after `from`.
+fn python_shape(f: &StateFrame, replay: &Value, from: u32) -> Value {
+    use citar_engine::base::codec::b64_encode;
+    let number = |key: &str, layer: &[Option<String>]| -> String {
+        let names: Vec<&str> = replay[key]
+            .as_array()
+            .expect("names")
+            .iter()
+            .map(|n| n.as_str().unwrap_or(""))
+            .collect();
+        let bytes: Vec<u8> = layer
+            .iter()
+            .map(|n| {
+                n.as_deref()
+                    .and_then(|n| names.iter().position(|&x| x == n))
+                    .map_or(0, |i| u8::try_from(i + 1).expect("a palette of at most 255"))
+            })
+            .collect();
+        b64_encode(&bytes)
+    };
+    json!({
+        "turn": f.turn,
+        "owner": b64_encode(&f.owner),
+        "improvement": number("improvement_ids", &f.improvement),
+        "route": b64_encode(&f.route),
+        "feature": number("feature_ids", &f.feature),
+        "cities": f.cities,
+        "units": f.units,
+        "explored": f.explored,
+        "event_range": [from, f.last_event],
+    })
 }
 
 // ---- Gate 3: replay data ---------------------------------------------------------------------------------
@@ -163,23 +217,45 @@ fn check_against_the_state(g: &Game, replay: &Value, frame: &Value) {
 fn the_replay_holds_the_frames_each_round_captured_in_both_formats() {
     let mut g = arena_game();
     records::capture_frames_for_test(true);
+    records::on_frame_for_test(Some(rebuild));
     play_out(&mut g);
+    records::on_frame_for_test(None);
     let captured = records::take_frames_for_test();
     records::capture_frames_for_test(false);
+    let rebuilt = REBUILT.with(|r| std::mem::take(&mut *r.borrow_mut()));
     assert!(captured.len() >= 99, "a frame a round: {}", captured.len());
 
     let full: Value = serde_json::from_slice(&g.replay_data(ReplayFormat::Full)).expect("JSON");
     assert_eq!(full, g.replay_json(ReplayFormat::Full), "the bytes are the value");
     assert_eq!(full["format"], json!("full"));
-    let units: Vec<Box<str>> =
-        g.rules().base_units().as_slice().iter().map(|u| u.name.clone()).collect();
+    let r = g.rules();
+    let names = |key: &str| -> Vec<String> {
+        full[key]
+            .as_array()
+            .expect("names")
+            .iter()
+            .map(|n| n.as_str().unwrap_or("").to_owned())
+            .collect()
+    };
+    let imps: Vec<String> =
+        r.improvements().as_slice().iter().map(|i| i.name.to_string()).collect();
+    assert_eq!(names("improvement_ids"), imps, "the ruleset's improvements number the frames");
+    let units: Vec<Box<str>> = r.base_units().as_slice().iter().map(|u| u.name.clone()).collect();
     let frames = full["frames"].as_array().expect("frames");
     assert_eq!(frames.len(), captured.len(), "a frame for each round");
-    for (got, want) in frames.iter().zip(&captured) {
-        assert_eq!(got, &python_frame(want, &units), "the frame of turn {}", want.turn);
+    assert_eq!(frames.len(), rebuilt.len(), "a frame for each round the state was read at");
+    let mut from = 0;
+    for ((got, want), state) in frames.iter().zip(&captured).zip(&rebuilt) {
+        assert_eq!(got, &python_shape(state, &full, from), "the frame of turn {}", state.turn);
+        assert_eq!(got, &python_frame(want, &units), "the captured frame of turn {}", want.turn);
+        from = state.last_event;
     }
+    // Nothing moves the map after the last round's frame.
     let last = frames.last().expect("a frame");
-    check_against_the_state(&g, &full, last);
+    let mut end = python_shape(&state_frame(&g), &full, 0);
+    end["turn"] = last["turn"].clone();
+    end["event_range"] = last["event_range"].clone();
+    assert_eq!(last, &end, "the last frame is the state as the game ends");
 
     // The rest of what the recap reads.
     let chron = g.chronicle();

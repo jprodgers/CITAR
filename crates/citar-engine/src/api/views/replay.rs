@@ -259,3 +259,110 @@ impl Game {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_frames, full_frame_json};
+    use crate::base::codec::b64_decode;
+    use crate::save::journal::{FramePalette, FrameWriter, FullFrame};
+    use crate::state::chronicle::FrameRecord;
+
+    fn names(xs: &[&str]) -> Vec<Box<str>> {
+        xs.iter().map(|&x| Box::from(x)).collect()
+    }
+
+    /// The current ruleset's names: what `Full` numbers into.
+    fn current() -> FramePalette {
+        FramePalette {
+            improvement: names(&["Farm", "Mine", "Trading post"]),
+            feature: names(&["Forest", "Jungle", "Marsh"]),
+            unit: names(&["Warrior"]),
+        }
+    }
+
+    /// A frame of four tiles under `palette`, with `owner` on the first.
+    fn frame(turn: i32, owner: u8, palette: FramePalette) -> FullFrame {
+        FullFrame {
+            turn,
+            palette,
+            owner: vec![owner, 255, 255, 255],
+            improvement: vec![0; 4],
+            route: vec![0; 4],
+            feature: vec![0; 4],
+            ..FullFrame::default()
+        }
+    }
+
+    fn layer(v: &serde_json::Value, key: &str) -> Vec<u8> {
+        b64_decode(v[key].as_str().expect("base64")).expect("base64")
+    }
+
+    /// The name a layer's byte stands for under `names`, numbered from 1.
+    fn name_of(names: &[Box<str>], b: u8) -> Option<&str> {
+        usize::from(b).checked_sub(1).and_then(|i| names.get(i)).map(|n| &**n)
+    }
+
+    #[test]
+    fn a_frame_of_another_ruleset_is_renumbered_by_name() {
+        let now = current();
+        // Recorded when the improvements and features were numbered otherwise, and one of each
+        // has gone from the ruleset since.
+        let then = FramePalette {
+            improvement: names(&["Mine", "Farm", "Moai"]),
+            feature: names(&["Marsh", "Forest", "Oasis"]),
+            unit: names(&["Warrior"]),
+        };
+        let mut f = frame(7, 1, then);
+        f.improvement = vec![0, 1, 2, 3];
+        f.feature = vec![2, 1, 3, 2];
+        let v = full_frame_json(&f, &now);
+        let (imp, feat) = (layer(&v, "improvement"), layer(&v, "feature"));
+        assert_eq!(imp, [0, 2, 1, 0], "none, Mine, Farm, and Moai as none");
+        assert_eq!(feat, [1, 3, 0, 1], "Forest, Marsh, Oasis as none, Forest");
+        let pairs = [
+            (&f.improvement, &imp, &f.palette.improvement, &now.improvement),
+            (&f.feature, &feat, &f.palette.feature, &now.feature),
+        ];
+        for (old, new, from, to) in pairs {
+            for (i, (&a, &b)) in old.iter().zip(new.iter()).enumerate() {
+                let was = name_of(from, a).filter(|n| to.iter().any(|x| &**x == *n));
+                assert_eq!(name_of(to, b), was, "tile {i} names what it named");
+            }
+        }
+
+        // Under the current ruleset's own names, the layers are as recorded.
+        let mut same = frame(7, 1, now.clone());
+        same.improvement = vec![0, 1, 2, 3];
+        same.feature = vec![3, 2, 1, 0];
+        let v = full_frame_json(&same, &now);
+        assert_eq!(layer(&v, "improvement"), same.improvement);
+        assert_eq!(layer(&v, "feature"), same.feature);
+    }
+
+    #[test]
+    fn a_frame_that_does_not_decode_is_dropped_until_the_next_keyframe() {
+        let frames: Vec<FullFrame> =
+            (1..=5_u8).map(|t| frame(i32::from(t), t, current())).collect();
+        // Three frames from one writer, then two from a fresh one, as after a load.
+        let mut w = FrameWriter::new();
+        let mut recs: Vec<FrameRecord> = frames[..3].iter().map(|f| w.push(f)).collect();
+        let mut w = FrameWriter::new();
+        recs.extend(frames[3..].iter().map(|f| w.push(f)));
+        let keys: Vec<bool> = recs.iter().map(|r| r.keyframe).collect();
+        assert_eq!(keys, [true, false, false, true, false]);
+        assert_eq!(decode_frames(&recs), frames, "every record decodes");
+
+        let kept = vec![frames[0].clone(), frames[3].clone(), frames[4].clone()];
+        // The second record cut short: it and the delta taken from it are dropped.
+        let mut cut = recs.clone();
+        let half = cut[1].bytes.len() / 2;
+        cut[1].bytes = cut[1].bytes[..half].into();
+        assert_eq!(decode_frames(&cut), kept, "a record cut short");
+        // The second record lost: the third is a delta from a frame the decoder never saw.
+        let mut lost = recs.clone();
+        lost.remove(1);
+        assert_eq!(decode_frames(&lost), kept, "a record lost");
+        // No keyframe after the loss: nothing more decodes.
+        assert_eq!(decode_frames(&lost[..2]), frames[..1], "no keyframe to resume at");
+    }
+}
