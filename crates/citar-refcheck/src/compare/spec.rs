@@ -244,7 +244,19 @@ impl CompareSpec {
                 .multiset(
                     "civs[*].view.diplomacy.players[*].trade_options.agreements_possible_now",
                 ),
-            Group::Briefing => spec.keyed("civs", "pid"),
+            // The lists whose order is no rule compare as sets: the policies, a religion's
+            // beliefs, a city's specialists, the civilizations met (Python kept them in the
+            // order adopted, assigned and met, a history no state keeps). So do the alerts and
+            // the points of interest, so that one more or less is reported as itself rather
+            // than as every one after it.
+            Group::Briefing => spec
+                .keyed("civs", "pid")
+                .multiset("civs[*].briefing.empire.policies")
+                .multiset("civs[*].briefing.religion.beliefs")
+                .multiset("civs[*].briefing.cities[*].specialists")
+                .multiset("civs[*].briefing.alerts")
+                .multiset("civs[*].briefing.poi")
+                .multiset("civs[*].briefing.players"),
         }
     }
 }

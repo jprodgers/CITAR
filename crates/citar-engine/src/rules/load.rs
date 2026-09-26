@@ -1158,6 +1158,7 @@ fn link(raw: &RawRuleset, p: &mut Problems) -> Option<Ruleset> {
         gen_tables: GenTables::default(),
         names: Default::default(),
         client: client::ClientSource::default(),
+        client_value: std::sync::OnceLock::new(),
         client_json: std::sync::OnceLock::new(),
     })
 }

@@ -33,14 +33,13 @@
 //! - `events` (optionally `since`, `type` and `player`, the last keeping what that player hears);
 //! - `find_tiles`: the tiles that pass the filters given, nearest first (see [`find_tiles`]);
 //! - `ops`: the scenario and test operations with their parameters;
-//! - `pending`: what is not ported yet, as the queries, operations, test operations, turn stages
-//!   and setup stages that wait for a package.
-//!
+//! - `pending`: what is not ported yet, as the operations, test operations, turn stages and setup
+//!   stages that wait for a package;
 //! - `view` (optionally `player`, a major, and `events`, how many): the client view, what the
-//!   browser receives for that player or for a spectator (`views.client_view`).
-//!
-//! `briefing` waits for the package that ports what it reads (1d-03), and is refused as not
-//! ported until then.
+//!   browser receives for that player or for a spectator (`views.client_view`);
+//! - `briefing` (`player`, a major): what a model reads to play its turn: the briefing, the turn's
+//!   progress and the alerts, as the briefing lists them (`briefing.briefing`,
+//!   `briefing.turn_progress` and `briefing.alerts`).
 //!
 //! Reads only: a query never changes the game or its digest.
 
@@ -64,45 +63,35 @@ use crate::state::cities::Constructible;
 use crate::state::diplo::side;
 use crate::state::players::{AutoDecision, Player, PlayerKind};
 
-/// Whether an `inspect` query is answered yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Answered {
-    Yes,
-    /// Not until the package named ports what it reads: until then it is refused as not ported,
-    /// by the `not_ported` marker at its arm of [`inspect`], which `cargo xtask check` counts (and
-    /// fails on from package 1e-04). Not a `Pending` stage: no stage of a game waits for it, and
-    /// from package 1c-10 the check fails on any of those.
-    From(&'static str),
-}
-
-/// The queries, by `what`, sorted, with whether each is answered yet.
-const QUERIES: [(&str, Answered); 26] = [
-    ("briefing", Answered::From("1d-03")),
-    ("build_options", Answered::Yes),
-    ("buildable", Answered::Yes),
-    ("camps", Answered::Yes),
-    ("city", Answered::Yes),
-    ("city_state", Answered::Yes),
-    ("costs", Answered::Yes),
-    ("events", Answered::Yes),
-    ("find_tiles", Answered::Yes),
-    ("game", Answered::Yes),
-    ("great_people", Answered::Yes),
-    ("negotiation", Answered::Yes),
-    ("ops", Answered::Yes),
-    ("pending", Answered::Yes),
-    ("player", Answered::Yes),
-    ("preview", Answered::Yes),
-    ("relation", Answered::Yes),
-    ("religion", Answered::Yes),
-    ("spies", Answered::Yes),
-    ("tile", Answered::Yes),
-    ("un", Answered::Yes),
-    ("unit", Answered::Yes),
-    ("unit_actions", Answered::Yes),
-    ("units", Answered::Yes),
-    ("victory", Answered::Yes),
-    ("view", Answered::Yes),
+/// The queries, by `what`, sorted. Every one is answered: package 1d-03 answered the last,
+/// `briefing`.
+const QUERIES: [&str; 26] = [
+    "briefing",
+    "build_options",
+    "buildable",
+    "camps",
+    "city",
+    "city_state",
+    "costs",
+    "events",
+    "find_tiles",
+    "game",
+    "great_people",
+    "negotiation",
+    "ops",
+    "pending",
+    "player",
+    "preview",
+    "relation",
+    "religion",
+    "spies",
+    "tile",
+    "un",
+    "unit",
+    "unit_actions",
+    "units",
+    "victory",
+    "view",
 ];
 
 /// Answers one query.
@@ -209,15 +198,19 @@ pub fn inspect(g: &Game, q: &Value) -> Result<Value, ActionError> {
             serde_json::to_value(g.client_view(viewer, limit))
                 .map_err(|e| bad(format!("The view does not serialise ({e}).")))
         }
-        "briefing" => Err(not_ported("api::briefing")),
-        _ => {
-            let known: Vec<&str> = QUERIES.iter().map(|&(name, _)| name).collect();
-            Err(bad(format!(
-                "Unknown inspect query {}. Known: {}.",
-                py::repr(&Value::from(what)),
-                known.join(", ")
-            )))
+        "briefing" => {
+            let p = pid(g, o.get("player"), true)?;
+            Ok(json!({
+                "text": crate::api::briefing::briefing(g, p),
+                "progress": crate::api::briefing::turn_progress(g, p),
+                "alerts": crate::api::briefing::alerts(g, p),
+            }))
         }
+        _ => Err(bad(format!(
+            "Unknown inspect query {}. Known: {}.",
+            py::repr(&Value::from(what)),
+            QUERIES.join(", ")
+        ))),
     }
 }
 
@@ -262,15 +255,6 @@ fn city_state(g: &Game, cs: PlayerId) -> Result<Value, ActionError> {
 
 fn bad(message: impl Into<String>) -> ActionError {
     ActionError::new(ErrCode::BadParam, message)
-}
-
-/// The refusal of a query whose system is not ported yet: `path` names the system, and
-/// `cargo xtask check` counts the calls (DESIGN.md 3.4, rule 4).
-fn not_ported(path: &str) -> ActionError {
-    ActionError::new(
-        ErrCode::NotPorted,
-        format!("This inspect query is not ported to the new engine yet ({path})."),
-    )
 }
 
 /// A player by id, the barbarians included, which scenario operations may not name but a script
@@ -886,14 +870,9 @@ pub fn find_tiles(g: &Game, o: &Map<String, Value>) -> Result<Value, ActionError
     ))
 }
 
-/// `pending`: every query, operation, test operation and stage still waiting for its package.
+/// `pending`: every operation, test operation and stage still waiting for its package.
 fn pending() -> Value {
     let mut out = Vec::new();
-    for (name, answered) in QUERIES {
-        if let Answered::From(pkg) = answered {
-            out.push(json!({"kind": "inspect", "name": name, "package": pkg}));
-        }
-    }
     for o in scenario::OPS {
         if let Porting::Pending(pkg) = o.porting {
             out.push(json!({"kind": "scenario_op", "name": o.name, "package": pkg}));

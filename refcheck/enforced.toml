@@ -89,3 +89,11 @@ group = "tool_errors"
 # events scrubbed for it, its empire, diplomacy, notes and alerts.
 [[enforce]]
 group = "views"
+
+# briefing (package 1d-03): the turn briefing and the turn's progress a model reads, for two civilizations of each
+# state, the briefing read into its sections and fields (crates/citar-refcheck/src/answer/briefing.rs): the empire's
+# line, the alerts, each city's and unit's line by field, the options for idle units and cities, the techs, the local
+# map and what it shows, the points of interest, the events, diplomacy, the to-do list and the notebook. With it,
+# every group is enforced.
+[[enforce]]
+group = "briefing"

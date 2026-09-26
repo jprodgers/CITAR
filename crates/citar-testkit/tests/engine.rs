@@ -3,6 +3,7 @@
 
 mod engine {
     mod advisor;
+    mod briefing;
     mod cities;
     mod city_states;
     mod combat;
@@ -18,6 +19,7 @@ mod engine {
     mod hex;
     mod kitchen_sink;
     mod mapgen;
+    mod maps;
     #[cfg(feature = "stats")]
     mod memos;
     mod production;

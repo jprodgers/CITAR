@@ -5,9 +5,10 @@
 //! - `inspect` reads without writing, and lists what waits for a later package;
 //! - a game survives the `reload` test operation whole;
 //! - the rules the operations need report a write the state refuses instead of stopping
-//!   halfway, and setting research plans on `&Game` before it writes.
+//!   halfway, and setting research plans on `&Game` before it writes;
+//! - the scenario editor's summary reads a saved scenario's state as the engine writes it.
 
-use citar_engine::api::{ErrCode, inspect, testops};
+use citar_engine::api::{ErrCode, inspect, scenario, testops};
 use citar_engine::base::ids::{PlayerId, TechId};
 use citar_engine::game::Game;
 use citar_engine::game::city_states::influence::{set_influence, update_ally};
@@ -120,15 +121,17 @@ fn inspect_reads_and_lists_what_is_pending() {
             )
         })
         .collect();
-    assert!(listed.contains(&("briefing".to_owned(), "1d-03".to_owned())), "briefing waits");
-    assert!(!listed.iter().any(|(name, _)| name == "view"), "the view is answered (1d-02)");
+    assert!(
+        !listed.iter().any(|(name, _)| name == "view" || name == "briefing"),
+        "the view and the briefing are answered (1d-02, 1d-03)"
+    );
     let kinds: Vec<&str> =
         pending.as_array().into_iter().flatten().filter_map(|p| p["kind"].as_str()).collect();
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [1, 0, 0],
-        "one query waits, and no test op"
+        [0, 0, 0],
+        "no query, operation or test op waits"
     );
     // Gate 1 of package 1c-09: no stage of a turn or of setup waits.
     assert_eq!([count("turn_stage"), count("setup_stage")], [0, 0], "no stage waits");
@@ -172,10 +175,13 @@ fn inspect_reads_and_lists_what_is_pending() {
             "{name} is ported"
         );
     }
-    let e = inspect::inspect(&g, &json!({"what": "briefing", "player": 0}))
-        .expect_err("a query that waits for its package");
-    assert_eq!(e.code, ErrCode::NotPorted, "briefing");
-    assert!(e.message.contains("api::briefing"), "briefing: {}", e.message);
+    let b = inspect::inspect(&g, &json!({"what": "briefing", "player": 0})).expect("a briefing");
+    assert!(b["text"].as_str().is_some_and(|t| t.starts_with("=== TURN ")), "{b}");
+    assert!(b["progress"].as_str().is_some_and(|t| t.starts_with("TURN PROGRESS")), "{b}");
+    assert!(b["alerts"].is_array(), "{b}");
+    let e = inspect::inspect(&g, &json!({"what": "briefing", "player": 3}))
+        .expect_err("a city-state has no briefing");
+    assert_eq!(e.code, ErrCode::BadParam);
     let view = inspect::inspect(&g, &json!({"what": "view", "player": 0})).expect("a view");
     assert_eq!(view["you"], json!(0));
     let spectator = inspect::inspect(&g, &json!({"what": "view"})).expect("a spectator's view");
@@ -203,6 +209,56 @@ fn a_reload_keeps_the_game_and_its_history() {
     // And again, from a game that was itself loaded.
     testops::apply(&mut g, &json!([{"op": "reload"}])).expect("a second reload");
     assert_eq!((g.digest().ok(), g.chronicle().events().len()), before);
+}
+
+/// The scenario editor's list reads a saved scenario's state as the engine writes it
+/// (`scenario_summary`, package 1d-03): the save's own JSON, so a change to the save format
+/// that the summary does not follow fails here, and a state it cannot read is refused rather
+/// than listed empty.
+#[test]
+fn a_scenario_s_summary_reads_the_engine_s_save() {
+    let mut g = arena();
+    g.apply_ops(&json!([{"op": "set_player", "player": 1, "name": "Renamed"}])).expect("renamed");
+    testops::apply(&mut g, &json!([{"op": "set_turn", "turn": 42}])).expect("a turn");
+    let save = g.snapshot().to_json().expect("a save");
+    let state: serde_json::Value = serde_json::from_slice(&save).expect("the save's JSON");
+    let seats = json!(scenario::default_seats(&g));
+    let doc = json!({
+        "id": "arena-42", "name": "The arena", "description": "Three and a city-state.",
+        "seats": seats, "modified": 1_700_000_000.5, "state": state,
+    });
+    let s = scenario::scenario_summary(&doc).expect("a summary");
+    assert_eq!(
+        s,
+        json!({
+            "id": "arena-42", "name": "The arena", "description": "Three and a city-state.",
+            "width": g.grid().width(), "height": g.grid().height(), "turn": 42,
+            "players": [
+                {"id": 0, "name": g.player(PlayerId(0)).map(|p| &*p.name), "nation": "BenchmarkCiv"},
+                {"id": 1, "name": "Renamed", "nation": "BenchmarkCiv"},
+                {"id": 2, "name": g.player(PlayerId(2)).map(|p| &*p.name), "nation": "BenchmarkCiv"},
+            ],
+            "city_states": 1, "seats": seats, "modified": 1_700_000_000.5,
+        })
+    );
+    assert_eq!(s["width"], json!(24), "the arena's size, not a default");
+
+    // What the summary cannot read is refused, whole.
+    let refused = |d: &serde_json::Value| {
+        scenario::scenario_summary(d).expect_err("refused").message.to_string()
+    };
+    let mut without = doc.clone();
+    without.as_object_mut().map(|o| o.shift_remove("state"));
+    assert_eq!(refused(&without), "The scenario has no state.");
+    let mut renamed = doc.clone();
+    renamed["state"]["players"][3]["kind"] = json!("CityState");
+    assert_eq!(refused(&renamed), "The scenario has no kind for each of its players.");
+    let mut no_turn = doc.clone();
+    no_turn["state"]["clock"] = json!({"round": 42});
+    assert_eq!(refused(&no_turn), "The scenario has no turn in its state.");
+    let mut no_width = doc;
+    no_width["state"]["map"]["width"] = json!("24");
+    assert_eq!(refused(&no_width), "The scenario has no map width in its state.");
 }
 
 #[test]

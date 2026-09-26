@@ -1,11 +1,13 @@
 //! The query tools and the facade's other views against the Python engine's answers
-//! (package 1d-02): `refcheck/query_tools.json.gz`, recorded by `scripts/refcheck/query_tools.py`
-//! on the committed fixtures.
+//! (packages 1d-02 and 1d-03): `refcheck/query_tools.json.gz`, recorded by
+//! `scripts/refcheck/query_tools.py` on the committed fixtures.
 //!
 //! The refcheck group `views` compares what the browser receives; the query tools read more of
 //! the views than that (a unit's and a city's detail, tiles, the tech tree, policies, religion,
-//! great people, espionage, city-states, victory), and the facade adds a spectator's view,
-//! `empire_summary`, `standings` and `path_preview`. Each recorded call runs through
+//! great people, espionage, city-states, victory, the ASCII map and the rules), and the facade
+//! adds a spectator's view, `empire_summary`, `standings`, `path_preview`, the game's terrain as
+//! a map with its summary and what the editor says of it, and the scenario editor's overview and
+//! seats. Each recorded call runs through
 //! `Game::execute_query` on the fixture loaded as refcheck loads it, and each answer is compared
 //! with refcheck's comparator; a difference must be one the engine makes on purpose, named by an
 //! id of `refcheck/intended.toml` or `tests/rules/intended.toml` in [`EXPLAINED`]. A second pass
@@ -18,8 +20,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use citar_engine::base::ids::{PlayerId, UnitId};
+use citar_engine::api::{maps, scenario};
+use citar_engine::base::ids::{ImprovementId, PlayerId, UnitId};
 use citar_engine::game::Game;
+use citar_engine::mapgen::document;
 use citar_engine::rules::Ruleset;
 use citar_refcheck::Group;
 use citar_refcheck::compare::{self, CompareSpec, Diff, DiffKind, Options, Pattern};
@@ -62,6 +66,62 @@ fn named_unknown(d: &Diff) -> bool {
     }
 }
 
+/// Whether a text differs from Python's, line for line, only where `same` allows.
+fn lines_differ_only(d: &Diff, same: fn(&str, &str) -> bool) -> bool {
+    let (Some(Value::String(py)), Some(Value::String(rs))) = (&d.python, &d.rust) else {
+        return false;
+    };
+    let (pl, rl): (Vec<&str>, Vec<&str>) = (py.lines().collect(), rs.lines().collect());
+    pl.len() == rl.len() && pl.iter().zip(&rl).all(|(p, r)| p == r || same(p, r))
+}
+
+/// A unit at 0 health in Python's line, at 1 in Rust's.
+fn zero_health(p: &str, r: &str) -> bool {
+    p.strip_suffix(" hp 0").is_some_and(|head| r.strip_suffix(" hp 1") == Some(head))
+}
+
+/// A map's text whose only differences are units at 0 health in Python's, at 1 in Rust's.
+fn zero_health_in_text(d: &Diff) -> bool {
+    lines_differ_only(d, zero_health)
+}
+
+/// A map's text whose differences are those, and owners the reader has not met, whom Rust calls
+/// an unknown civilization or city-state where Python named them.
+fn unknown_owners_in_text(d: &Diff) -> bool {
+    lines_differ_only(d, |p, r| {
+        zero_health(p, r)
+            || ["Unknown Civilization", "Unknown City-State"].iter().any(|u| {
+                r.split_once(&format!("(owned by {u})")).is_some_and(|(head, tail)| {
+                    p.starts_with(&format!("{head}(owned by ")) && p.ends_with(tail)
+                })
+            })
+    })
+}
+
+/// A great improvement Python's list let a map carry, which Rust's rule leaves to a scenario: a
+/// Farm or a Mine Rust lost stays unexplained.
+fn great_improvement_dropped(d: &Diff) -> bool {
+    let r = Ruleset::shared();
+    let great = d
+        .python
+        .as_ref()
+        .and_then(Value::as_str)
+        .and_then(|name| r.lookup::<ImprovementId>(name))
+        .is_some_and(|i| r.improvements()[i].great && !document::on_maps(r, i));
+    great && d.rust.as_ref().is_some_and(Value::is_null)
+}
+
+/// An influence Rust lists at zero, where Python's city-state kept none for that civilization
+/// (a zero, or a zero marked as a float by the kinds' pass).
+fn zero_influence_listed(d: &Diff) -> bool {
+    let zero = match &d.rust {
+        Some(Value::String(s)) => s == "\u{1}0.0",
+        Some(v) => v.as_f64() == Some(0.0),
+        None => false,
+    };
+    d.kind == DiffKind::Extra && zero
+}
+
 /// The differences in value the engine makes on purpose.
 const EXPLAINED: &[Why] = &[
     // Python matched the quests on a key its list never had, so it listed none.
@@ -75,6 +135,12 @@ const EXPLAINED: &[Why] = &[
     why("civilians-at-zero-health", "get_tile.ok.units[*].hp", false),
     why("civilians-at-zero-health", "get_unit.ok.attack_targets[*].defender_hp", false),
     why("civilians-at-zero-health", "god_view.units[*].hp", false),
+    Why {
+        id: "civilians-at-zero-health",
+        at: "get_map.ok",
+        committed: true,
+        only: Some(zero_health_in_text),
+    },
     // Marble's bonus toward wonders, in its own city only: production, and the turns to build.
     why("marble-bonus-in-its-own-city", "get_city.ok.yields.production", true),
     why("marble-bonus-in-its-own-city", "get_city.ok.yield_breakdown.*.production", true),
@@ -115,6 +181,27 @@ const EXPLAINED: &[Why] = &[
         at: "get_diplomacy.ok.messages[*].to[*]",
         committed: false,
         only: Some(named_unknown),
+    },
+    // The ASCII map names no owner the reader has not met.
+    Why {
+        id: "briefing-names-only-known-players",
+        at: "get_map.ok",
+        committed: false,
+        only: Some(unknown_owners_in_text),
+    },
+    // A Citadel on a game's map, which a map may not carry.
+    Why {
+        id: "map-documents-read-by-rule",
+        at: "maps.export.tiles[*][6]",
+        committed: false,
+        only: Some(great_improvement_dropped),
+    },
+    // The scenario editor's overview: each city-state's influence with every civilization.
+    Why {
+        id: "scenario-overview-lists-every-influence",
+        at: "scenario.overview.players[*].influence.*",
+        committed: true,
+        only: Some(zero_influence_listed),
     },
 ];
 
@@ -208,6 +295,9 @@ fn spec() -> CompareSpec {
         .keyed("god_view.players", "id")
         .keyed("god_view.negotiations", "id")
         .multiset("god_view.messages[*].to")
+        .multiset("scenario.overview.players[*].met")
+        .multiset("scenario.overview.players[*].policies")
+        .multiset("scenario.overview.cities[*].buildings")
 }
 
 /// Every intended id of both lists.
@@ -324,7 +414,52 @@ fn answers(g: &Game, rec: &Value) -> Vec<(String, Value, Value)> {
             json!({ "path_preview": rust }),
         ));
     }
+    out.push(("maps".into(), json!({ "maps": rec["maps"] }), json!({ "maps": map_answers(g) })));
+    out.push((
+        "scenario".into(),
+        json!({ "scenario": rec["scenario"] }),
+        json!({ "scenario": scenario_answers(g, &rec["scenario"]) }),
+    ));
     out
+}
+
+/// The game's terrain as a map, every 25th tile of it, its summary, what the editor says of it,
+/// and whether it reads back as it was written (its id aside, which the editor makes from its
+/// name).
+fn map_answers(g: &Game) -> Value {
+    let r = Ruleset::shared();
+    let export = g.export_map("");
+    let (clean, warnings) = maps::validate_map(r, &export).expect("the game's map reads");
+    let mut same = export.clone();
+    same["id"] = clean["id"].clone();
+    let mut sampled = export.clone();
+    if let Some(Value::Array(tiles)) = sampled.get_mut("tiles") {
+        *tiles = tiles.iter().step_by(25).cloned().collect();
+    }
+    json!({
+        "export": sampled,
+        "summary": maps::map_summary(r, &export).expect("a summary"),
+        "warnings": warnings,
+        "round_trip": clean == same,
+    })
+}
+
+/// The scenario editor's overview, the default seats, and the seat lists recorded, checked.
+fn scenario_answers(g: &Game, rec: &Value) -> Value {
+    let normalized: Vec<Value> = rec["normalize_seats"]
+        .as_array()
+        .expect("seat lists")
+        .iter()
+        .map(|n| match scenario::normalize_seats(g, Some(&n["seats"])) {
+            Ok(v) => json!({"seats": n["seats"], "ok": v}),
+            Err(e) => json!({"seats": n["seats"], "error": e.message}),
+        })
+        .collect();
+    json!({
+        "overview": scenario::overview(g),
+        "default_seats": scenario::default_seats(g),
+        "normalize_seats": normalized,
+    })
 }
 
 #[test]
@@ -417,10 +552,24 @@ fn marked(v: Option<&Value>) -> bool {
     }
 }
 
-/// One difference as a line of the report.
+/// One difference as a line of the report, with the lines that differ of a long text.
 fn line(name: &str, label: &str, d: Diff) -> String {
+    let changed: Vec<&str> = d
+        .detail
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .filter(|l| (l.starts_with('-') || l.starts_with('+')) && !l.starts_with("---"))
+        .filter(|l| !l.starts_with("+++"))
+        .take(6)
+        .collect();
+    let detail = if changed.is_empty() {
+        String::new()
+    } else {
+        format!("\n      {}", changed.join("\n      "))
+    };
     format!(
-        "{name} {label}: {} {:?} python {} rust {}",
+        "{name} {label}: {} {:?} python {} rust {}{detail}",
         d.path,
         d.kind,
         d.python.map_or_else(|| "-".into(), |v| trim(&v.to_string())),

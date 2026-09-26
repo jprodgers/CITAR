@@ -10,9 +10,9 @@ from typing import Any
 from .game import ActionError, Game
 from .state import AUTO_DECISIONS
 
-QUERIES = ("build_options", "buildable", "camps", "city", "city_state", "costs", "events", "find_tiles", "game",
-           "great_people", "negotiation", "ops", "pending", "player", "preview", "relation", "religion", "spies", "tile",
-           "un", "unit", "unit_actions", "units", "victory", "view")
+QUERIES = ("briefing", "build_options", "buildable", "camps", "city", "city_state", "costs", "events", "find_tiles",
+           "game", "great_people", "negotiation", "ops", "pending", "player", "preview", "relation", "religion", "spies",
+           "tile", "un", "unit", "unit_actions", "units", "victory", "view")
 
 
 def inspect(g: Game, q: dict) -> Any:
@@ -107,6 +107,11 @@ def inspect(g: Game, q: dict) -> Any:
         from .views import client_view
         pid = None if q.get("player") is None else _pid(g, q.get("player"), majors_only=True)
         return client_view(g, pid, 150 if q.get("events") is None else _whole(q.get("events")))
+    if what == "briefing":
+        from . import briefing
+        pid = _pid(g, q.get("player"), majors_only=True)
+        return {"text": briefing.briefing(g, pid), "progress": briefing.turn_progress(g, pid),
+                "alerts": briefing.alerts(g, pid)}
     if what == "pending":
         return []
     raise ActionError(f"Unknown inspect query {what!r}. Known: {', '.join(QUERIES)}.")

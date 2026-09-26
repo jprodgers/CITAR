@@ -5,13 +5,16 @@
 //! that need no view: `read_notes`, `get_events` and `preview_attack`, and checked the arguments
 //! of the rest. Package 1d-02 answers the fifteen the views build (`api::views`: a tile, a unit
 //! and the units, a city and the cities, the empire, the players, diplomacy, the city-states, the
-//! tech tree, policies, religion, great people, espionage and victory). `get_briefing`, `get_map`
-//! and `get_rules` wait for the briefing (package 1d-03) and refuse with a `NotPorted` refusal
-//! that `cargo xtask check` counts.
+//! tech tree, policies, religion, great people, espionage and victory). Package 1d-03 answers the
+//! last three: `get_briefing` and `get_map` (`api::briefing`) and `get_rules`
+//! (`api::views::rules`).
 
 use serde_json::{Map, Value, json};
 
 use super::registry::Query;
+use crate::api::briefing;
+use crate::api::text::MAP_LEGEND;
+use crate::api::views::rules::{TOPICS, rules_lookup};
 use crate::api::views::{cities, empire, info, players, tiles, units};
 use crate::base::ids::PlayerId;
 use crate::base::py;
@@ -30,35 +33,13 @@ const EVENTS_SCANNED: usize = 200;
 /// How many messages `get_diplomacy` shows by default (`tools.py:291`).
 const MESSAGES_SHOWN: i64 = 30;
 
-/// The topics of `get_rules`, in the order its refusal lists them (`views.rules_lookup`,
-/// `views.py:633-648`).
-const RULES_TOPICS: [&str; 19] = [
-    "units",
-    "buildings",
-    "techs",
-    "improvements",
-    "resources",
-    "promotions",
-    "terrains",
-    "terrain",
-    "policies",
-    "beliefs",
-    "specialists",
-    "eras",
-    "nations",
-    "city_state_types",
-    "speeds",
-    "difficulties",
-    "deal_items",
-    "combat",
-    "overview",
-];
+/// The rows `get_map` shows above and below its centre unless asked otherwise (`tools.py:218`).
+const MAP_RADIUS: i64 = 8;
 
 /// A query's answer to `pid`, from its coerced arguments.
 pub(super) fn answer(
     g: &Game,
     pid: PlayerId,
-    tool: &'static str,
     q: Query,
     args: &Map<String, Value>,
 ) -> Result<Value, ActionError> {
@@ -101,20 +82,32 @@ pub(super) fn answer(
         Query::GreatPeople => Ok(info::great_people_info(g, pid)),
         Query::Espionage => Ok(info::espionage_view(g, pid)),
         Query::VictoryStatus => Ok(info::victory_info(g, pid)),
-        Query::Map => {
-            // A centre given is checked before the map is drawn, so a bad one is refused rather
-            // than drawn somewhere else (`tools.py:226-227`).
-            if let (Some(x), Some(y)) = (int(args, "x"), int(args, "y")) {
-                tile_at(g, x, y)?;
-            }
-            Err(briefing(tool))
-        }
+        Query::Map => map(g, pid, args),
         Query::Rules => {
-            rules_topic(args.get("topic"))?;
-            Err(briefing(tool))
+            let topic = rules_topic(args.get("topic"))?;
+            rules_lookup(g, &topic, args.get("name"))
         }
-        Query::Briefing => Err(briefing(tool)),
+        Query::Briefing => Ok(json!(briefing::briefing(g, pid))),
     }
+}
+
+/// `get_map`: the ASCII map around a tile, the caller's capital by default, with the legend
+/// above it when asked (`tools.get_map`, `tools.py:218-229`). A centre given is checked before
+/// the map is drawn, so a bad one is refused rather than drawn somewhere else; with one
+/// coordinate only, the map centres on the capital, as Python's did. A radius of 0 is the
+/// default one, as Python's `radius or 8` read it.
+fn map(g: &Game, pid: PlayerId, args: &Map<String, Value>) -> Result<Value, ActionError> {
+    let centre = match (int(args, "x"), int(args, "y")) {
+        (Some(x), Some(y)) => {
+            let t = tile_at(g, x, y)?;
+            Some(g.xy(t))
+        }
+        _ => None,
+    };
+    let radius = int(args, "radius").filter(|&r| r != 0).unwrap_or(MAP_RADIUS);
+    let text = briefing::ascii_map(g, pid, centre, radius);
+    let legend = args.get("legend").is_some_and(py::truthy);
+    Ok(json!(if legend { format!("{MAP_LEGEND}\n\n{text}") } else { text }))
 }
 
 /// `get_tech_tree`: the tree, its techs filtered to one status, `available` unless the filter
@@ -188,7 +181,7 @@ fn rules_topic(topic: Option<&Value>) -> Result<String, ActionError> {
         _ => "",
     };
     let topic = py::strip(&raw.to_lowercase()).to_owned();
-    if RULES_TOPICS.contains(&topic.as_str()) {
+    if TOPICS.contains(&topic.as_str()) {
         return Ok(topic);
     }
     Err(ActionError::new(
@@ -196,23 +189,7 @@ fn rules_topic(topic: Option<&Value>) -> Result<String, ActionError> {
         format!(
             "Unknown topic '{}'. Topics: {}.",
             crate::base::text::echo(&topic),
-            RULES_TOPICS.join(", ")
+            TOPICS.join(", ")
         ),
     ))
-}
-
-/// The refusal of a query whose answer the briefing builds (package 1d-03).
-fn briefing(tool: &str) -> ActionError {
-    not_ported("api::briefing", tool)
-}
-
-/// The refusal of a query whose system is not ported yet: `path` names it, and `cargo xtask
-/// check` counts the calls (DESIGN.md 3.4, rule 4). The text is for a model, so it names the
-/// tool rather than the module.
-fn not_ported(path: &'static str, tool: &str) -> ActionError {
-    debug_assert!(path.starts_with("api::"), "a module of the host surface");
-    ActionError::new(
-        ErrCode::NotPorted,
-        format!("{tool} is not ported to the new engine yet; the other tools work."),
-    )
 }

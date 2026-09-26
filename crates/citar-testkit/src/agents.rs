@@ -1088,9 +1088,11 @@ fn some_query_tool(g: &Game, pid: PlayerId, rng: &mut Rng) -> (&'static str, ser
 }
 
 /// Reads a game as a host or a model would between two actions: `inspect` queries (a player's
-/// view and a spectator's among them, and the briefing, refused until it is ported), a query
-/// tool, what the tools read (a unit's reach, a preview, a city's list, the advisor's pick), the
-/// chronicle, and the digest.
+/// view and a spectator's among them, and the briefing, answered with its text, the turn's
+/// progress and the alerts), a query tool (`get_briefing`, `get_map` and `get_rules` among
+/// them), what the tools read (a unit's reach, a preview, a city's list, the advisor's pick), the
+/// chronicle, and the digest. Every one is answered or refused as a read: property P8 checks
+/// that none of them changes the game's digest.
 fn read_something(g: &Game, pid: PlayerId, rng: &mut Rng) {
     let q = some_query(g, pid, rng);
     let _answer = citar_engine::api::inspect::inspect(g, &q);

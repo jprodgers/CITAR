@@ -24,6 +24,22 @@ class RuleScripts(unittest.TestCase):
             self.assertEqual(fn.__name__, f"_{name}", name)
         self.assertEqual(len({id(fn) for fn, _ in testops.OPS.values()}), len(testops.OPS))
 
+    def test_a_script_map_s_wrapping_copy_keeps_its_tiles(self):
+        # maps/<name>_wrap.json is <name>.json wrapping both ways: its tiles, starts and anchors must stay the
+        # other's, or a script on the copy tests another map than its anchors say. The Rust side checks the same
+        # (crates/citar-testkit/tests/engine/maps.rs).
+        maps = rulescript.RULES / "maps"
+        copies = sorted(p.name[: -len("_wrap.json")] for p in maps.glob("*_wrap.json"))
+        self.assertIn("arena", copies)
+        for base in copies:
+            plain = json.loads((maps / f"{base}.json").read_text(encoding="utf-8"))
+            copy = json.loads((maps / f"{base}_wrap.json").read_text(encoding="utf-8"))
+            self.assertEqual((copy["wrap_x"], copy["wrap_y"]), (True, True), base)
+            for key in ("id", "name", "description", "wrap_x", "wrap_y"):
+                plain.pop(key, None)
+                copy.pop(key, None)
+            self.assertTrue(plain == copy, f"{base}_wrap.json is no longer {base}.json wrapping")
+
     def test_a_script_with_an_unknown_key_is_refused(self):
         with self.assertRaises(rulescript.ScriptError):
             rulescript.Script("bad", {"about": "x", "stepz": []})

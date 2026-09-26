@@ -1,0 +1,87 @@
+about = """
+The turn's progress, the short note a model reads after each batch of actions: its cities, its
+research, the cities with nothing in production, the units still needing orders (a settler that
+can found a city where it stands says so), and, once every one is handled, that it may end its
+turn. The briefing's unit list marks the units needing orders, and its to-do list goes with them.
+"""
+from = "citar/engine/briefing.py: turn_progress, briefing"
+
+[[step]]
+note = "Nothing yet: a settler on open ground, and a warrior."
+ops = [
+  { op = "add_unit", player = 0, unit = "Settler", at = "A" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { settler = "=made[0].unit_ids[0]", warrior = "=made[1].unit_ids[0]" }
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "progress"
+matches = "^TURN PROGRESS \\(current state; this supersedes the briefing\\): cities: none yet \\| research: NOT SET \\| units still needing orders: #[0-9]+ Settler at \\(5,5\\) \\(can found a city here\\); #[0-9]+ Warrior at \\(6,5\\)\\. Handle what remains, then call end_turn\\.$"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+contains = "\nCITIES (0):\n  none — found a city with a Settler (found_city)!\n"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\n  \\* \\[#[0-9]+\\] Settler \\(5,5\\) moves 2\\.0/2\\.0 · ready\n  \\* \\[#[0-9]+\\] Warrior \\(6,5\\) moves 2\\.0/2\\.0 · ready\n"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+contains = "\nTO DO: choose research (set_research); give orders to units marked '*' (or fortify/sleep them). Call end_turn when finished."
+
+[[step]]
+tool = "found_city"
+args = { unit_id = "=settler", name = "Roma" }
+as = "roma"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "progress"
+matches = "^TURN PROGRESS \\(current state; this supersedes the briefing\\): cities: Roma #[0-9]+ \\| research: NOT SET \\| cities with no production: Roma #[0-9]+ \\| units still needing orders: #[0-9]+ Warrior at \\(6,5\\)\\. Handle what remains, then call end_turn\\.$"
+
+[[step]]
+note = "A city founded with the tool has no production until it is given some."
+check = { what = "city", city = "=roma.city_id" }
+path = "queue"
+len = 0
+
+[[step]]
+tool = "set_research"
+args = { tech = "Pottery" }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=warrior", order = "fortify" }
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=roma.city_id", item = "Warrior" }
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "progress"
+matches = "^TURN PROGRESS \\(current state; this supersedes the briefing\\): cities: Roma #[0-9]+ \\| research: Pottery \\(set\\) \\| units still needing orders: none\\. Everything is handled — call end_turn now\\.$"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\n    \\[#[0-9]+\\] Warrior \\(6,5\\) moves 2\\.0/2\\.0 · fortify\n"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+not_contains = "TO DO"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\n  \\[#[0-9]+\\] Roma \\(5,5\\) pop 1 capital · food \\+[0-9]+ \\(grows in [0-9]+\\) · prod [0-9]+ · gold [0-9]+ · sci [0-9]+ · cul [0-9]+ · faith 0 · building Warrior \\(0/[0-9]+, [0-9]+ turns\\)\n"

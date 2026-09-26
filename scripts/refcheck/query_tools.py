@@ -1,5 +1,5 @@
 """Record the Python engine's answers to the query tools and the other views on the fixture states, for the Rust
-port of the views (crates/citar-engine DESIGN.md 8.1, package 1d-02).
+port of the views and the briefing (crates/citar-engine DESIGN.md 8.1, packages 1d-02 and 1d-03).
 
     PYTHONHASHSEED=0 python scripts/refcheck/query_tools.py            # writes refcheck/query_tools.json.gz
     PYTHONHASHSEED=0 python scripts/refcheck/query_tools.py --check    # re-records and compares with the committed file
@@ -20,7 +20,13 @@ state's name ``<case>/t<turn>``:
 * ``god_view``: ``views.client_view(g, None)``, what a spectator's browser receives, without its events and with
   every 25th tile;
 * ``facade``: ``EngineGame.empire_summary`` for each of those civilizations, ``standings``, and ``path_preview`` for
-  up to six of each one's units toward a tile drawn near it.
+  up to six of each one's units toward a tile drawn near it;
+* package 1d-03 adds to ``calls`` the ASCII map (``get_map``: around the capital, with the legend, around a unit
+  with a small radius, the widest, and off the map), and, on the first state only since the ruleset is the same in
+  all, ``get_rules`` for every topic, with a name that resolves loosely and one that does not; and ``maps``: the
+  state's terrain as a map (``maps.map_from_game``, with every 25th tile), its summary, and what ``maps.validate``
+  says of it; and ``scenario``: ``scenario.overview``, ``default_seats``, and ``normalize_seats`` of a list of seats
+  that exercises each of its rules, and of one it refuses.
 
 The Rust test (crates/citar-refcheck/tests/query_tools.rs) loads each state with ``Game::from_python``, asks the same
 questions, and compares the answers with refcheck's comparator, the differences explained by id from
@@ -57,6 +63,22 @@ GOD_TILES = 25
 EACH = 12
 TILES = 24
 PATHS = 6
+# get_rules: each topic, then each table topic with a loosely written name and a name it does not have.
+RULE_TOPICS = ["units", "buildings", "techs", "improvements", "resources", "promotions", "terrains", "terrain",
+               "policies", "beliefs", "specialists", "eras", "nations", "city_state_types", "speeds", "difficulties",
+               "deal_items", "combat", "overview", " Units ", "astrology"]
+RULE_NAMES = [("units", "warrior"), ("units", "Great Scientist"), ("buildings", "the_great_library"),
+              ("techs", "bronze working"), ("improvements", "Farm"), ("resources", "IRON"),
+              ("promotions", "Shock I"), ("terrains", "Grassland"), ("terrain", "Hill"), ("policies", "Tradition"),
+              ("policies", "legalism"), ("beliefs", "Tithe"), ("specialists", "Scientist"), ("eras", "Medieval era"),
+              ("nations", "Rome"), ("city_state_types", "Maritime"), ("city_state_types", "maritime"),
+              ("speeds", "quick"), ("difficulties", "Prince"), ("units", "Unicorn"), ("techs", 5)]
+# normalize_seats: a list that exercises each rule, and one whose handicap it refuses.
+SEATS = [{"type": "llm", "label": "A label much longer than the sixty characters a seat label keeps, cut",
+          "llm": {"model": "m", "api_key": "secret"}, "bot": {"style": "x"}, "handicap": "ai",
+          "auto": {"un_vote": False}},
+         "not a seat", {"type": "nobody", "label": 42}]
+BAD_SEATS = [{"handicap": "god"}]
 
 
 def states(folders):
@@ -81,10 +103,11 @@ def call(g, pid: int, tool: str, args: dict) -> dict:
     return e
 
 
-def record(name: str, path: Path) -> dict:
-    """One state's answers."""
+def record(name: str, path: Path, first: bool = False) -> dict:
+    """One state's answers; the ruleset's own, which every state shares, on the ``first`` only."""
     from citar import engine_api
-    from citar.engine import views
+    from citar.engine import maps, scenario, views
+    from citar.engine.game import ActionError
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         doc = json.load(fh)
     g = common.load_game(json.dumps(doc["state"]))
@@ -109,6 +132,21 @@ def record(name: str, path: Path) -> dict:
         for idx in tiles:
             x, y = g.grid.xy(idx)
             calls.append(call(g, pid, "get_tile", {"x": x, "y": y}))
+        calls.append(call(g, pid, "get_map", {}))
+        if n == 0:
+            calls.append(call(g, pid, "get_map", {"legend": True, "radius": 0}))
+            calls.append(call(g, pid, "get_map", {"x": g.s.width + 3, "y": 0}))
+            calls.append(call(g, pid, "get_map", {"radius": 40}))
+        if units:
+            x, y = g.grid.xy(units[-1].idx)
+            calls.append(call(g, pid, "get_map", {"x": x, "y": y, "radius": 3}))
+            calls.append(call(g, pid, "get_map", {"x": x, "radius": 1}))
+    if first:
+        pid = majors[0]
+        for topic in RULE_TOPICS:
+            calls.append(call(g, pid, "get_rules", {"topic": topic}))
+        for topic, rname in RULE_NAMES:
+            calls.append(call(g, pid, "get_rules", {"topic": topic, "name": rname}))
     god = json.loads(common.dumps(views.client_view(g, None)))
     god.pop("events", None)
     god["tiles"] = god["tiles"][::GOD_TILES]
@@ -123,7 +161,21 @@ def record(name: str, path: Path) -> dict:
             x, y = g.grid.xy(to)
             facade["path_preview"].append({"pid": pid, "unit": u.id, "x": x, "y": y,
                                            "answer": json.loads(common.dumps(eg.path_preview(pid, u.id, x, y)))})
-    return {"calls": calls, "god_view": god, "facade": facade}
+    exported = maps.map_from_game(g)
+    clean, warnings = maps.validate(g.rules, exported)
+    sampled = dict(exported)
+    sampled["tiles"] = exported["tiles"][::GOD_TILES]
+    mapped = {"export": sampled, "summary": maps.summary(exported), "warnings": warnings,
+              "round_trip": clean == {**exported, "id": clean["id"]}}
+    normalized = []
+    for seats in (SEATS, BAD_SEATS):
+        try:
+            normalized.append({"seats": seats, "ok": scenario.normalize_seats(g, seats)})
+        except ActionError as e:
+            normalized.append({"seats": seats, "error": str(e)})
+    scen = {"overview": json.loads(common.dumps(scenario.overview(g))),
+            "default_seats": scenario.default_seats(g), "normalize_seats": normalized}
+    return {"calls": calls, "god_view": god, "facade": facade, "maps": mapped, "scenario": scen}
 
 
 def main(argv=None) -> int:
@@ -133,7 +185,8 @@ def main(argv=None) -> int:
     ap.add_argument("--out", help="where to write (the committed file by default)")
     a = ap.parse_args(argv)
     folders = [Path(a.corpus)] if a.corpus else FIXTURES
-    out = {name: record(name, path) for name, path in states(folders)}
+    found = states(folders)
+    out = {name: record(name, path, first=(i == 0)) for i, (name, path) in enumerate(found)}
     text = json.dumps(out, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
     target = Path(a.out) if a.out else OUT
     if a.check:
