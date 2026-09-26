@@ -347,5 +347,6 @@ The generator is not kept: edit the file, keep every anchor where it is, and che
 `maps.validate` that the document is its own clean form.
 
 `maps/arena_wrap.json` is the same arena wrapping east-west and north-south (`map =
-"arena_wrap"`), for what a map that wraps changes: the tiles and anchors are the arena's, so keep
-the two files' tiles the same.
+"arena_wrap"`), for what a map that wraps changes: the tiles and anchors are the arena's, so an
+edit to one is made to both. Both runners' tests check that a map `<name>_wrap.json` differs from
+`<name>.json` only in its id, name, description and wrapping.

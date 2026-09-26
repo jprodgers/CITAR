@@ -1,6 +1,7 @@
 //! The map editor's API (package 1d-03, gate 3; `api::maps`): a document is checked, its problems
 //! fixed and reported; blank and generated maps check clean; and a game's terrain, exported as a
-//! map, reads back as it was written and plays again.
+//! map, reads back as it was written and plays again. The rule scripts' wrapping arena stays the
+//! arena's tiles.
 //!
 //! What the Python engine answered for the committed fixtures' exported maps (their summary,
 //! what the editor says of them, whether they read back) is compared in
@@ -11,6 +12,7 @@ use citar_engine::game::{DebugOptions, Game};
 use citar_engine::rules::Ruleset;
 use citar_engine::state::Phase;
 use citar_testkit::games::{self, agents_for};
+use citar_testkit::script::rules_dir;
 use serde_json::{Value, json};
 
 fn rules() -> &'static Ruleset {
@@ -170,4 +172,36 @@ fn a_game_s_map_exported_reads_back_and_plays_again() {
         json!(starts),
         "the new civilizations start where the old capitals stood"
     );
+}
+
+/// A script map's wrapping copy (`tests/rules/maps/<name>_wrap.json`) is the map itself but for
+/// its id, name, description and wrapping: its tiles, starts and anchors must stay the other's,
+/// or a script on the copy would test another map than its anchors say.
+/// `tests/test_rule_scripts.py` checks the same on the Python side.
+#[test]
+fn a_script_map_s_wrapping_copy_keeps_its_tiles() {
+    let dir = rules_dir().join("maps");
+    #[allow(clippy::disallowed_methods, reason = "the maps are files")]
+    let read = |name: &str| -> Value {
+        let path = dir.join(format!("{name}.json"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+    #[allow(clippy::disallowed_methods, reason = "the maps are files")]
+    let mut copies: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the maps")
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().to_str()?.strip_suffix("_wrap.json").map(str::to_owned))
+        .collect();
+    copies.sort();
+    assert!(copies.contains(&"arena".to_owned()), "the arena has its copy: {copies:?}");
+    for base in copies {
+        let (mut map, mut copy) = (read(&base), read(&format!("{base}_wrap")));
+        assert_eq!((copy["wrap_x"].clone(), copy["wrap_y"].clone()), (json!(true), json!(true)));
+        for key in ["id", "name", "description", "wrap_x", "wrap_y"] {
+            map.as_object_mut().map(|o| o.shift_remove(key));
+            copy.as_object_mut().map(|o| o.shift_remove(key));
+        }
+        assert!(map == copy, "{base}_wrap.json is no longer {base}.json wrapping");
+    }
 }
