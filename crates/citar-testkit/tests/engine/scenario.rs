@@ -120,15 +120,17 @@ fn inspect_reads_and_lists_what_is_pending() {
             )
         })
         .collect();
-    assert!(listed.contains(&("briefing".to_owned(), "1d-03".to_owned())), "briefing waits");
-    assert!(!listed.iter().any(|(name, _)| name == "view"), "the view is answered (1d-02)");
+    assert!(
+        !listed.iter().any(|(name, _)| name == "view" || name == "briefing"),
+        "the view and the briefing are answered (1d-02, 1d-03)"
+    );
     let kinds: Vec<&str> =
         pending.as_array().into_iter().flatten().filter_map(|p| p["kind"].as_str()).collect();
     let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
     assert_eq!(
         [count("inspect"), count("scenario_op"), count("test_op")],
-        [1, 0, 0],
-        "one query waits, and no test op"
+        [0, 0, 0],
+        "no query, operation or test op waits"
     );
     // Gate 1 of package 1c-09: no stage of a turn or of setup waits.
     assert_eq!([count("turn_stage"), count("setup_stage")], [0, 0], "no stage waits");
@@ -172,10 +174,13 @@ fn inspect_reads_and_lists_what_is_pending() {
             "{name} is ported"
         );
     }
-    let e = inspect::inspect(&g, &json!({"what": "briefing", "player": 0}))
-        .expect_err("a query that waits for its package");
-    assert_eq!(e.code, ErrCode::NotPorted, "briefing");
-    assert!(e.message.contains("api::briefing"), "briefing: {}", e.message);
+    let b = inspect::inspect(&g, &json!({"what": "briefing", "player": 0})).expect("a briefing");
+    assert!(b["text"].as_str().is_some_and(|t| t.starts_with("=== TURN ")), "{b}");
+    assert!(b["progress"].as_str().is_some_and(|t| t.starts_with("TURN PROGRESS")), "{b}");
+    assert!(b["alerts"].is_array(), "{b}");
+    let e = inspect::inspect(&g, &json!({"what": "briefing", "player": 3}))
+        .expect_err("a city-state has no briefing");
+    assert_eq!(e.code, ErrCode::BadParam);
     let view = inspect::inspect(&g, &json!({"what": "view", "player": 0})).expect("a view");
     assert_eq!(view["you"], json!(0));
     let spectator = inspect::inspect(&g, &json!({"what": "view"})).expect("a spectator's view");

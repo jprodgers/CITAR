@@ -25,9 +25,11 @@
 //!   `Game::view_json`, the info builders the query tools answer from, `empire_summary`,
 //!   `standings`, `path_preview`, the alerts and `replay_data`.
 
+pub mod briefing;
 pub mod game;
 pub mod maps;
 pub mod scenario;
+pub mod text;
 pub mod tools;
 pub mod views;
 

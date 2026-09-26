@@ -67,6 +67,8 @@ where = [
   { group = "state_echo", path = "units[*].hp" },
   { group = "combat_previews", path = "fights[*].preview.defender_hp" },
   { group = "views", path = "civs[*].view.units[*].hp" },
+  { group = "briefing", path = "civs[*].briefing.units[*].hp" },
+  { group = "briefing", path = "civs[*].briefing.window[*].hp" },
 ]
 python = 0
 rust = 1
@@ -86,6 +88,8 @@ where = [
   { group = "civs", path = "civs[*].stat_map.*.production" },
   { group = "views", path = "civs[*].view.cities[*].yields.production" },
   { group = "views", path = "civs[*].view.cities[*].queue[*].turns" },
+  { group = "briefing", path = "civs[*].briefing.cities[*].prod" },
+  { group = "briefing", path = "civs[*].briefing.cities[*].build.turns" },
 ]
 cases = [
   "duel-archipelago-normal-s1022/t120",
@@ -164,7 +168,10 @@ broad = true
 [[differences]]
 id = "marble-bonus-in-its-own-city-wonder-turns"
 reason = "Python gave a resource's `[in this city]` uniques to every city of its owner, so Marble's +15% production toward wonders held in every city, and every city's list showed its wonders taking fewer turns; Rust gives them to the city whose improved tile provides the resource (DESIGN.md 5.12)"
-where = [{ group = "buildable", path = "cities[*].costs.*.turns" }]
+where = [
+  { group = "buildable", path = "cities[*].costs.*.turns" },
+  { group = "briefing", path = "civs[*].briefing.city_options[*].wonders[*].turns" },
+]
 cases = [
   "duel-archipelago-normal-s1022/t120",
   "duel-archipelago-normal-s1022/t200",
@@ -347,6 +354,9 @@ where = [
   { group = "views", path = "civs[*].view.cities[*].turns_to_grow" },
   { group = "views", path = "civs[*].view.cities[*].starving" },
   { group = "views", path = "civs[*].view.alerts[*]" },
+  { group = "briefing", path = "civs[*].briefing.cities[*].food" },
+  { group = "briefing", path = "civs[*].briefing.cities[*].growth" },
+  { group = "briefing", path = "civs[*].briefing.alerts[*]" },
 ]
 # The corpus's states where a food total lies that close to a tenth's half or to zero; no committed
 # fixture has one.
@@ -361,4 +371,34 @@ cases = [
   "small-pangaea-raging-s1026/t200",
   "standard-continents-normal-s1010/t200",
   "standard-continents-off-s1030/t280",
+]
+
+# Package 1d-03: the briefing.
+
+[[differences]]
+id = "briefing-names-only-known-players"
+reason = "Python's briefing named whoever it mentioned: whose turn it is, a city-state's ally, the owner of a resource on a tile explored long ago, though the reader had never met them; Rust names them as the events do, Unknown Civilization or Unknown City-State"
+where = [
+  { group = "briefing", path = "civs[*].briefing.head[0]" },
+  { group = "briefing", path = "civs[*].briefing.city_states[*]" },
+  { group = "briefing", path = "civs[*].briefing.window[*]" },
+]
+rust = "re:Unknown (Civilization|City-State)"
+
+[[differences]]
+id = "briefing-lists-only-cities-it-could-have-seen"
+reason = "Python's briefing listed, among the points of interest, every foreign city on a tile the reader had explored, with its owner, including those of civilizations it had not met: cities founded there after it explored the tile, which it cannot have seen, since seeing a city's tile makes contact with its owner; Rust leaves them out"
+where = [{ group = "briefing", path = "civs[*].briefing.poi[*]" }]
+python = "re: city "
+rust = { is = "absent" }
+# The corpus's states with such a city; no committed fixture has one.
+cases = [
+  "small-pangaea-raging-s1026/t60",
+  "small-pangaea-raging-s1026/t120",
+  "small-pangaea-raging-s1026/t200",
+  "small-pangaea-raging-s1026/t280",
+  "standard-archipelago-off-s1012/t60",
+  "standard-inland_sea-normal-s1013/t200",
+  "standard-inland_sea-off-s1033/t25",
+  "standard-inland_sea-off-s1033/t60",
 ]

@@ -111,7 +111,7 @@ fn answer(
         return Err(ActionError::new(ErrCode::InvalidPlayer, "Invalid player."));
     }
     let args = normalize_with(&spec.args, args)?;
-    query_tools::answer(g, pid, spec.name(), q, &args)
+    query_tools::answer(g, pid, q, &args)
 }
 
 /// The tool called `tool`, in a game that takes calls.

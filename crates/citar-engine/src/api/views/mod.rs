@@ -32,7 +32,8 @@
 //! - [`events`]: an event as JSON for a viewer, the UN tally named (`game.py:880-990`);
 //! - [`alerts`]: what needs attention this turn (`briefing.alert_items`);
 //! - [`client`]: `client_view` and [`Game::view_json`] (`views.py:716-763`), and `path_preview`;
-//! - [`replay`]: [`Game::replay_data`] in the full and the delta formats (DESIGN.md 4.11).
+//! - [`replay`]: [`Game::replay_data`] in the full and the delta formats (DESIGN.md 4.11);
+//! - [`rules`] (package 1d-03): the rules as `get_rules` looks them up (`views.rules_lookup`).
 
 use serde_json::{Map, Value, json};
 
@@ -50,6 +51,7 @@ pub mod events;
 pub mod info;
 pub mod players;
 pub mod replay;
+pub mod rules;
 pub mod tiles;
 pub mod units;
 
