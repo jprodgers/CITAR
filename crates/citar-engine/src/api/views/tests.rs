@@ -241,3 +241,24 @@ fn a_sacked_city_names_no_building_as_null() {
         json!({"gold": 20, "citizen_killed": false, "building": null})
     );
 }
+
+#[test]
+fn views_write_floats_as_python_did() {
+    let v = serde_json::json!([
+        2.0,
+        1e16,
+        5e-5,
+        0.1,
+        -0.0,
+        3,
+        12.35,
+        123_456_789_012_345.0,
+        1e15,
+        2.5e-7
+    ]);
+    let text = String::from_utf8(super::to_py_json(&v)).expect("UTF-8");
+    assert_eq!(
+        text,
+        "[2.0,1e+16,5e-05,0.1,-0.0,3,12.35,123456789012345.0,1000000000000000.0,2.5e-07]"
+    );
+}

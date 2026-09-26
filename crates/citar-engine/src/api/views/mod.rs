@@ -52,6 +52,40 @@ pub use self::client::{ClientView, PathPreview};
 pub use self::empire::{EmpireSummary, Standing};
 pub use self::replay::ReplayFormat;
 
+/// JSON as Python's `json.dumps` wrote the views' numbers: a float as its `repr` (`2.0`,
+/// `1e+16`, `5e-05`, through [`PyFloat`](crate::base::fmt::PyFloat)), where `serde_json` would
+/// write `1e16` and `5e-5`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PyJson;
+
+impl serde_json::ser::Formatter for PyJson {
+    fn write_f64<W: ?Sized + std::io::Write>(&mut self, w: &mut W, x: f64) -> std::io::Result<()> {
+        // Most of a view's floats are whole: written at once, as `repr` writes them.
+        if x.fract() == 0.0 && x.abs() < 1e15 {
+            #[allow(clippy::cast_possible_truncation, reason = "a whole number below 1e15")]
+            let n = x as i64;
+            if n == 0 && x.is_sign_negative() {
+                return w.write_all(b"-0.0");
+            }
+            return write!(w, "{n}.0");
+        }
+        write!(w, "{}", crate::base::fmt::PyFloat(x))
+    }
+}
+
+/// `v` as JSON bytes, its floats as Python wrote them ([`PyJson`]).
+#[must_use]
+pub fn to_py_json<T: serde::Serialize + ?Sized>(v: &T) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4096);
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, PyJson);
+    // A view holds text, numbers, lists and maps with text keys, none of which fails to
+    // serialise; the empty view stands in should that ever change.
+    if v.serialize(&mut ser).is_err() {
+        return Vec::new();
+    }
+    out
+}
+
 /// A tile as `[x, y]` (`views._xy`).
 pub(crate) fn xy(g: &Game, t: TileIdx) -> Value {
     let (x, y) = g.xy(t);

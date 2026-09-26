@@ -169,7 +169,7 @@ impl Game {
     /// they happened), messages, thoughts, negotiations and deals, with where the game stands.
     #[must_use]
     pub fn replay_data(&self, format: ReplayFormat) -> Vec<u8> {
-        serde_json::to_vec(&self.replay_json(format)).unwrap_or_default()
+        super::to_py_json(&self.replay_json(format))
     }
 
     /// [`Game::replay_data`] as a value.

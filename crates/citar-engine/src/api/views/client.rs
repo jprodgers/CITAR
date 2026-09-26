@@ -225,13 +225,11 @@ fn tile_rows<'a>(g: &'a Game, r: &'a Ruleset, viewer: Option<PlayerId>) -> Vec<T
 
 impl Game {
     /// The client view as JSON bytes (`EngineGame.view`, DESIGN.md 8.1): what `viewer` sees, or
-    /// everything for `None`, with the last `event_limit` of its newest 200 events.
+    /// everything for `None`, with the last `event_limit` of its newest 200 events, its floats as
+    /// Python wrote them ([`super::PyJson`]).
     #[must_use]
     pub fn view_json(&self, viewer: Option<PlayerId>, event_limit: u32) -> Vec<u8> {
-        let v = self.client_view(viewer, i64::from(event_limit));
-        // A view holds text, numbers, lists and maps with text keys, none of which fails to
-        // serialise; the empty view stands in should that ever change.
-        serde_json::to_vec(&v).unwrap_or_default()
+        super::to_py_json(&self.client_view(viewer, i64::from(event_limit)))
     }
 
     /// The client view as a typed value, before it is written (`views.client_view`). An
