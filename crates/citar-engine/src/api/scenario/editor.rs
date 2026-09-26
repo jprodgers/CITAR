@@ -9,6 +9,7 @@
 //! (`scenario-overview-lists-every-influence`); and a scenario's summary reads the state as the
 //! engine saves it (DESIGN.md 4.9), where Python read its own.
 
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::base::ids::PlayerId;
@@ -227,6 +228,10 @@ pub fn normalize_seats(g: &Game, seats: Option<&Value>) -> Result<Vec<Value>, Ac
 /// city-states it has, its seats and when it was saved. Its `state` is a state as the engine
 /// saves it (DESIGN.md 4.9).
 ///
+/// The fields are read from the save's JSON rather than by loading it, which a list of
+/// scenarios cannot afford, so each is checked: a state whose map, turn or players' kinds do not
+/// read as the engine writes them is refused, rather than listed with nothing in it.
+///
 /// # Errors
 /// [`ErrCode::BadParam`] for a scenario without an id, a name or a state that reads as one.
 pub fn scenario_summary(doc: &Value) -> Result<Value, ActionError> {
@@ -237,16 +242,33 @@ pub fn scenario_summary(doc: &Value) -> Result<Value, ActionError> {
     let name = o.get("name").ok_or_else(|| bad("name"))?;
     let st = o.get("state").and_then(Value::as_object).ok_or_else(|| bad("state"))?;
     let map = st.get("map").ok_or_else(|| bad("map in its state"))?;
-    let turn =
-        st.get("clock").and_then(|c| c.get("turn")).ok_or_else(|| bad("turn in its state"))?;
+    let side = |k: &str| {
+        map.get(k)
+            .filter(|v| v.as_u64().is_some())
+            .cloned()
+            .ok_or_else(|| bad(&format!("map {k} in its state")))
+    };
+    let (width, height) = (side("width")?, side("height")?);
+    let turn = st
+        .get("clock")
+        .and_then(|c| c.get("turn"))
+        .filter(|v| v.as_u64().is_some())
+        .ok_or_else(|| bad("turn in its state"))?;
     let players = st.get("players").and_then(Value::as_array).ok_or_else(|| bad("players"))?;
-    fn kind(p: &Value) -> &str {
-        p.get("kind").and_then(Value::as_str).unwrap_or("")
+    // The kind as the save writes it, read by its own type, so a renamed kind is refused here.
+    let mut kinds = Vec::with_capacity(players.len());
+    for p in players {
+        let kind = p
+            .get("kind")
+            .and_then(|k| PlayerKind::deserialize(k).ok())
+            .ok_or_else(|| bad("kind for each of its players"))?;
+        kinds.push(kind);
     }
     let majors: Vec<Value> = players
         .iter()
-        .filter(|p| kind(p) == "major")
-        .map(|p| {
+        .zip(&kinds)
+        .filter(|&(_, &k)| k == PlayerKind::Major)
+        .map(|(p, _)| {
             json!({
                 "id": p.get("id").cloned().unwrap_or(Value::Null),
                 "name": p.get("name").cloned().unwrap_or(Value::Null),
@@ -254,13 +276,13 @@ pub fn scenario_summary(doc: &Value) -> Result<Value, ActionError> {
             })
         })
         .collect();
-    let city_states = players.iter().filter(|p| kind(p) == "city_state").count();
+    let city_states = kinds.iter().filter(|&&k| k == PlayerKind::CityState).count();
     Ok(json!({
         "id": id,
         "name": name,
         "description": o.get("description").cloned().unwrap_or_else(|| json!("")),
-        "width": map.get("width").cloned().unwrap_or(Value::Null),
-        "height": map.get("height").cloned().unwrap_or(Value::Null),
+        "width": width,
+        "height": height,
         "turn": turn,
         "players": majors,
         "city_states": city_states,
