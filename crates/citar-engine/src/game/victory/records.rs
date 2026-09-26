@@ -75,6 +75,16 @@ std::thread_local! {
     /// `test-ops`), for the test that decodes the chronicle's frames against them.
     static CAPTURED: core::cell::RefCell<Vec<FullFrame>> =
         const { core::cell::RefCell::new(Vec::new()) };
+    /// Called with the game as each frame is recorded on this thread (feature `test-ops`).
+    static FRAME_HOOK: core::cell::Cell<Option<fn(&Game)>> = const { core::cell::Cell::new(None) };
+}
+
+/// Calls `hook` with the game as it is when each frame on this thread is recorded, before the
+/// frame is captured, or stops with `None` (feature `test-ops`): a test rebuilds the frame from
+/// the state itself, with no help from [`FullFrame::capture`].
+#[cfg(feature = "test-ops")]
+pub fn on_frame_for_test(hook: Option<fn(&Game)>) {
+    FRAME_HOOK.with(|h| h.set(hook));
 }
 
 /// Keeps the frames recorded on this thread from now on as they are captured, or stops, and
@@ -98,6 +108,10 @@ pub fn take_frames_for_test() -> Vec<FullFrame> {
 /// events since the last frame: a keyframe or a delta from the last frame this game recorded
 /// since it was built or loaded.
 pub(crate) fn record_frame(g: &mut Game) {
+    #[cfg(feature = "test-ops")]
+    if let Some(hook) = FRAME_HOOK.with(core::cell::Cell::get) {
+        hook(g);
+    }
     let from = g.chron.frames().frames.last().and_then(journal::event_range).map_or(0, |r| r.1);
     let to = g.st.host().next_event_id.saturating_sub(1);
     let frame = FullFrame::capture(g.rules, &g.st, (from, to));

@@ -1,15 +1,18 @@
 //! The query tools' answers (`tools.py:200-406`), which change nothing.
 //!
 //! A query looks up what it names the way the actions do (`game::lookup`: the tile, the
-//! caller's unit or city), so its refusals are the tools' own. Package 1d-01 answers the queries
-//! that need no view: `read_notes`, `get_events` and `preview_attack`, and checks the arguments
-//! of the rest. The others build their answers from the views' info builders and the briefing,
-//! which packages 1d-02 (`api::views`) and 1d-03 (`api::briefing`) port; until then they refuse
-//! with a `NotPorted` refusal that `cargo xtask check` counts.
+//! caller's unit or city), so its refusals are the tools' own. Package 1d-01 answered the queries
+//! that need no view: `read_notes`, `get_events` and `preview_attack`, and checked the arguments
+//! of the rest. Package 1d-02 answers the fifteen the views build (`api::views`: a tile, a unit
+//! and the units, a city and the cities, the empire, the players, diplomacy, the city-states, the
+//! tech tree, policies, religion, great people, espionage and victory). `get_briefing`, `get_map`
+//! and `get_rules` wait for the briefing (package 1d-03) and refuse with a `NotPorted` refusal
+//! that `cargo xtask check` counts.
 
 use serde_json::{Map, Value, json};
 
 use super::registry::Query;
+use crate::api::views::{cities, empire, info, players, tiles, units};
 use crate::base::ids::PlayerId;
 use crate::base::py;
 use crate::game::Game;
@@ -23,6 +26,9 @@ const EVENTS_SHOWN: usize = 40;
 
 /// How far back `get_events` looks (`Game.events_for`'s default limit, `game.py:891`).
 const EVENTS_SCANNED: usize = 200;
+
+/// How many messages `get_diplomacy` shows by default (`tools.py:291`).
+const MESSAGES_SHOWN: i64 = 30;
 
 /// The topics of `get_rules`, in the order its refusal lists them (`views.rules_lookup`,
 /// `views.py:633-648`).
@@ -64,18 +70,37 @@ pub(super) fn answer(
             let t = tile_at(g, required(args, "x")?, required(args, "y")?)?;
             resolve::preview(g, u, t)
         }
-        Query::Tile => {
-            tile_at(g, required(args, "x")?, required(args, "y")?)?;
-            Err(views(tool))
-        }
+        Query::Tile => Ok(tiles::tile_info(
+            g,
+            tile_at(g, required(args, "x")?, required(args, "y")?)?,
+            Some(pid),
+        )),
         Query::Unit => {
-            own_unit(g, pid, required(args, "unit_id")?)?;
-            Err(views(tool))
+            Ok(units::unit_info(g, own_unit(g, pid, required(args, "unit_id")?)?, Some(pid), true))
         }
+        Query::Units => Ok(Value::Array(
+            g.player_units(pid).map(|u| units::unit_info(g, u.id(), Some(pid), false)).collect(),
+        )),
         Query::City => {
-            own_city(g, pid, required(args, "city_id")?)?;
-            Err(views(tool))
+            Ok(cities::city_info(g, own_city(g, pid, required(args, "city_id")?)?, Some(pid), true))
         }
+        Query::Cities => Ok(Value::Array(
+            g.player_cities(pid).map(|c| cities::city_info(g, c.id(), Some(pid), false)).collect(),
+        )),
+        Query::Empire => Ok(empire::empire_info(g, pid)),
+        Query::Players => Ok(Value::Array(players::players_overview(g, Some(pid)))),
+        Query::Diplomacy => Ok(players::diplomacy_info(
+            g,
+            pid,
+            int(args, "message_limit").unwrap_or(MESSAGES_SHOWN),
+        )),
+        Query::CityStates => Ok(Value::Array(players::city_states_info(g, pid))),
+        Query::TechTree => Ok(tech_tree(g, pid, args.get("filter"))),
+        Query::Policies => Ok(info::policies_info(g, pid)),
+        Query::Religion => Ok(info::religion_info(g, pid)),
+        Query::GreatPeople => Ok(info::great_people_info(g, pid)),
+        Query::Espionage => Ok(info::espionage_view(g, pid)),
+        Query::VictoryStatus => Ok(info::victory_info(g, pid)),
         Query::Map => {
             // A centre given is checked before the map is drawn, so a bad one is refused rather
             // than drawn somewhere else (`tools.py:226-227`).
@@ -89,19 +114,25 @@ pub(super) fn answer(
             Err(briefing(tool))
         }
         Query::Briefing => Err(briefing(tool)),
-        Query::Units
-        | Query::Cities
-        | Query::Empire
-        | Query::Players
-        | Query::Diplomacy
-        | Query::CityStates
-        | Query::TechTree
-        | Query::Policies
-        | Query::Religion
-        | Query::GreatPeople
-        | Query::Espionage
-        | Query::VictoryStatus => Err(views(tool)),
     }
+}
+
+/// `get_tech_tree`: the tree, its techs filtered to one status, `available` unless the filter
+/// says otherwise, or all of them for `all` (`tools.get_tech_tree`, `tools.py:309-321`). A filter
+/// that is no status leaves none, as Python's comparison did.
+fn tech_tree(g: &Game, pid: PlayerId, filter: Option<&Value>) -> Value {
+    let mut tt = info::tech_tree(g, pid);
+    let all = matches!(filter, Some(Value::String(s)) if s == "all");
+    if !all {
+        let want = match filter {
+            Some(v) if py::truthy(v) => v.clone(),
+            _ => Value::from("available"),
+        };
+        if let Some(Value::Array(techs)) = tt.get_mut("techs") {
+            techs.retain(|t| t.get("status") == Some(&want));
+        }
+    }
+    tt
 }
 
 /// An integer argument, as `normalize` left it.
@@ -168,11 +199,6 @@ fn rules_topic(topic: Option<&Value>) -> Result<String, ActionError> {
             RULES_TOPICS.join(", ")
         ),
     ))
-}
-
-/// The refusal of a query whose answer the views build (package 1d-02).
-fn views(tool: &str) -> ActionError {
-    not_ported("api::views", tool)
 }
 
 /// The refusal of a query whose answer the briefing builds (package 1d-03).

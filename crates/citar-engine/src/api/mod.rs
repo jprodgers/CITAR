@@ -19,11 +19,17 @@
 //! From package 1d-01:
 //! - [`tools`]: the registry of the 61 tools with their schemas, `Game::execute` and
 //!   `Game::execute_query` (`tools.py:15-201`), and the query tools that need no view.
+//!
+//! From package 1d-02:
+//! - [`views`]: the game as a player sees it (`views.py`, the view side of `game.py:880-990`):
+//!   `Game::view_json`, the info builders the query tools answer from, `empire_summary`,
+//!   `standings`, `path_preview`, the alerts and `replay_data`.
 
 pub mod game;
 pub mod maps;
 pub mod scenario;
 pub mod tools;
+pub mod views;
 
 #[cfg(feature = "test-ops")]
 pub mod inspect;

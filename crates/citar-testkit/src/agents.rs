@@ -1035,7 +1035,7 @@ fn some_query(g: &Game, pid: PlayerId, rng: &mut Rng) -> serde_json::Value {
     let nid = any_of(rng, &nids).unwrap_or(1);
     let t = TileIdx(u32::try_from(rng.below(g.grid().size() as u64)).unwrap_or(0));
     let (x, y) = g.grid().xy(t);
-    match rng.below(27) {
+    match rng.below(28) {
         0 => json!({"what": "briefing", "player": pid.0}),
         1 => json!({"what": "build_options", "unit": u}),
         2 => json!({"what": "buildable", "city": c}),
@@ -1062,6 +1062,7 @@ fn some_query(g: &Game, pid: PlayerId, rng: &mut Rng) -> serde_json::Value {
         23 => json!({"what": "unit_actions", "unit": u}),
         24 => json!({"what": "units", "player": q}),
         25 => json!({"what": "victory", "player": q}),
+        26 => json!({"what": "view"}),
         _ => json!({"what": "view", "player": pid.0}),
     }
 }
@@ -1086,10 +1087,10 @@ fn some_query_tool(g: &Game, pid: PlayerId, rng: &mut Rng) -> (&'static str, ser
     (tool, args)
 }
 
-/// Reads a game as a host or a model would between two actions: `inspect` queries (the views
-/// and the briefing among them, refused until they are ported), a query tool, what the tools
-/// read (a unit's reach, a preview, a city's list, the advisor's pick), the chronicle, and the
-/// digest.
+/// Reads a game as a host or a model would between two actions: `inspect` queries (a player's
+/// view and a spectator's among them, and the briefing, refused until it is ported), a query
+/// tool, what the tools read (a unit's reach, a preview, a city's list, the advisor's pick), the
+/// chronicle, and the digest.
 fn read_something(g: &Game, pid: PlayerId, rng: &mut Rng) {
     let q = some_query(g, pid, rng);
     let _answer = citar_engine::api::inspect::inspect(g, &q);

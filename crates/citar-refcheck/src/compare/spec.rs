@@ -217,11 +217,25 @@ impl CompareSpec {
             Group::CombatPreviews => spec,
             Group::DealChecks => spec.bot_only("deals[*].bot_value"),
             Group::ToolErrors => spec,
+            // Sets in meaning compare as multisets: a city's worked and locked tiles (sorted
+            // by tile in Rust), a unit's promotions (in the ruleset's order), an event's
+            // audience and a message's recipients (by id), and a tile's features. The alerts
+            // compare as a multiset too, so that one alert more or less is reported as itself
+            // rather than as every alert after it.
             Group::Views => spec
                 .keyed("civs", "pid")
+                .keyed_pos("civs[*].view.tiles", 0)
+                .multiset("civs[*].view.tiles[*][2]")
                 .keyed("civs[*].view.units", "id")
+                .multiset("civs[*].view.units[*].promotions")
                 .keyed("civs[*].view.cities", "id")
                 .multiset("civs[*].view.cities[*].buildings")
+                .multiset("civs[*].view.cities[*].worked_tiles")
+                .multiset("civs[*].view.cities[*].locked_tiles")
+                .keyed("civs[*].view.events", "id")
+                .multiset("civs[*].view.events[*].players")
+                .multiset("civs[*].view.diplomacy.messages[*].to")
+                .multiset("civs[*].view.alerts")
                 .keyed("civs[*].view.players", "id")
                 .multiset("civs[*].view.empire.policies")
                 .multiset("civs[*].view.empire.happiness.luxury_types")

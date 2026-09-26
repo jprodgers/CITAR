@@ -325,3 +325,29 @@ reason = "A resource or tech deal item that named no resource or tech was refuse
 [[differences]]
 id = "refusals-quote-at-most-60-characters"
 reason = "A refusal that quoted a caller's words (an unknown tool, item, tech, policy, belief, improvement, spy, city, specialist, recipient, status, topic or unit action) quoted all of them, so a long name made it run past 600 characters; Rust quotes the first 60 characters and '...', and puts a name it gave without quotation marks (a specialist the city has no slots for) in them once it is cut. A deal item is quoted as Python's repr with each text in it cut so and, past 100 characters, its remaining entries given as '...' and its brackets closed; a spy's city id that is not a number, on which Python raised, is quoted the same way, while a number is given as the whole number it reads as (12 for 12.5)"
+
+# Package 1d-02: the views and the query tools.
+
+[[differences]]
+id = "city-state-view-lists-its-quests"
+reason = "get_city_states listed each city-state's quests by matching them on a key the quest list never had, so it listed none; Rust lists the quests the city-state has given the caller"
+
+[[differences]]
+id = "great-people-view-shows-the-points"
+reason = "get_great_people read each great person's points under its pool's name, which the points were never kept under, so every kind showed 0 points; Rust shows the points each kind has earned, from cities or battles"
+
+[[differences]]
+id = "empire-summary-wars-by-id"
+reason = "The empire summary a negotiation answer reads listed the civilizations it was at war with in the order it had met them; Rust lists them by player id"
+
+[[differences]]
+id = "un-results-name-only-known-candidates"
+reason = "get_diplomacy and get_victory_status gave the United Nations' last result with every candidate's name, those of civilizations the caller had not met included; Rust names them as a scrubbed event does, Unknown Civilization or Unknown City-State (numbered from the second), and gives the winner only to a caller who knows it"
+
+[[differences]]
+id = "views-hide-unmet-allies-and-recipients"
+reason = "get_city_states named each city-state's ally, and get_diplomacy each recipient of a message the caller was on, even a civilization the caller had not met, which the player list hid as unknown; Rust names them only to a caller that has met them, and unknown otherwise"
+
+[[differences]]
+id = "city-food-stored-is-a-float"
+reason = "A city's food stored was written as a whole number after a rule set it (a starving city's box emptied, a city avoiding growth held at a full box, a city being razed) and with a decimal point otherwise; Rust always writes it with the decimal point"

@@ -183,6 +183,12 @@ pub fn round_ndigits(x: f64, ndigits: i32) -> f64 {
     if ndigits < NDIGITS_MIN {
         return 0.0 * x;
     }
+    round_ndigits_exact(x, ndigits).unwrap_or_else(|| round_ndigits_formatted(x, ndigits))
+}
+
+/// [`round_ndigits`] for a finite, non-zero `x` and `ndigits` within Python's bounds, through the
+/// exact decimal formatting of `x`: correct for any, but slow.
+fn round_ndigits_formatted(x: f64, ndigits: i32) -> f64 {
     let a = x.abs();
     let digits = match usize::try_from(ndigits) {
         Ok(n) => round_to_decimals(a, n),
@@ -194,6 +200,41 @@ pub fn round_ndigits(x: f64, ndigits: i32) -> f64 {
         return x;
     }
     if x.is_sign_negative() { -r } else { r }
+}
+
+/// The powers of ten a double holds exactly.
+const EXACT_TENS: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// [`round_ndigits`] in integers, for `0 <= ndigits <= 22` and a result of fewer than 2^53
+/// units in the last decimal place, which is every rounding a view or a rule asks for: `None`
+/// otherwise. `|x| = m * 2^e`, so `|x| * 10^n = m * 5^n * 2^(e + n)` exactly, in 128 bits; that
+/// is rounded to a whole number `q` of units, halves to even, and `q / 10^n` is the nearest float
+/// to the decimal, since a division of two doubles is rounded once. Formatting each value, as the
+/// general path does, cost most of a view's time.
+fn round_ndigits_exact(x: f64, ndigits: i32) -> Option<f64> {
+    let n = usize::try_from(ndigits).ok().filter(|&n| n < EXACT_TENS.len())?;
+    let (m, e) = lowest_bit_exponent(x.abs());
+    let five = 5u128.pow(u32::try_from(n).ok()?);
+    let scaled = u128::from(m) * five;
+    let shift = -(e + ndigits);
+    let q: u128 = if shift <= 0 {
+        // Already a whole number of units: x has no digits past the n-th.
+        return Some(x);
+    } else if shift >= 128 {
+        0
+    } else {
+        let s = shift.unsigned_abs();
+        let (q, rest) = (scaled >> s, scaled & ((1u128 << s) - 1));
+        let half = 1u128 << (s - 1);
+        if rest > half || (rest == half && q & 1 == 1) { q + 1 } else { q }
+    };
+    let q = u64::try_from(q).ok().filter(|&q| q < 1 << 53)?;
+    #[allow(clippy::cast_precision_loss, reason = "q is below 2^53, so exact")]
+    let r = q as f64 / EXACT_TENS[n];
+    Some(if x.is_sign_negative() { -r } else { r })
 }
 
 /// `|a|` as `m * 2^e` with `m` odd: returns `(m, e)`. `a` must be finite; a zero gives `(0, 0)`.
@@ -282,6 +323,27 @@ fn increment_decimal(s: &mut String) {
     }
     // Only ASCII digits and a point were touched.
     *s = String::from_utf8(bytes).unwrap_or_default();
+}
+
+// ---- Sums ----------------------------------------------------------------------------------------
+
+/// Python's `sum()` of floats (3.12 and later): Neumaier's compensated summation, which rounds
+/// the exact sum once rather than at every step. `sum([-3.0, -5.95, 4.0, 1.0, 1.0])` is `-2.95`,
+/// where adding in turn gives `-2.9499999999999993`, and the two round to a tenth differently.
+#[must_use]
+pub fn py_sum(xs: impl IntoIterator<Item = f64>) -> f64 {
+    // CPython's `cs_add` and `cs_to_double` (Objects/bltinmodule.c).
+    let (mut hi, mut lo) = (0.0f64, 0.0f64);
+    for x in xs {
+        let t = hi + x;
+        if hi.abs() >= x.abs() {
+            lo += (hi - t) + x;
+        } else {
+            lo += (x - t) + hi;
+        }
+        hi = t;
+    }
+    if lo != 0.0 && lo.is_finite() { hi + lo } else { hi }
 }
 
 // ---- Saturating conversions -------------------------------------------------------------------
@@ -406,5 +468,70 @@ mod tests {
         assert_eq!(round_ndigits(1.5, 400).to_bits(), 1.5f64.to_bits());
         assert_eq!(round_ndigits(-1.5, -400).to_bits(), (-0.0f64).to_bits());
         assert_eq!(round_ndigits(f64::MAX, -308).to_bits(), f64::MAX.to_bits());
+    }
+
+    #[test]
+    fn sums_round_once_as_python_s_sum_does() {
+        // Values Python 3.12's sum() gives (the first differs from adding in turn).
+        let cases: [(&[f64], f64); 5] = [
+            (&[-3.0, -5.95, 4.0, 0.0, 1.0, 1.0], -2.95),
+            (&[0.1, 0.2, 0.3], 0.6),
+            (&[1e100, 1.0, -1e100], 1.0),
+            (&[], 0.0),
+            (&[-0.0], 0.0),
+        ];
+        for (xs, want) in cases {
+            let got = py_sum(xs.iter().copied());
+            assert_eq!(got.to_bits(), want.to_bits(), "sum({xs:?}) = {got:?}, want {want:?}");
+        }
+        assert_eq!(
+            round_ndigits(py_sum([-3.0, -5.95, 4.0, 0.0, 1.0, 1.0]), 1).to_bits(),
+            (-3.0f64).to_bits()
+        );
+        assert!(py_sum([f64::INFINITY, 1.0]).is_infinite());
+    }
+
+    #[test]
+    fn rounding_in_integers_agrees_with_the_formatted_rounding() {
+        // A fixed stream of doubles of every magnitude a game meets, their halves and near-halves,
+        // and random bit patterns: the integer path must give the formatted path's bits exactly.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut checked = 0;
+        for i in 0..200_000u64 {
+            let r = next();
+            #[allow(clippy::cast_precision_loss, reason = "test values")]
+            let x = match i % 4 {
+                0 => (r % 2_000_000) as f64 / 1000.0 - 1000.0,
+                1 => (r % 100_000) as f64 / 20.0 + 0.005,
+                2 => f64::from_bits(r) % 1e9,
+                _ => (r % 1_000_000) as f64 * 0.1,
+            };
+            if !x.is_finite() || x == 0.0 {
+                continue;
+            }
+            for n in 0..=6 {
+                if let Some(fast) = round_ndigits_exact(x, n) {
+                    let slow = round_ndigits_formatted(x, n);
+                    assert_eq!(
+                        fast.to_bits(),
+                        slow.to_bits(),
+                        "round({x:?}, {n}): {fast:?} against {slow:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 1_000_000, "{checked} checked");
+        // Whole numbers come back as they are; a result past 2^53 units takes the general path.
+        assert_eq!(round_ndigits_exact(2.0, 1), Some(2.0));
+        assert_eq!(round_ndigits_exact(1e300, 2), Some(1e300));
+        assert_eq!(round_ndigits_exact(123_456_789.123_456_7, 9), None);
+        assert!(round_ndigits_exact(-0.04, 1).is_some_and(f64::is_sign_negative));
     }
 }

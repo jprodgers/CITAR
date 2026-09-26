@@ -83,3 +83,9 @@ group = "deal_checks"
 # name that is not there, a rule), and the text of each refusal, which is what a model reads.
 [[enforce]]
 group = "tool_errors"
+
+# views (package 1d-02): what the browser receives for two civilizations of each state (`client_view`), whole:
+# the map as each knows it, the units and cities it sees and remembers, everyone it knows of, the settings, its
+# events scrubbed for it, its empire, diplomacy, notes and alerts.
+[[enforce]]
+group = "views"

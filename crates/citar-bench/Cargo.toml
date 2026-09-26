@@ -96,5 +96,12 @@ harness = false
 name = "barbarians"
 harness = false
 
+# The client view (package 1d-02): a player's on a small map late in the game at 1.5 ms, a
+# spectator's on a large one at 20 ms (report-only), failing above three times either; a
+# spectator's of the synthetic gargantuan state against a 12 ms target (report-only).
+[[bench]]
+name = "views"
+harness = false
+
 [lints]
 workspace = true

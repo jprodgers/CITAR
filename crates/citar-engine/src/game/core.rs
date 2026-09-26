@@ -925,6 +925,16 @@ pub(crate) mod testing {
 
     /// The state of the test game.
     pub fn state() -> State {
+        state_of(&[
+            (PlayerKind::Major, "Rome", "Augustus Caesar"),
+            (PlayerKind::Major, "Greece", "Alexander"),
+            (PlayerKind::CityState, "Geneva", ""),
+            (PlayerKind::Barbarian, "Barbarians", ""),
+        ])
+    }
+
+    /// A state on the test game's map with these players, by id in order: kind, name, leader.
+    pub fn state_of(who: &[(PlayerKind, &str, &str)]) -> State {
         let r = Ruleset::shared();
         let grass = r.lookup::<TerrainId>("Grassland").unwrap_or(TerrainId(0));
         let map =
@@ -939,14 +949,11 @@ pub(crate) mod testing {
         let speed = r.lookup::<SpeedId>("Standard").unwrap_or(SpeedId(0));
         let difficulty = r.lookup::<DifficultyId>("Prince").unwrap_or(DifficultyId(0));
         let cfg = GameConfig::new(7, src, speed, difficulty, EraId(0), BarbarianLevelId(1), 500);
-        let players: PlayerVec<Player> = [
-            player(r, 0, PlayerKind::Major, "Rome", "Augustus Caesar"),
-            player(r, 1, PlayerKind::Major, "Greece", "Alexander"),
-            player(r, 2, PlayerKind::CityState, "Geneva", ""),
-            player(r, 3, PlayerKind::Barbarian, "Barbarians", ""),
-        ]
-        .into_iter()
-        .collect();
+        let players: PlayerVec<Player> = who
+            .iter()
+            .zip(0u8..)
+            .map(|(&(kind, name, leader), id)| player(r, id, kind, name, leader))
+            .collect();
         State::new(cfg, map, tiles, players).expect("a valid state")
     }
 
