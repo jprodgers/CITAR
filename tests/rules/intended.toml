@@ -343,3 +343,7 @@ reason = "The empire summary a negotiation answer reads listed the civilizations
 [[differences]]
 id = "un-results-name-only-known-candidates"
 reason = "get_diplomacy and get_victory_status gave the United Nations' last result with every candidate's name, those of civilizations the caller had not met included; Rust names them as a scrubbed event does, Unknown Civilization or Unknown City-State (numbered from the second), and gives the winner only to a caller who knows it"
+
+[[differences]]
+id = "views-hide-unmet-allies-and-recipients"
+reason = "get_city_states named each city-state's ally, and get_diplomacy each recipient of a message the caller was on, even a civilization the caller had not met, which the player list hid as unknown; Rust names them only to a caller that has met them, and unknown otherwise"

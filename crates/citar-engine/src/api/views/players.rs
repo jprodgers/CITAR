@@ -5,8 +5,8 @@
 use serde_json::{Map, Value, json};
 
 use super::empire::{luxury_resources, strategic_resources};
-use super::name_of;
 use super::tiles::resource_seen;
+use super::{known_name, name_of};
 use crate::base::ids::{PlayerId, ResourceId};
 use crate::base::num;
 use crate::game::city_states::{actions as csa, influence as csi, quests};
@@ -284,7 +284,8 @@ pub(crate) fn un_result(
 /// Relations, negotiations, deals and recent messages, from `pid`'s side
 /// (`views.diplomacy_info`, `views.py:440-471`): the majors it has met with what could be traded
 /// with each, its open and latest settled negotiations as it sees them, the deals in force, its
-/// last `message_limit` messages, and the United Nations' next vote.
+/// last `message_limit` messages (a recipient it has not met named `unknown`), and the United
+/// Nations' next vote.
 #[must_use]
 pub fn diplomacy_info(g: &Game, pid: PlayerId, message_limit: i64) -> Value {
     let r = g.rules();
@@ -343,7 +344,10 @@ pub fn diplomacy_info(g: &Game, pid: PlayerId, message_limit: i64) -> Value {
     let messages: Vec<Value> = msgs[py_tail(msgs.len(), message_limit)..]
         .iter()
         .map(|m| {
-            let to: Vec<&str> = m.to.iter().map(|p| name_of(g, p)).collect();
+            // A message sent to all a civilization met names civilizations some of its
+            // recipients have not met, which Python named to them.
+            // refcheck: views-hide-unmet-allies-and-recipients
+            let to: Vec<Value> = m.to.iter().map(|p| known_name(g, pid, p)).collect();
             json!({
                 "turn": m.turn,
                 "from": m.from.0,
@@ -391,8 +395,9 @@ pub fn diplomacy_info(g: &Game, pid: PlayerId, message_limit: i64) -> Value {
     Value::Object(out)
 }
 
-/// The city-states `pid` has met, with its influence and standing, their allies, bonuses,
-/// quests and what tribute they would pay (`views.city_states_info`, `views.py:474-502`).
+/// The city-states `pid` has met, with its influence and standing, their allies (`unknown` for
+/// one it has not met), bonuses, quests and what tribute they would pay
+/// (`views.city_states_info`, `views.py:474-502`).
 #[must_use]
 pub fn city_states_info(g: &Game, pid: PlayerId) -> Vec<Value> {
     let r = g.rules();
@@ -418,7 +423,10 @@ pub fn city_states_info(g: &Game, pid: PlayerId) -> Vec<Value> {
         m.insert("influence".into(), json!(num::round_ndigits(csi::influence(g, id, pid), 1)));
         m.insert("resting_point".into(), json!(csi::resting_point(g, id, pid)));
         m.insert("relationship".into(), json!(csi::relationship(g, id, pid).name()));
-        m.insert("ally".into(), json!(d.ally().map(|a| name_of(g, a))));
+        // Named only to a caller that knows the ally, as `players_overview` names it, where
+        // Python named it to anyone.
+        // refcheck: views-hide-unmet-allies-and-recipients
+        m.insert("ally".into(), d.ally().map_or(Value::Null, |a| known_name(g, pid, a)));
         m.insert("you_protect".into(), json!(d.protectors.contains(pid)));
         m.insert("at_war".into(), json!(g.at_war(pid, id)));
         m.insert("friend_bonuses".into(), json!(ty.map(|t| texts(&t.friend)).unwrap_or_default()));

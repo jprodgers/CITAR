@@ -2,9 +2,12 @@ about = """
 What the views show a player. The client view holds the tiles it has explored, and a spectator's
 all of them. get_city_states lists the quests a city-state has given the caller, where Python
 matched them on a key its list never had and listed none; get_great_people shows the points each
-kind of great person has, where Python read them under its pool's name and showed none.
+kind of great person has, where Python read them under its pool's name and showed none. A
+city-state's ally, and the recipients of a message, are named only to a caller that has met them:
+Python hid the ally in the player list but named it in get_city_states, and named every recipient
+in get_diplomacy.
 """
-from = "citar/engine/views.py: client_view, city_states_info, great_people_info"
+from = "citar/engine/views.py: client_view, players_overview, city_states_info, diplomacy_info, great_people_info"
 
 [config]
 city_states = 1
@@ -77,6 +80,43 @@ eq = ["Find Player (Civilization 2)"]
 intended = "city-state-view-lists-its-quests"
 
 [[step]]
+note = "The city-state allies with the civilization the first has not met."
+ops = [
+  { op = "meet", a = 1, b = 2 },
+  { op = "set_influence", city_state = 2, player = 1, amount = 70 },
+]
+
+[[step]]
+check = { what = "city_state", player = 2 }
+subset = { ally = 1 }
+
+[[step]]
+check = { what = "view", player = 0 }
+path = "players[id=2]"
+subset = { ally = "unknown" }
+
+[[step]]
+tool = "get_city_states"
+player = 1
+as = "ally_sees"
+
+[[step]]
+check = "ally_sees"
+path = "[0]"
+subset = { id = 2, ally = "Civilization 2" }
+
+[[step]]
+tool = "get_city_states"
+player = 0
+as = "stranger_sees"
+
+[[step]]
+check = "stranger_sees"
+path = "[0].ally"
+eq = "unknown"
+intended = "views-hide-unmet-allies-and-recipients"
+
+[[step]]
 note = "A merchant in Roma earns Great Merchant points each turn."
 ops = [{ op = "set_city", city = "=roma", pop = 3, add_buildings = ["Market"] }]
 
@@ -113,3 +153,54 @@ check = "after"
 path = 'progress[great_person="Great Merchant"].points'
 eq = 3
 intended = "great-people-view-shows-the-points"
+
+[[step]]
+note = "Three civilizations: the first writes to all it has met, two who have not met each other."
+new_game = { players = [{}, {}, {}] }
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "meet", a = 0, b = 2 },
+]
+
+[[step]]
+tool = "send_message"
+args = { to = "all", text = "Hello, all." }
+
+[[step]]
+tool = "get_diplomacy"
+player = 0
+as = "sender"
+
+[[step]]
+check = "sender"
+path = "messages[0]"
+subset = { from = 0, from_name = "Civilization 1", to = ["Civilization 2", "Civilization 3"], text = "Hello, all." }
+
+[[step]]
+tool = "get_diplomacy"
+player = 1
+as = "second"
+
+[[step]]
+check = "second"
+path = "messages[0]"
+subset = { from = 0, from_name = "Civilization 1", text = "Hello, all." }
+
+[[step]]
+check = "second"
+path = "messages[0].to"
+eq = ["Civilization 2", "unknown"]
+intended = "views-hide-unmet-allies-and-recipients"
+
+[[step]]
+tool = "get_diplomacy"
+player = 2
+as = "third"
+
+[[step]]
+check = "third"
+path = "messages[0].to"
+eq = ["unknown", "Civilization 3"]
+intended = "views-hide-unmet-allies-and-recipients"

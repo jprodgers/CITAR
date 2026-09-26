@@ -20,53 +20,146 @@ use citar_engine::base::ids::{PlayerId, UnitId};
 use citar_engine::game::Game;
 use citar_engine::rules::Ruleset;
 use citar_refcheck::Group;
-use citar_refcheck::compare::{self, CompareSpec, Options, Pattern};
+use citar_refcheck::compare::{self, CompareSpec, Diff, DiffKind, Options, Pattern};
 use serde_json::{Value, json};
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-/// Differences the engine makes on purpose, by the intended id that explains them and the path
-/// of the difference under the tool's name (or `god_view`, `empire_summary`, `standings`,
-/// `path_preview`), and whether the committed recording shows it (an explanation it shows must
-/// be used there, or it is stale; the others are the corpus's).
-const EXPLAINED: &[(&str, &str, bool)] = &[
+/// A difference the engine makes on purpose: the intended id that explains it, the path of the
+/// difference under the tool's name (or `god_view`, `empire_summary`, `standings`,
+/// `path_preview`), whether the committed recording shows it (an explanation it shows must be
+/// used there, or it is stale; the others are the corpus's), and, where the id explains only
+/// some of the differences at that path, which.
+struct Why {
+    id: &'static str,
+    at: &'static str,
+    committed: bool,
+    only: Option<fn(&Diff) -> bool>,
+}
+
+const fn why(id: &'static str, at: &'static str, committed: bool) -> Why {
+    Why { id, at, committed, only: None }
+}
+
+/// A build option Rust offers where Python offered none, one that removes the tile's feature
+/// first: an option Rust lost, or one it adds for another reason, stays unexplained.
+fn offered_with_a_removal(d: &Diff) -> bool {
+    d.kind == DiffKind::Extra && d.rust.as_ref().is_some_and(|v| v.get("first_removes").is_some())
+}
+
+/// A name Rust gives as `unknown` where Python gave it: in place (a text), or in a set of names
+/// (Python's name missing, `unknown` extra).
+fn named_unknown(d: &Diff) -> bool {
+    let unknown = Some(&json!("unknown"));
+    match d.kind {
+        DiffKind::Text | DiffKind::Extra => d.rust.as_ref() == unknown,
+        DiffKind::Missing => d.python.as_ref().is_some_and(Value::is_string),
+        _ => false,
+    }
+}
+
+/// The differences in value the engine makes on purpose.
+const EXPLAINED: &[Why] = &[
     // Python matched the quests on a key its list never had, so it listed none.
-    ("city-state-view-lists-its-quests", "get_city_states.ok[*].quests", false),
-    ("city-state-view-lists-its-quests", "get_city_states.ok[*].quests[*]", false),
+    why("city-state-view-lists-its-quests", "get_city_states.ok[*].quests", false),
+    why("city-state-view-lists-its-quests", "get_city_states.ok[*].quests[*]", false),
     // Python read each kind's points under its pool's name, so it showed none.
-    ("great-people-view-shows-the-points", "get_great_people.ok.progress[*].points", true),
+    why("great-people-view-shows-the-points", "get_great_people.ok.progress[*].points", true),
     // A civilian brought to 0 health, which Rust loads at 1.
-    ("civilians-at-zero-health", "get_unit.ok.hp", false),
-    ("civilians-at-zero-health", "get_units.ok[*].hp", false),
-    ("civilians-at-zero-health", "get_tile.ok.units[*].hp", false),
-    ("civilians-at-zero-health", "get_unit.ok.attack_targets[*].defender_hp", false),
-    ("civilians-at-zero-health", "god_view.units[*].hp", false),
+    why("civilians-at-zero-health", "get_unit.ok.hp", false),
+    why("civilians-at-zero-health", "get_units.ok[*].hp", false),
+    why("civilians-at-zero-health", "get_tile.ok.units[*].hp", false),
+    why("civilians-at-zero-health", "get_unit.ok.attack_targets[*].defender_hp", false),
+    why("civilians-at-zero-health", "god_view.units[*].hp", false),
     // Marble's bonus toward wonders, in its own city only: production, and the turns to build.
-    ("marble-bonus-in-its-own-city", "get_city.ok.yields.production", true),
-    ("marble-bonus-in-its-own-city", "get_city.ok.yield_breakdown.*.production", true),
-    ("marble-bonus-in-its-own-city", "get_city.ok.queue[*].turns", true),
-    ("marble-bonus-in-its-own-city", "get_city.ok.can_build.wonders[*].turns", true),
-    ("marble-bonus-in-its-own-city", "get_cities.ok[*].yields.production", true),
-    ("marble-bonus-in-its-own-city", "get_cities.ok[*].queue[*].turns", true),
-    ("marble-bonus-in-its-own-city", "god_view.cities[*].yields.production", true),
-    ("marble-bonus-in-its-own-city", "god_view.cities[*].queue[*].turns", true),
+    why("marble-bonus-in-its-own-city", "get_city.ok.yields.production", true),
+    why("marble-bonus-in-its-own-city", "get_city.ok.yield_breakdown.*.production", true),
+    why("marble-bonus-in-its-own-city", "get_city.ok.queue[*].turns", true),
+    why("marble-bonus-in-its-own-city", "get_city.ok.can_build.wonders[*].turns", true),
+    why("marble-bonus-in-its-own-city", "get_cities.ok[*].yields.production", true),
+    why("marble-bonus-in-its-own-city", "get_cities.ok[*].queue[*].turns", true),
+    why("marble-bonus-in-its-own-city", "god_view.cities[*].yields.production", true),
+    why("marble-bonus-in-its-own-city", "god_view.cities[*].queue[*].turns", true),
     // A farm, mine or plantation offered on a forest or jungle, the feature removed first.
-    ("improvements-over-removable-features", "get_unit.ok.build_options[*]", true),
+    Why {
+        id: "improvements-over-removable-features",
+        at: "get_unit.ok.build_options[*]",
+        committed: true,
+        only: Some(offered_with_a_removal),
+    },
     // A city's food total a hair from a tenth's half or from zero, rounded as it is.
-    ("city-view-rounds-its-own-sums", "get_city.ok.yields.food", false),
-    ("city-view-rounds-its-own-sums", "get_city.ok.turns_to_grow", false),
-    ("city-view-rounds-its-own-sums", "get_city.ok.starving", false),
-    ("city-view-rounds-its-own-sums", "get_cities.ok[*].yields.food", false),
-    ("city-view-rounds-its-own-sums", "get_cities.ok[*].turns_to_grow", false),
-    ("city-view-rounds-its-own-sums", "get_cities.ok[*].starving", false),
-    ("city-view-rounds-its-own-sums", "god_view.cities[*].yields.food", false),
-    ("city-view-rounds-its-own-sums", "god_view.cities[*].turns_to_grow", false),
-    ("city-view-rounds-its-own-sums", "god_view.cities[*].starving", false),
+    why("city-view-rounds-its-own-sums", "get_city.ok.yields.food", false),
+    why("city-view-rounds-its-own-sums", "get_city.ok.turns_to_grow", false),
+    why("city-view-rounds-its-own-sums", "get_city.ok.starving", false),
+    why("city-view-rounds-its-own-sums", "get_cities.ok[*].yields.food", false),
+    why("city-view-rounds-its-own-sums", "get_cities.ok[*].turns_to_grow", false),
+    why("city-view-rounds-its-own-sums", "get_cities.ok[*].starving", false),
+    why("city-view-rounds-its-own-sums", "god_view.cities[*].yields.food", false),
+    why("city-view-rounds-its-own-sums", "god_view.cities[*].turns_to_grow", false),
+    why("city-view-rounds-its-own-sums", "god_view.cities[*].starving", false),
     // The civilizations at war, by player id rather than in the order they were met.
-    ("empire-summary-wars-by-id", "empire_summary.at_war_with[*]", false),
+    why("empire-summary-wars-by-id", "empire_summary.at_war_with[*]", false),
+    // A city-state's ally, and a message's recipients, the caller has not met: unknown.
+    Why {
+        id: "views-hide-unmet-allies-and-recipients",
+        at: "get_city_states.ok[*].ally",
+        committed: false,
+        only: Some(named_unknown),
+    },
+    Why {
+        id: "views-hide-unmet-allies-and-recipients",
+        at: "get_diplomacy.ok.messages[*].to[*]",
+        committed: false,
+        only: Some(named_unknown),
+    },
 ];
+
+/// A list of explanations, with which of them explained something.
+struct Explanations {
+    rows: Vec<(&'static Why, Pattern)>,
+    used: Vec<bool>,
+}
+
+impl Explanations {
+    fn new(list: &'static [Why], known: &[String]) -> Self {
+        let rows: Vec<(&Why, Pattern)> = list
+            .iter()
+            .map(|w| {
+                assert!(known.iter().any(|k| k == w.id), "{} is in neither intended list", w.id);
+                (w, Pattern::parse(w.at).expect("a pattern"))
+            })
+            .collect();
+        let used = vec![false; rows.len()];
+        Self { rows, used }
+    }
+
+    /// Whether an explanation explains `d`; the first that does is used.
+    fn explain(&mut self, d: &Diff) -> bool {
+        let found = self
+            .rows
+            .iter()
+            .position(|(w, p)| p.matches(&d.path) && w.only.is_none_or(|only| only(d)));
+        found.inspect(|&i| self.used[i] = true).is_some()
+    }
+
+    /// Fails on an explanation the committed recording shows that explained nothing, unless the
+    /// recording is a corpus's.
+    fn assert_none_stale(&self) {
+        if std::env::var_os("CITAR_QUERY_TOOLS").is_some() {
+            return;
+        }
+        let stale: Vec<String> = self
+            .rows
+            .iter()
+            .zip(&self.used)
+            .filter(|((w, _), u)| w.committed && !**u)
+            .map(|((w, _), _)| format!("{} at {}", w.id, w.at))
+            .collect();
+        assert!(stale.is_empty(), "explanations that explain nothing: {stale:?}");
+    }
+}
 
 /// Lists compared as sets, and lists keyed by an id.
 fn spec() -> CompareSpec {
@@ -226,16 +319,8 @@ fn answers(g: &Game, rec: &Value) -> Vec<(String, Value, Value)> {
 #[test]
 fn the_query_tools_answer_as_python_s_did() {
     let (rec, dirs) = recording();
-    let known = intended_ids();
-    let explained: Vec<(&str, Pattern, bool)> = EXPLAINED
-        .iter()
-        .map(|&(id, p, committed)| {
-            assert!(known.iter().any(|k| k == id), "{id} is in neither intended list");
-            (id, Pattern::parse(p).expect("a pattern"), committed)
-        })
-        .collect();
+    let mut explained = Explanations::new(EXPLAINED, &intended_ids());
     let spec = spec();
-    let mut used = vec![false; explained.len()];
     let mut unexplained = Vec::new();
     let mut compared = 0usize;
     for (name, state) in rec.as_object().expect("states by name") {
@@ -244,38 +329,33 @@ fn the_query_tools_answer_as_python_s_did() {
         for (label, python, rust) in answers(&g, state) {
             compared += 1;
             for d in compare::compare(&spec, &python, &rust, &Options::default()) {
-                match explained.iter().position(|(_, p, _)| p.matches(&d.path)) {
-                    Some(i) => used[i] = true,
-                    None => unexplained.push(format!(
-                        "{name} {label}: {} {:?} python {} rust {}",
-                        d.path,
-                        d.kind,
-                        d.python.map_or_else(|| "-".into(), |v| trim(&v.to_string())),
-                        d.rust.map_or_else(|| "-".into(), |v| trim(&v.to_string())),
-                    )),
+                if !explained.explain(&d) {
+                    unexplained.push(line(name, &label, d));
                 }
             }
         }
         assert_eq!((g.digest().expect("a digest"), g.rev()), before, "{name}: a query changed it");
     }
     assert!(compared > 1000, "only {compared} answers compared");
-    let shown: Vec<&String> = unexplained.iter().take(40).collect();
     assert!(
         unexplained.is_empty(),
         "{} unexplained differences, the first:\n{}\nby place:\n{}",
         unexplained.len(),
-        shown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n"),
+        unexplained.iter().take(40).map(String::as_str).collect::<Vec<_>>().join("\n"),
         by_place(&unexplained)
     );
-    if std::env::var_os("CITAR_QUERY_TOOLS").is_none() {
-        let stale: Vec<String> = explained
-            .iter()
-            .zip(&used)
-            .filter(|((_, _, committed), u)| *committed && !**u)
-            .map(|((id, p, _), _)| format!("{id} at {p}"))
-            .collect();
-        assert!(stale.is_empty(), "explanations that explain nothing: {stale:?}");
-    }
+    explained.assert_none_stale();
+}
+
+/// One difference as a line of the report.
+fn line(name: &str, label: &str, d: Diff) -> String {
+    format!(
+        "{name} {label}: {} {:?} python {} rust {}",
+        d.path,
+        d.kind,
+        d.python.map_or_else(|| "-".into(), |v| trim(&v.to_string())),
+        d.rust.map_or_else(|| "-".into(), |v| trim(&v.to_string())),
+    )
 }
 
 fn trim(s: &str) -> String {
