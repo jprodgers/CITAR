@@ -36,7 +36,8 @@ fn fixture() -> (Game, String) {
         })
         .expect("the fixture");
     let bytes = fixtures::read_state(&f).expect("a state");
-    let (g, _) = Game::from_python(Ruleset::shared(), &bytes).expect("it loads");
+    let g =
+        citar_bench::unchecked(Game::from_python(Ruleset::shared(), &bytes).expect("it loads").0);
     (g, f.name)
 }
 

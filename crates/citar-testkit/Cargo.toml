@@ -24,8 +24,9 @@ arbitrary.workspace = true
 [features]
 default = ["checks"]
 # The engine's invariants and cache oracle in every build, release included (DESIGN.md 9.4): the
-# golden sets, chaos and the properties ask them. citar-bench builds testkit without it, so that
-# a benchmark's game runs no check (`citar_testkit::checks`).
+# golden sets, chaos and the properties ask them (`citar_testkit::checks`). citar-bench builds
+# testkit without it, and turns the checks off in every game it times (`citar_bench::unchecked`),
+# since a command that selects both crates unifies the feature back on.
 checks = ["citar-engine/checks"]
 # The engine's memo counters, which the soak slices read (DESIGN.md 10).
 stats = ["citar-engine/stats"]

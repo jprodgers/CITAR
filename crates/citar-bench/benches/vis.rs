@@ -39,8 +39,7 @@ fn late() -> Game {
         .find(|f| f.case == "small-continents-normal-s1025" && f.turn == 280)
         .expect("the late fixture");
     let bytes = fixtures::read_state(&f).expect("a state");
-    let (g, _) = Game::from_python(Ruleset::shared(), &bytes).expect("it loads");
-    g
+    citar_bench::unchecked(Game::from_python(Ruleset::shared(), &bytes).expect("it loads").0)
 }
 
 /// A unit that sees at radius 2 by the walk, and a land tile next to it with no unit on it.

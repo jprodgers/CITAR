@@ -37,8 +37,7 @@ fn fixture() -> Game {
         .find(|f| f.case == "standard-pangaea-normal-s1031" && f.turn == 120)
         .expect("the fixture");
     let bytes = fixtures::read_state(&f).expect("a state");
-    let (g, _) = Game::from_python(Ruleset::shared(), &bytes).expect("it loads");
-    g
+    citar_bench::unchecked(Game::from_python(Ruleset::shared(), &bytes).expect("it loads").0)
 }
 
 /// Every ground or sea unit and a tile in its range it may attack, the units readied.

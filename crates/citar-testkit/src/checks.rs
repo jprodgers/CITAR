@@ -3,9 +3,10 @@
 //!
 //! The engine compiles both only into test and debug builds and into release builds with its
 //! `checks` feature. Testkit turns that feature on through its own default `checks` feature, so
-//! the golden binary, chaos and the tests have them in every profile; citar-bench builds testkit
-//! without it, so that its games run no check. A build without them answers with one line saying
-//! so, never with an empty list that would pass for a clean game.
+//! the golden binary, chaos and the tests have them in every profile. citar-bench builds testkit
+//! without it, and turns the checks off in each game it times (`citar_bench::unchecked`), since a
+//! command that selects testkit too unifies the feature back on. A build without them answers
+//! with one line saying so, never with an empty list that would pass for a clean game.
 
 use citar_engine::game::Game;
 
