@@ -2473,6 +2473,7 @@ pub enum ConvertError { Json(String), Unresolved { path: String, name: String },
 - **Map API** (gate 3, `tests/engine/maps.rs`): a document's problems are fixed and reported, and what cannot be a map is refused; blank maps and generated maps of three types check clean, their tiles unchanged; a game's terrain after 40 rounds of random agents, exported, reads back as written and starts a new game on the same tiles, which exports them again, its civilizations where the old capitals stood.
 - **Performance** (gate 4, report-only, `benches/briefing.rs`): the briefing on `small-continents-normal-s1025/t280` about 0.43 ms against 1 ms, the turn's progress about 16 us, a large map's briefing about 0.47 ms.
 - **Kitchen sink.** No extra unique type is staged for the briefing, maps or scenarios: they read the types their systems read. Deferred: none.
+- **Counts** at this package's head: nextest 1078 passed, 1 skipped (`--workspace --all-features`, the corpus on); doctests pass; Python 607 OK (2 skipped); `cargo xtask check` 245 files, 0 NotPorted, 0 Pending; refcheck: all 14 groups enforced, every ratchet group at 0, clean on the 12 committed states and the corpus's 250 (the same two stale entries, `building-conditionals-read-a-filter` and `no-civ-adopted-counts-beliefs`); both query-tool tests pass on the committed and the corpus recordings; the 15 golden sets unchanged; clippy clean for the workspace and the engine in each feature set; `cargo doc` with `-D warnings` clean.
 
 ---
 
