@@ -16,7 +16,9 @@ publish = false
 
 [workspace.dependencies]
 citar-engine  = { path = "crates/citar-engine", default-features = false }
-citar-testkit = { path = "crates/citar-testkit" }
+# Without its `checks` feature, which the testkit crate's own builds turn on by default: a
+# benchmark that builds games through it must run no invariant (DESIGN.md 9.4).
+citar-testkit = { path = "crates/citar-testkit", default-features = false }
 # engine (the xtask allow-list: exactly these, plus their transitive closure)
 serde        = { version = "1.0.229", features = ["derive"] }
 serde_json   = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }

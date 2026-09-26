@@ -18,8 +18,15 @@ flate2.workspace = true
 # Rule scripts are TOML, and their `matches` checks regular expressions (DESIGN.md 9.3).
 toml.workspace = true
 regex.workspace = true
+# The fuzz targets' bytes, read as tool calls (`fuzz::fuzz_one`, DESIGN.md 9.5).
+arbitrary.workspace = true
 
 [features]
+default = ["checks"]
+# The engine's invariants and cache oracle in every build, release included (DESIGN.md 9.4): the
+# golden sets, chaos and the properties ask them. citar-bench builds testkit without it, so that
+# a benchmark's game runs no check (`citar_testkit::checks`).
+checks = ["citar-engine/checks"]
 # The engine's memo counters, which the soak slices read (DESIGN.md 10).
 stats = ["citar-engine/stats"]
 

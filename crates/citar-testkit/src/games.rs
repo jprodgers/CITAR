@@ -84,8 +84,9 @@ pub fn agents_for(g: &Game) -> Vec<RandomAgent> {
 pub fn problems(g: &mut Game) -> Vec<String> {
     let mut out: Vec<String> =
         g.take_violations().into_iter().map(|v| format!("turn {}: {v:?}", g.turn())).collect();
+    let turn = g.turn();
     out.extend(
-        g.check_invariants().into_iter().map(|v| format!("turn {}: breaks {v:?}", g.turn())),
+        crate::checks::invariants(g).into_iter().map(|v| format!("turn {turn}: breaks {v}")),
     );
     out
 }

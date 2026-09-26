@@ -22,9 +22,14 @@
 
 pub mod agents;
 pub mod calls;
+pub mod chaos;
+pub mod checks;
 pub mod fixtures;
+pub mod fuzz;
 pub mod games;
 pub mod golden;
 pub mod rulesets;
 pub mod script;
+pub mod spec;
+pub mod stability;
 pub mod states;
