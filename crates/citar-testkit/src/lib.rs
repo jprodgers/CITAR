@@ -5,7 +5,11 @@
 //!
 //! - [`agents`]: seat drivers for tests, `RandomAgent` among them (DESIGN.md 9.5);
 //! - [`calls`]: tool calls as models make them, right and wrong, for every tool of the registry;
+//! - [`chaos`]: the chaos driver of the `chaos` binary: random games with tool calls mixed in,
+//!   every step checked, each failure kept as a replay (DESIGN.md 9.5);
+//! - [`checks`]: the engine's invariants and cache oracle as testkit asks them;
 //! - [`fixtures`]: the Python states refcheck recorded, for the converter's tests and goldens;
+//! - [`fuzz`]: what the cargo-fuzz targets of `crates/citar-engine/fuzz` run;
 //! - [`games`]: whole games, a `RandomAgent` in every seat or a Python state passed round after
 //!   round, with a hook after every round, for the whole-game tests and golden sets;
 //! - [`golden`]: the golden sets that must come out identical on all five targets, and the
@@ -13,10 +17,13 @@
 //! - [`rulesets`]: test rulesets made from the shipped one by overlays, the kitchen sink among
 //!   them, which uses every unique type the engine supports;
 //! - [`script`]: the Rust runner of the rule scripts in `tests/rules/` (DESIGN.md 9.3);
+//! - [`spec`]: tool calls described by indices and bound to a game when made (`ActionSpec`);
+//! - [`stability`]: the properties P1 to P8, as one runner the property tests, chaos and the
+//!   fuzz targets share;
 //! - [`states`]: synthetic game states with every field filled, for the save, digest and journal
 //!   tests, the golden states and the digest benchmark.
 //!
-//! Later packages add the `chaos` and `soak` binaries.
+//! Package 1e-01 adds the `chaos` binary beside `golden`; 1e-02 adds `soak`.
 
 #![forbid(unsafe_code)]
 
