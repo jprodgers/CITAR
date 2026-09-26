@@ -5,14 +5,17 @@
 //! - **P1**, no panic: the caller's harness catches one (proptest, or chaos's `catch_unwind`);
 //! - **P2**, a refused call leaves the digest, the revision and the events as they were, so it
 //!   emitted nothing and settled nothing;
-//! - **P3**, the invariants hold after every call that changed the game, and no settle reported
-//!   a violation;
+//! - **P3**, the invariants hold after every call that changed the game, no settle reported a
+//!   violation, and the state has a digest after every step (a state with none, a NaN in it,
+//!   would leave P2, P6 and P8 comparing nothing);
 //! - **P4**, the caches equal a cold rebuild, every [`Options::verify_every`] steps and after the
 //!   last;
-//! - **P5**, every refusal reads as a sentence a model can use (`api::text_rule_broken`);
+//! - **P5**, every refusal reads as a sentence a model can use ([`refusal_rule_broken`]);
 //! - **P6**, a save and a load, every [`Options::save_every`] steps, give the digest saved, and
 //!   play goes on from the loaded game;
-//! - **P7**, at the end, at most players + 1 ends of turn move the turn on or end the game.
+//! - **P7**, at the end, at most one more end of turn than there are living major civilizations
+//!   (the seats whose turns the host ends; city-states and barbarians play inside the call)
+//!   moves the turn on or ends the game ([`stall_limit`]).
 //!
 //! **P8**, reads are free, needs two runs of the same steps: [`reads_are_free`] plays them once
 //! quietly and once with [`noise`] (queries of every kind, views, the briefing, snapshots, saves
@@ -29,6 +32,7 @@ use citar_engine::base::rng::{Purpose, Rng};
 use citar_engine::game::{DebugOptions, DriveOptions, Drivers, Game};
 use citar_engine::state::Phase;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::agents::{self, RandomAgent};
 use crate::spec::{ActionSpec, Shape};
@@ -128,7 +132,7 @@ impl Default for Options {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Taken {
     pub refused: Option<String>,
-    pub digest: Option<Digest>,
+    pub digest: Digest,
 }
 
 /// Steps played on a game, checking P2 to P7 as they go (see the module's documentation).
@@ -177,7 +181,8 @@ impl Run {
     pub fn step(&mut self, s: &Step) -> Result<Taken, Breach> {
         let at = self.steps;
         self.steps += 1;
-        let before = self.fingerprint();
+        let before = self.fingerprint(at)?;
+        // A refusal: the call, its arguments (to read the text against) and the text.
         let refused = match *s {
             Step::Call(spec) => {
                 let call = spec.bind(&self.g);
@@ -185,7 +190,7 @@ impl Run {
                 match self.g.execute(call.pid, call.tool, &call.args) {
                     Ok(_) if kind == ToolKind::Query => {
                         // A query is a read: it may change nothing (P8, checked here too).
-                        if self.fingerprint() != before {
+                        if self.fingerprint(at)? != before {
                             return Err(Breach::new(
                                 Property::P8,
                                 at,
@@ -195,25 +200,30 @@ impl Run {
                         None
                     }
                     Ok(_) => None,
-                    Err(e) => {
-                        Some((format!("{} {} by {}", call.tool, call.args, call.pid.0), e.message))
-                    }
+                    Err(e) => Some((
+                        format!("{} {} by {}", call.tool, call.args, call.pid.0),
+                        call.args,
+                        e.message,
+                    )),
                 }
             }
             Step::EndTurn => {
                 let p = self.g.current();
-                self.g.end_turn(p).err().map(|e| (format!("end_turn by {}", p.0), e.message))
+                self.g
+                    .end_turn(p)
+                    .err()
+                    .map(|e| (format!("end_turn by {}", p.0), Value::Null, e.message))
             }
             Step::Agent => {
                 self.agent_turn();
                 None
             }
         };
-        if let Some((call, text)) = &refused {
-            if let Some(why) = text_rule_broken(text) {
+        if let Some((call, args, text)) = &refused {
+            if let Some(why) = refusal_rule_broken(args, text) {
                 return Err(Breach::new(Property::P5, at, format!("{call}: {why}: {text}")));
             }
-            let after = self.fingerprint();
+            let after = self.fingerprint(at)?;
             if after != before {
                 return Err(Breach::new(
                     Property::P2,
@@ -233,7 +243,8 @@ impl Run {
             games::save_and_load(&mut self.g, &mut self.chunks)
                 .map_err(|e| Breach::new(Property::P6, at, e))?;
         }
-        Ok(Taken { refused: refused.map(|(_, t)| t), digest: self.g.digest().ok() })
+        let (digest, _, _) = self.fingerprint(at)?;
+        Ok(Taken { refused: refused.map(|(_, _, t)| t), digest })
     }
 
     /// The checks made after the last step: the caches (P4) and that the turns do not stall
@@ -251,8 +262,15 @@ impl Run {
 
     /// The digest, the revision and the number of events: what a refused call must leave as it
     /// was.
-    fn fingerprint(&self) -> (Option<Digest>, u64, usize) {
-        (self.g.digest().ok(), self.g.rev(), self.g.chronicle().events().len())
+    ///
+    /// # Errors
+    /// P3 at step `at` if the state has no digest: a NaN or an infinity somewhere in it, which no
+    /// comparison of digests could then see past.
+    fn fingerprint(&self, at: usize) -> Result<(Digest, u64, usize), Breach> {
+        let digest = self.g.digest().map_err(|e| {
+            Breach::new(Property::P3, at, format!("the state has no canonical digest: {e}"))
+        })?;
+        Ok((digest, self.g.rev(), self.g.chronicle().events().len()))
     }
 
     /// P3: what the settles reported and what the game breaks now.
@@ -295,7 +313,58 @@ impl Run {
     }
 }
 
-/// P7: from a copy of `g`, at most players + 1 ends of turn move the turn on or end the game.
+/// P5: which of the text rules (`api::text_rule_broken`, DESIGN.md 8.5) the refusal `text` of a
+/// call with arguments `args` breaks, if any.
+///
+/// A null inside an argument's value is the caller's own, and a refusal may quote it back as
+/// Python would, as `None` (`Unknown policy '[None]'.`). For such a call the word `None` is read
+/// as that null, and every other rule, `Some(`, `Idx(` and `::` among them, still holds. A null
+/// as an argument's whole value stands for the argument left out, and earns no such reading.
+#[must_use]
+pub fn refusal_rule_broken(args: &Value, text: &str) -> Option<&'static str> {
+    if !null_below_top(args) {
+        return text_rule_broken(text);
+    }
+    let words = citar_engine::base::text::find_word(text, "None");
+    let mut read = String::with_capacity(text.len());
+    let mut from = 0;
+    for w in words {
+        read.push_str(&text[from..w.start]);
+        read.push_str("null");
+        from = w.end;
+    }
+    read.push_str(&text[from..]);
+    text_rule_broken(&read)
+}
+
+/// Whether `args` hold a null below their top: inside an argument's value, or anywhere inside
+/// arguments that are no object at all.
+#[must_use]
+pub fn null_below_top(args: &Value) -> bool {
+    fn inside(v: &Value) -> bool {
+        match v {
+            Value::Array(a) => a.iter().any(|x| x.is_null() || inside(x)),
+            Value::Object(m) => m.values().any(|x| x.is_null() || inside(x)),
+            _ => false,
+        }
+    }
+    match args {
+        Value::Object(m) => m.values().any(inside),
+        other => inside(other),
+    }
+}
+
+/// P7's bound: one end of turn more than there are living major civilizations, the seats whose
+/// turns the host ends (`end_turn` plays the city-states' and the barbarians' turns itself, and
+/// stops at the next living major). From the first major's turn a round takes one end of turn
+/// for each; the one more is DESIGN.md 9.5's slack, and covers a major that a liberated city
+/// brings back to life within the round.
+#[must_use]
+pub fn stall_limit(g: &Game) -> usize {
+    g.majors(true).count() + 1
+}
+
+/// P7: from a copy of `g`, at most [`stall_limit`] ends of turn move the turn on or end the game.
 ///
 /// # Errors
 /// What stalled.
@@ -303,7 +372,7 @@ pub fn no_stall(g: &Game) -> Result<(), String> {
     let mut g = g.clone();
     g.set_debug_options(DebugOptions::OFF);
     let start = g.turn();
-    let limit = g.state().players().len() + 1;
+    let limit = stall_limit(&g);
     for _ in 0..limit {
         if g.phase() != Phase::Playing || g.turn() > start {
             return Ok(());

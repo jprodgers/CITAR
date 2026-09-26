@@ -15,10 +15,12 @@
 //!   as text, text as a number, a flag as a word, a list as one value), or a required one left
 //!   out;
 //! - [`Shape::Random`] (10%): JSON drawn at random, keyed by the spec's seed, often not an
-//!   object at all.
+//!   object at all, with nulls at any depth.
 //!
-//! No value this sends contains what the text rules take for Rust debug output (`None`, `::`),
-//! so a refusal that quotes it back is still checked fairly (property P5).
+//! No text this sends contains what the text rules take for Rust debug output (`None`, `::`),
+//! so a refusal that quotes it back is still checked fairly (property P5). A null inside a value
+//! may come back as Python's `None`, which P5 reads as the caller's
+//! (`stability::refusal_rule_broken`).
 
 use citar_engine::api::tools::SchemaType;
 use citar_engine::api::tools::registry::{TOOLS, ToolSpec};
@@ -78,7 +80,7 @@ pub struct ActionSpec {
     /// Which of the candidates each argument takes, modulo their number.
     pub target: u16,
     /// Where a tile argument lands: an offset from the named unit or city, or from the tile the
-    /// target names; `i16::MIN` in `x` puts it off the map.
+    /// target names; one `x` in sixteen puts it off the map instead ([`off_map`]).
     pub coords: (i16, i16),
     /// How the arguments are made.
     pub shape: Shape,
@@ -147,6 +149,13 @@ impl ActionSpec {
             _ => PlayerId(u8::try_from(n).unwrap_or(u8::MAX)),
         }
     }
+}
+
+/// Whether a spec's tile arguments land off the map: one `x` offset in sixteen, those that are
+/// 15 modulo 16.
+#[must_use]
+pub const fn off_map(coords: (i16, i16)) -> bool {
+    coords.0.rem_euclid(16) == 15
 }
 
 /// The `k`th of `v`, modulo its length.
@@ -252,18 +261,29 @@ impl<'a> Binder<'a> {
         }
     }
 
-    /// A coordinate: the base tile's, moved by the spec's offset (at most three either way),
-    /// kept on the map; or off it.
+    /// A coordinate: the base tile's, moved by the spec's offset (at most three either way) and
+    /// kept on the map, wrapped across an edge the map wraps and held at one it does not; or,
+    /// one spec in sixteen ([`off_map`]), off the map, past one of its four edges.
     fn coord(&self, tool: &ToolSpec, name: &str) -> Value {
         let g = self.g;
+        let grid = g.grid();
         let (dx, dy) = self.spec.coords;
-        if dx == i16::MIN {
-            return json!(if name == "x" { -3 } else { 99_999 });
-        }
         let (bx, by) = g.xy(self.base_tile(tool));
-        let (w, h) = (i32::from(g.grid().width()), i32::from(g.grid().height()));
-        let x = (bx + i32::from(dx % 4)).rem_euclid(w.max(1));
-        let y = (by + i32::from(dy % 4)).clamp(0, (h - 1).max(0));
+        let (w, h) = (i32::from(grid.width()).max(1), i32::from(grid.height()).max(1));
+        let (x, y) = if off_map(self.spec.coords) {
+            // The tools wrap no coordinate: past any edge is off the map, wrapping or not.
+            match dy.rem_euclid(4) {
+                0 => (-1 - i32::from(dx.rem_euclid(3)), by),
+                1 => (w + i32::from(dx.rem_euclid(3)), by),
+                2 => (bx, -1),
+                _ => (bx, h + 99_999),
+            }
+        } else {
+            let (x, y) = (bx + i32::from(dx % 4), by + i32::from(dy % 4));
+            let x = if grid.wrap_x() { x.rem_euclid(w) } else { x.clamp(0, w - 1) };
+            let y = if grid.wrap_y() { y.rem_euclid(h) } else { y.clamp(0, h - 1) };
+            (x, y)
+        };
         json!(if name == "x" { x } else { y })
     }
 
@@ -566,19 +586,19 @@ pub fn random_args(spec: &ToolSpec, seed: u32) -> Value {
     Value::Object(m)
 }
 
-/// A JSON value of any type, nested at most `depth` deep. A null only at the top, where it
-/// stands for an argument left out: inside a value a refusal would quote it back as Python's
-/// `None`, which the text rules take for Rust debug output.
+/// A JSON value of any type, nested at most `depth` deep, nulls included at any depth. A refusal
+/// may quote a null inside a value back as Python's `None`, which property P5 reads as the
+/// caller's (`stability::refusal_rule_broken`).
 fn random_json(rng: &mut Rng, depth: u32) -> Value {
-    random_value(rng, depth, true)
-}
-
-/// [`random_json`], with or without a null.
-fn random_value(rng: &mut Rng, depth: u32, top: bool) -> Value {
     let n = if depth == 0 { 6 } else { 8 };
     match rng.below(n) {
-        0 if top => Value::Null,
-        0 => json!("null"),
+        0 => {
+            if rng.chance(0.75) {
+                Value::Null
+            } else {
+                json!("null")
+            }
+        }
         1 => json!(rng.chance(0.5)),
         2 => json!(rng.range(-5, 40)),
         3 => {
@@ -590,11 +610,9 @@ fn random_value(rng: &mut Rng, depth: u32, top: bool) -> Value {
             json!(f[usize::try_from(rng.below(5)).unwrap_or(0)])
         }
         5 => json!(random_text(rng)),
-        6 => Value::Array((0..rng.below(4)).map(|_| random_value(rng, depth - 1, false)).collect()),
+        6 => Value::Array((0..rng.below(4)).map(|_| random_json(rng, depth - 1)).collect()),
         _ => Value::Object(
-            (0..rng.below(4))
-                .map(|_| (random_text(rng), random_value(rng, depth - 1, false)))
-                .collect(),
+            (0..rng.below(4)).map(|_| (random_text(rng), random_json(rng, depth - 1))).collect(),
         ),
     }
 }

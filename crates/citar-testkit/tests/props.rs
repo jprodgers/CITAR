@@ -24,8 +24,9 @@
 //!
 //! The number of cases follows `PROPTEST_CASES`: proptest's default of 256 for the properties of
 //! the earlier packages, 64 for the game properties, whose cases play whole turns. CI runs 64
-//! (`rust.yml`), the nightly run 10,000. Failures proptest finds are saved under
-//! `proptest-regressions/` and committed with their fix.
+//! (`rust.yml`), the nightly run 10,000. Failures proptest finds are saved beside each test's
+//! source (`props.proptest-regressions` for this file's, `props/<module>.proptest-regressions`
+//! for those in `props/`) and committed with their fix.
 
 use std::collections::BTreeSet;
 

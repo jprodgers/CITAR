@@ -4,15 +4,16 @@
 //! on the shipped ruleset or the kitchen sink, every step checked by `citar_testkit::stability`.
 //!
 //! The cases follow `PROPTEST_CASES`, 64 when it is unset (as in CI, `rust.yml`); the nightly run
-//! takes them to 10,000. A failure is saved by proptest under `proptest-regressions/props/`, and
-//! the file is committed with the fix so that the case runs first from then on.
+//! takes them to 10,000. A failure is saved by proptest beside this file, in
+//! `games.proptest-regressions`, which is committed with the fix so that the case runs first from
+//! then on.
 
 use std::cell::RefCell;
 
 use citar_engine::game::{DebugOptions, Game};
 use citar_testkit::agents::RandomAgent;
-use citar_testkit::spec::{ActionSpec, Shape};
-use citar_testkit::stability::{self, Breach, Options, Step};
+use citar_testkit::spec::{ActionSpec, Shape, off_map};
+use citar_testkit::stability::{self, Breach, Options, Step, null_below_top};
 use citar_testkit::{fixtures, games};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
@@ -53,12 +54,15 @@ pub enum Start {
     KitchenSink { small: bool, seed: u64, rounds: u8 },
 }
 
-/// The committed fixtures' count.
-const FIXTURES: usize = 12;
+/// How many committed fixtures there are, counted once.
+fn fixtures() -> usize {
+    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| fixtures::committed().expect("the fixtures").len().max(1))
+}
 
 pub fn start() -> impl Strategy<Value = Start> {
     prop_oneof![
-        6 => (0..FIXTURES).prop_map(Start::Fixture),
+        6 => (0..fixtures()).prop_map(Start::Fixture),
         2 => (any::<bool>(), 0u64..10_000, 0u8..12)
             .prop_map(|(small, seed, rounds)| Start::Generated { small, seed, rounds }),
         1 => (any::<bool>(), 0u64..10_000, 0u8..12)
@@ -75,6 +79,8 @@ std::thread_local! {
 pub fn build(s: &Start) -> Game {
     match *s {
         Start::Fixture(i) => LOADED.with(|l| {
+            // A case saved when there were more fixtures still starts from one.
+            let i = i % fixtures();
             let mut l = l.borrow_mut();
             if l.len() <= i {
                 l.resize(i + 1, None);
@@ -168,21 +174,12 @@ proptest! {
     }
 }
 
-/// Whether a JSON value holds a null below its top.
-fn nested_null(v: &serde_json::Value) -> bool {
-    match v {
-        serde_json::Value::Array(a) => a.iter().any(|x| x.is_null() || nested_null(x)),
-        serde_json::Value::Object(m) => m.values().any(|x| x.is_null() || nested_null(x)),
-        _ => false,
-    }
-}
-
 proptest! {
     #![proptest_config(config())]
 
     /// The shapes do what they say: a valid spec sends every required parameter, each
-    /// parameter it sends of the parameter's schema type; a random one sends no null below the
-    /// top, which a refusal would quote back as Python's `None`.
+    /// parameter it sends of the parameter's schema type, and its tiles on the map unless its
+    /// offset puts them off it (`spec::off_map`).
     #[test]
     fn a_spec_binds_arguments_of_the_shape_it_names(start in start(), spec in action_spec()) {
         let g = build(&start);
@@ -198,13 +195,38 @@ proptest! {
                 prop_assert!(p.json.fits(v), "{}: {} = {} is not {}", tool.name(), p.name, v, p.json.what());
             }
         }
-        let bound = spec.bind(&g);
-        let values: Vec<&serde_json::Value> = match &bound.args {
-            serde_json::Value::Object(m) => m.values().collect(),
-            other => vec![other],
-        };
-        for v in values {
-            prop_assert!(!nested_null(v), "{}: {}", tool.name(), bound.args);
+        let coord = |name: &str| args.get(name).and_then(serde_json::Value::as_i64);
+        if let (Some(x), Some(y)) = (coord("x"), coord("y")) {
+            let on = i32::try_from(x).ok().zip(i32::try_from(y).ok())
+                .is_some_and(|(x, y)| g.grid().in_bounds(x, y));
+            prop_assert_eq!(on, !off_map(spec.coords), "{}: ({}, {}) from {:?}", tool.name(), x, y, spec.coords);
         }
     }
+}
+
+/// Random arguments hold nulls inside their values now and then, as a model's may: a class of
+/// input the properties must meet, not avoid (the refusals that quote one back are read by
+/// `stability::refusal_rule_broken`).
+#[test]
+fn random_arguments_nest_nulls_now_and_then() {
+    let n = (0..2_000u32)
+        .filter(|&seed| {
+            let spec = ActionSpec {
+                tool: 0,
+                actor: 0,
+                target: 0,
+                coords: (0, 0),
+                shape: Shape::Random(seed),
+            };
+            null_below_top(&citar_testkit::spec::random_args(spec.tool_spec(), seed))
+        })
+        .count();
+    assert!(n >= 20, "{n} of 2,000 random arguments nest a null");
+}
+
+/// One spec in sixteen puts its tiles off the map.
+#[test]
+fn a_spec_puts_a_tile_off_the_map_one_time_in_sixteen() {
+    let off = (i16::MIN..=i16::MAX).filter(|&dx| off_map((dx, 0))).count();
+    assert_eq!(off, 65_536 / 16);
 }

@@ -25,6 +25,7 @@ mod engine {
     mod save;
     mod scenario;
     mod setup;
+    mod stability;
     mod state;
     mod tools;
     mod turns;

@@ -35,9 +35,11 @@ pub fn load_state(data: &[u8]) {
     }
 }
 
-/// How many starts [`fuzz_one`] picks from: two generated games, then the committed fixtures.
+/// How many starts [`fuzz_one`] picks from: two generated games, then the committed fixtures,
+/// counted once rather than by a walk of their folders for every input.
 fn starts() -> usize {
-    2 + fixtures::committed().map_or(0, |f| f.len())
+    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| 2 + fixtures::committed().map_or(0, |f| f.len()))
 }
 
 std::thread_local! {
