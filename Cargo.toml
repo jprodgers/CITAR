@@ -45,6 +45,8 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 arbitrary = "1.4"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 gungraun = "0.19"         # the successor of iai-callgrind
+# The criterion suites pin their thread to one core (DESIGN.md 9.7).
+core_affinity = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

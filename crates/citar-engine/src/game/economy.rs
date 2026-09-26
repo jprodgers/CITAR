@@ -1002,6 +1002,15 @@ pub(crate) fn compute_happiness(g: &Game, p: PlayerId) -> Happiness {
     compute_happiness_in(&g.view(), p, |c| super::derive::stats::city_parts(g, c))
 }
 
+/// Civilization `p`'s happiness total computed afresh, its cities' parts read from their memos:
+/// the benchmark of a happiness recompute with the cities cached (DESIGN.md 10).
+#[cfg(feature = "test-ops")]
+#[doc(hidden)]
+#[must_use]
+pub fn happiness_for_bench(g: &Game, p: PlayerId) -> i32 {
+    compute_happiness(g, p).total
+}
+
 /// [`compute_happiness`] as view `v` reads the game, with each of its cities' parts from
 /// `parts`: a what-if gives its own view, and its city's parts.
 pub(crate) fn compute_happiness_in<R: core::ops::Deref<Target = CityParts>>(

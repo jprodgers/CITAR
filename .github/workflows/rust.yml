@@ -2,8 +2,8 @@
 #
 # A separate workflow from test.yml, so a Python-only change skips it (the path filters below)
 # and the Rust results get their own summary. The five-target determinism matrix is
-# determinism.yml. A later package adds the perf job here, and the long runs as nightly.yml
-# (crates/citar-engine/DESIGN.md 2.6).
+# determinism.yml; the long runs are nightly.yml (crates/citar-engine/DESIGN.md 2.6). The perf
+# job counts instructions on pull requests against their base branch (DESIGN.md 9.7).
 name: rust
 
 on:
@@ -163,3 +163,55 @@ jobs:
           name: refcheck-report
           path: refcheck-report.json
           if-no-files-found: ignore
+
+  perf:
+    # Instruction counts (gungraun under valgrind's callgrind) of eight kernels and two macro
+    # benchmarks (crates/citar-bench/benches/iai.rs), on the base branch and on the pull request:
+    # a benchmark whose instructions rise more than 5% fails the job, unless the pull request
+    # carries the label `perf-accepted` (added after a failed run, re-run the job). Counts are
+    # stable to about 0.1% on shared runners, where wall clock varies 10-20% (DESIGN.md 9.7).
+    # The wall-clock budgets are `cargo xtask perf`'s, on the laptop.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf
+
+      - name: Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - uses: taiki-e/install-action@v2
+        with:
+          # The runner's version must equal the gungraun library's in Cargo.lock.
+          tool: gungraun-runner@0.19.4
+
+      - name: Counts on the base branch
+        # A base without the suite (the pull request that adds it) leaves no baseline, and the
+        # run below then saves one instead of comparing.
+        env:
+          GUNGRAUN_HOME: ${{ github.workspace }}/target/gungraun
+        run: |
+          set -eu
+          git worktree add --detach ../base "${{ github.event.pull_request.base.sha }}"
+          if [ -f ../base/crates/citar-bench/benches/iai.rs ]; then
+            cd ../base
+            CARGO_TARGET_DIR="${{ github.workspace }}/target" cargo bench --locked -p citar-bench               --features iai --bench iai -- --save-baseline=base
+          else
+            echo "the base branch has no iai suite: nothing to compare with"
+          fi
+
+      - name: Counts on the pull request, against the base
+        continue-on-error: ${{ contains(github.event.pull_request.labels.*.name, 'perf-accepted') }}
+        env:
+          GUNGRAUN_HOME: ${{ github.workspace }}/target/gungraun
+        run: >-
+          cargo bench --locked -p citar-bench --features iai --bench iai --
+          --baseline=base --callgrind-limits='ir=5%'

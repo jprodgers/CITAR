@@ -763,4 +763,13 @@ impl Game {
         let (moved, seen) = self.step_seeing(owner, |g| g.relocate_unit(u, to));
         moved.map(|()| seen)
     }
+
+    /// What every civilization sees, rebuilt from the state as a load rebuilds it (every source
+    /// registered afresh, no line of sight cached), for the benchmark of a full rebuild
+    /// (DESIGN.md 9.7): how many sources it registered.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn sight_rebuild_for_bench(&self) -> usize {
+        cold(self).sources().count()
+    }
 }
