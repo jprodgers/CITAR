@@ -208,7 +208,9 @@ impl Game {
             work.plan(g, &g.dv.vis)
         };
         let size = u32::try_from(self.st.tiles().len()).unwrap_or(u32::MAX);
-        let mut tr = Vec::new();
+        // A unit's step moves a few dozen tiles in and out of sight: room for them at once, where
+        // growing the vector from nothing was a tenth of a step (package 1e-03).
+        let mut tr = Vec::with_capacity(64);
         for (k, s) in plan {
             self.dv.vis.set(size, k, s, &mut tr);
         }
@@ -647,7 +649,7 @@ fn net(vis: &Visibility, mut tr: Vec<Transition>) -> Vec<Transition> {
     // A stable sort keeps each tile's transitions in the order they happened: the first says
     // whether the tile was seen before.
     tr.sort_by_key(|x| (x.civ, x.tile));
-    let mut out: Vec<Transition> = Vec::new();
+    let mut out: Vec<Transition> = Vec::with_capacity(tr.len());
     let mut i = 0;
     while i < tr.len() {
         let first = tr[i];
