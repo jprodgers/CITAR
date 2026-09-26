@@ -303,7 +303,7 @@ fn city_detail(g: &Game, c: CityId, m: &mut Map<String, Value>) {
     // Python listed a city's tiles, and chose among equally dear ones for sale, in its `within`
     // order.
     let in_order = |mut ts: Vec<crate::base::ids::TileIdx>| {
-        ts.sort_by_key(|&t| borders::within_order(g, city.tile(), t));
+        ts.sort_by_cached_key(|&t| borders::within_order(g, city.tile(), t));
         ts
     };
     let tiles: Vec<Value> = in_order(economy::city_tiles(g, c))

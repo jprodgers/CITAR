@@ -82,7 +82,7 @@ pub fn bombard_targets(g: &Game, p: PlayerId) -> Vec<Bombard> {
         let mut best: Option<Bombard> = None;
         // Of equal shots the first in Python's `within` order wins, as it did.
         let mut targets = ccity::bombard_targets(g, id);
-        targets.sort_by_key(|&t| borders::within_order(g, c.tile(), t));
+        targets.sort_by_cached_key(|&t| borders::within_order(g, c.tile(), t));
         for t in targets {
             let Some(d) = combatant::combatant_at(g, t) else { continue };
             let damage = combat::setup(g, a, c.tile(), d, false).damage_to_defender(0.5);

@@ -222,7 +222,7 @@ pub fn enemy_near(g: &Game, u: UnitId, radius: u32) -> bool {
 /// order keeps the answer Python's.
 fn within_py(g: &Game, t: TileIdx, radius: u32) -> Vec<TileIdx> {
     let mut v = g.grid().within(t, radius);
-    v.sort_by_key(|&n| super::cities::borders::within_order(g, t, n));
+    v.sort_by_cached_key(|&n| super::cities::borders::within_order(g, t, n));
     v
 }
 

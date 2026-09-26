@@ -1187,8 +1187,8 @@ enum Approach {
 /// unit to fight (more so when wounded), a civilian to capture (for a melee unit), something to
 /// pillage (for a land unit), each less 4 a tile. The five best are tried in turn, the best
 /// first, then the lowest tile, and the unit follows the path found to the first it can reach
-/// within `max(2, radius / 2 + 1)` turns. One [`PathTree`] answers every candidate. Whether it
-/// moved.
+/// within `max(2, radius / 2 + 1)` turns: a search to the first, and one [`PathTree`] for the
+/// rest once a search finds nothing. Whether it moved.
 fn seek(g: &mut Game, u: UnitId) -> bool {
     let radius = seek_radius(g);
     let Some((here, owner, base)) = g.unit(u).map(|x| (x.tile(), x.owner(), x.base)) else {
@@ -1246,7 +1246,20 @@ fn seek(g: &mut Game, u: UnitId) -> bool {
     let max_turns = (radius / 2 + 1).max(2);
     let chosen = {
         let Some(m) = Mover::unit(g, u) else { return false };
-        let Some(tree) = PathTree::build(&m, max_turns) else { return false };
+        // The first destination by one directed search, which most often finds it; after a
+        // search that found nothing, one tree for the rest (a failed search walks what the
+        // tree would). Both answer as `find_path` with the turn limit (package 1e-03).
+        let mut tree: Option<PathTree> = None;
+        let mut path_to = |dest: TileIdx| -> Option<Vec<TileIdx>> {
+            if let Some(t) = &tree {
+                return t.path_to(&m, dest);
+            }
+            let found = m.find_path(dest, max_turns);
+            if found.is_none() {
+                tree = PathTree::build(&m, max_turns);
+            }
+            found
+        };
         let mut chosen = None;
         'cands: for &(_, t, how) in cands.iter().take(5) {
             let dests: SmallVec<[TileIdx; 2]> = match how {
@@ -1264,7 +1277,7 @@ fn seek(g: &mut Game, u: UnitId) -> bool {
                 }
             };
             for dest in dests {
-                if let Some(path) = tree.path_to(&m, dest) {
+                if let Some(path) = path_to(dest) {
                     chosen = Some((dest, path));
                     break 'cands;
                 }
