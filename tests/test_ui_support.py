@@ -273,6 +273,16 @@ class SaveListTests(unittest.TestCase):
 
 
 class PathPreviewTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # The app reads the accounts database on every request. Run on its own, this module would otherwise meet an
+        # empty one; the test package has already pointed CITAR_DB_URL at a temporary file, as the API modules do.
+        import os
+        from citar import db, settings
+        settings.reset()
+        db.configure(os.environ["CITAR_DB_URL"])
+        db.create_all()
+
     def test_path_endpoint_returns_route_and_turns(self):
         from fastapi.testclient import TestClient
         from citar.server import app as appmod
@@ -282,7 +292,7 @@ class PathPreviewTests(unittest.TestCase):
                 client = TestClient(appmod.app)
                 s = appmod.manager.create({"map_size": "duel", "seed": 5, "barbarians": "off"}, [{"type": "human"}, {"type": "bot"}])
                 try:
-                    g = s.game
+                    g = s.game.python_game          # to pick a destination the route can reach
                     token = s.seats[0].token
                     w = next(u for u in g.player_units(0) if u.type == "Warrior")
                     dest = next(n for n in g.grid.within(w.idx, 3) if g.grid.distance(n, w.idx) == 3

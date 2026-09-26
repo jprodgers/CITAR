@@ -149,7 +149,7 @@ def trigger(g: "Game", u: Unique, pid: int, city=None, unit=None, tile: Optional
     if ph == U.OneTimeFreeGreatPerson:
         p.free_great_people += 1
         g.emit("great_person_available", f"{p.name} may choose a free Great Person{suffix}.", [pid])
-        if not g.is_humanlike(pid):
+        if p.auto.get("free_picks"):
             from . import great_people
             great_people.ai_choose_free(g, pid)
         return True
@@ -170,7 +170,7 @@ def trigger(g: "Game", u: Unique, pid: int, city=None, unit=None, tile: Optional
         n = 1 if ph == U.OneTimeFreeTech else int(u.n(0))
         p.free_techs += n
         g.emit("free_tech", f"{p.name} may choose {n} free technolog{'y' if n == 1 else 'ies'}{suffix}.", [pid])
-        if not g.is_humanlike(pid):
+        if p.auto.get("free_picks"):
             from . import research
             for _ in range(n):
                 av = research.available_techs(g, pid)

@@ -1,0 +1,101 @@
+about = """
+A driven seat's turn does not end while a negotiation it is in waits on a seat the host plays
+(rule T3): the drive stops, naming the negotiations, until the answer comes. An answer that comes
+back to the driven seat is put to its driver, whoever's turn it is, and a negotiation the host's
+seat opens with a driven seat gets the driver's answer when the host drives.
+"""
+from = "crates/citar-engine/src/game/turn/drive.rs (agents/bot_agent.py: play_turn, server/session.py: _dispatch_negotiation_interrupts)"
+
+[config]
+players = [{ controller = "bot" }, {}]
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+]
+
+[[step]]
+note = "On the driven seat's turn, a negotiation opens with the host's seat."
+op = "open_negotiation_as"
+args = { player = 0, to = 1, message = "Shall we talk?" }
+as = "opened"
+
+[[step]]
+op = "drive"
+args = { drivers = [0] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "awaiting_reply", player = 0, negotiations = ["=opened.negotiation_id"], turn = 1, current = 0 }
+
+[[step]]
+note = "Nothing has moved: it waits still."
+op = "drive"
+args = { drivers = [0] }
+as = "stop"
+
+[[step]]
+check = "stop"
+subset = { stop = "awaiting_reply", player = 0, current = 0 }
+
+[[step]]
+note = "The host's seat answers out of turn; the driver answers back, and the negotiation waits on the host's seat again."
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = "=opened.negotiation_id", action = "reply", message = "About what?" }
+
+[[step]]
+op = "drive"
+args = { drivers = [0], answer = "reply" }
+as = "stop"
+
+[[step]]
+check = "stop"
+subset = { stop = "awaiting_reply", player = 0, current = 0 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+subset = { status = "open", awaiting = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history"
+len = 3
+
+[[step]]
+note = "Once it is closed the driven seat's turn ends, and the drive stops at the host's seat."
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = "=opened.negotiation_id", action = "reject", message = "Never mind." }
+
+[[step]]
+op = "drive"
+args = { drivers = [0] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "external", player = 1, negotiations = [], turn = 1, current = 1 }
+
+[[step]]
+note = "The host's seat opens a negotiation with the driven seat: driving gets its driver's answer."
+tool = "open_negotiation"
+player = 1
+args = { to = 0, message = "Friends?" }
+as = "theirs"
+
+[[step]]
+op = "drive"
+args = { drivers = [0] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "external", player = 1, negotiations = [], turn = 1, current = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=theirs.negotiation_id" }
+subset = { status = "rejected" }

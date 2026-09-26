@@ -1,0 +1,148 @@
+# The determinism matrix: the golden sets on all five targets (crates/citar-engine/DESIGN.md 2.6
+# and 9.6).
+#
+# Each target runs `cargo golden check --out golden-<target>.json`, which hashes the answers that
+# build computes and compares them with the files committed in crates/citar-testkit/golden/. The
+# compare job then fails in two cases:
+#   - the targets disagree with each other: a determinism bug;
+#   - they agree with each other but not with the committed files: a behaviour change. If it is
+#     deliberate, run `cargo golden bless` and commit the files, saying why.
+# linux-x64 also runs the check in the release profile, since the ci profile (debug assertions,
+# no LTO) must play the same game as what ships.
+#
+# The golden sets grow with the engine (DESIGN.md 9.6): package 1a-02 brought rng, libm and pyfmt,
+# 1a-03 the RulesetId of the embedded ruleset (ruleset), 1a-05 every compiled unique (uniques), and
+# 1a-06 every compiled filter (filters) and the map-generation, AI and victory tables (gen),
+# 1a-09 the digests of three checked-in states (states), 1a-10 the digests of the twelve
+# committed refcheck fixtures as the Python-state converter reads them (convert), 1b-03 a game on
+# the arena played to its turn limit (turns), 1b-04 ten generated maps (maps), 1c-09 twelve new
+# games (newgame), and 1c-10 the fixtures after the settle on load (load), twenty rounds passed
+# from three of them (pass) and six RandomAgent games on generated maps (random).
+name: determinism
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "xtask/**"
+      - "Cargo.*"
+      - "clippy.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "citar/data/**"
+      - "refcheck/fixtures-mini/**"
+      - "refcheck/fixtures-late/**"
+      - ".github/workflows/determinism.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "xtask/**"
+      - "Cargo.*"
+      - "clippy.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "citar/data/**"
+      - "refcheck/fixtures-mini/**"
+      - "refcheck/fixtures-late/**"
+      - ".github/workflows/determinism.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: determinism-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  golden:
+    name: golden (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-24.04, profile: ci }
+          - { target: linux-x64-release, os: ubuntu-24.04, profile: release }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, profile: ci }
+          - { target: windows-x64, os: windows-latest, profile: ci }
+          - { target: macos-arm64, os: macos-15, profile: ci }
+          # If this label is retired, run x86_64-apple-darwin under Rosetta on macos-15 instead.
+          - { target: macos-x64, os: macos-15-intel, profile: ci }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: golden-${{ matrix.profile }}
+
+      - name: Golden check
+        id: golden
+        shell: bash
+        # The report is uploaded whatever the result, so the compare job can tell a determinism
+        # bug (targets disagree) from a behaviour change (targets agree, files differ).
+        run: |
+          set +e
+          cargo run --locked --package citar-testkit --bin golden --profile ${{ matrix.profile }} -- \
+            check --out golden-${{ matrix.target }}.json
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: golden-${{ matrix.target }}
+          path: golden-${{ matrix.target }}.json
+          if-no-files-found: error
+
+      - name: Result
+        if: steps.golden.outputs.status != '0'
+        run: exit 1
+
+  compare:
+    needs: golden
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: golden-*
+          merge-multiple: true
+
+      - name: Compare the targets
+        shell: python
+        run: |
+          import glob, json, sys
+
+          expected = {"linux-x64", "linux-x64-release", "linux-arm64", "windows-x64",
+                      "macos-arm64", "macos-x64"}
+          reports = {}
+          for path in sorted(glob.glob("golden-*.json")):
+              with open(path, encoding="utf-8") as f:
+                  reports[path[len("golden-"):-len(".json")]] = json.load(f)
+          failed = False
+          missing = expected - reports.keys()
+          if missing:
+              print(f"::error::no report from {', '.join(sorted(missing))}")
+              failed = True
+          names = sorted({name for r in reports.values() for name in r["sets"]})
+          for name in names:
+              computed = {t: r["sets"].get(name, {}).get("computed") for t, r in reports.items()}
+              matches = {t: r["sets"].get(name, {}).get("matches_committed") for t, r in reports.items()}
+              if len(set(computed.values())) != 1:
+                  lines = ", ".join(f"{t}={c}" for t, c in sorted(computed.items()))
+                  print(f"::error::{name}: the targets disagree, a determinism bug: {lines}")
+                  failed = True
+              elif not all(matches.values()):
+                  print(f"::error::{name}: every target agrees, but not with the committed file: "
+                        "a behaviour change (bless it if it is deliberate)")
+                  failed = True
+              else:
+                  print(f"{name}: identical on {len(reports)} targets and equal to the committed file")
+          sys.exit(1 if failed else 0)

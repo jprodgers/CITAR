@@ -31,6 +31,31 @@ ITEM_TYPES = {
 }
 MUTUAL = {"peace_treaty", "declaration_of_friendship", "research_agreement", "defensive_pact"}
 
+# The kinds of diplomatic decision a seat can hand to a language model while a bot plays the rest (hybrid seats). A
+# deal item belongs to exactly one; un and captured_cities are the engine's automatic decisions (Player.auto), and
+# denounce and chat have no bot logic behind them.
+CATEGORIES = ("trades", "agreements", "peace", "war", "denounce", "un", "city_states", "espionage", "captured_cities",
+              "chat")
+ITEM_CATEGORY = {"gold": "trades", "gold_per_turn": "trades", "resource": "trades", "tech": "trades",
+                 "share_map": "trades", "city": "trades", "embassy": "agreements", "open_borders": "agreements",
+                 "declaration_of_friendship": "agreements", "research_agreement": "agreements",
+                 "defensive_pact": "agreements", "peace_treaty": "peace", "declare_war": "war"}
+
+# What respond_negotiation accepts. The aliases are words people and models reach for; the history records the
+# canonical name, so everything that reads it has four actions to handle rather than seven.
+RESPONSE_ACTIONS = ("accept", "counter", "reject", "reply")
+ACTION_ALIASES = {"decline": "reject", "withdraw": "reject", "end": "reject"}
+
+
+def item_category(item: dict) -> str:
+    """The diplomacy category a deal item belongs to."""
+    return ITEM_CATEGORY[item["type"]]
+
+
+def proposal_categories(proposal: Optional[dict]) -> set:
+    """Every category the items of a proposal touch, on both sides."""
+    return {ITEM_CATEGORY[it["type"]] for items in (proposal or {}).values() for it in items}
+
 
 def new_relation() -> dict:
     """A fresh relationship record between two civilizations."""
@@ -186,7 +211,7 @@ def set_war(g: "Game", a: int, b: int, reason: str = "direct"):
                 add_opinion(g, q.id, a, "warmonger", -5)
     for n in list(g.s.negotiations):
         if n["status"] == "open" and {n["initiator"], n["responder"]} == {a, b}:
-            n["status"] = "cancelled"
+            close_negotiation(g, n["id"], "cancelled", f"{pa.name} declared war on {pb.name}.")
     for side, other in ((a, b), (b, a)):
         if g.player(side).kind != "major":
             continue
@@ -669,19 +694,52 @@ def on_city_captured(g: "Game", attacker: int, old_owner: int, city):
 # ----------------------------------------------------------------------------
 # Negotiations
 # ----------------------------------------------------------------------------
+# A negotiation is a chat between two major civilizations with a deal on the table. Entries alternate between the
+# two sides, each is {seq, by, action, message, proposal, turn} (plus "note" where the game adds one), and every one
+# carries a message. Neither side may end its turn while a negotiation it is in is open (end_turn_refusal), which is
+# what gives a slow answer time to arrive; the server times chats out with close_negotiation.
+CLOSED_STATUSES = ("rejected", "expired", "cancelled")
+
+
 def get_negotiation(g: "Game", nid: int) -> dict:
-    """An open negotiation by id."""
+    """A negotiation by id."""
     for n in g.s.negotiations:
         if n["id"] == nid:
             return n
     raise ActionError(f"No negotiation with id {nid}.")
 
 
+def max_chat_messages(g: "Game") -> int:
+    """How many messages a negotiation may hold before it closes: the game's own setting, else the ruleset's."""
+    own = g.s.config.get("diplomacy")
+    if isinstance(own, dict) and own.get("max_chat_messages"):
+        return max(2, int(own["max_chat_messages"]))
+    return g.rules.const["diplomacy"]["max_chat_messages"]
+
+
+def _add_entry(g: "Game", n: dict, by: Optional[int], action: str, message: str = "", proposal: Optional[dict] = None,
+               note: Optional[str] = None) -> dict:
+    """Append a numbered entry to a negotiation's history."""
+    entry = {"seq": len(n["history"]) + 1, "by": by, "action": action, "message": message, "proposal": proposal,
+             "turn": g.turn}
+    if note:
+        entry["note"] = note
+    n["history"].append(entry)
+    n["exchanges"] = len(n["history"])      # the archived frozen bots still read this
+    return entry
+
+
 def _make_proposal(g: "Game", speaker: int, other: int, give, receive) -> Optional[dict]:
-    """Build a proposal from what each side would give, or None if there is nothing concrete."""
+    """Build a proposal from what each side would give, or None if there is nothing concrete.
+
+    Empty lists on both sides are nothing concrete too (models often send them with a plain message): a proposal in
+    which neither side gives anything could be "accepted" into a deal of nothing.
+    """
     if give is None and receive is None:
         return None
     prop = {str(speaker): _normalize_items(g, give), str(other): _normalize_items(g, receive)}
+    if not prop[str(speaker)] and not prop[str(other)]:
+        return None
     # mutual agreements go on both sides
     for t in MUTUAL:
         if _has(prop, t):
@@ -692,7 +750,11 @@ def _make_proposal(g: "Game", speaker: int, other: int, give, receive) -> Option
 
 
 def open_negotiation(g: "Game", pid: int, to: int, message: str, give=None, receive=None) -> dict:
-    """Start a negotiation: a message plus an optional proposal, answered before play continues."""
+    """Start a negotiation: a message plus an optional proposal.
+
+    The other side answers in its own time. Until the negotiation is settled or withdrawn, neither side may end its
+    turn (see end_turn_refusal).
+    """
     try:
         to = int(to)
     except (TypeError, ValueError):
@@ -705,7 +767,7 @@ def open_negotiation(g: "Game", pid: int, to: int, message: str, give=None, rece
     if not g.has_met(pid, to):
         raise ActionError(f"You have not met {g.player(to).name}.")
     if not message or not str(message).strip():
-        raise ActionError("Open a negotiation with a message.")
+        raise ActionError("Open a negotiation with a message: every entry in a negotiation carries one.")
     for n in g.s.negotiations:
         if n["status"] == "open" and {n["initiator"], n["responder"]} == {pid, to}:
             raise ActionError(f"There is already an open negotiation with {g.player(to).name} (id {n['id']}).")
@@ -715,94 +777,156 @@ def open_negotiation(g: "Game", pid: int, to: int, message: str, give=None, rece
     proposal = _make_proposal(g, pid, to, give, receive)
     if proposal is not None:
         validate_items(g, pid, to, proposal[str(pid)], proposal)
+    text = str(message).strip()[:4000]
     n = {"id": len(g.s.negotiations) + 1, "initiator": pid, "responder": to, "turn": g.turn, "status": "open",
-         "awaiting": to, "proposal": proposal, "proposal_by": pid if proposal else None, "exchanges": 1,
-         "history": [{"by": pid, "action": "open", "message": str(message)[:4000], "proposal": proposal, "turn": g.turn}],
+         "awaiting": to, "proposal": proposal, "proposal_by": pid if proposal else None, "exchanges": 0, "history": [],
          "deal_id": None}
+    _add_entry(g, n, pid, "open", text, proposal)
     g.s.negotiations.append(n)
-    add_message(g, pid, [to], str(message))
-    text = f"{g.player(pid).name} opened negotiations with {g.player(to).name}: \"{str(message)[:500]}\""
+    add_message(g, pid, [to], text)
+    out = f"{g.player(pid).name} opened negotiations with {g.player(to).name}: \"{text[:500]}\""
     if proposal:
-        text += f" Proposal: {g.player(pid).name} gives {describe_items(g, proposal[str(pid)])}; " \
-                f"{g.player(to).name} gives {describe_items(g, proposal[str(to)])}."
-    g.emit("negotiation", text, [pid, to], negotiation=n["id"], awaiting=to)
+        out += f" Proposal: {g.player(pid).name} gives {describe_items(g, proposal[str(pid)])}; " \
+               f"{g.player(to).name} gives {describe_items(g, proposal[str(to)])}."
+    g.emit("negotiation", out, [pid, to], negotiation=n["id"], awaiting=to)
     return {"negotiation_id": n["id"], "status": "open", "awaiting": g.player(to).name}
 
 
 def respond_negotiation(g: "Game", pid: int, nid: int, action: str, message: Optional[str] = None,
                         give=None, receive=None) -> dict:
-    """Accept, reject, counter or reply in a negotiation."""
+    """Accept, counter, reject or reply in a negotiation.
+
+    Every response carries a message: a bare "reject" tells the other side nothing, and a chat is only a chat if
+    both sides talk. Only the side whose move it is may accept, counter or reply. Either side may reject at any
+    time, which is how the opener withdraws a proposal the other side is slow to answer.
+    """
     n = get_negotiation(g, int(nid))
+    nid = n["id"]
     if n["status"] != "open":
-        raise ActionError(f"Negotiation {nid} is {n['status']}.")
+        raise ActionError(f"Negotiation #{nid} is {n['status']}.")
     if pid not in (n["initiator"], n["responder"]):
-        raise ActionError("You are not part of this negotiation.")
-    if n["awaiting"] != pid:
-        raise ActionError(f"It is {g.player(n['awaiting']).name}'s move in this negotiation; wait for their reply.")
+        raise ActionError(f"You are not part of negotiation #{nid}.")
     other = n["responder"] if pid == n["initiator"] else n["initiator"]
-    action = (action or "").lower()
-    entry = {"by": pid, "action": action, "message": (message or "")[:4000], "proposal": None, "turn": g.turn}
-    limit = g.rules.const["diplomacy"]["max_negotiation_exchanges"]
-    if action == "accept":
+    act = str(action or "").strip().lower()
+    act = ACTION_ALIASES.get(act, act)
+    if act not in RESPONSE_ACTIONS:
+        raise ActionError(f"action must be one of: {', '.join(RESPONSE_ACTIONS)} (decline, withdraw and end also mean "
+                          f"reject).")
+    if n["awaiting"] != pid and act != "reject":
+        raise ActionError(f"It is {g.player(n['awaiting']).name}'s move in negotiation #{nid}; wait for their reply, "
+                          f"or withdraw it with action 'reject'.")
+    text = str(message or "").strip()[:4000]
+    if not text:
+        raise ActionError(f"Every response in a negotiation carries a message, and your {act} in negotiation #{nid} "
+                          f"has none: add message='...' (a short line will do).")
+    me = g.player(pid).name
+    if act == "accept":
         if not n["proposal"]:
-            raise ActionError("There is no proposal on the table to accept. Use 'reply' or 'counter'.")
+            raise ActionError(f"There is no proposal on the table in negotiation #{nid} to accept. Use 'reply' or "
+                              f"'counter'.")
         if n["proposal_by"] == pid:
             raise ActionError("You cannot accept your own proposal; wait for the other side.")
         deal = execute_deal(g, n["initiator"], n["responder"], n["proposal"])
         n["status"] = "accepted"
         n["deal_id"] = deal["id"]
         n["awaiting"] = None
-        n["history"].append(entry)
-        if message:
-            add_message(g, pid, [other], message)
-        g.emit("negotiation", f"{g.player(pid).name} accepted the deal." + (f" \"{message[:500]}\"" if message else ""),
-               [pid, other], negotiation=n["id"], status="accepted")
+        _add_entry(g, n, pid, "accept", text)
+        add_message(g, pid, [other], text)
+        g.emit("negotiation", f"{me} accepted the deal. \"{text[:500]}\"", [pid, other], negotiation=nid,
+               status="accepted")
         return {"status": "accepted", "deal": deal["summary"]}
-    if action in ("reject", "withdraw", "end"):
+    if act == "reject":
         n["status"] = "rejected"
         n["awaiting"] = None
-        n["history"].append(entry)
-        if message:
-            add_message(g, pid, [other], message)
-        g.emit("negotiation", f"{g.player(pid).name} ended the negotiation." + (f" \"{message[:500]}\"" if message else ""),
-               [pid, other], negotiation=n["id"], status="rejected")
+        _add_entry(g, n, pid, "reject", text)
+        add_message(g, pid, [other], text)
+        g.emit("negotiation", f"{me} ended the negotiation. \"{text[:500]}\"", [pid, other], negotiation=nid,
+               status="rejected")
         return {"status": "rejected"}
-    if action == "counter":
+    proposal = None
+    if act == "counter":
         proposal = _make_proposal(g, pid, other, give or [], receive or [])
+        if proposal is None:
+            raise ActionError("A counter-offer needs at least one item; use reply to send only a message.")
         validate_items(g, pid, other, proposal[str(pid)], proposal)
+    cap = max_chat_messages(g)
+    if len(n["history"]) >= cap:
+        # the safety cap: a chat that has run this long without a deal is not converging. The message that would pass
+        # the cap closes it instead of joining it, so an open chat never holds more than the cap
+        close_negotiation(g, nid, "expired", f"The negotiation reached its limit of {cap} messages and closed.")
+        return {"status": "expired", "awaiting": None,
+                "note": f"Negotiation #{nid} already held {cap} messages, its limit, so it has closed and your {act} "
+                        f"was not delivered."}
+    if proposal is not None:
         n["proposal"] = proposal
         n["proposal_by"] = pid
-        entry["proposal"] = proposal
-    elif action != "reply":
-        raise ActionError("action must be one of: accept, reject, counter, reply.")
-    if action == "reply" and not message:
-        raise ActionError("A reply needs a message.")
-    n["history"].append(entry)
-    n["exchanges"] += 1
+    _add_entry(g, n, pid, act, text, proposal)
     n["awaiting"] = other
-    if message:
-        add_message(g, pid, [other], message)
-    text = f"{g.player(pid).name} {'countered' if action == 'counter' else 'replied'}: \"{(message or '')[:500]}\""
-    if action == "counter":
-        text += f" New proposal: {g.player(pid).name} gives {describe_items(g, n['proposal'][str(pid)])}; " \
-                f"{g.player(other).name} gives {describe_items(g, n['proposal'][str(other)])}."
-    if n["exchanges"] >= limit:
-        n["status"] = "expired"
-        n["awaiting"] = None
-        text += " (Negotiation reached its exchange limit and closed.)"
-    g.emit("negotiation", text, [pid, other], negotiation=n["id"], awaiting=n["awaiting"])
-    return {"status": n["status"], "awaiting": g.player(other).name if n["awaiting"] is not None else None}
+    add_message(g, pid, [other], text)
+    out = f"{me} {'countered' if act == 'counter' else 'replied'}: \"{text[:500]}\""
+    if act == "counter":
+        out += f" New proposal: {me} gives {describe_items(g, proposal[str(pid)])}; " \
+               f"{g.player(other).name} gives {describe_items(g, proposal[str(other)])}."
+    g.emit("negotiation", out, [pid, other], negotiation=nid, awaiting=other)
+    return {"status": "open", "awaiting": g.player(other).name}
+
+
+def close_negotiation(g: "Game", nid: int, status: str, note: str, by: Optional[int] = None) -> dict:
+    """Close an open negotiation from outside the conversation: time it out, or force it shut.
+
+    Not a tool. The server uses it when an answer does not come in time and before it ends a turn a seat left
+    unfinished; the engine uses it when a war or an elimination makes the negotiation moot. The history gets an
+    entry carrying the note, so the chat shows why it ended, and both sides get the usual negotiation event. ``by``
+    is the player it is closed on behalf of, if any.
+    """
+    if status not in CLOSED_STATUSES:
+        raise ActionError(f"A negotiation closes as {', '.join(CLOSED_STATUSES)}, not '{status}'.")
+    n = get_negotiation(g, int(nid))
+    if n["status"] != "open":
+        raise ActionError(f"Negotiation #{n['id']} is already {n['status']}.")
+    n["status"] = status
+    n["awaiting"] = None
+    note = str(note or "")[:500]
+    _add_entry(g, n, by, "close", note=note)
+    a, b = n["initiator"], n["responder"]
+    verb = {"rejected": "was declined", "expired": "expired", "cancelled": "was cancelled"}[status]
+    text = f"Negotiation #{n['id']} between {g.player(a).name} and {g.player(b).name} {verb}. {note}"
+    g.emit("negotiation", text.strip(), [a, b], negotiation=n["id"], status=status)
+    return n
 
 
 def expire_negotiations(g: "Game", pid: int):
-    """Close negotiations that have gone unanswered too long."""
-    for n in g.s.negotiations:
+    """Close the negotiations a player opened that are still open at the end of its turn.
+
+    A safety net for headless runners, which call Game.end_turn directly: the end_turn tool refuses while a
+    negotiation is open (end_turn_refusal), so a player going through the tools never gets here with one.
+    """
+    for n in list(g.s.negotiations):
         if n["status"] == "open" and n["initiator"] == pid:
-            n["status"] = "expired"
-            n["awaiting"] = None
-            g.emit("negotiation", f"Negotiation {n['id']} between {g.player(n['initiator']).name} and "
-                                  f"{g.player(n['responder']).name} expired at the end of the turn.",
-                   [n["initiator"], n["responder"]], negotiation=n["id"], status="expired")
+            close_negotiation(g, n["id"], "expired", f"It was still open at the end of {g.player(pid).name}'s turn.")
+
+
+def end_turn_refusal(g: "Game", pid: int) -> Optional[str]:
+    """Why an open negotiation stops this player ending its turn, or None if none does.
+
+    One waiting on the player must be answered first. One waiting on the other side must get its reply, or be
+    withdrawn: ending the turn would otherwise leave the other side answering nobody. A negotiation waiting on the
+    player is named first, because that one the player can act on.
+    """
+    waiting = None
+    for n in g.s.negotiations:
+        if n["status"] != "open" or pid not in (n["initiator"], n["responder"]):
+            continue
+        name = g.player(n["responder"] if pid == n["initiator"] else n["initiator"]).name
+        if n["awaiting"] == pid:
+            return (f"Answer {name} in negotiation #{n['id']} first: respond_negotiation(negotiation_id={n['id']}, "
+                    f"action='accept', 'counter', 'reply' or 'reject', message=...). You cannot end your turn while a "
+                    f"negotiation waits on you.")
+        if waiting is None:
+            waiting = (f"You are waiting for {name} to answer negotiation #{n['id']}. End your turn after they reply, "
+                       f"or withdraw it with respond_negotiation(negotiation_id={n['id']}, action='reject', "
+                       f"message=...).")
+    return waiting
 
 
 def negotiation_view(g: "Game", n: dict, pid: int) -> dict:
@@ -820,12 +944,20 @@ def negotiation_view(g: "Game", n: dict, pid: int) -> dict:
         return {"you_give": prop.get(str(pid), []), "you_receive": prop.get(str(other), []),
                 "summary": f"You give {describe_items(g, prop.get(str(pid), []))}; you receive {describe_items(g, prop.get(str(other), []))}."}
 
+    def entry(i, h):
+        """One history entry, from the viewer's side."""
+        e = {"seq": h.get("seq", i), "by": g.player(h["by"]).name if h["by"] is not None else None,
+             "you": h["by"] == pid, "action": h["action"], "message": h["message"], "proposal": persp(h["proposal"])}
+        if h.get("note"):
+            e["note"] = h["note"]
+        return e
+
     return {
         "id": n["id"], "with": other, "with_name": g.player(other).name, "status": n["status"],
         "you_initiated": n["initiator"] == pid, "your_move": n["awaiting"] == pid, "turn": n["turn"],
-        "exchanges": n["exchanges"], "max_exchanges": g.rules.const["diplomacy"]["max_negotiation_exchanges"],
+        # entries the game added to close the chat are not messages, so an open chat never shows more than the cap
+        "messages": sum(1 for h in n["history"] if h["action"] != "close"), "max_messages": max_chat_messages(g),
         "current_proposal": persp(n["proposal"]),
         "proposal_by_you": n["proposal_by"] == pid if n["proposal"] else None,
-        "history": [{"by": g.player(h["by"]).name, "you": h["by"] == pid, "action": h["action"], "message": h["message"],
-                     "proposal": persp(h["proposal"])} for h in n["history"]],
+        "history": [entry(i, h) for i, h in enumerate(n["history"], 1)],
     }

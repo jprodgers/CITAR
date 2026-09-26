@@ -1,0 +1,65 @@
+about = """
+A civilization denounces another it has met, publicly, for 30 turns: their friendship ends, the
+denounced thinks worse of the denouncer, and so do the denounced's friends. It may not denounce twice,
+nor a civilization it is at war with; while it stands, the two cannot be friends.
+"""
+from = "citar/engine/diplomacy.py: denounce"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = "all" },
+  { op = "meet", a = 1, b = 2 },
+  { op = "set_relation", a = 1, b = 2, friends = true },
+  { op = "set_relation", a = 0, b = 2, friends = true },
+]
+
+[[step]]
+tool = "denounce"
+args = { player_id = 2 }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { denounced = "Civilization 3" }
+
+[[step]]
+check = { what = "relation", a = 0, b = 2 }
+subset = { friends = false, friendship_until = 0, opinion = [0, -35] }
+
+[[step]]
+note = "The denounced's friend thinks worse of the denouncer."
+check = { what = "relation", a = 0, b = 1 }
+path = "opinion"
+eq = [0, -15]
+
+[[step]]
+check = { what = "events", type = "denounce" }
+path = "[0]"
+subset = { text = "Civilization 1 denounced Civilization 3!", audience = "=null" }
+
+[[step]]
+tool = "denounce"
+args = { player_id = 2 }
+error = "You have already denounced Civilization 3."
+
+[[step]]
+tool = "denounce"
+args = { player_id = 0 }
+error = "You can only denounce civilizations you have met."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 2, message = "Friends again?", give = [{ type = "declaration_of_friendship" }] }
+error = "Friendship is impossible while at war or after a denunciation."
+
+[[step]]
+tool = "declare_war"
+args = { player_id = 1 }
+
+[[step]]
+tool = "denounce"
+args = { player_id = 1 }
+error = "You are at war with them already."

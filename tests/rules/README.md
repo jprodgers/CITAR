@@ -1,0 +1,352 @@
+# Rule scripts
+
+A rule script pins down one behaviour of the game engine: it sets a game up, acts, and checks
+what the engine then says. The same script runs on both engines:
+
+- the Rust engine, through `crates/citar-testkit/src/script` (`cargo nextest run -p citar-testkit
+  --test rules`, one test per script);
+- the Python engine, through `tests/rulescript.py` (`python -m unittest tests.test_rule_scripts`),
+  which drives `citar.engine_api.EngineGame` only.
+
+Scripts replace the Python tests that poked the engine's internals (DESIGN.md 9.3 in
+`crates/citar-engine/`). They play on hand-made maps with named places instead of generated ones,
+so a script means the same thing on both engines and before and after a system is ported. A
+script lands with the package that ports what it tests, and passes on Python first.
+
+`_selftest.toml` tests the runners themselves, including checks that must fail. Keep the two
+runners in step: a change to the language changes both, this file, and the self-test.
+
+## A script
+
+```toml
+about = "Seats get their handicap and automatic decisions from their controller."
+from = "tests/test_controllers.py::DefaultTests::test_defaults_follow_the_controller"
+map = "arena"          # optional: tests/rules/maps/<map>.json; the arena by default
+start = "bare"         # optional: "bare" (the default) or "full"
+
+[config]               # optional: settings over the runner's defaults
+players = [{ controller = "human" }, { controller = "bot" }]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "handicap"
+eq = "human"
+```
+
+| Key | |
+|---|---|
+| `about` | required: what the script pins down, in a sentence or two |
+| `from` | the Python test it ports, if any |
+| `map` | the map, `arena` by default |
+| `start` | `bare` or `full` |
+| `config` | settings, as `EngineGame.new` takes them |
+| `step` | the steps, in order |
+
+Any other key is refused. The file name is the test's name.
+
+## The game
+
+The runner builds the settings from, in order:
+
+1. its defaults: `seed = 1`, two players (`players = [{}, {}]`);
+2. with `start = "bare"`: `city_states = 0`, `barbarians = "off"`, `ruins = false`;
+3. the script's `config`, key by key (a key replaces the default whole);
+4. a `nation = "BenchmarkCiv"` for every player that names none: the benchmark civilization has
+   no unique ability, so no nation's bonus leaks into a script. Such players are called
+   "Civilization 1", "Civilization 2", ... by seat;
+5. the map document, inline.
+
+Then, with `start = "bare"`, every unit is removed (`clear_units` for `all`), and every barbarian
+camp (`clear_camps`, for a script that turns the barbarians on): a bare game has the
+map, the players, their starting techs, gold and culture, and nothing else.
+
+Player ids are the seats in order, then the city-states, then the barbarians. The engines draw
+city-states' nations differently, so scripts refer to a city-state by id and never by name.
+
+`start = "full"` keeps the starting units and camps. Barbarian camps and the ruins an editor map
+lacks are placed at random, differently in each engine, so a full script that looks at units or
+tiles turns them off (`barbarians = "off"`, `ruins = false`). Both runners set games up through
+the engine's own setup (`EngineGame.new`, and `Game::config_from_json` with `Game::new` in Rust),
+which begins the first seat's turn and announces it (`turn_start`, then `game_start`) before the
+bare prelude runs: count events by type, and never pin an event id at the start of a game.
+
+A game with more civilizations than the map gives starts, or more city-states than it gives sites,
+has the rest chosen (`maps.prepare`): the arena's sixth start is (11,3), and its second and third
+city-state sites (13,12) and (14,5).
+
+A civilization, or a city-state, with no unit and no city is eliminated at the end of a round, and
+one that loses its last city or unit to another's move is eliminated at once; with one civilization
+left of several, it wins the Domination victory. A script that plays across a round gives each
+player a unit first, with the `add_unit` operation.
+
+## Steps
+
+Each step is a `[[step]]` table with exactly one of `op`, `ops`, `tool`, `check`, `new_game`, `set`
+or `repeat`, its kind's own keys, and any of these that its kind takes (the runners refuse any
+other key, so a misplaced one never passes unread):
+
+| Key | |
+|---|---|
+| `note` | a comment the runners ignore |
+| `as = "name"` | `op`, `ops`, `tool` and `check` only: binds the step's result (an op's or tool's return value, a check's subject at its path) |
+| `error = "text"` | `op`, `ops`, `tool` and `new_game` only: the step must be refused with `text` in its message; `error = true`: refused with any message |
+| `must_fail = true` or `"text"` | the step itself must fail (for the self-test): a check that does not hold, an unexpected error, a refused script |
+| `intended = "id"` | the expected value is the Rust engine's, which differs from Python's on purpose: the Python runner skips the step. The id is listed in `refcheck/intended.toml` or `tests/rules/intended.toml` |
+| `coerce = true` | the step types numbers as strings on purpose (see [Numbers](#numbers)) |
+
+### `op`
+
+```toml
+[[step]]
+op = "grant_tech"
+args = { player = 0, tech = "Pottery" }
+as = "granted"
+```
+
+A scenario operation (`EngineGame.apply_ops`, `Game::apply_ops`) or a test operation
+(`EngineGame.test_ops`, `api::testops`), by name; `args` are its parameters. The result is the
+operation's return value. An error names the operation: `Operation 1 (grant_tech): Unknown tech
+'Foo'.`, `Test operation 1 (unmeet): ...`.
+
+`inspect` with `{ what = "ops" }` lists both kinds with their parameters, and
+`{ what = "pending" }` those not ported to the Rust engine yet.
+
+### `ops`
+
+```toml
+[[step]]
+ops = [
+  { op = "set_player", player = 0, gold = 40 },
+  { op = "grant_tech", player = 1, tech = "Pottery" },
+]
+```
+
+Scenario operations applied as one list, each table an operation with its parameters (and `at`)
+inline. The Rust engine applies a list all or nothing; Python left the operations before a failed
+one applied. The result is the list of what each returned.
+
+### `tool`
+
+```toml
+[[step]]
+tool = "set_research"
+player = 0             # optional: whose turn it is, by default
+args = { tech = "Writing" }
+```
+
+A player's tool call, as a host makes it (`EngineGame.execute`; in Rust the arguments go through
+`api::tools::normalize` and the typed action through `Game::act`). The result is the tool's.
+
+### `check`
+
+```toml
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "embassy[0]"
+eq = true
+```
+
+The subject is an `inspect` query ([below](#inspect)), or a bound variable by name
+(`check = "granted"`). `path` picks a place in it ([Paths](#paths)); the matchers say what must
+hold there. Every matcher given must hold:
+
+| Matcher | Holds when |
+|---|---|
+| `eq = v`, `ne = v` | the value equals `v`, or does not |
+| `gt`, `ge`, `lt`, `le` | the number compares so |
+| `approx = n` | the number is within `tol` (default `1e-6`) times the larger of 1 and the two sizes |
+| `contains = v`, `not_contains = v` | a list has an item equal to `v`, a string has `v` in it, an object has the key `v`; or not |
+| `len = n` | the list, string (in characters) or object has `n` items |
+| `absent = true` | the path leads nowhere (no other matcher then); `absent = false`: it leads somewhere |
+| `is_null = true` | the value is null (`false`: it is not) |
+| `matches = "re"` | the string matches the regular expression somewhere (keep to the syntax Rust's `regex` and Python's `re` share) |
+| `any = { ... }` | some item of the list passes the matchers in the table, which may have its own `path` into the item |
+| `none = { ... }` | no item does |
+| `subset = x` | `x` is part of the value: each key of an object with an equal value, each item of a list |
+
+Values compare as JSON: numbers by value (`3` equals `3.0`, and a boolean is never a number),
+objects whatever their key order, lists in order.
+
+### `new_game`
+
+```toml
+[[step]]
+new_game = { players = [{ controller = "bot", handicap = "deity" }] }
+error = "handicap must be 'human' or 'ai'"
+```
+
+A new game from the script's settings with these keys replaced. Without `error` it replaces the
+current game; with it, the settings must be refused (`ValueError` in Python).
+
+### `set`
+
+```toml
+[[step]]
+set = { start_gold = "=gold + 10", name = "Rome" }
+```
+
+Binds variables.
+
+### `repeat`
+
+```toml
+[[step]]
+repeat = 3
+steps = [{ op = "set_turn", args = { turn = 5 } }]
+```
+
+Runs the steps, in order, that many times.
+
+## Values
+
+A string that starts with `=` is an expression, evaluated when the step runs; `==` at the start
+is a literal `=`. Expressions have:
+
+- numbers, `'text'` in single quotes, `null`, `true` and `false` (TOML has no null: write
+  `"=null"`);
+- variables by name, with a path after them: `granted.techs_added.0`, `ids[0]`;
+- `+ - * / // %` and parentheses: whole numbers stay whole except under `/`, and `//` and `%`
+  round toward minus infinity, as Python's do; `+` also joins strings;
+- `x(ref)` and `y(ref)`, a tile reference's coordinates, and `len(v)`.
+
+### Tiles
+
+In `args` and in `check` queries, `at` is replaced by `x` and `y`. It is a tile reference:
+
+- an anchor of the map: `"A"`;
+- coordinates: `"(3,4)"`;
+- a walk: `"A>e>ne"`, a step per direction (`e`, `ne`, `nw`, `w`, `sw`, `se`) in odd-r offset
+  coordinates, where odd rows are shifted right;
+- a selector: a table, which is a `find_tiles` query: `at = { at = "A", radius = 2,
+  terrain = "Plains" }` is the first tile it finds, and `pick = 1` the second.
+
+### Paths
+
+| Segment | Selects |
+|---|---|
+| `key` first, or `.key` | the object key `key` (letters, digits, `_` and `-`): `techs_added.0` |
+| `["any key"]` | any object key, as a JSON string |
+| `[3]` | item 3 of a list |
+| `[id=4]` | the first item of a list that is an object whose `id` is 4 |
+| `[#0=12]` | the first item of a list that is a list whose item 0 is 12 |
+
+A selector value is a JSON literal, or a bare word for a string: `[type=Warrior]`. This is the
+path grammar of `refcheck/intended.toml` without its wildcards.
+
+### Numbers
+
+Tools and operations coerce `"3"` to 3, as Python's did. So that this is tested on purpose and
+never by accident, the runners refuse a step whose `args`, `ops`, `check` query or `new_game`
+types a number as a string, unless the step says `coerce = true`.
+
+`normalize.json` is the table of how a tool's arguments are coerced (`tools.py:113-127`): both
+engines run every case, Python through `tools.execute` in `tests/test_rule_scripts.py`, Rust
+through `api::tools::normalize_with` in `crates/citar-testkit/tests/engine/tools.rs`. A case with
+an `"intended"` id is a deliberate difference, which only Rust runs, as with an `intended` step.
+
+## Inspect
+
+`{ what = ..., ... }` asks the engine (`EngineGame.inspect`, `api::inspect`). Every shape is the
+same from both engines, and every set in it is sorted.
+
+| `what` | Takes | Gives |
+|---|---|---|
+| `game` | | `turn`, `current`, `phase` (`playing`, `over`), `winner`, `victory` (the victory's name, `Neutral` for `Triggers victory`, or null), `width`, `height`, `players` (how many), `majors`, `city_states` (ids), `barbarians` (id or null) |
+| `player` | `player` | `id`, `kind` (`major`, `city_state`, `barbarian`), `name`, `leader`, `nation`, `alive`, `controller`, `handicap`, `auto` (`un_vote`, `conquest`, `free_picks`), `overrides` (the `handicap` and `auto` keys the seat set explicitly), `difficulty` (the seat's, or a major's the game's), `gold`, `culture`, `faith`, `golden_age_turns`, `free_policies`, `free_techs`, `future_techs`, `techs` (names), `research` (`queue`, `goal`, `progress` (science stored by tech), `overflow`), `policies`, `met` (ids), `capital`, `cities`, `units` (ids), `explored` (how many tiles), `natural_wonders` (the names it has discovered), `notes`, `city_state` (null, or `type`, `ally` and `influence` by major id), `happiness` (now), `happiness_seen` (what its cities and conditionals go by: committed at setup and at the start and end of its turns; Python's is the live figure), `gold_rate` (written at the end of each of its turns; Python never wrote it) |
+| `tile` | `x`, `y` (or `at`) | `x`, `y`, `terrain`, `features`, `wonder`, `resource`, `resource_amount`, `improvement`, `pillaged`, `route` (`Road`, `Railroad` or null), `route_pillaged`, `river` (the edge mask), `owner`, `city`, `units` (ids), `visible` (the ids of the players who see it now) |
+| `relation` | `a`, `b` | `a`, `b`, `met`, `war`, `war_declared_by`, `since`, `treaty_until`, `friendship_until`, `pact_until`, `ra_until`, `embassy` (`[a's with b, b's with a]`), `open_borders_until` (`[a lets b in, b lets a in]`), `opinion` (`[a's of b, b's of a]`), `friends`, `pact` |
+| `unit` | `unit` | `id`, `owner`, `type`, `x`, `y`, `hp`, `xp`, `promotions`, `moves` and `max_moves` (move-scale units), `activity` (`fortify`, `fortify_heal`, `sleep`, `sleep_heal`, `heal`, `build`, `goto`, `explore`, `automate`, `air_sweep`, or null), `goto` (`{ x, y }` or null), `fortify` (turns fortified), `embarked`, `carried_by` (an id or null), `set_up`, `original_owner` (the player it was made for), `return_offer` (the player a recaptured civilian may be given back to, or null) |
+| `units` | optionally `player`, `x`, `y` | the units, by id, as `unit` gives them |
+| `city` | `city` | `id`, `name`, `owner`, `x`, `y`, `pop`, `buildings`, `worked`, `locked` and `workable` (tiles as `[x, y]`), `specialists` (count by name, those it has), `focus`, `avoid_growth`, `food` (stored), `yields` (the city's total of each stat: `food` is the surplus), `queue` (item names, the first being built), `progress` (production stored by item), `overflow`, `culture` (stored toward the next tile), `health`, `max_health`, `tiles` (how many tiles it owns), `founder`, `previous_owner` (null for a city never taken), `original_capital`, `puppet`, `razing`, `resistance` (turns left), `attacked` (whether it has bombarded this turn) |
+| `buildable` | `city` | what the city can build now: `units`, `buildings`, `wonders` and `other` (`Gold`, `Science`) as sorted names, and `production`, the production cost of each unit, building and wonder by name |
+| `preview` | `unit`, `x`, `y` (or `at`) | the attack preview (`combat.preview`): `attacker_strength` and `defender_strength` to a decimal, `attacker_modifiers` and `defender_modifiers` (`"Flanking +10%"`, in the order they apply), `ranged`, `damage_to_defender` and `damage_to_attacker` (`[lowest roll, highest roll]`), `defender` (its name), `defender_hp`, `target` (`unit` or `city`), and for a city with no defences left `note`; or `{ error }`, the attack's refusal |
+| `costs` | `player` | `tech` (what each tech it could research now costs it, by name), `policy` (its next policy's culture), `adoptable` (the policies and branches a major could adopt now, sorted) |
+| `religion` | `player` | `state` (`none`, `pantheon`, `religion`, `enhanced`), `religion` (its pantheon's belief or its religion's name, or null), `display` (the name it is shown under), `beliefs` (sorted), `free_beliefs` (count by kind, those it has), `pantheon_cost` and `prophet_cost` (the faith its next pantheon and great prophet cost), `prophets_earned`, `holy_city` (id or null) |
+| `religion` | `city` | `majority` (a religion's name, or null), `followers` (count by religion), `pressures` (by religion, `None` for no religion), `holy_city_of` (a religion's name, or null) |
+| `great_people` | `player` | `points` (great person points by great person), `free` (free great people to choose), `earned`, `golden_age_points`, `golden_ages`, `golden_age_turns`, `golden_age_needed` (the happiness the next golden age needs), `temp_uniques` (each unique held for some turns: `text`, the timed unique's, and `turns` left) |
+| `negotiation` | `negotiation` (an id); optionally `player` | as kept: `id`, `initiator`, `responder`, `turn`, `status` (`open`, `accepted`, `rejected`, `expired`, `cancelled`), `awaiting` (an id or null), `proposal` (what each side gives, by player id, as deal items, or null), `proposal_by`, `history` (each entry's `seq`, `by` (an id, or null for the game), `action` (`open`, `reply`, `counter`, `accept`, `reject`, `close`), `message`, `proposal`, `turn`, `note` (or null)), `deal_id`. With `player`, as that player sees it (`diplomacy.negotiation_view`): `id`, `with`, `with_name`, `status`, `you_initiated`, `your_move`, `turn`, `messages` (entries but the game's close), `max_messages`, `current_proposal` (`you_give`, `you_receive`, `summary`, or null), `proposal_by_you`, `history` (`seq`, `by` (a name or null), `you`, `action`, `message`, `proposal`, and `note` where there is one) |
+| `camps` | | the barbarian camps, by id: `id`, `x`, `y`, `countdown` (turns to the next spawn, or once destroyed until it is forgotten), `spawned` (from -1), `destroyed`. Camp ids differ between the engines |
+| `city_state` | `player` (a city-state) | `ally` (an id or null), `protectors` (ids), `influence` (by major id, as stored), `relationship` (`Unforgivable`, `Enemy`, `Ally`, `Friend`, `Afraid` or `Neutral`) and `resting_point`, each by the id of a major it has met, `quests` (`name`, `assignee`, `scope`: `individual` or `global`), `war_quests` (the kills it wants of an attacker's units, by the attacker's id), `recently_bullied` (turns it pays no tribute) |
+| `victory` | `player` | `score` (`cities`, `population`, `tiles`, `wonders`, `technologies`, `future_tech` and their `total`), `military_strength`, `progress` (for each enabled victory by name: `milestones`, each `milestone` and whether it is `done`, up to the first not done; `total`; `completed`), `spaceship` (`apollo_program`, `parts` (by name: `added`, `needed`), `complete`), `achieved` (the victory it would win now, a name or null; `Neutral` for `Triggers victory`) |
+| `un` | | the United Nations: `next_vote` (a turn or null), `votes` (the ballots cast, by voter id: a player id, or null to abstain), `results` (the last vote's `turn`, `tally` (`[player, votes]`, most first, equals by id), `votes_needed` and `winner`, or null), `won` (ids), `processed_turn`, `open` (whether voting is open now), `votes_needed`, `owner` (who built the United Nations, or null) |
+| `spies` | `player` | the civilization's spies in order: `name`, `rank`, `city` (an id, or null at the hideout), `action` (`None`, `Moving`, `Establishing Network`, `Observing City`, `Stealing Tech`, `Rigging Elections`, `Coup`, `Counter-intelligence`, `Dead`), `turns`, `progress` |
+| `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
+| `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |
+| `ops` | | `scenario` and `test`: each operation with its `params` |
+| `pending` | | what the Rust engine has not ported yet: `kind` (`scenario_op`, `test_op`, `turn_stage`, `setup_stage`), `name`, `package` (Python: nothing). A turn stage is named by its table and stage, `player_start S2: research progress`. Nothing is pending since package 1d-03 |
+| `view` | optionally `player` (a major; none for a spectator) and `events` (how many, 150 by default) | the client view, what the browser receives (`views.client_view`): `turn`, `year`, `current_player`, `phase`, `winner`, `victory`, `you`, `width`, `height`, `wrap_x`, `wrap_y`, `tiles` (each explored tile as `[idx, terrain, features, natural wonder, river bits, resource, improvement, route, pillaged, route pillaged, owner, visible]`), `units` and `cities` (as `get_units` and `get_cities` show the viewer's, others' as the viewer sees them, remembered cities with `stale`), `players` (as `get_players`), `turn_limit`, `config`, `events` (each as emitted, scrubbed for the viewer); a player's `empire`, `diplomacy`, `notes` and `alerts` (`type`, `text`, and `x`, `y`, `city`, `unit`, `player`, `negotiation` where they apply); a spectator's `stats`, `empires`, `thoughts`, `messages` and `negotiations` |
+| `briefing` | `player` (a major) | what a model reads to play its turn: `text` (the briefing, `briefing.briefing`), `progress` (the turn's progress, `briefing.turn_progress`) and `alerts` (each problem of the turn with the tool call that deals with it, as the briefing lists them, `briefing.alerts`) |
+
+`find_tiles` filters: `x` and `y` (or `at`), the place distances are counted from; `radius`, the
+farthest a tile may be; `terrain`, `feature`, `resource`, `improvement`, names the tile must have;
+`owner`, a player id or `"none"`; `land`, `river`, `city`, `units`, `bare` (no feature, resource,
+improvement or natural wonder), each true or false; `limit`, the most tiles to give.
+
+## Test operations
+
+What a script does that no player or editor may. `{ what = "ops" }` lists them.
+
+| Op | Takes | Does |
+|---|---|---|
+| `clear_units` | `player`: an id, a list, or `all` (every player, the barbarians included) | removes every unit of those players |
+| `set_turn` | `turn` | sets the turn number |
+| `unmeet` | `a`, `b` | the two no longer know each other |
+| `set_controller` | `player`, `controller`; optionally `handicap`, `auto` | hands the seat to another driver, as a host does |
+| `set_difficulty` | `player`, `difficulty` (a level's name, read loosely) | gives the seat its own difficulty, as the host's `set_difficulty` does. Gives `ok`: false, with nothing changed, for a name that is no level |
+| `debug` | `action` (`meet_all`, `reveal` or `gold`) | the host's developer shortcut (`EngineGame.debug`): every living civilization meets every other, has the whole map explored, or gets 500 gold. Refused for anything else |
+| `drive` | `drivers` (the players a test driver plays); optionally `answer` (`reject` by default, `accept`, `reply`, or `none`; anything else is refused), `defer` (drivers that leave what waits on them to the host), `seat_limit` | the host drives the game (`Game::drive`, which Python never had; `citar/engine/testops.py` plays the same machine): each driven seat's turn is played (the test driver does nothing with it) and ended, and a negotiation that waits on a driven seat gets its driver's `answer`, whoever's turn it is, unless the seat is under `defer`: its driver leaves the negotiation to the host, as a hybrid seat's bot leaves it to the seat's model (`DriverOutcome::Deferred`), and it waits on the host until it moves. It stops at the turn of a seat with no driver (`external`), after a hybrid seat's driver has played (`hybrid_diplomat`; the next drive ends the turn), while the seat whose driver has played is in a negotiation that waits on the host, on a seat with no driver or on one, itself included, whose driver deferred it (`awaiting_reply`, naming them), after `seat_limit` driven turns (`seat_limit`), and when the game is over (`game_over`). A stop inside a turn is kept through a `reload`, and forgotten when `force_turn` begins a turn anew. Gives `stop`, `player` (or null), `negotiations`, `turn` and `current` |
+| `set_auto` | `player`, `decision`, `on` | the engine takes one decision for the civilization, or not, until its controller changes |
+| `refresh_visibility` | | brings what everyone sees up to date |
+| `reload` | | saves the game and loads the save |
+| `end_turn` | optionally `player` (the current one by default) | ends that player's turn, as the host's `end_turn` does: city-states and the barbarians play inside the call, a round ends after the last player, and play stops at the next major civilization, whose turn begins. Gives `turn` and `current` |
+| `end_round` | | ends every turn left in the round, and the round. Gives `turn` and `current` |
+| `force_turn` | `player` | makes it that player's turn now and begins it (nothing if it already is). Gives `turn` and `current` |
+| `complete_construction` | `city` | finishes what the city builds now, as its turn would, whatever is stored: a building joins the city, a unit is placed in it or beside it. Refused when the city builds nothing that completes, and when no tile has room for the unit. Gives `completed` (the name) |
+| `set_unit` | `unit`; optionally `hp` (1 to 100), `moves` (move-scale units), `xp`, `x` and `y` (moved there without movement rules, with what it carries), `promotions` (names: the list it then has), `carrier` (an id, or null to leave it) | sets a unit's fields, as a test poked them |
+| `ready_unit` | `unit` | gives a unit its full movement, and no orders, attacks or action this turn. Gives `moves` |
+| `found_religion` | `unit`, `name`, `beliefs` (names) | the great prophet founds a religion in the city it stands in and is spent, as its unit action does (`religion.found_religion`). Gives `founded` (the name shown), `religion` (the ruleset's name), `beliefs`, `holy_city` |
+| `enhance_religion` | `unit`, `beliefs` (names) | the great prophet enhances its owner's religion from the city it stands in and is spent (`religion.enhance_religion`). Gives `enhanced`, `beliefs` |
+| `enter_ruins` | `unit` | the unit explores the ancient ruins it stands on, as moving onto them does (`ruins.enter`). Refused where there are none. Gives `found` (whether a reward was) |
+| `attack_as` | `unit`, `x`, `y` (or `at`) | the unit attacks the tile as the `attack` tool would, whoever's turn it is: a nuclear weapon detonates, an aircraft strikes, anything else attacks. Gives what the attack reports |
+| `capture_civilian` | `unit`, or `player` (the barbarians included); `x`, `y` (or `at`) | the unit's owner, or the player, takes the civilian on the tile, as a unit moving onto it would: a settler becomes a worker, a great person or religious unit is destroyed, one taken back from the barbarians comes with an offer to return it. Gives `unit`, the captured unit's new id, or null |
+| `add_spy` | `player` (a major civilization) | a new spy in its hideout, at its starting rank, whether or not espionage is on (`espionage.add_spy`). Gives `spy`, its name |
+| `close_negotiation` | `negotiation`, `status` (`rejected`, `expired` or `cancelled`), `note`; optionally `by` (the player it is closed for) | closes an open negotiation from outside it, as a host's timeout does (`diplomacy.close_negotiation`): its history ends with a close entry and the note, and both sides are told. Gives the negotiation as `inspect` does |
+| `open_negotiation_as` | `player`, `to`, `message`; optionally `give`, `receive` (deal items) | opens a negotiation for a player whether or not it is its turn (`EngineGame.open_negotiation_as`). Gives what `open_negotiation` does |
+| `add_barbarian` | `unit`, `x`, `y` (or `at`); optionally `hp` | a barbarian unit on the tile, which `add_unit` refuses to make. Gives `unit_id` |
+| `add_quest` | `city_state`, `player` (a major civilization), `quest` (its name); optionally `scope` (`individual` or `global`, the row's by default), `target`, `x` and `y` (or `at`) | the city-state gives the major the quest now, whether or not it fits the game, and tells it, as its turn would (`city_states._assign`): its row's influence and duration, from this turn. The target is the row's: a player id (Find Player, Conquer City State, Bully City State, Give Gold, Pledge to Protect, Denounce Civilization), a name (the resource, wonder, great person or natural wonder), the player whose religion to spread, a contest's starting score (0 by default), the investment percent (the row's by default), or for Clear Barbarian Camp the tile `x` and `y`. Gives `quest`, its text |
+| `barbarian_act` | optionally `unit` | the barbarians take a turn now, as the start of their turn has them: their units start their turn and act, then their camps count down, spawn and may appear (`barbarians.take_turn`); with `unit`, only that barbarian acts, with the moves it has (`barbarians._automate`) |
+| `clear_camps` | | removes every barbarian camp and its improvement, as the bare prelude does. Gives `removed` (the tiles as `[x, y]`) |
+| `create_camp` | `x`, `y` (or `at`) | a barbarian camp on the tile, its countdown at 0 (`barbarians.create_camp`). Gives its id |
+| `sack_city` | `city` | the barbarians sack the city (`barbarians.sack_city`). Gives what an attack that sacks it reports: `sacked_city` (its name), `gold_stolen`, `citizen_killed`, `building_destroyed` (a name or null); or `sacked_city` null and a `note` for a city sacked too recently |
+
+`automate` and `progress_builds` (package 1c-04) are described by `{ what = "ops" }`.
+
+## Maps
+
+`maps/arena.json` is 24 by 16 tiles, odd-r (odd rows shifted right), with no wrapping: an editor
+map document (`citar/engine/maps.py`) with an `anchors` key the runners read and give the
+engines without. Grassland, but for an ocean along the west edge (`x` 0 and 1), coast beside it
+(`x` 2), and plains around B (`x` 15 to 21, `y` 8 to 12).
+
+| Anchor | Tile | What |
+|---|---|---|
+| `A` | (5,5) | the first seat's start |
+| `B` | (18,10) | the second seat's start, on plains |
+| `C` | (18,4) | the third seat's start |
+| `D` | (5,11) | the fourth seat's start |
+| `E` | (11,13) | the fifth seat's start |
+| `CS` | (11,7) | the city-state start, 6 to 8 tiles from every seat |
+| `H` | (7,5) | a grassland hill, 2 east of A |
+| `F` | (3,5) | a grassland forest, 2 west of A |
+| `R` | (6,4) | north-east of A, with a river along its east and north-east edges |
+| `W` | (2,5) | coast, 3 west of A |
+| `L` | (4,3) | cotton, a luxury, on grassland 2 north of A |
+| `M` | (5,7) | a mountain, 2 south of A |
+
+The generator is not kept: edit the file, keep every anchor where it is, and check with
+`maps.validate` that the document is its own clean form.
+
+`maps/arena_wrap.json` is the same arena wrapping east-west and north-south (`map =
+"arena_wrap"`), for what a map that wraps changes: the tiles and anchors are the arena's, so an
+edit to one is made to both. Both runners' tests check that a map `<name>_wrap.json` differs from
+`<name>.json` only in its id, name, description and wrapping.

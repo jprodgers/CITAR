@@ -1,0 +1,165 @@
+# The Rust workspace: lint, tests on the three desktop platforms, and the reference checks.
+#
+# A separate workflow from test.yml, so a Python-only change skips it (the path filters below)
+# and the Rust results get their own summary. The five-target determinism matrix is
+# determinism.yml. A later package adds the perf job here, and the long runs as nightly.yml
+# (crates/citar-engine/DESIGN.md 2.6).
+name: rust
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "xtask/**"
+      - "Cargo.*"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "refcheck/**"
+      - "tests/rules/**"
+      - "citar/data/**"
+      # cargo xtask check holds the workspace version equal to this file's __version__.
+      - "citar/__init__.py"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "xtask/**"
+      - "Cargo.*"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "refcheck/**"
+      - "tests/rules/**"
+      - "citar/data/**"
+      # cargo xtask check holds the workspace version equal to this file's __version__.
+      - "citar/__init__.py"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes the run in flight for the same branch.
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artefacts are never reused on a fresh runner; they only slow the cache down.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        # rust-toolchain.toml pins the exact release; this installs it with rustfmt and clippy.
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Clippy, the engine alone in each feature set
+        # Cargo unifies features across the workspace, and testkit turns on legacy and test-ops,
+        # so the run above never compiles the engine the way it ships. `-p` builds it alone.
+        # Default is what citar-py wheels and the helper ship; + test-ops is citar-py's CI build;
+        # + legacy is refcheck and bench; no default features keeps embedded-ruleset optional.
+        run: |
+          set -eu
+          for features in "--no-default-features" "" "--features test-ops" "--features legacy" \
+                          "--features checks" "--features stats"; do
+            echo "::group::citar-engine ${features:-default features}"
+            cargo clippy -p citar-engine --all-targets --locked $features -- -D warnings
+            echo "::endgroup::"
+          done
+
+      - name: xtask check
+        # Dependency allow-list, version equality, layering, mutation access, generated files.
+        run: cargo xtask check
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple silicon; Intel macOS joins in determinism.yml.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Tests
+        # The ci profile: release optimisation with debug assertions, so whole-game tests run
+        # fast and invariants still fire. No retries: a second-try pass is a determinism bug.
+        # Property tests run 64 cases here; the nightly run takes them to 10,000.
+        env:
+          PROPTEST_CASES: 64
+        run: cargo nextest run --workspace --all-features --locked --cargo-profile ci --profile ci
+
+      - name: Doctests
+        # nextest does not run doctests. The ci profile reuses the libraries the step above built,
+        # instead of compiling the workspace a second time in the dev profile.
+        run: cargo test --workspace --all-features --locked --doc --profile ci
+
+  refcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: refcheck
+
+      - name: Reference checks
+        # The committed fixtures (refcheck/fixtures-mini and fixtures-late) on every group. An
+        # unexplained difference fails the job where refcheck/enforced.toml covers it; elsewhere it
+        # is reported, and the ratchet below holds its count. The cargo refcheck alias, with --locked.
+        run: cargo run --locked --package citar-refcheck --profile ci -- run --json refcheck-report.json
+
+      - name: Ratchet
+        # No group's counts may rise above refcheck/ratchet.json, and the file must hold the current
+        # counts (a fall or a newly compared group is recorded with --update and committed).
+        run: cargo run --locked --package citar-refcheck --profile ci -- ratchet
+
+      - name: Keep the report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: refcheck-report
+          path: refcheck-report.json
+          if-no-files-found: ignore

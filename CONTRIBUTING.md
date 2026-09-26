@@ -18,7 +18,7 @@ Thanks for looking. CITAR is a game and an instrument, and it needs help with bo
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
 pip install -e ".[dev]"
-python -m unittest discover -s tests     # 272 tests, about 90 seconds
+python -m unittest discover -s tests     # 456 tests, about four minutes
 citar serve --debug                      # http://127.0.0.1:8765
 ```
 
@@ -99,6 +99,53 @@ What is worth testing:
 Reserved handles (`admin`, `root`, `mod`, `guest`, …) are rejected, so fixtures must use other
 names.
 
+## Rust
+
+The Rust engine is being built in `crates/` to replace `citar/engine/` in 0.1.6.
+[crates/citar-engine/README.md](crates/citar-engine/README.md) has the rules every change to it
+follows, and [crates/citar-engine/DESIGN.md](crates/citar-engine/DESIGN.md) the design.
+
+`rust-toolchain.toml` pins the exact toolchain, and rustup installs it on first use. Then:
+
+```bash
+cargo nextest run                                   # tests (cargo install cargo-nextest)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo xtask check                                   # layering, dependencies, version, and more
+cargo golden check                                  # determinism goldens
+cargo fmt --all
+```
+
+These are what CI runs, on Linux, Windows and macOS. CI also lints the engine alone in each
+feature set, because the workspace build turns on features the shipped engine does not have
+(testkit enables `legacy` and `test-ops`). When you change what a feature gates, run
+`cargo clippy -p citar-engine --all-targets -- -D warnings` and again with
+`--no-default-features`. The later tools join the loop as they land:
+`cargo refcheck run --fixtures refcheck/fixtures-mini` (answers compared with the Python engine)
+and `cargo xtask perf` (benchmarks against their budgets).
+
+**Goldens.** `crates/citar-testkit/golden/` holds answers that must come out identical on all five
+targets; the determinism workflow checks them on each. When a change is meant to move them (a new
+RNG `Purpose`, a `libm` or toolchain bump), run `cargo golden bless` and say why in the commit.
+`pyfmt.json` is Python's own answers, so only `scripts/refcheck/pyfmt_vectors.py` writes it;
+`scripts/refcheck/hex_vectors.py` records the hex-grid answers the same way.
+
+**Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
+fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of
+build output. Point `CARGO_TARGET_DIR` somewhere else, one directory per checkout or worktree so
+parallel builds of different branches do not thrash each other:
+
+```bash
+export CARGO_TARGET_DIR=C:/dev/target/citar-main          # Git Bash; a Dev Drive is faster still
+$env:CARGO_TARGET_DIR = "C:\dev\target\citar-main"        # PowerShell
+```
+
+**Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
+`/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
+benchmarks need valgrind, so they run there too.
+
+**On a busy machine**, `CARGO_BUILD_JOBS=4` keeps a build from starving everything else, and
+wall-clock benchmark numbers are only indicative.
+
 ## Pull requests
 
 - One change per pull request.
@@ -127,10 +174,11 @@ write to a wiki, and fine-grained tokens have no wiki permission to grant.
 
 ## Releasing
 
-For maintainers: bump `citar/__init__.py`, add the section to `CHANGELOG.md`, tag `vX.Y.Z` and
-push. CI checks that the tag, the source version and the changelog agree, then builds and publishes
-everything. [packaging/README.md](packaging/README.md) covers the manifests that need updating
-afterwards.
+For maintainers: bump `citar/__init__.py` and `[workspace.package] version` in `Cargo.toml`
+together (`cargo xtask check` fails if they differ), add the section to `CHANGELOG.md`, tag
+`vX.Y.Z` and push. CI checks that the tag, the source version and the changelog agree, then
+builds and publishes everything. [packaging/README.md](packaging/README.md) covers the manifests
+that need updating afterwards.
 
 ## Code of conduct
 

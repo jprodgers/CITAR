@@ -297,10 +297,22 @@ def alert_items(g: Game, pid: int) -> list[dict]:
         add("un_vote", "The United Nations vote is open: cast your vote.",
             "United Nations vote open: un_vote candidate=<player id or 'abstain'>.")
     for n in g.s.negotiations:
-        if n["status"] == "open" and n.get("awaiting") == pid:
-            other = n["initiator"] if n["responder"] == pid else n["responder"]
-            add("negotiation", f"{g.player(other).name} awaits your reply in negotiation #{n['id']}.",
-                f"Negotiation #{n['id']} with {g.player(other).name} awaits your response: respond_negotiation.")
+        if n["status"] != "open" or pid not in (n["initiator"], n["responder"]):
+            continue
+        oid = n["initiator"] if n["responder"] == pid else n["responder"]
+        other = g.player(oid).name
+        # the counterparty's id lets the game screen open Diplomacy on this chat rather than the first civ
+        if n.get("awaiting") == pid:
+            add("negotiation", f"{other} awaits your reply in negotiation #{n['id']}.",
+                f"Negotiation #{n['id']} with {other} awaits your response: respond_negotiation, with a message.",
+                player=oid, negotiation=n["id"])
+        else:
+            # the end_turn tool refuses while this is open, so it is as much a to-do as one waiting on us
+            add("negotiation", f"Waiting for {other} to answer negotiation #{n['id']}: you can end your turn once "
+                               f"they reply, or withdraw it.",
+                f"Negotiation #{n['id']} is waiting for {other}'s answer. end_turn is refused until it is settled; "
+                f"to give up on it, respond_negotiation action=reject with a message.",
+                player=oid, negotiation=n["id"])
     return out
 
 
@@ -461,7 +473,14 @@ def turn_progress(g: Game, pid: int) -> str:
     if shots:
         parts.append("cities that can still bombard (city_attack): " + ", ".join(
             f"{c.name} #{c.id} -> {g.fmt_xy(idx)}" for c, idx, _, _ in shots))
-    done = not need and not idle_cities and (cur or not research.available_techs(g, pid))
+    chats = [n for n in g.s.negotiations if n["status"] == "open" and pid in (n["initiator"], n["responder"])]
+    if chats:
+        # end_turn is refused while any of these is open, so the model has to hear about them here
+        parts.append("open negotiations (end_turn waits for them): " + ", ".join(
+            f"#{n['id']} " + ("YOUR MOVE" if n["awaiting"] == pid else
+                              f"waiting for {g.player(n['awaiting']).name}") for n in chats))
+    done = not need and not idle_cities and (cur or not research.available_techs(g, pid)) \
+        and not any(n["awaiting"] == pid for n in chats)
     tail = " Everything is handled — call end_turn now." if done else " Handle what remains, then call end_turn."
     return "TURN PROGRESS (current state; this supersedes the briefing): " + " | ".join(parts) + "." + tail
 

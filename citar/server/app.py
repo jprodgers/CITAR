@@ -16,10 +16,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ..engine import tools as toolreg
-from ..engine.game import ActionError
-from ..engine.rules import get_rules
-from ..engine.views import client_view
+from .. import engine_api
+from ..engine_api import ActionError, EngineGame
 from .session import SessionManager, GameSession, SAVE_DIR
 from .benchmarks import BenchmarkScheduler
 from .admin_api import router as admin_router
@@ -279,13 +277,13 @@ async def _security_headers(request: Request, call_next):
 @app.get("/api/rules")
 def rules():
     """The whole ruleset, as the client needs it. Public: it is the same for everybody."""
-    return get_rules().to_client()
+    return engine_api.rules_client()
 
 
 @app.get("/api/tools")
 def tool_list():
     """Every player tool with its JSON schema. The authoritative reference for an agent."""
-    return toolreg.tool_list()
+    return engine_api.tool_list()
 
 
 class ModelProbe(BaseModel):
@@ -402,7 +400,7 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
         _row, perms = ownership.resolve(sdb, s, p.user)
         if access.VIEW not in perms:
             continue
-        phase = s.game.s.phase
+        phase = s.game.phase
         games["over" if phase != "playing" else "paused" if s.paused else "playing"] += 1
         statuses = list(s.agent_status.values())
         games["ai_thinking"] += statuses.count("thinking")
@@ -445,37 +443,36 @@ def game_summary(gid: str, request: Request, p: Principal = Depends(principal), 
     human in it; a spectator of a game somebody is still playing gets names and the turn, nothing
     the fog of war would hide.
     """
-    from ..engine import research, victory
     s, _row, perms = _gate(sdb, gid, p, access.VIEW, request)
     with s.lock:
         g = s.game
         full = access.MANAGE in perms or s.god_view_allowed()
         seats = {seat.player: seat for seat in s.seats}
+        summ = g.summary()
         players = []
-        for pl in g.s.players:
-            if pl.kind != "major":
+        for pl in summ["players"]:
+            if pl["kind"] != "major":
                 continue
-            seat = seats.get(pl.id)
-            d = {"id": pl.id, "name": pl.name, "color": pl.color, "alive": pl.alive,
+            seat = seats.get(pl["id"])
+            d = {"id": pl["id"], "name": pl["name"], "color": pl["color"], "alive": pl["alive"],
                  "seat": seat.type if seat else None,
                  "model": (seat.llm.get("model") or seat.llm.get("model_id")) if seat and seat.type == "llm" else None,
-                 "status": s.agent_status.get(pl.id),
-                 "error": getattr(s.agents.get(pl.id), "last_error", None) if full else None}
+                 "status": s.agent_status.get(pl["id"]),
+                 "error": getattr(s.agents.get(pl["id"]), "last_error", None) if full else None}
             if full:
-                cities = g.player_cities(pl.id)
-                d.update({"score": victory.score(g, pl.id)["total"], "cities": len(cities),
-                          "pop": sum(c.pop for c in cities), "techs": len(pl.techs),
-                          "era": g.rules.era_list[research.player_era(g, pl.id)]})
+                st = g.standing(pl["id"])
+                d.update({"score": st["score"], "cities": st["cities"], "pop": st["population"], "techs": st["techs"],
+                          "era": st["era"]})
             players.append(d)
         if full:
             players.sort(key=lambda d: (not d["alive"], -d.get("score", 0)))
         events = [{"turn": e["turn"], "type": e["type"], "text": e["text"]}
-                  for e in g.s.events[-300:] if e.get("players") is None][-20:]
+                  for e in g.events(last=300) if e.get("players") is None][-20:]
         info = s.info()
-        current = g.player(g.s.current).name if g.s.phase == "playing" else None
+        current = g.player_name(summ["current"]) if summ["phase"] == "playing" else None
         return {**{k: info[k] for k in ("id", "name", "turn", "phase", "winner", "victory", "paused", "pause_reason",
                                         "ai_delay", "created", "config")},
-                "turn_limit": g.total_turns(), "current": current, "players": players, "events": events,
+                "turn_limit": summ["turn_limit"], "current": current, "players": players, "events": events,
                 "full": full, "can_manage": access.MANAGE in perms}
 
 
@@ -483,7 +480,7 @@ def game_summary(gid: str, request: Request, p: Principal = Depends(principal), 
 def create_game(body: CreateGame, request: Request,
                 me=Depends(require_cap("create_games")), sdb: DbSession = Depends(get_db)):
     """Create a game and return it, with a seat token for each seat."""
-    top = get_rules().const["max_players"]
+    top = engine_api.max_players()
     if not 1 <= len(body.seats) <= top:
         raise HTTPException(400, f"A game needs 1 to {top} seats.")
     if len(body.seats) > max(1, me.max_seats_per_game or top):
@@ -551,20 +548,11 @@ def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     if not 0 <= pid < len(s.seats):
         raise HTTPException(404, "No such seat.")
-    with s.lock:
-        seat = s.seats[pid]
-        if body.type:
-            if body.type not in ("human", "mcp", "llm", "bot"):
-                raise HTTPException(400, "Invalid seat type.")
-            seat.type = body.type
-        if body.llm is not None:
-            seat.llm = body.llm
-        if body.bot is not None:
-            seat.bot = body.bot
-        if body.name is not None:
-            seat.name = body.name
-        s.cancel_agent(pid)  # aborts a turn in progress so the new controller takes over
-        s.cond.notify_all()
+    try:
+        # the session keeps the civilization's engine controller in step with the seat type
+        s.update_seat(pid, type=body.type, llm=body.llm, bot=body.bot, name=body.name)
+    except ValueError:
+        raise HTTPException(400, "Invalid seat type.")
     s.autosave(force=True)
     return s.info(include_tokens=True)
 
@@ -604,17 +592,20 @@ def view(gid: str, request: Request, token: Optional[str] = None, as_player: Opt
     with s.lock:
         seat = s.seat_for_token(tok)
         if seat is not None:
-            v = client_view(s.game, seat.player)
+            v = s.game.view(seat.player)
             v["seat"] = seat.public()
         elif s.is_spectator(tok) or access.VIEW in perms:
+            # Looking through one civilization's eyes is as revealing as the god view while a human is
+            # playing: it shows that civ's private cities, units and diplomacy, and for the AI seats it
+            # is a map of everything they have scouted. Both follow the same rule.
+            if not s.god_view_allowed():
+                raise HTTPException(403, "Spectator views are disabled while humans are playing.")
             if as_player is not None:
                 if not 0 <= as_player < len(s.seats):
                     raise HTTPException(404, "No such player.")
-                v = client_view(s.game, as_player)
-            elif s.god_view_allowed():
-                v = client_view(s.game, None)
+                v = s.game.view(as_player)
             else:
-                raise HTTPException(403, "God view is disabled while humans are playing.")
+                v = s.game.view(None)
             v["spectator"] = True
         else:
             raise HTTPException(403, "Invalid token.")  # unreachable: _gate already checked
@@ -648,25 +639,17 @@ def path_preview(gid: str, request: Request, unit_id: int, x: int, y: int,
                  sdb: DbSession = Depends(get_db)):
     """Route preview for the browser: the path a move order would take and how many turns it needs.
     Read-only and not part of the AI tool set."""
-    from ..engine import movement
     s, _row, _perms = _gate(sdb, gid, p, access.PLAY, request, token)
     pid = _seat_pid(s, _token(request, token))
     with s.lock:
-        g = s.game
-        u = g.unit(unit_id)
-        if u is None or u.owner != pid or not g.grid.in_bounds(x, y):
-            return {"path": None}
-        target = g.grid.idx(x, y)
-        path = movement.find_path(g, u, target)
-        if not path:
-            return {"path": None}
-        return {"path": [list(g.grid.xy(i)) for i in path], "turns": movement.path_turns(g, u, path)}
+        return s.game.path_preview(pid, unit_id, x, y)
 
 
 @app.get("/api/games/{gid}/wait")
 def wait_for_turn(gid: str, request: Request, token: Optional[str] = None, timeout: float = 50.0,
                   p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """Long-poll until it is this seat's turn, or a negotiation needs an answer.
+    """Long-poll until it is this seat's turn, or a negotiation needs an answer; on its own turn, until
+    the other side answers a negotiation it is in (see GameSession.wait_for_turn).
 
     Why an agent should use this rather than polling: it returns for a negotiation too, and an agent
     that only watched for its own turn would leave the other side of a deal waiting forever.
@@ -689,22 +672,13 @@ def debug_action(gid: str, action: str, request: Request, p: Principal = Depends
     if os.environ.get("CITAR_DEBUG") != "1":
         raise HTTPException(404, "Debug endpoints are disabled.")
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
-    from ..engine import visibility
     with s.lock:
         g = s.game
-        if action == "meet_all":
-            for a in g.majors():
-                for b in g.majors():
-                    g.meet(a.id, b.id)
-        elif action == "reveal":
-            for p in g.majors():
-                visibility.reveal_tiles(g, p.id, range(g.grid.size))
-        elif action == "gold":
-            for p in g.majors():
-                p.gold += 500
-        else:
+        try:
+            g.debug(action)
+        except ValueError:
             raise HTTPException(400, "Unknown debug action.")
-        s._after_action(g.turn, g.s.current)
+        s._after_action(g.turn, g.current)
     return {"ok": True}
 
 
@@ -727,7 +701,7 @@ def game_metrics_csv(gid: str, request: Request, p: Principal = Depends(principa
     s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request)
     with s.lock:
         rows = s.metrics.turn_rows()
-        names = {p.id: p.name for p in s.game.s.players}
+        names = {p["id"]: p["name"] for p in s.game.summary()["players"]}
     cols = ["turn", "player", "civ", "controller", "model", "wall_s", "model_steps", "model_s", "input_tokens",
             "output_tokens", "reasoning_tokens", "tool_calls", "actions_ok", "queries", "errors", "repeats",
             "blocked_repeats", "malformed", "stall_nudges", "peak_prompt_tokens", "slowest_step_s", "context_length",
@@ -749,9 +723,15 @@ def compare_models():
 
 
 @app.get("/api/games/{gid}/debug/errors")
-def errors(gid: str):
-    """Recent errors from AI seats. The first place to look when a model does nothing."""
-    s = _session(gid)
+def errors(gid: str, request: Request, p: Principal = Depends(principal),
+           sdb: DbSession = Depends(get_db)):
+    """Recent errors from AI seats. The first place to look when a model does nothing.
+
+    Gated on managing the game, not just viewing it: these are server tracebacks and the tool
+    arguments each seat sent, which show what a player was trying to do and are nobody else's
+    business. It used to answer anyone who knew the game id.
+    """
+    s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     return {"errors": s.errors[-50:], "agents": {pid: {"usage": getattr(a, "usage_total", None),
                                                        "last_error": getattr(a, "last_error", None)}
                                                  for pid, a in s.agents.items()}}
@@ -870,7 +850,7 @@ def bench_job_control(run_id: str, job_id: str, body: RunControl):
 def bench_job_watch(run_id: str, job_id: str):
     """Open a running benchmark game so it can be watched live."""
     s = _bench_call(_scheduler().open_job_game, run_id, job_id)
-    return {"game_id": s.id, "spectator_token": s.spectator_token, "phase": s.game.s.phase}
+    return {"game_id": s.id, "spectator_token": s.spectator_token, "phase": s.game.phase}
 
 
 # ----------------------------------------------------------------------------
@@ -878,51 +858,45 @@ def bench_job_watch(run_id: str, job_id: str):
 # ----------------------------------------------------------------------------
 def _map_call(fn, *args, **kw):
     """Call a map function, turning its errors into HTTP status codes."""
-    from ..engine import maps
     try:
         return fn(*args, **kw)
-    except maps.MapError as e:
+    except engine_api.MapError as e:
         raise HTTPException(400, str(e))
 
 
 @app.get("/api/maps", dependencies=[Depends(require_user)])
 def maps_list():
     """Saved maps."""
-    from ..engine import maps
-    return maps.list_maps()
+    return engine_api.list_maps()
 
 
 @app.get("/api/maps/{map_id}", dependencies=[Depends(require_user)])
 def maps_get(map_id: str):
     """One saved map."""
-    from ..engine import maps
-    return _map_call(maps.load_map, map_id)
+    return _map_call(engine_api.load_map, map_id)
 
 
 @app.put("/api/maps/{map_id}", dependencies=[Depends(require_user)])
 def maps_put(map_id: str, body: dict):
     """Create or replace a saved map."""
-    from ..engine import maps
     body = dict(body)
     body["id"] = map_id
-    clean, warnings = _map_call(maps.save_map, get_rules(), body)
-    return {"map": maps.summary(clean), "warnings": warnings}
+    clean, warnings = _map_call(engine_api.save_map, body)
+    return {"map": engine_api.map_summary(clean), "warnings": warnings}
 
 
 @app.delete("/api/maps/{map_id}", dependencies=[Depends(require_user)])
 def maps_delete(map_id: str):
     """Delete a saved map."""
-    from ..engine import maps
-    _map_call(maps.delete_map, map_id)
+    _map_call(engine_api.delete_map, map_id)
     return {"deleted": map_id}
 
 
 @app.post("/api/maps/validate", dependencies=[Depends(require_user)])
 def maps_validate(body: dict):
     """Check a map for problems - unreachable starts, missing resources - without saving it."""
-    from ..engine import maps
-    clean, warnings = _map_call(maps.validate, get_rules(), body)
-    return {"map": maps.summary(clean), "warnings": warnings}
+    clean, warnings = _map_call(engine_api.validate_map, body)
+    return {"map": engine_api.map_summary(clean), "warnings": warnings}
 
 
 class MapGenBody(BaseModel):
@@ -945,18 +919,15 @@ class MapGenBody(BaseModel):
 @app.post("/api/maps/generate", dependencies=[Depends(require_user)])
 def maps_generate(body: MapGenBody):
     """Generate a map, for the editor to start from."""
-    from ..engine import maps
-    R = get_rules()
-    size = R.const["map_sizes"].get(body.map_size or "small", R.const["map_sizes"]["small"])
+    sizes = engine_api.map_sizes()
+    size = sizes.get(body.map_size or "small", sizes["small"])
     w, h = body.width or size["width"], body.height or size["height"]
     if body.blank:
-        if body.blank not in R.terrains or R.terrains[body.blank]["type"] not in ("Land", "Water"):
-            raise HTTPException(400, f"Unknown base terrain '{body.blank}'.")
-        return _map_call(maps.blank_map, w, h, body.blank, body.name)
+        return _map_call(engine_api.blank_map, w, h, body.blank, body.name)
     players = body.players if body.players is not None else size["players"]
     cs = body.city_states if body.city_states is not None else size["city_states"]
     options = {"map_edges": body.map_edges, "river_density": body.river_density, "resources": body.resources}
-    return _map_call(maps.generated_map, R, w, h, body.map_type, max(1, players), max(0, cs), body.seed,
+    return _map_call(engine_api.generate_map, w, h, body.map_type, max(1, players), max(0, cs), body.seed,
                      body.ruins, body.name, options)
 
 
@@ -969,20 +940,18 @@ def maps_from_game(gid: str, request: Request, p: Principal = Depends(principal)
     reveals the layout of a private game. Found by scripts/audit_routes.py, which exists because
     this is exactly the kind of route that gets added and forgotten.
     """
-    from ..engine import maps
     s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request)
     with s.lock:
-        return maps.map_from_game(s.game, f"{s.name} terrain")
+        return s.game.export_map(f"{s.name} terrain")
 
 
 # ----------------------------------------------------------------------------
 # scenarios and the scenario editor
 # ----------------------------------------------------------------------------
-import copy as _copy
 import secrets as _secrets
 import threading as _threading
 
-EDITORS: dict[str, dict] = {}     # editor id -> {"game", "undo": [state dicts], "meta", "lock", "t"}
+EDITORS: dict[str, dict] = {}     # editor id -> {"game" (EngineGame), "undo": [state dicts], "meta", "lock", "t"}
 EDITOR_UNDO = 25
 
 
@@ -997,12 +966,11 @@ def _editor(eid: str) -> dict:
 
 def _editor_payload(eid: str, ed: dict, results=None) -> dict:
     """The editor's current state, as the client needs it."""
-    from ..engine import scenario as S
     g = ed["game"]
-    view = client_view(g, None, event_limit=0)
+    view = g.view(None, event_limit=0)
     for k in ("events", "thoughts", "messages", "negotiations", "stats", "empires"):
         view.pop(k, None)
-    return {"editor_id": eid, "meta": ed["meta"], "view": view, "overview": S.overview(g),
+    return {"editor_id": eid, "meta": ed["meta"], "view": view, "overview": g.scenario_overview(),
             "can_undo": bool(ed["undo"]), "results": results}
 
 
@@ -1020,8 +988,6 @@ class EditorOpen(BaseModel):
 @app.post("/api/scenario-editor", dependencies=[Depends(require_user)])
 def editor_open(body: EditorOpen):
     """Open a scenario editor and return its id."""
-    from ..engine import scenario as S
-    from ..engine.game import Game
     meta = {"id": "", "name": "", "description": "", "seats": None}
     try:
         if body.source in ("map", "generate"):
@@ -1031,30 +997,29 @@ def editor_open(body: EditorOpen):
                     raise HTTPException(400, "Choose a map.")
                 cfg["map"] = body.map
             players = body.players or [{"type": "human"}, {"type": "llm"}]
-            if len(players) > get_rules().const["max_players"]:
+            if len(players) > engine_api.max_players():
                 raise HTTPException(400, "Too many players.")
             cfg["players"] = [{"nation": p.get("nation") or None, "difficulty": p.get("difficulty") or None,
                                "controller": (p.get("type") if p.get("type") in ("human", "llm", "mcp", "bot") else "human"),
                                "name": p.get("civ_name") or None} for p in players]
-            g = Game.new(cfg)
+            g = EngineGame.new(cfg)
             meta["seats"] = [{"type": p.get("type") or "bot"} for p in players]
             meta["name"] = f"Scenario on {cfg.get('map') or cfg.get('map_type', 'a new map')}"
         elif body.source == "scenario":
-            data = S.load_scenario(body.scenario or "")
-            g = S.game_from_state(data["state"])
+            data = engine_api.load_scenario(body.scenario or "")
+            g = EngineGame.from_state(data["state"])
             meta.update({k: data.get(k) for k in ("id", "name", "description", "seats")})
         elif body.source == "save":
             from .session import load_save_file
             p = (SAVE_DIR / (body.save or "")).resolve()
             if SAVE_DIR.resolve() not in p.parents or not p.exists():
                 raise HTTPException(404, "Save not found.")
-            g = S.game_from_state(load_save_file(p)["state"])
+            g = EngineGame.from_state(load_save_file(p)["state"])
             meta["name"] = f"Scenario from {body.save}"
         elif body.source == "game":
             s = _session(body.game_id or "")
             with s.lock:
-                s.game.save_rng()
-                g = S.game_from_state(s.game.s.to_dict())
+                g = EngineGame.from_state(s.game.state_dict())
             meta["name"] = f"Scenario from {s.name} turn {g.turn}"
             meta["seats"] = [{"type": seat.type if seat.type != "human" else "human", "label": seat.name} for seat in s.seats]
         else:
@@ -1062,8 +1027,8 @@ def editor_open(body: EditorOpen):
     except (ValueError, ActionError) as e:
         raise HTTPException(400, str(e))
     if meta["seats"] is None:
-        meta["seats"] = S.default_seats(g)
-    meta["seats"] = S.normalize_seats(g, meta["seats"])
+        meta["seats"] = g.default_seats()
+    meta["seats"] = g.normalize_seats(meta["seats"])
     # drop idle editor sessions (an hour without use)
     for k in [k for k, v in EDITORS.items() if time.time() - v["t"] > 3600]:
         EDITORS.pop(k, None)
@@ -1086,16 +1051,14 @@ class EditorOps(BaseModel):
 @app.post("/api/scenario-editor/{eid}/ops", dependencies=[Depends(require_user)])
 def editor_ops(eid: str, body: EditorOps):
     """Apply edits to the scenario being edited, keeping an undo step."""
-    from ..engine import scenario as S
     ed = _editor(eid)
     with ed["lock"]:
         g = ed["game"]
-        g.save_rng()
-        before = _copy.deepcopy(g.s.to_dict())
+        before = g.state_dict()
         try:
-            results = S.apply_ops(g, body.ops)
+            results = g.apply_ops(body.ops)
         except ActionError as e:
-            ed["game"] = S.game_from_state(before)        # operations are all-or-nothing
+            ed["game"] = EngineGame.from_state(before)        # operations are all-or-nothing
             raise HTTPException(400, str(e))
         ed["undo"].append(before)
         del ed["undo"][:-EDITOR_UNDO]
@@ -1105,12 +1068,11 @@ def editor_ops(eid: str, body: EditorOps):
 @app.post("/api/scenario-editor/{eid}/undo", dependencies=[Depends(require_user)])
 def editor_undo(eid: str):
     """Undo the last set of edits."""
-    from ..engine import scenario as S
     ed = _editor(eid)
     with ed["lock"]:
         if not ed["undo"]:
             raise HTTPException(400, "Nothing to undo.")
-        ed["game"] = S.game_from_state(ed["undo"].pop())
+        ed["game"] = EngineGame.from_state(ed["undo"].pop())
         return _editor_payload(eid, ed)
 
 
@@ -1125,20 +1087,18 @@ class EditorMeta(BaseModel):
 @app.post("/api/scenario-editor/{eid}/meta", dependencies=[Depends(require_user)])
 def editor_meta(eid: str, body: EditorMeta):
     """Rename the scenario being edited."""
-    from ..engine import scenario as S
     ed = _editor(eid)
     for k in ("id", "name", "description"):
         if getattr(body, k) is not None:
             ed["meta"][k] = getattr(body, k)
     if body.seats is not None:
-        ed["meta"]["seats"] = S.normalize_seats(ed["game"], body.seats)
+        ed["meta"]["seats"] = ed["game"].normalize_seats(body.seats)
     return {"meta": ed["meta"]}
 
 
 @app.post("/api/scenario-editor/{eid}/save", dependencies=[Depends(require_user)])
 def editor_save(eid: str, body: EditorMeta):
     """Save the scenario being edited."""
-    from ..engine import scenario as S
     ed = _editor(eid)
     editor_meta(eid, body)
     m = ed["meta"]
@@ -1146,8 +1106,8 @@ def editor_save(eid: str, body: EditorMeta):
         raise HTTPException(400, "Give the scenario a name.")
     with ed["lock"]:
         try:
-            summ = S.save_scenario(ed["game"], m.get("id") or m["name"], m.get("name") or m["id"],
-                                   m.get("description", ""), m.get("seats"))
+            summ = ed["game"].save_scenario(m.get("id") or m["name"], m.get("name") or m["id"],
+                                            m.get("description", ""), m.get("seats"))
         except ActionError as e:
             raise HTTPException(400, str(e))
     m["id"] = summ["id"]
@@ -1164,23 +1124,20 @@ def editor_close(eid: str):
 @app.get("/api/scenario-ops", dependencies=[Depends(require_user)])
 def scenario_ops_help():
     """The list of edit operations, with their parameters. The reference for the Operations tab."""
-    from ..engine import scenario as S
-    return S.ops_help()
+    return engine_api.scenario_ops_help()
 
 
 @app.get("/api/scenarios", dependencies=[Depends(require_user)])
 def scenarios_list():
     """Saved scenarios."""
-    from ..engine import scenario as S
-    return S.list_scenarios()
+    return engine_api.list_scenarios()
 
 
 @app.get("/api/scenarios/{sid}", dependencies=[Depends(require_user)])
 def scenarios_get(sid: str):
     """One scenario."""
-    from ..engine import scenario as S
     try:
-        return S.summary(S.load_scenario(sid))
+        return engine_api.scenario_summary(engine_api.load_scenario(sid))
     except ActionError as e:
         raise HTTPException(404, str(e))
 
@@ -1188,9 +1145,8 @@ def scenarios_get(sid: str):
 @app.delete("/api/scenarios/{sid}", dependencies=[Depends(require_user)])
 def scenarios_delete(sid: str):
     """Delete a scenario."""
-    from ..engine import scenario as S
     try:
-        S.delete_scenario(sid)
+        engine_api.delete_scenario(sid)
     except ActionError as e:
         raise HTTPException(400, str(e))
     return {"deleted": sid}
@@ -1205,9 +1161,8 @@ class LaunchBody(BaseModel):
 @app.post("/api/scenarios/{sid}/launch", dependencies=[Depends(require_user)])
 def scenarios_launch(sid: str, body: LaunchBody):
     """Start a playable game from a saved scenario."""
-    from ..engine import scenario as S
     try:
-        scn = S.load_scenario(sid)
+        scn = engine_api.load_scenario(sid)
         s = manager.create_from_scenario(scn, body.seats, body.name or scn["name"])
     except (ActionError, ValueError) as e:
         raise HTTPException(400, str(e))
@@ -1443,11 +1398,16 @@ def models_scores():
 # replay / recap
 # ----------------------------------------------------------------------------
 @app.get("/api/games/{gid}/replay")
-def replay(gid: str, request: Request, token: Optional[str] = None):
-    """The whole game, turn by turn, for the recap."""
-    s = _session(gid)
+def replay(gid: str, request: Request, token: Optional[str] = None,
+           p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The whole game, turn by turn, for the recap.
+
+    Gated on viewing the game, like everything else about it: a finished private game is still
+    private. The spectator token counts as view, so watching an AI-only game live still works.
+    """
+    s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request, token)
     tok = _token(request, token)
-    if not (s.game.s.phase != "playing" or (s.is_spectator(tok) and s.god_view_allowed())):
+    if not (s.game.phase != "playing" or (s.is_spectator(tok) and s.god_view_allowed())):
         raise HTTPException(403, "The recap is available when the game is over (or to spectators of AI-only games).")
     return _replay_payload(s)
 
@@ -1455,20 +1415,10 @@ def replay(gid: str, request: Request, token: Optional[str] = None):
 def _replay_payload(s: GameSession) -> dict:
     """Build the replay, under the session lock so it cannot catch a half-applied turn."""
     with s.lock:
-        g = s.game
-        return {
-            "id": s.id, "name": s.name, "width": g.s.width, "height": g.s.height,
-            "wrap_x": g.grid.wrap_x, "wrap_y": g.grid.wrap_y,
-            "terrain": [[t.terrain, 1 if t.hills else 0, int(t.river or 0), t.resource, t.wonder] for t in g.s.tiles],
-            "improvement_ids": list(g.rules.improvements), "feature_ids": list(g.rules.terrains),
-            "players": [{"id": p.id, "name": p.name, "leader": p.leader, "color": p.color, "kind": p.kind, "alive": p.alive,
-                         "eliminated_turn": p.eliminated_turn, "seat": s.seats[p.id].public() if p.id < len(s.seats) else None}
-                        for p in g.s.players],
-            "frames": g.frames, "stats": g.s.stats, "events": g.s.events, "messages": g.s.messages,
-            "thoughts": g.s.thoughts, "negotiations": g.s.negotiations, "deals": g.s.deals,
-            "winner": g.s.winner, "victory": g.s.victory, "phase": g.s.phase, "turn": g.turn,
-            "config": g.s.config,
-        }
+        data = s.game.replay_data()
+        for p in data["players"]:
+            p["seat"] = s.seats[p["id"]].public() if p["id"] < len(s.seats) else None
+        return {"id": s.id, "name": s.name, **data}
 
 
 # ----------------------------------------------------------------------------

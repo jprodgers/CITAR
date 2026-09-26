@@ -1,0 +1,154 @@
+about = """
+A city's production queue: set_production puts an item first, or at the end with append; a unit
+or building is named loosely; a conversion of production needs its tech; what the city cannot
+build is refused with the first reason why, and so is a building queued twice by append.
+change_queue moves, removes and clears entries, and refuses an unknown edit or a position off the
+queue. Each result is the queue as the city then has it, and the turns the first item takes.
+"""
+from = "citar/engine/cities.py: resolve_item, set_production, change_queue; citar/engine/tools.py: set_production, change_queue"
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma" }
+as = "roma"
+
+[[step]]
+set = { city = "=roma.city_id" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { queue = [], progress = {} }
+
+[[step]]
+note = "A name read loosely, first in the queue."
+tool = "set_production"
+args = { city_id = "=city", item = "warrior" }
+as = "first"
+
+[[step]]
+check = "first"
+eq = { city = "Roma", queue = ["Warrior"], turns = 10 }
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=city", item = "Monument", append = true }
+as = "appended"
+
+[[step]]
+check = "appended"
+eq = { city = "Roma", queue = ["Warrior", "Monument"], turns = 10 }
+
+[[step]]
+note = "A building queued once is refused a second time at the end of the queue."
+tool = "set_production"
+args = { city_id = "=city", item = "Monument", append = true }
+error = "Monument is already queued in Roma."
+
+[[step]]
+note = "Put first, it moves to the front."
+tool = "set_production"
+args = { city_id = "=city", item = "Monument" }
+as = "moved"
+
+[[step]]
+check = "moved"
+path = "queue"
+eq = ["Monument", "Warrior"]
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=city", item = "Gold", append = true }
+error = "Converting production to Gold needs the right technology."
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=city", item = "Library" }
+error = "Library requires Writing."
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=city", item = "Nonsense" }
+error = "Unknown item 'Nonsense'. Use unit or building names like 'Warrior' or 'Granary'."
+
+[[step]]
+tool = "set_production"
+args = { city_id = 999, item = "Warrior" }
+error = "You have no city with id 999."
+
+[[step]]
+tool = "change_queue"
+args = { city_id = "=city", index = 0, action = "down" }
+as = "down"
+
+[[step]]
+check = "down"
+eq = { city = "Roma", queue = ["Warrior", "Monument"] }
+
+[[step]]
+tool = "change_queue"
+args = { city_id = "=city", index = 1, action = "first" }
+as = "back"
+
+[[step]]
+check = "back"
+path = "queue"
+eq = ["Monument", "Warrior"]
+
+[[step]]
+tool = "change_queue"
+args = { city_id = "=city", index = 7, action = "up" }
+error = "Queue position must be 0-1 (0 is the item in production)."
+
+[[step]]
+tool = "change_queue"
+args = { city_id = "=city", action = "sideways" }
+error = "Action must be one of up, down, first, last, remove, clear."
+
+[[step]]
+tool = "change_queue"
+args = { city_id = "=city", index = 0, action = "remove" }
+as = "removed"
+
+[[step]]
+check = "removed"
+path = "queue"
+eq = ["Warrior"]
+
+[[step]]
+tool = "change_queue"
+args = { city_id = "=city", action = "clear" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "queue"
+eq = []
+
+[[step]]
+tool = "change_queue"
+args = { city_id = "=city", index = 0, action = "up" }
+error = "Roma's production queue is empty."
+
+[[step]]
+note = "With Pottery the conversion to gold is still unknown, but a Shrine can be queued."
+op = "grant_tech"
+args = { player = 0, tech = "Pottery" }
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=city", item = "Shrine" }
+as = "shrine"
+
+[[step]]
+check = "shrine"
+path = "queue"
+eq = ["Shrine"]
+
+[[step]]
+note = "What a city can build, and what each costs in production."
+check = { what = "buildable", city = "=city" }
+subset = { units = ["Scout", "Warrior", "Worker"], buildings = ["Granary", "Monument", "Shrine"], wonders = [], other = [] }
+
+[[step]]
+check = { what = "buildable", city = "=city" }
+path = "production"
+subset = { Warrior = 40, Monument = 40, Scout = 25 }

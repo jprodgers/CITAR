@@ -1,0 +1,80 @@
+about = """
+The events a briefing reports: what happened since the reader's last turn ended, as the reader may
+see it. A wonder built by a civilization it has not met is told of an unknown civilization in an
+unknown city; its builder reads its own names. Once the reader's turn has ended, what came before
+is no longer news.
+"""
+from = "tests/test_events.py::EventScrubbingTest::test_views_briefings_and_tools_are_scrubbed; citar/engine/briefing.py: briefing"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "grant_tech", player = 1, tech = "Masonry" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", carthago = "=made[1].city_id" }
+
+[[step]]
+op = "unmeet"
+args = { a = 0, b = 1 }
+
+[[step]]
+note = "The game's start and the founding are news; the wonder is not built yet."
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\nEVENTS since your last turn:\n  - T1: "
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+not_contains = "The Pyramids"
+
+[[step]]
+tool = "set_research"
+args = { tech = "Pottery" }
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=roma", item = "Warrior" }
+
+[[step]]
+ops = [
+  { op = "set_city", city = "=carthago", production = "The Pyramids" },
+]
+
+[[step]]
+op = "complete_construction"
+args = { city = "=carthago" }
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+contains = "\n  - T1: Unknown Civilization has built The Pyramids in an unknown city.\n"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+not_contains = "Carthago"
+
+[[step]]
+check = { what = "briefing", player = 1 }
+path = "text"
+contains = "\n  - T1: Civilization 2 has built The Pyramids in Carthago.\n"
+
+[[step]]
+note = "Once its turn has ended, the reader's briefing starts from there."
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+not_contains = "The Pyramids"

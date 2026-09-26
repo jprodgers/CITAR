@@ -436,7 +436,7 @@ def make_bot(ref=None, *, seed: Optional[int] = None, aggression: Optional[float
     with neither, 0.4."""
     r = resolve(ref)
     if r["engine"] == "idle":
-        from ..balance import IdleBot
+        from .idle import IdleBot
         return IdleBot()
     agg = r["aggression"] if r["aggression"] is not None else (aggression if aggression is not None else 0.4)
     mod = module(r["engine"])

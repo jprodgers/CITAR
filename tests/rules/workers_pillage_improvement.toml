@@ -1,0 +1,127 @@
+about = """
+An enemy military unit pillages a farm: its owner is told, the pillager takes the farm's loot (a
+random amount up to twice its yield, drawn from the game's own stream) and heals 25; the farm stays,
+pillaged, until a worker repairs it. One's own tile, a tile of a civilization one is not at war
+with, and a pillager out of movement are refused.
+"""
+from = "citar/engine/workers.py: pillage, _loot, _set_pillaged"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+  { op = "set_tile", at = "A>e", improvement = "Farm" },
+  { op = "set_tile", at = "B>w", improvement = "Farm" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "B>w", hp = 50 },
+]
+as = "made"
+
+[[step]]
+set = { home = "=made[4].unit_ids[0]", raider = "=made[5].unit_ids[0]" }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=home", order = "pillage" }
+error = "You cannot pillage your own tiles."
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=raider", order = "pillage" }
+error = "You can only pillage tiles of civilizations you are at war with."
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+
+[[step]]
+op = "set_unit"
+args = { unit = "=raider", moves = 0 }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=raider", order = "pillage" }
+error = "The unit has no movement left."
+
+[[step]]
+op = "set_unit"
+args = { unit = "=raider", moves = 120 }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=raider", order = "pillage" }
+as = "pillaged"
+
+[[step]]
+check = "pillaged"
+subset = { pillaged = "Farm", healed = 25 }
+
+[[step]]
+check = "pillaged"
+path = "loot.gold"
+ge = 0
+
+[[step]]
+check = "pillaged"
+path = "loot.gold"
+le = 36
+
+[[step]]
+check = { what = "unit", unit = "=raider" }
+subset = { hp = 75, moves = 60 }
+
+[[step]]
+check = { what = "tile", at = "B>w" }
+subset = { improvement = "Farm", pillaged = true }
+
+[[step]]
+check = { what = "events", type = "pillaged" }
+path = "[0]"
+subset = { text = "An enemy Warrior has pillaged our Farm." }
+
+[[step]]
+check = { what = "events", type = "loot", player = 0 }
+path = "[0].text"
+matches = "^We have looted [0-9]+ gold from a Farm[.]$"
+
+[[step]]
+note = "A pillaged farm has nothing left to pillage."
+tool = "unit_order"
+args = { unit_id = "=raider", order = "pillage" }
+error = "There is nothing here to pillage."
+
+[[step]]
+ops = [
+  { op = "remove_units", unit = "=raider" },
+  { op = "add_unit", player = 1, unit = "Worker", at = "B>w" },
+]
+as = "back"
+
+[[step]]
+op = "force_turn"
+args = { player = 1 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=back[1].unit_ids[0]" }
+
+[[step]]
+check = { what = "build_options", unit = "=back[1].unit_ids[0]" }
+path = "[0]"
+subset = { name = "Repair" }
+
+[[step]]
+tool = "build_improvement"
+player = 1
+args = { unit_id = "=back[1].unit_ids[0]", improvement = "Repair" }
+as = "repair"
+
+[[step]]
+op = "progress_builds"
+args = { player = 1, turns = "=repair.turns" }
+
+[[step]]
+check = { what = "tile", at = "B>w" }
+subset = { improvement = "Farm", pillaged = false, builds = [] }

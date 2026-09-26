@@ -1,0 +1,17 @@
+{"format": 1,
+"states": "[fixture, digest after Game::from_python's settle, canonical length, [players, cities, units], explored tiles (summed over players), events]",
+"ruleset_id": "3b89bbdfb807639c32c28f6c0ad8d1d2935355d61f86d43994fff824e5d8a389",
+"rows": [
+["duel-continents-normal/t1","88a383ddd152085fac0b6ab1be5dc60996916d6de579ab46bf79e1fa777fff1c",48105,[7,0,8],120,2],
+["duel-continents-normal/t20","00c32cabc816d77cffeef420236e0d884b7ee24a9e5036a0aaf7908da2640c48",52016,[7,6,29],423,192],
+["duel-continents-normal/t50","6eb0c41afd2b38fb456ec3f7e1160dc26ee26f0c63238ed765482e6be0654c2c",54739,[7,8,38],644,657],
+["scenario-duel-fractal/t10","2637ebb9abdee05d9be05ebd08de67dabc2d3e7983a394e293d498697890fe86",50683,[6,7,17],2556,260],
+["scenario-duel-fractal/t11","a27041e9507006b4fa24908cac8c3259a74b0fc621bcd45999aa8b6b25c91c0a",50680,[6,7,15],2565,281],
+["scenario-duel-fractal/t12","64420c99be2fbbba53bdbf9588d63f73231ba815c2f5582305b0ef963f6bdfc4",50554,[6,7,12],2565,296],
+["scenario-small-continents-s3001/t61","599ed33b803f83e01536adea67c1e2f19b6694f8c93f14b67a75a1bd51c8e30d",148234,[13,17,84],5748,1811],
+["small-continents-normal-s1025/t280","80c295e4829ef966989bda9a5a4e9a335aab9e6c3fc89328116b944ee708f4f8",193099,[13,44,163],3026,10120],
+["small-pangaea-raging/t1","3fc752e23e76f5ed1848b353a8d412e20647b9a50b87d7826d3c97f6e9cff86f",129362,[13,0,16],221,2],
+["small-pangaea-raging/t12","5e92bca9cc1eebe615c2562f51e9153bcb25f45f87fd64639a8ce6e91772b600",135929,[13,12,46],531,188],
+["small-pangaea-raging/t50","038234d39e5c88f50b635ad358020b71a0e2e94b0a7a462e453ea695b6c645b8",140755,[13,16,69],1321,1674],
+["standard-pangaea-normal-s1031/t120","376c52e7c44b9a23e5d46469526448f9d14acd13eec2f9173cacd5539f748527",316456,[19,36,137],4113,5339]
+]}

@@ -1,0 +1,42 @@
+about = """
+The rule holds in both directions: the side a negotiation waits on cannot end its turn either, as when
+the opener's turn ended without the tool and the responder's began with the chat still open.
+"""
+from = "tests/test_negotiation_chat.py::EndTurnTests::test_the_responder_cannot_end_its_turn_on_an_open_chat_either"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+note = "As if the opener's turn had ended without the tool: the negotiation stays open."
+op = "force_turn"
+args = { player = 1 }
+
+[[step]]
+tool = "end_turn"
+player = 1
+error = "Answer Civilization 1 in negotiation #1 first"
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "status"
+eq = "open"
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reply", message = "Talk to me." }
+
+[[step]]
+note = "Now it waits on the other side, which the responder must wait for too."
+tool = "end_turn"
+player = 1
+error = "You are waiting for Civilization 1 to answer negotiation #1."

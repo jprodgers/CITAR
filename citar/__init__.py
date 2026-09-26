@@ -9,6 +9,7 @@ the program rather than bolted on.
 Start here
 ----------
 ``citar.engine``   the rules, with no I/O — the map, cities, combat, diplomacy, victory
+``citar.engine_api``  the only door to the engine for everything else
 ``citar.agents``   the adapters that let a model take a seat
 ``citar.server``   the FastAPI app, session manager and benchmark scheduler
 ``citar.paths``    where files live, whether run from a checkout or an installed wheel

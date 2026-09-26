@@ -58,8 +58,8 @@ def _game_details(game_id: str) -> Optional[dict]:
         return {"error": f"{type(e).__name__}: {e}"}
     from ..server.benchmarks import game_progress
     llm_seats = [seat for seat in s.seats if seat.type == "llm"]
-    out = {"game_id": game_id, "name": s.name, "turn": s.game.turn, "phase": s.game.s.phase, "victory": s.game.s.victory,
-           "winner": s.game.s.winner, "seats": []}
+    out = {"game_id": game_id, "name": s.name, "turn": s.game.turn, "phase": s.game.phase, "victory": s.game.victory,
+           "winner": s.game.winner, "seats": []}
     for seat in llm_seats:
         s.benchmark = dict(s.benchmark or {}, llm_player=seat.player, model=seat.llm.get("model"))
         try:
@@ -67,7 +67,7 @@ def _game_details(game_id: str) -> Optional[dict]:
                 prog = game_progress(s)
         except Exception:
             prog = {}
-        players = {seat.player: {"name": s.game.player(seat.player).name, "controller": "llm", "model": seat.llm.get("model")}}
+        players = {seat.player: {"name": s.game.player_name(seat.player), "controller": "llm", "model": seat.llm.get("model")}}
         summ = s.metrics.summary(players).get(seat.player, {})
         prog.pop("series", None)
         out["seats"].append({"player": seat.player, "server_id": seat.llm.get("server_id"), "model": seat.llm.get("model"),

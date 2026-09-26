@@ -1,0 +1,36 @@
+[package]
+name = "citar-testkit"
+description = "Every integration test of the CITAR engine: rule scripts, properties, goldens, agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
+serde.workspace = true
+# raw_value: a fixture's state is handed to the converter as the text Python wrote.
+serde_json = { workspace = true, features = ["raw_value"] }
+blake3.workspace = true
+# The refcheck fixtures are gzipped.
+flate2.workspace = true
+# Rule scripts are TOML, and their `matches` checks regular expressions (DESIGN.md 9.3).
+toml.workspace = true
+regex.workspace = true
+
+[features]
+# The engine's memo counters, which the soak slices read (DESIGN.md 10).
+stats = ["citar-engine/stats"]
+
+[dev-dependencies]
+proptest.workspace = true
+# One trial per rule script, so that nextest lists each (tests/rules.rs).
+libtest-mimic.workspace = true
+
+[[test]]
+name = "rules"
+harness = false
+
+[lints]
+workspace = true

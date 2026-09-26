@@ -1,0 +1,57 @@
+about = """
+Only the side whose move it is may answer (accept, counter or reply); either side may reject at any
+time, which is how the opener withdraws a proposal the other side is slow to answer.
+"""
+from = "tests/test_negotiation_chat.py::MessageTests::test_either_side_may_withdraw_but_only_the_side_to_move_may_answer"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?", give = [{ type = "gold", amount = 20 }] }
+
+[[step]]
+note = "It is the other side's move."
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "reply", message = "Hello?" }
+error = "It is Civilization 2's move in negotiation #1; wait for their reply, or withdraw it with action 'reject'."
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "accept", message = "Deal." }
+error = "It is Civilization 2's move in negotiation #1"
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "reject", message = "Never mind." }
+as = "withdrawn"
+
+[[step]]
+check = "withdrawn"
+eq = { status = "rejected" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "rejected", awaiting = "=null" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[1]"
+subset = { seq = 2, by = 0, action = "reject", message = "Never mind." }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+path = "[1]"
+subset = { text = "Civilization 1 ended the negotiation. \"Never mind.\"", audience = [0, 1] }
+
+[[step]]
+note = "A settled negotiation takes no more answers."
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reply", message = "Wait!" }
+error = "Negotiation #1 is rejected."

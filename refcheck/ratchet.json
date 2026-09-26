@@ -1,0 +1,23 @@
+{
+  "fixtures": [
+    "refcheck/fixtures-mini",
+    "refcheck/fixtures-late"
+  ],
+  "unexplained": {
+    "uniques": 0,
+    "state_echo": 0,
+    "fixed_point": 0,
+    "tile_yields": 0,
+    "city_stats": 0,
+    "civs": 0,
+    "buildable": 0,
+    "movement": 0,
+    "visible": 0,
+    "combat_previews": 0,
+    "deal_checks": 0,
+    "tool_errors": 0,
+    "views": 0,
+    "briefing": 0
+  },
+  "failed": {}
+}

@@ -280,7 +280,7 @@ def session_servers(s) -> dict:
     if s.stopped:
         return None
     g = s.game
-    if s.paused or g.s.phase != "playing":
+    if s.paused or g.phase != "playing":
         return {}
     from . import servers as S
     out: dict = {}
@@ -290,7 +290,7 @@ def session_servers(s) -> dict:
         drv = getattr(s, "_driver", None)
         out[host] = {"threads": [drv.native_id] if drv is not None and drv.native_id else []}
     for seat in s.seats:
-        if seat.type == "llm" and seat.llm.get("server_id") and g.player(seat.player).alive:
+        if seat.type == "llm" and seat.llm.get("server_id") and g.is_alive(seat.player):
             out.setdefault(seat.llm["server_id"], {"threads": []})
     return out
 
@@ -312,12 +312,12 @@ def finish_session(s, **fields):
     act = getattr(s, "usage_act", None)
     if not act:
         return
-    g = s.game
-    majors = [p for p in g.s.players if p.kind == "major"]
+    summ = s.game.summary()
+    majors = [p for p in summ["players"] if p["kind"] == "major"]
     t = tracker()
-    t.update(act, turn=g.turn, phase=g.s.phase, winner=g.s.winner, victory=g.s.victory,
-             ended=time.time() if g.s.phase != "playing" else None,
-             alive={str(p.id): p.alive for p in majors}, **fields)
+    t.update(act, turn=summ["turn"], phase=summ["phase"], winner=summ["winner"], victory=summ["victory"],
+             ended=time.time() if summ["phase"] != "playing" else None,
+             alive={str(p["id"]): p["alive"] for p in majors}, **fields)
 
 
 # ----------------------------------------------------------------------------- power sampling

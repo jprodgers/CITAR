@@ -16,7 +16,8 @@ reports) and ``setup_api`` (first-run setup and the operator console).
 Two things hold across all of it.
 
 **The engine is untouched.** Everything here is a caller of :mod:`citar.engine`, which does no I/O
-and knows nothing about requests. A game is a value that this package loads, drives and saves.
+and knows nothing about requests, and it calls through :mod:`citar.engine_api` only. A game is a value that
+this package loads, drives and saves.
 
 **Authorisation happens in one place.** :mod:`citar.auth.access` answers "what may this viewer do
 with this object", and no route decides for itself. Refusals are 404 rather than 403 when the

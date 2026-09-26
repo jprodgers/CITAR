@@ -1,0 +1,12 @@
+# cargo nextest profiles. `default` is the laptop; `ci` is what rust.yml runs.
+
+[profile.default]
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci]
+# No retries: a test that passes on a second try is a determinism bug, not a flake.
+retries = 0
+fail-fast = false
+failure-output = "immediate-final"
+slow-timeout = { period = "120s", terminate-after = 5 }

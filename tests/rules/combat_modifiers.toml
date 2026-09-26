@@ -1,0 +1,52 @@
+about = """
+The preview names every modifier with its source, in the order they apply: a great general's bonus
+to units within two tiles, the malus of a melee attack across a river, flanking for each friendly
+melee unit beside the defender; and for the defender, a fortification of one turn.
+"""
+from = "citar/engine/combat.py: attack_modifiers, defense_modifiers, _great_general_bonus"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "R" },
+  { op = "add_unit", player = 0, unit = "Spearman", at = "H" },
+  { op = "add_unit", player = 0, unit = "Great General", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "R>e" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[0].unit_ids[0]", enemy = "=made[3].unit_ids[0]" }
+
+[[step]]
+note = "the defender fortifies on its own turn"
+op = "force_turn"
+args = { player = 1 }
+
+[[step]]
+tool = "unit_order"
+player = 1
+args = { unit_id = "=enemy", order = "fortify" }
+
+[[step]]
+op = "end_turn"
+
+[[step]]
+check = { what = "unit", unit = "=enemy" }
+subset = { activity = "fortify", fortify = 1 }
+
+[[step]]
+check = { what = "preview", unit = "=w", at = "R>e" }
+subset = { attacker_strength = 8.4, defender_strength = 9.6, attacker_modifiers = ["Great General +15%", "Across river -20%", "Flanking +10%"], defender_modifiers = ["Fortification +20%"] }
+
+[[step]]
+note = "a unit short of its strategic resource fights at -25%"
+ops = [
+  { op = "add_unit", player = 0, unit = "Swordsman", at = "D" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "D>e" },
+]
+as = "more"
+
+[[step]]
+check = { what = "preview", unit = "=more[0].unit_ids[0]", at = "D>e" }
+subset = { attacker_strength = 10.5, attacker_modifiers = ["Missing resource -25%"], defender_modifiers = [] }

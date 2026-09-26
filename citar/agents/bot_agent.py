@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 
+from .. import engine_api
 from ..bots import profiles
 
 
@@ -23,42 +24,49 @@ class BotAgent:
             self.profile = profiles.resolve(ref)
         self.bot = profiles.make_bot(ref, seed=seed, aggression=float(aggression) if aggression is not None else None)
 
-    def _bind(self, session, pid):
-        """Give the bot a way to call tools against this session."""
-        def ex(g, p, _tool, **args):
-            """Execute one tool call on the bot's behalf."""
-            res = session.call_tool(p, _tool, args)
+    @staticmethod
+    def _executor(session):
+        """How the bot's tool calls reach the game: through the session, so each one is recorded like a model's."""
+        def ex(p, tool, args):
+            """Execute one tool call on the bot's behalf; None when it is refused."""
+            res = session.call_tool(p, tool, args)
             return res["result"] if res["ok"] else None
-        self.bot.ex = ex
+        return ex
 
     def play_turn(self, session, pid: int):
         """Play the bot's turn."""
-        self._bind(session, pid)
+        ex = self._executor(session)
+        g = session.game
         with session.lock:
-            g = session.game
-            if g.s.current != pid:
+            if g.current != pid:
                 return
-            self.bot.play_turn(g, pid, end_turn=False)
-        # give counterparts a chance to answer negotiations we opened
+            g.play_bot_turn(pid, self.bot, end_turn=False, execute=ex)
+        # give counterparts a chance to answer negotiations we opened; what is still open after this the driver
+        # closes before it ends the turn
         deadline = time.time() + 90
-        while time.time() < deadline:
+        while time.time() < deadline and not session.stopped:
             with session.lock:
-                g = session.game
-                mine = [n for n in g.s.negotiations if n["status"] == "open" and pid in (n["initiator"], n["responder"])]
+                mine = [n for n in g.open_negotiations(pid) if self._owns(n)]
                 if not mine:
                     break
-                for n in mine:
-                    if n["awaiting"] == pid:
-                        before = len(n["history"])
-                        self.bot.respond(g, pid, n["id"])
-                        if n["status"] == "open" and n["awaiting"] == pid and len(n["history"]) == before:
+                for nid in [n["id"] for n in mine]:
+                    n = g.negotiation_head(nid)     # as it stands now: an earlier answer may have settled it
+                    if n["status"] == "open" and n["awaiting"] == pid:
+                        g.bot_respond(pid, nid, self.bot, execute=ex)
+                        now = g.negotiation_head(nid)
+                        if now["status"] == "open" and now["awaiting"] == pid and now["entries"] == n["entries"]:
                             # the bot's answer was refused and nothing moved: end it rather than stall the game
                             session.call_tool(pid, "respond_negotiation",
-                                              {"negotiation_id": n["id"], "action": "reject"})
+                                              {"negotiation_id": n["id"], "action": "reject",
+                                               "message": "We have nothing further to discuss."})
                 session.cond.wait(timeout=1.0)
 
+    def _owns(self, n: dict) -> bool:
+        """Whether the bot answers this negotiation itself, rather than the language model its seat hands it to."""
+        return engine_api.bot_owns_negotiation(self.bot, n)
+
     def respond_negotiation(self, session, pid: int, nid: int):
-        """Answer a negotiation as the bot."""
-        self._bind(session, pid)
+        """Answer a negotiation as the bot, unless it belongs to the seat's language model."""
         with session.lock:
-            self.bot.respond(session.game, pid, nid)
+            if self._owns(session.game.negotiation(nid)):
+                session.game.bot_respond(pid, nid, self.bot, execute=self._executor(session))

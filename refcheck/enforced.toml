@@ -1,0 +1,99 @@
+# The refcheck groups whose unexplained differences fail a run (crates/citar-engine/DESIGN.md 9.2).
+#
+# CI runs `cargo refcheck run` on refcheck/fixtures-mini and refcheck/fixtures-late: an unexplained difference
+# (one refcheck/intended.toml does not explain) at a place listed here fails it. Elsewhere, unexplained
+# differences are reported and counted in refcheck/ratchet.json, where they may only fall.
+#
+# Every system package that brings an answer module adds its group here, or the paths it has made clean
+# (DESIGN.md 3.4, rule 1). A group listed here must have an answer module; enforcing a group that is never
+# compared would pass without checking anything, so the run stops with a configuration error instead.
+#
+#   [[enforce]]
+#   group = "tile_yields"                  # the whole group
+#
+#   [[enforce]]
+#   group = "civs"                         # only these paths, in the path grammar of intended.toml,
+#   paths = ["civs[*].resource_supply.**", "civs[*].unit_supply"]   # matched against a difference's whole path
+#
+# A difference above an enforced path that hides it counts too: an answer module that failed, a missing or extra
+# civilization (or any value holding an enforced place), a `civs` list that could not be keyed by pid.
+#
+# uniques (package 1a-05): every unique text of the ruleset compiles as Python read it.
+[[enforce]]
+group = "uniques"
+
+# state_echo (package 1a-10): each fixture's state reads back from its conversion, field by field (every
+# persisted field the converter keeps; what its report drops aside).
+[[enforce]]
+group = "state_echo"
+
+# tile_yields (package 1b-06): what every owned tile yields to its owner as its own city works it, and a
+# sample of unowned tiles as nobody and a civilization see them.
+[[enforce]]
+group = "tile_yields"
+
+# city_stats (package 1b-06): each city's stats breakdown with Python's keys, its food to the next citizen,
+# maintenance, health, strength, the tiles it could work, its trade route and the turns to build what it
+# builds; and (package 1b-08) its religion: followers, majority and the pressure arriving from its surroundings.
+[[enforce]]
+group = "city_stats"
+
+# fixed_point (package 1c-01): the settle on load, which builds every civilization's sight from nothing,
+# explores no new tile and makes no new meeting.
+[[enforce]]
+group = "fixed_point"
+
+# civs (package 1b-05): the civilization-level data, whole. Its resources, line by line and net; the unique index
+# by placeholder; unit upkeep and unit supply; and the era the index is built with (1b-05). Happiness, the stats for
+# the next turn by source and in total, and gold per turn (1b-06); what each tech it could research costs, its next
+# policy's culture and the policies it could adopt (1b-07); a major's military strength (1c-06); a major's score and
+# its progress toward each victory, and the world: the world era, the United Nations' owner, the votes a diplomatic
+# victory needs and whether voting is open (1c-08).
+[[enforce]]
+group = "civs"
+
+# visible (package 1c-01): the tiles each living major sees.
+[[enforce]]
+group = "visible"
+
+# buildable (package 1b-07): what each major's cities can build, and for each unit, building and wonder its
+# production cost, the turns it takes, and whether and for how much it can be bought with gold and with faith.
+[[enforce]]
+group = "buildable"
+
+# movement (package 1c-02): where units can get this turn, with the movement they would have left,
+# and the sampled paths with their turns and step costs.
+[[enforce]]
+group = "movement"
+
+# combat_previews (package 1c-03): the sampled fights' strengths and modifiers, the damage both ways at the rolls
+# 0, 0.5 and 1, the attack preview (or its refusal) of ground and sea units, and for aircraft whether they can
+# attack now and every interceptor they would meet, with its chance, factor and damage.
+[[enforce]]
+group = "combat_previews"
+
+# deal_checks (package 1c-05): sampled proposals between majors who have met, as the rules read them: the normalised
+# proposal, whether each side can give its items (else the first refusal), how each side's items read, and the
+# research agreement's cost. The fresh bot's valuation (`bot_value`) is Phase 2's, compared only with --with-bot.
+[[enforce]]
+group = "deal_checks"
+
+# tool_errors (package 1d-01): about thirty tool calls through `Game::execute` that should be refused, each for a
+# different reason (an unknown tool, a caller who may not act, a missing or mistyped argument, a unit, city, tile or
+# name that is not there, a rule), and the text of each refusal, which is what a model reads.
+[[enforce]]
+group = "tool_errors"
+
+# views (package 1d-02): what the browser receives for two civilizations of each state (`client_view`), whole:
+# the map as each knows it, the units and cities it sees and remembers, everyone it knows of, the settings, its
+# events scrubbed for it, its empire, diplomacy, notes and alerts.
+[[enforce]]
+group = "views"
+
+# briefing (package 1d-03): the turn briefing and the turn's progress a model reads, for two civilizations of each
+# state, the briefing read into its sections and fields (crates/citar-refcheck/src/answer/briefing.rs): the empire's
+# line, the alerts, each city's and unit's line by field, the options for idle units and cities, the techs, the local
+# map and what it shows, the points of interest, the events, diplomacy, the to-do list and the notebook. With it,
+# every group is enforced.
+[[enforce]]
+group = "briefing"

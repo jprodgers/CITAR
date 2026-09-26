@@ -1,0 +1,36 @@
+{
+ "turn": 160,
+ "phase": "over",
+ "turn_limit": 494,
+ "map_size": "small",
+ "map_type": "custom",
+ "winner": null,
+ "winner_id": null,
+ "names": {
+  "0": "🐍",
+  "1": "\"quoted\" Hawaiʻi",
+  "2": "\"quoted\"",
+  "3": "Ñandú back\\slash",
+  "4": "Rome",
+  "5": "Ñandú O'Brien",
+  "6": "Rome 東京"
+ },
+ "majors": [
+  {
+   "id": 0,
+   "name": "🐍",
+   "nation": "Genoa",
+   "alive": true
+  },
+  {
+   "id": 1,
+   "name": "\"quoted\" Hawaiʻi",
+   "nation": "Babylon",
+   "alive": false
+  }
+ ],
+ "scores": {
+  "0": 1251,
+  "1": 2079
+ }
+}

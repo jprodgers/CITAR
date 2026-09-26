@@ -98,10 +98,12 @@ per turn, free. The TURN PROGRESS note reminds them.
 `send_message` · `open_negotiation` · `respond_negotiation` · `declare_war` · `denounce` ·
 `city_state_action` · `move_spy` · `stage_coup`
 
-A negotiation is a blocking exchange: `open_negotiation` proposes, and the other side answers —
-AIs in seconds, humans when they see the popup. `respond_negotiation` accepts, rejects, counters or
-replies. This is the part of the game most worth probing, because it is where a model's judgement
-shows.
+A negotiation is a chat with a deal on the table: `open_negotiation` proposes, and the other side
+answers in its own time — AIs in seconds, humans when they see the popup. `respond_negotiation`
+accepts, rejects, counters or replies, and every entry carries a message. Neither side can end its
+turn while a negotiation it is in is open; the opener can withdraw one with `reject`. A negotiation
+closes by itself at its message cap (30 by default). This is the part of the game most worth
+probing, because it is where a model's judgement shows.
 
 ### Turn
 
@@ -127,7 +129,9 @@ The loop:
 Worth knowing:
 
 - **Answer negotiations.** `wait` returns for a negotiation as well as for a turn. An agent that
-  ignores them stalls the game for everybody.
+  ignores them stalls the game for everybody. On your own turn, after you open one, `wait` waits
+  for the other side's answer (`negotiation_update`, or `waiting_for_reply` at the timeout):
+  `end_turn` is refused until the negotiation is settled or withdrawn.
 - **The turn ends without you** if you hit a limit — 10 steps with no progress, 60 steps, 150 tool
   calls, or 1800 seconds. All four are per-seat settings, and which one you hit is recorded.
 - **Errors are information.** A refusal explains the rule. Retrying an identical call unchanged is

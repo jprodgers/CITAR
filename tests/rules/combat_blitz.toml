@@ -1,0 +1,52 @@
+about = """
+A unit with an additional attack that kills keeps its movement and attacks again; a melee unit
+moves into the tile of what it killed; the Janissary's ability heals it by 50 after each kill (to
+full health at most) and gives it +25% when it attacks. Its second attack spends its movement.
+"""
+from = "citar/engine/combat.py: _reduce_attacker_moves, _heal_after_kill; units.py: max_attacks"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A", hp = 50, promotions = ["Blitz", "[Janissary] ability"] },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "A>e", hp = 1 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "A>ne", hp = 1 },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[0].unit_ids[0]" }
+
+[[step]]
+check = { what = "preview", unit = "=w", at = "A>e" }
+subset = { attacker_strength = 10.0, attacker_modifiers = ["[Janissary] ability +25%"] }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w", at = "A>e" }
+as = "first"
+
+[[step]]
+check = "first"
+subset = { defender_killed = true, advanced = true }
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { x = 6, y = 5, hp = "=100 - first.damage_to_attacker", xp = 5, moves = 120 }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w", at = "A>ne" }
+as = "second"
+
+[[step]]
+check = "second"
+subset = { defender_killed = true, advanced = true }
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { x = 6, y = 4, hp = 100, xp = 10, moves = 0 }
+
+[[step]]
+check = { what = "events", type = "unit_killed" }
+len = 2

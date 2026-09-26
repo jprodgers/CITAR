@@ -1,0 +1,160 @@
+about = """
+Aircraft: a bomber striking a tile meets the defender's likeliest interceptor first (an
+anti-aircraft gun always fires, and damages it), then fights. A fighter's air sweep draws the
+interceptors over a tile: a ground interceptor fires, misses and is spent for the turn, so a bomber
+following meets none; a sweep of a tile no one guards meets nothing; an enemy fighter the sweep
+meets fights the sweeper, and each earns 5 experience. An aircraft moves by rebasing to another
+city of its owner, if it has not acted this turn.
+"""
+from = "citar/engine/combat.py: try_intercept, air_strike, air_sweep, rebase"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 0, at = "D", name = "Antium" },
+  { op = "add_unit", player = 0, unit = "Fighter", at = "A", count = 3 },
+  { op = "add_unit", player = 0, unit = "Bomber", at = "A", count = 2 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "A>e>e>e>e>e>e" },
+  { op = "add_unit", player = 1, unit = "Anti-Aircraft Gun", at = "A>e>e>e>e>e>e>e" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { f1 = "=made[2].unit_ids[0]", f2 = "=made[2].unit_ids[1]", f3 = "=made[2].unit_ids[2]", b1 = "=made[3].unit_ids[0]", b2 = "=made[3].unit_ids[1]", aa = "=made[5].unit_ids[0]" }
+
+[[step]]
+note = "no one guards this tile"
+tool = "air_sweep"
+args = { unit_id = "=f1", x = 9, y = 3 }
+as = "sweep"
+
+[[step]]
+check = "sweep"
+eq = { air_sweep = "Nothing tried to intercept." }
+
+[[step]]
+note = "the gun intercepts the bomber, which then destroys the warrior"
+tool = "attack"
+args = { unit_id = "=b1", at = "A>e>e>e>e>e>e" }
+as = "strike"
+
+[[step]]
+check = "strike"
+subset = { attacker = "Bomber", defender = "Warrior", defender_killed = true }
+
+[[step]]
+check = "strike"
+path = "intercepted"
+gt = 0
+
+[[step]]
+check = { what = "unit", unit = "=b1" }
+subset = { hp = "=100 - strike.intercepted - strike.damage_to_attacker", xp = 4, moves = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=aa" }
+path = "xp"
+eq = 2
+
+[[step]]
+check = { what = "events", type = "combat" }
+any = { path = "text", matches = "Anti-Aircraft Gun intercepted .*Bomber" }
+
+[[step]]
+note = "the first gun is spent; a second one is drawn by the sweep"
+ops = [
+  { op = "add_unit", player = 1, unit = "Warrior", at = "A>e>e>e>e>e>e" },
+  { op = "add_unit", player = 1, unit = "Anti-Aircraft Gun", at = "A>e>e>e>e>e" },
+]
+
+[[step]]
+tool = "air_sweep"
+args = { unit_id = "=f2", at = "A>e>e>e>e>e>e" }
+as = "sweep2"
+
+[[step]]
+check = "sweep2"
+eq = { air_sweep = "Ground interceptor Anti-Aircraft Gun fired and missed; it is spent for this turn." }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=b2", at = "A>e>e>e>e>e>e" }
+as = "strike2"
+
+[[step]]
+check = "strike2"
+subset = { defender_killed = true }
+
+[[step]]
+check = "strike2"
+path = "intercepted"
+absent = true
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=f2", at = "A>e>e>e>e>e" }
+error = "has no movement left this turn."
+
+[[step]]
+note = "rebasing"
+tool = "move_unit"
+args = { unit_id = "=b1", at = "D" }
+error = "This aircraft has already acted this turn."
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=f3", at = "D>e" }
+error = "Aircraft can only be based in your own cities or on carriers."
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=f3", at = "D" }
+as = "moved"
+
+[[step]]
+check = "moved"
+eq = { rebased_to = { x = 5, y = 11 }, carrier = "=null" }
+
+[[step]]
+check = { what = "unit", unit = "=f3" }
+subset = { x = 5, y = 11, moves = 0 }
+
+[[step]]
+note = "a sweep an enemy fighter meets: they fight, and each earns 5 experience"
+ops = [
+  { op = "found_city", player = 1, at = "A>e>e>e>e>e>e>e>e>e", name = "Hangar" },
+  { op = "add_unit", player = 1, unit = "Fighter", at = "A>e>e>e>e>e>e>e>e>e" },
+  { op = "add_unit", player = 0, unit = "Fighter", at = "A" },
+]
+as = "made2"
+
+[[step]]
+set = { theirs = "=made2[1].unit_ids[0]", f4 = "=made2[2].unit_ids[0]" }
+
+[[step]]
+note = "their fighter has its movement, as at the start of its owner's turn"
+op = "ready_unit"
+args = { unit = "=theirs" }
+
+[[step]]
+tool = "air_sweep"
+args = { unit_id = "=f4", at = "A>e>e>e>e>e>e" }
+as = "sweep3"
+
+[[step]]
+check = "sweep3"
+subset = { air_sweep = "Fighter" }
+
+[[step]]
+check = "sweep3"
+path = "damage_to_interceptor"
+gt = 0
+
+[[step]]
+check = { what = "unit", unit = "=f4" }
+subset = { xp = 5, hp = "=100 - sweep3.damage_to_attacker" }
+
+[[step]]
+check = { what = "unit", unit = "=theirs" }
+subset = { xp = 5, hp = "=100 - sweep3.damage_to_interceptor" }

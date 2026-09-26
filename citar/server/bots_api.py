@@ -149,18 +149,17 @@ class ExperimentBody(BaseModel):
 def queue_experiment(body: ExperimentBody, user: User = Depends(require_role("admin"))):
     """Queue a lab experiment: the chosen profiles fill the seats in turn (A, B, A, B...) and rotate through the start
     positions, so each plays every position on the same maps and seeds."""
-    from .. import lab
-    from ..engine.mapgen import MAP_TYPES
-    from ..engine.rules import get_rules
-    R = get_rules()
-    if body.size not in R.const["map_sizes"]:
-        raise HTTPException(400, f"Map size is one of {', '.join(R.const['map_sizes'])}.")
-    if not body.maps or any(m not in MAP_TYPES for m in body.maps):
-        raise HTTPException(400, f"Maps are from {', '.join(MAP_TYPES)}.")
-    if body.speed not in R.speeds:
-        raise HTTPException(400, f"Speed is one of {', '.join(R.speeds)}.")
-    if body.difficulty not in R.difficulty_list:
-        raise HTTPException(400, f"Difficulty is one of {', '.join(R.difficulty_list)}.")
+    from .. import engine_api, lab
+    sizes, map_types = engine_api.map_sizes(), engine_api.map_types()
+    speeds, difficulties = engine_api.speeds(), engine_api.difficulties()
+    if body.size not in sizes:
+        raise HTTPException(400, f"Map size is one of {', '.join(sizes)}.")
+    if not body.maps or any(m not in map_types for m in body.maps):
+        raise HTTPException(400, f"Maps are from {', '.join(map_types)}.")
+    if body.speed not in speeds:
+        raise HTTPException(400, f"Speed is one of {', '.join(speeds)}.")
+    if body.difficulty not in difficulties:
+        raise HTTPException(400, f"Difficulty is one of {', '.join(difficulties)}.")
     try:
         resolved = [profiles.get(pid) for pid in body.profiles]
     except profiles.ProfileError as e:

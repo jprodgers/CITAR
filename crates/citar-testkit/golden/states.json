@@ -1,0 +1,8 @@
+{"format": 1,
+"digest": "blake3(CITAR-DIGEST, CANON_V1, RulesetId, canon(State)) (DESIGN.md 4.10)",
+"ruleset_id": "3b89bbdfb807639c32c28f6c0ad8d1d2935355d61f86d43994fff824e5d8a389",
+"states": [
+["tiny","cac2aff2d8e47688ca188495d249338f79b0c2099ff7b14fe825c9153f205fa2",8253],
+["duel","0f949d630b030612b4b904d0c343555778bb34d56197a8c433df0f2361011220",62348],
+["crowded","9d04c01be67d274c82e226ab5c84457018b0bd25bc8a52bd7d0d3f5af5aac1cf",85543]
+]}

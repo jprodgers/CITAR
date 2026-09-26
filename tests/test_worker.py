@@ -219,7 +219,7 @@ class PooledWork(unittest.TestCase):
                                    [{"type": "llm", "llm": {"server_id": self.server_id, "model": "m1"}}, {"type": "bot"}])
         game.suspend()
         self.assertEqual(len(seats.occupied(self.server_id)), 1)
-        game.game.player(0).alive = False       # the bots play on; the model will never be asked again
+        game.game.python_game.player(0).alive = False       # the bots play on; the model will never be asked again
         self.assertEqual(seats.occupied(self.server_id), [])
 
     def _bare_runner(self):
@@ -339,6 +339,59 @@ class QuietHours(unittest.TestCase):
             self.assertEqual(servers.restriction_config("sv_d")["grace_minutes"], 5)
 
 
+class LocalSettings(unittest.TestCase):
+    """What the server may and may not decide about a completion the helper runs."""
+
+    def _config_seen(self, config, params):
+        """Run `_complete` with the local model call stubbed out; return the config it was given."""
+        from types import SimpleNamespace
+        from citar.worker.agent import Worker
+        seen = {}
+
+        class FakeConversation:
+            def __init__(self, cfg, system, tools):
+                seen.update(cfg)
+                self.usage = {}
+
+            def step(self):
+                return SimpleNamespace(text="", thinking="", stop_reason="stop", malformed=0,
+                                       tool_calls=[])
+
+            def close(self):
+                pass
+
+        with mock.patch("citar.agents.providers.openai_provider.OpenAIConversation", FakeConversation):
+            Worker(config)._complete({"model": "test-model", "messages": [], "params": params})
+        return seen
+
+    def test_server_params_cannot_change_where_or_with_what_key(self):
+        """Where to connect and with which key are the owner's settings. A server that could set
+        them could aim the helper at another machine on the owner's network, or have it send the
+        owner's API key to a host of the server's choosing."""
+        from citar.worker.agent import WorkerConfig
+        seen = self._config_seen(
+            WorkerConfig(server_url="https://citar.test", token="t", base_url="http://localhost:1234/v1",
+                         provider="lmstudio", api_key_env="CITAR_TEST_HELPER_KEY", collect_hardware=False),
+            {"base_url": "http://192.168.1.1/v1", "provider": "openai",
+             "api_key": "sk-the-servers-own", "api_key_env": "AWS_SECRET_ACCESS_KEY",
+             "temperature": 0.3, "max_tokens": 64, "reasoning_effort": "low", "top_p": 0.9, "seed": 7})
+
+        self.assertEqual(seen["base_url"], "http://localhost:1234/v1")
+        self.assertEqual(seen["provider"], "lmstudio")
+        self.assertEqual(seen["api_key_env"], "CITAR_TEST_HELPER_KEY")
+        self.assertNotIn("api_key", seen)
+        # Generation settings are the server's to choose, and still get through.
+        self.assertEqual((seen["temperature"], seen["max_tokens"], seen["reasoning_effort"],
+                          seen["top_p"], seen["seed"]), (0.3, 64, "low", 0.9, 7))
+
+    def test_a_helper_without_a_key_cannot_be_given_one(self):
+        from citar.worker.agent import WorkerConfig
+        seen = self._config_seen(WorkerConfig(server_url="https://citar.test", token="t",
+                                              collect_hardware=False),
+                                 {"api_key_env": "AWS_SECRET_ACCESS_KEY"})
+        self.assertNotIn("api_key_env", seen)
+
+
 class Authentication(unittest.TestCase):
     def setUp(self):
         _reset()
@@ -445,7 +498,7 @@ class EndToEnd(unittest.TestCase):
         cls.server.should_exit = True
         cls.thread.join(timeout=10)
 
-    def _run_worker(self, *, fake_completion=None, max_concurrent=1, quiet=None):
+    def _run_worker(self, *, fake_completion=None, max_concurrent=1, quiet=None, models=None):
         """Start a worker in a background thread with its local model call stubbed out.
 
         Stubbing only `_complete` keeps everything that matters real: the websocket, the handshake,
@@ -455,7 +508,7 @@ class EndToEnd(unittest.TestCase):
 
         cfg = WorkerConfig(server_url=f"http://127.0.0.1:{self.port}", token=self.token,
                            max_concurrent=max_concurrent, name="testbox",
-                           collect_hardware=False, quiet_hours=quiet or [])
+                           collect_hardware=False, quiet_hours=quiet or [], models=models)
         worker = Worker(cfg)
         worker.discover_models = lambda: _async_value([{"key": "test-model", "label": "Test"}])
         worker._complete = fake_completion or (lambda data: {
@@ -573,6 +626,35 @@ class EndToEnd(unittest.TestCase):
                                timeout=15)
             self.assertEqual(caught.exception.refusal, "closed")
             self.assertIn("quiet hours", str(caught.exception))
+        finally:
+            self._stop_worker(worker, loop, thread)
+
+    def test_worker_refuses_a_model_its_owner_did_not_list(self):
+        """The configured list is an allowlist, not an advertisement: the server can ask for any name,
+        and the worker must say no to one its owner did not offer."""
+        calls = []
+
+        def completion(data):
+            calls.append(data)
+            return {"text": "ran", "tool_calls": [], "usage": {}, "stop_reason": "stop",
+                    "thinking": "", "malformed": 0}
+
+        worker, loop, thread = self._run_worker(fake_completion=completion, models=["test-model"])
+        try:
+            with self.assertRaises(W.WorkerError) as caught:
+                W.hub().submit(self.server_id,
+                               P.Request(id="unlisted-1", model="some-other-model", messages=[],
+                                         timeout=15),
+                               timeout=15)
+            self.assertEqual(caught.exception.refusal, "unknown_model")
+            self.assertFalse(caught.exception.retryable)
+            self.assertEqual(calls, [], "the unlisted model was run anyway")
+
+            answer = W.hub().submit(self.server_id,
+                                    P.Request(id="listed-1", model="test-model", messages=[],
+                                              timeout=15),
+                                    timeout=15)
+            self.assertEqual(answer.get("text"), "ran")
         finally:
             self._stop_worker(worker, loop, thread)
 

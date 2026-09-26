@@ -1,0 +1,84 @@
+about = """
+The host drives the seats that have drivers turn after turn: it ends each driven seat's turn once
+its driver has played, and stops at the turn of a seat it plays itself, after as many driven turns
+as it was allowed, and when the game is over.
+"""
+from = "crates/citar-engine/src/game/turn/drive.rs (bots/headless.py: play)"
+
+[config]
+players = [{ controller = "bot" }, {}, { controller = "bot" }]
+turn_limit = 4
+
+[[step]]
+note = "A civilization with no unit and no city is eliminated when a round ends: each keeps a warrior."
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "add_unit", player = 2, unit = "Warrior", at = "C" },
+]
+
+[[step]]
+note = "The first seat is driven: its turn ends, and the drive stops at the second, which the host plays."
+op = "drive"
+args = { drivers = [0, 2] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "external", player = 1, negotiations = [], turn = 1, current = 1 }
+
+[[step]]
+note = "Driving again changes nothing until the host ends its seat's turn."
+op = "drive"
+args = { drivers = [0, 2] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "external", player = 1, negotiations = [], turn = 1, current = 1 }
+
+[[step]]
+op = "end_turn"
+
+[[step]]
+note = "The third seat plays, the round ends, the first plays, and the second's turn comes again."
+op = "drive"
+args = { drivers = [0, 2] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "external", player = 1, negotiations = [], turn = 2, current = 1 }
+
+[[step]]
+note = "With every seat driven and a limit of one seat, the drive returns after the second's turn."
+op = "drive"
+args = { drivers = [0, 1, 2], seat_limit = 1 }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "seat_limit", player = "=null", negotiations = [], turn = 2, current = 2 }
+
+[[step]]
+op = "drive"
+args = { drivers = [0, 1, 2], seat_limit = 2 }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "seat_limit", player = "=null", negotiations = [], turn = 3, current = 1 }
+
+[[step]]
+note = "Driven to the turn limit, the game ends."
+op = "drive"
+args = { drivers = [0, 1, 2] }
+as = "stop"
+
+[[step]]
+check = "stop"
+subset = { stop = "game_over", player = "=null" }
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over" }

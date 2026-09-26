@@ -1,0 +1,78 @@
+about = """
+A wonder race lost: when another civilization finishes a wonder a city was building, the city
+drops it from its queue at its next turn and its stored production comes back as gold, which its
+owner hears of. A finished wonder is told to the whole world, and nobody may build it again.
+"""
+from = "citar/engine/cities.py: _validate_progress, validate_queue, complete_construction"
+
+[[step]]
+ops = [
+  { op = "grant_tech", player = "all", tech = "Calendar" },
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 3, production = "Stonehenge" },
+  { op = "found_city", player = 1, at = "B", name = "Athens", pop = 3 },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[1].city_id", athens = "=made[2].city_id" }
+
+[[step]]
+repeat = 2
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { queue = ["Stonehenge"], progress = { Stonehenge = 8 } }
+
+[[step]]
+check = { what = "buildable", city = "=athens" }
+path = "wonders"
+contains = "Stonehenge"
+
+[[step]]
+op = "set_city"
+args = { city = "=athens", production = "Stonehenge" }
+
+[[step]]
+op = "complete_construction"
+args = { city = "=athens" }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { completed = "Stonehenge" }
+
+[[step]]
+check = { what = "events", type = "wonder_built" }
+path = "[0]"
+subset = { text = "Civilization 2 has built Stonehenge in Athens.", audience = "=null" }
+
+[[step]]
+check = { what = "buildable", city = "=roma" }
+path = "wonders"
+not_contains = "Stonehenge"
+
+[[step]]
+op = "set_player"
+args = { player = 0, gold = 0 }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { queue = [], progress = {} }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+ge = 8
+
+[[step]]
+check = { what = "events", type = "wonder_refund" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "wonder_refund" }
+path = "[0]"
+subset = { text = "Excess production for Stonehenge converted to 8 gold in Roma.", audience = [0] }

@@ -1,0 +1,69 @@
+about = """
+A city bombards an enemy within two tiles once a turn: a ranged attack that takes nothing back and
+gives its target 2 experience. It may fire again once its owner's next turn begins.
+"""
+from = "tests/test_single_player.py::BombardViewTests; citar/engine/combat.py: can_bombard, city_bombard"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "H" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "H>e" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", enemy = "=made[1].unit_ids[0]" }
+
+[[step]]
+tool = "city_attack"
+args = { city_id = "=roma", at = "H>e" }
+error = "Target is out of the city's range (2)."
+
+[[step]]
+tool = "city_attack"
+args = { city_id = "=roma", at = "H" }
+as = "shot"
+
+[[step]]
+check = "shot"
+subset = { attacker = "Roma", defender = "Warrior", ranged = true, damage_to_attacker = 0 }
+
+[[step]]
+check = "shot"
+path = "damage_to_defender"
+gt = 0
+
+[[step]]
+check = { what = "unit", unit = "=enemy" }
+subset = { hp = "=100 - shot.damage_to_defender", xp = 2 }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { attacked = true }
+
+[[step]]
+tool = "city_attack"
+args = { city_id = "=roma", at = "H" }
+error = "Roma has already attacked this turn."
+
+[[step]]
+op = "add_unit"
+args = { player = 1, unit = "Warrior", at = "B" }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { attacked = false }
+
+[[step]]
+tool = "city_attack"
+args = { city_id = "=roma", at = "H" }
+as = "again"
+
+[[step]]
+check = "again"
+subset = { attacker = "Roma", damage_to_attacker = 0 }

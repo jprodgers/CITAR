@@ -1,0 +1,121 @@
+about = """
+A city's borders: the culture it makes each turn is stored, and when it reaches the next tile's
+cost, 6 x (tiles claimed beyond the first ring + 1.4813)^1.3, the borders grow into the best tile
+beside them (a visible luxury first) and the cost is paid; the next tile costs more. A tile beside
+the borders, within the city's working distance, is bought with gold for 50 a step beyond the
+first and 5 a tile claimed; bought or grown into, it is the city's. What cannot be bought is
+refused with the rule.
+"""
+from = "citar/engine/cities.py: culture_to_next_tile, rank_tile_for_expansion, expand_borders, buy_tile"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", buildings = ["Monument"] },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { city = "=made[0].city_id" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { culture = 0, tiles = 7 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.culture"
+eq = 3
+
+[[step]]
+repeat = 3
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { culture = 9, tiles = 7 }
+
+[[step]]
+check = { what = "tile", at = "L" }
+subset = { owner = "=null", city = "=null" }
+
+[[step]]
+note = "Ten culture pays for the first tile: the cotton, a luxury, two tiles north."
+op = "end_round"
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { culture = 2, tiles = 8 }
+
+[[step]]
+check = { what = "tile", at = "L" }
+subset = { owner = 0, city = "=city" }
+
+[[step]]
+check = { what = "events", type = "borders" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "borders" }
+path = "[0]"
+subset = { text = "Roma has expanded its borders.", audience = [0] }
+
+[[step]]
+note = "The next tile costs twenty: five more turns leave 17."
+repeat = 5
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { culture = 17, tiles = 8 }
+
+[[step]]
+op = "set_player"
+args = { player = 0, gold = 0 }
+
+[[step]]
+note = "The hill two tiles east is beside the borders: fifty for the step beyond the first, five for the tile claimed."
+tool = "buy_tile"
+args = { city_id = "=city", at = "H" }
+error = "Buying that tile costs 55 gold; you have 0."
+
+[[step]]
+op = "set_player"
+args = { player = 0, gold = 100 }
+
+[[step]]
+tool = "buy_tile"
+args = { city_id = "=city", at = "H" }
+as = "bought"
+
+[[step]]
+check = "bought"
+eq = { bought = { x = 7, y = 5 }, gold_spent = 55 }
+
+[[step]]
+check = { what = "tile", at = "H" }
+subset = { owner = 0, city = "=city" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { gold = 45 }
+
+[[step]]
+tool = "buy_tile"
+args = { city_id = "=city", at = "H" }
+error = "That tile is already owned."
+
+[[step]]
+tool = "buy_tile"
+args = { city_id = "=city", x = 9, y = 5 }
+error = "Tiles can only be bought within 3 tiles of the city."
+
+[[step]]
+tool = "buy_tile"
+args = { city_id = "=city", x = 5, y = 8 }
+error = "You can only buy tiles adjacent to the city's borders."
+
+[[step]]
+tool = "buy_tile"
+args = { city_id = "=city", x = 50, y = 5 }
+error = "(50,5) is off the map (map is 24x16)."

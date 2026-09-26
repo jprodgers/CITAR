@@ -58,7 +58,7 @@ def run_model(manager: SessionManager, args, model: str) -> dict:
     last_turn = 0
     print(f"\n=== {model} (game {s.id}, tool mode {tool_mode}) ===", flush=True)
     try:
-        while s.game.turn <= args.turns and s.game.s.phase == "playing":
+        while s.game.turn <= args.turns and s.game.phase == "playing":
             if time.time() - started > args.max_total_minutes * 60:
                 print("  stopping: total time limit reached", flush=True)
                 break
@@ -77,17 +77,17 @@ def run_model(manager: SessionManager, args, model: str) -> dict:
         g = s.game
         report = s.metrics_report()
         summary = report["summary"].get(0, {})
-        p = g.player(0)
-        from .engine.victory import score
-        bots = [q for q in g.majors(alive_only=False) if q.id != 0]
-        bot_scores = [score(g, q.id)["total"] if q.alive else 0 for q in bots]
+        standings = g.standings()
+        me = standings[0]
+        bots = [q for q in g.majors(alive_only=False) if q["id"] != 0]
+        bot_scores = [standings[q["id"]]["score"] if q["alive"] else 0 for q in bots]
         outcome = {
-            "turns_played": g.turn - 1, "civ_name": p.name, "cities": len(g.player_cities(0)), "units": len(g.player_units(0)),
-            "techs": len(p.techs), "score": score(g, 0)["total"], "bot_score": max(bot_scores or [0]),
-            "bot_scores": bot_scores, "bot_techs": [len(q.techs) for q in bots],
-            "bot_cities": [len(g.player_cities(q.id)) for q in bots],
-            "winner": g.s.winner, "victory": g.s.victory,
-            "population": sum(c.pop for c in g.player_cities(0)), "gold": int(p.gold),
+            "turns_played": g.turn - 1, "civ_name": g.player_name(0), "cities": me["cities"], "units": me["units"],
+            "techs": me["techs"], "score": me["score"], "bot_score": max(bot_scores or [0]),
+            "bot_scores": bot_scores, "bot_techs": [standings[q["id"]]["techs"] for q in bots],
+            "bot_cities": [standings[q["id"]]["cities"] for q in bots],
+            "winner": g.winner, "victory": g.victory,
+            "population": me["population"], "gold": me["gold"],
         }
         errors = [e for e in s.errors if e.get("player") in (0, None)][-5:]
     s.save("benchmark")

@@ -1,0 +1,39 @@
+//! Integration tests of the engine's modules, against answers recorded from the Python engine
+//! and against their own contracts. One file per module under `tests/engine/`.
+
+mod engine {
+    mod advisor;
+    mod briefing;
+    mod cities;
+    mod city_states;
+    mod combat;
+    mod convert;
+    mod diplomacy;
+    mod drive;
+    mod economy;
+    mod eval;
+    mod execute;
+    mod filters;
+    mod game;
+    mod game_eval;
+    mod hex;
+    mod kitchen_sink;
+    mod mapgen;
+    mod maps;
+    mod production;
+    mod religion;
+    mod rules;
+    mod save;
+    mod scenario;
+    mod setup;
+    mod state;
+    mod tools;
+    mod turns;
+    mod uniques;
+    mod units;
+    mod victory;
+    mod views;
+    mod vis;
+    mod whole_game;
+    mod workers;
+}

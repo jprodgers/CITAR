@@ -1,0 +1,83 @@
+about = """
+A civilization that sees a natural wonder discovers it and is told so; the first to find El Dorado
+is granted 500 gold, and the second none. City-states discover nothing.
+"""
+from = "citar/engine/visibility.py: _discover_natural_wonders"
+
+[config]
+city_states = 1
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+as = "gold0"
+absent = false
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "gold"
+as = "gold1"
+absent = false
+
+[[step]]
+op = "set_tile"
+args = { at = "A>ne", wonder = "El Dorado" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "natural_wonders"
+eq = ["El Dorado"]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = "=gold0 + 500"
+
+[[step]]
+check = { what = "events", type = "natural_wonder" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "natural_wonder" }
+path = "[0]"
+subset = { text = "We have discovered El Dorado! (+500 gold)", audience = [0] }
+
+[[step]]
+note = "The second seat walks up to it: no gold, and the two meet."
+op = "add_unit"
+args = { player = 1, unit = "Warrior", at = "A>ne>ne" }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "natural_wonders"
+eq = ["El Dorado"]
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "gold"
+eq = "=gold1"
+
+[[step]]
+check = { what = "events", type = "natural_wonder" }
+path = "[1]"
+subset = { text = "We have discovered El Dorado!" }
+
+[[step]]
+note = "The city-state's warrior beside it discovers nothing."
+op = "add_unit"
+args = { player = 2, unit = "Warrior", at = "A>ne>e" }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "natural_wonders"
+eq = []
+
+[[step]]
+check = { what = "events", type = "natural_wonder" }
+len = 2

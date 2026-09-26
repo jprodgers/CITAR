@@ -1,10 +1,20 @@
-"""Test package. Games created by tests are saved to a temporary folder, not the real saves/ directory, and the server
-registry is a small temporary one (a host PC, the Anthropic API and the dry-run server), not config/servers.json."""
+"""Test package. Games created by tests are saved to a temporary folder, not the real saves/ directory, the server
+registry is a small temporary one (a host PC, the Anthropic API and the dry-run server), not config/servers.json, and
+the accounts database is a temporary one, never the per-user citar.db."""
 import atexit
 import json
 import os
 import shutil
 import tempfile
+
+# The API test modules each point CITAR_DATA_DIR and CITAR_DB_URL at their own temporary database. This default is
+# for a module run on its own that builds the app without doing so: without it, the app opens the per-user database.
+if not os.environ.get("CITAR_DATA_DIR"):
+    _data = tempfile.mkdtemp(prefix="citar-test-data-")
+    os.environ["CITAR_DATA_DIR"] = _data
+    atexit.register(shutil.rmtree, _data, ignore_errors=True)
+if not os.environ.get("CITAR_DB_URL"):
+    os.environ["CITAR_DB_URL"] = "sqlite:///" + os.path.join(os.environ["CITAR_DATA_DIR"], "test.db").replace("\\", "/")
 
 if not os.environ.get("CITAR_SAVE_DIR"):
     _tmp = tempfile.mkdtemp(prefix="citar-test-saves-")

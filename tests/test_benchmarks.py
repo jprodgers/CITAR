@@ -117,10 +117,10 @@ class BenchmarkTests(unittest.TestCase):
         run = sch.create_run(suite)
         job = run["jobs"][0]
         self.assertTrue(wait_for(lambda: job.get("game_id") and self.manager.get(job["game_id"]), sch=sch))
-        g = self.manager.get(job["game_id"]).game
-        self.assertTrue(g.grid.wrap_x)
-        self.assertFalse(any(t.river for t in g.s.tiles))
-        self.assertFalse(any(t.resource == "Uranium" for t in g.s.tiles))
+        m = self.manager.get(job["game_id"]).game.export_map()      # tiles as [terrain, features, wonder, river, resource, ...]
+        self.assertTrue(m["wrap_x"])
+        self.assertFalse(any(t[3] for t in m["tiles"]))
+        self.assertFalse(any(t[4] == "Uranium" for t in m["tiles"]))
 
     def test_a_job_ends_when_its_model_is_eliminated(self):
         sch = self.scheduler()
@@ -129,7 +129,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: job["status"] == "running" and self.manager.get(job["game_id"]), sch=sch))
         s = self.manager.get(job["game_id"])
         with s.lock:
-            s.game.player(0).alive = False
+            s.game.python_game.player(0).alive = False
         self.assertTrue(wait_for(lambda: job["status"] == "done", sch=sch, timeout=30))
         self.assertEqual(job["result"]["outcome"], "eliminated")
         self.assertEqual(job["result"]["performance"], 0)
@@ -341,6 +341,18 @@ class BenchmarkTests(unittest.TestCase):
         self.assertGreaterEqual(row["benchmark_turns"], 3)
         self.assertIsNotNone(row["overall"])
         self.assertTrue(0 <= row["overall"] <= 100)
+        # once the game is only a save on disk, it scores the same (read through engine_api.state_summary)
+        from citar.server.scoring import _digest_save, _reports
+        live = _reports(self.manager)[game.id]
+        saved = _digest_save(game.save("scored"))
+        self.assertEqual((saved["turn"], set(saved["summary"])), (live["turn"], set(live["summary"])))
+        for k in ("model", "turns", "phase"):
+            self.assertEqual(saved["benchmark"][k], live["benchmark"][k], k)
+        # a save is scored from its last per-turn stats row (a running game from the score as it stands)
+        last = game.game.stats(1)[0]["players"]
+        self.assertEqual(saved["benchmark"]["score"], last["0"]["score"])
+        self.assertEqual(saved["benchmark"]["best_bot_score"], max(v["score"] for k, v in last.items() if k != "0"))
+        self.assertTrue(0 <= saved["benchmark"]["performance"] <= 100)
 
     def test_normalize_fills_defaults(self):
         s = normalize_suite({"servers": [{"server_id": "sv_x", "models": ["m_a", {"model_id": "m_b", "enabled": False}]},

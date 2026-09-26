@@ -1,0 +1,367 @@
+# Deliberate differences that only the rule scripts can show: a check whose expected value is the
+# Rust engine's carries `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md).
+# Differences a refcheck group shows belong in refcheck/intended.toml, which scripts may cite too.
+# `cargo refcheck changelog` lists both files as the changelog's rule fixes, so the reason is
+# written for a reader of the changelog, and an id may be in only one of them.
+#
+# One [[differences]] table per entry, as in refcheck/intended.toml but without `where`:
+#   id      kebab-case and unique; the code that makes the fix cites it as `// refcheck: <id>`
+#           (citar-refcheck's tests check that every id here is cited in the engine)
+#   reason  one line: what Python did, and what Rust does instead
+
+[[differences]]
+id = "atomic-apply-ops"
+reason = "Python applied scenario operations until the first failure and left the earlier ones applied; Rust applies a list all or nothing"
+
+[[differences]]
+id = "scenario-set-tile-checks-kinds"
+reason = "The scenario operation set_tile stored any terrain name as a tile's terrain, feature or natural wonder; Rust refuses a name of the wrong kind"
+
+[[differences]]
+id = "scenario-numbers-finite-and-in-range"
+reason = "Scenario operations stored any number they were given; Rust refuses one that is not finite, and a whole number that does not fit its field (a resource amount above 255)"
+
+[[differences]]
+id = "scenario-war-refuses-standing-treaties"
+reason = "The scenario operation set_relation could leave two players at war with a friendship, defensive pact or open borders in force; Rust refuses a relation no game can reach"
+
+[[differences]]
+id = "scenario-opinion-counts"
+reason = "The scenario operation set_relation stored an opinion under a key nothing read; in Rust it is the holder's own opinion of the other, within the -100 to 100 every reason keeps"
+
+[[differences]]
+id = "scenario-influence-majors-only"
+reason = "The scenario operation set_influence took a city-state as the player whose influence it set; Rust takes only a major civilization"
+
+[[differences]]
+id = "scenario-techs-string-is-one-name"
+reason = "The scenario operation grant_tech read a techs string letter by letter; Rust reads it as one tech's name"
+
+[[differences]]
+id = "scenario-tech-announcement-wording"
+reason = "A tech a scenario granted was announced as 'Rome scenario Pottery.'; Rust announces 'Rome was granted Pottery.'"
+
+[[differences]]
+id = "scenario-errors-are-sentences"
+reason = "A scenario parameter of the wrong type was refused with Python's own exception ('bad parameters (ValueError: ...)'); Rust refuses it with a sentence naming the parameter and what it takes"
+
+[[differences]]
+id = "normalize-refuses-big-ints-and-non-objects"
+reason = "Tool arguments took integers of any size, and arguments sent as a list of pairs; Rust refuses an integer beyond 64 bits and arguments that are not an object"
+
+[[differences]]
+id = "config-refuses-unknown-names"
+reason = "A new game's settings fell back to a default for a speed, difficulty, era, map size, map type, edges, barbarian level, victory or AI base values Python did not know, drew a random nation for an unknown one or a city-state, and took any controller; Rust refuses the settings, naming what is valid"
+
+[[differences]]
+id = "map-documents-read-by-rule"
+reason = "A map document kept the improvements of a list of 19 names (a Citadel among them) and removed four named ones on water; Rust keeps any improvement proper that is neither a city centre nor a great improvement, and on water removes every improvement built only on land"
+
+[[differences]]
+id = "end-turn-names-whose-turn-it-is"
+reason = "Ending another player's turn was refused with 'It is not your turn.'; Rust names whose turn it is, as the tools' refusal does"
+
+[[differences]]
+id = "end-turn-stops-without-majors"
+reason = "With no major civilization alive, ending a turn played round after round and never returned; Rust ends the round and returns before anyone plays in the next one"
+
+[[differences]]
+id = "force-turn-only-for-the-living"
+reason = "Forcing a turn (EngineGame.force_turn) made an eliminated player's turn current, and moved the turn of a game that was over; Rust refuses both"
+
+[[differences]]
+id = "mapgen-wonder-conversions-read-every-condition"
+reason = "A natural wonder's 'Neighboring tiles will convert to [terrain]' read only its <in tiles without [...]> conditions; Rust converts a neighbour only where every condition holds"
+
+[[differences]]
+id = "mapgen-no-river-along-new-water"
+reason = "A natural wonder that turned the land beside it into coast (Krakatoa, the Rock of Gibraltar) left rivers running along the sea; Rust takes a river off a tile that becomes water, on both sides of the edge"
+
+[[differences]]
+id = "mapgen-features-that-never-generate"
+reason = "Map generation drew vegetation and rare features even when the ruleset marked them 'Doesn't generate naturally'; Rust never places one marked so, and one marked 'Doesn't generate naturally <in [...] tiles>' only where its conditions do not hold (no shipped feature is either)"
+
+[[differences]]
+id = "mapgen-shares-keep-every-type"
+reason = "A resource's share of its kind took over normal resources' tiles down to a type's last deposit, which the variety top-ups after it put back as a fresh cluster of two or three, so a 25% luxury share came out near 20%; Rust takes no normal type's last deposit, so the share holds to a tile and the variety needs no top-up"
+
+[[differences]]
+id = "mapgen-luxury-variety-by-tile-count"
+reason = "The share of luxury types a generated map keeps was interpolated over the areas of the ruleset's lobby sizes, looked up by their keys; Rust interpolates over the tile counts of the shipped sizes, the same for the shipped ruleset and for any other"
+
+[[differences]]
+id = "between-stat-scales-by-speed"
+reason = "Python scaled `when above/below [n] [stat]` by game speed on `(modified by game speed)` uniques but not the two bounds of `when between [a] and [b] [stat]`; Rust scales all three alike"
+
+[[differences]]
+id = "happiness-seen-committed"
+reason = "Python's conditionals and citizen ranking read a civilization's happiness live; Rust commits it at the start and the end of the civilization's turn and reads what was committed, so no call can make citizens flip back and forth"
+
+[[differences]]
+id = "last-gold-rate-written"
+reason = "Python's citizen ranking read a gold rate nothing wrote, so a shrinking treasury never made gold count double; Rust writes the rate at the end of each turn"
+
+[[differences]]
+id = "work-tile-refuses-a-lock-past-the-citizens"
+reason = "work_tile silently dropped a city's oldest lock when every citizen was already locked; Rust keeps locks as a set and refuses another lock until one is released"
+
+[[differences]]
+id = "specialist-counts-must-be-numbers"
+reason = "set_specialists let a count that is not a number raise Python's ValueError; Rust refuses it with a sentence"
+
+
+[[differences]]
+id = "citizens-follow-a-blockade-at-once"
+reason = "Python took a citizen off a blockaded tile, and its lock, at the end of its city's turn; Rust places the city's citizens again as soon as a blockade begins or ends, as after any change to what they can work"
+
+[[differences]]
+id = "citizens-follow-a-neighbour-at-once"
+reason = "Python placed a city's citizens again at the end of its turn when a tile next to one it could work changed, as a Moai beside a Moai does; Rust places them at once, as after any change to what its tiles yield"
+
+[[differences]]
+id = "citizen-tools-list-tiles-sorted"
+reason = "work_tile, set_city_focus and set_specialists listed a city's worked and locked tiles in the order its citizens took them; Rust lists them by column and then row, as the city's own view does"
+
+[[differences]]
+id = "cities-never-share-a-tile"
+reason = "Python let a city work a tile a sibling city of the same owner worked, unless the tile was that sibling's own territory, so two cities could work one tile; Rust gives a worked tile to one city, and no other may work it"
+
+[[differences]]
+id = "scenario-adopt-policy-skips-the-era"
+reason = "The scenario operation adopt_policy skipped the era check, then checked it again inside the adoption and refused a branch of a later era; Rust adopts it whatever the era, as the operation promises"
+
+[[differences]]
+id = "perpetual-production-is-not-banked"
+reason = "A city converting its production to gold or science also banked that production as overflow, which the next item it built took whole, so turns of Gold finished a wonder at once; Rust banks nothing, as UnCiv does, since the conversion already paid out"
+
+[[differences]]
+id = "increasing-cost-counts-what-was-built"
+reason = "An item whose cost increases each time it is built counted as built at every start of turn its production was ready, even when the unit could not be placed and waited, so each blocked turn raised its price; Rust counts it when it is finished"
+
+[[differences]]
+id = "promotion-needs-its-experience"
+reason = "A promotion bought while a free one was on offer went through without the experience, which Python then took anyway, leaving the unit's experience below zero; Rust refuses a paid promotion without the experience or a free pick of its own, and a unit's experience never goes below zero"
+
+[[differences]]
+id = "upgrade-places-before-removing"
+reason = "An upgrade whose new unit had nowhere to stand removed the unit and put a copy back (a new id, without its name, religion, used abilities or original owner), then refused; Rust finds where the new unit will stand before the old one goes, so such an upgrade, bought or free, changes nothing"
+
+[[differences]]
+id = "units-gained-recorded"
+reason = "Python never recorded the units a civilization gained, so Carthage's `Land units may cross [Mountain] tiles after the first [Great General] is earned` never held; Rust records each unit a civilization gains, and Carthage's land units cross mountains once it has had a Great General"
+
+[[differences]]
+id = "unit-refusals-change-nothing"
+reason = "A move_unit that was refused (no path, or its first step refused) had already woken the unit from its sleep, fortification or other order, and cleared its standing move order when the step was refused; Rust refuses the move with the unit as it was"
+
+[[differences]]
+id = "timed-uniques-granted-whatever-their-conditionals"
+reason = "Python asked a timed unique's own conditionals when it was granted, so the Autocracy finisher's `[+25]% Strength <when attacking> ... <for [50] turns>` was never granted, nor a triggered one such as `[+10]% Strength <when attacking> <for [10] turns> <upon being declared war on by [Major] Civilizations>`; Rust grants a timed unique whatever its conditionals, which are its effect's, whether its source is gained or its trigger fires, as UnCiv does"
+
+[[differences]]
+id = "adopt-a-belief-joins-the-religion"
+reason = "Python's `Adopt [belief]` did nothing for a belief; in Rust a belief nobody has taken joins the civilization's religion or pantheon when it fits it (a pantheon or follower belief once there is a pantheon, a founder belief only a religion without one, an enhancer belief only an enhanced religion without one) and does what a belief does when taken"
+
+[[differences]]
+id = "adopt-a-policy-whatever-it-requires"
+reason = "Python's `Adopt [policy]` raised out of the trigger for a policy the civilization could not adopt yet (its branch closed, its era not reached), failing whatever caused it; Rust adopts the policy whatever it requires, as UnCiv does"
+
+[[differences]]
+id = "hurry-wonder-construction"
+reason = "Python offered `Can speed up the construction of a wonder` the hurry action and then refused any unit without `Can speed up construction of a building`; in Rust either hurries construction, the first only while the city builds a wonder"
+
+[[differences]]
+id = "great-person-born-fires-gaining-once"
+reason = "A great person born from points fired `upon gaining a [unit]` twice, the second time for every such unique of the civilization whatever unit it named, so `Gain [10] [Faith] <upon gaining a [Great Prophet] unit>` paid 20 for a prophet and 10 for a scientist; Rust fires it once, for the unit it names, as for any unit made in a city"
+
+[[differences]]
+id = "expending-a-unit-fires-once"
+reason = "A great person spent on an action (hurrying research or construction, a trade mission) fired `upon expending a [unit]` twice, once for the action and once as the unit was consumed; Rust fires it once"
+
+[[differences]]
+id = "combat-points-for-the-civilizations-own-great-people"
+reason = "Experience earned in combat credited every great person of the ruleset earned through combat, so any civilization earned a Mongol Khan beside its Great General and had both; Rust credits the civilization's own kinds only (a Khan for the Mongols in place of the general), as UnCiv does"
+
+[[differences]]
+id = "ai-free-great-person-within-the-calendar"
+reason = "A civilization that let the engine pick its free great person picked among every kind, and took nothing when the Maya long count allowed only the kinds it had not taken yet; Rust picks the first preferred kind the calendar allows"
+
+[[differences]]
+id = "refused-founding-owes-nothing"
+reason = "Founding a religion without a pantheon marked the civilization as owing a pantheon belief before the beliefs chosen were checked, so a founding refused for its beliefs still left the mark; Rust's checks write nothing"
+
+[[differences]]
+id = "belief-listed-twice-refused"
+reason = "A belief listed twice when founding or enhancing a religion filled two slots and joined the religion once, founding it with one belief fewer than it was owed; Rust refuses the choice"
+
+[[differences]]
+id = "ai-beliefs-tie-by-ruleset-order"
+reason = "An AI choosing beliefs broke a tie between beliefs it weighed the same by their names; Rust breaks it by the ruleset's order, so no game rule compares text"
+
+[[differences]]
+id = "trigger-chains-stop"
+reason = "One-time effects that fed themselves (`Free [Warrior] appears <upon gaining a [Warrior] unit>`, a promotion that is never kept and gives itself) recursed until Python raised, failing whatever caused the first; Rust stops the chain eight effects deep and reports it where the checks run"
+
+# Package 1c-03: combat and conquest.
+
+[[differences]]
+id = "vs-units-never-matches-a-city"
+reason = "Python's `vs [x] units` shared `vs [x]`'s test, so a city matched `[All]`, `[City]` or a city filter's word there; Rust asks it about units only (no shipped unique shows it, so no reference state does)"
+
+[[differences]]
+id = "civilians-under-fire"
+reason = "A ranged attack that brought a civilian to 0 health left it on the map at 0, neither dead nor captured, and every attack on a civilian reported it captured; Rust kills a civilian brought to 0 health, and reports a capture only when a melee unit took the civilian"
+
+[[differences]]
+id = "may-not-annex-refuses-annexing"
+reason = "A civilization that `May not annex cities` had the cities it captured made puppets, then could annex them at will; Rust refuses it annex"
+
+[[differences]]
+id = "met-lists-in-player-id-order"
+reason = "A message to all a civilization had met went to them in the order they were met; Rust sends it to them in player-id order, as every other list of players is kept"
+
+[[differences]]
+id = "deal-items-fit-their-fields"
+reason = "A deal item naming a player id or a city id no game can have, or an amount beyond 32 bits, was stored in a proposal and refused only when the deal was accepted, or never for an amount; Rust refuses it when it is proposed"
+
+[[differences]]
+id = "deal-war-on-a-partners-pact-refused"
+reason = "A deal in which one side declared war on a civilization with a defensive pact with the other side was carried out, and the pact then put the deal's two parties at war with the deal still in force and its chat both closed and accepted; Rust refuses such an item when it is proposed or accepted"
+
+# Package 1c-04: workers, unit actions and automation.
+
+[[differences]]
+id = "improvements-over-removable-features"
+reason = "An improvement was refused on a tile whose feature it may not stand on (a farm on a forest) unless it removed features itself, so the removal it would have queued first never was; Rust offers it once the civilization knows how to remove each feature in its way, and queues the removals first, top down (fallout, then the forest under it), as the tool says and UnCiv does"
+
+[[differences]]
+id = "city-states-found-one-city"
+reason = "A city-state's settler founded cities as a major's did, so a city-state that kept its starting settler, was given one or captured one grew past its single city; Rust refuses the settler's action to a city-state that has a city, as city-states train no settlers either"
+
+[[differences]]
+id = "unit-results-give-tiles"
+reason = "The results of founding a city with a unit and of a paradrop gave each tile as the keys of its coordinates (['x', 'y']); Rust gives where it is, as {x, y}"
+
+[[differences]]
+id = "jobs-by-builder-class"
+reason = "An automated worker's job on a tile was judged for the first worker of its type to ask in a turn, with that unit's promotions and conditionals, and kept for every other; Rust judges it for the builder class and its civilization, whichever unit asks"
+
+[[differences]]
+id = "jobs-tie-by-ruleset-order"
+reason = "Two worker jobs of the same priority on the same tile went to the improvement whose name sorted last; Rust takes the one later in the ruleset"
+
+[[differences]]
+id = "fallout-removal-is-a-job"
+reason = "An automated worker cleared fallout only where a tile's fallout flag was set, which no nuke did, so it never cleared any; Rust reads the tile's Fallout feature, and clearing it is a job where nothing better is"
+
+# Package 1c-07: the production advisor.
+
+[[differences]]
+id = "advisor-ties-by-id"
+reason = "The production advisor read the units a city could build from a set of names, so the first settler, worker or scout and the best of equally strong units were whichever the set gave first, and of equally valued choices it took the name last in code point order; Rust reads them in the ruleset's order and takes the largest id of equally valued choices"
+
+[[differences]]
+id = "advisor-draws-by-city-and-turn"
+reason = "The production advisor's one random choice, whether a city prefers a ranged unit, drew from a bot seeded with the city's id and made afresh for each pick, so a city drew the same every turn; Rust draws from a stream of its own keyed by the city and the turn"
+
+[[differences]]
+id = "advisor-counts-a-free-unit-as-costing-one"
+reason = "The production advisor divided a military unit's strength by a power of its cost, so a unit costing nothing raised a division by zero and the city picked nothing; Rust values it as if it cost one"
+
+[[differences]]
+id = "advisor-what-if-leaves-no-trace"
+reason = "The production advisor valued a building by adding it to the city, swapping two of the game's caches away and restoring them; what was computed with the building stayed in the caches it did not swap, so an answer depended on what had been asked before (a city advised a Monument after its puppet's pick was weighed, a Stadium on a fresh load). Rust's what-if reads the game with the building and writes nothing, so the same game always gives the same answer"
+
+[[differences]]
+id = "city-state-gifts-need-a-common-nation"
+reason = "A militaristic city-state gave units faster to a civilization with 'Militaristic City-States grant units [n] times as fast when you are at war with a common nation' in every game with barbarians, since everyone is at war with them; Rust counts only a civilization or city-state both fight"
+
+# Package 1c-08: victory, the United Nations and eliminations.
+
+[[differences]]
+id = "eliminated-on-its-own-turn-at-the-round-end"
+reason = "A civilization that lost its last city or unit on its own turn was eliminated at once and its turn ended for a player the game had removed; Rust eliminates the player whose turn it is when the round ends, and anyone else at once as Python did"
+
+[[differences]]
+id = "un-vote-for-no-player-refused"
+reason = "A world leader vote for a player id the game did not have raised an error the un_vote tool did not catch, or, for a negative id, counted from the end of the list of players; Rust refuses it as it refuses any vote for what is not a living major civilization"
+
+[[differences]]
+id = "un-city-state-votes-for-a-living-ally"
+reason = "A city-state voted in the world leader election for its ally even after that civilization was eliminated, a vote that could elect no one; Rust's city-state votes for its ally only while it lives"
+
+[[differences]]
+id = "victories-python-named-are-the-rulesets"
+reason = "The United Nations' world leader vote, the Domination win and the Time victory at the turn limit were on unless a game turned them off, even with a ruleset that had no Diplomatic, Domination or Time victory; Rust has each only when the ruleset has that victory and the game leaves it on, so such a ruleset holds no vote and ends at its turn limit with no winner"
+
+[[differences]]
+id = "deal-war-names-both-sides"
+reason = "A war declared as agreed in a deal was announced without saying who declared war on whom, so statistics counting wars by their attacker (the baseline's wars declared) missed it; Rust's names the attacker and the defender, as every other declaration of war does"
+
+# Package 1c-09: setup completed, and the drive.
+
+[[differences]]
+id = "map-prepare-draws-its-own-stream"
+reason = "The ancient ruins spread on an editor map that had none were drawn from the game's one random stream, after the nations were shuffled; Rust draws them from a stream of their own, so where they lie differs while how many does not"
+
+[[differences]]
+id = "games-hold-at-most-64-players"
+reason = "A game could hold any number of players; Rust holds at most 64, city-states and barbarians included (a set of players is one machine word), and refuses settings that would make more, such as 24 civilizations with 40 city-states and the barbarians"
+
+# Package 1d-01: the tool registry and execute.
+
+[[differences]]
+id = "gift-unit-described-as-ruled"
+reason = "The city_state_action tool told models that a unit next to a city-state's territory could be gifted, which the rule refused; its description now says the unit must stand in the territory with movement left"
+
+[[differences]]
+id = "tool-arguments-of-the-wrong-type-refused"
+reason = "A tool given something other than text where it reads a name failed with a Python exception (unit_order's order, get_rules' topic) or read a number as the name '5' (promote_unit's promotion, build_improvement's improvement, unit_action's action); Rust refuses it with a sentence naming the parameter and what it takes"
+
+[[differences]]
+id = "deal-items-name-what-they-trade"
+reason = "A resource or tech deal item that named no resource or tech was refused as \"'None' is not a tradeable strategic or luxury resource\" or \"Unknown tech 'None'\"; Rust says what the item lacks, with an example of one written right"
+
+[[differences]]
+id = "refusals-quote-at-most-60-characters"
+reason = "A refusal that quoted a caller's words (an unknown tool, item, tech, policy, belief, improvement, spy, city, specialist, recipient, status, topic or unit action) quoted all of them, so a long name made it run past 600 characters; Rust quotes the first 60 characters and '...', and puts a name it gave without quotation marks (a specialist the city has no slots for) in them once it is cut. A deal item is quoted as Python's repr with each text in it cut so and, past 100 characters, its remaining entries given as '...' and its brackets closed; a spy's city id that is not a number, on which Python raised, is quoted the same way, while a number is given as the whole number it reads as (12 for 12.5)"
+
+# Package 1d-02: the views and the query tools.
+
+[[differences]]
+id = "city-state-view-lists-its-quests"
+reason = "get_city_states listed each city-state's quests by matching them on a key the quest list never had, so it listed none; Rust lists the quests the city-state has given the caller"
+
+[[differences]]
+id = "great-people-view-shows-the-points"
+reason = "get_great_people read each great person's points under its pool's name, which the points were never kept under, so every kind showed 0 points; Rust shows the points each kind has earned, from cities or battles"
+
+[[differences]]
+id = "empire-summary-wars-by-id"
+reason = "The empire summary a negotiation answer reads listed the civilizations it was at war with in the order it had met them; Rust lists them by player id"
+
+[[differences]]
+id = "un-results-name-only-known-candidates"
+reason = "get_diplomacy and get_victory_status gave the United Nations' last result with every candidate's name, those of civilizations the caller had not met included; Rust names them as a scrubbed event does, Unknown Civilization or Unknown City-State (numbered from the second), and gives the winner only to a caller who knows it"
+
+[[differences]]
+id = "views-hide-unmet-allies-and-recipients"
+reason = "get_city_states named each city-state's ally, and get_diplomacy each recipient of a message the caller was on, even a civilization the caller had not met, which the player list hid as unknown; Rust names them only to a caller that has met them, and unknown otherwise"
+
+[[differences]]
+id = "city-food-stored-is-a-float"
+reason = "A city's food stored was written as a whole number after a rule set it (a starving city's box emptied, a city avoiding growth held at a full box, a city being razed) and with a decimal point otherwise; Rust always writes it with the decimal point"
+
+# Package 1d-03
+
+[[differences]]
+id = "lists-in-rule-order"
+reason = "Python listed a civilization's policies, the civilizations it had met, a city's specialists and buildings and a religion's beliefs in the order they were adopted, met, assigned, built and chosen, a history no state keeps; Rust lists them in the ruleset's order, branch by branch for the policies, and by player id, in the briefing and the scenario editor's overview"
+
+[[differences]]
+id = "map-summary-reads-water-by-rule"
+reason = "A map's summary counted as land every tile whose terrain was not called Ocean, Coast or Lakes; Rust counts the tiles whose terrain the ruleset makes water, so a ruleset's own water terrains count as water"
+
+[[differences]]
+id = "scenario-overview-lists-every-influence"
+reason = "The scenario editor's overview gave a city-state's influence with the civilizations whose influence had ever been set; Rust gives its influence with every civilization, 0 where there is none"

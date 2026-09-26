@@ -1,0 +1,43 @@
+about = """
+The end_turn tool waits for the other side's answer: while a negotiation the player opened waits on the
+other side, ending the turn is refused, naming whom it waits for and how to withdraw it. Withdrawn, the
+turn ends and play moves on.
+"""
+from = "tests/test_negotiation_chat.py::EndTurnTests::test_end_turn_waits_for_the_other_sides_answer"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+tool = "end_turn"
+error = "You are waiting for Civilization 2 to answer negotiation #1. End your turn after they reply, or withdraw it with respond_negotiation(negotiation_id=1, action='reject', message=...)."
+
+[[step]]
+check = { what = "game" }
+path = "current"
+eq = 0
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "withdraw", message = "Another time." }
+
+[[step]]
+tool = "end_turn"
+as = "ended"
+
+[[step]]
+check = "ended"
+eq = { ended = true, next_player = "Civilization 2", turn = 1, phase = "playing" }
+
+[[step]]
+check = { what = "game" }
+path = "current"
+eq = 1

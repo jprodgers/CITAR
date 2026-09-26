@@ -1,0 +1,55 @@
+about = """
+Two cities of one owner never work one tile. A city may work a tile of its owner in its reach,
+in its own territory or a sibling's; once a sibling works it, it is no longer the city's to work.
+
+Python refused only the tiles their own territory's city worked, so a city could still take a
+tile of its own territory that a sibling worked, and both worked it
+(intended: cities-never-share-a-tile).
+"""
+from = "citar/engine/cities.py: workable_tiles"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 1, claim_radius = 2 },
+  { op = "found_city", player = 0, at = "(9,5)", name = "Antium", pop = 1, claim_radius = 1 },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", antium = "=made[1].city_id" }
+
+[[step]]
+note = "Roma works a tile of its own, away from Antium"
+tool = "work_tile"
+args = { city_id = "=roma", at = "F" }
+
+[[step]]
+check = { what = "tile", at = "(6,5)" }
+subset = { city = "=roma" }
+
+[[step]]
+check = { what = "city", city = "=antium" }
+path = "workable"
+contains = [6, 5]
+
+[[step]]
+note = "Antium takes a tile of Roma's territory"
+tool = "work_tile"
+args = { city_id = "=antium", at = "(6,5)" }
+as = "taken"
+
+[[step]]
+check = "taken"
+path = "worked_tiles"
+contains = [6, 5]
+
+[[step]]
+check = { what = "city", city = "=roma" }
+path = "worked"
+not_contains = [6, 5]
+
+[[step]]
+check = { what = "city", city = "=roma" }
+path = "workable"
+not_contains = [6, 5]
+intended = "cities-never-share-a-tile"

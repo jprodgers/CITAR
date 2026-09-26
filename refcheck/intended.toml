@@ -1,0 +1,434 @@
+# Deliberate differences between the Rust engine and the Python reference fixtures (format v2).
+#
+# `cargo refcheck` (crates/citar-refcheck) compares the Rust engine's answers with the answers recorded in
+# refcheck/fixtures-mini/, refcheck/fixtures-late/ and refcheck/corpus/ (see refcheck/README.md). A difference not
+# explained here is unexplained: it fails the run where refcheck/enforced.toml covers it, and counts against the
+# group in refcheck/ratchet.json everywhere else. Every entry is a rule the Rust engine gets right on purpose where
+# the Python engine did not, or a redesign whose numbers legitimately differ. `cargo refcheck changelog` prints the
+# entries as the changelog's list of rule fixes, so the reason is written for a reader of the changelog.
+#
+# One [[differences]] table per entry:
+#
+#   id      kebab-case and unique; the code that makes the fix cites it as `// refcheck: <id>`
+#   reason  one line: what Python did, and what Rust does instead
+#   where   the places it covers: [{ group = "...", path = "..." }, ...]
+#           group: uniques, state_echo, fixed_point, tile_yields, city_stats, civs, buildable, movement, visible,
+#                  combat_previews, deal_checks, tool_errors, views, briefing
+#           path:  in the path grammar, matched against the whole path of a difference:
+#                  .key  ["any key"]  [3]  [pid=0] (a keyed list)  [#0=12] (keyed by tuple position)
+#                  [*] (any list element)  .* (any key)  .** (any depth, none included)
+#   cases   optional: globs on "<case>/t<turn>" that limit it to some fixtures (default: every fixture)
+#   python  optional constraints on the two values at the difference, so an entry never hides a later,
+#   rust    unrelated change at the same place:
+#             3, "text", [1, 2]         that value (numbers within refcheck's tolerance; 3 equals 3.0)
+#             "re:^Unknown tool"        a string matching the regex (unanchored)
+#             { min = 0, max = 50 }     a number within the bounds, inclusive; either may be left out
+#             { eq = "re:..." }         a value, spelled out
+#             { is = "null" }, { is = "absent" }
+#   rule    optional: "rust_le_python", both values numbers and Rust's not above Python's. A route with fewer
+#           turns than Python's (kind `better`) needs it.
+#   broad   required, as true, when a path uses .* or .**: say so when an entry reaches that far
+#
+# An entry that explains nothing in a run that covered it (compared one of its groups on a fixture its cases
+# match) is stale: a warning, and an error with --strict. `cargo refcheck suggest` prints stubs for the unexplained
+# differences of a run, and `cargo refcheck explain <id>` shows what an entry explains.
+#
+# For example:
+#
+#   [[differences]]
+#   id = "civ-stats-gold"
+#   reason = "Python computed civ_stats_gold but never wrote it into the total; Rust does"
+#   where = [{ group = "city_stats", path = "cities[*].stats.total.gold" }]
+#   python = 0
+#
+# The entries below come before the answer modules of their groups (package 1a-07): their paths are the best
+# known places, to be tightened when those groups are compared.
+
+[[differences]]
+id = "building-conditionals-read-a-filter"
+reason = "Python's building conditionals (`if [x] is constructed`, `in cities with a [x]` and the rest) compared the text with building names, so `[Wonder]` or `[Culture]` never held; Rust reads the text as a building filter"
+where = [
+  { group = "buildable", path = "cities[*].items.*" },
+]
+broad = true
+
+[[differences]]
+id = "no-civ-adopted-counts-beliefs"
+reason = "Python's `if no Civilization has adopted [x]` read policies only, so a belief never counted as adopted; Rust counts beliefs too"
+where = [
+  { group = "buildable", path = "cities[*].items.*" },
+]
+broad = true
+
+[[differences]]
+id = "civilians-at-zero-health"
+reason = "Python left a civilian that a ranged attack brought to 0 health on the map at 0, neither dead nor captured (combat.py:109, 806); no Rust unit is ever at 0, and one loaded at 0 keeps 1"
+where = [
+  { group = "state_echo", path = "units[*].hp" },
+  { group = "combat_previews", path = "fights[*].preview.defender_hp" },
+  { group = "views", path = "civs[*].view.units[*].hp" },
+  { group = "briefing", path = "civs[*].briefing.units[*].hp" },
+  { group = "briefing", path = "civs[*].briefing.window[*].hp" },
+]
+python = 0
+rust = 1
+
+# Package 1b-06: tile yields, city stats, happiness and the stats for the next turn.
+
+[[differences]]
+id = "marble-bonus-in-its-own-city"
+reason = "Python gave a resource's `[in this city]` uniques to every city of its owner, so Marble's +15% production toward wonders held in every city; Rust gives them to the city whose improved tile provides the resource (DESIGN.md 5.12)"
+where = [
+  { group = "city_stats", path = "cities[*].stats.pct.production" },
+  { group = "city_stats", path = "cities[*].stats.final.*.production" },
+  { group = "city_stats", path = "cities[*].stats.total.production" },
+  { group = "city_stats", path = "cities[*].stats.production" },
+  { group = "city_stats", path = "cities[*].current.turns" },
+  { group = "civs", path = "civs[*].civ_stats.production" },
+  { group = "civs", path = "civs[*].stat_map.*.production" },
+  { group = "views", path = "civs[*].view.cities[*].yields.production" },
+  { group = "views", path = "civs[*].view.cities[*].queue[*].turns" },
+  { group = "briefing", path = "civs[*].briefing.cities[*].prod" },
+  { group = "briefing", path = "civs[*].briefing.cities[*].build.turns" },
+]
+cases = [
+  "duel-archipelago-normal-s1022/t120",
+  "duel-archipelago-normal-s1022/t200",
+  "duel-archipelago-normal-s1022/t280",
+  "duel-archipelago-raging-s1002/t120",
+  "duel-continents-off-s1000/t120",
+  "duel-continents-off-s1000/t200",
+  "duel-continents-off-s1000/t280",
+  "duel-fractal-normal-s1004/t120",
+  "duel-fractal-normal-s1004/t200",
+  "duel-fractal-normal-s1004/t280",
+  "duel-fractal-normal-s1004/t60",
+  "duel-fractal-off-s1024/t280",
+  "duel-inland_sea-off-s1003/t120",
+  "duel-inland_sea-off-s1003/t280",
+  "duel-inland_sea-off-s1003/t60",
+  "duel-pangaea-normal-s1001/t120",
+  "duel-pangaea-off-s1021/t120",
+  "duel-pangaea-off-s1021/t60",
+  "large-archipelago-raging-s1017/t200",
+  "large-continents-off-s1015/t120",
+  "large-continents-off-s1015/t200",
+  "large-continents-off-s1015/t280",
+  "large-continents-raging-s1035/t200",
+  "large-continents-raging-s1035/t280",
+  "large-fractal-normal-s1019/t200",
+  "large-fractal-normal-s1019/t60",
+  "large-fractal-off-s1039/t120",
+  "large-fractal-off-s1039/t280",
+  "large-inland_sea-off-s1018/t120",
+  "large-inland_sea-off-s1018/t200",
+  "large-inland_sea-off-s1018/t280",
+  "large-inland_sea-raging-s1038/t280",
+  "large-pangaea-normal-s1016/t280",
+  "large-pangaea-off-s1036/t120",
+  "large-pangaea-off-s1036/t200",
+  "large-pangaea-off-s1036/t280",
+  "large-pangaea-off-s1036/t60",
+  "scenario-small-continents-s3001/t60",
+  "scenario-small-continents-s3001/t61",
+  "scenario-standard-pangaea-s3002/t121",
+  "scenario-standard-pangaea-s3002/t123",
+  "small-archipelago-normal-s1007/t120",
+  "small-archipelago-normal-s1007/t60",
+  "small-archipelago-off-s1027/t60",
+  "small-continents-normal-s1025/t120",
+  "small-continents-normal-s1025/t200",
+  "small-continents-raging-s1005/t280",
+  "small-fractal-off-s1009/t120",
+  "small-fractal-raging-s1029/t120",
+  "small-fractal-raging-s1029/t60",
+  "small-inland_sea-normal-s1028/t120",
+  "small-pangaea-off-s1006/t120",
+  "small-pangaea-off-s1006/t200",
+  "small-pangaea-off-s1006/t280",
+  "standard-archipelago-off-s1012/t120",
+  "standard-archipelago-off-s1012/t200",
+  "standard-archipelago-raging-s1032/t120",
+  "standard-continents-normal-s1010/t120",
+  "standard-continents-normal-s1010/t280",
+  "standard-continents-off-s1030/t120",
+  "standard-continents-off-s1030/t200",
+  "standard-continents-off-s1030/t280",
+  "standard-fractal-normal-s1034/t200",
+  "standard-inland_sea-normal-s1013/t120",
+  "standard-inland_sea-normal-s1013/t200",
+  "standard-inland_sea-off-s1033/t120",
+  "standard-inland_sea-off-s1033/t280",
+  "standard-inland_sea-off-s1033/t60",
+  "standard-pangaea-normal-s1031/t120",
+  "standard-pangaea-raging-s1011/t280",
+]
+broad = true
+
+[[differences]]
+id = "marble-bonus-in-its-own-city-wonder-turns"
+reason = "Python gave a resource's `[in this city]` uniques to every city of its owner, so Marble's +15% production toward wonders held in every city, and every city's list showed its wonders taking fewer turns; Rust gives them to the city whose improved tile provides the resource (DESIGN.md 5.12)"
+where = [
+  { group = "buildable", path = "cities[*].costs.*.turns" },
+  { group = "briefing", path = "civs[*].briefing.city_options[*].wonders[*].turns" },
+]
+cases = [
+  "duel-archipelago-normal-s1022/t120",
+  "duel-archipelago-normal-s1022/t200",
+  "duel-archipelago-normal-s1022/t280",
+  "duel-archipelago-raging-s1002/t120",
+  "duel-archipelago-raging-s1002/t280",
+  "duel-continents-off-s1000/t120",
+  "duel-continents-off-s1000/t200",
+  "duel-continents-off-s1000/t280",
+  "duel-continents-off-s1000/t60",
+  "duel-continents-raging-s1020/t200",
+  "duel-continents-raging-s1020/t280",
+  "duel-fractal-normal-s1004/t120",
+  "duel-fractal-normal-s1004/t200",
+  "duel-fractal-normal-s1004/t280",
+  "duel-fractal-normal-s1004/t60",
+  "duel-fractal-off-s1024/t200",
+  "duel-fractal-off-s1024/t280",
+  "duel-fractal-off-s1024/t60",
+  "duel-inland_sea-off-s1003/t120",
+  "duel-inland_sea-off-s1003/t280",
+  "duel-inland_sea-off-s1003/t60",
+  "duel-pangaea-normal-s1001/t120",
+  "duel-pangaea-normal-s1001/t200",
+  "duel-pangaea-normal-s1001/t280",
+  "duel-pangaea-off-s1021/t120",
+  "duel-pangaea-off-s1021/t200",
+  "duel-pangaea-off-s1021/t280",
+  "duel-pangaea-off-s1021/t60",
+  "large-archipelago-normal-s1037/t120",
+  "large-archipelago-raging-s1017/t120",
+  "large-archipelago-raging-s1017/t200",
+  "large-archipelago-raging-s1017/t60",
+  "large-continents-off-s1015/t120",
+  "large-continents-off-s1015/t200",
+  "large-continents-off-s1015/t280",
+  "large-continents-off-s1015/t60",
+  "large-continents-raging-s1035/t200",
+  "large-continents-raging-s1035/t280",
+  "large-fractal-normal-s1019/t200",
+  "large-fractal-normal-s1019/t60",
+  "large-fractal-off-s1039/t120",
+  "large-fractal-off-s1039/t280",
+  "large-inland_sea-off-s1018/t120",
+  "large-inland_sea-off-s1018/t200",
+  "large-inland_sea-off-s1018/t280",
+  "large-inland_sea-off-s1018/t60",
+  "large-inland_sea-raging-s1038/t120",
+  "large-inland_sea-raging-s1038/t200",
+  "large-inland_sea-raging-s1038/t280",
+  "large-inland_sea-raging-s1038/t60",
+  "large-pangaea-normal-s1016/t280",
+  "large-pangaea-normal-s1016/t60",
+  "large-pangaea-off-s1036/t120",
+  "large-pangaea-off-s1036/t200",
+  "large-pangaea-off-s1036/t280",
+  "large-pangaea-off-s1036/t60",
+  "scenario-small-continents-s3001/t60",
+  "scenario-small-continents-s3001/t61",
+  "scenario-small-continents-s3001/t63",
+  "scenario-standard-pangaea-s3002/t120",
+  "scenario-standard-pangaea-s3002/t121",
+  "scenario-standard-pangaea-s3002/t123",
+  "small-archipelago-normal-s1007/t120",
+  "small-archipelago-normal-s1007/t200",
+  "small-archipelago-normal-s1007/t60",
+  "small-archipelago-off-s1027/t120",
+  "small-archipelago-off-s1027/t60",
+  "small-continents-normal-s1025/t120",
+  "small-continents-normal-s1025/t200",
+  "small-continents-normal-s1025/t280",
+  "small-continents-raging-s1005/t120",
+  "small-continents-raging-s1005/t200",
+  "small-continents-raging-s1005/t280",
+  "small-fractal-off-s1009/t120",
+  "small-fractal-off-s1009/t200",
+  "small-fractal-off-s1009/t60",
+  "small-fractal-raging-s1029/t120",
+  "small-fractal-raging-s1029/t200",
+  "small-fractal-raging-s1029/t60",
+  "small-inland_sea-normal-s1028/t120",
+  "small-inland_sea-normal-s1028/t60",
+  "small-pangaea-off-s1006/t120",
+  "small-pangaea-off-s1006/t200",
+  "small-pangaea-off-s1006/t280",
+  "small-pangaea-off-s1006/t60",
+  "small-pangaea-raging-s1026/t200",
+  "standard-archipelago-off-s1012/t120",
+  "standard-archipelago-off-s1012/t200",
+  "standard-archipelago-off-s1012/t60",
+  "standard-archipelago-raging-s1032/t120",
+  "standard-archipelago-raging-s1032/t200",
+  "standard-continents-normal-s1010/t120",
+  "standard-continents-normal-s1010/t280",
+  "standard-continents-normal-s1010/t60",
+  "standard-continents-off-s1030/t120",
+  "standard-continents-off-s1030/t200",
+  "standard-continents-off-s1030/t280",
+  "standard-fractal-normal-s1034/t120",
+  "standard-fractal-normal-s1034/t200",
+  "standard-fractal-normal-s1034/t60",
+  "standard-inland_sea-normal-s1013/t120",
+  "standard-inland_sea-normal-s1013/t200",
+  "standard-inland_sea-normal-s1013/t280",
+  "standard-inland_sea-off-s1033/t120",
+  "standard-inland_sea-off-s1033/t280",
+  "standard-inland_sea-off-s1033/t60",
+  "standard-pangaea-normal-s1031/t120",
+  "standard-pangaea-normal-s1031/t200",
+  "standard-pangaea-normal-s1031/t280",
+  "standard-pangaea-normal-s1031/t60",
+  "standard-pangaea-raging-s1011/t120",
+  "standard-pangaea-raging-s1011/t200",
+  "standard-pangaea-raging-s1011/t280",
+]
+broad = true
+
+[[differences]]
+id = "gold-per-turn-rounds-a-sum-at-a-half"
+reason = "Gold per turn is shown rounded to one place from a sum of floats taken in the order of the cities' worked tiles, which Python kept in the order it placed the citizens and Rust keeps sorted; a sum a hair from a half rounds either way"
+cases = ["small-fractal-off-s1009/t280"]
+where = [{ group = "civs", path = "civs[*].gold_per_turn.*" }]
+broad = true
+
+# Package 1c-03: combat and conquest.
+
+[[differences]]
+id = "combat-modifiers-in-ruleset-order"
+reason = "The attack preview listed a unit's promotions' modifiers in the order the unit gained them; Rust keeps a unit's promotions as a set and lists their modifiers in the ruleset's order (the same modifiers, with the same values)"
+where = [
+  { group = "combat_previews", path = "fights[*].preview.attacker_modifiers[*]" },
+  { group = "combat_previews", path = "fights[*].preview.defender_modifiers[*]" },
+]
+cases = ["large-pangaea-normal-s1016/t280"]
+
+# Package 1d-01: the tool registry and the refusals models read.
+
+[[differences]]
+id = "refusal-lists-capped"
+reason = "A refusal of a unit or city id that is not the caller's listed every unit or city the caller had, past 600 characters for a large empire; Rust keeps the ones that fit and says how many more get_units or get_cities lists"
+where = [{ group = "tool_errors", path = "calls[*].error" }]
+# The corpus's late states whose empires are that large; no committed fixture has one.
+cases = [
+  "duel-continents-off-s1000/t280",
+  "duel-inland_sea-off-s1003/t200",
+  "duel-inland_sea-off-s1003/t280",
+  "duel-pangaea-normal-s1001/t280",
+  "duel-pangaea-off-s1021/t280",
+  "large-continents-off-s1015/t200",
+  "large-continents-off-s1015/t280",
+  "large-fractal-normal-s1019/t280",
+  "large-pangaea-normal-s1016/t280",
+  "large-pangaea-off-s1036/t280",
+  "small-inland_sea-normal-s1028/t280",
+  "standard-continents-off-s1030/t200",
+  "standard-continents-off-s1030/t280",
+  "standard-inland_sea-normal-s1013/t200",
+  "standard-inland_sea-normal-s1013/t280",
+  "standard-inland_sea-off-s1033/t200",
+  "standard-inland_sea-off-s1033/t280",
+  "standard-pangaea-normal-s1031/t280",
+]
+python = "re:^You have no (unit|city) with id .{560,}$"
+rust = 're:more \((get_units|get_cities) lists them all\)\.$'
+
+[[differences]]
+id = "refusals-end-as-sentences"
+reason = "Refusals that ended with a list (a promotion the unit cannot take, a belief that is not available) had no full stop, and a long one ran past 600 characters; Rust ends them as sentences and keeps them within 600 characters"
+where = [{ group = "tool_errors", path = "calls[*].error" }]
+python = "re:Available: [^.]*[^.]$"
+rust = 're:Available: .*\.$'
+
+# Package 1d-02: the views.
+
+[[differences]]
+id = "city-view-rounds-its-own-sums"
+reason = "A city's food in the client view is its stats' total rounded to a tenth, and Python's total carried the rounding error of each addition (12.349999999999998 for 12.35, 4.4e-16 for 0), so a total a hair below a half rounded down, a surplus of 4e-16 food showed as 0.0 food growing the city in 5e16 turns, and one of -2e-16 showed the city as starving, with a starving alert; Rust's totals agree with Python's to 1e-6, and the view rounds them as they are"
+where = [
+  { group = "views", path = "civs[*].view.cities[*].yields.food" },
+  { group = "views", path = "civs[*].view.cities[*].turns_to_grow" },
+  { group = "views", path = "civs[*].view.cities[*].starving" },
+  { group = "views", path = "civs[*].view.alerts[*]" },
+  { group = "briefing", path = "civs[*].briefing.cities[*].food" },
+  { group = "briefing", path = "civs[*].briefing.cities[*].growth" },
+  { group = "briefing", path = "civs[*].briefing.alerts[*]" },
+]
+# The corpus's states where a food total lies that close to a tenth's half or to zero; no committed
+# fixture has one.
+cases = [
+  "duel-archipelago-raging-s1002/t60",
+  "duel-archipelago-raging-s1002/t200",
+  "duel-inland_sea-raging-s1023/t200",
+  "large-archipelago-normal-s1037/t280",
+  "large-pangaea-normal-s1016/t120",
+  "large-pangaea-normal-s1016/t280",
+  "small-fractal-off-s1009/t280",
+  "small-pangaea-raging-s1026/t200",
+  "standard-continents-normal-s1010/t200",
+  "standard-continents-off-s1030/t280",
+]
+
+# Package 1d-03: the briefing.
+
+[[differences]]
+id = "briefing-names-only-known-players"
+reason = "Python's briefing named whoever it mentioned: whose turn it is, a city-state's ally, the owner of a resource on a tile explored long ago, though the reader had never met them; Rust names them as the events do, Unknown Civilization or Unknown City-State"
+# The briefing's structure reads each of these names into a field of its own (whose turn it is,
+# a city-state's ally, an entry's owner), so the entry explains the name and nothing else.
+where = [
+  { group = "briefing", path = "civs[*].briefing.turn.note" },
+  { group = "briefing", path = "civs[*].briefing.city_states[*].ally" },
+  { group = "briefing", path = "civs[*].briefing.window[*].owner" },
+]
+rust = "re:^(Unknown (Civilization|City-State)|waiting \\(Unknown (Civilization|City-State)'s turn\\))$"
+
+[[differences]]
+id = "briefing-lists-only-cities-it-could-have-seen"
+reason = "Python's briefing listed, among the points of interest, every foreign city on a tile the reader had explored, with its owner, including those of civilizations it had not met: cities founded there after it explored the tile, which it cannot have seen, since seeing a city's tile makes contact with its owner; Rust leaves them out"
+where = [{ group = "briefing", path = "civs[*].briefing.poi[*]" }]
+python = "re: city "
+rust = { is = "absent" }
+# The corpus's states with such a city; no committed fixture has one.
+cases = [
+  "small-pangaea-raging-s1026/t60",
+  "small-pangaea-raging-s1026/t120",
+  "small-pangaea-raging-s1026/t200",
+  "small-pangaea-raging-s1026/t280",
+  "standard-archipelago-off-s1012/t60",
+  "standard-inland_sea-normal-s1013/t200",
+  "standard-inland_sea-off-s1033/t25",
+  "standard-inland_sea-off-s1033/t60",
+]
+
+[[differences]]
+id = "briefing-nearby-reads-what-it-knows"
+reason = "Python's briefing told a unit needing orders of the ruins and camps near it as they stood, on any tile the reader had explored, so it named camps raised in the fog since the reader looked and ruins on tiles it had only had revealed, which its own map and points of interest did not show, and dropped a camp it had seen as soon as the camp was gone, though its map still showed it; Rust names those the reader knows of, as its map shows them"
+where = [{ group = "briefing", path = "civs[*].briefing.unit_options[*].nearby" }]
+# The states where such a camp or ruins is near a unit that needs orders: three committed (the
+# duel's revealed ruins, the small continents' camps), the rest the corpus's.
+cases = [
+  "large-fractal-normal-s1019/t200",
+  "scenario-duel-fractal/t10",
+  "scenario-duel-fractal/t11",
+  "scenario-small-continents-s3001/t60",
+  "scenario-small-continents-s3001/t61",
+  "scenario-small-continents-s3001/t63",
+  "scenario-standard-pangaea-s3002/t120",
+  "scenario-standard-pangaea-s3002/t121",
+  "scenario-standard-pangaea-s3002/t123",
+  "small-fractal-raging-s1029/t120",
+  "small-inland_sea-raging-s1008/t280",
+  "small-pangaea-raging-s1026/t200",
+  "small-pangaea-raging-s1026/t280",
+  "standard-continents-normal-s1010/t60",
+  "standard-continents-normal-s1010/t200",
+  "standard-fractal-raging-s1014/t60",
+  "standard-inland_sea-normal-s1013/t25",
+  "standard-inland_sea-normal-s1013/t200",
+  "standard-pangaea-normal-s1031/t25",
+]

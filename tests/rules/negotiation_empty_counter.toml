@@ -1,0 +1,32 @@
+about = """
+A counter-offer needs at least one item: one with nothing on either side is refused, pointing at reply
+for a message alone, and the proposal on the table stays.
+"""
+from = "tests/test_negotiation_chat.py::MessageTests::test_an_empty_counter_is_refused"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?", give = [{ type = "gold", amount = 20 }] }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "counter", message = "Hmm.", give = [], receive = [] }
+error = "A counter-offer needs at least one item; use reply to send only a message."
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "counter", message = "Hmm." }
+error = "A counter-offer needs at least one item; use reply to send only a message."
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "open", awaiting = 1, proposal_by = 0, proposal = { "0" = [{ type = "gold", amount = 20 }], "1" = [] } }
