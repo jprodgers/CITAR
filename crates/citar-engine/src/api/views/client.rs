@@ -9,13 +9,14 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::alerts::alert_items;
-use super::cities::city_info;
+use super::cities::{CityView, city_view};
 use super::empire::empire_info;
 use super::events::events_json;
 use super::players::{diplomacy_info, players_overview};
-use super::tiles::{Known, feature_names, resource_seen, route_name};
-use super::units::unit_info;
+use super::tiles::{Known, resource_seen, route_name};
+use super::units::{UnitView, unit_view};
 use crate::base::ids::{PlayerId, UnitId};
+use crate::base::sets::FeatureSet;
 use crate::game::vis::sight::unit_visible_to;
 use crate::game::{Game, movement, victory};
 use crate::rules::Ruleset;
@@ -43,7 +44,7 @@ const PATH_TURNS: u32 = 40;
 pub struct TileRow<'a>(
     pub u32,
     pub &'a str,
-    pub Vec<&'a str>,
+    pub FeatureNames<'a>,
     pub Option<&'a str>,
     pub u8,
     pub Option<&'a str>,
@@ -54,6 +55,34 @@ pub struct TileRow<'a>(
     pub Option<u8>,
     pub u8,
 );
+
+/// A tile's features as the list of their names, lowest layer first, written without collecting
+/// them: the tiles are most of a view.
+#[derive(Clone, Copy, Debug)]
+pub struct FeatureNames<'a>(pub FeatureSet, pub &'a Ruleset);
+
+/// The same features named by the same ruleset.
+impl PartialEq for FeatureNames<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0 && core::ptr::eq(self.1, other.1)
+    }
+}
+
+impl Eq for FeatureNames<'_> {}
+
+impl Serialize for FeatureNames<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let r = self.1;
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for f in self.0.iter() {
+            if let Some(name) = r.derived().features.get(f).and_then(|&t| r.name(t)) {
+                seq.serialize_element(name)?;
+            }
+        }
+        seq.end()
+    }
+}
 
 /// The client view (`views.client_view`): the map as the viewer knows it, the units and cities it
 /// sees (and the cities it remembers), everyone it knows of, the settings and its events; for a
@@ -73,8 +102,8 @@ pub struct ClientView<'a> {
     pub wrap_x: bool,
     pub wrap_y: bool,
     pub tiles: Vec<TileRow<'a>>,
-    pub units: Vec<Value>,
-    pub cities: Vec<Value>,
+    pub units: Vec<UnitView<'a>>,
+    pub cities: Vec<CityEntry<'a>>,
     pub players: Vec<Value>,
     pub turn_limit: i32,
     pub config: Value,
@@ -83,6 +112,15 @@ pub struct ClientView<'a> {
     /// `empires`, `thoughts`, `messages` and `negotiations`.
     #[serde(flatten)]
     pub rest: Map<String, Value>,
+}
+
+/// A city in the client view: one the viewer sees, or one it remembers from when it last saw it
+/// (`stale`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum CityEntry<'a> {
+    Seen(Box<CityView<'a>>),
+    Remembered { id: u32, name: &'a str, owner: u8, x: i32, y: i32, pop: u16, stale: bool },
 }
 
 /// The route a move order would take (`EngineGame.path_preview`): the tiles from the unit's to
@@ -169,7 +207,7 @@ fn tile_rows<'a>(g: &'a Game, r: &'a Ruleset, viewer: Option<PlayerId>) -> Vec<T
         rows.push(TileRow(
             t.0,
             r.name(tile.terrain()).unwrap_or(""),
-            feature_names(g, k.features).collect(),
+            FeatureNames(k.features, r),
             tile.wonder().and_then(|w| r.name(w)),
             tile.river_mask(),
             res,
@@ -206,11 +244,11 @@ impl Game {
         let vis = viewer.and_then(|v| g.derived().vis().visible(v));
         let sees =
             |t: crate::base::ids::TileIdx| viewer.is_none() || vis.is_some_and(|x| x.contains(t.0));
-        let units: Vec<Value> = st
+        let units: Vec<UnitView<'_>> = st
             .units()
             .iter()
             .filter(|u| viewer.is_none_or(|v| sees(u.tile()) && unit_visible_to(g, v, u.id())))
-            .map(|u| unit_info(g, u.id(), viewer, false))
+            .filter_map(|u| unit_view(g, u.id(), viewer))
             .collect();
         let explored = |t: crate::base::ids::TileIdx| {
             viewer.and_then(|v| g.player(v)).is_some_and(|p| p.explored.contains(t.0))
@@ -220,15 +258,20 @@ impl Game {
         let mut cities = Vec::new();
         for c in st.cities().iter() {
             if sees(c.tile()) {
-                cities.push(city_info(g, c.id(), viewer, false));
+                cities.extend(city_view(g, c.id(), viewer).map(|v| CityEntry::Seen(Box::new(v))));
             } else if explored(c.tile())
                 && let Some(mem) = memory.and_then(|m| m.city(c.tile()))
             {
                 let (x, y) = g.xy(c.tile());
-                cities.push(json!({
-                    "id": c.id().get(), "name": &*mem.name, "owner": mem.owner.0, "x": x, "y": y,
-                    "pop": mem.pop, "stale": true,
-                }));
+                cities.push(CityEntry::Remembered {
+                    id: c.id().get(),
+                    name: &mem.name,
+                    owner: mem.owner.0,
+                    x,
+                    y,
+                    pop: mem.pop,
+                    stale: true,
+                });
             }
         }
         let mut rest = Map::new();

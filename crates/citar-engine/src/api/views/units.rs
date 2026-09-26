@@ -1,6 +1,7 @@
 //! A unit as a viewer sees it, and everything its owner needs to give it orders
 //! (`views.unit_info` and `_unit_detail`, `views.py:50-157`).
 
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::{rule_text, xy};
@@ -52,93 +53,165 @@ pub fn unit_class(g: &Game, d: &BaseUnitDef) -> &'static str {
     }
 }
 
-/// A unit as `viewer` sees it (`views.unit_info`): what anyone sees of it, and for its owner (or
-/// a spectator) its movement, orders, experience and promotions; with `detail`, what its owner
-/// needs to play its turn.
+/// A unit as a viewer sees it (`views.unit_info` without the detail), typed so that the client
+/// view writes it straight to JSON: what anyone sees of it, and for its owner (or a spectator)
+/// [`OwnUnit`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UnitView<'a> {
+    pub id: u32,
+    #[serde(rename = "type")]
+    pub base: &'a str,
+    pub name: &'a str,
+    pub owner: u8,
+    pub x: i32,
+    pub y: i32,
+    pub hp: i16,
+    pub military: bool,
+    pub domain: &'static str,
+    pub unit_type: &'a str,
+    pub class: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub great_person: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub religion: Option<String>,
+    #[serde(flatten)]
+    pub own: Option<OwnUnit<'a>>,
+}
+
+/// What a unit's owner sees of it besides: its movement, orders, experience and promotions.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct OwnUnit<'a> {
+    pub moves: f64,
+    pub max_moves: f64,
+    pub activity: Option<&'static str>,
+    pub xp: i32,
+    pub promotions: Vec<&'a str>,
+    pub can_promote: bool,
+    pub promotion_ready: bool,
+    pub attacks_made: u8,
+    pub embarked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fortified_turns: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_offer: Option<ReturnOffer<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<[&'static str; 1]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub building: Option<Vec<BuildStepView<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goto: Option<[i32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub religious_strength: Option<i16>,
+}
+
+/// A recaptured civilian's first owner, whom it may be given back to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReturnOffer<'a> {
+    pub player: u8,
+    /// Its name, or "its original owner" to a viewer that has not met it.
+    pub name: &'a str,
+}
+
+/// An improvement being built on a tile, and the turns it has left.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BuildStepView<'a> {
+    pub improvement: &'a str,
+    pub turns_left: i16,
+}
+
+/// A unit as `viewer` sees it, typed (`views.unit_info` without the detail).
 #[must_use]
-pub fn unit_info(g: &Game, u: UnitId, viewer: Option<PlayerId>, detail: bool) -> Value {
-    let Some(x) = g.unit(u) else { return Value::Null };
+pub fn unit_view(g: &Game, u: UnitId, viewer: Option<PlayerId>) -> Option<UnitView<'_>> {
+    let x = g.unit(u)?;
     let r = g.rules();
     let d = &r.base_units()[x.base];
     let (ux, uy) = g.xy(x.tile());
     let own = viewer.is_none_or(|v| v == x.owner());
     let type_name = &*d.name;
-    let mut m = Map::new();
-    m.insert("id".into(), json!(u.get()));
-    m.insert("type".into(), json!(type_name));
-    m.insert("name".into(), json!(x.name.as_deref().unwrap_or(type_name)));
-    m.insert("owner".into(), json!(x.owner().0));
-    m.insert("x".into(), json!(ux));
-    m.insert("y".into(), json!(uy));
-    m.insert("hp".into(), json!(x.hp));
-    m.insert("military".into(), json!(d.military));
-    m.insert("domain".into(), json!(domain_name(d.domain)));
-    m.insert("unit_type".into(), json!(&*r.unit_types()[d.unit_type].name));
-    m.insert("class".into(), json!(unit_class(g, d)));
-    if d.great_person {
-        m.insert("great_person".into(), json!(true));
-    }
-    if let Some(rel) = x.religion
-        && g.religion_enabled()
-    {
-        m.insert("religion".into(), json!(religion::display_name(g, rel)));
-    }
-    if own {
+    let religion =
+        x.religion.filter(|_| g.religion_enabled()).map(|rel| religion::display_name(g, rel));
+    let own = own.then(|| {
         let sc = f64::from(r.constants().move_scale);
         let promote = promotions::can_promote(g, u);
-        m.insert("moves".into(), json!(num::round_ndigits(f64::from(x.moves) / sc, 2)));
-        m.insert(
-            "max_moves".into(),
-            json!(num::round_ndigits(f64::from(movement::max_moves(g, u)) / sc, 2)),
-        );
-        m.insert("activity".into(), json!(x.activity.map(|a| a.name())));
-        m.insert("xp".into(), json!(x.xp));
-        let promos: Vec<&str> = x.promotions.iter().filter_map(|p| r.name(p)).collect();
-        m.insert("promotions".into(), json!(promos));
-        m.insert("can_promote".into(), json!(promote));
-        m.insert("promotion_ready".into(), json!(promote));
-        m.insert("attacks_made".into(), json!(x.attacks));
-        m.insert("embarked".into(), json!(movement::is_embarked(g, u)));
-        if x.fortify > 0 {
-            m.insert("fortified_turns".into(), json!(x.fortify));
-        }
-        if let (Some(back), Some(v)) = (x.return_offer, viewer) {
-            let name = if g.has_met(v, back) {
-                json!(super::name_of(g, back))
-            } else {
-                json!("its original owner")
-            };
-            m.insert("return_offer".into(), json!({"player": back.0, "name": name}));
-        }
-        if x.set_up {
-            m.insert("status".into(), json!(["Set Up"]));
-        }
+        let return_offer = match (x.return_offer, viewer) {
+            (Some(back), Some(v)) => Some(ReturnOffer {
+                player: back.0,
+                name: if g.has_met(v, back) {
+                    super::name_of(g, back)
+                } else {
+                    "its original owner"
+                },
+            }),
+            _ => None,
+        };
         let building = matches!(
             x.activity,
             Some(crate::state::units::Activity::Build | crate::state::units::Activity::Automate)
         );
         let steps = g.state().tiles().builds(x.tile());
-        if building && !steps.is_empty() {
-            let list: Vec<Value> = steps
+        let building = (building && !steps.is_empty()).then(|| {
+            steps
                 .iter()
                 .filter(|s| s.turns_left >= 0)
-                .map(|s| {
-                    json!({"improvement": &*r.improvements()[s.improvement].name, "turns_left": s.turns_left})
+                .map(|s| BuildStepView {
+                    improvement: &r.improvements()[s.improvement].name,
+                    turns_left: s.turns_left,
                 })
-                .collect();
-            m.insert("building".into(), Value::Array(list));
+                .collect()
+        });
+        let religious =
+            x.religion.is_some() && units::type_has(g, x.base, UniqueType::ReligiousUnit);
+        OwnUnit {
+            moves: num::round_ndigits(f64::from(x.moves) / sc, 2),
+            max_moves: num::round_ndigits(f64::from(movement::max_moves(g, u)) / sc, 2),
+            activity: x.activity.map(|a| a.name()),
+            xp: x.xp,
+            promotions: x.promotions.iter().filter_map(|p| r.name(p)).collect(),
+            can_promote: promote,
+            promotion_ready: promote,
+            attacks_made: x.attacks,
+            embarked: movement::is_embarked(g, u),
+            fortified_turns: (x.fortify > 0).then_some(x.fortify),
+            return_offer,
+            status: x.set_up.then_some(["Set Up"]),
+            building,
+            goto: x.goto.map(|t| {
+                let (a, b) = g.xy(t);
+                [a, b]
+            }),
+            religious_strength: religious.then_some(x.religious_strength),
         }
-        if let Some(to) = x.goto {
-            m.insert("goto".into(), xy(g, to));
-        }
-        if x.religion.is_some() && units::type_has(g, x.base, UniqueType::ReligiousUnit) {
-            m.insert("religious_strength".into(), json!(x.religious_strength));
-        }
+    });
+    Some(UnitView {
+        id: u.get(),
+        base: type_name,
+        name: x.name.as_deref().unwrap_or(type_name),
+        owner: x.owner().0,
+        x: ux,
+        y: uy,
+        hp: x.hp,
+        military: d.military,
+        domain: domain_name(d.domain),
+        unit_type: &r.unit_types()[d.unit_type].name,
+        class: unit_class(g, d),
+        great_person: d.great_person.then_some(true),
+        religion,
+        own,
+    })
+}
+
+/// A unit as `viewer` sees it (`views.unit_info`): [`unit_view`], and with `detail` what its
+/// owner needs to play its turn.
+#[must_use]
+pub fn unit_info(g: &Game, u: UnitId, viewer: Option<PlayerId>, detail: bool) -> Value {
+    let Some(view) = unit_view(g, u, viewer) else { return Value::Null };
+    let own = view.own.is_some();
+    // A view is text, numbers, lists and maps with text keys, which always convert.
+    let mut v = serde_json::to_value(view).unwrap_or(Value::Null);
+    if detail && let (Some(m), Some(x)) = (v.as_object_mut(), g.unit(u)) {
+        unit_detail(g, u, &g.rules().base_units()[x.base], own, m);
     }
-    if detail {
-        unit_detail(g, u, d, own, &mut m);
-    }
-    Value::Object(m)
+    v
 }
 
 /// Everything an owner needs to give a unit orders: what it can do, where it can go and what it
