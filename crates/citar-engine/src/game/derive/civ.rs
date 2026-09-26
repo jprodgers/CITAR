@@ -86,17 +86,40 @@ struct CityMemos {
 #[derive(Clone, Debug)]
 struct Shared<K> {
     map: RefCell<LookupMap<K, Arc<Csr>>>,
+    /// The last two keys asked for, the latest first, with their indexes: a fight asks of its two
+    /// units' profiles a score of times, and a key compare is cheaper than a hash.
+    recent: RefCell<[Option<(K, Arc<Csr>)>; 2]>,
 }
 
 impl<K: Eq + Hash> Default for Shared<K> {
     fn default() -> Self {
-        Self { map: RefCell::new(LookupMap::new()) }
+        Self { map: RefCell::new(LookupMap::new()), recent: RefCell::new([None, None]) }
     }
 }
 
-impl<K: Eq + Hash> Shared<K> {
+impl<K: Eq + Hash + Clone> Shared<K> {
     /// The index of `key`, built by `build` the first time it is asked for.
     fn get(&self, key: K, build: impl FnOnce() -> Csr) -> Arc<Csr> {
+        {
+            let mut recent = self.recent.borrow_mut();
+            if let Some((_, c)) = recent[0].as_ref().filter(|(k, _)| *k == key) {
+                return Arc::clone(c);
+            }
+            if let Some((_, c)) = recent[1].as_ref().filter(|(k, _)| *k == key) {
+                let c = Arc::clone(c);
+                recent.swap(0, 1);
+                return c;
+            }
+        }
+        let c = self.lookup(key.clone(), build);
+        let mut recent = self.recent.borrow_mut();
+        recent.swap(0, 1);
+        recent[0] = Some((key, Arc::clone(&c)));
+        c
+    }
+
+    /// [`get`](Self::get) without the recent keys.
+    fn lookup(&self, key: K, build: impl FnOnce() -> Csr) -> Arc<Csr> {
         if let Some(c) = self.map.borrow().get(&key) {
             return Arc::clone(c);
         }

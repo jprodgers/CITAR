@@ -264,12 +264,15 @@ pub fn city_strength(g: &Game, c: CityId, theirs: Option<Combatant>, action: Com
     num::round_half_even_i32(s)
 }
 
-/// A unit's `[n] Strength` in a fight, its own uniques only (`combat.py:183, 196`).
-fn strength_amount(g: &Game, u: UnitId, ctx: &Ctx) -> i32 {
+/// A unit's `[n] Strength` in a fight, its own uniques only (`combat.py:183, 196`): the fight's
+/// context is made only for a unit that has such a unique.
+fn strength_amount(g: &Game, u: UnitId, ctx: impl FnOnce() -> Ctx) -> i32 {
     let v = g.view();
-    uq::sum_i32(uq::unit(&v, u, UniqueType::StrengthAmount, ctx), |d| match d {
-        UniqueData::StrengthAmount(x) => Some(x.strength),
-        _ => None,
+    uq::unit_candidates(&v, u, UniqueType::StrengthAmount, false, ctx).map_or(0, |h| {
+        uq::sum_i32(h, |d| match d {
+            UniqueData::StrengthAmount(x) => Some(x.strength),
+            _ => None,
+        })
     })
 }
 
@@ -292,9 +295,9 @@ pub fn base_attack_from(g: &Game, a: Combatant, from: TileIdx, d: Option<Combata
             let Some(x) = g.unit(u) else { return 0.0 };
             let def = &g.rules().base_units()[x.base];
             let extra = match d {
-                Some(_) => {
-                    strength_amount(g, u, &fight_ctx_at(g, a, from, d, CombatAction::Attack, None))
-                }
+                Some(_) => strength_amount(g, u, || {
+                    fight_ctx_at(g, a, from, d, CombatAction::Attack, None)
+                }),
                 None => 0,
             };
             let base = if def.ranged { def.ranged_strength } else { def.strength };
@@ -322,7 +325,7 @@ pub fn base_defense(g: &Game, d: Combatant, a: Option<Combatant>) -> f64 {
             let r = g.rules();
             let def = &r.base_units()[x.base];
             let extra = match a {
-                Some(_) => strength_amount(g, u, &fight_ctx(g, d, a, CombatAction::Defend, None)),
+                Some(_) => strength_amount(g, u, || fight_ctx(g, d, a, CombatAction::Defend, None)),
                 None => 0,
             };
             if def.military && crate::game::movement::is_embarked(g, u) {
@@ -455,27 +458,16 @@ fn general_modifiers(
                 }
             }
             // The units beside it; the enemy counts where it fights from, beside it or not
-            // (a unit shooting from afar is not beside it, one attacking from beside it is).
-            let mut adj: SmallVec<[UnitId; 8]> = g
-                .grid()
-                .neighbors(at)
-                .flat_map(|n| g.units_at(n))
-                .filter(|o| Combatant::Unit(o.id()) != enemy)
-                .map(Unit::id)
-                .collect();
-            if let Combatant::Unit(e) = enemy
-                && g.grid().neighbors(at).any(|n| n == enemy_at)
-            {
-                adj.push(e);
-            }
+            // (a unit shooting from afar is not beside it, one attacking from beside it is). The
+            // worst malus of those at war with it that may carry one: the least, in any order.
             let f = r.uniques().filters();
             let mut worst: Option<i32> = None;
             let adjacent = &r.derived().combat.adjacent;
-            for o in adj {
-                let Some(ou) = g.unit(o) else { continue };
+            let mut beside = |ou: &Unit| {
                 if !g.at_war(ou.owner(), owner) || !adjacent.may(ou.base, &ou.promotions) {
-                    continue;
+                    return;
                 }
+                let o = ou.id();
                 let octx = Ctx::unit(&v, o);
                 for h in uq::unit(&v, o, UniqueType::StrengthForAdjacentEnemies, &octx) {
                     if let UniqueData::StrengthForAdjacentEnemies(x) = h.data()
@@ -486,6 +478,19 @@ fn general_modifiers(
                         worst = Some(x.percent);
                     }
                 }
+            };
+            for n in g.grid().neighbors(at) {
+                for ou in g.units_at(n) {
+                    if Combatant::Unit(ou.id()) != enemy {
+                        beside(ou);
+                    }
+                }
+            }
+            if let Combatant::Unit(e) = enemy
+                && g.grid().neighbors(at).any(|n| n == enemy_at)
+                && let Some(eu) = g.unit(e)
+            {
+                beside(eu);
             }
             if let Some(w) = worst {
                 put(&mut mods, ModKey::AdjacentEnemies, w);

@@ -137,14 +137,32 @@ fn main() {
             });
         }
         "combat" => {
-            let g = fixtures::committed_game("standard-pangaea-normal-s1031", 120);
-            let pairs: Vec<(UnitId, TileIdx)> = g
+            // The pairs of `combat/preview`: every unit and a tile within two it may attack, the
+            // units readied so that the checks pass.
+            let mut g = fixtures::committed_game("standard-pangaea-normal-s1031", 120);
+            let cands: Vec<(UnitId, TileIdx)> = g
                 .state()
                 .units()
                 .iter()
                 .flat_map(|u| g.grid().within(u.tile(), 2).into_iter().map(move |t| (u.id(), t)))
-                .filter(|&(u, t)| resolve::preview_of(&g, u, t).is_ok())
+                .filter(|&(u, t)| {
+                    resolve::contains_attackable_enemy(
+                        &g,
+                        t,
+                        citar_engine::unique::Combatant::Unit(u),
+                    )
+                    .is_none()
+                })
                 .collect();
+            let ready: Vec<serde_json::Value> = cands
+                .iter()
+                .map(|&(u, _)| serde_json::json!({"op": "ready_unit", "unit": u.get()}))
+                .collect();
+            citar_engine::api::testops::apply(&mut g, &serde_json::Value::Array(ready))
+                .expect("readied");
+            let pairs: Vec<(UnitId, TileIdx)> =
+                cands.into_iter().filter(|&(u, t)| resolve::preview_of(&g, u, t).is_ok()).collect();
+            println!("{} fights", pairs.len());
             run(n * 100, || {
                 for &(u, t) in &pairs {
                     black_box(resolve::preview_of(&g, u, t).ok());

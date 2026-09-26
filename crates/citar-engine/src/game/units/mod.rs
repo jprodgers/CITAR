@@ -65,12 +65,7 @@ pub fn unit_uniques(g: &Game, u: UnitId, ty: UniqueType, with_civ: bool) -> Vec<
 #[must_use]
 pub fn unit_has(g: &Game, u: UnitId, ty: UniqueType, with_civ: bool) -> bool {
     let v = g.view();
-    let ctx = Ctx::unit(&v, u);
-    if with_civ {
-        uq::any(uq::unit_and_civ(&v, u, ty, &ctx))
-    } else {
-        uq::any(uq::unit(&v, u, ty, &ctx))
-    }
+    uq::unit_candidates(&v, u, ty, with_civ, || Ctx::unit(&v, u)).is_some_and(uq::any)
 }
 
 /// The sum of an amount over the unit's uniques of type `ty` that hold, each as many times as
@@ -83,12 +78,7 @@ pub(crate) fn unit_sum(
     f: impl FnMut(&UniqueData) -> Option<i32>,
 ) -> i32 {
     let v = g.view();
-    let ctx = Ctx::unit(&v, u);
-    if with_civ {
-        uq::sum_i32(uq::unit_and_civ(&v, u, ty, &ctx), f)
-    } else {
-        uq::sum_i32(uq::unit(&v, u, ty, &ctx), f)
-    }
+    uq::unit_candidates(&v, u, ty, with_civ, || Ctx::unit(&v, u)).map_or(0, |h| uq::sum_i32(h, f))
 }
 
 /// Whether a unit counts as a city's garrison, for its strength and its happiness
