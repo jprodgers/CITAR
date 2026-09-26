@@ -1,0 +1,147 @@
+about = """
+The rules as a model looks them up (get_rules): a whole topic, its entries in brief for units,
+buildings, techs and nations and whole for the rest; one entry by a name written loosely; a tech
+with what it unlocks; a city-state type as the bonuses it gives; the deal items; the rules and
+combat in brief. An unknown topic is refused with the topics there are, and a name the topic has no
+entry for is refused by name.
+"""
+from = "citar/engine/views.py: rules_lookup, RULES_OVERVIEW, RULES_COMBAT; citar/engine/tools.py: get_rules"
+
+[[step]]
+tool = "get_rules"
+args = { topic = "units", name = "warrior" }
+as = "warrior"
+
+[[step]]
+check = "warrior"
+subset = { name = "Warrior", strength = 8, cost = 40, requiredTech = "Agriculture", movement = 2 }
+
+[[step]]
+tool = "get_rules"
+args = { topic = " Units " }
+as = "units"
+
+[[step]]
+check = "units"
+path = "Warrior"
+subset = { cost = 40, strength = 8, ranged = 0, movement = 2, tech = "Agriculture", upgrades_to = "Swordsman" }
+
+[[step]]
+tool = "get_rules"
+args = { topic = "techs", name = "bronze working" }
+as = "tech"
+
+[[step]]
+check = "tech"
+subset = { name = "Bronze Working", era = "Ancient era", prerequisites = ["Mining"] }
+
+[[step]]
+check = "tech"
+path = "unlocks.units"
+contains = "Spearman"
+
+[[step]]
+check = "tech"
+path = "unlocks"
+not_contains = "policies"
+
+[[step]]
+tool = "get_rules"
+args = { topic = "buildings" }
+as = "buildings"
+
+[[step]]
+check = "buildings"
+path = "Monument"
+subset = { wonder = false, national_wonder = false, maintenance = 1 }
+
+[[step]]
+check = "buildings"
+path = '["The Pyramids"]'
+subset = { wonder = true, tech = "Masonry" }
+
+[[step]]
+tool = "get_rules"
+args = { topic = "city_state_types" }
+as = "types"
+
+[[step]]
+check = "types"
+eq = ["Cultured", "Maritime", "Mercantile", "Militaristic", "Religious"]
+
+[[step]]
+tool = "get_rules"
+args = { topic = "city_state_types", name = "Maritime" }
+as = "maritime"
+
+[[step]]
+check = "maritime"
+path = "ally_bonuses"
+len = 2
+
+[[step]]
+note = "A city-state type is named exactly."
+tool = "get_rules"
+args = { topic = "city_state_types", name = "maritime" }
+error = "No city_state_types entry 'maritime'."
+
+[[step]]
+tool = "get_rules"
+args = { topic = "policies", name = "legalism" }
+as = "legalism"
+
+[[step]]
+check = "legalism"
+subset = { name = "Legalism", branch = "Tradition", requires = ["Tradition"] }
+
+[[step]]
+tool = "get_rules"
+args = { topic = "nations", name = "Rome" }
+as = "rome"
+
+[[step]]
+check = "rome"
+path = "cities[0]"
+eq = "Rome"
+
+[[step]]
+tool = "get_rules"
+args = { topic = "deal_items" }
+as = "items"
+
+[[step]]
+check = "items"
+path = "gold"
+eq = 'Lump sum of gold: {"type": "gold", "amount": 100}'
+
+[[step]]
+check = "items"
+len = 13
+
+[[step]]
+tool = "get_rules"
+args = { topic = "overview" }
+as = "overview"
+
+[[step]]
+check = "overview"
+matches = "^CITAR rules overview\\. The rules and numbers are UnCiv's \"Civ V - Gods & Kings\" ruleset\\.\n"
+
+[[step]]
+tool = "get_rules"
+args = { topic = "combat" }
+as = "combat"
+
+[[step]]
+check = "combat"
+matches = "^Combat \\(UnCiv formulas\\): damage to the defender = 24 \\+ 12r"
+
+[[step]]
+tool = "get_rules"
+args = { topic = "astrology" }
+error = "Unknown topic 'astrology'. Topics: units, buildings, techs, improvements, resources, promotions, terrains, terrain, policies, beliefs, specialists, eras, nations, city_state_types, speeds, difficulties, deal_items, combat, overview."
+
+[[step]]
+tool = "get_rules"
+args = { topic = "units", name = "Unicorn" }
+error = "No units entry 'Unicorn'."

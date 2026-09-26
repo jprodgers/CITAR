@@ -1,0 +1,90 @@
+about = """
+The ASCII map a model reads in place of a screen (get_map): the area around its capital, or a tile
+it names, with a row of column numbers, each row numbered, odd rows shifted by half a cell, and each
+cell its terrain, feature and marker; then what it sees in the window. A centre off the map is
+refused rather than drawn somewhere else; the radius is held between 2 and 20; the legend comes
+first when asked for. The local map of the briefing is the same, five rows each way.
+"""
+from = "citar/engine/briefing.py: ascii_map, MAP_LEGEND; citar/engine/tools.py: get_map"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "H" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "R" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id" }
+
+[[step]]
+tool = "get_map"
+player = 0
+as = "map"
+
+[[step]]
+check = "map"
+matches = "^Map around \\(5,5\\), x 0-21, y 0-13:\n      0              5              10             15             20\n"
+
+[[step]]
+note = "Roma on grassland, the warrior on the hill east of it, the worker by the river."
+check = "map"
+matches = "\ny=5    [^\n]*G\\.@G\\. GhU"
+
+[[step]]
+check = "map"
+matches = "\ny=4   [^\n]*Grw"
+
+[[step]]
+check = "map"
+matches = "\nIn this window:\n  city 'Roma' #[0-9]+ \\(5,5\\) owner Civilization 1 pop 1\n  unit #[0-9]+ Warrior \\(7,5\\) yours hp 100\n  unit #[0-9]+ Worker \\(6,4\\) yours hp 100\n  resource Cotton \\(4,3\\)$"
+
+[[step]]
+tool = "get_map"
+player = 0
+args = { x = 11, y = 7, radius = 1 }
+as = "small"
+
+[[step]]
+check = "small"
+matches = "^Map around \\(11,7\\), x 7-15, y 5-9:\n"
+
+[[step]]
+tool = "get_map"
+player = 0
+args = { legend = true, radius = 99 }
+as = "legend"
+
+[[step]]
+check = "legend"
+matches = "^Legend: each cell is 3 chars \\[terrain\\]\\[feature\\]\\[marker\\]\\. [^\n]*\nTerrain: G grassland[^\n]*\nMarkers: @ your city[^\n]*\n\nMap around \\(5,5\\), x 0-23, y 0-15:\n"
+
+[[step]]
+tool = "get_map"
+player = 0
+args = { x = 30, y = 3 }
+error = "(30,3) is off the map (map is 24x16)."
+
+[[step]]
+note = "With one coordinate the map is the capital's."
+tool = "get_map"
+player = 0
+args = { x = 20 }
+as = "one"
+
+[[step]]
+check = "one"
+matches = "^Map around \\(5,5\\)"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\nLOCAL MAP \\(legend: get_map legend=true\\):\nMap around \\(5,5\\), x 0-15, y 0-10:\n"
+
+[[step]]
+note = "The briefing's own units are listed above it, so the local map's entries leave them out."
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\nAlso in this window: city 'Roma' #[0-9]+ \\(5,5\\) owner Civilization 1 pop 1; resource Cotton \\(4,3\\)\n"
