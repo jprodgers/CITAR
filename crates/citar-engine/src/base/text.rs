@@ -275,6 +275,34 @@ pub fn truncate_chars(text: &str, n: usize) -> &str {
     }
 }
 
+/// The most of a caller's own words a refusal quotes back.
+pub const ECHO_CHARS: usize = 60;
+
+/// A caller's text as a refusal quotes it back ("Unknown tool '...'."): as it is, or its first
+/// [`ECHO_CHARS`] characters and `...` when it is longer, so that a refusal stays within the 600
+/// characters it may take whatever it was sent (property P5, DESIGN.md 8.5). Python quoted all
+/// of it. A refusal that quotes a JSON value rather than text uses
+/// [`crate::base::py::repr_echo`], which cuts each text in the value so.
+// refcheck: refusals-quote-at-most-60-characters
+#[must_use]
+pub fn echo(text: &str) -> Cow<'_, str> {
+    let head = truncate_chars(text, ECHO_CHARS);
+    if head.len() == text.len() { Cow::Borrowed(text) } else { Cow::Owned(format!("{head}...")) }
+}
+
+/// A caller's text where a refusal names it without quotation marks, as Python did ("Roma has
+/// no slots for Scientist."): as it is, or, when [`echo`] cuts it, cut and put in quotation
+/// marks, so that its `...` does not run into the full stop after it.
+// refcheck: refusals-quote-at-most-60-characters
+#[must_use]
+pub fn echo_bare(text: &str) -> Cow<'_, str> {
+    if truncate_chars(text, ECHO_CHARS).len() == text.len() {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("'{}'", echo(text)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +367,21 @@ mod tests {
         let text = "Kraków is here";
         let byte = text.find("is").expect("present");
         assert_eq!(char_offset(text, byte), 7);
+    }
+
+    #[test]
+    fn a_long_echo_is_cut() {
+        assert_eq!(echo("Warp Drive"), "Warp Drive");
+        let long = "é".repeat(ECHO_CHARS + 1);
+        let cut = echo(&long);
+        assert_eq!(cut.chars().count(), ECHO_CHARS + 3);
+        assert!(cut.ends_with("é..."));
+        // Unquoted, a name stays as Python wrote it until it is cut.
+        assert_eq!(echo_bare("Scientist"), "Scientist");
+        assert_eq!(echo_bare(&"a".repeat(ECHO_CHARS)), "a".repeat(ECHO_CHARS));
+        assert_eq!(echo_bare(&long), format!("'{cut}'"));
+        // 63 characters cut to 60 and `...` are as long as they were, and still cut.
+        let just_over = "b".repeat(ECHO_CHARS + 3);
+        assert_eq!(echo_bare(&just_over), format!("'{}...'", "b".repeat(ECHO_CHARS)));
     }
 }

@@ -26,13 +26,15 @@ use serde_json::{Map, Value};
 
 use super::args::{self, ArgType, ToolArgs};
 use crate::base::py;
+use crate::base::text::echo;
 use crate::game::error::{ActionError, ErrCode};
 
 /// The arguments of a call to `tool`, coerced as `tools.execute` coerced them. An unknown tool is
 /// refused as Python refused it.
 pub fn normalize(tool: &str, args: &Value) -> Result<Map<String, Value>, ActionError> {
-    let spec = args::spec(tool)
-        .ok_or_else(|| ActionError::new(ErrCode::UnknownTool, format!("Unknown tool '{tool}'.")))?;
+    let spec = args::spec(tool).ok_or_else(|| {
+        ActionError::new(ErrCode::UnknownTool, format!("Unknown tool '{}'.", echo(tool)))
+    })?;
     normalize_with(spec, args)
 }
 
@@ -59,9 +61,10 @@ pub fn normalize_with(spec: &ToolArgs, args: &Value) -> Result<Map<String, Value
         ));
     }
     out.retain(|k, _| spec.param(k).is_some());
-    for &(name, ty) in spec.params {
+    for p in spec.params {
+        let name = p.name;
         let Some(v) = out.get_mut(name) else { continue };
-        match ty {
+        match p.ty() {
             ArgType::Integer if !v.is_null() => {
                 // refcheck: normalize-refuses-big-ints-and-non-objects (beyond i64 is refused)
                 let n = py::int_of(v).ok_or_else(|| {
@@ -102,12 +105,7 @@ mod tests {
 
     const PROBE: ToolArgs = ToolArgs {
         tool: "probe",
-        params: &[
-            ("n", ArgType::Integer),
-            ("flag", ArgType::Boolean),
-            ("names", ArgType::Array),
-            ("m", ArgType::Integer),
-        ],
+        params: &[args::int("n"), args::boolean("flag"), args::strings("names"), args::int("m")],
         required: &["n"],
     };
 

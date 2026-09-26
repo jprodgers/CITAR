@@ -2,8 +2,10 @@
 //! may take, taking one with what follows from it, and combat experience.
 
 use crate::base::ids::{PromotionId, UnitId};
+use crate::base::text::echo;
 use crate::game::derive::rev::UnitTouch;
 use crate::game::error::ActionError;
+use crate::game::lookup::with_list;
 use crate::game::{Game, triggers};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::unique::trigger::{OneTimeEffect, TriggerEvent, TriggerSite};
@@ -151,11 +153,10 @@ pub fn plan_promotion(g: &Game, u: UnitId, name: &str) -> Result<PromotionId, Ac
     let av = available_promotions(g, u);
     let Some(pr) = found.filter(|p| av.contains(p)) else {
         let shown = found.and_then(|p| r.name(p)).unwrap_or(name);
-        let names: Vec<&str> = av.iter().filter_map(|&p| r.name(p)).collect();
-        let list = if names.is_empty() { "none".to_owned() } else { names.join(", ") };
-        return Err(ActionError::rule(format!(
-            "{shown} is not available for this unit. Available: {list}"
-        )));
+        let names: Vec<String> = av.iter().filter_map(|&p| r.name(p)).map(str::to_owned).collect();
+        // refcheck: refusals-end-as-sentences
+        let head = format!("{} is not available for this unit. Available: ", echo(shown));
+        return Err(ActionError::rule(with_list(&head, &names, ".", "get_unit")));
     };
     // A paid promotion needs the experience or a free pick of its own: Python let any promotion
     // through while a free one was available, and took the experience the unit did not have.

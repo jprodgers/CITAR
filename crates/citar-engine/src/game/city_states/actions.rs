@@ -26,7 +26,8 @@ use crate::game::diplomacy::relations::{
     add_opinion, civ_has, name, peace_with_city_state, plan_peace_with_city_state,
 };
 use crate::game::error::{ActionError, ErrCode};
-use crate::game::units::{self, actions::own_unit, place_unit_near};
+use crate::game::lookup::own_unit;
+use crate::game::units::{self, place_unit_near};
 use crate::game::{Game, conquest, victory};
 use crate::rules::defs::{CityStatePersonality, QuestKind, QuestScope};
 use crate::state::chronicle::{EngineEvent, EventData};

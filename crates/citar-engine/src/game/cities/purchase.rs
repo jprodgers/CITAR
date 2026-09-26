@@ -15,7 +15,6 @@ use super::super::Game;
 use super::super::action::{OutcomeSpec, Rule};
 use super::super::derive::rev::{CityTouch, PlayerTouch};
 use super::super::error::{ActionError, ErrCode};
-use super::citizens::own_city;
 use super::construction::{
     RejectionKind, complete_construction, item_name, rejection_kinds, rejection_reasons,
     unit_placement, validate_queue,
@@ -26,6 +25,7 @@ use crate::base::ids::{CityId, PlayerId, SetRef};
 use crate::base::num;
 use crate::base::py;
 use crate::base::stats::Stat;
+use crate::game::lookup::own_city;
 use crate::rules::defs::Domain;
 use crate::state::cities::Constructible;
 use crate::unique::{Ctx, SourceUniques, UniqueData, UniqueType, uq};

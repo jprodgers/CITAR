@@ -30,15 +30,16 @@ use super::cities::founding::{found_check, found_city_by};
 use super::cities::stats::current_construction;
 use super::derive::rev::{PlayerTouch, UnitTouch};
 use super::error::{ActionError, ErrCode};
+use super::lookup::{own_unit, tile_at};
 use super::religion::{found, spread};
 use super::units::abilities::{consume_action, usable_action};
-use super::units::actions::{own_unit, tile_at};
 use super::units::type_has;
 use super::workers::{self, InstantOption};
 use super::{great_people, policies, research, triggers};
 use crate::base::fmt::PyFloat;
 use crate::base::ids::{CityId, ImprovementId, PlayerId, TileIdx, UniqueId, UnitId};
 use crate::base::py;
+use crate::base::text::echo;
 use crate::rules::defs::ReligionProgress;
 use crate::state::cities::Constructible;
 use crate::state::map::Tile;
@@ -422,7 +423,8 @@ pub fn plan_action(
         let names = if ids.is_empty() { "none".to_owned() } else { ids.join(", ") };
         let unit = &g.rules().base_units()[x.base].name;
         return Err(ActionError::rule(format!(
-            "{unit} has no action '{action}'. Its actions: {names}."
+            "{unit} has no action '{}'. Its actions: {names}.",
+            echo(action)
         )));
     };
     if let Some(reason) = &a.reason {

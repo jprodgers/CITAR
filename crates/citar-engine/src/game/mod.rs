@@ -83,6 +83,7 @@ pub mod eval;
 pub mod events;
 pub mod great_people;
 pub mod invariants;
+pub mod lookup;
 pub mod meta;
 pub mod movement;
 pub mod mutate;

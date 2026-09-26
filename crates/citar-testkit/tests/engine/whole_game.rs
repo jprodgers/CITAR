@@ -11,7 +11,8 @@
 //! - the agent tries every action a seat has, and the game carries out most of them;
 //! - the whole-game helpers refuse a game whose rounds they cannot count, and drive any driver.
 
-use citar_engine::api::tools::args::TOOLS;
+use citar_engine::api::tools::ToolKind;
+use citar_engine::api::tools::registry::TOOLS;
 use citar_engine::base::ids::{NegotiationId, PlayerId};
 use citar_engine::game::{DebugOptions, DriverOutcome, Game, SeatDriver};
 use citar_engine::state::Phase;
@@ -338,8 +339,9 @@ fn the_agent_tries_every_action_and_the_game_takes_most() {
         games::play_random(&mut g, &mut agents, 120, &mut |_, _| Ok(())).expect("it plays");
     }
     let plain = take_tally();
-    // Every action tool a seat has: the 40 of the registry's argument specs.
-    let every: Vec<&str> = TOOLS.iter().map(|t| t.tool).collect();
+    // Every action tool a seat has: the registry's 40.
+    let every: Vec<&str> =
+        TOOLS.iter().filter(|t| t.kind() == ToolKind::Action).map(|t| t.name()).collect();
     assert_eq!(every.len(), 40);
     let untried: Vec<&&str> = every.iter().filter(|t| !plain.contains_key(**t)).collect();
     assert!(untried.is_empty(), "never tried: {untried:?}\n{plain:#?}");

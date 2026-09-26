@@ -3,10 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use citar_engine::api::{ActionError, ErrCode, inspect, testops, tools};
+use citar_engine::api::{ActionError, inspect, testops};
 use citar_engine::base::ids::PlayerId;
 use citar_engine::base::py;
-use citar_engine::game::{Action, DebugOptions, Game};
+use citar_engine::game::{DebugOptions, Game};
 use citar_engine::rules::Ruleset;
 use serde_json::{Map, Value, json};
 
@@ -224,18 +224,10 @@ impl<'s> Runner<'s> {
         }
     }
 
-    /// A tool call as a host makes one: the arguments coerced, then the typed action through
-    /// the one pipeline.
+    /// A tool call as a host makes one, through `Game::execute`: the caller checked, the
+    /// arguments coerced, then the query's answer or the typed action through the one pipeline.
     fn tool(&mut self, pid: PlayerId, name: &str, args: &Value) -> Result<Value, ActionError> {
-        let mut fields = tools::normalize(name, args)?;
-        fields.insert("tool".into(), json!(name));
-        let action: Action = serde_json::from_value(Value::Object(fields)).map_err(|e| {
-            ActionError::new(
-                ErrCode::BadParam,
-                format!("The arguments of '{name}' do not fit it: {e}."),
-            )
-        })?;
-        self.game.act(pid, action).map(|(out, _)| out)
+        self.game.execute(pid, name, args).map(|done| done.result)
     }
 
     /// What an op, tool or new game did, against what the step expects: success, or an error

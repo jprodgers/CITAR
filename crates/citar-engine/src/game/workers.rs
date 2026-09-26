@@ -44,6 +44,7 @@ use crate::base::num;
 use crate::base::rng::{KeyPart, Purpose, Rng};
 use crate::base::sets::{FeatureSet, ImprovementSet, PlayerSet};
 use crate::base::stats::{Stat, StatMask, Stats};
+use crate::base::text::echo;
 use crate::rules::defs::{BuilderClass, ImprovementKind, Route, TerrainType};
 use crate::state::chronicle::{EngineEvent, EventData};
 use crate::state::map::{BuildQueue, BuildStep, Tile};
@@ -944,7 +945,7 @@ pub fn plan_build(g: &Game, u: UnitId, target: &str) -> Result<BuildPlan, Action
         return Ok(BuildPlan::Cancel(u, t));
     } else {
         r.resolve::<ImprovementId>(target)
-            .ok_or_else(|| ActionError::rule(format!("Unknown improvement '{target}'.")))?
+            .ok_or_else(|| ActionError::rule(format!("Unknown improvement '{}'.", echo(target))))?
     };
     let instants = {
         let mut v = water_options(g, u);
@@ -1049,7 +1050,7 @@ impl super::action::Rule for BuildImprovement {
     type Plan = BuildPlan;
 
     fn check(&self, g: &Game, pid: PlayerId) -> Result<BuildPlan, ActionError> {
-        let u = super::units::actions::own_unit(g, pid, self.unit_id)?;
+        let u = super::lookup::own_unit(g, pid, self.unit_id)?;
         plan_build(g, u, &self.improvement)
     }
 

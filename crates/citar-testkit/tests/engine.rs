@@ -11,6 +11,7 @@ mod engine {
     mod drive;
     mod economy;
     mod eval;
+    mod execute;
     mod filters;
     mod game;
     mod game_eval;

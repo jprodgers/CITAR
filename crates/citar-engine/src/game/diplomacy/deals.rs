@@ -34,6 +34,7 @@ use crate::base::num;
 use crate::base::py;
 use crate::base::sets::PlayerSet;
 use crate::base::stats::Stat;
+use crate::base::text::echo;
 use crate::game::derive::rev::{DiploTouch, PlayerTouch};
 use crate::game::error::ActionError;
 use crate::game::research::{self, TechSource};
@@ -103,14 +104,15 @@ fn normalize_item(g: &Game, giver: PlayerId, raw: &Value) -> Result<DealItem, Ac
     let (Some(kind), Some(orig)) = (kind, raw.as_object()) else {
         return Err(ActionError::rule(format!(
             "Invalid deal item {}. Valid types: {}.",
-            py::repr(raw),
+            py::repr_echo(raw),
             type_names()
         )));
     };
     // Python converted the fields of a copy in place, and quoted the copy as it then was.
     let mut it = orig.clone();
     let malformed = |it: &Map<String, Value>| {
-        ActionError::rule(format!("Malformed deal item {}.", py::repr(&Value::Object(it.clone()))))
+        let shown = py::repr_echo(&Value::Object(it.clone()));
+        ActionError::rule(format!("Malformed deal item {shown}."))
     };
     let r = g.rules();
     // refcheck: deal-items-fit-their-fields
@@ -145,9 +147,17 @@ fn normalize_item(g: &Game, giver: PlayerId, raw: &Value) -> Result<DealItem, Ac
                 .and_then(|t| r.resolve::<ResourceId>(t))
                 .filter(|&id| tradeable(g, id));
             let Some(resource) = resource else {
-                let shown = it.get("resource").map_or_else(|| "None".to_owned(), py::str_of);
+                // refcheck: deal-items-name-what-they-trade
+                let Some(shown) = it.get("resource").filter(|v| !v.is_null()).map(py::str_of)
+                else {
+                    return Err(ActionError::rule(
+                        "A resource item names its resource, like {\"type\": \"resource\", \
+                         \"resource\": \"Iron\", \"amount\": 1}.",
+                    ));
+                };
                 return Err(ActionError::rule(format!(
-                    "'{shown}' is not a tradeable strategic or luxury resource."
+                    "'{}' is not a tradeable strategic or luxury resource.",
+                    echo(&shown)
                 )));
             };
             DealItem::Resource { resource, amount, turns }
@@ -176,8 +186,14 @@ fn normalize_item(g: &Game, giver: PlayerId, raw: &Value) -> Result<DealItem, Ac
         DealItemKind::Tech => {
             let text = name_text(it.get("tech")).map_err(|()| malformed(&it))?;
             let Some(tech) = text.as_deref().and_then(|t| r.resolve::<TechId>(t)) else {
-                let shown = it.get("tech").map_or_else(|| "None".to_owned(), py::str_of);
-                return Err(ActionError::rule(format!("Unknown tech '{shown}'.")));
+                // refcheck: deal-items-name-what-they-trade
+                let Some(shown) = it.get("tech").filter(|v| !v.is_null()).map(py::str_of) else {
+                    return Err(ActionError::rule(
+                        "A tech item names its tech, like {\"type\": \"tech\", \"tech\": \
+                         \"Writing\"}.",
+                    ));
+                };
+                return Err(ActionError::rule(format!("Unknown tech '{}'.", echo(&shown))));
             };
             DealItem::Tech { tech }
         }

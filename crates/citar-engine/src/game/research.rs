@@ -41,6 +41,7 @@ use crate::base::num;
 use crate::base::py;
 use crate::base::sets::{PlayerSet, TechSet};
 use crate::base::stats::Stat;
+use crate::base::text::echo;
 use crate::rules::Ruleset;
 use crate::rules::defs::PolicyKind;
 use crate::state::chronicle::{EngineEvent, EventData};
@@ -404,7 +405,7 @@ pub fn plan_dequeue(
 ) -> Result<(Vec<TechId>, Vec<TechId>), ActionError> {
     let queue: Vec<TechId> = g.player(p).map(|x| x.tech.queue.clone()).unwrap_or_default();
     let Some(tech) = tech.filter(|t| queue.contains(t)) else {
-        return Err(ActionError::rule(format!("{asked} is not in your research queue.")));
+        return Err(ActionError::rule(format!("{} is not in your research queue.", echo(asked))));
     };
     let r = g.rules;
     let removed: Vec<TechId> =
@@ -874,7 +875,7 @@ impl Rule for SetResearch {
         let tech = tech.ok_or_else(|| {
             ActionError::new(
                 ErrCode::BadParam,
-                format!("Unknown technology '{text}'. Use names like 'Bronze Working'."),
+                format!("Unknown technology '{}'. Use names like 'Bronze Working'.", echo(&text)),
             )
         })?;
         plan_research(g, pid, tech, self.append.as_ref().is_some_and(py::truthy))
