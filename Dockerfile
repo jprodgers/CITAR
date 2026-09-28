@@ -11,7 +11,7 @@
 # For a public deployment with TLS, see docker-compose.yml, which puts a reverse proxy in front.
 
 # --------------------------------------------------------------------------------- builder
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 # build-essential and libffi are for any dependency without a prebuilt wheel for this platform.
 RUN apt-get update \
@@ -50,7 +50,7 @@ COPY . .
 RUN pip install --no-deps .
 
 # --------------------------------------------------------------------------------- runtime
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 LABEL org.opencontainers.image.title="CITAR" \
       org.opencontainers.image.description="Civ Inspired Tool for AI Research - a Civilization V-style 4X game for benchmarking language models" \
