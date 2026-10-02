@@ -1,0 +1,36 @@
+[package]
+name = "citar-py"
+description = "citar._engine: the CITAR engine, bots, runner and saves for Python (PyO3, abi3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The extension module `citar._engine`, which maturin builds (DESIGN.md P2.6.7). Tested through
+# Python (tests/test_engine_module.py): the library has no Rust tests, and a test binary would
+# have to link libpython.
+[lib]
+name = "_engine"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[features]
+# The engine's test operations (api::testops, api::inspect), for the Python suite's builds
+# (`cargo xtask develop`, CI's build-ext job). It only forwards: cargo xtask check refuses any
+# other way to turn them on, and pyproject.toml's maturin features never list it, so no shipped
+# wheel has them.
+test-ops = ["citar-engine/test-ops"]
+
+# cargo xtask check: the engine, the bot, the runner and the store (DESIGN.md P2.2).
+[dependencies]
+citar-engine = { workspace = true, features = ["embedded-ruleset"] }
+citar-bot.workspace = true
+citar-sim.workspace = true
+citar-store.workspace = true
+pyo3.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

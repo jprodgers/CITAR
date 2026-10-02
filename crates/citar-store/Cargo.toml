@@ -1,0 +1,20 @@
+[package]
+name = "citar-store"
+description = "CITAR's save files: the .citar v2 container (a JSON header and a zstd body) and the append-only journal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# cargo xtask check: no workspace crate (DESIGN.md P2.2). The store frames bytes; what the bytes
+# mean is the engine's, so the helper and the bindings can both link it.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+
+[lints]
+workspace = true
