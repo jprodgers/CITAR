@@ -52,6 +52,11 @@ pub mod game;
 
 pub mod api;
 
+// build.rs's content code (DESIGN.md P2.2.1), here so that its tests run with the engine's.
+#[cfg(test)]
+#[path = "../content_code.rs"]
+mod build_code;
+
 /// Proves at compile time that a type is `Send`.
 ///
 /// Hosts move a `Game` between threads: citar-py drives it inside `allow_threads`, whose closure

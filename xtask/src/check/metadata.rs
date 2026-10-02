@@ -44,6 +44,9 @@ pub struct Dependency {
 #[derive(Debug, Deserialize)]
 pub struct Target {
     pub kind: Vec<String>,
+    /// The target's root file.
+    #[serde(default)]
+    pub src_path: String,
 }
 
 #[derive(Debug, Deserialize)]

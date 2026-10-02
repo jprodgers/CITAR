@@ -3,6 +3,9 @@
 //! Every crate the engine links can change a game, so the list is short and deliberate: adding
 //! to it means editing [`ALLOWED`] here as well as the manifest. Their transitive closure comes
 //! with them. Dev-dependencies are free, since they never reach a game.
+//!
+//! The engine's one build step is `build.rs`, which hashes its sources into its content code
+//! (DESIGN.md P2.2.1) and links nothing: its build-dependencies are held to [`BUILD_ALLOWED`].
 
 use super::Finding;
 use super::metadata::Metadata;
@@ -25,6 +28,12 @@ pub const ALLOWED: &[&str] = &[
     "bitflags",
 ];
 
+/// The crates the engine's build script may use: blake3, for the content code.
+pub const BUILD_ALLOWED: &[&str] = &["blake3"];
+
+/// The engine's build script, relative to its manifest's folder.
+const BUILD_SCRIPT: &str = "build.rs";
+
 /// The one `libm` release whose answers the goldens hold; a bump re-blesses them.
 const LIBM_REQ: &str = "=0.2.16";
 
@@ -36,12 +45,12 @@ pub fn check(meta: &Metadata) -> Vec<Finding> {
     };
 
     for dep in &engine.dependencies {
-        let label = match dep.kind.as_deref() {
-            None => "dependency",
-            Some("build") => "build-dependency",
+        let (label, allowed) = match dep.kind.as_deref() {
+            None => ("dependency", ALLOWED),
+            Some("build") => ("build-dependency", BUILD_ALLOWED),
             Some(_) => continue,
         };
-        if !ALLOWED.contains(&dep.name.as_str()) {
+        if !allowed.contains(&dep.name.as_str()) {
             out.push(Finding::new(
                 CHECK,
                 format!(
@@ -83,11 +92,17 @@ pub fn check(meta: &Metadata) -> Vec<Finding> {
         }
     }
 
-    if engine.targets.iter().any(|t| t.kind.iter().any(|k| k == "custom-build")) {
-        out.push(Finding::new(
-            CHECK,
-            format!("{ENGINE} has a build script; the engine is pure Rust with no build step"),
-        ));
+    for t in engine.targets.iter().filter(|t| t.kind.iter().any(|k| k == "custom-build")) {
+        let path = t.src_path.replace('\\', "/");
+        if !path.ends_with(&format!("citar-engine/{BUILD_SCRIPT}")) {
+            out.push(Finding::new(
+                CHECK,
+                format!(
+                    "{ENGINE} has the build script {path}; its one build step is \
+                     crates/citar-engine/{BUILD_SCRIPT}, the content code (DESIGN.md P2.2.1)"
+                ),
+            ));
+        }
     }
     out
 }
@@ -163,9 +178,17 @@ mod tests {
     }
 
     #[test]
-    fn a_build_script_is_refused() {
-        let targets = format!(r#"{LIB}, {{"kind": ["custom-build"]}}"#);
-        let found = check(&meta("", "", &targets));
+    fn only_the_content_code_build_script_is_allowed() {
+        let ours =
+            r#"{"kind": ["custom-build"], "src_path": "C:\\x\\crates\\citar-engine\\build.rs"}"#;
+        assert_eq!(check(&meta("", "", &format!("{LIB}, {ours}"))), []);
+        let other = r#"{"kind": ["custom-build"], "src_path": "/x/crates/citar-engine/gen.rs"}"#;
+        let found = check(&meta("", "", &format!("{LIB}, {other}")));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("gen.rs"), "{found:?}");
+        // Its build-dependencies are blake3 alone.
+        assert_eq!(check(&meta(&dep("blake3", "^1.8", "\"build\"", false), "", LIB)), []);
+        let found = check(&meta(&dep("serde", "^1", "\"build\"", true), "", LIB));
         assert_eq!(found.len(), 1, "{found:?}");
     }
 }

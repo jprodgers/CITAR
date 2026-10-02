@@ -7,7 +7,7 @@
 //! A ruleset is identified by its [`RulesetId`], a blake3 over a canonical walk of the parsed
 //! JSON rather than over the bytes: a CRLF checkout or a reformatted file gives the same id, and
 //! any changed value a different one. Saves record it, and proof of work signs it with
-//! [`BUILD_ID`].
+//! [`BUILD_ID`], the engine's content code.
 
 use core::fmt;
 
@@ -55,11 +55,23 @@ pub fn all_file_names() -> impl Iterator<Item = &'static str> {
     RULESET_FILES.into_iter().chain([CUSTOM_NATIONS, GAME])
 }
 
-/// The build the engine was compiled as, from `CITAR_BUILD_ID` at compile time; `dev` otherwise.
-/// Proof of work signs it together with the [`RulesetId`].
-pub const BUILD_ID: &str = match option_env!("CITAR_BUILD_ID") {
+/// The engine's content code: 16 hex digits of blake3 over its sources, the ruleset files it
+/// embeds, its version and the locked versions of what it links, computed by `build.rs`
+/// (DESIGN.md P2.2.1). Any change to the engine's code or data moves it; a commit that touches
+/// neither does not.
+pub const ENGINE_CODE: &str = env!("CITAR_ENGINE_CODE");
+
+/// The build the engine was compiled as: its content code, [`ENGINE_CODE`]. Saves name it
+/// (`0.1.6+<BUILD_ID>`); `citar_bot::build_id` combines it with the bot's code and a
+/// [`RulesetId`] into the id that fingerprints, lab results and proof of work sign.
+pub const BUILD_ID: &str = ENGINE_CODE;
+
+/// A label for people, display only: `CITAR_BUILD_ID` at compile time (the build sets it from
+/// `git describe`), else `unknown`. It moves on every commit, docs included, so nothing keys on
+/// it.
+pub const BUILD_LABEL: &str = match option_env!("CITAR_BUILD_ID") {
     Some(s) => s,
-    None => "dev",
+    None => "unknown",
 };
 
 /// A ruleset's files as bytes, by name: `ruleset/techs.json`, `custom/nations.json`, `game.json`.
