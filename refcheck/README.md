@@ -163,7 +163,7 @@ cargo refcheck explain tile_yields:owned[*].yields     # the differences at a pl
 cargo refcheck explain <intended-id>                   # what an entry explains, and what it just misses
 cargo refcheck suggest                                 # [[differences]] stubs for what is unexplained
 cargo refcheck ratchet [--update]                      # no count may rise; --update records the rest
-cargo refcheck changelog                               # the entries as the CHANGELOG's rule fixes
+cargo refcheck changelog [--write | --check]           # the entries as the CHANGELOG's rule fixes
 cargo refcheck list                                    # the fixtures, and each group's state
 ```
 
@@ -207,7 +207,12 @@ fix site as `// refcheck: <id>`, a one-line reason written for the changelog, th
 `cases` globs, and optional constraints on the Python and Rust values, so an entry never hides a later,
 unrelated change at the same place. Text answers (tool errors, briefings) follow the same rule: model-facing text
 is ported as-is where it is fine and fixed where it is wrong (decision G), and each fix is listed. An entry that
-explains nothing in a run that covered it is stale: a warning, and an error with `--strict`.
+explains nothing in a run that covered it is stale: a warning, and an error with `--strict`. So a deliberate
+difference that no group shows on the recorded states (a rule the shipped ruleset never exercises, a scenario
+operation) goes in `tests/rules/intended.toml` instead, with a rule script or a Rust test that shows it. Every
+entry of either file is cited in the engine, and every citation names an entry (a citar-refcheck test checks
+both). The two files together are the CHANGELOG's list of rule fixes: `cargo refcheck changelog --write` writes
+them between its markers, and a test fails while the CHANGELOG lags behind.
 
 **Enforcement and the ratchet.** `enforced.toml` lists the groups, or paths within them, that are clean: an
 unexplained difference there fails the run. So does a difference above an enforced path that hides it: an answer
@@ -226,7 +231,9 @@ could not be loaded, or a usage error; 3 stale entries under `--strict`. The JSO
 byte for byte, on every run over the same inputs.
 
 The refcheck is clean when every difference is fixed or listed, over all 262 states and 14 groups. That is Phase
-1's exit condition. Start with the committed fixtures (quick, and run in CI), then run the whole corpus. The
+1's exit condition, and it has held since package 1e-04: the `--strict` run over all 262 states reports no
+unexplained difference and no stale entry, and every group's ratchet count is 0. Start with the committed
+fixtures (quick, and run in CI), then run the whole corpus. The
 `fn` names, which `explain` prints, tell you which Python function to read when an answer is not obvious.
 
 ### The nightly run and the corpus

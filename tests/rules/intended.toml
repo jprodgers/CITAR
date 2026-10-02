@@ -1,12 +1,13 @@
-# Deliberate differences that only the rule scripts can show: a check whose expected value is the
-# Rust engine's carries `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md).
-# Differences a refcheck group shows belong in refcheck/intended.toml, which scripts may cite too.
-# `cargo refcheck changelog` lists both files as the changelog's rule fixes, so the reason is
-# written for a reader of the changelog, and an id may be in only one of them.
+# Deliberate differences no refcheck group shows on the 262 recorded states, each shown by a rule
+# script or a Rust test instead: a script check whose expected value is the Rust engine's carries
+# `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md). Differences a
+# refcheck group shows belong in refcheck/intended.toml, which scripts may cite too.
+# `cargo refcheck changelog --write` writes both files into CHANGELOG.md as its rule fixes, so the
+# reason is written for a reader of the changelog, and an id may be in only one of them.
 #
 # One [[differences]] table per entry, as in refcheck/intended.toml but without `where`:
 #   id      kebab-case and unique; the code that makes the fix cites it as `// refcheck: <id>`
-#           (citar-refcheck's tests check that every id here is cited in the engine)
+#           (citar-refcheck's tests check that every id of both files is cited in the engine)
 #   reason  one line: what Python did, and what Rust does instead
 
 [[differences]]
