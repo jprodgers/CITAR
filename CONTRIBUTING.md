@@ -127,7 +127,42 @@ and `cargo xtask perf` (benchmarks against their budgets).
 targets; the determinism workflow checks them on each. When a change is meant to move them (a new
 RNG `Purpose`, a `libm` or toolchain bump), run `cargo golden bless` and say why in the commit.
 `pyfmt.json` is Python's own answers, so only `scripts/refcheck/pyfmt_vectors.py` writes it;
-`scripts/refcheck/hex_vectors.py` records the hex-grid answers the same way.
+`scripts/refcheck/hex_vectors.py` records the hex-grid answers the same way. `long.json`, whole
+games on every map size, is the nightly run's: `cargo golden check --long` checks it (about a
+minute) and `cargo golden bless long` writes it, so bless it too when a change moves the games.
+
+When the targets disagree, the determinism workflow's `divergence` artifact holds each odd
+target's state at the first round where a game parted from the committed file, the same state
+played on Linux, and the places where they differ. To look into one by hand:
+
+```bash
+cargo golden check --states states/                 # a game that differs leaves its state there
+cargo golden dump random:random-duel-continents-s101 57 --out here.json   # the same game, here
+cargo golden diff here.json states/random--random-duel-continents-s101--t57.json
+cargo golden dump --list                             # every game dump plays
+```
+
+**Long runs.** `nightly.yml` runs the properties at 10,000 cases, 20 minutes of chaos and a short
+soak on each OS, the long golden set on every target and, on Sundays, the benchmarks. Label a pull
+request `nightly` to run it there. Locally:
+
+```bash
+cargo chaos --seconds 600                           # random games with tool calls of every kind
+cargo soak --games 12                               # whole games on every map size, checked
+PROPTEST_CASES=10000 cargo nextest run -p citar-testkit --test props --cargo-profile ci --profile nightly
+```
+
+The laptop soak is 200 games, 33 or 34 of each map size, each to its 330-turn limit: about 40
+minutes on one core, so split it over a few processes with `--shard` (each plays the games whose
+number is K modulo N, the same games whatever the split). A failure names the game, and
+`cargo soak --seed S --game N` plays it again alone.
+
+```bash
+for k in 0 1 2 3; do cargo soak --games 200 --shard $k/4 --json soak-$k.json > soak-$k.log & done; wait
+```
+
+The corpus checks that go with them are in `refcheck/README.md` ("The nightly run and the
+corpus").
 
 **Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
 fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of
