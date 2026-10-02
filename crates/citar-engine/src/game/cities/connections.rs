@@ -43,25 +43,10 @@ bitflags::bitflags! {
 
 /// Which of a civilization's cities are linked to its capital, and by what: its cities that are,
 /// in id order.
-///
-/// Two are equal when their cities and media are: `water` is what the floods walked, which says
-/// nothing more of the cities.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Connectivity {
     pub cities: SmallVec<[(CityId, Media); 8]>,
-    /// The tiles the harbours' water flood reached (water, and the cities it passed through):
-    /// the water a harbour of a linked city already reaches. The production advisor's what-if of
-    /// a harbour reads it (`what_if::Overlay::network`).
-    pub water: BitSet,
 }
-
-impl PartialEq for Connectivity {
-    fn eq(&self, other: &Self) -> bool {
-        self.cities == other.cities
-    }
-}
-
-impl Eq for Connectivity {}
 
 impl Connectivity {
     /// How a city is linked, if it is.
@@ -216,13 +201,22 @@ pub fn connected_cities(g: &Game, p: PlayerId) -> Connectivity {
 /// memo, which reads the index the supply feeds.
 #[must_use]
 pub fn connected_cities_in(v: &crate::game::EvalView<'_>, p: PlayerId) -> Connectivity {
+    network_in(v, p).0
+}
+
+/// [`connected_cities_in`], with the tiles the harbours' water flood reached (water, and the
+/// cities it passed through): the water a harbour of a linked city already reaches, which the
+/// production advisor's what-if of a harbour reads ([`with_harbour`]). The memo keeps it beside
+/// the network (`derive::stats::connectivity_water`), worked out with it.
+#[must_use]
+pub(crate) fn network_in(v: &crate::game::EvalView<'_>, p: PlayerId) -> (Connectivity, BitSet) {
     let g = v.game();
     let mut out = Connectivity::default();
     let Some(cap) = g.player(p).and_then(|x| x.capital).and_then(|c| g.city(c)) else {
-        return out;
+        return (out, BitSet::default());
     };
     if cap.owner() != p {
-        return out;
+        return (out, BitSet::default());
     }
     let r = g.rules();
     let known = &r.derived().known;
@@ -293,8 +287,7 @@ pub fn connected_cities_in(v: &crate::game::EvalView<'_>, p: PlayerId) -> Connec
     media.retain(|(c, _)| g.city(*c).is_some_and(|x| x.owner() == p));
     media.sort_by_key(|&(c, _)| c);
     out.cities = media.into_iter().collect();
-    out.water = water.seen;
-    out
+    (out, water.seen)
 }
 
 /// The trade network of civilization `p` with one more harbour, in its city `c`, worked out from
@@ -317,12 +310,13 @@ pub fn connected_cities_in(v: &crate::game::EvalView<'_>, p: PlayerId) -> Connec
 pub(crate) fn with_harbour(
     v: &crate::game::EvalView<'_>,
     now: &Connectivity,
+    water: &BitSet,
     p: PlayerId,
     c: CityId,
 ) -> Option<Option<Connectivity>> {
     let g = v.game();
     let tile = g.city(c)?.tile();
-    let flooded = now.water.contains(tile.0);
+    let flooded = water.contains(tile.0);
     let linked = |x: CityId| now.media(x).is_some();
     let gains = |now: &Connectivity| -> Option<Connectivity> {
         let i = now.cities.binary_search_by_key(&c, |&(x, _)| x).ok()?;

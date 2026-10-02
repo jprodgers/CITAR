@@ -250,7 +250,9 @@ impl Overlay {
         let v = EvalView::what_if(g, self);
         if !other {
             let now = memo::connectivity(g, self.owner);
-            if let Some(after) = connections::with_harbour(&v, &now, self.owner, self.city) {
+            let water = memo::connectivity_water(g, self.owner);
+            if let Some(after) = connections::with_harbour(&v, &now, &water, self.owner, self.city)
+            {
                 debug_assert_eq!(
                     after.as_ref().unwrap_or(&now).cities,
                     connections::connected_cities_in(&v, self.owner).cities,
