@@ -1,0 +1,172 @@
+about = """
+A hybrid seat's bot leaves to the seat's language model every negotiation that touches a category the
+model owns: one such item makes the whole deal the model's, and with nothing on the table the talk is
+the model's when it owns chat. The negotiation stays open and waits on the seat. What the bot owns it
+answers.
+"""
+from = "tests/test_bot_diplomacy.py::TradeSwitchTests::test_trade_negotiations_are_left_to_the_model, CategoryTests::test_who_owns_a_negotiation"
+needs = "2-01a"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "found_city", player = 1, at = "B", capital = true },
+  { op = "found_city", player = 2, at = "C", capital = true },
+  { op = "meet", a = 0, b = "all" },
+  { op = "set_player", player = "all", gold = 300 },
+]
+
+[[step]]
+note = "Gold for a map is a trade."
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Maps for gold?", give = [{ type = "gold", amount = 10 }], receive = [{ type = "share_map" }] }
+as = "trade"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=trade.negotiation_id"
+diplomacy = { trades = "llm" }
+as = "answered"
+
+[[step]]
+check = "answered"
+eq = { outcome = "deferred" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=trade.negotiation_id" }
+subset = { status = "open", awaiting = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=trade.negotiation_id" }
+path = "history"
+len = 1
+
+[[step]]
+note = "Owning only chat, the model does not own a deal on the table."
+bot = "respond"
+player = 1
+negotiation = "=trade.negotiation_id"
+diplomacy = { chat = "llm" }
+as = "answered"
+
+[[step]]
+check = "answered"
+eq = { outcome = "done" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=trade.negotiation_id" }
+path = "history"
+len = 2
+
+[[step]]
+check = { what = "negotiation", negotiation = "=trade.negotiation_id" }
+path = "history[1].by"
+eq = 1
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = "=trade.negotiation_id", status = "cancelled", note = "The next question." }
+
+[[step]]
+note = "An embassy for gold touches agreements and trades: owning either makes it the model's."
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Embassies?", give = [{ type = "gold", amount = 10 }], receive = [{ type = "embassy" }] }
+as = "mixed"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=mixed.negotiation_id"
+diplomacy = { agreements = "llm" }
+as = "answered"
+
+[[step]]
+check = "answered"
+eq = { outcome = "deferred" }
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=mixed.negotiation_id"
+diplomacy = { trades = "llm", agreements = "bot" }
+as = "answered"
+
+[[step]]
+check = "answered"
+eq = { outcome = "deferred" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=mixed.negotiation_id" }
+path = "history"
+len = 1
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = "=mixed.negotiation_id", status = "cancelled", note = "The next question." }
+
+[[step]]
+note = "Talk with nothing on the table is the model's when it owns chat, and the bot's otherwise."
+tool = "open_negotiation"
+player = 0
+args = { to = 2, message = "Hello." }
+as = "talk"
+
+[[step]]
+bot = "respond"
+player = 2
+negotiation = "=talk.negotiation_id"
+diplomacy = { chat = "llm" }
+as = "answered"
+
+[[step]]
+check = "answered"
+eq = { outcome = "deferred" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=talk.negotiation_id" }
+path = "history"
+len = 1
+
+[[step]]
+bot = "respond"
+player = 2
+negotiation = "=talk.negotiation_id"
+diplomacy = { trades = "llm", agreements = "llm", peace = "llm", war = "llm" }
+as = "answered"
+
+[[step]]
+check = "answered"
+eq = { outcome = "done" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=talk.negotiation_id" }
+path = "history"
+len = 2
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = "=talk.negotiation_id", status = "cancelled", note = "The next question." }
+
+[[step]]
+note = "A proposal of nothing on either side is talk too."
+tool = "open_negotiation"
+player = 0
+args = { to = 2, message = "Anything?", give = [], receive = [] }
+as = "empty"
+
+[[step]]
+bot = "respond"
+player = 2
+negotiation = "=empty.negotiation_id"
+diplomacy = { chat = "llm" }
+as = "answered"
+
+[[step]]
+check = "answered"
+eq = { outcome = "deferred" }

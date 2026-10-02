@@ -1,0 +1,108 @@
+about = """
+The bot spends a policy on the branch order of its temperament, and finishes the branches it has
+opened before it opens another: a peaceful bot opens Tradition, the first of its order, unless it has
+opened Liberty already, when it takes a Liberty policy; an aggressive one opens Honor.
+"""
+from = "citar/bots/basic.py:1003-1033 (_policy_order, empire_choices)"
+needs = "2-01b"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "set_player", player = 0, free_policies = 1 },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+eq = ["Tradition"]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "free_policies"
+eq = 0
+
+[[step]]
+note = "With Liberty open, a Liberty policy comes before Tradition."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "set_player", player = 0, free_policies = 1 },
+  { op = "adopt_policy", player = 0, policy = "Liberty" },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+len = 2
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+contains = "Liberty"
+not_contains = "Tradition"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "free_policies"
+eq = 0
+
+[[step]]
+note = "An aggressive bot opens Honor."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "set_player", player = 0, free_policies = 1 },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+aggression = 0.9
+params = "=calm"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+eq = ["Honor"]
+
+[[step]]
+note = "A named order replaces the temperament's: liberty_first opens Liberty."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "set_player", player = 0, free_policies = 1 },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0, policy_order_peaceful = "liberty_first" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+eq = ["Liberty"]
