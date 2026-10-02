@@ -197,6 +197,46 @@ fn the_kitchen_sink_plays_random_games_with_every_check_and_a_save_every_round()
 }
 
 #[test]
+fn a_city_whose_uniques_read_its_own_citizens_settles_where_its_reassignments_come_back() {
+    // Found by package 1e-02's soak (seed 2026, game 162): in this kitchen-sink duel, from turn
+    // 324, a city's best assignment depended on its own specialists (the Kitchen Sink nation's
+    // `[+10]% [Food] [in all cities] <in cities with [2] [Specialists]>`) and had no fixed point,
+    // so every settle flipped it until its passes ran out (SETTLE-1). The settle now stops
+    // where the city comes back to an assignment it held, and the citizen oracle accepts a city
+    // its reassignments lead back to.
+    use citar_engine::game::cities::citizens::{Assignment, assign};
+    let debug = DebugOptions { invariants: true, verify_caches: false };
+    let mut g = games::kitchen_sink_game("duel", 40_117_891_984_495, 330, b"settle-cycle", debug)
+        .expect("the game");
+    let mut agents = games::agents_for(&g);
+    let mut cycling = 0usize;
+    let mut hook = |g: &mut Game, (turn, _): Round| -> Result<(), String> {
+        let found = g.take_violations();
+        if !found.is_empty() {
+            return Err(format!("turn {turn}: {found:?}"));
+        }
+        if turn >= 318 {
+            let caches = citar_testkit::checks::caches(g);
+            if !caches.is_empty() {
+                return Err(format!("turn {turn}: {caches:?}"));
+            }
+            // The cities a fresh assignment would move: those the settle stopped in a cycle.
+            cycling += g
+                .state()
+                .cities()
+                .iter()
+                .filter(|c| c.citizens_settled)
+                .filter(|c| assign(g, c.id(), false).is_some_and(|a| a != Assignment::of(c)))
+                .count();
+        }
+        Ok(())
+    };
+    games::play_random(&mut g, &mut agents, 330, &mut hook).expect("a clean game");
+    assert_eq!(g.phase(), Phase::Over);
+    assert!(cycling > 0, "the game no longer reaches the cycle this test was written for");
+}
+
+#[test]
 fn a_fixture_saved_and_loaded_every_round_passes_as_it_would_have() {
     // Gate 3 on a Python state, whose history and caches came from the converter.
     let f = fixtures::committed()

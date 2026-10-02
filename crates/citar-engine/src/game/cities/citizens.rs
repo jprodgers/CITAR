@@ -510,11 +510,25 @@ impl Game {
     /// Reassigns city `c`'s citizens, as the settle does for a flagged city: writes the new
     /// assignment if it differs (or if the engine never assigned the city), marks the city
     /// settled, and flags the cities of its owner that could work a tile it took or released.
+    ///
+    /// A city whose new assignment is one the settle under way has already moved it away from
+    /// keeps the one it has. Where a city's uniques read its own citizens (the kitchen sink's
+    /// `[+10]% [Food] <in cities with [2] [Specialists]>`, counted from the specialists it has
+    /// while the food of the next citizen is weighed), the best assignment can depend on the
+    /// assignment itself with no fixed point: two specialists bring the food that sends one of
+    /// them to a tile, and one brings too little. Python placed the citizens once per refresh and
+    /// flipped between the two from one to the next; the settle used to flip until its passes ran
+    /// out (SETTLE-1). Stopping at the first assignment the city comes back to is a function of
+    /// the settle's own passes, so it is as deterministic as the rest; the citizen oracle
+    /// ([`verify`]) accepts a city its reassignments lead back to.
     pub(crate) fn reassign(&mut self, c: CityId) {
         let Some(a) = assign(self, c, false) else { return };
         let Some(city) = self.city(c) else { return };
         let before = Assignment::of(city);
         if before == a && city.citizens_settled {
+            return;
+        }
+        if self.citizens_held.iter().any(|(x, held)| *x == c && *held == a) {
             return;
         }
         let owner = city.owner();
@@ -527,6 +541,9 @@ impl Game {
             .collect();
         let changed = before != a;
         self.set_citizens(c, a);
+        if changed {
+            self.citizens_held.push((c, before));
+        }
         let deps = self.dv.stats.deps().citizens;
         if !moved.is_empty() && deps.contains(crate::unique::CondDeps::MAP) {
             // What a tile yields reads whether a city works the tiles around it (a filter asked
@@ -594,7 +611,9 @@ impl Game {
 }
 
 /// The citizen oracle (DESIGN.md 6.8): every city this engine has assigned has its citizens where
-/// a fresh assignment would put them. One line for each that does not.
+/// a fresh assignment would put them, or where the reassignments that start there lead back to
+/// (a city whose uniques read its own citizens, which the settle stops in its cycle:
+/// [`Game::reassign`]). One line for each that does not.
 #[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
@@ -602,7 +621,8 @@ pub fn verify(g: &Game) -> Vec<String> {
     for city in g.state().cities().iter().filter(|c| c.citizens_settled) {
         let c = city.id();
         let Some(a) = assign(g, c, false) else { continue };
-        if a != Assignment::of(city) {
+        let held = Assignment::of(city);
+        if a != held && !comes_back(g, c, &held, a.clone()) {
             out.push(format!(
                 "city {}: its citizens are at {:?} with specialists {:?}, a fresh assignment at \
                  {:?} with {:?}",
@@ -615,6 +635,24 @@ pub fn verify(g: &Game) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether city `c`'s reassignments, from `next` on, come back to `held` within a settle's passes:
+/// `held` is then in a cycle of them, where the settle stops. On a copy of the game, and only
+/// for a city whose fresh assignment differs from its own, which a sound game has only in such a
+/// cycle; a stale city's fresh assignment is a fixed point, which never leads back.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
+fn comes_back(g: &Game, c: CityId, held: &Assignment, mut next: Assignment) -> bool {
+    let mut copy = g.clone();
+    for _ in 0..crate::game::turn::SETTLE_PASSES {
+        copy.set_citizens(c, next);
+        match assign(&copy, c, false) {
+            Some(a) if a == *held => return true,
+            Some(a) => next = a,
+            None => return false,
+        }
+    }
+    false
 }
 
 // ---- The tools (tools.py:679-757) ---------------------------------------------------------------

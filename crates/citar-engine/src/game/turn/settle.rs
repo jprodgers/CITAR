@@ -9,15 +9,19 @@
 //!    and the two alternate until neither has anything left;
 //! 2. citizens: flagged cities reassign their citizens in id order, pass after pass, until no
 //!    city is flagged or [`SETTLE_PASSES`] passes are spent, which is invariant violation
-//!    SETTLE-1 (`game::cities::citizens`, package 1b-06);
+//!    SETTLE-1 (`game::cities::citizens`, package 1b-06). A city whose reassignment would give
+//!    it back an assignment it held earlier in the same settle keeps the one it has: a ruleset
+//!    whose uniques read a city's own citizens can make the best assignment depend on the
+//!    assignment, with no fixed point (package 1e-02's soak found one);
 //! 3. the checks [`DebugOptions`](crate::game::DebugOptions) asks for, in the builds that have
 //!    them (test, debug, or release with the `checks` feature).
 //!
 //! Settle runs at the end of every successful mutating call and at the settle points of a turn,
 //! never after a refusal, a query, a view, a snapshot or a save. Within one settle nothing
-//! citizens read can move: happiness and the gold rate are committed only at fixed stages, and
-//! sight never depends on citizens. So the passes converge, and what a settle does is a pure
-//! function of the calls that succeeded.
+//! citizens read can move but the citizens themselves: happiness and the gold rate are committed
+//! only at fixed stages, and sight never depends on citizens. So the passes converge, or a city
+//! comes back to an assignment it held and stops there, and what a settle does is a pure function
+//! of the calls that succeeded.
 
 use crate::game::Game;
 #[cfg(any(test, debug_assertions, feature = "checks"))]
@@ -42,11 +46,13 @@ impl Game {
     /// Pending work is empty afterwards.
     pub(crate) fn settle(&mut self) {
         self.settle_sight();
+        self.citizens_held.clear();
         let mut passes = 0;
         while self.pending.any_recheck() && passes < SETTLE_PASSES {
             self.reassign_flagged();
             passes += 1;
         }
+        self.citizens_held.clear();
         if self.pending.any_recheck() {
             let left = self.pending.take_recheck();
             if self.debug.invariants {
