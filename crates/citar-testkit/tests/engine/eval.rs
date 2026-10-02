@@ -173,6 +173,15 @@ const SCALED: [&str; 3] = [
     "[+4 Gold] <when between [10] and [20] [Gold]> <(modified by game speed)>",
 ];
 
+/// Building conditionals over a building filter rather than a name, each under `[+5 Gold]`:
+/// Python compared the text with building names, so none of these could hold there.
+const FILTERED: [&str; 4] = [
+    "[+5 Gold] <if [Wonder] is constructed>",
+    "[+5 Gold] <if [Culture] is constructed by anybody>",
+    "[+5 Gold] <in cities with a [Wonder]>",
+    "[+5 Gold] <if [Wonder] is constructed in at least [2] of [All] cities>",
+];
+
 /// Countables with filters, each compiled in `[+3 Gold] <when number of [..] is more than [0]>`.
 const COUNTED: &[&str] = &[
     "[Temple] Buildings",
@@ -193,6 +202,7 @@ fn rules() -> &'static Ruleset {
             COUNTED.iter().map(|c| format!("[+3 Gold] <when number of [{c}] is more than [0]>")),
         );
         uniques.extend(SCALED.iter().map(|&u| u.to_owned()));
+        uniques.extend(FILTERED.iter().map(|&u| u.to_owned()));
         let patch = json!({ "Eval Test": {
             "name": "Eval Test", "kind": "major", "leaderName": "Eval Leader", "adjective": "Eval",
             "preferredVictoryType": "Scientific", "cities": ["Evalton", "Testburg"],
@@ -1053,7 +1063,9 @@ fn case(w: &mut World, c: &CondData, yes: bool) -> Option<Ctx> {
             w.civ(P0).researching = Some(id(r, pick(yes, "Writing", "Pottery")));
             civ
         }
-        // A policy or a belief alike (Python's dead key read policies only).
+        // A policy or a belief alike (Python's dead key read policies only): with
+        // `[Ancestor Worship]` another major's belief makes it fail (refcheck:
+        // no-civ-adopted-counts-beliefs).
         C::ConditionalNoCivAdopted(x) => {
             // A city-state's adoption does not count; another major's does.
             adopt(w, pick(yes, P2, P1), x.adopted);
@@ -2416,6 +2428,42 @@ fn the_stat_comparisons_scale_by_game_speed() {
     assert!(applies(between, &ctx, &w));
     with_gold(&mut w, 15.0);
     assert!(!applies(between, &ctx, &w));
+}
+
+/// The building conditionals read a building filter (refcheck:
+/// building-conditionals-read-a-filter): `[Wonder]` holds for any wonder and `[Culture]` for a
+/// building that makes culture, where Python compared the text with building names and so never
+/// held. No shipped unique writes a filter there, so no reference state shows it; this does.
+#[test]
+fn the_building_conditionals_read_a_building_filter() {
+    let r = rules();
+    let [wonder, culture, city_wonder, two_wonders] = FILTERED.map(|u| eval_text(r, u));
+    let answers = |w: &World| {
+        [
+            applies(wonder, &Ctx::civ(P0), w),
+            applies(culture, &Ctx::civ(P0), w),
+            applies(city_wonder, &Ctx::city(w, cid(2)), w),
+            applies(two_wonders, &Ctx::civ(P0), w),
+        ]
+    };
+    // A Temple (faith) is neither a wonder nor a culture building.
+    let mut w = World::new();
+    w.give_building(1, "Temple");
+    w.give_building(2, "Temple");
+    w.reindex();
+    assert_eq!(answers(&w), [false, false, false, false]);
+    // A wonder in the Eval Test's second city; a Monument (culture) in another civilization's.
+    w.give_building(2, "Stonehenge");
+    w.give_building(3, "Monument");
+    w.reindex();
+    assert_eq!(answers(&w), [true, true, true, false]);
+    // A wonder in each of its two cities.
+    w.give_building(1, "The Great Library");
+    w.reindex();
+    assert_eq!(answers(&w), [true, true, true, true]);
+    // The names still read as names, as in Python.
+    let named = eval_unique(r, "if [Temple] is constructed");
+    assert!(applies(named, &Ctx::civ(P0), &w));
 }
 
 #[test]
