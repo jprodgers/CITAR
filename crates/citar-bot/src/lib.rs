@@ -1,7 +1,7 @@
 //! The CITAR bots (DESIGN.md P2.3): compiled versions that play a seat as the engine's
 //! [`SeatDriver`](citar_engine::game::SeatDriver).
 //!
-//! A version is a code module plus its parameter schema, compiled in ([`versions`]): `basic-1`,
+//! A version is a code module plus its parameter schema, compiled in ([`versions()`]): `basic-1`,
 //! the port of `citar/bots/basic.py`, and `idle`, the port of `citar/bots/idle.py`. A seat plays
 //! a [`BotSpec`] (version, tuning, aggression, who owns each kind of diplomacy) through a
 //! [`Bot`], which holds no game state between calls: what lasts lives in the seat's
