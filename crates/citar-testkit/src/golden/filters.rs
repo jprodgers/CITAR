@@ -16,7 +16,7 @@ use citar_engine::unique::params::RegionType;
 use citar_engine::unique::{CityLeaf, CivLeaf, Expr, GenFilter, TileLeaf, UnitLeaf};
 use serde_json::{Value, json};
 
-use super::{SetReport, capped, diff_rows, digest_of, read_committed, render_rows};
+use super::{SetReport, diff_rows, read_committed, render_rows};
 
 /// The lists of `filters.json`, one row each.
 pub(super) const FILTER_LISTS: [&str; 5] = ["units", "tiles", "cities", "civs", "combatants"];
@@ -305,7 +305,7 @@ fn check(name: &'static str, file: &str, got: &Value, lists: &[&str]) -> SetRepo
             }
         }
     }
-    SetReport { name, computed: digest_of(got), problems: capped(problems), waiting: Vec::new() }
+    SetReport::new(name, got, lists, problems, Vec::new())
 }
 
 pub(super) fn check_filters() -> SetReport {

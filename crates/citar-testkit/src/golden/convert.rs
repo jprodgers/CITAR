@@ -13,7 +13,7 @@ use citar_engine::rules::Ruleset;
 use citar_engine::save::{self, canon};
 use serde_json::{Value, json};
 
-use super::{SetReport, capped, diff_rows, digest_of, read_committed, render_rows};
+use super::{SetReport, diff_rows, read_committed, render_rows};
 use crate::fixtures;
 
 /// Each committed fixture's digest after conversion, and what went wrong converting one.
@@ -81,10 +81,5 @@ pub fn check_convert() -> SetReport {
             ));
         }
     }
-    SetReport {
-        name: "convert",
-        computed: digest_of(&got),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new("convert", &got, &["states"], problems, Vec::new())
 }

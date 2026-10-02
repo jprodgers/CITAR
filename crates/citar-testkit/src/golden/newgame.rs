@@ -14,7 +14,8 @@ use citar_engine::game::{DebugOptions, Game};
 use citar_engine::rules::Ruleset;
 use serde_json::{Map, Value, json};
 
-use super::{SetReport, capped, diff_rows, digest_of, read_committed, render_rows};
+use super::divergence;
+use super::{SetReport, diff_rows, read_committed, render_rows};
 use crate::script;
 
 /// The generated games: (lobby size, map type, edges, seed).
@@ -121,26 +122,45 @@ pub fn arena_games() -> Result<Vec<(String, u64, Value)>, String> {
     ])
 }
 
+/// Every game of the set: `(name, seed, settings)`, the generated ones first.
+///
+/// # Errors
+/// If the arena cannot be read.
+pub fn games() -> Result<Vec<(String, u64, Value)>, String> {
+    let mut games: Vec<(String, u64, Value)> = GAMES
+        .iter()
+        .map(|&(size, ty, edges, seed)| {
+            (format!("newgame-{size}-{ty}"), seed, generated_settings(size, ty, edges, seed))
+        })
+        .collect();
+    games.extend(arena_games().map_err(|e| format!("the arena: {e}"))?);
+    Ok(games)
+}
+
 /// One row per game, and what went wrong setting one up.
 fn answers() -> (Value, Vec<String>) {
     let r = Ruleset::shared();
     let mut rows = Vec::new();
     let mut problems = Vec::new();
-    let mut games: Vec<(String, u64, Result<Value, String>)> = GAMES
-        .iter()
-        .map(|&(size, ty, edges, seed)| {
-            (format!("newgame-{size}-{ty}"), seed, Ok(generated_settings(size, ty, edges, seed)))
-        })
-        .collect();
-    match arena_games() {
-        Ok(more) => games.extend(more.into_iter().map(|(name, seed, v)| (name, seed, Ok(v)))),
-        Err(e) => problems.push(format!("the arena: {e}")),
-    }
+    let games = match games() {
+        Ok(g) => g,
+        Err(e) => return (json!({"format": 1}), vec![e]),
+    };
+    let committed = divergence::dir().and_then(|_| read_committed("newgame.json").ok());
     for (name, seed, settings) in games {
-        let made = settings.and_then(|s| new_game(&s));
-        match made {
+        match new_game(&settings) {
             Ok(mut g) => match row(&name, seed, &g) {
                 Ok(v) => {
+                    if let Some(want) = committed.as_ref() {
+                        let theirs = want.get("rows").and_then(Value::as_array).and_then(|rows| {
+                            rows.iter().find(|r| r.get(0).and_then(Value::as_str) == Some(&name))
+                        });
+                        if theirs != Some(&v) {
+                            let digest = theirs.and_then(|r| r.get(3)).and_then(Value::as_str);
+                            let ours = v.get(3).and_then(Value::as_str).unwrap_or_default();
+                            problems.extend(divergence::whole("newgame", &name, &g, digest, ours));
+                        }
+                    }
                     rows.push(v);
                     problems.extend(soundness(&name, &mut g));
                 }
@@ -181,10 +201,5 @@ pub fn check_newgame() -> SetReport {
             problems.extend(diff_rows("newgame.json", "rows", want.get("rows"), &got["rows"]));
         }
     }
-    SetReport {
-        name: "newgame",
-        computed: digest_of(&got),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new("newgame", &got, &["rows"], problems, Vec::new())
 }

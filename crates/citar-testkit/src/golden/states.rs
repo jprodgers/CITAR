@@ -17,7 +17,7 @@ use citar_engine::rules::Ruleset;
 use citar_engine::save::{self, canon, json};
 use serde_json::{Value, json};
 
-use super::{SetReport, capped, diff_rows, digest_of, read_committed, render_rows};
+use super::{SetReport, diff_rows, read_committed, render_rows};
 use crate::states::{self as generate, Shape};
 
 /// The checked-in states: file name, and the seed and shape `golden states` made them from.
@@ -147,10 +147,5 @@ pub fn check_states() -> SetReport {
             problems.extend(diff_rows("states.json", "states", want.get("states"), &got["states"]));
         }
     }
-    SetReport {
-        name: "states",
-        computed: digest_of(&got),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new("states", &got, &["states"], problems, Vec::new())
 }

@@ -86,6 +86,11 @@ pub struct Game {
     /// How deeply the triggers and one-time effects in progress are nested (`game::triggers`):
     /// zero between calls, never saved.
     pub(crate) trigger_depth: u8,
+    /// The assignments the settle under way has moved cities away from, oldest first, so that a
+    /// city its reassignments lead back to stops there (`Game::reassign_in_settle`; a
+    /// reassignment outside a settle records none); emptied at the start and the end of every
+    /// settle's citizen passes, never saved.
+    pub(crate) citizens_held: Vec<(CityId, super::cities::citizens::Assignment)>,
 }
 
 impl Game {
@@ -122,6 +127,7 @@ impl Game {
             driving: None,
             turn_yields: None,
             trigger_depth: 0,
+            citizens_held: Vec::new(),
         }
     }
 

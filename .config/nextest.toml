@@ -10,3 +10,11 @@ retries = 0
 fail-fast = false
 failure-output = "immediate-final"
 slow-timeout = { period = "120s", terminate-after = 5 }
+
+[profile.nightly]
+# nightly.yml: the properties at 10,000 cases, whose two game properties take tens of minutes
+# each. Long tests are reported every 5 minutes and stopped after 100.
+retries = 0
+fail-fast = false
+failure-output = "immediate-final"
+slow-timeout = { period = "300s", terminate-after = 20 }

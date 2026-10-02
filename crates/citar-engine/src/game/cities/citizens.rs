@@ -507,10 +507,40 @@ fn unassign_extra(
 // ---- Settle and the oracle (DESIGN.md 6.7, 6.8) ---------------------------------------------------
 
 impl Game {
-    /// Reassigns city `c`'s citizens, as the settle does for a flagged city: writes the new
-    /// assignment if it differs (or if the engine never assigned the city), marks the city
-    /// settled, and flags the cities of its owner that could work a tile it took or released.
+    /// Reassigns city `c`'s citizens outside a settle, as a city's end of turn does before it
+    /// picks what to build: writes the new assignment if it differs (or if the engine never
+    /// assigned the city), marks the city settled, and flags the cities that could read a tile it
+    /// took or released.
     pub(crate) fn reassign(&mut self, c: CityId) {
+        self.reassign_city(c, false);
+    }
+
+    /// Reassigns flagged city `c`'s citizens in one of the settle's citizen passes, as
+    /// [`Game::reassign`] does, with the settle's stop for a city in a cycle.
+    ///
+    /// Where a city's uniques read its own citizens (the kitchen sink's `[+10]% [Food] <in cities
+    /// with [2] [Specialists]>`, counted from the specialists it has while the food of the next
+    /// citizen is weighed; a tile's yield `<in tiles adjacent to [worked] tiles>`), the best
+    /// assignment can depend on the assignment itself with no fixed point: two specialists bring
+    /// the food that sends one of them to a tile, and one brings too little. Python placed the
+    /// citizens once per refresh and flipped between the two from one to the next; the settle
+    /// used to flip until its passes ran out (SETTLE-1).
+    ///
+    /// So a city whose new assignment is one the settle under way has already moved it away from
+    /// (`citizens_held`) takes it only if it stands now: the city is put there and assigned
+    /// again, and if that moves it on, it goes back to the assignment it has and stops in its
+    /// cycle. A return that stands is taken, since another city's move may have given back what
+    /// the city left for (a tile `<in tiles adjacent to [worked] tiles>` beside one a neighbour
+    /// released and took again). A held entry is not dropped when another city's move flags the
+    /// city: two neighbouring cities each in its own cycle flag each other at every flip, and
+    /// would flip until the passes ran out. What the settle does is a function of its own passes,
+    /// so it is as deterministic as the rest; the citizen oracle ([`verify`]) accepts a city its
+    /// reassignments lead back to.
+    pub(crate) fn reassign_in_settle(&mut self, c: CityId) {
+        self.reassign_city(c, true);
+    }
+
+    fn reassign_city(&mut self, c: CityId, settling: bool) {
         let Some(a) = assign(self, c, false) else { return };
         let Some(city) = self.city(c) else { return };
         let before = Assignment::of(city);
@@ -518,6 +548,7 @@ impl Game {
             return;
         }
         let owner = city.owner();
+        let changed = before != a;
         let moved: SmallVec<[TileIdx; 8]> = before
             .worked
             .iter()
@@ -525,8 +556,22 @@ impl Game {
             .chain(a.worked.iter().filter(|t| !before.worked.contains(t)))
             .copied()
             .collect();
-        let changed = before != a;
-        self.set_citizens(c, a);
+        let back = settling && self.citizens_held.iter().any(|(x, held)| *x == c && *held == a);
+        if back {
+            // A return: the city tries it, and keeps it only if a fresh assignment leaves it
+            // there. Otherwise the write is undone, which leaves the state as it was.
+            let tried = a.clone();
+            self.set_citizens(c, a);
+            if assign(self, c, false).as_ref() != Some(&tried) {
+                self.set_citizens(c, before);
+                return;
+            }
+        } else {
+            self.set_citizens(c, a);
+        }
+        if settling && changed {
+            self.citizens_held.push((c, before));
+        }
         let deps = self.dv.stats.deps().citizens;
         if !moved.is_empty() && deps.contains(crate::unique::CondDeps::MAP) {
             // What a tile yields reads whether a city works the tiles around it (a filter asked
@@ -594,7 +639,9 @@ impl Game {
 }
 
 /// The citizen oracle (DESIGN.md 6.8): every city this engine has assigned has its citizens where
-/// a fresh assignment would put them. One line for each that does not.
+/// a fresh assignment would put them, or where the reassignments that start there lead back to
+/// (a city whose uniques read its own citizens, which the settle stops in its cycle:
+/// `Game::reassign_in_settle`). One line for each that does not.
 #[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
@@ -602,7 +649,8 @@ pub fn verify(g: &Game) -> Vec<String> {
     for city in g.state().cities().iter().filter(|c| c.citizens_settled) {
         let c = city.id();
         let Some(a) = assign(g, c, false) else { continue };
-        if a != Assignment::of(city) {
+        let held = Assignment::of(city);
+        if a != held && !comes_back(g, c, &held, a.clone()) {
             out.push(format!(
                 "city {}: its citizens are at {:?} with specialists {:?}, a fresh assignment at \
                  {:?} with {:?}",
@@ -615,6 +663,24 @@ pub fn verify(g: &Game) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether city `c`'s reassignments, from `next` on, come back to `held` within a settle's passes:
+/// `held` is then in a cycle of them, where the settle stops. On a copy of the game, and only
+/// for a city whose fresh assignment differs from its own, which a sound game has only in such a
+/// cycle; a stale city's fresh assignment is a fixed point, which never leads back.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
+fn comes_back(g: &Game, c: CityId, held: &Assignment, mut next: Assignment) -> bool {
+    let mut copy = g.clone();
+    for _ in 0..crate::game::turn::SETTLE_PASSES {
+        copy.set_citizens(c, next);
+        match assign(&copy, c, false) {
+            Some(a) if a == *held => return true,
+            Some(a) => next = a,
+            None => return false,
+        }
+    }
+    false
 }
 
 // ---- The tools (tools.py:679-757) ---------------------------------------------------------------

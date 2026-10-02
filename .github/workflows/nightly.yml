@@ -1,0 +1,299 @@
+# The long runs (crates/citar-engine/DESIGN.md 2.6, 9.5, 9.6), too slow for every push:
+#   - props: the properties at 10,000 cases (rust.yml runs 64), P1 to P7, P8 and the rest
+#     in three jobs. A failure keeps proptest's saved case as an artifact, to commit with the fix;
+#   - stability, on Linux, Windows and macOS: chaos for 20 minutes (`cargo chaos`), then a reduced
+#     soak (`cargo soak`): 36 whole RandomAgent games, six of each map size, to their 330-turn
+#     limit with the invariants on. Chaos replays and the soak's report are kept as artifacts;
+#   - golden-long: every golden set with the long one (whole games on every map size) on the five
+#     targets and linux-x64 in the release profile, compared as determinism.yml compares the
+#     short sets, with the states where targets part kept the same way;
+#   - criterion, on Sundays and on a manual run: the benchmarks as a trend, kept as an artifact
+#     (wall clock on a shared runner varies 10-20%; the gates are the laptop's `cargo xtask perf`
+#     and the pull requests' instruction counts).
+#
+# The full-corpus reference check is not here: the corpus stays on the laptop (an owner decision
+# of 2026-09-23), so it is a laptop run, documented in refcheck/README.md ("The nightly run and the
+# corpus") with the 200-game soak that goes with it.
+#
+# Every job is independent, so the run takes as long as its longest job. By the laptop's measure
+# (GitHub's runners played chaos about as fast as it in rust.yml's runs): P8's 10,000 cases about
+# 17 minutes, a stability job 30 to 40 (the build, 20 of chaos, 5 to 12 of soak), the long golden
+# set about a minute a target, the criterion trend about 15. The whole run must stay under two
+# hours (package 1e-02, gate 4); each job has a timeout to keep it there.
+name: nightly
+
+on:
+  schedule:
+    # 03:17 UTC every night; the Sunday run also takes the criterion trend.
+    - cron: "17 3 * * 1-6"
+    - cron: "17 3 * * 0"
+  # A schedule runs on the default branch only, and so does a manual run (GitHub dispatches only
+  # a workflow its default branch has). Before this file reaches it, or to try a branch's pull
+  # request, label the pull request `nightly` (`gh label create nightly` once, then add it; take
+  # it off and add it again to run again): every job runs on it, with the defaults.
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      props_cases:
+        description: Cases of each property (10,000 for the nightly run)
+        default: "10000"
+      chaos_seconds:
+        description: Seconds of chaos on each OS (1200 for the nightly run)
+        default: "1200"
+      soak_games:
+        description: Games of the reduced soak on each OS (36, six of each map size)
+        default: "36"
+      criterion:
+        description: Run the criterion trend too
+        type: boolean
+        default: true
+
+concurrency:
+  # One run at a time; a label added to a pull request while a run is under way waits for it.
+  group: nightly-${{ github.event_name == 'pull_request' && github.event.label.name || 'run' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  props:
+    name: props (${{ matrix.part }})
+    if: github.event_name != 'pull_request' || github.event.label.name == 'nightly'
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { part: p1-p7, filter: "test(p1_to_p7)" }
+          - { part: p8, filter: "test(p8_reads_are_free)" }
+          - { part: the rest, filter: "not (test(p1_to_p7) | test(p8_reads_are_free))" }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Properties
+        # The nightly nextest profile lets one test run 100 minutes; the ci profile stops it at 10.
+        env:
+          PROPTEST_CASES: ${{ inputs.props_cases || '10000' }}
+        run: >
+          cargo nextest run -p citar-testkit --test props --locked --cargo-profile ci
+          --profile nightly -E '${{ matrix.filter }}'
+
+      - name: Keep proptest's saved cases
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: proptest-regressions-${{ strategy.job-index }}
+          path: crates/citar-testkit/tests/**/*.proptest-regressions
+
+  stability:
+    name: stability (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.label.name == 'nightly'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-tools
+
+      - name: Build chaos and soak
+        run: cargo build --locked -p citar-testkit --bins --profile ci
+
+      - name: Chaos
+        # Seeds a million apart from rust.yml's, whose run numbers count separately.
+        shell: bash
+        run: >
+          ./target/ci/chaos --seconds "${{ inputs.chaos_seconds || '1200' }}"
+          --seed "$((1000000 + ${{ github.run_number }}))" --out chaos-replays
+
+      - name: Soak
+        # The 2,700 s keep the job inside its timeout; a soak they stop before its last game
+        # fails (exit 3), so a slow runner shows as a failure rather than as fewer games played.
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: >
+          ./target/ci/soak --games "${{ inputs.soak_games || '36' }}" --seconds 2700
+          --seed "${{ github.run_number }}" --json soak-${{ matrix.os }}.json
+
+      - name: Keep the chaos replays
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chaos-replays-${{ matrix.os }}
+          path: chaos-replays
+          if-no-files-found: ignore
+
+      - name: Keep the soak's report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: soak-${{ matrix.os }}
+          path: soak-${{ matrix.os }}.json
+          if-no-files-found: ignore
+
+  golden-long:
+    name: golden-long (${{ matrix.target }})
+    if: github.event_name != 'pull_request' || github.event.label.name == 'nightly'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-24.04, profile: ci }
+          - { target: linux-x64-release, os: ubuntu-24.04, profile: release }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, profile: ci }
+          - { target: windows-x64, os: windows-latest, profile: ci }
+          - { target: macos-arm64, os: macos-15, profile: ci }
+          - { target: macos-x64, os: macos-15-intel, profile: ci }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: golden-${{ matrix.profile }}
+
+      - name: Golden check, the long set too
+        id: golden
+        shell: bash
+        run: |
+          set +e
+          cargo run --locked --package citar-testkit --bin golden --profile ${{ matrix.profile }} -- \
+            check --long --out golden-${{ matrix.target }}.json --states golden-states
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: golden-long-report-${{ matrix.target }}
+          path: golden-${{ matrix.target }}.json
+          if-no-files-found: error
+
+      - name: Keep the states where games left the committed files
+        if: steps.golden.outputs.status != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-states-${{ matrix.target }}
+          path: golden-states
+          if-no-files-found: ignore
+
+      - name: Result
+        if: steps.golden.outputs.status != '0'
+        run: exit 1
+
+  golden-compare:
+    needs: golden-long
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.label.name == 'nightly') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: golden-long-report-*
+          merge-multiple: true
+          path: reports
+
+      - name: Compare the targets
+        id: compare
+        run: >
+          python .github/scripts/golden_compare.py compare reports
+          --expect linux-x64,linux-x64-release,linux-arm64,windows-x64,macos-arm64,macos-x64
+          --odd odd.json
+
+      - name: Toolchain
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        with:
+          shared-key: golden-ci
+
+      - uses: actions/download-artifact@v8
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        with:
+          pattern: golden-states-*
+          path: states
+
+      - name: Compare the states where the targets part
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        run: |
+          cargo build --locked --package citar-testkit --bin golden --profile ci
+          python .github/scripts/golden_compare.py states states odd.json target/ci/golden divergence
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        with:
+          name: divergence
+          path: |
+            odd.json
+            states
+            divergence
+          if-no-files-found: ignore
+
+  criterion:
+    if: >-
+      ${{ github.event.schedule == '17 3 * * 0'
+      || (github.event_name == 'workflow_dispatch' && inputs.criterion)
+      || github.event.label.name == 'nightly' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench
+
+      - name: Benchmarks
+        # Every suite of citar-bench, without the corpus (it stays on the laptop), so the states
+        # are the committed fixtures and the synthetic ones. The suites' own limits are the
+        # laptop's (DESIGN.md 10), which a shared runner's slower, noisier cores can cross: a
+        # trend reports, it does not gate, so a suite over its limit neither stops the others
+        # (--no-fail-fast) nor fails the run.
+        continue-on-error: true
+        run: cargo bench --locked --no-fail-fast -p citar-bench
+
+      - name: Keep the numbers
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: criterion-${{ github.run_number }}
+          path: |
+            target/criterion
+            target/perf
+          retention-days: 90
+          if-no-files-found: warn

@@ -14,7 +14,7 @@ use citar_engine::state::config::MapEdges;
 use citar_engine::state::map::WATER;
 use serde_json::{Value, json};
 
-use super::{SetReport, capped, diff_rows, digest_of, read_committed, render_rows};
+use super::{SetReport, diff_rows, read_committed, render_rows};
 
 /// The maps: (lobby size, type, edges, seed).
 const MAPS: [(&str, MapType, MapEdges, u64); 10] = [
@@ -133,10 +133,5 @@ pub fn check_maps() -> SetReport {
             problems.extend(diff_rows("maps.json", "rows", want.get("rows"), &got["rows"]));
         }
     }
-    SetReport {
-        name: "maps",
-        computed: digest_of(&got),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new("maps", &got, &["rows"], problems, Vec::new())
 }

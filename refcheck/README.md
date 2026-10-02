@@ -229,6 +229,25 @@ The refcheck is clean when every difference is fixed or listed, over all 262 sta
 1's exit condition. Start with the committed fixtures (quick, and run in CI), then run the whole corpus. The
 `fn` names, which `explain` prints, tell you which Python function to read when an answer is not obvious.
 
+### The nightly run and the corpus
+
+The corpus is not published (it stays on the laptop), so `.github/workflows/nightly.yml` cannot check it. The
+nightly run's reference check is this laptop run instead, worth doing before a merge into `main` and after any
+change to a rule:
+
+```
+cargo refcheck run --fixtures refcheck/fixtures-mini --fixtures refcheck/fixtures-late \
+                   --fixtures refcheck/corpus --strict                 # all 262 states, every group
+CITAR_REFCHECK_CORPUS=$PWD/refcheck/corpus cargo nextest run -p citar-testkit --cargo-profile ci \
+                   -E 'test(every_fixture_plays_five_pass_rounds_cleanly)'   # the 250 corpus states pass rounds
+CITAR_REFCHECK_CORPUS=$PWD/refcheck/corpus cargo chaos --from-fixtures --seconds 600
+```
+
+The first takes about 20 seconds on one thread; `--strict` also fails on an intended entry that explains
+nothing (exit 3). The second plays five rounds from every corpus state with the invariants at every settle and
+the cache oracle after the rounds; the third plays chaos from them. The soak that goes with them, 200 whole
+games, is in CONTRIBUTING.md ("Rust").
+
 ## The statistical baseline
 
 ```

@@ -9,14 +9,17 @@
 //! Until then `golden check` computes it, and the determinism workflow compares what the targets
 //! computed, with no committed file to compare them with.
 
-use citar_engine::game::setup;
+use citar_engine::base::digest::Digest;
+use citar_engine::base::ids::Turn;
 use citar_engine::game::turn::stages;
+use citar_engine::game::{Game, setup};
 use citar_engine::rules::Ruleset;
 use citar_engine::save::chain::DigestChain;
 use citar_engine::state::Phase;
 use serde_json::{Value, json};
 
-use super::{SetReport, capped, diff_rows, digest_of, read_committed, render_rows};
+use super::divergence::{self, Watch};
+use super::{SetReport, diff_rows, read_committed, render_rows};
 use crate::script;
 
 /// The stages the set depends on that are still pending: every setup stage and every stage of a
@@ -28,13 +31,13 @@ pub fn waiting() -> Vec<String> {
     setup.chain(turn).collect()
 }
 
-/// The game, and the digest of every round.
-fn answers() -> (Value, Vec<String>) {
-    let r = Ruleset::shared();
-    let (doc, _) = match script::map_doc("arena") {
-        Ok(d) => d,
-        Err(e) => return (json!({"format": 1}), vec![e]),
-    };
+/// The game as it starts: the arena, seed 20260924, two bots and a human seat, a city-state, the
+/// barbarians and 20 turns, keeping a chain of round digests.
+///
+/// # Errors
+/// If the arena cannot be read or the settings are refused.
+pub fn game() -> Result<Game, String> {
+    let (doc, _) = script::map_doc("arena")?;
     let cfg = json!({
         "seed": 20_260_924,
         "players": [{"controller": "bot"}, {"controller": "bot"}, {"controller": "human"}],
@@ -43,27 +46,69 @@ fn answers() -> (Value, Vec<String>) {
         "turn_limit": 20,
         "map": doc,
     });
-    let mut g = match script::new_game(r, cfg.as_object().unwrap_or(&serde_json::Map::new())) {
-        Ok(g) => g,
-        Err(e) => return (json!({"format": 1}), vec![format!("the game does not set up: {e}")]),
-    };
+    let mut g =
+        script::new_game(Ruleset::shared(), cfg.as_object().unwrap_or(&serde_json::Map::new()))
+            .map_err(|e| format!("the game does not set up: {e}"))?;
     g.set_chain(Some(DigestChain::new(b"golden:turns")));
-    let mut rows = Vec::new();
-    let mut problems = Vec::new();
+    Ok(g)
+}
+
+/// Plays the game turn after turn until it ends, calling `each` for every round the chain takes
+/// with its own turn number; `each` returns whether to go on. Returns what went wrong.
+pub fn play(g: &mut Game, each: &mut dyn FnMut(&Game, Turn, &Digest) -> bool) -> Vec<String> {
     let mut last = g.last_round();
-    while g.phase() == Phase::Playing && rows.len() < 100 {
+    let mut rounds = 0;
+    while g.phase() == Phase::Playing && rounds < 100 {
         if let Err(e) = g.end_turn(g.current()) {
-            problems.push(format!("turn {}: {}", g.turn(), e.message));
-            break;
+            return vec![format!("turn {}: {}", g.turn(), e.message)];
         }
-        // A row for each round the chain took, under the round's own turn number.
         if g.last_round() != last {
             last = g.last_round();
-            if let Some((round, d)) = last {
-                rows.push(json!([round, d.to_hex()]));
+            rounds += 1;
+            if let Some((round, d)) = last
+                && !each(g, round, &d)
+            {
+                break;
             }
         }
     }
+    Vec::new()
+}
+
+/// The game, and the digest of every round.
+fn answers() -> (Value, Vec<String>) {
+    let r = Ruleset::shared();
+    let mut g = match game() {
+        Ok(g) => g,
+        Err(e) => return (json!({"format": 1}), vec![e]),
+    };
+    let committed = divergence::dir().and_then(|_| read_committed("turns.json").ok());
+    let want: Vec<(Turn, String)> = committed
+        .as_ref()
+        .and_then(|c| c.get("rounds"))
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    Some((
+                        Turn::try_from(r.get(0)?.as_i64()?).ok()?,
+                        r.get(1)?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut watch = Watch::new("turns", "arena", want);
+    let mut rows = Vec::new();
+    // A row for each round the chain took, under the round's own turn number.
+    let mut problems = play(&mut g, &mut |g, round, d| {
+        if let Some(w) = watch.as_mut() {
+            w.round(g, round, d);
+        }
+        rows.push(json!([round, d.to_hex()]));
+        true
+    });
+    problems.extend(watch.map(|w| w.problems).unwrap_or_default());
     let head = g.chain().map(|c| c.head().to_hex());
     let v = json!({
         "format": 1,
@@ -124,5 +169,5 @@ pub fn check_turns() -> SetReport {
             }
         }
     }
-    SetReport { name: "turns", computed: digest_of(&got), problems: capped(problems), waiting }
+    SetReport::new("turns", &got, &["rounds"], problems, waiting)
 }
