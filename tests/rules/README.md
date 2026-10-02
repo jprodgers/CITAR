@@ -258,6 +258,8 @@ ported (package 2-00b), and each names in `needs` the package of the port that m
 faith, settlers, workers, scouts), `2-03` (units and fighting) or `2-05` (diplomacy). The Python runner
 plays a script whatever its `needs`; the Rust runner refuses it, and its harness lists it as ignored. A
 package's gate is that no script names it any more: it removes the header from the scripts it makes pass.
+`bot_selftest.toml` is the bot step's own self-test, with its must-fail steps; it stays apart from
+`_selftest.toml`, which the Rust runner plays today, until the Rust runner has the step.
 
 ## Values
 

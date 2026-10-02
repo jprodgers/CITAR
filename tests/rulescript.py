@@ -795,9 +795,12 @@ class Runner:
             if g.phase != "playing" or g.current != pid:
                 self.outcome(s, label, None, f"It is not player {pid}'s turn.")
                 return
-            g.play_bot_turn(pid, bot, end_turn=True)
-            if g.phase == "playing" and g.current == pid:
-                g.execute(pid, "end_turn", {})          # the idle bot plays without ending its turn
+            try:
+                g.play_bot_turn(pid, bot, end_turn=True)
+                if g.phase == "playing" and g.current == pid:
+                    g.execute(pid, "end_turn", {})          # the idle bot plays without ending its turn
+            except ActionError as e:
+                raise ScriptError(f"{label}: the bot's turn did not end: {e}")
             self.outcome(s, label, {"turn": g.turn, "current": g.current}, None)
             return
         if ask == "respond":
