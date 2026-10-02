@@ -46,6 +46,44 @@ class RuleScripts(unittest.TestCase):
         with self.assertRaises(rulescript.ScriptError):
             rulescript.Script("bad", {"step": []})
 
+    def test_needs_names_a_bot_package(self):
+        # A script's `needs` is the Phase 2 package that makes it pass on the Rust engine, which then removes the
+        # header (crates/citar-engine DESIGN.md P2.3.11): only the bot's ports carry scripts the Rust runner ignores.
+        for bad in ("later", "2-1", "2-01ab", 3):
+            with self.assertRaises(rulescript.ScriptError):
+                rulescript.Script("bad", {"about": "x", "needs": bad})
+        for path in rulescript.discover():
+            needs = rulescript.load(path).needs
+            if needs is not None:
+                self.assertIn(needs, ("2-01a", "2-01b", "2-03", "2-05"), path.name)
+
+    def test_every_bot_script_is_named_for_the_bot(self):
+        # The bot's scripts are found by name (bot_*.toml), and every script with a bot step is one of them.
+        import tomllib
+
+        def has_bot_step(steps):
+            return any(isinstance(s, dict) and ("bot" in s or has_bot_step(s.get("steps", []))) for s in steps)
+        for path in rulescript.discover():
+            with open(path, "rb") as fh:
+                doc = tomllib.load(fh)
+            if has_bot_step(doc.get("step", [])):
+                self.assertTrue(path.stem.startswith("bot_"), path.name)
+
+    def test_a_bot_turn_pins_every_draw(self):
+        pinned = {"tech_noise": 0, "ranged_chance": 1, "peace_offer_chance": 0, "friend_chance": 1,
+                  "friend_chance_aggr": 0, "war_chance": 1, "war_chance_aggr": 0}
+        self.assertIsNone(rulescript.unpinned_draws(pinned))
+        self.assertIsNone(rulescript.unpinned_draws(dict(pinned, war_prep_rate=2)))
+        self.assertIsNone(rulescript.unpinned_draws(dict(pinned, war_chance=0, war_prep_rate=0.5)))
+        self.assertIn("war_prep_rate", rulescript.unpinned_draws(dict(pinned, war_prep_rate=0.5)))
+        self.assertIn("tech_noise", rulescript.unpinned_draws(dict(pinned, tech_noise=0.1)))
+        self.assertIn("ranged_chance", rulescript.unpinned_draws(dict(pinned, ranged_chance=0.3)))
+        self.assertIn("war_chance_aggr", rulescript.unpinned_draws(dict(pinned, war_chance_aggr=0.15)))
+        for key in pinned:
+            missing = dict(pinned)
+            del missing[key]
+            self.assertIn(key, rulescript.unpinned_draws(missing))
+
 
 def _script_test(path: Path):
     def test(self):

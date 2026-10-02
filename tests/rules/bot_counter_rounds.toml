@@ -1,0 +1,63 @@
+about = """
+The bot never haggles forever: it counters at most counter_rounds times in one negotiation, then
+rejects with a last word. With counter_rounds 2, the third shortfall offer is rejected.
+"""
+from = "tests/test_bot_diplomacy.py::CounterTests::test_the_bot_stops_countering_after_counter_rounds"
+needs = "2-05"
+
+[[step]]
+set = { short = { counter_rounds = 2 } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+]
+
+[[step]]
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Maps for gold?", give = [{ type = "gold", amount = 10 }], receive = [{ type = "share_map" }] }
+as = "opened"
+
+[[step]]
+repeat = 2
+steps = [
+  { bot = "respond", player = 1, negotiation = "=opened.negotiation_id", params = "=short" },
+  { tool = "respond_negotiation", player = 0, args = { negotiation_id = "=opened.negotiation_id", action = "counter", message = "No.", give = [{ type = "gold", amount = 10 }], receive = [{ type = "share_map" }] } },
+]
+
+[[step]]
+note = "Two counters by the bot, each answered by the same short offer."
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history"
+len = 5
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history[1].action"
+eq = "counter"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history[3].action"
+eq = "counter"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=opened.negotiation_id"
+params = "=short"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+subset = { status = "rejected" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history[5]"
+subset = { by = 1, action = "reject", message = "That is our last word, then. No deal." }

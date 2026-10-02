@@ -1,0 +1,69 @@
+about = """
+A spaceship part goes to the capital, which has the Apollo Program, and is added to the spaceship
+there. A great general parked in the capital is moved out of the way first, since a tile holds one
+civilian.
+"""
+from = "citar/bots/basic.py:1960-1966 (handle_special), 2039-2052 (_clear_civilian_slot)"
+needs = "2-03"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3, buildings = ["Apollo Program"] },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 0, unit = "Great General", at = "A" },
+  { op = "add_unit", player = 0, unit = "SS Booster", at = "A>e>e" },
+  { op = "found_city", player = 1, at = "B", capital = true },
+]
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[type=SS Booster].id"
+absent = false
+as = "booster"
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[type=Great General].id"
+absent = false
+as = "general"
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = 'spaceship.parts["SS Booster"]'
+eq = { added = 0, needed = 3 }
+
+[[step]]
+note = "The part walks into the capital; the general made room for it."
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "unit", unit = "=booster" }
+subset = { x = "=x('A')", y = "=y('A')" }
+
+[[step]]
+check = { what = "units", player = 0, at = "A" }
+none = { path = "id", eq = "=general" }
+
+[[step]]
+op = "end_turn"
+args = { player = 1 }
+
+[[step]]
+note = "In the capital it is added to the spaceship."
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = 'spaceship.parts["SS Booster"]'
+eq = { added = 1, needed = 3 }
+
+[[step]]
+check = { what = "units", player = 0 }
+none = { path = "type", eq = "SS Booster" }

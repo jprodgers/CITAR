@@ -553,6 +553,7 @@ class Runner:
         self.anchors = {k: tuple(v) for k, v in doc.pop("anchors", {}).items()}
         self.doc, self.width, self.height = doc, doc["width"], doc["height"]
         self.vars: dict = {}
+        self.bots: dict = {}             # the seats' bots, by (player, version, aggression, params)
         self.intended = intended_ids()
         self.game = self.make_game({})
         self.test_op_names = {o["op"] for o in self.game.inspect({"what": "ops"})["test"]}
@@ -726,6 +727,7 @@ class Runner:
         if s.get("error", False) is not False:
             raise ScriptError(f"{label}: expected the settings to be refused")
         self.game = g
+        self.bots = {}
 
     def do_set(self, s: dict, label: str):
         if not isinstance(s["set"], dict):
@@ -782,11 +784,8 @@ class Runner:
         if nid is not None and (not _is_num(nid) or int(nid) != nid):
             raise ScriptError(f"{label}: negotiation {show(nid)} is no negotiation id")
         nid = None if nid is None else int(nid)
-        engine = "idle" if version == "idle" else "basic"
-        # The seed is ignored on the Rust engine, which keys the bot's draws by the game's seed (DESIGN.md P2.3.5);
-        # here it only has to be fixed, since a turn step pins every draw that could move what a script checks.
-        bot = engine_api.bot_instance(engine, seed=0, aggression=float(aggression), params=params or None)
-        if owners:
+        bot = self.seat_bot(pid, version, float(aggression), params)
+        if version != "idle":
             try:
                 engine_api.bot_set_diplomacy(bot, owners)
             except ValueError as e:
@@ -822,6 +821,25 @@ class Runner:
             self.outcome(s, label, None, str(e))
             return
         self.outcome(s, label, plain(advice), None)
+
+    def seat_bot(self, pid: int, version: str, aggression: float, params: dict):
+        """The seat's bot for a step: the one its earlier steps used, while the version, aggression and params
+        stay the same, else a new one.
+
+        A game keeps its seats' bots from turn to turn, and what a bot remembers (an escort, a war it prepares, a
+        site it gave up) lasts with it, as the Rust bot's memory lasts in the seat's DriverMemory whatever the
+        handle. A script that relies on that memory gives a seat the same version, aggression and params in every
+        step. The seed is ignored on the Rust engine, which keys the bot's draws by the game's seed (DESIGN.md
+        P2.3.5); here it only has to be fixed, since a turn step pins every draw a script could see.
+        """
+        key = (pid, version, aggression, json.dumps(params, sort_keys=True))
+        bot = self.bots.get(key)
+        if bot is None:
+            engine = "idle" if version == "idle" else "basic"
+            bot = engine_api.bot_instance(engine, seed=0, aggression=aggression, params=params or None)
+            self.bots = {k: b for k, b in self.bots.items() if k[0] != pid}
+            self.bots[key] = bot
+        return bot
 
     # ---- values
 
