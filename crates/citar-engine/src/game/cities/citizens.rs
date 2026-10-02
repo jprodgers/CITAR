@@ -321,7 +321,7 @@ impl Assignment {
 /// slot; with `reset`, its locks dropped first. Reads only.
 ///
 /// A city with more citizens locked to tiles and set as specialists by hand than it has sheds
-/// the extra ones, a locked tile's lock with it ([`unassign_extra`]); a lock past its citizens,
+/// the extra ones, a locked tile's lock with it (`unassign_extra`); a lock past its citizens,
 /// which no citizen worked, is then the next one worked, and shed in turn. Python placed the
 /// citizens once per refresh, so it shed one lock a refresh and the city moved at every one
 /// until enough were gone; here the placement goes on until no lock is shed, which is where
