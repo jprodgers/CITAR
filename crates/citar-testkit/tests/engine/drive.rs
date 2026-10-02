@@ -532,3 +532,136 @@ fn random_agents_that_leave_chats_to_the_drive_get_their_answers() {
     assert!(g.negotiations().iter().all(|n| n.status != NegStatus::Open), "none left open");
     clean(&mut g);
 }
+
+// ---- Game::answer (package 2-00a, gate 3) ---------------------------------------------------
+
+/// The host's seat 0 offers seat 1 `gold` for nothing, on its own turn: the negotiation, which
+/// waits on seat 1.
+fn offer_to_seat_one(g: &mut Game, gold: u32) -> NegotiationId {
+    g.meet(PlayerId(0), PlayerId(1)).expect("they meet");
+    g.apply_ops(&json!([{"op": "set_player", "player": 0, "gold": 100}])).expect("gold");
+    let offer = OpenNegotiation {
+        to: 1,
+        message: json!("A gift."),
+        give: Some(json!([{"type": "gold", "amount": gold}])),
+        receive: Some(json!([])),
+    };
+    let (out, _) = g.act(PlayerId(0), Action::OpenNegotiation(offer)).expect("it opens");
+    let nid = out["negotiation_id"].as_u64().and_then(|n| u32::try_from(n).ok());
+    let nid = nid.and_then(NegotiationId::new).expect("an id");
+    assert_eq!(g.negotiation(nid).and_then(|n| n.awaiting), Some(PlayerId(1)));
+    nid
+}
+
+fn gold(g: &Game, p: PlayerId) -> f64 {
+    g.player(p).map_or(0.0, |x| x.econ.gold)
+}
+
+#[test]
+fn answer_puts_a_negotiation_that_waits_on_a_seat_to_a_driver_and_keeps_its_memory() {
+    let mut g = arena(&json!([{}, {"controller": "bot"}]), &json!({}));
+    let nid = offer_to_seat_one(&mut g, 30);
+    let before = gold(&g, PlayerId(1));
+    let mut bot = Tester::new(Some("accept"));
+    let (outcome, batch) = g.answer(PlayerId(1), nid, &mut bot).expect("it waits on seat 1");
+    assert_eq!(outcome, DriverOutcome::Done);
+    assert_eq!(bot.answers, 1, "put to the driver once");
+    assert!(!batch.is_empty(), "the answer's events come back");
+    let n = g.negotiation(nid).expect("it exists");
+    assert_eq!((n.status, n.awaiting), (NegStatus::Accepted, None));
+    assert!((gold(&g, PlayerId(1)) - before - 30.0).abs() < 1e-9, "the deal was carried out");
+    assert_eq!(memory(&g, PlayerId(1)), [0, 1], "the driver's answer, in the seat's memory");
+    assert_eq!((g.turn(), g.current()), (1, PlayerId(0)), "nobody's turn moved");
+    // Settled: every invariant and every cache holds after the call.
+    clean(&mut g);
+    // Answered, it waits on nobody: a second answer is refused, as a responder that lost the
+    // race to it would be.
+    let e = g.answer(PlayerId(1), nid, &mut bot).expect_err("no longer open");
+    assert_eq!(e.code, ErrCode::Negotiation);
+    assert_eq!(bot.answers, 1, "and the driver was not asked");
+    assert_eq!(memory(&g, PlayerId(1)), [0, 1]);
+}
+
+#[test]
+fn answer_left_to_the_host_keeps_the_negotiation_open_and_the_memory_written() {
+    let mut g = arena(&json!([{}, {"controller": "hybrid"}]), &json!({}));
+    let nid = offer_to_seat_one(&mut g, 10);
+    let mut bot = Tester::new(None);
+    bot.defer = true;
+    let (outcome, _) = g.answer(PlayerId(1), nid, &mut bot).expect("it waits on seat 1");
+    assert_eq!(outcome, DriverOutcome::Deferred);
+    let n = g.negotiation(nid).expect("it exists");
+    assert_eq!((n.status, n.awaiting), (NegStatus::Open, Some(PlayerId(1))));
+    assert_eq!(memory(&g, PlayerId(1)), [0, 1]);
+    // The seat's model answers it later, as a host's own seat would.
+    answer_as(&mut g, PlayerId(1), nid, "reject");
+    assert_eq!(g.negotiation(nid).map(|n| n.status), Some(NegStatus::Rejected));
+    clean(&mut g);
+}
+
+#[test]
+fn answer_refuses_a_negotiation_that_waits_on_another_seat_or_none() {
+    let mut g = arena(&json!([{}, {"controller": "bot"}, {"controller": "bot"}]), &json!({}));
+    let nid = offer_to_seat_one(&mut g, 10);
+    let mut bot = Tester::new(Some("accept"));
+    for (seat, n) in [(PlayerId(0), nid), (PlayerId(2), nid)] {
+        let e = g.answer(seat, n, &mut bot).expect_err("it waits on seat 1");
+        assert_eq!(e.code, ErrCode::Negotiation, "{}", e.message);
+        assert!(e.message.contains("not open and waiting"), "{}", e.message);
+    }
+    let missing = NegotiationId::new(99).expect("an id");
+    let e = g.answer(PlayerId(1), missing, &mut bot).expect_err("no such negotiation");
+    assert_eq!(e.code, ErrCode::Negotiation);
+    assert_eq!(bot.answers, 0, "no driver was asked");
+    assert_eq!(g.negotiation(nid).and_then(|n| n.awaiting), Some(PlayerId(1)));
+    assert!(memory(&g, PlayerId(2)).is_empty());
+    clean(&mut g);
+}
+
+/// A driver that, inside its turn, tries to have another driver answer a negotiation.
+struct Nested {
+    nid: NegotiationId,
+    refused: Option<ErrCode>,
+}
+
+impl SeatDriver for Nested {
+    fn play_turn(&mut self, g: &mut Game, pid: PlayerId, _: &mut DriverMemory) -> DriverOutcome {
+        let mut inner = Tester::new(Some("accept"));
+        self.refused = g.answer(pid, self.nid, &mut inner).err().map(|e| e.code);
+        assert_eq!(inner.answers, 0);
+        DriverOutcome::Done
+    }
+
+    fn respond(
+        &mut self,
+        _: &mut Game,
+        _: PlayerId,
+        _: NegotiationId,
+        _: &mut DriverMemory,
+    ) -> DriverOutcome {
+        DriverOutcome::Done
+    }
+}
+
+#[test]
+fn answer_is_refused_inside_a_driver_and_on_a_poisoned_game() {
+    let mut g = arena(&json!([{}, {"controller": "bot"}]), &json!({}));
+    let nid = offer_to_seat_one(&mut g, 10);
+    g.end_turn(PlayerId(0)).expect("the host ends its turn");
+    // Seat 1's driver plays: inside it, the game answers through no other driver.
+    let mut nested = Nested { nid, refused: None };
+    let mut d = Drivers::none(2).with(PlayerId(1), &mut nested);
+    let (stop, _) = g.drive(&mut d, DriveOptions::default()).expect("live");
+    assert_eq!(stop, Stop::External(PlayerId(0)), "its turn played and ended");
+    drop(d);
+    assert_eq!(nested.refused, Some(ErrCode::Rule), "refused while a driver plays");
+    // A poisoned game answers nothing.
+    let mut g = arena(&json!([{}, {"controller": "bot"}]), &json!({}));
+    let nid = offer_to_seat_one(&mut g, 10);
+    g.poison("a test stopped it");
+    let mut bot = Tester::new(Some("accept"));
+    let e = g.answer(PlayerId(1), nid, &mut bot).expect_err("poisoned");
+    assert_eq!(e.code, ErrCode::Poisoned);
+    assert_eq!(bot.answers, 0);
+    assert_eq!(g.negotiation(nid).map(|n| n.status), Some(NegStatus::Open));
+}
