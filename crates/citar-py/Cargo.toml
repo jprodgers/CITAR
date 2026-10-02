@@ -32,5 +32,9 @@ citar-store.workspace = true
 pyo3.workspace = true
 serde_json.workspace = true
 
+# build.rs: an extension leaves libpython's symbols to the interpreter that imports it.
+[build-dependencies]
+pyo3-build-config.workspace = true
+
 [lints]
 workspace = true

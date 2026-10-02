@@ -255,6 +255,7 @@ dependencies = [
  "citar-sim",
  "citar-store",
  "pyo3",
+ "pyo3-build-config",
  "serde_json",
 ]
 

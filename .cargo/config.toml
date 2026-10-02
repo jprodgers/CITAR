@@ -9,3 +9,11 @@ refcheck = "run --package citar-refcheck --profile ci --"
 golden = "run --package citar-testkit --bin golden --profile ci --"
 chaos = "run --package citar-testkit --bin chaos --profile ci --"
 soak = "run --package citar-testkit --bin soak --profile ci --"
+
+# citar-py is a Python extension, which never links libpython: the interpreter that imports it
+# provides the symbols. PyO3 0.29 reads this (its replacement for the deprecated
+# `extension-module` feature, and what maturin sets), so a plain `cargo build --workspace` links
+# on a Linux box without a Python development library. crates/citar-py/build.rs adds macOS's
+# `-undefined dynamic_lookup`. No crate here embeds Python, so nothing needs libpython linked.
+[env]
+PYO3_BUILD_EXTENSION_MODULE = "1"

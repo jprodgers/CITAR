@@ -117,7 +117,10 @@ cargo fmt --all
 
 These are what CI runs, on Linux, Windows and macOS. `citar-py` (the Python extension) has no
 Rust tests, since Python tests it, so the tests leave it out; clippy and the docs cover it, and
-building it needs a Python 3.11 or later on the `PATH` for PyO3. CI also lints the engine
+building it needs a Python 3.11 or later on the `PATH` for PyO3. It does not need Python's
+development package: an extension never links libpython, and `.cargo/config.toml` sets
+`PYO3_BUILD_EXTENSION_MODULE` (as maturin does) so that a plain `cargo build` builds it that way
+on every OS. CI also lints the engine
 alone in each feature set, because the workspace build turns on features the shipped engine
 does not have (testkit enables `legacy` and `test-ops`). When you change what a feature gates, run
 `cargo clippy -p citar-engine --all-targets -- -D warnings` and again with
