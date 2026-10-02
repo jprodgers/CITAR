@@ -1,24 +1,29 @@
 """The Python runner of the rule scripts in tests/rules/ (the language is tests/rules/README.md).
 
-It plays a script on the engine through ``citar.engine_api.EngineGame`` alone, as the Rust runner
-(crates/citar-testkit/src/script) plays it on the Rust engine; tests/rules/_selftest.toml keeps the two in step. Steps
-marked ``intended`` expect the Rust engine's deliberate difference and are skipped here.
+It plays a script on the engine through ``citar.engine_api`` alone (``EngineGame`` and the bot functions), as the Rust
+runner (crates/citar-testkit/src/script) plays it on the Rust engine; tests/rules/_selftest.toml keeps the two in step.
+Steps marked ``intended`` expect the Rust engine's deliberate difference and are skipped here. A script's ``needs``
+names the package that makes it pass on Rust; this runner plays it regardless.
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 import tomllib
 from pathlib import Path
 from typing import Any, Optional
 
+from citar import engine_api
 from citar.engine_api import ActionError, EngineGame
 
 RULES = Path(__file__).resolve().parent / "rules"
 ROOT = RULES.parent.parent
+#: the parameter schema of the bot version basic-1, which bot steps' params are checked against
+BOT_SCHEMA = ROOT / "crates" / "citar-bot" / "params" / "basic-1.json"
 
-TOP = ("about", "from", "map", "start", "config", "step")
-KINDS = ("op", "ops", "tool", "check", "new_game", "set", "repeat")
+TOP = ("about", "from", "needs", "map", "start", "config", "step")
+KINDS = ("op", "ops", "tool", "check", "new_game", "set", "repeat", "bot")
 # `as` and `error` belong to the kinds that use them, so a check that says `error` is refused rather than passing
 # without looking.
 COMMON = ("note", "must_fail", "intended", "coerce")
@@ -26,7 +31,16 @@ MATCHERS = ("absent", "is_null", "eq", "ne", "gt", "ge", "lt", "le", "approx", "
             "matches", "any", "none", "subset")
 WITH = ("tol",)
 OWN = {"op": ("args", "as", "error"), "ops": ("as", "error"), "tool": ("player", "args", "as", "error"),
-       "check": ("path", "as"), "new_game": ("error",), "repeat": ("steps",)}
+       "check": ("path", "as"), "new_game": ("error",), "repeat": ("steps",),
+       "bot": ("player", "negotiation", "version", "aggression", "params", "diplomacy", "as", "error")}
+#: a script's `needs`: the Phase 2 package that makes it pass on the Rust engine
+NEEDS = re.compile(r"[0-9]-[0-9]{2}[a-z]?")
+#: what a bot step asks the seat's bot
+BOT_ASKS = ("turn", "respond", "advice")
+BOT_VERSIONS = ("basic-1", "idle")
+#: the bot's draws a turn step must pin (DESIGN.md P2.3.5): its params give each of these
+PINS = ("tech_noise", "ranged_chance", "peace_offer_chance", "friend_chance", "friend_chance_aggr", "war_chance",
+        "war_chance_aggr")
 
 
 class ScriptError(Exception):
@@ -459,6 +473,42 @@ def number_as_string(v, at: str) -> Optional[str]:
     return None
 
 
+# ------------------------------------------------------------------------------------------------ bots
+
+@functools.cache
+def bot_parameters() -> dict:
+    """basic-1's parameters by key, from its schema (crates/citar-bot/params/basic-1.json)."""
+    doc = json.loads(BOT_SCHEMA.read_text(encoding="utf-8"))
+    return {s["key"]: s for g in doc["groups"] for s in g["params"]}
+
+
+def unpinned_draws(params: dict) -> Optional[str]:
+    """Why a bot turn with these params could draw a result a script checks, or None when every draw is pinned.
+
+    The bot's draws (DESIGN.md P2.3.5) are a tech's noise, ranged or melee, a peace offer, a friendship and a war's
+    preparation; each is pinned when its chance is 0 or 1, so the draw's value cannot matter. The spies' draw only
+    breaks ties between capitals: a script that moves spies has one capital to send them to.
+    """
+    missing = [k for k in PINS if k not in params]
+    if missing:
+        return f"params must give {', '.join(missing)}"
+    for k in PINS:
+        if not _is_num(params[k]):
+            return f"{k} is a number"
+    if params["tech_noise"] != 0:
+        return "tech_noise is 0"
+    for k in ("ranged_chance", "peace_offer_chance", "friend_chance", "war_chance"):
+        if params[k] not in (0, 1):
+            return f"{k} is 0 or 1"
+    for k in ("friend_chance_aggr", "war_chance_aggr"):
+        if params[k] != 0:
+            return f"{k} is 0"
+    rate = params.get("war_prep_rate", bot_parameters()["war_prep_rate"]["default"])
+    if not _is_num(rate) or 0 < params["war_chance"] * rate < 1:
+        return "war_prep_rate keeps the war chance 0 or at least 1"
+    return None
+
+
 # ------------------------------------------------------------------------------------------------ scripts
 
 class Script:
@@ -480,8 +530,12 @@ class Script:
             raise ScriptError(f"{name}: config is a table")
         if not isinstance(steps, list):
             raise ScriptError(f"{name}: steps are [[step]] tables")
+        needs = doc.get("needs")
+        if needs is not None and not (isinstance(needs, str) and NEEDS.fullmatch(needs)):
+            raise ScriptError(f'{name}: needs names a package, as "2-01a"')
         self.name, self.about, self.map = name, about, doc.get("map", "arena")
         self.bare, self.config, self.steps = start == "bare", config, steps
+        self.needs = needs
 
 
 def load(path: Path) -> Script:
@@ -557,7 +611,7 @@ class Runner:
                                   f"refcheck/intended.toml nor tests/rules/intended.toml")
             return
         if s.get("coerce") is not True:
-            for key in ("args", "ops", "new_game"):
+            for key in ("args", "ops", "new_game", "params"):
                 if key in s:
                     bad = number_as_string(s[key], key)
                     if bad:
@@ -686,6 +740,88 @@ class Runner:
         for rnd in range(1, int(n) + 1):
             for j, st in enumerate(s.get("steps", [])):
                 self.step(st, f"{label} (round {rnd}, step {j + 1})")
+
+    def do_bot(self, s: dict, label: str):
+        """A seat's bot plays its turn, answers a negotiation, or gives its advice (tests/rules/README.md, `bot`)."""
+        ask = s["bot"]
+        if ask not in BOT_ASKS:
+            raise ScriptError(f"{label}: bot is one of {', '.join(BOT_ASKS)}, not {show(ask)}")
+        if "player" not in s:
+            raise ScriptError(f"{label}: a bot step names its player")
+        pid = self.value(s["player"], label)
+        if not _is_num(pid) or int(pid) != pid:
+            raise ScriptError(f"{label}: player {show(pid)} is no player id")
+        pid = int(pid)
+        version = self.value(s.get("version", "basic-1"), label)
+        if version not in BOT_VERSIONS:
+            raise ScriptError(f"{label}: version is one of {', '.join(BOT_VERSIONS)}, not {show(version)}")
+        aggression = self.value(s.get("aggression", 0.4), label)
+        if not _is_num(aggression):
+            raise ScriptError(f"{label}: aggression is a number")
+        params = self.value(s.get("params", {}), label)
+        owners = self.value(s.get("diplomacy", {}), label)
+        if not isinstance(params, dict) or not isinstance(owners, dict):
+            raise ScriptError(f"{label}: params and diplomacy are tables")
+        if version == "idle" and (params or owners):
+            raise ScriptError(f"{label}: the idle bot takes no params and no diplomacy")
+        known = bot_parameters()
+        unknown = [k for k in params if k not in known]
+        if unknown:
+            raise ScriptError(f"{label}: params: {unknown[0]} is not a parameter of basic-1")
+        if ask == "turn" and version != "idle":
+            unpinned = unpinned_draws(params)
+            if unpinned:
+                raise ScriptError(f"{label}: a bot turn pins its draws: {unpinned}")
+        if ask == "turn" and "negotiation" in s:
+            raise ScriptError(f"{label}: a bot turn takes no negotiation")
+        if ask == "advice" and version == "idle":
+            raise ScriptError(f"{label}: the idle bot gives no advice")
+        if ask == "respond" and "negotiation" not in s:
+            raise ScriptError(f"{label}: a bot respond step names its negotiation")
+        nid = self.value(s["negotiation"], label) if "negotiation" in s else None
+        if nid is not None and (not _is_num(nid) or int(nid) != nid):
+            raise ScriptError(f"{label}: negotiation {show(nid)} is no negotiation id")
+        nid = None if nid is None else int(nid)
+        engine = "idle" if version == "idle" else "basic"
+        # The seed is ignored on the Rust engine, which keys the bot's draws by the game's seed (DESIGN.md P2.3.5);
+        # here it only has to be fixed, since a turn step pins every draw that could move what a script checks.
+        bot = engine_api.bot_instance(engine, seed=0, aggression=float(aggression), params=params or None)
+        if owners:
+            try:
+                engine_api.bot_set_diplomacy(bot, owners)
+            except ValueError as e:
+                raise ScriptError(f"{label}: diplomacy: {e}")
+        g = self.game
+        if ask == "turn":
+            if g.phase != "playing" or g.current != pid:
+                self.outcome(s, label, None, f"It is not player {pid}'s turn.")
+                return
+            g.play_bot_turn(pid, bot, end_turn=True)
+            if g.phase == "playing" and g.current == pid:
+                g.execute(pid, "end_turn", {})          # the idle bot plays without ending its turn
+            self.outcome(s, label, {"turn": g.turn, "current": g.current}, None)
+            return
+        if ask == "respond":
+            try:
+                n = g.negotiation(nid)
+            except ActionError as e:
+                self.outcome(s, label, None, str(e))
+                return
+            if n["status"] != "open" or n["awaiting"] != pid:
+                self.outcome(s, label, None, f"Negotiation {nid} does not wait on player {pid}.")
+                return
+            if not engine_api.bot_owns_negotiation(bot, n):
+                self.outcome(s, label, {"outcome": "deferred"}, None)
+                return
+            g.bot_respond(pid, nid, bot)
+            self.outcome(s, label, {"outcome": "done"}, None)
+            return
+        try:
+            advice = g.bot_advice(pid, bot, nid)
+        except ActionError as e:
+            self.outcome(s, label, None, str(e))
+            return
+        self.outcome(s, label, plain(advice), None)
 
     # ---- values
 

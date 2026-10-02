@@ -21,8 +21,16 @@ const KINDS: [&str; 7] = ["op", "ops", "tool", "check", "new_game", "set", "repe
 /// says `error` is refused rather than passing without looking.
 const COMMON: [&str; 4] = ["note", "must_fail", "intended", "coerce"];
 
-/// Plays a script; the error says which step failed and why.
+/// Plays a script; the error says which step failed and why. A script that `needs` a package is
+/// refused: its steps use what that package brings (the `bot` step), and until then the harness
+/// reports it as ignored ([`super::ignored`]).
 pub fn run(script: &Script) -> Result<(), String> {
+    if let Some(pkg) = &script.needs {
+        return Err(format!(
+            "{}: needs package {pkg}, which makes it pass on the Rust engine",
+            script.name
+        ));
+    }
     let mut r = Runner::start(script)?;
     for (i, step) in script.steps.iter().enumerate() {
         r.step(step, &format!("step {}", i + 1))?;
