@@ -177,9 +177,9 @@ pub fn unit_and_civ<'w, W: EvalWorld>(
         .index(w.civ_index(w.unit_owner(u), IndexLayer::Full))
 }
 
-/// [`unit`], or [`unit_and_civ`] with `with_civ`, when the unit's profile or its owner's index has
-/// uniques of type `ty`; `None` when neither does, so that nothing could hold and the context
-/// `ctx` is never built (most types a unit is asked about, most units have none of).
+/// [`unit`](fn@unit), or [`unit_and_civ`] with `with_civ`, when the unit's profile or its owner's
+/// index has uniques of type `ty`; `None` when neither does, so that nothing could hold and the
+/// context `ctx` is never built (most types a unit is asked about, most units have none of).
 pub fn unit_candidates<'w, W: EvalWorld>(
     w: &'w W,
     u: UnitId,
