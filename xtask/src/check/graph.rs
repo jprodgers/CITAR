@@ -3,8 +3,9 @@
 //!
 //! The engine depends on no workspace crate; the bot on the engine; the store on none, so the
 //! helper and the bindings can link it; the runner on the engine and the bot; the bindings on all
-//! four. The tools and tests (testkit, refcheck, bench) may add the bot, and bench the runner. A
-//! crate that joins the workspace gets a row here, deliberately.
+//! four. The tools and tests (testkit, refcheck, bench) may add the bot, and bench the runner and
+//! the store, whose save and load its io suite times (package 2-02). A crate that joins the
+//! workspace gets a row here, deliberately.
 
 use std::collections::BTreeSet;
 
@@ -22,7 +23,7 @@ pub const GRAPH: &[(&str, &[&str])] = &[
     ("citar-py", &["citar-engine", "citar-bot", "citar-sim", "citar-store"]),
     ("citar-testkit", &["citar-engine", "citar-bot"]),
     ("citar-refcheck", &["citar-engine", "citar-bot"]),
-    ("citar-bench", &["citar-engine", "citar-testkit", "citar-bot", "citar-sim"]),
+    ("citar-bench", &["citar-engine", "citar-testkit", "citar-bot", "citar-sim", "citar-store"]),
     ("xtask", &[]),
 ];
 

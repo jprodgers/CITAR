@@ -21,6 +21,8 @@ citar-testkit.workspace = true
 # The bot games of the `games` suite, played by the runner (DESIGN.md P2.4.2).
 citar-bot.workspace = true
 citar-sim.workspace = true
+# The io suite's container and journal (package 2-02, report-only).
+citar-store.workspace = true
 # The suites' shared runner (lib.rs) drives criterion and pins its thread.
 criterion.workspace = true
 core_affinity.workspace = true
