@@ -1029,6 +1029,11 @@ pub struct CityBase {
     pub each: Vec<(BuildingId, Stats)>,
     /// Its uniques' flat stats by source.
     pub by_source: SmallVec<[(SourceKind, Yields); 4]>,
+    /// Whether working out `each` and `by_source` read any city's buildings through the view
+    /// (`unique::record::watch_buildings`) beside its own walk over them: a filter, conditional or
+    /// count that reads buildings, whatever classes it names. The what-if reuses a base only when
+    /// it read none.
+    pub reads_buildings: bool,
     /// The percentage its food is raised by (the food of `pct_bonuses`).
     pub food_pct: f64,
     /// Its own tiles that yield without a citizen ([`free_tiles`]).
@@ -1040,6 +1045,7 @@ impl super::super::derive::rev::BitEq for CityBase {
         self.buildings.bit_eq(&other.buildings)
             && self.each.len() == other.each.len()
             && self.each.iter().zip(&other.each).all(|(a, b)| a.0 == b.0 && a.1.bit_eq(&b.1))
+            && self.reads_buildings == other.reads_buildings
             && self.food_pct.to_bits() == other.food_pct.to_bits()
             && self.free == other.free
             && self.by_source.len() == other.by_source.len()
@@ -1065,18 +1071,24 @@ pub(crate) fn city_base_in(v: &EvalView<'_>, c: CityId) -> CityBase {
         return CityBase::default();
     }
     let ctx = Ctx::city(v, c);
-    let bu = BuildingUniques::stats(v, c, &ctx);
-    let mut buildings = Stats::ZERO;
-    let mut each = Vec::with_capacity(v.city_buildings(c).len());
-    for b in v.city_buildings(c).iter() {
-        let s = building_stats_with(g, v, b, &ctx, &bu);
-        buildings += s;
-        each.push((b, s));
-    }
+    // The walk over its buildings is unwatched: the what-if redoes it building by building.
+    let ((buildings, each, by_source), reads_buildings) = record::watch_buildings(|| {
+        let bu = BuildingUniques::stats(v, c, &ctx);
+        let walked = v.buildings_walked(c);
+        let mut buildings = Stats::ZERO;
+        let mut each = Vec::with_capacity(walked.len());
+        for b in walked.iter() {
+            let s = building_stats_with(g, v, b, &ctx, &bu);
+            buildings += s;
+            each.push((b, s));
+        }
+        (buildings, each, uniques_by_source(v, c))
+    });
     CityBase {
         buildings,
         each,
-        by_source: uniques_by_source(v, c),
+        by_source,
+        reads_buildings,
         food_pct: food_percent(v, c),
         free: free_tiles(g, c),
     }
@@ -1115,7 +1127,7 @@ pub(crate) fn city_yield_base_in(
     let ctx = Ctx::city(v, c);
     let bu = BuildingUniques::stats(v, c, &ctx);
     let mut buildings = Stats::ZERO;
-    for b in v.city_buildings(c).iter() {
+    for b in v.buildings_walked(c).iter() {
         buildings += building_stats_with(g, v, b, &ctx, &bu);
     }
     (buildings, uniques_by_source(v, c))

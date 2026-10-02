@@ -10,6 +10,9 @@
 //! recomputation run so (`derive::rev::Memo::get`), since what a memo upstream read is its own,
 //! and the memo downstream validates against that memo's stamp instead.
 //!
+//! Beside the classes, [`watch_buildings`] tells whether a computation read any city's buildings
+//! through the view, which no class has to name for it to show.
+//!
 //! The recorder is the thread's: the engine computes on one thread (DESIGN.md 6.13), and a later
 //! `par` must carry it into its sections. It holds nothing between computations.
 
@@ -22,6 +25,9 @@ std::thread_local! {
     /// The classes read since the innermost [`recorded`] began; `None` when no computation
     /// records.
     static READ: Cell<Option<CondDeps>> = const { Cell::new(None) };
+    /// Whether a city's buildings were read through the view since the innermost
+    /// [`watch_buildings`] began; `None` when nothing watches.
+    static BUILDINGS: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 /// Puts the recorder back as it was when dropped: a computation that panics leaves the thread's
@@ -32,6 +38,43 @@ impl Drop for Restore {
     fn drop(&mut self) {
         READ.with(|r| r.set(self.0));
     }
+}
+
+/// Puts the buildings watch back as it was when dropped.
+struct RestoreWatch(Option<bool>);
+
+impl Drop for RestoreWatch {
+    fn drop(&mut self) {
+        BUILDINGS.with(|b| b.set(self.0));
+    }
+}
+
+/// Notes that a city's buildings were read through the view (`FilterFacts::city_buildings` of
+/// `game::EvalView`), if a computation watches.
+#[inline]
+pub fn note_buildings_read() {
+    BUILDINGS.with(|b| {
+        if b.get().is_some() {
+            b.set(Some(true));
+        }
+    });
+}
+
+/// Runs `f` watching whether it reads a city's buildings through the view, and returns that with
+/// its value: every filter, conditional and count reads them there, whatever classes it names, so
+/// the production advisor's what-if can tell a city's base that read none but its own walk over
+/// them (`cities::what_if`, package 1e-03's fix round). What `f` reads goes to an enclosing
+/// watch too; what a memo computes meanwhile does not ([`isolated`]).
+pub fn watch_buildings<T>(f: impl FnOnce() -> T) -> (T, bool) {
+    let outer = BUILDINGS.with(|b| b.replace(Some(false)));
+    let restore = RestoreWatch(outer);
+    let v = f();
+    let read = BUILDINGS.with(Cell::get).unwrap_or(false);
+    drop(restore);
+    if read {
+        note_buildings_read();
+    }
+    (v, read)
 }
 
 /// Adds what evaluating unique `id` reads, if a computation records.
@@ -64,9 +107,11 @@ pub fn recorded<T>(f: impl FnOnce() -> T) -> (T, CondDeps) {
     (v, d)
 }
 
-/// Runs `f` with the recorder off: nothing it reads is added to an enclosing computation's.
+/// Runs `f` with the recorder and the buildings watch off: nothing it reads is added to an
+/// enclosing computation's.
 pub fn isolated<T>(f: impl FnOnce() -> T) -> T {
     let _restore = Restore(READ.with(|r| r.replace(None)));
+    let _watch = RestoreWatch(BUILDINGS.with(|b| b.replace(None)));
     f()
 }
 
@@ -87,6 +132,21 @@ mod tests {
         assert_eq!(inner, CondDeps::MAP);
         assert_eq!(d, CondDeps::TECHS | CondDeps::WAR, "neither the nested nor the isolated");
         assert_eq!(READ.with(Cell::get), None, "off again, as it was");
+    }
+
+    #[test]
+    fn a_buildings_watch_sees_its_own_reads_and_its_nested_watches_but_not_an_isolated_one() {
+        note_buildings_read();
+        let ((), none) = watch_buildings(|| isolated(note_buildings_read));
+        assert!(!none, "an isolated read is the memo's");
+        let (inner, outer) = watch_buildings(|| {
+            let ((), inner) = watch_buildings(note_buildings_read);
+            inner
+        });
+        assert!(inner && outer, "a nested watch's read is the enclosing one's too");
+        let ((), after) = watch_buildings(|| ());
+        assert!(!after);
+        assert_eq!(BUILDINGS.with(Cell::get), None, "off again, as it was");
     }
 
     #[test]

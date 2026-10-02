@@ -40,7 +40,7 @@ use crate::game::core::has_type;
 use crate::game::economy::ResourceSupply;
 use crate::game::tiles::{CityMods, TileMod};
 use crate::unique::index::Extra;
-use crate::unique::{CondDeps, Csr, FilterFacts as _, UniqueType, index, record};
+use crate::unique::{CondDeps, Csr, UniqueType, index, record};
 
 /// A city's stats with and without one more building (`_simulate`'s answer beside the city's
 /// own): each is the total of its stats (`city_stats(g, c)["total"]`), with its happiness the
@@ -316,6 +316,9 @@ struct CityRead {
     each: Vec<(BuildingId, Stats)>,
     by_source: SmallVec<[(cstats::SourceKind, cstats::Yields); 4]>,
     base_read: CondDeps,
+    /// Whether computing them read any city's buildings through the view beside the walk over
+    /// its own (`CityBase::reads_buildings`).
+    base_reads_buildings: bool,
 }
 
 impl CityRead {
@@ -329,9 +332,9 @@ impl CityRead {
                 (t, s, read)
             })
             .collect();
-        let (each, by_source) = {
+        let (each, by_source, base_reads_buildings) = {
             let base = memo::city_base(g, x);
-            (base.each.clone(), base.by_source.clone())
+            (base.each.clone(), base.by_source.clone(), base.reads_buildings)
         };
         Some(Self {
             mods: memo::city_mods(g, x).map(|m| m.clone()).unwrap_or_default(),
@@ -340,6 +343,7 @@ impl CityRead {
             each,
             by_source,
             base_read: memo::city_base_deps(g, x),
+            base_reads_buildings,
         })
     }
 }
@@ -382,13 +386,27 @@ fn parts_in(v: &EvalView<'_>, o: &Overlay, x: CityId, read: &CityRead) -> Option
         // they were: the sum is taken again in the set's order, the new one's in its place.
         let mut buildings = Stats::ZERO;
         let mut each = read.each.iter().peekable();
-        for b in v.city_buildings(x).iter() {
+        for b in v.buildings_walked(x).iter() {
             buildings += match each.next_if(|&&(e, _)| e == b) {
                 Some(&(_, s)) => s,
                 None => cstats::one_building_stats_in(v, x, b),
             };
         }
-        (buildings, read.by_source.clone())
+        let by_source = read.by_source.clone();
+        // Debug builds work the base out again and hold the reuse to it: a read of the city's
+        // buildings that names no building class would show here first.
+        #[cfg(debug_assertions)]
+        {
+            use super::super::derive::rev::BitEq as _;
+            let (fresh, fresh_by_source) = cstats::city_yield_base_in(v, x);
+            debug_assert!(
+                fresh.bit_eq(&buildings) && same_by_source(&fresh_by_source, &by_source),
+                "the what-if of {:?} in city {x:?} reused a base that moves: {buildings:?} and \
+                 {by_source:?} against {fresh:?} and {fresh_by_source:?}",
+                o.buildings
+            );
+        }
+        (buildings, by_source)
     } else {
         cstats::city_yield_base_in(v, x)
     };
@@ -396,16 +414,44 @@ fn parts_in(v: &EvalView<'_>, o: &Overlay, x: CityId, read: &CityRead) -> Option
 }
 
 /// Whether city `x`'s base (what its buildings yield, its uniques' flat stats by source) is as its
-/// memo has it but for the new building's own yield: the building adds none of the types the base
-/// reads to the city's index or its owner's, the resource layer is as it was, and what computing
-/// the base read is not what the building moves (the city's buildings among them).
+/// memo has it but for the new building's own yield.
+///
+/// What the base reads (`cities::stats::city_base_in`), and why each is as it was when this says
+/// so:
+/// - its walk over the city's buildings: every building the city had yields as it did, the new
+///   one's yield is worked out in the view, and the sum is taken again in the set's order;
+/// - any city's buildings read otherwise, by a filter, a conditional or a count, whatever classes
+///   it names: the base was watched for them (`CityBase::reads_buildings`) and read none;
+/// - which uniques of [`cstats::BASE_TYPES`] the city's indexes hold: the building adds none to
+///   the city's or its owner's, and the resource layer is as it was;
+/// - the rest of what the uniques asked read: the classes of each are recorded
+///   (`unique::record`), and none is one the building moves ([`Overlay::moved`]: its owner's
+///   resources and trade network where they changed, every building class);
+/// - their parameters otherwise: objects and building sets name buildings by type, and a terrain
+///   filter reads the city's tile.
+///
+/// Debug builds check every reuse against the base worked out again ([`parts_in`]).
 fn base_holds(g: &Game, o: &Overlay, x: CityId, read: &CityRead) -> bool {
     let local = x != o.city || !cstats::BASE_TYPES.iter().any(|&ty| o.adds_local.has(ty));
     local
+        && !read.base_reads_buildings
         && !o.layer
         && !o.civ_moves(g, &cstats::BASE_TYPES)
         && !read.base_read.intersects(o.moved())
         && (x != o.city || read.each.iter().all(|&(b, _)| o.buildings.contains(b)))
+}
+
+/// Whether two lists of flat stats by source are the same, bit for bit.
+#[cfg(debug_assertions)]
+fn same_by_source(
+    a: &[(cstats::SourceKind, cstats::Yields)],
+    b: &[(cstats::SourceKind, cstats::Yields)],
+) -> bool {
+    use super::super::derive::rev::BitEq as _;
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.0 == y.0 && x.1.keys == y.1.keys && x.1.stats.bit_eq(&y.1.stats))
 }
 
 /// The modifiers one of `a` and `b` holds and the other does not, when those they share come in

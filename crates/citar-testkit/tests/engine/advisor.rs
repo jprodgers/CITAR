@@ -370,6 +370,7 @@ mod sink {
     use citar_engine::game::{DebugOptions, Game, query};
     use citar_engine::rules::Ruleset;
     use citar_engine::state::cities::Constructible;
+    use citar_engine::unique::CondDeps;
     use citar_testkit::rulesets::{KITCHEN_SINK, files_of, kitchen_sink, overlay};
     use citar_testkit::script::{map_doc, new_game};
     use serde_json::{Value, json};
@@ -527,7 +528,10 @@ mod sink {
         // `[stats] [in all cities with a world wonder]` and `[stats] per [n] population [...]`
         // read the city's buildings through their city filter, which names no class of its own:
         // the what-if of a plain wonder (Stonehenge) must not reuse the city's base, whose flat
-        // stats by source the wonder moves (package 1e-03's fix round).
+        // stats by source the wonder moves (package 1e-03's fix round). So must a conditional
+        // that counts the cities such a filter passes, which reads their buildings too.
+        let counter = "[+5 Gold] [in all cities] \
+                       <when number of [[in all cities with a world wonder] Cities] is more than [0]>";
         let r = shipped_with_buildings(&json!({
             "Wonder Treasury": {
                 "name": "Wonder Treasury", "cost": 60, "maintenance": 0,
@@ -539,9 +543,21 @@ mod sink {
                 "uniques": ["[+2 Gold] per [1] population [in all cities with a world wonder]"],
                 "id": "wonder_market",
             },
+            "Wonder Counter": {
+                "name": "Wonder Counter", "cost": 60, "maintenance": 0,
+                "uniques": [counter],
+                "id": "wonder_counter",
+            },
         }));
+        // The count reads the counted cities' buildings, as its owner's buildings.
+        let t = r.uniques();
+        let counted = t.iter().find(|&(u, _)| t.text_of(u) == counter).map(|(u, _)| u);
+        let counted = counted.expect("the counter's unique");
+        assert!(t.cond_deps(counted).contains(CondDeps::CIV_BUILDINGS), "{counter}");
         let stonehenge = r.lookup::<BuildingId>("Stonehenge").expect("Stonehenge");
-        for (building, gold) in [("Wonder Treasury", 5.0), ("Wonder Market", 8.0)] {
+        for (building, gold) in
+            [("Wonder Treasury", 5.0), ("Wonder Market", 8.0), ("Wonder Counter", 5.0)]
+        {
             let (doc, _) = map_doc("arena").expect("the arena");
             let cfg = json!({
                 "seed": 1,
