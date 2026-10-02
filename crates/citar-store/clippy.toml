@@ -1,0 +1,5 @@
+# Relaxed: this is a host crate (DESIGN.md P2.2). It reads and writes files, keeps time and runs
+# threads for the games it hosts, so it replaces the strict root clippy.toml (clippy uses the
+# nearest file and does not merge them). The workspace lints in Cargo.toml still apply, including
+# iter_over_hash_type. Nothing in this crate decides a game: the engine and the bot do, under the
+# strict rules.

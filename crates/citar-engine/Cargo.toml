@@ -35,6 +35,11 @@ base64.workspace = true
 aho-corasick.workspace = true
 bitflags.workspace = true
 
+# build.rs hashes the sources into the content code (DESIGN.md P2.2.1); xtask check holds build
+# dependencies to the allow-list too.
+[build-dependencies]
+blake3.workspace = true
+
 # Dev-dependencies never reach a game (xtask check allows any). The memo properties of
 # game::derive::civ drive the game's own writes, which only the crate's tests can reach.
 [dev-dependencies]

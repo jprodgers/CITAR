@@ -1,0 +1,8 @@
+//! Integration tests of the bots (DESIGN.md P2.3.11): one file per part under `tests/bot/`.
+//!
+//! Package 2-00a registered this root with the skeleton's own test; 2-01a adds params, memory,
+//! streams, owners and idle; 2-01b economy; 2-03 units, war and the fixture sweep.
+
+mod bot {
+    mod skeleton;
+}

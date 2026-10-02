@@ -18,6 +18,11 @@ iai = ["dep:gungraun"]
 citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
 # The fixtures, the synthetic states, and the games and agents of the macro benchmarks.
 citar-testkit.workspace = true
+# The bot games of the `games` suite, played by the runner (DESIGN.md P2.4.2).
+citar-bot.workspace = true
+citar-sim.workspace = true
+# The io suite's container and journal (package 2-02, report-only).
+citar-store.workspace = true
 # The suites' shared runner (lib.rs) drives criterion and pins its thread.
 criterion.workspace = true
 core_affinity.workspace = true
@@ -44,6 +49,13 @@ harness = false
 # The digest, the snapshot under a host's lock, the save, the load and the ruleset.
 [[bench]]
 name = "io"
+harness = false
+
+# Whole bot games (DESIGN.md P2.4.2): the small 4-bot Quick game to 330 rounds and a gargantuan
+# 24-bot game, single-threaded and pinned, written for `cargo xtask perf --suite games`.
+# Report-only until package 2-07.
+[[bench]]
+name = "games"
 harness = false
 
 # Instruction counts (gungraun, valgrind): eight kernels and two macro benchmarks, the per-PR

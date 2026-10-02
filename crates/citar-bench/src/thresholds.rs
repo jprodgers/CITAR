@@ -18,7 +18,7 @@ pub fn path() -> PathBuf {
 pub struct Budget {
     /// The measure, as a suite records it (`Suite::put`).
     pub id: String,
-    /// The suite that records it: `kernels`, `turns` or `io`.
+    /// The suite that records it: `kernels`, `turns`, `io` or `games`.
     pub suite: String,
     /// The budget as written (`"5 ns"`, `"1.5 µs"`, `"20 ms"`).
     pub budget: String,
@@ -27,6 +27,10 @@ pub struct Budget {
     /// Whether it is measured only on a corpus state.
     #[serde(default)]
     pub corpus: bool,
+    /// Whether it is reported against its budget without failing anything: the `games` suite's
+    /// rows until package 2-07 makes them hard (DESIGN.md P2.4.2).
+    #[serde(default)]
+    pub report_only: bool,
     /// The budget in nanoseconds, filled in on load.
     #[serde(skip)]
     pub ns: f64,

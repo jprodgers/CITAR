@@ -56,7 +56,7 @@ use self::names::NameIndex;
 pub use self::names::{NameKind, Named};
 #[cfg(feature = "embedded-ruleset")]
 pub use self::source::embedded;
-pub use self::source::{BUILD_ID, RulesetFiles, RulesetId};
+pub use self::source::{BUILD_ID, BUILD_LABEL, ENGINE_CODE, RulesetFiles, RulesetId};
 use crate::unique::{SourceUniques, UniqueTable};
 
 /// The whole ruleset: every table typed, every reference an id, and the derived tables.

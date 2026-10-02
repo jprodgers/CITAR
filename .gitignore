@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 *.so
+# The engine's extension, built into the checkout by `pip install -e .` or maturin (DESIGN.md
+# P2.6.7): a 20 MB binary of one build, never source.
+citar/_engine*.pyd
+citar/_engine*.so
 .Python
 build/
 dist/

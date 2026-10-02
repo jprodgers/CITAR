@@ -1,12 +1,13 @@
 //! Benchmarks of the CITAR engine, kept out of the engine's manifest (DESIGN.md 2.1, 9.7, 10).
 //!
-//! Four bench targets:
+//! Five bench targets:
 //! - `kernels`: the hot algorithms one at a time (tile yields, stats, citizens, indexes, sight,
 //!   paths, combat, buildable lists, job maps, religion, the advisor, barbarians, map
 //!   generation, hexes);
 //! - `turns`: the macro benchmarks, pass rounds on every corpus state with their ratio to
 //!   Python's (`refcheck/perf/python-turns.json`), the client views and a whole game;
 //! - `io`: the digest, the snapshot under a host's lock, the save, the load and the ruleset;
+//! - `games`: whole bot games through the runner (DESIGN.md P2.4.2), report-only until 2-07;
 //! - `iai`: gungraun instruction counts of eight kernels and two macro benchmarks, the per-PR
 //!   gate of `rust.yml` (Linux, valgrind).
 //!
@@ -190,7 +191,7 @@ impl Suite {
     }
 
     /// Records measure `id`, printed against its budget in `thresholds.toml`; one above its hard
-    /// limit fails the run at [`finish`](Self::finish).
+    /// limit fails the run at [`finish`](Self::finish), unless its budget is report-only.
     ///
     /// # Panics
     ///
@@ -202,7 +203,9 @@ impl Suite {
             .unwrap_or_else(|| panic!("thresholds.toml has no budget for {id}"));
         let ns = took.as_secs_f64() * 1e9;
         let hard = b.ns * self.thresholds.hard;
-        let verdict = if ns > hard {
+        let verdict = if ns > hard && b.report_only {
+            "over the hard limit (report-only)"
+        } else if ns > hard {
             self.over.push(format!("{id}: {} over its hard limit {}", show(took), b.text()));
             "OVER THE HARD LIMIT"
         } else if ns > b.ns {

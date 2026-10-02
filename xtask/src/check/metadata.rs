@@ -10,6 +10,9 @@ pub struct Metadata {
     pub packages: Vec<Package>,
     pub workspace_members: Vec<String>,
     pub resolve: Option<Resolve>,
+    /// Where the workspace is, so findings can name files relative to it.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -17,6 +20,9 @@ pub struct Package {
     pub name: String,
     pub version: String,
     pub id: String,
+    /// The package's `Cargo.toml`.
+    #[serde(default)]
+    pub manifest_path: String,
     pub dependencies: Vec<Dependency>,
     pub targets: Vec<Target>,
     /// The package's own features and what each turns on.
@@ -44,6 +50,9 @@ pub struct Dependency {
 #[derive(Debug, Deserialize)]
 pub struct Target {
     pub kind: Vec<String>,
+    /// The target's root file.
+    #[serde(default)]
+    pub src_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +96,20 @@ impl Metadata {
 
     pub fn members(&self) -> impl Iterator<Item = &Package> {
         self.packages.iter().filter(|p| self.workspace_members.contains(&p.id))
+    }
+
+    /// A package's manifest, relative to the workspace root with `/` separators: what a finding
+    /// about its dependencies or features names.
+    pub fn manifest(&self, p: &Package) -> String {
+        if p.manifest_path.is_empty() {
+            return format!("{}'s Cargo.toml", p.name);
+        }
+        let path = p.manifest_path.replace('\\', "/");
+        let root = self.workspace_root.as_deref().map(|r| r.replace('\\', "/"));
+        match root.as_deref().and_then(|r| path.strip_prefix(r)) {
+            Some(rel) => rel.trim_start_matches('/').to_owned(),
+            None => path,
+        }
     }
 
     /// The resolved features of the package with this id.

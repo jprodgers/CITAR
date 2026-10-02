@@ -73,6 +73,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "citar-bot"
+version = "0.1.5"
+dependencies = [
+ "blake3",
+ "citar-engine",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
 name = "citar-engine"
 version = "0.1.5"
 dependencies = [
@@ -103,6 +115,7 @@ version = "0.1.5"
 dependencies = [
  "arbitrary",
  "blake3",
+ "citar-bot",
  "citar-engine",
  "flate2",
  "regex",

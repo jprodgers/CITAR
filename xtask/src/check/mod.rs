@@ -1,13 +1,18 @@
 //! `cargo xtask check`: the rules of DESIGN.md that clippy cannot see.
 //!
-//! - the engine's normal dependencies stay on the allow-list, with `libm` pinned and plain;
-//! - only refcheck, testkit and bench build the engine with `legacy`, which never ships;
+//! - the engine's normal dependencies stay on the allow-list, with `libm` pinned and plain, and
+//!   its one build script is the content code's;
+//! - each workspace crate depends only on the crates its row of the crate graph names (P2.2);
+//! - only refcheck, testkit and bench build the engine with `legacy`, which never ships; the bot,
+//!   the store and the runner never turn on `test-ops`, and citar-py only through its own
+//!   `test-ops` feature, which forwards;
 //! - the workspace version equals `__version__` in `citar/__init__.py`;
 //! - each layer of the engine uses only the layers below it;
 //! - only `game/mutate.rs`, `save/` and `compat/` call `State`'s mutable accessors;
 //! - generated files are up to date;
 //! - no `Pending` stage outlives its package, and, once switched on, no `NotPorted` or
-//!   `Pending` remains at all.
+//!   `Pending` remains at all;
+//! - in the bot, `&mut Game` appears only in `driver.rs`; in citar-py, no hand-written `unsafe`.
 //!
 //! Exit code 0 means every check passed, 1 that at least one found a problem, and 2 that the
 //! checks could not run.
@@ -17,10 +22,12 @@ mod config;
 mod deps;
 mod features;
 mod generated;
+mod graph;
 mod layers;
 mod metadata;
 mod pending;
 mod source;
+mod sources;
 mod version;
 
 use std::fmt;
@@ -76,13 +83,18 @@ fn run_all(root: &Path) -> Result<(Vec<Finding>, String), String> {
     let config = config::Config::load(root)?;
     let meta = metadata::Metadata::load(root)?;
     let tree = source::SourceTree::load(&root.join(ENGINE_SRC))?;
+    let bot = source::SourceTree::load_under(sources::BOT_SRC, &root.join(sources::BOT_SRC))?;
+    let py = source::SourceTree::load_under(sources::PY_SRC, &root.join(sources::PY_SRC))?;
 
     let mut findings = Vec::new();
     findings.extend(deps::check(&meta));
+    findings.extend(graph::check(&meta));
     findings.extend(features::check(&meta));
     findings.extend(version::check(root, &meta)?);
     findings.extend(layers::check(&tree));
     findings.extend(access::check(&tree));
+    findings.extend(sources::check_bot(&bot));
+    findings.extend(sources::check_py(&py));
     findings.extend(generated::check(root, generated::FILES));
     let markers = pending::scan(&tree);
     findings.extend(pending::check(&markers, &config));

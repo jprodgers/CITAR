@@ -75,7 +75,7 @@ pub enum DriverOutcome {
 }
 
 /// Whoever plays a seat for the host: `Send`, since hosts drive games inside
-/// `py.allow_threads`, whose closure must be (DESIGN.md 6.12).
+/// `Python::detach`, whose closure must be (DESIGN.md 6.12, P2.6.2).
 pub trait SeatDriver: Send {
     /// Plays `pid`'s turn: acts through [`Game::act`] and returns, and [`Game::drive`] ends the
     /// turn. A driver does not end the turn itself: while it plays, [`Game::end_turn`] and
@@ -97,6 +97,15 @@ pub trait SeatDriver: Send {
         mem: &mut DriverMemory,
     ) -> DriverOutcome;
 }
+
+// The bindings hold each game in a `Mutex` inside a frozen Python class, which must be `Sync`, and
+// drive it inside `Python::detach` (DESIGN.md P2.2, P2.6.2): a `Game` must move between threads,
+// and so a lock around one may be shared. `lib.rs` also holds it `!Sync`, which the lock covers.
+crate::assert_send!(Game);
+const _: fn() = || {
+    fn shared<T: Sync>() {}
+    shared::<std::sync::Mutex<Game>>();
+};
 
 /// The drivers of a game's seats, by player: `None` for a seat the host plays itself.
 pub struct Drivers<'a> {
@@ -293,6 +302,47 @@ impl Game {
         };
         self.batch_start = first;
         Ok((stop, self.take_batch()))
+    }
+
+    /// Puts negotiation `nid`, which waits on `pid`, to `driver`, whoever's turn it is, as
+    /// [`drive`](Self::drive) puts it to the seat's driver (DESIGN.md P2.6.1): `driving` set, so
+    /// the game ends and forces no turn inside the answer; on a copy of the seat's memory,
+    /// written back when it changed; and the game settled. Returns what the driver did and every
+    /// event its answer appended.
+    ///
+    /// It is the host's responder for a bot seat (the session answering a person's or a model's
+    /// proposal), and the Rust runner's `bot = "respond"` step. Refused (`ErrCode::Negotiation`)
+    /// when the negotiation does not wait on `pid`, which a responder that lost a race to another
+    /// answer ignores; refused on a game that is over or poisoned, and from inside a driver.
+    pub fn answer(
+        &mut self,
+        pid: PlayerId,
+        nid: NegotiationId,
+        driver: &mut dyn SeatDriver,
+    ) -> Result<(DriverOutcome, EventBatch), ActionError> {
+        self.ensure_live()?;
+        self.ensure_not_driving()?;
+        if self.phase() != Phase::Playing {
+            return Err(ActionError::new(ErrCode::GameOver, "The game is over."));
+        }
+        let waits = self
+            .negotiation(nid)
+            .is_some_and(|n| n.status == NegStatus::Open && n.awaiting == Some(pid));
+        if !waits {
+            return Err(ActionError::new(
+                ErrCode::Negotiation,
+                format!(
+                    "Negotiation {} is not open and waiting on player {}'s answer.",
+                    nid.get(),
+                    pid.0
+                ),
+            ));
+        }
+        let first = self.st.host().next_event_id;
+        let outcome = self.with_driver(pid, |g, mem| driver.respond(g, pid, nid, mem))?;
+        self.settle();
+        self.batch_start = first;
+        Ok((outcome, self.take_batch()))
     }
 
     /// The mark of a stop inside `pid`'s turn: its driver has played this turn.

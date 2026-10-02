@@ -3,7 +3,17 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/citar-engine", "crates/citar-testkit", "crates/citar-refcheck", "crates/citar-bench", "xtask"]
+members = [
+    "crates/citar-engine",
+    "crates/citar-bot",
+    "crates/citar-store",
+    "crates/citar-sim",
+    "crates/citar-py",
+    "crates/citar-testkit",
+    "crates/citar-refcheck",
+    "crates/citar-bench",
+    "xtask",
+]
 exclude = ["crates/citar-engine/fuzz"]
 
 [workspace.package]
@@ -21,6 +31,10 @@ citar-engine  = { path = "crates/citar-engine", default-features = false }
 # `cargo bench` at the root) unifies the feature back on, so each benchmark's game also turns its
 # checks off (`citar_bench::unchecked`, DESIGN.md 9.4).
 citar-testkit = { path = "crates/citar-testkit", default-features = false }
+# Phase 2 (DESIGN.md P2.2): cargo xtask check holds each crate to its row of the crate graph.
+citar-bot     = { path = "crates/citar-bot" }
+citar-store   = { path = "crates/citar-store" }
+citar-sim     = { path = "crates/citar-sim" }
 # engine (the xtask allow-list: exactly these, plus their transitive closure)
 serde        = { version = "1.0.229", features = ["derive"] }
 serde_json   = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
@@ -35,6 +49,15 @@ thiserror    = "2.0"
 base64       = "0.23"
 aho-corasick = "1.1"
 bitflags     = "2.13"
+# hosts: the store, the runner and the bindings (DESIGN.md P2.2)
+# 0.13, MIT: 0.14 moved to BSD-3-Clause. No default features: neither legacy zstd formats nor
+# dictionaries are read or written.
+zstd = { version = "0.13", default-features = false }
+# One abi3 extension per OS for Python 3.11 and up (DESIGN.md P2.6.1). PyO3 0.29 links Windows
+# through raw-dylib and deprecated `generate-import-lib`, which is no longer needed.
+pyo3 = { version = "0.29", features = ["abi3-py311"] }
+# citar-py's build script: the extension's link arguments on macOS (crates/citar-py/build.rs).
+pyo3-build-config = "0.29"
 # tools and tests only
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1.1"
