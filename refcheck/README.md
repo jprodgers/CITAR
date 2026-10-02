@@ -287,7 +287,7 @@ The kinds, by the package of the port that is checked against them:
 | 1 (2-01b) | `context` | the turn's context: army target, supply, gold per turn, happiness, era, wars, offense, exposed cities, luxuries owned, resources pending, hostile units, the military |
 | | `tech_values` | the value of every technology it lacks, in both modes (`classic`, `potential`) |
 | | `next_research` | in both modes, the free technology it would take and the first step it would research, as if nothing were being researched; and the free technology it would take if it held one |
-| | `empire` | the policy it would adopt now and the one it would adopt if it could afford one, its free great person, its pantheon now and the one it would found if it could |
+| | `empire` | the policy it would adopt now and the one it would adopt if it could afford one; its free great person now and the one it would choose if it held one; its pantheon now and the one it would found if it could |
 | | `cities` | each city's threat, defence, danger and need of a garrison |
 | | `sites` | the expansion sites, best first |
 | | `spare` | the spare units, in the order they would be disbanded |

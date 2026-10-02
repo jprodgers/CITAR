@@ -30,10 +30,10 @@ Stage 1 (2-01b): the empire's economy.
   * ``empire``: ``empire_choices`` (basic.py:1011-1039) without spies: the first policy it would adopt, the free great
     person it would choose, the pantheon belief it would found (each null when there is none to take);
     ``preferred_policy``, the policy it would adopt if it could afford one (``policies.can_adopt_any`` patched true),
-    and ``preferred_pantheon``, the belief it would found a pantheon with if it could (``religion.can_found_pantheon``
-    patched to allow a major in a game with religion), so the two rankings are recorded on every state and not only
-    on the few turns a civilization can act on them. The free great person has no such variant: its only input is
-    the era, which ``context`` records;
+    ``preferred_great_person``, the great person it would choose if it held a free one (``free_great_people`` raised
+    to 1), and ``preferred_pantheon``, the belief it would found a pantheon with if it could
+    (``religion.can_found_pantheon`` patched to allow a major in a game with religion), so the three are recorded on
+    every state and not only on the few turns a civilization can act on them;
   * ``cities``: for each city, its threat (from the context), ``city_defense``, ``in_danger`` and ``needs_garrison``;
   * ``sites``: ``expansion_sites``, best first, as [x, y];
   * ``spare``: ``_spare_units``' unit ids, in order.
@@ -153,15 +153,16 @@ def any_pantheon_affordable():
 
 
 @contextlib.contextmanager
-def a_free_tech(g, pid):
-    """The civilization holds a free technology to choose (at least one), and its own count is put back after."""
+def holding_one(g, pid, field: str):
+    """The civilization holds at least one free pick of a kind (``free_techs``, ``free_great_people``) to choose, and
+    its own count is put back after."""
     p = g.player(pid)
-    held = p.free_techs
-    p.free_techs = max(1, held)
+    held = getattr(p, field)
+    setattr(p, field, max(1, held))
     try:
         yield
     finally:
-        p.free_techs = held
+        setattr(p, field, held)
 
 
 @contextlib.contextmanager
@@ -212,7 +213,7 @@ def next_research(g, pid):
         out[mode] = {"free": free[0]["tech"] if free else None, "tech": chosen[0]["tech"] if chosen else None}
     g.clear_static()
     rec = Recorder()
-    with a_free_tech(g, pid):
+    with holding_one(g, pid, "free_techs"):
         rec.bot.choose_research(g, pid)
     free = rec.made("choose_free_tech")
     out["preferred_free"] = free[0]["tech"] if free else None
@@ -227,13 +228,15 @@ def empire(g, pid):
     pantheon = rec.made("found_pantheon")
     g.clear_static()
     rec = Recorder()
-    with any_policy_affordable(), any_pantheon_affordable():
+    with any_policy_affordable(), any_pantheon_affordable(), holding_one(g, pid, "free_great_people"):
         rec.bot.empire_choices(g, pid, rec.bot.context(g, pid))
     preferred = rec.made("adopt_policy")
+    preferred_person = rec.made("choose_great_person")
     preferred_pantheon = rec.made("found_pantheon")
     return {"policy": policy[0]["policy"] if policy else None,
             "preferred_policy": preferred[0]["policy"] if preferred else None,
             "great_person": person[0]["great_person"] if person else None,
+            "preferred_great_person": preferred_person[0]["great_person"] if preferred_person else None,
             "pantheon": pantheon[0]["belief"] if pantheon else None,
             "preferred_pantheon": preferred_pantheon[0]["belief"] if preferred_pantheon else None}
 
@@ -431,7 +434,8 @@ CHOICES = {
     "next_research.preferred_free": ("civilization", lambda m: [
         ("preferred_free", (_each(m, "next_research") or {}).get("preferred_free"))]),
     **{f"empire.{k}": ("civilization", lambda m, k=k: [(k, (_each(m, "empire") or {}).get(k))])
-       for k in ("policy", "preferred_policy", "great_person", "pantheon", "preferred_pantheon")},
+       for k in ("policy", "preferred_policy", "great_person", "preferred_great_person", "pantheon",
+                 "preferred_pantheon")},
     "cities.danger": ("city", lambda m: [(c["city"], c["danger"]) for c in _each(m, "cities") or []]),
     "cities.garrison": ("city", lambda m: [(c["city"], c["garrison"]) for c in _each(m, "cities") or []]),
     "sites (top 3 as a set)": ("civilization", lambda m: [("sites", (_each(m, "sites") or [])[:3])]),
