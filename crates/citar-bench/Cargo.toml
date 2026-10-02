@@ -7,107 +7,51 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The gungraun suite (benches/iai.rs): instruction counts under valgrind, on Linux only, the
+# per-PR gate of rust.yml. Off by default so that `cargo bench` on Windows builds without it.
+iai = ["dep:gungraun"]
+
 [dependencies]
-# test-ops: Game::step_unit_for_test, a unit's step (package 1c-01), Game::settle_for_bench, the
-# settle with nothing pending (package 1b-06, and the barbarian round's settle, 1c-06), and
-# jobs::rebuild_for_bench (package 1c-04).
+# test-ops: the engine's benchmark hooks (`*_for_bench`, `step_unit_for_test`, the settle on its
+# own); legacy: the fixtures load through the Python converter.
 citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
-# The synthetic states the save and digest benchmarks time.
+# The fixtures, the synthetic states, and the games and agents of the macro benchmarks.
 citar-testkit.workspace = true
-
-[dev-dependencies]
+# The suites' shared runner (lib.rs) drives criterion and pins its thread.
 criterion.workspace = true
-# The scenario operations the stats benchmarks set their states up with.
+core_affinity.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
+# What Python recorded beside each fixture (the recorded paths and fights).
+flate2.workspace = true
+gungraun = { workspace = true, optional = true }
 
-# The digest and the save of a synthetic gargantuan state (package 1a-09): the digest is gated at
-# 5 ms (report-only) and fails the run above 15 ms (DESIGN.md 4.10, 10).
+# The kernels, one part per system (packages 1b-05 to 1c-07, gathered in 1e-03): budgets of
+# DESIGN.md 10 in thresholds.toml, hard at 1.5 times.
 [[bench]]
-name = "digest"
+name = "kernels"
+path = "benches/kernels/main.rs"
 harness = false
 
-# Map generation (package 1b-04): a small map is budgeted at 50 ms and a gargantuan one at 1.5 s
-# (report-only); the run fails above three times either (DESIGN.md 9.7).
+# The macro benchmarks: pass rounds on every reference state (with Python's ratios), the client
+# views, and a whole engine-only game.
 [[bench]]
-name = "mapgen"
+name = "turns"
 harness = false
 
-# The unique indexes of a civilization (package 1b-05): a lookup at 20 ns and a rebuild at 10 us
-# (report-only), failing above three times either.
+# The digest, the snapshot under a host's lock, the save, the load and the ruleset.
 [[bench]]
-name = "index"
+name = "io"
 harness = false
 
-# Visibility (package 1c-01): one unit step at sight 2 with its sight brought up to date, budgeted at
-# 1.5 us, and line of sight at sight 3 worked out uncached, at 1 us (report-only); the run fails
-# above three times either.
+# Instruction counts (gungraun, valgrind): eight kernels and two macro benchmarks, the per-PR
+# gate of rust.yml against the base branch (+5% fails).
 [[bench]]
-name = "vis"
+name = "iai"
 harness = false
-
-# Tile yields, city stats, citizens, connectivity and settle (package 1b-06): a tile yield hit at
-# 5 ns, its first read after an unrelated change at 50 ns and a recompute at 1 us; city stats at
-# 10 us; a city of 20's citizens at 10 us; connectivity on a small map at 30 us; a settle with
-# nothing pending at 0.5 us (report-only), failing above three times any.
-[[bench]]
-name = "stats"
-harness = false
-
-# What a city can build (package 1b-07): the Buildable memo read at 50 ns and recomputed at 20 us
-# (report-only), failing above three times either.
-[[bench]]
-name = "buildable"
-harness = false
-
-# Paths (package 1c-02): the best path on a small map at 20 us, across fog on a gargantuan one at
-# 150 us, and what a unit reaches this turn at 5 us (report-only); the run fails above three times
-# any of them.
-[[bench]]
-name = "path"
-harness = false
-
-# Religious pressure (package 1b-08): one round of it on a gargantuan map at 1 ms (report-only),
-# failing above three times.
-[[bench]]
-name = "religion"
-harness = false
-
-# Combat (package 1c-03): the attack preview, its checks and the fight's numbers gathered once, at
-# 1 us (report-only).
-[[bench]]
-name = "combat"
-harness = false
-
-# The production advisor (package 1c-07): a call per city on a small map at turn 200 at 50 us
-# (report-only: the run warns above it).
-[[bench]]
-name = "advisor"
-harness = false
-
-# Worker job maps (package 1c-04): a civilization's whole job map built cold on a small map at
-# 200 us (report-only), failing above three times.
-[[bench]]
-name = "jobs"
-harness = false
-
-# A barbarian round (package 1c-06): stage S0 on a small map with raging barbarians at 2 ms
-# (report-only: the run warns above it).
-[[bench]]
-name = "barbarians"
-harness = false
-
-# The client view (package 1d-02): a player's on a small map late in the game at 1.5 ms, a
-# spectator's on a large one at 20 ms (report-only), failing above three times either; a
-# spectator's of the synthetic gargantuan state against a 12 ms target (report-only).
-[[bench]]
-name = "views"
-harness = false
-
-# The briefing (package 1d-03): a civilization's on a small map late in the game, and the turn's
-# progress, at 1 ms (report-only); on a large map, report-only.
-[[bench]]
-name = "briefing"
-harness = false
+required-features = ["iai"]
 
 [lints]
 workspace = true

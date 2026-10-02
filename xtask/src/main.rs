@@ -1,14 +1,15 @@
 //! `cargo xtask`: the workspace's own checks (DESIGN.md 2.1).
 //!
 //! `check` enforces the rules of DESIGN.md that clippy cannot see; `gen-uniques` writes the
-//! engine's unique types from their two sources (1a-05). Later packages add `perf` (1e-03) and
-//! `ci-local`.
+//! engine's unique types from their two sources (1a-05); `perf` runs the criterion suites and
+//! holds them to their budgets (perfgate, 1e-03). A later package adds `ci-local`.
 
 #![forbid(unsafe_code)]
 
 mod check;
 mod gen_uniques;
 mod lexer;
+mod perf;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -20,7 +21,11 @@ commands:
            NotPorted and Pending stages (exit 0 clean, 1 problems, 2 could not run)
   gen-uniques
            write crates/citar-engine/src/unique/gen.rs from unique_types.tsv and
-           unique_supported.toml (exit 0 written, 2 could not)";
+           unique_supported.toml (exit 0 written, 2 could not)
+  perf [--check] [--suite kernels|turns|io] [-- <bench arguments>]
+           run the criterion suites of citar-bench, then check every budget of
+           crates/citar-bench/thresholds.toml and the pass rounds' ratios to Python
+           (--check: only check what a run left; exit 0 within, 1 over, 2 could not run)";
 
 fn workspace_root() -> PathBuf {
     // xtask/ sits at the root; this is fixed at build time, so each worktree checks itself.
@@ -49,6 +54,10 @@ fn main() -> ExitCode {
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["check"] => check::run(&workspace_root()),
         ["gen-uniques"] => write_gen_uniques(&workspace_root()),
+        ["perf", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
+            perf::run(&workspace_root(), &rest)
+        }
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
             ExitCode::SUCCESS

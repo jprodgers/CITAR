@@ -203,7 +203,8 @@ impl Filters {
     }
 
     /// What asking city filter `id` of the city in context reads: its leaves' classes, and the
-    /// city's own (`CITY`) where a leaf reads the city's buildings ([`CityLeaf::reads_buildings`]).
+    /// city's own (`CITY`, with `CITY_BUILDINGS`) where a leaf reads the city's buildings
+    /// ([`CityLeaf::reads_buildings`]).
     /// A memo keyed by the city validates that against the city's revisions whatever it recorded;
     /// what reads only the classes a memo recorded (the production advisor's what-if) needs it
     /// named.
@@ -213,7 +214,7 @@ impl Filters {
         for l in self.cities[id].leaves() {
             d |= l.deps();
             if l.reads_buildings() {
-                d |= CondDeps::CITY;
+                d |= CondDeps::CITY | CondDeps::CITY_BUILDINGS;
             }
         }
         d
@@ -907,7 +908,7 @@ mod tests {
         for i in 0..3 {
             assert!(f.city_reads_buildings(id(i)));
             assert!(f.city(id(i)).deps().is_empty());
-            assert_eq!(f.city_deps_here(id(i)), CondDeps::CITY);
+            assert_eq!(f.city_deps_here(id(i)), CondDeps::CITY | CondDeps::CITY_BUILDINGS);
         }
         assert!(!f.city_reads_buildings(id(3)));
         assert!(f.city_deps_here(id(3)).is_empty());

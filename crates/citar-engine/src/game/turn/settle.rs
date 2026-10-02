@@ -96,6 +96,25 @@ impl Game {
         self.settle();
     }
 
+    /// Makes the next path search look at every tile again, as the first search after a write
+    /// does, without a write (DESIGN.md 10: the A* budget is a search that reads no earlier
+    /// search's looks).
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    pub fn forget_path_looks_for_bench(&self) {
+        if let Ok(mut sc) = self.derived().path_scratch().try_borrow_mut() {
+            sc.forget_looks();
+        }
+    }
+
+    /// How many tiles the last path search closed (DESIGN.md 6.10), for the benchmark's report.
+    #[cfg(feature = "test-ops")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn path_closed_for_bench(&self) -> usize {
+        self.derived().path_scratch().try_borrow().map_or(0, |sc| sc.closed_count())
+    }
+
     /// A write that moves the game's revision and nothing any cache reads (a touch of player
     /// `p`'s `OTHER` fields), for the benchmark of a first read after an unrelated change
     /// (DESIGN.md 10).

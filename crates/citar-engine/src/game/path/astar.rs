@@ -94,13 +94,50 @@ struct Bound {
     c: u32,
     full: u32,
     per_turn: u32,
+    /// Dividing by `c` and by `per_turn` without a divide ([`Divisor`]): the bound is worked out
+    /// for every label a search pushes.
+    by_c: Divisor,
+    by_turn: Divisor,
+}
+
+/// Division of a `u32` by a fixed `u32` as a multiply (Lemire, Kaser and Kurz, "Faster remainder
+/// by direct computation", 2019): `n / d` is the high 64 bits of `M·n` with `M = ⌊(2⁶⁴−1)/d⌋ + 1`,
+/// exact for every 32-bit `n` and every `d` of 2 or more.
+#[derive(Clone, Copy, Debug)]
+struct Divisor {
+    d: u32,
+    m: u64,
+}
+
+impl Divisor {
+    const fn new(d: u32) -> Self {
+        let m = if d < 2 { 0 } else { u64::MAX / d as u64 + 1 };
+        Self { d, m }
+    }
+
+    /// `n / d`; `n` for a divisor of 0 or 1 (a divisor of 0 is never divided by).
+    #[inline]
+    const fn div(self, n: u32) -> u32 {
+        if self.d < 2 {
+            return n;
+        }
+        ((self.m as u128 * n as u128) >> 64) as u32
+    }
+
+    /// `n.div_ceil(d)`.
+    #[inline]
+    const fn div_ceil(self, n: u32) -> u32 {
+        let q = self.div(n);
+        if self.d >= 2 && q * self.d < n { q + 1 } else { q }
+    }
 }
 
 impl Bound {
     fn new(c: i32, full: i32) -> Self {
         let c = u32::try_from(c.max(0)).unwrap_or(0);
         let full = u32::try_from(full.max(1)).unwrap_or(1);
-        Self { c, full, per_turn: if c == 0 { 0 } else { full.div_ceil(c) } }
+        let per_turn = if c == 0 { 0 } else { full.div_ceil(c) };
+        Self { c, full, per_turn, by_c: Divisor::new(c), by_turn: Divisor::new(per_turn) }
     }
 
     /// Where `k` steps costing `c` each take a search standing at `p`.
@@ -122,8 +159,8 @@ impl Bound {
             // Every step fits in this turn's movement, the last perhaps overdrawing.
             return (t, left.saturating_sub(k.saturating_mul(c)));
         }
-        let rest = k - left.div_ceil(c);
-        let turns = rest.div_ceil(self.per_turn);
+        let rest = k - self.by_c.div_ceil(left);
+        let turns = self.by_turn.div_ceil(rest);
         let last = rest - (turns - 1) * self.per_turn;
         (t + u64::from(turns), self.full.saturating_sub(last.saturating_mul(c)))
     }
@@ -222,11 +259,31 @@ impl<'n> Heur<'n> {
 /// takes 10 left or 30 left to the same place), so a tile and the neighbour that would give it a
 /// better label can have the same priority, and the neighbour, with the smaller label, must be
 /// expanded first for the tile to be closed with its best label.
+///
+/// The fields compare in that order (the derived order), in 24 bytes where a 128-bit word of the
+/// two keys made an entry 32: the heap moves entries more than it compares them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Entry {
     prio: u64,
     label: u64,
     tile: u32,
+}
+
+impl Entry {
+    /// The label the tile had when it was pushed.
+    #[inline]
+    const fn label(self) -> u64 {
+        self.label
+    }
+
+    /// Whether it comes before `other` in the derived order, worked out without a branch: which
+    /// of two entries is the less is as good as a coin toss, and the heap asks it at every level.
+    #[inline(always)]
+    fn before(&self, other: &Self) -> bool {
+        let a = (u128::from(self.prio) << 64) | u128::from(self.label);
+        let b = (u128::from(other.prio) << 64) | u128::from(other.label);
+        (a < b) | ((a == b) & (self.tile < other.tile))
+    }
 }
 
 /// The open set: a four-ary min-heap of [`Entry`]s (shallower than a binary one, for pops).
@@ -235,13 +292,13 @@ struct Open(Vec<Entry>);
 
 impl Open {
     #[inline]
-    fn entry(prio: u64, label: u64, t: TileIdx) -> Entry {
+    const fn entry(prio: u64, label: u64, t: TileIdx) -> Entry {
         Entry { prio, label, tile: t.0 }
     }
 
     /// The priority and tile of an entry.
     #[inline]
-    fn parts(e: Entry) -> (u64, TileIdx) {
+    const fn parts(e: Entry) -> (u64, TileIdx) {
         (e.prio, TileIdx(e.tile))
     }
 
@@ -256,7 +313,7 @@ impl Open {
         h.push(e);
         while i > 0 {
             let p = (i - 1) / 4;
-            if h[p] <= e {
+            if !e.before(&h[p]) {
                 break;
             }
             h[i] = h[p];
@@ -277,13 +334,21 @@ impl Open {
             if first >= n {
                 break;
             }
-            let mut c = first;
-            for j in first + 1..(first + 4).min(n) {
-                if h[j] < h[c] {
-                    c = j;
+            // The least of its children: all four, which most have, compared in pairs.
+            let c = if first + 3 < n {
+                let a = if h[first + 1].before(&h[first]) { first + 1 } else { first };
+                let b = if h[first + 3].before(&h[first + 2]) { first + 3 } else { first + 2 };
+                if h[b].before(&h[a]) { b } else { a }
+            } else {
+                let mut c = first;
+                for j in first + 1..n {
+                    if h[j].before(&h[c]) {
+                        c = j;
+                    }
                 }
-            }
-            if h[c] >= last {
+                c
+            };
+            if !h[c].before(&last) {
                 break;
             }
             h[i] = h[c];
@@ -300,7 +365,10 @@ impl Open {
 struct Cell {
     /// The search that last wrote the cell; for any other the cell is empty.
     generation: u32,
-    /// [`LABELLED`], [`CLOSED`] and [`SEEN`].
+    /// The look that found `pass` and `facts` ([`PathScratch::looks`]): they hold for every
+    /// search of the same mover at the same revision.
+    seen: u32,
+    /// [`LABELLED`], [`CLOSED`] and [`MEASURED`].
     flags: u8,
     /// Whether the mover may route through the tile on its way elsewhere.
     pass: bool,
@@ -316,17 +384,41 @@ struct Cell {
 const LABELLED: u8 = 1;
 /// The tile is expanded, its label final.
 const CLOSED: u8 = 2;
-/// The search has looked at the tile: `pass`, `dist` and `facts` hold.
-const SEEN: u8 = 4;
+/// The search has worked out the tile's distance to its target: `dist` holds.
+const MEASURED: u8 = 4;
+
+/// Whom and when a scratch's looks were for: a mover is a function of the game at a revision and
+/// its unit (or its player and base unit), so two searches with the same key look at every tile
+/// alike, and the second reads the first's looks (package 1e-03: the same unit asked for several
+/// paths before anything moves, as an AI weighs its targets, looked at every tile again).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LookKey {
+    rev: u64,
+    unit: Option<crate::base::ids::UnitId>,
+    pid: crate::base::ids::PlayerId,
+    base: crate::base::ids::BaseUnitId,
+}
+
+impl LookKey {
+    fn of(m: &Mover<'_>) -> Self {
+        Self { rev: m.game().derived().revs().now().get(), unit: m.unit, pid: m.pid, base: m.base }
+    }
+}
 
 /// The per-tile cells a search works in, reused from search to search: a generation stamp
-/// empties them without clearing (DESIGN.md 6.10).
+/// empties them without clearing (DESIGN.md 6.10), and a second stamp keeps what the mover's
+/// looks found while the same mover searches at the same revision.
 #[derive(Debug, Default)]
 pub struct PathScratch {
     generation: u32,
+    /// The look the cells' facts belong to, and whose it was.
+    looks: u32,
+    look_key: Option<LookKey>,
     cells: Vec<Cell>,
     heap: Open,
     target: Option<TileIdx>,
+    /// The target's cube coordinates, which every tile's distance is measured to.
+    target_cube: crate::base::hex::Cube,
     /// The tiles closed so far, in the order they were: what a tree reads back, without a walk
     /// over the map.
     closed: Vec<TileIdx>,
@@ -340,19 +432,46 @@ impl Clone for PathScratch {
 }
 
 impl PathScratch {
-    fn begin(&mut self, size: usize, target: Option<TileIdx>) {
+    fn begin(&mut self, m: &Mover<'_>, target: Option<TileIdx>) {
+        let size = m.game().state().map().size() as usize;
         self.target = target;
+        if let Some(x) = target {
+            self.target_cube = m.game().grid().cube(x);
+        }
         if self.cells.len() != size {
             self.cells = vec![Cell::default(); size];
             self.generation = 0;
+            self.looks = 0;
+            self.look_key = None;
         }
         self.generation = self.generation.wrapping_add(1);
-        if self.generation == 0 {
+        let key = LookKey::of(m);
+        if self.look_key != Some(key) || self.looks == 0 {
+            self.look_key = Some(key);
+            self.looks = self.looks.wrapping_add(1);
+        }
+        if self.generation == 0 || self.looks == 0 {
+            // A stamp came round: nothing a cell holds may be taken for this search's.
             self.cells.fill(Cell::default());
             self.generation = 1;
+            self.looks = 1;
         }
         self.heap.clear();
         self.closed.clear();
+    }
+
+    /// Forgets whose looks the cells hold, so that the next search looks at every tile again, as
+    /// the first search after a write does (feature `test-ops`, for the benchmark of a search
+    /// that reads no earlier search's looks).
+    #[cfg(feature = "test-ops")]
+    pub(crate) fn forget_looks(&mut self) {
+        self.look_key = None;
+    }
+
+    /// How many tiles the last search closed (feature `test-ops`).
+    #[cfg(feature = "test-ops")]
+    pub(crate) fn closed_count(&self) -> usize {
+        self.closed.len()
     }
 
     /// The cell of tile `t`, emptied first if an earlier search wrote it.
@@ -405,20 +524,74 @@ impl PathScratch {
     }
 
     /// Whether mover `m` may route through tile `t` on its way elsewhere, and the facts of `t`
-    /// its steps read: worked out on the first look, then remembered for the search.
+    /// its steps read: worked out on the first look, then remembered while the same mover
+    /// searches at the same revision; and the tile's distance to the search's target.
     #[inline]
     fn look(&mut self, m: &Mover<'_>, t: TileIdx) -> (bool, Facts) {
-        let target = self.target;
+        let (target, looks, cube) = (self.target, self.looks, self.target_cube);
         let c = self.cell(t);
-        if c.flags & SEEN == 0 {
+        if c.seen != looks {
             let (pass, facts) = m.look(t).unwrap_or_default();
             c.pass = pass;
             c.facts = facts;
-            c.dist = target
-                .map_or(0, |x| u16::try_from(m.game().grid().distance(t, x)).unwrap_or(u16::MAX));
-            c.flags |= SEEN;
+            c.seen = looks;
+        }
+        if c.flags & MEASURED == 0 {
+            c.dist = measure(m, t, target, cube);
+            c.flags |= MEASURED;
         }
         (c.pass, c.facts)
+    }
+
+    /// Closes tile `t` to expand it: `None` if it was closed already (a stale entry of the open
+    /// set); else its label, if it has one. One visit to the cell where the search made three.
+    #[inline]
+    fn close_open(&mut self, t: TileIdx) -> Option<Option<u64>> {
+        let c = self.cell(t);
+        if c.flags & CLOSED != 0 {
+            return None;
+        }
+        c.flags |= CLOSED;
+        let label = (c.flags & LABELLED != 0).then_some(c.key);
+        self.closed.push(t);
+        Some(label)
+    }
+
+    /// The facts of tile `t`, worked out on the first look as [`look`](Self::look) does.
+    #[inline]
+    fn facts_of(&mut self, m: &Mover<'_>, t: TileIdx) -> Facts {
+        let looks = self.looks;
+        let c = self.cell(t);
+        if c.seen != looks {
+            let (pass, facts) = m.look(t).unwrap_or_default();
+            c.pass = pass;
+            c.facts = facts;
+            c.seen = looks;
+        }
+        c.facts
+    }
+
+    /// The cell of a neighbour a search may label, made ready: `None` if it is closed; else its
+    /// index, the cell this search's, looked at (as [`look`](Self::look) does) and measured. The
+    /// search then reads and writes it in place, one visit where it made three.
+    #[inline]
+    fn open_index(&mut self, m: &Mover<'_>, t: TileIdx) -> Option<usize> {
+        let (target, looks, cube) = (self.target, self.looks, self.target_cube);
+        let c = self.cell(t);
+        if c.flags & CLOSED != 0 {
+            return None;
+        }
+        if c.seen != looks {
+            let (pass, facts) = m.look(t).unwrap_or_default();
+            c.pass = pass;
+            c.facts = facts;
+            c.seen = looks;
+        }
+        if c.flags & MEASURED == 0 {
+            c.dist = measure(m, t, target, cube);
+            c.flags |= MEASURED;
+        }
+        Some(t.0 as usize)
     }
 
     /// The distance of tile `t` to the target, once [`look`](Self::look) has seen it.
@@ -426,6 +599,21 @@ impl PathScratch {
     fn dist(&self, t: TileIdx) -> u32 {
         self.this(t).map_or(0, |c| u32::from(c.dist))
     }
+}
+
+/// The hex distance of tile `t` to the search's target (`cube`, its coordinates), held to 16 bits;
+/// 0 with no target.
+#[inline]
+fn measure(
+    m: &Mover<'_>,
+    t: TileIdx,
+    target: Option<TileIdx>,
+    cube: crate::base::hex::Cube,
+) -> u16 {
+    if target.is_none() {
+        return 0;
+    }
+    u16::try_from(m.game().grid().distance_to_cube(t, cube)).unwrap_or(u16::MAX)
 }
 
 /// What a path search is asked: the unit where it stands with the moves it has, the target and
@@ -590,7 +778,7 @@ impl Mover<'_> {
     ) -> Option<u64> {
         let g = self.g;
         let grid = g.grid();
-        sc.begin(g.state().map().size() as usize, target);
+        sc.begin(self, target);
         let first = Label { turns: 0, left: s.moves.max(0) };
         sc.set(s.tile, first.key(), crate::base::hex::NO_TILE);
         let _ = sc.look(self, s.tile);
@@ -602,14 +790,11 @@ impl Mover<'_> {
         let mut stop_at: Option<(u64, u64)> = None;
         while let Some(e) = sc.heap.pop() {
             let (p, v) = Open::parts(e);
-            if stop_at.is_some_and(|c| (p, e.label) > c) {
+            if stop_at.is_some_and(|c| (p, e.label()) > c) {
                 break;
             }
-            if sc.is_closed(v) {
-                continue;
-            }
-            sc.close(v);
-            let Some(k) = sc.label(v) else { continue };
+            let Some(label) = sc.close_open(v) else { continue };
+            let Some(k) = label else { continue };
             if Some(v) == target {
                 found = Some(k);
                 stop_at = Some((p, k));
@@ -619,24 +804,24 @@ impl Mover<'_> {
             if here.turns > max_turns {
                 continue;
             }
-            let (_, fv) = sc.look(self, v);
+            let fv = sc.facts_of(self, v);
+            let zoc = self.zoc_mask();
             for (d, &n) in grid.neighbor_table(v).iter().enumerate() {
                 if n == crate::base::hex::NO_TILE {
                     continue;
                 }
                 let nb = TileIdx(n);
-                if sc.is_closed(nb) {
-                    continue;
-                }
+                // The neighbour's cell, made ready once and then read in place.
+                let Some(i) = sc.open_index(self, nb) else { continue };
+                let c = &sc.cells[i];
                 let is_target = Some(nb) == target;
-                let (pass, fnb) = sc.look(self, nb);
                 // The target alone may hold a civilian it would capture.
-                if !(if is_target { self.passable(nb, target) } else { pass }) {
+                if !(if is_target { self.passable(nb, target) } else { c.pass }) {
                     continue;
                 }
-                let next = here.step(self.cost_from(v, d, &fv, &fnb, true), s.full);
+                let next = here.step(self.cost_with(v, d, &fv, &c.facts, zoc), s.full);
                 let nk = next.key();
-                if sc.label(nb).is_some_and(|old| old <= nk) {
+                if c.flags & LABELLED != 0 && c.key <= nk {
                     continue;
                 }
                 if !is_target {
@@ -652,12 +837,14 @@ impl Mover<'_> {
                         continue;
                     }
                 }
-                let dn = sc.dist(nb);
-                let np = heur.key(next, nb, dn);
+                let np = heur.key(next, nb, u32::from(c.dist));
                 if target.is_some() && (np >> 32) > u64::from(max_turns) + 1 {
                     continue;
                 }
-                sc.set(nb, nk, v.0);
+                let c = &mut sc.cells[i];
+                c.flags |= LABELLED;
+                c.key = nk;
+                c.parent = v.0;
                 sc.heap.push(Open::entry(np, nk, nb));
             }
         }
@@ -736,7 +923,7 @@ impl Mover<'_> {
         let grid = g.grid();
         let Some(explored) = g.player(self.pid).map(|p| &p.explored) else { return Vec::new() };
         with_scratch(g.derived().path_scratch(), |sc| {
-            sc.begin(g.state().map().size() as usize, None);
+            sc.begin(self, None);
             // Keys here are movement left alone: more is better, so the heap pops the most.
             let key = |l: i32| u64::from(u32::MAX - u32::try_from(l.max(0)).unwrap_or(0));
             sc.set(s.tile, key(s.moves), crate::base::hex::NO_TILE);
@@ -862,6 +1049,25 @@ mod tests {
         assert_eq!(l.step(120, full), Label { turns: 0, left: 0 });
         assert_eq!(Label { turns: 0, left: 0 }.step(60, full), Label { turns: 1, left: 60 });
         assert_eq!(Label { turns: 2, left: 30 }.step(10, full), Label { turns: 2, left: 20 });
+    }
+
+    #[test]
+    fn an_entry_comes_before_another_as_the_derived_order_says() {
+        let vals = [0u64, 1, 2, u64::from(u32::MAX), u64::MAX - 1, u64::MAX];
+        let tiles = [0u32, 1, 7, u32::MAX];
+        let mut all = Vec::new();
+        for &prio in &vals {
+            for &label in &vals {
+                for &tile in &tiles {
+                    all.push(Entry { prio, label, tile });
+                }
+            }
+        }
+        for a in &all {
+            for b in &all {
+                assert_eq!(a.before(b), a < b, "{a:?} {b:?}");
+            }
+        }
     }
 
     #[test]

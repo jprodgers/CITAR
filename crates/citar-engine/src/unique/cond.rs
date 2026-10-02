@@ -118,13 +118,14 @@ pub fn deps_of(data: &CondData, filters: &Filters) -> CondDeps {
         // The city a rule means, found through the tile in context when no city is in it
         // (`Ctx::rel_city`): `TILE` for which city's territory the tile is.
         C::ConditionalInThisCity
-        | C::ConditionalCityWithBuilding(_)
-        | C::ConditionalCityWithoutBuilding(_)
         | C::ConditionalPopulationFilter(_)
         | C::ConditionalExactPopulationFilter(_)
         | C::ConditionalBetweenPopulationFilter(_)
         | C::ConditionalBelowPopulationFilter(_) => D::CITY | D::TILE,
-        C::ConditionalCityFilter(x) => D::CITY | D::TILE | filters.city(x.cities).deps(),
+        C::ConditionalCityWithBuilding(_) | C::ConditionalCityWithoutBuilding(_) => {
+            D::CITY | D::CITY_BUILDINGS | D::TILE
+        }
+        C::ConditionalCityFilter(x) => D::CITY | D::TILE | filters.city_deps_here(x.cities),
         // The trade network to the capital of the city a rule means (`cities.py:1967-2067`),
         // which the connectivity memo keeps.
         C::ConditionalCityConnected => D::CITY | D::TILE | D::CONNECTED,
@@ -191,12 +192,16 @@ pub(crate) fn assign_deps(t: &mut UniqueTable) {
     for (c, d) in t.conds.as_mut_slice().iter_mut().zip(&deps) {
         c.deps = *d;
     }
+    // A unique keeps its conditionals' classes but `CITY_BUILDINGS` (`Unique::deps`); what
+    // evaluating it reads keeps them all.
+    let mut full: Vec<CondDeps> = Vec::with_capacity(t.uniques.len());
     for u in t.uniques.as_mut_slice() {
         let d = u.conds.ids().fold(CondDeps::empty(), |d, c| d | deps[c.index()]);
         u.set_deps(d);
+        full.push(d);
     }
     let reads: Vec<CondDeps> =
-        t.uniques.iter().map(|(_, u)| u.deps() | param_reads(t, u)).collect();
+        t.uniques.iter().zip(&full).map(|((_, u), &d)| d | param_reads(t, u)).collect();
     t.reads = IdVec::from_vec(reads);
     let this_city = t.city_filters.iter().find(|&(_, &text)| t.text(text) == "in this city");
     t.this_city = this_city.map(|(id, _)| id);

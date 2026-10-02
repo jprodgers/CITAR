@@ -10,6 +10,11 @@
 //!   reaches of it, by id, each with its distance. A memo per city, valid while `revs.cities`
 //!   stands and the reach is what it was found for, so a turn's pressure reads a list, not the
 //!   grid.
+//! - **The religion most of a city's citizens follow** ([`majority`]), with how many follow it:
+//!   a memo per city on its `religion` and `core` revisions (its pressures and population) and
+//!   the settings. Every unique asked of a city reads its followers' beliefs through it
+//!   (`unique::query::city`), and working out the followers each time was a seventh of an
+//!   advisor's call (package 1e-03).
 //! - **The major religion a city follows** ([`major_religion`]): its majority, when that is a
 //!   full religion and religion is in play. A memo per city on its `religion` and `core`
 //!   revisions (its pressures and population), the religions and the settings. Pressure arrives
@@ -109,6 +114,8 @@ impl BitEq for NearCities {
 /// One city's memos.
 #[derive(Clone, Debug)]
 struct CityMemo {
+    /// The religion most of its citizens follow, and how many do.
+    majority: CopyMemo<(Option<ReligionId>, i32)>,
     /// The major religion it follows.
     major: CopyMemo<Option<ReligionId>>,
     /// Its spread, with the classes its last computation recorded.
@@ -122,6 +129,7 @@ struct CityMemo {
 impl Default for CityMemo {
     fn default() -> Self {
         Self {
+            majority: CopyMemo::new(),
             major: CopyMemo::new(),
             source: Memo::new(),
             deps: Cell::new(CondDeps::empty()),
@@ -365,6 +373,29 @@ pub fn reach(g: &Game) -> i32 {
     caches.reach.get(revs.now(), inputs, compute)
 }
 
+/// The religion most of city `c`'s citizens follow and how many follow it, computed afresh
+/// (`religion.majority_religion`, `religion.followers_of_majority`).
+fn compute_majority(g: &Game, c: CityId) -> (Option<ReligionId>, i32) {
+    let Some(city) = g.city(c) else { return (None, 0) };
+    match religion::majority_of_followers(g, city) {
+        Some((r, n)) => (Some(r), n),
+        None => (None, 0),
+    }
+}
+
+/// The religion most of city `c`'s citizens follow, if at least half of them do and religion is
+/// in play, and how many follow it (see the module's doc).
+#[must_use]
+pub fn majority(g: &Game, c: CityId) -> (Option<ReligionId>, i32) {
+    let Some(m) = g.dv.religion.cities.get(&c) else { return compute_majority(g, c) };
+    let revs = &g.dv.revs;
+    let inputs = || {
+        let cr = revs.city(c);
+        cr.religion.max(cr.core).max(revs.config)
+    };
+    m.majority.get(revs.now(), inputs, || compute_majority(g, c))
+}
+
 /// The major religion city `c` follows, computed afresh.
 fn compute_major(g: &Game, c: CityId) -> Option<ReligionId> {
     religion::majority_religion(g, c).filter(|&r| religion::is_major(g, r))
@@ -476,6 +507,12 @@ pub fn verify(g: &Game, cold: &Game) -> Vec<String> {
         if !g.dv.religion.cities.contains_key(&c) {
             out.push(format!("city {}: no religious memos", c.get()));
             continue;
+        }
+        if majority(g, c) != majority(cold, c) {
+            out.push(format!(
+                "city {}: its majority religion differs from a cold rebuild",
+                c.get()
+            ));
         }
         if major_religion(g, c) != major_religion(cold, c) {
             out.push(format!("city {}: its major religion differs from a cold rebuild", c.get()));

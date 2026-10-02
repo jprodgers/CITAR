@@ -70,6 +70,17 @@ impl<'a> EvalView<'a> {
         Self { supply: true, ..self }
     }
 
+    /// City `c`'s buildings as this view has them, unwatched: for a computation's own walk over a
+    /// city's buildings, which the production advisor's what-if redoes building by building
+    /// (`cities::stats::city_base_in`). Every other read goes through `FilterFacts::city_buildings`.
+    #[must_use]
+    pub(crate) fn buildings_walked(&self, c: CityId) -> BuildingSet {
+        if let Some(o) = self.over.filter(|o| o.city == c) {
+            return o.buildings;
+        }
+        self.city_at(c).map_or_else(BuildingSet::new, |x| x.buildings)
+    }
+
     /// Whether city `c` is linked to its capital by railroad (`connected_to_capital(rail=True)`):
     /// the `Connectivity` memo, or the overlay's trade network where the building changed it.
     #[must_use]
@@ -346,11 +357,11 @@ impl FilterFacts for EvalView<'_> {
         self.city_at(c).map_or(PlayerId(0), |x| x.founder)
     }
 
+    /// Noted for a computation that watches for it (`unique::record::watch_buildings`): every
+    /// filter, conditional and count reads a city's buildings here.
     fn city_buildings(&self, c: CityId) -> BuildingSet {
-        if let Some(o) = self.over.filter(|o| o.city == c) {
-            return o.buildings;
-        }
-        self.city_at(c).map_or_else(BuildingSet::new, |x| x.buildings)
+        crate::unique::record::note_buildings_read();
+        self.buildings_walked(c)
     }
 
     fn city_is_capital(&self, c: CityId) -> bool {

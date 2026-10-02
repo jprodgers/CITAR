@@ -1,0 +1,301 @@
+# The performance budgets of crates/citar-engine/DESIGN.md 10, one per measure the criterion
+# suites record (citar-bench: benches/kernels, turns.rs, io.rs). From package 1e-03 on they are
+# hard: a measure above `hard` times its budget fails its suite and `cargo xtask perf`.
+#
+# Figures are for one P-core of the laptop (i5-13420H), the bench profile (release: fat LTO, one
+# codegen unit, no overflow checks), on corpus states where a row names one. Each suite takes the
+# median of its own timings after Criterion's run and writes it to <target>/perf/<suite>.json;
+# perfgate checks every budget below against those files, and the pass rounds against Python's
+# (refcheck/perf/python-turns.json, from scripts/refcheck/turn_timing.py).
+
+hard = 1.5
+
+# ---- kernels ---------------------------------------------------------------------------------
+
+[[budget]]
+id = "tile_yield/hit"
+suite = "kernels"
+budget = "5 ns"
+row = "Tile yield: a hit at a stable revision"
+
+[[budget]]
+id = "tile_yield/first_read_after_change"
+suite = "kernels"
+budget = "50 ns"
+row = "Tile yield: the first read after one unrelated change (per tile a civilization owns)"
+
+[[budget]]
+id = "tile_yield/recompute"
+suite = "kernels"
+budget = "1 µs"
+row = "Tile yield: a recompute"
+
+[[budget]]
+id = "city_stats/recompute"
+suite = "kernels"
+budget = "10 µs"
+row = "City stats recompute"
+
+[[budget]]
+id = "citizens/assign_pop20"
+suite = "kernels"
+budget = "10 µs"
+row = "Citizen assignment, pop 20"
+
+[[budget]]
+id = "happiness/recompute"
+suite = "kernels"
+budget = "3 µs"
+row = "Happiness recompute, cities cached"
+
+[[budget]]
+id = "civ_index/lookup"
+suite = "kernels"
+budget = "20 ns"
+row = "Civ index: a lookup"
+
+[[budget]]
+id = "civ_index/rebuild"
+suite = "kernels"
+budget = "10 µs"
+row = "Civ index: a rebuild"
+
+[[budget]]
+id = "vis_step/sight2"
+suite = "kernels"
+budget = "1.5 µs"
+row = "Visibility after one step, sight 2 (both footprints cached)"
+
+[[budget]]
+id = "vis_step/sight2_fresh"
+suite = "kernels"
+budget = "1.5 µs"
+row = "Visibility after one step, sight 2 (a footprint no unit saw from lately)"
+
+[[budget]]
+id = "vis_step/sight5"
+suite = "kernels"
+budget = "4 µs"
+row = "Visibility after one step, sight 5"
+
+[[budget]]
+id = "los/sight3_uncached"
+suite = "kernels"
+budget = "1 µs"
+row = "Line of sight, sight 3, uncached"
+
+[[budget]]
+id = "astar_small_30"
+suite = "kernels"
+budget = "20 µs"
+row = "A*: small map, 25 to 35 tiles (the mean of three committed small maps), each search looking at every tile afresh"
+
+[[budget]]
+id = "astar_garg_fog"
+suite = "kernels"
+budget = "150 µs"
+row = "A*: gargantuan through fog, 50 to 58 tiles"
+
+[[budget]]
+id = "astar/recorded_pairs"
+suite = "kernels"
+budget = "50 µs"
+row = "A*: the mean over the pairs refcheck recorded (movement.paths of the committed fixtures)"
+
+[[budget]]
+id = "reachable"
+suite = "kernels"
+budget = "5 µs"
+row = "reachable_this_turn"
+
+[[budget]]
+id = "combat/preview"
+suite = "kernels"
+budget = "1 µs"
+row = "Combat preview"
+
+[[budget]]
+id = "buildable/recompute"
+suite = "kernels"
+budget = "20 µs"
+row = "Buildable per city: a recompute"
+
+[[budget]]
+id = "buildable/hit"
+suite = "kernels"
+budget = "50 ns"
+row = "Buildable per city: a hit"
+
+[[budget]]
+id = "buildable/other_lists_after_a_sibling_changed"
+suite = "kernels"
+budget = "10 µs"
+row = "Buildable: a civilization's 12 other lists after one of its cities changed (package 1b-07)"
+
+[[budget]]
+id = "connectivity/small"
+suite = "kernels"
+budget = "30 µs"
+row = "Connectivity per civ, small"
+
+[[budget]]
+id = "connectivity/gargantuan"
+suite = "kernels"
+budget = "300 µs"
+row = "Connectivity per civ, gargantuan"
+
+[[budget]]
+id = "jobmap_small"
+suite = "kernels"
+budget = "200 µs"
+row = "Job map per civ, small, full"
+
+[[budget]]
+id = "settle/nothing_pending"
+suite = "kernels"
+budget = "500 ns"
+row = "Settle with nothing pending"
+
+[[budget]]
+id = "religion/round"
+suite = "kernels"
+budget = "1 ms"
+row = "Religious pressure, one gargantuan round (package 1b-08)"
+
+[[budget]]
+id = "barbarians/round"
+suite = "kernels"
+budget = "2 ms"
+row = "A barbarian round, small, raging, turn 120 (package 1c-06)"
+corpus = true
+
+[[budget]]
+id = "advisor/call_per_city"
+suite = "kernels"
+budget = "50 µs"
+row = "An advisor call per city, small, turn 200 (package 1c-07)"
+
+[[budget]]
+id = "mapgen/small"
+suite = "kernels"
+budget = "50 ms"
+row = "Map generation, small (the slowest map type)"
+
+[[budget]]
+id = "mapgen/gargantuan"
+suite = "kernels"
+budget = "1.5 s"
+row = "Map generation, gargantuan (the slowest map type)"
+
+# ---- macro benchmarks ------------------------------------------------------------------------
+
+[[budget]]
+id = "view/player"
+suite = "turns"
+budget = "1.5 ms"
+row = "view(pid), small T300 (the committed t280)"
+
+[[budget]]
+id = "view/god"
+suite = "turns"
+budget = "20 ms"
+row = "God view, large t280 (the plan's floor)"
+corpus = true
+
+[[budget]]
+id = "view/god_gargantuan"
+suite = "turns"
+budget = "12 ms"
+row = "God view, gargantuan (the synthetic state)"
+
+[[budget]]
+id = "briefing/small"
+suite = "turns"
+budget = "1 ms"
+row = "Briefing, small T300 (the committed t280)"
+
+[[budget]]
+id = "briefing/turn_progress"
+suite = "turns"
+budget = "1 ms"
+row = "The turn's progress, small T300 (the committed t280), asked after every batch of actions"
+
+[[budget]]
+id = "game/random_small_330"
+suite = "turns"
+budget = "10 s"
+row = "An engine-only RandomAgent small game of 330 turns (the Phase 1 gate)"
+
+# ---- I/O -------------------------------------------------------------------------------------
+
+[[budget]]
+id = "ruleset/load"
+suite = "io"
+budget = "20 ms"
+row = "Ruleset load (embedded)"
+
+[[budget]]
+id = "snapshot/gargantuan"
+suite = "io"
+budget = "10 ms"
+row = "snapshot() under the lock, gargantuan (the plan: 100 ms)"
+
+[[budget]]
+id = "to_json/small_t280"
+suite = "io"
+budget = "20 ms"
+row = "to_json (off the lock), small t280"
+
+[[budget]]
+id = "to_json/gargantuan"
+suite = "io"
+budget = "100 ms"
+row = "to_json (off the lock), gargantuan"
+
+[[budget]]
+id = "load/small_t280"
+suite = "io"
+budget = "30 ms"
+row = "Load, small t280"
+
+[[budget]]
+id = "digest/gargantuan"
+suite = "io"
+budget = "5 ms"
+row = "Digest, gargantuan"
+
+[[budget]]
+id = "digest/small_t280"
+suite = "io"
+budget = "200 µs"
+row = "Digest, small t280"
+
+# ---- pass rounds -----------------------------------------------------------------------------
+# `turns` records `turn/pass_round/<case>/t<turn>` for every corpus state (the committed ones
+# without the corpus): the median of rounds each passed on a fresh copy of the state after one
+# untimed round, as turn_timing.py times Python's.
+
+[pass_round]
+# Every corpus state at least this many times faster than Python's round.
+ratio = 20.0
+
+# Hard backstops, whatever Python took.
+[[pass_round.backstop]]
+case_prefix = "small-"
+turn = 280
+budget = "150 ms"
+
+[[pass_round.backstop]]
+case_prefix = "large-"
+turn = 280
+budget = "400 ms"
+
+# The target budgets, in milliseconds at turns 50, 150 and 300 (interpolated between, held
+# beyond), hard at `hard` times like every budget.
+[[pass_round.target]]
+case_prefix = "small-"
+points = [[50, 2.0], [150, 8.0], [300, 20.0]]
+
+[[pass_round.target]]
+case_prefix = "gargantuan-"
+points = [[50, 40.0], [150, 150.0], [300, 350.0]]

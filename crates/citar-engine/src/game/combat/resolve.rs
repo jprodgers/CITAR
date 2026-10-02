@@ -152,7 +152,11 @@ pub fn contains_attackable_enemy_from(
     let t_ = g.rules().uniques();
     let f = t_.filters();
     let mut only_units: SmallVec<[_; 2]> = SmallVec::new();
-    for h in uq::unit(&v, u, UniqueType::CanOnlyAttackUnits, &ctx) {
+    // Most units have neither: their profiles say so without a query.
+    for h in uq::unit_candidates(&v, u, UniqueType::CanOnlyAttackUnits, false, || ctx)
+        .into_iter()
+        .flatten()
+    {
         if let UniqueData::CanOnlyAttackUnits(x) = h.data() {
             only_units.extend(core::iter::repeat_n(x.combatants, usize::from(h.n)));
         }
@@ -162,7 +166,10 @@ pub fn contains_attackable_enemy_from(
         return Some(format!("{what} can only attack {} targets.", names.join(", ")));
     }
     let mut only_tiles: SmallVec<[_; 2]> = SmallVec::new();
-    for h in uq::unit(&v, u, UniqueType::CanOnlyAttackTiles, &ctx) {
+    for h in uq::unit_candidates(&v, u, UniqueType::CanOnlyAttackTiles, false, || ctx)
+        .into_iter()
+        .flatten()
+    {
         if let UniqueData::CanOnlyAttackTiles(x) = h.data() {
             only_tiles.extend(core::iter::repeat_n(x.tiles, usize::from(h.n)));
         }
@@ -310,10 +317,11 @@ pub fn preview_of_from(
     let d = validate_attack_from(g, u, from, t)?;
     let a = Combatant::Unit(u);
     let setup = strength::setup(g, a, from, d, false);
+    let (damage_to_defender, damage_to_attacker) = setup.damage_range();
     Ok(Preview {
         ranged: combatant::is_ranged(g, a),
-        damage_to_defender: [setup.damage_to_defender(0.0), setup.damage_to_defender(1.0)],
-        damage_to_attacker: [setup.damage_to_attacker(0.0), setup.damage_to_attacker(1.0)],
+        damage_to_defender,
+        damage_to_attacker,
         defender_hp: combatant::hp(g, d),
         city_down: matches!(d, Combatant::City(_)) && combatant::defeated(g, d),
         setup,

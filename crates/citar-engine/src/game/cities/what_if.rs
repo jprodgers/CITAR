@@ -27,6 +27,8 @@
 
 use std::borrow::Cow;
 
+use smallvec::SmallVec;
+
 use super::super::derive::{civ, stats as memo};
 use super::super::{EvalView, Game, economy, tiles};
 use super::connections::{self, Connectivity};
@@ -36,7 +38,7 @@ use crate::base::sets::{BuildingSet, ResourceSet};
 use crate::base::stats::Stats;
 use crate::game::core::has_type;
 use crate::game::economy::ResourceSupply;
-use crate::game::tiles::CityMods;
+use crate::game::tiles::{CityMods, TileMod};
 use crate::unique::index::Extra;
 use crate::unique::{CondDeps, Csr, UniqueType, index, record};
 
@@ -94,9 +96,11 @@ pub(crate) struct Overlay {
 }
 
 /// The classes a building added to a city moves whatever it is: what reads a city's buildings
-/// (`CITY`, the city in context), a civilization's and the world's.
+/// (`CITY_BUILDINGS`, of the city in context), a civilization's and the world's. The rest of
+/// the city (`CITY`: its population, religion, status) is as it was, so a tile's yield that read
+/// only that is reused.
 const MOVED: CondDeps =
-    CondDeps::CITY.union(CondDeps::CIV_BUILDINGS).union(CondDeps::GLOBAL_BUILDINGS);
+    CondDeps::CITY_BUILDINGS.union(CondDeps::CIV_BUILDINGS).union(CondDeps::GLOBAL_BUILDINGS);
 
 /// The unique types a city's tile modifiers are gathered from (`tiles::city_mods`).
 const TILE_MOD_TYPES: [UniqueType; 5] = [
@@ -229,20 +233,36 @@ impl Overlay {
 
     /// Its owner's trade network with the building, when the building could change it: a
     /// harbour, a `Forests and Jungles are roads` it adds, or what the network's conditionals
-    /// read.
+    /// read. A harbour that moves nothing else is most often answered from the network as it is
+    /// (`connections::with_harbour`), without its floods.
     fn network(&mut self, g: &Game, b: BuildingId) {
         let r = g.rules();
         let mut reads = MOVED;
         if self.supply.is_some() {
             reads |= CondDeps::RESOURCES;
         }
-        let may = has_type(r, &r.buildings()[b].uniques, UniqueType::ConnectTradeRoutes)
-            || self.civ_moves(g, &[UniqueType::ForestsAndJunglesAreRoads])
+        let harbour = has_type(r, &r.buildings()[b].uniques, UniqueType::ConnectTradeRoutes);
+        let other = self.civ_moves(g, &[UniqueType::ForestsAndJunglesAreRoads])
             || memo::connectivity_deps(g, self.owner).intersects(reads);
-        if !may {
+        if !harbour && !other {
             return;
         }
-        let after = connections::connected_cities_in(&EvalView::what_if(g, self), self.owner);
+        let v = EvalView::what_if(g, self);
+        if !other {
+            let now = memo::connectivity(g, self.owner);
+            let water = memo::connectivity_water(g, self.owner);
+            if let Some(after) = connections::with_harbour(&v, &now, &water, self.owner, self.city)
+            {
+                debug_assert_eq!(
+                    after.as_ref().unwrap_or(&now).cities,
+                    connections::connected_cities_in(&v, self.owner).cities,
+                    "a harbour's network from the network as it is"
+                );
+                self.connectivity = after;
+                return;
+            }
+        }
+        let after = connections::connected_cities_in(&v, self.owner);
         if after != *memo::connectivity(g, self.owner) {
             self.connectivity = Some(after);
         }
@@ -293,6 +313,14 @@ struct CityRead {
     mods: CityMods,
     mods_read: CondDeps,
     tiles: Vec<(TileIdx, Stats, CondDeps)>,
+    /// What each of its buildings yields and its uniques' flat stats by source (its base), and
+    /// what computing them read.
+    each: Vec<(BuildingId, Stats)>,
+    by_source: SmallVec<[(cstats::SourceKind, cstats::Yields); 4]>,
+    base_read: CondDeps,
+    /// Whether computing them read any city's buildings through the view beside the walk over
+    /// its own (`CityBase::reads_buildings`).
+    base_reads_buildings: bool,
 }
 
 impl CityRead {
@@ -306,10 +334,18 @@ impl CityRead {
                 (t, s, read)
             })
             .collect();
+        let (each, by_source, base_reads_buildings) = {
+            let base = memo::city_base(g, x);
+            (base.each.clone(), base.by_source.clone(), base.reads_buildings)
+        };
         Some(Self {
             mods: memo::city_mods(g, x).map(|m| m.clone()).unwrap_or_default(),
             mods_read: memo::city_mods_deps(g, x),
             tiles,
+            each,
+            by_source,
+            base_read: memo::city_base_deps(g, x),
+            base_reads_buildings,
         })
     }
 }
@@ -323,12 +359,23 @@ fn parts_in(v: &EvalView<'_>, o: &Overlay, x: CityId, read: &CityRead) -> Option
     let owner = city.owner();
     let moved = o.moved();
     let fresh = o.mods_move(g, x, read.mods_read).then(|| tiles::city_mods_in(v, x));
-    // A tile's memo read the modifiers the city has now: its yield holds while they are the
-    // same and nothing else it read moved.
+    // A tile's memo read the modifiers the city has now: its yield holds while nothing else it
+    // read moved and the modifiers are the same, or differ only by some that land on other
+    // tiles, the rest in the same order (so a tile's sums are taken as they were).
     let mods = fresh.as_ref().unwrap_or(&read.mods);
-    let same = fresh.as_ref().is_none_or(|m| *m == read.mods);
+    let changed = match &fresh {
+        Some(m) if *m != read.mods => Some(mods_changed(&m.mods, &read.mods.mods)),
+        _ => None,
+    };
     let mut sum = Stats::ZERO;
     for &(t, s, deps) in &read.tiles {
+        let same = match &changed {
+            None => true,
+            Some(None) => false,
+            Some(Some(diff)) => {
+                !diff.iter().any(|m| m.per_tile || tiles::mod_may_land(v, m, t, Some(owner)))
+            }
+        };
         sum += if same && !deps.intersects(moved) {
             s
         } else {
@@ -336,8 +383,100 @@ fn parts_in(v: &EvalView<'_>, o: &Overlay, x: CityId, read: &CityRead) -> Option
             tiles::compute_tile_yield_in(v, t, Some(owner), Some(x), Some(mods), &mut d)
         };
     }
-    let base = cstats::city_base_in(v, x);
-    Some(cstats::city_parts_from(v, x, &Work::of(city), sum, base.buildings, base.by_source))
+    let (buildings, by_source) = if base_holds(g, o, x, read) {
+        // Every building but the new one yields as it did, and the uniques by source are as
+        // they were: the sum is taken again in the set's order, the new one's in its place.
+        let mut buildings = Stats::ZERO;
+        let mut each = read.each.iter().peekable();
+        for b in v.buildings_walked(x).iter() {
+            buildings += match each.next_if(|&&(e, _)| e == b) {
+                Some(&(_, s)) => s,
+                None => cstats::one_building_stats_in(v, x, b),
+            };
+        }
+        let by_source = read.by_source.clone();
+        // Debug builds work the base out again and hold the reuse to it: a read of the city's
+        // buildings that names no building class would show here first.
+        #[cfg(debug_assertions)]
+        {
+            use super::super::derive::rev::BitEq as _;
+            let (fresh, fresh_by_source) = cstats::city_yield_base_in(v, x);
+            debug_assert!(
+                fresh.bit_eq(&buildings) && same_by_source(&fresh_by_source, &by_source),
+                "the what-if of {:?} in city {x:?} reused a base that moves: {buildings:?} and \
+                 {by_source:?} against {fresh:?} and {fresh_by_source:?}",
+                o.buildings
+            );
+        }
+        (buildings, by_source)
+    } else {
+        cstats::city_yield_base_in(v, x)
+    };
+    Some(cstats::city_parts_from(v, x, &Work::of(city), sum, buildings, by_source))
+}
+
+/// Whether city `x`'s base (what its buildings yield, its uniques' flat stats by source) is as its
+/// memo has it but for the new building's own yield.
+///
+/// What the base reads (`cities::stats::city_base_in`), and why each is as it was when this says
+/// so:
+/// - its walk over the city's buildings: every building the city had yields as it did, the new
+///   one's yield is worked out in the view, and the sum is taken again in the set's order;
+/// - any city's buildings read otherwise, by a filter, a conditional or a count, whatever classes
+///   it names: the base was watched for them (`CityBase::reads_buildings`) and read none;
+/// - which uniques of [`cstats::BASE_TYPES`] the city's indexes hold: the building adds none to
+///   the city's or its owner's, and the resource layer is as it was;
+/// - the rest of what the uniques asked read: the classes of each are recorded
+///   (`unique::record`), and none is one the building moves ([`Overlay::moved`]: its owner's
+///   resources and trade network where they changed, every building class);
+/// - their parameters otherwise: objects and building sets name buildings by type, and a terrain
+///   filter reads the city's tile.
+///
+/// Debug builds check every reuse against the base worked out again ([`parts_in`]).
+fn base_holds(g: &Game, o: &Overlay, x: CityId, read: &CityRead) -> bool {
+    let local = x != o.city || !cstats::BASE_TYPES.iter().any(|&ty| o.adds_local.has(ty));
+    local
+        && !read.base_reads_buildings
+        && !o.layer
+        && !o.civ_moves(g, &cstats::BASE_TYPES)
+        && !read.base_read.intersects(o.moved())
+        && (x != o.city || read.each.iter().all(|&(b, _)| o.buildings.contains(b)))
+}
+
+/// Whether two lists of flat stats by source are the same, bit for bit.
+#[cfg(debug_assertions)]
+fn same_by_source(
+    a: &[(cstats::SourceKind, cstats::Yields)],
+    b: &[(cstats::SourceKind, cstats::Yields)],
+) -> bool {
+    use super::super::derive::rev::BitEq as _;
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.0 == y.0 && x.1.keys == y.1.keys && x.1.stats.bit_eq(&y.1.stats))
+}
+
+/// The modifiers one of `a` and `b` holds and the other does not, when those they share come in
+/// the same order in both; `None` when they do not.
+fn mods_changed<'m>(a: &'m [TileMod], b: &'m [TileMod]) -> Option<SmallVec<[&'m TileMod; 4]>> {
+    let mut used = vec![false; b.len()];
+    let mut in_a: SmallVec<[usize; 16]> = SmallVec::new();
+    let mut out: SmallVec<[&TileMod; 4]> = SmallVec::new();
+    for x in a {
+        match (0..b.len()).find(|&j| !used[j] && b[j] == *x) {
+            Some(j) => {
+                used[j] = true;
+                in_a.push(j);
+            }
+            None => out.push(x),
+        }
+    }
+    // The shared ones in `a`'s order must be `b`'s order.
+    if in_a.windows(2).any(|w| w[0] > w[1]) {
+        return None;
+    }
+    out.extend(b.iter().zip(&used).filter(|&(_, &u)| !u).map(|(x, _)| x));
+    Some(out)
 }
 
 /// The what-ifs of one city (`BasicBot._simulate` for each building the advisor weighs): what
@@ -399,7 +538,7 @@ fn happiness_total(v: &EvalView<'_>, o: &Overlay, parts: &CityParts) -> i32 {
     let g = v.game();
     let wide = reaches_others(o);
     // Another city's own buildings are as they were.
-    let others = o.moved().difference(CondDeps::CITY);
+    let others = o.moved().difference(CondDeps::CITY_BUILDINGS);
     economy::compute_happiness_in(v, o.owner, |x| -> Cow<'_, CityParts> {
         if x == o.city {
             return Cow::Borrowed(parts);

@@ -346,7 +346,7 @@ fn attack_targets(g: &Game, u: UnitId, d: &BaseUnitDef) -> Vec<Value> {
     let mut out = Vec::new();
     // In Python's `within` order, as it listed them.
     let mut near = g.grid().within(x.tile(), radius);
-    near.sort_by_key(|&t| borders::within_order(g, x.tile(), t));
+    near.sort_by_cached_key(|&t| borders::within_order(g, x.tile(), t));
     for t in near.into_iter().skip(1) {
         let Ok(Value::Object(pv)) = resolve::preview(g, u, t) else { continue };
         let (tx, ty) = g.xy(t);

@@ -49,6 +49,8 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 arbitrary = "1.4"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 gungraun = "0.19"         # the successor of iai-callgrind
+# The criterion suites pin their thread to one core (DESIGN.md 9.7).
+core_affinity = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -83,7 +85,10 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "unwind"                   # never abort: hosts turn a panic into one poisoned game
-overflow-checks = true             # kept unless the bench report shows > 3% cost
+# Off: the 1e-03 bench report measured 5-9% on pass rounds (DESIGN.md 10, "As built in 1e-03"),
+# over the 3% the design allowed. The ci profile, which every test, golden and chaos run uses,
+# keeps them, so an overflow still fails a test.
+overflow-checks = false
 
 [profile.ci]
 inherits = "release"
@@ -91,6 +96,7 @@ lto = false
 codegen-units = 16
 incremental = false
 debug-assertions = true
+overflow-checks = true
 
 [profile.profiling]
 inherits = "release"

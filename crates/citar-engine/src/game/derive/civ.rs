@@ -18,6 +18,8 @@
 //!   resources the supply has some of ([`Csr::merged`]);
 //! - the era (per civilization, `research.player_era`), which era conditionals read once per
 //!   unique, and the tiles it owns (`economy.owned_tiles`), which route upkeep walks;
+//! - the units of a civilization that may carry a great general's aura (`aura_units`), which
+//!   every fight asks about;
 //! - `CityLocal` (per city): its buildings' uniques that hold in it alone. `CityLocalFull` adds
 //!   those of the resources its improved tiles give, of the ones its owner's supply has some of
 //!   (the Marble decision, DESIGN.md 5.12); the supply's own view reads `CityLocal`, so the
@@ -64,6 +66,8 @@ struct CivMemos {
     era: CopyMemo<Option<EraId>>,
     /// The tiles it owns, in map order.
     owned: Memo<Vec<TileIdx>>,
+    /// Its units that may carry a great general's aura.
+    auras: Memo<Vec<UnitId>>,
 }
 
 /// The memos of one city.
@@ -76,22 +80,48 @@ struct CityMemos {
     full: Memo<Csr>,
 }
 
+/// The last two keys a [`Shared`] table was asked for, the latest first, with their indexes.
+type Recent<K> = [Option<(K, Arc<Csr>)>; 2];
+
 /// A table of indexes that are pure functions of their keys: it only grows, is never iterated,
 /// and lends its indexes out shared, so a lookup that adds a key never meets a borrow of another.
 #[derive(Clone, Debug)]
 struct Shared<K> {
     map: RefCell<LookupMap<K, Arc<Csr>>>,
+    /// The last two keys asked for: a fight asks of its two units' profiles a score of times, and
+    /// a key compare is cheaper than a hash.
+    recent: RefCell<Recent<K>>,
 }
 
 impl<K: Eq + Hash> Default for Shared<K> {
     fn default() -> Self {
-        Self { map: RefCell::new(LookupMap::new()) }
+        Self { map: RefCell::new(LookupMap::new()), recent: RefCell::new([None, None]) }
     }
 }
 
-impl<K: Eq + Hash> Shared<K> {
+impl<K: Eq + Hash + Clone> Shared<K> {
     /// The index of `key`, built by `build` the first time it is asked for.
     fn get(&self, key: K, build: impl FnOnce() -> Csr) -> Arc<Csr> {
+        {
+            let mut recent = self.recent.borrow_mut();
+            if let Some((_, c)) = recent[0].as_ref().filter(|(k, _)| *k == key) {
+                return Arc::clone(c);
+            }
+            if let Some((_, c)) = recent[1].as_ref().filter(|(k, _)| *k == key) {
+                let c = Arc::clone(c);
+                recent.swap(0, 1);
+                return c;
+            }
+        }
+        let c = self.lookup(key.clone(), build);
+        let mut recent = self.recent.borrow_mut();
+        recent.swap(0, 1);
+        recent[0] = Some((key, Arc::clone(&c)));
+        c
+    }
+
+    /// [`get`](Self::get) without the recent keys.
+    fn lookup(&self, key: K, build: impl FnOnce() -> Csr) -> Arc<Csr> {
         if let Some(c) = self.map.borrow().get(&key) {
             return Arc::clone(c);
         }
@@ -313,6 +343,28 @@ pub(crate) fn owned_tiles(g: &Game, p: PlayerId) -> Option<Ref<'_, Vec<TileIdx>>
         || revs.civ(p).cities,
         || g.st.tiles().iter().filter(|(_, t)| t.owner() == Some(p)).map(|(i, _)| i).collect(),
     ))
+}
+
+/// The units of civilization `p` that may carry a great general's aura, in the order of its
+/// units: those whose base unit or promotions the ruleset lets carry `[n]% Strength bonus for
+/// [units] units within [n] tiles` (`CombatRules::aura`). Valid while its `roster` (which units
+/// it has, and of which base unit) stands, and when a promotion may carry an aura the global
+/// `units_core` (any unit's promotions) too. A fighter asks its side's few carriers for their
+/// aura instead of looking on every tile within the widest aura's reach, and most sides have
+/// none (package 1e-03).
+pub(crate) fn aura_units(g: &Game, p: PlayerId) -> SmallVec<[UnitId; 8]> {
+    let aura = &g.rules.derived().combat.aura;
+    let compute = || -> Vec<UnitId> {
+        g.player_units(p).filter(|u| aura.may(u.base, &u.promotions)).map(|u| u.id()).collect()
+    };
+    let Some(m) = g.dv.civ.civs.get(p) else { return compute().into_iter().collect() };
+    let revs = &g.dv.revs;
+    let inputs = || {
+        let roster = revs.civ(p).roster;
+        if aura.promotions.is_empty() { roster } else { roster.max(revs.units_core) }
+    };
+    let units = m.auras.get(revs.now(), inputs, compute);
+    units.iter().copied().collect()
 }
 
 /// The latest revision of what civilization `p`'s supply is computed from, for a memo last
@@ -537,6 +589,12 @@ pub fn verify(g: &Game, cold: &Game) -> Vec<String> {
         }
         if owned_tiles(g, p).as_deref() != owned_tiles(cold, p).as_deref() {
             out.push(format!("player {}: the tiles it owns differ from a cold rebuild", p.0));
+        }
+        if aura_units(g, p) != aura_units(cold, p) {
+            out.push(format!(
+                "player {}: the units that may carry an aura differ from a cold rebuild",
+                p.0
+            ));
         }
     }
     for city in g.st.cities().iter() {

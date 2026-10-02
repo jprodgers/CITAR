@@ -21,6 +21,8 @@ mod engine {
     mod kitchen_sink;
     mod mapgen;
     mod maps;
+    #[cfg(feature = "stats")]
+    mod memos;
     mod production;
     mod religion;
     mod rules;

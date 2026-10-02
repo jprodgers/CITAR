@@ -264,12 +264,15 @@ pub fn city_strength(g: &Game, c: CityId, theirs: Option<Combatant>, action: Com
     num::round_half_even_i32(s)
 }
 
-/// A unit's `[n] Strength` in a fight, its own uniques only (`combat.py:183, 196`).
-fn strength_amount(g: &Game, u: UnitId, ctx: &Ctx) -> i32 {
+/// A unit's `[n] Strength` in a fight, its own uniques only (`combat.py:183, 196`): the fight's
+/// context is made only for a unit that has such a unique.
+fn strength_amount(g: &Game, u: UnitId, ctx: impl FnOnce() -> Ctx) -> i32 {
     let v = g.view();
-    uq::sum_i32(uq::unit(&v, u, UniqueType::StrengthAmount, ctx), |d| match d {
-        UniqueData::StrengthAmount(x) => Some(x.strength),
-        _ => None,
+    uq::unit_candidates(&v, u, UniqueType::StrengthAmount, false, ctx).map_or(0, |h| {
+        uq::sum_i32(h, |d| match d {
+            UniqueData::StrengthAmount(x) => Some(x.strength),
+            _ => None,
+        })
     })
 }
 
@@ -292,9 +295,9 @@ pub fn base_attack_from(g: &Game, a: Combatant, from: TileIdx, d: Option<Combata
             let Some(x) = g.unit(u) else { return 0.0 };
             let def = &g.rules().base_units()[x.base];
             let extra = match d {
-                Some(_) => {
-                    strength_amount(g, u, &fight_ctx_at(g, a, from, d, CombatAction::Attack, None))
-                }
+                Some(_) => strength_amount(g, u, || {
+                    fight_ctx_at(g, a, from, d, CombatAction::Attack, None)
+                }),
                 None => 0,
             };
             let base = if def.ranged { def.ranged_strength } else { def.strength };
@@ -322,7 +325,7 @@ pub fn base_defense(g: &Game, d: Combatant, a: Option<Combatant>) -> f64 {
             let r = g.rules();
             let def = &r.base_units()[x.base];
             let extra = match a {
-                Some(_) => strength_amount(g, u, &fight_ctx(g, d, a, CombatAction::Defend, None)),
+                Some(_) => strength_amount(g, u, || fight_ctx(g, d, a, CombatAction::Defend, None)),
                 None => 0,
             };
             if def.military && crate::game::movement::is_embarked(g, u) {
@@ -345,8 +348,8 @@ pub fn base_defense(g: &Game, d: Combatant, a: Option<Combatant>) -> f64 {
 /// for a unit whose civilization has `Great General provides double combat bonus` when the
 /// general is a great person of war.
 ///
-/// Only the units that may carry an aura are asked, and only those within the ruleset's widest
-/// aura of `at`, found on the tiles that near, or among the side's units when those are fewer.
+/// Only the side's units that may carry an aura are asked (`derive::civ::aura_units`), and only
+/// those within the ruleset's widest aura of `at`.
 fn great_general_bonus(
     g: &Game,
     ours: UnitId,
@@ -396,17 +399,12 @@ fn great_general_bonus(
             }
         }
     };
-    let radius = rules.aura_radius;
-    let area = 1 + 3 * u64::from(radius) * (u64::from(radius) + 1);
-    let side = g.state().units().of(owner).len();
-    if area < u64::try_from(side).unwrap_or(u64::MAX) {
-        // A wrapping map may show a tile twice, which the choice above does not mind.
-        g.grid().any_within(at, radius, |t| {
-            g.units_at(t).for_each(&mut consider);
-            false
-        });
-    } else {
-        g.player_units(owner).for_each(&mut consider);
+    for general in crate::game::derive::civ::aura_units(g, owner) {
+        if let Some(x) = g.unit(general)
+            && g.grid().distance(x.tile(), at) <= rules.aura_radius
+        {
+            consider(x);
+        }
     }
     let (_, general, mut bonus) = best?;
     if unit_has(g, ours, UniqueType::GreatGeneralProvidesDoubleCombatBonus, true)
@@ -460,27 +458,16 @@ fn general_modifiers(
                 }
             }
             // The units beside it; the enemy counts where it fights from, beside it or not
-            // (a unit shooting from afar is not beside it, one attacking from beside it is).
-            let mut adj: SmallVec<[UnitId; 8]> = g
-                .grid()
-                .neighbors(at)
-                .flat_map(|n| g.units_at(n))
-                .filter(|o| Combatant::Unit(o.id()) != enemy)
-                .map(Unit::id)
-                .collect();
-            if let Combatant::Unit(e) = enemy
-                && g.grid().neighbors(at).any(|n| n == enemy_at)
-            {
-                adj.push(e);
-            }
+            // (a unit shooting from afar is not beside it, one attacking from beside it is). The
+            // worst malus of those at war with it that may carry one: the least, in any order.
             let f = r.uniques().filters();
             let mut worst: Option<i32> = None;
             let adjacent = &r.derived().combat.adjacent;
-            for o in adj {
-                let Some(ou) = g.unit(o) else { continue };
+            let mut beside = |ou: &Unit| {
                 if !g.at_war(ou.owner(), owner) || !adjacent.may(ou.base, &ou.promotions) {
-                    continue;
+                    return;
                 }
+                let o = ou.id();
                 let octx = Ctx::unit(&v, o);
                 for h in uq::unit(&v, o, UniqueType::StrengthForAdjacentEnemies, &octx) {
                     if let UniqueData::StrengthForAdjacentEnemies(x) = h.data()
@@ -491,6 +478,19 @@ fn general_modifiers(
                         worst = Some(x.percent);
                     }
                 }
+            };
+            for n in g.grid().neighbors(at) {
+                for ou in g.units_at(n) {
+                    if Combatant::Unit(ou.id()) != enemy {
+                        beside(ou);
+                    }
+                }
+            }
+            if let Combatant::Unit(e) = enemy
+                && g.grid().neighbors(at).any(|n| n == enemy_at)
+                && let Some(eu) = g.unit(e)
+            {
+                beside(eu);
             }
             if let Some(w) = worst {
                 put(&mut mods, ModKey::AdjacentEnemies, w);
@@ -713,8 +713,19 @@ pub fn wounded_ratio(g: &Game, c: Combatant) -> f64 {
 /// UnCiv's fourth-power curve, with the roll between 24 and 36.
 #[must_use]
 pub fn damage_modifier(ratio: f64, to_attacker: bool, rnd: f64) -> f64 {
+    damage_modifier_with(ratio, damage_power(ratio), to_attacker, rnd)
+}
+
+/// The part of [`damage_modifier`] that depends on the strength ratio alone, which a preview's
+/// four damages share.
+fn damage_power(ratio: f64) -> f64 {
     let stronger = if ratio >= 1.0 { ratio } else { 1.0 / ratio };
-    let mut rm = (num::pow((stronger + 3.0) / 4.0, 4.0) + 1.0) / 2.0;
+    (num::pow((stronger + 3.0) / 4.0, 4.0) + 1.0) / 2.0
+}
+
+/// [`damage_modifier`] with its [`damage_power`] given.
+fn damage_modifier_with(ratio: f64, power: f64, to_attacker: bool, rnd: f64) -> f64 {
+    let mut rm = power;
     if (to_attacker && ratio > 1.0) || (!to_attacker && ratio < 1.0) {
         rm = 1.0 / rm;
     }
@@ -749,8 +760,7 @@ impl CombatSetup {
         if self.civilian {
             return DAMAGE_TO_CIVILIAN;
         }
-        let ratio = self.attack / self.defense;
-        num::round_half_even_i32(damage_modifier(ratio, false, rnd) * self.attacker_wounds)
+        self.to_defender(rnd, self.power())
     }
 
     /// The damage the attacker takes back at roll `rnd` (`combat.damage_to_attacker`): none for
@@ -760,8 +770,47 @@ impl CombatSetup {
         if self.ranged || self.civilian {
             return 0;
         }
+        self.to_attacker(rnd, self.power())
+    }
+
+    /// The damage each side takes at the lowest roll and at the highest, `([to the defender],
+    /// [to the attacker])`, as [`damage_to_defender`](Self::damage_to_defender) and
+    /// [`damage_to_attacker`](Self::damage_to_attacker) give them, with the power of the
+    /// strength ratio worked out once for the four.
+    #[must_use]
+    pub fn damage_range(&self) -> ([i32; 2], [i32; 2]) {
+        let power = self.power();
+        (
+            [self.to_defender(0.0, power), self.to_defender(1.0, power)],
+            [self.to_attacker(0.0, power), self.to_attacker(1.0, power)],
+        )
+    }
+
+    /// The [`damage_power`] of the strength ratio.
+    fn power(&self) -> f64 {
+        damage_power(self.attack / self.defense)
+    }
+
+    /// [`damage_to_defender`](Self::damage_to_defender) with the ratio's `power` given.
+    fn to_defender(&self, rnd: f64, power: f64) -> i32 {
+        if self.civilian {
+            return DAMAGE_TO_CIVILIAN;
+        }
         let ratio = self.attack / self.defense;
-        num::round_half_even_i32(damage_modifier(ratio, true, rnd) * self.defender_wounds)
+        num::round_half_even_i32(
+            damage_modifier_with(ratio, power, false, rnd) * self.attacker_wounds,
+        )
+    }
+
+    /// [`damage_to_attacker`](Self::damage_to_attacker) with the ratio's `power` given.
+    fn to_attacker(&self, rnd: f64, power: f64) -> i32 {
+        if self.ranged || self.civilian {
+            return 0;
+        }
+        let ratio = self.attack / self.defense;
+        num::round_half_even_i32(
+            damage_modifier_with(ratio, power, true, rnd) * self.defender_wounds,
+        )
     }
 
     /// A setup of two units with no modifiers and the numbers given, for tests of the damage

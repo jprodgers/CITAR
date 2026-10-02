@@ -257,6 +257,10 @@ struct CivMemos {
     upkeep_deps: Cell<CondDeps>,
     connectivity: Memo<Connectivity>,
     connectivity_deps: Cell<CondDeps>,
+    /// The water the harbours' flood reached when the network was last worked out
+    /// (`connections::network_in`): set by every computation, whether the network came out as it
+    /// was or not, so it is never older than the memo's last validation.
+    connectivity_water: RefCell<crate::base::sets::BitSet>,
     deficit: CopyMemo<i32>,
     deficit_deps: Cell<CondDeps>,
 }
@@ -273,6 +277,7 @@ impl Default for CivMemos {
             upkeep_deps: none(),
             connectivity: Memo::new(),
             connectivity_deps: none(),
+            connectivity_water: RefCell::default(),
             deficit: CopyMemo::new(),
             deficit_deps: none(),
         }
@@ -288,6 +293,7 @@ struct Empty {
     happiness: RefCell<Happiness>,
     civ_stats: RefCell<CivStats>,
     connectivity: RefCell<Connectivity>,
+    connectivity_water: RefCell<crate::base::sets::BitSet>,
 }
 
 /// Every memo of this module: part of `Derived`.
@@ -579,6 +585,12 @@ pub(crate) fn city_base(g: &Game, c: CityId) -> Ref<'_, CityBase> {
     m.base.get(revs.now(), inputs, compute)
 }
 
+/// The classes the last computation of city `c`'s base read, validated now.
+pub(crate) fn city_base_deps(g: &Game, c: CityId) -> CondDeps {
+    drop(city_base(g, c));
+    g.dv.stats.cities.get(&c).map_or(CondDeps::all(), |m| m.base_deps.get())
+}
+
 fn base_changed(g: &Game, c: CityId) -> Rev {
     drop(city_base(g, c));
     g.dv.stats.cities.get(&c).map_or(Rev::START, |m| m.base.changed())
@@ -695,7 +707,7 @@ fn civ_level_cond(g: &Game, deps: CondDeps, p: PlayerId) -> Rev {
     }
     let revs = &g.dv.revs;
     let fight = local.contains(CondDeps::COMBAT);
-    let city = fight || local.contains(CondDeps::CITY);
+    let city = fight || local.intersects(CondDeps::CITY | CondDeps::CITY_BUILDINGS);
     let tile = fight || local.contains(CondDeps::TILE);
     if city || tile {
         r = r.max(revs.cities).max(revs.civ(p).cities);
@@ -890,11 +902,23 @@ pub(crate) fn connectivity(g: &Game, p: PlayerId) -> Ref<'_, Connectivity> {
             .max(civ::cond(g, deps, &Ctx::civ(p)))
     };
     let compute = || {
-        let (x, d) = record::recorded(|| connections::connected_cities(g, p));
+        let ((x, water), d) = record::recorded(|| connections::network_in(&g.view(), p));
         m.connectivity_deps.set(d);
+        *m.connectivity_water.borrow_mut() = water;
         x
     };
     m.connectivity.get(g.dv.revs.now(), inputs, compute)
+}
+
+/// The water civilization `p`'s harbours reach, as its network was last worked out, validated now
+/// (`connections::network_in`). Kept beside the memo rather than in its value: the network is the
+/// same when only the water moved, and the cities that read it need not be asked again.
+pub(crate) fn connectivity_water(g: &Game, p: PlayerId) -> Ref<'_, crate::base::sets::BitSet> {
+    drop(connectivity(g, p));
+    match g.dv.stats.civs.get(p) {
+        Some(m) => m.connectivity_water.borrow(),
+        None => g.dv.stats.empty.connectivity_water.borrow(),
+    }
 }
 
 /// The classes the last computation of civilization `p`'s connectivity read, validated now.
@@ -1046,7 +1070,9 @@ pub fn verify(g: &Game, cold: &Game) -> Vec<String> {
         if unit_upkeep(g, p) != unit_upkeep(cold, p) {
             out.push(format!("player {}: its unit upkeep differs from a cold rebuild", p.0));
         }
-        if *connectivity(g, p) != *connectivity(cold, p) {
+        if *connectivity(g, p) != *connectivity(cold, p)
+            || *connectivity_water(g, p) != *connectivity_water(cold, p)
+        {
             out.push(format!("player {}: its connectivity differs from a cold rebuild", p.0));
         }
         if unit_supply_deficit(g, p) != unit_supply_deficit(cold, p) {

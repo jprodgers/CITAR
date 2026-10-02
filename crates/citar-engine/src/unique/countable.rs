@@ -79,7 +79,11 @@ impl Countable {
         })
     }
 
-    /// What the count reads (DESIGN.md 5.8), its filter's leaves included.
+    /// What the count reads (DESIGN.md 5.8), its filter's leaves included. A city filter's
+    /// leaves leave out the facts of the city asked, which `CITY_COUNT` validates for every city
+    /// counted; the buildings of those cities are named (`CIV_BUILDINGS`) where a leaf reads them
+    /// (`[Cities with a [Wonder]] Cities`), since the production advisor's what-if reuses what
+    /// read no buildings (package 1e-03's fix round).
     #[must_use]
     pub fn deps(self, filters: &Filters) -> CondDeps {
         match self {
@@ -91,7 +95,14 @@ impl Countable {
             Self::Stat(Stat::Food) => CondDeps::CITY,
             Self::Stat(_) => CondDeps::STOCKS,
             Self::UnitsMatching(x) => CondDeps::UNIT_SET | filters.unit(x).deps(),
-            Self::CitiesMatching(x) => CondDeps::CITY_COUNT | filters.city(x).deps(),
+            Self::CitiesMatching(x) => {
+                let buildings = if filters.city_reads_buildings(x) {
+                    CondDeps::CIV_BUILDINGS
+                } else {
+                    CondDeps::empty()
+                };
+                CondDeps::CITY_COUNT | filters.city(x).deps() | buildings
+            }
             Self::RemainingCivs(x) => CondDeps::CITY_COUNT | filters.civ(x).deps(),
             Self::BuildingsMatching(_) => CondDeps::CIV_BUILDINGS,
         }

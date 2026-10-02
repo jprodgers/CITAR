@@ -177,6 +177,28 @@ pub fn unit_and_civ<'w, W: EvalWorld>(
         .index(w.civ_index(w.unit_owner(u), IndexLayer::Full))
 }
 
+/// [`unit`](fn@unit), or [`unit_and_civ`] with `with_civ`, when the unit's profile or its owner's
+/// index has uniques of type `ty`; `None` when neither does, so that nothing could hold and the
+/// context `ctx` is never built (most types a unit is asked about, most units have none of).
+pub fn unit_candidates<'w, W: EvalWorld>(
+    w: &'w W,
+    u: UnitId,
+    ty: UniqueType,
+    with_civ: bool,
+    ctx: impl FnOnce() -> Ctx,
+) -> Option<Hits<'w, W>> {
+    let own = w.unit_index(u);
+    let civ = with_civ.then(|| w.civ_index(w.unit_owner(u), IndexLayer::Full));
+    if own.get(ty).is_empty() && civ.as_ref().is_none_or(|c| c.get(ty).is_empty()) {
+        return None;
+    }
+    let hits = Hits::new(w, ty, &ctx()).index(own);
+    Some(match civ {
+        Some(c) => hits.index(c),
+        None => hits,
+    })
+}
+
 /// The uniques of type `ty` of the tile's terrains (base, features, natural wonder) that hold.
 pub fn terrains<'w, W: EvalWorld>(w: &'w W, t: TileIdx, ty: UniqueType, ctx: &Ctx) -> Hits<'w, W> {
     let r = w.rules();

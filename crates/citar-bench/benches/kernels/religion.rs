@@ -1,27 +1,20 @@
-//! Religious pressure (package 1b-08, gate 5).
+//! Religious pressure (package 1b-08).
 //!
 //! The state is a gargantuan pangaea of twelve civilizations with a city on every site that
 //! allows one, six of them with a religion founded in their capital. Late in a game nearly every
 //! city follows some religion, and each one spreads to the cities around it, which is what a
 //! round costs most: so every city is given a thousand pressure a citizen toward the religion of
 //! the holy city nearest it, and five rounds of pressure are played before anything is timed.
-//! Budget (DESIGN.md 10, report-only until 1e-03):
-//! - one round of pressure, every city's religious turn in id order (`religion::city_end_turn`:
-//!   the pressure of its surroundings added and a new majority taken), at or under 1 ms.
+//! Budget (DESIGN.md 10): one round of pressure, every city's religious turn in id order
+//! (`religion::city_end_turn`: the pressure of its surroundings added and a new majority taken),
+//! at or under 1 ms, each round on a fresh copy of the game.
 //!
-//! Report-only besides: every city's surroundings asked at a stable revision
+//! Report-only: every city's surroundings asked at a stable revision
 //! (`pressures_from_surroundings`), which validates each spread and reads the grid.
-//!
-//! After Criterion, the run takes the median of its own timings and fails above three times the
-//! budget.
-//!
-//! ```text
-//! cargo bench -p citar-bench --bench religion
-//! ```
 
 use std::hint::black_box;
-use std::time::{Duration, Instant};
 
+use citar_bench::{Suite, median, median_on_copies};
 use citar_engine::api::testops;
 use citar_engine::base::ids::{CityId, PlayerId, ReligionId, TileIdx};
 use citar_engine::game::Game;
@@ -34,7 +27,6 @@ use citar_testkit::script::new_game;
 use criterion::Criterion;
 use serde_json::json;
 
-const ROUND: Duration = Duration::from_millis(1);
 const MAJORS: u8 = 12;
 const RELIGIONS: u8 = 6;
 
@@ -109,31 +101,7 @@ fn round(g: &mut Game, cities: &[CityId]) {
     }
 }
 
-/// The median of `n` rounds, each on a fresh copy of the game (the copy is not timed).
-fn median_round(g: &Game, cities: &[CityId], n: usize) -> Duration {
-    let mut times: Vec<Duration> = (0..n)
-        .map(|_| {
-            let mut copy = g.clone();
-            let t = Instant::now();
-            round(&mut copy, cities);
-            let took = t.elapsed();
-            black_box(copy);
-            took
-        })
-        .collect();
-    times.sort();
-    times[n / 2]
-}
-
-fn check(name: &str, took: Duration, budget: Duration) {
-    println!("{name} median: {took:?} (budget {budget:?}, hard limit {:?})", budget * 3);
-    assert!(took <= budget * 3, "{name} took {took:?}, over three times {budget:?}");
-    if took > budget {
-        println!("warning: {name} is over its {budget:?} budget (report-only until 1e-03)");
-    }
-}
-
-fn main() {
+pub fn run(s: &mut Suite, cr: &mut Criterion) {
     let (g, cities) = gargantuan();
     let following = cities
         .iter()
@@ -147,8 +115,6 @@ fn main() {
         following
     );
     assert!(following * 10 >= cities.len() * 9, "nearly every city follows a religion");
-
-    let mut cr = Criterion::default().configure_from_args();
     cr.bench_function("religion/round", |b| {
         b.iter_batched(
             || g.clone(),
@@ -162,12 +128,11 @@ fn main() {
     cr.bench_function("religion/surroundings", |b| {
         b.iter(|| surroundings_for_bench(black_box(&g)));
     });
-    cr.final_summary();
-
-    check("religion/round", median_round(&g, &cities, 31), ROUND);
-    let t = Instant::now();
-    for _ in 0..31 {
-        black_box(surroundings_for_bench(black_box(&g)));
-    }
-    println!("religion/surroundings: {:?} a round (report-only)", t.elapsed() / 31);
+    s.put("religion/round", median_on_copies(&g, 31, |copy| round(copy, &cities)));
+    s.note(
+        "religion/surroundings",
+        median(11, 3, || {
+            black_box(surroundings_for_bench(black_box(&g)));
+        }),
+    );
 }

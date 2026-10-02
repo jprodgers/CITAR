@@ -89,6 +89,24 @@ pub fn governing(g: &Game, t: &Tile) -> crate::base::ids::TerrainId {
     }
 }
 
+/// What a look at a tile reads of its terrain, once for the checks and the costs that need it:
+/// the terrain that governs it ([`governing`]) and whether its base terrain is water.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ground {
+    pub gov: crate::base::ids::TerrainId,
+    pub water: bool,
+}
+
+impl Ground {
+    /// The ground of tile `t`.
+    #[inline]
+    pub(crate) fn of(g: &Game, t: &Tile) -> Self {
+        let water =
+            g.rules().terrains()[t.terrain()].kind == crate::rules::defs::TerrainType::Water;
+        Self { gov: governing(g, t), water }
+    }
+}
+
 /// Whether nothing may enter the tile (`tiles.is_impassable`, `tiles.py:77-79`).
 #[must_use]
 pub fn impassable(g: &Game, t: TileIdx) -> bool {
@@ -130,13 +148,28 @@ impl Mover<'_> {
     /// [`terrain_reason`](Self::terrain_reason) of tile `t`, given what is on it: whether a
     /// city stands there.
     pub(crate) fn terrain_reason_on(&self, t: TileIdx, tile: &Tile, city: bool) -> Option<Blocked> {
+        if self.is_air() {
+            return None;
+        }
+        self.terrain_reason_ground(t, tile, city, Ground::of(self.g, tile))
+    }
+
+    /// [`terrain_reason_on`](Self::terrain_reason_on) with the tile's [`Ground`] given.
+    #[inline(always)]
+    pub(crate) fn terrain_reason_ground(
+        &self,
+        t: TileIdx,
+        tile: &Tile,
+        city: bool,
+        ground: Ground,
+    ) -> Option<Blocked> {
         let g = self.g;
         if self.is_air() {
             return None;
         }
         let terrains = g.rules().terrains();
         let land_unit = self.def.domain == Domain::Land;
-        if !city && terrains[governing(g, tile)].impassable {
+        if !city && terrains[ground.gov].impassable {
             let ice = self.rules.ice.is_some_and(|i| tile.features().contains(i));
             let ok = self.prof.impassable_ok
                 || (self.prof.ice_ok && ice)
@@ -147,7 +180,7 @@ impl Mover<'_> {
                 return Some(Blocked::Impassable(t));
             }
         }
-        let water = terrains[tile.terrain()].kind == crate::rules::defs::TerrainType::Water;
+        let water = ground.water;
         if !water && self.def.domain == Domain::Water && !city {
             return Some(Blocked::NavalOnLand);
         }
@@ -258,12 +291,26 @@ impl Mover<'_> {
         city: Option<PlayerId>,
         target: Option<TileIdx>,
     ) -> bool {
+        self.passable_ground(t, tile, city, target, Ground::of(self.g, tile))
+    }
+
+    /// [`passable_on`](Self::passable_on) with the tile's [`Ground`] given: inlined into a
+    /// search's first look at a tile.
+    #[inline(always)]
+    pub(crate) fn passable_ground(
+        &self,
+        t: TileIdx,
+        tile: &Tile,
+        city: Option<PlayerId>,
+        target: Option<TileIdx>,
+        ground: Ground,
+    ) -> bool {
         let g = self.g;
         let explored = self.barbarian || self.explored.is_some_and(|e| e.contains(t.0));
         if !explored {
             return true;
         }
-        if self.terrain_reason_on(t, tile, city.is_some()).is_some() {
+        if self.terrain_reason_ground(t, tile, city.is_some(), ground).is_some() {
             return false;
         }
         if let Some(o) = tile.owner()

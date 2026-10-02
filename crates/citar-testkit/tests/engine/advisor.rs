@@ -370,6 +370,7 @@ mod sink {
     use citar_engine::game::{DebugOptions, Game, query};
     use citar_engine::rules::Ruleset;
     use citar_engine::state::cities::Constructible;
+    use citar_engine::unique::CondDeps;
     use citar_testkit::rulesets::{KITCHEN_SINK, files_of, kitchen_sink, overlay};
     use citar_testkit::script::{map_doc, new_game};
     use serde_json::{Value, json};
@@ -512,6 +513,81 @@ mod sink {
         assert!(d[Stat::Production] > 0.0, "{d:?}");
         assert!(g.take_violations().is_empty());
         assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
+    }
+
+    /// The shipped ruleset with `patch` over its buildings: unlike the kitchen sink, a city's base
+    /// there reads few classes, so the what-if reuses it where it can.
+    fn shipped_with_buildings(patch: &Value) -> &'static Ruleset {
+        let patch = patch.to_string();
+        let files = overlay(&[("ruleset/buildings.json", &patch)]).expect("the patch applies");
+        Ruleset::leak(&files_of(&files)).expect("the ruleset loads")
+    }
+
+    #[test]
+    fn flat_stats_of_cities_with_a_wonder_come_with_the_wonder() {
+        // `[stats] [in all cities with a world wonder]` and `[stats] per [n] population [...]`
+        // read the city's buildings through their city filter, which names no class of its own:
+        // the what-if of a plain wonder (Stonehenge) must not reuse the city's base, whose flat
+        // stats by source the wonder moves (package 1e-03's fix round). So must a conditional
+        // that counts the cities such a filter passes, which reads their buildings too.
+        let counter = "[+5 Gold] [in all cities] \
+                       <when number of [[in all cities with a world wonder] Cities] is more than [0]>";
+        let r = shipped_with_buildings(&json!({
+            "Wonder Treasury": {
+                "name": "Wonder Treasury", "cost": 60, "maintenance": 0,
+                "uniques": ["[+5 Gold] [in all cities with a world wonder]"],
+                "id": "wonder_treasury",
+            },
+            "Wonder Market": {
+                "name": "Wonder Market", "cost": 60, "maintenance": 0,
+                "uniques": ["[+2 Gold] per [1] population [in all cities with a world wonder]"],
+                "id": "wonder_market",
+            },
+            "Wonder Counter": {
+                "name": "Wonder Counter", "cost": 60, "maintenance": 0,
+                "uniques": [counter],
+                "id": "wonder_counter",
+            },
+        }));
+        // The count reads the counted cities' buildings, as its owner's buildings.
+        let t = r.uniques();
+        let counted = t.iter().find(|&(u, _)| t.text_of(u) == counter).map(|(u, _)| u);
+        let counted = counted.expect("the counter's unique");
+        assert!(t.cond_deps(counted).contains(CondDeps::CIV_BUILDINGS), "{counter}");
+        let stonehenge = r.lookup::<BuildingId>("Stonehenge").expect("Stonehenge");
+        for (building, gold) in
+            [("Wonder Treasury", 5.0), ("Wonder Market", 8.0), ("Wonder Counter", 5.0)]
+        {
+            let (doc, _) = map_doc("arena").expect("the arena");
+            let cfg = json!({
+                "seed": 1,
+                "players": [{"nation": "Rome"}, {"nation": "Greece"}],
+                "city_states": 0,
+                "barbarians": "off",
+                "ruins": false,
+                "map": doc,
+            });
+            let mut g =
+                new_game(r, cfg.as_object().expect("an object")).unwrap_or_else(|e| panic!("{e}"));
+            g.set_debug_options(DebugOptions::ALL);
+            testops::apply(&mut g, &json!([{"op": "clear_units", "player": "all"}]))
+                .expect("cleared");
+            let out = ops(
+                &mut g,
+                &json!([
+                    {"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Treasury",
+                     "pop": 4},
+                    {"op": "set_city", "x": 5, "y": 5, "add_buildings": [building]},
+                ]),
+            );
+            let c = founded(&out[0]);
+            let d = agrees(&mut g, c, stonehenge);
+            // Stonehenge's own 5 faith, and the gold the wonder turns on.
+            assert!(d[Stat::Faith] >= 5.0, "{building}: {d:?}");
+            assert!(d[Stat::Gold] >= gold, "{building}: {d:?}");
+            assert!(g.take_violations().is_empty());
+            assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
+        }
     }
 
     #[test]

@@ -1511,8 +1511,10 @@ fn what_each_conditional_reads() {
         ("in [Capital] cities", city),
         // The trade network, which its memo keeps.
         ("in cities connected to the capital", city.union(D::CONNECTED)),
-        ("in cities with a [Temple]", city),
-        ("in cities without a [Temple]", city),
+        // The city's buildings besides (package 1e-03): a what-if of one more building reads
+        // them apart from the rest of the city.
+        ("in cities with a [Temple]", city.union(D::CITY_BUILDINGS)),
+        ("in cities without a [Temple]", city.union(D::CITY_BUILDINGS)),
         ("in cities with at least [3] [Population]", city),
         ("in cities with [2] [Specialists]", city),
         ("in cities with between [1] and [5] [Population]", city),
@@ -1562,13 +1564,18 @@ fn what_each_conditional_reads() {
         let c = t.conds(t.get(u))[0];
         assert_eq!(c.deps, want, "<{text}>");
         assert_eq!(deps_of(&c.data, t.filters()), want, "<{text}>, recomputed");
-        assert_eq!(t.get(u).deps(), want, "a unique reads what its conditional reads");
+        // A unique keeps its conditionals' classes but the city's buildings, which what
+        // evaluating it reads keeps.
+        let kept = want.difference(D::CITY_BUILDINGS);
+        assert_eq!(t.get(u).deps(), kept, "a unique reads what its conditional reads");
+        assert_eq!(t.cond_deps(u), want, "<{text}>, with the city's buildings");
     }
     // A unique's deps are the union of its conditionals', and empty exactly when it has none,
     // over every unique of the kitchen sink.
     for (u, x) in t.iter() {
         let union = t.conds(x).iter().fold(CondDeps::empty(), |d, c| d | c.deps);
-        assert_eq!(x.deps(), union, "{}", t.text_of(u));
+        assert_eq!(x.deps(), union.difference(D::CITY_BUILDINGS), "{}", t.text_of(u));
+        assert_eq!(t.cond_deps(u), union, "{}", t.text_of(u));
         assert_eq!(x.deps().is_empty(), x.conds.is_empty(), "{}", t.text_of(u));
     }
     // The shipped tile-neighbourhood uniques (the Celts' Faith, Polynesia's Moai) read neither the

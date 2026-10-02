@@ -8,13 +8,13 @@
 //!
 //! | Memo (DESIGN.md 6.5) | Checked by |
 //! |---|---|
-//! | `CivIndex`, `ResourceSupply`, `CivIndexFull`, `CityLocal`, `FollowerIndex` (with the city's full local index, the unit profiles, the era and the owned tiles) | `derive::civ::verify`, against the one cold game `cold` builds from a clone of the state |
-//! | `CityMods`, `TileYield` (the owners' and every other viewer's), `CityHappiness`, `CityStats`, `Happiness`, `CivStats`, `Connectivity` (with unit upkeep and the supply deficit) | `derive::stats::verify`, against the same cold game |
+//! | `CivIndex`, `ResourceSupply`, `CivIndexFull`, `CityLocal`, `FollowerIndex` (with the city's full local index, the unit profiles, the era, the owned tiles and the units that may carry an aura) | `derive::civ::verify`, against the one cold game `cold` builds from a clone of the state |
+//! | `CityMods`, `TileYield` (the owners' and every other viewer's), `CityHappiness`, `CityStats`, `Happiness`, `CivStats`, `Connectivity` (with the harbours' water, unit upkeep and the supply deficit) | `derive::stats::verify`, against the same cold game |
 //! | `SightMods`, `UnitSight`, `LosCache`, and the visibility counts and sources | `vis::verify`: sight rebuilt from the state, each unit's sight against the index, every line of sight kept against a fresh walk; then the met sets and the natural wonders found against Python's rule over what each civilization now sees |
 //! | `Buildable` (with the civilization-wide requirements) | `derive::buildable::verify`, against the same cold game |
 //! | `JobMap` | `derive::jobs::verify` |
 //! | `DangerMap` | `derive::danger::verify` |
-//! | `CityNeighbours` (the grid of cities) and each city's religious spread | `derive::religion::verify`, against the same cold game |
+//! | `CityNeighbours` (the grid of cities) and each city's majority religion and religious spread | `derive::religion::verify`, against the same cold game |
 //! | `MoveCosts`, `Zoc`, and the unit movement profiles | `path::memo::verify` |
 //! | `RouteLayer`, and the cheapest step off the routes | here: against a cold look at the map |
 //! | the paths found at this revision | here: each against a fresh search |

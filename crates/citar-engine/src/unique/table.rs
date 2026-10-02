@@ -69,7 +69,10 @@ pub struct Unique {
 const _: () = assert!(core::mem::size_of::<UniqueData>() == 16);
 const _: () = assert!(core::mem::size_of::<Unique>() <= 32, "DESIGN.md 5.5");
 const _: () = assert!(core::mem::size_of::<Unique>() == 24);
-const _: () = assert!(CondDeps::all().bits() < 1 << DEPS_BITS, "the classes fit their bits");
+const _: () = assert!(
+    CondDeps::all().difference(CondDeps::CITY_BUILDINGS).bits() < 1 << DEPS_BITS,
+    "the classes a unique keeps fit their bits"
+);
 const _: () =
     assert!((UFlags::all().bits() as u32) < 1 << (32 - DEPS_BITS), "and the flags theirs");
 
@@ -80,11 +83,16 @@ const DEPS_MASK: u32 = (1 << DEPS_BITS) - 1;
 
 impl Unique {
     pub(crate) fn new(data: UniqueData, conds: CondSpan, deps: CondDeps, flags: UFlags) -> Self {
-        Self { data, conds, packed: deps.bits() | (u32::from(flags.bits()) << DEPS_BITS) }
+        Self {
+            data,
+            conds,
+            packed: (deps.bits() & DEPS_MASK) | (u32::from(flags.bits()) << DEPS_BITS),
+        }
     }
 
     /// What its conditionals read: empty exactly when it has none, so that it always applies
-    /// and no memo that reads it needs to validate against a revision for its sake.
+    /// and no memo that reads it needs to validate against a revision for its sake. Without
+    /// [`CondDeps::CITY_BUILDINGS`], which [`UniqueTable::reads`] keeps.
     #[must_use]
     #[inline]
     pub const fn deps(&self) -> CondDeps {
@@ -94,7 +102,7 @@ impl Unique {
     /// Replaces what its conditionals read, keeping its flags: the loader's, once the filters the
     /// conditionals read are compiled (`unique::cond::assign_deps`).
     pub(crate) fn set_deps(&mut self, deps: CondDeps) {
-        self.packed = (self.packed & !DEPS_MASK) | deps.bits();
+        self.packed = (self.packed & !DEPS_MASK) | (deps.bits() & DEPS_MASK);
     }
 
     /// The unique's own flags.
@@ -230,13 +238,25 @@ bitflags! {
         const CONNECTED = 1 << 24;
         /// Every city-state's influence with every major: whom a city-state counts a friend.
         const INFLUENCE = 1 << 25;
+        /// The buildings of the city a rule means, named beside [`CondDeps::CITY`] by what reads
+        /// them (`in cities with a [building]`, a city filter with a building leaf), so that what
+        /// one more building moves can be told from the rest of the city: the production
+        /// advisor's what-if reuses a tile's yield that read the city but not its buildings
+        /// (package 1e-03). Everything that names it names `CITY` too, whose revisions cover it.
+        /// A unique's own classes ([`Unique::deps`], 26 bits) leave it out; what evaluating one
+        /// reads ([`UniqueTable::reads`]) keeps it.
+        const CITY_BUILDINGS = 1 << 26;
     }
 }
 
 impl CondDeps {
     /// The context-local classes: a conditional reading one of them is evaluated per city, unit,
     /// tile or fight (DESIGN.md 5.8, hoisting).
-    pub const LOCAL: Self = Self::CITY.union(Self::UNIT).union(Self::TILE).union(Self::COMBAT);
+    pub const LOCAL: Self = Self::CITY
+        .union(Self::CITY_BUILDINGS)
+        .union(Self::UNIT)
+        .union(Self::TILE)
+        .union(Self::COMBAT);
 
     /// Every class but the context-local ones.
     pub const CIV_LEVEL: Self = Self::all().difference(Self::LOCAL);
@@ -636,6 +656,15 @@ impl UniqueTable {
         self.reads.get(id).copied().unwrap_or_else(CondDeps::empty)
     }
 
+    /// What the unique `id`'s conditionals read: its own classes ([`Unique::deps`]) with
+    /// [`CondDeps::CITY_BUILDINGS`] where a conditional reads the city's buildings, which the
+    /// unique does not keep.
+    #[must_use]
+    #[inline]
+    pub fn cond_deps(&self, id: UniqueId) -> CondDeps {
+        self.get(id).deps() | (self.reads(id) & CondDeps::CITY_BUILDINGS)
+    }
+
     /// The unique's conditionals, in the order the text writes them.
     #[must_use]
     pub fn conds(&self, u: &Unique) -> &[Cond] {
@@ -862,13 +891,16 @@ mod tests {
             CondDeps::all(),
             UFlags::LOCAL | UFlags::TEMPORARY,
         );
-        assert_eq!(u.deps(), CondDeps::all());
+        assert_eq!(u.deps(), CondDeps::all().difference(CondDeps::CITY_BUILDINGS));
         assert_eq!(u.flags(), UFlags::LOCAL | UFlags::TEMPORARY);
         let v = Unique::new(u.data, u.conds, CondDeps::empty(), UFlags::all());
         assert_eq!(v.deps(), CondDeps::empty());
         assert_eq!(v.flags(), UFlags::all());
         assert_eq!(u.conds.ids().map(|c| c.0).collect::<Vec<_>>(), [7, 8]);
-        assert!(CondDeps::all().bits() < 1 << DEPS_BITS, "the classes fit their bits");
+        assert!(
+            CondDeps::all().difference(CondDeps::CITY_BUILDINGS).bits() < 1 << DEPS_BITS,
+            "the classes fit their bits"
+        );
         assert!(
             CondDeps::all().contains(CondDeps::MAP) && !CondDeps::LOCAL.contains(CondDeps::MAP)
         );

@@ -32,7 +32,7 @@ use crate::game::core::has_type;
 use crate::game::economy;
 use crate::state::cities::{City, Constructible, Perpetual};
 use crate::unique::world::CombatAction;
-use crate::unique::{Ctx, FilterFacts as _, Source, UniqueData, UniqueType, uq};
+use crate::unique::{Ctx, FilterFacts as _, Source, UniqueData, UniqueType, record, uq};
 
 // ---- Stats as Python's dicts held them ----------------------------------------------------------
 
@@ -741,9 +741,12 @@ fn uniques_by_source(v: &EvalView<'_>, c: CityId) -> SmallVec<[(SourceKind, Yiel
             out[slot].1.keys.insert(k);
         }
     };
+    // A city filter that reads the city's buildings (`in all cities with a world wonder`) names
+    // no class of its own: the city's own is noted, so the production advisor's what-if of a
+    // building computes the base again rather than reusing it.
     for h in uq::city(&v, c, UniqueType::StatsPerCity, &ctx) {
         if let UniqueData::StatsPerCity(x) = h.data()
-            && filters.city_matches(x.cities, &v, c, None)
+            && noted_city_matches(filters, x.cities, &v, c)
         {
             for _ in 0..h.n {
                 add(h.id, t.stats(x.stats), 1.0);
@@ -752,7 +755,7 @@ fn uniques_by_source(v: &EvalView<'_>, c: CityId) -> SmallVec<[(SourceKind, Yiel
     }
     for h in uq::city(&v, c, UniqueType::StatsPerPopulation, &ctx) {
         if let UniqueData::StatsPerPopulation(x) = h.data()
-            && filters.city_matches(x.cities, &v, c, None)
+            && noted_city_matches(filters, x.cities, &v, c)
         {
             let per = i32::from(city.pop).div_euclid(x.per.max(1));
             for _ in 0..h.n {
@@ -770,6 +773,19 @@ fn uniques_by_source(v: &EvalView<'_>, c: CityId) -> SmallVec<[(SourceKind, Yiel
         }
     }
     out
+}
+
+/// Whether city `c` passes city filter `f`, with the classes of the city's own that the filter
+/// reads noted (`Filters::city_deps_here`: `CITY_BUILDINGS` for a building leaf), which the
+/// filter's own classes leave out.
+fn noted_city_matches(
+    filters: &crate::unique::Filters,
+    f: crate::base::ids::CityFilterId,
+    v: &EvalView<'_>,
+    c: CityId,
+) -> bool {
+    record::note_classes(filters.city_deps_here(f));
+    filters.city_matches(f, v, c, None)
 }
 
 /// Every percentage modifier of a city's yields (`cities._pct_bonuses`, `cities.py:387-438`): a
@@ -1007,8 +1023,17 @@ pub fn current_construction(city: &City) -> Option<Constructible> {
 pub struct CityBase {
     /// What its buildings yield.
     pub buildings: Stats,
+    /// What each of its buildings yields, in the order `buildings` sums them: the production
+    /// advisor's what-if adds one more building's to them rather than working them all out
+    /// again.
+    pub each: Vec<(BuildingId, Stats)>,
     /// Its uniques' flat stats by source.
     pub by_source: SmallVec<[(SourceKind, Yields); 4]>,
+    /// Whether working out `each` and `by_source` read any city's buildings through the view
+    /// (`unique::record::watch_buildings`) beside its own walk over them: a filter, conditional or
+    /// count that reads buildings, whatever classes it names. The what-if reuses a base only when
+    /// it read none.
+    pub reads_buildings: bool,
     /// The percentage its food is raised by (the food of `pct_bonuses`).
     pub food_pct: f64,
     /// Its own tiles that yield without a citizen ([`free_tiles`]).
@@ -1018,6 +1043,9 @@ pub struct CityBase {
 impl super::super::derive::rev::BitEq for CityBase {
     fn bit_eq(&self, other: &Self) -> bool {
         self.buildings.bit_eq(&other.buildings)
+            && self.each.len() == other.each.len()
+            && self.each.iter().zip(&other.each).all(|(a, b)| a.0 == b.0 && a.1.bit_eq(&b.1))
+            && self.reads_buildings == other.reads_buildings
             && self.food_pct.to_bits() == other.food_pct.to_bits()
             && self.free == other.free
             && self.by_source.len() == other.by_source.len()
@@ -1043,17 +1071,66 @@ pub(crate) fn city_base_in(v: &EvalView<'_>, c: CityId) -> CityBase {
         return CityBase::default();
     }
     let ctx = Ctx::city(v, c);
-    let bu = BuildingUniques::stats(v, c, &ctx);
-    let mut buildings = Stats::ZERO;
-    for b in v.city_buildings(c).iter() {
-        buildings += building_stats_with(g, v, b, &ctx, &bu);
-    }
+    // The walk over its buildings is unwatched: the what-if redoes it building by building.
+    let ((buildings, each, by_source), reads_buildings) = record::watch_buildings(|| {
+        let bu = BuildingUniques::stats(v, c, &ctx);
+        let walked = v.buildings_walked(c);
+        let mut buildings = Stats::ZERO;
+        let mut each = Vec::with_capacity(walked.len());
+        for b in walked.iter() {
+            let s = building_stats_with(g, v, b, &ctx, &bu);
+            buildings += s;
+            each.push((b, s));
+        }
+        (buildings, each, uniques_by_source(v, c))
+    });
     CityBase {
         buildings,
-        by_source: uniques_by_source(v, c),
+        each,
+        by_source,
+        reads_buildings,
         food_pct: food_percent(v, c),
         free: free_tiles(g, c),
     }
+}
+
+/// The unique types a city's base reads (its buildings' yields and its uniques' flat stats by
+/// source), besides each building's own `Stats` uniques.
+pub(crate) const BASE_TYPES: [UniqueType; 6] = [
+    UniqueType::StatsFromObject,
+    UniqueType::StatsFromBuildings,
+    UniqueType::StatsPerCity,
+    UniqueType::StatsPerPopulation,
+    UniqueType::StatsFromCitiesOnSpecificTiles,
+    UniqueType::BonusStatsFromCityStates,
+];
+
+/// What building `b` yields in city `c` read in view `v` (a what-if's), with the city's uniques
+/// gathered in it.
+pub(crate) fn one_building_stats_in(v: &EvalView<'_>, c: CityId, b: BuildingId) -> Stats {
+    let ctx = Ctx::city(v, c);
+    building_stats_with(v.game(), v, b, &ctx, &BuildingUniques::stats(v, c, &ctx))
+}
+
+/// The part of [`city_base_in`] a city's parts read (what its buildings yield and its uniques'
+/// flat stats by source), without the food percentage and the free tiles, which a what-if does
+/// not move and does not read.
+#[must_use]
+pub(crate) fn city_yield_base_in(
+    v: &EvalView<'_>,
+    c: CityId,
+) -> (Stats, SmallVec<[(SourceKind, Yields); 4]>) {
+    let g = v.game();
+    if g.city(c).is_none() {
+        return (Stats::ZERO, SmallVec::new());
+    }
+    let ctx = Ctx::city(v, c);
+    let bu = BuildingUniques::stats(v, c, &ctx);
+    let mut buildings = Stats::ZERO;
+    for b in v.buildings_walked(c).iter() {
+        buildings += building_stats_with(g, v, b, &ctx, &bu);
+    }
+    (buildings, uniques_by_source(v, c))
 }
 
 /// A city's happiness and the parts of its yields its stats reuse (`cities._city_happiness`,
