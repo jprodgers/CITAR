@@ -60,6 +60,122 @@ engine-side tools such as `scripts/refcheck`.
 
 ---
 
+## The Rust engine (0.1.6)
+
+`crates/` holds the engine that replaces `citar/engine/` in this release. It was built beside
+the Python engine, which runs every game until the facade switches to the Rust backend; both sit
+behind `engine_api.py`. Its design is
+[crates/citar-engine/DESIGN.md](https://github.com/jprodgers/CITAR/blob/main/crates/citar-engine/DESIGN.md),
+and the crate's README lists the rules a reviewer checks.
+
+| Crate | |
+|---|---|
+| `citar-engine` | The game. A library with no I/O, no threads, no clock, no C code and no `unsafe` |
+| `citar-testkit` | Every integration test, the rule-script runner, `RandomAgent`, and the `golden`, `chaos` and `soak` tools |
+| `citar-refcheck` | Compares the engine's answers with the Python engine's on 262 recorded game states |
+| `citar-bench` | Benchmarks: wall clock on the laptop against hard budgets, instruction counts on every pull request |
+| `xtask` | `cargo xtask check`: allowed dependencies, layering, generated files up to date, nothing left unported |
+
+Inside the engine each top-level module is a layer, which may use only the layers below it:
+`base` (ids, sets, the keyed RNG, maths, hex geometry), `rules` and `unique` (the compiled
+ruleset), `state` and `save` (the saved game and its format), `mapgen`, `game` (every rule
+system, the caches and the turn) and `api` (tools, views, the briefing, the scenario and map
+editors). `cargo xtask check` enforces it.
+
+### The compiled ruleset
+
+The ruleset is the same JSON, `citar/data/`, embedded in the binary. Loading it compiles every
+unique once: the text is matched to its UnCiv type, each parameter becomes a typed value (a stat,
+an amount, an id, a compiled filter), and each conditional a typed condition. While a game runs,
+no rule parses or compares a string; it asks an index for the uniques of a type and reads their
+typed values.
+
+Loading is all or nothing. A misspelt unique or field, a parameter that does not read, a name
+nothing has, or a unique type the engine does not support stops the load, with every error at
+once, each naming its file, object and text. The Python engine's failure mode, a unique that
+silently does nothing, cannot happen.
+
+A ruleset has an id, a hash of the parsed files (so line endings and formatting do not change
+it), which every save and every digest of a game's state includes.
+
+The engine supports every unique type and conditional the Python engine handled: the 402 types
+the shipped ruleset uses and 125 more from other UnCiv rulesets, 527 of UnCiv's 637.
+[MODDING.md](MODDING.md#in-the-rust-engine-016) lists what that means for a mod.
+
+### State, writes and caches
+
+A game is its `State`, which is saved, and its caches, which never are. Four rules hold them
+together:
+
+- **Reads take `&self`.** A query, a view, a briefing or a tool's own check cannot change the
+  game, so how often a host reads can never change how a game goes.
+- **Writes go through `game::mutate`.** A write either returns a `Change` (a tile, an owner, a
+  unit placed or removed: writes whose consequences need the new state) or takes a `Touch` naming
+  what it edits. Both move revision counters before anything can read the new state.
+- **Caches are self-validating memos.** Each remembers the revisions it was computed from and
+  checks them when it is read. Only if one moved does it compute again, and if the answer is the
+  same as before, bit for bit, what depends on it stays valid. So a tech that changes no tile's
+  yield recomputes no tile, and no cache can be stale, since no write can skip its revision. The
+  unique indexes are memos too, rebuilt from their sources (techs, policies, buildings, beliefs,
+  resources) instead of kept up to date by hooks.
+- **Two values are committed, not live**: a civilization's happiness as conditionals and citizens
+  see it (at the start and the end of its turn) and its gold rate (at the end). Citizens depend on
+  both and both depend on citizens; committing them breaks the cycle, so placing citizens twice
+  gives the same answer.
+
+The cache oracle rebuilds every cache cold and compares, at every settle in tests, rule scripts,
+chaos and the soak; a write with the wrong `Touch` fails it.
+
+### Settle
+
+A write only records what it made stale: a city whose citizens must be placed again, a unit whose
+sight changed. The consequences, citizens placed, tiles revealed, civilizations meeting, happen in
+the **settle**, which runs at the end of every successful call and at fixed points of a turn, and
+never after a refusal or a read. It brings sight up to date and applies what that reveals, then
+places the citizens of the cities flagged, pass after pass, until none is flagged. A city whose
+best placement depends on the placement itself (a ruleset can say so) stops at the first one it
+comes back to. Nothing is pending after a settle, so saves, digests and snapshots are taken only
+there, and pending work is never saved.
+
+So every action runs in three steps: it checks, on `&self`, and refuses before anything is
+written; it applies; it settles. A refused action changes nothing: no event, the same digest.
+
+### Determinism
+
+The same seed and the same actions give the same game, digest for digest, on Windows, Linux and
+macOS, on x64 and arm64. Each random draw is keyed by what it is for (the seed, a purpose, the
+turn, the unit) rather than taken from one stream, so a new draw in one place moves no other.
+Maths goes through `libm`, collections iterate in insertion or id order, and clippy bans the
+hash-ordered and platform-dependent alternatives. Golden files hold the digests, and CI compares
+them on all five targets.
+
+### How it is checked
+
+| | |
+|---|---|
+| Reference checks (`cargo refcheck`) | 262 game states recorded from the Python engine, loaded into the Rust engine and asked the same questions in 14 groups (yields, city stats, paths, combat odds, tool errors, views, briefings and more), every group enforced. A deliberate difference is listed in `refcheck/intended.toml` with its reason, and the code that makes it cites the entry |
+| Rule scripts (`tests/rules/`) | 142 TOML scripts over scenario operations, run by a Rust and a Python runner. Differences only a script or test shows are in `tests/rules/intended.toml` |
+| Invariants and the cache oracle | At every settle in every test build |
+| Properties P1-P8, chaos, fuzzing and the soak | Random actions and whole random games, looking for panics, broken invariants, refusals that write and reads that change a game |
+| Golden sets (`cargo golden`) | Digests on five targets, in two build profiles |
+| Benchmarks (`cargo xtask perf`) | Hard budgets on the laptop; instruction counts on every pull request |
+
+The two intended lists are the changelog's list of rule fixes (`cargo refcheck changelog
+--write`).
+
+### Where to change things in the Rust engine
+
+| To change | Go to |
+|---|---|
+| A rule | Its system's module under `crates/citar-engine/src/game/`; each names the Python lines it replaces |
+| A new kind of unique | `unique_supported.toml`, `cargo xtask gen-uniques`, then the systems that read it ([MODDING.md](MODDING.md#in-the-rust-engine-016)) |
+| A player action | Its system's `Action` and rule, then `src/api/tools/` for the tool's schema and text |
+| A cache | `src/game/derive/`: a memo, the revisions it reads, and its check in the oracle |
+| Something that follows from a write | The settle (`src/game/turn/settle.rs`), never the write itself |
+| A rule that should differ from the Python engine's | The fix, cited `// refcheck: <id>`, and its entry in one of the two intended lists |
+
+---
+
 ## Engine modules
 
 | Module | |
