@@ -78,8 +78,9 @@ pub struct BotSpec {
     /// What the seat plays with: the profile's fixed aggression, else the seat's, else 0.4,
     /// held to 0..1 as `BasicBot.__init__` held it.
     pub aggression: f64,
-    /// The profile's own aggression, `None` when the seat decides: what the fingerprint hashes,
-    /// so that one profile is one entry however the lab seats it (DESIGN.md P2.8.6).
+    /// The profile's own aggression, held to 0..1 as it plays, `None` when the seat decides: what
+    /// the fingerprint hashes, so that one profile is one entry however the lab seats it
+    /// (DESIGN.md P2.8.6).
     pub fixed_aggression: Option<f64>,
     /// Who decides each kind of diplomacy.
     pub owners: Owners,
@@ -91,8 +92,14 @@ impl BotSpec {
     pub const DEFAULT_AGGRESSION: f64 = 0.4;
 
     /// A spec: version `version` with `tuning`, the profile's `fixed` aggression if it has one,
-    /// else the seat's, else [`DEFAULT_AGGRESSION`](Self::DEFAULT_AGGRESSION); the bot owns
-    /// every kind of diplomacy.
+    /// else the seat's, else [`DEFAULT_AGGRESSION`](Self::DEFAULT_AGGRESSION), held to 0..1; the
+    /// bot owns every kind of diplomacy.
+    ///
+    /// A NaN is no value: a NaN fixed aggression leaves the seat to decide, and a NaN seat value
+    /// leaves the default. (Python's `max(0.0, min(1.0, nan))` gave 1.0, the most aggressive bot,
+    /// by the order of its arguments.) The fixed aggression is kept as it plays, held to 0..1,
+    /// so two profiles that play alike share a fingerprint, as Python's profiles clamped it on
+    /// saving.
     #[must_use]
     pub fn new(
         version: VersionId,
@@ -100,17 +107,10 @@ impl BotSpec {
         fixed: Option<f64>,
         seat: Option<f64>,
     ) -> Self {
-        let aggression = fixed.or(seat).unwrap_or(Self::DEFAULT_AGGRESSION);
-        // NaN reads as the default: Python's max/min passed it through, and every comparison the
-        // bot made with it was then false.
-        let aggression = if aggression.is_nan() { Self::DEFAULT_AGGRESSION } else { aggression };
-        Self {
-            version,
-            tuning,
-            aggression: aggression.clamp(0.0, 1.0),
-            fixed_aggression: fixed.filter(|a| !a.is_nan()),
-            owners: Owners::default(),
-        }
+        let held = |a: f64| (!a.is_nan()).then(|| a.clamp(0.0, 1.0));
+        let fixed = fixed.and_then(held);
+        let aggression = fixed.or_else(|| seat.and_then(held)).unwrap_or(Self::DEFAULT_AGGRESSION);
+        Self { version, tuning, aggression, fixed_aggression: fixed, owners: Owners::default() }
     }
 
     /// This spec with these owners: what `set_diplomacy` swaps in (DESIGN.md P2.6.5).
@@ -402,6 +402,16 @@ mod tests {
         assert!((spec(None, Some(-1.0)).aggression).abs() < 1e-12);
         assert!((spec(None, Some(f64::NAN)).aggression - 0.4).abs() < 1e-12);
         assert_eq!(spec(None, Some(0.2)).fixed_aggression, None);
+        // A NaN fixed value is none: the seat decides, and the fingerprint says so.
+        let nan = spec(Some(f64::NAN), Some(0.2));
+        assert!((nan.aggression - 0.2).abs() < 1e-12);
+        assert_eq!(nan.fixed_aggression, None);
+        assert!((spec(Some(f64::NAN), None).aggression - 0.4).abs() < 1e-12);
+        // An out-of-range fixed value is kept as it plays.
+        let high = spec(Some(3.0), Some(0.2));
+        assert_eq!(high.fixed_aggression, Some(1.0));
+        assert_eq!(spec(Some(-0.5), None).fixed_aggression, Some(0.0));
+        assert_eq!(spec(Some(f64::INFINITY), None).fixed_aggression, Some(1.0));
     }
 
     #[test]
@@ -413,6 +423,13 @@ mod tests {
         assert_ne!(fingerprint(&spec(None, None), "b2"), a, "another build");
         let idle = BotSpec::new(VersionId::Idle, spec(None, None).tuning, None, None);
         assert_ne!(fingerprint(&idle, "b1"), a, "another version");
+        // What plays is what is hashed: a NaN fixed value is the seat's, and 3 plays as 1.
+        assert_eq!(fingerprint(&spec(Some(f64::NAN), Some(0.9)), "b1"), a, "NaN: the seat's");
+        assert_eq!(
+            fingerprint(&spec(Some(3.0), None), "b1"),
+            fingerprint(&spec(Some(1.0), Some(0.1)), "b1"),
+            "two profiles that play alike"
+        );
     }
 
     #[test]
