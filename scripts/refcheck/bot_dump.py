@@ -23,7 +23,10 @@ Stage 1 (2-01b): the empire's economy.
   * ``tech_values``: ``_tech_value`` of every technology the civilization lacks and can research, in both modes
     (``tech_mode`` classic and potential);
   * ``next_research``: in both modes, ``choose_research`` as if nothing were being researched: the free technology it
-    would take (or null) and the first step of the path it would set (or null);
+    would take (or null) and the first step of the path it would set (or null); and ``preferred_free``, the free
+    technology it would take if it held one (``free_techs`` raised to 1 for the question; the mode does not matter):
+    the most expensive available, the first of equals in ``available_techs``' order, a question the saved states,
+    holding no free technology, never ask;
   * ``empire``: ``empire_choices`` (basic.py:1011-1039) without spies: the first policy it would adopt, the free great
     person it would choose, the pantheon belief it would found (each null when there is none to take);
     ``preferred_policy``, the policy it would adopt if it could afford one (``policies.can_adopt_any`` patched true),
@@ -150,6 +153,18 @@ def any_pantheon_affordable():
 
 
 @contextlib.contextmanager
+def a_free_tech(g, pid):
+    """The civilization holds a free technology to choose (at least one), and its own count is put back after."""
+    p = g.player(pid)
+    held = p.free_techs
+    p.free_techs = max(1, held)
+    try:
+        yield
+    finally:
+        p.free_techs = held
+
+
+@contextlib.contextmanager
 def nothing_researched():
     """``research.current`` answers None, so choose_research decides as if the queue were empty."""
     real = research.current
@@ -195,6 +210,12 @@ def next_research(g, pid):
         free = rec.made("choose_free_tech")
         chosen = rec.made("set_research")
         out[mode] = {"free": free[0]["tech"] if free else None, "tech": chosen[0]["tech"] if chosen else None}
+    g.clear_static()
+    rec = Recorder()
+    with a_free_tech(g, pid):
+        rec.bot.choose_research(g, pid)
+    free = rec.made("choose_free_tech")
+    out["preferred_free"] = free[0]["tech"] if free else None
     return out
 
 
@@ -407,6 +428,8 @@ CHOICES = {
         (mode, (_each(m, "next_research") or {}).get(mode, {}).get("tech")) for mode in ("classic", "potential")]),
     "next_research.free": ("civilization and mode", lambda m: [
         (mode, (_each(m, "next_research") or {}).get(mode, {}).get("free")) for mode in ("classic", "potential")]),
+    "next_research.preferred_free": ("civilization", lambda m: [
+        ("preferred_free", (_each(m, "next_research") or {}).get("preferred_free"))]),
     **{f"empire.{k}": ("civilization", lambda m, k=k: [(k, (_each(m, "empire") or {}).get(k))])
        for k in ("policy", "preferred_policy", "great_person", "pantheon", "preferred_pantheon")},
     "cities.danger": ("city", lambda m: [(c["city"], c["danger"]) for c in _each(m, "cities") or []]),
