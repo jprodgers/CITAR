@@ -81,14 +81,17 @@ struct CityMemos {
     full: Memo<Csr>,
 }
 
+/// The last two keys a [`Shared`] table was asked for, the latest first, with their indexes.
+type Recent<K> = [Option<(K, Arc<Csr>)>; 2];
+
 /// A table of indexes that are pure functions of their keys: it only grows, is never iterated,
 /// and lends its indexes out shared, so a lookup that adds a key never meets a borrow of another.
 #[derive(Clone, Debug)]
 struct Shared<K> {
     map: RefCell<LookupMap<K, Arc<Csr>>>,
-    /// The last two keys asked for, the latest first, with their indexes: a fight asks of its two
-    /// units' profiles a score of times, and a key compare is cheaper than a hash.
-    recent: RefCell<[Option<(K, Arc<Csr>)>; 2]>,
+    /// The last two keys asked for: a fight asks of its two units' profiles a score of times, and
+    /// a key compare is cheaper than a hash.
+    recent: RefCell<Recent<K>>,
 }
 
 impl<K: Eq + Hash> Default for Shared<K> {
