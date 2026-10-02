@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 #![allow(
     clippy::disallowed_methods,
-    reason = "a build script reads its environment and its crate's files"
+    clippy::disallowed_macros,
+    reason = "a build script reads its environment and its crate's files, and talks to cargo \
+              on its standard output"
 )]
 
 #[path = "content_code.rs"]

@@ -190,7 +190,7 @@ pub fn locked_versions(direct: &[String], lock: &str) -> Vec<String> {
     let mut queue: Vec<usize> = packages
         .iter()
         .enumerate()
-        .filter(|(_, p)| direct.iter().any(|d| *d == p.name))
+        .filter(|(_, p)| direct.contains(&p.name))
         .map(|(i, _)| i)
         .collect();
     while let Some(i) = queue.pop() {
@@ -264,6 +264,9 @@ pub fn crate_locked(manifest: &Path, lock: &Path) -> Result<Vec<String>, String>
     Ok(std::fs::read_to_string(lock).map_or_else(|_| Vec::new(), |l| locked_versions(&direct, &l)))
 }
 
+/// A crate's inputs from its manifest's folder: [`engine_inputs`] or [`bot_inputs`].
+pub type Recipe = fn(&Path) -> Vec<Input>;
+
 /// The engine's code's domain tag.
 pub const ENGINE_TAG: &str = "citar-engine-code-v1";
 
@@ -319,7 +322,7 @@ mod tests {
         fn new(name: &str) -> Self {
             let dir = std::env::temp_dir()
                 .join(format!("citar-content-code-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::remove_dir_all(&dir).ok();
             std::fs::create_dir_all(&dir).expect("a scratch folder");
             Self(dir)
         }
@@ -333,7 +336,7 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            std::fs::remove_dir_all(&self.0).ok();
         }
     }
 
@@ -426,7 +429,7 @@ mod tests {
     }
 
     /// This crate's tag, the code its build script computed, and its recipe.
-    fn this_crate() -> (&'static str, &'static str, fn(&Path) -> Vec<Input>) {
+    fn this_crate() -> (&'static str, &'static str, Recipe) {
         match (option_env!("CITAR_ENGINE_CODE"), option_env!("CITAR_BOT_CODE")) {
             (Some(code), _) => (ENGINE_TAG, code, engine_inputs),
             (None, Some(code)) => (BOT_TAG, code, bot_inputs),
@@ -437,7 +440,7 @@ mod tests {
     /// Copies the crate's inputs, its manifest and the workspace's lock file from the crate at
     /// `real` to the same places below `ws` (the crate at `ws/crates/<name>`), with every line
     /// ending `eol`; returns the copy's crate folder.
-    fn copy_crate(real: &Path, ws: &Path, recipe: fn(&Path) -> Vec<Input>, eol: &str) -> PathBuf {
+    fn copy_crate(real: &Path, ws: &Path, recipe: Recipe, eol: &str) -> PathBuf {
         let name = real.file_name().expect("a crate folder");
         let dir = ws.join("crates").join(name);
         let copy = |from: &Path, to: &Path| {
