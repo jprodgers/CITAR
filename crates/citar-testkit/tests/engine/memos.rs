@@ -10,10 +10,11 @@
 //! DESIGN.md 10 bounds the recomputes that come out as they were at 5% of each memo's recomputes
 //! (Python's were 74-99.5%). As built in 1e-03 most memos are far above it: a memo recomputes when
 //! an input its revisions name moves (a city's pressure, its health, the turn, any city's owner),
-//! and such inputs move nearly every round while the value rarely changes. That test is kept,
-//! ignored, as the gate's measure. What runs is the guard against over-bumping: no memo may
-//! recompute more than a quarter above what this soak recorded, and a memo not recorded must
-//! stay under the 5%.
+//! and such inputs move nearly every round while the value rarely changes. Phase 1 gates the guard
+//! against over-bumping instead (DESIGN.md 10's decisions, 1e-03's fix round, on the owner's
+//! priority of stability first): no memo may recompute more than a quarter above what this soak
+//! recorded, and a memo not recorded must stay under the 5%. The 5% test is kept, ignored, as a
+//! diagnostic that prints the table.
 
 use std::collections::BTreeMap;
 
@@ -132,10 +133,10 @@ fn no_memo_recomputes_more_than_the_soak_recorded() {
     assert!(over.is_empty(), "memos recomputing more than recorded:\n{}", over.join("\n"));
 }
 
-/// Gate 6 of package 1e-03 as DESIGN.md 10 states it, which the memos do not hold (see the
-/// module's doc): run with `--run-ignored all` for the table.
+/// Gate 6 of package 1e-03 as the design first stated it, which the memos do not hold and Phase 1
+/// does not gate (see the module's doc): run with `--run-ignored all` for the table.
 #[test]
-#[ignore = "DESIGN.md 10's 5% redundancy is not held (As built in 1e-03); the guard above runs"]
+#[ignore = "a diagnostic: Phase 1 gates the guard above instead (DESIGN.md 10's decisions)"]
 #[allow(clippy::disallowed_macros, reason = "the soak's table is reported")]
 fn no_memo_recomputes_to_the_same_value_more_than_one_time_in_twenty() {
     let mut all = BTreeMap::new();
