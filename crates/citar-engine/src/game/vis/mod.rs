@@ -20,6 +20,7 @@ pub mod los;
 pub mod sight;
 pub mod visibility;
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 pub use self::effects::verify;
 pub use self::sight::{
     enemy_spotted, has_los, has_sight, sight, sight_of, unit_viewable, unit_visible_to,

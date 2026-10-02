@@ -48,7 +48,6 @@ use crate::game::research;
 use crate::rules::Ruleset;
 use crate::state::State;
 use crate::state::change::Change;
-use crate::state::chronicle::Chronicle;
 use crate::unique::index::{self, CityStateBonus};
 use crate::unique::{CivIndex, CivSources, CondDeps, Csr, Ctx, IndexRef, UniqueType};
 
@@ -513,27 +512,30 @@ fn networks(g: &Game, ctx: &Ctx) -> SmallVec<[PlayerId; 3]> {
 
 /// Every memo and table of this module, validated, against a cold rebuild from the same state:
 /// one line for each that disagrees.
+///
+/// `cold` is a game over a copy of `g`'s state with every cache cold, which the oracle builds once
+/// for all the families that compare with one.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
-pub fn verify(g: &Game) -> Vec<String> {
-    let cold = Game::assemble(g.rules, g.st.clone(), Chronicle::new(), false);
+pub fn verify(g: &Game, cold: &Game) -> Vec<String> {
     let mut out = Vec::new();
     for p in g.st.players().ids() {
-        if *civ_index(g, p) != *civ_index(&cold, p) {
+        if *civ_index(g, p) != *civ_index(cold, p) {
             out.push(format!("player {}: the unique index differs from a cold rebuild", p.0));
         }
-        if supply(g, p).as_deref() != supply(&cold, p).as_deref() {
+        if supply(g, p).as_deref() != supply(cold, p).as_deref() {
             out.push(format!("player {}: the resource supply differs from a cold rebuild", p.0));
         }
-        if *civ_index_full(g, p) != *civ_index_full(&cold, p) {
+        if *civ_index_full(g, p) != *civ_index_full(cold, p) {
             out.push(format!(
                 "player {}: the unique index with resources differs from a cold rebuild",
                 p.0
             ));
         }
-        if era(g, p) != era(&cold, p) {
+        if era(g, p) != era(cold, p) {
             out.push(format!("player {}: the era differs from a cold rebuild", p.0));
         }
-        if owned_tiles(g, p).as_deref() != owned_tiles(&cold, p).as_deref() {
+        if owned_tiles(g, p).as_deref() != owned_tiles(cold, p).as_deref() {
             out.push(format!("player {}: the tiles it owns differ from a cold rebuild", p.0));
         }
     }
@@ -543,10 +545,10 @@ pub fn verify(g: &Game) -> Vec<String> {
             out.push(format!("city {}: no local index memo", c.get()));
             continue;
         }
-        if *city_local(g, c) != *city_local(&cold, c) {
+        if *city_local(g, c) != *city_local(cold, c) {
             out.push(format!("city {}: the local index differs from a cold rebuild", c.get()));
         }
-        if *city_local_full(g, c) != *city_local_full(&cold, c) {
+        if *city_local_full(g, c) != *city_local_full(cold, c) {
             out.push(format!(
                 "city {}: the local index with resources differs from a cold rebuild",
                 c.get()
@@ -555,12 +557,12 @@ pub fn verify(g: &Game) -> Vec<String> {
     }
     for i in 0..g.st.world().religions.len() {
         let r = ReligionId(u8::try_from(i).unwrap_or(u8::MAX));
-        if *follower(g, r) != *follower(&cold, r) {
+        if *follower(g, r) != *follower(cold, r) {
             out.push(format!("religion {i}: the follower index differs from a fresh build"));
         }
     }
     for u in g.st.units().iter() {
-        if *unit_profile(g, u.id()) != *unit_profile(&cold, u.id()) {
+        if *unit_profile(g, u.id()) != *unit_profile(cold, u.id()) {
             out.push(format!("unit {}: its profile differs from a fresh build", u.id().get()));
         }
     }

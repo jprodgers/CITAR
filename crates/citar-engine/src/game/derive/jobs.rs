@@ -1106,6 +1106,7 @@ fn update(g: &Game, p: PlayerId, class: BuilderClass, m: &mut JobMap) {
 }
 
 /// Whether two jobs are the same, their values as bits.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn same(a: Option<(ImprovementId, f64)>, b: Option<(ImprovementId, f64)>) -> bool {
     match (a, b) {
         (Some((i, v)), Some((j, w))) => i == j && v.to_bits() == w.to_bits(),
@@ -1169,6 +1170,7 @@ pub fn map_jobs(
 
 /// The cache oracle for the job maps: each map computed so far, brought up to date, against a
 /// fresh look at every tile it covers, with no improvement passed over.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 pub(crate) fn verify(g: &Game) -> Vec<String> {
     let keys: Vec<(PlayerId, BuilderClass)> = g.dv.jobs.maps.borrow().keys().copied().collect();
     let mut out = Vec::new();

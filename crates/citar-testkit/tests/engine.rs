@@ -4,6 +4,7 @@
 mod engine {
     mod advisor;
     mod briefing;
+    mod chaos;
     mod cities;
     mod city_states;
     mod combat;
@@ -26,6 +27,7 @@ mod engine {
     mod save;
     mod scenario;
     mod setup;
+    mod stability;
     mod state;
     mod tools;
     mod turns;

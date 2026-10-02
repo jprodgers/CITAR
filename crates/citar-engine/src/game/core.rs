@@ -265,34 +265,13 @@ impl Game {
     }
 
     /// Every invariant of DESIGN.md 9.4 the game breaks now. Meaningful at a settle point, where
-    /// nothing is pending: after a load or a public call.
+    /// nothing is pending: after a load or a public call. Compiled into test and debug builds,
+    /// and into release builds with the `checks` feature, beside the cache oracle
+    /// ([`Game::verify_caches`], `derive::oracle`).
+    #[cfg(any(test, debug_assertions, feature = "checks"))]
     #[must_use]
     pub fn check_invariants(&self) -> Vec<Violation> {
         super::invariants::check(self)
-    }
-
-    /// Where the caches disagree with a cold recompute (the cache oracle, DESIGN.md 9.4).
-    #[must_use]
-    pub fn verify_caches(&self) -> Vec<String> {
-        let mut out = self.dv.verify(self.rules, &self.st);
-        out.extend(super::derive::civ::verify(self));
-        out.extend(super::vis::verify(self));
-        out.extend(super::derive::stats::verify(self));
-        out.extend(super::derive::buildable::verify(self));
-        out.extend(super::derive::religion::verify(self));
-        out.extend(super::cities::citizens::verify(self));
-        out.extend(super::path::memo::verify(self));
-        out.extend(super::derive::danger::verify(self));
-        out.extend(super::derive::jobs::verify(self));
-        if self.dv.terrain_floor(self) != super::path::terrain_floor(self) {
-            out.push(
-                "the cheapest step off the routes differs from a cold look at the map".to_owned(),
-            );
-        }
-        if *self.dv.route_net(self) != super::path::route_net(self) {
-            out.push("where routes run differs from a cold look at the map".to_owned());
-        }
-        out
     }
 
     /// What the checks have found since the last take, oldest first.

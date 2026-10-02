@@ -48,8 +48,13 @@ fn count(csr: &Csr, ty: UniqueType) -> usize {
     csr.get(ty).iter().map(|e| usize::from(e.n)).sum()
 }
 
+/// The civilization memos' own oracle, against a cold game of their own.
+fn check(g: &Game) -> Vec<String> {
+    verify(g, &crate::game::derive::oracle::cold(g))
+}
+
 fn clean(g: &Game) {
-    let found = verify(g);
+    let found = check(g);
     assert!(found.is_empty(), "{found:?}");
 }
 
@@ -875,11 +880,11 @@ proptest! {
         for (i, o) in ops.iter().enumerate() {
             apply(&mut g, o);
             if i % 8 == 7 {
-                let found = verify(&g);
+                let found = check(&g);
                 prop_assert!(found.is_empty(), "after {:?}: {:?}", &ops[..=i], found);
             }
         }
-        let found = verify(&g);
+        let found = check(&g);
         prop_assert!(found.is_empty(), "{:?}", found);
     }
 }

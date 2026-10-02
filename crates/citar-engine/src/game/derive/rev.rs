@@ -1332,6 +1332,16 @@ impl<T: BitEq + Default> Memo<T> {
     pub fn peek(&self) -> Ref<'_, T> {
         self.value.borrow()
     }
+
+    /// Changes the stored value through its `RefCell` and leaves the stamps as they were: the
+    /// write a read must never make, for the seeded bug of a query that makes it
+    /// (`game::seeded`). Does nothing while the value is borrowed.
+    #[cfg(feature = "test-ops")]
+    pub(crate) fn poke(&self, f: impl FnOnce(&mut T)) {
+        if let Ok(mut v) = self.value.try_borrow_mut() {
+            f(&mut v);
+        }
+    }
 }
 
 /// A [`Memo`] for a small `Copy` value, read by copy (DESIGN.md 6.3): stats, totals, flags.

@@ -52,7 +52,9 @@ fn gargantuan() -> (Game, Vec<CityId>) {
         "barbarians": "off",
         "ruins": false,
     });
-    let mut g = new_game(r, cfg.as_object().expect("an object")).expect("a gargantuan game");
+    let mut g = citar_bench::unchecked(
+        new_game(r, cfg.as_object().expect("an object")).expect("a gargantuan game"),
+    );
     let tiles: Vec<TileIdx> = g.grid().tiles().collect();
     let mut n = 0u8;
     for t in tiles.into_iter().step_by(3) {

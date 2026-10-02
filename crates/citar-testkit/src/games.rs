@@ -57,6 +57,29 @@ pub fn new_game(settings: &Value, spec: &[u8], debug: DebugOptions) -> Result<Ga
     Ok(g)
 }
 
+/// A new game on the kitchen-sink ruleset (`rulesets::kitchen_sink`): a generated map of `size`
+/// with the first seat's civilization the Kitchen Sink nation, whose buildings, units,
+/// promotions, beliefs and improvements carry the unique types the shipped ruleset does not
+/// use, keeping a chain of round digests under `spec`.
+///
+/// # Errors
+/// The engine's refusal of the settings.
+pub fn kitchen_sink_game(
+    size: &str,
+    seed: u64,
+    turn_limit: u32,
+    spec: &[u8],
+    debug: DebugOptions,
+) -> Result<Game, String> {
+    let mut settings = random_settings(size, "continents", "wrap_x", seed, turn_limit);
+    settings["players"][0]["nation"] = Value::from("Kitchen Sink");
+    let cfg: Map<String, Value> = settings.as_object().cloned().unwrap_or_default();
+    let mut g = script::new_game(crate::rulesets::kitchen_sink(), &cfg)?;
+    g.set_debug_options(debug);
+    g.set_chain(Some(DigestChain::new(spec)));
+    Ok(g)
+}
+
 /// A committed or corpus fixture loaded as refcheck loads it (`Game::from_python`: converted,
 /// then settled once), keeping a chain of round digests under `spec`.
 ///
@@ -84,8 +107,9 @@ pub fn agents_for(g: &Game) -> Vec<RandomAgent> {
 pub fn problems(g: &mut Game) -> Vec<String> {
     let mut out: Vec<String> =
         g.take_violations().into_iter().map(|v| format!("turn {}: {v:?}", g.turn())).collect();
+    let turn = g.turn();
     out.extend(
-        g.check_invariants().into_iter().map(|v| format!("turn {}: breaks {v:?}", g.turn())),
+        crate::checks::invariants(g).into_iter().map(|v| format!("turn {turn}: breaks {v}")),
     );
     out
 }
@@ -190,8 +214,8 @@ pub fn pass_rounds(g: &mut Game, rounds: u32, hook: &mut Hook<'_>) -> Result<u32
 /// its checks as they were: what a host that saves every round and plays on from the save does.
 ///
 /// # Errors
-/// If the game does not save, the save does not load, the history does not rebuild whole, or
-/// the loaded state is not the saved one.
+/// If the game does not save, the save does not load, the history does not rebuild whole, either
+/// state has no digest, or the loaded state is not the saved one.
 pub fn save_and_load(g: &mut Game, chunks: &mut Vec<Vec<u8>>) -> Result<(), String> {
     let at = g.turn();
     // The journal first, as a host appends it before it writes the snapshot (DESIGN.md 4.11):
@@ -205,7 +229,11 @@ pub fn save_and_load(g: &mut Game, chunks: &mut Vec<Vec<u8>>) -> Result<(), Stri
     if report.chronicle_incomplete {
         return Err(format!("turn {at}: the journal did not rebuild the history whole"));
     }
-    if back.digest().ok() != g.digest().ok() {
+    // A state with no digest (a NaN in it) would compare equal to another with none.
+    let saved = g.digest().map_err(|e| format!("turn {at}: the saved state has no digest: {e}"))?;
+    let loaded =
+        back.digest().map_err(|e| format!("turn {at}: the loaded state has no digest: {e}"))?;
+    if loaded != saved {
         return Err(format!("turn {at}: the loaded state is not the one saved"));
     }
     back.set_debug_options(g.debug_options());

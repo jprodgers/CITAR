@@ -7,3 +7,4 @@
 xtask = "run --quiet --package xtask --"
 refcheck = "run --package citar-refcheck --profile ci --"
 golden = "run --package citar-testkit --bin golden --profile ci --"
+chaos = "run --package citar-testkit --bin chaos --profile ci --"

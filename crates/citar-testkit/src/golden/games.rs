@@ -94,7 +94,9 @@ fn load_answers() -> (Value, Vec<String>) {
             (Err(e), _) | (_, Err(e)) => problems.push(format!("{} does not digest: {e}", f.name)),
         }
         problems.extend(soundness(&f.name, &mut g));
-        problems.extend(g.verify_caches().into_iter().map(|e| format!("{}: caches: {e}", f.name)));
+        problems.extend(
+            crate::checks::caches(&g).into_iter().map(|e| format!("{}: caches: {e}", f.name)),
+        );
     }
     let v = json!({
         "format": 1,

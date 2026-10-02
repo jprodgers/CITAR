@@ -468,6 +468,12 @@ impl PathCache {
         self.found.iter().find(|(k, _)| k == key).map(|(_, p)| p.clone())
     }
 
+    /// Every answer kept at revision `rev`: none if the cache holds another revision's.
+    #[cfg(any(test, debug_assertions, feature = "checks"))]
+    pub(crate) fn at(&self, rev: u64) -> &[(PathKey, Option<Vec<TileIdx>>)] {
+        if self.rev == rev { &self.found } else { &[] }
+    }
+
     /// Keeps the answer to `key` at revision `rev`.
     pub fn put(&mut self, rev: u64, key: PathKey, path: Option<Vec<TileIdx>>) {
         if self.rev != rev {

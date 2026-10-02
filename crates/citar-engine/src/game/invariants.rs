@@ -1,9 +1,13 @@
 //! What must hold of a game at every settle point (DESIGN.md 9.4).
 //!
-//! [`check`] reads the game and returns every [`Violation`] it finds, each under the code of the
+//! `check` reads the game and returns every [`Violation`] it finds, each under the code of the
 //! invariant it breaks. Settle runs it when `DebugOptions::invariants` is on (the default in
 //! debug builds and with the `checks` feature), and testkit after every public call. It only
 //! reads, so a game plays the same with the checks on or off.
+//!
+//! Like the cache oracle (`derive::oracle`), `check` is compiled only into test and debug builds
+//! and into release builds with the `checks` feature (DESIGN.md 9.4): a shipped build keeps the
+//! codes and [`Violation`], which settle's own reports (SETTLE-1) use, and nothing that checks.
 //!
 //! Python had no invariants; a few of these catch states its bugs produced (DESIGN.md 4.4-4.6).
 //! Two bounds of
@@ -15,10 +19,15 @@
 
 use core::fmt;
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 use super::Game;
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 use crate::base::ids::{CityId, TileIdx};
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 use crate::state::Phase;
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 use crate::state::cities::{City, Constructible};
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 use crate::state::diplo::NegStatus;
 
 /// An invariant of DESIGN.md 9.4.
@@ -116,6 +125,7 @@ impl fmt::Display for Violation {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 /// Every invariant the game breaks, in code order, then in the order found.
 #[must_use]
 pub fn check(g: &Game) -> Vec<Violation> {
@@ -136,14 +146,17 @@ pub fn check(g: &Game) -> Vec<Violation> {
     out.0
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 struct Out(Vec<Violation>);
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 impl Out {
     fn push(&mut self, code: Code, message: String) {
         self.0.push(Violation { code, message });
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn ids(g: &Game, out: &mut Out) {
     let st = &g.st;
     let ids = st.ids();
@@ -185,6 +198,7 @@ fn ids(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn occupancy(g: &Game, out: &mut Out) {
     if let Err(e) = g.st.units().verify() {
         out.push(Code::Occ1, e.to_string());
@@ -194,6 +208,7 @@ fn occupancy(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn units(g: &Game, out: &mut Out) {
     let st = &g.st;
     let size = st.map().size();
@@ -229,9 +244,11 @@ fn units(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 /// The most movement points a unit may hold (UNIT-1).
 const MOVES_CAP: i32 = 100;
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn cities(g: &Game, out: &mut Out) {
     let st = &g.st;
     let r = g.rules;
@@ -325,10 +342,12 @@ fn cities(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn strictly_sorted(v: &[TileIdx]) -> bool {
     v.windows(2).all(|w| w[0] < w[1])
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn tiles(g: &Game, out: &mut Out) {
     let st = &g.st;
     for (t, tile) in st.tiles().iter() {
@@ -350,6 +369,7 @@ fn tiles(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 /// Reports `v` if it is not finite. What it is gets written only then: the check runs at every
 /// settle over every stock, progress, influence and opinion.
 fn finite(v: f64, what: impl FnOnce() -> String, out: &mut Out) {
@@ -358,6 +378,7 @@ fn finite(v: f64, what: impl FnOnce() -> String, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn players(g: &Game, out: &mut Out) {
     let st = &g.st;
     for (p, pl) in st.players().iter() {
@@ -428,6 +449,7 @@ fn players(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn diplomacy(g: &Game, out: &mut Out) {
     if let Err(e) = g.st.diplo().verify() {
         out.push(Code::Diplo1, e);
@@ -449,6 +471,7 @@ fn diplomacy(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn negotiations(g: &Game, out: &mut Out) {
     let st = &g.st;
     let cap = match st.config().diplomacy.max_chat_messages {
@@ -486,6 +509,7 @@ fn negotiations(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn vis(g: &Game, out: &mut Out) {
     for (p, pl) in g.st.players().iter() {
         if pl.is_barbarian() {
@@ -501,6 +525,7 @@ fn vis(g: &Game, out: &mut Out) {
     }
 }
 
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 fn clock(g: &Game, out: &mut Out) {
     let c = g.st.clock();
     let over = c.phase == Phase::Over;

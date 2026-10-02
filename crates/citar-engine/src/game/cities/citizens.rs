@@ -576,8 +576,26 @@ impl Game {
     }
 }
 
+#[cfg(feature = "test-ops")]
+impl Game {
+    /// Flags every city for a citizen recheck and settles, so that the engine assigns the
+    /// citizens of every city, those a converted state kept as Python left them included, and
+    /// the citizen oracle covers them all (DESIGN.md 6.8): what chaos and the properties do to a
+    /// fixture before they play it. Returns the events the settle appended.
+    pub fn assign_every_city_for_test(&mut self) -> crate::game::EventBatch {
+        self.begin_call();
+        let all: Vec<CityId> = self.state().cities().iter().map(City::id).collect();
+        for c in all {
+            self.pending.flag_city(c);
+        }
+        self.settle();
+        self.take_batch()
+    }
+}
+
 /// The citizen oracle (DESIGN.md 6.8): every city this engine has assigned has its citizens where
 /// a fresh assignment would put them. One line for each that does not.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
     let mut out = Vec::new();

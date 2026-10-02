@@ -83,6 +83,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -226,6 +232,7 @@ dependencies = [
 name = "citar-testkit"
 version = "0.1.5"
 dependencies = [
+ "arbitrary",
  "blake3",
  "citar-engine",
  "flate2",

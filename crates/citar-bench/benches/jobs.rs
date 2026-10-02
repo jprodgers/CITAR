@@ -42,7 +42,7 @@ fn fixture(case: &str, turn: u32) -> Game {
         .find(|f| f.case == case && f.turn == turn)
         .expect("the fixture");
     let bytes = fixtures::read_state(&f).expect("a state");
-    Game::from_python(Ruleset::shared(), &bytes).expect("it loads").0
+    citar_bench::unchecked(Game::from_python(Ruleset::shared(), &bytes).expect("it loads").0)
 }
 
 /// The major with the most cities, and the Worker's builder class.

@@ -338,7 +338,12 @@ impl Game {
         self.begin_call();
         self.guard(pid, a.any_time())?;
         let record = self.action_record(pid, &a);
-        let spec = a.run(self, pid)?;
+        #[cfg(feature = "test-ops")]
+        let watch = super::seeded::Watch::of(&a);
+        let spec = a.run(self, pid);
+        #[cfg(feature = "test-ops")]
+        watch.after(self, pid, spec.is_ok());
+        let spec = spec?;
         self.settle();
         Record::of(&mut self.st, &mut self.chron).action(record);
         let out = spec.finish(self);

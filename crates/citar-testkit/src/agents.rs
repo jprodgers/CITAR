@@ -379,8 +379,10 @@ fn play(g: &mut Game, pid: PlayerId, a: Action) -> bool {
     noise(g, pid);
     let tool = a.tool();
     let done = g.act(pid, a);
+    // An agent's own arguments hold no null; a name another caller gave the game may.
     if let Err(e) = &done
-        && let Some(why) = citar_engine::api::text_rule_broken(&e.message)
+        && let Some(why) =
+            crate::stability::refusal_rule_broken(g, &serde_json::Value::Null, &e.message)
     {
         panic!("{tool} was refused with a text a model cannot use ({why}): {}", e.message);
     }

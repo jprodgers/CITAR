@@ -421,7 +421,7 @@ fn make_game(
         )
         .map_err(|e| e.message)?;
     }
-    let broken = g.check_invariants();
+    let broken = crate::checks::invariants(&g);
     if !broken.is_empty() {
         return Err(format!("the new game breaks invariants: {broken:?}"));
     }

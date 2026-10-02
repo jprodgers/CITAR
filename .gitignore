@@ -76,3 +76,4 @@ desktop.ini
 crates/citar-engine/fuzz/target/
 crates/citar-engine/fuzz/corpus/
 crates/citar-engine/fuzz/artifacts/
+crates/citar-engine/fuzz/coverage/

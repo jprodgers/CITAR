@@ -9,7 +9,8 @@
 //! civilization stats, happiness and connectivity ([`stats`], 1b-06), the buildable lists
 //! ([`buildable`], 1b-07), the grid of cities and each city's religious spread ([`religion`],
 //! 1b-08), the danger tiles and the job maps of automation ([`danger`], [`jobs`], 1c-04), and the
-//! rest with their systems.
+//! rest with their systems. The cache oracle checks them all against a cold rebuild (`oracle`,
+//! package 1e-01; compiled into test, debug and `checks` builds only).
 //!
 //! Replaces the caches of `game.py:100-145` (`_cache`, `_ycache`, `_static`, `_jobcache`,
 //! `_viewcache`, `_names`) and the invalidation of `game.py:565-609`.
@@ -18,6 +19,8 @@ pub mod buildable;
 pub mod civ;
 pub mod danger;
 pub mod jobs;
+#[cfg(any(test, debug_assertions, feature = "checks"))]
+pub mod oracle;
 pub mod religion;
 pub mod rev;
 pub mod stats;
@@ -415,8 +418,9 @@ impl Derived {
 
     /// The cache oracle (DESIGN.md 9.4) for the caches that read the state alone: validated,
     /// against a cold recompute from the same state. Returns what disagrees, one line each. The
-    /// memos that evaluate uniques need the whole game: [`civ::verify`] checks them, and
-    /// `vis::verify` what each civilization sees.
+    /// memos that evaluate uniques need the whole game: `civ::verify` checks them, and
+    /// `vis::verify` what each civilization sees ([`oracle`] runs them all).
+    #[cfg(any(test, debug_assertions, feature = "checks"))]
     #[must_use]
     pub fn verify(&self, rules: &Ruleset, st: &State) -> Vec<String> {
         let cold = Self::new(rules, st);

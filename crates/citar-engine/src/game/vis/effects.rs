@@ -532,7 +532,11 @@ impl Work {
         for &s in todo {
             match s {
                 SightSource::Unit(u) => {
-                    self.units.insert(u);
+                    // A seeded bug (test builds only, `game::seeded`): the unit's footprint is
+                    // left where it was.
+                    if !crate::game::seeded::has(crate::game::seeded::SeededBug::StaleVisibility) {
+                        self.units.insert(u);
+                    }
                     self.arrived.insert(u);
                 }
                 SightSource::City(c) => {
@@ -707,6 +711,7 @@ pub(crate) fn cold(g: &Game) -> Visibility {
 /// The cache oracle for sight (DESIGN.md 9.4): the counts and sources against a rebuild from the
 /// state, and the met sets and discoveries against Python's rule over what each civilization
 /// sees. One line for each difference.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
     let rebuilt = cold(g);

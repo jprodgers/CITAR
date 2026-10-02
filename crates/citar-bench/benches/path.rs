@@ -55,8 +55,7 @@ fn fixture(case: &str, turn: u32) -> Game {
         .find(|f| f.case == case && f.turn == turn)
         .expect("the fixture");
     let bytes = fixtures::read_state(&f).expect("a state");
-    let (g, _) = Game::from_python(Ruleset::shared(), &bytes).expect("it loads");
-    g
+    citar_bench::unchecked(Game::from_python(Ruleset::shared(), &bytes).expect("it loads").0)
 }
 
 /// A new gargantuan game, at its first turn.
@@ -64,8 +63,7 @@ fn gargantuan() -> Game {
     let r = Ruleset::shared();
     let cfg = br#"{"map_size": "gargantuan", "seed": 1, "players": [{}, {}, {}, {}, {}, {}]}"#;
     let setup = Game::config_from_json(r, cfg).expect("settings");
-    let (g, _) = Game::new(r, &setup).expect("a new game");
-    g
+    citar_bench::unchecked(Game::new(r, &setup).expect("a new game").0)
 }
 
 /// A path as `movement::find_path` finds one the cache does not hold: a mover, then the search.

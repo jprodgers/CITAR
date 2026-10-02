@@ -372,7 +372,11 @@ pub fn plan_rename(g: &Game, c: CityId, name: &str) -> Result<String, ActionErro
 
 /// Writes a city's name.
 pub(crate) fn write_name(g: &mut Game, c: CityId, name: &str) {
-    if let Some(x) = g.city_mut(c, CityTouch::NAME) {
+    use crate::game::seeded::{SeededBug, has};
+    // A seeded bug (test builds only, `game::seeded`): the wrong flag, which leaves the event
+    // name index with the old name.
+    let touch = if has(SeededBug::WrongTouch) { CityTouch::CORE } else { CityTouch::NAME };
+    if let Some(x) = g.city_mut(c, touch) {
         x.name = name.into();
     }
 }

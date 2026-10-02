@@ -41,6 +41,10 @@ on:
       - "citar/__init__.py"
       - ".github/workflows/rust.yml"
   workflow_dispatch:
+    inputs:
+      chaos_seconds:
+        description: How long the chaos step plays on each OS (DESIGN.md 9.5; gate 2 of 1e-01 is 600)
+        default: "60"
 
 concurrency:
   # A new push supersedes the run in flight for the same branch.
@@ -89,6 +93,16 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Clippy, the engine as it ships
+        # A release build without the checks feature compiles no invariants and no cache oracle
+        # (DESIGN.md 9.4). The runs above are all dev builds, which always have them.
+        run: cargo clippy -p citar-engine --release --locked -- -D warnings
+
+      - name: Fuzz targets build
+        # Not a workspace member: its own lockfile. No libFuzzer here (that needs nightly and a
+        # C++ compiler); the targets' code is checked on stable.
+        run: cargo check --locked --no-default-features --bins --manifest-path crates/citar-engine/fuzz/Cargo.toml
+
       - name: xtask check
         # Dependency allow-list, version equality, layering, mutation access, generated files.
         run: cargo xtask check
@@ -132,6 +146,25 @@ jobs:
         # nextest does not run doctests. The ci profile reuses the libraries the step above built,
         # instead of compiling the workspace a second time in the dev profile.
         run: cargo test --workspace --all-features --locked --doc --profile ci
+
+      - name: Chaos
+        # RandomAgent games with tool calls of every kind mixed in, every step checked for the
+        # properties P1 to P7 (DESIGN.md 9.5). A minute on every push; a manual run takes the
+        # seconds it is given (600 for 1e-01's gate 2). The binary is the one the Tests step built
+        # for testkit's integration tests: `cargo run` would resolve the features again without
+        # the dev-dependencies and rebuild the engine and testkit. The seed is the run's number,
+        # so that every push plays other games; each failure leaves a replay file, which
+        # `cargo chaos --replay FILE` plays again whatever the seed.
+        shell: bash
+        run: ./target/ci/chaos --seconds "${{ inputs.chaos_seconds || '60' }}" --seed "${{ github.run_number }}" --out chaos-replays
+
+      - name: Keep the chaos replays
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chaos-replays-${{ matrix.os }}
+          path: chaos-replays
+          if-no-files-found: ignore
 
   refcheck:
     runs-on: ubuntu-latest

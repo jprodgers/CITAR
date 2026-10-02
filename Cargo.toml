@@ -16,7 +16,11 @@ publish = false
 
 [workspace.dependencies]
 citar-engine  = { path = "crates/citar-engine", default-features = false }
-citar-testkit = { path = "crates/citar-testkit" }
+# Without its `checks` feature, which the testkit crate's own builds turn on by default, so that
+# `cargo bench -p citar-bench` compiles no check. A command that also selects testkit (a plain
+# `cargo bench` at the root) unifies the feature back on, so each benchmark's game also turns its
+# checks off (`citar_bench::unchecked`, DESIGN.md 9.4).
+citar-testkit = { path = "crates/citar-testkit", default-features = false }
 # engine (the xtask allow-list: exactly these, plus their transitive closure)
 serde        = { version = "1.0.229", features = ["derive"] }
 serde_json   = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }

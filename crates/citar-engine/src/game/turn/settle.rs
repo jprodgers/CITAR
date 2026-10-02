@@ -10,7 +10,8 @@
 //! 2. citizens: flagged cities reassign their citizens in id order, pass after pass, until no
 //!    city is flagged or [`SETTLE_PASSES`] passes are spent, which is invariant violation
 //!    SETTLE-1 (`game::cities::citizens`, package 1b-06);
-//! 3. the checks [`DebugOptions`](crate::game::DebugOptions) asks for.
+//! 3. the checks [`DebugOptions`](crate::game::DebugOptions) asks for, in the builds that have
+//!    them (test, debug, or release with the `checks` feature).
 //!
 //! Settle runs at the end of every successful mutating call and at the settle points of a turn,
 //! never after a refusal, a query, a view, a snapshot or a save. Within one settle nothing
@@ -19,7 +20,9 @@
 //! function of the calls that succeeded.
 
 use crate::game::Game;
-use crate::game::invariants::{self, Code, Violation};
+#[cfg(any(test, debug_assertions, feature = "checks"))]
+use crate::game::invariants;
+use crate::game::invariants::{Code, Violation};
 use crate::game::pending::{Effect, EffectQueue};
 
 /// How many citizen passes one settle may take (DESIGN.md 6.7).
@@ -162,6 +165,7 @@ impl Game {
     }
 
     /// The checks the debug options ask for (DESIGN.md 9.4): they only read.
+    #[cfg(any(test, debug_assertions, feature = "checks"))]
     fn run_checks(&mut self) {
         if self.debug.invariants {
             for v in invariants::check(self) {
@@ -174,6 +178,10 @@ impl Game {
             }
         }
     }
+
+    /// A shipped build has no checks to run, whatever the debug options say.
+    #[cfg(not(any(test, debug_assertions, feature = "checks")))]
+    const fn run_checks(&self) {}
 }
 
 #[cfg(all(test, feature = "embedded-ruleset"))]

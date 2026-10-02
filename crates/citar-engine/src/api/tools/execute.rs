@@ -111,7 +111,10 @@ fn answer(
         return Err(ActionError::new(ErrCode::InvalidPlayer, "Invalid player."));
     }
     let args = normalize_with(&spec.args, args)?;
-    query_tools::answer(g, pid, q, &args)
+    let told = query_tools::answer(g, pid, q, &args);
+    #[cfg(feature = "test-ops")]
+    crate::game::seeded::after_query(g, pid);
+    told
 }
 
 /// The tool called `tool`, in a game that takes calls.

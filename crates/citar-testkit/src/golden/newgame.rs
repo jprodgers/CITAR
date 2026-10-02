@@ -89,8 +89,8 @@ fn row(name: &str, seed: u64, g: &Game) -> Result<Value, String> {
 fn soundness(name: &str, g: &mut Game) -> Vec<String> {
     g.set_debug_options(DebugOptions::ALL);
     let mut out: Vec<String> =
-        g.check_invariants().iter().map(|v| format!("{name}: breaks {v:?}")).collect();
-    out.extend(g.verify_caches().into_iter().map(|e| format!("{name}: caches: {e}")));
+        crate::checks::invariants(g).iter().map(|v| format!("{name}: breaks {v}")).collect();
+    out.extend(crate::checks::caches(g).into_iter().map(|e| format!("{name}: caches: {e}")));
     out
 }
 

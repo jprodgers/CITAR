@@ -1,6 +1,10 @@
 //! Which checks a game runs on itself (DESIGN.md 9.4). Never saved, and never able to change the
 //! course of a game: the checks only read.
 //!
+//! The checks themselves (`game::invariants::check` and the cache oracle, `derive::oracle`) are
+//! compiled into test and debug builds, and into release builds with the `checks` feature. A
+//! shipped release build has none, and these switches do nothing there.
+//!
 //! Replaces nothing in Python, which had neither invariants nor a cache oracle.
 
 /// The checks a game runs at every settle.
@@ -14,9 +18,13 @@ pub struct DebugOptions {
     pub verify_caches: bool,
 }
 
+/// Whether this build has the checks: test and debug builds, and release builds with the
+/// `checks` feature.
+const BUILT_WITH_CHECKS: bool = cfg!(any(test, debug_assertions, feature = "checks"));
+
 impl Default for DebugOptions {
     fn default() -> Self {
-        Self { invariants: cfg!(any(debug_assertions, feature = "checks")), verify_caches: false }
+        Self { invariants: BUILT_WITH_CHECKS, verify_caches: false }
     }
 }
 

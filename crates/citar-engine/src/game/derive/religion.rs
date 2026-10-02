@@ -47,7 +47,6 @@ use crate::game::{Game, religion};
 use crate::rules::Ruleset;
 use crate::state::State;
 use crate::state::change::Change;
-use crate::state::chronicle::Chronicle;
 use crate::unique::{CondDeps, Ctx, IndexRef, UniqueData, UniqueType, record};
 
 /// A religion's base reach, and the size of the grid's buckets (`religion.py:244`).
@@ -457,15 +456,18 @@ pub fn spread_source(g: &Game, c: CityId) -> Option<SpreadSource> {
 
 /// Every city's memos and the grid and reach, validated, against a cold rebuild from the same
 /// state: one line for each that disagrees (the cache oracle, DESIGN.md 9.4).
+///
+/// `cold` is a game over a copy of `g`'s state with every cache cold, which the oracle builds once
+/// for all the families that compare with one.
+#[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
-pub fn verify(g: &Game) -> Vec<String> {
-    let cold = Game::assemble(g.rules, g.st.clone(), Chronicle::new(), false);
+pub fn verify(g: &Game, cold: &Game) -> Vec<String> {
     let mut out = Vec::new();
-    if *grid(g) != *grid(&cold) {
+    if *grid(g) != *grid(cold) {
         out.push("the religious grid of cities differs from a cold rebuild".to_owned());
     }
     // The reach bounds every city's search: one too small would miss pressure without a trace.
-    let (warm, fresh) = (reach(g), reach(&cold));
+    let (warm, fresh) = (reach(g), reach(cold));
     if warm != fresh {
         out.push(format!("the religious reach is {warm}, a cold rebuild's {fresh}"));
     }
@@ -475,14 +477,14 @@ pub fn verify(g: &Game) -> Vec<String> {
             out.push(format!("city {}: no religious memos", c.get()));
             continue;
         }
-        if major_religion(g, c) != major_religion(&cold, c) {
+        if major_religion(g, c) != major_religion(cold, c) {
             out.push(format!("city {}: its major religion differs from a cold rebuild", c.get()));
         }
-        let (warm, fresh) = (spread_source(g, c), spread_source(&cold, c));
+        let (warm, fresh) = (spread_source(g, c), spread_source(cold, c));
         if !warm.bit_eq(&fresh) {
             out.push(format!("city {}: its religious spread differs from a cold rebuild", c.get()));
         }
-        let same = with_near(g, c, |a| with_near(&cold, c, |b| a == b));
+        let same = with_near(g, c, |a| with_near(cold, c, |b| a == b));
         if !same {
             out.push(format!("city {}: its neighbours differ from a cold rebuild", c.get()));
         }
