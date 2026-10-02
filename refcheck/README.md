@@ -273,7 +273,7 @@ CITAR_BOT_DUMP=C:/dev/bot_decisions-corpus.json.gz \
 ```
 
 The script re-runs itself with `PYTHONHASHSEED=0` and writes gzip with a zero timestamp, so two runs give the
-same bytes. The committed states take about 10 seconds, the corpus a few minutes. Without `CITAR_BOT_DUMP`
+same bytes. The committed states take about 10 seconds, the corpus about ten minutes. Without `CITAR_BOT_DUMP`
 the corpus's file goes beside it (`refcheck/corpus/bot_decisions.json.gz`); the Rust side reads it from the
 same two places. Like the corpus, it stays local; it is archived with it before the Python engine is removed
 (package 2-12).
