@@ -7,20 +7,32 @@
 //!   relations, and the memo agrees with both after edits (gate 3);
 //! - P8 in miniature (gate 5): queries and refused calls between two actions leave every digest
 //!   what it is without them;
+//! - the settle's stop for a city in a cycle (package 1e-02), on hand-built games whose plains
+//!   yield more beside a worked tile: a city takes back an assignment another city's move made
+//!   good again, and two neighbouring cities each in a cycle of its own both stop;
 //! - every check, the cache and citizen oracles among them, clean after each.
 
+use std::sync::OnceLock;
+
 use citar_engine::api::{ActionError, testops, tools};
-use citar_engine::base::ids::{BuildingId, CityId, PlayerId, TileIdx};
+use citar_engine::base::ids::{
+    BarbarianLevelId, BuildingId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId,
+    PlayerId, ResourceId, SpeedId, TerrainId, TileIdx,
+};
+use citar_engine::base::sets::PlayerVec;
 use citar_engine::base::stats::Stat;
 use citar_engine::game::cities::citizens::{RankCtx, rank_stats_for_work};
 use citar_engine::game::cities::connections::{connected_cities, connected_cities_naive};
 use citar_engine::game::cities::stats::{self as cstats, StatSource};
 use citar_engine::game::{Action, DebugOptions, Game, query};
-use citar_engine::rules::Ruleset;
-use citar_engine::state::State;
+use citar_engine::rules::{Named, Ruleset};
 use citar_engine::state::chronicle::Chronicle;
-use citar_engine::state::cities::Constructible;
-use citar_testkit::rulesets::kitchen_sink;
+use citar_engine::state::cities::{Cities, City, Constructible};
+use citar_engine::state::config::{GameConfig, MapEdges, MapSource};
+use citar_engine::state::map::{MapInfo, Tile, Tiles};
+use citar_engine::state::players::{Controller, Player, PlayerKind, Rgb, Seat, SeatOverrides};
+use citar_engine::state::{IdCounters, State, TileClaim};
+use citar_testkit::rulesets::{files_of, kitchen_sink, overlay};
 use citar_testkit::script::{map_doc, new_game};
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -476,4 +488,190 @@ fn reads_and_refusals_between_two_actions_change_nothing() {
         (digests, outs)
     };
     assert_eq!(run(true), run(false));
+}
+
+// ---- The settle's stop for a city in a cycle (package 1e-02) ------------------------------------
+
+/// The shipped ruleset with a Neighbourly nation, whose plains yield 3 more food beside a tile
+/// its own city works: a tile's yield reads the tiles around it, so one city's citizens can move
+/// another city's best tile, and a city's own citizens can move its own.
+fn neighbourly() -> &'static Ruleset {
+    static RULES: OnceLock<&'static Ruleset> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let nation = json!({"Neighbourly": {
+            "name": "Neighbourly",
+            "kind": "major",
+            "leaderName": "Neighbourly Leader",
+            "adjective": "Neighbourly",
+            "preferredVictoryType": "Neutral",
+            "cities": ["Hither", "Thither", "Yonder"],
+            "uniques": [
+                "[+3 Food] from [Plains] tiles [in all cities] <in tiles adjacent to [worked] tiles>",
+            ],
+        }})
+        .to_string();
+        let files = overlay(&[("ruleset/nations.json", &nation)]).expect("the patch applies");
+        Ruleset::leak(&files_of(&files)).expect("the ruleset loads")
+    })
+}
+
+/// A city's place and the tile its one citizen works before the engine assigns it.
+type Placed = ((i32, i32), (i32, i32));
+
+/// A 16 by 10 grassland game for a Neighbourly civilization and a second with nothing, with
+/// `plains` and `cattle` (3 food) where given and a city of one citizen at each centre of
+/// `cities`, working the tile given: citizens as a converted state or a test leaves them, before
+/// this engine assigns them. Every tile within 4 of a centre is the nearest city's.
+fn neighbours(cities: &[Placed], plains: &[(i32, i32)], cattle: &[(i32, i32)]) -> Game {
+    fn id<I: Named>(r: &Ruleset, name: &str) -> I {
+        r.lookup::<I>(name).unwrap_or_else(|| panic!("the ruleset has {name}"))
+    }
+    const W: u16 = 16;
+    const H: u16 = 10;
+    let r = neighbourly();
+    let size = u32::from(W) * u32::from(H);
+    let player = |n: u8, nation: &str, controller: Controller| {
+        let seat = Seat::new(controller, SeatOverrides::default(), None);
+        let nation = id::<NationId>(r, nation);
+        let name = format!("Civ {n}").into();
+        Player::new(PlayerId(n), PlayerKind::Major, name, nation, Rgb::default(), seat, size)
+    };
+    let players: PlayerVec<Player> =
+        [player(0, "Neighbourly", Controller::Human), player(1, "BenchmarkCiv", Controller::Bot)]
+            .into_iter()
+            .collect();
+    let map = MapInfo { width: W, height: H, wrap_x: false, wrap_y: false, continents: Vec::new() };
+    let src = MapSource::Generated {
+        size: MapSizeId(0),
+        map_type: MapTypeId(0),
+        edges: MapEdges::IceCaps,
+        dims: None,
+    };
+    let cfg = GameConfig::new(
+        3,
+        src,
+        id::<SpeedId>(r, "Standard"),
+        id::<DifficultyId>(r, "Prince"),
+        EraId(0),
+        BarbarianLevelId(1),
+        500,
+    );
+    let grass = Tile::new(id::<TerrainId>(r, "Grassland"));
+    let st =
+        State::new(cfg, map, Tiles::new(vec![grass; size as usize]), players).expect("a new state");
+    let mut parts = st.into_parts();
+    let grid = parts.map.grid().expect("a grid");
+    let at = |(x, y): (i32, i32)| grid.idx(x, y).expect("on the map");
+    let mut tiles: Vec<Tile> = parts.tiles.as_slice().to_vec();
+    for &p in plains {
+        tiles[at(p).0 as usize] = Tile::new(id::<TerrainId>(r, "Plains"));
+    }
+    for &p in cattle {
+        tiles[at(p).0 as usize] = grass.with_resource(Some(id::<ResourceId>(r, "Cattle")), 0);
+    }
+    let ids: Vec<CityId> = (1..=cities.len())
+        .map(|n| u32::try_from(n).ok().and_then(CityId::new).expect("an id"))
+        .collect();
+    for t in grid.tiles() {
+        let nearest = cities
+            .iter()
+            .zip(&ids)
+            .map(|(&(centre, _), &c)| (grid.distance(at(centre), t), c))
+            .min_by_key(|&(d, c)| (d, c.get()));
+        if let Some((_, c)) = nearest.filter(|&(d, _)| d <= 4) {
+            tiles[t.0 as usize] = tiles[t.0 as usize].with_claim(TileClaim::city(ME, c));
+        }
+    }
+    parts.tiles = Tiles::new(tiles);
+    let mut made = Vec::new();
+    for (&(centre, works), &c) in cities.iter().zip(&ids) {
+        let mut city = City::new(c, format!("City {}", c.get()).into(), ME, at(centre), 1);
+        city.pop = 1;
+        city.worked = vec![at(works)];
+        made.push(city);
+    }
+    if let Some(p) = parts.players.get_mut(ME) {
+        p.capital = made.first().map(City::id);
+        p.original_capital = p.capital;
+    }
+    parts.cities = Cities::from_cities(made).expect("cities");
+    parts.ids = IdCounters::starting_at(u32::try_from(cities.len()).unwrap_or(0) + 1);
+    let st = State::from_parts(parts).expect("the parts fit");
+    let mut g = Game::from_state(r, st, Chronicle::new()).expect("a sound state");
+    g.set_debug_options(DebugOptions::ALL);
+    g
+}
+
+/// The tiles a city works, as `(x, y)`.
+fn works(g: &Game, c: CityId) -> Vec<(i32, i32)> {
+    g.city(c).map(|x| x.worked.iter().map(|&t| g.xy(t)).collect()).unwrap_or_default()
+}
+
+/// The distance between two places.
+fn apart(g: &Game, (ax, ay): (i32, i32), (bx, by): (i32, i32)) -> u32 {
+    let grid = g.grid();
+    match (grid.idx(ax, ay), grid.idx(bx, by)) {
+        (Some(a), Some(b)) => grid.distance(a, b),
+        _ => u32::MAX,
+    }
+}
+
+#[test]
+fn a_city_takes_back_an_assignment_another_citys_move_made_good_again() {
+    // From the review of package 1e-02: within one settle a city leaves its plains while the
+    // cattle beside them is not worked, and comes back when a neighbour takes the cattle; the
+    // settle's stop for a city in a cycle must not keep it from coming back.
+    //
+    // City 1 at (2, 4) works the plains at (5, 4): 4 food beside the cattle at (6, 4) when city 2
+    // works it, else 1 food and 1 production, against the cattle at (0, 4)'s 3 food. City 2 at
+    // (9, 4) works grassland at (10, 4), and the cattle at (6, 4) is its best tile. Both are
+    // flagged. City 1, first by id, finds the cattle beside its plains unworked and moves to
+    // (0, 4); city 2 then takes (6, 4), which flags city 1 again, whose plains are worth 4 food
+    // once more. It ends on them, and every oracle agrees.
+    let mut g = neighbours(&[((2, 4), (5, 4)), ((9, 4), (10, 4))], &[(5, 4)], &[(0, 4), (6, 4)]);
+    // What the layout rests on: city 1 reaches its plains and not the cattle beside them, city 2
+    // the cattle and not the plains, and each is a step past the other's working distance (a
+    // tile taken or released flags the cities within a step of their working distance of it).
+    assert_eq!((apart(&g, (2, 4), (5, 4)), apart(&g, (2, 4), (6, 4))), (3, 4));
+    assert_eq!((apart(&g, (9, 4), (6, 4)), apart(&g, (9, 4), (5, 4))), (3, 4));
+    g.assign_every_city_for_test();
+    let two = CityId::new(2).expect("an id");
+    assert_eq!(works(&g, two), [(6, 4)]);
+    assert_eq!(works(&g, CityId::FIRST), [(5, 4)], "city 1 is back on its plains");
+    clean(&mut g);
+}
+
+#[test]
+fn two_neighbouring_cities_each_in_its_own_cycle_both_stop() {
+    // Each city has two plains side by side and one citizen: whichever it works makes the other
+    // worth 4 food, so its best assignment is always the one it does not have (a cycle of its own
+    // citizens, as the kitchen sink's specialists made one in the soak). Each flip moves a tile
+    // within a step of the other city's working distance, so each flags the other at every
+    // flip: a stop that forgot what a city held whenever another city flagged it would flip both
+    // until the passes ran out (SETTLE-1). Both stop, and the citizen oracle accepts each in its
+    // cycle.
+    let mine = [(4, 2), (5, 2)];
+    let theirs = [(6, 6), (7, 6)];
+    let plains = [mine, theirs].concat();
+    let mut g = neighbours(&[((3, 4), mine[0]), ((8, 4), theirs[0])], &plains, &[]);
+    // Each city's plains are within its own working distance and out of the other's, with one
+    // of them a step past it; no plains of one city touches the other's.
+    for (centre, own, other) in [((3, 4), mine, theirs), ((8, 4), theirs, mine)] {
+        assert!(own.iter().all(|&p| apart(&g, centre, p) <= 3));
+        let far: Vec<u32> = other.iter().map(|&p| apart(&g, centre, p)).collect();
+        assert!(far.iter().all(|&d| d >= 4) && far.contains(&4), "{far:?}");
+        assert!(own.iter().all(|&p| other.iter().all(|&q| apart(&g, p, q) > 1)));
+    }
+    let two = CityId::new(2).expect("an id");
+    let both = |g: &Game| (works(g, CityId::FIRST), works(g, two));
+    // Each flips once, flagging the other, and stops when its next flip would be a return that
+    // does not stand.
+    g.assign_every_city_for_test();
+    assert_eq!(both(&g), (vec![mine[1]], vec![theirs[1]]));
+    clean(&mut g);
+    // What a settle held goes with it, so the next settle of both flips each once more, and
+    // stops it again.
+    g.assign_every_city_for_test();
+    assert_eq!(both(&g), (vec![mine[0]], vec![theirs[0]]));
+    clean(&mut g);
 }
