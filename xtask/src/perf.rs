@@ -2,9 +2,13 @@
 //!
 //! Runs the criterion suites of citar-bench (`kernels`, `turns`, `io`), each pinned to one core,
 //! then checks what they wrote to `<target>/perf/<suite>.json` against
-//! `crates/citar-bench/thresholds.toml`:
+//! `crates/citar-bench/thresholds.toml`. The `games` suite (whole bot games, DESIGN.md P2.4.2)
+//! runs only when named (`--suite games`): it takes minutes, and is timed with the other lane
+//! paused. Its file is read with the others whenever a run left one.
+//!
 //! - every budget holds a measure, at or under `hard` (1.5) times the budget; a budget that needs
-//!   the corpus is skipped when a suite ran without it;
+//!   the corpus is skipped when a suite ran without it, and a report-only budget (the `games`
+//!   rows until package 2-07) is printed against its budget and fails nothing;
 //! - every pass round is at least `ratio` (20) times faster than Python's
 //!   (`refcheck/perf/python-turns.json`), within the backstops, and within the target budgets
 //!   times `hard`.
@@ -26,7 +30,11 @@ use std::process::{Command, ExitCode};
 
 use serde::Deserialize;
 
-const SUITES: [&str; 3] = ["kernels", "turns", "io"];
+/// Every suite perfgate knows: the files it reads, and what `--suite` may name.
+const SUITES: [&str; 4] = ["kernels", "turns", "io", "games"];
+
+/// The suites a run without `--suite` runs: not `games`, which plays whole bot games for minutes.
+const DEFAULT_SUITES: [&str; 3] = ["kernels", "turns", "io"];
 
 #[derive(Debug, Deserialize)]
 struct Budget {
@@ -36,6 +44,8 @@ struct Budget {
     row: String,
     #[serde(default)]
     corpus: bool,
+    #[serde(default)]
+    report_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,7 +289,9 @@ fn check_budgets(
         let status = match (written, got) {
             (_, Some(m)) => {
                 let x = m.ns / budget;
-                let s = if x > t.hard {
+                let s = if b.report_only {
+                    if x > 1.0 { "report-only: over the budget" } else { "report-only: ok" }
+                } else if x > t.hard {
                     problems.push(format!(
                         "{}: {} is {x:.2} times its budget {} ({})",
                         b.id,
@@ -297,6 +309,7 @@ fn check_budgets(
                 continue;
             }
             (Some(w), None) if b.corpus && !w.corpus => "skipped: needs the corpus",
+            (_, None) if b.report_only => "report-only: not measured",
             (None, None) => {
                 problems.push(format!("{}: the {} suite wrote nothing", b.id, b.suite));
                 "MISSING (the suite did not run)"
@@ -415,7 +428,7 @@ fn check_rounds(
 
 pub fn run(root: &Path, args: &[String]) -> ExitCode {
     let mut check_only = false;
-    let mut suites: Vec<&str> = SUITES.to_vec();
+    let mut suites: Vec<&str> = DEFAULT_SUITES.to_vec();
     let mut extra: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -552,6 +565,48 @@ mod tests {
             assert!(parse_ns(&b.budget).is_some(), "{}: {}", b.id, b.budget);
         }
         assert!(t.pass_round.backstop.iter().all(|b| parse_ns(&b.budget).is_some()));
+        assert!(DEFAULT_SUITES.iter().all(|s| SUITES.contains(s)));
+        assert!(!DEFAULT_SUITES.contains(&"games"), "the games suite runs only when named");
+    }
+
+    #[test]
+    fn a_report_only_budget_fails_nothing() {
+        let t: Thresholds = toml::from_str(
+            r#"hard = 1.5
+               [[budget]]
+               id = "game/bot_small_330"
+               suite = "games"
+               budget = "16 s"
+               row = "a small bot game"
+               report_only = true
+               [[budget]]
+               id = "game/hard"
+               suite = "games"
+               budget = "1 s"
+               row = "a hard one"
+               [pass_round]
+               ratio = 20.0
+               backstop = []
+               target = []"#,
+        )
+        .expect("it parses");
+        let mut measures = BTreeMap::new();
+        measures.insert("game/bot_small_330".to_owned(), Measure { ns: 40e9 });
+        measures.insert("game/hard".to_owned(), Measure { ns: 2e9 });
+        let w = Written {
+            corpus: false,
+            overflow_checks: false,
+            core: Some(0),
+            run: None,
+            merged: false,
+            measures,
+        };
+        let results = BTreeMap::from([("games".to_owned(), w)]);
+        let problems = check_budgets(&t, &results).expect("checked");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].starts_with("game/hard"), "{problems:?}");
+        let none = check_budgets(&t, &BTreeMap::new()).expect("checked");
+        assert_eq!(none.len(), 1, "a missing report-only measure fails nothing: {none:?}");
     }
 
     #[test]
@@ -568,7 +623,8 @@ mod tests {
         results.insert("kernels".to_owned(), w(Some("now")));
         results.insert("turns".to_owned(), w(Some("before")));
         results.insert("io".to_owned(), w(None));
-        assert_eq!(not_written(&results, &SUITES, "now"), vec!["turns", "io"]);
+        assert_eq!(not_written(&results, &DEFAULT_SUITES, "now"), vec!["turns", "io"]);
+        assert_eq!(not_written(&results, &["games"], "now"), vec!["games"]);
         results.remove("kernels");
         assert_eq!(not_written(&results, &["kernels"], "now"), vec!["kernels"]);
     }
