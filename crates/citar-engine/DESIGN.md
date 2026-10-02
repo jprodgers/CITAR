@@ -544,6 +544,7 @@ The work breakdown gives the packages and their gates. Five rules keep each pack
    - its `RandomAgent` moves, so the agent exercises new actions as soon as they exist.
 3. **Every system package wires its own stages into the stage tables** of §6.2 and §6.14. A stage whose system is not ported yet is listed as `Pending("<package>")` and runs as an explicit no-op. Goldens refuse to bless while any stage they depend on is pending.
 4. **A rule effect whose dependency is not ported yet returns `Err(NotPorted("combat::nuke"))`.** It never uses `todo!()`. Tests assert on it, and `xtask check` fails 1e-04 if any `NotPorted` remains.
+   - As built in 1e-04: Phase 1 ported every rule, and `ErrCode::NotPorted` is removed. `xtask/check.toml`'s `not_ported.forbid` is on, so `cargo xtask check` refuses a `NotPorted(..)` marker, the `not_ported(..)` helper and any path to the variant. Since `pending.forbid_all` (1c-10) refuses any `Pending` stage as well, unfinished work stays on its own branch until it is done.
 5. **A rule script lands with the package that ports what it tests,** never earlier. It is validated on Python first.
 
 ---
@@ -2460,6 +2461,8 @@ pub struct LoadReport { pub rules_changed: Option<(RulesetId, String)>, pub chro
 pub struct RulesetErrors(pub Vec<RulesetError /* { file, object, text, kind } */>);
 pub enum ConvertError { Json(String), Unresolved { path: String, name: String }, UnknownKey(String), NonFinite(String) }
 ```
+
+As built in 1e-04: `ErrCode` has no `NotPorted`. Nothing returned it once 1d-03 answered the last queries, so 1e-04 removed it, and `cargo xtask check` now refuses the marker, the `not_ported` helper and any path to the variant (§3.4 rule 4).
 
 - **The message is what models read.** It explains the rule and names what is valid.
   - Existing text is ported verbatim where it is fine and fixed where it is wrong; each fix is listed in `intended.toml`.
