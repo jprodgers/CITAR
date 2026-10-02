@@ -165,5 +165,20 @@ class QueryTools(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
+class BotDecisions(unittest.TestCase):
+    """refcheck/bot_decisions.json.gz is the Python bot's deterministic sub-decisions on the committed fixtures, which
+    the Rust bot's are checked against (scripts/refcheck/bot_dump.py; DESIGN.md P2.3.11). The recording runs with
+    PYTHONHASHSEED=0, in a process of its own, and gives the same bytes every time."""
+
+    def test_the_recorded_decisions_are_current(self):
+        import os
+        import subprocess
+        import sys
+        script = Path(__file__).resolve().parents[1] / "scripts" / "refcheck" / "bot_dump.py"
+        env = dict(os.environ, PYTHONHASHSEED="0")
+        done = subprocess.run([sys.executable, str(script), "--check"], env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
