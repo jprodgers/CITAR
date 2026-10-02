@@ -3,16 +3,21 @@ PARAM_GROUPS, and the table of what ``profiles.clean_params`` makes of a profile
 ``clean()`` is tested against (crates/citar-engine DESIGN.md P2.3.2, packages 2-00b and 2-01a).
 
 The schema file was written by scripts/bots/export_params.py and is the source of truth from then on; this module
-holds it equal to PARAM_GROUPS, apart from the two cache parameters basic-1 drops, for as long as the Python bot exists.
+holds it equal to PARAM_GROUPS, apart from the two cache parameters basic-1 drops and the 41 it types ``float`` where
+Python's default literal made them ``int`` (the exporter's ``DROPPED`` and ``RETYPED``), for as long as the Python bot
+exists.
 
 tests/data/clean_params_cases.json is recorded from the inputs in ``CASES``:
 
     python -m tests.test_bot_params --record
 
-A case marked ``fix`` is one where basic-1 refuses on purpose what Python accepted (``FIXES``).
+A case marked ``fix`` is one where basic-1's ``clean()`` answers differently from Python on purpose (``FIXES``); its
+``basic1`` is the answer basic-1 gives instead.
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import importlib.util
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -20,14 +25,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "crates" / "citar-bot" / "params" / "basic-1.json"
 TABLE = ROOT / "tests" / "data" / "clean_params_cases.json"
-DROPPED = ("site_cache_turns", "bv_cache_turns")
+EXPORTER = ROOT / "scripts" / "bots" / "export_params.py"
+ADVISOR = ROOT / "crates" / "citar-engine" / "src" / "game" / "advisor.rs"
 
-#: Python accepted these, and basic-1's clean() refuses them (DESIGN.md P2.3.2, the two laxities fixed)
+
+def _exporter():
+    """scripts/bots/export_params.py as a module (scripts/ is not a package)."""
+    spec = importlib.util.spec_from_file_location("export_params", EXPORTER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+export_params = _exporter()
+DROPPED = export_params.DROPPED
+RETYPED = export_params.RETYPED
+
+#: what basic-1's clean() answers differently from Python's clean_params, on purpose (DESIGN.md P2.3.2)
 FIXES = {
     "int-integral": "An int must be integral: 2, 2.0 and \"2\" are 2, and 2.5 is refused. Python kept a fractional "
                     "value as a float, which turned the bot's // into float floor division.",
     "names-known": "The names in an order or a list must be among the parameter's options (or a preset, \"default\" "
                    "or null). Python accepted any string.",
+    "dropped": "site_cache_turns and bv_cache_turns tuned caches basic-1 does not keep (DESIGN.md P2.3.9, fixes 5 and "
+               "6). They are not parameters of basic-1, but stored profiles carry them, so clean() drops them "
+               "whatever their value, as Python dropped them at their default, rather than refusing the profile.",
+    "retyped": "basic-1 types 41 parameters float that Python typed int by their default's literal (multipliers and "
+               "the weights the engine's advisor holds as f64; scripts/bots/export_params.py RETYPED), so clean() "
+               "gives their values as floats: 4 becomes 4.0.",
 }
 
 #: (what the case shows, the overrides, the fix it meets or None)
@@ -104,23 +129,56 @@ CASES = [
     ("a list of null", {"promo_in_city": None}, None),
     ("an unknown key", {"no_such_parameter": 1}, None),
     ("a cache parameter basic-1 drops is known to Python", {"site_cache_turns": 8}, "dropped"),
+    # answered alike: Python dropped the value as its default, basic-1 as a retired key
+    ("a retired cache parameter at its default, as stored profiles carry it", {"bv_cache_turns": 0}, None),
+    ("a retired cache parameter among overrides", {"bv_cache_turns": 0, "counter_rounds": 2}, None),
+    ("a retired cache parameter is dropped whatever its value", {"site_cache_turns": "x"}, "dropped"),
     ("an unknown key among known ones", {"counter_rounds": 2, "bogus": 1}, None),
+    ("a multiplier typed int by its default's literal takes a fraction", {"mil_war_mult": 1.5}, None),
+    ("a retyped multiplier at its default is dropped", {"mil_war_mult": 2}, None),
+    ("a retyped multiplier given an integer", {"mil_war_mult": 4}, "retyped"),
+    ("a retyped weight given an integer as a string", {"c_danger": "800"}, "retyped"),
+    ("a retyped weight takes a fraction", {"c_danger": 999.5}, None),
     ("several overrides, defaults dropped",
      {"counter_rounds": "6", "tech_noise": 0.1, "lux_buy": "yes", "tech_mode": "potential",
       "policy_order_aggressive": "liberty_first"}, None),
 ]
 
 
-def record_case(name: str, params, fix) -> dict:
-    """What ``clean_params("basic", params)`` gives for one case: its output, or its error's message."""
+def answer(params) -> dict:
+    """What ``clean_params("basic", params)`` gives: ``{"out": overrides}`` or ``{"error": ProfileError's message}``."""
     from citar.bots.profiles import ProfileError, clean_params
-    case = {"name": name, "params": params}
     try:
-        case["out"] = clean_params("basic", params)
+        return {"out": clean_params("basic", params)}
     except ProfileError as e:
-        case["error"] = str(e)
+        return {"error": str(e)}
+
+
+def basic1_answer(params: dict, fix: str) -> dict:
+    """What basic-1's clean() gives for a case marked with ``fix``, in the shape of ``answer``.
+
+    A refusal keeps Python's message for an invalid value (the label, the key, Python's repr of the value, the type).
+    """
+    from citar.bots.basic import PARAM_SPECS
+    if fix in ("int-integral", "names-known"):
+        (key, value), = params.items()
+        spec = next(s for s in PARAM_SPECS if s["key"] == key)
+        return {"error": f"{spec['label']} ({key}): {value!r} is not a valid {spec['type']}."}
+    if fix == "dropped":
+        return answer({k: v for k, v in params.items() if k not in DROPPED})
+    if fix == "retyped":
+        python = answer(params)
+        return {"out": {k: float(v) if k in RETYPED else v for k, v in python["out"].items()}}
+    raise ValueError(fix)
+
+
+def record_case(name: str, params, fix) -> dict:
+    """What ``clean_params("basic", params)`` gives for one case: its output, or its error's message; and for a case
+    marked with a fix, what basic-1 gives instead."""
+    case = {"name": name, "params": params, **answer(params)}
     if fix:
         case["fix"] = fix
+        case["basic1"] = basic1_answer(params, fix)
     return case
 
 
@@ -130,14 +188,14 @@ def table() -> dict:
         "format": 1,
         "about": "profiles.clean_params(\"basic\", params) for each case: \"out\", the cleaned overrides, or "
                  "\"error\", ProfileError's message. Python's live bot is named \"basic\" in its messages; it is the "
-                 "version basic-1. A case marked \"fix\" is one basic-1's clean() answers differently on purpose: "
-                 "\"int-integral\" and \"names-known\" are refused (see \"fixes\"), and \"dropped\" names a "
-                 "parameter basic-1 does not have, refused as an unknown key. Recorded by "
-                 "python -m tests.test_bot_params --record.",
+                 "version basic-1. A case marked \"fix\" is one basic-1's clean() answers differently on purpose "
+                 "(see \"fixes\"), and its \"basic1\" is what basic-1's clean() gives instead, \"out\" or \"error\": "
+                 "\"int-integral\" and \"names-known\" are refused, \"dropped\" removes a retired cache parameter "
+                 "whatever its value, and \"retyped\" gives a parameter basic-1 types float as a float. Every other "
+                 "case is answered alike. Recorded by python -m tests.test_bot_params --record.",
         "engine": "basic",
         "version": "basic-1",
-        "fixes": dict(FIXES, dropped="site_cache_turns and bv_cache_turns are not parameters of basic-1 "
-                                     "(DESIGN.md P2.3.9, fixes 5 and 6)."),
+        "fixes": FIXES,
         "cases": [record_case(*c) for c in CASES],
     }
 
@@ -152,12 +210,25 @@ def exact(v) -> str:
     return json.dumps(v, sort_keys=True)
 
 
+def advisor_field_types() -> dict:
+    """The engine's AdvisorParams fields and their Rust types, read from advisor.rs."""
+    text = ADVISOR.read_text(encoding="utf-8")
+    body = re.search(r"pub struct AdvisorParams \{(.*?)\n\}", text, re.S)
+    return dict(re.findall(r"^\s*pub (\w+): (\w+),", body.group(1), re.M))
+
+
+#: the schema type each AdvisorParams field type reads as (the enums are choices)
+RUST_TYPES = {"f64": "float", "i32": "int", "u32": "int", "usize": "int", "bool": "bool",
+              "ProductionMode": "choice", "GarrisonMode": "choice"}
+
+
 class ParameterSchema(unittest.TestCase):
-    """basic-1.json is PARAM_GROUPS without the two cache parameters, spec for spec."""
+    """basic-1.json is PARAM_GROUPS without the two cache parameters, spec for spec, with 41 ints typed float."""
 
     @classmethod
     def setUpClass(cls):
         cls.doc = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        cls.specs = {s["key"]: s for g in cls.doc["groups"] for s in g["params"]}
 
     def test_the_file_has_the_bots_page_shape(self):
         self.assertEqual(list(self.doc), ["engine", "groups"])
@@ -173,9 +244,9 @@ class ParameterSchema(unittest.TestCase):
         counts = {}
         for s in specs:
             counts[s["type"]] = counts.get(s["type"], 0) + 1
-        self.assertEqual(counts, {"int": 220, "float": 127, "choice": 9, "bool": 8, "order": 7, "list": 2})
+        self.assertEqual(counts, {"int": 179, "float": 168, "choice": 9, "bool": 8, "order": 7, "list": 2})
 
-    def test_every_spec_is_param_groups_apart_from_the_dropped_keys(self):
+    def test_every_spec_is_param_groups_apart_from_the_dropped_and_retyped_keys(self):
         from citar.bots.basic import PARAM_GROUPS
         self.assertEqual(len(self.doc["groups"]), len(PARAM_GROUPS))
         for group, (name, help_text, specs) in zip(self.doc["groups"], PARAM_GROUPS):
@@ -183,11 +254,39 @@ class ParameterSchema(unittest.TestCase):
             kept = [s for s in specs if s["key"] not in DROPPED]
             self.assertEqual([s["key"] for s in group["params"]], [s["key"] for s in kept], name)
             for mine, theirs in zip(group["params"], kept):
+                if theirs["key"] in RETYPED:
+                    # Python's int by its default's literal; basic-1's float, the default the same number
+                    self.assertEqual(theirs["type"], "int", theirs["key"])
+                    self.assertEqual(type(theirs["default"]), int, theirs["key"])
+                    theirs = dict(theirs, type="float", default=float(theirs["default"]))
                 # every key, type, default, label, help, range, unit, choice, option and preset, as JSON has it
                 self.assertEqual(exact(mine), exact(theirs), mine["key"])
                 self.assertEqual(list(mine), list(theirs), mine["key"])
         dropped = [s["key"] for _, _, specs in PARAM_GROUPS for s in specs if s["key"] in DROPPED]
         self.assertEqual(sorted(dropped), sorted(DROPPED))
+
+    def test_the_retyped_keys_are_the_multipliers_and_the_advisors_floats(self):
+        """RETYPED is exactly Python's int parameters that are multipliers (unit x) or that AdvisorParams holds as
+        f64, and no int parameter outside it is either."""
+        from citar.bots.basic import PARAM_SPECS
+        advisor = advisor_field_types()
+        want = {s["key"] for s in PARAM_SPECS if s["type"] == "int" and s["key"] not in DROPPED
+                and (s["unit"] == "x" or advisor.get(s["key"]) == "f64")}
+        self.assertEqual(len(RETYPED), len(set(RETYPED)))
+        self.assertEqual(set(RETYPED), want)
+        self.assertEqual(len(want), 41)
+        self.assertEqual([k for k, s in self.specs.items() if s["type"] == "int" and s["unit"] == "x"], [])
+
+    def test_the_advisors_parameters_have_the_schemas_types(self):
+        """Every AdvisorParams field but the seat's aggression is a parameter of basic-1, of the matching type, so
+        the advisor and the bot read one effective map alike (DESIGN.md P2.3.2)."""
+        fields = advisor_field_types()
+        self.assertGreaterEqual(len(fields), 140)       # the struct was read, not missed
+        for key, rust in fields.items():
+            if key == "aggression":
+                continue
+            self.assertIn(key, self.specs, key)
+            self.assertEqual(self.specs[key]["type"], RUST_TYPES[rust], key)
 
     def test_the_specs_keys_by_type(self):
         number = {"key", "default", "type", "label", "help", "min", "max", "unit"}
@@ -201,11 +300,6 @@ class ParameterSchema(unittest.TestCase):
     def test_the_exporter_writes_this_file(self):
         import contextlib
         import io
-        sys.path.insert(0, str(ROOT / "scripts" / "bots"))
-        try:
-            import export_params
-        finally:
-            sys.path.remove(str(ROOT / "scripts" / "bots"))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             status = export_params.main(["--check"])
         self.assertEqual(status, 0, out.getvalue())
@@ -262,6 +356,28 @@ class CleanParams(unittest.TestCase):
             self.assertTrue(one(("bool",), v), f"the bool spelling {v!r}")
         self.assertTrue(all(("out" in c) != ("error" in c) for c in cases))
         self.assertTrue(all(c.get("fix") in (None, *self.doc["fixes"]) for c in cases))
+        self.assertEqual(set(self.doc["fixes"]), set(FIXES))
+        for fix in FIXES:
+            self.assertTrue(any(c.get("fix") == fix for c in cases), fix)
+        # the retired key as stored profiles carry it: at its default, which Python dropped quietly
+        self.assertTrue(any(c["params"] == {"bv_cache_turns": 0} and c.get("out") == {} for c in cases))
+
+    def test_basic1s_answer_is_given_for_every_fix_and_only_there(self):
+        for c in self.doc["cases"]:
+            if c.get("fix") is None:
+                self.assertNotIn("basic1", c, c["name"])
+                continue
+            mine = c["basic1"]
+            self.assertEqual(len(mine), 1, c["name"])
+            self.assertIn(next(iter(mine)), ("out", "error"), c["name"])
+            self.assertNotEqual(exact(mine), exact({k: c[k] for k in ("out", "error") if k in c}), c["name"])
+            if c["fix"] in ("int-integral", "names-known"):
+                self.assertIn("error", mine, c["name"])
+            if c["fix"] == "dropped":
+                self.assertFalse(set(mine.get("out", {})) & set(DROPPED), c["name"])
+            if c["fix"] == "retyped":
+                for k, v in mine["out"].items():
+                    self.assertIs(type(v), float if k in RETYPED else type(c["out"][k]), c["name"])
 
 
 if __name__ == "__main__":

@@ -1,12 +1,13 @@
 {
   "format": 1,
-  "about": "profiles.clean_params(\"basic\", params) for each case: \"out\", the cleaned overrides, or \"error\", ProfileError's message. Python's live bot is named \"basic\" in its messages; it is the version basic-1. A case marked \"fix\" is one basic-1's clean() answers differently on purpose: \"int-integral\" and \"names-known\" are refused (see \"fixes\"), and \"dropped\" names a parameter basic-1 does not have, refused as an unknown key. Recorded by python -m tests.test_bot_params --record.",
+  "about": "profiles.clean_params(\"basic\", params) for each case: \"out\", the cleaned overrides, or \"error\", ProfileError's message. Python's live bot is named \"basic\" in its messages; it is the version basic-1. A case marked \"fix\" is one basic-1's clean() answers differently on purpose (see \"fixes\"), and its \"basic1\" is what basic-1's clean() gives instead, \"out\" or \"error\": \"int-integral\" and \"names-known\" are refused, \"dropped\" removes a retired cache parameter whatever its value, and \"retyped\" gives a parameter basic-1 types float as a float. Every other case is answered alike. Recorded by python -m tests.test_bot_params --record.",
   "engine": "basic",
   "version": "basic-1",
   "fixes": {
     "int-integral": "An int must be integral: 2, 2.0 and \"2\" are 2, and 2.5 is refused. Python kept a fractional value as a float, which turned the bot's // into float floor division.",
     "names-known": "The names in an order or a list must be among the parameter's options (or a preset, \"default\" or null). Python accepted any string.",
-    "dropped": "site_cache_turns and bv_cache_turns are not parameters of basic-1 (DESIGN.md P2.3.9, fixes 5 and 6)."
+    "dropped": "site_cache_turns and bv_cache_turns tuned caches basic-1 does not keep (DESIGN.md P2.3.9, fixes 5 and 6). They are not parameters of basic-1, but stored profiles carry them, so clean() drops them whatever their value, as Python dropped them at their default, rather than refusing the profile.",
+    "retyped": "basic-1 types 41 parameters float that Python typed int by their default's literal (multipliers and the weights the engine's advisor holds as f64; scripts/bots/export_params.py RETYPED), so clean() gives their values as floats: 4 becomes 4.0."
   },
   "cases": [
     {
@@ -81,7 +82,10 @@
       "out": {
         "counter_rounds": 2.5
       },
-      "fix": "int-integral"
+      "fix": "int-integral",
+      "basic1": {
+        "error": "Counter-offers up to (counter_rounds): 2.5 is not a valid int."
+      }
     },
     {
       "name": "an int from a fractional string",
@@ -91,7 +95,10 @@
       "out": {
         "counter_rounds": 2.5
       },
-      "fix": "int-integral"
+      "fix": "int-integral",
+      "basic1": {
+        "error": "Counter-offers up to (counter_rounds): '2.5' is not a valid int."
+      }
     },
     {
       "name": "an int equal to its default is dropped",
@@ -511,7 +518,10 @@
           "Bogus"
         ]
       },
-      "fix": "names-known"
+      "fix": "names-known",
+      "basic1": {
+        "error": "Policy order (peaceful) (policy_order_peaceful): ['Tradition', 'Bogus'] is not a valid order."
+      }
     },
     {
       "name": "an order refuses a name that is no string",
@@ -598,7 +608,10 @@
           "Bogus"
         ]
       },
-      "fix": "names-known"
+      "fix": "names-known",
+      "basic1": {
+        "error": "Promotions in a city (promo_in_city): ['Cover', 'Bogus'] is not a valid list."
+      }
     },
     {
       "name": "a list has no presets",
@@ -633,7 +646,38 @@
       "out": {
         "site_cache_turns": 8
       },
-      "fix": "dropped"
+      "fix": "dropped",
+      "basic1": {
+        "out": {}
+      }
+    },
+    {
+      "name": "a retired cache parameter at its default, as stored profiles carry it",
+      "params": {
+        "bv_cache_turns": 0
+      },
+      "out": {}
+    },
+    {
+      "name": "a retired cache parameter among overrides",
+      "params": {
+        "bv_cache_turns": 0,
+        "counter_rounds": 2
+      },
+      "out": {
+        "counter_rounds": 2
+      }
+    },
+    {
+      "name": "a retired cache parameter is dropped whatever its value",
+      "params": {
+        "site_cache_turns": "x"
+      },
+      "error": "Replan every (site_cache_turns): 'x' is not a valid int.",
+      "fix": "dropped",
+      "basic1": {
+        "out": {}
+      }
     },
     {
       "name": "an unknown key among known ones",
@@ -642,6 +686,61 @@
         "bogus": 1
       },
       "error": "bogus is not a parameter of basic."
+    },
+    {
+      "name": "a multiplier typed int by its default's literal takes a fraction",
+      "params": {
+        "mil_war_mult": 1.5
+      },
+      "out": {
+        "mil_war_mult": 1.5
+      }
+    },
+    {
+      "name": "a retyped multiplier at its default is dropped",
+      "params": {
+        "mil_war_mult": 2
+      },
+      "out": {}
+    },
+    {
+      "name": "a retyped multiplier given an integer",
+      "params": {
+        "mil_war_mult": 4
+      },
+      "out": {
+        "mil_war_mult": 4
+      },
+      "fix": "retyped",
+      "basic1": {
+        "out": {
+          "mil_war_mult": 4.0
+        }
+      }
+    },
+    {
+      "name": "a retyped weight given an integer as a string",
+      "params": {
+        "c_danger": "800"
+      },
+      "out": {
+        "c_danger": 800
+      },
+      "fix": "retyped",
+      "basic1": {
+        "out": {
+          "c_danger": 800.0
+        }
+      }
+    },
+    {
+      "name": "a retyped weight takes a fraction",
+      "params": {
+        "c_danger": 999.5
+      },
+      "out": {
+        "c_danger": 999.5
+      }
     },
     {
       "name": "several overrides, defaults dropped",
