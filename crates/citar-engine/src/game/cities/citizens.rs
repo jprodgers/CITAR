@@ -613,7 +613,7 @@ impl Game {
 /// The citizen oracle (DESIGN.md 6.8): every city this engine has assigned has its citizens where
 /// a fresh assignment would put them, or where the reassignments that start there lead back to
 /// (a city whose uniques read its own citizens, which the settle stops in its cycle:
-/// [`Game::reassign`]). One line for each that does not.
+/// `Game::reassign`). One line for each that does not.
 #[cfg(any(test, debug_assertions, feature = "checks"))]
 #[must_use]
 pub fn verify(g: &Game) -> Vec<String> {
