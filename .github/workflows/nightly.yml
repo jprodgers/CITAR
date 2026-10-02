@@ -15,8 +15,10 @@
 # of 2026-09-23), so it is a laptop run, documented in refcheck/README.md ("The nightly run and the
 # corpus") with the 200-game soak that goes with it.
 #
-# Every job is independent, so the run takes as long as its longest job: the 10,000 cases of P8,
-# under an hour on a GitHub runner by the laptop's measure. The whole run must stay under two
+# Every job is independent, so the run takes as long as its longest job. By the laptop's measure
+# (GitHub's runners played chaos about as fast as it in rust.yml's runs): P8's 10,000 cases about
+# 17 minutes, a stability job 30 to 40 (the build, 20 of chaos, 5 to 12 of soak), the long golden
+# set about a minute a target, the criterion trend about 15. The whole run must stay under two
 # hours (package 1e-02, gate 4); each job has a timeout to keep it there.
 name: nightly
 
