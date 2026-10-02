@@ -1,6 +1,8 @@
 about = """
 A city in danger (the enemies near it outweigh its defence) with no unit in it buys a defender with
-gold, preferring a ranged unit, on the bot's turn; the bot also sets a defender as its production.
+gold, preferring a ranged unit, on the bot's turn. What the city builds afterwards is not checked: the
+production the bot queued before the purchase (a defender) is the item the purchase takes, so a script
+cannot see it after the turn.
 """
 from = "citar/bots/basic.py:1591-1606 (manage_gold), 869-871 (in_danger)"
 needs = "2-01b"
