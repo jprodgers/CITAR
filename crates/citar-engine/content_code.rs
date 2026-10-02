@@ -9,9 +9,13 @@
 //!   `core.autocrlf` gives the same code as a Linux one;
 //! - the `name version` of every package of `Cargo.lock` the crate's normal dependencies reach,
 //!   sorted: a bump of serde_json, or of the ryu that formats its floats, can change a save.
+//!   A workspace package the crate depends on (citar-engine, for the bot) counts as a leaf: the
+//!   lock lists a workspace package's dev-dependencies beside its normal ones (the engine's
+//!   proptest, and all it pulls in), and its own content code covers what it links.
 //!
 //! Nothing else is read, so a commit that touches only docs, tests or another crate leaves the
-//! code as it is, and a `git describe` label (which moves on every commit) plays no part.
+//! code as it is, and a `git describe` label (which moves on every commit) plays no part. Nor
+//! does a dev-dependency's bump, of the crate's own or of a workspace package it uses.
 //!
 //! The same file is `crates/citar-engine/content_code.rs` and `crates/citar-bot/content_code.rs`
 //! (citar-bot's tests hold the two equal): each build script includes its own copy, so either
@@ -138,6 +142,10 @@ pub fn normal_dependencies(manifest: &str) -> Vec<String> {
 struct Locked {
     name: String,
     version: String,
+    /// Whether the lock gives it a `source` (a registry or a git repository). A package without
+    /// one is a path package, a member of the workspace, whose dependencies the lock lists with
+    /// its dev-dependencies among them.
+    sourced: bool,
     /// Its dependencies as the lock file writes them: `name`, or `name version` when the name is
     /// ambiguous, possibly followed by a source in brackets.
     deps: Vec<(String, Option<String>)>,
@@ -150,7 +158,12 @@ fn parse_lock(lock: &str) -> Vec<Locked> {
     for line in lock.lines() {
         let line = line.trim();
         if line == "[[package]]" {
-            out.push(Locked { name: String::new(), version: String::new(), deps: Vec::new() });
+            out.push(Locked {
+                name: String::new(),
+                version: String::new(),
+                sourced: false,
+                deps: Vec::new(),
+            });
             in_deps = false;
             continue;
         }
@@ -174,6 +187,8 @@ fn parse_lock(lock: &str) -> Vec<Locked> {
             pkg.name = name;
         } else if let Some(version) = quoted("version") {
             pkg.version = version;
+        } else if quoted("source").is_some() {
+            pkg.sourced = true;
         } else if line.starts_with("dependencies") && line.ends_with('[') {
             in_deps = true;
         }
@@ -183,6 +198,11 @@ fn parse_lock(lock: &str) -> Vec<Locked> {
 
 /// The `name version` of every package of `lock` that the dependencies named `direct` reach,
 /// sorted. A direct name the lock holds in several versions counts each of them.
+///
+/// A path package (a workspace member) is listed but not followed. The lock gives a workspace
+/// member's dev-dependencies with its normal ones, so following them would move the bot's code
+/// on a bump of the engine's proptest; and a workspace member's own content code covers what it
+/// links (the build id combines the engine's code with the bot's).
 #[must_use]
 pub fn locked_versions(direct: &[String], lock: &str) -> Vec<String> {
     let packages = parse_lock(lock);
@@ -194,7 +214,7 @@ pub fn locked_versions(direct: &[String], lock: &str) -> Vec<String> {
         .map(|(i, _)| i)
         .collect();
     while let Some(i) = queue.pop() {
-        if std::mem::replace(&mut seen[i], true) {
+        if std::mem::replace(&mut seen[i], true) || !packages[i].sourced {
             continue;
         }
         for (name, version) in &packages[i].deps {
@@ -341,31 +361,66 @@ mod tests {
     }
 
     const MANIFEST: &str = "[package]\nname = \"x\"\n\n[dependencies]\nserde.workspace = true\n\
-                            other = { package = \"renamed\", version = \"1\" }\n# a comment\n\n\
+                            other = { package = \"renamed\", version = \"1\" }\n# a comment\n\
+                            engine.workspace = true\n\n\
                             [dev-dependencies]\nproptest.workspace = true\n\n\
                             [build-dependencies]\nblake3 = \"1\"\n";
 
+    /// A lock as cargo writes one: registry packages with their source, and `engine`, a
+    /// workspace member without one, listing its dev-dependency `devonly` beside `serde`.
     const LOCK: &str = "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.1\"\n\
                         source = \"registry\"\ndependencies = [\n \"serde_derive\",\n]\n\n\
                         [[package]]\nname = \"serde_derive\"\nversion = \"1.0.1\"\n\
-                        dependencies = [\n \"syn 2.0.0\",\n]\n\n\
-                        [[package]]\nname = \"syn\"\nversion = \"1.0.0\"\n\n\
-                        [[package]]\nname = \"syn\"\nversion = \"2.0.0\"\n\n\
-                        [[package]]\nname = \"renamed\"\nversion = \"0.3.0\"\n\n\
-                        [[package]]\nname = \"proptest\"\nversion = \"1.11.0\"\n\n\
-                        [[package]]\nname = \"blake3\"\nversion = \"1.8.7\"\n";
+                        source = \"registry\"\ndependencies = [\n \"syn 2.0.0\",\n]\n\n\
+                        [[package]]\nname = \"syn\"\nversion = \"1.0.0\"\nsource = \"registry\"\n\n\
+                        [[package]]\nname = \"syn\"\nversion = \"2.0.0\"\nsource = \"registry\"\n\n\
+                        [[package]]\nname = \"renamed\"\nversion = \"0.3.0\"\n\
+                        source = \"registry\"\n\n\
+                        [[package]]\nname = \"engine\"\nversion = \"0.1.5\"\n\
+                        dependencies = [\n \"devonly\",\n \"serde\",\n]\n\n\
+                        [[package]]\nname = \"devonly\"\nversion = \"0.9.0\"\n\
+                        source = \"registry\"\ndependencies = [\n \"rand_core\",\n]\n\n\
+                        [[package]]\nname = \"rand_core\"\nversion = \"0.6.0\"\n\
+                        source = \"registry\"\n\n\
+                        [[package]]\nname = \"proptest\"\nversion = \"1.11.0\"\n\
+                        source = \"registry\"\n\n\
+                        [[package]]\nname = \"blake3\"\nversion = \"1.8.7\"\nsource = \"registry\"\n";
 
     #[test]
     fn normal_dependencies_and_what_they_reach_in_the_lock() {
-        assert_eq!(normal_dependencies(MANIFEST), ["renamed", "serde"]);
+        assert_eq!(normal_dependencies(MANIFEST), ["engine", "renamed", "serde"]);
         let locked = locked_versions(&normal_dependencies(MANIFEST), LOCK);
-        // Neither dev nor build dependencies, and only the syn the lock names.
-        assert_eq!(locked, ["renamed 0.3.0", "serde 1.0.1", "serde_derive 1.0.1", "syn 2.0.0"]);
-        assert_eq!(normal_dependencies(&MANIFEST.replace('\n', "\r\n")), ["renamed", "serde"]);
+        // Neither dev nor build dependencies, only the syn the lock names, and the workspace
+        // package without what it lists.
+        assert_eq!(
+            locked,
+            ["engine 0.1.5", "renamed 0.3.0", "serde 1.0.1", "serde_derive 1.0.1", "syn 2.0.0"]
+        );
+        assert_eq!(
+            normal_dependencies(&MANIFEST.replace('\n', "\r\n")),
+            ["engine", "renamed", "serde"]
+        );
         assert_eq!(
             locked_versions(&normal_dependencies(MANIFEST), &LOCK.replace('\n', "\r\n")),
             locked
         );
+    }
+
+    /// The lock lists a workspace package's dev-dependencies with its normal ones: the bot's
+    /// lock entry for the engine names proptest. Bumping one (or what it pulls in) leaves the
+    /// code of a crate that depends on the workspace package as it is.
+    #[test]
+    fn a_workspace_packages_dev_dependencies_do_not_count() {
+        let direct = normal_dependencies(MANIFEST);
+        let locked = locked_versions(&direct, LOCK);
+        assert!(!locked.iter().any(|l| l.starts_with("devonly") || l.starts_with("rand_core")));
+        let bumped = LOCK.replace("0.9.0", "0.9.1").replace("0.6.0", "0.7.0");
+        assert_eq!(locked_versions(&direct, &bumped), locked);
+        // A registry package's own dependencies are followed: they are what it links.
+        let devonly = locked_versions(&["devonly".to_owned()], LOCK);
+        assert_eq!(devonly, ["devonly 0.9.0", "rand_core 0.6.0"]);
+        // A bump of serde, which the crate names itself, still counts.
+        assert_ne!(locked_versions(&direct, &LOCK.replace("1.0.1", "1.0.2")), locked);
     }
 
     fn code_of(root: &Path) -> String {
@@ -426,6 +481,8 @@ mod tests {
         assert_ne!(code_of(&lf.0), code, "a locked dependency bump changes the code");
         lf.write("Cargo.lock", &LOCK.replace("1.11.0", "1.12.0"));
         assert_eq!(code_of(&lf.0), code, "a dev dependency's bump does not");
+        lf.write("Cargo.lock", &LOCK.replace("0.9.0", "0.9.1"));
+        assert_eq!(code_of(&lf.0), code, "nor a workspace package's dev dependency's");
     }
 
     /// This crate's tag, the code its build script computed, and its recipe.
@@ -492,6 +549,35 @@ mod tests {
         std::fs::write(&lib, text).expect("written");
         let edited = crate_code(tag, version, &lf_dir, &recipe(&lf_dir)).expect("a code");
         assert_ne!(edited, built, "a source edit moves the code");
+    }
+
+    /// On the workspace's real lock: the code covers what the crate links and none of the
+    /// engine's dev-dependencies, which the lock lists under the engine (proptest, and the rand
+    /// family it pulls in), so a `cargo update -p proptest` moves neither code.
+    #[test]
+    fn the_real_lock_gives_what_the_crate_links_and_no_dev_dependency() {
+        let real = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let locked = crate_locked(&real.join("Cargo.toml"), &real.join("../../Cargo.lock"))
+            .expect("the manifest");
+        let names: Vec<&str> = locked.iter().filter_map(|l| l.split(' ').next()).collect();
+        for linked in ["serde", "serde_json", "blake3", "smallvec", "thiserror"] {
+            assert!(names.contains(&linked), "{linked} in {locked:?}");
+        }
+        for dev in ["proptest", "rand", "rand_chacha", "rand_core", "regex-syntax", "unarray"] {
+            assert!(!names.contains(&dev), "{dev} in {locked:?}");
+        }
+        let (tag, _, _) = this_crate();
+        assert_eq!(names.contains(&"citar-engine"), tag == BOT_TAG, "the bot names the engine");
+
+        // proptest bumped in the real lock: the same list, so the same code.
+        let manifest = std::fs::read_to_string(real.join("Cargo.toml")).expect("the manifest");
+        let lock = std::fs::read(real.join("../../Cargo.lock")).expect("the lock");
+        let lock = String::from_utf8(normalise(&lock)).expect("UTF-8");
+        let at = "name = \"proptest\"\nversion = \"";
+        assert!(lock.contains(at), "the lock has proptest");
+        let bumped = lock.replace(at, &format!("{at}99."));
+        let direct = normal_dependencies(&manifest);
+        assert_eq!(locked_versions(&direct, &bumped), locked_versions(&direct, &lock));
     }
 
     #[test]
