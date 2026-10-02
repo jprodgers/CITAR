@@ -28,6 +28,7 @@ Rust tool that checks the engine against it is `crates/citar-refcheck` ([Checkin
 | `refcheck/fixtures-late/` | three late corpus states, copied (committed, about 0.7 MB) |
 | `refcheck/corpus/` | the `--full` fixtures (git-ignored, generated) |
 | `refcheck/baseline/` | baseline runs (git-ignored, generated) |
+| `refcheck/baseline/python/` | the four Python baselines, committed byte for byte (see below) |
 | `refcheck/intended.toml` | the accepted differences, each with a reason |
 | `refcheck/enforced.toml` | the groups (or paths) whose unexplained differences fail CI |
 | `refcheck/ratchet.json` | unexplained differences and failed answer modules per group, which may only fall |
@@ -266,6 +267,20 @@ python scripts/refcheck/baseline.py --games 150 --sizes duel,standard --name pyt
 python scripts/refcheck/summarize.py refcheck/baseline/python-<hash>.jsonl
 python scripts/refcheck/summarize.py refcheck/baseline/python-<hash>.jsonl refcheck/baseline/rust-<hash>.jsonl
 ```
+
+**The committed Python baselines.** Nothing can write them again once the Python engine is gone, so the four
+runs of 2026-09-23 (engine `5287456aff`, bot `a01652e3a2`) are committed in `refcheck/baseline/python/` exactly as
+they were written, Windows line endings included (`-text` in `.gitattributes`):
+
+| File | Games | sha256 |
+|---|---|---|
+| `small.jsonl` | 60 small, seeds 5000-5059 | `029843f2d36a0e6a9547b74976d592ec73e8518cf4e20961468d4e5c4d3d174e` |
+| `std-large.jsonl` | 14 standard and 10 large | `aa9f0455e8a1fee9f0f6fedb51543674b7df60d70cbc50f8cc012d268780a9a8` |
+| `gargantuan.jsonl` | 2 gargantuan | `2e43d860fb6786bb89d3727539573d8a1785dd1ff12aaf0e6aac551f47ed1728` |
+| `smoke.jsonl` | 2 smoke duels | `8d728f4f0e02850114eeb41cf1c34b0ea9ab338737e32dfa92c5d859248de2b0` |
+
+The Rust runner's line type (`citar_sim::BaselineLine`) reads every one of their lines back to the same JSON
+value, which a test checks. Every other run, the Rust ones included, stays out of git.
 
 **How a run is made.** Game *i* uses seed `--seed + i` and the *i*-th combination of `--sizes`, `--maps` and
 `--barbarians`. A run is resumable: games already in the output file are skipped, and a crashed game is played

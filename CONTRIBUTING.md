@@ -108,16 +108,18 @@ follows, and [crates/citar-engine/DESIGN.md](crates/citar-engine/DESIGN.md) the 
 `rust-toolchain.toml` pins the exact toolchain, and rustup installs it on first use. Then:
 
 ```bash
-cargo nextest run                                   # tests (cargo install cargo-nextest)
+cargo nextest run --workspace --exclude citar-py    # tests (cargo install cargo-nextest)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo xtask check                                   # layering, dependencies, version, and more
 cargo golden check                                  # determinism goldens
 cargo fmt --all
 ```
 
-These are what CI runs, on Linux, Windows and macOS. CI also lints the engine alone in each
-feature set, because the workspace build turns on features the shipped engine does not have
-(testkit enables `legacy` and `test-ops`). When you change what a feature gates, run
+These are what CI runs, on Linux, Windows and macOS. `citar-py` (the Python extension) has no
+Rust tests, since Python tests it, so the tests leave it out; clippy and the docs cover it, and
+building it needs a Python 3.11 or later on the `PATH` for PyO3. CI also lints the engine
+alone in each feature set, because the workspace build turns on features the shipped engine
+does not have (testkit enables `legacy` and `test-ops`). When you change what a feature gates, run
 `cargo clippy -p citar-engine --all-targets -- -D warnings` and again with
 `--no-default-features`. The later tools join the loop as they land:
 `cargo refcheck run --fixtures refcheck/fixtures-mini` (answers compared with the Python engine)

@@ -71,10 +71,17 @@ and the crate's README lists the rules a reviewer checks.
 | Crate | |
 |---|---|
 | `citar-engine` | The game. A library with no I/O, no threads, no clock, no C code and no `unsafe` |
+| `citar-bot` | The bots as compiled versions (`basic-1`, the port of `basic.py`, and `idle`) that play seats through the engine's `SeatDriver` |
+| `citar-sim` | The headless runner: whole games with a bot in every seat, `run_game`, the statistical baseline, the `citar-sim` CLI |
+| `citar-store` | Save files: the `.citar` v2 container and the append-only journal beside it |
+| `citar-py` | `citar._engine`, the Python extension the facade backs onto (PyO3, one abi3 build per OS) |
 | `citar-testkit` | Every integration test, the rule-script runner, `RandomAgent`, and the `golden`, `chaos` and `soak` tools |
 | `citar-refcheck` | Compares the engine's answers with the Python engine's on 262 recorded game states |
 | `citar-bench` | Benchmarks: wall clock on the laptop against hard budgets, instruction counts on every pull request |
-| `xtask` | `cargo xtask check`: allowed dependencies, layering, generated files up to date, nothing left unported |
+| `xtask` | `cargo xtask check`: allowed dependencies, the crate graph, layering, generated files up to date, nothing left unported |
+
+The Phase 2 crates (bot, sim, store, py) are being filled in during 0.1.6; their design is
+DESIGN.md's "Phase 2".
 
 Inside the engine each top-level module is a layer, which may use only the layers below it:
 `base` (ids, sets, the keyed RNG, maths, hex geometry), `rules` and `unique` (the compiled
