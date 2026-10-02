@@ -25,8 +25,12 @@ Stage 1 (2-01b): the empire's economy.
   * ``next_research``: in both modes, ``choose_research`` as if nothing were being researched: the free technology it
     would take (or null) and the first step of the path it would set (or null);
   * ``empire``: ``empire_choices`` (basic.py:1011-1039) without spies: the first policy it would adopt, the free great
-    person it would choose, the pantheon belief it would found (each null when there is none to take), and
-    ``preferred_policy``, the policy it would adopt if it could afford one (``policies.can_adopt_any`` patched true);
+    person it would choose, the pantheon belief it would found (each null when there is none to take);
+    ``preferred_policy``, the policy it would adopt if it could afford one (``policies.can_adopt_any`` patched true),
+    and ``preferred_pantheon``, the belief it would found a pantheon with if it could (``religion.can_found_pantheon``
+    patched to allow a major in a game with religion), so the two rankings are recorded on every state and not only
+    on the few turns a civilization can act on them. The free great person has no such variant: its only input is
+    the era, which ``context`` records;
   * ``cities``: for each city, its threat (from the context), ``city_defense``, ``in_danger`` and ``needs_garrison``;
   * ``sites``: ``expansion_sites``, best first, as [x, y];
   * ``spare``: ``_spare_units``' unit ids, in order.
@@ -42,6 +46,13 @@ Stage 3 (2-05): diplomacy.
   * ``reachable``: ``_reachable_city`` for every other living major, by its id: a city id or null;
   * ``lux_trade``: the negotiations ``trade_luxuries`` would open (``to``, ``give``, ``receive``), in order;
   * ``advice``: ``advice`` without a negotiation, and with each open negotiation the civilization is a party to.
+    The states are saved at a turn's start and hold none; with one, only ``deal_value`` changes, and it is
+    ``round(evaluate(...), 1)`` of the proposal, which refcheck's ``deal_checks`` holds as ``bot_value``.
+
+The choices are compared as agreement rates over the items where either engine's answer says something (a choice
+that is not null, a list that is not empty, a flag that is true; P2.3.11), so a port that never answers cannot pass
+on the items where Python did. The script prints each choice's base rate: the items whose answer says something, of
+those asked (``CHOICES``).
 
 A question that raises is recorded as ``{"error": ...}`` and counted; the script then exits 1.
 """
@@ -63,7 +74,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import common
 from citar.bots.basic import BasicBot, _is_recon, _ud
-from citar.engine import policies, research
+from citar.engine import policies, religion, research
 from citar.engine import testops
 
 OUT = ROOT / "refcheck" / "bot_decisions.json.gz"
@@ -126,6 +137,19 @@ def any_policy_affordable():
 
 
 @contextlib.contextmanager
+def any_pantheon_affordable():
+    """``religion.can_found_pantheon`` allows any major civilization in a game with religion, whatever its faith and
+    whether it has a religion already; the bot itself still looks for a belief nobody has taken."""
+    real = religion.can_found_pantheon
+    religion.can_found_pantheon = lambda g, pid: None if g.religion_enabled and g.player(pid).kind == "major" \
+        else "not a question here"
+    try:
+        yield
+    finally:
+        religion.can_found_pantheon = real
+
+
+@contextlib.contextmanager
 def nothing_researched():
     """``research.current`` answers None, so choose_research decides as if the queue were empty."""
     real = research.current
@@ -182,13 +206,15 @@ def empire(g, pid):
     pantheon = rec.made("found_pantheon")
     g.clear_static()
     rec = Recorder()
-    with any_policy_affordable():
+    with any_policy_affordable(), any_pantheon_affordable():
         rec.bot.empire_choices(g, pid, rec.bot.context(g, pid))
     preferred = rec.made("adopt_policy")
+    preferred_pantheon = rec.made("found_pantheon")
     return {"policy": policy[0]["policy"] if policy else None,
             "preferred_policy": preferred[0]["policy"] if preferred else None,
             "great_person": person[0]["great_person"] if person else None,
-            "pantheon": pantheon[0]["belief"] if pantheon else None}
+            "pantheon": pantheon[0]["belief"] if pantheon else None,
+            "preferred_pantheon": preferred_pantheon[0]["belief"] if preferred_pantheon else None}
 
 
 def cities(g, pid):
@@ -362,6 +388,51 @@ def counts(doc: dict) -> dict:
     return out
 
 
+def _says(v) -> bool:
+    """Whether one item's answer says something: a choice that is not null, a list that is not empty, a true flag."""
+    return v not in (None, [], False, {})
+
+
+def _each(m: dict, kind: str):
+    """The answer of one kind, or nothing when the question raised."""
+    v = m.get(kind)
+    return None if isinstance(v, dict) and "error" in v else v
+
+
+#: The choices an agreement rate is computed over, with the item each compares (P2.3.11): for one major's answers,
+#: the items as (key, answer). Values (tech values, defences, threats, the context's numbers) are compared with a
+#: tolerance instead.
+CHOICES = {
+    "next_research.tech": ("civilization and mode", lambda m: [
+        (mode, (_each(m, "next_research") or {}).get(mode, {}).get("tech")) for mode in ("classic", "potential")]),
+    "next_research.free": ("civilization and mode", lambda m: [
+        (mode, (_each(m, "next_research") or {}).get(mode, {}).get("free")) for mode in ("classic", "potential")]),
+    **{f"empire.{k}": ("civilization", lambda m, k=k: [(k, (_each(m, "empire") or {}).get(k))])
+       for k in ("policy", "preferred_policy", "great_person", "pantheon", "preferred_pantheon")},
+    "cities.danger": ("city", lambda m: [(c["city"], c["danger"]) for c in _each(m, "cities") or []]),
+    "cities.garrison": ("city", lambda m: [(c["city"], c["garrison"]) for c in _each(m, "cities") or []]),
+    "sites (top 3 as a set)": ("civilization", lambda m: [("sites", (_each(m, "sites") or [])[:3])]),
+    "spare": ("civilization", lambda m: [("spare", _each(m, "spare"))]),
+    "attacks": ("unit", lambda m: [(a["unit"], a["target"]) for a in _each(m, "attacks") or []]),
+    "war_target": ("civilization", lambda m: [("war_target", _each(m, "war_target"))]),
+    "reachable": ("rival", lambda m: list((_each(m, "reachable") or {}).items())),
+    "lux_trade": ("civilization", lambda m: [("lux_trade", _each(m, "lux_trade"))]),
+    "advice.wants": ("civilization", lambda m: [("wants", ((_each(m, "advice") or {}).get("none") or {}).get("wants"))]),
+}
+
+
+def rates(doc: dict) -> dict:
+    """For each choice: what it compares, the items whose answer says something, and the items asked."""
+    out = {c: {"item": item, "saying": 0, "asked": 0} for c, (item, _) in CHOICES.items()}
+    for s in doc["states"]:
+        for m in s["majors"]:
+            for c, (_, items) in CHOICES.items():
+                for _, v in items(m):
+                    out[c]["asked"] += 1
+                    out[c]["saying"] += _says(v)
+    return out
+
+
 def main(argv=None):
     common.ensure_hash_seed()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -379,6 +450,9 @@ def main(argv=None):
     body = text(doc)
     for kind, n in counts(doc).items():
         print(f"  {kind}: {n['asked']} asked, {n['answered']} saying something, {n['items']} items")
+    print("base rates of the choices (items whose answer says something, of those asked):")
+    for choice, n in rates(doc).items():
+        print(f"  {choice}: {n['saying']} of {n['asked']} (by {n['item']})")
     if errors:
         print(f"{len(errors)} questions raised:", *errors, sep="\n  ")
     if args.check:

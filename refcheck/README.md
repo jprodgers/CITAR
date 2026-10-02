@@ -287,7 +287,7 @@ The kinds, by the package of the port that is checked against them:
 | 1 (2-01b) | `context` | the turn's context: army target, supply, gold per turn, happiness, era, wars, offense, exposed cities, luxuries owned, resources pending, hostile units, the military |
 | | `tech_values` | the value of every technology it lacks, in both modes (`classic`, `potential`) |
 | | `next_research` | in both modes, the free technology it would take and the first step it would research, as if nothing were being researched |
-| | `empire` | the policy it would adopt now, the one it would adopt if it could afford one, its free great person and its pantheon |
+| | `empire` | the policy it would adopt now and the one it would adopt if it could afford one, its free great person, its pantheon now and the one it would found if it could |
 | | `cities` | each city's threat, defence, danger and need of a garrison |
 | | `sites` | the expansion sites, best first |
 | | `spare` | the spare units, in the order they would be disbanded |
@@ -295,12 +295,19 @@ The kinds, by the package of the port that is checked against them:
 | | `war_target` | at war, the target city, the rally point, `advance` and `siege_ready`; else null |
 | 3 (2-05) | `reachable` | the rival city it could attack, by rival |
 | | `lux_trade` | the luxury trade it would offer |
-| | `advice` | its advice, without a negotiation and with each open one |
+| | `advice` | its advice, without a negotiation and with each open one (the states hold none: they are saved at a turn's start) |
 
 Values are compared with refcheck's numeric tolerance; choices are reported as agreement rates by `cargo
-refcheck bot-agreement`, with a floor of 95% per kind (P2.3.11). On the committed states the file has 38
-civilizations; the script prints, for each kind, how many civilizations it asked, how many answers say
-something (not null or empty), and the items they hold.
+refcheck bot-agreement`, with a floor of 95% per kind (P2.3.11). A choice's rate counts only the items
+(civilizations, cities, units, rival pairs) where either engine's answer says something: a choice that is
+not null, a list that is not empty, a flag that is true. Most answers are empty on most items, and a rate
+over every item would let a port that never answers pass.
+
+On the committed states the file has 38 civilizations. The script prints, for each kind, how many
+civilizations it asked, how many answers say something, and the items they hold; then each choice's base
+rate, the items saying something of those asked (`CHOICES` in the script). Advice about a negotiation
+differs from advice without one only in `deal_value`, the bot's `evaluate` of the proposal, rounded, which
+`deal_checks`' `bot_value` holds.
 
 ## The statistical baseline
 
