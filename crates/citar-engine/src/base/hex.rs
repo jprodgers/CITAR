@@ -89,7 +89,7 @@ const CUBE_DIRS: [(i32, i32); 6] = [(1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), 
 pub const NO_TILE: u32 = u32::MAX;
 
 /// Cube coordinates: `q` and `r`, with `s = -q - r` implied.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Cube {
     pub q: i32,
     pub r: i32,
@@ -362,7 +362,19 @@ impl HexGrid {
         if !self.contains(a) || !self.contains(b) {
             return u32::MAX;
         }
-        let (ca, cb) = (self.cube(a), self.cube(b));
+        self.distance_to_cube(a, self.cube(b))
+    }
+
+    /// [`distance`](Self::distance) from tile `a` to the tile whose cube coordinates are `cb`
+    /// ([`cube`](Self::cube)), for a search that measures many tiles against one target:
+    /// `u32::MAX` if `a` is off the map.
+    #[must_use]
+    #[inline]
+    pub fn distance_to_cube(&self, a: TileIdx, cb: Cube) -> u32 {
+        if !self.contains(a) {
+            return u32::MAX;
+        }
+        let ca = self.cube(a);
         let (dq, dr) = (cb.q - ca.q, cb.r - ca.r);
         let mut best = u32::MAX;
         for &(sq, sr) in self.shifts() {

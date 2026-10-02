@@ -236,6 +236,11 @@ pub struct Mover<'g> {
     pub prof: Profile,
     pub civ: CivMove,
     pub barbarian: bool,
+    /// A land unit that may not move on water: a step between land and water embarks or
+    /// disembarks it, which every step of a search asks first.
+    pub(crate) embarks: bool,
+    /// It has a `Double movement in [...]` unique, which a look at a tile asks after.
+    pub(crate) doubled: bool,
     /// Whose territory it may enter (`Game::can_enter_territory`, by owner).
     pub(crate) enter: PlayerSet,
     /// Who it is at war with.
@@ -299,6 +304,8 @@ impl<'g> Mover<'g> {
     ) -> Option<Self> {
         let def = g.rules().base_units().get(base)?;
         let parts = super::memo::civ_parts(g, p)?;
+        let embarks = def.domain == Domain::Land && !prof.on_water;
+        let doubled = !prof.doubles.is_empty();
         Some(Self {
             g,
             rules,
@@ -310,6 +317,8 @@ impl<'g> Mover<'g> {
             prof,
             civ: parts.civ.clone(),
             barbarian: g.is_barbarian(p),
+            embarks,
+            doubled,
             enter: parts.enter,
             war: g.state().diplo().war_mask(p),
             city_states: parts.city_states,

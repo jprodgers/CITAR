@@ -10,9 +10,9 @@
 
 use super::ALL;
 use super::class::{DoubleOn, Mover};
-use super::node::governing;
-use crate::base::ids::TileIdx;
-use crate::rules::defs::{Domain, Route, TerrainType};
+use super::node::Ground;
+use crate::base::ids::{TerrainId, TileIdx};
+use crate::rules::defs::Route;
 use crate::state::map::Tile;
 use crate::unique::Ctx;
 
@@ -86,7 +86,7 @@ impl Mover<'_> {
         zoc: Option<&crate::base::sets::BitSet>,
     ) -> i32 {
         let sc = self.rules.scale;
-        if self.def.domain == Domain::Land && fa.land != fb.land && !self.prof.on_water {
+        if self.embarks && fa.land != fb.land {
             return if fb.land { self.prof.disembark } else { self.prof.embark }.unwrap_or(ALL);
         }
         if let Some(z) = zoc
@@ -119,7 +119,7 @@ impl Mover<'_> {
     /// What a step needs to know of tile `t`; `None` off the map.
     pub(crate) fn facts(&self, t: TileIdx) -> Option<Facts> {
         let tile = self.g.tile(t)?;
-        Some(self.facts_on(t, tile, self.g.city_at(t)))
+        Some(self.facts_on(t, tile, self.g.city_at(t), Ground::of(self.g, tile)))
     }
 
     /// Whether the mover may route through tile `t` on its way elsewhere
@@ -128,16 +128,22 @@ impl Mover<'_> {
     pub(crate) fn look(&self, t: TileIdx) -> Option<(bool, Facts)> {
         let tile = self.g.tile(t)?;
         let city = self.g.city_at(t);
-        let pass = self.passable_on(t, tile, city.map(crate::state::cities::City::owner), None);
-        Some((pass, self.facts_on(t, tile, city)))
+        // Its terrain, read once for both.
+        let ground = Ground::of(self.g, tile);
+        let owner = city.map(crate::state::cities::City::owner);
+        let pass = self.passable_ground(t, tile, owner, None, ground);
+        Some((pass, self.facts_on(t, tile, city, ground)))
     }
 
-    /// The facts of tile `t`, given what is on it.
+    /// The facts of tile `t`, given what is on it and its [`Ground`]. Inlined into
+    /// [`look`](Self::look), the first look of every tile a search meets.
+    #[inline(always)]
     fn facts_on(
         &self,
         t: TileIdx,
         tile: &Tile,
         city: Option<&crate::state::cities::City>,
+        ground: Ground,
     ) -> Facts {
         let g = self.g;
         let own = if tile.route_pillaged() { None } else { tile.route() };
@@ -155,31 +161,36 @@ impl Mover<'_> {
             Some(o) if self.at_war(o) => self.extra(o),
             _ => 0,
         };
-        let water = g.rules().terrains()[tile.terrain()].kind == TerrainType::Water;
         Facts {
-            land: !water || city.is_some(),
+            land: !ground.water || city.is_some(),
             rail: route == Some(Route::Railroad),
             conn,
             river: tile.river_mask(),
             extra,
-            terrain: self.terrain_cost(t, tile, city.is_some(), extra),
+            terrain: self.terrain_cost(t, tile, city.is_some(), extra, ground.gov),
         }
     }
 
     /// Entering tile `b` over its terrain (`movement.py:362-377`), `extra` included where Python
-    /// added it.
-    fn terrain_cost(&self, b: TileIdx, tb: &Tile, city: bool, extra: i32) -> i32 {
+    /// added it; `gov` is the terrain that governs it.
+    #[inline(always)]
+    fn terrain_cost(&self, b: TileIdx, tb: &Tile, city: bool, extra: i32, gov: TerrainId) -> i32 {
         let g = self.g;
         let r = g.rules();
         let sc = self.rules.scale;
         let terrain_cost =
-            if city { sc } else { r.terrains()[governing(g, tb)].movement_cost.saturating_mul(sc) };
+            if city { sc } else { r.terrains()[gov].movement_cost.saturating_mul(sc) };
         let half = terrain_cost / 2 + extra;
         let features = tb.features();
         let doubles = &self.prof.doubles;
-        if doubles.iter().any(|d| {
-            matches!(d.on, DoubleOn::Feature(f) if features.contains(f)) && self.double_holds(d, b)
-        }) {
+        // Most units move double nowhere: the three checks of it are skipped together.
+        let doubled = self.doubled;
+        if doubled
+            && doubles.iter().any(|d| {
+                matches!(d.on, DoubleOn::Feature(f) if features.contains(f))
+                    && self.double_holds(d, b)
+            })
+        {
             return half;
         }
         if self.prof.rough_penalty && rough(g, tb) {
@@ -187,6 +198,9 @@ impl Mover<'_> {
         }
         if features.contains(self.rules.hill) && self.civ.hill_ignore {
             return sc + extra;
+        }
+        if !doubled {
+            return terrain_cost + extra;
         }
         if doubles.iter().any(|d| {
             matches!(d.on, DoubleOn::Base(t) if t == tb.terrain()) && self.double_holds(d, b)
