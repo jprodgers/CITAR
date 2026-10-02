@@ -47,6 +47,10 @@ env.example text eol=lf
 *.bat       text eol=crlf
 *.cmd       text eol=crlf
 
+# The Python baselines (DESIGN.md P2.4.3), byte for byte as the laptop wrote them, CRLF and all:
+# nothing can write them again once the Python engine is gone.
+refcheck/baseline/python/*.jsonl -text
+
 # Never touched
 *.png  binary
 *.jpg  binary
