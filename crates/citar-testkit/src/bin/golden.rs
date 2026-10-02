@@ -112,7 +112,10 @@ fn dump_options<'a>(args: &[&'a str]) -> Result<(Option<Turn>, Option<&'a str>),
 }
 
 fn check(long: bool, out: Option<&str>, states: Option<&str>) -> ExitCode {
-    divergence::set_dir(states.map(PathBuf::from));
+    if let Err(e) = divergence::set_dir(states.map(PathBuf::from)) {
+        eprintln!("golden: {e}");
+        return ExitCode::from(2);
+    }
     let mut reports = golden::check_all();
     if long {
         reports.extend(golden::check_long());

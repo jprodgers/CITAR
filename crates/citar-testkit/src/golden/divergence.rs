@@ -7,7 +7,9 @@
 //!   digest for that round ([`Watch`]); at the first round that differs it writes the state as
 //!   it ended that round, and the state of the round before (the last that agreed), as save JSON
 //!   (format v1, `Snapshot::to_json`). The single-state sets (`newgame`, `load`) write the state
-//!   of a row that differs. Each file written is listed in `DIR/divergence.jsonl`.
+//!   of a row that differs. Each file written is listed in `DIR/divergence.jsonl`. Each check
+//!   starts the list afresh: the list a check before it left in the folder, and the states that
+//!   list names, are removed first, so a folder used twice lists only the last check's states.
 //! - `golden dump SET:GAME [TURN]` plays a game of a set on this machine and writes its state as
 //!   that round ended ([`super::dump`]): the same state from a target that agrees with the file.
 //! - `golden diff A B` with two states lists the places they differ, exactly
@@ -30,11 +32,48 @@ use serde_json::{Value, json};
 /// The folder the check writes divergent states to, if it was given one.
 static DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// Sets the folder `golden check` writes divergent states to, or none.
-pub fn set_dir(dir: Option<PathBuf>) {
-    if let Ok(mut d) = DIR.lock() {
-        *d = dir;
+/// The list of the states a check wrote, in its folder.
+const LIST: &str = "divergence.jsonl";
+
+/// Sets the folder `golden check` writes divergent states to, or none. A folder given starts
+/// afresh: the list a check before left there and the states it names are removed.
+///
+/// # Errors
+/// A list or a state it names that is there but cannot be read or removed.
+pub fn set_dir(dir: Option<PathBuf>) -> Result<(), String> {
+    if let Some(d) = &dir {
+        clear(d)?;
     }
+    if let Ok(mut slot) = DIR.lock() {
+        *slot = dir;
+    }
+    Ok(())
+}
+
+/// Removes the list a check left in `dir`, and the states it names: only plain file names in
+/// the folder, as [`file_name`] makes them, so a list edited by hand removes nothing outside it.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types, reason = "the artifacts are files")]
+fn clear(dir: &Path) -> Result<(), String> {
+    use std::io::ErrorKind;
+    let list = dir.join(LIST);
+    let text = match std::fs::read_to_string(&list) {
+        Ok(t) => t,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", list.display())),
+    };
+    let named = text.lines().filter_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        v.get("file")?.as_str().map(str::to_owned)
+    });
+    for file in named
+        .filter(|f| f.ends_with(".json") && !f.starts_with('.') && !f.contains(['/', '\\', ':']))
+    {
+        match std::fs::remove_file(dir.join(&file)) {
+            Err(e) if e.kind() != ErrorKind::NotFound => return Err(format!("{file}: {e}")),
+            _ => {}
+        }
+    }
+    std::fs::remove_file(&list).map_err(|e| format!("{}: {e}", list.display()))
 }
 
 /// The folder divergent states go to, if one was set.
@@ -67,9 +106,9 @@ fn write(dir: &Path, entry: &Value, file: &str, snapshot: &Snapshot) -> Result<(
     let mut list = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("divergence.jsonl"))
-        .map_err(|e| format!("divergence.jsonl: {e}"))?;
-    writeln!(list, "{entry}").map_err(|e| format!("divergence.jsonl: {e}"))
+        .open(dir.join(LIST))
+        .map_err(|e| format!("{LIST}: {e}"))?;
+    writeln!(list, "{entry}").map_err(|e| format!("{LIST}: {e}"))
 }
 
 /// Writes the state of a single-state set's row that differs from the committed file (`newgame`,

@@ -224,11 +224,34 @@ fn a_game_that_leaves_its_file_leaves_its_state_where_it_does() {
         .find(|r| r[0] == name.as_str() && r[1] == 7)
         .expect("round 7");
     at[2] = serde_json::Value::from("0".repeat(64));
-    divergence::set_dir(Some(dir.clone()));
-    assert!(Watch::new("random", &name, Watch::rows_of(Some(&rows), &name)).is_some());
-    let p = played("random", &play, &[], Some(&rows));
-    divergence::set_dir(None);
-    assert!(p.problems.is_empty(), "{:?}", p.problems);
+    // What an earlier check left in the folder: its list, a state it names, and a file it does
+    // not name. Each check starts the list afresh, and removes no file the list does not name.
+    #[allow(clippy::disallowed_methods, reason = "a scratch folder")]
+    {
+        std::fs::create_dir_all(&dir).expect("the folder");
+        std::fs::write(
+            dir.join("divergence.jsonl"),
+            "{\"file\": \"stale.json\"}\n{\"file\": \"../outside.json\"}\n",
+        )
+        .expect("a stale list");
+        std::fs::write(dir.join("stale.json"), "{}").expect("a stale state");
+        std::fs::write(dir.join("notes.txt"), "kept").expect("a file of the user's");
+    }
+    let rerun = || {
+        divergence::set_dir(Some(dir.clone())).expect("the folder starts afresh");
+        assert!(Watch::new("random", &name, Watch::rows_of(Some(&rows), &name)).is_some());
+        let p = played("random", &play, &[], Some(&rows));
+        divergence::set_dir(None).expect("no folder");
+        assert!(p.problems.is_empty(), "{:?}", p.problems);
+    };
+    rerun();
+    // A second check into the same folder lists its own states, not the first's as well.
+    rerun();
+    #[allow(clippy::disallowed_methods, reason = "a scratch folder")]
+    {
+        assert!(!dir.join("stale.json").exists(), "the stale state went with its list");
+        assert!(dir.join("notes.txt").exists(), "a file no list names stays");
+    }
     #[allow(clippy::disallowed_methods, reason = "the artifacts are files")]
     let list = std::fs::read_to_string(dir.join("divergence.jsonl")).expect("the list");
     let entries: Vec<serde_json::Value> =
