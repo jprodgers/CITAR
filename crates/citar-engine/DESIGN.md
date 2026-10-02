@@ -9,6 +9,8 @@
 
 A critic then reviewed the merged design. I checked every finding against the code at `4b5a912`. The accepted findings are folded into the body. Where I rejected a finding or changed it, Appendix A says why.
 
+**Phase 1 is complete** (package 1e-04, 2026-10-02). Every exit criterion of §1.3 holds; the evidence is in "As built in 1e-04" after §1.3's table. The "As built" notes through the document record what each package built where it differs from or adds to the design.
+
 **Sources:**
 - `ops/plan-0.1.6.md`, including the 2026-09-23 revision: no bit parity, stability and speed first, fix Python bugs rather than port them, deterministic across platforms from day one;
 - `ops/phase0-spec.md`;
@@ -109,6 +111,43 @@ The plan's §7 exit, made concrete:
 | Determinism | every golden set identical on 5 targets, under both the `ci` and `release` profiles, and in `same_process_twice` |
 | Engine-only speed | §10 gates: a pass round at least 20x faster than Python on every corpus state, god view within 20 ms, snapshot lock within 100 ms on gargantuan |
 | Nothing left pending | no `NotPorted` error and no `Pending` stage remains (`cargo xtask check`) |
+
+**As built in 1e-04: the Phase 1 exit** (§1.3, §3.4 rule 4, §9.2, §9.3; Appendix B). Every criterion of the table holds. The evidence below is from local runs at this package's head and from CI's runs at its base, `d4e2a94` (v0.1.6). The head differs from the base only in tests, docs, the refcheck tool and one enum variant nothing used, so no game, golden digest or measure moves between the two.
+- **Refcheck** (scope 1, gate 1). `cargo refcheck run --fixtures refcheck/fixtures-mini --fixtures refcheck/fixtures-late --fixtures refcheck/corpus --strict` loads the 262 states (9, 3 and 250) and compares all 14 groups, every one enforced: 0 unexplained, 0 stale, exit 0, in about 19 s on the laptop. `cargo refcheck ratchet` holds, with every group at 0. The 3,701 explained differences come from the 11 entries of `refcheck/intended.toml`, each used: the Marble pair 2,530, `civilians-at-zero-health` 630, `refusals-end-as-sentences` 262, `briefing-names-only-known-players` 149, `city-view-rounds-its-own-sums` 58, `briefing-nearby-reads-what-it-knows` 39, `refusal-lists-capped` 18, `briefing-lists-only-cities-it-could-have-seen` 10, `combat-modifiers-in-ruleset-order` 4, `gold-per-turn-rounds-a-sum-at-a-half` 1.
+  - **The two stale entries.** At the base the run had nothing unexplained and two stale entries: 1a-07's `building-conditionals-read-a-filter` and `no-civ-adopted-counts-beliefs`, written before their groups had answer modules, with broad `buildable` paths. No state can show either. The shipped ruleset names a building in every building conditional (`<if [Apollo Program] is constructed>`, `<if [Monument] is constructed in all [non-[Puppeted]] cities>`), and it never uses `<if no Civilization has adopted []>`. Both entries moved to `tests/rules/intended.toml`, beside 1a-07's other conditional fixes, and `tests/engine/eval.rs` shows them:
+    - `the_building_conditionals_read_a_building_filter` (new) reads `[Wonder]` and `[Culture]` in four building conditionals;
+    - the conditional table's case for `<if no Civilization has adopted [Ancestor Worship]>` fails on another major's belief, and now cites its entry.
+
+    The rule from here on: an entry of `refcheck/intended.toml` must explain something on the recorded states. A deliberate difference no group shows goes in the scripts' list, with the script or test that shows it.
+  - **Citations.** All 98 entries of the two lists are cited in the engine as `// refcheck: <id>`. citar-refcheck's repository test `the_repository_lists_are_well_formed_and_cited` replaces the scripts-only one. It covers both lists, reads a citation's id whole (so an id that starts a longer one is not cited by it), and fails on a citation that names no entry. Neither kind existed.
+  - **The changelog.** `cargo refcheck changelog --write` writes both lists between two marker lines of `CHANGELOG.md` (`intended::CHANGELOG_BEGIN` and `CHANGELOG_END`; anything but one of each, on lines of their own and in order, is refused). `--check` exits 1 while the file lags, and so does the repository test `the_repository_changelog_lists_the_rule_fixes`. The Unreleased section's Fixed list now holds the 98 rule fixes, after a paragraph saying what they are.
+- **Nothing pending** (scope 2, gate 3). No marker was left: 1d-02 and 1d-03 replaced the last two. `ErrCode::NotPorted`, which nothing has returned since, is removed, and `xtask/check.toml` turns `not_ported.forbid` on, which xtask's test of the committed file pins. `cargo xtask check` reports 247 files, 0 `NotPorted` and 0 `Pending`, all clear; any marker, or any path to the variant, now fails it. `game::Porting` and the `pending`/`pending_or` helpers stay: the stage tables use the type, and a later port's marker would be refused by the check anyway.
+- **Docs** (scope 3).
+  - `docs/ARCHITECTURE.md` gains "The Rust engine (0.1.6)": the crates and layers, the compiled ruleset, the support scope, state, writes and the self-validating memos, the two committed values, the settle, determinism, how the engine is checked and where to change it.
+  - `docs/MODDING.md`'s Rust section now covers: every supported type is implemented (fourteen are inert, as in Python); how strictly a mod's JSON and uniques are read; the rules that read differently (now with the Marble and timed-unique fixes); what the committed happiness and the settle mean for a mod; and the steps to add a type, its conditional's dependencies included.
+  - `refcheck/README.md`, the engine's README and the scripts' list's header follow.
+  - `mkdocs build --strict` and `scripts/check_links.py` pass.
+- **The exit criteria** (scope 4, gate 2):
+  - *Refcheck clean*: above.
+  - *Rule tests*: the 142 scripts and `_selftest` pass on Rust (the 143 trials of `tests/rules.rs`, in nextest on Windows and Linux). They pass on Python too (`tests/test_rule_scripts.py`, 150 tests with `normalize.json`'s cases, skipping the checks tagged `intended`). The plan asked for about 110.
+  - *No panics, no corruption.*
+    - **Properties at 10,000 cases.** At the head on Windows (nextest's `nightly` profile): P1 to P7 in 435 s, P8 in 944 s, and the other 19 (the pure properties, the seeded-bug hunts, the spec) in 47 s, all passing. At the base, nightly.yml's run 36990822403 passed the same three jobs (329 s, 883 s, 50 s).
+    - **Chaos.** At the base, nightly.yml ran 1,200 s on each OS with seed 1000001: ubuntu-latest 2,220 games, windows-latest 2,000, macos-latest 1,850, 0 failures. At the head: 1,200 s on Windows (seed 1605: 1,259 games, 739,337 steps) and on Linux under WSL beside the soak (seed 1604: 1,071 games, 643,403 steps), 0 failures; and 600 s from the corpus states (`--from-fixtures`, refcheck/README's laptop run: 119 games), 0 failures.
+    - **The soak.** 2,000 small games on Windows (seed 1604, six shards, 1,547 s): 631,042 rounds, 500 of the games on the kitchen sink (333 of those won before the limit). 0 failures and 0 panics; 2 outliers (rounds of 91 and 76 ms against medians near 10 ms, with the laptop fully loaded); peak heap 28.2 MiB. 200 larger games under WSL (seed 1605, five shards, 1,210 s): 50 each of standard (12 on the kitchen sink), large, huge and gargantuan, 65,263 rounds. 0 failures, 0 panics and 0 outliers; peak heap 126.8 MiB, a gargantuan game. The nightly run at the base also soaked 36 games on each OS, clean.
+  - *Determinism.* At the head, `golden check --long` on Windows x64 and Linux x64 (WSL), in the ci and release profiles, finds every set ok, the long one included. `golden_compare.py compare` over the four reports: every set identical and equal to the committed file. `same_process_twice` passes in nextest on both. At the base, determinism.yml's run 36990743395 is green on its six rows, and nightly.yml's golden-long and golden-compare found every set, long included, "identical on 6 targets and equal to the committed file": the five targets (macOS arm64 and x64, and linux-arm64 on real hardware, among them) and linux-x64 in release.
+  - *Engine-only speed*: the three citar-bench suites at the head, run one after another at High priority on core 0 with the corpus, once the laptop was quiet (no build, test or game running beside them). `cargo xtask perf --check`: every budget holds within the 1.5x hard limit (329 measures written; the 42 budgets and the 250 pass rounds gated).
+    - One measure is over its budget and within the limit, as 1e-03 accepted: `astar_small_30` at 25.8 µs against 20 µs (1.29x).
+    - Pass rounds on all 250 corpus states run at least 145x faster than Python's (`refcheck/perf/python-turns.json`; the lowest a duel at turn 1), against the floor of 20x. The slowest t280 rounds are 13.0 ms on small maps (backstop 150 ms) and 34.5 ms on large (backstop 400 ms). One round is over its target budget, within 1.5x: `small-pangaea-raging-s1026/t25` at 2.25 ms against 2 ms.
+    - The god view on the gargantuan state takes 10.1 ms (§1.1's 20 ms, target 12 ms), and the snapshot on gargantuan 0.68 ms (100 ms, target 10 ms).
+    - A whole small 330-round RandomAgent game takes 0.85 s (budget 10 s).
+  - *Nothing left pending*: above.
+  - **Also green at the head.**
+    - nextest on Windows: 1,141 passed and 2 skipped (the two ignored diagnostics), with the corpus and without it. nextest on Linux (WSL, a fresh clone): 1,141 passed and 2 skipped, without the corpus, as CI runs it.
+    - The doctests on both.
+    - Python: 608 OK (2 skipped).
+    - rust.yml's lint job, step by step: fmt; clippy for the workspace, for the engine in each of the six feature sets, and for the engine as it ships; the fuzz targets; `cargo xtask check`; the docs with `-D warnings`.
+- **The pull request** (scope 4). Worktree agents neither push nor write to GitHub, so the exit evidence for PR #5 is drafted for the merge, in the shape of the description's Phase 0 section: "Phase 1: the Rust engine (done)", at `C:/dev/target/p1e04/pr5-phase1.md`.
+- **Kitchen sink.** No extra unique type is staged for this package; the soak played the kitchen sink in 512 games. Deferred: none.
 
 ### 1.4 The load-bearing decisions
 
@@ -4007,4 +4046,6 @@ As built: `citar-bench`'s three suites (`kernels`, `turns`, `io`) pinned to core
 - **Gates:** (1) Full corpus, all 262 states, --strict: 0 unexplained, 0 stale, ratchet at 0.
 (2) Every Phase 1 exit criterion in design section 1.3 holds: rule scripts, stability (P1-P8), determinism and performance.
 (3) cargo xtask check reports zero NotPorted and zero Pending stages.
+
+As built: the strict run over the 262 states is clean (0 unexplained, 0 stale, every ratchet count 0) once the two stale entries of 1a-07, which no state can show, moved to `tests/rules/intended.toml` with a test that shows each; every entry of both lists is cited and every citation names one, both checked by a test; `cargo refcheck changelog --write` keeps CHANGELOG.md's 98 rule fixes; `ErrCode::NotPorted` is gone and `cargo xtask check` forbids any marker; ARCHITECTURE and MODDING describe the Rust engine. Gates 1 to 3 hold, gate 2 locally at the head (Windows and Linux) and in CI at its base on macOS and real linux-arm64 too; the PR text is drafted for the merge. See "As built in 1e-04" after §1.3.
 
