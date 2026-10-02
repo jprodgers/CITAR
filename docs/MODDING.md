@@ -85,7 +85,11 @@ can see both:
 - *Citizens are placed after each action and at fixed points of the turn*, in one step the engine
   calls the settle, until no city wants to change. A unique whose condition reads a city's own
   citizens (`<in cities with [2] [Specialists]>`) can make a city's best placement depend on the
-  placement; the engine then keeps the first placement the city comes back to.
+  placement; the engine then keeps the first placement the city comes back to. A settle takes at
+  most `SETTLE_PASSES` (8) passes, though: two neighbouring cities whose placements keep changing
+  each other's yields (with `<in tiles adjacent to [worked] tiles>`, say) stop there, each where
+  the last pass left it, and test builds report it as invariant SETTLE-1. So avoid uniques that
+  make neighbouring cities' best placements depend on each other.
 
 Everything else is computed when it is read and kept until something it depends on changes, so
 how often a value is asked for, or when, never changes the answer.

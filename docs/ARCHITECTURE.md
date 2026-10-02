@@ -123,8 +123,10 @@ together:
   both and both depend on citizens; committing them breaks the cycle, so placing citizens twice
   gives the same answer.
 
-The cache oracle rebuilds every cache cold and compares, at every settle in tests, rule scripts,
-chaos and the soak; a write with the wrong `Touch` fails it.
+The cache oracle rebuilds every cache cold and compares; a write with the wrong `Touch` fails it.
+It runs at every settle in the rule scripts and in the tests that turn every check on
+(`DebugOptions::ALL`), every 10 steps and after the last in the properties and chaos, and every
+50 rounds and at the end of each game in the soak.
 
 ### Settle
 
@@ -134,8 +136,10 @@ the **settle**, which runs at the end of every successful call and at fixed poin
 never after a refusal or a read. It brings sight up to date and applies what that reveals, then
 places the citizens of the cities flagged, pass after pass, until none is flagged. A city whose
 best placement depends on the placement itself (a ruleset can say so) stops at the first one it
-comes back to. Nothing is pending after a settle, so saves, digests and snapshots are taken only
-there, and pending work is never saved.
+comes back to. A settle takes at most `SETTLE_PASSES` (8) citizen passes: two cities whose
+placements keep changing each other's yields, with no placement that suits both, stop there as
+they stand, and a test build reports it as invariant SETTLE-1. Nothing is pending after a settle,
+so saves, digests and snapshots are taken only there, and pending work is never saved.
 
 So every action runs in three steps: it checks, on `&self`, and refuses before anything is
 written; it applies; it settles. A refused action changes nothing: no event, the same digest.
@@ -155,7 +159,7 @@ them on all five targets.
 |---|---|
 | Reference checks (`cargo refcheck`) | 262 game states recorded from the Python engine, loaded into the Rust engine and asked the same questions in 14 groups (yields, city stats, paths, combat odds, tool errors, views, briefings and more), every group enforced. A deliberate difference is listed in `refcheck/intended.toml` with its reason, and the code that makes it cites the entry |
 | Rule scripts (`tests/rules/`) | 142 TOML scripts over scenario operations, run by a Rust and a Python runner. Differences only a script or test shows are in `tests/rules/intended.toml` |
-| Invariants and the cache oracle | At every settle in every test build |
+| Invariants and the cache oracle | The invariants at every settle in every test build. The oracle at every settle in the rule scripts and the tests that set `DebugOptions::ALL`, every 10 steps and after the last in the properties and chaos, every 50 rounds and at the end in the soak |
 | Properties P1-P8, chaos, fuzzing and the soak | Random actions and whole random games, looking for panics, broken invariants, refusals that write and reads that change a game |
 | Golden sets (`cargo golden`) | Digests on five targets, in two build profiles |
 | Benchmarks (`cargo xtask perf`) | Hard budgets on the laptop; instruction counts on every pull request |
