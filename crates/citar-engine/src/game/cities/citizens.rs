@@ -319,26 +319,49 @@ impl Assignment {
 /// Where city `c`'s citizens would be put now (`cities.assign_citizens`, `cities.py:803-815`):
 /// its locks on tiles it can still work, then every free citizen to the best tile or specialist
 /// slot; with `reset`, its locks dropped first. Reads only.
+///
+/// A city with more citizens locked to tiles and set as specialists by hand than it has sheds
+/// the extra ones, a locked tile's lock with it (`unassign_extra`); a lock past its citizens,
+/// which no citizen worked, is then the next one worked, and shed in turn. Python placed the
+/// citizens once per refresh, so it shed one lock a refresh and the city moved at every one
+/// until enough were gone; here the placement goes on until no lock is shed, which is where
+/// those refreshes would end, so that placing the citizens again leaves them where they are
+/// (the citizen oracle, `verify`). It ends: each round sheds a lock or a specialist, or stops.
+// refcheck: citizens-shed-locks-at-once
 #[must_use]
 pub fn assign(g: &Game, c: CityId, reset: bool) -> Option<Assignment> {
     let city = g.city(c)?;
     let avail = cstats::workable_tiles(g, c);
-    let mut a =
-        Assignment { worked: Vec::new(), locked: Vec::new(), specialists: [0; MAX_SPECIALISTS] };
-    if !reset {
-        a.locked = city.locked.iter().copied().filter(|t| avail.contains(t)).collect();
-    }
-    a.worked = a.locked.iter().copied().take(usize::from(city.pop)).collect();
     let maxs = max_specialists(g, c);
+    let mut locked: Vec<TileIdx> = if reset {
+        Vec::new()
+    } else {
+        city.locked.iter().copied().filter(|t| avail.contains(t)).collect()
+    };
+    let mut specialists = [0; MAX_SPECIALISTS];
     if city.manual_specialists {
         for (i, &n) in city.specialists.iter().enumerate() {
             let cap = u8::try_from(i).ok().map_or(0, |s| slots(&maxs, SpecialistId(s)));
-            a.specialists[i] = u8::try_from(i32::from(n).min(cap).max(0)).unwrap_or(0);
+            specialists[i] = u8::try_from(i32::from(n).min(cap).max(0)).unwrap_or(0);
         }
     }
-    auto_assign(g, c, city, &avail, &maxs, &mut a);
-    a.worked.sort();
-    Some(a)
+    loop {
+        let mut a = Assignment {
+            worked: locked.iter().copied().take(usize::from(city.pop)).collect(),
+            locked: locked.clone(),
+            specialists,
+        };
+        auto_assign(g, c, city, &avail, &maxs, &mut a);
+        let shed = a.locked != locked || (city.manual_specialists && a.specialists != specialists);
+        if !shed {
+            a.worked.sort();
+            return Some(a);
+        }
+        locked = a.locked;
+        if city.manual_specialists {
+            specialists = a.specialists;
+        }
+    }
 }
 
 /// A tile a citizen could take: where it is, what it yields, its coordinates for ties, and what
@@ -652,12 +675,14 @@ pub fn verify(g: &Game) -> Vec<String> {
         let held = Assignment::of(city);
         if a != held && !comes_back(g, c, &held, a.clone()) {
             out.push(format!(
-                "city {}: its citizens are at {:?} with specialists {:?}, a fresh assignment at \
-                 {:?} with {:?}",
+                "city {}: its citizens are at {:?} (locked {:?}) with specialists {:?}, a fresh \
+                 assignment at {:?} (locked {:?}) with {:?}",
                 c.get(),
                 city.worked,
+                city.locked,
                 city.specialists,
                 a.worked,
+                a.locked,
                 a.specialists
             ));
         }

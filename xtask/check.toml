@@ -8,5 +8,6 @@ done = ["P1-00", "1a-01", "1a-02", "1a-03", "1a-04", "1a-05", "1a-05b", "1a-06",
 forbid_all = true
 
 [not_ported]
-# From 1e-04 on, any NotPorted error fails.
-forbid = false
+# From 1e-04 on, any NotPorted error fails, and so does any path to the variant: Phase 1 ported
+# every rule, and the variant itself is gone.
+forbid = true

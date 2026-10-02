@@ -18,7 +18,7 @@ and the dev loop.
 | Only refcheck, testkit and bench build the engine with `legacy`, which never ships | `cargo xtask check` |
 | One version for the Rust workspace and `citar/__init__.py` | `cargo xtask check` |
 | Layering, and who may call `State`'s mutable accessors | `cargo xtask check` |
-| Generated files up to date; no `Pending` stage or `NotPorted` left once its time has come | `cargo xtask check` ([xtask/check.toml](../../xtask/check.toml) holds the switches) |
+| Generated files up to date; no `Pending` stage and no `NotPorted` (Phase 1 ported every rule) | `cargo xtask check` ([xtask/check.toml](../../xtask/check.toml) holds the switches) |
 | The same RNG streams, maths bits and Python number formatting on all five targets, equal to the committed golden sets | `cargo golden check`, in the tests on three platforms and in [determinism.yml](../../.github/workflows/determinism.yml) on all five |
 | No `Change` discarded by `_ = g.set_x();`, `let _x = g.set_x();` or `drop(g.set_x())`, which no lint sees | review |
 | Everything below | review |
@@ -99,13 +99,13 @@ Each top-level module is a layer, and a layer may use only the layers listed for
 - Each module's doc comment names the Python lines it replaces, so a reviewer can put the two
   side by side.
 - Comments say why, not what.
-- A rule effect whose dependency is not ported yet returns `Err(NotPorted("combat::nuke"))`,
-  never `todo!()`. A turn or setup stage whose system is not ported yet is `Pending("<package>")`.
-- **Write a marker's argument as a string literal at the marker**, because `cargo xtask check`
-  counts markers by it: `NotPorted("combat::nuke")`, a helper named `not_ported("combat::nuke")`
-  (or `not_ported!`), `Porting::Pending("1b-05")`. A constant or a parameter passed through
-  fails the check; a helper under any other name would hide the marker, so it is a review item.
-  From 1e-04 any path to the variant, such as `ErrCode::NotPorted`, fails too.
+- Nothing is left unported. While Phase 1 ported the engine system by system, a rule effect whose
+  dependency was not ported yet returned `Err(NotPorted("combat::nuke"))`, never `todo!()`, and a
+  turn or setup stage whose system was not ported yet was `Pending("<package>")`. Since package
+  1e-04 `cargo xtask check` fails on any such marker, `NotPorted("..")`, a helper named
+  `not_ported("..")` (or `not_ported!`), `Porting::Pending("..")`, and on any path to the
+  `NotPorted` variant, which `ErrCode` no longer has. A new rule that is not finished does not
+  merge; a marker hidden behind another name or a constant is a review item.
 - Integration tests live in `crates/citar-testkit`; this crate has only `#[cfg(test)]` unit tests
   and doctests.
 

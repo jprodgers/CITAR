@@ -41,24 +41,10 @@
 #   where = [{ group = "city_stats", path = "cities[*].stats.total.gold" }]
 #   python = 0
 #
-# The entries below come before the answer modules of their groups (package 1a-07): their paths are the best
-# known places, to be tightened when those groups are compared.
-
-[[differences]]
-id = "building-conditionals-read-a-filter"
-reason = "Python's building conditionals (`if [x] is constructed`, `in cities with a [x]` and the rest) compared the text with building names, so `[Wonder]` or `[Culture]` never held; Rust reads the text as a building filter"
-where = [
-  { group = "buildable", path = "cities[*].items.*" },
-]
-broad = true
-
-[[differences]]
-id = "no-civ-adopted-counts-beliefs"
-reason = "Python's `if no Civilization has adopted [x]` read policies only, so a belief never counted as adopted; Rust counts beliefs too"
-where = [
-  { group = "buildable", path = "cities[*].items.*" },
-]
-broad = true
+# A deliberate difference no refcheck group shows on the 262 recorded states goes in tests/rules/intended.toml
+# instead, with the script or test that shows it: under --strict an entry here that explains nothing is an error.
+#
+# Package 1b-01: the game core, which loads Python states.
 
 [[differences]]
 id = "civilians-at-zero-health"

@@ -419,6 +419,7 @@ mod tests {
         assert_eq!(str_of(&json!(3.0)), "3.0");
     }
 
+    // refcheck: refusals-quote-at-most-60-characters
     #[test]
     fn a_quoted_value_is_cut_and_closed() {
         // Short values read as Python's repr.

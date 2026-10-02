@@ -317,6 +317,7 @@ fn open_borders_a_city_a_map_and_a_war_change_hands() {
 /// A war one side of a deal would declare on a civilization with a defensive pact with the other
 /// side is refused, proposed or accepted: the pact would put the deal's parties at war with the
 /// deal in force and close the chat being accepted (`deal-war-on-a-partners-pact-refused`).
+// refcheck: deal-war-on-a-partners-pact-refused
 #[test]
 fn a_deal_may_not_declare_war_on_the_other_sides_pact_partner() {
     let mut g = shipped(3);
@@ -460,6 +461,31 @@ fn deal_items_are_read_as_callers_write_them_and_categorised() {
         bad.message,
         "Deal items must be a list of objects like {\"type\": \"gold\", \"amount\": 50}."
     );
+}
+
+/// A resource or tech item that names nothing is refused with what it lacks and an item written
+/// right, where Python quoted the missing name as 'None'; a name that is wrong is still quoted.
+// refcheck: deal-items-name-what-they-trade
+#[test]
+fn a_deal_item_that_names_nothing_says_what_it_lacks() {
+    let g = shipped(2);
+    let refused = |items: Value| {
+        deals::make_proposal(&g, ME, YOU, Some(&items), None).expect_err("refused").message
+    };
+    assert_eq!(
+        refused(json!([{"type": "resource", "amount": 1}])),
+        "A resource item names its resource, like {\"type\": \"resource\", \"resource\": \
+         \"Iron\", \"amount\": 1}."
+    );
+    assert_eq!(
+        refused(json!([{"type": "tech", "tech": null}])),
+        "A tech item names its tech, like {\"type\": \"tech\", \"tech\": \"Writing\"}."
+    );
+    assert_eq!(
+        refused(json!([{"type": "resource", "resource": "Wheat"}])),
+        "'Wheat' is not a tradeable strategic or luxury resource."
+    );
+    assert_eq!(refused(json!([{"type": "tech", "tech": "Alchemy"}])), "Unknown tech 'Alchemy'.");
 }
 
 /// Typed items, as a bot or the host holds them, are checked as the same items written would

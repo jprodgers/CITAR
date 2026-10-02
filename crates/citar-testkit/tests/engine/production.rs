@@ -500,6 +500,7 @@ fn what_the_other_cities_build_is_read_as_the_list_is_lent() {
 
 // ---- What production keeps ---------------------------------------------------------------------
 
+// refcheck: increasing-cost-counts-what-was-built
 #[test]
 fn a_unit_with_no_room_waits_and_costs_no_more() {
     // `Cost increases by [n] when built` counts what was finished: a Warrior on an island city

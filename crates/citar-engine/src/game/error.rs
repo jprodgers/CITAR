@@ -41,8 +41,6 @@ pub enum ErrCode {
     Negotiation,
     /// A game rule refused it.
     Rule,
-    /// The rule behind it is not ported yet (DESIGN.md 3.4, rule 4).
-    NotPorted,
     /// The game stopped after an internal error and takes no more commands.
     Poisoned,
 }

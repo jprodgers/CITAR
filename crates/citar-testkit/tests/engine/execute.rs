@@ -162,6 +162,7 @@ fn preview_attack_answers_as_the_combat_preview_or_refuses_as_it_does() {
     assert!(text.starts_with("(-3,99) is off the map (map is "), "{text}");
 }
 
+// refcheck: tool-arguments-of-the-wrong-type-refused
 #[test]
 fn an_argument_the_action_cannot_read_is_refused_by_name() {
     let mut g = arena();
@@ -283,6 +284,7 @@ fn reads_badly(text: &str) -> Option<&'static str> {
     None
 }
 
+// refcheck: refusals-quote-at-most-60-characters
 #[test]
 fn a_name_too_long_is_quoted_back_in_part() {
     let name = "Zanzibar ".repeat(200);

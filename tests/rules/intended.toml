@@ -1,13 +1,19 @@
-# Deliberate differences that only the rule scripts can show: a check whose expected value is the
-# Rust engine's carries `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md).
+# Deliberate differences no refcheck group shows on the 262 recorded states, so a rule script or a
+# Rust test shows each instead, and names it there: a script check whose expected value is the
+# Rust engine's carries `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md);
+# a test that shows one cites it as `// refcheck: <id>`, or names it in a table as "<id>".
 # Differences a refcheck group shows belong in refcheck/intended.toml, which scripts may cite too.
-# `cargo refcheck changelog` lists both files as the changelog's rule fixes, so the reason is
-# written for a reader of the changelog, and an id may be in only one of them.
+# `cargo refcheck changelog --write` writes both files into CHANGELOG.md as its rule fixes, so the
+# reason is written for a reader of the changelog, and an id may be in only one of them.
 #
 # One [[differences]] table per entry, as in refcheck/intended.toml but without `where`:
 #   id      kebab-case and unique; the code that makes the fix cites it as `// refcheck: <id>`
-#           (citar-refcheck's tests check that every id here is cited in the engine)
 #   reason  one line: what Python did, and what Rust does instead
+#
+# citar-refcheck's tests check that every id of both files is cited in the engine's code (its
+# tests aside), and that every id here is named by a rule script or a test. Thirteen older entries
+# that no script or test names yet are spared, listed in `NAMED_BY_NO_TEST`
+# (crates/citar-refcheck/src/intended.rs); that list only shrinks.
 
 [[differences]]
 id = "atomic-apply-ops"
@@ -93,6 +99,18 @@ reason = "The share of luxury types a generated map keeps was interpolated over 
 id = "between-stat-scales-by-speed"
 reason = "Python scaled `when above/below [n] [stat]` by game speed on `(modified by game speed)` uniques but not the two bounds of `when between [a] and [b] [stat]`; Rust scales all three alike"
 
+# Package 1a-07's two other conditional fixes, moved here from refcheck/intended.toml by 1e-04: the
+# shipped ruleset names buildings in these conditionals and never asks whether no civilization has
+# adopted something, so no reference state shows either. tests/engine/eval.rs shows both.
+
+[[differences]]
+id = "building-conditionals-read-a-filter"
+reason = "Python's building conditionals (`if [x] is constructed`, `in cities with a [x]` and the rest) compared the text with building names, so `[Wonder]` or `[Culture]` never held; Rust reads the text as a building filter (no shipped unique uses a filter there)"
+
+[[differences]]
+id = "no-civ-adopted-counts-beliefs"
+reason = "Python's `if no Civilization has adopted [x]` read policies only, so a belief never counted as adopted; Rust counts beliefs too (no shipped unique uses the conditional)"
+
 [[differences]]
 id = "happiness-seen-committed"
 reason = "Python's conditionals and citizen ranking read a civilization's happiness live; Rust commits it at the start and the end of the civilization's turn and reads what was committed, so no call can make citizens flip back and forth"
@@ -121,6 +139,10 @@ reason = "Python placed a city's citizens again at the end of its turn when a ti
 [[differences]]
 id = "citizen-tools-list-tiles-sorted"
 reason = "work_tile, set_city_focus and set_specialists listed a city's worked and locked tiles in the order its citizens took them; Rust lists them by column and then row, as the city's own view does"
+
+[[differences]]
+id = "citizens-shed-locks-at-once"
+reason = "A city with more citizens locked to tiles and set as specialists by hand than it had shed one lock each time its citizens were placed, so they moved at every placement until enough locks were gone; Rust sheds them in one placement, where those placements would have ended"
 
 [[differences]]
 id = "cities-never-share-a-tile"

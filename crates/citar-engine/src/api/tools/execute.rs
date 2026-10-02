@@ -191,6 +191,7 @@ mod tests {
         }
     }
 
+    // refcheck: tool-arguments-of-the-wrong-type-refused
     #[test]
     fn a_name_that_is_no_text_is_refused_naming_the_parameter() {
         let spec = registry::tool("unit_order").expect("unit_order");

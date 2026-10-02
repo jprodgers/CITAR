@@ -39,39 +39,78 @@ Conditionals work the same way:
 
 The Rust engine in `crates/citar-engine` supports every unique type and conditional the Python
 engine handled. That is the 402 types the shipped ruleset uses and 125 more that other UnCiv
-rulesets use: 527 of UnCiv's 637 types. `crates/citar-engine/unique_supported.toml` lists them.
+rulesets use: 527 of UnCiv's 637 types. `crates/citar-engine/unique_supported.toml` lists them,
+the 125 marked `(extra)`, each with its role (a standing effect, a flag, a requirement, a one-time
+effect, a conditional, a trigger, ...) and the game systems that read it. Every one is
+implemented: each system reads the types that name it. Fourteen types the shipped ruleset uses are
+inert, as they were in the Python engine: they compile, and nothing reads them (the file gives
+each one's reason).
 
-The engine compiles every unique when the ruleset loads. A mod does not load at all if one of its
-uniques:
+**The ruleset is compiled when it loads.** Each unique is matched to its type once, and its
+parameters become typed values: a stat, an amount, an id, a compiled filter, a conditional. A
+game never reads unique text again. So a mod does not load at all if one of its uniques:
 
 - is misspelt;
 - has a parameter that does not read, such as a stat that does not exist, a name nothing has, or
   a number out of range (`Must be on [-1] largest landmasses`);
 - uses one of UnCiv's other 110 types.
 
-The error names the file, the object and what is wrong. Nothing is silently ignored.
+The JSON is read as strictly: an unknown or repeated field, an object whose `name` is not its
+key, or a reference to something that does not exist (a `requiredTech`, a unit's promotion) is an
+error too. Every error is reported at once, each naming the file, the object and what is wrong.
+Nothing is silently ignored.
 
-The 125 types the shipped ruleset does not use are marked `(extra)` in that file. They all
-compile now, and every conditional is evaluated. The other rules arrive with the parts of the engine
-that read them, as each game system is ported. A few conditionals read differently from the
-Python engine:
+**What reads differently from the Python engine.** A few rules a mod can meet:
 
 - the building conditionals take a building filter, so `<if [Wonder] is constructed>` works;
 - `<when between [a] and [b] [stat]>` scales both bounds by game speed on a unique
   `<(modified by game speed)>`, as `<when above>` and `<when below>` do;
 - `<if no Civilization has adopted []>` counts beliefs as well as policies;
-- `<vs [] units>` asks about units only; `<vs [City]>` is the one for cities.
+- `<vs [] units>` asks about units only; `<vs [City]>` is the one for cities;
+- a resource's `[in this city]` uniques hold in the city whose improved tile provides the
+  resource, not in every city of its owner;
+- a timed unique (`<for [10] turns>`) is granted whatever its other conditionals say, which then
+  decide, turn by turn, whether it applies.
 
-`refcheck/intended.toml` lists each of these with its reason.
+The CHANGELOG lists every rule the Rust engine reads differently, each with its reason, from
+`refcheck/intended.toml` and `tests/rules/intended.toml`.
 
-`crates/citar-testkit/testdata/rulesets/kitchen_sink/` is a small mod that uses every one of the
-125, so it has a worked example of each. Its files are JSON
-merge patches over the shipped ruleset files: an object in a patch is added, or merged into the one
-of the same name.
+**When rules are evaluated.** Two things follow from how the engine keeps its numbers, and a mod
+can see both:
 
-To support another UnCiv type, add its line to `unique_supported.toml`: its role, a name for each
-parameter, and the systems that read it. Then run `cargo xtask gen-uniques`, handle it where those
-systems read it, and test it.
+- *Conditionals that read happiness* (`<while the empire is happy>`, `<when above [5]
+  [Happiness]>`) read the value committed at the start and the end of the civilization's turn,
+  not the live one. Within a turn it does not move, so citizens cannot flip back and forth as
+  happiness crosses zero.
+- *Citizens are placed after each action and at fixed points of the turn*, in one step the engine
+  calls the settle, until no city wants to change. A unique whose condition reads a city's own
+  citizens (`<in cities with [2] [Specialists]>`) can make a city's best placement depend on the
+  placement; the engine then keeps the first placement the city comes back to. A settle takes at
+  most `SETTLE_PASSES` (8) passes, though: two neighbouring cities whose placements keep changing
+  each other's yields (with `<in tiles adjacent to [worked] tiles>`, say) stop there, each where
+  the last pass left it, and test builds report it as invariant SETTLE-1. So avoid uniques that
+  make neighbouring cities' best placements depend on each other.
+
+Everything else is computed when it is read and kept until something it depends on changes, so
+how often a value is asked for, or when, never changes the answer.
+
+**The worked example.** `crates/citar-testkit/testdata/rulesets/kitchen_sink/` is a small mod
+that uses every one of the 125 extra types, so it has an example of each, and the tests play it
+(whole games, in the soak). Its files are JSON merge patches over the shipped ruleset files: an
+object in a patch is added, or merged into the one of the same name.
+
+**Supporting another UnCiv type** takes code:
+
+1. Add its line to `unique_supported.toml`: its role, a name for each parameter, and the systems
+   that read it.
+2. Run `cargo xtask gen-uniques`, which writes `src/unique/gen.rs` (`cargo xtask check` fails
+   while that file is out of date).
+3. Handle it where those systems read it: an effect in the module of `src/game/` that owns the
+   system; a conditional in `src/unique/cond.rs`, both its answer and what it reads, its
+   dependencies. The caches that evaluate a conditional recompute when one of its dependencies
+   changes, so a dependency left out leaves a stale answer, which the cache oracle in the tests
+   reports.
+4. Use it in the kitchen-sink ruleset, and test it in `crates/citar-testkit`.
 
 ---
 
