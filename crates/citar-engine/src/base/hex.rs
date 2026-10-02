@@ -362,7 +362,7 @@ impl HexGrid {
         if !self.contains(a) || !self.contains(b) {
             return u32::MAX;
         }
-        self.distance_to_cube(a, self.cube(b))
+        self.cube_distance(self.cube(a), self.cube(b))
     }
 
     /// [`distance`](Self::distance) from tile `a` to the tile whose cube coordinates are `cb`
@@ -374,7 +374,13 @@ impl HexGrid {
         if !self.contains(a) {
             return u32::MAX;
         }
-        let ca = self.cube(a);
+        self.cube_distance(self.cube(a), cb)
+    }
+
+    /// The steps between two tiles of the map given by their cube coordinates, the short way
+    /// round on a wrapping map.
+    #[inline]
+    fn cube_distance(&self, ca: Cube, cb: Cube) -> u32 {
         let (dq, dr) = (cb.q - ca.q, cb.r - ca.r);
         let mut best = u32::MAX;
         for &(sq, sr) in self.shifts() {
