@@ -61,8 +61,11 @@ fn lock_lost<T>(_: &PoisonError<T>) -> String {
 /// codes (DESIGN.md P2.2.1).
 #[pyfunction]
 fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyBytes>> {
-    let info = citar_bot::build_info(Ruleset::shared());
-    let bytes = serde_json::to_vec(&info).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    // The first call in a process parses and compiles the embedded ruleset for its id, a heavy
+    // call, so it runs with the GIL released (DESIGN.md P2.6.2) like every other.
+    let bytes = py
+        .detach(|| serde_json::to_vec(&citar_bot::build_info(Ruleset::shared())))
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(PyBytes::new(py, &bytes))
 }
 
