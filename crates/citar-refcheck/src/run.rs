@@ -38,6 +38,8 @@ pub const INTENDED: &str = "refcheck/intended.toml";
 pub const SCRIPT_INTENDED: &str = "tests/rules/intended.toml";
 pub const ENFORCED: &str = "refcheck/enforced.toml";
 pub const RATCHET: &str = "refcheck/ratchet.json";
+/// The changelog, whose list of rule fixes `cargo refcheck changelog --write` keeps.
+pub const CHANGELOG: &str = "CHANGELOG.md";
 
 /// What to check.
 #[derive(Debug, Clone)]

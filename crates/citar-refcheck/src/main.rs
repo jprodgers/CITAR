@@ -5,13 +5,13 @@
 //! cargo refcheck explain <intended-id | group | group:path> [selection]
 //! cargo refcheck suggest [selection]
 //! cargo refcheck ratchet [--update]
-//! cargo refcheck changelog
+//! cargo refcheck changelog [--write | --check]
 //! cargo refcheck list [--fixtures DIR]... [--case GLOB]...
 //! ```
 //!
-//! Exit codes: 0 clean; 1 unexplained differences (or a ratchet that rose or is out of date); 2 a
-//! load failure, a bad configuration file or a usage error; 3 stale intended entries under
-//! `--strict`.
+//! Exit codes: 0 clean; 1 unexplained differences (or a ratchet that rose or is out of date, or a
+//! CHANGELOG whose rule fixes lag behind the intended lists); 2 a load failure, a bad configuration
+//! file or a usage error; 3 stale intended entries under `--strict`.
 
 #![forbid(unsafe_code)]
 
@@ -25,7 +25,9 @@ use citar_refcheck::answer::{Answers, Engine};
 use citar_refcheck::fixture::{self, Fixture, FixtureSet};
 use citar_refcheck::intended::{self, ScriptIntended};
 use citar_refcheck::ratchet::{Count, DEFAULT_FIXTURES, Ratchet};
-use citar_refcheck::run::{self, Config, INTENDED, RATCHET, RunOptions, SCRIPT_INTENDED};
+use citar_refcheck::run::{
+    self, CHANGELOG, Config, INTENDED, RATCHET, RunOptions, SCRIPT_INTENDED,
+};
 use citar_refcheck::{Error, Group, Result, report, suggest};
 
 #[derive(Parser)]
@@ -77,7 +79,14 @@ enum Command {
         update: bool,
     },
     /// Print the intended differences as the CHANGELOG's list of rule fixes
-    Changelog,
+    Changelog {
+        /// Write the list into CHANGELOG.md, between its rule-fix markers
+        #[arg(long, conflicts_with = "check")]
+        write: bool,
+        /// Exit 1 when CHANGELOG.md's list differs from the intended lists
+        #[arg(long)]
+        check: bool,
+    },
     /// List the fixtures, and the groups with their state
     List {
         #[arg(long = "fixtures", value_name = "DIR")]
@@ -152,17 +161,41 @@ fn execute(cli: Cli) -> Result<u8> {
             Ok(if run.load_failures.is_empty() { 0 } else { 2 })
         }
         Command::Ratchet { update } => ratchet(&root, update, &answers),
-        Command::Changelog => {
+        Command::Changelog { write, check } => {
             let config = Config::load(&root)?;
             let scripts = ScriptIntended::load(&root.join(SCRIPT_INTENDED))?;
             let text = intended::changelog(&config.intended, &scripts)?;
-            if text.is_empty() {
-                eprintln!(
-                    "refcheck: neither {INTENDED} nor {SCRIPT_INTENDED} lists a difference yet"
-                );
+            if !(write || check) {
+                if text.is_empty() {
+                    eprintln!(
+                        "refcheck: neither {INTENDED} nor {SCRIPT_INTENDED} lists a difference yet"
+                    );
+                }
+                print!("{text}");
+                return Ok(0);
             }
-            print!("{text}");
-            Ok(0)
+            let path = root.join(CHANGELOG);
+            let file = std::fs::read_to_string(&path)
+                .map_err(|e| Error::new(format!("cannot read {}: {e}", path.display())))?
+                .replace("\r\n", "\n");
+            let spliced =
+                intended::splice_changelog(&file, &text).map_err(|e| e.context(CHANGELOG))?;
+            let fixes = text.lines().count();
+            if spliced == file {
+                eprintln!("refcheck: {CHANGELOG} lists the {fixes} rule fixes");
+                Ok(0)
+            } else if check {
+                eprintln!(
+                    "refcheck: {CHANGELOG}'s rule fixes differ from the intended lists: run \
+                     `cargo refcheck changelog --write`"
+                );
+                Ok(1)
+            } else {
+                std::fs::write(&path, spliced)
+                    .map_err(|e| Error::new(format!("cannot write {}: {e}", path.display())))?;
+                eprintln!("refcheck: wrote the {fixes} rule fixes into {CHANGELOG}");
+                Ok(0)
+            }
         }
         Command::List { fixtures, cases } => list(&root, &fixtures, &cases, &answers),
     }

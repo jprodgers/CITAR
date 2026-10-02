@@ -355,6 +355,42 @@ pub fn changelog(intended: &Intended, scripts: &ScriptIntended) -> Result<String
     Ok(out)
 }
 
+/// The line before the list of rule fixes in `CHANGELOG.md`, which `cargo refcheck changelog
+/// --write` keeps equal to [`changelog`]; a test fails while the file lags behind the lists.
+pub const CHANGELOG_BEGIN: &str =
+    "<!-- rule fixes: written by `cargo refcheck changelog --write` from the intended lists -->";
+/// The line after it.
+pub const CHANGELOG_END: &str = "<!-- rule fixes: end -->";
+
+/// `markdown` (the CHANGELOG) with the lines between [`CHANGELOG_BEGIN`] and [`CHANGELOG_END`]
+/// replaced by `list`. Each marker must be there once, the first before the second, each on a
+/// line of its own: anything else is refused rather than guessed at.
+pub fn splice_changelog(markdown: &str, list: &str) -> Result<String> {
+    let find = |marker: &str| -> Result<usize> {
+        let mut at = markdown.match_indices(marker).map(|(i, _)| i);
+        match (at.next(), at.next()) {
+            (Some(i), None) => {
+                let line_start = i == 0 || markdown[..i].ends_with('\n');
+                let line_end = markdown[i + marker.len()..].starts_with(['\n', '\r']);
+                if line_start && line_end {
+                    Ok(i)
+                } else {
+                    Err(Error::new(format!("`{marker}` must be a line of its own")))
+                }
+            }
+            (None, _) => Err(Error::new(format!("there is no `{marker}` line"))),
+            (Some(_), Some(_)) => Err(Error::new(format!("`{marker}` is there twice"))),
+        }
+    };
+    let begin = find(CHANGELOG_BEGIN)?;
+    let end = find(CHANGELOG_END)?;
+    if end < begin {
+        return Err(Error::new(format!("`{CHANGELOG_END}` comes before `{CHANGELOG_BEGIN}`")));
+    }
+    let head = &markdown[..begin + CHANGELOG_BEGIN.len()];
+    Ok(format!("{head}\n{list}{}", &markdown[end..]))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWhere {
@@ -588,6 +624,8 @@ fn reject_inline_form(text: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::compare::{Path, Seg};
     use serde_json::json;
@@ -834,10 +872,58 @@ reason = "Python left half a list applied; Rust applies all or nothing"
         }
     }
 
-    /// The repository's own list: it loads, shares no id with `refcheck/intended.toml`, and every
-    /// entry is cited where its fix is made (`// refcheck: <id>`), as `intended.toml`'s are.
+    const CHANGELOG: &str = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n\
+         <!-- rule fixes: written by `cargo refcheck changelog --write` from the intended lists -->\n\
+         - an old fix (`old`)\n\
+         <!-- rule fixes: end -->\n\n## [0.1.5]\n";
+
     #[test]
-    fn the_repository_script_list_is_well_formed_and_cited() {
+    fn the_changelog_list_is_spliced_between_its_markers() {
+        let spliced = splice_changelog(CHANGELOG, "- a (`a`)\n- b (`b`)\n").unwrap();
+        assert_eq!(spliced, CHANGELOG.replace("- an old fix (`old`)\n", "- a (`a`)\n- b (`b`)\n"));
+        assert_eq!(splice_changelog(&spliced, "- a (`a`)\n- b (`b`)\n").unwrap(), spliced);
+        let empty = splice_changelog(CHANGELOG, "").unwrap();
+        assert!(empty.contains("lists -->\n<!-- rule fixes: end -->\n"), "{empty}");
+        let refused = [
+            CHANGELOG.replace(CHANGELOG_END, ""),
+            CHANGELOG.replace(CHANGELOG_BEGIN, ""),
+            format!("{CHANGELOG}{CHANGELOG_END}\n"),
+            format!("{CHANGELOG_END}\n{}", CHANGELOG.replace(CHANGELOG_END, "")),
+            CHANGELOG.replace(&format!("{CHANGELOG_BEGIN}\n"), &format!("x {CHANGELOG_BEGIN}\n")),
+        ];
+        for text in refused {
+            assert!(splice_changelog(&text, "- a (`a`)\n").is_err(), "{text}");
+        }
+    }
+
+    /// The ids `source` cites as `refcheck: <id>`: the kebab-case word after each, whole.
+    fn citations(source: &str) -> BTreeSet<String> {
+        source
+            .match_indices("refcheck: ")
+            .map(|(i, m)| {
+                let rest = &source[i + m.len()..];
+                let n = rest
+                    .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+                    .unwrap_or(rest.len());
+                rest[..n].trim_end_matches('-').to_string()
+            })
+            .filter(|id| !id.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn a_citation_is_the_whole_id() {
+        let cited =
+            citations("// refcheck: marble-bonus (the city)\n// refcheck: a-b-c.\nrefcheck: X");
+        assert_eq!(cited, BTreeSet::from(["marble-bonus".to_string(), "a-b-c".to_string()]));
+    }
+
+    /// The repository's two lists: they load and share no id, every entry of either is cited
+    /// where its fix is made (`// refcheck: <id>`, the whole id, so a longer id that starts with it
+    /// does not count), and every citation in the engine names an entry, so a renamed or removed
+    /// entry leaves no citation behind.
+    #[test]
+    fn the_repository_lists_are_well_formed_and_cited() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let intended = Intended::load(&root.join(crate::run::INTENDED)).unwrap();
         let scripts = ScriptIntended::load(&root.join(crate::run::SCRIPT_INTENDED)).unwrap();
@@ -854,12 +940,32 @@ reason = "Python left half a list applied; Rust applies all or nothing"
                 }
             }
         }
-        let uncited: Vec<&str> = scripts
+        let cited = citations(&sources);
+        let listed: BTreeSet<String> = intended
             .entries()
             .iter()
-            .map(|e| e.id.as_str())
-            .filter(|id| !sources.contains(&format!("refcheck: {id}")))
+            .map(|e| e.id.clone())
+            .chain(scripts.entries().iter().map(|e| e.id.clone()))
             .collect();
+        let uncited: Vec<&String> = listed.difference(&cited).collect();
         assert!(uncited.is_empty(), "not cited in the engine: {uncited:?}");
+        let unlisted: Vec<&String> = cited.difference(&listed).collect();
+        assert!(unlisted.is_empty(), "cited in the engine, listed in neither file: {unlisted:?}");
+    }
+
+    /// `CHANGELOG.md` lists the rule fixes as the two lists say: after an entry is added, changed
+    /// or removed, `cargo refcheck changelog --write` brings it up to date.
+    #[test]
+    fn the_repository_changelog_lists_the_rule_fixes() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let intended = Intended::load(&root.join(crate::run::INTENDED)).unwrap();
+        let scripts = ScriptIntended::load(&root.join(crate::run::SCRIPT_INTENDED)).unwrap();
+        let list = changelog(&intended, &scripts).unwrap();
+        let file = std::fs::read_to_string(root.join(crate::run::CHANGELOG)).unwrap();
+        let file = file.replace("\r\n", "\n");
+        assert!(
+            splice_changelog(&file, &list).unwrap() == file,
+            "CHANGELOG.md's rule fixes are out of date: run `cargo refcheck changelog --write`"
+        );
     }
 }
