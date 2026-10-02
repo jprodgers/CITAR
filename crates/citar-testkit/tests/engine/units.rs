@@ -218,6 +218,7 @@ fn a_unit_that_cannot_embark_stays_ashore() {
     assert!(movement::find_path(&g, walker, at(0, 4), 40).is_none(), "no way over the water");
 }
 
+// refcheck: promotion-needs-its-experience
 #[test]
 fn a_free_promotion_costs_no_experience() {
     let r = kitchen_sink();

@@ -209,9 +209,11 @@ unrelated change at the same place. Text answers (tool errors, briefings) follow
 is ported as-is where it is fine and fixed where it is wrong (decision G), and each fix is listed. An entry that
 explains nothing in a run that covered it is stale: a warning, and an error with `--strict`. So a deliberate
 difference that no group shows on the recorded states (a rule the shipped ruleset never exercises, a scenario
-operation) goes in `tests/rules/intended.toml` instead, with a rule script or a Rust test that shows it. Every
-entry of either file is cited in the engine, and every citation names an entry (a citar-refcheck test checks
-both). The two files together are the CHANGELOG's list of rule fixes: `cargo refcheck changelog --write` writes
+operation) goes in `tests/rules/intended.toml` instead, with a rule script or a Rust test that shows it and
+names it (a script check's `intended = "<id>"`, a test's `// refcheck: <id>`). Every entry of either file is
+cited in the engine's code, every citation names an entry, and every entry of the scripts' list is named by a
+script or a test, but for thirteen older ones that no test names yet (`NAMED_BY_NO_TEST` in
+`crates/citar-refcheck/src/intended.rs`, a list that only shrinks). citar-refcheck's tests check all three. The two files together are the CHANGELOG's list of rule fixes: `cargo refcheck changelog --write` writes
 them between its markers, and a test fails while the CHANGELOG lags behind.
 
 **Enforcement and the ratchet.** `enforced.toml` lists the groups, or paths within them, that are clean: an

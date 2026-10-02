@@ -501,6 +501,7 @@ fn a_capped_resource_stays_under_its_cap() {
 /// kind's total is what the density made, the same as without the share, and every strategic
 /// type and the luxury variety stay on the map (`mapgen-shares-keep-every-type`: Python's
 /// shares took a type's last deposit, and the top-ups that put it back diluted the share).
+// refcheck: mapgen-shares-keep-every-type
 #[test]
 fn a_share_sets_a_resource_s_part_of_its_kind() {
     let r = Ruleset::shared();
@@ -562,6 +563,7 @@ fn features_held_back() -> &'static Ruleset {
 /// A feature marked `Doesn't generate naturally <in [Hill] tiles>` still grows where the
 /// condition does not hold, and never where it does; one marked unconditionally never grows
 /// (`mapgen-features-that-never-generate`).
+// refcheck: mapgen-features-that-never-generate
 #[test]
 fn a_feature_held_back_on_some_tiles_grows_on_the_others() {
     let count = |r: &Ruleset| {

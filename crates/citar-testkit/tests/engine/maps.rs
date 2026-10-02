@@ -12,6 +12,7 @@ use citar_engine::game::{DebugOptions, Game};
 use citar_engine::rules::Ruleset;
 use citar_engine::state::Phase;
 use citar_testkit::games::{self, agents_for};
+use citar_testkit::rulesets::{files_of, overlay};
 use citar_testkit::script::rules_dir;
 use serde_json::{Value, json};
 
@@ -112,6 +113,30 @@ fn blank_and_generated_maps_check_clean() {
             (doc["starts"].clone(), doc["cs_starts"].clone())
         );
     }
+}
+
+/// A map's land share counts as water every tile whose terrain the ruleset makes water, a mod's
+/// own water included, where Python counted every terrain but Ocean, Coast and Lakes as land.
+// refcheck: map-summary-reads-water-by-rule
+#[test]
+fn a_map_summary_counts_a_ruleset_s_own_water_as_water() {
+    let deep = json!({"Deep Ocean": {
+        "name": "Deep Ocean", "type": "Water", "food": 1, "movementCost": 1, "id": "deep_ocean",
+    }})
+    .to_string();
+    let files = overlay(&[("ruleset/terrains.json", &deep)]).expect("the patch applies");
+    let r = Ruleset::leak(&files_of(&files)).unwrap_or_else(|e| panic!("does not load: {e}"));
+    let sea = blank_map(r, 8, 8, "Deep Ocean", "Deep").expect("a blank map");
+    assert_eq!(map_summary(r, &sea).expect("a summary")["land_share"], json!(0.0));
+    let land = blank_map(r, 8, 8, "Grassland", "Shore").expect("a blank map");
+    let row = land["tiles"][0].clone();
+    let mut shore = land;
+    for i in 0..16 {
+        let mut deep_row = row.clone();
+        deep_row[0] = json!("Deep Ocean");
+        shore = with_row(shore, i, deep_row);
+    }
+    assert_eq!(map_summary(r, &shore).expect("a summary")["land_share"], json!(0.75));
 }
 
 /// A game on a generated duel map, played by random agents for `rounds` rounds.

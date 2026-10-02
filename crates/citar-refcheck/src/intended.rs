@@ -918,29 +918,80 @@ reason = "Python left half a list applied; Rust applies all or nothing"
         assert_eq!(cited, BTreeSet::from(["marble-bonus".to_string(), "a-b-c".to_string()]));
     }
 
-    /// The repository's two lists: they load and share no id, every entry of either is cited
-    /// where its fix is made (`// refcheck: <id>`, the whole id, so a longer id that starts with it
-    /// does not count), and every citation in the engine names an entry, so a renamed or removed
-    /// entry leaves no citation behind.
-    #[test]
-    fn the_repository_lists_are_well_formed_and_cited() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let intended = Intended::load(&root.join(crate::run::INTENDED)).unwrap();
-        let scripts = ScriptIntended::load(&root.join(crate::run::SCRIPT_INTENDED)).unwrap();
-        changelog(&intended, &scripts).unwrap();
-        let mut sources = String::new();
-        let mut stack = vec![root.join("crates/citar-engine/src")];
+    /// The repository's root.
+    fn repository() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// Every file under `dir` whose extension is one of `exts`, with its text, in path order.
+    fn files_under(dir: &std::path::Path, exts: &[&str]) -> Vec<(std::path::PathBuf, String)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if path.extension().is_some_and(|x| x == "rs") {
-                    sources.push_str(&std::fs::read_to_string(&path).unwrap());
+                } else if path.extension().is_some_and(|x| exts.iter().any(|e| x == *e)) {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    out.push((path, text));
                 }
             }
         }
-        let cited = citations(&sources);
+        out.sort();
+        out
+    }
+
+    /// Where an engine source file's test code starts: all of a `tests.rs`, or an inline module
+    /// declared `mod <name> {` under a `#[cfg(..test..)]` attribute (other attributes and
+    /// comments may come between), which runs to the end of its file: the engine keeps its test
+    /// modules last.
+    fn test_code_from(path: &std::path::Path, text: &str) -> usize {
+        if path.file_name().is_some_and(|n| n == "tests.rs") {
+            return 0;
+        }
+        let mut at = 0;
+        let mut cfg_test = false;
+        for line in text.split_inclusive('\n') {
+            let l = line.trim();
+            if cfg_test && l.starts_with("mod ") && l.ends_with('{') {
+                return at;
+            }
+            if l.starts_with("#[cfg(") && l.contains("test") {
+                cfg_test = true;
+            } else if !(l.is_empty() || l.starts_with("#[") || l.starts_with("//")) {
+                cfg_test = false;
+            }
+            at += line.len();
+        }
+        text.len()
+    }
+
+    /// The engine's sources split at [`test_code_from`]: the code that makes the fixes, and the
+    /// engine's own tests.
+    fn engine_sources(root: &std::path::Path) -> (String, String) {
+        let (mut code, mut tests) = (String::new(), String::new());
+        for (path, text) in files_under(&root.join("crates/citar-engine/src"), &["rs"]) {
+            let (c, t) = text.split_at(test_code_from(&path, &text));
+            code.push_str(c);
+            tests.push_str(t);
+        }
+        (code, tests)
+    }
+
+    /// The repository's two lists: they load and share no id, every entry of either is cited
+    /// where its fix is made (`// refcheck: <id>` in the engine's code, outside its tests; the
+    /// whole id, so a longer id that starts with it does not count), and every citation in the
+    /// engine and the tests names an entry, so a renamed or removed entry leaves no citation
+    /// behind.
+    #[test]
+    fn the_repository_lists_are_well_formed_and_cited() {
+        let root = repository();
+        let intended = Intended::load(&root.join(crate::run::INTENDED)).unwrap();
+        let scripts = ScriptIntended::load(&root.join(crate::run::SCRIPT_INTENDED)).unwrap();
+        changelog(&intended, &scripts).unwrap();
+        let (code, engine_tests) = engine_sources(&root);
+        let cited = citations(&code);
         let listed: BTreeSet<String> = intended
             .entries()
             .iter()
@@ -949,8 +1000,70 @@ reason = "Python left half a list applied; Rust applies all or nothing"
             .collect();
         let uncited: Vec<&String> = listed.difference(&cited).collect();
         assert!(uncited.is_empty(), "not cited in the engine: {uncited:?}");
-        let unlisted: Vec<&String> = cited.difference(&listed).collect();
-        assert!(unlisted.is_empty(), "cited in the engine, listed in neither file: {unlisted:?}");
+        let mut everywhere = cited;
+        everywhere.extend(citations(&engine_tests));
+        everywhere.extend(citations(&test_sources(&root)));
+        let unlisted: Vec<&String> = everywhere.difference(&listed).collect();
+        assert!(unlisted.is_empty(), "cited, but listed in neither file: {unlisted:?}");
+    }
+
+    /// The entries of the scripts' list that no rule script or test names yet. Each is cited at
+    /// its fix; tests that predate the check below may show it without naming it, or nothing may
+    /// show it. The list only shrinks: a test that shows one names it (`// refcheck: <id>`), and
+    /// the id comes off.
+    const NAMED_BY_NO_TEST: &[&str] = &[
+        "mapgen-wonder-conversions-read-every-condition",
+        "mapgen-no-river-along-new-water",
+        "mapgen-luxury-variety-by-tile-count",
+        "upgrade-places-before-removing",
+        "adopt-a-policy-whatever-it-requires",
+        "expending-a-unit-fires-once",
+        "combat-points-for-the-civilizations-own-great-people",
+        "ai-free-great-person-within-the-calendar",
+        "ai-beliefs-tie-by-ruleset-order",
+        "jobs-by-builder-class",
+        "jobs-tie-by-ruleset-order",
+        "un-city-state-votes-for-a-living-ally",
+        "map-prepare-draws-its-own-stream",
+    ];
+
+    /// The Rust tests outside the engine: the testkit's and refcheck's integration tests.
+    fn test_sources(root: &std::path::Path) -> String {
+        ["crates/citar-testkit/tests", "crates/citar-refcheck/tests"]
+            .iter()
+            .flat_map(|d| files_under(&root.join(d), &["rs"]))
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    /// An entry of the scripts' list is a difference no refcheck group shows, so a rule script or
+    /// a test must show it instead, and names it where it does: a script check's
+    /// `intended = "<id>"` (or a script table's `"intended": "<id>"`), a test's
+    /// `// refcheck: <id>`, or a test table's `"<id>"`. Engine tests count, the code that makes
+    /// the fix does not. Only the older entries of [`NAMED_BY_NO_TEST`] are spared.
+    #[test]
+    fn the_scripts_entries_are_named_where_they_are_shown() {
+        let root = repository();
+        let scripts = ScriptIntended::load(&root.join(crate::run::SCRIPT_INTENDED)).unwrap();
+        let rule_files: String = files_under(&root.join("tests/rules"), &["toml", "json"])
+            .into_iter()
+            .filter(|(path, _)| path.file_name().is_none_or(|n| n != "intended.toml"))
+            .map(|(_, text)| text)
+            .collect();
+        let (_, engine_tests) = engine_sources(&root);
+        let tests = test_sources(&root) + &engine_tests;
+        let cited = citations(&tests);
+        let named = |id: &str| {
+            let quoted = format!("\"{id}\"");
+            cited.contains(id) || tests.contains(&quoted) || rule_files.contains(&quoted)
+        };
+        let ids: Vec<&str> = scripts.entries().iter().map(|e| e.id.as_str()).collect();
+        let unnamed: Vec<&str> =
+            ids.iter().copied().filter(|id| !named(id) && !NAMED_BY_NO_TEST.contains(id)).collect();
+        assert!(unnamed.is_empty(), "no rule script or test names {unnamed:?}");
+        let spared: Vec<&str> =
+            NAMED_BY_NO_TEST.iter().copied().filter(|id| named(id) || !ids.contains(id)).collect();
+        assert!(spared.is_empty(), "take {spared:?} off NAMED_BY_NO_TEST: named, or no entry");
     }
 
     /// `CHANGELOG.md` lists the rule fixes as the two lists say: after an entry is added, changed

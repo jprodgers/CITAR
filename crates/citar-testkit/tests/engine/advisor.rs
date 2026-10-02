@@ -177,6 +177,7 @@ fn advice_holds(f: &Fixture) -> Vec<String> {
     out
 }
 
+// refcheck: advisor-what-if-leaves-no-trace
 #[test]
 fn the_advisor_gives_what_can_be_built_and_the_same_twice() {
     let mut bad = Vec::new();

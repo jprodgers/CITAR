@@ -1,14 +1,19 @@
-# Deliberate differences no refcheck group shows on the 262 recorded states, each shown by a rule
-# script or a Rust test instead: a script check whose expected value is the Rust engine's carries
-# `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md). Differences a
-# refcheck group shows belong in refcheck/intended.toml, which scripts may cite too.
+# Deliberate differences no refcheck group shows on the 262 recorded states, so a rule script or a
+# Rust test shows each instead, and names it there: a script check whose expected value is the
+# Rust engine's carries `intended = "<id>"`, and the Python runner skips it (tests/rules/README.md);
+# a test that shows one cites it as `// refcheck: <id>`, or names it in a table as "<id>".
+# Differences a refcheck group shows belong in refcheck/intended.toml, which scripts may cite too.
 # `cargo refcheck changelog --write` writes both files into CHANGELOG.md as its rule fixes, so the
 # reason is written for a reader of the changelog, and an id may be in only one of them.
 #
 # One [[differences]] table per entry, as in refcheck/intended.toml but without `where`:
 #   id      kebab-case and unique; the code that makes the fix cites it as `// refcheck: <id>`
-#           (citar-refcheck's tests check that every id of both files is cited in the engine)
 #   reason  one line: what Python did, and what Rust does instead
+#
+# citar-refcheck's tests check that every id of both files is cited in the engine's code (its
+# tests aside), and that every id here is named by a rule script or a test. Thirteen older entries
+# that no script or test names yet are spared, listed in `NAMED_BY_NO_TEST`
+# (crates/citar-refcheck/src/intended.rs); that list only shrinks.
 
 [[differences]]
 id = "atomic-apply-ops"

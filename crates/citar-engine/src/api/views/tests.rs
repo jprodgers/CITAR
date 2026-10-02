@@ -155,6 +155,7 @@ fn unmet_city_states_and_capitals_at_a_sentence_start() {
     );
 }
 
+// refcheck: un-results-name-only-known-candidates
 #[test]
 fn the_un_tally_names_the_candidates_a_viewer_has_not_met_as_unknown() {
     let mut g = game();
