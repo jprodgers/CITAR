@@ -19,7 +19,9 @@
 //! plays every size alike and the shards take about as long as each other.
 //!
 //! Time and memory come from the binary ([`Probe`]): the engine and this library read no clock.
-//! Panics, violations and errors fail the run; outliers and memory are reported.
+//! Panics, violations and errors fail the run; outliers and memory are reported. A run its time
+//! budget stopped before it played every game it was to play says so ([`Report::cut_short`]),
+//! and the binary fails it on its own exit code: a slower runner must not quietly shrink a run.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -209,6 +211,9 @@ impl GameReport {
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Report {
     pub seed: u64,
+    /// How many games the run (or its shard) was to play: fewer were played when the probe
+    /// stopped it ([`Report::cut_short`]).
+    pub planned: u32,
     pub games: Vec<GameReport>,
 }
 
@@ -216,6 +221,14 @@ impl Report {
     /// The games that failed.
     pub fn failed(&self) -> impl Iterator<Item = &GameReport> {
         self.games.iter().filter(|g| g.failed())
+    }
+
+    /// Whether the probe stopped the run before it had played every game it was to play: a
+    /// time budget that ran out, so the run covered less than it was asked to. Not a failure of
+    /// the games played, but not the run that was asked for either.
+    #[must_use]
+    pub fn cut_short(&self) -> bool {
+        self.games.len() < self.planned as usize
     }
 
     /// The report as JSON.
@@ -451,7 +464,8 @@ pub fn play_game(spec: &GameSpec, settings: &Settings, probe: &mut dyn Probe) ->
 }
 
 /// Plays the run's games one after another, those of its shard, while the probe says to go on;
-/// `each` sees every game's report as it ends.
+/// `each` sees every game's report as it ends. The report counts the games the run was to play
+/// beside those it played.
 ///
 /// # Errors
 /// A size that does not exist, or a shard that is not one.
@@ -465,17 +479,18 @@ pub fn run(
         return Err(format!("no shard {k} of {n}"));
     }
     let laps = u32::try_from(sizes(settings)?.len()).map_err(|e| e.to_string())?.max(1);
-    let mut report = Report { seed: settings.seed, games: Vec::new() };
     // Game `i` is the same game whatever the count, so asking for one past the count plays it.
     let count = settings.only.map_or(settings.games, |i| settings.games.max(i.saturating_add(1)));
-    for spec in plan(&Settings { games: count, ..settings.clone() })? {
-        let wanted = match settings.only {
+    let mine: Vec<GameSpec> = plan(&Settings { games: count, ..settings.clone() })?
+        .into_iter()
+        .filter(|spec| match settings.only {
             Some(i) => spec.index == i,
             None => (spec.index / laps) % n == k,
-        };
-        if !wanted {
-            continue;
-        }
+        })
+        .collect();
+    let planned = u32::try_from(mine.len()).map_err(|e| e.to_string())?;
+    let mut report = Report { seed: settings.seed, planned, games: Vec::new() };
+    for spec in mine {
         if !probe.keep_going() {
             break;
         }
@@ -546,9 +561,13 @@ mod tests {
         }
         seen.sort();
         assert_eq!(seen, (0..30).collect::<Vec<u32>>());
-        // A run whose probe says stop plays nothing, and a shard that is not one is refused.
-        let r = run(&Settings { shard: (1, 4), ..s.clone() }, &mut Still, &mut |_| {});
-        assert_eq!(r.map(|r| r.games.len()), Ok(0));
+        // A run whose probe says stop plays nothing, and says it was cut short; a shard that is
+        // not one is refused.
+        let r =
+            run(&Settings { shard: (1, 4), ..s.clone() }, &mut Still, &mut |_| {}).expect("a run");
+        assert_eq!((r.planned, r.games.len(), r.cut_short()), (6, 0, true));
+        let none = Report { seed: 1, planned: 0, games: Vec::new() };
+        assert!(!none.cut_short(), "a run with nothing to play played it all");
         assert!(run(&Settings { shard: (4, 4), ..s }, &mut Still, &mut |_| {}).is_err());
     }
 

@@ -14,8 +14,10 @@
 //!                     the report to FILE as JSON
 //! ```
 //!
-//! Exit codes: 0 every game clean, 1 a game panicked or failed a check, 2 a usage or I/O error.
-//! Outliers and memory are reported, never a failure.
+//! Exit codes: 0 every game clean, 1 a game panicked or failed a check, 2 a usage or I/O error,
+//! 3 the time budget ran out before every game asked for was played (and those played were
+//! clean): a run that covered less than it was asked to is not a pass. Outliers and memory are
+//! reported, never a failure.
 //!
 //! Peak memory is the most heap the game held, counted by this binary's allocator (a thin
 //! wrapper of the system allocator that keeps a running total and its high-water mark), so it
@@ -271,13 +273,27 @@ fn main() -> ExitCode {
     let failed: Vec<&GameReport> = report.failed().collect();
     let rounds: u32 = report.games.iter().map(|g| g.rounds).sum();
     println!(
-        "soak: {} games, {rounds} rounds in {:.0} s: {} failed",
+        "soak: {} of {} games, {rounds} rounds in {:.0} s: {} failed",
         report.games.len(),
+        report.planned,
         clock.started.elapsed().as_secs_f64(),
         failed.len()
     );
+    if report.cut_short() {
+        let text = format!(
+            "soak: the time budget of {} s ran out after {} of the {} games asked for, so the run \
+             covered less than it was asked to (the games not played are its last)",
+            cmd.seconds.unwrap_or(0),
+            report.games.len(),
+            report.planned
+        );
+        println!("{text}");
+        if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            println!("::error::{text}");
+        }
+    }
     if failed.is_empty() {
-        return ExitCode::SUCCESS;
+        return if report.cut_short() { ExitCode::from(3) } else { ExitCode::SUCCESS };
     }
     for g in failed {
         println!(
