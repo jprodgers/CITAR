@@ -103,7 +103,10 @@ pub struct BaselineCrash {
     pub bot: String,
     pub crash: String,
     pub trace: String,
-    pub seconds: f64,
+    /// How long the game ran before it crashed. Absent when the worker itself died or stalled
+    /// (baseline.py:234 writes that line from the parent, which never timed the game).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
 }
 
 /// One line of a baseline file.
@@ -150,5 +153,20 @@ mod tests {
                        "seconds": 1.5}"#;
         let typed: BaselineLine = serde_json::from_str(line).expect("a crash line");
         assert!(matches!(typed, BaselineLine::Crash(ref c) if c.crash.starts_with("GameTimeout")));
+        assert!(matches!(typed, BaselineLine::Crash(ref c) if c.seconds == Some(1.5)));
+    }
+
+    /// The line baseline.py writes for a worker that died or stalled (`{**_ident(spec), **code,
+    /// "crash": why, "trace": ""}`, baseline.py:234) has no `seconds`, and reads as a crash that
+    /// writes back to the same JSON value.
+    #[test]
+    fn a_dead_workers_crash_line_has_no_seconds() {
+        let line = r#"{"i":7,"seed":5007,"size":"small","map_type":"fractal","barbarians":"off",
+                       "speed":"Quick","turn_limit":null,"engine":"x","bot":"y",
+                       "crash":"its worker process died (killed, or out of memory?)","trace":""}"#;
+        let value: serde_json::Value = serde_json::from_str(line).expect("JSON");
+        let typed: BaselineLine = serde_json::from_str(line).expect("a crash line");
+        assert!(matches!(typed, BaselineLine::Crash(ref c) if c.seconds.is_none()));
+        assert_eq!(serde_json::to_value(&typed).expect("serialises"), value);
     }
 }
