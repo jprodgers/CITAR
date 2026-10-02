@@ -141,6 +141,10 @@ id = "citizen-tools-list-tiles-sorted"
 reason = "work_tile, set_city_focus and set_specialists listed a city's worked and locked tiles in the order its citizens took them; Rust lists them by column and then row, as the city's own view does"
 
 [[differences]]
+id = "citizens-shed-locks-at-once"
+reason = "A city with more citizens locked to tiles and set as specialists by hand than it had shed one lock each time its citizens were placed, so they moved at every placement until enough locks were gone; Rust sheds them in one placement, where those placements would have ended"
+
+[[differences]]
 id = "cities-never-share-a-tile"
 reason = "Python let a city work a tile a sibling city of the same owner worked, unless the tile was that sibling's own territory, so two cities could work one tile; Rust gives a worked tile to one city, and no other may work it"
 

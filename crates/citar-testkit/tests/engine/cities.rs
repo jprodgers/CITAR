@@ -675,3 +675,41 @@ fn two_neighbouring_cities_each_in_its_own_cycle_both_stop() {
     assert_eq!(both(&g), (vec![mine[0]], vec![theirs[0]]));
     clean(&mut g);
 }
+
+// ---- Locks and specialists by hand --------------------------------------------------------------
+
+/// A city with more citizens locked to tiles and set as specialists by hand than it has sheds
+/// the locks it cannot keep in one placement, so placing its citizens again leaves them where
+/// they are. Python shed one lock a placement and moved the city at every one; one placement of
+/// that kind left a lock past the city's one citizen in the soak (seed 1607, game 138), which the
+/// citizen oracle found.
+// refcheck: citizens-shed-locks-at-once
+#[test]
+fn a_city_sheds_the_locks_its_citizens_cannot_keep_in_one_placement() {
+    let mut g = arena(Ruleset::shared(), 2);
+    let (out, _) = g
+        .apply_ops(&json!([{"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Roma",
+            "pop": 3, "claim_radius": 2, "buildings": ["Market"]}]))
+        .expect("a city");
+    let c = founded(&out[0]);
+    let tiles: Vec<(i32, i32)> =
+        cstats::workable_tiles(&g, c).into_iter().take(3).map(|t| g.xy(t)).collect();
+    for &(x, y) in &tiles {
+        tool(&mut g, ME, "work_tile", &json!({"city_id": c.get(), "x": x, "y": y})).expect("lock");
+    }
+    g.apply_ops(&json!([{"op": "set_city", "city": c.get(), "pop": 2}])).expect("two citizens");
+    let city = g.city(c).expect("Roma");
+    assert_eq!((city.locked.len(), city.worked.len()), (3, 2), "a lock past the citizens stays");
+    clean(&mut g);
+    // A merchant by hand: of the two citizens one is left for the three locked tiles.
+    let merchant = json!({"city_id": c.get(), "specialists": {"Merchant": 1}});
+    tool(&mut g, ME, "set_specialists", &merchant).expect("a merchant");
+    let city = g.city(c).expect("Roma");
+    assert_eq!(city.specialists.iter().map(|&n| u32::from(n)).sum::<u32>(), 1);
+    assert_eq!(city.worked.len(), 1);
+    assert_eq!(city.locked, city.worked, "the locks no citizen can keep are gone at once");
+    clean(&mut g);
+    g.assign_every_city_for_test();
+    assert_eq!(g.city(c).map(|x| (x.worked.len(), x.locked.len())), Some((1, 1)));
+    clean(&mut g);
+}
