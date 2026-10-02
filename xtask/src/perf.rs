@@ -4,7 +4,7 @@
 //! then checks what they wrote to `<target>/perf/<suite>.json` against
 //! `crates/citar-bench/thresholds.toml`. The `games` suite (whole bot games, DESIGN.md P2.4.2)
 //! runs only when named (`--suite games`): it takes minutes, and is timed with the other lane
-//! paused. Its file is read with the others whenever a run left one.
+//! paused. A run without `--suite` checks its file too whenever an earlier run left one.
 //!
 //! - every budget holds a measure, at or under `hard` (1.5) times the budget; a budget that needs
 //!   the corpus is skipped when a suite ran without it, and a report-only budget (the `games`
@@ -14,8 +14,11 @@
 //!   times `hard`.
 //!
 //! It prints each measure against its budget, and each pass round with its Python ratio.
-//! `--check` skips the run and checks the files a run left; `--suite <name>` runs one suite (the
-//! check still reads every file, and says which an earlier run left); arguments after `--` go to
+//! `--check` skips the run and checks the files a run left, every suite's; `--suite <name>` runs
+//! one suite and checks only its budgets (and the pass rounds only when it is `turns`), so
+//! `--suite games` needs no file of the other suites (with `--check`, it checks the games file
+//! alone); a run without either checks the suites it ran and any file an earlier run left of
+//! the others. Arguments after `--` go to
 //! the benches (one criterion filter, which names a part or starts a measure's id, and options
 //! such as `--quick`). Exit 0 all within, 1 over, 2 could not run: `cargo bench` failed with no
 //! measure over its hard limit to say why, or a suite it ran did not write its file in this run
@@ -274,14 +277,33 @@ fn case_turn(name: &str) -> Option<(&str, u32)> {
     Some((case, t.parse().ok()?))
 }
 
-/// Checks the budgets; returns the problems.
+/// The suites whose budgets this run checks: the one `--suite` named; with `--check`, every
+/// suite; after a run of the default suites, those and any other whose file an earlier run left
+/// (the games file, when one was timed).
+fn checked_suites(
+    named: Option<&'static str>,
+    check_only: bool,
+    results: &BTreeMap<String, Written>,
+) -> Vec<&'static str> {
+    match named {
+        Some(s) => vec![s],
+        None if check_only => SUITES.to_vec(),
+        None => SUITES
+            .into_iter()
+            .filter(|s| DEFAULT_SUITES.contains(s) || results.contains_key(*s))
+            .collect(),
+    }
+}
+
+/// Checks the budgets of the `checked` suites; returns the problems.
 fn check_budgets(
     t: &Thresholds,
     results: &BTreeMap<String, Written>,
+    checked: &[&str],
 ) -> Result<Vec<String>, String> {
     let mut problems = Vec::new();
     println!("\n{:<48} {:>11} {:>11} {:>7}  status", "measure", "median", "budget", "x");
-    for b in &t.budget {
+    for b in t.budget.iter().filter(|b| checked.contains(&b.suite.as_str())) {
         let budget =
             parse_ns(&b.budget).ok_or_else(|| format!("{}: bad budget {}", b.id, b.budget))?;
         let written = results.get(&b.suite);
@@ -428,7 +450,7 @@ fn check_rounds(
 
 pub fn run(root: &Path, args: &[String]) -> ExitCode {
     let mut check_only = false;
-    let mut suites: Vec<&str> = DEFAULT_SUITES.to_vec();
+    let mut named: Option<&'static str> = None;
     let mut extra: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -436,7 +458,7 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             "--check" => check_only = true,
             "--suite" => match it.next().map(String::as_str) {
                 Some(s) if SUITES.contains(&s) => {
-                    suites = vec![SUITES[SUITES.iter().position(|x| *x == s).unwrap_or(0)]]
+                    named = SUITES.into_iter().find(|x| *x == s);
                 }
                 other => {
                     eprintln!("perfgate: --suite takes one of {SUITES:?}, not {other:?}");
@@ -471,6 +493,7 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let suites: Vec<&str> = named.map_or_else(|| DEFAULT_SUITES.to_vec(), |s| vec![s]);
     let filters = filters_of(&extra);
     if filters.len() > 1 {
         eprintln!("perfgate: criterion takes one filter, not {filters:?}");
@@ -489,7 +512,8 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
         }
     };
     let results = read_results(&dir);
-    for (s, w) in &results {
+    let checked = checked_suites(named, check_only, &results);
+    for (s, w) in results.iter().filter(|(s, _)| checked.contains(&s.as_str())) {
         let earlier = !check_only && w.run.as_deref() != Some(run.as_str());
         println!(
             "perfgate: {s}: {} measures, {}, corpus {}, overflow checks {}{}{}",
@@ -517,18 +541,20 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
         }
     }
     let python = python_rounds(root);
-    let mut problems = match check_budgets(&t, &results) {
+    let mut problems = match check_budgets(&t, &results, &checked) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("perfgate: {e}");
             return ExitCode::from(2);
         }
     };
-    match check_rounds(&t, results.get("turns"), &python) {
-        Ok(p) => problems.extend(p),
-        Err(e) => {
-            eprintln!("perfgate: {e}");
-            return ExitCode::from(2);
+    if checked.contains(&"turns") {
+        match check_rounds(&t, results.get("turns"), &python) {
+            Ok(p) => problems.extend(p),
+            Err(e) => {
+                eprintln!("perfgate: {e}");
+                return ExitCode::from(2);
+            }
         }
     }
     if problems.is_empty() && !bench_ok {
@@ -602,23 +628,68 @@ mod tests {
             measures,
         };
         let results = BTreeMap::from([("games".to_owned(), w)]);
-        let problems = check_budgets(&t, &results).expect("checked");
+        let problems = check_budgets(&t, &results, &SUITES).expect("checked");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].starts_with("game/hard"), "{problems:?}");
-        let none = check_budgets(&t, &BTreeMap::new()).expect("checked");
+        let none = check_budgets(&t, &BTreeMap::new(), &SUITES).expect("checked");
         assert_eq!(none.len(), 1, "a missing report-only measure fails nothing: {none:?}");
     }
 
-    #[test]
-    fn only_a_file_this_run_wrote_counts() {
-        let w = |run: Option<&str>| Written {
+    fn written(run: Option<&str>, measures: &[(&str, f64)]) -> Written {
+        Written {
             corpus: true,
             overflow_checks: false,
             core: Some(0),
             run: run.map(str::to_owned),
             merged: false,
-            measures: BTreeMap::new(),
-        };
+            measures: measures
+                .iter()
+                .map(|(id, ns)| ((*id).to_owned(), Measure { ns: *ns }))
+                .collect(),
+        }
+    }
+
+    /// `--suite games` in a target directory where no other suite ever ran: only the games
+    /// budgets are checked, so the committed thresholds give no problem, and the pass rounds
+    /// (the turns suite's) are left alone.
+    #[test]
+    fn a_named_suite_checks_only_its_own_budgets() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let text = std::fs::read_to_string(root.join("crates/citar-bench/thresholds.toml"))
+            .expect("thresholds.toml");
+        let t: Thresholds = toml::from_str(&text).expect("it parses");
+        let games_only = BTreeMap::from([("games".to_owned(), written(Some("now"), &[]))]);
+        let checked = checked_suites(Some("games"), false, &games_only);
+        assert_eq!(checked, ["games"]);
+        let problems = check_budgets(&t, &games_only, &checked).expect("checked");
+        assert_eq!(problems, Vec::<String>::new());
+        assert!(!checked.contains(&"turns"), "the pass rounds are the turns suite's");
+        assert_eq!(checked_suites(Some("games"), true, &games_only), ["games"]);
+        // Every other suite's budgets would be missing.
+        let all = check_budgets(&t, &games_only, &SUITES).expect("checked");
+        assert!(!all.is_empty() && all.iter().all(|p| !p.contains("games suite")), "{all:?}");
+        // A named suite's own missing measure is still a problem.
+        let kernels = checked_suites(Some("kernels"), false, &games_only);
+        assert!(!check_budgets(&t, &games_only, &kernels).expect("checked").is_empty());
+    }
+
+    /// Without `--suite`: `--check` checks every suite; a run checks the suites it ran and the
+    /// games file only when an earlier run left one.
+    #[test]
+    fn an_unnamed_run_checks_what_ran_and_what_was_left() {
+        let mut results = BTreeMap::new();
+        for s in DEFAULT_SUITES {
+            results.insert(s.to_owned(), written(Some("now"), &[]));
+        }
+        assert_eq!(checked_suites(None, false, &results), DEFAULT_SUITES);
+        assert_eq!(checked_suites(None, true, &results), SUITES);
+        results.insert("games".to_owned(), written(Some("before"), &[]));
+        assert_eq!(checked_suites(None, false, &results), SUITES);
+    }
+
+    #[test]
+    fn only_a_file_this_run_wrote_counts() {
+        let w = |run: Option<&str>| written(run, &[]);
         let mut results = BTreeMap::new();
         results.insert("kernels".to_owned(), w(Some("now")));
         results.insert("turns".to_owned(), w(Some("before")));
