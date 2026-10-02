@@ -275,6 +275,15 @@ impl Entry {
     const fn label(self) -> u64 {
         self.label
     }
+
+    /// Whether it comes before `other` in the derived order, worked out without a branch: which
+    /// of two entries is the less is as good as a coin toss, and the heap asks it at every level.
+    #[inline(always)]
+    fn before(&self, other: &Self) -> bool {
+        let a = (u128::from(self.prio) << 64) | u128::from(self.label);
+        let b = (u128::from(other.prio) << 64) | u128::from(other.label);
+        (a < b) | ((a == b) & (self.tile < other.tile))
+    }
 }
 
 /// The open set: a four-ary min-heap of [`Entry`]s (shallower than a binary one, for pops).
@@ -304,7 +313,7 @@ impl Open {
         h.push(e);
         while i > 0 {
             let p = (i - 1) / 4;
-            if h[p] <= e {
+            if !e.before(&h[p]) {
                 break;
             }
             h[i] = h[p];
@@ -327,19 +336,19 @@ impl Open {
             }
             // The least of its children: all four, which most have, compared in pairs.
             let c = if first + 3 < n {
-                let a = if h[first + 1] < h[first] { first + 1 } else { first };
-                let b = if h[first + 3] < h[first + 2] { first + 3 } else { first + 2 };
-                if h[b] < h[a] { b } else { a }
+                let a = if h[first + 1].before(&h[first]) { first + 1 } else { first };
+                let b = if h[first + 3].before(&h[first + 2]) { first + 3 } else { first + 2 };
+                if h[b].before(&h[a]) { b } else { a }
             } else {
                 let mut c = first;
                 for j in first + 1..n {
-                    if h[j] < h[c] {
+                    if h[j].before(&h[c]) {
                         c = j;
                     }
                 }
                 c
             };
-            if h[c] >= last {
+            if !h[c].before(&last) {
                 break;
             }
             h[i] = h[c];
@@ -1034,6 +1043,25 @@ mod tests {
         assert_eq!(l.step(120, full), Label { turns: 0, left: 0 });
         assert_eq!(Label { turns: 0, left: 0 }.step(60, full), Label { turns: 1, left: 60 });
         assert_eq!(Label { turns: 2, left: 30 }.step(10, full), Label { turns: 2, left: 20 });
+    }
+
+    #[test]
+    fn an_entry_comes_before_another_as_the_derived_order_says() {
+        let vals = [0u64, 1, 2, u64::from(u32::MAX), u64::MAX - 1, u64::MAX];
+        let tiles = [0u32, 1, 7, u32::MAX];
+        let mut all = Vec::new();
+        for &prio in &vals {
+            for &label in &vals {
+                for &tile in &tiles {
+                    all.push(Entry { prio, label, tile });
+                }
+            }
+        }
+        for a in &all {
+            for b in &all {
+                assert_eq!(a.before(b), a < b, "{a:?} {b:?}");
+            }
+        }
     }
 
     #[test]
