@@ -27,8 +27,10 @@ on:
     # 03:17 UTC every night; the Sunday run also takes the criterion trend.
     - cron: "17 3 * * 1-6"
     - cron: "17 3 * * 0"
-  # A schedule runs on the default branch only. Before this file reaches it, or to try a branch's
-  # pull request, label the pull request `nightly`: every job runs on it, with the defaults.
+  # A schedule runs on the default branch only, and so does a manual run (GitHub dispatches only
+  # a workflow its default branch has). Before this file reaches it, or to try a branch's pull
+  # request, label the pull request `nightly` (`gh label create nightly` once, then add it; take
+  # it off and add it again to run again): every job runs on it, with the defaults.
   pull_request:
     types: [labeled]
   workflow_dispatch:
@@ -131,6 +133,8 @@ jobs:
           --seed "$((1000000 + ${{ github.run_number }}))" --out chaos-replays
 
       - name: Soak
+        # The 2,700 s keep the job inside its timeout; a soak they stop before its last game
+        # fails (exit 3), so a slow runner shows as a failure rather than as fewer games played.
         if: ${{ !cancelled() }}
         shell: bash
         run: >

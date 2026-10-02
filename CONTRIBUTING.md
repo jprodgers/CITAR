@@ -137,14 +137,17 @@ played on Linux, and the places where they differ. To look into one by hand:
 
 ```bash
 cargo golden check --states states/                 # a game that differs leaves its state there
+                                                    # (each check clears the last one's list)
 cargo golden dump random:random-duel-continents-s101 57 --out here.json   # the same game, here
 cargo golden diff here.json states/random--random-duel-continents-s101--t57.json
 cargo golden dump --list                             # every game dump plays
 ```
 
 **Long runs.** `nightly.yml` runs the properties at 10,000 cases, 20 minutes of chaos and a short
-soak on each OS, the long golden set on every target and, on Sundays, the benchmarks. Label a pull
-request `nightly` to run it there. Locally:
+soak on each OS, the long golden set on every target and, on Sundays, the benchmarks. Its schedule
+and a manual run need the workflow on the default branch; elsewhere, label a pull request `nightly`
+to run it there (`gh label create nightly` once; take the label off and add it again to run it
+again). A soak its time budget stops before its last game fails (exit 3). Locally:
 
 ```bash
 cargo chaos --seconds 600                           # random games with tool calls of every kind
