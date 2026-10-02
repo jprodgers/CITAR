@@ -17,6 +17,8 @@
 //! - [`rulesets`]: test rulesets made from the shipped one by overlays, the kitchen sink among
 //!   them, which uses every unique type the engine supports;
 //! - [`script`]: the Rust runner of the rule scripts in `tests/rules/` (DESIGN.md 9.3);
+//! - [`soak`]: the soak driver of the `soak` binary: long random games on every map size with
+//!   the invariants on, reporting panics, violations, turn-time outliers and peak memory;
 //! - [`spec`]: tool calls described by indices and bound to a game when made (`ActionSpec`);
 //! - [`stability`]: the properties P1 to P8, as one runner the property tests, chaos and the
 //!   fuzz targets share;
@@ -37,6 +39,7 @@ pub mod games;
 pub mod golden;
 pub mod rulesets;
 pub mod script;
+pub mod soak;
 pub mod spec;
 pub mod stability;
 pub mod states;
