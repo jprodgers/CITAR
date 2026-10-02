@@ -10,8 +10,8 @@
 //!                     cache oracle every R rounds (50) and a save and load every R (25), both
 //!                     also at each game's end; a round over F times its game's median (8) and
 //!                     over MS ms (50) is an outlier; start no game after S seconds; play only
-//!                     the games whose number is K modulo N, or only game I; write the report
-//!                     to FILE as JSON
+//!                     the laps of the sizes whose number is K modulo N, or only game I; write
+//!                     the report to FILE as JSON
 //! ```
 //!
 //! Exit codes: 0 every game clean, 1 a game panicked or failed a check, 2 a usage or I/O error.

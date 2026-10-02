@@ -153,9 +153,9 @@ PROPTEST_CASES=10000 cargo nextest run -p citar-testkit --test props --cargo-pro
 ```
 
 The laptop soak is 200 games, 33 or 34 of each map size, each to its 330-turn limit: about 40
-minutes on one core, so split it over a few processes with `--shard` (each plays the games whose
-number is K modulo N, the same games whatever the split). A failure names the game, and
-`cargo soak --seed S --game N` plays it again alone.
+minutes on one core, so split it over a few processes with `--shard K/N` (each takes the laps of
+the six sizes whose number is K modulo N: the same games whatever the split, every size in each
+shard). A failure names the game, and `cargo soak --seed S --game N` plays it again alone.
 
 ```bash
 for k in 0 1 2 3; do cargo soak --games 200 --shard $k/4 --json soak-$k.json > soak-$k.log & done; wait

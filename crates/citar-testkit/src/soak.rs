@@ -13,9 +13,10 @@
 //!
 //! Games are drawn from the run's seed in a fixed order ([`plan`]): the sizes in turn, the map
 //! types and edges rotating under them, and every fourth lap of the sizes the duel, small and
-//! standard games on the kitchen-sink ruleset with the Kitchen Sink nation in the first seat. So game `n` of a seed
-//! is the same game on every machine, and a run split over processes (`shard`) plays the same
-//! games as one that is not.
+//! standard games on the kitchen-sink ruleset with the Kitchen Sink nation in the first seat. So
+//! game `n` of a seed is the same game on every machine, and a run split over processes (`shard`)
+//! plays the same games as one that is not: each shard takes whole laps of the sizes, so each
+//! plays every size alike and the shards take about as long as each other.
 //!
 //! Time and memory come from the binary ([`Probe`]): the engine and this library read no clock.
 //! Panics, violations and errors fail the run; outliers and memory are reported.
@@ -119,7 +120,7 @@ pub struct Settings {
     pub outlier_factor: f64,
     /// ... and above this many milliseconds.
     pub outlier_floor_ms: f64,
-    /// Play only the games whose number is `k` modulo `n`: `(k, n)`.
+    /// Play only the laps of the sizes whose number is `k` modulo `n`: `(k, n)`.
     pub shard: (u32, u32),
     /// Play only this game.
     pub only: Option<u32>,
@@ -179,7 +180,9 @@ pub struct GameReport {
     pub median_round_ms: f64,
     pub max_round_ms: f64,
     pub outliers: Vec<Outlier>,
-    /// The most heap the game held, in bytes, if the binary counts it.
+    /// The most heap the game held, in bytes, if the binary counts it: the game, its agents, and
+    /// the journal chunks the soak keeps to load the game back from (`journal_bytes`), as a
+    /// host that keeps its journal in memory would hold them.
     pub peak_bytes: Option<u64>,
     /// The canonical state's size at the end, and the journal chunks' total.
     pub state_bytes: usize,
@@ -461,13 +464,14 @@ pub fn run(
     if n == 0 || k >= n {
         return Err(format!("no shard {k} of {n}"));
     }
+    let laps = u32::try_from(sizes(settings)?.len()).map_err(|e| e.to_string())?.max(1);
     let mut report = Report { seed: settings.seed, games: Vec::new() };
     // Game `i` is the same game whatever the count, so asking for one past the count plays it.
     let count = settings.only.map_or(settings.games, |i| settings.games.max(i.saturating_add(1)));
     for spec in plan(&Settings { games: count, ..settings.clone() })? {
         let wanted = match settings.only {
             Some(i) => spec.index == i,
-            None => spec.index % n == k,
+            None => (spec.index / laps) % n == k,
         };
         if !wanted {
             continue;
@@ -508,6 +512,44 @@ mod tests {
         }
         // The same plan twice: game n of a seed is one game.
         assert_eq!(plan(&Settings { games: 200, ..Settings::default() }).expect("a plan"), games);
+    }
+
+    /// A probe with no clock and no memory, which never stops a run.
+    struct Still;
+
+    impl Probe for Still {
+        fn now_ns(&mut self) -> u64 {
+            0
+        }
+        fn reset_peak(&mut self) {}
+        fn peak_bytes(&mut self) -> Option<u64> {
+            None
+        }
+        fn keep_going(&mut self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn shards_take_whole_laps_of_the_sizes_and_cover_the_run_once() {
+        let s = Settings { games: 30, ..Settings::default() };
+        let all = plan(&s).expect("a plan");
+        let mut seen = Vec::new();
+        for k in 0..4 {
+            let mine: Vec<u32> =
+                all.iter().filter(|g| (g.index / 6) % 4 == k).map(|g| g.index).collect();
+            // Every shard of a 30-game run but the last plays whole laps: each size alike.
+            if k < 3 {
+                assert_eq!(mine.len() % 6, 0, "shard {k}: {mine:?}");
+            }
+            seen.extend(mine);
+        }
+        seen.sort();
+        assert_eq!(seen, (0..30).collect::<Vec<u32>>());
+        // A run whose probe says stop plays nothing, and a shard that is not one is refused.
+        let r = run(&Settings { shard: (1, 4), ..s.clone() }, &mut Still, &mut |_| {});
+        assert_eq!(r.map(|r| r.games.len()), Ok(0));
+        assert!(run(&Settings { shard: (4, 4), ..s }, &mut Still, &mut |_| {}).is_err());
     }
 
     #[test]
