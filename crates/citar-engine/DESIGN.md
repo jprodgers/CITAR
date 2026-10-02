@@ -4065,3 +4065,891 @@ As built: `citar-bench`'s three suites (`kernels`, `turns`, `io`) pinned to core
 
 As built: the strict run over the 262 states is clean (0 unexplained, 0 stale, every ratchet count 0) once the two stale entries of 1a-07, which no state can show, moved to `tests/rules/intended.toml` with a test that shows each; every entry of both lists is cited and every citation names one, both checked by a test; `cargo refcheck changelog --write` keeps CHANGELOG.md's 98 rule fixes; `ErrCode::NotPorted` is gone and `cargo xtask check` forbids any marker; ARCHITECTURE and MODDING describe the Rust engine. Gates 1 to 3 hold, gate 2 locally at the head (Windows and Linux) and in CI at its base on macOS and real linux-arm64 too; the PR text is drafted for the merge. The fix round: the docs' oracle and settle claims corrected; every entry of the scripts' list named by the script or test that shows it, checked by a test (thirteen older ones spared on a list that only shrinks); a citizen placement the soak found was not a fixed point fixed (`citizens-shed-locks-at-once`, 99 rule fixes), which moved one round of the long golden set; every gate again at its head, the goldens on Windows, Linux and emulated linux-arm64. See "As built in 1e-04" after §1.3.
 
+---
+
+## Phase 2: the bot, the runner, the bindings and the swap
+
+**Status.** Final design, 2026-10-02, by the lead architect, for Phase 2 of `ops/plan-0.1.6.md` §7, after one review round (P2.14 logs what changed and what was rejected). Phase 1 is complete at `8f84421`. Sections are numbered P2.x so they cannot be confused with Phase 1's. P2.13 summarises the work breakdown, which is kept as the package list beside this section.
+
+**Sources:**
+- `ops/plan-0.1.6.md` §§1, 3, 4, 5, 6.8 and 7, with the 2026-09-23 revision: no bit parity, stability and speed first, fix Python bugs instead of porting them;
+- `ops/STATUS.md` (Phase 1 results and the exit verifier's Phase 2 notes);
+- this document's §§1.2, 2.1-2.7, 4.5, 4.9-4.11, 6.12, 7.1, 8, 9.8 and 10, and the as-built notes of 1b-03, 1c-05, 1c-07, 1c-09, 1e-03 and 1e-04;
+- `citar/engine_api.py`, `citar/bots/{basic,profiles,headless,idle}.py`, `citar/lab.py`, `citar/sim.py`, `citar/balance.py`, `citar/server/{session,app}.py`, `citar/agents/bot_agent.py`;
+- `ops/review-0.1.6/{bots,server-runtime,agents-llm,build-ci-tests}.json`;
+- `scripts/refcheck/{baseline,common,summarize}.py` and `refcheck/baseline/*.jsonl`;
+- `.github/workflows/*.yml`, `Dockerfile`, `.dockerignore`, `.gitignore`, `pyproject.toml`.
+
+**Facts the design leans on,** checked against the tree at `8f84421`:
+- `citar/bots/basic.py` is 2,771 lines. `PARAM_GROUPS` holds 17 `(name, help, specs)` groups and 375 parameters: 222 int, 127 float, 9 choice, 8 bool, 7 order, 2 list. Two defaults are `null`: `small_city_focus` (a choice) and `policy_order_aggressive` (an order meaning "the default order").
+- `profiles.schema` returns `{engine, groups}`, the Bots page's shape. `clean_params` (profiles.py:185-225) accepts integral floats and numeric strings for an int and keeps a fractional value as a float.
+- The bot draws from two Mersenne Twister streams: `self.rng` (tech noise 906; ranged or melee 1336) and `self.rng_diplo` (spies 1057, peace 2427, friendship 2438, war preparation 2449). Its memory is eleven dicts (684-694), lost on every save.
+- In the server every bot action goes through `session.call_tool` (bot_agent.py:27-33), which runs `_after_action` (session.py:200-215): the version, metrics turns, negotiation responders, the `turn` and `update` broadcasts, the autosave.
+- `engine_api.__all__` has 38 names. `bot_set_diplomacy` changes the bot in place (test_engine_api.py:151-160); `run_game` honours `raise_errors` (sim.py:48), `labels` and `traceback_limit` (balance.py:86); `lab.play` reads `bots[pid].aggression`.
+- `Game::drive`, `SeatDriver`, `DriverMemory` (at most 4 MiB), `DriverOutcome::Deferred` and the five `Stop`s exist (`game/turn/drive.rs`); `with_driver` is private. Nothing asserts `Game: Send`.
+- `take_journal_chunk` moves the game's journal cursor when it returns a chunk (core.rs:255-259).
+- A poisoned game refuses with `ActionError { code: ErrCode::Poisoned }` (core.rs:308). Nothing in `citar/server` or `citar/agents` handles a crash, and `_drive`'s error handler calls `game.emit`, which a poisoned game refuses.
+- `BUILD_ID` is `CITAR_BUILD_ID` at compile time, else `"dev"` (rules/source.rs:60).
+- The advisor reads no bot memory: it assumes "a bot that asks only for production" at advisor.rs:444 (war preparation), 728 (sites given up), 925 (garrisons) and 1363 (boat turns), and has no escort override (basic.py:1249, 1415).
+- `Purpose::BotBase = 0x1000_0000` is reserved. Refcheck's `deal_checks` holds Python's `bot_value` for every sampled deal, compared only with `--with-bot`.
+- The Python baselines are git-ignored and exist only on the laptop: small, 60 games (seeds 5000-5059; 55 to turn 330, 5 Scientific victories); std-large, 24 games (14 standard, 10 large); gargantuan, 2 games (8,364 s and 8,368 s); a smoke file.
+- Per-game spreads are small: on small maps techs@100 is 19.24 (sd 0.73), policies@100 8.00 (sd 0.40), score@100 229 (sd 22.5), cities@100 3.26 (sd 0.47). 33 of 240 civilizations had fewer than three cities at turn 100.
+- `.dockerignore` excludes `dist`; `.gitignore` covers `*.so` but not `*.pyd`; `docs.yml` runs `pip install -e ".[dev]"`. The Python suite is 608 tests, 2 skipped; `tests/rules/` holds 144 script files.
+
+### P2.1 Goals, non-goals and exit
+
+#### P2.1.1 What Phase 2 delivers
+
+1. **The live bot in Rust** (`citar-bot`). `basic.py` becomes the compiled version `basic-1`, with 373 of its 375 parameters (two are dropped, P2.3.9) and its profiles. It keeps the per-category diplomacy switches and `advice()` that Phase 0 added. `idle.py` becomes the version `idle`.
+2. **A headless runner** (`citar-sim`): `run_game` and the baseline JSONL writer.
+3. **Saves** (`citar-store`): a zstd container, plus an append-only journal file for replay frames and history, written off the session lock.
+4. **Python bindings** (`citar-py`): `citar._engine`, backend 2 of `citar/engine_api.py`, releasing the GIL on every heavy call.
+5. **The swap.** The server, agents, MCP, probes, benchmarks, the lab and the Bots page run on Rust, and the Python suite passes on it.
+6. **The removal.** The Python engine and the 18 frozen bots are archived on a tag and deleted. Bot versions and a new ladder replace freezing.
+7. **The Phase 2 speed floors.** A small 4-bot Quick game in 25 s or less; gargantuan at least 30x faster than Python's 8,364 s, which is 279 s or less.
+
+**Owner decisions that bind this phase:**
+- Port only the live bot. Archive the 18 frozen bots and the old ratings.
+- Bot versions are named and compiled in. Profiles change parameters only, and are pinned to engine build plus bot version.
+- One maturin-built `citar` package with abi3-py311 wheels.
+- Saves are zstd, with replay frames in an append-only side file written off the session lock.
+- The Python engine is removed after the swap and archived on a tag.
+- Hybrid seats come in Phase 3, but the Rust bot must have the switches and `advice()`.
+- At most two packages in parallel. Each package fits one agent session and is verifiable when done.
+
+#### P2.1.2 Non-goals
+
+- **Phase 3:** the hybrid agent, its diplomat prompt and triggers; the trade-chat UI and rule T3's lobby timeouts; pooled prompts; `replay.js` reading the `Delta` format (the `Full` replay stays); ETags on views and trade options leaving the view (plan 6.8). The engine already stops for `HybridDiplomat` and honours `Deferred` (1c-09). Phase 2 keeps the bot side ready: switches, deferred answers and advice.
+- **Phase 4:** the Rust helper, CPU jobs, signatures and trust, and a Python-free lab job. `citar-sim` and `citar-store` are libraries so the helper can link them.
+- **Phase 5:** the release wheel matrix, multi-arch Docker, installers, Scoop, winget, Homebrew and the VPS.
+- **Game-for-game parity with the Python bot.** The comparison is statistical (P2.4.4) and by deterministic sub-decisions (P2.3.11).
+- **Memo redundancy under 5%.** §10's decision stands: the soak guards each memo's recompute count. It is taken up only if a speed floor fails.
+- **Threads inside a game.** Throughput comes from games side by side, now on several cores because the GIL is released.
+
+#### P2.1.3 Exit criteria
+
+| Criterion | Measured by |
+|---|---|
+| The bot is ported | Every `basic.py` decision has a Rust home (P2.3.10). The bot scripts pass on Rust, and passed on Python while it existed. `cargo refcheck run --with-bot --strict` is clean on the 262 states. The `bot_decisions` agreement floors hold (P2.3.11). |
+| Whole bot games alike | Gates G1-G4 of P2.4.4 pass on every stratum: Rust small ×120 and standard/large ×50 against the committed Python baselines. |
+| No panics, no corruption | Bot soak: 1,000 small and 100 larger bot games with the invariants on, 0 failures. Mixed bot/random chaos: 20 minutes per OS, 0 failures. The bot fixture sweep: one bot round on each of the 262 states, clean. |
+| Determinism | The `bot` golden set is identical on the 6 determinism targets. Save and load at every round of a bot game equals the uninterrupted chain. |
+| Speed | `game/bot_small_330` median ≤ 24 s (floor 25 s, target 5 s). `game/bot_gargantuan_330` ≤ 270 s (floor 279 s, target 90 s). God view ≤ 20 ms. Save lock time ≤ 10 ms budget, 100 ms plan limit. |
+| The server runs on Rust | `citar/engine` and the frozen bots are deleted and tagged. The full Python suite, ruff, the route audit, the link check and `mkdocs --strict` are green. The server soak in 2-13 is clean: bot turns broadcast, autosave keeps up, a restart resumes, the replay loads. |
+| Packaging for now | `pip install -e .` builds the extension. CI builds an abi3 wheel per OS, installs a manylinux wheel in a clean venv, and the Docker job runs from it. |
+
+### P2.2 Crates and what the checks add
+
+| Crate | Kind | Depends on (workspace) | Purpose |
+|---|---|---|---|
+| `citar-bot` | lib | `citar-engine` | The bot versions (`basic-1`, `idle`) as `SeatDriver`s; parameters, memory, streams, advice and deal valuation |
+| `citar-store` | lib | none | zstd, the `.citar` v2 container, journal framing and torn-tail recovery |
+| `citar-sim` | lib + bin | `citar-engine`, `citar-bot` | The headless runner, `run_game`, the baseline writer, the CLI |
+| `citar-py` | cdylib `citar._engine` | engine, bot, sim, store | PyO3 0.29, abi3-py311; `[lib] test = false, doctest = false` (tested through Python) |
+
+- **Lints.** `citar-bot` uses the strict root `clippy.toml`: its decisions must be as deterministic as the engine's (no hash iteration, no std transcendental functions, stable sorts). `citar-sim`, `citar-store` and `citar-py` are host crates with relaxed files, as testkit's binaries are. If PyO3's macro expansion trips the workspace's `unsafe_code = "deny"`, `citar-py`'s `lib.rs` carries one `#![allow(unsafe_code)]` with its reason, and xtask refuses any hand-written `unsafe` block in the crate.
+- **New `cargo xtask check` rules** (written in 2-00a):
+  1. **The crate graph.** Each crate depends only on the crates in the table. `citar-testkit`, `citar-refcheck` and `citar-bench` may add `citar-bot`; bench may add `citar-sim`.
+  2. **`&mut Game` stays in one file.** In `crates/citar-bot/src/**` the text `&mut Game` may appear only in `src/driver.rs`. Every other bot file reads `&Game` and acts through `Turn` (P2.3.6), so the bot cannot reach the engine's public `&mut Game` functions (`relations::set_war`, `execute_deal`, ...) except through `Game::act`.
+  3. **Shipped builds stay clean.** `citar-bot`, `citar-sim` and `citar-store` turn on neither `legacy` nor `test-ops`. `citar-py`'s `test-ops` only forwards to the engine's. `pyproject.toml`'s `[tool.maturin] features` must not list `test-ops` (from 2-06b).
+  4. **`crates/citar-bot/src/params/gen.rs` is up to date** with its schema (`cargo xtask gen-params`, from 2-01a), as `gen-uniques` is checked today.
+- **`Game: Send`** gets a compile-time assertion beside `SeatDriver`, since the bindings hold games in a `Mutex` inside `Python::detach`.
+
+#### P2.2.1 Build identity
+
+The fingerprints, the lab's results, the baseline writer's "refuse another build's file" and Phase 4's proof of work all need an id that changes exactly when behaviour can. `CITAR_BUILD_ID` is unset in `pip install -e .`, CI wheels, Docker and any sdist, so it reads `dev` almost everywhere; `git describe --dirty` would move on docs-only commits. So the id comes from content:
+- **`crates/citar-engine/build.rs`** hashes (blake3) its `src/**/*.rs` in path order with CRLF normalised to LF, the embedded data files, the package version and the `Cargo.lock` versions of its normal dependencies, and sets `CITAR_ENGINE_CODE` (16 hex). `BUILD_ID` becomes that code. The save's `engine` string (`0.1.6+<BUILD_ID>`) is not part of the digest, which covers the ruleset and the state, so no golden digest moves (2-00a's gate checks it).
+- **`crates/citar-bot/build.rs`** does the same over its `src/**` and `params/*.json`: `CITAR_BOT_CODE`.
+- **`citar_bot::build_id(rules) = hex(blake3("CITAR-BUILD" ‖ ENGINE_CODE ‖ BOT_CODE ‖ RulesetId))[..12]`**, a function because a runtime ruleset (P2.8.4) has its own id.
+- **`CITAR_BUILD_ID` becomes `BUILD_LABEL`**, display only (`git describe`, else `unknown`). `build_info()` reports version, build id, label, `RulesetId` and both codes.
+- A test computes the codes from an LF and a CRLF copy of the sources and gets the same ids. Any source change in either crate moves the id; a commit outside them does not.
+
+**Changes to the Phase 1 text,** recorded in P2.12:
+- §2.1 said the bot "talks only to `game::query` and `Action`". It reads any public function that takes `&Game` and writes only through `Game::act`.
+- §7.1 reserved "`BotBase` and up, one per decision type". There is one purpose, `BotBase`, and the decision type is the first key word.
+- §4.5 left the bytes of `DriverMemory` open. They are JSON.
+- §8.2 mapped `play_bot_turn` and `bot_respond` onto `drive`. They map onto `drive` and a new `Game::answer`.
+- `BUILD_ID` is a content hash, not an environment variable.
+
+### P2.3 citar-bot
+
+#### P2.3.1 Shape
+
+```
+crates/citar-bot/
+  build.rs                CITAR_BOT_CODE (P2.2.1)
+  params/basic-1.json     the parameter schema of version basic-1: the Bots page's, profiles.py's and the bot's
+  src/lib.rs              BotSpec, Tuning, Bot, BotError; versions(), schema(), clean(), fingerprint(), build_id(), advice(), evaluate()
+  src/versions.rs         VERSIONS: basic-1 (memory kind 1), idle; LATEST = "basic-1"
+  src/params/             schema.rs (the JSON), gen.rs (GENERATED: Params), clean.rs, resolve.rs (names -> ids)
+  src/owners.rs           Owners: who decides each diplomacy category; owns(&Negotiation)
+  src/memory.rs           Memory and its codec in DriverMemory
+  src/stream.rs           Stream: the decision types' key words under Purpose::BotBase
+  src/driver.rs           impl SeatDriver for Bot; Turn, the only holder of &mut Game
+  src/basic1/             context, research, empire, faith, cities, gold, settlers, workers,
+                          units/{mod, scouts, military, attack, war_plan, special, air, naval, promote},
+                          diplomacy/{mod, war, trade, evaluate, respond, city_states, spies}, advice
+  src/idle.rs             founds its capital, rejects every negotiation
+```
+
+```rust
+pub struct BotSpec { pub version: VersionId, pub tuning: Arc<Tuning>, pub aggression: f64,
+                     pub fixed_aggression: Option<f64>, pub owners: Owners }
+pub struct Tuning { overrides: Overrides /* cleaned, sorted */, params: Params,
+                    resolved: Mutex<SmallVec<[(RulesetId, Arc<Resolved>); 1]>> }
+pub struct Bot { spec: Arc<BotSpec>, refusals: Refusals }        // impl SeatDriver; cheap to build
+pub fn versions() -> &'static [Version];                 // id, label, description, latest, memory kind
+pub fn schema(v: &str) -> Result<&'static str, BotError>; // the JSON, verbatim
+pub fn clean(v: &str, overrides: &Value) -> Result<Overrides, ParamError>;
+pub fn fingerprint(spec: &BotSpec, build_id: &str) -> String;
+pub fn advice(g: &Game, pid: PlayerId, spec: &BotSpec, nid: Option<NegotiationId>) -> Advice;
+pub fn evaluate(g: &Game, spec: &BotSpec, pid: PlayerId, other: PlayerId, give: &[DealItem], receive: &[DealItem]) -> f64;
+```
+
+- **A `Bot` holds no game state between calls.** What lasts lives in the seat's `DriverMemory`. What lasts a turn (the `Context`, one `Advisor`, caches) is local to `play_turn`. So a `Bot` can be rebuilt from its spec at any time, and any host can use it: the runner, the bindings, later the helper.
+- **Ruleset resolution is cached in `Tuning`,** which every spec with the same parameters shares. Hosts build fresh `Bot`s for each drive, so the cache must outlive them; it holds one entry per ruleset the spec has met.
+- **`aggression`** is what the seat plays with: the profile's, else the seat's, else 0.4, held to 0..1 as `BasicBot.__init__` held it. **`fixed_aggression`** is the profile's own value, `None` when the seat decides; it is what the fingerprint hashes (P2.8.6).
+- **`seed` is gone** (P2.3.5).
+- **2-00a writes these signatures with stub bodies,** so the bindings and the runner can be written in parallel with the port. The stub `Bot` plays as `idle`.
+
+#### P2.3.2 Parameters: one JSON schema
+
+- **The file.** `crates/citar-bot/params/basic-1.json` is `{"engine": "basic-1", "groups": [{"name", "help", "params": [spec, ...]}]}`, exactly the shape `/api/bots/schema` serves today, so it is served verbatim. Each spec has the keys of Python's specs: `key`, `type` (`int`, `float`, `bool`, `choice`, `order` or `list`), `default`, `label`, `help`; `min`, `max` and `unit` for numbers; `choices` for a choice (it may list `null`); `options` and `presets` for an order or a list.
+- **Where it comes from.** `scripts/bots/export_params.py` (2-00b) writes it once from `PARAM_GROUPS`, without `site_cache_turns` and `bv_cache_turns`. From then on the file is the source of truth; the script goes in 2-12.
+- **Three readers, one file:** the Bots page and `profiles.py` through `engine_api.bot_schema(version)`, and the bot through `include_str!` and the generated struct.
+- **Generation.** `cargo xtask gen-params` writes `src/params/gen.rs`: `pub struct Params` with one field per key (`i32`, `f64`, `bool`, a generated enum per choice, `Option<_>` when `null` is a choice, and `NameList { Default, Preset(Box<str>), Names(Vec<Box<str>>) }` for order and list, where `null` and `"default"` both read as `Default`), `serde(deny_unknown_fields)` and no `default`s. Effective parameters are the schema's defaults overlaid with the overrides, deserialized into `Params`; a key missing from either side fails a test, so struct and schema cannot drift.
+- **Cleaning.** `clean()` ports `profiles.clean_params`: unknown keys are refused with Python's message; bools accept `1`, `true`, `yes` and `on`; values equal to the default are dropped; keys are sorted. Two laxities are fixed:
+  1. An `int` must be integral. `2`, `2.0` and `"2"` are accepted as 2; `2.5` is refused. Python kept it as a float, which turned `//` into float floor division.
+  2. The names in an `order` or `list` must be among the spec's `options`, a preset, `"default"` or `null`. Python accepted any string.
+
+  `min` and `max` stay hints for the editor, as in Python.
+- **Resolution.** `Resolved::new(&Params, &'static Ruleset)` turns names into ids once per ruleset: policy branches, beliefs per kind, the pantheon order, the free great-person choices and the promotion lines (a `PromotionSet` of the promotions whose name starts with a listed prefix, as `startswith` did). Names a ruleset lacks (a mod) are skipped and counted.
+- **The advisor's parameters.** The engine's `AdvisorParams` gains `Deserialize` and is read from the same effective map. A test holds `AdvisorParams` from `basic-1`'s defaults equal to `AdvisorParams::default()`, which 1c-07 checked against Python field by field.
+
+#### P2.3.3 Typed context
+
+`Context` is `BasicBot.context()` (basic.py:777-835) as a struct, built twice a turn as Python did: at the start, and again after the units move. Its fields: `cities`, `units`, `military` (not scouts), `hostile` (visible enemy military); `threat` and `near_enemies` per city; `gpt`, `hap`, `era`, `wars` (met living majors at war), `gold`, `supply`, `army_target`; `offense` (at war or preparing one), `exposed` (with `garrison_mode = exposed`), `lux_owned`, `pending_res`. Beside it, as functions over `&Game` and `&Context`: `city_defense`, `in_danger`, `needs_garrison` and `breaks_space_reserve` (836-871).
+
+#### P2.3.4 Memory
+
+```rust
+#[derive(Serialize, Deserialize, Default, PartialEq)] #[serde(deny_unknown_fields)]
+pub struct Memory {
+    war_prep: Option<WarPrep>,              // _war_prep[pid]: player, since, target, rally
+    war_plan: Option<WarPlan>,              // _war_plan[pid]: city tile, since, advance, checked, rally, siege_ready
+    escorts: BTreeMap<UnitId, UnitId>,      // settler -> escort
+    garrisons: BTreeMap<CityId, UnitId>,
+    retreats: BTreeMap<TileIdx, u8>,        // _retreats[(pid, site)]
+    bad_sites: BTreeMap<TileIdx, Turn>,     // _bad_sites[(pid, site)]
+    need_escort: Option<TileIdx>,           // the city tile where a settler waits
+    boat_turns: BTreeMap<CityId, Turn>,
+}
+```
+
+- **Per seat.** Python keyed most dicts by player because one object could play several seats; a seat's memory needs no key.
+- **Encoding.** `serde_json` of the struct (fields in declaration order, map keys in order), so the same memory always gives the same bytes, which matters because the engine digests them (§4.10). Stored as `DriverMemory { kind: 1, version: 1 }`.
+- **A memory from elsewhere starts fresh.** A kind or version this driver does not know (a seat that changed bot version mid-game, an older schema) gives an empty memory.
+- **Pruning.** At the start of each turn the bot drops entries naming units or cities that are gone, blacklisted sites older than `site_blacklist_turns` and boat turns older than `c_boat_retry_turns`, so memory stays far under `DriverMemory::MAX_LEN`.
+- **Not kept:** `_sites_cache`, `_bv_cache` and `_space_res` (P2.3.9). `_space_res` is a ruleset fact and lives in `Resolved`.
+
+#### P2.3.5 Random streams
+
+Every draw is `Rng::keyed(seed, Purpose::BotBase, &[stream, pid, turn, ...])`, the game's seed, keyed by what it decides about.
+
+| Word | Stream | Python draw | Key after `[stream, pid, turn]` |
+|---|---|---|---|
+| 1 | `Research` | `rng.uniform(1 - tech_noise, 1 + tech_noise)` (basic.py:906) | tech |
+| 2 | `Spies` | `rng_diplo.random()` added to the tech lead (1057) | spy index, target player |
+| 3 | `Peace` | `peace_offer_chance` (2427) | other player |
+| 4 | `Friendship` | `friend_chance` (2438) | other player |
+| 5 | `WarPrep` | `war_chance` (2449) | other player |
+
+- **The sixth draw is the advisor's.** The ranged-or-melee pick (1336) is drawn by the advisor from `Purpose::Advisor` keyed `[city, turn]` (1c-07), shared with automatic production.
+- **The seed is the game's.** `bot_instance(seed=...)` is accepted and ignored until 2-12 removes the argument. Python seeded each bot `seed * 101 + pid`; keying by the game's seed and the seat does the same job.
+- **What this gives:** handing a category to a language model cannot move any other draw (plan 2.1); a game resumed from a save plays as the uninterrupted one; the order in which the bot asks never changes what it draws.
+- **Pinned.** `tests/bot/streams.rs` pins the first draws of each stream. Keeping the words in citar-bot keeps bot vocabulary out of the engine and leaves `golden/rng.json` as it is.
+
+#### P2.3.6 Acting: `Turn`
+
+```rust
+pub(crate) struct Turn<'g> { g: &'g mut Game, pid: PlayerId, refused: &'g mut Refusals }
+impl Turn<'_> {
+    pub fn game(&self) -> &Game;
+    pub fn act(&mut self, a: Action) -> Option<Outcome>;   // Game::act; a refusal is None, counted by tool
+}
+```
+
+- **It replaces Python's `ex`** (basic.py:697-707). The bot proposes freely and the rules refuse, so a refusal is normal: never an error, never a panic.
+- **Counts.** `Bot::refusals()` gives accepted and refused actions by tool name. Tests read them, the soak prints them (a bot looping on a refused action shows), and the server records them per bot turn (P2.7.1).
+- **Typed actions.** The bot uses the typed `Action` variants, never the JSON `execute`, and never ends a turn: `drive` ends it.
+
+#### P2.3.7 Using the engine: the advisor, the what-if and reads
+
+**Production is the advisor's** (`game::advisor`, 1c-07). Phase 2 adds the bot's memory as input:
+
+```rust
+pub struct BotFacts<'a> {
+    pub preparing_war: bool,                    // `pid in _war_prep`: army target and offense (basic.py:806-810)
+    pub garrisons: &'a [UnitId],                // `_is_garrison` in _pick_military (1332)
+    pub need_escort: Option<TileIdx>,           // the escort override (1249, 1415)
+    pub boat_turns: &'a BTreeMap<CityId, Turn>, // `c_boat_retry_turns` (1455)
+    pub blocked_sites: &'a [TileIdx],           // `_bad_sites` within `site_blacklist_turns` (1090)
+}
+impl Advisor { pub fn with_facts(g: &Game, p: PlayerId, pp: &AdvisorParams, f: &BotFacts) -> Self; /* new() = with NONE */ }
+```
+
+- **The four assumptions read the facts** (advisor.rs:444, 728, 925 and 1363), and the escort override the advisor lacks is added in both modes (a defender first in the unciv mode, `c_escort` in the classic one). Automatic production passes `BotFacts::NONE`, so its picks do not move; the advisor's corpus test proves it.
+- **The advisor stays read-only.** Python's production popped `_need_escort` when it chose a defender; the bot clears `memory.need_escort` itself when the item the advisor picked for that city is a military unit.
+- **Made public:** `Advisor::best_military(g, city, role)` and `Advisor::sites(g)`, for the emergency purchases (basic.py:1604) and the settlers.
+
+**The what-if.** Building values come from `cities::what_if::what_if_building` inside the advisor. The bot never edits a city to simulate one, as `_simulate` did (1491-1505).
+
+**Reads.** The bot reads the game through `&Game`: its accessors and the systems' public read functions, which cannot change the game (property P8). The roughly 70 engine helpers the review counted have Rust equivalents:
+
+| Python | Rust |
+|---|---|
+| `research.available_techs`, `tech_cost`, `path_to`, `is_unresearchable` | `game::research::*` |
+| `policies.adoptable_policies`, `branch_of`, `can_adopt_any` | `game::policies::*` |
+| `religion.beliefs_available`, `can_found_pantheon`, `beliefs_to_choose`, `ai_choose_beliefs` | `game::religion::*`, `religion::found::*` |
+| `cm.purchase_check`, `buildable_items`, `found_check` | `game::cities::{purchase, construction, founding}` |
+| `combat.preview`, `can_attack_now` | `game::combat::resolve::{preview_of, can_attack_now}` (typed `Preview`) |
+| `movement.can_stand`, `find_path`; `visibility.has_los` | `game::movement::*`; `game::vis::sight::has_los` |
+| `automation._threat_reach`, `city_site_score` | `game::derive::danger::threat_reach`; the advisor |
+| `briefing.bombard_targets` | `game::combat::city::bombard_targets` |
+| `actions.unit_actions`; `units.check_upgrade` | `game::actions::unit_actions`; `game::units::upgrades::check_upgrade` |
+| `CS.influence`, `influence_from_gold` | `game::city_states::*` |
+| `victory.military_strength`; `D.opinion`, `ra_cost`, `is_friends`, `has_pact` | `game::victory::score::military_strength`; `game::diplomacy::{relations, deals}` |
+| `economy.luxury_resources`, `strategic_resources` | the supply memo through `game::economy` |
+
+- **Hot reads stay typed.** JSON-building functions (`combat::preview`, the view builders) are not used on hot paths; the bot calls the typed function under each.
+- **No new read API.** `game::query` is refcheck's API; copying 70 reads into it would add a layer without adding safety. The safety is `&Game`.
+
+#### P2.3.8 Diplomacy: typed deals, the switches and advice
+
+- **`Owners`** is `[Owner; 10]` over `game::diplomacy::category::Category`: trades, agreements, peace, war, denounce, un, city_states, espionage, captured_cities, chat. `set` refuses an unknown category or owner with `set_diplomacy`'s messages. `owns(&Negotiation)` ports `owns_negotiation` through `category::proposal_categories`.
+- **The switches** are honoured wherever Python checked `_llm(...)`: espionage, spies (1040); city_states, gifts (1640); war, preparing and declaring war (2406, 2445; the bot still fights every war it is in); peace, peace offers (2426); agreements, embassies, friendship and research agreements (2432); trades, luxury trades and the gold counter (2486, 2699). `respond` returns `DriverOutcome::Deferred` for a negotiation the model owns, so `drive` holds it for the host (1c-09). un and captured_cities are the seat's `auto` flags, as in Phase 0.
+- **Valuation is typed.** `evaluate` ports basic.py:2558-2643 over `state::diplo::DealItem`, reading the proposal as the `Negotiation`'s typed `Terms` and the seat's memory for war plans and preparation.
+- **Counters are built from typed items.** The gold ask is merged into an existing `DealItem::Gold` and never exceeds what the other side holds less what is on the table. Answers go out as `Action::RespondNegotiation`, offers as `Action::OpenNegotiation`.
+- **`advice(g, pid, spec, nid) -> Advice`** ports 2713-2771 with Python's JSON keys (`deal_value`, `war_readiness`, `spare_luxuries`, `wants`). It decodes the seat's memory and reads the game; it writes nothing. The facade's `bot_advice` calls it, and so will Phase 3's hybrid advisor.
+- **`_settle_chats` and `handle_negotiations` are not ported** (744, 759-772). Before every step, `drive` puts each negotiation waiting on a driven seat to its driver. A chat waiting on another seat is rule T3's `AwaitingReply`, which the host settles.
+
+#### P2.3.9 Fixes instead of ports
+
+Each fix is listed in the module docs of the code that makes it, and any fix a refcheck group can show gets an `intended.toml` entry.
+1. `_simulate`'s cache swapping is gone: the advisor's what-if.
+2. `u.goto = None` (1872, 1886) wrote engine state directly. A goto onto a blacklisted site is ignored and `memory.bad_sites` is the record.
+3. One sequential stream becomes keyed streams (P2.3.5).
+4. Memory survives saves (P2.3.4).
+5. **`_sites_cache` and `site_cache_turns` are gone.** The advisor finds sites once per turn, only when a city could start a settler; fresh sites are better than four-turn-old ones and cheap in Rust.
+6. **`_bv_cache` and `bv_cache_turns` are gone.** Its default, 0, already meant "no cache". The schema has 373 parameters.
+7. Fractional ints and unknown list names are refused (P2.3.2).
+8. Ties broken by Python's set order of unit names become ruleset id order, as the advisor does (`advisor-ties-by-id`).
+9. Exceptions as control flow (`except ActionError` per unit, `_simulate` returning 0) become `Option`s; a refusal skips one action and never the rest of the turn.
+
+#### P2.3.10 Porting order of `basic.py`
+
+| basic.py | What | Rust | Package |
+|---|---|---|---|
+| 32-64, 71-628 | constants, `PARAM_GROUPS` | `params/basic-1.json` (2-00b), `params/*` | 2-01a |
+| 631-707 | helpers, `__init__`, `ex` | `lib.rs`, `versions.rs`, `driver.rs` (`Turn`) | 2-01a |
+| 709-738 | `set_diplomacy`, `_llm`, `owns_negotiation` | `owners.rs` | 2-01a |
+| 740-757 | `play_turn` | `driver.rs` (phases filled in by 2-01b, 2-03, 2-05) | 2-01a |
+| idle.py | the idle bot | `idle.rs` | 2-01a |
+| 777-871 | `context`, defence, danger, space reserve | `basic1/context.rs` | 2-01b |
+| 876-998 | research, tech values (both modes) | `basic1/research.rs` | 2-01b |
+| 1003-1041 | policy order, policies, free great people, pantheon | `basic1/empire.rs` | 2-01b |
+| 1069-1150, 1204-1576 | sites, counts, production | the engine's advisor, with `BotFacts` | 2-01b |
+| 1152-1202, 1577-1587 | `manage_cities`, focus, avoid growth, city bombard | `basic1/cities.rs` | 2-01b |
+| 1591-1643, 1739-1766 | gold, purchases, upgrades, spare units | `basic1/gold.rs` | 2-01b |
+| 1696-1737 | beliefs, spending faith | `basic1/faith.rs` | 2-01b |
+| 1771-1805 (dispatch), 1835-1857, 1879-1888, 1927-1949, 2054-2063 | `manage_units`' order and dispatch; settlers (no escort yet), workers, work boats, scouts | `basic1/units/{mod,scouts}.rs`, `basic1/{settlers,workers}.rs` | 2-01b |
+| 1806-1833 | promotions, garrisons | `basic1/units/promote.rs` | 2-03 |
+| 1858-1925 | settler danger, escorts, retreats | `basic1/settlers.rs` | 2-03 |
+| 1951-2052, 2065-2094 | special units, air, naval | `basic1/units/{special,air,naval}.rs` | 2-03 |
+| 2096-2389 | attacks, military orders, camps, ruins, war target, rally, approach, military power | `basic1/units/{attack,military,war_plan}.rs` | 2-03 |
+| 1043-1064, 1645-1694 | spies, city-state gifts | `basic1/diplomacy/{spies,city_states}.rs` | 2-05 |
+| 2394-2503 | `consider_diplomacy`, reachable city | `basic1/diplomacy/{mod,war}.rs` | 2-05 |
+| 2505-2556 | luxury trades | `basic1/diplomacy/trade.rs` | 2-05 |
+| 2558-2643 | `evaluate`, war items | `basic1/diplomacy/evaluate.rs` | 2-05 |
+| 2645-2708 | answers and counters | `basic1/diplomacy/respond.rs` | 2-05 |
+| 2713-2771 | `advice` | `basic1/advice.rs` | 2-05 |
+| 759-772 | `_settle_chats` | not ported (P2.3.8) | |
+
+After 2-01b the bot grows an economy, explores and expands with barbarians off; after 2-03 it fights the wars it is in; after 2-05 it is whole.
+
+#### P2.3.11 How the port is checked
+
+1. **Every Python recording is made first** (2-00b), while nothing else depends on it: the parameter schema, the bot-decision dumps for all three porting stages, and the bot scripts validated on Python. The Rust packages then only make things pass.
+2. **Refcheck `--with-bot`.** `answer/deal_checks.rs` answers `deals[*].bot_value` with `citar_bot::evaluate` (a fresh memory, default parameters, aggression 0.4: the conditions Python recorded). `refcheck/enforced.toml` adds the path in 2-05 and the ratchet holds it at 0. Accepted differences are the engine's intended ones (supply, tech costs); an entry covering a pure bot difference is not accepted.
+3. **A refcheck group, `bot_decisions`.** `scripts/refcheck/bot_dump.py` records, on each state and for each living major, the deterministic sub-decisions of a fresh `BasicBot(seed=0)` with `tech_noise = 0`:
+   - stage 1 (2-01b): tech values in both modes, the next research and policy, each city's defence, danger and garrison need, the expansion sites, the spare units;
+   - stage 2 (2-03): the attack each military unit would make (`ex` patched to record instead of act), the war target and rally point of a civilization at war;
+   - stage 3 (2-05): the reachable city per pair, the luxury trade proposal, the advice with and without each open negotiation.
+
+   Values are compared with refcheck's numeric tolerance and enforced. Choices are reported as agreement rates by `cargo refcheck bot-agreement`, with a floor of 95% per kind on the committed states and, locally, the corpus; the rest is attributed to a named cause (ties by id, an intended engine difference). The 12 committed states' recordings are committed (`refcheck/bot_decisions.json.gz`); the corpus's stay local (`CITAR_BOT_DUMP`), as the advisor's did.
+4. **Bot scripts** (`tests/rules/bot_*.toml`, about 24, written in 2-00b).
+   - A step kind `{ bot = "turn" | "respond" | "advice", player, negotiation?, aggression?, params?, diplomacy? }`. `turn` means "play the seat's turn and end it" on both runners: the Rust runner drives that seat alone with a seat limit of 1, the Python runner calls `play_bot_turn(end_turn=True)`; checks after it read the same point.
+   - Every step pins the draws through `params`: `tech_noise = 0`, `ranged_chance` 0 or 1, and the war, peace and friendship chances 0 or 1. Scripts assert only outcomes no draw decides.
+   - A script header `needs = "2-0x"` names the package that makes it pass on Rust. The Python runner ignores it; the Rust runner reports such a script as ignored. Each package's gate is that no script names it any more.
+   - They cover what Phase 1 deferred: the 15 bot scripts, and the bot parts of `test_bot_diplomacy` and `test_bots`.
+5. **The fixture sweep.** Every state, 12 committed and 250 in the corpus, loaded through `Game::from_python`; bots drive one round for every major with `DebugOptions::ALL`: no panic, no violation. This puts the bot in late-game positions in minutes.
+6. **Whole games** in `crates/citar-testkit/tests/bot/`, with the invariants on, mixing bots and `RandomAgent`s.
+7. **Statistics** (P2.4.4).
+8. **Determinism.** The `bot` golden set, and a save and load at every round.
+
+### P2.4 citar-sim and the statistical comparison
+
+#### P2.4.1 The runner
+
+- **`citar_sim::Runner`** owns a `Game` and one driver per major. **`step()` is one `Game::drive` with `seat_limit = 1`**, so control comes back after each driven seat: a host can check a time budget between seats, call `on_round` when the turn changes (as `common.play`'s `on_round` does), and, in the bindings, reacquire the GIL to deliver that step's events.
+- **Panics.** A drive panic is caught (`catch_unwind(AssertUnwindSafe(..))`). The runner poisons the game, writes a crash record with the message (and the seat's label, if the spec gave one) and ends the game. There is no `max_errors`: a Rust bot does not raise, and a panic is a bug. With `raise_errors` the binding raises `EngineCrash` instead (`citar sim`'s contract).
+
+**Two outputs, each in the shape its Python reader already reads:**
+- **`run_game`.** `engine_api.run_game`'s dict: `{turn, turns, phase, winner, victory, turn_limit, stats, players, errors}`; majors add `difficulty`, `techs`, `future_techs`, `policies`, `religion`, `great_people`, `cities`, `spaceship` and `score` (0 once eliminated), as `headless.result` does.
+- **The baseline writer.** `baseline.py`'s line exactly: `IDENTITY` (`i`, `seed`, `size`, `map_type`, `barbarians`, `speed`, `turn_limit`); the size × map × barbarian rotation and seed `--seed + i`; `civs[].at` with `"100"`, `"200"`, `"300"` and `"end"`; the `Tally` semantics (wars by attacker split by the defender's kind, captures and losses, checkpoint totals taken at the start of round T+1, the end-of-game fallback); `engine` = the build id, `bot` = `basic-1`; resuming, refusing to add to another build's file, crash lines, `--workers` on `std::thread`. A `BaselineLine` serde type round-trips every committed Python line, so the schema cannot drift.
+
+**The lab stays in Python.** `lab.play` already plays through `engine_api.run_game` with `on_turn` and `on_event` (lab.py:303-389); on Rust its bots are facade handles and its tallies come from the events the binding delivers per step. A Python-free lab job is Phase 4's, when the helper needs one and its result format is redesigned with signatures.
+
+**The CLI** (`citar-sim`, a developer tool): `play` (`citar sim`'s printout), `baseline` (as `baseline.py`), `--smoke` (two short duel games). The wheel exposes the same runner through `engine_api.run_game`.
+
+#### P2.4.2 The game benchmarks
+
+`crates/citar-bench/benches/games.rs` (`harness = false`) plays, single-threaded, release, pinned to core 0: the small 4-bot Quick game of seeds 5000-5002 to 330 rounds (median), and one gargantuan 24-bot game of seed 5000. It writes `<target>/perf/games.json` for `cargo xtask perf --suite games`:
+
+| Measure | Budget | Hard limit (1.5x) | Floor | Target |
+|---|---|---|---|---|
+| `game/bot_small_330` | 16 s | 24 s | 25 s | 5 s |
+| `game/bot_gargantuan_330` | 180 s | 270 s | 279 s | 90 s |
+
+25 s is the plan's 20x over Python's ≈ 510 s on one core; 279 s is 30x under `python-gargantuan.jsonl`'s faster game. The suite is report-only until 2-07 and hard from then on. Timed runs are taken with the other lane paused (the orchestrator's job) and record the machine's load.
+
+#### P2.4.3 The Python baselines are committed
+
+2-00a moves `refcheck/baseline/python-*.jsonl` to `refcheck/baseline/python/{small,std-large,gargantuan,smoke}.jsonl` (490 KB) and commits them; `refcheck/.gitignore` narrows to Rust runs and logs. They cannot be recreated once the Python engine is gone, and today they exist on one laptop.
+
+#### P2.4.4 Statistical comparison: method and gates
+
+**Data.** Python: small ×60; standard ×14 and large ×10; gargantuan ×2. Rust: small ×120 (seeds 5000-5119, the rotation over the five map types, barbarians normal, Quick, no turn limit); standard/large ×50 (the rotation gives 25 of each); gargantuan ×2, for timing and as a check that both games end.
+
+**Method** (`scripts/refcheck/summarize.py`, pure Python, kept after the removal):
+- **The unit is the game.** Civilizations in a game are correlated, so each metric becomes one number per game: the mean over the majors alive at the checkpoint for state metrics (`cities`, `population`, `techs`, `score`, `military`, `policies`, `land`, `era`), the game's total for event metrics (`wars_declared`, `cities_captured`).
+- **Strata.** Small, standard and large are compared separately: score@200 is 420 on standard and 349 on large, and the two runs mix the sizes differently.
+- **Per metric, checkpoint and stratum:** the ratio of means, the difference with a bootstrap 90% interval (2,000 seeded resamples of games), and `d` from the per-game values for reference. `--split-half` reports the noise of the Rust run against itself.
+- **Rates per stratum:** the share of games with a war declared, with a capture, ending before the turn limit, by victory type, and with an elimination.
+
+**Gates,** run by `summarize.py PYTHON RUST --gate refcheck/baseline/explained.toml`, exit 1 on a failure:
+
+| Gate | Small | Standard, large |
+|---|---|---|
+| G1 crashes | 0 crashed, poisoned or timed-out games; 0 invariant violations in a 20-game subset run with checks on | same |
+| G2 gross gaps: cities, population, techs, score at 100/200/300 | Rust's mean within [0.75, 1.33]x of Python's, and Rust's means rising from 100 to 200 to 300 | [0.67, 1.5]x, and rising |
+| G3 explained gaps: every metric × checkpoint | a gap of 10% or more whose interval excludes 0 needs an `explained.toml` entry (event metrics only where Python's mean is at least 1 a game) | 15% |
+| G4 rates | each rate within ±25 percentage points of Python's, or explained | ±35 points |
+
+- **`explained.toml`** holds `[[gap]]` entries (`metric`, `checkpoint`, `stratum`, `reason`). A reason is an intended engine fix by id, a bot fix from P2.3.9, or a measured cause with its evidence. An entry whose gap no longer meets G3's rule is printed as a warning, not a failure, so a re-run on a later head cannot fail on noise.
+- **Why these numbers.** On these metrics the per-game coefficient of variation is 4-20%, so G2's ratio bounds sit many standard deviations out: they catch §9.8's gross mistakes (cities that never grow, wars that never end) and nothing else. Requiring both a material gap (10%) and a significant one makes every real behavioural difference a written decision, without asking for causes of 2% gaps on low-spread metrics. The intended rule fixes (99 of them) and a new map generator move the distributions a little, which is why G3 explains rather than forbids, and why game length is a rate (early endings) rather than a median that sits at 330.
+- **Calibration** (report-only, 2-07): the same table for Rust `standard` against Rust `classic-production` (small ×60 each), so a reader can see what a known bot change moves.
+- **Bounded fixing.** 2-07 fixes porting mistakes it finds. A gap that needs bot-logic work beyond that becomes a follow-up package (`2-07f`), scheduled by the orchestrator before 2-12; `explained.toml` marks it `pending = "2-07f"`, which 2-12's precondition refuses.
+
+### P2.5 citar-store
+
+#### P2.5.1 The container
+
+```
+"CITARSV2" | u32 LE header length | header JSON | one zstd frame: body JSON
+header: {"format":"citar-save","version":2,"saved_at", "engine_build", "rules":"<RulesetId hex>",
+         "summary": <save::summary of the state>, "session": {id, name, benchmark},
+         "journal": {"file", "records", "bytes", "head"}}
+body:   {"session": {...}, "metrics": {...}, "state": <the engine's state JSON, spliced raw>, "chain": null | {"head","rounds"}}
+```
+
+- **The header is uncompressed and small.** Listing saves (`list_saves`, `scoring`, `save_meta`) reads only headers, never a gargantuan state's 6 MB.
+- **The body is zstd level 3,** about 10x on this JSON. The state is spliced in raw and handed to `Game::load` without a second parse.
+- **Writes are atomic:** a temporary file, then a rename, retried eight times at 250 ms on `PermissionDenied` (the OneDrive and scanner case `session.save` already retries).
+
+#### P2.5.2 The journal
+
+```
+"CITARJNL" | u16 LE version (1) | records...
+record: u32 LE payload length | u32 LE seq | u8 kind (1 = engine journal chunk) | u8 codec (0 raw, 1 zstd) | [u8; 8] blake3(payload) | payload
+```
+
+- **`JournalWriter::open(path) -> (JournalWriter, Recovered)`** scans the records and takes an exclusive OS lock (`File::try_lock`), refusing a file another writer holds.
+  - It truncates only an **incomplete tail**: a last record whose length runs past the end of the file (a crash mid-append).
+  - A **complete record that fails its hash, or breaks the seq order,** is corruption (bit rot, a sync conflict). `open` then truncates nothing and refuses to append: `Recovered { records, bytes, torn: Option<u64>, corrupt_at: Option<u64> }` says where the good prefix ends, and the session forks from it (P2.5.3).
+- **`append(seq, chunk)`** refuses a seq that is not the next one, so records are exactly the engine's chunks 0, 1, 2, ... **`sync`** is `File::sync_data`. A `PermissionDenied` on append is retried as on the rename.
+- **A container names its journal by `JournalRef { file, records, bytes, head }`.** `read_upto(path, &JournalRef)` reads exactly that prefix and refuses when record `records - 1` does not hash to `head`: the journal was rewritten, forked or swapped, and the save is refused rather than loaded with someone else's history.
+- **`fork(path, &JournalRef, new)`** copies the prefix's bytes to a new file.
+- **Nothing panics on any input.** Every failure is a `StoreError`.
+
+#### P2.5.3 Timelines, and writing off the lock
+
+- **Files.** A game's folder holds containers (`autosave.citar`, `turnNNN.citar`, `benchmark.citar`) and journals (`journal.cjnl`, then `journal-2.cjnl`, ...).
+- **A session writes one journal at a time, its timeline:**
+  - a new game opens `journal.cjnl`;
+  - loading a save continues its journal only if no container in the folder names a longer prefix of that journal and the journal opens clean; records past the save's `bytes` (a chunk appended for a save that never completed) are truncated;
+  - otherwise (an older save, or corruption) it forks a new journal from the save's prefix, so every other save that names the old journal stays valid.
+- **`delete_save`** also removes journals no container in the folder names.
+- **Chunks are never lost.** `take_journal_chunk` moves the game's cursor when it returns, so the session's `Journal` keeps every chunk taken but not yet appended and appends those first on the next write. A failed append (a locked file, a full disk) leaves its chunk pending and writes no container, so no container ever names a record that is not on disk.
+
+**The save writer.** `autosave()` is called from `_after_action`, with the session lock held by its caller, so the write cannot happen in place. Each session has one writer thread:
+
+```
+autosave() / save(name), under the session lock:   # microseconds to milliseconds
+    snap = game.save_snapshot()                     # Rust: Snapshot (a State clone) + take_journal_chunk()
+    writer.submit(snap, session dict copy, metrics copy, name)
+writer thread (GIL released inside the write):
+    journal.append(pending chunks in seq order) + sync
+    to_json, zstd, tmp file, rename                 # the container, naming the journal's new end
+```
+
+- Queued autosaves coalesce: every chunk is appended in order, but only the newest autosave container is written. A named save (the save route) waits for its own write, outside the lock, and reports its error.
+- **`stop()` drains the writer** (waits for the write in flight) and closes the journal, so a session loaded next never shares a journal with a stopping one; the OS lock enforces it.
+- **Crash-safe ordering.** Chunks are appended and synced before the container that names them is renamed into place. A crash between leaves extra records, which the next continuation truncates.
+- **What runs under the lock:** `Snapshot::new` (0.98 ms on the synthetic gargantuan state, 1e-03) and taking one round's chunk. `to_json` (23 ms), compression and both writes run off it. This fixes the torn saves `session.save()` produced by serialising live structures outside the lock (plan §2). Budget 10 ms.
+
+#### P2.5.4 Replays and `events()`
+
+- **A live game keeps its chronicle in memory,** frames as deltas (§4.11), so `replay_data(Full)`, `events()`, `stats()` and `thoughts()` read memory.
+- **On load,** `Game::load(state, chunks)` rebuilds the chronicle from the records the container names. If counts or the running hash disagree, `LoadReport.chronicle_incomplete` is set: the game plays on, the session logs a warning and serves what it has.
+- **One test covers the chain end to end:** play with an autosave every round, reload, and compare `replay_data`, `events()` and the digest with the live game's.
+
+### P2.6 citar-py and the backend switch
+
+#### P2.6.1 The module
+
+- **`crates/citar-py`** builds `citar._engine`: PyO3 0.29, `abi3-py311`, `generate-import-lib` for Windows. API names follow PyO3 0.26 and later (`Python::detach`, `Python::attach`); a `#[pyclass(frozen)]` must be `Sync`. 2-00a's skeleton compiles these, so the names are settled before 2-06a.
+- **Classes:** `Game` (frozen: `Mutex<citar_engine::Game>` plus `Heads`, P2.6.2); `Bot` (frozen: `Mutex<Arc<BotSpec>>`, P2.6.5); from 2-11 `SaveSnapshot` and `Journal`; the exceptions of P2.6.3.
+- **Values cross as bytes or small Python values.** Every value that would be a dict comes back as JSON bytes and is decoded by the facade; counts, ids and names come back as ints and strs.
+
+| Facade (`engine_api`) | Binding |
+|---|---|
+| `rules_version`, `rules_client`, `max_players`, `map_sizes`, `map_types`, `speeds`, `difficulties`, `resolve_name`, `ruleset_counts` | module functions over the process ruleset (`Ruleset::shared()`, or `CITAR_RULESET_DIR`'s from 2-12) |
+| `tool_list`, `tool_kind` | `api::tools::{schemas_json, kind}` |
+| `state_summary` | `save::summary` |
+| `validate_map`, `map_summary`, `blank_map`, `generate_map`; `list_maps`, `load_map`, `save_map`, `delete_map`, the scenario files | `api::maps::*`; the facade draws seeds (`random.randrange(1, 2**31)`) and does the file I/O |
+| `scenario_ops_help`, `scenario_summary`, `list_scenarios`, `load_scenario`, `delete_scenario` | `api::scenario::*`, file I/O in the facade |
+| `DIPLOMACY_CATEGORIES`, `item_category`, `proposal_categories` | `game::diplomacy::category` |
+| `RULES_OVERVIEW`, `MAP_LEGEND`, `DEBUG_ACTIONS` | module constants (`api::text`) |
+| `bot_instance`, `bot_set_diplomacy`, `bot_owns_negotiation` | `Bot(version, params_json, aggression, fixed_aggression)`, `.set_diplomacy(owners_json)` (in place), `.owns_negotiation(negotiation_json)`, `.aggression`, `.version` |
+| `run_game` | `run_game(spec_json, {pid: Bot}, on_turn, on_event)`: the citar-sim runner; the GIL is released for each step and reacquired to deliver that step's events and the turn hook; `raise_errors`, `labels` and `traceback_limit` honoured |
+| `EngineGame.new`, `from_state`, `from_save`, `state_dict`, `to_save` | `Game.new(config_json)`, `Game.load(state_json, chunks)`, the state JSON and the whole history as one chunk; the facade inlines the map document and draws the seed (§8.1) |
+| `turn`, `current`, `phase`, `winner`, `victory`, `turn_limit`, `is_alive`, `negotiation_head`, `open_negotiation_heads` | read from `Heads` with the GIL held |
+| `config`, `player`, `majors`, `summary`, `player_name`, `standing`, `standings`, `stats`, `events`, `event_view`, `thoughts`, `thought_count`, `add_thought`, `emit` | `api::host`, `api::views::empire`, the chronicle reads, `event_json`, `add_thought`, `emit_host` |
+| `execute`, `view`, `briefing`, `turn_progress`, `empire_summary`, `end_turn_refusal` | `execute`, `view_json`, `briefing`, `turn_progress`, `empire_summary` |
+| the negotiation reads and `close_negotiation`, `max_chat_messages`, `deal`, `describe_items`, `validate_items`, `open_negotiation_as` | the host methods of 1c-05 |
+| `set_controller`, `set_difficulty`, `apply_ops`, `scenario_overview`, `save_scenario`, `default_seats`, `normalize_seats`, `export_map`, `path_preview`, `has_met`, `meet`, `force_turn`, `debug`, `replay_data` | the host methods of 1b-02, 1c-09, 1d-02 and 1d-03 |
+| `play_bot_turn`, `bot_respond`, `bot_advice` | one-seat `Game.drive`, `Game.answer(pid, nid, Bot)`, `citar_bot::advice` |
+| Phase 2 names: `EngineGame.drive`, `answer`, `view_json`, `replay_json`; `build_info`, `bot_versions`, `bot_schema`, `bot_clean_params`, `bot_fingerprint`; the exceptions `EngineCrash` and `BackendError` (defined on both backends) | `Game.drive({pid: Bot}, seat_limit)`, `Game.answer`, `view_json(pid, extra)`, `replay_json(extra)`; `citar_bot::*` and `build_id` (P2.2.1) |
+| `inspect`, `test_ops` (tests) | `api::{inspect, testops}`, present only with `test-ops` (`citar._engine.HAS_TEST_OPS`) |
+
+**Engine additions for hosts (`api::host`, 2-06a),** since §3.2's `api/summary.rs` was never built: `summary` and its player rows (controller, handicap, auto, overrides, difficulty, `founded_city`); the lobby config as JSON and the turn limit; the negotiation heads and the open negotiations; an event by id; the stats and thoughts as Python's rows. They are engine functions with engine tests, so the binding stays a thin layer of calls.
+
+**Two more engine additions:**
+- **`Game::answer(pid, nid, &mut dyn SeatDriver) -> Result<(DriverOutcome, EventBatch), ActionError>`** (2-00a). It puts one open negotiation that waits on `pid` to a driver through the same `with_driver` that `drive` uses (`driving` set, memory copied and written back, the game settled). It refuses (`ErrCode::Negotiation`) a negotiation that does not wait on `pid`, which a responder that lost a race ignores. It is the session's responder for bot seats and the Rust runner's `bot = "respond"` step.
+- **The test operations `eliminate {player}`, `end_game {winner?, victory?}` and `panic`** (2-06a; `panic` exists for the bindings' tests). The first two replace the eleven places tests poke `python_game`, and the Python `testops` gains them while it exists.
+
+#### P2.6.2 The GIL, the locks and `Heads`
+
+- **Heavy calls run inside `py.detach`, with the game `Mutex` taken inside.** No thread ever waits for a game lock while holding the GIL, so the two cannot deadlock. Heavy means anything that can exceed about 100 µs: `execute`, `drive`, `answer`, views, briefing, replay, load, `apply_ops`, snapshots and writes, `summary`.
+- **Cheap reads never detach and never wait for the game.** At the end of every call that changes the game, still under the game lock, the binding publishes a small `Heads` copy (turn, current, phase, winner, victory, turn limit, revision, the alive set, the open negotiations' heads, poisoned or not) into its own `Mutex`, held only for a copy. The getters in the table read it with the GIL held; `negotiation_head` of a negotiation no longer open falls back to a locked read. Many server paths read these without the session lock (`info()` for the lobby, `queue_machine`, `mark_live`, `god_view_allowed`, the pool), and they no longer wait for a bot turn or pay to re-acquire the GIL.
+- **Lock order is game, then heads; getters take only heads.** Nothing inside `detach` touches Python. Callbacks (`run_game`'s hooks, event fan-out) run after the game lock is released, with the GIL held.
+- **The session's `RLock` still serialises a game's callers.** The `Mutex` is insurance against a caller that skips it, never the protocol.
+- **What the server gains:** two games on two cores (plan §3). 2-06a's gate 2 measures it.
+
+#### P2.6.3 Errors
+
+| Engine | Python |
+|---|---|
+| `ActionError { code, message }` | `citar._engine.ActionError(message)` with `.code` (`"not_your_turn"`, ...), exported as `ActionError`, so `except ActionError` works on both backends |
+| `ErrCode::Poisoned`, `EngineError::Poisoned`, a caught panic | `citar._engine.EngineCrash(RuntimeError)`, **never** `ActionError`: the server must not swallow a crash as a refusal. The game refuses commands and still answers reads and snapshots (§8.5). |
+| `EngineError::Config` | `ValueError`, as `Game.new` raised |
+| `EngineError::Map`, a map refusal | `citar._engine.MapError(ValueError)`, exported as `MapError` |
+| `LoadError`, `StoreError` | `citar._engine.LoadError(ValueError)` |
+
+#### P2.6.4 Events, panics and interpreter exit
+
+- **Every mutating call returns its `EventBatch` as JSON,** each event in Python's dict shape (`Game::event_json(ev, None)`, 1d-02).
+- **The facade fans events out.** `EngineGame` keeps the subscribers and calls each for each event after the call returns, on the calling thread. That changes `subscribe`'s documented timing from "during the call" to "after it"; the docstring says so.
+- **Panics never cross the boundary.** Each entry point runs `catch_unwind` inside the game lock, so the `Mutex` is never poisoned; the game is marked poisoned and the caller gets `EngineCrash`.
+- **Interpreter exit.** A daemon thread (a session driver) can be inside `detach` when Python finalizes; re-attaching then can kill the thread in ways that abort the process on some Python versions. The binding counts calls in flight, and the facade's `atexit` hook waits up to 5 s for them. A test on Linux with Python 3.11, 3.12 and 3.13 exits the interpreter while a daemon thread drives a game and asserts exit code 0.
+
+#### P2.6.5 Bots across the boundary
+
+- **A `Bot` handle holds `Mutex<Arc<BotSpec>>`.** `set_diplomacy` swaps in a spec with the new owners, in place, as `bot_set_diplomacy` promises and Phase 3's hybrid seats rely on; the `Tuning` (and its resolution cache) is shared, not rebuilt. `.aggression` and `.version` are read-only properties (`lab.play` reads the first).
+- **Each `drive` or `answer` snapshots every handle's `Arc` once at its start** and builds fresh `citar_bot::Bot`s from them, so no Python object is borrowed across the call, two seats may share a handle, and a `set_diplomacy` during a drive applies to the next one.
+- **The drive's result carries each bot's action counts** (`{pid: {tool: [ok, refused]}}`, from `Bot::refusals()`), which the server records (P2.7.1).
+- **Only compiled bots run on Rust.** A Python bot object is refused with a `TypeError`.
+
+#### P2.6.6 How the facade selects its backend
+
+- **`citar/engine_api.py` becomes the selector.** `BACKEND = os.environ.get("CITAR_ENGINE", "python")`, then `from .engine.facade import *` or `from ._facade_rust import *`. It keeps one `__all__` and checks at import time that the backend defines every name.
+- **The Python backend is frozen** at today's 38 names and `EngineGame` methods, moved unchanged into `citar/engine/facade.py` (deleted with the engine). Names added in Phase 2 are **Rust-only**: on the Python backend they raise `BackendError("Rust backend only")`, and tests that use them are marked `@rust_only`. Nobody writes a throwaway Python implementation.
+- **`citar/_facade_rust.py`** implements every name over `citar._engine` with the shapes the docstrings promise. Two documented behaviour changes: `apply_ops` is all or nothing on Rust (`atomic-apply-ops`), and `subscribe` fires after the call.
+- **The boundary test grows:** `citar._engine` is importable only from the facade's modules, and no module outside the facade and the tests reads `BACKEND`.
+- **The parity test** (`tests/test_facade_parity.py`) imports both backend modules, plays the same seeded duel and small game on each, and compares every original name's and method's key sets and value types under type classes: int and float are one number class, `None` matches any type where the docstring says optional, an empty collection matches any element type. Behaviour tests run on both: `bot_set_diplomacy` then `bot_owns_negotiation`, `raise_errors` raising, event order and counts.
+- **The default flips to Rust at the end of 2-09,** when the server passes on it. From then CI's Python-backend job runs only `tests/python_reference.txt`: the Python runner of the rule scripts on the Python engine, the parity test and the parameter-schema test. 2-12 deletes the switch.
+
+#### P2.6.7 The build and the dev loop
+
+```toml
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+[tool.maturin]
+python-source = "."
+module-name = "citar._engine"
+manifest-path = "crates/citar-py/Cargo.toml"
+features = []                            # never test-ops (xtask check); maturin sets the extension-module flag itself
+include = [ ... web, migrations, data (until the data move), collectors ... ]
+exclude = ["**/__pycache__/**", "**/*.pyc"]
+```
+
+- **The version is Cargo's** (`[project] dynamic = ["version"]`); `cargo xtask check` already holds the workspace version equal to `citar/__init__.py`'s `__version__`. Dependencies are unchanged, so `requirements.txt` and `scripts/sync_requirements.py` are unaffected.
+- **`.gitignore`** gains `citar/_engine*.pyd` and `citar/_engine*.so` (2-00a), so no agent commits a 20 MB binary.
+- **The laptop dev loop is `cargo xtask develop [--release]`** (2-06a). `maturin develop` would write the extension into the OneDrive checkout (§2.7's os error 32 and sync churn) and a running server would hold it. Instead develop:
+  - refuses unless the active venv belongs to this worktree (one venv per worktree, so two lanes never test each other's build);
+  - installs the project's dependencies into it when `pyproject.toml` changed;
+  - builds `citar-py` with cargo into the worktree's `CARGO_TARGET_DIR` (outside OneDrive), with `--features test-ops` and the `ci` profile, or `--release` for timing, and the build label from `git describe`;
+  - copies the library to `<target>/citar-ext/_engine.<ext>`, renaming a locked old copy aside;
+  - writes `citar-dev.pth` into the venv, which sets `CITAR_EXT_DIR`.
+
+  `citar/__init__.py` puts `CITAR_EXT_DIR`, when set, first on the package's `__path__`, so `import citar._engine` finds the built library while the sources come from the checkout. CONTRIBUTING says to stop the dev server and the lab before a rebuild on Windows.
+- **`pip install -e .`** also works and builds into the tree, which is fine in CI and on Linux.
+
+#### P2.6.8 CI
+
+- **rust.yml** (2-00a): `actions/setup-python` before the build (PyO3 needs an interpreter config); nextest and the doc tests run with `--exclude citar-py` (its library has no Rust tests and would link libpython); the lint job's clippy and `cargo doc` cover it. determinism.yml and nightly.yml build single packages (`-p citar-testkit`, `-p citar-bench`) and are unaffected. Path filters gain `crates/citar-engine/data/**` after the move.
+- **test.yml** (2-06b):
+  - a `build-ext` job per OS (ubuntu, windows, macos) builds the abi3 test wheel once (`PyO3/maturin-action`, `--profile ci --features test-ops`, rust-cache, the pinned toolchain) and uploads it;
+  - each test job downloads its OS's wheel, installs its dependencies, and unpacks `citar/_engine*` into the checkout (`scripts/ci/unpack_ext.py`), so the checkout's sources are tested with the built extension and the three ubuntu Pythons share one build;
+  - the `package` job builds a release-profile wheel without test operations, `manylinux: 2_28` explicit (the Docker base and the VPS have glibc 2.36 or newer), installs it in a clean venv, imports `citar._engine` from site-packages, checks the `abi3` tag and runs `citar doctor`;
+  - the `installer` jobs use the build-ext wheels with `install.sh --from`;
+  - the `docker` job puts the manylinux wheel in `wheelhouse/` and the Dockerfile installs `wheelhouse/*.whl` (`.dockerignore` keeps excluding `dist`).
+- **docs.yml** installs the pinned toolchain with rust-cache before `pip install -e ".[dev]"`.
+- **release.yml** is not reworked before Phase 5; 2-06b adds a first step that fails with "release packaging is Phase 5" while `__version__` is `0.1.6`.
+
+### P2.7 The swap
+
+#### P2.7.1 The server
+
+- **Bot seats go through `drive`, and every drive goes through the session's side effects.** `BotAgent.play_turn`, under the session lock:
+  1. records `before = (turn, current)`, then calls `game.drive({pid: bot for every bot seat}, seat_limit=1)`. Passing every bot seat lets a negotiation one bot opens with another be answered inside the same drive;
+  2. sets the metrics record's `end_reason` to `end_turn` if the drive ended the turn, records the drive's action counts on the turn row (`bot_actions`), and calls `session._after_action(*before)`: the version bump, `_track_turn`, the responders for model seats, the `turn` and `update` broadcasts and the autosave;
+  3. on `awaiting_reply`, the `_after_action` call has already started the model seat's responder; the agent waits on `cond` as today (90 s; Phase 3E replaces it with rule T3's lobby timeouts), drives again when woken, and calls `_after_action` after every drive. When the wait runs out it closes those chats as `expired`, "(no reply in time)", through `close_negotiation` (which runs `_after_action`) and drives once more, which ends the turn.
+- **The rest of `_drive` keeps its shape.** A seat whose turn the drive already ended fails the `turn_marker` check, so the driver's own `end_turn` is skipped.
+- **Responders.** `_dispatch_negotiation_interrupts` and `_run_responder` stay. A bot seat's answer is `game.answer(pid, nid, bot)` followed by `_after_action`, so a human's or model's proposal answered by a bot is broadcast and wakes waiters. A refused answer (the chat moved) is ignored.
+- **Crashes.** A `GameSession` that catches `EngineCrash` anywhere (`call_tool`, the driver, a responder, a view) calls `_crashed(message)`, which:
+  - records `crashed = {message, turn, at}`, pauses, stops the driver and cancels every agent;
+  - emits nothing on the game (a poisoned game refuses) and broadcasts `{"type": "crashed"}`;
+  - writes the poisoned state once as `crash-<turn>.citar` for debugging, and never autosaves over the last good save;
+  - keeps reads working (summary, views and the replay of a poisoned game) and shows the state in `info()` and the lobby.
+
+  `_drive`'s generic error handler no longer calls `game.emit` on a game that may be poisoned. A test drives the `panic` test operation through `call_tool` and through a bot drive, and checks each point.
+- **Metrics.** Bot seats get a turn row per turn, with `end_reason` and their action counts, but no per-tool rows (their actions do not pass through `call_tool`); the metrics and reports code tolerates it. LLM seats are unaffected.
+- **Views and the replay as bytes.** `/api/games/{gid}/view` uses `EngineGame.view_json(pid, extra)`, which splices `seat`, `session`, `version` and `spectator` into the engine's bytes, and the route returns them as they are: a gargantuan god view otherwise costs a parse and a re-dump of 2.6 MB per refresh. `/replay` does the same with `replay_json(extra)`, which splices `id`, `name` and each player's `seat`.
+- **Saves.** Until 2-11 saves keep the gzip JSON file, with Rust's `to_save()` as `{"state": <state dict>, "journal": <the whole history as one chunk>}`, built fresh under the lock (slow on large games, but never torn). From 2-11 saves are the v2 container through the writer (P2.5.3).
+
+#### P2.7.2 Agents, MCP, probes, benchmarks and reports
+
+- **Agents and MCP** reach the game only through the facade (`tool_list`, `tool_kind`, `execute`, `briefing`, `add_thought`, `negotiation_view`, the text constants). They need no change beyond the facade's shapes, which the parity test holds.
+- **Probes** create games from scenarios, whose `state` is the engine's own save JSON (§4.9; `scenario_summary` reads it), and use `apply_ops`, `force_turn` and `open_negotiation_as`. Scenarios from 0.1.5 were archived in Phase 0.
+- **Benchmarks, scoring and reports** read saves through the facade: scores from `state_summary`, from 2-11 from the container header's `summary`.
+
+#### P2.7.3 The lab, profiles, the Bots page, `sim` and `balance`
+
+- **The lab** (`lab.py`): `normalize` resolves profiles to a version (`basic` becomes `LATEST`) instead of freezing code; `play()` keeps its body over `engine_api.run_game` with facade bots and prints its `PROGRESS` lines from `on_turn`; results record per seat the build id, bot version, profile, revision and fingerprint computed at play time, so a queued experiment that runs on a newer build is labelled with the build that played it; `engine_hash()` becomes the build id; the subprocess-per-game runner stays until Phase 4.
+- **Profiles and the Bots page** read versions, schema, cleaning and fingerprints through the facade (P2.8). `bots_api`'s `/engines` and `/schema` serve them unchanged in shape.
+- **`sim.py` and `balance.py`** keep `run_game`. Their bots are facade handles and the `seed` arguments are ignored.
+
+#### P2.7.4 The Python suite on the Rust backend
+
+- **Markers** (`tests/backends.py`): `RUST = engine_api.BACKEND == "rust"`; `@python_engine_only("<successor>")` for a test that pokes the Python engine, whose behaviour now lives in the named rule script, Rust test or Python test; `@rust_pending("<package>")` for a test the named package will make pass on Rust; `@rust_only` for a test of a Rust-only name.
+- **The meta-test** (`tests/test_backends.py`) checks that every successor exists (a `tests/rules/*.toml`, a test name in `crates/**/*.rs`, or a Python test id). Each package's gate includes `git grep` finding no `rust_pending("<its id>")` and no script `needs` naming it.
+- **CI** runs the suite with `CITAR_ENGINE=rust` from 2-08, and the default flips in 2-09 (P2.6.6).
+
+| Modules | What happens |
+|---|---|
+| `test_engine`, `test_mechanics`, `test_barbarians`, `test_events`, `test_single_player`, `test_negotiation_chat`, `test_controllers`, `test_mapgen` | Their engine tests became Phase 1's rule scripts and native Rust tests (§9.3). They are marked `python_engine_only` with successors and deleted in 2-12. Their server-side tests (`update_seat`, the driver closing chats, about 14) are rewritten onto the facade. |
+| `test_bots`, `test_bot_diplomacy` | Ported to bot scripts (2-00b) made to pass by 2-01b, 2-03 and 2-05; the BotAgent tests are rewritten for `drive` in 2-09. |
+| `test_session`, `test_benchmarks`, `test_access`, `test_worker` | The `python_game` pokes become the `eliminate` and `end_game` test operations; otherwise backend-neutral. |
+| `test_editor`, `test_ui_support`, `test_providers` | Moved from `citar.engine.{maps,scenario,tools,...}` onto facade functions |
+| `test_engine_api` | Bots are handles. The frozen-bot and Python `Crasher` cases are replaced: a version id check, and the `panic` test operation reaching `run_game` as a crash record (and as `EngineCrash` with `raise_errors`). |
+| `test_rule_scripts` | On Rust the Python runner plays every script through the bindings and runs the `intended` checks. The Python `testops.OPS` check and the `--check` re-recordings of `tool_list.json` and `query_tools.json` stay in the Python reference subset until 2-12 deletes them. |
+| `test_bot_profiles`, lab tests | Versions instead of frozen engines (2-10) |
+| `test_auth`, `test_pool`, `test_costs`, `test_sharing`, `test_paths`, `test_setup`, `test_metrics` | Unchanged; they pass on both backends |
+
+### P2.8 Removal, bot versions and the new ladder
+
+#### P2.8.1 The archive tag and what must exist first
+
+- **2-12 starts by checking that everything recorded from Python is safe:**
+  - committed: the fixtures and their answers, `tool_list.json`, `query_tools.json.gz`, the advisor recording and the bot-decision recordings of the committed states, the four baseline files, `basic-1.json`;
+  - archived on the laptop under `saves/_archive_2026-10_python-reference/` (inside the OneDrive-synced checkout, git-ignored) with a committed checksum list `refcheck/corpus.sha256`: the 250-state corpus with its answers and the local `CITAR_ADVISOR_DUMP` and `CITAR_BOT_DUMP` files, which 2-13's full-corpus runs read and which nothing can regenerate;
+  - no `rust_pending` marker, no script `needs`, no `explained.toml` entry marked `pending`.
+- **The tag.** At 2-12's merge the orchestrator tags the base `python-engine-0.1.6` (annotated: "the Python engine, the live bot basic.py and the 18 frozen bots, as of the swap") and pushes it with the branch. The repository is public and all of it is already on `main` and in the v0.1.5 wheel, so the tag exposes nothing new.
+- **The lab history** (586 games) and the laptop's profiles are already archived under `saves/_archive_2026-09-23_pre-0.1.6/` (Phase 0).
+
+#### P2.8.2 What is deleted
+
+- `citar/engine/` (with `facade.py`, `testops.py` and `inspect.py`); `citar/bots/{basic,headless,idle}.py` and the 18 `frozen_*.py`; the `__path__` hack in `citar/bots/__init__.py`; the `CITAR_ENGINE` switch; `seed=` in the bot factories' callers.
+- The tests marked `python_engine_only`, `tests/python_reference.txt` and what it lists that only made sense on Python, `tests/test_bot_params.py`.
+- The Python recorders under `scripts/refcheck/` (`summarize.py` and the committed data stay), `scripts/check_refs.py`, `scripts/check_uniques.py`, `scripts/bots/`, and anything else importing `citar.engine` (found by `git grep -nE 'citar[./]engine([./]|$)'`, which does not match `engine_api`).
+- CI: test.yml's "Ruleset integrity" step and the Python-backend job.
+
+#### P2.8.3 What stays in Python
+
+`citar/bots/profiles.py` (storage, revisions, `resolve`, `make_bot` over the facade); `citar/bots/ratings.py` (the Bradley-Terry fit, unchanged); `citar/lab.py` (queue, runner, `play`, reports, quiet hours); `citar/server/bots_api.py`, `citar/sim.py`, `citar/balance.py`, `citar/bench.py`, `citar/aggregate.py`; the whole server, agents, providers, pool, auth and reports; `scripts/refcheck/summarize.py`.
+
+#### P2.8.4 The data move, and modding
+
+- **What moves.** `citar/data/{ruleset,custom,game.json}` moves with `git mv` to `crates/citar-engine/data/`, and `rules::source::embedded()`'s paths change. `citar/data/collectors/` stays, because the Servers page offers it for download. The contents are unchanged, so `RulesetId` and every golden digest are unchanged; the golden check proves it. The sdist becomes self-contained (§11 risk 10). `doctor`'s message and test.yml's package check move to the module (`citar._engine.ruleset_counts()`).
+- **Modding keeps working without a toolchain.** `docs/MODDING.md` tells modders to add a file under `citar/data/custom/`, restart, and run `check_uniques.py` and `check_refs.py`; with an embedded ruleset and those scripts gone that would silently stop working. So:
+  - `CITAR_RULESET_DIR`, read once when `citar._engine` loads: a directory in the data layout (`ruleset/`, `custom/`, `game.json`) loaded with `Ruleset::load` and used for every game and ruleset function of the process; `build_info()` reports its `RulesetId`, so its games, saves and fingerprints are told apart from the embedded ruleset's;
+  - `python -m citar ruleset check DIR` prints `RulesetErrors` (unknown uniques, broken references), replacing the two scripts;
+  - MODDING.md and the CHANGELOG's Compatibility section say how.
+
+#### P2.8.5 Bot versions
+
+- **A version is a code module plus its parameter schema, compiled in:** `basic-1`, the port of today's `basic.py` (memory kind 1); `idle`, no parameters, no memory.
+- **A new version is a deliberate copy.** A bot change that should not move existing results copies `src/basic1/` and `params/basic-1.json` to `basic2` and `basic-2`, makes the change there, and adds a `VERSIONS` row. A version is deleted once no queued experiment or saved profile names it.
+- **`basic` names the latest version.** The `standard` profile follows it, and the lab pins it at submission. This replaces `profiles.freeze()`, which copied Python source.
+
+#### P2.8.6 Profiles and fingerprints
+
+- **A profile** is `{engine, aggression, params}` with its revision history. `engine` is `basic`, `basic-N` or `idle` (`ENGINE_RE = ^(basic|basic-\d+|idle)$`); a `frozen_*` engine is refused with "archived with 0.1.5".
+- **The built-in profiles** are `standard` (`basic`, defaults), `classic-production` (`prod_mode = classic`) and `idle`. `snapshot-0922`, `v1` and `v0` pointed at frozen code and are dropped.
+- **Validation is Rust's:** `clean_params` is `engine_api.bot_clean_params`; the Bots page's schema is `bot_schema` (373 parameters in 17 groups).
+- **The fingerprint** is `hex(blake3("CITAR-BOT" ‖ build_id ‖ version ‖ canonical overrides ‖ fixed aggression or "seat"))[..12]`. It hashes the profile's fixed aggression, as Python did, never the value a seat plays with: lab seats get aggression by position (`0.25 + 0.5*((pid*37+seed)%10)/9`, ten values), and one profile must stay one entry per build and difficulty. With the content build id (P2.2.1), this is the owner's "pinned to engine build plus bot version": every behaviour change starts new entries, and two builds' results are never mixed in one.
+
+#### P2.8.7 Ratings and the new ladder
+
+- **The fit is unchanged.** Entries are keyed by fingerprint and difficulty.
+- **Entries are named from the results themselves.** Each lab result records per seat the profile, revision, fingerprint, bot version and build, so `ratings.collect` no longer re-derives fingerprints by importing bot modules (ratings.py:100-106), and `profiles.engines()` no longer globs frozen files; both broke the moment the frozen bots went.
+- **The ladder starts empty.** The first entries come from 2-10's gate experiment, then from the owner's experiments; `best` resolves as before.
+
+### P2.9 Packaging: now and Phase 5
+
+**Needed now:**
+- `pyproject.toml` on maturin (P2.6.7) and the CI of P2.6.8 (2-06b).
+- `.gitignore` for the extension (2-00a) and the Rust baseline outputs; `refcheck/.gitignore` narrowed (2-00a).
+- The data move and the ruleset override (2-12).
+
+**Left for Phase 5:**
+- the wheel matrix: win-x64, macOS arm64 and x64, manylinux x64 and aarch64, built natively; an sdist build in CI; attestations;
+- multi-arch Docker from wheels;
+- install scripts that use wheels only; the Windows bundle carrying `_engine.pyd`; Scoop, winget and the helper-only Homebrew tap;
+- the VPS deploy from the release wheel. Its systemd units (the server and `citar-lab`) run `python -m` from a `git archive` tree in `/opt/citar`, whose `citar/` would shadow an installed wheel and import without `_engine`: their `WorkingDirectory` must become the state directory, not a source tree;
+- `BUILD_LABEL` from the tag, and release.yml's check of the Cargo version.
+
+### P2.10 Performance
+
+- **Where the time goes.** In Python the bot's own logic was about 10% of a game and its engine calls the rest. In Rust the engine part is already at least 133x faster per pass round, so the bot's own work and its pathfinding are the share to watch.
+- **Expected cost.** Per bot turn about 1-5 ms on small maps (an advisor call 43 µs a city, a cold A* 25 µs, a combat preview 0.7 µs): 330 rounds × 4 bots is roughly 2-7 s plus the engine's 0.8 s, inside the 5 s target and well inside the 24 s gate.
+- **If 2-07 finds a floor missed, the tuning order is:** (1) bot-side caches for one turn (the `Context`, one `Advisor` per turn, path trees per unit per turn through `PathTree`); (2) fewer previews (only tiles in reach); (3) only then engine memos, measured by the `stats` feature.
+- **Seeing where it goes.** `examples/profile.rs` in citar-bench gains a bot game for callgrind and samply.
+- **The server's share** is plan §4's: god view ≤ 20 ms (10 ms measured), passed through as bytes; save lock time ≤ 10 ms; cheap reads from `Heads` without waiting for a drive.
+
+### P2.11 Risks
+
+1. **The yardstick moves:** a weaker or stronger Rust bot shifts every model score. Mitigation: the bot-decision refcheck, the statistics gates and `explained.toml`, all before 2-12.
+2. **Engine-intended differences look like bot bugs** (worker automation, sites, supply). Mitigation: G3 entries name an intended id; the agreement floors attribute misses.
+3. **Bot speed dominates games.** Mitigation: the games suite, the tuning order, the refusal counts.
+4. **GIL, lock and interpreter-exit hazards.** Mitigation: the one rule, `Heads`, a concurrency test, the exit test.
+5. **Facade drift between backends.** Mitigation: the parity test with type classes and behaviour tests.
+6. **Bot turns' server side effects** were carried by `call_tool`. Mitigation: `_after_action` after every drive and answer; 2-09's gates on each effect.
+7. **Saves:** mismatches, locks, crashes between writes, failed appends, corruption, two writers. Mitigation: P2.5's ordering, pending chunks, seq and head checks, forks, the OS lock, the drained writer.
+8. **Coverage lost with the Python tests.** Mitigation: every deleted test names a successor that a test checks exists.
+9. **Nothing can be re-recorded after 2-12.** Mitigation: 2-00a and 2-00b first, 2-12's precondition. Refcheck becomes a frozen regression suite; new reference states can only come from Rust runs.
+10. **CI time.** Mitigation: one abi3 build per OS, rust-cache, the `ci` profile.
+11. **Fingerprints per build fragment the ladder** (the owner's decision). The content build id limits it to real changes, and entries are named by profile and revision.
+12. **A bot panic poisons a game.** Mitigation: the fixture sweep, chaos with bots, P8 with bot drivers, the server's crash handling.
+13. **Hybrid paths untested until Phase 3:** `Deferred`, `HybridDiplomat` and `advice` are covered by scripts and drive tests, but no model drives them until 3D.
+14. **The in-memory chronicle grows** (tens of MB for a gargantuan 330-round game). Measured in the 2-13 soak; paging frames to the journal is a later option.
+15. **The Windows dev loop.** Mitigation: `cargo xtask develop`.
+
+### P2.12 Decisions taken in this design (Appendix A continued)
+
+63. **Bot reads:** `&Game` and any public read; writes only through `Game::act`; `&mut Game` only in `driver.rs`.
+64. **Bot streams:** one purpose, `BotBase`, the decision type as first key word; the game's seed.
+65. **Bot memory:** typed JSON in `DriverMemory`, pruned each turn; a mismatch starts fresh.
+66. **Parameters:** one JSON schema per version in the Bots page's shape, generated into a struct; two cache parameters removed; fractional ints and unknown names refused.
+67. **The advisor reads the bot's memory** through `BotFacts`, gains the escort override, stays read-only.
+68. **`drive` everywhere, with the session's side effects:** `play_bot_turn` and `bot_respond` become `drive` and `Game::answer`; the server runs `_after_action` after each.
+69. **Saves:** header plus zstd body; journal records with seqs and hashes; one timeline per session, forked when in doubt; chunks before containers, pending on failure; one writer thread per session.
+70. **The backend switch:** Python backend frozen at its 38 names; Phase 2 names Rust-only; the default flips at the end of 2-09.
+71. **Python recordings first:** baselines committed in 2-00a, every recording made in 2-00b.
+72. **Statistical gates** G1-G4 per stratum (P2.4.4).
+73. **Build identity is content;** `CITAR_BUILD_ID` is a label.
+74. **Fingerprints** hash build id, version, overrides and the profile's fixed aggression.
+75. **Cheap reads from `Heads`;** heavy calls detach and lock.
+76. **A poisoned game is `EngineCrash`, never `ActionError`;** the session stops, keeps its last good save, stays readable.
+77. **The lab stays in Python over `run_game`** until Phase 4.
+78. **Modding without a toolchain:** `CITAR_RULESET_DIR` and `citar ruleset check`.
+
+### P2.13 Work breakdown at a glance
+
+Seventeen packages in two lanes, at most two at once. The longest chain is **2-00a → 2-04 → 2-06a → 2-06b → 2-08 → 2-09 → 2-11 → 2-12 → 2-13**, and the bot's chain **2-00a → 2-01a → 2-01b → 2-03 → 2-05 → 2-07** joins it at 2-12. Fifteen packages fill eight two-lane slots, then 2-12 and 2-13 run alone: ten slots, the least this package count allows. Slot 7's free lane is kept for a `2-07f` follow-up if 2-07 needs one.
+
+| Slot | Lane A | Lane B |
+|---|---|---|
+| 0 | 2-00a Foundation: skeletons, rules, `Game::answer`, build ids, baselines committed | 2-00b Python reference: schema export, bot dumps, bot scripts |
+| 1 | 2-01a Bot I: parameters, versions, owners, memory, streams, driver, idle | 2-04 citar-sim: runner, `run_game`, baseline writer, game benches |
+| 2 | 2-01b Bot II: context, economy, settlers, workers, scouts, `BotFacts` | 2-06a citar-py: the module, `api::host`, `Heads`, test ops, dev loop |
+| 3 | 2-03 Bot III: units and fighting | 2-06b Packaging and CI: maturin, wheels, Docker, docs |
+| 4 | 2-05 Bot IV: diplomacy, war, switches, advice, valuation | 2-08 The Rust facade and the switch |
+| 5 | 2-07 Statistics, speed floors, bot goldens | 2-09 Server, agents, probes, benchmarks on Rust; the default flips |
+| 6 | 2-10 Bots, lab and the ladder on Rust | 2-02 citar-store |
+| 7 | | 2-11 Saves v2 |
+| 8 | 2-12 The swap, the removal, the data move | |
+| 9 | 2-13 Phase 2 exit | |
+
+- **Parallel lanes share no file.** 2-00a writes every manifest, `Cargo.lock` entry, xtask rule and command registration (`gen-params`, the `games` perf suite), bench target, testkit test root (`tests/bot.rs`) and rust.yml change the later crates need, and every public signature they meet, so later packages fill in bodies. Every facade name the server and the lab use is added in 2-08, so 2-09 and 2-10 only consume them; 2-11 adds the save names after 2-09, since both edit `session.py`.
+- Each package ends with its gates passing, then a review and a fix round, as in Phase 1, and adds an "As built in 2-xx" note to this section.
+
+### P2.14 Review log
+
+Each finding was checked against the code at `8f84421`.
+- **Bot turns lose the session's side effects** (blocker): confirmed (session.py:146-215, bot_agent.py:27-33). Fixed in P2.7.1, with five 2-09 gates.
+- **G2 too tight, G5 cannot fail** (blocker): confirmed from the files. Fixed in P2.4.4: ratio bounds, material-and-significant G3, strata, early endings as a rate, calibration, staleness a warning, a bounded 2-07.
+- **2-01's city gate** would fail for Python itself: confirmed (33 of 240 under three cities). Distribution gates; scouts moved into 2-01b so the bot explores.
+- **Crashes invisible to the server:** confirmed. Fixed in P2.6.3 and P2.7.1.
+- **Fingerprints by seat position:** confirmed (lab.py:323). The profile's fixed aggression is hashed.
+- **Build id `dev`:** confirmed. Content ids (P2.2.1).
+- **Order of work, shared files, late baselines:** confirmed. 2-00a and 2-00b, signatures first, the server's and the lab's facade names all in 2-08.
+- **2-01 and 2-06 too big:** accepted; split, and the Python recordings moved to 2-00b.
+- **Journal gaps:** confirmed (journal.rs:202-226). Fixed in P2.5.2-P2.5.3, with the writer thread that an autosave called under the lock needs.
+- **Getters wait for drives:** accepted; `Heads`.
+- **CI pitfalls:** confirmed where checkable (.dockerignore, docs.yml); fixed in P2.6.8. "A member cannot override a workspace lint" is not a blocker: an inner `#![allow]` relaxes a `deny`.
+- **The Windows dev loop:** accepted; `cargo xtask develop`.
+- **Facade behaviour the parity test cannot see:** confirmed; P2.6.5-P2.6.6.
+- **Throwaway Python implementations, a Rust `lab_game`:** accepted, with one change: the default flips after 2-09, not at once, so the server never runs on a half-ported backend.
+- **Mis-specified gates, bot-script draws, schema details, the local-only corpus, the resolution cache, the Phase 5 items:** accepted, in P2.3, P2.8.1, P2.9 and the packages' gates.
+- **Modding:** confirmed (MODDING.md:133-150). Decided: a runtime ruleset and `citar ruleset check`, not "rebuild to mod".
+- **The open question on pushing the tag:** its premise was wrong (the frozen bots are on `main` and in the v0.1.5 wheel); withdrawn.
+
+---
+
+## Appendix C: Phase 2 work breakdown
+
+Each package is sized for one implementation session and ends with its gates passing. The corpus and the bot-decision dump stay on the laptop (owner decision, 2026-09-23).
+
+### 2-00a: Foundation: crate skeletons with their public signatures, xtask rules, Game::answer, content build ids, CI for the new crates, the Python baselines committed
+
+- **Depends on:** nothing
+- **Estimated size:** ~1,900 Rust (skeletons 900, build ids 250, Game::answer 150, xtask 300, tests 300) + CI and data moves
+- **Scope:** Workspace: members crates/citar-bot, citar-store, citar-sim, citar-py; workspace dependencies (zstd 0.13, pyo3 0.29 with abi3-py311 and generate-import-lib, clap); Cargo.lock; testkit, refcheck and bench manifests gain citar-bot (bench also citar-sim). Skeletons with the final public signatures of DESIGN P2.3.1, P2.4.1 and P2.5 and stub bodies: citar-bot (BotSpec, Tuning, Bot implementing SeatDriver and playing as idle, Owners, Memory, Stream, Refusals, versions, schema, clean, fingerprint, build_id, advice and evaluate returning neutral values), citar-store (container and journal types, StoreError, functions returning a NotYet error that 2-02 removes), citar-sim (Runner, RunSpec, RunResult, run_game, BaselineLine), citar-py (module citar._engine with build_info() and a #[pyclass(frozen)] Game holding Mutex<citar_engine::Game> whose method runs inside Python::detach; [lib] test = false, doctest = false; its lint table, with one crate-level #![allow(unsafe_code)] only if PyO3's expansion needs it). Engine: Game::answer(pid, nid, &mut dyn SeatDriver) in game/turn/drive.rs through with_driver (refuses a negotiation not waiting on pid with ErrCode::Negotiation, refuses while driving and when poisoned), with engine tests; a compile-time assertion that Game: Send. Build identity (DESIGN P2.2.1): crates/citar-engine/build.rs and crates/citar-bot/build.rs hash their sources (CRLF normalised), embedded data or params, version and locked dependency versions into CITAR_ENGINE_CODE and CITAR_BOT_CODE; BUILD_ID = the engine code; CITAR_BUILD_ID becomes BUILD_LABEL; citar_bot::build_id(rules). xtask: the `gen-params` subcommand registered (its generator, xtask/src/gen_params.rs, a stub until 2-01a) and the `games` suite registered in `cargo xtask perf`; citar-bench's `games` bench target (harness = false) and testkit's tests/bot.rs root registered, so later packages fill in files rather than share them. xtask check: the crate graph allow-list, `&mut Game` only in crates/citar-bot/src/driver.rs, no legacy or test-ops in citar-bot/citar-sim/citar-store and citar-py's test-ops only forwarding, no hand-written unsafe in citar-py. rust.yml: actions/setup-python before builds; nextest and doc tests with --exclude citar-py; the lint job's clippy and cargo doc cover citar-py. Data: git mv refcheck/baseline/python-*.jsonl to refcheck/baseline/python/{small,std-large,gargantuan,smoke}.jsonl and commit them; refcheck/.gitignore narrowed to Rust runs and logs; .gitignore gains citar/_engine*.pyd and citar/_engine*.so. DESIGN: 'As built in 2-00a'.
+- **Gates:** (1) cargo build --workspace (citar-py included), cargo nextest run --workspace --exclude citar-py --all-features, clippy -D warnings for the workspace including citar-py, cargo doc -D warnings and cargo xtask check pass locally on Windows and on every rust.yml job. (2) xtask check's own tests: a planted `&mut Game` in a citar-bot file other than driver.rs, citar-sim depending on citar-py, and citar-bot enabling test-ops each fail the check with a message naming the file. (3) Game::answer engine tests: answers a negotiation waiting on pid through a test driver, writes changed memory back and settles; refuses a negotiation not waiting on pid; refuses inside a driver; a poisoned game refuses. (4) Build ids: the engine and bot codes computed from an LF copy and a CRLF copy of the sources are equal; editing one src file changes the id, editing a file under docs/ does not; cargo golden check is unchanged for all 15 sets under ci and release. (5) The four baseline files under refcheck/baseline/python/ are byte-identical to the laptop's originals (sha256 listed in the package notes); git check-ignore reports citar/_engine.cp311-win_amd64.pyd and citar/_engine.abi3.so as ignored. (6) The Python suite (608 tests) and ruff green.
+
+### 2-00b: Python reference: the parameter schema export, the bot step on the Python runner, the bot scripts and every bot-decision recording
+
+- **Depends on:** nothing
+- **Estimated size:** ~1,500 Python + ~1,200 lines of TOML scripts + generated JSON; ~60 Rust in the testkit script parser
+- **Scope:** scripts/bots/export_params.py writes crates/citar-bot/params/basic-1.json ({"engine": "basic-1", "groups": [...]}, 373 parameters: PARAM_GROUPS without site_cache_turns and bv_cache_turns). tests/test_bot_params.py holds the file equal to PARAM_GROUPS apart from those keys, and records tests/data/clean_params_cases.json: at least 40 inputs with Python's clean_params output or error (null order default, null choice, 2, 2.0, "2", 2.5, unknown key, unknown list name, presets, 'default', each bool spelling), which 2-01a's Rust test reads. tests/rulescript.py: the step { bot = "turn" | "respond" | "advice", player, negotiation?, aggression?, params?, diplomacy? } on the facade ('turn' = play_bot_turn(end_turn=True), 'respond' = bot_respond, 'advice' = bot_advice), and the script header needs = "2-0x", which the Python runner ignores. Rust: crates/citar-testkit/src/script parses `needs` and reports such a script as ignored (no other Rust change). About 24 bot scripts tests/rules/bot_*.toml, each with pinned draws (tech_noise 0, ranged_chance 0 or 1, war, peace and friendship chances 0 or 1) and a needs header naming 2-01a, 2-01b, 2-03 or 2-05, covering Phase 1's 15 deferred bot scripts and the bot parts of test_bots and test_bot_diplomacy (19 tests): research beeline, policies finishing branches, a defender bought in danger, disbanding in deficit, a settler founding at its site, faith buildings before missionaries, scouts exploring; a settler waiting for an escort, garrisons fortifying, holding a losing attack, ranged siege first, a great person used, a spaceship part to the capital; each diplomacy switch, counters merging gold and never asking more than held, stopping after counter_rounds, an offer standing once then rejected, advice as plain data, idle rejecting, a model-owned negotiation deferred. scripts/refcheck/bot_dump.py records, for a fresh BasicBot(seed=0) with tech_noise 0 and ex patched to record, on each state and living major, the three stages of DESIGN P2.3.11; writes refcheck/bot_decisions.json.gz for the 12 committed states (committed) and the corpus to the path in CITAR_BOT_DUMP (local), and documents how in scripts/refcheck/README.
+- **Gates:** (1) tests/test_bot_params.py passes: 373 parameters in 17 groups, every key, type, default, range, choice, option and preset equal to PARAM_GROUPS apart from the two removed keys; the clean-params table has at least 40 cases covering every listed input. (2) Every bot script passes on the Python runner (test_rule_scripts green) and carries pinned draws and a needs header; the Rust runner reports each as ignored and nextest stays green. (3) bot_dump.py runs without error on the 12 committed states and the 250 corpus states; the committed file covers every living major of every committed state for every kind of the three stages (counts in the package notes); two runs give byte-identical files. (4) The Python suite and ruff green; git diff touches no Rust file outside crates/citar-testkit/src/script.
+
+### 2-01a: Bot I: parameters and their generation, versions, owners, memory, streams, the driver and Turn, the idle bot, the Rust bot step
+
+- **Depends on:** 2-00a, 2-00b
+- **Estimated size:** ~2,200 Rust + ~1,000 generated (gen.rs) + ~900 tests
+- **Scope:** crates/citar-bot: params/schema.rs (include_str! of basic-1.json), cargo xtask gen-params (filling xtask/src/gen_params.rs) writing src/params/gen.rs (Params, an enum per choice, NameList with null and "default" as Default, deny_unknown_fields, no defaults) and xtask check rule 4 (gen.rs up to date); clean.rs (port of clean_params with the two fixes: fractional ints refused with integral floats and numeric strings accepted; order and list names limited to options, presets, "default" and null); resolve.rs (Resolved per RulesetId cached in Tuning, unknown names counted); versions.rs (basic-1 memory kind 1, idle, LATEST); owners.rs (Owners over game::diplomacy::category::Category, set with set_diplomacy's messages, owns(&Negotiation) through proposal_categories); memory.rs (Memory, JSON codec in DriverMemory kind 1 version 1, pruning, foreign kind or version starts fresh); stream.rs (the five words under Purpose::BotBase); driver.rs (impl SeatDriver for Bot; Turn wrapping Game::act with Refusals by tool; play_turn calling the phases in Python's order, each a no-op until its package; respond returning Deferred when the model owns the negotiation and otherwise rejecting with a canned line until 2-05); idle.rs; fingerprint(spec, build_id) hashing the profile's fixed aggression (DESIGN P2.8.6). Engine: AdvisorParams gains Deserialize and a constructor from basic-1's effective map. Testkit: tests/rules.rs plays the bot step (turn = drive with only that seat driven and seat limit 1; respond = Game::answer; advice = citar_bot::advice); tests/bot/{params,memory,streams,owners,idle}.rs.
+- **Gates:** (1) Effective defaults deserialize into Params; a key missing from struct or schema fails a test; AdvisorParams from basic-1's defaults equals AdvisorParams::default(); clean() matches 2-00b's clean-params table on every case except the two documented fixes, which return the documented results; editing gen.rs by hand fails cargo xtask check. (2) Memory: proptest round trip (1,000 cases) to equal bytes; a 64-player worst case under DriverMemory::MAX_LEN; a memory of another kind or version starts empty. (3) The first draws of each stream are pinned; Owners::set refuses an unknown category or owner with set_diplomacy's messages; owns() agrees with Phase 0's owns_negotiation cases (test_engine_api, test_bot_diplomacy) ported as unit tests. (4) Fingerprint: two lab seats of one profile at different positions share a fingerprint; a different fixed aggression, override, version or build id changes it. (5) An all-idle 4-seat small game of 50 rounds with DebugOptions::ALL: no panic or violation, every seat founds a capital, every negotiation put to idle is rejected. (6) No script names needs = "2-01a"; every script passes or is ignored by its needs; nextest, clippy -D warnings, cargo doc, cargo xtask check (rules 1-4) and the Python suite green.
+
+### 2-01b: Bot II: context, research, empire, faith, cities, gold, settlers, workers, scouts, and the advisor's BotFacts
+
+- **Depends on:** 2-01a
+- **Estimated size:** ~2,600 Rust + ~700 tests
+- **Scope:** crates/citar-bot/src/basic1: context.rs (basic.py 777-871), research.rs (876-998, both tech modes, the Research stream per tech), empire.rs (1003-1041), faith.rs (1696-1737, religion::found::ai_choose_beliefs for belief_mode unciv), cities.rs (1152-1202 through Advisor::with_facts with started() after each pick; focus; avoid growth; city bombard 1577-1587), gold.rs (1591-1643 without city-state gifts; spare units 1739-1766), settlers.rs (1835-1857, 1879-1888 without danger or escorts; bad sites in memory), workers.rs (automate; work boats 1927-1949), units/mod.rs (manage_units' order, ranged first then id, and the dispatch, the other branches no-ops until 2-03), units/scouts.rs (2054-2063). Engine advisor: BotFacts and Advisor::with_facts (new() = BotFacts::NONE); advisor.rs:444, 728, 925 and 1363 read the facts; the escort override added in both modes; Advisor::best_military and Advisor::sites public. citar-refcheck: the group bot_decisions (stage 1 kinds) reading refcheck/bot_decisions.json.gz and CITAR_BOT_DUMP, values compared with refcheck's tolerance and enforced in refcheck/enforced.toml; `cargo refcheck bot-agreement` printing agreement per kind with misses attributed. Testkit: tests/bot/economy.rs.
+- **Gates:** (1) Automatic production unchanged: with BotFacts::NONE the advisor's corpus test (1c-07 gate 4) gives identical picks; one test per fact shows the fact changing the pick it should. (2) bot_decisions stage 1: tech values within tolerance for every major of the 12 committed states (and the 250 corpus states locally), enforced and clean; cargo refcheck bot-agreement at least 95% for next research, next policy, expansion sites (top 3 as a set), spare units, and the danger and garrison flags; every miss attributed to a named cause. (3) Whole games, barbarians off, 4 bots on small, seeds 5000-5004, 150 rounds, DebugOptions::ALL: no panic or violation; at turn 100 the mean cities over the 20 civilizations is at least 2.8, at least 85% have two cities or more, mean techs at least 17 with every civilization at least 12; every civilization built a settler by turn 60; no tool is refused more than 50 times in one bot turn; a save and load at round 75 gives the uninterrupted digest chain. (4) No script names needs = "2-01b" and those scripts pass on both runners. (5) nextest, clippy, cargo doc, cargo xtask check and the Python suite green.
+
+### 2-02: citar-store: zstd, the .citar v2 container, journal framing with seqs, torn-tail and corruption recovery, the OS lock
+
+- **Depends on:** 2-00a
+- **Estimated size:** ~1,000 Rust + ~600 tests
+- **Scope:** Fill in crates/citar-store (relaxed clippy; zstd 0.13, blake3, serde_json, thiserror; no workspace crate) and remove its NotYet error. Container (DESIGN P2.5.1): 'CITARSV2' + u32 LE header length + header JSON + one zstd frame (level 3) of the body JSON with the state spliced raw; write_container (temporary file and rename, 8 retries at 250 ms on PermissionDenied), read_header (no decompression), read_container. Journal (P2.5.2): 'CITARJNL' + u16 version; records u32 length | u32 seq | u8 kind | u8 codec | 8-byte blake3 | payload; JournalWriter::open (exclusive File::try_lock; truncates only an incomplete tail; a complete record with a bad hash or out-of-order seq is corruption: nothing truncated, appends refused, Recovered { records, bytes, torn, corrupt_at }); append(seq, payload) refusing a seq that is not the next, retried on PermissionDenied; sync (sync_data); JournalRef { file, records, bytes, head }; read_upto (refuses a ref past the intact prefix or whose last record does not hash to head); fork (byte copy of a prefix). StoreError for every failure; the formats specified in the module docs. A container and journal case in citar-bench's io suite (report-only).
+- **Gates:** (1) Round trips: proptest (1,000 cases) of headers, bodies and record sequences; the synthetic gargantuan state JSON with 330 chunks. (2) For a 50-record journal, every truncation point: open recovers exactly the complete records before it and truncates only the partial one; every single-byte corruption inside a complete record: open truncates nothing, reports corrupt_at at that record, refuses append, and fork of the good prefix gives a journal that opens clean; read_upto never panics and refuses refs past the good prefix or with another head. (3) A second JournalWriter::open of a file already open fails with a lock error on Windows and Linux. (4) Arbitrary bytes as container or journal: always an Err, never a panic (proptest 10,000 cases). (5) Bench (report-only): writing the gargantuan container (JSON already made) at most 150 ms, read_header at most 1 ms. (6) clippy, cargo doc, cargo xtask check green.
+
+### 2-03: Bot III: units and fighting
+
+- **Depends on:** 2-01b
+- **Estimated size:** ~2,800 Rust + ~800 tests
+- **Scope:** Ports basic.py 1806-1833 (promotions through Resolved's promo_in_city and promo_lines; garrisons in memory), 1858-1925 (settler danger with threat_reach, escorts, follow, retreats, bad sites and need_escort in memory; the goto write replaced by memory), 1951-2052 (special units: spaceship parts to the capital and clearing its civilian slot, founding and enhancing religions with the bot's beliefs, hurry and trade missions, triggers, missionaries and inquisitors, great improvements near the capital, generals following the front), 2065-2094 (air, naval), 2096-2139 (attack_best on the typed combat::resolve::preview_of), 2141-2389 (handle_military: escort duty, ranged siege moves with siege_move_first, attacks, garrison and fortify, healing, filling empty garrisons, defending threatened cities, the war target, the rally point, advance and siege_ready on memory.war_plan, the war-preparation rally read from memory.war_prep, camps, ruins, seeking rival cities, returning home; military_power). BotFacts gains garrisons and need_escort from memory. citar-refcheck: bot_decisions stage 2 kinds. Testkit: tests/bot/{units,war,sweep}.rs, the sweep loading every state through Game::from_python and driving one round for every major by bots.
+- **Gates:** (1) cargo refcheck bot-agreement at least 95% for attack targets and war targets on the 12 committed states and, locally, the 250 corpus states; misses attributed. (2) Fixture sweep: every committed state (and locally every corpus state), one bot-driven round for every major with DebugOptions::ALL: no panic or violation; refusals per bot turn reported. (3) Mixed games: 2 bots against 2 RandomAgents (which declare wars after turn 50) on small, 20 seeds x 200 rounds: no panic or violation; the bots out-score both agents in at least 18 of 20 games; bot attacks in every game and at least one city captured by a bot across the 20. (4) 4-bot small games with barbarians normal, 10 seeds x 330 rounds: no panic or violation, every game ends. (5) No script names needs = "2-03" and those scripts pass on both runners. (6) 2-01b's gates still hold; nextest, clippy, cargo doc, cargo xtask check green.
+
+### 2-04: citar-sim: the headless runner, run_game, the baseline writer, the CLI, the game benchmarks
+
+- **Depends on:** 2-00a
+- **Estimated size:** ~1,800 Rust + ~600 tests; ~80 Python
+- **Scope:** Fill in crates/citar-sim (lib + bin, relaxed clippy; citar-engine with embedded-ruleset, citar-bot, serde_json, clap). Runner (DESIGN P2.4.1): one Game::drive with seat_limit 1 per step; on_round when the turn changes; a time budget checked between steps; catch_unwind -> poison + a crash record with the seat's label (no max_errors); raise_errors surfaced to the host. RunResult = engine_api.run_game's dict with headless.result's player rows. Baseline writer = baseline.py's lines exactly (IDENTITY, the rotation, seed + i, Tally semantics with checkpoint totals at the start of round T+1 and the end-of-game fallback, engine = build id, bot = basic-1, resume, refusing another build's file, crash lines, --workers on std::thread, --smoke), with the BaselineLine serde type. CLI citar-sim play | baseline. scripts/bots/run_game_keys.py records the key and type shape of a Python run_game result on a duel spec into crates/citar-sim/tests/data/run_game_keys.json. Tests use the idle bot, the skeleton basic-1 and a local test driver (one that panics on demand). citar-bench: benches/games.rs (the target 2-00a registered): the small 4-bot game of seeds 5000-5002 to 330 rounds (median) and one gargantuan 24-bot game of seed 5000; thresholds rows game/bot_small_330 (16 s) and game/bot_gargantuan_330 (180 s), report-only; cargo xtask perf --suite games.
+- **Gates:** (1) BaselineLine round-trips every line of the four committed Python files to equal JSON values, and a Rust line validates against it. (2) run_game's result has exactly the recorded keys and value types (run_game_keys.json, numbers as one class); the same spec twice gives identical results. (3) A panicking test driver yields a crash record naming its label and a poisoned game, and the process lives; with raise_errors the runner returns the error to its caller. (4) citar-sim baseline --smoke plays two duel games; a run killed midway resumes (finished lines kept, the unfinished game replayed); a file from another build id is refused. (5) cargo bench -p citar-bench --bench games writes perf/games.json and cargo xtask perf --suite games reports it (report-only). (6) nextest, clippy, cargo doc, cargo xtask check green.
+
+### 2-05: Bot IV: diplomacy, war, the switches, advice and deal valuation
+
+- **Depends on:** 2-03
+- **Estimated size:** ~2,200 Rust + ~800 tests
+- **Scope:** Ports basic.py 1043-1064 (spies on the Spies stream), 1645-1694 (city-state gifts, classic and typed), 2394-2503 (consider_diplomacy: peace offers on the Peace stream; embassies, friendship on the Friendship stream and research agreements every diplo_every turns; war preparation on the WarPrep stream with reachable_city, gathering at the rally, declaring and creating the war plan, aborting), 2505-2556 (luxury trades and buying), 2558-2643 (evaluate over typed DealItems and Terms; war items with memory), 2651-2708 (respond: talk, an offer standing once, accept, counter merging gold and capped by what they hold, counter_rounds, a refused counter becoming a reject), 2713-2771 (advice as a pure read with Python's keys). Every _llm site honours Owners; respond returns Deferred for model-owned negotiations; _settle_chats and handle_negotiations are not ported. citar-refcheck: --with-bot answers deals[*].bot_value with citar_bot::evaluate (fresh memory, defaults, aggression 0.4), refcheck/enforced.toml adds the path, ratchet at 0; bot_decisions stage 3 kinds.
+- **Gates:** (1) cargo refcheck run --with-bot --fixtures refcheck/fixtures-mini --fixtures refcheck/fixtures-late --strict: bot_value clean (and on the corpus locally). (2) cargo refcheck bot-agreement at least 95% for reachable cities, trade proposals and advice wants; advice deal_value within tolerance. (3) No script names needs = "2-05"; every script in tests/rules passes on both runners. (4) Switches: with every category owned by the model, 4 bots on small for 200 rounds open no negotiation, declare no war, gift no city-state and move no spy, still fight wars RandomAgents declare on them, and return Deferred for every negotiation put to them; with city_states = 0 and 30 turns before contact, all-bot and all-model owners give identical digests. (5) All-bot games, 4 bots x 20 seeds x 330 rounds on small: wars declared in at least 30% of games, peace made at least once, a resource trade executed in at least 50% of games, every game ends, drive never returns AwaitingReply. (6) Save and load at every round of a 120-round bot game equals the uninterrupted chain. (7) nextest, clippy, cargo doc, cargo xtask check and the Python suite green.
+
+### 2-06a: citar-py: the module, api::host, Heads, the bot handle, test operations, the dev loop
+
+- **Depends on:** 2-04, 2-00a
+- **Estimated size:** ~2,600 Rust + ~700 Python (tests, stubs, xtask develop glue)
+- **Scope:** Fill in crates/citar-py (cdylib citar._engine; PyO3 0.29 abi3-py311; engine with embedded-ruleset, bot, sim; feature test-ops forwarding to the engine's). Classes Game (frozen: Mutex<Game> plus Heads) and Bot (frozen: Mutex<Arc<BotSpec>>; set_diplomacy in place; .aggression, .version, owns_negotiation); exceptions ActionError (.code), MapError(ValueError), LoadError(ValueError), EngineCrash(RuntimeError) with ErrCode::Poisoned and every caught panic mapped to EngineCrash. Every row of DESIGN P2.6.1 except saves v2: ruleset, tools, maps, scenario helpers, categories, text constants, bots (versions, schema, clean, fingerprint, build_info), run_game with per-step callbacks and raise_errors, labels and traceback_limit, and the Game methods (new, load, Heads getters, summary/stats/events/thoughts JSON, execute, view_json and replay_json with extra spliced, briefing, turn_progress, empire_summary, negotiation reads and ops, seats, apply_ops, scenario and map ops, path_preview, meet, force_turn, debug, replay_data, drive returning stop, events and per-bot action counts, answer, bot_advice, inspect and test_ops with test-ops). Heavy calls inside Python::detach with the Mutex taken inside and catch_unwind inside the lock; Heads published at the end of each mutating call; a calls-in-flight counter for the facade's atexit wait. Engine additions with engine tests: api::host (summary and player rows, config JSON, turn limit, negotiation heads, open negotiations, event by id, stats and thoughts rows); test operations eliminate, end_game and panic (Python testops gains eliminate and end_game). citar/_engine.pyi stubs. The dev loop (DESIGN P2.6.7): cargo xtask develop [--release] (venv must belong to the worktree, dependencies installed when pyproject changed, cargo build into CARGO_TARGET_DIR, copy to <target>/citar-ext with a locked copy renamed aside, citar-dev.pth setting CITAR_EXT_DIR); citar/__init__.py puts CITAR_EXT_DIR first on __path__ when set; CONTRIBUTING's dev loop section.
+- **Gates:** (1) tests/test_engine_module.py (skipped without the module): every binding called on a seeded duel; results decode; errors map (ActionError with code, ValueError, MapError, LoadError); a poisoned game raises EngineCrash, never ActionError, and still answers summary, view_json and replay_json. (2) Parallelism: two threads each driving its own 4-bot small game for 60 rounds reach a process CPU time to wall time ratio of at least 1.6; a Python thread counting in a loop keeps at least half its solo rate while another thread drives; 1,000 turn() polls from a third thread during a drive never wait for it (each under 1 ms) and never deadlock. (3) The panic test operation gives EngineCrash, the game refuses further commands, the Mutex is not poisoned, the process lives. (4) run_game with Python callbacks delivers every event exactly once in order (count equals the chronicle's) and on_turn once per round; raise_errors raises EngineCrash; bot_set_diplomacy changes an existing handle in place and owns_negotiation follows it. (5) Interpreter exit: in WSL with Python 3.11, 3.12 and 3.13, a script that starts a daemon thread driving a game and exits mid-drive returns exit code 0 (2-06b puts it in CI). (6) cargo xtask develop on the laptop builds into the target directory, writes nothing under citar/, and a second worktree's venv is refused; the suite imports the extension through CITAR_EXT_DIR. (7) nextest, clippy, cargo doc, cargo xtask check and the Python suite (Python backend) green.
+
+### 2-06b: Packaging and CI: pyproject on maturin, one abi3 build per OS, the wheel, Docker and docs workflows
+
+- **Depends on:** 2-06a
+- **Estimated size:** ~600 (pyproject, workflows, Dockerfile, scripts/ci, xtask) + docs
+- **Scope:** pyproject.toml on maturin (DESIGN P2.6.7: mixed layout, python-source '.', module-name citar._engine, manifest-path crates/citar-py/Cargo.toml, features without test-ops, includes for web, migrations, data and collectors, dynamic version from Cargo); xtask check: pyproject's maturin features exclude test-ops and citar-py never enables legacy. test.yml (P2.6.8): a build-ext job per OS (PyO3/maturin-action, --profile ci --features test-ops, rust-cache, the pinned toolchain) uploading the abi3 test wheel; the five test jobs download it, install dependencies and unpack citar/_engine* into the checkout (scripts/ci/unpack_ext.py); the package job builds a release-profile manylinux_2_28 wheel without test operations, installs it in a clean venv, imports citar._engine from site-packages, checks the abi3 tag and runs citar doctor; the installer jobs use the build-ext wheels with install.sh --from; the docker job copies the manylinux wheel to wheelhouse/ and the Dockerfile installs wheelhouse/*.whl (.dockerignore still excludes dist); the interpreter-exit job of 2-06a joins test.yml. docs.yml installs the toolchain with rust-cache before pip install -e ".[dev]". release.yml gains a first step failing with 'release packaging is Phase 5' while __version__ is 0.1.6. CONTRIBUTING and INSTALL's from-source notes (a Rust toolchain is needed to build from source).
+- **Gates:** (1) test.yml green on every job at the package's head: build-ext on three OSes, the five test jobs running the suite with the unpacked extension, package (clean-venv import from site-packages, abi3 tag, citar doctor), installer, docker (the container answers its health check). (2) docs.yml green on a workflow_dispatch run of the branch. (3) rust.yml green. (4) release.yml's first step fails with its message when run against the branch (its script run locally in the package notes). (5) cargo xtask check fails on a pyproject listing test-ops. (6) pip install -e . from a fresh clone builds the extension on Windows and the Python suite passes.
+
+### 2-07: Whole-game comparison with the Python baseline, the speed floors, the bot golden set
+
+- **Depends on:** 2-04, 2-05
+- **Estimated size:** ~700 (summarize.py, explained.toml, goldens, thresholds) + bot or engine fixes as found
+- **Scope:** Run citar-sim baseline in release with 6 workers: Rust small x120 (seeds 5000-5119), standard/large x50 (25 each), gargantuan x2 (timing), and the calibration run (classic-production small x60). scripts/refcheck/summarize.py (DESIGN P2.4.4): per-game values, strata, ratios, bootstrap 90% intervals of the difference (2,000 seeded resamples, pure Python), d for reference, --split-half, rates, and --gate refcheck/baseline/explained.toml implementing G1-G4 (exit 1 on failure, stale entries a warning, entries marked pending refused by 2-12). Write explained.toml. Fix porting mistakes found, each with a script or test, re-running the affected runs; a gap needing bot-logic work beyond that is entered as pending = "2-07f" for a follow-up package. Make the games suite hard (budgets 16 s and 180 s); if over, tune in P2.10's order. Bot golden set crates/citar-testkit/golden/bot.json (a 120-round duel, two 100-round small games, the late fixture passed 10 rounds by bots; per-round digest chains and memory hashes), blessed and compared by determinism.yml; long.json gains one 330-round 4-bot small game for nightly. DESIGN 'As built in 2-07' with the comparison and calibration tables.
+- **Gates:** (1) python scripts/refcheck/summarize.py refcheck/baseline/python/small.jsonl <rust small> --gate refcheck/baseline/explained.toml exits 0, and the same for the standard and large strata of std-large. (2) 0 crashed, poisoned or timed-out games among the 172; 0 invariant violations in the 20-game subset with checks on. (3) With the other lane paused: cargo xtask perf --suite games --check exits 0 (bot small median at most 24 s, gargantuan at most 270 s); the ratios to the 5 s and 90 s targets reported. (4) cargo golden check identical on Windows x64 and Linux x64 under ci and release; determinism.yml green on its 6 rows with the bot set. (5) The split-half noise and the calibration table are in the as-built note. (6) nextest, clippy, cargo xtask check green.
+
+### 2-08: The Rust backend of the facade, the backend switch, every Phase 2 facade name the server and lab use, and the core suite on both backends
+
+- **Depends on:** 2-06a, 2-06b, 2-01b
+- **Estimated size:** ~1,500 Python + ~500 test changes
+- **Scope:** citar/engine_api.py becomes the selector (BACKEND from CITAR_ENGINE, default python; one __all__; an import-time check that the backend defines every name); its current body moves unchanged to citar/engine/facade.py. citar/_facade_rust.py implements the 38 names and every EngineGame method over citar._engine with the docstrings' shapes (subscribe fan-out after each call; seeds drawn and map documents inlined in Python; Bot handles; play_bot_turn as a one-seat drive; bot_respond as answer; state_dict, to_save and from_save with the whole history as one chunk; getters on Heads). Every Phase 2 facade name the server and the lab use, defined on both backends and raising BackendError on Python: EngineGame.drive, answer, view_json, replay_json; build_info, bot_versions, bot_schema, bot_clean_params, bot_fingerprint; EngineCrash, BackendError. Docstrings record the two behaviour changes (atomic apply_ops, subscribe after the call). profiles.make_bot, lab.make_bot and balance.make_bot go through engine_api.bot_instance. tests/backends.py (RUST, python_engine_only(successor), rust_pending(package), rust_only) and tests/test_backends.py (successors exist); test_engine_boundary forbids citar._engine outside the facade modules and BACKEND reads outside the facade and tests; tests/test_facade_parity.py (key sets and value types under type classes, plus behaviour tests: set_diplomacy then owns_negotiation, raise_errors, event order and counts); tests/rulescript.py runs the intended checks on Rust; the eleven python_game pokes replaced by the eliminate and end_game test operations; Python-engine-only tests marked with successors. CI: a test.yml job (ubuntu, 3.12) with CITAR_ENGINE=rust.
+- **Gates:** (1) With CITAR_ENGINE=rust: test_engine_api, test_rule_scripts (every script in tests/rules, counted from the directory, through the bindings), test_engine_boundary, test_backends, test_facade_parity, test_setup, test_paths and the facade-level controller tests pass; every other test passes or is marked (python_engine_only with an existing successor, rust_pending naming 2-09, 2-10 or 2-11, or rust_only). (2) The whole suite passes on the Python backend. (3) The parity test finds zero differences under its type classes and its behaviour tests pass on both backends. (4) CI green on both test jobs and rust.yml; ruff green.
+
+### 2-09: The server, agents, MCP, probes, benchmarks and reports on Rust; crash handling; the default flips
+
+- **Depends on:** 2-08, 2-05
+- **Estimated size:** ~1,000 Python + test changes
+- **Scope:** session.py (DESIGN P2.7.1): BotAgent.play_turn drives every bot seat with seat_limit 1 under the lock, sets end_reason and records the drive's action counts, and calls _after_action after every drive; on awaiting_reply waits on cond (90 s), drives again, and on timeout closes the chats as expired through close_negotiation and drives once more; respond_negotiation answers with EngineGame.answer then _after_action, ignoring a refused answer. Crash handling: _crashed(message) on EngineCrash anywhere (call_tool, the driver, responders, views): crashed state, pause, driver stopped, agents cancelled, no emit, a 'crashed' broadcast, crash-<turn> save written once, autosave never over the last good save, reads still served, info() and the lobby show it; _drive's error handler no longer emits on the game. Metrics and reports tolerate bot turns without per-tool rows and show bot_actions. app.py: /view returns EngineGame.view_json bytes, /replay returns replay_json bytes; replay, path preview, debug, export_map, the scenario editor and summaries on Rust. Agents and MCP on the facade shapes; probes on engine-format scenario states; benchmarks, scoring and reports on interim saves. Tests: test_session, test_benchmarks, test_access, test_worker, test_ui_support, test_editor, test_providers, test_metrics made backend-neutral; the BotAgent tests of test_bot_diplomacy rewritten for drive; every rust_pending('2-09') removed; tests/test_server_rust_smoke.py. The default flips to CITAR_ENGINE=rust; CI's Python-backend job runs only tests/python_reference.txt.
+- **Gates:** (1) The full suite passes on Rust (now the default) with no rust_pending('2-09'); the Python reference subset passes on Python. (2) Side effects, in an all-bot 4-seat small lobby game under the session driver (TestClient): the session version rises every round; after 20 rounds autosave is at most one round behind; metrics hold a turn row per bot turn with end_reason; a chat a bot opens with a stub LLM seat starts that seat's responder and the bot's turn ends after the stub answers; a human's proposal answered by a bot produces an 'update' broadcast. (3) Crashes: the panic test operation through call_tool and through a bot drive leaves the session crashed, the driver stopped, no exception from emit, the last good autosave intact, the crash save written, and summary, /view and /replay answering. (4) /view returns exactly view_json's bytes with json.loads never called on them (mocked); the late fixture's god view through TestClient has a median at most 20 ms over 20 requests. (5) 4 bot seats on small play 100 rounds under the session driver with responders active, no round longer than 10 s. (6) The smoke test passes; CI green; ruff and scripts/audit_routes.py --strict green.
+
+### 2-10: Bots, the lab and the ladder on Rust: versions, profiles, fingerprints, lab results, ratings, sim, balance
+
+- **Depends on:** 2-08
+- **Estimated size:** ~700 Python + ~250 tests
+- **Scope:** profiles.py: engines() from bot_versions plus idle; schema, defaults, clean_params and fingerprint through the facade (fingerprint over the profile's fixed aggression); ENGINE_RE ^(basic|basic-\d+|idle)$; basic resolves to the latest version at use; freeze, module and code_id removed and frozen_* refused as archived with 0.1.5; BUILTIN = standard, classic-production, idle. bots_api /engines and /schema from the facade, same shapes. lab.py: normalize pins versions (no freeze); play() keeps its body over engine_api.run_game with facade bots, printing PROGRESS from on_turn; results record build id, bot version, profile, revision and fingerprint per seat at play time; engine_hash() = build id. ratings.py names entries from each result's own records, no bot-module imports or frozen globbing. sim.py and balance.py on run_game with facade bots, seed arguments ignored. docs/BOTS.md and docs/BOT_TUNING.md: versions, the schema, the new ladder. test_bot_profiles and the lab tests on Rust; every rust_pending('2-10') removed.
+- **Gates:** (1) The full suite passes with no rust_pending('2-10') left. (2) A lab experiment (standard against classic-production, 4 duel games of 60 turns) queued and run by python -m citar.lab run writes results with build id, version, profile, revision and fingerprint per seat; standard's seats at different positions share one fingerprint; ratings.rankings() lists exactly two entries, named after the profiles. (3) The Bots page API returns basic-1's schema (373 parameters in 17 groups, {engine, groups}); a saved profile round-trips through bot_clean_params; a frozen_* engine is refused with the archive message. (4) citar sim plays a 4-bot small game and prints standings; balance runs one matchup. (5) CI green.
+
+### 2-11: Saves v2 in the server: the container and the journal, the session's save writer, timelines, crash safety
+
+- **Depends on:** 2-02, 2-09
+- **Estimated size:** ~600 Rust + ~700 Python + ~500 tests
+- **Scope:** citar-py: Journal (open with recovery and the OS lock, fork, append in seq order under its own Mutex, the pending chunks of DESIGN P2.5.3), Game.save_snapshot() -> SaveSnapshot (engine Snapshot + take_journal_chunk under the game lock), SaveSnapshot.write(path, journal, session_json, metrics_json) with the GIL released (pending and new chunks appended and synced, state JSON, zstd, container temporary file and rename), read_save(path), save_header(path), Game.load_save(doc, journal path) through citar-store. Facade names open_journal, read_save, save_header, EngineGame.save_snapshot and from_save(doc) (Rust-only, BackendError on Python). session.py: one writer thread per session (autosave and named saves snapshot under the lock and submit; queued autosaves coalesce; a named save waits for its own write outside the lock); one journal timeline per session (continue only when no container in the folder names a longer prefix and the journal opens clean, truncating records past the save; fork otherwise, corruption included); stop() drains the writer and closes the journal; from_save via read_save; save_meta and list_saves from headers; delete_save removes unreferenced journals; a crashed session's crash save goes through the same path. scoring.py, reports/data.py, benchmarks.py, probes.py and app.py's scenario-from-save through the facade. A v1 gzip save is refused with 'saved by the Python engine; archived with 0.1.5'. Test hooks to stop between append and container write and to fail appends.
+- **Gates:** (1) A 4-bot small game autosaved every round for 100 rounds, reloaded from autosave: replay_data(Full), events() and the digest equal the live game's. (2) Stopped between append and container write: the next load of autosave succeeds with the extra record truncated; loading turn050 after a later autosave forks a new journal, and both timelines play on and load again. (3) Appends failing three times: no container is written, the chunks stay pending, the next save appends them in order, and a reload has the complete chronicle. (4) A corrupt record in the middle of journal.cjnl: loading a save that names it forks from the good prefix and leaves the corrupt file untouched; a save naming records past the corruption is refused with a clear error. (5) A second session opening the same journal is refused; stop() returns only after the write in flight. (6) save_snapshot's time under the lock on the synthetic gargantuan state at most 10 ms (budget), never above 100 ms. (7) Listing 50 gargantuan saves reads headers only (asserted: no zstd decode). (8) The full suite passes with no rust_pending('2-11'); CI green.
+
+### 2-12: The swap and the removal: the Python engine and frozen bots tagged and deleted, the data move, modding without a toolchain
+
+- **Depends on:** 2-07, 2-09, 2-10, 2-11
+- **Estimated size:** +700 / -60,000 (deletions)
+- **Scope:** Precondition checklist (DESIGN P2.8.1): every Python recording committed (fixtures and answers, tool_list.json, query_tools.json.gz, the advisor and bot-decision recordings of the committed states, the four baselines, basic-1.json); the corpus, its answers and the local advisor and bot dumps archived under saves/_archive_2026-10_python-reference/ with refcheck/corpus.sha256 committed; no rust_pending marker, no script needs, no explained.toml entry marked pending. The orchestrator tags the base python-engine-0.1.6 (annotated) and pushes it with the merge. engine_api imports the Rust facade only (the switch, BACKEND, BackendError and citar/engine/facade.py go). Delete citar/engine/, citar/bots/{basic,headless,idle}.py and the 18 frozen_*.py, the __path__ hack, the python_engine_only tests and emptied modules, tests/python_reference.txt, test_rule_scripts' Python-only checks, tests/test_bot_params.py, the Python recorders under scripts/refcheck except summarize.py, scripts/check_refs.py, scripts/check_uniques.py, scripts/bots/, and anything else importing citar.engine; the seed arguments of the bot factories' callers. Data move: git mv citar/data/{ruleset,custom,game.json} crates/citar-engine/data/, rules::source paths, collectors stay; doctor's message and test.yml's package check to citar._engine.ruleset_counts(); pyproject includes; ruff excludes. Modding (P2.8.4): CITAR_RULESET_DIR read when citar._engine loads (Ruleset::load, used for every game and ruleset function, reported by build_info); python -m citar ruleset check DIR printing RulesetErrors. Docs: MODDING.md, docs/reference.md onto citar.engine_api with a link to the Rust API docs, README, ARCHITECTURE, CONTRIBUTING, CHANGELOG Compatibility (0.1.5 saves, scenarios, frozen bots and profiles do not load; building from source needs Rust; modding through CITAR_RULESET_DIR). CI: test.yml drops the Python-backend job and the Ruleset integrity step; rust.yml path filters gain crates/citar-engine/data/**.
+- **Gates:** (1) git grep -nE 'citar[./]engine([./]|$)', and git grep for 'frozen_' and 'python_game', find nothing outside CHANGELOG, DESIGN history and archived docs. (2) The Python suite (Rust only), ruff, scripts/audit_routes.py --strict, scripts/check_links.py --strict and mkdocs build --strict pass. (3) nextest, cargo refcheck run on mini and late --strict --with-bot, and cargo golden check (bot set included) unchanged across the data move, the RulesetId equal before and after. (4) A wheel built by maturin installs in a clean venv and citar doctor passes; pip install -e . from a fresh clone builds and the suite passes. (5) CITAR_RULESET_DIR pointing at a copy of the data with one added nation: a game starts with it, build_info reports a different RulesetId, and its save is refused by a process without it; citar ruleset check reports a planted unknown unique and a broken reference. (6) CI green on every workflow.
+
+### 2-13: Phase 2 exit: soak, chaos, determinism, speed, the server soak, docs
+
+- **Depends on:** 2-12
+- **Estimated size:** ~400 (soak and chaos driver options, nightly jobs) + docs
+- **Scope:** Testkit soak and chaos binaries gain --drivers bot|random|mixed. Runs: 1,000 small bot games (6 shards, invariants on, the cache oracle every 50 rounds, save and load every 25) and 100 larger (40 standard, 30 large, 20 huge, 10 gargantuan) under WSL; mixed bot/random chaos 20 minutes on Windows and Linux; the bot fixture sweep and cargo refcheck --strict --with-bot on the 250 corpus states from the archive (checksums verified first); props P1-P8 at 10,000 cases with bot drivers in P8's noisy game; nightly.yml gains bot chaos, a bot soak and the long bot golden game. Determinism: cargo golden check --long with the bot sets on Windows x64 and Linux x64 (ci and release) and determinism.yml and nightly.yml on 6 targets. Speed: cargo xtask perf --check on every suite including games, with the machine otherwise idle. Server soak: an 8-bot standard lobby game played to its end on the dev server with autosave, a restart mid-game (restore_live), a model seat's chat with a bot answered, and the finished game's replay. Docs: ARCHITECTURE ('Bots and the bindings'), BOTS.md, CONTRIBUTING; DESIGN 'As built in 2-13' recording each criterion of P2.1.3 with its evidence; ops/STATUS.md.
+- **Gates:** Each row of DESIGN P2.1.3 measured and recorded: (1) the bot soak and mixed chaos have 0 failures and 0 panics, peak memory reported; the corpus sweep is clean. (2) The bot golden sets are identical on 6 targets and equal to the committed files. (3) game/bot_small_330 at most 24 s and game/bot_gargantuan_330 at most 270 s; god view at most 20 ms; save lock at most 10 ms; every other budget within its hard limit. (4) The Python suite, nextest, doctests, cargo refcheck --strict --with-bot on all 262 states, cargo xtask check, ruff, the route audit, the link check and mkdocs --strict green. (5) The server soak game ends cleanly, broadcasts every bot turn, survives the restart with autosave at most one round behind, and its replay loads. (6) CI green on every workflow at the head.
+
