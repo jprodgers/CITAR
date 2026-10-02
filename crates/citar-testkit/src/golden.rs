@@ -59,10 +59,18 @@
 //!   200 turns twice, small for 120 twice, standard for 60, large for 30), each round's digest
 //!   chained. `pass` and `random`, like `turns`, are only blessed with no stage pending.
 //!
-//! Each set's report carries a blake3 of the answers this build computed. The determinism
-//! workflow compares those across targets (a determinism bug if they differ) and the problems
-//! against the committed files (a behaviour change if the targets agree with each other but not
-//! with the file).
+//! Package 1e-02 adds, in [`games`], the long set, which the nightly run checks and the
+//! pull-request run does not:
+//! - **`long.json`**: a Quick game's 330 turns with `RandomAgent` in every seat on every map
+//!   size, duel to gargantuan, two kitchen-sink games and the three late fixtures passed on.
+//!
+//! Each set's report carries a blake3 of the answers this build computed, and a short hash of
+//! every row of each of its lists. The determinism workflow compares those across targets (a
+//! determinism bug if they differ; `golden diff` names the first row where two reports part)
+//! and the problems against the committed files (a behaviour change if the targets agree with
+//! each other but not with the file). With `golden check --states DIR`, a game that leaves its
+//! file also leaves its state there at the first round that differs ([`divergence`]), which
+//! `golden dump` reproduces on another machine for `golden diff` to compare ([`dump`]).
 
 use std::path::PathBuf;
 
@@ -96,9 +104,61 @@ pub struct SetReport {
     /// waiting for any is computed, so the targets can be compared, but it has no committed file
     /// yet and `golden bless` refuses it.
     pub waiting: Vec<String>,
+    /// Each list of the set's answers, and a short hash of each of its rows, so that two targets'
+    /// reports say which row they first disagree on (`golden diff`), not only that they do.
+    pub rows: Vec<(String, Vec<String>)>,
+}
+
+impl SetReport {
+    /// The report on a set whose answers this build computed as `got`, with its row lists
+    /// `lists`: the answers' hash and each row's, the problems capped for reading.
+    #[must_use]
+    pub fn new(
+        name: &'static str,
+        got: &Value,
+        lists: &[&str],
+        problems: Vec<String>,
+        waiting: Vec<String>,
+    ) -> Self {
+        Self {
+            name,
+            computed: digest_of(got),
+            problems: capped(problems),
+            waiting,
+            rows: row_hashes(got, lists),
+        }
+    }
+
+    /// The report on a set this build could not compute at all.
+    #[must_use]
+    pub fn failed(name: &'static str, problem: String) -> Self {
+        Self {
+            name,
+            computed: String::new(),
+            problems: vec![problem],
+            waiting: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+}
+
+/// A short hash of each row of each list: 16 hex digits of the row's blake3, enough to tell rows
+/// apart and small enough that a report of every set stays a few hundred kilobytes.
+fn row_hashes(got: &Value, lists: &[&str]) -> Vec<(String, Vec<String>)> {
+    lists
+        .iter()
+        .map(|key| {
+            let rows = got.get(*key).and_then(Value::as_array).map_or_else(Vec::new, |rows| {
+                rows.iter().map(|r| digest_of(r)[..16].to_owned()).collect()
+            });
+            ((*key).to_owned(), rows)
+        })
+        .collect()
 }
 
 pub mod convert;
+pub mod divergence;
+pub mod dump;
 pub mod filters;
 pub mod games;
 pub mod maps;
@@ -128,6 +188,19 @@ pub fn check_all() -> Vec<SetReport> {
     ]
 }
 
+/// The long set, which the nightly run checks on every target (`golden check --long`): whole
+/// games of every map size to their end, too slow for every pull request.
+#[must_use]
+pub fn check_long() -> Vec<SetReport> {
+    vec![games::check_long()]
+}
+
+/// The file `golden bless long` writes.
+#[must_use]
+pub fn blessed_long() -> Vec<(&'static str, String)> {
+    games::blessed_long()
+}
+
 /// The sets `golden bless` refuses, and why: those that depend on a stage of the engine that is
 /// still pending (DESIGN.md 3.4, rule 3; 9.6).
 #[must_use]
@@ -140,12 +213,16 @@ pub fn bless_refusals() -> Vec<(&'static str, String)> {
 pub fn report_json(reports: &[SetReport]) -> Value {
     let mut sets = serde_json::Map::new();
     for r in reports {
+        let rows: serde_json::Map<String, Value> =
+            r.rows.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
         sets.insert(
             r.name.to_owned(),
             json!({
                 "computed": r.computed,
                 "matches_committed": r.problems.is_empty(),
                 "waiting": r.waiting.len(),
+                "problems": r.problems,
+                "rows": rows,
             }),
         );
     }
@@ -176,6 +253,12 @@ pub fn blessed_files() -> Vec<(&'static str, String)> {
     .chain(newgame::blessed())
     .chain(games::blessed())
     .collect()
+}
+
+/// The committed file of set `set`, if it reads.
+#[must_use]
+pub fn committed(set: &str) -> Option<Value> {
+    read_committed(&format!("{set}.json")).ok()
 }
 
 #[allow(
@@ -392,12 +475,13 @@ fn check_rng() -> SetReport {
             }
         }
     }
-    SetReport {
-        name: "rng",
-        computed: digest_of(&got),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new(
+        "rng",
+        &got,
+        &["purposes", "streams", "draws", "chi_square"],
+        problems,
+        Vec::new(),
+    )
 }
 
 fn render_rows(head: &Value, lists: &[&str]) -> String {
@@ -606,14 +690,7 @@ fn check_libm() -> SetReport {
     let mut problems = Vec::new();
     let committed = match read_committed("libm.json") {
         Ok(v) => v,
-        Err(e) => {
-            return SetReport {
-                name: "libm",
-                computed: String::new(),
-                problems: vec![e],
-                waiting: Vec::new(),
-            };
-        }
+        Err(e) => return SetReport::failed("libm", e),
     };
     let rows = committed.get("cases").and_then(Value::as_array).cloned().unwrap_or_default();
     if rows.len() < 1_900 {
@@ -637,12 +714,7 @@ fn check_libm() -> SetReport {
         inputs.iter().map(|(n, a)| (n.as_str(), a.clone())).collect();
     let got = libm_answers(&named);
     problems.extend(diff_rows("libm.json", "cases", committed.get("cases"), &got["cases"]));
-    SetReport {
-        name: "libm",
-        computed: digest_of(&got["cases"]),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new("libm", &got, &["cases"], problems, Vec::new())
 }
 
 // ---- ruleset.json -----------------------------------------------------------------------------
@@ -683,12 +755,7 @@ fn check_ruleset() -> SetReport {
             }
         }
     }
-    SetReport {
-        name: "ruleset",
-        computed: digest_of(&got),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new("ruleset", &got, &[], problems, Vec::new())
 }
 
 // ---- uniques.json -----------------------------------------------------------------------------
@@ -922,12 +989,7 @@ fn check_uniques() -> SetReport {
             }
         }
     }
-    SetReport {
-        name: "uniques",
-        computed: digest_of(&got),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new("uniques", &got, &UNIQUE_LISTS, problems, Vec::new())
 }
 
 // ---- pyfmt.json -------------------------------------------------------------------------------
@@ -943,14 +1005,7 @@ fn same_float(a: f64, b: f64) -> bool {
 fn check_pyfmt() -> SetReport {
     let want = match read_committed("pyfmt.json") {
         Ok(v) => v,
-        Err(e) => {
-            return SetReport {
-                name: "pyfmt",
-                computed: String::new(),
-                problems: vec![e],
-                waiting: Vec::new(),
-            };
-        }
+        Err(e) => return SetReport::failed("pyfmt", e),
     };
     let mut problems = Vec::new();
     let ndigits: Vec<i32> = want
@@ -1080,12 +1135,7 @@ fn check_pyfmt() -> SetReport {
         "fixed": computed_fixed,
         "floor": computed_floor,
     });
-    SetReport {
-        name: "pyfmt",
-        computed: digest_of(&computed),
-        problems: capped(problems),
-        waiting: Vec::new(),
-    }
+    SetReport::new("pyfmt", &computed, &["cases", "extra", "fixed", "floor"], problems, Vec::new())
 }
 
 #[cfg(test)]
