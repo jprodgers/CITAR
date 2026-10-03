@@ -251,9 +251,11 @@ fn a_file_from_another_build_or_other_options_is_refused() {
     let o = duels(&dir, "theirs", 2, 12);
     assert_eq!(run(&o).0, Outcome::Done);
     let path = dir.join("theirs.jsonl");
-    let mine = lines(&path);
+    // Game 0's line: the two workers finish in either order.
+    let game0 =
+        lines(&path).into_iter().find(|l| l.starts_with("{\"i\":0,")).expect("game 0 finished");
 
-    let foreign = mine[0].replacen(&build_id(Ruleset::shared()), "000000000000", 1);
+    let foreign = game0.replacen(&build_id(Ruleset::shared()), "000000000000", 1);
     std::fs::write(&path, format!("{foreign}\n")).expect("written");
     let (outcome, said) = run(&o);
     assert_eq!(outcome, Outcome::Refused);
@@ -263,11 +265,12 @@ fn a_file_from_another_build_or_other_options_is_refused() {
     assert_eq!(lines(&path), [foreign], "nothing written");
 
     let other_seed = duels(&dir, "theirs", 2, 12);
-    std::fs::write(&path, format!("{}\n", mine[0])).expect("written");
+    std::fs::write(&path, format!("{game0}\n")).expect("written");
     let o2 = Options { seed: 7000, ..other_seed };
     let (outcome, said) = run(&o2);
     assert_eq!(outcome, Outcome::Refused);
-    assert!(said.join("\n").contains("has seed 500"), "{said:#?}");
+    let all = said.join("\n");
+    assert!(all.contains("line 1 (game 0) has seed 5000 (this run: 7000)"), "{all}");
 
     std::fs::write(&path, "{\"i\": \"zero\"}\n").expect("written");
     let (outcome, said) = run(&o);
