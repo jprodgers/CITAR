@@ -510,12 +510,14 @@ class ShapeTests(unittest.TestCase):
                         "a key dropped from some records")
         self.assertEqual(compare([{"a": 1, "f": 2}, {"a": 1}], [{"a": 1, "f": 3}, {"a": 2}]), [])
 
-    def test_optional_keys_are_learned_within_one_answer(self):
-        # One answer's two views: what the player's view alone has is no excuse for the god's view to lack a key.
-        player, god = {"units": [], "empire": {"gold": 1}}, {"units": [], "empires": {"Rome": 1}}
+    def test_each_answer_is_compared_on_its_own(self):
+        # Merged into one collection, a player view's own key reads as optional (the god view lacks it), so the
+        # battery compares each view with the same view on the other backend: there, a dropped key is a difference.
+        player, god, bare = {"units": [], "empire": {"gold": 1}}, {"units": [], "empires": {"Rome": 1}}, {"units": []}
+        self.assertEqual(compare([player, god], [bare, god]), [], "what merging the two views would let pass")
         self.assertEqual(compare(player, player), [])
-        self.assertTrue(compare(god, {"units": []}), "a god view without its empires")
-        self.assertTrue(compare({"view": player}, {"view": {"units": []}}), "a player view without its empire")
+        self.assertTrue(compare(player, bare), "a player view without its empire")
+        self.assertTrue(compare(god, bare), "a god view without its empires")
 
     def test_conditional_keys(self):
         own, outside = {"id": 1, "moves": 2}, {"id": 2}
