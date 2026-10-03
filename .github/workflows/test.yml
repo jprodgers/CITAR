@@ -31,6 +31,11 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental artefacts are never reused on a fresh runner; they only slow the cache down.
   CARGO_INCREMENTAL: 0
+  # The maturin every wheel and source distribution here is built with: the version tested, moved on
+  # deliberately. Left to itself maturin-action takes the newest release that pyproject.toml's
+  # `maturin>=1.15,<2` allows, and how maturin reads the include and exclude lists has changed
+  # between minor releases; scripts/ci/check_dist.py then holds what it built to the checkout.
+  MATURIN_VERSION: v1.15.0
 
 jobs:
   build-ext:
@@ -66,20 +71,19 @@ jobs:
         # builds the manylinux wheel.
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
           command: build
           args: --profile ci --features test-ops --locked --out wheels
           manylinux: "off"
 
-      - name: One abi3 wheel
+      - name: One abi3 wheel, holding the package and the extension
+        # The installer jobs install this wheel, so what it holds matters as much as the package
+        # job's: one cp311-abi3 tag, this OS's library, the files git tracks under citar/ and
+        # nothing else but the dist-info.
         shell: bash
         run: |
           ls -l wheels
-          set -- wheels/*.whl
-          [ "$#" -eq 1 ] || { echo "::error::expected one wheel, found $#"; exit 1; }
-          case "$(basename "$1")" in
-            citar-*-cp311-abi3-*.whl) echo "abi3 for Python 3.11 and later: $(basename "$1")" ;;
-            *) echo "::error::not an abi3 wheel for Python 3.11: $(basename "$1")"; exit 1 ;;
-          esac
+          python scripts/ci/check_dist.py wheel wheels --library "citar/_engine${{ runner.os == 'Windows' && '.pyd' || '.abi3.so' }}"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -250,6 +254,7 @@ jobs:
         # Before the wheel: the container below leaves target/ owned by root.
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
           command: sdist
           args: --out dist
 
@@ -260,27 +265,19 @@ jobs:
         # installs rust-toolchain.toml's toolchain itself.
         uses: PyO3/maturin-action@v1
         with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
           command: build
           args: --release --locked --out dist
           manylinux: "2_28"
 
-      - name: One abi3 manylinux_2_28 wheel, and its tags say so
+      - name: One abi3 manylinux_2_28 wheel, and both files hold what the checkout says
+        # The wheel: its one tag, its library, exactly the files git tracks under citar/ and the
+        # dist-info. The source distribution: only tracked files, all of citar/ and everything its
+        # includes name. scripts/ci/check_dist.py lists any difference.
         run: |
           ls -l dist
-          set -- dist/*.whl
-          [ "$#" -eq 1 ] || { echo "::error::expected one wheel, found $#"; exit 1; }
-          python -P - "$1" <<'PY'
-          import sys, zipfile
-          path = sys.argv[1]
-          with zipfile.ZipFile(path) as z:
-              wheel = next(n for n in z.namelist() if n.endswith(".dist-info/WHEEL"))
-              tags = [l.split(":", 1)[1].strip() for l in z.read(wheel).decode().splitlines() if l.startswith("Tag:")]
-              libs = [n for n in z.namelist() if n.startswith("citar/_engine") and not n.endswith(".pyi")]
-          print("tags:", tags, "library:", libs)
-          assert tags == ["cp311-abi3-manylinux_2_28_x86_64"], f"not one abi3 manylinux_2_28 tag: {tags}"
-          assert path.endswith("-cp311-abi3-manylinux_2_28_x86_64.whl"), path
-          assert libs == ["citar/_engine.abi3.so"], libs
-          PY
+          python scripts/ci/check_dist.py wheel dist --tag cp311-abi3-manylinux_2_28_x86_64 --library citar/_engine.abi3.so
+          python scripts/ci/check_dist.py sdist dist
 
       - name: Install the wheel into a clean environment
         run: |

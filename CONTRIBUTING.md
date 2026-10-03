@@ -225,7 +225,12 @@ test operations or `legacy`, so no wheel carries them. `test.yml`'s build-ext jo
 wheel per OS (the ci profile with `--features test-ops`); each test job installs only the
 dependencies (`scripts/ci/requirements.py all`) and unpacks the wheel's library into the checkout
 (`scripts/ci/unpack_ext.py`, which fails unless it imports with the test operations), and the
-package job builds the release wheel as it would ship. To run the suite as a test job does:
+package job builds the release wheel as it would ship. Every wheel and the source distribution are
+built with one maturin, `MATURIN_VERSION` at the top of `test.yml`, and `scripts/ci/check_dist.py`
+holds each to the checkout: the files git tracks under `citar/`, the library, and nothing stray.
+After changing `[tool.maturin]`'s `include` or `exclude`, or moving that pin, run it on a local
+build (`python scripts/ci/check_dist.py wheel DIR`, or `sdist DIR`). To run the suite as a test job
+does:
 
 ```bash
 maturin build --profile ci --features test-ops --out "$CARGO_TARGET_DIR/wheels"
