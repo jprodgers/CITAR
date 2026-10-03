@@ -196,9 +196,12 @@ class BotAgentTests(unittest.TestCase):
 
     @python_engine_only("tests.test_engine_api.BotTests.test_bots_are_compiled_versions")
     def test_a_frozen_bot_answers_everything(self):
-        """The archived bots predate the switch: BotAgent falls back to answering every negotiation."""
+        """The archived bots predate the switch: BotAgent falls back to answering every negotiation. (No profile
+        names one since package 2-10 archived them, so the seat is given one through the Python facade.)"""
+        from citar import engine_api
         from citar.agents.bot_agent import BotAgent
-        agent = BotAgent(profile="snapshot-0922", seed=1)
+        agent = BotAgent(seed=1)
+        agent.bot = engine_api.bot_instance("frozen_d95d50cb", seed=1)
         self.assertFalse(hasattr(agent.bot, "owns_negotiation"))
         trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
         agent.respond_negotiation(self.s, 1, trade)

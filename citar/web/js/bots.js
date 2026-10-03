@@ -37,7 +37,7 @@ export async function renderBots(root, rules, sub) {
       "the bot decides with is a parameter. Profiles are what lab experiments, lobby seats and benchmark opponents " +
       "play. Ratings come from every lab game: each game's finishing order is split into head-to-head results and " +
       "fitted on the Elo scale (400 points ≈ 10:1 odds of finishing ahead). An entry is one exact configuration " +
-      "(its fingerprint) at one difficulty, so each revision of a profile, and each code change of the live bot, " +
+      "(its fingerprint) at one difficulty, so each revision of a profile, and each build that changes the bot, " +
       "gets its own line."),
     el("div", { class: "tabbar" },
       ...[["profiles", "Profiles"], ["rankings", "Rankings"]].map(([k, label]) =>
@@ -152,7 +152,7 @@ async function drawRankings(body) {
         el("td", {}, tick, color ? el("span", { class: "swatch", style: { background: color } }) : null),
         el("td", { class: "muted" }, e.rated ? `${i + 1}` : "–"),
         el("td", {}, e.profile ? el("a", { href: `#/bots/${encodeURIComponent(e.profile)}`, onclick: (ev) => ev.stopPropagation() }, e.name) : e.name,
-          el("div", { class: "muted small" }, `${e.code}${Object.keys(e.params || {}).length ? ` · ${Object.keys(e.params).length} overrides` : ""}` +
+          el("div", { class: "muted small" }, `${e.code}${e.build ? ` · build ${e.build}` : ""}${Object.keys(e.params || {}).length ? ` · ${Object.keys(e.params).length} overrides` : ""}` +
             `${e.aggression != null ? ` · aggression ${e.aggression}` : ""} · ${e.experiments.join(", ")}`)),
         el("td", {}, e.rated ? el("span", {}, el("b", {}, fmt(e.rating)), el("span", { class: "muted small" }, ` ±${fmt(e.se)}`)) : el("span", { class: "muted" }, "no rival games")),
         el("td", {}, e.seats ?? "–"),
@@ -585,7 +585,7 @@ export async function abDialog(rules, preselect = []) {
   const content = el("div", { class: "col ab-form" },
     el("p", { class: "muted small" }, "The chosen profiles take the seats in turn (A, B, A, B…) and the seat order rotates every game, so each " +
       "profile plays every start position on the same maps and seeds — which removes map and position luck from the comparison. " +
-      "Profiles are frozen when the experiment is queued: editing one later doesn't change it."),
+      "Profiles are resolved when the experiment is queued, and \"latest\" is pinned to the version it names then: editing a profile later doesn't change it."),
     field("Profiles", pickBox),
     el("div", { class: "grid-scenario" },
       field("Players", num("players", { min: 2, max: 8 })),

@@ -1,18 +1,30 @@
 """Bot profiles: named, revisioned configurations of the scripted bot, for A/B testing and rankings.
 
-A profile is an *engine* (the bot code: ``basic`` - the live bot - or a frozen snapshot ``frozen_<hash>``, or
-``idle``), an optional fixed *aggression*, and *parameter overrides* on top of that engine's defaults. Every
-number the bot decides with is a parameter (see ``citar.bots.basic.PARAM_GROUPS``), so two profiles can differ in
-anything from a single weight to the whole war doctrine.
+A profile is an *engine* - a bot version compiled into the Rust engine (``basic-1``, ``idle``), or ``basic``, which
+names the latest version wherever the profile is used - an optional fixed *aggression*, and *parameter overrides* on
+top of that version's defaults. Every number the bot decides with is a parameter (the version's schema,
+``engine_api.bot_schema``; basic-1 has 373 in 17 groups), so two profiles can differ in anything from a single weight
+to the whole war doctrine (crates/citar-engine/DESIGN.md P2.8.5-P2.8.6).
 
 Profiles are what lab experiments, lobby seats and benchmark opponents name. Two things keep results honest:
 
 * **Revisions.** Saving a profile bumps its revision and keeps the old one in its history. Results are recorded
   against a revision, never against "whatever the profile says today".
-* **Fingerprints.** A fingerprint hashes what actually plays - the code (the frozen hash of the engine's source),
-  the effective overrides and the aggression. Ratings are kept per fingerprint, so a profile that follows the live
-  bot (``basic``) gets a new rating line whenever the code changes, and two profiles that happen to be identical
-  share one.
+* **Fingerprints.** A fingerprint hashes what actually plays (``engine_api.bot_fingerprint``): the build id (the
+  engine's and the bot's code and the ruleset), the version, the overrides as cleaned and the profile's *fixed*
+  aggression ("seat" when the seat decides), never the aggression a lab seat is given by its position. Ratings are
+  kept per fingerprint, so a profile that follows the latest version (``basic``) gets a new rating line whenever a
+  build changes what the bot does, and two profiles that happen to be identical share one.
+
+Versions replace 0.1.5's frozen copies of ``basic.py``: a bot change that should not move existing results is a new
+version, a deliberate copy in the Rust engine, so nothing is copied here any more. A ``frozen_*`` engine is refused
+with :data:`ARCHIVED`: the snapshots were archived with 0.1.5.
+
+Every question about a version - which exist, their parameters, cleaning, fingerprints - goes to the Rust engine
+through the facade. Until package 2-12 deletes it, the Python engine can still be the facade's backend, and it has
+none of those names (they raise ``engine_api.BackendError`` there): on it a profile still plays in a lobby seat
+(:func:`resolve` and :func:`make_bot` then pass the stored overrides to the Python bot as they are and give no
+fingerprint), but listing versions, editing profiles, the lab and the rankings' fingerprints need the Rust engine.
 
 Built-in profiles are defined here and cannot be edited, only forked. Saved ones live in
 ``saves/bots/profiles/<id>.json``.
@@ -20,48 +32,41 @@ Built-in profiles are defined here and cannot be edited, only forked. Saved ones
 from __future__ import annotations
 
 import copy
-import functools
-import hashlib
-import importlib
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .. import paths
+from .. import engine_api, paths
 from ..fsutil import replace as _fs_replace
 
-BOTS_DIR = paths.PACKAGE / "bots"
 PROFILES_DIR = paths.saves_path("bots", "profiles")
-FROZEN_DIR = paths.saves_path("bots", "frozen")         # frozen copies when the package directory is read-only
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,59}$")
-ENGINE_RE = re.compile(r"^(basic|idle|frozen_[0-9a-f]{8})$")
+#: The engines a profile may name: ``basic`` (the latest version, resolved where it is used), a version
+#: ``basic-N``, or the idle bot.
+ENGINE_RE = re.compile(r"^(basic|basic-\d+|idle)$")
+LATEST = "basic"
 DEFAULT_PROFILE = "standard"
 BEST = "best"                # a seat may ask for the best-ranked profile on this server (see ratings.best_profile)
+#: Why a frozen snapshot of 0.1.5's Python bot is refused.
+ARCHIVED = ("{engine} is a frozen snapshot of the Python bot, archived with 0.1.5: the bot is now a version "
+            "compiled into the engine. Use basic (the latest version), a version such as basic-1, or idle.")
 
 BUILTIN: list[dict] = [
     {"id": "standard", "name": "Standard", "engine": "basic", "aggression": None, "params": {},
      "tags": ["yardstick"],
-     "description": "The live bot with its current defaults: the yardstick every benchmark is measured against. It "
-                    "follows basic.py, so each code change starts a new rating line."},
+     "description": "The latest bot version with its defaults: the yardstick every benchmark is measured against. "
+                    "It follows the latest version, and each build that changes what the bot does starts a new "
+                    "rating line."},
     {"id": "classic-production", "name": "Classic production", "engine": "basic", "aggression": None,
      "params": {"prod_mode": "classic"}, "tags": ["control"],
-     "description": "The live bot with the older fixed-priority production heuristic. A control to measure "
-                    "production changes against."},
-    {"id": "snapshot-0922", "name": "Snapshot 22 Sep", "engine": "frozen_d95d50cb", "aggression": None, "params": {},
-     "tags": ["snapshot"],
-     "description": "basic.py as of 2026-09-22 (v1 plus the deal-pricing fixes): the bot the server lab's "
-                    "benchmark-reference experiments were queued with."},
-    {"id": "v1", "name": "v1 (18 Sep)", "engine": "frozen_7149efb1", "aggression": None, "params": {},
-     "tags": ["snapshot"],
-     "description": "The accepted v1 baseline (2026-09-18): UnCiv-style production, luxury trades every 3 turns, "
-                    "science and happiness weights from the first factorial screens."},
-    {"id": "v0", "name": "v0 (18 Sep)", "engine": "frozen_4ce67344", "aggression": None, "params": {},
-     "tags": ["snapshot"],
-     "description": "The bot before the tuning campaign began (2026-09-18 morning)."},
+     "description": "The latest bot version with the older fixed-priority production heuristic. A control to "
+                    "measure production changes against."},
     {"id": "idle", "name": "Idle", "engine": "idle", "aggression": None, "params": {}, "tags": ["control"],
-     "description": "Does nothing but end its turn. The floor any real player should beat."},
+     "description": "Founds its capital and then does nothing but end its turn. The floor any real player should "
+                    "beat."},
 ]
 _BUILTIN_IDS = {p["id"] for p in BUILTIN}
 
@@ -71,190 +76,93 @@ class ProfileError(ValueError):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# engines
+# engines: the bot versions
 # ----------------------------------------------------------------------------------------------------------------------
-def _frozen_dirs() -> list[Path]:
-    """Directories frozen bot copies are found in: the package's own, then the writable saves directory."""
-    return [BOTS_DIR, FROZEN_DIR]
-
-
-def code_id(engine: str) -> str:
-    """The identity of an engine's code: ``frozen_<hash of basic.py>`` for the live bot, the name itself for a frozen
-    copy, ``idle`` for the idle bot. The same code always gets the same id wherever it runs."""
-    if engine == "basic":
-        text = (BOTS_DIR / "basic.py").read_text(encoding="utf-8")
-        return "frozen_" + hashlib.sha1(text.encode()).hexdigest()[:8]
+def check_engine(engine) -> str:
+    """``engine`` if a profile may name it, else ProfileError: a frozen snapshot with :data:`ARCHIVED`, anything else
+    that is no ``basic``, ``basic-N`` or ``idle`` as unknown. Whether a ``basic-N`` is compiled in is the facade's to
+    say (:func:`version`)."""
+    if isinstance(engine, str) and engine.startswith("frozen_"):
+        raise ProfileError(ARCHIVED.format(engine=engine))
+    if not isinstance(engine, str) or not ENGINE_RE.match(engine):
+        raise ProfileError(f"Unknown bot engine {engine}: a profile plays basic (the latest version), a version such "
+                           "as basic-1, or idle.")
     return engine
 
 
-def freeze(engine: str = "basic") -> str:
-    """The frozen module name for an engine, writing the frozen copy of basic.py if it does not exist yet.
-
-    Frozen copies go in the package directory when it is writable (a source checkout, where they are committed so
-    other machines can reproduce the result) and in the saves directory otherwise (an installed server)."""
-    if engine != "basic":
-        return engine
-    text = (BOTS_DIR / "basic.py").read_text(encoding="utf-8")
-    name = "frozen_" + hashlib.sha1(text.encode()).hexdigest()[:8]
-    if any((d / f"{name}.py").exists() for d in _frozen_dirs()):
-        return name
-    body = f"# Frozen copy of citar/bots/basic.py made by citar.lab on {datetime.now():%Y-%m-%d %H:%M}\n" + text
-    for d in _frozen_dirs():
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-            (d / f"{name}.py").write_text(body, encoding="utf-8")
-            importlib.invalidate_caches()
-            return name
-        except OSError:
-            continue
-    raise ProfileError("Could not write a frozen copy of the bot anywhere (package and saves are read-only).")
-
-
-def module(engine: str):
-    """The Python module of an engine (``basic`` or a frozen copy)."""
-    if engine == "idle" or not ENGINE_RE.match(engine or ""):
-        raise ProfileError(f"'{engine}' is not a bot engine with parameters.")
-    try:
-        return importlib.import_module(f"citar.bots.{engine}")
-    except ImportError as e:
-        raise ProfileError(f"Bot engine {engine} is not installed here ({e}).") from None
+def _refused(e: ValueError) -> ProfileError:
+    """The facade's refusal (an unknown version, overrides that do not clean) as a profile error."""
+    return ProfileError(str(e))
 
 
 def engines() -> list[dict]:
-    """Every engine a profile can use: the live bot, each frozen snapshot (newest first) and the idle bot."""
-    out = [{"id": "basic", "label": "Live bot (basic.py)", "code": code_id("basic"), "created": None,
-            "description": "The current code. Profiles on it follow every change."}]
-    seen = set()
-    frozen = []
-    for d in _frozen_dirs():
-        for p in d.glob("frozen_*.py") if d.exists() else ():
-            if p.stem in seen or not ENGINE_RE.match(p.stem):
-                continue
-            seen.add(p.stem)
-            first = p.read_text(encoding="utf-8").split("\n", 1)[0]
-            m = re.search(r"on (\d{4}-\d\d-\d\d \d\d:\d\d)", first)
-            frozen.append({"id": p.stem, "code": p.stem, "created": m.group(1) if m else None,
-                           "label": f"Snapshot {m.group(1) if m else ''} ({p.stem[7:]})".replace("  ", " "),
-                           "description": "A frozen copy of basic.py. It never changes."})
-    frozen.sort(key=lambda e: e["created"] or "", reverse=True)
-    names = {p["engine"]: p["name"] for p in BUILTIN if p["engine"].startswith("frozen_")}
-    for e in frozen:
-        if e["id"] in names:
-            e["label"] = f"{names[e['id']]} ({e['id'][7:]})"
-    out += frozen
-    out.append({"id": "idle", "label": "Idle bot", "code": "idle", "created": None,
-                "description": "Ends its turn and nothing else."})
+    """Every engine a profile can name: ``basic``, which follows the latest version, then each version compiled into
+    the engine, the latest first (``engine_api.bot_versions``; the idle bot is one). Each is {"id", "label", "code"
+    (the version it plays today), "latest" (whether that is the latest version), "description", "created" (None:
+    versions are compiled in, not made)}."""
+    versions = engine_api.bot_versions()
+    latest = next(v for v in versions if v["latest"])
+    out = [{"id": LATEST, "label": f"Latest version ({latest['label']})", "code": latest["id"], "latest": True,
+            "created": None,
+            "description": f"Follows the latest version, today {latest['id']}: {latest['description']} A profile "
+                           "on it plays each new version once one is compiled in."}]
+    for v in versions:
+        out.append({"id": v["id"], "label": v["label"], "code": v["id"], "latest": v["latest"], "created": None,
+                    "description": v["description"] + (" Pinned: a later version does not change it."
+                                                       if v["id"] != "idle" else "")})
     return out
+
+
+def version(engine: str) -> str:
+    """The version an engine name plays now: ``basic`` resolves to the latest, a version id to itself. ProfileError
+    for a name the engine does not compile in."""
+    check_engine(engine)
+    versions = engine_api.bot_versions()
+    if engine == LATEST:
+        return next(v["id"] for v in versions if v["latest"])
+    if any(v["id"] == engine for v in versions):
+        return engine
+    raise ProfileError(f"'{engine}' is not a bot version here (the versions are "
+                       f"{', '.join(v['id'] for v in versions)}).")
+
+
+def schema(engine: str = LATEST) -> dict:
+    """A version's editable parameters, grouped, with labels, help, defaults and ranges: {"engine" (the version id),
+    "groups"}, the Bots page's shape. ``basic`` gives the latest version's; the idle bot has no groups."""
+    check_engine(engine)
+    try:
+        return engine_api.bot_schema(engine)
+    except ValueError as e:
+        raise _refused(e) from None
 
 
 def defaults(engine: str) -> dict:
-    """An engine's default parameters (empty for the idle bot)."""
-    if engine == "idle":
-        return {}
-    return dict(getattr(module(engine), "DEFAULT_PARAMS", {}))
-
-
-def schema(engine: str = "basic") -> dict:
-    """The editable parameters of an engine, grouped, with labels, help and ranges. Old frozen engines predate the
-    parameter descriptions, so theirs are inferred from their defaults."""
-    if engine == "idle":
-        return {"engine": engine, "groups": []}
-    mod = module(engine)
-    groups = getattr(mod, "PARAM_GROUPS", None)
-    if groups:
-        return {"engine": engine, "groups": [{"name": name, "help": help, "params": copy.deepcopy(specs)}
-                                             for name, help, specs in groups]}
-    specs = []
-    for k, v in getattr(mod, "DEFAULT_PARAMS", {}).items():
-        t = "bool" if isinstance(v, bool) else "int" if isinstance(v, int) else "float" if isinstance(v, float) \
-            else "order" if isinstance(v, list) else "text"
-        specs.append({"key": k, "default": v, "type": t, "label": k, "help": "", "min": None, "max": None})
-    return {"engine": engine, "groups": [{"name": "Parameters", "help": "This snapshot predates parameter "
-                                          "descriptions; names are the code's own.", "params": specs}]}
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-# parameters
-# ----------------------------------------------------------------------------------------------------------------------
-@functools.lru_cache(maxsize=64)
-def _spec_index(engine: str) -> dict:
-    """key -> spec for an engine (cached: an imported module's parameters don't change while it is loaded)."""
-    return {s["key"]: s for g in schema(engine)["groups"] for s in g["params"]}
+    """A version's default parameters, by key (empty for the idle bot)."""
+    return {s["key"]: s["default"] for g in schema(engine)["groups"] for s in g["params"]}
 
 
 def clean_params(engine: str, params: Optional[dict]) -> dict:
-    """Validate and canonicalise overrides for an engine: unknown keys are refused, values are coerced to the
-    parameter's type, and values equal to the engine's default are dropped (they are not overrides)."""
-    params = dict(params or {})
-    if engine == "idle":
-        return {}
-    specs = _spec_index(engine)
-    out = {}
-    for k, v in params.items():
-        spec = specs.get(k)
-        if spec is None:
-            raise ProfileError(f"{k} is not a parameter of {engine}.")
-        t = spec["type"]
-        try:
-            if t == "bool":
-                v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
-            elif t == "int":
-                if isinstance(v, bool):
-                    raise ValueError
-                f = float(v)
-                v = int(f) if f == int(f) else f      # a fractional value is kept (the bot accepts floats)
-            elif t == "float":
-                if isinstance(v, bool):
-                    raise ValueError
-                v = float(v)
-            elif t == "choice":
-                if v not in spec["choices"]:
-                    raise ValueError
-            elif t in ("order", "list"):
-                if isinstance(v, str):
-                    if v not in spec.get("presets", {}) and v != "default":
-                        raise ValueError
-                elif v is not None:
-                    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
-                        raise ValueError
-                    v = list(v)
-        except (TypeError, ValueError):
-            raise ProfileError(f"{spec['label']} ({k}): {v!r} is not a valid {t}.") from None
-        if v != spec["default"]:
-            out[k] = v
-    return out
-
-
-def effective_params(engine: str, overrides: dict) -> dict:
-    """Every parameter's value for an engine with overrides applied."""
-    p = defaults(engine)
-    p.update(overrides or {})
-    return p
+    """Validate and canonicalise overrides for a version (``engine_api.bot_clean_params``): unknown keys are refused,
+    values are coerced to the parameter's type, values equal to the version's default are dropped (they are not
+    overrides), and the keys are sorted. The idle bot takes none and ignores any."""
+    check_engine(engine)
+    try:
+        return engine_api.bot_clean_params(engine, params or {})
+    except ValueError as e:
+        raise _refused(e) from None
 
 
 def fingerprint(engine: str, params: Optional[dict], aggression: Optional[float]) -> str:
-    """What actually plays, hashed: code identity, canonical overrides, fixed aggression (None = set by the seat).
-
-    ``engine`` may be ``basic`` (resolved to the hash of its current source) or a frozen copy; the same code and the
-    same overrides give the same fingerprint wherever and however they were run."""
-    code = code_id(engine)
+    """What plays, hashed: the build, the version ``engine`` plays now, the overrides as cleaned and the profile's
+    fixed ``aggression`` (None: set by the seat). ``basic`` and the version it names give the same fingerprint, and
+    so do overrides that clean alike; a new build that changes the engine or the bot gives a new one."""
+    check_engine(engine)
     try:
-        overrides = clean_params(code if code != "idle" and _importable(code) else engine, params)
-    except ProfileError:
-        overrides = dict(params or {})         # an old snapshot's keys we cannot validate: hash them as given
-    blob = json.dumps({"code": code, "params": overrides,
-                       "aggression": None if aggression is None else round(float(aggression), 3)},
-                      sort_keys=True, default=str)
-    return hashlib.sha1(blob.encode()).hexdigest()[:10]
-
-
-def _importable(engine: str) -> bool:
-    """Whether a frozen engine's module can be loaded here."""
-    try:
-        module(engine)
-        return True
-    except ProfileError:
-        return False
+        bot = engine_api.bot_instance(engine, params=params or {},
+                                      fixed_aggression=None if aggression is None else float(aggression))
+    except ValueError as e:
+        raise _refused(e) from None
+    return engine_api.bot_fingerprint(bot)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -277,7 +185,8 @@ def _builtin(pid: str) -> Optional[dict]:
 
 
 def list_profiles() -> list[dict]:
-    """Every profile: built-ins first, then saved ones by name."""
+    """Every profile: built-ins first, then saved ones by name. A saved profile on an archived frozen engine is
+    listed (its history explains old results) but refused wherever it would play."""
     out = [_builtin(b["id"]) for b in BUILTIN]
     saved = []
     if PROFILES_DIR.exists():
@@ -305,6 +214,15 @@ def get(pid: str) -> dict:
         raise ProfileError(f"No bot profile called '{pid}'.") from None
 
 
+def exists(pid: str) -> bool:
+    """Whether a profile with this id exists."""
+    try:
+        get(pid)
+        return True
+    except ProfileError:
+        return False
+
+
 def _slug(name: str) -> str:
     """A profile id from its name."""
     s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50] or "bot"
@@ -329,19 +247,20 @@ def save(data: dict, user: Optional[str] = None, note: str = "") -> dict:
     name = (data.get("name") or "").strip()
     if not name:
         raise ProfileError("A profile needs a name.")
-    engine = data.get("engine") or "basic"
-    if not ENGINE_RE.match(engine):
-        raise ProfileError(f"Unknown engine {engine}.")
-    if engine != "idle":
-        module(engine)                            # installed here?
+    engine = check_engine(data.get("engine") or LATEST)
+    version(engine)                               # compiled in here?
     agg = data.get("aggression")
-    if agg is not None and agg != "":
-        try:
-            agg = max(0.0, min(1.0, float(agg)))
-        except (TypeError, ValueError):
-            raise ProfileError("Aggression is a number from 0 to 1, or empty to let the seat decide.") from None
-    else:
+    if agg is None or agg == "":
         agg = None
+    else:
+        try:
+            agg = float(agg)
+        except (TypeError, ValueError):
+            agg = math.nan
+        # a NaN is no number: Python's max(0, min(1, nan)) made it 1.0, the most aggressive bot
+        if math.isnan(agg):
+            raise ProfileError("Aggression is a number from 0 to 1, or empty to let the seat decide.")
+        agg = max(0.0, min(1.0, agg))
     params = clean_params(engine, data.get("params"))
     now = datetime.now().isoformat(timespec="seconds")
     existing = None
@@ -396,12 +315,22 @@ def delete(pid: str):
 # ----------------------------------------------------------------------------------------------------------------------
 # using a profile
 # ----------------------------------------------------------------------------------------------------------------------
-def resolve(ref, *, freeze_code: bool = False) -> dict:
-    """What a profile reference plays: engine, overrides, aggression, plus its identity.
+def resolve(ref, *, pin: bool = False) -> dict:
+    """What a profile reference plays: {"engine", "version", "params", "aggression", "profile", "profile_rev",
+    "profile_name", "fingerprint"}.
 
     ``ref`` is a profile id, or a seat-like dict with "profile" (and optionally "params" to layer on top and
-    "aggression"), or a raw seat {"bot": engine, "params": ...} without a profile. With ``freeze_code`` the live
-    engine is replaced by a frozen copy of the current code, which is what a lab experiment needs."""
+    "aggression"), or a raw seat {"bot": engine, "params": ...} without a profile. ``engine`` is as the profile names
+    it (``basic`` follows the latest version) and ``version`` the version that plays now; with ``pin`` the engine is
+    that version, which is what a lab experiment records when it is submitted. ``aggression`` is the profile's fixed
+    one (or the seat's "aggression"), None when the seat decides. The overrides are cleaned against the version's
+    schema; a raw seat's that do not clean are refused too.
+
+    On the Python backend (until package 2-12) there are no versions to resolve to and no schema or build to clean
+    and fingerprint against: ``version`` and ``fingerprint`` are None and the overrides are passed on as stored, which
+    lets a lobby seat play its profile there; ``pin`` raises the facade's BackendError, since only a version can be
+    pinned.
+    """
     if isinstance(ref, str) or ref is None:
         ref = {"profile": ref or DEFAULT_PROFILE}
     ref = dict(ref)
@@ -409,51 +338,41 @@ def resolve(ref, *, freeze_code: bool = False) -> dict:
         from .ratings import best_profile
         ref["profile"] = best_profile()
     prof = get(ref["profile"]) if ref.get("profile") else None
-    engine = (prof or {}).get("engine") or ref.get("bot") or "basic"
-    if engine == "live":
-        engine = "basic"
+    engine = (prof or {}).get("engine") or ref.get("bot") or LATEST
+    if engine == "live":                          # 0.1.5's name for the live bot
+        engine = LATEST
+    check_engine(engine)
     params = dict((prof or {}).get("params") or {})
-    params.update(ref.get("params") or {})
+    extra = ref.get("params") or {}
+    if not isinstance(extra, dict):
+        raise ProfileError("A seat's parameter overrides are an object of names and values.")
+    params.update(extra)
     agg = ref.get("aggression")
     if agg is None and prof is not None:
         agg = prof.get("aggression")
-    if freeze_code:
-        engine = freeze(engine)
-    if engine not in ("idle",) and not engine.startswith("frozen_") and engine != "basic":
-        raise ProfileError(f"Unknown bot engine {engine}.")
     try:
+        ver = version(engine)
         params = clean_params(engine, params)
-    except ProfileError:
-        if prof is not None:
+        fp = fingerprint(engine, params, agg)
+    except engine_api.BackendError:
+        if pin:
             raise
-    return {"engine": engine, "params": params, "aggression": agg,
+        ver = fp = None
+    return {"engine": ver if pin else engine, "version": ver, "params": params, "aggression": agg,
             "profile": prof["id"] if prof else None, "profile_rev": prof.get("rev") if prof else None,
-            "profile_name": prof["name"] if prof else None, "fingerprint": fingerprint(engine, params, agg)}
+            "profile_name": prof["name"] if prof else None, "fingerprint": fp}
 
 
 def make_bot(ref=None, *, seed: Optional[int] = None, aggression: Optional[float] = None):
     """A bot for a profile reference (see resolve), made by the engine's facade (``engine_api.bot_instance``), so it
-    is the backend's own: a Python bot object, or a compiled bot's handle on the Rust engine. ``aggression`` applies
-    when the profile leaves it open; with neither, 0.4."""
-    from .. import engine_api
+    is the backend's own: a compiled bot's handle on the Rust engine. The profile's fixed aggression wins and is what
+    its fingerprint hashes (``fixed_aggression``); ``aggression`` is the seat's, used when the profile leaves it
+    open; with neither, 0.4. ``seed`` reaches only the Python backend's bot: the Rust bot draws from the game's
+    seed."""
     r = resolve(ref)
-    if r["engine"] == "idle":
-        return engine_api.bot_instance("idle")
-    agg = r["aggression"] if r["aggression"] is not None else (aggression if aggression is not None else 0.4)
-    return engine_api.bot_instance(r["engine"], seed=seed, aggression=float(agg), params=r["params"])
-
-
-def revision_fingerprints() -> dict:
-    """fingerprint -> (profile id, name, revision) for every revision of every profile whose code is pinned, and for
-    the current revision of profiles on the live bot. Used to name rating entries."""
-    out = {}
-    for p in list_profiles():
-        revs = p.get("history") or [{"rev": p.get("rev", 1), "engine": p["engine"], "aggression": p.get("aggression"),
-                                     "params": p.get("params") or {}}]
-        for h in revs:
-            try:
-                fp = fingerprint(h["engine"], h.get("params"), h.get("aggression"))
-            except ProfileError:
-                continue
-            out.setdefault(fp, (p["id"], p["name"], h.get("rev", 1)))
-    return out
+    seat = float(aggression) if aggression is not None else 0.4
+    try:
+        return engine_api.bot_instance(r["engine"], seed=seed, aggression=seat, params=r["params"],
+                                       fixed_aggression=None if r["aggression"] is None else float(r["aggression"]))
+    except ValueError as e:
+        raise _refused(e) from None

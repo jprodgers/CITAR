@@ -1,8 +1,10 @@
 """Ratings for bot profiles, from every recorded game: who beats whom, and how that changes over time.
 
-**What is rated.** An *entry* is a fingerprint (the exact code, parameter overrides and aggression that played; see
-``citar.bots.profiles``) at a difficulty level. A Deity bot and a Prince bot running the same code are different
-entries - which makes the ladder experiments a handicap scale to place models on.
+**What is rated.** An *entry* is a fingerprint (the build, the bot version, the parameter overrides and the
+profile's fixed aggression that played; see ``citar.bots.profiles``) at a difficulty level. A Deity bot and a Prince
+bot running the same code are different entries - which makes the ladder experiments a handicap scale to place models
+on. A build that changes what the bot does changes every fingerprint, so its games start new entries and two builds'
+results are never mixed in one (crates/citar-engine/DESIGN.md P2.8.7).
 
 **How.** Each game's final ranking (by score) is split into pairwise results: every pair of seats with different
 entries is one comparison, won by the higher score (equal scores tie). A game of n players contributes each pair
@@ -16,8 +18,12 @@ Fitting everything at once (rather than updating Elo game by game) makes a ratin
 finished in, which matters when a dozen experiments run in parallel. **History** is the same fit on the games
 finished up to the end of each day.
 
-**Where the games come from.** The lab's results (``saves/lab/results``). Results from before fingerprints were
-recorded are mapped through their experiment's seat list (engine, parameters, aggression by label).
+**Where the games come from.** The lab's results (``saves/lab/results``). Each result records per seat what played,
+taken when the game was played: the fingerprint, the build id, the bot version, the profile, its revision and name,
+the overrides and the profile's fixed aggression. Entries are keyed and named from those records alone, so
+collecting them needs neither the bot's code nor the engine: no fingerprint is re-derived. A game in which a seat
+recorded no fingerprint (0.1.5's oldest results, archived with the rest of its lab history) is not rated. The ladder
+of 0.1.6 starts empty.
 """
 from __future__ import annotations
 
@@ -28,6 +34,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Optional
 
+from .. import engine_api
 from . import profiles
 
 PRIOR_GAMES = 2.0            # drawn games against a 1500 anchor every entry starts with
@@ -69,25 +76,25 @@ def _signature() -> tuple:
     return tuple(sorted(sig))
 
 
-def _seat_identity(exp: dict, player: dict) -> tuple:
-    """(code, overrides, aggression) of a result's seat, from the result itself or its experiment's seat list."""
-    if exp.get("factors"):
-        params = dict(exp.get("base_params") or {})
-        params.update(player.get("levels") or {})
-        return player.get("bot") or exp.get("bot") or "basic", params, exp.get("aggression")
-    seat = next((s for s in exp.get("seats", []) if s.get("label") == player.get("label")), None) or {}
-    return player.get("bot") or seat.get("bot") or "basic", seat.get("params") or {}, seat.get("aggression")
+def _entry(eid: str, fp: str, diff: str, r: dict, pl: dict, factorial: bool) -> dict:
+    """A new entry, from what a result records about one of its seats."""
+    return {"id": eid, "fingerprint": fp, "difficulty": diff,
+            # 0.1.5's results named the code in "bot" and the engine's hash in "engine", and recorded no overrides
+            "version": pl.get("version") or pl.get("bot"), "build": pl.get("build") or r.get("engine"),
+            "params": pl.get("params"), "aggression": pl.get("fixed_aggression"),
+            "profile": pl.get("profile"), "profile_rev": pl.get("profile_rev"), "profile_name": pl.get("profile_name"),
+            "labels": Counter(), "experiments": set(), "factorial": factorial, "first": None, "last": None}
 
 
 def collect() -> tuple[list[dict], dict]:
-    """Every rated game (oldest first) and what is known about each entry that played."""
+    """Every rated game (oldest first) and what is known about each entry that played, from the results' own
+    records."""
+    from .. import lab
     games, entries = [], {}
-    fp_cache: dict = {}
     for exp, path in _lab_files():
         if not path.exists():
             continue
         factorial = bool(exp.get("factors"))
-        from .. import lab
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 r = lab.complete_players(exp, json.loads(line))
@@ -95,28 +102,22 @@ def collect() -> tuple[list[dict], dict]:
                 continue
             if r.get("crash") or not r.get("players") or len(r["players"]) < 2:
                 continue
+            if not all(isinstance(pl, dict) and pl.get("fingerprint") for pl in r["players"].values()):
+                continue
             seats = []
             for k, pl in r["players"].items():
-                code, params, agg = _seat_identity(exp, pl)
-                fp = pl.get("fingerprint")
-                if not fp:
-                    key = (code, json.dumps(params, sort_keys=True, default=str), agg)
-                    if key not in fp_cache:
-                        fp_cache[key] = "idle" if code == "idle" else profiles.fingerprint(code, params, agg)
-                    fp = fp_cache[key]
+                fp = pl["fingerprint"]
                 diff = pl.get("difficulty") or exp.get("difficulty") or "Prince"
                 eid = f"{fp}@{diff}"
                 e = entries.get(eid)
                 if e is None:
-                    e = entries[eid] = {"id": eid, "fingerprint": fp, "difficulty": diff, "code": code,
-                                        "params": params, "aggression": agg, "labels": Counter(), "experiments": set(),
-                                        "profile": pl.get("profile"), "profile_rev": pl.get("profile_rev"),
-                                        "factorial": factorial, "first": None, "last": None}
+                    e = entries[eid] = _entry(eid, fp, diff, r, pl, factorial)
                 e["labels"][pl.get("label") or "?"] += 1
                 e["experiments"].add(exp["name"])
                 e["factorial"] = e["factorial"] and factorial
                 if pl.get("profile") and not e.get("profile"):
                     e["profile"], e["profile_rev"] = pl["profile"], pl.get("profile_rev")
+                    e["profile_name"] = pl.get("profile_name")
                 seats.append({"entry": eid, "share": pl.get("score_share") or 0.0, "rank": pl.get("rank"),
                               "alive": pl.get("alive"), "techs": pl.get("techs"), "cities": pl.get("cities"),
                               "captured": (pl.get("events") or {}).get("captured_city", 0),
@@ -225,27 +226,36 @@ def expected(ra: float, rb: float) -> float:
 # ----------------------------------------------------------------------------------------------------------------------
 # presentation
 # ----------------------------------------------------------------------------------------------------------------------
-def _name(e: dict, revs: dict, pinned: dict, engines: dict) -> tuple:
-    """(display name, profile id, revision) for an entry."""
-    diff = "" if e["difficulty"] == "Prince" else f" @ {e['difficulty']}"
-    if e["fingerprint"] in revs:
-        pid, name, rev = revs[e["fingerprint"]]
-        return f"{name}{' r' + str(rev) if rev and rev > 1 else ''}{diff}", pid, rev
+def _base_name(e: dict) -> str:
+    """An entry's name from its records: its profile's name (as the profile is called now, else as recorded) with
+    the revision past the first, else the label its seats played under; and the difficulty, if not Prince."""
+    name = None
     if e.get("profile"):
         try:
-            p = profiles.get(e["profile"])
-            return f"{p['name']} r{e.get('profile_rev') or '?'}{diff}", p["id"], e.get("profile_rev")
-        except profiles.ProfileError:
-            pass
-    code = e["code"]
-    when = (engines.get(code) or {}).get("created")
-    stamp = f"{code[7:] if code.startswith('frozen_') else code}" + (f", {when[5:10]}" if when else "")
-    if not e["params"] and e["aggression"] is None:
-        if code in pinned:
-            return f"{pinned[code][1]}{diff}", pinned[code][0], 1
-        return f"Standard · code {stamp}{diff}", "standard", None       # the live bot as it was then
-    label = e["labels"].most_common(1)[0][0] if e["labels"] else "bot"
-    return f"{label} · {stamp}{diff}", None, None
+            name = profiles.get(e["profile"])["name"]
+        except profiles.ProfileError:            # deleted since: the name it had when it played
+            name = e.get("profile_name")
+        rev = e.get("profile_rev")
+        if name and rev and rev > 1:
+            name = f"{name} r{rev}"
+    if not name:
+        name = e["labels"].most_common(1)[0][0] if e["labels"] else "bot"
+    return name + ("" if e["difficulty"] == "Prince" else f" @ {e['difficulty']}")
+
+
+def _names(entries: list[dict]) -> dict:
+    """entry id -> display name. Entries that would share a name (one profile on two builds or versions, say) are
+    told apart by their version and build, and those still alike by their fingerprint."""
+    tiers = (lambda e: _base_name(e),
+             lambda e: f"{_base_name(e)} · {e.get('version') or '?'}, build {e.get('build') or '?'}",
+             lambda e: f"{_base_name(e)} · {e.get('version') or '?'}, build {e.get('build') or '?'}, {e['fingerprint']}")
+    out, todo = {}, list(entries)
+    for tier in tiers:
+        names = {e["id"]: tier(e) for e in todo}
+        count = Counter(names.values())
+        out.update(names)
+        todo = [e for e in todo if count[names[e["id"]]] > 1]
+    return out
 
 
 def _entry_stats(games: list[dict]) -> dict:
@@ -295,24 +305,21 @@ def rankings(include_factorial: bool = False, history: bool = True) -> dict:
         compared[a] += n
         compared[b] += n
     stats = _entry_stats(rated)
-    revs = profiles.revision_fingerprints()
-    pinned = {p["engine"]: (p["id"], p["name"]) for p in profiles.BUILTIN if p["engine"].startswith("frozen_")
-              and not p["params"] and p["aggression"] is None}
-    engines = {e["id"]: e for e in profiles.engines()}
+    names = _names([entries[eid] for eid in keep])
     board = []
     for eid in keep:
         e = entries[eid]
-        name, pid, rev = _name(e, revs, pinned, engines)
         r, se = ratings.get(eid, (1500.0, None))
-        board.append({"id": eid, "name": name, "profile": pid, "rev": rev, "fingerprint": e["fingerprint"],
-                      "difficulty": e["difficulty"], "code": e["code"], "params": e["params"],
+        board.append({"id": eid, "name": names[eid], "profile": e["profile"], "rev": e["profile_rev"],
+                      "fingerprint": e["fingerprint"], "difficulty": e["difficulty"], "code": e["version"],
+                      "version": e["version"], "build": e["build"], "params": e["params"],
                       "aggression": e["aggression"], "labels": dict(e["labels"].most_common(5)),
                       "experiments": sorted(e["experiments"]), "factorial": e["factorial"],
                       "first": e["first"], "last": e["last"], "rating": round(r, 1),
                       "se": round(se, 1) if se else None, "compared": round(compared[eid], 2),
                       "rated": compared[eid] > 0, "group": group.get(eid),
                       "group_size": group_size.get(group.get(eid), 0), **stats.get(eid, {})})
-    board.sort(key=lambda b: (not b["rated"], -b["rating"]))
+    board.sort(key=lambda b: (not b["rated"], -b["rating"], b["name"]))
     for i, b in enumerate(board):
         b["rank"] = i + 1
     hist = _history(rated, keep) if history else {}
@@ -384,24 +391,30 @@ def profile_summary(pid: str, board: Optional[list] = None) -> dict:
 def profile_rating(p: dict, board: list) -> dict:
     """A profile with its rating, the most relevant Prince entry first:
 
-    * exactly the current revision (same fingerprint): ``rating_is_current``;
-    * else the same settings (parameters and aggression) on earlier code of the live bot - the profile's own
-      rating from before the last code change, ``rating_same_settings``, the latest such code first;
+    * exactly the current revision on this build (same fingerprint): ``rating_is_current``;
+    * else, for a profile that follows the latest version (``basic``), the same settings (parameters and fixed
+      aggression) on an earlier build or version - the profile's own rating from before the last change of the bot,
+      ``rating_same_settings``, the latest first;
     * else its best rated entry from an earlier revision (flagged by both being false).
+
+    Without the Rust engine (the Python backend, until package 2-12) there is no fingerprint to compare, so no
+    rating is current there.
     """
     mine = [b for b in board if b.get("profile") == p["id"]]
     rated = [b for b in mine if b.get("rated")]
     best = ([b for b in rated if b["difficulty"] == "Prince"] or rated or [None])[0]
     try:
         live = profiles.fingerprint(p["engine"], p.get("params"), p.get("aggression"))
-    except profiles.ProfileError:
+    except (profiles.ProfileError, engine_api.BackendError):     # an archived engine; the Python backend
         live = None
     current = next((b for b in mine if b["fingerprint"] == live and b["difficulty"] == "Prince" and b.get("rated")),
                    None)
     same = None
-    if current is None and p.get("engine") == "basic":
+    if current is None and p.get("engine") == profiles.LATEST:
         agg = p.get("aggression")
-        cands = [b for b in rated if b["difficulty"] == "Prince" and (b.get("params") or {}) == (p.get("params") or {})
+        # an entry whose results recorded no overrides (0.1.5's) cannot be said to have the same settings
+        cands = [b for b in rated if b["difficulty"] == "Prince" and b.get("params") is not None
+                 and b["params"] == (p.get("params") or {})
                  and (b.get("aggression") is None and agg is None
                       or b.get("aggression") is not None and agg is not None and abs(b["aggression"] - agg) < 1e-6)]
         same = max(cands, key=lambda b: b.get("last") or "", default=None)
@@ -429,8 +442,8 @@ def ranked_profiles(board: Optional[list] = None) -> list[dict]:
 
 def best_profile(board: Optional[list] = None) -> str:
     """The id "Best bot" stands for: the highest-rated profile whose rating describes its current settings (its
-    current revision, or the same settings on earlier code of the live bot), else the highest-rated at all, else
-    Standard. Never the idle bot or an archived profile."""
+    current revision, or the same settings on an earlier build of the latest version), else the highest-rated at
+    all, else Standard. Never the idle bot or an archived profile."""
     try:
         ranked = [p for p in ranked_profiles(board) if p["engine"] != "idle" and not p.get("archived")
                   and p["rating"] and p["rating"].get("rated")]

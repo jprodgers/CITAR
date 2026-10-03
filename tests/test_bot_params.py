@@ -13,6 +13,10 @@ tests/data/clean_params_cases.json is recorded from the inputs in ``CASES``:
 
 A case marked ``fix`` is one where basic-1's ``clean()`` answers differently from Python on purpose (``FIXES``); its
 ``basic1`` is the answer basic-1 gives instead.
+
+Python's ``clean_params`` lives on here as :func:`python_clean_params`, verbatim but for its name and error: package
+2-10 moved ``citar.bots.profiles`` onto the engine's own cleaning (``engine_api.bot_clean_params``, basic-1's
+``clean()``), and the table records what Python's gave.
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import importlib.util
@@ -146,12 +150,59 @@ CASES = [
 ]
 
 
+class Refused(ValueError):
+    """What Python's ``clean_params`` raised (a ``ProfileError``), with its message."""
+
+
+def python_clean_params(engine: str, params) -> dict:
+    """``citar.bots.profiles.clean_params`` as it was until package 2-10 (0.1.5's), over the live bot's
+    PARAM_GROUPS: unknown keys refused, values coerced to the parameter's type, values equal to the default dropped."""
+    from citar.bots.basic import PARAM_GROUPS
+    params = dict(params or {})
+    if engine == "idle":
+        return {}
+    specs = {s["key"]: s for _, _, group in PARAM_GROUPS for s in group}
+    out = {}
+    for k, v in params.items():
+        spec = specs.get(k)
+        if spec is None:
+            raise Refused(f"{k} is not a parameter of {engine}.")
+        t = spec["type"]
+        try:
+            if t == "bool":
+                v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            elif t == "int":
+                if isinstance(v, bool):
+                    raise ValueError
+                f = float(v)
+                v = int(f) if f == int(f) else f      # a fractional value is kept (the bot accepts floats)
+            elif t == "float":
+                if isinstance(v, bool):
+                    raise ValueError
+                v = float(v)
+            elif t == "choice":
+                if v not in spec["choices"]:
+                    raise ValueError
+            elif t in ("order", "list"):
+                if isinstance(v, str):
+                    if v not in spec.get("presets", {}) and v != "default":
+                        raise ValueError
+                elif v is not None:
+                    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                        raise ValueError
+                    v = list(v)
+        except (TypeError, ValueError):
+            raise Refused(f"{spec['label']} ({k}): {v!r} is not a valid {t}.") from None
+        if v != spec["default"]:
+            out[k] = v
+    return out
+
+
 def answer(params) -> dict:
     """What ``clean_params("basic", params)`` gives: ``{"out": overrides}`` or ``{"error": ProfileError's message}``."""
-    from citar.bots.profiles import ProfileError, clean_params
     try:
-        return {"out": clean_params("basic", params)}
-    except ProfileError as e:
+        return {"out": python_clean_params("basic", params)}
+    except Refused as e:
         return {"error": str(e)}
 
 
