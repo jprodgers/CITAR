@@ -11,6 +11,16 @@
 //! reads to build a defender there); a site it has turned back from `settler_max_retreats` times
 //! (`memory.retreats`) is given up on for a while (`memory.bad_sites`).
 //!
+//! A fix (the seventh of package 2-03): Python's settler counted as escorted when any military
+//! unit of its civilization shared its tile (`_guarded`), so one in danger in a garrisoned city
+//! walked out alone, the garrison staying behind, and one waiting for an escort left alone as
+//! soon as the defender its city built for it appeared there and became the garrison. Only the
+//! settler's own escort (`memory.escorts`) on its tile makes the trip safe now. A tile holds one
+//! military unit, so an escort cannot join a settler in a city its garrison holds: it stands
+//! beside the city ([`escort_spot`]), and the settler steps out onto its tile and stays there
+//! with it for the turn. And the two go together: a settler whose escort has no moves left this
+//! turn waits with it.
+//!
 //! The sites are the production advisor's (`Advisor::sites`), found afresh each turn, where
 //! Python kept them for `site_cache_turns` (P2.3.9, fix 5); a site no city can be founded on now,
 //! or one the bot has given up on, is not gone to.
@@ -24,13 +34,14 @@ use citar_engine::base::ids::{PlayerId, TileIdx, UnitId};
 use citar_engine::game::actions::UnitAction;
 use citar_engine::game::cities::founding::found_check;
 use citar_engine::game::derive::danger::threat_reach;
-use citar_engine::game::movement::find_path;
+use citar_engine::game::movement::{can_stand, find_path};
 use citar_engine::game::units::actions::MoveUnit;
 use citar_engine::game::{Action, Game, Outcome};
 use citar_engine::rules::defs::Domain;
 
 use super::Seat;
 use super::context::Context;
+use super::units::military::approach_tile;
 use super::units::{is_garrison, nearest, nearest_city, within};
 use super::workers::order;
 use crate::driver::Turn;
@@ -102,10 +113,20 @@ pub(crate) fn handle_settler(
         found(t, u);
         return;
     }
-    if in_danger(g, s, ctx, here, target) && !guarded(g, pid, here) {
-        let escort = assign_escort(t, s, ctx, u);
-        if escort.is_none() || !guarded(t.game(), pid, here) {
+    if in_danger(g, s, ctx, here, target) {
+        if escort_with(g, s, pid, u).is_none() {
+            assign_escort(t, s, ctx, u);
+            if join_escort(t, s, u) {
+                // Out of its city onto its escort's tile: the two set out together next turn.
+                return;
+            }
+        }
+        let Some(e) = escort_with(t.game(), s, pid, u) else {
             retreat(t, s, ctx, u, target);
+            return;
+        };
+        if t.game().unit(e).is_none_or(|x| x.moves <= 0) {
+            // Its escort came this turn and has no step left: they go on together next turn.
             return;
         }
     }
@@ -140,14 +161,54 @@ fn in_danger(g: &Game, s: &Seat<'_>, ctx: &Context, here: TileIdx, site: TileIdx
     })
 }
 
-/// Whether a military unit of the seat's shares tile `at` (`_guarded`, basic.py:1896-1899).
-fn guarded(g: &Game, pid: PlayerId, at: TileIdx) -> bool {
-    g.military_at(at).is_some_and(|m| m.owner() == pid)
+/// The escort of settler `u` when it is with it: assigned (`memory.escorts`), still the seat's,
+/// and on the settler's tile (`_guarded`, basic.py:1896-1899, which took any military unit of the
+/// seat's there: the module's fix).
+fn escort_with(g: &Game, s: &Seat<'_>, pid: PlayerId, u: UnitId) -> Option<UnitId> {
+    let at = g.unit(u)?.tile();
+    let e = g.unit(*s.memory.escorts.get(&u)?)?;
+    (e.owner() == pid && e.tile() == at).then(|| e.id())
+}
+
+/// Where escort `e` stands to go with a settler on `at`: that tile, or, when it may not stand
+/// there (a city its garrison holds: a tile holds one military unit), the nearest tile beside it
+/// it may stand on (`_approach_tile`'s ring of one), from which the settler sets out with it.
+pub(crate) fn escort_spot(
+    g: &Game,
+    pid: PlayerId,
+    s: &Seat<'_>,
+    e: UnitId,
+    at: TileIdx,
+) -> Option<TileIdx> {
+    let base = g.unit(e)?.base;
+    if can_stand(g, pid, base, at, Some(e)) {
+        return Some(at);
+    }
+    approach_tile(g, pid, s, e, at, false, 1)
+}
+
+/// A settler on a tile its escort may not stand on (a city its garrison holds) steps onto the
+/// escort waiting beside it (the module's fix), where the two stay for the turn and from which
+/// they set out together; whether it stepped there.
+fn join_escort(t: &mut Turn<'_>, s: &Seat<'_>, u: UnitId) -> bool {
+    let pid = t.pid();
+    let g = t.game();
+    let (Some(x), Some(e)) = (g.unit(u), s.memory.escorts.get(&u).and_then(|&e| g.unit(e))) else {
+        return false;
+    };
+    let (here, to) = (x.tile(), e.tile());
+    let beside = e.owner() == pid
+        && g.grid().distance(to, here) == 1
+        && x.moves > 0
+        && !can_stand(g, pid, e.base, here, Some(e.id()))
+        && can_stand(g, pid, x.base, to, Some(u));
+    beside && move_to(t, u, to).is_some() && t.game().unit(u).is_some_and(|x| x.tile() == to)
 }
 
 /// `_assign_escort` (basic.py:1901-1915): the settler's escort, assigned if it has none (the
 /// nearest free land unit of the army within `escort_radius`, with `escort_min_hp`), brought
-/// onto its tile if it can still move; `None` when there is nobody to send.
+/// onto its tile, or beside it ([`escort_spot`]), if it can still move; `None` when there is
+/// nobody to send.
 fn assign_escort(t: &mut Turn<'_>, s: &mut Seat<'_>, ctx: &Context, u: UnitId) -> Option<UnitId> {
     let pid = t.pid();
     let g = t.game();
@@ -175,8 +236,11 @@ fn assign_escort(t: &mut Turn<'_>, s: &mut Seat<'_>, ctx: &Context, u: UnitId) -
         escort = Some(chosen);
     }
     let e = escort?;
-    if t.game().unit(e).is_some_and(|x| x.tile() != here && x.moves > 0) {
-        move_to(t, e, here);
+    let g = t.game();
+    if let Some(to) = escort_spot(g, pid, s, e, here)
+        && g.unit(e).is_some_and(|x| x.tile() != to && x.moves > 0)
+    {
+        move_to(t, e, to);
     }
     Some(e)
 }
@@ -204,17 +268,21 @@ fn retreat(t: &mut Turn<'_>, s: &mut Seat<'_>, ctx: &Context, u: UnitId, site: T
     }
 }
 
-/// `_follow` (basic.py:1917-1925): the settler moved, and its escort comes onto its tile; an
-/// escort or a settler that is gone ends the escort.
+/// `_follow` (basic.py:1917-1925): the settler moved, and its escort comes onto its tile (or
+/// beside it, [`escort_spot`]); an escort or a settler that is gone ends the escort.
 fn follow(t: &mut Turn<'_>, s: &mut Seat<'_>, u: UnitId) {
+    let pid = t.pid();
     let g = t.game();
     let escort = s.memory.escorts.get(&u).copied().and_then(|e| g.unit(e));
     let (Some(e), Some(x)) = (escort, g.unit(u)) else {
         s.memory.escorts.remove(&u);
         return;
     };
-    if e.tile() != x.tile() && e.moves > 0 {
-        let (e, to) = (e.id(), x.tile());
+    let (e, moves, from) = (e.id(), e.moves, e.tile());
+    if let Some(to) = escort_spot(g, pid, s, e, x.tile())
+        && from != to
+        && moves > 0
+    {
         move_to(t, e, to);
     }
 }

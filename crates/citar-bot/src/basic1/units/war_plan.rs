@@ -15,6 +15,8 @@
 //! plan still preferred its city for siege fire and kept the army "campaigning", which raised the
 //! threat a city had to face before the army came home to defend it. A plan that no longer holds
 //! is forgotten as the units' turn starts ([`forget_stale`]), and when a new target is asked for.
+//!
+//! Another: a seat with no city makes no plan, where Python's `min` over its cities raised.
 
 use citar_engine::base::ids::{PlayerId, TileIdx};
 use citar_engine::base::num;
@@ -60,6 +62,12 @@ pub(crate) fn war_target(
     let turn = g.turn();
     let grid = g.grid();
     forget_stale(g, pid, s, ctx);
+    if ctx.cities.is_empty() {
+        // No city to fight from (where Python's `min` over the cities raised): no plan, rather
+        // than one made from the nearest-city default of 99, which `war_target_max_dist`'s
+        // default of 99 lets in, and dropped again the next turn.
+        return None;
+    }
     if s.memory.war_plan.is_none() {
         let pl = g.player(pid)?;
         let mut best: Option<(TileIdx, f64)> = None;

@@ -10,8 +10,9 @@
 //! - A unit with an ability that triggers once (a great artist's golden age) uses it.
 //! - A missionary with a religion spreads it where the majority follows another, else walks
 //!   beside the nearest city it has seen, at peace with it, whose majority does; one with none
-//!   sleeps. An inquisitor removes the heresy in one of the seat's cities whose majority follows
-//!   another religion, else walks beside such a city.
+//!   sleeps. An inquisitor removes the heresy in the seat's city whose land it stands in, else
+//!   walks beside the nearest of the seat's cities that has one: another founded religion's
+//!   pressure ([`heresy`]).
 //! - A civilian great person builds its great improvement on the seat's land, walking to a free
 //!   tile within two of the capital first.
 //! - A great general or admiral follows the army: the unit of its domain with the most enemies
@@ -26,13 +27,19 @@
 //!   the rest of the game; it is used as the great scientist's and engineer's abilities are.
 //! - An inquisitor walked beside cities whose majority followed another religion and never
 //!   removed anything; it removes the heresy in the seat's own city when the engine allows it.
+//!   It goes only to the seat's cities where another founded religion has pressure, which the
+//!   engine's inquisition clears (`religion::spread::has_heresy`): a city with no majority, a
+//!   new one or one with no religion at all, is no heresy, and an inquisitor that went beside one
+//!   would have stood there for good. A pantheon's pressure, the seat's own among them, is no
+//!   heresy either, though the engine would clear it: that is no use of an inquisitor's one
+//!   action.
 
-use citar_engine::base::ids::{TileIdx, UnitId};
+use citar_engine::base::ids::{CityId, ReligionId, TileIdx, UnitId};
 use citar_engine::game::actions::{ActionKind, UnitAction, UnitActionEntry, unit_actions};
 use citar_engine::game::movement::can_stand;
 use citar_engine::game::religion::found::{beliefs_to_choose, can_found_religion};
-use citar_engine::game::religion::majority_religion;
-use citar_engine::game::religion::spread::plan_remove_heresy;
+use citar_engine::game::religion::spread::{has_heresy, plan_remove_heresy};
+use citar_engine::game::religion::{is_major, majority_religion};
 use citar_engine::game::{Action, Game};
 use citar_engine::rules::defs::ReligionProgress;
 use serde_json::{Value, json};
@@ -174,16 +181,17 @@ pub(crate) fn handle_special(t: &mut Turn<'_>, s: &Seat<'_>, ctx: &Context, u: U
             act(t, u, id, None, None);
             return;
         }
+        let heretic = |c| carries.is_some_and(|r| heresy(g, c, r));
         if let Some(a) = ready(&acts, |k| matches!(k, ActionKind::RemoveHeresy))
-            && land_of.is_some_and(other)
+            && land_of.is_some_and(heretic)
             && plan_remove_heresy(g, u).is_ok()
         {
             let id = a.id.clone();
             act(t, u, id, None, None);
             return;
         }
-        // The nearest city it has seen, at peace, whose majority follows another religion; an
-        // inquisitor's own.
+        // The nearest city it has seen, at peace, whose majority follows another religion; for
+        // an inquisitor, the nearest of the seat's own with a heresy.
         let grid = g.grid();
         let mut cities: Vec<_> = g
             .state()
@@ -192,11 +200,11 @@ pub(crate) fn handle_special(t: &mut Turn<'_>, s: &Seat<'_>, ctx: &Context, u: U
             .filter(|c| {
                 let owner = c.owner();
                 let fits = if inquisitor && !spreads {
-                    owner == pid
+                    owner == pid && heretic(c.id())
                 } else {
-                    owner == pid || !g.is_barbarian(owner)
+                    (owner == pid || !g.is_barbarian(owner)) && other(c.id())
                 };
-                fits && !g.at_war(pid, owner) && other(c.id()) && pl.explored.contains(c.tile().0)
+                fits && !g.at_war(pid, owner) && pl.explored.contains(c.tile().0)
             })
             .map(|c| (grid.distance(c.tile(), here), c.tile()))
             .collect();
@@ -265,6 +273,14 @@ pub(crate) fn handle_special(t: &mut Turn<'_>, s: &Seat<'_>, ctx: &Context, u: U
             }
         }
     }
+}
+
+/// Whether city `c` has a heresy for an inquisitor of `r` to clear (the module's fix): another
+/// founded religion's pressure, which the engine's inquisition clears (`has_heresy`, checked
+/// too, so that the bot never sends one where the engine would refuse it).
+fn heresy(g: &Game, c: CityId, r: ReligionId) -> bool {
+    let founded = |k: Option<ReligionId>| k.is_some_and(|k| k != r && is_major(g, k));
+    has_heresy(g, c, r) && g.city(c).is_some_and(|x| x.pressures.iter().any(|&(k, _)| founded(k)))
 }
 
 /// `_clear_civilian_slot` (basic.py:2039-2052): a tile holds one civilian, so the seat's other

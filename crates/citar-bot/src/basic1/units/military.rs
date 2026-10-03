@@ -1,6 +1,6 @@
 //! The army's orders (`handle_military`, `_camp_target`, `_ruin_target` and `_approach_tile`,
 //! basic.py:2141-2289, 2360-2384): a land unit, in order of what comes first,
-//! - escorts the settler it is assigned to;
+//! - escorts the settler it is assigned to, standing beside it in a city a garrison holds;
 //! - in an advancing siege, a ranged unit first moves to a firing position on the target city
 //!   (`siege_move_first`);
 //! - attacks the best target in reach ([`attack_best`]), and a garrison then stays;
@@ -36,7 +36,7 @@ use super::war_plan::war_target;
 use super::{is_garrison, nearest, nearest_city, py_ring, py_within, radius, within};
 use crate::basic1::Seat;
 use crate::basic1::context::{Context, city_defense, needs_garrison};
-use crate::basic1::settlers::move_to;
+use crate::basic1::settlers::{escort_spot, move_to};
 use crate::basic1::workers::order;
 use crate::driver::Turn;
 
@@ -74,11 +74,14 @@ pub(crate) fn handle_military(t: &mut Turn<'_>, s: &mut Seat<'_>, ctx: &Context,
         (d.ranged, d.domain == Domain::Land)
     };
     let garrison = is_garrison(s, u);
-    // The settler it escorts, if any.
+    // The settler it escorts, if any: onto its tile, or beside it in a city a garrison holds.
     let ward = s.memory.escorts.iter().find(|&(_, &e)| e == u).map(|(&w, _)| w);
     if let Some(w) = ward {
-        if let Some(to) = t.game().unit(w).map(citar_engine::state::units::Unit::tile) {
-            if h.at != to {
+        let g = t.game();
+        if let Some(at) = g.unit(w).map(citar_engine::state::units::Unit::tile) {
+            if let Some(to) = escort_spot(g, pid, s, u, at)
+                && h.at != to
+            {
                 move_to(t, u, to);
             }
             return;
