@@ -65,7 +65,8 @@ if BACKEND == "python":
 elif BACKEND == "rust":
     from ._facade_rust import *  # noqa: F403
 else:
-    raise ImportError(f"CITAR_ENGINE={BACKEND!r} is no engine backend: use 'python' or 'rust'.")
+    # named for this module, so that a caller (citar doctor) can tell a wrong choice from a broken install
+    raise ImportError(f"CITAR_ENGINE={BACKEND!r} is no engine backend: use 'python' or 'rust'.", name=__name__)
 
 _missing = [n for n in __all__ if n not in globals()]
 if _missing:

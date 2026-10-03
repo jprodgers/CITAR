@@ -1,6 +1,10 @@
 """The engine facade: what it hands out is plain data, saves round-trip through it, and headless games run on it."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 from citar import engine_api
 from citar.engine_api import ActionError, EngineGame
@@ -250,6 +254,63 @@ class BotTests(unittest.TestCase):
         self.assertNotIsInstance(e.exception, ActionError)
         with self.assertRaises(TypeError):
             engine_api.run_game({"config": spec()["config"], "bots": {0: object()}})
+
+
+#: What `citar doctor` says of the engine, run in a child whose backend is chosen by its environment. The child may
+#: first hide the Rust extension, as an install without it would be.
+_DOCTOR = """
+import sys
+if sys.argv[1] == "hide":
+    class NoExtension:
+        def find_spec(self, name, path=None, target=None):
+            if name == "citar._engine":
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+    sys.meta_path.insert(0, NoExtension())
+from citar import doctor
+r = doctor.Report()
+doctor._check_engine(r)
+doctor._check_ruleset(r)
+print("failures", r.failures, "warnings", r.warnings)
+"""
+
+
+class SelectorTests(unittest.TestCase):
+    """The backend switch: CITAR_ENGINE, read once at import, and what a wrong one says."""
+
+    def child(self, engine: str, *args: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ, CITAR_ENGINE=engine)
+        return subprocess.run([sys.executable, *args], capture_output=True, text=True, env=env, timeout=120,
+                              cwd=Path(__file__).resolve().parent.parent)
+
+    def test_an_unknown_backend_is_refused_at_import(self):
+        r = self.child("bogus", "-c", "import citar.engine_api")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ImportError: CITAR_ENGINE='bogus' is no engine backend: use 'python' or 'rust'.", r.stderr)
+
+    def test_the_doctor_names_a_wrong_choice_not_a_broken_install(self):
+        r = self.child("bogus", "-c", _DOCTOR, "as is")
+        self.assertIn("[ FAIL ] backend: CITAR_ENGINE='bogus' is no engine backend", r.stdout)
+        self.assertNotIn("extension", r.stdout)
+        self.assertIn("ruleset: not checked: the engine does not load", r.stdout)
+        self.assertIn("failures 1 warnings 1", r.stdout)
+
+    def test_the_doctor_names_a_missing_extension(self):
+        r = self.child("rust", "-c", _DOCTOR, "hide")
+        self.assertIn("[ FAIL ] engine: does not load (cannot import name '_engine'", r.stdout)
+        self.assertIn("The Rust engine's extension is missing or out of date", r.stdout)
+        self.assertIn("failures 1 warnings 1", r.stdout)
+
+    def test_the_doctor_names_the_backend(self):
+        r = self.child("python", "-c", _DOCTOR, "as is")
+        self.assertIn("[  ok  ] backend: python (the Python engine)", r.stdout)
+        self.assertIn("failures 0 warnings 0", r.stdout)
+        try:
+            from citar import _facade_rust  # noqa: F401
+        except ImportError:
+            return                          # the extension is not built: the Rust line has nothing to name
+        r = self.child("rust", "-c", _DOCTOR, "as is")
+        self.assertRegex(r.stdout, r"\[  ok  \] backend: rust, build [0-9a-f]{12} \(.+\), version ")
+        self.assertIn("failures 0 warnings 0", r.stdout)
 
 
 if __name__ == "__main__":

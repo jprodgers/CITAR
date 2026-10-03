@@ -221,8 +221,12 @@ def _check_engine(r: Report) -> None:
     try:
         from . import engine_api
     except ImportError as exc:
-        r.line(FAIL, "engine", f"does not load ({exc})",
-               "The Rust engine's extension is missing: reinstall CITAR, or build it (cargo xtask develop).")
+        if exc.name == f"{__package__}.engine_api":
+            # the selector refused the backend asked for: the setting is wrong, not the installation
+            r.line(FAIL, "backend", str(exc), "Set that variable to one of those, or unset it for the default.")
+        else:
+            r.line(FAIL, "engine", f"does not load ({exc})", "The Rust engine's extension is missing or out of date: "
+                   "reinstall CITAR, or build it (cargo xtask develop).")
         return
     try:
         info = engine_api.build_info()
@@ -237,7 +241,10 @@ def _check_ruleset(r: Report) -> None:
     r.section("Ruleset")
     try:
         from . import engine_api
-
+    except ImportError:
+        r.line(WARN, "ruleset", "not checked: the engine does not load (see Engine above)")
+        return
+    try:
         counts = [f"{n} {kind}" for kind, n in engine_api.ruleset_counts().items()]
         r.line(OK, "loaded", ", ".join(counts) or "ok")
     except Exception as exc:
