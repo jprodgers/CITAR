@@ -22,7 +22,11 @@ pub struct Resolved {
     /// (`policy_order_peaceful`) and above it (`policy_order_aggressive`).
     pub policy_order_peaceful: Vec<PolicyId>,
     pub policy_order_aggressive: Vec<PolicyId>,
-    /// The beliefs of each kind in order of preference, for `belief_mode = "prefs"`.
+    /// The beliefs of each kind in order of preference, for `belief_mode = "prefs"`. An empty
+    /// order stays empty here, and its user gives it Python's meaning: `choose_beliefs` ranks by
+    /// the four orders one after another when a kind's order is empty (basic.py:1707), and
+    /// `empire_choices` takes the first pantheon available (1036). Python asked whether the
+    /// order as written was empty, not whether the ruleset had its names.
     pub beliefs_pantheon: Vec<BeliefId>,
     pub beliefs_founder: Vec<BeliefId>,
     pub beliefs_follower: Vec<BeliefId>,

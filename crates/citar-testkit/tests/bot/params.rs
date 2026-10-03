@@ -343,7 +343,8 @@ fn name_lists_resolve_as_written_and_unknown_names_are_counted() {
     // An empty order is the default one, as Python's `order or POLICY_ORDER[...]` made it.
     assert_eq!(names(&r.policy_order_aggressive)[..2], ["Honor", "Tradition"]);
     assert_eq!(names(&r.beliefs_founder), ["Tithe", "Pilgrimage"]);
-    // An empty belief order is empty: the first belief available is taken (2-01b).
+    // An empty belief order stays empty; 2-01b gives it Python's meaning where it is used (all
+    // four orders in turn in `choose_beliefs`, the first available pantheon in `empire_choices`).
     assert!(r.beliefs_pantheon.is_empty());
     // null for a list without presets: its default names.
     assert_eq!(r.promo_in_city.iter().count(), 2);
