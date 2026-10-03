@@ -96,7 +96,8 @@ class UnpackExt(unittest.TestCase):
         w = wheel(self.tmp, {f"citar/_engine{HERE}": b"not a library"})
         with self.assertRaisesRegex(unpack_ext.Refused, "does not import"):
             unpack_ext.install(w, package=self.package)
-        self.assertEqual(sorted(p.name for p in self.package.iterdir()), ["__init__.py"])
+        # The import may leave a __pycache__ of the package's __init__ behind; no library stays.
+        self.assertEqual([p.name for p in self.package.iterdir() if p.name.startswith("_engine")], [])
 
     def test_the_import_check_decides_and_hears_test_ops(self):
         w = wheel(self.tmp, {f"citar/_engine{HERE}": b"lib"})
