@@ -1,0 +1,130 @@
+about = """
+A counter never asks for more gold than the other side holds: the rules check only the counterer's
+side, so an ask they could not pay would fail only when they accepted it. Offered 80 gold for a map it
+values at 120, the bot is 40 short and would ask 50 more: with 200 gold the other side is asked 130 in
+all, with 125 it is asked all 125, and with 100 it cannot cover the shortfall and the bot rejects.
+"""
+from = "tests/test_bot_diplomacy.py::CounterTests::test_a_counter_never_asks_for_more_gold_than_they_hold"
+needs = "2-05"
+
+[[step]]
+set = { pricey = { deal_map_give = 120 } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Your map?", give = [{ type = "gold", amount = 80 }], receive = [{ type = "share_map" }] }
+as = "rich"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=rich.negotiation_id"
+params = "=pricey"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=rich.negotiation_id" }
+path = "history[1].action"
+eq = "counter"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=rich.negotiation_id" }
+path = 'proposal["0"]'
+eq = [{ type = "gold", amount = 130 }]
+
+[[step]]
+note = "They can pay it."
+tool = "respond_negotiation"
+player = 0
+args = { negotiation_id = "=rich.negotiation_id", action = "accept", message = "Done." }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=rich.negotiation_id" }
+path = "status"
+eq = "accepted"
+
+[[step]]
+note = "With 125 gold, all of it."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 125 },
+]
+
+[[step]]
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Your map?", give = [{ type = "gold", amount = 80 }], receive = [{ type = "share_map" }] }
+as = "close"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=close.negotiation_id"
+params = "=pricey"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=close.negotiation_id" }
+path = 'proposal["0"]'
+eq = [{ type = "gold", amount = 125 }]
+
+[[step]]
+tool = "respond_negotiation"
+player = 0
+args = { negotiation_id = "=close.negotiation_id", action = "accept", message = "Done." }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=close.negotiation_id" }
+path = "status"
+eq = "accepted"
+
+[[step]]
+note = "With 100 gold the shortfall cannot be covered: the bot rejects."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 100 },
+]
+
+[[step]]
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Your map?", give = [{ type = "gold", amount = 80 }], receive = [{ type = "share_map" }] }
+as = "poor"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=poor.negotiation_id"
+params = "=pricey"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=poor.negotiation_id" }
+subset = { status = "rejected" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=poor.negotiation_id" }
+path = "history[1]"
+subset = { by = 1, action = "reject", message = "That does not interest us." }

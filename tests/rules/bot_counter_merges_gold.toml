@@ -1,0 +1,70 @@
+about = """
+A deal the bot values below nothing, by less than counter_max_gap, gets a counter that asks for the
+shortfall plus counter_margin in gold, added to the gold already on the table rather than as a second
+gold line, always with a message. Offered 10 gold for its map, which it values at 20, it asks for 30.
+"""
+from = "tests/test_bot_diplomacy.py::CounterTests::test_a_counter_adds_to_the_gold_already_on_the_table"
+needs = "2-05"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+  { op = "grant_tech", player = "all", tech = "Writing" },
+]
+
+[[step]]
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Maps for gold?", give = [{ type = "gold", amount = 10 }], receive = [{ type = "share_map" }] }
+as = "opened"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=opened.negotiation_id"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history[1]"
+subset = { by = 1, action = "counter", message = "Add 20 gold and we have a deal." }
+
+[[step]]
+note = "One gold line, 10 + (shortfall 10 + margin 10); the map is still asked for."
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "proposal"
+eq = { "0" = [{ type = "gold", amount = 30 }], "1" = [{ type = "share_map" }] }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+subset = { status = "open", awaiting = 0, proposal_by = 1 }
+
+[[step]]
+note = "Where no gold is on the table, the counter adds a gold line: an embassy (8) for the map (20) is 12 short."
+op = "close_negotiation"
+args = { negotiation = "=opened.negotiation_id", status = "cancelled", note = "Next." }
+
+[[step]]
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Your map, for our embassy?", give = [{ type = "embassy" }], receive = [{ type = "share_map" }] }
+as = "second"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=second.negotiation_id"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=second.negotiation_id" }
+path = "history[1].action"
+eq = "counter"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=second.negotiation_id" }
+path = 'proposal["0"]'
+eq = [{ type = "embassy" }, { type = "gold", amount = 22 }]

@@ -23,6 +23,7 @@ Rust tool that checks the engine against it is `crates/citar-refcheck` ([Checkin
 | `scripts/refcheck/baseline.py` | the statistical baseline: one JSON line per bot game |
 | `scripts/refcheck/summarize.py` | distribution tables, and the comparison of two baselines |
 | `scripts/refcheck/common.py` | the game loop, bots, hashing and file helpers they share |
+| `scripts/refcheck/bot_dump.py` | the Python bot's deterministic sub-decisions on each state ([The bot's decisions](#the-bots-decisions)) |
 | `crates/citar-refcheck/` | `cargo refcheck`: loads the fixtures, compares the Rust answers, reports |
 | `refcheck/fixtures-mini/` | the `--quick` fixtures (committed, under 1 MB) |
 | `refcheck/fixtures-late/` | three late corpus states, copied (committed, about 0.7 MB) |
@@ -32,6 +33,7 @@ Rust tool that checks the engine against it is `crates/citar-refcheck` ([Checkin
 | `refcheck/intended.toml` | the accepted differences, each with a reason |
 | `refcheck/enforced.toml` | the groups (or paths) whose unexplained differences fail CI |
 | `refcheck/ratchet.json` | unexplained differences and failed answer modules per group, which may only fall |
+| `refcheck/bot_decisions.json.gz` | the Python bot's decisions on the 12 committed states (committed) |
 
 The tools use the Python engine directly and run their own game loop. They do not use `citar.sim`, `citar.lab`
 or `citar.balance`, so the fixtures don't change when those modules change.
@@ -257,6 +259,56 @@ The first takes about 20 seconds on one thread; `--strict` also fails on an inte
 nothing (exit 3). The second plays five rounds from every corpus state with the invariants at every settle and
 the cache oracle after the rounds; the third plays chaos from them. The soak that goes with them, 200 whole
 games, is in CONTRIBUTING.md ("Rust").
+
+## The bot's decisions
+
+The Rust bot (`crates/citar-bot`, Phase 2) is checked against the Python bot's decisions where no draw decides
+them (DESIGN.md P2.3.11 in `crates/citar-engine/`). `scripts/refcheck/bot_dump.py` records them before the
+Python engine goes; nothing can record them afterwards.
+
+```
+python scripts/refcheck/bot_dump.py                  # the 12 committed states -> refcheck/bot_decisions.json.gz
+python scripts/refcheck/bot_dump.py --check          # record them again and compare with the file
+CITAR_BOT_DUMP=C:/dev/bot_decisions-corpus.json.gz \
+  python scripts/refcheck/bot_dump.py --fixtures refcheck/corpus    # the 250 corpus states, a local file
+```
+
+The script re-runs itself with `PYTHONHASHSEED=0` and writes gzip with a zero timestamp, so two runs give the
+same bytes. The committed states take about 10 seconds, the corpus about ten minutes. Without `CITAR_BOT_DUMP`
+the corpus's file goes beside it (`refcheck/corpus/bot_decisions.json.gz`); the Rust side reads it from the
+same two places. Like the corpus, it stays local; it is archived with it before the Python engine is removed
+(package 2-12).
+
+For every living major of each state, a fresh `BasicBot(seed=0)` with `tech_noise` 0, at the default aggression
+and parameters, answers each question with its tool calls recorded instead of made, from cleared caches.
+The kinds, by the package of the port that is checked against them:
+
+| Stage | Kind | What |
+|---|---|---|
+| 1 (2-01b) | `context` | the turn's context: army target, supply, gold per turn, happiness, era, wars, offense, exposed cities, luxuries owned, resources pending, hostile units, the military |
+| | `tech_values` | the value of every technology it lacks, in both modes (`classic`, `potential`) |
+| | `next_research` | in both modes, the free technology it would take and the first step it would research, as if nothing were being researched; and the free technology it would take if it held one |
+| | `empire` | the policy it would adopt now and the one it would adopt if it could afford one; its free great person now and the one it would choose if it held one; its pantheon now and the one it would found if it could |
+| | `cities` | each city's threat, defence, danger and need of a garrison |
+| | `sites` | the expansion sites, best first |
+| | `spare` | the spare units, in the order they would be disbanded |
+| 2 (2-03) | `attacks` | for each military land or sea unit, readied, the tile it would attack or null |
+| | `war_target` | at war, the target city, the rally point, `advance` and `siege_ready`; else null |
+| 3 (2-05) | `reachable` | the rival city it could attack, by rival |
+| | `lux_trade` | the luxury trade it would offer |
+| | `advice` | its advice, without a negotiation and with each open one (the states hold none: they are saved at a turn's start) |
+
+Values are compared with refcheck's numeric tolerance; choices are reported as agreement rates by `cargo
+refcheck bot-agreement`, with a floor of 95% per kind (P2.3.11). A choice's rate counts only the items
+(civilizations, cities, units, rival pairs) where either engine's answer says something: a choice that is
+not null, a list that is not empty, a flag that is true. Most answers are empty on most items, and a rate
+over every item would let a port that never answers pass.
+
+On the committed states the file has 38 civilizations. The script prints, for each kind, how many
+civilizations it asked, how many answers say something, and the items they hold; then each choice's base
+rate, the items saying something of those asked (`CHOICES` in the script). Advice about a negotiation
+differs from advice without one only in `deal_value`, the bot's `evaluate` of the proposal, rounded, which
+`deal_checks`' `bot_value` holds.
 
 ## The statistical baseline
 

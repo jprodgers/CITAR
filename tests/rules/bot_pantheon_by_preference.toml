@@ -1,0 +1,61 @@
+about = """
+With the faith for a pantheon, the bot founds one with the first belief of its preference order that
+nobody has taken: beliefs_pantheon in the prefs mode, pantheon_unciv in the unciv mode.
+"""
+from = "citar/bots/basic.py:1034-1039 (empire_choices)"
+needs = "2-01b"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true },
+  { op = "set_player", player = 0, faith = 40 },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "religion", player = 0 }
+subset = { state = "pantheon", beliefs = ["Goddess of Love"] }
+
+[[step]]
+note = "The next civilization cannot have it: it takes the next of the order."
+op = "set_player"
+args = { player = 1, faith = 40 }
+
+[[step]]
+bot = "turn"
+player = 1
+params = "=calm"
+
+[[step]]
+check = { what = "religion", player = 1 }
+subset = { state = "pantheon", beliefs = ["Fertility Rites"] }
+
+[[step]]
+note = "In the unciv mode the order is pantheon_unciv's."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true },
+  { op = "set_player", player = 0, faith = 40 },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0, belief_mode = "unciv", pantheon_unciv = ["Goddess of the Hunt", "Fertility Rites"] }
+
+[[step]]
+check = { what = "religion", player = 0 }
+subset = { state = "pantheon", beliefs = ["Goddess of the Hunt"] }

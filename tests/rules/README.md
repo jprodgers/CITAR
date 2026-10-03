@@ -6,7 +6,7 @@ what the engine then says. The same script runs on both engines:
 - the Rust engine, through `crates/citar-testkit/src/script` (`cargo nextest run -p citar-testkit
   --test rules`, one test per script);
 - the Python engine, through `tests/rulescript.py` (`python -m unittest tests.test_rule_scripts`),
-  which drives `citar.engine_api.EngineGame` only.
+  which drives `citar.engine_api` only: `EngineGame`, and the bot functions for the `bot` step.
 
 Scripts replace the Python tests that poked the engine's internals (DESIGN.md 9.3 in
 `crates/citar-engine/`). They play on hand-made maps with named places instead of generated ones,
@@ -37,6 +37,7 @@ eq = "human"
 |---|---|
 | `about` | required: what the script pins down, in a sentence or two |
 | `from` | the Python test it ports, if any |
+| `needs` | the Phase 2 package that makes it pass on the Rust engine, as `"2-01a"` (see [Bot scripts](#bot-scripts)) |
 | `map` | the map, `arena` by default |
 | `start` | `bare` or `full` |
 | `config` | settings, as `EngineGame.new` takes them |
@@ -81,15 +82,15 @@ player a unit first, with the `add_unit` operation.
 
 ## Steps
 
-Each step is a `[[step]]` table with exactly one of `op`, `ops`, `tool`, `check`, `new_game`, `set`
-or `repeat`, its kind's own keys, and any of these that its kind takes (the runners refuse any
+Each step is a `[[step]]` table with exactly one of `op`, `ops`, `tool`, `check`, `new_game`, `set`,
+`repeat` or `bot`, its kind's own keys, and any of these that its kind takes (the runners refuse any
 other key, so a misplaced one never passes unread):
 
 | Key | |
 |---|---|
 | `note` | a comment the runners ignore |
-| `as = "name"` | `op`, `ops`, `tool` and `check` only: binds the step's result (an op's or tool's return value, a check's subject at its path) |
-| `error = "text"` | `op`, `ops`, `tool` and `new_game` only: the step must be refused with `text` in its message; `error = true`: refused with any message |
+| `as = "name"` | `op`, `ops`, `tool`, `check` and `bot` only: binds the step's result (an op's or tool's return value, a check's subject at its path, what a bot step gives) |
+| `error = "text"` | `op`, `ops`, `tool`, `new_game` and `bot` only: the step must be refused with `text` in its message; `error = true`: refused with any message |
 | `must_fail = true` or `"text"` | the step itself must fail (for the self-test): a check that does not hold, an unexpected error, a refused script |
 | `intended = "id"` | the expected value is the Rust engine's, which differs from Python's on purpose: the Python runner skips the step. The id is listed in `refcheck/intended.toml` or `tests/rules/intended.toml` |
 | `coerce = true` | the step types numbers as strings on purpose (see [Numbers](#numbers)) |
@@ -196,6 +197,69 @@ steps = [{ op = "set_turn", args = { turn = 5 } }]
 ```
 
 Runs the steps, in order, that many times.
+
+### `bot`
+
+```toml
+[[step]]
+bot = "turn"           # "turn", "respond" or "advice"
+player = 0
+params = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 }
+diplomacy = { trades = "llm" }
+```
+
+The seat's bot acts (DESIGN.md P2.3.11 in `crates/citar-engine/`). Its keys:
+
+| Key | |
+|---|---|
+| `bot` | `turn`: the bot plays the seat's turn and the turn ends; `respond`: the bot answers one negotiation that waits on the seat; `advice`: what the bot makes of the seat's diplomacy |
+| `player` | required: the seat |
+| `negotiation` | the negotiation to answer (`respond`, required) or to value (`advice`, optional); a turn takes none |
+| `version` | the bot version: `basic-1` (the default) or `idle` (no params, no diplomacy, no advice) |
+| `aggression` | 0.4 by default |
+| `params` | parameters of basic-1 over its defaults (`crates/citar-bot/params/basic-1.json`); a key it does not have is refused |
+| `diplomacy` | who owns each diplomacy category, `{ category = "bot" or "llm" }`, `bot` for any not named |
+
+What each gives, to `as`:
+
+- **`turn`** plays as a host plays a bot seat: the Python runner calls `play_bot_turn(end_turn = True)` (the
+  bot settles its chats and ends its turn; the runner ends the idle bot's), the Rust runner drives that seat
+  alone with a seat limit of 1. It gives `turn` and `current` after it. A turn on a seat whose turn it is not is
+  refused.
+- **`respond`** gives `outcome`: `done` once the bot has answered, or `deferred` when the negotiation touches a
+  category the seat's model owns (one such item makes the deal the model's, and talk with nothing on the
+  table is the model's when it owns `chat`): the bot leaves it, and it still waits on the seat. A negotiation
+  that does not wait on the seat is refused (Python: `bot_respond` behind `bot_owns_negotiation`; Rust:
+  `Game::answer`).
+- **`advice`** gives the advice, `deal_value`, `war_readiness`, `spare_luxuries` and `wants`.
+
+A seat keeps its bot from step to step while its version, aggression and params stay the same, so what the
+bot remembers (an escort, a war plan) lasts as it does in a game. The Rust bot keeps its memory in the
+seat's `DriverMemory` whatever the step says, so a script that relies on memory gives a seat the same
+version, aggression and params in every step.
+
+**Draws are pinned.** The bot draws for a tech's noise, ranged or melee, a peace offer, a friendship and a
+war's preparation, and the two engines draw differently (Python from its own generators, Rust keyed by the
+game's seed). So a `turn` step's `params` must give `tech_noise = 0`; `ranged_chance`,
+`peace_offer_chance`, `friend_chance` and `war_chance` each 0 or 1; `friend_chance_aggr` and
+`war_chance_aggr` 0; and no `war_prep_rate` that puts the war chance strictly between 0 and 1. The runners
+refuse a turn that leaves a draw free. The spies' draw only breaks ties between capitals: a script that
+moves spies gives them one capital to go to. `respond` and `advice` draw nothing.
+
+**What a script reads.** A script checks only outcomes no draw decides, and none that depends on how a
+negotiation the bot opened with a seat nobody drives was closed when its turn ended: Python's bot withdraws
+it, a host would let it expire. Read its opening entry (`history[0]`), not its status.
+
+### Bot scripts
+
+`bot_*.toml` pin down the bot. They were written and checked on the Python runner before the bot was
+ported (package 2-00b), and each names in `needs` the package of the port that makes it pass on Rust:
+`2-01a` (the step itself, the idle bot, deferring to the model), `2-01b` (research, policies, cities, gold,
+faith, settlers, workers, scouts), `2-03` (units and fighting) or `2-05` (diplomacy). The Python runner
+plays a script whatever its `needs`; the Rust runner refuses it, and its harness lists it as ignored. A
+package's gate is that no script names it any more: it removes the header from the scripts it makes pass.
+`bot_selftest.toml` is the bot step's own self-test, with its must-fail steps; it stays apart from
+`_selftest.toml`, which the Rust runner plays today, until the Rust runner has the step.
 
 ## Values
 

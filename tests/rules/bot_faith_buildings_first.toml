@@ -1,0 +1,115 @@
+about = """
+With a religion and faith to spare, the bot buys the buildings its beliefs let it buy with faith (a
+Pagoda for Pagodas) before it buys missionaries, one purchase a turn; with faith_buildings off it
+buys a missionary instead.
+"""
+from = "citar/bots/basic.py:1712-1737 (_spend_faith)"
+needs = "2-01b"
+
+[[step]]
+set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 4 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true },
+  { op = "set_player", player = 0, faith = 25 },
+]
+as = "made"
+
+[[step]]
+set = { city = "=made[0].city_id" }
+
+[[step]]
+tool = "found_pantheon"
+args = { belief = "God of the Sea" }
+
+[[step]]
+op = "add_unit"
+args = { player = 0, unit = "Great Prophet", at = "A" }
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[type=Great Prophet].id"
+absent = false
+as = "prophet"
+
+[[step]]
+op = "found_religion"
+args = { unit = "=prophet", name = "Sun", beliefs = ["Ceremonial Burial", "Pagodas"] }
+
+[[step]]
+op = "set_player"
+args = { player = 0, faith = 1000 }
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "buildings"
+contains = "Pagoda"
+
+[[step]]
+check = { what = "units", player = 0 }
+none = { path = "type", eq = "Missionary" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "faith"
+lt = 1000
+
+[[step]]
+note = "Without faith buildings, a missionary."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 4 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true },
+  { op = "set_player", player = 0, faith = 25 },
+]
+as = "made"
+
+[[step]]
+set = { city = "=made[0].city_id" }
+
+[[step]]
+tool = "found_pantheon"
+args = { belief = "God of the Sea" }
+
+[[step]]
+op = "add_unit"
+args = { player = 0, unit = "Great Prophet", at = "A" }
+
+[[step]]
+check = { what = "units", player = 0 }
+path = "[type=Great Prophet].id"
+absent = false
+as = "prophet"
+
+[[step]]
+op = "found_religion"
+args = { unit = "=prophet", name = "Sun", beliefs = ["Ceremonial Burial", "Pagodas"] }
+
+[[step]]
+op = "set_player"
+args = { player = 0, faith = 1000 }
+
+[[step]]
+bot = "turn"
+player = 0
+params = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0, faith_buildings = false }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "buildings"
+not_contains = "Pagoda"
+
+[[step]]
+check = { what = "units", player = 0 }
+any = { path = "type", eq = "Missionary" }
