@@ -145,8 +145,9 @@ fn every_advisor_field_has_its_schema_type() {
             Kind::Order | Kind::List => panic!("the advisor reads no names ({})", s.key),
         }
     }
-    // Every field (148) but the aggression, which is the seat's.
-    assert_eq!(fields, 147, "the advisor's parameters read from the map");
+    // Every field (149, `c_escort` since package 2-01b) but the aggression, which is the
+    // seat's.
+    assert_eq!(fields, 148, "the advisor's parameters read from the map");
     // A negative count or radius, which no editor offers, reads as 0.
     let mut m = defaults;
     m.insert("site_radius".to_owned(), json!(-3));

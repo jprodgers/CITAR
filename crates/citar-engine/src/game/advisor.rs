@@ -31,8 +31,20 @@
 //! cities are gathered once in an [`Advisor`], which the bot keeps for a civilization's turn and
 //! asks for each city; the sites are asked only when a city could start a settler otherwise.
 //! A site is scored by package 1c-04's `automation::city_site_score`.
+//!
+//! The bot's memory reaches production as [`BotFacts`] (package 2-01b, DESIGN.md P2.3.7): a war
+//! being prepared, the garrisons, a settler waiting for its escort, the turns work boats were
+//! queued and the sites given up on, where Python's production read the bot's dicts. Automatic
+//! production asks with [`BotFacts::NONE`], which is the bot it asked in Python, so its picks are
+//! those of Phase 1. A city that has never queued a work boat need not wait to queue one, where
+//! Python read a missing turn as -99 (with `c_boat_retry_turns` over 99 that held boats back in
+//! the first turns; no profile sets it so). The functions the bot shares with production are
+//! public: [`hostile_units`], [`threat_at`], [`city_defense`], [`exposed_cities`],
+//! [`breaks_space_reserve`], [`power`], [`is_army`], [`Advisor::sites`] and
+//! [`Advisor::best_military`].
 
 use core::cell::OnceCell;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -45,7 +57,7 @@ use super::cities::founding::found_check;
 use super::cities::stats::{city_strength, max_health, remaining_work};
 use super::cities::what_if::{CityWhatIf, StatsDelta};
 use super::derive::{civ, stats as memo};
-use crate::base::ids::{BaseUnitId, BuildingId, CityId, PlayerId, TileIdx, UnitId};
+use crate::base::ids::{BaseUnitId, BuildingId, CityId, PlayerId, TileIdx, Turn, UnitId};
 use crate::base::num;
 use crate::base::rng::{Purpose, Rng};
 use crate::base::sets::{BaseUnitSet, ResourceSet};
@@ -161,6 +173,7 @@ pub struct AdvisorParams {
     pub garrison_after_turn: i32,
     pub danger_ratio: f64,
     // Classic production.
+    pub c_escort: i32,
     pub c_danger: f64,
     pub c_garrison: f64,
     pub c_military_min_gpt: f64,
@@ -329,6 +342,7 @@ impl Default for AdvisorParams {
             space_reserve: 3,
             garrison_after_turn: 12,
             danger_ratio: 0.5,
+            c_escort: 140,
             c_danger: 1000.0,
             c_garrison: 300.0,
             c_military_min_gpt: 1.0,
@@ -489,7 +503,7 @@ struct Situation {
     gold: f64,
     supply: i32,
     army_target: i32,
-    /// At war or preparing one (a bot that asks only for production prepares none).
+    /// At war, or preparing one ([`BotFacts::preparing_war`]).
     offense: bool,
     /// With `GarrisonMode::Exposed`, the cities that want a garrison.
     exposed: Option<Vec<CityId>>,
@@ -504,13 +518,22 @@ impl Situation {
 }
 
 /// A unit's combat weight, the larger of its strengths (`_power`, `basic.py:653-655`).
-fn power(d: &BaseUnitDef) -> f64 {
+#[must_use]
+pub fn power(d: &BaseUnitDef) -> f64 {
     f64::from(d.strength.max(d.ranged_strength))
 }
 
 /// Whether a unit is a scout (`_is_recon`, `basic.py:642-644`).
 fn is_recon(g: &Game, d: &BaseUnitDef) -> bool {
     g.rules().derived().advisor.scout == Some(d.unit_type)
+}
+
+/// Whether a base unit counts in an army: military and no scout (the bot's `military`,
+/// `basic.py:803`).
+#[must_use]
+pub fn is_army(g: &Game, u: BaseUnitId) -> bool {
+    let d = &g.rules().base_units()[u];
+    d.military && !is_recon(g, d)
 }
 
 /// A civilization's era, by index.
@@ -526,16 +549,13 @@ fn within_py(g: &Game, t: TileIdx, radius: u32) -> Vec<TileIdx> {
     v
 }
 
-/// What civilization `p`'s turn looks like to production (`BasicBot.context`,
-/// `basic.py:777-835`): the enemies it sees and how near each city they are, its army, its
-/// economy, and how big an army it wants.
-fn situation(g: &Game, p: PlayerId, pp: &AdvisorParams) -> Situation {
+/// The enemy military units civilization `p` sees (`context`'s `hostile`, `basic.py:789-790`),
+/// in the game's order: its enemies' military units on tiles it sees, visible to it.
+#[must_use]
+pub fn hostile_units(g: &Game, p: PlayerId) -> Vec<UnitId> {
     let r = g.rules();
-    let units: Vec<UnitId> = g.player_units(p).map(crate::state::units::Unit::id).collect();
-    let cities: Vec<CityId> = g.player_cities(p).map(crate::state::cities::City::id).collect();
     let vis = g.derived().vis();
-    let hostile: Vec<&crate::state::units::Unit> = g
-        .state()
+    g.state()
         .units()
         .iter()
         .filter(|u| {
@@ -544,46 +564,91 @@ fn situation(g: &Game, p: PlayerId, pp: &AdvisorParams) -> Situation {
                 && r.base_units()[u.base].military
                 && super::vis::sight::unit_visible_to(g, p, u.id())
         })
-        .collect();
+        .map(crate::state::units::Unit::id)
+        .collect()
+}
+
+/// The weight of `hostile` near tile `at` (`context`'s `threat`, `basic.py:794-801`): each
+/// within `threat_radius` by its power and health, the near ones (`threat_near_dist`) more.
+#[must_use]
+pub fn threat_at(g: &Game, hostile: &[UnitId], at: TileIdx, pp: &AdvisorParams) -> f64 {
+    let r = g.rules();
     let grid = g.grid();
+    let mut t = 0.0;
+    for u in hostile.iter().filter_map(|&u| g.unit(u)) {
+        let d = grid.distance(u.tile(), at);
+        if d <= pp.threat_radius {
+            let w =
+                if d <= pp.threat_near_dist { pp.threat_near_weight } else { pp.threat_far_weight };
+            t += power(&r.base_units()[u.base]) * f64::from(u.hp) / 100.0 * w;
+        }
+    }
+    t
+}
+
+/// With `GarrisonMode::Exposed`, the cities of `p` that want a garrison (`context`'s `exposed`,
+/// `basic.py:822-829`): the capital (every city while it has none), the threatened ones (`threat`
+/// as `cities` lists them), and those within `garrison_exposed_radius` of a foreign major's city
+/// or a barbarian camp.
+#[must_use]
+pub fn exposed_cities(
+    g: &Game,
+    p: PlayerId,
+    cities: &[CityId],
+    threat: &[f64],
+    pp: &AdvisorParams,
+) -> Vec<CityId> {
+    let grid = g.grid();
+    let capital = g.player(p).and_then(|x| x.capital);
+    let others: Vec<TileIdx> = g
+        .state()
+        .cities()
+        .iter()
+        .filter(|x| x.owner() != p && !g.is_city_state(x.owner()))
+        .map(crate::state::cities::City::tile)
+        .collect();
+    let camps: Vec<TileIdx> =
+        g.state().world().camps.values().filter(|x| !x.destroyed).map(|x| x.tile).collect();
+    let rr = pp.garrison_exposed_radius;
+    cities
+        .iter()
+        .zip(threat)
+        .filter(|&(&c, &t)| {
+            let at = g.city(c).map_or(TileIdx(0), crate::state::cities::City::tile);
+            capital.is_none_or(|x| x == c)
+                || t > 0.0
+                || others.iter().chain(&camps).any(|&o| grid.distance(at, o) <= rr)
+        })
+        .map(|(&c, _)| c)
+        .collect()
+}
+
+/// What civilization `p`'s turn looks like to production (`BasicBot.context`,
+/// `basic.py:777-835`): the enemies it sees and how near each city they are, its army, its
+/// economy, and how big an army it wants, larger at war or while it prepares one.
+fn situation(g: &Game, p: PlayerId, pp: &AdvisorParams, preparing_war: bool) -> Situation {
+    let units: Vec<UnitId> = g.player_units(p).map(crate::state::units::Unit::id).collect();
+    let cities: Vec<CityId> = g.player_cities(p).map(crate::state::cities::City::id).collect();
+    let hostile = hostile_units(g, p);
     let threat: Vec<f64> = cities
         .iter()
         .map(|&c| {
             let at = g.city(c).map_or(TileIdx(0), crate::state::cities::City::tile);
-            let mut t = 0.0;
-            for u in &hostile {
-                let d = grid.distance(u.tile(), at);
-                if d <= pp.threat_radius {
-                    let w = if d <= pp.threat_near_dist {
-                        pp.threat_near_weight
-                    } else {
-                        pp.threat_far_weight
-                    };
-                    t += power(&r.base_units()[u.base]) * f64::from(u.hp) / 100.0 * w;
-                }
-            }
-            t
+            threat_at(g, &hostile, at, pp)
         })
         .collect();
-    let military: Vec<UnitId> = units
-        .iter()
-        .copied()
-        .filter(|&u| {
-            g.unit(u).is_some_and(|x| {
-                let d = &r.base_units()[x.base];
-                d.military && !is_recon(g, d)
-            })
-        })
-        .collect();
+    let military: Vec<UnitId> =
+        units.iter().copied().filter(|&u| g.unit(u).is_some_and(|x| is_army(g, x.base))).collect();
     let wars = g
         .state()
         .players()
         .iter()
         .any(|(q, x)| q != p && x.alive() && x.is_major() && g.has_met(p, q) && g.at_war(p, q));
+    let offense = wars || preparing_war;
     let n = f64::from(u32::try_from(cities.len()).unwrap_or(u32::MAX));
     let threatened =
         f64::from(u32::try_from(threat.iter().filter(|&&t| t > 0.0).count()).unwrap_or(0));
-    let war_extra = if wars { n * pp.army_war_per_city + pp.army_war_extra } else { 0.0 };
+    let war_extra = if offense { n * pp.army_war_per_city + pp.army_war_extra } else { 0.0 };
     let army_target = num::trunc_i32(
         n * (pp.army_per_city + pp.army_per_city_aggr * pp.aggr())
             + pp.army_base
@@ -593,34 +658,14 @@ fn situation(g: &Game, p: PlayerId, pp: &AdvisorParams) -> Situation {
     let happiness = memo::happiness(g, p);
     let (hap, lux_owned) = (happiness.total, happiness.luxury_types.iter().copied().collect());
     drop(happiness);
-    let exposed = (pp.garrison_mode == GarrisonMode::Exposed).then(|| {
-        let capital = g.player(p).and_then(|x| x.capital);
-        let others: Vec<TileIdx> = g
-            .state()
-            .cities()
-            .iter()
-            .filter(|x| x.owner() != p && !g.is_city_state(x.owner()))
-            .map(crate::state::cities::City::tile)
-            .collect();
-        let camps: Vec<TileIdx> =
-            g.state().world().camps.values().filter(|x| !x.destroyed).map(|x| x.tile).collect();
-        let rr = pp.garrison_exposed_radius;
-        cities
-            .iter()
-            .zip(&threat)
-            .filter(|&(&c, &t)| {
-                let at = g.city(c).map_or(TileIdx(0), crate::state::cities::City::tile);
-                capital.is_none_or(|x| x == c)
-                    || t > 0.0
-                    || others.iter().chain(&camps).any(|&o| grid.distance(at, o) <= rr)
-            })
-            .map(|(&c, _)| c)
-            .collect()
-    });
+    let exposed = (pp.garrison_mode == GarrisonMode::Exposed)
+        .then(|| exposed_cities(g, p, &cities, &threat, pp));
     Situation {
         threat,
         hostile: !hostile.is_empty(),
-        barbarians_near: hostile.iter().any(|u| g.is_barbarian(u.owner())),
+        barbarians_near: hostile
+            .iter()
+            .any(|&u| g.unit(u).is_some_and(|x| g.is_barbarian(x.owner()))),
         gpt: memo::civ_stats(g, p).total[Stat::Gold],
         hap,
         era: era_index(g, p),
@@ -628,7 +673,7 @@ fn situation(g: &Game, p: PlayerId, pp: &AdvisorParams) -> Situation {
         gold: g.player(p).map_or(0.0, |x| x.econ.gold),
         supply: super::economy::unit_supply(g, p),
         army_target,
-        offense: wars,
+        offense,
         exposed,
         lux_owned,
         cities,
@@ -639,7 +684,8 @@ fn situation(g: &Game, p: PlayerId, pp: &AdvisorParams) -> Situation {
 
 /// How well a city is defended (`BasicBot.city_defense`, `basic.py:836-844`): its strength by
 /// its health, and its own military units on and beside it.
-fn city_defense(g: &Game, c: CityId) -> f64 {
+#[must_use]
+pub fn city_defense(g: &Game, c: CityId) -> f64 {
     let Some(city) = g.city(c) else { return 0.0 };
     let r = g.rules();
     let mut s = f64::from(city_strength(g, c)) * f64::from(city.health)
@@ -667,7 +713,8 @@ fn needs_garrison(c: CityId, s: &Situation) -> bool {
 /// (`BasicBot._breaks_space_reserve`, `basic.py:846-863`): from the space era, while the
 /// scientific victory is on, an item that needs one of the resources the spaceship's parts need,
 /// unless it is a part, when fewer than `space_reserve` would be left.
-fn breaks_space_reserve(
+#[must_use]
+pub fn breaks_space_reserve(
     g: &Game,
     p: PlayerId,
     item: Constructible,
@@ -772,10 +819,15 @@ fn site_score(g: &Game, p: PlayerId, t: TileIdx) -> Option<f64> {
 
 /// Where a civilization would found its next cities, best first (`BasicBot.expansion_sites`,
 /// `basic.py:1069-1111`): land within reach of its cities (or of its settlers, before it has a
-/// city), on a landmass it is on, far enough from its cities, scoring enough, less for distance,
-/// spaced apart. A bot that asks only for production has no sites cached and none it gave up
-/// on.
-fn expansion_sites(g: &Game, p: PlayerId, s: &Situation, pp: &AdvisorParams) -> Vec<TileIdx> {
+/// city), on a landmass it is on, far enough from its cities, not a site the bot has given up on
+/// ([`BotFacts::blocked_sites`]), scoring enough, less for distance, spaced apart.
+fn expansion_sites(
+    g: &Game,
+    p: PlayerId,
+    s: &Situation,
+    pp: &AdvisorParams,
+    blocked: &[TileIdx],
+) -> Vec<TileIdx> {
     let r = g.rules();
     let a = &r.derived().advisor;
     let grid = g.grid();
@@ -802,6 +854,7 @@ fn expansion_sites(g: &Game, p: PlayerId, s: &Situation, pp: &AdvisorParams) -> 
             if g.is_water(t)
                 || grid.distance(center, t) < pp.site_min_distance
                 || !reachable.contains(&g.continent(t))
+                || blocked.contains(&t)
             {
                 continue;
             }
@@ -875,13 +928,17 @@ fn may_build_settler(adv: &Advisor, g: &Game, c: CityId, check_size: bool) -> bo
 
 // ---- Units (basic.py:1325-1336, 1543-1575) ---------------------------------------------------
 
-/// What `best_military` looks for.
-#[derive(Clone, Copy, Default)]
-struct Role {
-    prefer_ranged: bool,
-    offense: bool,
-    siege_only: bool,
-    melee_only: bool,
+/// What [`Advisor::best_military`] looks for (`best_military`'s arguments, `basic.py:1543-1544`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Role {
+    /// Ranged strength counts for more than melee (`unit_ranged_pref`), else for less.
+    pub prefer_ranged: bool,
+    /// To attack: siege units, mounted and armoured units count in full.
+    pub offense: bool,
+    /// Siege units only.
+    pub siege_only: bool,
+    /// Units with no ranged attack only.
+    pub melee_only: bool,
 }
 
 /// The best military unit a city can build for a role (`BasicBot.best_military`,
@@ -961,6 +1018,7 @@ fn pick_military(
     s: &Situation,
     units: &BaseUnitSet,
     pp: &AdvisorParams,
+    garrisons: &[UnitId],
 ) -> Option<BaseUnitId> {
     let r = g.rules();
     let a = &r.derived().advisor;
@@ -970,8 +1028,11 @@ fn pick_military(
     let siege =
         i32::try_from(bases().filter(|d| a.siege == Some(d.unit_type)).count()).unwrap_or(i32::MAX);
     let want_siege = s.offense && siege.saturating_mul(pp.siege_per_units) < mil - n + 1;
-    // A bot that asks only for production keeps no garrisons: every melee unit is in the field.
-    let field_melee = i32::try_from(bases().filter(|d| !d.ranged).count()).unwrap_or(i32::MAX);
+    // Only melee units capture cities: those that garrison a city ([`BotFacts::garrisons`]) are
+    // not in the field.
+    let field = s.military.iter().filter(|u| !garrisons.contains(u)).filter_map(|&u| g.unit(u));
+    let field_melee =
+        i32::try_from(field.filter(|u| !r.base_units()[u.base].ranged).count()).unwrap_or(i32::MAX);
     let want_melee = s.offense && field_melee < pp.min_field_melee;
     if want_melee
         && let Some(u) = best_military(
@@ -1214,6 +1275,10 @@ fn choose_unciv(adv: &Advisor, g: &Game, c: CityId, danger: bool) -> Option<Cons
         {
             return Some(Constructible::Unit(d));
         }
+        // A settler waits here for an escort (`basic.py:1249-1251`).
+        if adv.facts.need_escort == Some(city.tile()) {
+            return Some(Constructible::Unit(d));
+        }
     }
     let mut choices: Vec<Choice> = Vec::new();
     let mut add = |item: Option<Constructible>, modifier: f64| {
@@ -1292,7 +1357,7 @@ fn choose_unciv(adv: &Advisor, g: &Game, c: CityId, danger: bool) -> Option<Cons
         if k.army >= s.army_target && !at_war {
             modifier /= pp.mil_army_full_div;
         }
-        let picked = pick_military(g, c, s, &units, pp).or(defender);
+        let picked = pick_military(g, c, s, &units, pp, &adv.facts.garrisons).or(defender);
         add(unit(picked), pp.u_military * modifier);
     }
     // Buildings, and wonders unless the city is a puppet or the empire too small.
@@ -1354,6 +1419,10 @@ fn choose_classic(adv: &Advisor, g: &Game, c: CityId, danger: bool) -> Option<Co
     };
     let defender = best_military(g, c, &units, Role { prefer_ranged: true, ..Role::default() }, pp);
     if let Some(d) = defender {
+        // A settler waits here for an escort (`basic.py:1415-1417`).
+        if adv.facts.need_escort == Some(city.tile()) {
+            add(f64::from(pp.c_escort), d);
+        }
         if danger {
             add(pp.c_danger, d);
         } else if g.military_at(city.tile()).is_none()
@@ -1366,7 +1435,7 @@ fn choose_classic(adv: &Advisor, g: &Game, c: CityId, danger: bool) -> Option<Co
             && s.gpt >= pp.c_military_min_gpt;
         let target = s.army_target;
         if k.army < target && (affordable || s.offense) {
-            let attacker = pick_military(g, c, s, &units, pp).unwrap_or(d);
+            let attacker = pick_military(g, c, s, &units, pp, &adv.facts.garrisons).unwrap_or(d);
             let shortfall = 1.0 - f64::from(k.army) / f64::from(target.max(1));
             let base = if s.offense {
                 pp.c_army_offense + pp.c_army_offense_aggr * pp.aggr()
@@ -1408,11 +1477,13 @@ fn choose_classic(adv: &Advisor, g: &Game, c: CityId, danger: bool) -> Option<Co
             add(if urgent { pp.c_worker_urgent } else { pp.c_worker }, x);
         }
     }
-    // A bot that asks only for production has queued no boat anywhere, so any turn is past the
-    // retry wait.
+    // A city that queued a boat waits `c_boat_retry_turns` before it queues another
+    // ([`BotFacts::boat_turns`]); one that never did need not wait, where Python read a city it
+    // had no turn for as having queued one on turn -99 (`basic.py:1455`).
+    let retry = adv.facts.boat_turns.get(&c).is_none_or(|&b| turn - b > pp.c_boat_retry_turns);
     if let Some(x) = first(&units, |u| a.boats.contains(u))
         && k.boat == 0
-        && turn + 99 > pp.c_boat_retry_turns
+        && retry
         && boat_wanted(g, p, c, pp)
     {
         add(pp.c_boat, x);
@@ -1463,12 +1534,62 @@ fn choose_classic(adv: &Advisor, g: &Game, c: CityId, danger: bool) -> Option<Co
     Some(top.item)
 }
 
+/// What a bot remembers that its production reads (DESIGN.md P2.3.7): the four places where the
+/// advisor of Phase 1 assumed "a bot that asks only for production", and the escort it lacked.
+/// Automatic production asks with [`BotFacts::NONE`], which is that bot, so its picks do not
+/// move.
+#[derive(Clone, Copy, Debug)]
+pub struct BotFacts<'a> {
+    /// It is preparing a war (`pid in _war_prep`): its army target counts the war's extra units
+    /// and it builds for offense, as at war (`basic.py:806-810`).
+    pub preparing_war: bool,
+    /// The units that garrison its cities, which are not in the field army (`_is_garrison` in
+    /// `_pick_military`, `basic.py:1332`).
+    pub garrisons: &'a [UnitId],
+    /// The city tile where a settler waits for an escort: that city builds a defender first
+    /// (`basic.py:1249-1251` in the UnCiv mode, `c_escort` in the classic one, 1415-1417). The
+    /// advisor only reads it; the bot forgets it once the city picks a military unit.
+    pub need_escort: Option<TileIdx>,
+    /// The turn each city last queued a work boat; a city waits `c_boat_retry_turns` before it
+    /// queues another in the classic mode (`basic.py:1455`). A city without one need not wait.
+    pub boat_turns: &'a BTreeMap<CityId, Turn>,
+    /// The sites it has given up on, within `site_blacklist_turns` (`_bad_sites`,
+    /// `basic.py:1090`): no expansion site is one of them.
+    pub blocked_sites: &'a [TileIdx],
+}
+
+/// No boat turns, for [`BotFacts::NONE`].
+static NO_BOAT_TURNS: BTreeMap<CityId, Turn> = BTreeMap::new();
+
+impl BotFacts<'static> {
+    /// A bot that asks only for production: preparing no war, with no garrison, no settler
+    /// waiting, no boat queued and no site given up. Automatic production asks with it.
+    pub const NONE: Self = Self {
+        preparing_war: false,
+        garrisons: &[],
+        need_escort: None,
+        boat_turns: &NO_BOAT_TURNS,
+        blocked_sites: &[],
+    };
+}
+
+/// [`BotFacts`] as an [`Advisor`] keeps them for its turn.
+#[derive(Clone, Debug, Default)]
+struct Facts {
+    garrisons: Vec<UnitId>,
+    need_escort: Option<TileIdx>,
+    boat_turns: BTreeMap<CityId, Turn>,
+    blocked_sites: Vec<TileIdx>,
+}
+
 /// The production advisor for one civilization's turn: what it gathers once and reads for each
 /// of its cities (`BasicBot.context`, `_counts` and the cached `expansion_sites`, as
 /// `manage_cities` shared them, `basic.py:1152-1180`). The bot of Phase 2 keeps one for a
-/// civilization's turn, asks it for each city ([`advise`](Self::advise)) and tells it what each
-/// started ([`started`](Self::started)); [`advise_production`] asks a fresh one, as automatic
-/// production does for each pick (a fresh `BasicBot`, `cities.py:1699`).
+/// civilization's turn, made with what it remembers ([`with_facts`](Self::with_facts)), asks it
+/// for each city ([`advise`](Self::advise)) and tells it what each started
+/// ([`started`](Self::started)); [`advise_production`] asks a fresh one with
+/// [`BotFacts::NONE`], as automatic production does for each pick (a fresh `BasicBot`,
+/// `cities.py:1699`).
 ///
 /// It holds no game: the game it is asked with may have moved since it was made, as Python's
 /// context did while the bot set production.
@@ -1478,19 +1599,34 @@ pub struct Advisor {
     pp: AdvisorParams,
     s: Situation,
     k: Counts,
+    facts: Facts,
     /// Where the civilization would found its next cities, asked the first time a city could
-    /// start a settler, then kept for the advisor's turn (`_sites_cache`, `site_cache_turns`);
-    /// each read drops a site a city can no longer be founded on, as Python's cache did.
+    /// start a settler, then kept for the advisor's turn (`_sites_cache`, `site_cache_turns`).
     sites: OnceCell<Vec<TileIdx>>,
 }
 
 impl Advisor {
-    /// The advisor for civilization `p`'s turn as the game is now, with parameters `pp`.
+    /// The advisor for civilization `p`'s turn as the game is now, with parameters `pp`, for a
+    /// bot that asks only for production: [`with_facts`](Self::with_facts) with
+    /// [`BotFacts::NONE`].
     #[must_use]
     pub fn new(g: &Game, p: PlayerId, pp: &AdvisorParams) -> Self {
-        let s = situation(g, p, pp);
+        Self::with_facts(g, p, pp, &BotFacts::NONE)
+    }
+
+    /// The advisor for civilization `p`'s turn as the game is now, with parameters `pp` and what
+    /// its bot remembers.
+    #[must_use]
+    pub fn with_facts(g: &Game, p: PlayerId, pp: &AdvisorParams, f: &BotFacts<'_>) -> Self {
+        let s = situation(g, p, pp, f.preparing_war);
         let k = counts(g, &s);
-        Self { p, pp: pp.clone(), s, k, sites: OnceCell::new() }
+        let facts = Facts {
+            garrisons: f.garrisons.to_vec(),
+            need_escort: f.need_escort,
+            boat_turns: f.boat_turns.clone(),
+            blocked_sites: f.blocked_sites.to_vec(),
+        };
+        Self { p, pp: pp.clone(), s, k, facts, sites: OnceCell::new() }
     }
 
     /// What city `c` should build next (`BasicBot._choose_production`, `basic.py:1204-1208`),
@@ -1521,10 +1657,30 @@ impl Advisor {
         }
     }
 
-    /// Where the civilization would found its next cities ([`expansion_sites`]), computed the
-    /// first time they are asked.
-    fn sites(&self, g: &Game) -> &[TileIdx] {
-        self.sites.get_or_init(|| expansion_sites(g, self.p, &self.s, &self.pp))
+    /// Where the civilization would found its next cities, best first ([`expansion_sites`],
+    /// `BasicBot.expansion_sites`, `basic.py:1069-1111`), computed the first time they are asked
+    /// and kept for the advisor's turn. A site may since have become one no city can be founded
+    /// on (`found_check`): Python's cache dropped those as it read them, and so must a caller
+    /// that needs a site to found on.
+    pub fn sites(&self, g: &Game) -> &[TileIdx] {
+        self.sites.get_or_init(|| {
+            expansion_sites(g, self.p, &self.s, &self.pp, &self.facts.blocked_sites)
+        })
+    }
+
+    /// The best military unit city `c` can build for `role` (`BasicBot.best_military`,
+    /// `basic.py:1543-1575`), with parameters `pp`: land units that fight, not scouts, nuclear
+    /// weapons or missiles, nor any that would use a resource kept for the spaceship; by strength
+    /// (ranged strength weighed by the role) over a power of cost. `None` when it can build none.
+    #[must_use]
+    pub fn best_military(
+        g: &Game,
+        c: CityId,
+        role: Role,
+        pp: &AdvisorParams,
+    ) -> Option<BaseUnitId> {
+        g.city(c)?;
+        best_military(g, c, &buildable_items(g, c).units, role, pp)
     }
 }
 
@@ -1564,7 +1720,7 @@ pub fn puppet_pick(g: &Game, c: CityId) -> Option<Constructible> {
     let pp = AdvisorParams::auto_production();
     let p = g.city(c)?.owner();
     let items = buildable_items(g, c);
-    let s = situation(g, p, &pp);
+    let s = situation(g, p, &pp, false);
     let mut scored: Vec<Choice> = Vec::new();
     let wi = CityWhatIf::new(g, c);
     for b in items.buildings.iter() {
