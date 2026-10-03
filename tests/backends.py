@@ -7,8 +7,8 @@ The others say why they do not, with a marker that tests/test_backends.py holds 
   successor: a rule script (``tests/rules/<name>.toml``; one whose ``needs`` names a bot package still to come runs on
   Rust once that package lands), a Rust test (a ``fn`` of that name in ``crates/**/*.rs`` with a test attribute) or
   a Python test (``tests.<module>.<Class>.<test>``). Skipped on Rust; deleted with the Python engine in 2-12.
-- ``@rust_pending("<package>")``: a test the named package (2-09, 2-10 or 2-11) makes pass on Rust. Skipped on Rust
-  until then; that package's gate is that no marker names it any more.
+- ``@rust_pending("<package>")``: a test the named package (2-09 or 2-11) makes pass on Rust. Skipped on Rust
+  until then; that package's gate is that no marker names it any more, and it leaves ``PENDING_PACKAGES``.
 - ``@rust_only``: a test of a name only the Rust backend has. Skipped on Python.
 
 Each marker works on a test method or a whole TestCase class, and records what it says on the object (``_backend``),
@@ -24,8 +24,9 @@ from citar import engine_api
 
 #: Whether the suite runs on the Rust backend.
 RUST = engine_api.BACKEND == "rust"
-#: The packages a rust_pending marker may name: the ones that finish the swap's Python side.
-PENDING_PACKAGES = ("2-09", "2-10", "2-11")
+#: The packages a rust_pending marker may name: the ones still to finish the swap's Python side. A package leaves
+#: this list when it lands (2-10, the bots, the lab and the ladder, has), so no marker can name it again.
+PENDING_PACKAGES = ("2-09", "2-11")
 #: The bot packages still to come, whose rule scripts carry a ``needs`` header that both runners skip on Rust: a
 #: python_engine_only successor may be such a script until its package lands. A package removes itself here when it
 #: removes its headers.

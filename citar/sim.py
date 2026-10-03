@@ -17,8 +17,10 @@ def run(players: int = 4, turns: int = 0, map_type: str = "continents", map_size
         barbarians: str = "normal", verbose: bool = True, speed: str = "Quick", nation: str = None) -> dict:
     """Play one headless bot-vs-bot game, printing what happens. Returns engine_api.run_game's result.
 
-    A bot that crashes stops the run with its traceback: this is the crash check for the bot, so a crash must not
-    pass as a quiet game (the lab and balance runs record crashes and play on instead).
+    Every seat plays the latest bot version (``basic``) with its own aggression, and one ``seed`` plays one game: the
+    Rust bot draws from the game's seed, and the Python backend's bot (until package 2-12) from the seed each seat is
+    given here. A bot that crashes stops the run with its traceback: this is the crash check for the bot, so a crash
+    must not pass as a quiet game (the lab and balance runs record crashes and play on instead).
     """
     config = {"map_type": map_type, "map_size": map_size, "seed": seed, "barbarians": barbarians, "speed": speed,
               "players": [{"controller": "bot", "nation": nation} for _ in range(players)], "turn_limit": turns or None}

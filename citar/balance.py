@@ -1,10 +1,12 @@
 """Batch bot-vs-bot simulations for balancing the rules and measuring bot strength.
 
     python -m citar.balance --games 48 --players 4 --size small --label baseline
-    python -m citar.balance --games 60 --players 2 --size duel --bots basic,snapshot_old --label ab-test
+    python -m citar.balance --games 60 --players 2 --size duel --bots standard,classic-production --label ab-test
 
-Games run in parallel (one process per game). `--bots` assigns bot types to seats in rotation, and the seat order is
-rotated between games so no bot type always gets the same start. The report covers pacing (techs, eras, cities,
+Games run in parallel (one process per game). `--bots` assigns bots to seats in rotation, each a bot profile's id or
+a bot version (basic, the latest; basic-N; idle), and the seat order is rotated between games so no bot always gets
+the same start. One seed plays one game: the Rust bot draws from the game's seed, and the Python backend's bot
+(until package 2-12) from a seed each seat is given from it. The report covers pacing (techs, eras, cities,
 population by turn), economy (bankruptcy, unhappiness, starvation), conflict (wars, captures, eliminations,
 barbarians), what gets built, victory types, and win rates per bot type. A JSON copy is written to saves/balance/.
 """
@@ -25,19 +27,13 @@ STAT_KEYS = ("score", "cities", "population", "land", "techs", "era", "military"
 
 
 def make_bot(kind: str, seed: int, aggression: float):
-    """Instantiate a bot by name: a bot profile id, the idle bot, or a module in citar/bots (live or frozen)."""
-    from . import engine_api
-    if kind == "idle":
-        return engine_api.bot_instance("idle")
+    """The bot ``kind`` names: a bot profile's id, else a bot version (basic, the latest; basic-N; idle), with the
+    seat's ``aggression`` where the profile leaves it open. ProfileError for anything else: an unknown name, or a
+    frozen snapshot of 0.1.5 (archived), which no longer fall back to the live bot unannounced. ``seed`` reaches only
+    the Python backend's bot (the Rust bot draws from the game's seed)."""
     from .bots import profiles
-    try:
-        return profiles.make_bot(kind, seed=seed, aggression=aggression)
-    except profiles.ProfileError:
-        pass
-    if kind.startswith(("snapshot", "frozen_")):
-        # a copy of basic.py saved as citar/bots/<kind>.py, for A/B testing bot changes
-        return engine_api.bot_instance(kind, seed=seed, aggression=aggression)
-    return engine_api.bot_instance("basic", seed=seed, aggression=aggression)
+    ref = kind if profiles.exists(kind) else {"profile": None, "bot": kind}
+    return profiles.make_bot(ref, seed=seed, aggression=aggression)
 
 
 def play_game(spec: dict) -> dict:
@@ -47,7 +43,8 @@ def play_game(spec: dict) -> dict:
     n = spec["players"]
     # the majors are the first n players of a new game
     kinds = {pid: spec["seat_bots"][pid % len(spec["seat_bots"])] for pid in range(n)}
-    bots = {pid: make_bot(k, spec["seed"] * 101 + pid, 0.25 + 0.5 * ((pid * 37 + spec["seed"]) % 10) / 9) for pid, k in kinds.items()}
+    bots = {pid: make_bot(k, spec["seed"] * 101 + pid, 0.25 + 0.5 * ((pid * 37 + spec["seed"]) % 10) / 9)
+            for pid, k in kinds.items()}
     events = defaultdict(Counter)       # pid -> counter
     built = defaultdict(Counter)        # pid -> item counter
     era_turn = defaultdict(dict)        # pid -> {era: turn}
@@ -261,8 +258,8 @@ def main():
     ap.add_argument("--speed", default="Quick")
     ap.add_argument("--nation", default=None, help="e.g. BenchmarkCiv for every seat (default: random civilizations)")
     ap.add_argument("--barbarians", default="normal")
-    ap.add_argument("--bots", default="basic", help="comma-separated bot types assigned to seats in rotation "
-                                                    "(basic, idle, snapshot_<name>)")
+    ap.add_argument("--bots", default="basic", help="comma-separated bots assigned to seats in rotation: profile "
+                                                    "ids or bot versions (basic, basic-N, idle)")
     ap.add_argument("--seed", type=int, default=1000, help="first seed")
     ap.add_argument("--workers", type=int, default=0, help="parallel games (default: CPU count - 1)")
     ap.add_argument("--label", default="run")
@@ -271,6 +268,12 @@ def main():
     workers = a.workers or max(1, (os.cpu_count() or 2) - 1)
     maps = a.maps.split(",")
     bot_types = a.bots.split(",")
+    from .bots import profiles
+    for kind in set(bot_types):                 # a misspelt bot stops the run here, not in every worker
+        try:
+            make_bot(kind, 0, 0.5)
+        except profiles.ProfileError as e:
+            ap.error(f"--bots {kind}: {e}")
     specs = []
     for i in range(a.games):
         rot = i % len(bot_types)

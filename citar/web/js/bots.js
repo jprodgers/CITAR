@@ -37,7 +37,7 @@ export async function renderBots(root, rules, sub) {
       "the bot decides with is a parameter. Profiles are what lab experiments, lobby seats and benchmark opponents " +
       "play. Ratings come from every lab game: each game's finishing order is split into head-to-head results and " +
       "fitted on the Elo scale (400 points ≈ 10:1 odds of finishing ahead). An entry is one exact configuration " +
-      "(its fingerprint) at one difficulty, so each revision of a profile, and each code change of the live bot, " +
+      "(its fingerprint) at one difficulty, so each revision of a profile, and each build that changes the bot, " +
       "gets its own line."),
     el("div", { class: "tabbar" },
       ...[["profiles", "Profiles"], ["rankings", "Rankings"]].map(([k, label]) =>
@@ -52,8 +52,11 @@ export async function renderBots(root, rules, sub) {
 // ---------------------------------------------------------------------------------------------------------------------
 // profiles list
 // ---------------------------------------------------------------------------------------------------------------------
+// The engine list only labels each profile's code: without it (the Python backend answers 501) the ids stand in.
+const engineList = () => api.botEngines().catch(() => ({ engines: [] }));
+
 async function drawProfiles(body, rules) {
-  const [{ profiles }, { engines }] = await Promise.all([api.botProfiles(), api.botEngines()]);
+  const [{ profiles }, { engines }] = await Promise.all([api.botProfiles(), engineList()]);
   const eng = Object.fromEntries(engines.map((e) => [e.id, e]));
   const card = el("div", { class: "card" });
   const table = el("table", { class: "list jobs" }, el("tr", {},
@@ -152,7 +155,7 @@ async function drawRankings(body) {
         el("td", {}, tick, color ? el("span", { class: "swatch", style: { background: color } }) : null),
         el("td", { class: "muted" }, e.rated ? `${i + 1}` : "–"),
         el("td", {}, e.profile ? el("a", { href: `#/bots/${encodeURIComponent(e.profile)}`, onclick: (ev) => ev.stopPropagation() }, e.name) : e.name,
-          el("div", { class: "muted small" }, `${e.code}${Object.keys(e.params || {}).length ? ` · ${Object.keys(e.params).length} overrides` : ""}` +
+          el("div", { class: "muted small" }, `${e.code}${e.build ? ` · build ${e.build}` : ""}${Object.keys(e.params || {}).length ? ` · ${Object.keys(e.params).length} overrides` : ""}` +
             `${e.aggression != null ? ` · aggression ${e.aggression}` : ""} · ${e.experiments.join(", ")}`)),
         el("td", {}, e.rated ? el("span", {}, el("b", {}, fmt(e.rating)), el("span", { class: "muted small" }, ` ±${fmt(e.se)}`)) : el("span", { class: "muted" }, "no rival games")),
         el("td", {}, e.seats ?? "–"),
@@ -282,13 +285,18 @@ function ratingChart(series) {
 // ---------------------------------------------------------------------------------------------------------------------
 async function renderProfile(page, rules, pid) {
   let info, engines;
-  try { [info, { engines }] = await Promise.all([api.botProfile(pid), api.botEngines()]); }
+  try { [info, { engines }] = await Promise.all([api.botProfile(pid), engineList()]); }
   catch (e) { page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots"))); return {}; }
   const saved = info.profile;
-  const editable = !saved.builtin && isAdmin();
+  // A profile whose code the engine refuses (a frozen snapshot of 0.1.5, or no Rust engine on this server) has no
+  // schema: it is shown read-only with the refusal, and its owner can still delete it.
+  let schema, refused = null;
+  try { schema = await api.botSchema(saved.engine); }
+  catch (e) { refused = e.message; schema = { engine: saved.engine, groups: [] }; }
+  const owner = !saved.builtin && isAdmin();
+  const editable = owner && !refused;
   const draft = { name: saved.name, description: saved.description || "", tags: [...(saved.tags || [])], engine: saved.engine,
     aggression: saved.aggression, params: JSON.parse(JSON.stringify(saved.params || {})), archived: !!saved.archived, parent: saved.parent };
-  let schema = await api.botSchema(draft.engine);
   let filter = "", changedOnly = false;
   const openGroups = new Set();
   const head = el("div", { class: "card" });
@@ -308,15 +316,16 @@ async function renderProfile(page, rules, pid) {
     head.append(
       el("div", { class: "row" }, el("a", { href: "#/bots" }, "← Bots"), el("span", { class: "grow" }),
         saved.builtin ? el("span", { class: "pill muted" }, "built-in: fork it to change it") : el("span", { class: "pill" }, `revision ${saved.rev}`),
-        el("button", { onclick: () => forkProfile(saved) }, "Fork"),
-        el("button", { onclick: () => abDialog(rules, [saved.id]) }, "A/B test…"),
-        editable ? el("button", { class: "danger", onclick: async () => {
+        refused ? null : el("button", { onclick: () => forkProfile(saved) }, "Fork"),
+        refused ? null : el("button", { onclick: () => abDialog(rules, [saved.id]) }, "A/B test…"),
+        owner ? el("button", { class: "danger", onclick: async () => {
           if (!(await confirmBox("Delete profile", `Delete ${saved.name}? Its games stay in the rankings under its fingerprint.`))) return;
           try { await api.deleteBotProfile(saved.id); location.hash = "#/bots"; } catch (e) { toast(e.message, "error"); }
         } }, "Delete") : null),
+      refused ? el("p", { class: "bad" }, refused) : null,
       el("div", { class: "profile-grid" },
         field("Name", el("input", { value: draft.name, disabled: !editable, oninput: (e) => { draft.name = e.target.value; drawSave(); } })),
-        field("Code", el("select", { disabled: !editable, onchange: async (e) => {
+        field("Code", refused ? el("input", { value: draft.engine, disabled: true }) : el("select", { disabled: !editable, onchange: async (e) => {
           const next = e.target.value;
           const nextSchema = await api.botSchema(next);
           const keys = new Set(nextSchema.groups.flatMap((g) => g.params.map((p) => p.key)));
@@ -375,6 +384,11 @@ async function renderProfile(page, rules, pid) {
     groupsBox);
     function drawGroups() {
       clear(groupsBox);
+      if (refused) {
+        groupsBox.append(el("p", { class: "muted" }, "The parameters can't be shown, for the reason above. The stored overrides:"),
+          el("pre", { class: "small" }, JSON.stringify(saved.params || {}, null, 1)));
+        return;
+      }
       if (!schema.groups.length) { groupsBox.appendChild(el("p", { class: "muted" }, "This code has no parameters.")); return; }
       for (const g of schema.groups) {
         const ps = g.params.filter((p) => (!changedOnly || p.key in draft.params)
@@ -585,7 +599,7 @@ export async function abDialog(rules, preselect = []) {
   const content = el("div", { class: "col ab-form" },
     el("p", { class: "muted small" }, "The chosen profiles take the seats in turn (A, B, A, B…) and the seat order rotates every game, so each " +
       "profile plays every start position on the same maps and seeds — which removes map and position luck from the comparison. " +
-      "Profiles are frozen when the experiment is queued: editing one later doesn't change it."),
+      "Profiles are resolved when the experiment is queued, and \"latest\" is pinned to the version it names then: editing a profile later doesn't change it."),
     field("Profiles", pickBox),
     el("div", { class: "grid-scenario" },
       field("Players", num("players", { min: 2, max: 8 })),
