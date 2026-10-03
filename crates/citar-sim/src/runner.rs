@@ -347,7 +347,7 @@ impl Runner {
 }
 
 /// The text of a panic's payload.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|s| (*s).to_owned())
@@ -391,7 +391,8 @@ mod tests {
     use super::*;
     use citar_bot::{Bot, BotSpec, Overrides, Tuning, VersionId};
     use citar_engine::base::ids::NegotiationId;
-    use citar_engine::game::DriverOutcome;
+    use citar_engine::game::diplomacy::actions::OpenNegotiation;
+    use citar_engine::game::{Action, DriverOutcome};
     use citar_engine::state::players::DriverMemory;
     use serde_json::json;
     use std::sync::Arc;
@@ -492,6 +493,122 @@ mod tests {
             Err(SimError::Crashed(c)) => assert_eq!(c.label.as_deref(), Some("panicker")),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A driver that, on its first turn, meets `to` and opens a chat with it, and answers
+    /// nothing.
+    struct Opener {
+        to: PlayerId,
+        opened: bool,
+    }
+
+    impl SeatDriver for Opener {
+        fn play_turn(
+            &mut self,
+            g: &mut Game,
+            pid: PlayerId,
+            _: &mut DriverMemory,
+        ) -> DriverOutcome {
+            if !std::mem::replace(&mut self.opened, true) {
+                g.meet(pid, self.to).expect("they meet");
+                let offer = OpenNegotiation {
+                    to: i64::from(self.to.0),
+                    message: json!("Friends?"),
+                    give: None,
+                    receive: None,
+                };
+                g.act(pid, Action::OpenNegotiation(offer)).expect("it opens");
+            }
+            DriverOutcome::Done
+        }
+
+        fn respond(
+            &mut self,
+            _: &mut Game,
+            _: PlayerId,
+            _: NegotiationId,
+            _: &mut DriverMemory,
+        ) -> DriverOutcome {
+            DriverOutcome::Done
+        }
+    }
+
+    /// A driver that leaves every chat put to it to the host, as a hybrid seat's bot leaves one
+    /// its model owns.
+    struct Deferrer;
+
+    impl SeatDriver for Deferrer {
+        fn play_turn(&mut self, _: &mut Game, _: PlayerId, _: &mut DriverMemory) -> DriverOutcome {
+            DriverOutcome::Done
+        }
+
+        fn respond(
+            &mut self,
+            _: &mut Game,
+            _: PlayerId,
+            _: NegotiationId,
+            _: &mut DriverMemory,
+        ) -> DriverOutcome {
+            DriverOutcome::Deferred
+        }
+    }
+
+    /// Steps `r` to the game's end, returning the chats each `AwaitingReply` named.
+    fn play_out(r: &mut Runner) -> Vec<NegotiationId> {
+        let mut waited = Vec::new();
+        let mut steps = 0;
+        while !r.is_over() {
+            let s = r.step().expect("steps");
+            if let Stop::AwaitingReply { pid, nids } = &s.stop {
+                assert_eq!(*pid, PlayerId(0), "the opener's turn waits");
+                waited.extend(nids.iter().copied());
+            }
+            steps += 1;
+            assert!(steps < 30, "a 5-turn duel ends though a chat waited on the host");
+        }
+        waited
+    }
+
+    fn expired_by_the_runner(r: &Runner, nid: NegotiationId) {
+        let n = r.game().negotiation(nid).expect("the chat");
+        assert_eq!(n.status, NegStatus::Expired);
+        let note = n.history.last().and_then(|e| e.note.as_deref());
+        assert_eq!(note, Some(EXPIRED_NOTE));
+    }
+
+    #[test]
+    fn a_chat_with_a_seat_nobody_plays_expires_and_the_game_goes_on() {
+        let rules = Ruleset::shared();
+        let opener = Opener { to: PlayerId(1), opened: false };
+        let drivers = vec![(PlayerId(0), Box::new(opener) as Box<dyn SeatDriver>)];
+        let mut r = Runner::new(rules, duel(5), drivers).expect("a game");
+        let s = r.step().expect("steps");
+        let Stop::AwaitingReply { pid: PlayerId(0), nids } = &s.stop else {
+            panic!("the opener's turn waits on the host: {:?}", s.stop)
+        };
+        assert_eq!(nids.len(), 1);
+        let nid = nids[0];
+        expired_by_the_runner(&r, nid);
+        assert!(s.events.events().iter().any(|e| e.kind.name() == "negotiation"));
+        assert_eq!(play_out(&mut r), Vec::<NegotiationId>::new(), "it waited once");
+        assert_eq!(r.result().phase, "over");
+        assert_eq!(r.result().turns, 5);
+    }
+
+    #[test]
+    fn a_chat_a_driver_leaves_to_the_host_expires_and_the_game_goes_on() {
+        let rules = Ruleset::shared();
+        let opener = Opener { to: PlayerId(1), opened: false };
+        let drivers = vec![
+            (PlayerId(0), Box::new(opener) as Box<dyn SeatDriver>),
+            (PlayerId(1), Box::new(Deferrer) as Box<dyn SeatDriver>),
+        ];
+        let mut r = Runner::new(rules, duel(5), drivers).expect("a game");
+        let waited = play_out(&mut r);
+        assert_eq!(waited.len(), 1, "the deferred chat stopped the drive once");
+        expired_by_the_runner(&r, waited[0]);
+        assert_eq!(r.result().phase, "over");
+        assert_eq!(r.result().turns, 5);
     }
 
     #[test]
