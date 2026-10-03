@@ -3,6 +3,9 @@
 use serde::Deserialize;
 use std::path::Path;
 
+/// The switches' file, relative to the workspace root.
+pub const FILE: &str = "xtask/check.toml";
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -28,7 +31,7 @@ pub struct NotPortedConfig {
 
 impl Config {
     pub fn load(root: &Path) -> Result<Self, String> {
-        let path = root.join("xtask/check.toml");
+        let path = root.join(FILE);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
         Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))

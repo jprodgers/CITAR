@@ -16,6 +16,9 @@ pub struct Generated {
     /// The command that rewrites it, named in the finding.
     pub command: &'static str,
     pub generate: fn(&Path) -> Result<String, String>,
+    /// The files `generate` reads, relative to the workspace root: a change to one must run the
+    /// checks (`triggers`).
+    pub inputs: &'static [&'static str],
 }
 
 /// Every generated file in the workspace.
@@ -23,6 +26,7 @@ pub const FILES: &[Generated] = &[Generated {
     path: crate::gen_uniques::OUT,
     command: "cargo xtask gen-uniques",
     generate: crate::gen_uniques::generate,
+    inputs: &[crate::gen_uniques::TSV, crate::gen_uniques::TOML],
 }];
 
 pub fn check(root: &Path, files: &[Generated]) -> Vec<Finding> {
@@ -64,8 +68,12 @@ mod tests {
         Ok("// GENERATED\nhello\n".into())
     }
 
-    const HELLO: &[Generated] =
-        &[Generated { path: "gen.rs", command: "cargo xtask gen-hello", generate: hello }];
+    const HELLO: &[Generated] = &[Generated {
+        path: "gen.rs",
+        command: "cargo xtask gen-hello",
+        generate: hello,
+        inputs: &[],
+    }];
 
     #[test]
     fn a_fresh_file_passes_whatever_its_line_endings() {

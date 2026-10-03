@@ -22,7 +22,7 @@ use super::features::{self, BINDINGS};
 use super::metadata::{Metadata, Package};
 
 const CHECK: &str = "pyproject";
-const FILE: &str = "pyproject.toml";
+pub const FILE: &str = "pyproject.toml";
 const ENGINE: &str = "citar-engine";
 
 /// The manifest `[tool.maturin] manifest-path` must name.

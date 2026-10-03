@@ -12,6 +12,7 @@
 //! - each layer of the engine uses only the layers below it;
 //! - only `game/mutate.rs`, `save/` and `compat/` call `State`'s mutable accessors;
 //! - generated files are up to date;
+//! - rust.yml's path filters match every file these checks read, so a change to one runs them;
 //! - no `Pending` stage outlives its package, and, once switched on, no `NotPorted` or
 //!   `Pending` remains at all;
 //! - in the bot, `&mut Game` appears only in `driver.rs`; in citar-py, no hand-written `unsafe`.
@@ -31,6 +32,7 @@ mod pending;
 mod pyproject;
 mod source;
 mod sources;
+mod triggers;
 mod version;
 
 use std::fmt;
@@ -100,6 +102,7 @@ fn run_all(root: &Path) -> Result<(Vec<Finding>, String), String> {
     findings.extend(sources::check_bot(&bot));
     findings.extend(sources::check_py(&py));
     findings.extend(generated::check(root, generated::FILES));
+    findings.extend(triggers::check(root, &reads(&meta))?);
     let markers = pending::scan(&tree);
     findings.extend(pending::check(&markers, &config));
 
@@ -110,4 +113,23 @@ fn run_all(root: &Path) -> Result<(Vec<Finding>, String), String> {
         markers.count(pending::Kind::Pending),
     );
     Ok((findings, summary))
+}
+
+/// Every file the checks read, relative to the workspace root, for [`triggers`]: a change to any
+/// of them must run rust.yml. A source tree stands in by its `lib.rs`.
+fn reads(meta: &metadata::Metadata) -> Vec<String> {
+    let mut out: Vec<String> = ["Cargo.toml", "Cargo.lock"].map(str::to_owned).to_vec();
+    out.extend(meta.members().map(|p| meta.manifest(p)));
+    out.extend(
+        [config::FILE, version::PYTHON_FILE, pyproject::FILE, triggers::WORKFLOW]
+            .map(str::to_owned),
+    );
+    out.extend([ENGINE_SRC, sources::BOT_SRC, sources::PY_SRC].map(|src| format!("{src}/lib.rs")));
+    for g in generated::FILES {
+        out.push(g.path.to_owned());
+        out.extend(g.inputs.iter().map(|i| (*i).to_owned()));
+    }
+    out.sort();
+    out.dedup();
+    out
 }

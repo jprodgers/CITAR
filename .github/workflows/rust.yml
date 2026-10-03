@@ -23,6 +23,9 @@ on:
       - "citar/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.
       - "citar/__init__.py"
+      # cargo xtask check holds pyproject.toml's maturin table: its features never reach the test
+      # operations or `legacy`, it builds crates/citar-py, and the version stays dynamic.
+      - "pyproject.toml"
       - ".github/workflows/rust.yml"
   pull_request:
     paths:
@@ -39,6 +42,9 @@ on:
       - "citar/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.
       - "citar/__init__.py"
+      # cargo xtask check holds pyproject.toml's maturin table: its features never reach the test
+      # operations or `legacy`, it builds crates/citar-py, and the version stays dynamic.
+      - "pyproject.toml"
       - ".github/workflows/rust.yml"
   workflow_dispatch:
     inputs:

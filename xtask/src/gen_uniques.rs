@@ -32,8 +32,9 @@ macro_rules! wl {
 
 /// Where the output goes, relative to the workspace root.
 pub const OUT: &str = "crates/citar-engine/src/unique/gen.rs";
-const TSV: &str = "crates/citar-engine/unique_types.tsv";
-const TOML: &str = "crates/citar-engine/unique_supported.toml";
+/// The sources it is generated from, relative to the workspace root.
+pub const TSV: &str = "crates/citar-engine/unique_types.tsv";
+pub const TOML: &str = "crates/citar-engine/unique_supported.toml";
 
 /// The largest payload a main type may have, and its alignment (DESIGN.md 5.5): with the `u16`
 /// tag, `UniqueData` is then 16 bytes.
