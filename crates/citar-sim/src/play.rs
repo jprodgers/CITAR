@@ -69,7 +69,8 @@ impl PlayOptions {
             seed,
             ..self.clone()
         };
-        [duel("continents", self.seed), duel("pangaea", self.seed + 1)]
+        // The seed after the largest is 0: a smoke run never refuses its seed.
+        [duel("continents", self.seed), duel("pangaea", self.seed.wrapping_add(1))]
     }
 
     /// The game's configuration (`sim.run`'s).
@@ -202,6 +203,9 @@ mod tests {
         assert_eq!((b.map.as_str(), b.seed), ("pangaea", 8));
         assert_eq!(a.config()["turn_limit"], json!(40));
         assert_eq!(PlayOptions::default().config()["turn_limit"], Value::Null);
+        // The largest seed's next is 0, in every build.
+        let [a, b] = PlayOptions { seed: u64::MAX, ..PlayOptions::default() }.smoke();
+        assert_eq!((a.seed, b.seed), (u64::MAX, 0));
     }
 
     #[test]

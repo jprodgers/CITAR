@@ -30,7 +30,10 @@ use serde_json::Value;
 
 use super::BaselineLine;
 use super::play::{Code, Context, crash_line, play_one, round1};
-use super::spec::{GameSpec, IDENTITY, Options, game_spec, output_path, stall_limit};
+use super::spec::{
+    GameSpec, IDENTITY, Options, check_minutes, check_seeds, game_spec, output_path, stall_limit,
+};
+use crate::runner::panic_message;
 
 /// The stack of a worker thread: a game's deepest call chains (settles inside drives inside
 /// steps) with room to spare, whatever the platform's default.
@@ -170,11 +173,14 @@ fn truthy(v: &Value) -> bool {
 }
 
 /// Every option names something the ruleset has: each combination of size, map type and
-/// barbarian setting makes a configuration with the speed.
+/// barbarian setting makes a configuration with the speed. The budget is a number of minutes,
+/// and every game's seed is one (`seed + i` passes no `u64`).
 fn check_options(rules: &'static Ruleset, o: &Options) -> Result<(), String> {
     if o.sizes.is_empty() || o.maps.is_empty() || o.barbarians.is_empty() {
         return Err("--sizes, --maps and --barbarians each need at least one value".to_owned());
     }
+    check_minutes(o.max_minutes)?;
+    check_seeds(o.seed, o.games)?;
     if o.checks && !CHECKS_BUILT {
         return Err("--checks needs a build with the engine's checks: a debug or ci build, or \
                     --features checks"
@@ -367,9 +373,11 @@ fn run_parallel(
                     if tx.send(Msg::Started(spec.i)).is_err() {
                         break;
                     }
+                    // play_one writes a panic of its game as the game's crash line; this catch
+                    // is the last resort, for one in writing that line.
                     let line =
                         catch_unwind(AssertUnwindSafe(|| play_one(&cx, &spec))).map_err(|p| {
-                            format!("the job raised a panic: {}", payload_text(p.as_ref()))
+                            format!("the job raised a panic: {}", panic_message(p.as_ref()))
                         });
                     if tx.send(Msg::Finished(spec.i, Box::new(line))).is_err() {
                         break;
@@ -424,15 +432,6 @@ fn run_parallel(
             }
         }
     }
-}
-
-/// The text of a panic's payload.
-fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
-    payload
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "a panic with no message".to_owned())
 }
 
 /// Starts the next line of `file` on a line of its own: a run stopped mid-write leaves its last

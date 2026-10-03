@@ -291,6 +291,46 @@ fn options_that_name_nothing_are_refused() {
     assert!(!dir.join("x.jsonl").exists());
 }
 
+/// A budget that is no number of minutes, and seeds that would pass the largest, are refused
+/// before anything is written, in every build (a debug build once panicked on both, a release
+/// build wrapped the seed to 0).
+#[test]
+fn budgets_and_seeds_that_cannot_be_played_are_refused() {
+    let dir = folder("bounds");
+    for minutes in [f64::INFINITY, f64::NAN, -1.0, 1e300] {
+        let o = Options { max_minutes: minutes, ..duels(&dir, "x", 1, 5) };
+        let (outcome, said) = run(&o);
+        assert_eq!(outcome, Outcome::Refused, "{minutes}");
+        assert!(said[0].starts_with("--max-minutes: "), "{said:#?}");
+    }
+    let o = Options { seed: u64::MAX, ..duels(&dir, "x", 2, 5) };
+    let (outcome, said) = run(&o);
+    assert_eq!(outcome, Outcome::Refused);
+    assert!(said[0].contains("would pass the largest seed"), "{said:#?}");
+    let o = Options { seed: u64::MAX, smoke: true, ..duels(&dir, "x", 1, 5) };
+    assert_eq!(run(&o).0, Outcome::Refused, "a smoke run plays two seeds");
+    assert!(!dir.join("x.jsonl").exists() && !dir.join("x-smoke.jsonl").exists());
+
+    // The CLI says so and exits 2, without a panic.
+    let exe = env!("CARGO_BIN_EXE_citar-sim");
+    for args in [
+        ["--max-minutes", "inf", "--games", "1"],
+        ["--seed", "18446744073709551615", "--games", "2"],
+    ] {
+        let out = Command::new(exe)
+            .arg("baseline")
+            .args(args)
+            .arg("--dir")
+            .arg(&dir)
+            .output()
+            .expect("citar-sim runs");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+    }
+    assert_eq!(std::fs::read_dir(&dir).expect("the folder").count(), 0, "nothing written");
+}
+
 /// With the checks on (a debug or ci build has them), the games run the invariants at every
 /// settle and finish clean.
 #[test]

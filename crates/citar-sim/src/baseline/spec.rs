@@ -198,7 +198,9 @@ impl GameSpec {
     }
 }
 
-/// Game `i` of a run with options `o` (already [`Options::effective`]).
+/// Game `i` of a run with options `o` (already [`Options::effective`]). A seed past the largest
+/// wraps around to 0: a run refuses options whose games would reach it, and a line read back
+/// from a file (any `i`) must not stop the reading.
 #[must_use]
 pub fn game_spec(rules: &Ruleset, o: &Options, i: u32) -> GameSpec {
     let combos = o.combos();
@@ -206,7 +208,7 @@ pub fn game_spec(rules: &Ruleset, o: &Options, i: u32) -> GameSpec {
         combos.get(i as usize % combos.len().max(1)).copied().unwrap_or(("small", "", ""));
     GameSpec {
         i,
-        seed: o.seed + u64::from(i),
+        seed: o.seed.wrapping_add(u64::from(i)),
         size: size.to_owned(),
         map_type: map_type.to_owned(),
         barbarians: barbarians.to_owned(),
@@ -218,11 +220,13 @@ pub fn game_spec(rules: &Ruleset, o: &Options, i: u32) -> GameSpec {
 }
 
 /// How long a game on a `size` map may run: `minutes` if given, else an hour on a small map
-/// scaled by the map's area, and never under 20 minutes (`common.time_budget`).
+/// scaled by the map's area, and never under 20 minutes (`common.time_budget`). Minutes that are
+/// not a positive number read as not given, and more than a `Duration` holds as no limit; a run
+/// refuses both ([`check_minutes`]).
 #[must_use]
 pub fn time_budget(rules: &Ruleset, size: &str, minutes: f64) -> Duration {
     if minutes > 0.0 {
-        return Duration::from_secs_f64(minutes * 60.0);
+        return Duration::try_from_secs_f64(minutes * 60.0).unwrap_or(Duration::MAX);
     }
     let k = rules.constants();
     let area = |s: &str| {
@@ -238,7 +242,39 @@ pub fn time_budget(rules: &Ruleset, size: &str, minutes: f64) -> Duration {
 #[must_use]
 pub fn stall_limit(budgets: impl IntoIterator<Item = Duration>) -> Duration {
     let longest = budgets.into_iter().max().unwrap_or_default();
-    longest + Duration::from_secs_f64(STALL_GRACE_S)
+    longest.saturating_add(Duration::from_secs_f64(STALL_GRACE_S))
+}
+
+/// Why `--max-minutes` cannot be a game's budget, if it cannot: it is a number of minutes a
+/// `Duration` holds, or 0 for the default.
+///
+/// # Errors
+/// Minutes that are negative, not a number, infinite or too many.
+pub fn check_minutes(minutes: f64) -> Result<(), String> {
+    let fits = minutes.is_finite()
+        && minutes >= 0.0
+        && Duration::try_from_secs_f64(minutes * 60.0).is_ok();
+    if fits {
+        Ok(())
+    } else {
+        Err(format!("--max-minutes: {minutes:?} is no budget: give minutes, or 0 for the default"))
+    }
+}
+
+/// Why game seeds `seed` to `seed + games - 1` cannot all be played, if they cannot: the last
+/// would pass the largest seed.
+///
+/// # Errors
+/// Seeds past `u64::MAX`.
+pub fn check_seeds(seed: u64, games: u32) -> Result<(), String> {
+    match seed.checked_add(u64::from(games.saturating_sub(1))) {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "--seed {seed} with --games {games}: game i plays seed + i, and the last would pass \
+             the largest seed, {}",
+            u64::MAX
+        )),
+    }
 }
 
 /// The output file of a run named `name` in `dir`.
@@ -307,5 +343,28 @@ mod tests {
         assert_eq!(time_budget(r, "gargantuan", 2.5), Duration::from_secs(150));
         let stall = stall_limit([Duration::from_secs(60), Duration::from_secs(3600)]);
         assert_eq!(stall, Duration::from_secs(3600 + 600));
+    }
+
+    #[test]
+    fn no_budget_or_seed_panics_and_a_run_refuses_those_it_cannot_play() {
+        let r = Ruleset::shared();
+        // What a run refuses still makes a budget, in every build, rather than a panic.
+        assert_eq!(time_budget(r, "small", f64::INFINITY), Duration::MAX);
+        assert_eq!(time_budget(r, "small", 1e300), Duration::MAX);
+        assert_eq!(time_budget(r, "small", f64::NAN), Duration::from_secs(3600));
+        assert_eq!(time_budget(r, "small", -5.0), Duration::from_secs(3600));
+        assert_eq!(stall_limit([Duration::MAX]), Duration::MAX);
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN, -1.0, 1e300] {
+            assert!(check_minutes(bad).is_err(), "{bad}");
+        }
+        for good in [0.0, 0.5, 60.0, 1e6] {
+            assert_eq!(check_minutes(good), Ok(()), "{good}");
+        }
+        assert_eq!(check_seeds(u64::MAX, 1), Ok(()));
+        assert_eq!(check_seeds(u64::MAX, 0), Ok(()));
+        assert_eq!(check_seeds(u64::MAX - 9, 10), Ok(()));
+        assert!(check_seeds(u64::MAX - 9, 11).is_err());
+        let o = Options { seed: u64::MAX, ..Options::default() };
+        assert_eq!(game_spec(r, &o, 1).seed, 0, "wraps, never panics");
     }
 }
