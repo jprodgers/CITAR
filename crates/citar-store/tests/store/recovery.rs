@@ -9,9 +9,10 @@
 //!   or with another head.
 //!
 //! The file-level runs try two changes of each byte (`^ 0x01` and `^ 0x80`: a length one off,
-//! within the file, and one that runs past its end or past any record's limit); the journal
-//! module's own test tries all 255 of each byte in memory. The cases run on a few threads, each
-//! in its own folder.
+//! within the file, and one that runs past its end or past any record's limit), or all 255 when
+//! `CITAR_STORE_EVERY_VALUE` is set (half a million files: minutes on Linux, hours on a Windows
+//! laptop whose virus scanner reads each one); the journal module's own test tries all 255 of
+//! each byte in memory. The cases run on a few threads, each in its own folder.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -151,7 +152,11 @@ fn every_cut_recovers_exactly_the_whole_records_before_it() {
 fn every_damaged_byte_inside_a_record_is_corruption_at_that_record() {
     let f = fifty();
     let first = 10usize;
-    let masks = [0x01u8, 0x80];
+    let masks: Vec<u8> = if std::env::var_os("CITAR_STORE_EVERY_VALUE").is_some() {
+        (1..=255).collect()
+    } else {
+        vec![0x01, 0x80]
+    };
     spread("damage", (f.bytes.len() - first) * masks.len(), |dir, i| {
         let p = first + i / masks.len();
         let mask = masks[i % masks.len()];
