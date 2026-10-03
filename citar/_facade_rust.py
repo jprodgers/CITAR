@@ -861,7 +861,10 @@ class EngineGame:
     def path_preview(self, pid: int, unit_id: int, x: int, y: int) -> dict:
         """The route a move order would take for one of ``pid``'s units: {"path": [[x, y], ...], "turns"}, or
         {"path": None} when there is none (or the unit is not theirs)."""
-        return json.loads(self._g.path_preview(pid, unit_id, x, y))
+        try:
+            return json.loads(self._g.path_preview(pid, unit_id, x, y))
+        except OverflowError:   # an id or a coordinate past the binding's integers (a route's query) names nothing
+            return {"path": None}
 
     def has_met(self, a: int, b: int) -> bool:
         """Whether two civilizations know each other."""

@@ -315,6 +315,12 @@ class PathPreviewTests(unittest.TestCase):
                     enemy = next(u for u in g.view(None)["units"] if u["owner"] == 1)
                     r2 = client.get(f"/api/games/{s.id}/path", params={"token": token, "unit_id": enemy["id"], "x": x, "y": y}).json()
                     self.assertIsNone(r2["path"])
+                    # numbers past any engine's integers name no unit or tile: no route, not a server error
+                    for bad in ({"unit_id": w["id"], "x": 10 ** 12, "y": y}, {"unit_id": w["id"], "x": x, "y": -10 ** 12},
+                                {"unit_id": 10 ** 30, "x": x, "y": y}, {"unit_id": -1, "x": x, "y": y}):
+                        r3 = client.get(f"/api/games/{s.id}/path", params={"token": token, **bad})
+                        self.assertEqual(r3.status_code, 200, bad)
+                        self.assertIsNone(r3.json()["path"], bad)
                 finally:
                     appmod.manager.delete(s.id)
 
