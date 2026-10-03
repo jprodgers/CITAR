@@ -3,12 +3,12 @@
 //! baseline's map rotation (`refcheck/baseline/python/small.jsonl`: continents, pangaea,
 //! archipelago, inland sea, fractal; Quick, Prince), 150 rounds each, the five side by side.
 //!
-//! Units and fighting are package 2-03's and diplomacy 2-05's, so these bots expand, research
-//! and build, and fight and trade nothing; what is measured is the economy: at turn 100 the 20
-//! civilizations hold 2.8 cities on average and 85% of them two or more, know 17 technologies on
-//! average and each at least 12; each built a settler by turn 60; no tool is refused more than
-//! 50 times in one bot turn; and a game saved and loaded at round 75 plays on as the
-//! uninterrupted one.
+//! These bots play their units and fight (package 2-03), but with the barbarians off and no war
+//! declared until 2-05's diplomacy they fight little and trade nothing, so what is measured is
+//! the economy: at turn 100 the 20 civilizations hold 2.8 cities on average and 85% of them two
+//! or more, know 17 technologies on average and each at least 12; each built a settler by turn
+//! 60; no tool is refused more than 50 times in one bot turn; and a game saved and loaded at
+//! round 75 plays on as the uninterrupted one.
 //!
 //! A civilization whose landmass holds no expansion site has no settler to build: Python's bot
 //! (`expansion_sites`, basic.py:1080-1088) and its port settle only the landmass their cities

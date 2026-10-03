@@ -8,8 +8,8 @@
 //!   least one city across the twenty. The bots declare no war (that is package 2-05's
 //!   diplomacy), so their wars are the agents' and the barbarians'. The bots take the first two
 //!   seats in one game and the last two in the next.
-//! - **Barbarian games** (gate 4): four bots, 10 games of 330 rounds, to the game's end at its
-//!   turn limit: no panic or violation, and every game ends.
+//! - **Barbarian games** (gate 4): four bots, 10 games of 330 rounds, to the game's end, at its
+//!   turn limit or by an earlier victory: no panic or violation, and every game ends.
 //!
 //! The games play on as many threads as there are cores, in about twenty seconds in the ci
 //! profile on the laptop; nextest counts each test as taking every test thread
@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use citar_engine::base::ids::{NegotiationId, PlayerId, Turn};
 use citar_engine::game::victory::score::score;
+use citar_engine::game::victory::won_by;
 use citar_engine::game::{DebugOptions, DriverOutcome, Game, SeatDriver};
 use citar_engine::state::Phase;
 use citar_engine::state::chronicle::{EngineEvent, EventType};
@@ -93,6 +94,8 @@ struct Played {
     seed: u64,
     rounds: u32,
     over: bool,
+    /// The victory that ended it, by name (`Time` at the turn limit).
+    victory: Option<String>,
     /// Each major's score at the end, by seat, and whether a bot played it.
     scores: BTreeMap<u8, (i32, bool)>,
     /// Attacks the bots made.
@@ -155,6 +158,7 @@ fn play(run: &Run) -> Played {
     out.rounds = games::play_random(&mut g, &mut seats, rounds, &mut hook)
         .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
     out.over = g.phase() != Phase::Playing;
+    out.victory = won_by(&g).map(|w| w.name(g.rules()).to_owned());
     for p in g.majors(false) {
         out.scores.insert(p.id().0, (score(&g, p.id()).total, bots.contains(&p.id().0)));
     }
@@ -244,9 +248,9 @@ fn four_bots_play_330_rounds_with_the_barbarians_to_the_end() {
         .collect();
     for p in play_all(&runs) {
         eprintln!(
-            "seed {}: {} rounds, over {}; scores {:?}; {} attacks, {} cities taken; most \
+            "seed {}: {} rounds, over {} ({:?}); scores {:?}; {} attacks, {} cities taken; most \
              refusals of a tool in a bot turn {:?}",
-            p.seed, p.rounds, p.over, p.scores, p.attacks, p.captured, p.worst
+            p.seed, p.rounds, p.over, p.victory, p.scores, p.attacks, p.captured, p.worst
         );
         assert!(p.over, "seed {}: not over after {} rounds", p.seed, p.rounds);
     }
