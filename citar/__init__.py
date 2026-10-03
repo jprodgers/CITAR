@@ -20,3 +20,21 @@ The command line is ``citar`` (see :mod:`citar.cli`); ``citar serve`` starts the
 
 __version__ = "0.1.5"
 __all__ = ["__version__"]
+
+
+def _ext_dir_first():
+    """Put ``CITAR_EXT_DIR``, when set, first on the package's path.
+
+    The laptop's dev loop (``cargo xtask develop``, CONTRIBUTING.md) builds the Rust extension outside the checkout,
+    which sits in a synced folder that locks files mid-build, and a running server would hold a copy built into the
+    tree. With the folder first, ``import citar._engine`` finds the library built there while every other module
+    still comes from the checkout: the folder holds nothing else.
+    """
+    import os
+    ext = os.environ.get("CITAR_EXT_DIR")
+    if ext and ext not in __path__:
+        __path__.insert(0, ext)
+
+
+_ext_dir_first()
+del _ext_dir_first

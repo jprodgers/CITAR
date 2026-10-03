@@ -5,7 +5,7 @@
 //! negotiation whose proposal touches one is the model's to answer (a deal is answered whole).
 
 use citar_engine::game::diplomacy::category::{CATEGORIES, Category, proposal_categories};
-use citar_engine::state::diplo::Negotiation;
+use citar_engine::state::diplo::{Negotiation, Terms};
 use serde_json::{Map, Value};
 
 /// Who decides a category.
@@ -124,7 +124,15 @@ impl Owners {
     /// not when the model owns chat.
     #[must_use]
     pub fn owns(&self, n: &Negotiation) -> bool {
-        let touched = proposal_categories(n.proposal.as_ref());
+        self.owns_terms(n.proposal.as_ref())
+    }
+
+    /// Whether the bot answers a negotiation whose proposal on the table is `proposal`, as
+    /// [`owns`](Self::owns) decides: for a host that holds the negotiation as a record, as the
+    /// bindings' `Bot.owns_negotiation` does.
+    #[must_use]
+    pub fn owns_terms(&self, proposal: Option<&Terms>) -> bool {
+        let touched = proposal_categories(proposal);
         if touched.is_empty() {
             return !self.llm(Category::Chat);
         }

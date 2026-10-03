@@ -168,6 +168,41 @@ pub enum Stop {
     GameOver,
 }
 
+impl Stop {
+    /// Its name, as hosts and the rule scripts read it: `external`, `hybrid_diplomat`,
+    /// `awaiting_reply`, `seat_limit`, `game_over`.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::External(_) => "external",
+            Self::HybridDiplomat(_) => "hybrid_diplomat",
+            Self::AwaitingReply { .. } => "awaiting_reply",
+            Self::SeatLimit => "seat_limit",
+            Self::GameOver => "game_over",
+        }
+    }
+
+    /// The seat it stopped at, if it stopped at one.
+    #[must_use]
+    pub const fn player(&self) -> Option<PlayerId> {
+        match self {
+            Self::External(p) | Self::HybridDiplomat(p) | Self::AwaitingReply { pid: p, .. } => {
+                Some(*p)
+            }
+            Self::SeatLimit | Self::GameOver => None,
+        }
+    }
+
+    /// The negotiations that wait on the host, for `AwaitingReply`; none otherwise.
+    #[must_use]
+    pub fn negotiations(&self) -> &[NegotiationId] {
+        match self {
+            Self::AwaitingReply { nids, .. } => nids,
+            _ => &[],
+        }
+    }
+}
+
 /// How [`Game::drive`] drives.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]

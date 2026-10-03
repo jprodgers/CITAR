@@ -182,6 +182,30 @@ export CARGO_TARGET_DIR=C:/dev/target/citar-main          # Git Bash; a Dev Driv
 $env:CARGO_TARGET_DIR = "C:\dev\target\citar-main"        # PowerShell
 ```
 
+**The Python extension: the dev loop.** `citar._engine` (`crates/citar-py`) is the Rust engine
+as Python sees it. Build it with `cargo xtask develop`, not `maturin develop`, which would write
+the library into the checkout: inside a synced folder that fails mid-build, and a running server
+holds the file open. Give each checkout or worktree its own venv, outside the checkout:
+
+```bash
+python -m venv C:/dev/venv/citar-main                     # once; --system-site-packages reuses what is installed
+source C:/dev/venv/citar-main/Scripts/activate            # Git Bash; bin/activate on Linux and macOS
+export CARGO_TARGET_DIR=C:/dev/target/citar-main
+cargo xtask develop                                       # the ci profile with the test operations
+cargo xtask develop --release                             # the release profile, for timing
+python -m unittest discover -s tests                      # imports the extension just built
+```
+
+`develop` refuses a venv another worktree already uses (its `citar-dev.pth` names that worktree),
+installs the project's dependencies into the venv whenever `pyproject.toml` has changed, builds
+`citar-py` into `$CARGO_TARGET_DIR/develop` with the build label from `git describe`, copies the
+library to `$CARGO_TARGET_DIR/citar-ext/`, and writes `citar-dev.pth` into the venv: the checkout
+on `sys.path` and `CITAR_EXT_DIR`, which `citar/__init__.py` puts first on the package's path. It
+writes nothing under the checkout. Rebuild after every Rust change you want Python to see. On
+Windows, stop the dev server and the lab before a rebuild: a library a running process holds is
+renamed aside rather than replaced, and the process keeps the old engine until it restarts.
+`tests/test_engine_module.py` tests the extension itself and is skipped when it is not built.
+
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
 benchmarks need valgrind, so they run there too.

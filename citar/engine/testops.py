@@ -659,6 +659,76 @@ def _sack_city(g: Game, o: dict):
     return barbarians.sack_city(g, c)
 
 
+def _standing(g: Game) -> dict:
+    """Where the game stands once a test operation ended a civilization or the game."""
+    return {"turn": g.turn, "current": g.s.current, "phase": g.s.phase, "winner": g.s.winner,
+            "victory": g.s.victory}
+
+
+def _end_without_majors(g: Game):
+    """End a game no major civilization is left in, with no winner: nobody is left to play its turns."""
+    if g.s.phase == "playing" and not g.majors():
+        g.s.phase = "over"
+        g.emit("game_over", "No major civilization is left. The game ends with no winner.", None)
+
+
+@op("eliminate", "player (a living civilization or city-state): its turn ends first if it is its turn, then its "
+                 "cities are destroyed, its units removed, and it is eliminated as a defeat eliminates a "
+                 "civilization; a game left with no major civilization ends with no winner")
+def _eliminate(g: Game, o: dict):
+    """Eliminate a civilization now, as the tests poked ``player.alive = False``, but soundly: its turn ends first if
+    it is its turn (a game always has a living player whose turn it is), then it loses its cities and units and is
+    eliminated as a defeat eliminates one (``victory.check_elimination``). The Rust engine's ``eliminate``."""
+    from . import cities, victory
+    from .scenario import _pid
+    pid = _pid(g, o.get("player"), majors_only=False)
+    p = g.player(pid)
+    if not p.alive:
+        raise ActionError(f"Player {pid} has been eliminated already.")
+    if g.s.phase == "playing" and g.s.current == pid:
+        g.end_turn(pid)
+    # Ending its turn may have ended a round whose eliminations took it, and destroying its last city eliminates
+    # a civilization that founded one.
+    for c in list(g.player_cities(pid)):
+        cities.destroy_city(g, c)
+    if p.alive:
+        for u in list(g.player_units(pid)):
+            g.remove_unit(u)
+        victory.check_elimination(g, pid)
+        if p.alive:
+            raise ActionError(f"Player {pid} could not be eliminated: it is not defeated without its cities and "
+                              f"units.")
+    _end_without_majors(g)
+    return {**_standing(g), "eliminated": pid}
+
+
+@op("end_game", "optional winner (a living major civilization), victory (a victory's name; it needs a winner): the "
+                "game ends now, won by the winner, by that victory or none, or with no winner")
+def _end_game(g: Game, o: dict):
+    """End the game now, as the tests poked ``phase = "over"``: won by ``winner`` (by ``victory`` if named, else
+    Neutral) with the winner's announcement, or with no winner. The Rust engine's ``end_game``."""
+    from . import victory
+    from .scenario import _pid
+    if g.s.phase != "playing":
+        raise ActionError("The game is over.")
+    winner = None if o.get("winner") is None else _pid(g, o.get("winner"), majors_only=True)
+    if winner is not None and not g.player(winner).alive:
+        raise ActionError(f"Player {winner} has been eliminated.")
+    vtype = None
+    if o.get("victory") is not None:
+        vtype = g.rules.resolve("victory", str(o.get("victory")))
+        if vtype is None:
+            raise ActionError(f"Unknown victory '{o.get('victory')}'.")
+    if winner is not None:
+        victory.declare_winner(g, winner, vtype or "Neutral")
+    elif vtype is not None:
+        raise ActionError("A victory needs a winner.")
+    else:
+        g.s.phase = "over"
+        g.emit("game_over", "The game has been ended with no winner.", None)
+    return _standing(g)
+
+
 def apply_one(g: Game, n: int, o) -> dict:
     """Run the ``n``-th test operation of a list; the error names it, as apply_ops' does."""
     if not isinstance(o, dict) or o.get("op") not in OPS:
