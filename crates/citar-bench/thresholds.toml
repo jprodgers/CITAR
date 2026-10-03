@@ -291,6 +291,21 @@ suite = "io"
 budget = "200 µs"
 row = "Digest, small t280"
 
+# The store (package 2-02, DESIGN.md P2.5): report-only, as its gate 5 sets them.
+[[budget]]
+id = "container/write_gargantuan"
+suite = "io"
+budget = "150 ms"
+row = "The gargantuan .citar v2 container written from its JSON (zstd, a synced temporary file, the rename)"
+report_only = true
+
+[[budget]]
+id = "container/read_header"
+suite = "io"
+budget = "1 ms"
+row = "A container's header read alone, as listing saves reads it"
+report_only = true
+
 # ---- pass rounds -----------------------------------------------------------------------------
 # `turns` records `turn/pass_round/<case>/t<turn>` for every corpus state (the committed ones
 # without the corpus): the median of rounds each passed on a fresh copy of the state after one

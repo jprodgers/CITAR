@@ -295,6 +295,7 @@ name = "citar-store"
 version = "0.1.5"
 dependencies = [
  "blake3",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",

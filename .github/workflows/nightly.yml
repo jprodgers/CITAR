@@ -1,6 +1,8 @@
 # The long runs (crates/citar-engine/DESIGN.md 2.6, 9.5, 9.6), too slow for every push:
 #   - props: the properties at 10,000 cases (rust.yml runs 64), P1 to P7, P8 and the rest
-#     in three jobs. A failure keeps proptest's saved case as an artifact, to commit with the fix;
+#     in three jobs; the rest includes citar-store's (package 2-02's gates 1 and 4, which the
+#     laptop runs at their counts by hand). A failure keeps proptest's saved case as an artifact,
+#     to commit with the fix;
 #   - stability, on Linux, Windows and macOS: chaos for 20 minutes (`cargo chaos`), then a reduced
 #     soak (`cargo soak`): 36 whole RandomAgent games, six of each map size, to their 330-turn
 #     limit with the invariants on. Chaos replays and the soak's report are kept as artifacts;
@@ -93,15 +95,17 @@ jobs:
         env:
           PROPTEST_CASES: ${{ inputs.props_cases || '10000' }}
         run: >
-          cargo nextest run -p citar-testkit --test props --locked --cargo-profile ci
-          --profile nightly -E '${{ matrix.filter }}'
+          cargo nextest run -p citar-testkit --test props -p citar-store --test store --locked
+          --cargo-profile ci --profile nightly -E '${{ matrix.filter }}'
 
       - name: Keep proptest's saved cases
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: proptest-regressions-${{ strategy.job-index }}
-          path: crates/citar-testkit/tests/**/*.proptest-regressions
+          path: |
+            crates/citar-testkit/tests/**/*.proptest-regressions
+            crates/citar-store/tests/**/*.proptest-regressions
 
   stability:
     name: stability (${{ matrix.os }})

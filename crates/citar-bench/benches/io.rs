@@ -19,16 +19,35 @@
 //! Report-only besides: `load/gargantuan_state`, the gargantuan save read and validated (no
 //! game).
 //!
+//! The store (citar-store, package 2-02, DESIGN.md P2.5), report-only:
+//! - `container/write_gargantuan`: the gargantuan state's `.citar` v2 container written from
+//!   its JSON (zstd, a synced temporary file, the rename), what the session's writer does off the
+//!   lock. Budget 150 ms.
+//! - `container/read_header`: its header read alone, what listing saves costs a save. Budget
+//!   1 ms.
+//! - Noted: `container/read_gargantuan` (read, decompressed and its shape checked),
+//!   `journal/append_sync` (one round's chunk appended and synced, as each autosave does) and
+//!   `journal/read_330` (330 rounds' chunks read back, as a load does).
+//!
 //! ```text
 //! cargo bench -p citar-bench --bench io
 //! ```
 
 use std::hint::black_box;
+use std::path::PathBuf;
 
 use citar_bench::{Suite, fixtures, median};
 use citar_engine::game::Game;
 use citar_engine::rules::{Ruleset, embedded};
+use citar_engine::save::journal::{self as chunks, JournalCursor};
 use citar_engine::save::{self, Digester, canon};
+use citar_engine::state::chronicle::{Chronicle, ChronicleHeads, HostHeads};
+use citar_store::journal::{JournalRef, JournalWriter};
+use citar_store::{
+    BodyParts, Header, SessionRef, container, read_container, read_header, read_upto,
+    write_container,
+};
+use citar_testkit::states;
 
 fn main() {
     let mut s = Suite::start("io");
@@ -129,6 +148,104 @@ fn main() {
             }),
         );
     }
+    if s.wants("container") || s.wants("journal") {
+        store(&mut s, &mut c, r);
+    }
     c.final_summary();
     s.finish();
+}
+
+/// The store's cases, in a folder of their own under cargo's temporary folder for benchmarks.
+fn store(s: &mut Suite, c: &mut criterion::Criterion, r: &'static Ruleset) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("io-store");
+    let _stale = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a folder");
+
+    let json = save::to_json(r, &fixtures::gargantuan_state()).expect("saves");
+    let summary = save::summary(&json).expect("a summary");
+    let header = Header {
+        format: container::FORMAT.to_owned(),
+        version: container::VERSION,
+        saved_at: "2026-10-02T12:00:00Z".to_owned(),
+        engine_build: citar_bot::build_id(r),
+        rules: r.id().to_hex(),
+        summary: serde_json::to_value(&summary).expect("JSON"),
+        session: SessionRef { id: "bench".into(), name: "Gargantuan".into(), benchmark: true },
+        journal: None,
+    };
+    let body = BodyParts { session: b"{}", metrics: b"{}", state: &json, chain: None };
+    let path = dir.join("gargantuan.citar");
+    write_container(&path, &header, &body).expect("writes");
+    println!(
+        "the gargantuan container: {:.1} MB of JSON, {:.2} MB on disk",
+        json.len() as f64 / 1e6,
+        std::fs::metadata(&path).map_or(0, |m| m.len()) as f64 / 1e6
+    );
+
+    // 330 rounds of history, each the chunk the engine takes for a round.
+    let (mut chron, mut heads, mut host) =
+        (Chronicle::new(), ChronicleHeads::default(), HostHeads::default());
+    let mut cursor = JournalCursor::default();
+    let rounds: Vec<Vec<u8>> = (0..330u64)
+        .map(|i| {
+            states::history(r, 7_000 + i, 12, &mut heads, &mut host, &mut chron);
+            chunks::take_chunk(r, &chron, &mut cursor, &mut host)
+                .expect("encodes")
+                .expect("a round's history")
+                .json
+        })
+        .collect();
+    let full = dir.join("full.cjnl");
+    let (mut w, _) = JournalWriter::open(&full).expect("a journal");
+    for (i, chunk) in rounds.iter().enumerate() {
+        w.append(i as u32, chunk).expect("appends");
+    }
+    w.sync().expect("syncs");
+    let full_ref: JournalRef = w.reference();
+    drop(w);
+    // A journal that grows by a round each time an append is timed.
+    let (mut growing, _) = JournalWriter::open(&dir.join("growing.cjnl")).expect("a journal");
+    let mut next = 0u32;
+    let mut append = move || {
+        let chunk = &rounds[next as usize % rounds.len()];
+        growing.append(next, chunk).expect("appends");
+        growing.sync().expect("syncs");
+        next += 1;
+    };
+
+    let mut grp = c.benchmark_group("io");
+    grp.sample_size(10);
+    grp.bench_function("container/write_gargantuan", |b| {
+        b.iter(|| write_container(&path, &header, &body).expect("writes"));
+    });
+    grp.bench_function("container/read_header", |b| {
+        b.iter(|| read_header(black_box(&path)).expect("reads"));
+    });
+    grp.bench_function("container/read_gargantuan", |b| {
+        b.iter(|| read_container(black_box(&path)).expect("reads"));
+    });
+    grp.bench_function("journal/append_sync", |b| b.iter(&mut append));
+    grp.bench_function("journal/read_330", |b| {
+        b.iter(|| read_upto(black_box(&full), &full_ref).expect("reads"));
+    });
+    grp.finish();
+
+    s.put(
+        "container/write_gargantuan",
+        median(7, 1, || write_container(&path, &header, &body).expect("writes")),
+    );
+    s.put(
+        "container/read_header",
+        median(31, 10, || drop(black_box(read_header(&path).expect("reads")))),
+    );
+    s.note(
+        "container/read_gargantuan",
+        median(7, 1, || drop(black_box(read_container(&path).expect("reads")))),
+    );
+    s.note("journal/append_sync", median(31, 1, &mut append));
+    s.note(
+        "journal/read_330",
+        median(7, 1, || drop(black_box(read_upto(&full, &full_ref).expect("reads")))),
+    );
+    let _done = std::fs::remove_dir_all(&dir);
 }
