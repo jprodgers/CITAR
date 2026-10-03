@@ -121,8 +121,8 @@ pub fn existing(
             clashes.push(format!(
                 "line {n} (game {i}) was played by engine {}, bot {}; this code is engine {}, \
                  bot {}",
-                shown(engine),
-                shown(bot),
+                plain(engine),
+                plain(bot),
                 code.engine,
                 code.bot
             ));
@@ -143,9 +143,18 @@ pub fn existing(
     Ok((done, clashes))
 }
 
-/// A value of a line as a message shows it: its JSON, or `None` when it is missing.
+/// A value of a line as a message shows it, as Python's `repr` did: its JSON (a string quoted),
+/// or `None` when it is missing.
 fn shown(v: Option<&Value>) -> String {
     v.map_or_else(|| "None".to_owned(), Value::to_string)
+}
+
+/// A value of a line as text, as Python's f-string did: a string as it is.
+fn plain(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => s.clone(),
+        other => shown(other),
+    }
 }
 
 /// Whether a value is set, as Python's `if r.get("crash")` reads it.

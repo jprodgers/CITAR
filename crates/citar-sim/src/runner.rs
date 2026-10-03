@@ -47,6 +47,9 @@ pub const TRACEBACK_LIMIT: usize = 5;
 /// What a chat closed by the runner says: nobody at the table could answer it.
 const EXPIRED_NOTE: &str = "No answer came: the game is played headless.";
 
+/// The drivers of a game's seats, by player: a seat left out has none, and passes its turns.
+pub type Seats = Vec<(PlayerId, Box<dyn SeatDriver>)>;
+
 /// What to play.
 #[derive(Clone, Debug)]
 pub struct RunSpec {
@@ -177,7 +180,7 @@ impl RoundInfo {
 /// One game and its drivers.
 pub struct Runner {
     game: Game,
-    drivers: Vec<(PlayerId, Box<dyn SeatDriver>)>,
+    drivers: Seats,
     labels: BTreeMap<PlayerId, String>,
     raise_errors: bool,
     budget: Option<Duration>,
@@ -192,11 +195,7 @@ impl Runner {
     ///
     /// # Errors
     /// The configuration does not make a game.
-    pub fn new(
-        rules: &'static Ruleset,
-        spec: RunSpec,
-        drivers: Vec<(PlayerId, Box<dyn SeatDriver>)>,
-    ) -> Result<Self, SimError> {
+    pub fn new(rules: &'static Ruleset, spec: RunSpec, drivers: Seats) -> Result<Self, SimError> {
         Self::new_with(rules, spec, |_| drivers)
     }
 
@@ -209,7 +208,7 @@ impl Runner {
     pub fn new_with(
         rules: &'static Ruleset,
         spec: RunSpec,
-        drivers: impl FnOnce(&Game) -> Vec<(PlayerId, Box<dyn SeatDriver>)>,
+        drivers: impl FnOnce(&Game) -> Seats,
     ) -> Result<Self, SimError> {
         let setup = config_from_value(rules, spec.config)?;
         // The events of the game's creation are not a step's: Python's on_event heard only those
@@ -367,7 +366,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 pub fn run_game(
     rules: &'static Ruleset,
     spec: RunSpec,
-    drivers: Vec<(PlayerId, Box<dyn SeatDriver>)>,
+    drivers: Seats,
     on_round: &mut dyn FnMut(&RoundInfo),
     on_events: &mut dyn FnMut(&EventBatch),
 ) -> Result<RunResult, SimError> {

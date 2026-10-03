@@ -27,5 +27,5 @@ pub mod runner;
 pub use self::baseline::{BaselineCiv, BaselineCrash, BaselineGame, BaselineLine, CheckpointRow};
 pub use self::result::{MajorRow, PlayerRow, RunResult};
 pub use self::runner::{
-    Crash, RoundInfo, RunSpec, Runner, SimError, Step, TRACEBACK_LIMIT, run_game,
+    Crash, RoundInfo, RunSpec, Runner, Seats, SimError, Step, TRACEBACK_LIMIT, run_game,
 };
