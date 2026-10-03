@@ -280,6 +280,13 @@ class GameTests(unittest.TestCase):
         self.assertIsNone(g.end_turn_refusal(0))
         path = json.loads(g.path_preview(0, 10 ** 6, 1, 1))
         self.assertEqual(path, {"path": None})
+        unit = json.loads(g.execute(0, "get_units")[0])
+        uid, x, y = unit[0]["id"], unit[0]["x"], unit[0]["y"]
+        route = json.loads(g.path_preview(0, uid, x + 2, y))
+        self.assertEqual(route["path"][0], [x, y])
+        self.assertEqual(route["path"][-1], [x + 2, y])
+        self.assertGreaterEqual(route["turns"], 1)
+        self.assertEqual(json.loads(g.path_preview(1, uid, x + 2, y)), {"path": None}, "not player 1's unit")
 
     def test_negotiations(self):
         g = duel()
@@ -306,6 +313,15 @@ class GameTests(unittest.TestCase):
             g.close_negotiation(nid, "rejected", "Again.")
         with self.assertRaises(E.ActionError):
             g.negotiation(42)
+        # A deal concluded: the other side accepts a gift.
+        opened, _ = g.execute(0, "open_negotiation", dumps({"to": 1, "message": "A gift.",
+                                                             "give": [{"type": "gold", "amount": 40}]}))
+        gift = json.loads(opened)["negotiation_id"]
+        g.execute(1, "respond_negotiation", dumps({"negotiation_id": gift, "action": "accept", "message": "Thanks."}))
+        deal_id = json.loads(g.negotiation(gift))["deal_id"]
+        deal = json.loads(g.deal(deal_id))
+        self.assertEqual((deal["id"], deal["parties"]), (deal_id, [0, 1]))
+        self.assertIn("40 gold", deal["summary"])
 
     def test_seats_scenario_map_and_debug(self):
         g = duel()
@@ -662,6 +678,12 @@ class LifecycleTests(unittest.TestCase):
 
     def test_no_call_is_in_flight_between_tests(self):
         self.assertEqual(E.calls_in_flight(), 0)
+
+    def test_the_shutdown_parks_other_threads_and_lets_its_own_go_on(self):
+        run = subprocess.run([sys.executable, str(ROOT / "tests" / "engine_exit_child.py"), "barred"],
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        self.assertIn("barred ok", run.stdout)
 
     def test_the_interpreter_exits_cleanly_with_a_daemon_thread_inside_a_call(self):
         for mode in ("long", "short"):

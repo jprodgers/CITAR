@@ -7,13 +7,14 @@ aborts the process. ``citar._engine`` registers ``shutdown`` with atexit so no t
 tests/test_engine_module.py runs it with the interpreter it runs under, and CI's interpreter-exit job on each Python
 version; it needs only ``citar._engine`` (built by ``cargo xtask develop`` or unpacked into ``citar/``).
 
-    python tests/engine_exit_child.py long|short [--unguarded]
+    python tests/engine_exit_child.py long|short|barred [--unguarded]
 
 ``long``: the thread is inside one long drive (a whole game in a call) when the interpreter exits; ``short``: it drives
 one seat per call, so it is as likely to be between calls, or entering one, as inside one. Finalization releases the
 GIL for a moment (an object whose ``__del__`` sleeps, as a closing log handler or socket may), which is when a waiting
 thread would re-attach. ``--unguarded`` takes the atexit hook away, to show what it guards against. Prints ``exiting``
-and exits 0; anything else is a failure.
+and exits 0; anything else is a failure. ``barred`` calls ``shutdown`` itself and checks the mechanism: a call another
+thread then makes parks that thread for good, while this thread's calls go on; it prints ``barred ok``.
 """
 import atexit
 import json
@@ -52,8 +53,30 @@ class _SlowToGo:
         self.sleep(0.2)
 
 
+def _barred() -> int:
+    """shutdown with nothing in flight returns True at once; afterwards another thread's call parks it (its game
+    never moves), and this thread's calls still answer."""
+    g = _game(1)
+    if not E.shutdown(1.0) or E.calls_in_flight() != 0:
+        print("shutdown did not finish with nothing in flight")
+        return 1
+    t = threading.Thread(target=g.drive, args=({p: E.Bot("idle") for p in range(4)}, 0), daemon=True)
+    t.start()
+    t.join(0.5)
+    if not t.is_alive() or g.turn != 1:
+        print("another thread's call was not parked")
+        return 1
+    if json.loads(g.summary())["turn"] != 1 or not E.Game.new(json.dumps({"seed": 2}).encode()).turn:
+        print("this thread's calls did not go on")
+        return 1
+    print("barred ok", flush=True)
+    return 0
+
+
 def main(argv: list) -> int:
     mode = argv[0] if argv else "long"
+    if mode == "barred":
+        return _barred()
     if "--unguarded" in argv:
         atexit.unregister(E.shutdown)
     seat_limit = 0 if mode == "long" else 1
