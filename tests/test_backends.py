@@ -1,7 +1,7 @@
 """The suite's backend markers are honest (crates/citar-engine/DESIGN.md P2.7.4).
 
 Every ``@python_engine_only`` names a successor that exists and runs on Rust: a rule script, a Rust test or a Python
-test that is not itself Python-engine-only. Every ``@rust_pending`` names a package still to come (2-09, 2-10 or
+test that is neither Python-engine-only nor pending, itself or through its class. Every ``@rust_pending`` names a package still to come (2-09, 2-10 or
 2-11), so a package that lands removes its markers, and none names a package that has. The markers are read from the
 test modules without running them.
 """
@@ -62,6 +62,20 @@ def _python_test(test_id: str):
     return None
 
 
+def successor_holds(successor: str, rust: set) -> bool:
+    """Whether a python_engine_only successor exists and runs on Rust: a rule script under tests/rules/, a function
+    of the crates (``rust``, the names), or a Python test that is neither Python-engine-only nor pending, itself or
+    through its class."""
+    if successor.endswith(".toml"):
+        return successor.startswith("tests/rules/") and (ROOT / successor).is_file()
+    if successor.startswith("tests."):
+        target = _python_test(successor)
+        cls = _python_test(successor.rsplit(".", 1)[0])
+        marks = {k for obj in (target, cls) for k, _ in getattr(obj, "_backend", ())}
+        return target is not None and not {"python_engine_only", "rust_pending"} & marks
+    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", successor) is not None and successor in rust
+
+
 class MarkerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -74,20 +88,8 @@ class MarkerTests(unittest.TestCase):
 
     def test_every_successor_exists_and_runs_on_rust(self):
         rust = _rust_test_names()
-        bad = []
-        for test_id, kind, successor in self.found:
-            if kind != "python_engine_only":
-                continue
-            if successor.endswith(".toml"):
-                ok = (ROOT / successor).is_file() and successor.startswith("tests/rules/")
-            elif successor.startswith("tests."):
-                target = _python_test(successor)
-                ok = target is not None and not any(k == "python_engine_only"
-                                                    for k, _ in getattr(target, "_backend", ()))
-            else:
-                ok = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", successor) is not None and successor in rust
-            if not ok:
-                bad.append(f"{test_id}: {successor}")
+        bad = [f"{test_id}: {successor}" for test_id, kind, successor in self.found
+               if kind == "python_engine_only" and not successor_holds(successor, rust)]
         self.assertEqual(bad, [], "python_engine_only successors that do not exist (or do not run on Rust)")
 
     def test_pending_names_a_package_to_come(self):
@@ -119,6 +121,16 @@ class MarkerTests(unittest.TestCase):
 
     def test_the_successor_finders_tell_real_from_missing(self):
         rust = _rust_test_names()
+        self.assertTrue(successor_holds("tests/rules/_selftest.toml", rust))
+        self.assertFalse(successor_holds("tests/rules/no_such_script.toml", rust))
+        self.assertFalse(successor_holds("tests/test_engine.py", rust), "a script lives in tests/rules")
+        self.assertTrue(successor_holds("arguments_are_coerced_as_python_coerced_them", rust))
+        self.assertFalse(successor_holds("no_such_rust_test_anywhere", rust))
+        self.assertTrue(successor_holds("tests.test_facade_games.SettingsTests.test_a_seats_difficulty_survives_a_save",
+                                        rust))
+        # a successor that does not run on Rust is none: one Python-engine-only, one pending (by its class)
+        self.assertFalse(successor_holds("tests.test_engine.HexTests.test_line_endpoints", rust))
+        self.assertFalse(successor_holds("tests.test_editor.MapTests.test_big_sizes_exist", rust))
         self.assertIn("arguments_are_coerced_as_python_coerced_them", rust)
         self.assertNotIn("no_such_rust_test_anywhere", rust)
         self.assertIsNotNone(_python_test("tests.test_backends.MarkerTests.test_pending_names_a_package_to_come"))
