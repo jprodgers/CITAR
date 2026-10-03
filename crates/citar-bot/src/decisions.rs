@@ -10,18 +10,28 @@
 //! technologies, policies, beliefs and great people, `[x, y]` for tiles, ids for cities and
 //! units, lists sorted as the recording sorted them.
 //!
-//! Stage 1 (package 2-01b) is the economy's: [`Question`]. Stages 2 and 3 (units and fighting,
-//! diplomacy) come with packages 2-03 and 2-05.
+//! Stage 1 (package 2-01b) is the economy's; stage 2 (package 2-03) the fighting's: the attack
+//! each unit would make and the war plan ([`Question`]). Stage 3 (diplomacy) comes with package
+//! 2-05.
+//!
+//! The recorder readied every unit it asked about the attack of (the `ready_unit` test
+//! operation: its full movement, no orders, no attack made this turn), since a state saved at the
+//! start of one civilization's turn holds the others' units spent. [`ask`] reads the game as it
+//! is, so a caller that compares with the recording readies [`fighters`] first, as refcheck does
+//! on a copy of the game.
 
 use std::sync::{Arc, OnceLock};
 
-use citar_engine::base::ids::{PlayerId, TileIdx};
+use citar_engine::base::ids::{PlayerId, TileIdx, UnitId};
 use citar_engine::game::Game;
+use citar_engine::game::advisor::is_army;
 use citar_engine::game::diplomacy::category::Category;
 use citar_engine::game::religion::found::can_found_pantheon;
+use citar_engine::rules::defs::Domain;
 use serde_json::{Map, Value, json};
 
 use crate::basic1::context::{self, Context, city_defense, in_danger, needs_garrison};
+use crate::basic1::units::{attack, war_plan};
 use crate::basic1::{Seat, empire, gold, research};
 use crate::memory::Memory;
 use crate::owners::Owner;
@@ -29,7 +39,7 @@ use crate::params::{Overrides, Tuning};
 use crate::versions::VersionId;
 use crate::{BotSpec, clean};
 
-/// A question of stage 1, as `bot_dump.py` names its kind.
+/// A question of stage 1 or 2, as `bot_dump.py` names its kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Question {
     /// `BasicBot.context`: the army target, the unit supply, gold per turn, happiness, the era,
@@ -51,11 +61,18 @@ pub enum Question {
     Sites,
     /// `_spare_units`, in order.
     Spare,
+    /// For each of [`fighters`], by id, the tile `_attack_best` would attack, or null; with no
+    /// war plan, so no siege city is preferred.
+    Attacks,
+    /// At war with a major civilization, `_war_target`'s plan from none: the city and the rally
+    /// point, whether the army advances and whether the siege is ready; null in peace or with no
+    /// target.
+    WarTarget,
 }
 
 impl Question {
-    /// Every question of stage 1, in `bot_dump.py`'s order.
-    pub const ALL: [Self; 7] = [
+    /// Every question of stages 1 and 2, in `bot_dump.py`'s order.
+    pub const ALL: [Self; 9] = [
         Self::Context,
         Self::TechValues,
         Self::NextResearch,
@@ -63,6 +80,8 @@ impl Question {
         Self::Cities,
         Self::Sites,
         Self::Spare,
+        Self::Attacks,
+        Self::WarTarget,
     ];
 
     /// Its kind's name in the recording.
@@ -76,6 +95,8 @@ impl Question {
             Self::Cities => "cities",
             Self::Sites => "sites",
             Self::Spare => "spare",
+            Self::Attacks => "attacks",
+            Self::WarTarget => "war_target",
         }
     }
 
@@ -116,13 +137,30 @@ fn with_seat<T>(
     g: &Game,
     pid: PlayerId,
     spec: &BotSpec,
-    f: impl FnOnce(&Seat<'_>, &Context) -> T,
+    f: impl FnOnce(&mut Seat<'_>, &Context) -> T,
 ) -> T {
     let resolved = spec.tuning.resolved(g.rules());
     let mut memory = Memory::default();
-    let seat = Seat::new(spec, &resolved, &mut memory);
+    let mut seat = Seat::new(spec, &resolved, &mut memory);
     let ctx = context::build(g, pid, &seat);
-    f(&seat, &ctx)
+    f(&mut seat, &ctx)
+}
+
+/// The units whose attack [`Question::Attacks`] asks about, by id: `pid`'s military units on
+/// land or at sea, but scouts (`bot_dump.py`'s `fighters`).
+#[must_use]
+pub fn fighters(g: &Game, pid: PlayerId) -> Vec<UnitId> {
+    let r = g.rules();
+    let mut out: Vec<UnitId> = g
+        .player_units(pid)
+        .filter(|u| {
+            let d = &r.base_units()[u.base];
+            is_army(g, u.base) && matches!(d.domain, Domain::Land | Domain::Water)
+        })
+        .map(|u| u.id())
+        .collect();
+    out.sort();
+    out
 }
 
 /// The answer of `q` for major `pid` of `g`, in the recording's shape.
@@ -208,6 +246,29 @@ pub fn ask(g: &Game, pid: PlayerId, q: Question) -> Value {
         }),
         Question::Spare => with_seat(g, pid, plain, |s, ctx| {
             json!(gold::spare_units(g, pid, s, ctx).iter().map(|u| u.get()).collect::<Vec<_>>())
+        }),
+        Question::Attacks => with_seat(g, pid, plain, |s, _| {
+            let rows: Vec<Value> = fighters(g, pid)
+                .into_iter()
+                .map(|u| {
+                    let target = attack::best_target(g, pid, s, u).map(|t| xy(g, t));
+                    json!({"unit": u.get(), "target": target})
+                })
+                .collect();
+            Value::Array(rows)
+        }),
+        Question::WarTarget => with_seat(g, pid, plain, |s, ctx| {
+            if ctx.wars.is_empty() || ctx.cities.is_empty() {
+                return Value::Null;
+            }
+            war_plan::war_target(g, pid, s, ctx).map_or(Value::Null, |plan| {
+                json!({
+                    "city": xy(g, plan.city),
+                    "rally": plan.rally.map(|t| xy(g, t)),
+                    "advance": plan.advance,
+                    "siege_ready": plan.siege_ready,
+                })
+            })
         }),
     }
 }

@@ -1,5 +1,6 @@
-//! The `bot_decisions` group (DESIGN.md P2.3.11, package 2-01b): the bot's deterministic
-//! sub-decisions on each state, the values of stage 1 compared with what the Python bot gave.
+//! The `bot_decisions` group (DESIGN.md P2.3.11, packages 2-01b and 2-03): the bot's
+//! deterministic sub-decisions on each state, the values of stage 1 compared with what the
+//! Python bot gave.
 //!
 //! `scripts/refcheck/bot_dump.py` recorded them from a fresh `BasicBot(seed=0)` with
 //! `tech_noise` 0, its tool calls recorded instead of made, for every living major: the 12
@@ -10,16 +11,19 @@
 //! happiness, era, wars, offense, exposed cities, luxuries owned, resources waiting for an
 //! improvement, the enemies seen and the military), every tech value in both modes, and each
 //! city's threat and defence. The choices (the research, policy, great person and pantheon
-//! picks, the danger and garrison flags, the sites, the spare units) are agreement rates, which
-//! `cargo refcheck bot-agreement` reports ([`crate::agreement`]); a choice that differs is no
-//! difference here. The Rust side is `citar_bot::decisions::ask` of the same bot.
+//! picks, the danger and garrison flags, the sites, the spare units; stage 2's attacks and war
+//! targets) are agreement rates, which `cargo refcheck bot-agreement` reports
+//! ([`crate::agreement`]); a choice that differs is no difference here. The Rust side is
+//! `citar_bot::decisions::ask` of the same bot ([`ask_recorded`]). Stage 2 records no value of
+//! its own: what an attack weighs is the combat preview, which `combat_previews` compares.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use citar_bot::decisions::{Question, ask};
+use citar_bot::decisions::{Question, ask, fighters};
+use citar_engine::api::testops;
 use citar_engine::base::ids::PlayerId;
 use citar_engine::game::Game;
 use serde_json::{Map, Value, json};
@@ -101,6 +105,27 @@ pub fn recorded(root: &Path, case: &str, turn: u32) -> Result<Arc<Vec<Value>>, A
          scripts/refcheck/bot_dump.py and name the file in {ENV}",
         tried.join(", ")
     )))
+}
+
+/// The Rust bot's answer to question `q` of major `pid` on `g`, asked as `bot_dump.py` asked it:
+/// for the attacks, each of the civilization's [`fighters`] readied first (the `ready_unit` test
+/// operation, on a copy of the game: its full movement, no orders, no attack made this turn),
+/// since a state saved at one civilization's turn holds the others' units spent.
+#[must_use]
+pub fn ask_recorded(g: &Game, pid: PlayerId, q: Question) -> Value {
+    if q != Question::Attacks {
+        return ask(g, pid, q);
+    }
+    let ops: Vec<Value> =
+        fighters(g, pid).iter().map(|u| json!({"op": "ready_unit", "unit": u.get()})).collect();
+    if ops.is_empty() {
+        return ask(g, pid, q);
+    }
+    let mut ready = g.clone();
+    match testops::apply(&mut ready, &Value::Array(ops)) {
+        Ok(_) => ask(&ready, pid, q),
+        Err(e) => json!({"error": format!("the units did not ready: {}", e.message)}),
+    }
 }
 
 /// A major's id in a recorded row.

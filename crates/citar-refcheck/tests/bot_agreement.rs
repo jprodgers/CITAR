@@ -1,6 +1,6 @@
-//! The bot's choices against the Python bot's on the committed states (package 2-01b, gate 2;
-//! DESIGN.md P2.3.11): every kind of stage 1 at its floor of 95% over the items where either
-//! engine says something, and every miss with a cause. The values are refcheck's
+//! The bot's choices against the Python bot's on the committed states (packages 2-01b and 2-03,
+//! gates 2 and 1; DESIGN.md P2.3.11): every kind of stages 1 and 2 at its floor of 95% over the
+//! items where either engine says something, and every miss with a cause. The values are refcheck's
 //! `bot_decisions` group, which `cargo refcheck run` enforces. Recordings edited by hand show
 //! that a miss is found, that items are matched by what names them, and that a miss is put down
 //! to an intended entry only when the entry explains a value that choice weighs.
@@ -65,6 +65,8 @@ fn the_bot_chooses_as_pythons_did_on_the_committed_states() {
     assert_eq!(considered(Choice::Danger), 14);
     assert_eq!(considered(Choice::Sites), 29);
     assert_eq!(considered(Choice::Spare), 21);
+    assert_eq!(considered(Choice::Attacks), 19);
+    assert_eq!(considered(Choice::WarTarget), 8);
     holds(&committed(), "the committed states");
 }
 
@@ -93,6 +95,8 @@ fn state(name: &str) -> (Game, Vec<Value>) {
 }
 
 const DUEL: &str = "duel-continents-normal/t50";
+/// A state of a war: both civilizations name a war target, and units of each would attack.
+const WAR: &str = "scenario-duel-fractal/t10";
 /// A state of the intended entry `marble-bonus-in-its-own-city`: player 2's potential values of
 /// the four technologies it names differ, as the group's run shows; player 3's do not.
 const MARBLE: &str = "scenario-small-continents-s3001/t61";
@@ -269,4 +273,69 @@ fn an_answer_that_says_nothing_on_both_sides_is_not_counted() {
     // Nobody holds a free technology at turn 50: asked of both, considered for neither.
     assert_eq!((t.asked, t.considered), (4, 0));
     assert_eq!(t.rate().to_bits(), 1f64.to_bits());
+}
+
+#[test]
+fn attacks_are_matched_by_unit_and_a_war_target_weighs_the_wars_and_the_army() {
+    let (g, rows) = state(WAR);
+    let (tallies, misses) = agreement::compare_state(&g, WAR, &rows, &intended());
+    assert!(misses.is_empty(), "{misses:?}");
+    assert_eq!(tally(&tallies, Choice::WarTarget).considered, 2);
+    let attacking = tally(&tallies, Choice::Attacks);
+    assert_eq!(attacking.considered, 4, "{attacking:?}");
+    // The units in another order agree; a target Python's answer gives elsewhere is a miss of
+    // that unit, which nothing recorded explains.
+    let mut edited = rows.clone();
+    let r = row(&mut edited, 1);
+    let attacks = r["attacks"].as_array_mut().expect("the attacks");
+    attacks.reverse();
+    let (_, misses) = agreement::compare_state(&g, WAR, &edited, &intended());
+    assert!(misses.is_empty(), "{misses:?}");
+    let r = row(&mut edited, 1);
+    let first = r["attacks"]
+        .as_array_mut()
+        .expect("the attacks")
+        .iter_mut()
+        .find(|a| !a["target"].is_null())
+        .expect("an attack");
+    first["target"] = json!([0, 0]);
+    let key = format!("unit {}", first["unit"]);
+    let (_, misses) = agreement::compare_state(&g, WAR, &edited, &intended());
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert_eq!((misses[0].choice, misses[0].item.as_str()), (Choice::Attacks, key.as_str()));
+    assert_eq!(misses[0].cause, Cause::Unattributed);
+    // A war target that differs is put down to an entry explaining a difference in the army it
+    // counts; one in a value it does not weigh (the supply) explains nothing.
+    let list = Intended::parse(&format!(
+        r#"
+[[differences]]
+id = "an-army"
+reason = "a test's"
+broad = true
+where = [{{ group = "bot_decisions", path = "majors[*].context.military.**" }}]
+cases = ["{WAR}"]
+
+[[differences]]
+id = "a-supply"
+reason = "a test's"
+where = [{{ group = "bot_decisions", path = "majors[*].context.supply" }}]
+cases = ["{WAR}"]
+"#
+    ))
+    .expect("a list");
+    let mut edited = rows.clone();
+    let r = row(&mut edited, 0);
+    let advance = r["war_target"]["advance"].as_bool().expect("a plan");
+    r["war_target"]["advance"] = json!(!advance);
+    r["context"]["supply"] = json!(-7);
+    let (_, misses) = agreement::compare_state(&g, WAR, &edited, &list);
+    let war = of(&misses, Choice::WarTarget);
+    assert_eq!(war.len(), 1, "{misses:?}");
+    assert_eq!(war[0].cause, Cause::Unattributed);
+    let r = row(&mut edited, 0);
+    r["context"]["military"].as_array_mut().expect("the army").push(json!(99_999));
+    let (_, misses) = agreement::compare_state(&g, WAR, &edited, &list);
+    let war = of(&misses, Choice::WarTarget);
+    let Cause::Intended { ids, .. } = &war[0].cause else { panic!("{misses:?}") };
+    assert_eq!(ids, &["an-army".to_owned()]);
 }

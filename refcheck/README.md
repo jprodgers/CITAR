@@ -310,7 +310,7 @@ rate, the items saying something of those asked (`CHOICES` in the script). Advic
 differs from advice without one only in `deal_value`, the bot's `evaluate` of the proposal, rounded, which
 `deal_checks`' `bot_value` holds.
 
-**Checking the Rust bot** (package 2-01b, stage 1):
+**Checking the Rust bot** (packages 2-01b and 2-03, stages 1 and 2):
 
 ```
 cargo refcheck run --groups bot_decisions            # the values, on the committed states (enforced)
@@ -336,6 +336,15 @@ pantheon and the sites weigh no recorded value, so nothing explains their misses
 entry explains, which the group's own run reports. At package 2-01b every stage-1 kind agrees on every item
 considered, on the committed states and on the corpus (zero misses), and the group has no unexplained
 difference on either.
+
+Stage 2 (package 2-03) adds two choices and no value. `attacks` is matched unit by unit (`unit <id>`):
+`bot-agreement` readies the civilization's military land and sea units but scouts first, on a copy of the
+game, with the `ready_unit` test operation the recorder used (refcheck builds the engine with its test
+operations for it), and asks each unit's best attack with no war plan. An attack weighs the combat
+preview, which the `combat_previews` group compares, and no value of this group, so nothing here explains
+its misses. `war_target` compares the whole plan (the city, the rally point, `advance`, `siege_ready`)
+made from none; it weighs the civilization's wars and its military. At package 2-03 both agree on every
+item considered: 19 attacks and 8 war targets on the committed states, 675 and 151 on the corpus.
 
 ## The statistical baseline
 
