@@ -1,0 +1,104 @@
+about = """
+Free picks are the engine's to make only for a civilization whose free picks are automatic: a free
+technology (the Great Library's) and a free great person (Liberty's) are chosen for it at once, and
+otherwise wait for the civilization to choose them.
+"""
+from = "tests/test_controllers.py::AutoDecisionTests::test_free_picks_are_made_only_when_they_are_automatic, test_free_great_people_are_chosen_only_when_picks_are_automatic"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "grant_tech", player = 0, tech = "Writing" },
+]
+as = "made"
+
+[[step]]
+op = "set_auto"
+args = { player = 0, decision = "free_picks", on = true }
+
+[[step]]
+note = "Agriculture, and Writing with what it needs"
+check = { what = "player", player = 0 }
+path = "techs"
+len = 3
+
+[[step]]
+tool = "set_production"
+player = 0
+args = { city_id = "=made[0].city_id", item = "The Great Library" }
+
+[[step]]
+op = "complete_construction"
+args = { city = "=made[0].city_id" }
+
+[[step]]
+note = "Automatic: the free technology is chosen at once."
+check = { what = "player", player = 0 }
+subset = { free_techs = 0 }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "techs"
+len = 4
+
+[[step]]
+op = "adopt_policy"
+args = { player = 0, policies = ["Republic", "Citizenship", "Collective Rule", "Representation", "Meritocracy"] }
+
+[[step]]
+check = { what = "great_people", player = 0 }
+subset = { free = 0 }
+
+[[step]]
+note = "The engine's choice for a civilization with no bot's preferences: a Great Scientist."
+check = { what = "units", player = 0 }
+any = { subset = { type = "Great Scientist" } }
+
+[[step]]
+note = "Not automatic: the same wonder leaves the pick to the civilization."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "grant_tech", player = 0, tech = "Writing" },
+]
+as = "made"
+
+[[step]]
+op = "set_auto"
+args = { player = 0, decision = "free_picks", on = false }
+
+[[step]]
+note = "Agriculture, and Writing with what it needs"
+check = { what = "player", player = 0 }
+path = "techs"
+len = 3
+
+[[step]]
+tool = "set_production"
+player = 0
+args = { city_id = "=made[0].city_id", item = "The Great Library" }
+
+[[step]]
+op = "complete_construction"
+args = { city = "=made[0].city_id" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { free_techs = 1 }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "techs"
+len = 3
+
+[[step]]
+op = "adopt_policy"
+args = { player = 0, policies = ["Republic", "Citizenship", "Collective Rule", "Representation", "Meritocracy"] }
+
+[[step]]
+check = { what = "great_people", player = 0 }
+subset = { free = 1 }
