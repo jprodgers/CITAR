@@ -298,7 +298,7 @@ class ParityTests(unittest.TestCase):
                 call()
         self.assertIs(PY.BackendError, RS.BackendError)
         with self.assertRaises(RS.BackendError):
-            RS.EngineGame.new(dict(DUEL)).python_game
+            _ = RS.EngineGame.new(dict(DUEL)).python_game
 
 
 @unittest.skipIf(RS is None, "citar._engine is not built (cargo xtask develop)")
@@ -316,7 +316,9 @@ class BehaviourTests(unittest.TestCase):
                 g.close_negotiation(trade["id"], "expired", "(no reply in time)")   # one chat a pair at a time
                 talk = g.negotiation(g.open_negotiation_as(1, 0, "Hello there.")["negotiation_id"])
                 bot = B.bot_instance("basic", seed=1)
-                owns = lambda: (B.bot_owns_negotiation(bot, trade), B.bot_owns_negotiation(bot, talk))  # noqa: E731
+
+                def owns(B=B, bot=bot, trade=trade, talk=talk):
+                    return B.bot_owns_negotiation(bot, trade), B.bot_owns_negotiation(bot, talk)
                 self.assertEqual(owns(), (True, True))
                 B.bot_set_diplomacy(bot, {"trades": "llm"})
                 self.assertEqual(owns(), (False, True))
