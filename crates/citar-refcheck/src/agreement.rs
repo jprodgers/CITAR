@@ -1,11 +1,13 @@
-//! `cargo refcheck bot-agreement` (DESIGN.md P2.3.11 point 3, package 2-01b): how often the Rust
-//! bot makes the choices the Python bot made on the reference states, per kind of choice.
+//! `cargo refcheck bot-agreement` (DESIGN.md P2.3.11 point 3, packages 2-01b and 2-03): how often
+//! the Rust bot makes the choices the Python bot made on the reference states, per kind of
+//! choice.
 //!
 //! The values of the bot's sub-decisions (tech values, threats, defences, the turn's context)
 //! are refcheck's `bot_decisions` group, compared within its tolerance. Its choices are rates
 //! here: which technology it researches, which policy, great person and pantheon it takes, now
 //! and as if it could, which cities it counts in danger or wanting a garrison, its best three
-//! sites, its spare units. A choice counts only on the items where either engine's answer says
+//! sites, its spare units; what each of its units would attack, and the city its war is fought
+//! for with the plan around it. A choice counts only on the items where either engine's answer says
 //! something (a choice that is not null, a list that is not empty, a flag that is true), so a
 //! port that never answers cannot pass; `bot_dump.py`'s `CHOICES` named the same items. The
 //! items are matched by what names them (a tech mode, a city's id), never by their place in the
@@ -23,13 +25,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use citar_bot::decisions::{Question, ask};
+use citar_bot::decisions::Question;
 use citar_engine::game::Game;
 use citar_engine::rules::Ruleset;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
-use crate::answer::bot_decisions::{answer_row, player, raised, recorded, values_of};
+use crate::answer::bot_decisions::{answer_row, ask_recorded, player, raised, recorded, values_of};
 use crate::compare::{self, CompareSpec, Diff, Options, Pattern};
 use crate::fixture::{self, Fixture, FixtureRef, FixtureSet};
 use crate::intended::Intended;
@@ -62,6 +64,11 @@ pub enum Choice {
     Sites,
     /// The spare units, in order.
     Spare,
+    /// Per unit: the tile it would attack.
+    Attacks,
+    /// The war plan: its city and rally point, whether the army advances, whether the siege is
+    /// ready.
+    WarTarget,
 }
 
 /// One item a choice is compared on: the name that matches it across the engines (and that the
@@ -75,8 +82,8 @@ struct Item {
 }
 
 impl Choice {
-    /// Every kind of stage 1, in `bot_dump.py`'s `CHOICES` order.
-    pub const ALL: [Self; 13] = [
+    /// Every kind of stages 1 and 2, in `bot_dump.py`'s `CHOICES` order.
+    pub const ALL: [Self; 15] = [
         Self::NextResearch,
         Self::FreeNow,
         Self::PreferredFree,
@@ -90,6 +97,8 @@ impl Choice {
         Self::Garrison,
         Self::Sites,
         Self::Spare,
+        Self::Attacks,
+        Self::WarTarget,
     ];
 
     /// Its name, as `bot_dump.py` printed it.
@@ -108,6 +117,8 @@ impl Choice {
             Self::Garrison => "cities.garrison",
             Self::Sites => "sites (top 3 as a set)",
             Self::Spare => "spare",
+            Self::Attacks => "attacks",
+            Self::WarTarget => "war_target",
         }
     }
 
@@ -124,6 +135,8 @@ impl Choice {
             Self::Danger | Self::Garrison => Question::Cities,
             Self::Sites => Question::Sites,
             Self::Spare => Question::Spare,
+            Self::Attacks => Question::Attacks,
+            Self::WarTarget => Question::WarTarget,
         }
     }
 
@@ -138,8 +151,11 @@ impl Choice {
     /// - A city's danger compares its threat with its defence (869-871); a garrison is wanted
     ///   in the exposed cities (865-867); the spare units are the military outside the
     ///   threatened cities (1739-1766). A city only one engine has is a place of each.
+    /// - The war plan aims at the enemy cities nearest the civilization's own among its wars,
+    ///   and the army it counts gathered is its military (2291-2339).
     /// - The free technology (the most expensive available), the policy, the pantheon and the
-    ///   sites read no value the recording holds: no difference explains their misses.
+    ///   sites read no value the recording holds, nor does an attack, which weighs the combat
+    ///   preview (`combat_previews` compares it): no difference explains their misses.
     pub fn weighs(self, at: Option<&str>) -> Vec<String> {
         let city = |field: &str| at.map(|c| format!("majors[*].cities[city={c}]{field}"));
         let places: Vec<Option<String>> = match self {
@@ -154,13 +170,18 @@ impl Choice {
                 Some("majors[*].cities[*]".to_owned()),
                 Some("majors[*].cities[*].threat".to_owned()),
             ],
+            Self::WarTarget => vec![
+                Some("majors[*].context.wars.**".to_owned()),
+                Some("majors[*].context.military.**".to_owned()),
+            ],
             Self::FreeNow
             | Self::PreferredFree
             | Self::Policy
             | Self::PreferredPolicy
             | Self::Pantheon
             | Self::PreferredPantheon
-            | Self::Sites => Vec::new(),
+            | Self::Sites
+            | Self::Attacks => Vec::new(),
         };
         places.into_iter().flatten().collect()
     }
@@ -210,6 +231,17 @@ impl Choice {
                 one(Value::Array(top))
             }
             Self::Spare => one(answer.clone()),
+            Self::Attacks => answer
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|a| Item {
+                    key: format!("unit {}", a["unit"]),
+                    at: Some(a["unit"].to_string()),
+                    choice: a.get("target").cloned().unwrap_or(Value::Null),
+                })
+                .collect(),
+            Self::WarTarget => one(answer.clone()),
         }
     }
 }
@@ -456,7 +488,7 @@ pub fn compare_state(
         for c in Choice::ALL {
             let q = c.question();
             let Some(py) = row.get(q.name()).filter(|v| !raised(v)) else { continue };
-            let rust = answers.entry(q).or_insert_with(|| ask(g, pid, q));
+            let rust = answers.entry(q).or_insert_with(|| ask_recorded(g, pid, q));
             let t = tallies.entry(c).or_default();
             for (item, p, x) in paired(c.items(py), c.items(rust)) {
                 t.asked += 1;

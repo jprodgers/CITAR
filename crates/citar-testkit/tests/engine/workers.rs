@@ -375,6 +375,18 @@ fn a_removal_learned_opens_the_tiles_of_its_feature() {
 }
 
 #[test]
+fn the_map_of_a_civilization_that_lost_its_last_city_is_checked_up_to_date() {
+    // The oracle asks a map about every tile of its civilization's land: with none left it asked
+    // nothing, so the map was not brought up to date, and the oracle took the land it had held
+    // for a map gone wrong (package 2-03's war games, a civilization taken out of its last city).
+    let (mut g, class) = job_game(&json!([]));
+    assert!(!jobs::map_jobs(&g, ME, class).is_empty());
+    ops(&mut g, &json!([{"op": "remove_city", "x": 5, "y": 5}]));
+    clean(&mut g);
+    assert_eq!(jobs::map_jobs(&g, ME, class), []);
+}
+
+#[test]
 fn a_luxury_improvement_replaced_is_a_job_again() {
     // Two sugar plantations, so the luxury stays owned when one goes: nothing better than a
     // plantation, then a trading post, which costs as much, standing where it stood.

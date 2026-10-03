@@ -162,6 +162,13 @@ pub struct HeresyPlan {
     pub action: UniqueId,
 }
 
+/// Whether a religion other than `r` has pressure in city `c`: what an inquisitor of `r` could
+/// clear out of it ([`plan_remove_heresy`]), and what a bot looks for to send one there.
+#[must_use]
+pub fn has_heresy(g: &Game, c: CityId, r: ReligionId) -> bool {
+    g.city(c).is_some_and(|x| x.pressures.iter().any(|&(k, _)| k.is_some_and(|k| k != r)))
+}
+
 /// Whether unit `u` may clear the other religions out of the city of its owner whose land it
 /// stands in (`religion.remove_heresy`'s checks, `religion.py:753-765`). Reads only.
 ///
@@ -181,7 +188,7 @@ pub fn plan_remove_heresy(g: &Game, u: UnitId) -> Result<HeresyPlan, ActionError
         .ok_or_else(|| {
             ActionError::rule("Inquisitors remove heresy in your own cities' territory.")
         })?;
-    if !city.pressures.iter().any(|&(k, _)| k.is_some_and(|k| k != r)) {
+    if !has_heresy(g, city.id(), r) {
         return Err(ActionError::rule(format!("There is no other religion in {}.", city.name)));
     }
     let Some(action) = usable_action(g, u, UniqueType::CanRemoveHeresy) else {

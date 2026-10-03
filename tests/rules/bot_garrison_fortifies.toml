@@ -4,7 +4,6 @@ to the nearest city with no garrison, within garrison_radius, and fortifies in i
 no empty city near heals where it stands.
 """
 from = "citar/bots/basic.py:1774-1775 (manage_units' garrisons), 2141-2198 (handle_military)"
-needs = "2-03"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

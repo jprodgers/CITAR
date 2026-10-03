@@ -4,6 +4,22 @@
 retries = 0
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# Whole-game tests that play several games on threads of their own count as that many test
+# threads, so that nextest does not run them over each other: the bots' war games and fixture
+# sweep fill every core, and the economy games (five games, and two) ran past their 300 s when
+# they shared the cores (package 2-03). Every profile reads the default profile's overrides.
+[[profile.default.overrides]]
+filter = 'binary_id(citar-testkit::bot) & test(/^bot::(war|sweep)::/)'
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
+filter = 'binary_id(citar-testkit::bot) & test(/^bot::economy::four_bots/)'
+threads-required = 5
+
+[[profile.default.overrides]]
+filter = 'binary_id(citar-testkit::bot) & test(/^bot::economy::a_bot_game_saved/)'
+threads-required = 2
+
 [profile.ci]
 # No retries: a test that passes on a second try is a determinism bug, not a flake.
 retries = 0

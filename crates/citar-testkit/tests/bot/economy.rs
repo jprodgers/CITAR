@@ -3,12 +3,12 @@
 //! baseline's map rotation (`refcheck/baseline/python/small.jsonl`: continents, pangaea,
 //! archipelago, inland sea, fractal; Quick, Prince), 150 rounds each, the five side by side.
 //!
-//! Units and fighting are package 2-03's and diplomacy 2-05's, so these bots expand, research
-//! and build, and fight and trade nothing; what is measured is the economy: at turn 100 the 20
-//! civilizations hold 2.8 cities on average and 85% of them two or more, know 17 technologies on
-//! average and each at least 12; each built a settler by turn 60; no tool is refused more than
-//! 50 times in one bot turn; and a game saved and loaded at round 75 plays on as the
-//! uninterrupted one.
+//! These bots play their units and fight (package 2-03), but with the barbarians off and no war
+//! declared until 2-05's diplomacy they fight little and trade nothing, so what is measured is
+//! the economy: at turn 100 the 20 civilizations hold 2.8 cities on average and 85% of them two
+//! or more, know 17 technologies on average and each at least 12; each built a settler by turn
+//! 60; no tool is refused more than 50 times in one bot turn; and a game saved and loaded at
+//! round 75 plays on as the uninterrupted one.
 //!
 //! A civilization whose landmass holds no expansion site has no settler to build: Python's bot
 //! (`expansion_sites`, basic.py:1080-1088) and its port settle only the landmass their cities
@@ -18,16 +18,14 @@
 //! civilization's sites stayed empty every round, and that there is at most one.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
-use citar_bot::{Bot, BotSpec, Overrides, Tuning, VersionId};
 use citar_engine::base::digest::Digest;
-use citar_engine::base::ids::{NegotiationId, PlayerId, Turn};
+use citar_engine::base::ids::{PlayerId, Turn};
 use citar_engine::game::advisor::{Advisor, AdvisorParams};
-use citar_engine::game::{DebugOptions, DriverOutcome, Game, SeatDriver};
+use citar_engine::game::{DebugOptions, Game};
 use citar_engine::state::chronicle::{EngineEvent, EventType};
 use citar_engine::state::cities::Constructible;
-use citar_engine::state::players::DriverMemory;
+use citar_testkit::bots::CountingBot;
 use citar_testkit::games;
 use serde_json::json;
 
@@ -36,54 +34,6 @@ const MAPS: [&str; 5] = ["continents", "pangaea", "archipelago", "inland_sea", "
 
 /// The rounds each game plays.
 const ROUNDS: u32 = 150;
-
-/// A `basic-1` seat at the defaults, built afresh for every drive step so that its refusals are
-/// one bot turn's: the most refusals of one tool in one call are kept.
-struct Counting {
-    spec: Arc<BotSpec>,
-    /// The most refusals of one tool in one turn, with the tool and the turn.
-    worst: (u32, &'static str, Turn),
-}
-
-impl Counting {
-    fn new() -> Self {
-        let tuning = Arc::new(Tuning::new(VersionId::Basic1, Overrides::default()));
-        Self {
-            spec: Arc::new(BotSpec::new(VersionId::Basic1, tuning, None, None)),
-            worst: (0, "", 0),
-        }
-    }
-
-    fn keep(&mut self, b: &Bot, turn: Turn) {
-        for (tool, _, refused) in b.refusals().iter() {
-            if refused > self.worst.0 {
-                self.worst = (refused, tool, turn);
-            }
-        }
-    }
-}
-
-impl SeatDriver for Counting {
-    fn play_turn(&mut self, g: &mut Game, pid: PlayerId, mem: &mut DriverMemory) -> DriverOutcome {
-        let mut b = Bot::new(Arc::clone(&self.spec));
-        let out = b.play_turn(g, pid, mem);
-        self.keep(&b, g.turn());
-        out
-    }
-
-    fn respond(
-        &mut self,
-        g: &mut Game,
-        pid: PlayerId,
-        nid: NegotiationId,
-        mem: &mut DriverMemory,
-    ) -> DriverOutcome {
-        let mut b = Bot::new(Arc::clone(&self.spec));
-        let out = b.respond(g, pid, nid, mem);
-        self.keep(&b, g.turn());
-        out
-    }
-}
 
 /// Game `i` of the run: the baseline's settings, with the barbarians off.
 fn game(i: u32) -> Game {
@@ -119,7 +69,8 @@ fn play(i: u32, reload: Option<u32>) -> Played {
     let mut g = game(i);
     let majors: Vec<u8> = g.majors(true).map(|p| p.id().0).collect();
     assert_eq!(majors.len(), 4, "game {i}");
-    let mut bots: Vec<Counting> = (0..g.state().players().len()).map(|_| Counting::new()).collect();
+    let mut bots: Vec<CountingBot> =
+        (0..g.state().players().len()).map(|_| CountingBot::basic1()).collect();
     let mut out = Played::default();
     let mut seen_events = 0u32;
     let mut chunks: Vec<Vec<u8>> = Vec::new();

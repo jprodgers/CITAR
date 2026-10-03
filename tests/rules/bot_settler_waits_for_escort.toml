@@ -4,7 +4,6 @@ near it, it waits in its city (and the city builds a defender) until the danger 
 out; with one, that unit escorts it and the two go to the site, where the city is founded.
 """
 from = "citar/bots/basic.py:1858-1925 (handle_settler's danger, _assign_escort, _follow)"
-needs = "2-03"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

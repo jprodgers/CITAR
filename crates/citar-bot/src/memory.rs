@@ -113,8 +113,10 @@ impl Memory {
     ///   (basic.py:1090);
     /// - retreat counts of 0, which read as no entry (basic.py:1867-1871 resets a count to 0).
     ///
-    /// War plans name players and tiles, which the war code weighs each turn (package 2-03), and
-    /// a settler's waiting tile is the advisor's to read, so they stay.
+    /// War plans name players and tiles, which the war code weighs each turn: it forgets a plan
+    /// whose city is no longer an enemy's as the units' turn starts (`units::war_plan`), and a
+    /// prepared war is diplomacy's (package 2-05). A settler's waiting tile is the advisor's to
+    /// read. So they stay.
     pub fn prune(&mut self, g: &Game, pid: PlayerId, blacklist_turns: i32, boat_retry_turns: i32) {
         let turn = g.turn();
         let ours_u = |u: UnitId| g.unit(u).is_some_and(|x| x.owner() == pid);

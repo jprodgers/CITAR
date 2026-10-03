@@ -3,7 +3,6 @@ A unit attacks only when the predicted exchange favours it: beside a full-streng
 warrior as strong as itself, a warrior holds; beside a wounded warrior it would likely kill, it attacks.
 """
 from = "citar/bots/basic.py:2096-2139 (_attack_best)"
-needs = "2-03"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
@@ -81,8 +80,12 @@ player = 0
 params = "=calm"
 
 [[step]]
-check = { what = "events", type = "combat" }
-len = 1
+note = """
+It attacked: a fight its target survives is a combat event, one it does not survive is the
+target's death. Which of the two the roll gives is the engine's draw, so the check takes either.
+"""
+check = { what = "events" }
+any = { path = "text", matches = "^Civilization 1's Warrior (attacked|destroyed) Civilization 2's Warrior at \\(13,8\\)" }
 
 [[step]]
 note = "It is wounded further, or dead."

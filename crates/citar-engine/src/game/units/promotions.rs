@@ -34,7 +34,8 @@ pub fn xp_for_next(g: &Game, u: UnitId) -> i32 {
 }
 
 /// Whether a promotion is free: `This Promotion is free`, whatever its conditionals.
-fn is_free(g: &Game, pr: PromotionId) -> bool {
+#[must_use]
+pub fn is_free(g: &Game, pr: PromotionId) -> bool {
     let r = g.rules();
     crate::game::core::has_type(r, &r.promotions()[pr].uniques, UniqueType::FreePromotion)
 }

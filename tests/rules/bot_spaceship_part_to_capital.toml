@@ -4,7 +4,6 @@ there. A great general parked in the capital is moved out of the way first, sinc
 civilian.
 """
 from = "citar/bots/basic.py:1960-1966 (handle_special), 2039-2052 (_clear_civilian_slot)"
-needs = "2-03"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

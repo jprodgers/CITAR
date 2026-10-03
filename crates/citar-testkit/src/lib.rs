@@ -4,6 +4,8 @@
 //! unit tests and doctests; that removes the dev-dependency cycle between the two (DESIGN.md 2.1).
 //!
 //! - [`agents`]: seat drivers for tests, `RandomAgent` among them (DESIGN.md 9.5);
+//! - [`bots`]: bot seats that count what each of their turns did, for the bots' whole games
+//!   (DESIGN.md P2.3.11);
 //! - [`calls`]: tool calls as models make them, right and wrong, for every tool of the registry;
 //! - [`chaos`]: the chaos driver of the `chaos` binary: random games with tool calls mixed in,
 //!   every step checked, each failure kept as a replay (DESIGN.md 9.5);
@@ -30,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agents;
+pub mod bots;
 pub mod calls;
 pub mod chaos;
 pub mod checks;

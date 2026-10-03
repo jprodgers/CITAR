@@ -4,7 +4,6 @@ close to firing range and bombard the city first: they act before the melee unit
 themselves at a city still at full strength.
 """
 from = "citar/bots/basic.py:1776 (ranged units first), 2156-2172 and 2212-2231 (handle_military), 2291-2339 (_war_target)"
-needs = "2-03"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

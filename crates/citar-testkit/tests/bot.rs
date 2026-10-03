@@ -12,5 +12,8 @@ mod bot {
     mod params;
     mod skeleton;
     mod streams;
+    mod sweep;
     mod turns;
+    mod units;
+    mod war;
 }

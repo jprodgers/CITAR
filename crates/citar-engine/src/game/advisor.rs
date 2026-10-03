@@ -896,8 +896,9 @@ fn expansion_sites(
 }
 
 /// Whether civilization `p` has seen a rival's city (`BasicBot._knows_rival_city`,
-/// `basic.py:1890-1894`).
-fn knows_rival_city(g: &Game, p: PlayerId) -> bool {
+/// `basic.py:1890-1894`). The bot's army reads it too, to go looking for one.
+#[must_use]
+pub fn knows_rival_city(g: &Game, p: PlayerId) -> bool {
     let Some(pl) = g.player(p) else { return false };
     g.state().cities().iter().any(|c| {
         c.owner() != p

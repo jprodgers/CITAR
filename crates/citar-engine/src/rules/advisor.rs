@@ -1,5 +1,5 @@
-//! The ruleset's names and uniques the production advisor reads (`bots/basic.py:642-655,
-//! 846-864, 1113-1590`), resolved once at load.
+//! The ruleset's names and uniques the production advisor and the bot read (`bots/basic.py:642-655,
+//! 846-864, 1113-1590, 2017`), resolved once at load.
 //!
 //! Python compared unit type names (`Scout`, `Siege`, `Mounted`, `Armored`) and a victory's
 //! (`Scientific`) at every choice, and looked each unit's and building's uniques up by type;
@@ -12,16 +12,20 @@ use crate::unique::index::{Extra, building_extra};
 use crate::unique::{SourceUniques, UniqueData, UniqueTable, UniqueType};
 
 const SCOUT: &str = "Scout";
+const CIVILIAN: &str = "Civilian";
 const SIEGE: &str = "Siege";
 const MOUNTED: &str = "Mounted";
 const ARMORED: &str = "Armored";
 const SCIENTIFIC: &str = "Scientific";
 
-/// What the production advisor reads of the ruleset.
+/// What the production advisor (and the bot beside it) reads of the ruleset.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AdvisorRules {
     /// The unit type of scouts (`_is_recon`, `basic.py:642-644`).
     pub scout: Option<UnitTypeId>,
+    /// The unit type of civilians: the great people the bot sends to build their great
+    /// improvement near the capital (`handle_special`, `basic.py:2017-2028`).
+    pub civilian: Option<UnitTypeId>,
     /// The unit type of siege units (`basic.py:1328, 1563-1566`).
     pub siege: Option<UnitTypeId>,
     /// The unit types that defend less well than they attack (`basic.py:1567`).
@@ -170,6 +174,7 @@ impl AdvisorRules {
             |name: &str| r.unit_types().iter().find(|(_, u)| &*u.name == name).map(|(id, _)| id);
         let mut out = Self {
             scout: unit_type(SCOUT),
+            civilian: unit_type(CIVILIAN),
             siege: unit_type(SIEGE),
             mounted: unit_type(MOUNTED),
             armored: unit_type(ARMORED),
