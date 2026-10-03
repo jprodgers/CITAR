@@ -34,6 +34,8 @@
 
 use core::cell::OnceCell;
 
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 use smallvec::SmallVec;
 
 use super::Game;
@@ -55,7 +57,8 @@ use crate::state::units::Activity;
 // ---- Parameters (basic.py:143-403) ----------------------------------------------------------
 
 /// How the advisor chooses (`prod_mode`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ProductionMode {
     /// UnCiv's `ConstructionAutomation`: every option valued, the best value per production
     /// left wins (`_choose_production_unciv`).
@@ -66,7 +69,8 @@ pub enum ProductionMode {
 }
 
 /// Which cities want a unit in them (`garrison_mode`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GarrisonMode {
     /// Every city.
     #[default]
@@ -77,10 +81,16 @@ pub enum GarrisonMode {
 
 /// The advisor's parameters: the live bot's that its production reads (`basic.py:PARAM_GROUPS`),
 /// with their defaults. Integers stay integers, as Python compared and counted with them.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// A bot reads them from its effective parameter map ([`from_map`](Self::from_map), DESIGN.md
+/// P2.3.2): each field by the key of the same name, which `basic-1`'s schema types as the field
+/// is typed (`f64` a `float`, the integers an `int`, the modes a `choice`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[allow(missing_docs, reason = "each is the live bot's parameter of the same name")]
 pub struct AdvisorParams {
-    /// Army size and willingness to fight, 0 to 1 (`BasicBot(aggression=...)`).
+    /// Army size and willingness to fight, 0 to 1 (`BasicBot(aggression=...)`): the seat's, not
+    /// a parameter, so never read from the map.
+    #[serde(skip)]
     pub aggression: f64,
     pub prod_mode: ProductionMode,
     // Building value (UnCiv mode).
@@ -112,6 +122,7 @@ pub struct AdvisorParams {
     pub u_victory_building: f64,
     // Build priorities (UnCiv mode).
     pub u_settler: f64,
+    #[serde(deserialize_with = "non_negative_u32")]
     pub settler_site_range: u32,
     pub settler_per_cities: i32,
     pub settler_min_pop: i32,
@@ -125,6 +136,7 @@ pub struct AdvisorParams {
     pub worker_count_offset: f64,
     pub worker_unimproved: f64,
     pub u_boat: f64,
+    #[serde(deserialize_with = "non_negative_u32")]
     pub boat_search_radius: u32,
     pub u_scout: f64,
     pub scout_until_turn: i32,
@@ -206,11 +218,16 @@ pub struct AdvisorParams {
     // Expansion.
     pub site_min_score: f64,
     pub site_new_lux: f64,
+    #[serde(deserialize_with = "non_negative_u32")]
     pub site_lux_radius: u32,
     pub site_distance_cost: f64,
+    #[serde(deserialize_with = "non_negative_u32")]
     pub site_radius: u32,
+    #[serde(deserialize_with = "non_negative_u32")]
     pub site_min_distance: u32,
+    #[serde(deserialize_with = "non_negative_u32")]
     pub site_spacing: u32,
+    #[serde(deserialize_with = "non_negative_usize")]
     pub site_candidates: usize,
     pub target_cities: i32,
     // Army.
@@ -229,13 +246,17 @@ pub struct AdvisorParams {
     pub unit_mobile_defensive: f64,
     pub unit_cost_exp: f64,
     // Tactics.
+    #[serde(deserialize_with = "non_negative_u32")]
     pub threat_radius: u32,
+    #[serde(deserialize_with = "non_negative_u32")]
     pub threat_near_dist: u32,
     pub threat_near_weight: f64,
     pub threat_far_weight: f64,
     pub garrison_mode: GarrisonMode,
+    #[serde(deserialize_with = "non_negative_u32")]
     pub garrison_exposed_radius: u32,
     // Research.
+    #[serde(deserialize_with = "non_negative_usize")]
     pub tech_space_era: usize,
 }
 
@@ -395,7 +416,34 @@ impl Default for AdvisorParams {
     }
 }
 
+/// A count or a radius the schema types `int` and the advisor holds unsigned: a negative
+/// value, which no editor offers (the schema's `min` is 0 or more), reads as 0, the least the
+/// advisor can do with it, where Python's ranges and `within` over it came out empty.
+fn non_negative_u32<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let n = i64::deserialize(d)?;
+    Ok(u32::try_from(n.max(0)).unwrap_or(u32::MAX))
+}
+
+/// [`non_negative_u32`] for the counts the advisor holds as `usize`.
+fn non_negative_usize<'de, D: Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+    let n = i64::deserialize(d)?;
+    Ok(usize::try_from(n.max(0)).unwrap_or(usize::MAX))
+}
+
 impl AdvisorParams {
+    /// The parameters a bot's effective parameter map gives (a JSON object: `basic-1`'s
+    /// defaults overlaid with a profile's overrides, DESIGN.md P2.3.2), with `aggression`, the
+    /// seat's. Every field but `aggression` is read by its key, which must be there; the keys
+    /// production does not read are ignored.
+    ///
+    /// # Errors
+    /// A key missing, or a value of another type than its field's.
+    pub fn from_map(map: &Value, aggression: f64) -> Result<Self, serde_json::Error> {
+        let mut p = Self::deserialize(map)?;
+        p.aggression = aggression;
+        Ok(p)
+    }
+
     /// What automatic production asks with: the live bot's defaults at aggression 0.25
     /// (`BasicBot(aggression=0.25, seed=city.id)`, `cities.py:1699`).
     #[must_use]
