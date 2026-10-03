@@ -23,6 +23,8 @@ on:
       - "citar/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.
       - "citar/__init__.py"
+      # The interpreter-exit job's check.
+      - "tests/engine_exit_child.py"
       - ".github/workflows/rust.yml"
   pull_request:
     paths:
@@ -39,6 +41,8 @@ on:
       - "citar/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.
       - "citar/__init__.py"
+      # The interpreter-exit job's check.
+      - "tests/engine_exit_child.py"
       - ".github/workflows/rust.yml"
   workflow_dispatch:
     inputs:
@@ -189,6 +193,52 @@ jobs:
           name: chaos-replays-${{ matrix.os }}
           path: chaos-replays
           if-no-files-found: ignore
+
+  interpreter-exit:
+    # DESIGN.md P2.6.4 (2-06a's gate 5): the interpreter exits while a daemon thread is inside a
+    # call to citar._engine, on each Python from 3.11, and the process must exit 0 with no call
+    # left in flight. tests/engine_exit_child.py says how it checks. One abi3 build serves every
+    # version. 2-06b moves this job into test.yml, onto its build-ext wheel.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: exit
+
+      - uses: actions/setup-python@v7
+        # Every version is installed; the last is the default, which PyO3 builds against.
+        with:
+          python-version: |
+            3.11
+            3.12
+            3.13
+            3.14
+
+      - name: Build the extension
+        # As 2-06b's build-ext job and `cargo xtask develop` build it.
+        run: cargo build -p citar-py --features test-ops --locked --profile ci
+
+      - name: Exit mid-drive on each Python
+        # The extension only, on CITAR_EXT_DIR (citar/__init__.py puts it first on the path).
+        run: |
+          set -u
+          ext="$RUNNER_TEMP/citar-ext"
+          mkdir -p "$ext"
+          cp target/ci/lib_engine.so "$ext/_engine.abi3.so"
+          export CITAR_EXT_DIR="$ext"
+          failed=0
+          for v in 3.11 3.12 3.13 3.14; do
+            echo "::group::Python $v"
+            "python$v" --version
+            "python$v" tests/engine_exit_child.py check || { failed=1; echo "::error::the check failed on Python $v"; }
+            echo "::endgroup::"
+          done
+          exit $failed
 
   refcheck:
     runs-on: ubuntu-latest
