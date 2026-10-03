@@ -12,9 +12,10 @@ loads in every Python from 3.11, so the three Linux versions share one build.
 files are a copy of the checkout's. Any other ``_engine`` library already in ``citar/`` is removed first, so an
 older build with another file name can never be the one Python imports. The library's suffix must be one this
 interpreter loads (``importlib.machinery.EXTENSION_SUFFIXES``), which tells a Windows wheel from a Linux or macOS
-one; the import below catches the rest. Last, a fresh interpreter imports it from the checkout and prints its build; ``--test-ops`` also requires
-the test operations, which the suite's engine tests need: without them those tests are skipped, and a test job
-that skipped them would pass having tested nothing of the engine.
+one; the import catches the rest. Last, a fresh interpreter imports it from the checkout and prints its build;
+``--test-ops`` also requires the test operations, which the suite's engine tests need: without them those tests
+are skipped, and a test job that skipped them would pass having tested nothing of the engine. A library that fails
+this check is removed again.
 
 Exit status 0 when the library is in place and imports, 1 when not (with the reason), 2 for a usage error.
 """
@@ -89,14 +90,31 @@ def check_import(root: Path = ROOT, test_ops: bool = False) -> str:
     code = ("import json, sys, citar._engine as E\n"
             "print(json.loads(E.build_info())['label'], E.__file__, E.HAS_TEST_OPS)\n"
             f"sys.exit(0 if E.HAS_TEST_OPS or not {test_ops!r} else 3)\n")
-    # The checkout's citar, not a dev loop's library: CITAR_EXT_DIR would put another folder first.
+    # The checkout's library, not a dev loop's: CITAR_EXT_DIR would put another folder first, and a dev venv's
+    # citar-dev.pth sets it at startup, so the check runs without the site hook (-S) as well as without the variable.
+    # The import needs nothing outside the standard library.
     env = {k: v for k, v in os.environ.items() if k != "CITAR_EXT_DIR"}
-    done = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True)
+    done = subprocess.run([sys.executable, "-S", "-c", code], cwd=root, env=env, capture_output=True, text=True)
     if done.returncode == 3:
         raise Refused(f"the extension was built without the test operations: {done.stdout.strip()}")
     if done.returncode != 0:
         raise Refused(f"the extension does not import: {(done.stdout + done.stderr).strip()}")
     return done.stdout.strip()
+
+
+def install(where: Path, test_ops: bool = False, package: Path = PACKAGE) -> tuple[Path, Path, str]:
+    """Unpack the wheel ``where`` names into ``package`` and import it: the wheel, the library and its build.
+
+    A library that does not pass is removed again, so a refusal never leaves a build in place that the next import
+    would pick up."""
+    wheel = find_wheel(where)
+    target = unpack(wheel, package)
+    try:
+        build = check_import(package.parent, test_ops)
+    except Refused:
+        target.unlink(missing_ok=True)
+        raise
+    return wheel, target, build
 
 
 def main(argv=None) -> int:
@@ -105,9 +123,7 @@ def main(argv=None) -> int:
     parser.add_argument("--test-ops", action="store_true", help="require the engine's test operations")
     args = parser.parse_args(argv)
     try:
-        wheel = find_wheel(args.wheel)
-        target = unpack(wheel)
-        build = check_import(test_ops=args.test_ops)
+        wheel, target, build = install(args.wheel, args.test_ops)
     except Refused as e:
         print(f"unpack_ext: {e}", file=sys.stderr)
         return 1

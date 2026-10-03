@@ -89,6 +89,34 @@ class UnpackExt(unittest.TestCase):
         with self.assertRaisesRegex(unpack_ext.Refused, "no such"):
             unpack_ext.find_wheel(self.tmp / "missing")
 
+    def test_a_library_that_does_not_import_is_refused_and_removed(self):
+        # A real interpreter, in a checkout of its own whose citar package holds the wheel's library: bytes that are no
+        # library fail the import, and the refusal takes the file away again.
+        (self.package / "__init__.py").write_text("")
+        w = wheel(self.tmp, {f"citar/_engine{HERE}": b"not a library"})
+        with self.assertRaisesRegex(unpack_ext.Refused, "does not import"):
+            unpack_ext.install(w, package=self.package)
+        self.assertEqual(sorted(p.name for p in self.package.iterdir()), ["__init__.py"])
+
+    def test_the_import_check_decides_and_hears_test_ops(self):
+        w = wheel(self.tmp, {f"citar/_engine{HERE}": b"lib"})
+        calls = []
+        original = unpack_ext.check_import
+        self.addCleanup(setattr, unpack_ext, "check_import", original)
+
+        def refuse(root, test_ops):
+            calls.append((root, test_ops))
+            raise unpack_ext.Refused("the extension was built without the test operations")
+
+        unpack_ext.check_import = refuse
+        with self.assertRaises(unpack_ext.Refused):
+            unpack_ext.install(w, test_ops=True, package=self.package)
+        self.assertEqual(calls, [(self.tmp, True)])
+        self.assertEqual(list(self.package.iterdir()), [])
+        unpack_ext.check_import = lambda root, test_ops: "label path True"
+        self.assertEqual(unpack_ext.install(w, package=self.package),
+                         (w, self.package / f"_engine{HERE}", "label path True"))
+
     def test_a_usage_error_and_a_refusal_exit_with_their_codes(self):
         import contextlib
         import io
