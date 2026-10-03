@@ -354,6 +354,39 @@ fn name_lists_resolve_as_written_and_unknown_names_are_counted() {
     assert_eq!(r.unknown_names, 2);
 }
 
+/// `choose_beliefs`' ranks (basic.py:1707), worked out once per ruleset: a place counts in the
+/// order as written, and a kind written empty, or `Any`, ranks by the four orders together.
+#[test]
+fn belief_places_count_each_order_as_written() {
+    use citar_engine::base::ids::BeliefId;
+    use citar_engine::rules::defs::{BeliefKind, BeliefType};
+    let o = clean(
+        "basic-1",
+        &json!({"beliefs_pantheon": ["Tradition", "Fertility Rites"], "beliefs_founder": [],
+                "beliefs_follower": ["Pagodas"], "beliefs_enhancer": ["Messiah"]}),
+    )
+    .expect("clean");
+    let t = Tuning::new(VersionId::Basic1, o);
+    let r = t.resolved(Ruleset::shared());
+    let place = |kind: BeliefKind, name: &str| {
+        r.belief_place(kind, Ruleset::shared().lookup::<BeliefId>(name).expect(name))
+    };
+    let [pantheon, founder, follower, _] = BeliefType::ALL.map(BeliefKind::Type);
+    // Tradition, which the ruleset lacks, keeps its place, as Python's `index` counted it.
+    assert_eq!(place(pantheon, "Fertility Rites"), Some(1));
+    assert_eq!(place(pantheon, "Goddess of Love"), None);
+    // A kind's own order is its alone.
+    assert_eq!(place(follower, "Pagodas"), Some(0));
+    assert_eq!(place(follower, "Messiah"), None);
+    // The founder order was written empty: the four orders one after another.
+    for kind in [founder, BeliefKind::Any] {
+        assert_eq!(place(kind, "Fertility Rites"), Some(1));
+        assert_eq!(place(kind, "Pagodas"), Some(2));
+        assert_eq!(place(kind, "Messiah"), Some(3));
+        assert_eq!(place(kind, "Tithe"), None);
+    }
+}
+
 // ---- Fingerprints (gate 4) -----------------------------------------------------------------
 
 fn spec(version: VersionId, overrides: &Value, fixed: Option<f64>, seat: Option<f64>) -> BotSpec {
