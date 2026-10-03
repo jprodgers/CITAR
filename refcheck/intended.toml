@@ -76,8 +76,14 @@ where = [
   { group = "views", path = "civs[*].view.cities[*].queue[*].turns" },
   { group = "briefing", path = "civs[*].briefing.cities[*].prod" },
   { group = "briefing", path = "civs[*].briefing.cities[*].build.turns" },
-  # The bot weighs a building's production percentage by the empire's production (basic.py:936-938).
-  { group = "bot_decisions", path = "majors[*].tech_values.potential.*" },
+  # The bot weighs a building's production percentage by the empire's production (basic.py:936-938):
+  # the technologies of the Workshop, the Factory, the Solar Plant and the Nuclear Plant, in the
+  # potential mode only (the classic mode reads a building's flat stats). Austria's Coffee House
+  # (Economics) would be one more; no reference state shows it.
+  { group = "bot_decisions", path = "majors[*].tech_values.potential[\"Metal Casting\"]" },
+  { group = "bot_decisions", path = "majors[*].tech_values.potential.Industrialization" },
+  { group = "bot_decisions", path = "majors[*].tech_values.potential.Ecology" },
+  { group = "bot_decisions", path = "majors[*].tech_values.potential[\"Nuclear Fission\"]" },
 ]
 cases = [
   "duel-archipelago-normal-s1022/t120",
