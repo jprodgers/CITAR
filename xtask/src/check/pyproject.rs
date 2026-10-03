@@ -154,6 +154,10 @@ impl<'m> Forbidden<'m> {
                 if (dep == self.engine_key || dep == ENGINE) && self.engine.contains(feature) {
                     return Some(format!("{ENGINE}'s `{feature}`"));
                 }
+                // cargo's `--features citar-py/x` names the package's own feature.
+                if dep == BINDINGS {
+                    todo.push(feature.to_owned());
+                }
                 continue;
             }
             if value == features::TEST_OPS {
@@ -224,10 +228,17 @@ mod tests {
         assert!(f[0].message.contains("citar-py's `test-ops`"), "{f:?}");
         assert_eq!(f[0].to_string().split(']').next(), Some("[pyproject"));
         // The engine's, named through the dependency, optional or not.
-        for listed in ["citar-engine/test-ops", "citar-engine?/test-ops", "citar-engine/legacy"] {
+        for listed in [
+            "citar-engine/test-ops",
+            "citar-engine?/test-ops",
+            "citar-engine/legacy",
+            "citar-py/test-ops",
+        ] {
             let f = found(&pyproject(&format!("features = [{listed:?}]")), &meta);
             assert_eq!(f.len(), 1, "{listed}: {f:?}");
-            assert!(f[0].message.contains("citar-engine's"), "{f:?}");
+            let (crate_name, feature) = listed.split_once('/').expect("a dependency's feature");
+            let named = format!("{}'s `{feature}`", crate_name.trim_end_matches('?'));
+            assert!(f[0].message.contains(&named), "{f:?}");
         }
     }
 
