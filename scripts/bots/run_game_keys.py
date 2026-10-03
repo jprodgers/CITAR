@@ -73,7 +73,9 @@ def canonical(v) -> str:
 
 def record() -> dict:
     """Play the duel through run_game and take its result's shape."""
-    from citar import engine_api
+    # The Python engine's facade whatever CITAR_ENGINE says: the file is the Python result's shape, which the Rust
+    # runner is held to (recorded through citar.engine_api on the Rust backend, it would hold Rust to itself).
+    from citar.engine import facade as engine_api
     bots = {pid: engine_api.bot_instance("basic", aggression=0.4, seed=1 + pid) for pid in range(2)}
     result = engine_api.run_game({"config": json.loads(json.dumps(CONFIG)), "bots": bots, "raise_errors": True})
     return {"_doc": "The key and type shape of engine_api.run_game's result on this duel (scripts/bots/"
