@@ -17,10 +17,21 @@ Thanks for looking. CITAR is a game and an instrument, and it needs help with bo
 
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
-pip install -e ".[dev]"
+pip install -e ".[dev]"                  # builds the Rust engine too, so it needs a Rust toolchain
 python -m unittest discover -s tests     # 456 tests, about four minutes
 citar serve --debug                      # http://127.0.0.1:8765
 ```
+
+**A Rust toolchain is needed to build from source.** The package includes the Rust engine as the
+extension module `citar._engine` (`crates/citar-py`), and installing from a checkout builds it with
+maturin. Install [rustup](https://rustup.rs) (on Windows with the MSVC build tools its installer
+offers); `rust-toolchain.toml` pins the exact release, and rustup fetches it on first use. An
+editable install builds the `ci` profile (release optimisation with debug assertions on), which
+takes a few minutes the first time and seconds after a small change; `pip install .` builds the
+release profile, which takes longer. Rebuild after a Rust change with the same command. Neither
+includes the engine's test operations, so `tests/test_engine_module.py` skips the tests that need
+them; the extension's own dev loop under [Rust](#rust) builds with them. Released wheels need no
+toolchain.
 
 A checkout keeps its state beside the code — `saves/`, `config/`, `benchmarks/` — rather than in
 your user directory, so your test games are where you can see and delete them.
@@ -205,6 +216,30 @@ writes nothing under the checkout. Rebuild after every Rust change you want Pyth
 Windows, stop the dev server and the lab before a rebuild: a library a running process holds is
 renamed aside rather than replaced, and the process keeps the old engine until it restarts.
 `tests/test_engine_module.py` tests the extension itself and is skipped when it is not built.
+`pip install -e .` builds the extension too, into `citar/` and without the test operations: fine
+on Linux, macOS and in CI, and the thing to avoid in a synced folder.
+
+**The extension in CI.** `pyproject.toml` builds the package with maturin (`[tool.maturin]`), and
+its feature list never names `test-ops`: `cargo xtask check` refuses one that would turn on the
+test operations or `legacy`, so no wheel carries them. `test.yml`'s build-ext job builds a test
+wheel per OS (the ci profile with `--features test-ops`); each test job installs only the
+dependencies (`scripts/ci/requirements.py all`) and unpacks the wheel's library into the checkout
+(`scripts/ci/unpack_ext.py`, which fails unless it imports with the test operations), and the
+package job builds the release wheel as it would ship. Every wheel and the source distribution are
+built with one maturin, `MATURIN_VERSION` at the top of `test.yml`, and `scripts/ci/check_dist.py`
+holds each to the checkout: the files git tracks under `citar/`, the library, and nothing stray.
+After changing `[tool.maturin]`'s `include` or `exclude`, or moving that pin, run it on a local
+build (`python scripts/ci/check_dist.py wheel DIR`, or `sdist DIR`). To run the suite as a test job
+does:
+
+```bash
+maturin build --profile ci --features test-ops --out "$CARGO_TARGET_DIR/wheels"
+python scripts/ci/unpack_ext.py "$CARGO_TARGET_DIR/wheels" --test-ops   # citar/_engine.pyd or .abi3.so
+python -m unittest discover -s tests
+```
+
+The unpacked library is ignored by git. Delete it before going back to the dev loop, whose tests
+check that nothing was built into the checkout.
 
 **Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
 `/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count

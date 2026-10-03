@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 const CHECK: &str = "version";
-const PYTHON_FILE: &str = "citar/__init__.py";
+pub const PYTHON_FILE: &str = "citar/__init__.py";
 
 pub fn check(root: &Path, meta: &Metadata) -> Result<Vec<Finding>, String> {
     let path = root.join(PYTHON_FILE);

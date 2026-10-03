@@ -164,7 +164,7 @@ short version:
 
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
-pip install -e ".[dev]"
+pip install -e ".[dev]"                  # builds the Rust engine: needs rustup (rustup.rs)
 python -m unittest discover -s tests     # 456 tests, about four minutes
 citar serve --debug
 ```
