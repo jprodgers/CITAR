@@ -1,23 +1,35 @@
 """Exits the interpreter while a daemon thread is inside a call to the Rust engine (DESIGN.md P2.6.4).
 
-A session's driver is a daemon thread, and it may be inside ``Game.drive`` when the server exits. A thread that comes
-back from a call with the GIL released and re-attaches to a finalizing interpreter is ended from inside
-``PyEval_RestoreThread`` (``pthread_exit`` on Python 3.11 to 3.13), an unwind through the extension's Rust frames that
-aborts the process. ``citar._engine`` registers ``shutdown`` with atexit so no thread does; this script is the check.
-tests/test_engine_module.py runs it with the interpreter it runs under, and CI's interpreter-exit job on each Python
-version; it needs only ``citar._engine`` (built by ``cargo xtask develop`` or unpacked into ``citar/``).
+A session's driver is a daemon thread, and it may be inside ``Game.drive`` when the server exits. If that call ends
+once the interpreter has begun to finalize, Python 3.11 to 3.13 end the thread from inside ``PyEval_RestoreThread``
+as it re-attaches (``pthread_exit`` on Linux, a forced unwind through the extension's Rust frames; 3.14 hangs it).
+``citar._engine`` registers ``shutdown`` with atexit: it waits for the calls in flight and then parks any other
+thread at its next call, before it re-attaches. PyO3 0.29 also parks a thread the unwind reaches (crates/citar-py's
+calls.rs), so even without the hook the process exits 0; ``--unguarded`` shows that.
 
-    python tests/engine_exit_child.py long|short|barred [--unguarded]
+    python tests/engine_exit_child.py [check | long | short | barred] [--unguarded]
 
-``long``: the thread is inside one long drive (a whole game in a call) when the interpreter exits; ``short``: it drives
-one seat per call, so it is as likely to be between calls, or entering one, as inside one. Finalization releases the
-GIL for a moment (an object whose ``__del__`` sleeps, as a closing log handler or socket may), which is when a waiting
-thread would re-attach. ``--unguarded`` takes the atexit hook away, to show what it guards against. Prints ``exiting``
-and exits 0; anything else is a failure. ``barred`` calls ``shutdown`` itself and checks the mechanism: a call another
-thread then makes parks that thread for good, while this thread's calls go on; it prints ``barred ok``.
+``check`` (the default; CI's interpreter-exit job and tests/test_engine_module.py run it) runs each mode below in a
+child interpreter and checks what it printed: ``long``, ``short`` and ``barred`` must pass, and the ``--unguarded``
+runs of ``long`` and ``short`` are reported, not judged. It prints a line per run and exits 0 when every judged run
+passed. It needs only ``citar._engine`` (built by ``cargo xtask develop``, or unpacked into ``citar/``).
+
+``long``: a daemon thread is inside one long drive (a whole game in a call) when the interpreter exits; ``short``: it
+drives one seat per call, so it is as likely to be between calls, or entering one, as inside one. Either waits until
+a call is in flight, prints ``exiting after a call was in flight``, and then, during finalization, opens the window: the interpreter's last collection
+(it runs with ``sys.is_finalizing()`` true) frees an object whose finalizer releases the GIL for half a second, long
+enough for any call to end, when a waiting thread would re-attach. The finalizer prints ``window: finalizing=1
+in_flight=A->B``, the calls in flight as it opened and as it closed. Guarded, both are 0: the hook waited for every
+call, and each thread parked without re-attaching. A child that never opened the window prints no such line, and the
+check fails. ``barred`` calls ``shutdown`` itself and checks the mechanism: a call another thread then makes parks
+that thread for good, while this thread's calls go on; it prints ``barred ok``.
 """
 import atexit
+import gc
 import json
+import os
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -27,9 +39,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))     # the checko
 
 from citar import _engine as E
 
+WINDOW_SECONDS = 0.5
+"""How long the finalizer holds the window open: well over a call (a 60-round game in one drive takes 0.1 s)."""
 
-def _game(seed: int):
-    cfg = {"seed": seed, "map_size": "small", "players": [{"controller": "bot"}] * 4}
+
+def _game(seed: int, turn_limit: int = 60):
+    cfg = {"seed": seed, "map_size": "small", "players": [{"controller": "bot"}] * 4, "turn_limit": turn_limit}
     return E.Game.new(json.dumps(cfg).encode())
 
 
@@ -43,14 +58,26 @@ def _drive(seat_limit: int):
         seed += 1
 
 
-class _SlowToGo:
-    """Releases the GIL for a moment while the interpreter finalizes, when the module's globals are cleared."""
+class _Window:
+    """Releases the GIL for ``seconds`` while the interpreter finalizes, and says so on stdout.
 
-    def __init__(self):
-        self.sleep = time.sleep
+    The collector is off and the object is its own cycle, so only the interpreter's last collection frees it, once
+    finalization has begun. (A module global would not do: a daemon thread's frame keeps ``__main__``'s globals alive
+    past the end, so their finalizers never run.) Builtins and module globals are being torn down by then, so it
+    keeps everything it calls. It waits on a lock it holds rather than in ``time.sleep``, which raises during
+    finalization on Windows' 3.14 (its timer handle is gone); either wait releases the GIL."""
+
+    def __init__(self, seconds: float):
+        self.cycle = self
+        self.seconds = seconds
+        self.held = threading.Lock()
+        self.held.acquire()
+        self.write, self.finalizing, self.in_flight = os.write, sys.is_finalizing, E.calls_in_flight
 
     def __del__(self):
-        self.sleep(0.2)
+        opened = self.in_flight()
+        self.held.acquire(True, self.seconds)
+        self.write(1, b"window: finalizing=%d in_flight=%d->%d\n" % (self.finalizing(), opened, self.in_flight()))
 
 
 def _barred() -> int:
@@ -73,11 +100,8 @@ def _barred() -> int:
     return 0
 
 
-def main(argv: list) -> int:
-    mode = argv[0] if argv else "long"
-    if mode == "barred":
-        return _barred()
-    if "--unguarded" in argv:
+def _exit_mid_drive(mode: str, unguarded: bool) -> int:
+    if unguarded:
         atexit.unregister(E.shutdown)
     seat_limit = 0 if mode == "long" else 1
     threading.Thread(target=_drive, args=(seat_limit,), daemon=True).start()
@@ -86,12 +110,72 @@ def main(argv: list) -> int:
     deadline = time.monotonic() + 30
     while E.calls_in_flight() == 0 and time.monotonic() < deadline:
         time.sleep(0.001)
+    if E.calls_in_flight() == 0:
+        print("no call began in 30 s", flush=True)
+        return 1
     if mode != "long":
         time.sleep(0.05)
-    global _slow
-    _slow = _SlowToGo()
-    print("exiting", flush=True)
+    gc.disable()
+    _Window(WINDOW_SECONDS)                 # unreachable at once; only finalization's last collection frees it
+    print("exiting after a call was in flight", flush=True)
     return 0
+
+
+_WINDOW = re.compile(rb"^window: finalizing=(\d) in_flight=(\d+)->(\d+)$", re.M)
+_EXITING = b"exiting after a call was in flight"
+
+
+def run(mode: str, unguarded: bool = False, python: str = sys.executable) -> tuple:
+    """Runs one mode in a child interpreter: (passed, one line saying how it went)."""
+    args = [python, str(Path(__file__).resolve()), mode] + (["--unguarded"] if unguarded else [])
+    try:
+        out = subprocess.run(args, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, f"{mode}{' unguarded' if unguarded else ''}: no exit in 120 s"
+    name = f"{mode}{' unguarded' if unguarded else ''}"
+    said = out.stdout.decode(errors="replace").strip().replace("\n", "; ")
+    if out.returncode != 0:
+        tail = out.stderr.decode(errors="replace").strip().splitlines()[-3:]
+        return False, f"{name}: exit {out.returncode}: {said} {' | '.join(tail)}"
+    if mode == "barred":
+        return b"barred ok" in out.stdout, f"{name}: exit 0: {said}"
+    window = _WINDOW.search(out.stdout)
+    if _EXITING not in out.stdout:
+        return False, f"{name}: it never exited mid-drive: {said}"
+    if window is None:
+        return False, f"{name}: the window never opened (no finalizer ran during finalization): {said}"
+    if window[1] != b"1":
+        return False, f"{name}: the window opened before finalization: {said}"
+    opened, closed = int(window[2]), int(window[3])
+    if not unguarded and (opened, closed) != (0, 0):
+        return False, f"{name}: calls still in flight in the window ({opened}->{closed}): {said}"
+    return True, f"{name}: exit 0: {said}"
+
+
+def check(python: str = sys.executable) -> int:
+    """Every mode, guarded (judged) and unguarded (reported); 0 when every judged run passed."""
+    failed = 0
+    for mode, unguarded in (("long", False), ("short", False), ("barred", False), ("long", True), ("short", True)):
+        ok, line = run(mode, unguarded, python)
+        if unguarded:
+            print("report  " + line, flush=True)
+        else:
+            print(("ok      " if ok else "FAILED  ") + line, flush=True)
+            failed += 0 if ok else 1
+    print(f"{failed} failed", flush=True)
+    return 1 if failed else 0
+
+
+def main(argv: list) -> int:
+    mode = argv[0] if argv else "check"
+    if mode == "check":
+        return check()
+    if mode == "barred":
+        return _barred()
+    if mode not in ("long", "short"):
+        print(__doc__)
+        return 2
+    return _exit_mid_drive(mode, "--unguarded" in argv)
 
 
 if __name__ == "__main__":

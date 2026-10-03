@@ -5,9 +5,21 @@
 //! threads run and two games use two cores. Nothing inside it touches Python.
 //!
 //! **Interpreter exit.** A daemon thread (a session's driver) may be inside a call when Python
-//! exits. Re-attaching it to a finalizing interpreter ends the thread from inside
-//! `PyEval_RestoreThread` (`pthread_exit` on Python 3.11 to 3.13), an unwind through the Rust
-//! frames below it that aborts the process. So:
+//! exits. If that call ends once the interpreter has begun to finalize, Python 3.11 to 3.13 end
+//! the thread from inside `PyEval_RestoreThread` as it re-attaches: on Linux with `pthread_exit`,
+//! a forced unwind through the Rust frames below it, on Windows with `_endthreadex`, which
+//! unwinds nothing. 3.14 hangs the thread instead. DESIGN.md P2.6.4 feared the unwind would
+//! abort the process. It does not in this build: PyO3 0.29's `PyEval_RestoreThread` (in
+//! `pyo3-ffi`) wraps the call in a guard that parks the thread when the unwind reaches it
+//! (rust-lang/rust#135929), as 3.14 does, and `tests/engine_exit_child.py --unguarded` exits 0
+//! (on Linux with the threads parked there). The module keeps a guard of its own for what
+//! PyO3's does not give:
+//! - the exit waits a while for the calls in flight, so a daemon thread's call (a save being
+//!   written) completes instead of being cut off when the process ends;
+//! - a thread stops at a place of the binding's own, before it re-attaches, without relying on
+//!   a private wrapper of PyO3's.
+//!
+//! How:
 //! - a call counts as in flight from when it releases the GIL until it has it back, and Python
 //!   code that runs from inside a Rust call (`run_game`'s hooks) counts too ([`hold`]): either
 //!   is a thread with Rust frames on its stack that may need the GIL;
@@ -20,8 +32,7 @@
 //!   ends around it. A thread waiting for the GIL to come back from a call is counted, so the
 //!   wait lets it through before the interpreter finalizes, and it parks at its next call. The
 //!   thread that called `shutdown` (the main thread) goes on calling as before, so other exit
-//!   hooks may still save games. Python 3.14 hangs such threads itself; this makes every
-//!   supported version behave so.
+//!   hooks may still save games.
 
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread::ThreadId;
