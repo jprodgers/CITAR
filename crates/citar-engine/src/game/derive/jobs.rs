@@ -1115,6 +1115,23 @@ fn same(a: Option<(ImprovementId, f64)>, b: Option<(ImprovementId, f64)>) -> boo
     }
 }
 
+/// Brings civilization `p`'s map for builder class `class` up to date, making it if it is new.
+///
+/// # Panics
+///
+/// Never: the map is borrowed mutably only while it is brought up to date, and computing a job
+/// reads no job map.
+fn bring_up_to_date(g: &Game, p: PlayerId, class: BuilderClass) {
+    let caches = &g.dv.jobs;
+    let now = g.dv.revs.now();
+    let current = caches.maps.borrow().get(&(p, class)).is_some_and(|m| m.verified == now);
+    if !current {
+        let mut maps = caches.maps.borrow_mut();
+        let m = maps.entry((p, class)).or_insert_with(JobMap::new);
+        update(g, p, class, m);
+    }
+}
+
 /// The best job of civilization `p`'s builder class `class` on tile `t`, from its job map; a tile
 /// the map does not cover (not its cities' land) is worked out on the spot.
 ///
@@ -1125,13 +1142,7 @@ fn same(a: Option<(ImprovementId, f64)>, b: Option<(ImprovementId, f64)>) -> boo
 #[must_use]
 pub fn job(g: &Game, p: PlayerId, class: BuilderClass, t: TileIdx) -> Option<(ImprovementId, f64)> {
     let caches = &g.dv.jobs;
-    let now = g.dv.revs.now();
-    let current = caches.maps.borrow().get(&(p, class)).is_some_and(|m| m.verified == now);
-    if !current {
-        let mut maps = caches.maps.borrow_mut();
-        let m = maps.entry((p, class)).or_insert_with(JobMap::new);
-        update(g, p, class, m);
-    }
+    bring_up_to_date(g, p, class);
     let found = caches.maps.borrow().get(&(p, class)).and_then(|m| m.tiles.get(&t).map(|e| e.job));
     match found {
         Some(job) => job,
@@ -1170,11 +1181,16 @@ pub fn map_jobs(
 
 /// The cache oracle for the job maps: each map computed so far, brought up to date, against a
 /// fresh look at every tile it covers, with no improvement passed over.
+///
+/// Each map is brought up to date before its tiles are compared: a civilization that has lost
+/// its last city has no tile to ask about, and its map, asked nothing, stood as it was, so the
+/// oracle once took the land it had held for a map gone wrong.
 #[cfg(any(test, debug_assertions, feature = "checks"))]
 pub(crate) fn verify(g: &Game) -> Vec<String> {
     let keys: Vec<(PlayerId, BuilderClass)> = g.dv.jobs.maps.borrow().keys().copied().collect();
     let mut out = Vec::new();
     for (p, class) in keys {
+        bring_up_to_date(g, p, class);
         let b = Builder::class(p, class);
         let fresh_tiles = candidates(g, p);
         for &t in &fresh_tiles {
