@@ -3,11 +3,13 @@
 //! `check` enforces the rules of DESIGN.md that clippy cannot see; `gen-uniques` writes the
 //! engine's unique types from their two sources (1a-05); `gen-params` writes the bot's parameter
 //! struct from its schema (registered in 2-00a, written in 2-01a); `perf` runs the criterion
-//! suites and holds them to their budgets (perfgate, 1e-03; the `games` suite from 2-00a).
+//! suites and holds them to their budgets (perfgate, 1e-03; the `games` suite from 2-00a);
+//! `develop` builds the Python extension for the laptop's venv (DESIGN.md P2.6.7, 2-06a).
 
 #![forbid(unsafe_code)]
 
 mod check;
+mod develop;
 mod gen_params;
 mod gen_uniques;
 mod lexer;
@@ -27,6 +29,10 @@ commands:
   gen-params
            write crates/citar-bot/src/params/gen.rs from crates/citar-bot/params/basic-1.json
            (exit 0 written, 2 could not; the generator comes with package 2-01a)
+  develop [--release] [--venv DIR]
+           build citar._engine (ci profile and test-ops, or the release profile) into
+           $CARGO_TARGET_DIR/citar-ext for this worktree's venv, outside the checkout
+           (exit 0 built, 1 failed, 2 refused)
   perf [--check] [--suite kernels|turns|io|games] [-- <bench arguments>]
            run the criterion suites of citar-bench (games only when named), then check every
            budget of crates/citar-bench/thresholds.toml and the pass rounds' ratios to Python
@@ -77,6 +83,10 @@ fn main() -> ExitCode {
         ["check"] => check::run(&workspace_root()),
         ["gen-uniques"] => write_gen_uniques(&workspace_root()),
         ["gen-params"] => write_gen_params(&workspace_root()),
+        ["develop", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
+            develop::run_develop(&workspace_root(), &rest)
+        }
         ["perf", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|x| (*x).to_owned()).collect();
             perf::run(&workspace_root(), &rest)
