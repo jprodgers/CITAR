@@ -41,7 +41,7 @@ pub struct MajorRow {
 /// One civilization at the end of a run.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PlayerRow {
-    pub id: u8,
+    pub id: PlayerId,
     /// `major`, `city_state` or `barbarian`.
     pub kind: &'static str,
     pub name: String,
@@ -61,7 +61,7 @@ pub struct RunResult {
     /// `playing` or `over`: a game a crash stopped is still `playing`, as a Python run stopped
     /// by its error limit was.
     pub phase: &'static str,
-    pub winner: Option<u8>,
+    pub winner: Option<PlayerId>,
     /// The victory's name (`Time`, `Scientific`, ..., `Neutral` for a win no victory type
     /// stands for).
     pub victory: Option<String>,
@@ -89,7 +89,7 @@ impl RunResult {
                 Phase::Playing => "playing",
                 Phase::Over => "over",
             },
-            winner: clock.winner.map(|p| p.0),
+            winner: clock.winner,
             victory: won_by(g).map(|w| w.name(rules).to_owned()),
             turn_limit: st.config().turn_limit,
             stats: Value::Array(g.stats(None).iter().map(stats_row_json).collect()),
@@ -111,7 +111,7 @@ pub const fn kind_name(kind: PlayerKind) -> &'static str {
 
 fn player_row(g: &Game, id: PlayerId, p: &Player) -> PlayerRow {
     PlayerRow {
-        id: id.0,
+        id,
         kind: kind_name(p.kind),
         name: p.name.to_string(),
         alive: p.alive(),
