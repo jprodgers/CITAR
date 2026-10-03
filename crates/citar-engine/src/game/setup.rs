@@ -290,7 +290,11 @@ fn named<I: Named>(
     key: &str,
 ) -> Result<Option<I>, EngineError> {
     match v {
-        None => Ok(None),
+        // A seat's `"nation": null` is a nation drawn at random, as `citar sim`, the lab and the
+        // balance runner write it, and a null difficulty is the game's: Python's
+        // `rules.resolve(kind, None)` is None (`rules.py:265`). The settings' own keys drop
+        // their nulls before they get here.
+        None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) if s.is_empty() => Ok(None),
         // refcheck: config-refuses-unknown-names
         Some(Value::String(s)) => rules.resolve::<I>(s).map(Some).ok_or_else(|| {
@@ -1216,5 +1220,27 @@ mod tests {
         let seats = c.host.get("players").and_then(Value::as_array).map(Vec::len);
         assert_eq!(seats, Some(4), "a small map's players");
         assert_eq!(c.city_states, 8);
+    }
+
+    /// `citar sim`, the lab, the balance runner and the baseline seat bots with
+    /// `{"controller": "bot", "nation": None}`: a null nation is drawn at random and a null
+    /// difficulty is the game's, as Python resolved them, not refused.
+    #[test]
+    fn a_seats_null_nation_and_difficulty_are_none_chosen() {
+        let r = Ruleset::shared();
+        let seat = json!({"controller": "bot", "nation": null, "difficulty": null});
+        let new = config_from_value(
+            r,
+            json!({"seed": 3, "map_size": "duel", "players": [seat.clone(), seat]}),
+        )
+        .expect("null is none chosen");
+        let (g, _) = Game::new(r, &new).expect("a game");
+        let nations: Vec<NationId> = g.majors(false).map(|p| p.nation).collect();
+        assert_eq!(nations.len(), 2);
+        assert_ne!(nations[0], nations[1], "drawn at random, each its own");
+        let game = g.state().config().difficulty;
+        assert!(g.majors(false).all(|p| g.seat_difficulty(Some(p.id())) == game), "the game's");
+        let wrong = json!({"seed": 3, "players": [{"controller": "bot", "nation": 3}]});
+        assert!(config_from_value(r, wrong).is_err(), "a number is still no name");
     }
 }
