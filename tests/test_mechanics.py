@@ -5,6 +5,7 @@ import unittest
 from citar.engine.game import Game, ActionError
 from citar.engine import (tools, cities, movement, research, units as unitmod, victory, workers, economy, policies,
                           religion, city_states, espionage, visibility)
+from tests.backends import python_engine_only
 
 
 def game(**kw):
@@ -36,6 +37,7 @@ def grant(g, pid, *techs):
 
 
 class CaptureTests(unittest.TestCase):
+    @python_engine_only("tests/rules/combat_city_capture.toml")
     def test_capture_city_and_domination(self):
         g = game()
         found_capitals(g)
@@ -58,6 +60,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(g.s.phase, "over")
         self.assertEqual(g.s.victory, "Domination")
 
+    @python_engine_only("tests/rules/combat_city_capture.toml")
     def test_puppet_annex_and_raze_rules(self):
         g = game()
         found_capitals(g)
@@ -69,6 +72,7 @@ class CaptureTests(unittest.TestCase):
 
 
 class ScienceVictoryTests(unittest.TestCase):
+    @python_engine_only("tests/rules/victory_spaceship.toml")
     def test_spaceship(self):
         g = game()
         found_capitals(g)
@@ -86,6 +90,7 @@ class ScienceVictoryTests(unittest.TestCase):
 
 
 class UnitTests(unittest.TestCase):
+    @python_engine_only("tests/rules/units_upgrade.toml")
     def test_upgrade_and_promotion(self):
         g = game()
         found_capitals(g)
@@ -104,6 +109,7 @@ class UnitTests(unittest.TestCase):
         with self.assertRaises(ActionError):
             tools.execute(g, 0, "promote_unit", {"unit_id": w.id, "promotion": "Drill I"})
 
+    @python_engine_only("tests/rules/units_embark_needs_optics.toml")
     def test_embark_requires_optics(self):
         g = game()
         found_capitals(g)
@@ -121,6 +127,7 @@ class UnitTests(unittest.TestCase):
 
 
 class WorkerTests(unittest.TestCase):
+    @python_engine_only("tests/rules/workers_road_pillage_repair.toml")
     def test_build_road_pillage_and_repair(self):
         g = game()
         found_capitals(g)
@@ -151,6 +158,7 @@ class WorkerTests(unittest.TestCase):
             workers.progress_builds(g, 0)
         self.assertFalse(g.s.tiles[spot].route_pillaged)
 
+    @python_engine_only("tests/rules/workers_forest_chop_farm.toml")
     def test_forest_needs_removal_before_farm(self):
         g = game()
         found_capitals(g)
@@ -167,6 +175,7 @@ class WorkerTests(unittest.TestCase):
 
 
 class EconomyTests(unittest.TestCase):
+    @python_engine_only("tests/rules/purchase_gold.toml")
     def test_buy_and_happiness(self):
         g = game()
         found_capitals(g)
@@ -180,6 +189,7 @@ class EconomyTests(unittest.TestCase):
         self.assertEqual(h["total"], int(round(sum(h["breakdown"].values()))))
         self.assertIn("Cities", h["breakdown"])
 
+    @python_engine_only("tests/rules/victory_turn_limit.toml")
     def test_turn_limit_time_victory(self):
         g = game(turn_limit=3)
         found_capitals(g)
@@ -191,6 +201,7 @@ class EconomyTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
+    @python_engine_only("tests/rules/policies_adopt.toml")
     def test_adopt_branch_and_policy(self):
         g = game()
         found_capitals(g)
@@ -211,6 +222,7 @@ class PolicyTests(unittest.TestCase):
 
 
 class ReligionTests(unittest.TestCase):
+    @python_engine_only("tests/rules/religion_pantheon_then_religion.toml")
     def test_pantheon_and_religion(self):
         g = game()
         found_capitals(g)
@@ -232,6 +244,7 @@ class ReligionTests(unittest.TestCase):
 
 
 class GreatPeopleTests(unittest.TestCase):
+    @python_engine_only("tests/rules/great_people_actions.toml")
     def test_scientist_and_artist(self):
         g = game()
         found_capitals(g)
@@ -252,6 +265,7 @@ class GreatPeopleTests(unittest.TestCase):
 
 
 class CityStateTests(unittest.TestCase):
+    @python_engine_only("tests/rules/city_states_gifts.toml")
     def test_gift_gold_makes_friends(self):
         g = game()
         found_capitals(g)
@@ -265,6 +279,7 @@ class CityStateTests(unittest.TestCase):
 
 
 class EspionageTests(unittest.TestCase):
+    @python_engine_only("tests/rules/espionage_counter_intelligence.toml")
     def test_spy_counter_intelligence(self):
         g = game()
         found_capitals(g)
@@ -276,6 +291,7 @@ class EspionageTests(unittest.TestCase):
 
 
 class DiplomaticVictoryTests(unittest.TestCase):
+    @python_engine_only("tests/rules/victory_un_vote.toml")
     def test_united_nations_vote(self):
         g = game()
         found_capitals(g)
@@ -295,6 +311,7 @@ class DiplomaticVictoryTests(unittest.TestCase):
 
 
 class NaturalWonderTests(unittest.TestCase):
+    @python_engine_only("tests/rules/vis_natural_wonder.toml")
     def test_discovery(self):
         g = game(map_size="small", players=[{}, {}, {}, {}])
         w = next((i for i, t in enumerate(g.s.tiles) if t.wonder), None)
@@ -307,6 +324,7 @@ class NaturalWonderTests(unittest.TestCase):
 
 
 class RuleGapTests(unittest.TestCase):
+    @python_engine_only("tests/rules/units_paradrop.toml")
     def test_paratrooper_paradrop(self):
         g = game()
         found_capitals(g)
@@ -329,6 +347,7 @@ class RuleGapTests(unittest.TestCase):
         self.assertEqual(para.idx, far)
         self.assertEqual(para.moves, 0)
 
+    @python_engine_only("tests/rules/units_fountain_of_youth.toml")
     def test_fountain_of_youth_promotes_adjacent_units(self):
         g = game()
         spot = next(i for i in range(g.grid.size) if g.is_land(i) and not g.units_at(i)
@@ -341,6 +360,7 @@ class RuleGapTests(unittest.TestCase):
         movement.on_enter_tile(g, w, nb)
         self.assertIn("Rejuvenation", w.promotions)
 
+    @python_engine_only("tests.test_facade_games.SettingsTests.test_a_later_starting_era_disables_religion")
     def test_later_start_era_disables_religion(self):
         self.assertTrue(game().religion_enabled)
         self.assertFalse(game(starting_era="Industrial era").religion_enabled)
@@ -352,11 +372,13 @@ class DifficultyTests(unittest.TestCase):
         cfg.update(kw)
         return Game.new(cfg)
 
+    @python_engine_only("tests.test_facade_games.SettingsTests.test_the_default_difficulty_is_prince_everywhere")
     def test_default_is_prince_everywhere(self):
         g = self._game(players=[{"controller": "bot"}, {"controller": "human"}])
         self.assertEqual([p.difficulty for p in g.majors()], ["Prince", "Prince"])
         self.assertEqual(g.s.config["barbarian_difficulty"], "Prince")
 
+    @python_engine_only("tests.test_facade_games.SettingsTests.test_bot_seats_get_their_own_difficultys_ai_bonuses")
     def test_bot_seats_get_their_own_ai_bonuses(self):
         g = self._game(players=[{"controller": "bot", "difficulty": "Deity"}, {"controller": "bot", "difficulty": "Chieftain"}])
         deity, chief = g.player(0), g.player(1)
@@ -368,6 +390,7 @@ class DifficultyTests(unittest.TestCase):
         self.assertLess(cities.production_cost(g, 0, "Warrior"), cities.production_cost(g, 1, "Warrior"))
         self.assertLess(cities.production_cost(g, 0, "Monument"), cities.production_cost(g, 1, "Monument"))
 
+    @python_engine_only("tests/rules/costs_follow_the_handicap.toml")
     def test_human_seats_get_player_values(self):
         g = self._game(players=[{"controller": "human", "difficulty": "Settler"},
                                 {"controller": "llm", "difficulty": "Deity"}])
@@ -376,6 +399,7 @@ class DifficultyTests(unittest.TestCase):
         # AI bonuses are for bots only
         self.assertEqual(len(g.player(1).techs), len(g.player(0).techs))
 
+    @python_engine_only("tests/rules/barbarians_difficulty.toml")
     def test_barbarian_difficulty(self):
         from citar.engine import combat
         g = self._game(players=[{"controller": "human"}, {"controller": "human"}], barbarian_difficulty="Chieftain")
@@ -392,6 +416,7 @@ class DifficultyTests(unittest.TestCase):
         visibility.refresh(g, force=True)
         self.assertIn("Difficulty +50%", combat.preview(g, w, spot)["attacker_modifiers"])
 
+    @python_engine_only("tests.test_facade_games.SettingsTests.test_a_seats_difficulty_survives_a_save")
     def test_seat_difficulty_survives_save(self):
         from citar.engine.state import GameState
         g = self._game(players=[{"controller": "bot", "difficulty": "King"}, {"controller": "human"}])
@@ -423,6 +448,7 @@ class PerCivLimitTests(unittest.TestCase):
         self.addCleanup(patch.stop)
         return g, city
 
+    @python_engine_only("what_the_other_cities_build_is_read_as_the_list_is_lent")
     def test_the_last_allowed_part_stays_in_the_queue(self):
         g, city = self._space_ready_city()
         # limited to 1 and none built: it used to count its own place in the queue and be dropped at once
@@ -438,6 +464,7 @@ class PerCivLimitTests(unittest.TestCase):
         self.assertEqual(cities.count_constructed(g, 0, "SS Booster"), 3)
         self.assertEqual(cities.count_constructed(g, 0, "SS Booster", exclude=city), 2)
 
+    @python_engine_only("what_the_other_cities_build_is_read_as_the_list_is_lent")
     def test_the_limit_still_holds(self):
         g, city = self._space_ready_city()
         for _ in range(3):

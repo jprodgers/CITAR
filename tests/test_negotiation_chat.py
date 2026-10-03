@@ -11,6 +11,7 @@ from citar.engine.game import Game, ActionError
 from citar.engine import diplomacy as D, tools
 from citar.server.session import SessionManager
 from tests.test_session import ScriptedConversation
+from tests.backends import python_engine_only
 
 
 def two_civs(**kw):
@@ -36,6 +37,7 @@ def respond(g, pid, nid, action, message="Fine.", **items):
 
 
 class MessageTests(unittest.TestCase):
+    @python_engine_only("tests/rules/negotiation_every_entry_needs_a_message.toml")
     def test_every_entry_needs_a_message_and_the_refusal_names_the_negotiation(self):
         g = two_civs()
         with self.assertRaises(ActionError):
@@ -50,6 +52,7 @@ class MessageTests(unittest.TestCase):
                 self.assertIn("message", str(cm.exception))
         self.assertEqual(D.get_negotiation(g, nid)["status"], "open")
 
+    @python_engine_only("tests/rules/negotiation_reject_aliases.toml")
     def test_aliases_are_stored_as_reject(self):
         for alias in ("decline", "withdraw", "end", "Reject"):
             with self.subTest(alias=alias):
@@ -59,6 +62,7 @@ class MessageTests(unittest.TestCase):
                 n = D.get_negotiation(g, nid)
                 self.assertEqual((n["status"], n["history"][-1]["action"]), ("rejected", "reject"))
 
+    @python_engine_only("tests/rules/negotiation_unknown_action.toml")
     def test_an_unknown_action_is_refused_with_the_valid_ones(self):
         g = two_civs()
         nid = open_chat(g)
@@ -66,6 +70,7 @@ class MessageTests(unittest.TestCase):
             respond(g, 1, nid, "haggle")
         self.assertIn("accept, counter, reject, reply", str(cm.exception))
 
+    @python_engine_only("tests/rules/negotiation_empty_counter.toml")
     def test_an_empty_counter_is_refused(self):
         g = two_civs()
         nid = open_chat(g, give=[{"type": "gold", "amount": 20}])
@@ -73,6 +78,7 @@ class MessageTests(unittest.TestCase):
             respond(g, 1, nid, "counter", "Hmm.", give=[], receive=[])
         self.assertEqual(str(cm.exception), "A counter-offer needs at least one item; use reply to send only a message.")
 
+    @python_engine_only("tests/rules/negotiation_talk_is_no_proposal.toml")
     def test_empty_lists_are_no_proposal(self):
         """Models often send give=[] and receive=[] with a plain message: that is talk, not a deal of nothing."""
         g = two_civs()
@@ -84,6 +90,7 @@ class MessageTests(unittest.TestCase):
         self.assertIn("no proposal on the table", str(cm.exception))
         self.assertEqual(n["status"], "open")
 
+    @python_engine_only("tests/rules/negotiation_entries_numbered.toml")
     def test_entries_are_numbered_in_order(self):
         g = two_civs()
         nid = open_chat(g, give=[{"type": "gold", "amount": 20}], receive=[{"type": "share_map"}])
@@ -99,6 +106,7 @@ class MessageTests(unittest.TestCase):
         self.assertEqual([h["seq"] for h in view["history"]], [1, 2, 3, 4, 5])
         self.assertEqual((view["messages"], view["max_messages"]), (5, 30))
 
+    @python_engine_only("tests/rules/negotiation_withdraw.toml")
     def test_either_side_may_withdraw_but_only_the_side_to_move_may_answer(self):
         g = two_civs()
         nid = open_chat(g, give=[{"type": "gold", "amount": 20}])
@@ -109,10 +117,12 @@ class MessageTests(unittest.TestCase):
 
 
 class MessageCapTests(unittest.TestCase):
+    @python_engine_only("tests/rules/negotiation_message_cap_setting.toml")
     def test_the_ruleset_cap_is_30_and_a_game_can_set_its_own(self):
         self.assertEqual(D.max_chat_messages(two_civs()), 30)
         self.assertEqual(D.max_chat_messages(two_civs(diplomacy={"max_chat_messages": 4})), 4)
 
+    @python_engine_only("tests/rules/negotiation_message_cap_closes.toml")
     def test_a_chat_that_would_pass_the_cap_closes_as_expired(self):
         g = two_civs(diplomacy={"max_chat_messages": 4})
         nid = open_chat(g)
@@ -136,6 +146,7 @@ class MessageCapTests(unittest.TestCase):
         with self.assertRaises(ActionError):
             respond(g, 1, nid, "reply", "Hello?")
 
+    @python_engine_only("tests/rules/negotiation_final_answer_at_cap.toml")
     def test_a_final_answer_still_fits_at_the_cap(self):
         g = two_civs(diplomacy={"max_chat_messages": 2})
         nid = open_chat(g, give=[{"type": "gold", "amount": 20}])
@@ -145,6 +156,7 @@ class MessageCapTests(unittest.TestCase):
 
 
 class EndTurnTests(unittest.TestCase):
+    @python_engine_only("tests/rules/negotiation_end_turn_waits_for_the_answer.toml")
     def test_end_turn_waits_for_the_other_sides_answer(self):
         g = two_civs()
         nid = open_chat(g)
@@ -158,6 +170,7 @@ class EndTurnTests(unittest.TestCase):
         tools.execute(g, 0, "end_turn", {})
         self.assertEqual(g.s.current, 1)
 
+    @python_engine_only("tests/rules/negotiation_end_turn_waits_for_your_answer.toml")
     def test_end_turn_waits_for_your_own_answer(self):
         g = two_civs()
         nid = open_chat(g, give=[{"type": "gold", "amount": 20}])
@@ -169,6 +182,7 @@ class EndTurnTests(unittest.TestCase):
         tools.execute(g, 0, "end_turn", {})
         self.assertEqual(g.s.current, 1)
 
+    @python_engine_only("tests/rules/negotiation_responder_cannot_end_turn.toml")
     def test_the_responder_cannot_end_its_turn_on_an_open_chat_either(self):
         g = two_civs()
         nid = open_chat(g)
@@ -177,6 +191,7 @@ class EndTurnTests(unittest.TestCase):
             tools.execute(g, 1, "end_turn", {})
         self.assertIn(f"Answer Avalon in negotiation #{nid} first", str(cm.exception))
 
+    @python_engine_only("tests/rules/negotiation_each_side_sees_the_other.toml")
     def test_the_alerts_name_the_other_side(self):
         """So the game screen can open Diplomacy on the chat itself, not on the first civilization met."""
         from citar.engine.briefing import alert_items
@@ -187,6 +202,7 @@ class EndTurnTests(unittest.TestCase):
                 alert = next(a for a in alert_items(g, pid) if a["type"] == "negotiation")
                 self.assertEqual((alert["player"], alert["negotiation"]), (other, nid))
 
+    @python_engine_only("tests/rules/negotiation_host_end_turn_expires.toml")
     def test_game_end_turn_still_expires_the_openers_chats(self):
         """Headless runners call Game.end_turn directly: it keeps the old safety net rather than refusing."""
         g = two_civs()
@@ -198,6 +214,7 @@ class EndTurnTests(unittest.TestCase):
 
 
 class CloseNegotiationTests(unittest.TestCase):
+    @python_engine_only("tests/rules/negotiation_close_with_a_note.toml")
     def test_close_records_a_note_and_tells_both_sides(self):
         g = two_civs()
         nid = open_chat(g)
@@ -215,6 +232,7 @@ class CloseNegotiationTests(unittest.TestCase):
         with self.assertRaises(ActionError):
             D.close_negotiation(g, nid, "expired", "again")
 
+    @python_engine_only("tests/rules/negotiation_close_only_closed_statuses.toml")
     def test_only_closed_statuses_are_allowed(self):
         g = two_civs()
         nid = open_chat(g)
@@ -222,6 +240,7 @@ class CloseNegotiationTests(unittest.TestCase):
             D.close_negotiation(g, nid, "accepted", "no")
         self.assertEqual(D.get_negotiation(g, nid)["status"], "open")
 
+    @python_engine_only("tests/rules/negotiation_war_cancels.toml")
     def test_war_cancels_the_chat_with_a_note(self):
         g = two_civs()
         nid = open_chat(g)

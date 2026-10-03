@@ -7,6 +7,7 @@ from citar.engine.game import Game, ActionError
 from citar.engine.rules import get_rules
 from citar import probes as P
 from citar.server.session import SessionManager
+from tests.backends import rust_pending
 
 DRY = {"provider": "dryrun", "model": "dry-run", "dry_run_delay": 0}
 
@@ -16,6 +17,7 @@ def small_map(name="unit-map", starts=2):
     return m
 
 
+@rust_pending("2-09")
 class MapTests(unittest.TestCase):
     def test_big_sizes_exist(self):
         R = get_rules()
@@ -63,6 +65,7 @@ class MapTests(unittest.TestCase):
         maps.delete_map("unit-test-map")
 
 
+@rust_pending("2-09")
 class ScenarioTests(unittest.TestCase):
     def make(self):
         R = get_rules()
@@ -117,6 +120,7 @@ class ScenarioTests(unittest.TestCase):
         S.delete_scenario("unit-scn")
 
 
+@rust_pending("2-09")
 class ProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
