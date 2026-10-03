@@ -8,6 +8,10 @@ what the engine then says. The same script runs on both engines:
 - the Python engine, through `tests/rulescript.py` (`python -m unittest tests.test_rule_scripts`),
   which drives `citar.engine_api` only: `EngineGame`, and the bot functions for the `bot` step.
 
+The Python runner runs on the facade's backend, so with `CITAR_ENGINE=rust` it plays every script on
+the Rust engine through the bindings (`citar._engine`) as well: the `intended` steps included, and
+the scripts whose `needs` names a package left out, as the Rust harness leaves them.
+
 Scripts replace the Python tests that poked the engine's internals (DESIGN.md 9.3 in
 `crates/citar-engine/`). They play on hand-made maps with named places instead of generated ones,
 so a script means the same thing on both engines and before and after a system is ported. A
@@ -92,7 +96,7 @@ other key, so a misplaced one never passes unread):
 | `as = "name"` | `op`, `ops`, `tool`, `check` and `bot` only: binds the step's result (an op's or tool's return value, a check's subject at its path, what a bot step gives) |
 | `error = "text"` | `op`, `ops`, `tool`, `new_game` and `bot` only: the step must be refused with `text` in its message; `error = true`: refused with any message |
 | `must_fail = true` or `"text"` | the step itself must fail (for the self-test): a check that does not hold, an unexpected error, a refused script |
-| `intended = "id"` | the expected value is the Rust engine's, which differs from Python's on purpose: the Python runner skips the step. The id is listed in `refcheck/intended.toml` or `tests/rules/intended.toml` |
+| `intended = "id"` | the expected value is the Rust engine's, which differs from Python's on purpose: the Python runner skips the step on the Python engine (and runs it on the Rust one). The id is listed in `refcheck/intended.toml` or `tests/rules/intended.toml` |
 | `coerce = true` | the step types numbers as strings on purpose (see [Numbers](#numbers)) |
 
 ### `op`
@@ -223,8 +227,8 @@ The seat's bot acts (DESIGN.md P2.3.11 in `crates/citar-engine/`). Its keys:
 What each gives, to `as`:
 
 - **`turn`** plays as a host plays a bot seat: the Python runner calls `play_bot_turn(end_turn = True)` (the
-  bot settles its chats and ends its turn; the runner ends the idle bot's), the Rust runner drives that seat
-  alone with a seat limit of 1. A negotiation the seat is in that waits on a seat nobody drives stops that
+  bot settles its chats and ends its turn; the runner ends the idle bot's; on the Rust backend that is the
+  one-seat drive below), the Rust runner drives that seat alone with a seat limit of 1. A negotiation the seat is in that waits on a seat nobody drives stops that
   drive; the Rust runner closes it, as a host does when its wait runs out, and drives on (Python's bot
   withdrew it). One the bot leaves to the seat's model keeps the turn from ending on both runners, and the
   step fails with `end_turn`'s reason (`end_turn_refusal`, in the same words on both). It gives `turn` and
@@ -259,8 +263,8 @@ it, a host would let it expire. Read its opening entry (`history[0]`), not its s
 `bot_*.toml` pin down the bot. They were written and checked on the Python runner before the bot was
 ported (package 2-00b), and each names in `needs` the package of the port that makes it pass on Rust:
 `2-01b` (research, policies, cities, gold, faith, settlers, workers, scouts), `2-03` (units and fighting) or
-`2-05` (diplomacy). The Python runner plays a script whatever its `needs`; the Rust runner refuses it, and
-its harness lists it as ignored. A package's gate is that no script names it any more: it removes the
+`2-05` (diplomacy). The Python runner plays a script whatever its `needs` on the Python engine; the Rust
+runner refuses it, its harness lists it as ignored, and the Python runner skips it on the Rust backend. A package's gate is that no script names it any more: it removes the
 header from the scripts it makes pass. Package 2-01a (the step itself, the idle bot, deferring to the model)
 removed its own: both runners play `bot_selftest.toml`, `bot_idle_rejects.toml` and
 `bot_model_owned_deferred.toml`. `bot_selftest.toml` is the bot step's own self-test, with its must-fail

@@ -8,6 +8,7 @@ from unittest import mock
 
 from citar.engine.game import Game, ActionError
 from citar.engine import tools, cities, movement, visibility, automation
+from tests.backends import rust_pending
 
 
 def game(**kw):
@@ -22,6 +23,7 @@ def found_capital(g, pid=0):
     return g.player_cities(pid)[0]
 
 
+@rust_pending("2-09")
 class QueueTests(unittest.TestCase):
     def setUp(self):
         self.g = game()
@@ -60,6 +62,7 @@ class QueueTests(unittest.TestCase):
         self.assertIn("0-2", str(cm.exception))
 
 
+@rust_pending("2-09")
 class AutoProductionTests(unittest.TestCase):
     def test_enabling_fills_empty_queue_and_turn_processing_refills_it(self):
         g = game()
@@ -84,6 +87,7 @@ class AutoProductionTests(unittest.TestCase):
         self.assertTrue(any(e["type"] == "city_idle" for e in g.s.events))
 
 
+@rust_pending("2-09")
 class MoveOrderTests(unittest.TestCase):
     def test_move_order_captures_enemy_civilian(self):
         g = game()
@@ -172,6 +176,7 @@ class MoveOrderTests(unittest.TestCase):
         self.assertTrue(w.goto is None or w.path[-1] == back)
 
 
+@rust_pending("2-09")
 class WorkerSafetyTests(unittest.TestCase):
     def _setup(self, automated):
         g = game()
@@ -202,6 +207,7 @@ class WorkerSafetyTests(unittest.TestCase):
         self.assertTrue(any(e["type"] == "unit_woke" and "stopped building" in e["text"] for e in g.s.events))
 
 
+@rust_pending("2-09")
 class EventPrivacyTests(unittest.TestCase):
     def test_city_production_is_not_shared_with_observers(self):
         g = game(barbarians="off")
@@ -292,20 +298,29 @@ class PathPreviewTests(unittest.TestCase):
                 client = TestClient(appmod.app)
                 s = appmod.manager.create({"map_size": "duel", "seed": 5, "barbarians": "off"}, [{"type": "human"}, {"type": "bot"}])
                 try:
-                    g = s.game.python_game          # to pick a destination the route can reach
+                    g = s.game
                     token = s.seats[0].token
-                    w = next(u for u in g.player_units(0) if u.type == "Warrior")
-                    dest = next(n for n in g.grid.within(w.idx, 3) if g.grid.distance(n, w.idx) == 3
-                                and movement.find_path(g, w, n))
-                    x, y = g.grid.xy(dest)
-                    r = client.get(f"/api/games/{s.id}/path", params={"token": token, "unit_id": w.id, "x": x, "y": y}).json()
-                    self.assertEqual(r["path"][0], list(g.grid.xy(w.idx)))
+                    w = next(u for u in g.view(0)["units"] if u["owner"] == 0 and u["type"] == "Warrior")
+                    # a destination three tiles off that the route can reach, found through the facade's preview
+                    dest = next((w["x"] + dx, w["y"] + dy) for dx, dy in ((3, 0), (-3, 0), (2, 2), (-2, 2), (2, -2),
+                                                                           (-2, -2), (1, 3), (-1, -3))
+                                if (g.path_preview(0, w["id"], w["x"] + dx, w["y"] + dy)["path"] or [None])[-1]
+                                == [w["x"] + dx, w["y"] + dy])
+                    x, y = dest
+                    r = client.get(f"/api/games/{s.id}/path", params={"token": token, "unit_id": w["id"], "x": x, "y": y}).json()
+                    self.assertEqual(r["path"][0], [w["x"], w["y"]])
                     self.assertEqual(r["path"][-1], [x, y])
                     self.assertGreaterEqual(r["turns"], 1)
                     # someone else's unit: no route
-                    enemy = next(u for u in g.player_units(1))
-                    r2 = client.get(f"/api/games/{s.id}/path", params={"token": token, "unit_id": enemy.id, "x": x, "y": y}).json()
+                    enemy = next(u for u in g.view(None)["units"] if u["owner"] == 1)
+                    r2 = client.get(f"/api/games/{s.id}/path", params={"token": token, "unit_id": enemy["id"], "x": x, "y": y}).json()
                     self.assertIsNone(r2["path"])
+                    # numbers past any engine's integers name no unit or tile: no route, not a server error
+                    for bad in ({"unit_id": w["id"], "x": 10 ** 12, "y": y}, {"unit_id": w["id"], "x": x, "y": -10 ** 12},
+                                {"unit_id": 10 ** 30, "x": x, "y": y}, {"unit_id": -1, "x": x, "y": y}):
+                        r3 = client.get(f"/api/games/{s.id}/path", params={"token": token, **bad})
+                        self.assertEqual(r3.status_code, 200, bad)
+                        self.assertIsNone(r3.json()["path"], bad)
                 finally:
                     appmod.manager.delete(s.id)
 

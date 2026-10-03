@@ -334,13 +334,13 @@ class GameRoutes(unittest.TestCase):
 
     # ---------------------------------------------------------------- replay
     def test_stranger_gets_404_on_replay_of_a_finished_private_game(self):
-        self.game.game.python_game.s.phase = "over"
+        self.game.game.test_ops([{"op": "end_game"}])
         for who in (None, "other"):
             with self.subTest(who=who or "anonymous"):
                 self.assertEqual(self._get("/replay", who).status_code, 404)
 
     def test_viewers_read_the_replay_of_a_finished_game(self):
-        self.game.game.python_game.s.phase = "over"
+        self.game.game.test_ops([{"op": "end_game"}])
         for who in ("owner", "zara"):
             with self.subTest(who=who):
                 self.assertEqual(self._get("/replay", who).status_code, 200)

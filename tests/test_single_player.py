@@ -4,6 +4,7 @@ import unittest
 from citar.engine.game import Game, ActionError, unique_colors, colors_clash
 from citar.engine import tools, views
 from citar.engine.state import PLAYER_COLORS
+from tests.backends import python_engine_only
 
 
 def new_game(**kw):
@@ -12,6 +13,7 @@ def new_game(**kw):
     return Game.new(cfg)
 
 
+@python_engine_only("tests/rules/research_queue_tools.toml")
 class ResearchQueueTests(unittest.TestCase):
     def test_append_adds_to_the_end_with_missing_prerequisites(self):
         g = new_game()
@@ -50,12 +52,14 @@ class ResearchQueueTests(unittest.TestCase):
 
 
 class ColorTests(unittest.TestCase):
+    @python_engine_only("colours_asked_for_are_granted_unless_one_too_close_is_taken")
     def test_palette_is_distinct(self):
         self.assertEqual(len(set(PLAYER_COLORS)), len(PLAYER_COLORS))
         for i, a in enumerate(PLAYER_COLORS):
             for b in PLAYER_COLORS[i + 1:]:
                 self.assertFalse(colors_clash(a, b), (a, b))
 
+    @python_engine_only("colours_asked_for_are_granted_unless_one_too_close_is_taken")
     def test_first_come_first_served(self):
         out = unique_colors(["#aa0000", "#aa0000", None, "#ab0101", "#00AA00"])
         self.assertEqual(out[0], "#aa0000")
@@ -65,6 +69,7 @@ class ColorTests(unittest.TestCase):
             for b in out[i + 1:]:
                 self.assertFalse(colors_clash(a, b))
 
+    @python_engine_only("tests.test_facade_games.SettingsTests.test_a_new_game_never_repeats_a_colour")
     def test_new_game_never_repeats_a_color(self):
         g = Game.new({"map_size": "small", "seed": 3,
                       "players": [{"controller": "human", "color": "#123456"}] * 4})
@@ -73,6 +78,7 @@ class ColorTests(unittest.TestCase):
         self.assertEqual(len(set(colors)), 4)
 
 
+@python_engine_only("tests/rules/combat_civilian_return.toml")
 class RecapturedCivilianTests(unittest.TestCase):
     def setUp(self):
         from citar.engine import units as unitmod, diplomacy
@@ -127,6 +133,7 @@ class RecapturedCivilianTests(unittest.TestCase):
         self.assertTrue(all(u.return_offer is None for u in g.player_units(0) if u.id != self.freed.id))
 
 
+@python_engine_only("tests/rules/combat_city_bombard.toml")
 class BombardViewTests(unittest.TestCase):
     def test_city_reports_whether_it_can_still_bombard(self):
         g = new_game()

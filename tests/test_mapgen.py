@@ -6,6 +6,7 @@ import unittest
 from citar.engine import mapgen
 from citar.engine import unique_types as U
 from citar.engine.rules import get_rules
+from tests.backends import python_engine_only
 
 
 class ResourceVarietyTest(unittest.TestCase):
@@ -29,6 +30,7 @@ class ResourceVarietyTest(unittest.TestCase):
             random.Random(seed), options=options)
         return {t.resource for t in tiles if t.resource}
 
+    @python_engine_only("the_luxury_variety_rises_with_the_lobby_sizes")
     def test_variety_curve(self):
         def v(k):
             return mapgen.luxury_variety(self.R, self.R.const["map_sizes"][k]["width"]
@@ -42,6 +44,7 @@ class ResourceVarietyTest(unittest.TestCase):
         self.assertAlmostEqual(mapgen.luxury_variety(self.R, 100), 0.5)
         self.assertLess(v("standard"), mapgen.luxury_variety(self.R, 4500), v("large"))
 
+    @python_engine_only("big_maps_have_every_luxury_and_strategic_type")
     def test_big_maps_have_every_type(self):
         # few players leave the most luxury types to chance, so they are the hard case
         for size, seed in (("huge", 1), ("huge", 7), ("gargantuan", 3)):
@@ -49,6 +52,7 @@ class ResourceVarietyTest(unittest.TestCase):
             self.assertEqual(self.lux - present, set(), f"{size} seed {seed}")
             self.assertEqual(self.strat - present, set(), f"{size} seed {seed}")
 
+    @python_engine_only("standard_and_small_maps_keep_their_share_of_the_types")
     def test_standard_and_small_maps(self):
         for seed in (1, 2, 5):
             present = self.gen("standard", seed, players=2, city_states=0)
@@ -59,6 +63,7 @@ class ResourceVarietyTest(unittest.TestCase):
                 self.assertGreaterEqual(len(self.lux & present), len(self.lux) // 2, f"{size} seed {seed}")
                 self.assertEqual(self.strat - present, set(), f"{size} seed {seed}")
 
+    @python_engine_only("sparse_settings_still_have_every_strategic_type")
     def test_sparse_settings_still_have_every_strategic(self):
         opts = {"resources": {"strategic": {"density": 0.05}, "luxury": {"each": {"Silk": {"mode": "off"}}}}}
         present = self.gen("duel", 4, options=opts)
@@ -68,6 +73,7 @@ class ResourceVarietyTest(unittest.TestCase):
         present = self.gen("duel", 4, options={"resources": {"strategic": {"density": 0}}})
         self.assertEqual(self.strat & present, set())
 
+    @python_engine_only("a_seed_makes_the_same_map_every_time")
     def test_deterministic(self):
         a = mapgen.generate_map(self.R, 44, 28, "continents", 2, 2, random.Random(9))[0]
         b = mapgen.generate_map(self.R, 44, 28, "continents", 2, 2, random.Random(9))[0]

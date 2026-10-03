@@ -760,6 +760,9 @@ fn engine_sources() -> Vec<(String, String)> {
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "py"))
+        // The facade's Python backend (package 2-08) lives here but is no engine: its `emit`
+        // passes on whatever event the host names.
+        .filter(|p| p.file_name().is_none_or(|n| n != "facade.py"))
         .collect();
     files.sort();
     files

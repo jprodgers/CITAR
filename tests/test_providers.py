@@ -140,7 +140,7 @@ class OpenAITests(unittest.TestCase):
 
     def test_plain_text_tool_calls(self):
         from citar.agents.providers.openai_provider import parse_plain_calls
-        from citar.engine.tools import tool_list
+        from citar.engine_api import tool_list
         tools = [{"type": "function", "function": {"name": t["name"], "parameters": t["input_schema"]}} for t in tool_list()]
 
         def parsed(text):

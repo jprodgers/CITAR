@@ -4,6 +4,7 @@ import unittest
 
 from citar.engine.game import Game
 from citar.engine import barbarians, cities, combat, movement, visibility, units as unitmod
+from tests.backends import python_engine_only
 
 
 def game(barbs="normal", **kw):
@@ -40,6 +41,7 @@ def land_ring(g, center, dist, ud="Warrior", pid=None, exclude=()):
 
 
 class SackTests(unittest.TestCase):
+    @python_engine_only("tests/rules/barbarians_sack_instead_of_capture.toml")
     def test_barbarians_sack_instead_of_capturing(self):
         g = game()
         city = g.player_cities(0)[0]
@@ -58,6 +60,7 @@ class SackTests(unittest.TestCase):
         self.assertNotIn("captured_city", res)
         self.assertTrue(any(e["type"] == "city_sacked" for e in g.s.events))
 
+    @python_engine_only("tests/rules/barbarians_sacked_city_left_alone.toml")
     def test_a_sacked_city_is_left_alone_for_a_while(self):
         g = game(barbarian_aggression=100)
         city = g.player_cities(0)[0]
@@ -76,6 +79,7 @@ class SackTests(unittest.TestCase):
         g.s.turn += 5
         self.assertTrue(any(g.city_at(t[1]) is city for t in barbarians._attack_targets(g, b)))
 
+    @python_engine_only("tests/rules/barbarians_sack_spares_wonders.toml")
     def test_sack_never_burns_wonders_or_the_palace(self):
         g = game(barbarian_aggression=100)
         city = g.player_cities(0)[0]
@@ -92,6 +96,7 @@ class SackTests(unittest.TestCase):
 
 
 class AggressionTests(unittest.TestCase):
+    @python_engine_only("aggression_sets_every_knob")
     def test_config_and_defaults(self):
         g = game()
         self.assertEqual(barbarians.aggression(g), g.rules.const["barbarians"]["levels"]["normal"]["aggression"])
@@ -103,6 +108,7 @@ class AggressionTests(unittest.TestCase):
         self.assertEqual(g.rules.to_client()["barbarian_aggression"]["raging"],
                          g.rules.const["barbarians"]["levels"]["raging"]["aggression"])
 
+    @python_engine_only("aggression_sets_every_knob")
     def test_knobs_grow_with_aggression(self):
         lo, hi = game(barbarian_aggression=0), game(barbarian_aggression=100)
         self.assertLess(barbarians.seek_radius(lo), barbarians.seek_radius(hi))
@@ -119,10 +125,12 @@ class AggressionTests(unittest.TestCase):
         barbarians._automate(g, b)
         return city.health < hp
 
+    @python_engine_only("tests/rules/barbarians_aggression_storms_cities.toml")
     def test_aggression_makes_barbarians_storm_cities(self):
         self.assertFalse(self._city_attack(0))
         self.assertTrue(self._city_attack(100))
 
+    @python_engine_only("tests/rules/barbarians_hunt_from_afar.toml")
     def test_aggressive_barbarians_hunt_from_afar(self):
         g = game(barbarian_aggression=100)
         city = g.player_cities(0)[0]
@@ -135,6 +143,7 @@ class AggressionTests(unittest.TestCase):
 
 
 class PillageTests(unittest.TestCase):
+    @python_engine_only("tests/rules/barbarians_pillage_resources_first.toml")
     def test_resource_improvements_first(self):
         g = game()
         lux = next(r for r, d in g.rules.resources.items() if d["resourceType"] == "Luxury")
@@ -168,6 +177,7 @@ class PillageTests(unittest.TestCase):
 
 
 class CivilianCaptureTests(unittest.TestCase):
+    @python_engine_only("tests/rules/barbarians_capture_and_carry.toml")
     def test_capture_and_carry_to_camp(self):
         g = game(barbarian_aggression=85)
         bid = g.barbarian_id
@@ -189,6 +199,7 @@ class CivilianCaptureTests(unittest.TestCase):
 
 
 class TurnTests(unittest.TestCase):
+    @python_engine_only("tests/rules/barbarians_camps_spawn.toml")
     def test_raging_barbarians_play_turns(self):
         g = Game.new({"map_size": "duel", "seed": 21, "barbarians": "raging", "city_states": 0,
                       "players": [{"controller": "bot"}, {"controller": "bot"}]})

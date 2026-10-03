@@ -2,8 +2,10 @@
 
 It plays a script on the engine through ``citar.engine_api`` alone (``EngineGame`` and the bot functions), as the Rust
 runner (crates/citar-testkit/src/script) plays it on the Rust engine; tests/rules/_selftest.toml keeps the two in step.
-Steps marked ``intended`` expect the Rust engine's deliberate difference and are skipped here. A script's ``needs``
-names the package that makes it pass on Rust; this runner plays it regardless.
+It runs on the facade's backend (``CITAR_ENGINE``): on the Python engine, steps marked ``intended`` expect the Rust
+engine's deliberate difference and are skipped; on the Rust backend, through the bindings, they run, as the Rust runner
+runs them. A script's ``needs`` names the package that makes it pass on Rust: the Python engine plays it regardless,
+and on the Rust backend tests/test_rule_scripts.py skips it, as the Rust harness ignores it.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from typing import Any, Optional
 
 from citar import engine_api
 from citar.engine_api import ActionError, EngineGame
+from tests.backends import RUST
 
 RULES = Path(__file__).resolve().parent / "rules"
 ROOT = RULES.parent.parent
@@ -545,7 +548,7 @@ def load(path: Path) -> Script:
 
 
 class Runner:
-    """Plays one script on the Python engine."""
+    """Plays one script on the facade's backend."""
 
     def __init__(self, script: Script):
         self.script = script
@@ -610,7 +613,8 @@ class Runner:
             if s["intended"] not in self.intended:
                 raise ScriptError(f"{label}: intended = {json.dumps(s['intended'])} is in neither "
                                   f"refcheck/intended.toml nor tests/rules/intended.toml")
-            return
+            if not RUST:
+                return          # the Rust engine's deliberate difference: the Python engine gives the old answer
         if s.get("coerce") is not True:
             for key in ("args", "ops", "new_game", "params"):
                 if key in s:

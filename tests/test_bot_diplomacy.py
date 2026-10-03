@@ -11,6 +11,7 @@ from citar.bots.idle import IdleBot
 from citar.bots.basic import BasicBot
 from citar.engine import diplomacy as D, tools
 from citar.engine.game import Game
+from tests.backends import python_engine_only, rust_pending
 
 # Settings under which the bot prepares and declares war as soon as it can (a control for the war switch)
 EAGER_WAR = {"war_min_turn": 0, "war_chance": 1.0, "war_power_ratio": 0, "war_power_ratio_aggr": 0,
@@ -46,6 +47,7 @@ def play(g, bots, until_turn, handle=None):
 
 
 class CategoryTests(unittest.TestCase):
+    @python_engine_only("every_item_has_one_category_and_names_round_trip")
     def test_every_item_type_has_a_category(self):
         self.assertEqual(set(D.ITEM_TYPES), set(D.ITEM_CATEGORY))
         self.assertTrue(set(D.ITEM_CATEGORY.values()) <= set(D.CATEGORIES))
@@ -54,6 +56,7 @@ class CategoryTests(unittest.TestCase):
                          {"trades", "peace"})
         self.assertEqual(D.proposal_categories(None), set())
 
+    @python_engine_only("set_refuses_with_set_diplomacys_messages_and_changes_nothing")
     def test_the_switch_is_checked(self):
         with self.assertRaises(ValueError):
             BasicBot(diplomacy={"trade": "llm"})
@@ -63,6 +66,7 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(bot.diplomacy["trades"], "llm")
         self.assertEqual(bot.diplomacy["war"], "bot")
 
+    @python_engine_only("tests/rules/bot_model_owned_deferred.toml")
     def test_who_owns_a_negotiation(self):
         bot = BasicBot(diplomacy={"trades": "llm"})
         gold = {"proposal": {"0": [{"type": "gold", "amount": 5}], "1": [{"type": "embassy"}]}}
@@ -75,6 +79,7 @@ class CategoryTests(unittest.TestCase):
         self.assertFalse(BasicBot(diplomacy={"chat": "llm"}).owns_negotiation({"proposal": {"0": [], "1": []}}))
 
 
+@python_engine_only("tests/rules/bot_switch_trades.toml")
 class TradeSwitchTests(unittest.TestCase):
     def test_no_trade_offers_when_the_model_owns_trades(self):
         g = two_civs()
@@ -157,6 +162,7 @@ class BotAgentTests(unittest.TestCase):
         with self.s.lock:
             return self.s.game.open_negotiation_as(0, 1, "A proposal.", give, receive)["negotiation_id"]
 
+    @rust_pending("2-09")
     def test_an_interrupt_skips_what_the_model_owns(self):
         from citar.agents.bot_agent import BotAgent
         agent = BotAgent(seed=1)
@@ -171,6 +177,7 @@ class BotAgentTests(unittest.TestCase):
         agent.respond_negotiation(self.s, 1, talk)
         self.assertGreater(len(self.s.game.negotiation(talk)["history"]), 1)
 
+    @rust_pending("2-09")
     def test_the_end_of_turn_wait_skips_what_the_model_owns(self):
         from citar.agents.bot_agent import BotAgent
         trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
@@ -187,6 +194,7 @@ class BotAgentTests(unittest.TestCase):
         n = self.s.game.negotiation(trade)
         self.assertEqual((n["status"], len(n["history"])), ("open", 1))
 
+    @python_engine_only("tests.test_engine_api.BotTests.test_bots_are_compiled_versions")
     def test_a_frozen_bot_answers_everything(self):
         """The archived bots predate the switch: BotAgent falls back to answering every negotiation."""
         from citar.agents.bot_agent import BotAgent
@@ -197,6 +205,7 @@ class BotAgentTests(unittest.TestCase):
         self.assertGreater(len(self.s.game.negotiation(trade)["history"]), 1)
 
 
+@python_engine_only("tests/rules/bot_switch_war.toml")
 class WarSwitchTests(unittest.TestCase):
     def test_the_bot_never_declares_war_but_fights_the_war_it_is_given(self):
         def game():
@@ -220,6 +229,7 @@ class WarSwitchTests(unittest.TestCase):
         self.assertTrue(fought, "the bot should attack in a war its model declared")
 
 
+@python_engine_only("every_key_is_its_own_stream")
 class RandomStreamTests(unittest.TestCase):
     def test_diplomacy_has_its_own_stream(self):
         bot = BasicBot(seed=5)
@@ -241,6 +251,7 @@ class RandomStreamTests(unittest.TestCase):
 
 
 class CounterTests(unittest.TestCase):
+    @python_engine_only("tests/rules/bot_counter_merges_gold.toml")
     def test_a_counter_adds_to_the_gold_already_on_the_table(self):
         g = two_civs()
         # from the bot's side: 10 gold for its map, which it values at 20
@@ -252,6 +263,7 @@ class CounterTests(unittest.TestCase):
         self.assertEqual(gold, [{"type": "gold", "amount": 30}])        # 10 + (shortfall 10 + margin 10)
         self.assertTrue(n["history"][-1]["message"])
 
+    @python_engine_only("tests/rules/bot_counter_capped_by_treasury.toml")
     def test_a_counter_never_asks_for_more_gold_than_they_hold(self):
         """The rules check only the counterer's side of a counter, so an ask the other side cannot pay would fail only
         when they accepted it. The bot asks for what closes the gap within their treasury, or rejects."""
@@ -272,6 +284,7 @@ class CounterTests(unittest.TestCase):
                 tools.execute(g, 0, "respond_negotiation", {"negotiation_id": nid, "action": "accept", "message": "Done."})
                 self.assertEqual(n["status"], "accepted")
 
+    @python_engine_only("tests/rules/bot_counter_rounds.toml")
     def test_the_bot_stops_countering_after_counter_rounds(self):
         g = two_civs()
         bot = BasicBot(seed=1, params={"counter_rounds": 2})
@@ -287,6 +300,7 @@ class CounterTests(unittest.TestCase):
         self.assertEqual((n["status"], n["history"][-1]["action"]), ("rejected", "reject"))
         self.assertTrue(n["history"][-1]["message"])
 
+    @python_engine_only("tests/rules/bot_offer_stands_once.toml")
     def test_our_offer_stands_once_then_the_bot_rejects(self):
         g = two_civs()
         bot = BasicBot(seed=1)
@@ -300,6 +314,7 @@ class CounterTests(unittest.TestCase):
         n = D.get_negotiation(g, nid)
         self.assertEqual((n["status"], n["history"][-1]["action"]), ("rejected", "reject"))
 
+    @python_engine_only("a_chat_with_a_seat_nobody_plays_expires_and_the_game_goes_on")
     def test_the_bot_settles_its_chats_before_ending_its_own_turn(self):
         g = two_civs()
         bot = BasicBot(seed=1)
@@ -309,6 +324,7 @@ class CounterTests(unittest.TestCase):
         tools.execute(g, 0, "end_turn", {})
 
 
+@python_engine_only("tests/rules/bot_advice_plain_data.toml")
 class AdviceTests(unittest.TestCase):
     def test_advice_is_plain_data_and_changes_nothing(self):
         g = two_civs()

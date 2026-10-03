@@ -8,6 +8,7 @@ from citar.engine import cities, conquest, research, triggers, victory
 from citar.engine.game import Game
 from citar.engine.state import GameState, Player, seat_overrides
 from citar.engine.uniques import Unique, civ_matches
+from tests.backends import python_engine_only
 
 ALL_ON = {"un_vote": True, "conquest": True, "free_picks": True}
 ALL_OFF = {"un_vote": False, "conquest": False, "free_picks": False}
@@ -21,6 +22,7 @@ def game(*players, **kw):
 
 
 class DefaultTests(unittest.TestCase):
+    @python_engine_only("tests/rules/controllers_seat_defaults.toml")
     def test_defaults_follow_the_controller(self):
         g = game(*({"controller": c} for c in ("human", "llm", "mcp", "bot", "hybrid")), map_size="small")
         got = {p.controller: (p.handicap, p.auto) for p in g.s.players}
@@ -29,12 +31,14 @@ class DefaultTests(unittest.TestCase):
         for c in ("bot", "hybrid", "minor", "barbarian"):
             self.assertEqual(got[c], ("ai", ALL_ON), c)
 
+    @python_engine_only("tests/rules/costs_follow_the_handicap.toml")
     def test_difficulty_and_unique_filters_follow_the_handicap(self):
         g = game({"controller": "hybrid"}, {"controller": "hybrid", "handicap": "human"}, difficulty="Settler")
         self.assertEqual([g.is_humanlike(0), g.is_humanlike(1)], [False, True])
         self.assertEqual([civ_matches(g, 0, "AI player"), civ_matches(g, 1, "Human player")], [True, True])
         self.assertNotEqual(research.tech_cost(g, 0, "Pottery"), research.tech_cost(g, 1, "Pottery"))
 
+    @python_engine_only("tests/rules/controllers_seat_overrides.toml")
     def test_overrides_are_kept_and_checked(self):
         g = game({"controller": "hybrid", "handicap": "human", "auto": {"un_vote": False, "conquest": False}},
                  {"controller": "llm", "auto": {"free_picks": True}})
@@ -46,6 +50,7 @@ class DefaultTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 game(bad, {"controller": "bot"})
 
+    @python_engine_only("tests/rules/controllers_seat_overrides.toml")
     def test_auto_values_must_be_true_or_false(self):
         """The string "false" is truthy: coercing it would hand the seat the very decision it declined."""
         self.assertEqual(seat_overrides(None, {"un_vote": False}), {"auto": {"un_vote": False}})
@@ -54,6 +59,7 @@ class DefaultTests(unittest.TestCase):
         self.assertIn("un_vote", str(cm.exception))
         self.assertNotIn("conquest", str(cm.exception))
 
+    @python_engine_only("tests/rules/controllers_set_controller.toml")
     def test_a_new_controller_rederives_what_was_not_set_explicitly(self):
         p = Player(id=0, name="A", color="#aa0000", controller="bot", overrides={"auto": {"un_vote": False}})
         self.assertEqual((p.handicap, p.auto), ("ai", {**ALL_ON, "un_vote": False}))
@@ -64,6 +70,7 @@ class DefaultTests(unittest.TestCase):
 
 
 class SaveTests(unittest.TestCase):
+    @python_engine_only("tests/rules/controllers_reload_keeps_seats.toml")
     def test_round_trip_keeps_the_settings(self):
         g = game({"controller": "hybrid", "handicap": "human", "auto": {"un_vote": False}}, {"controller": "bot"})
         g.player(1).auto["conquest"] = False               # set during play, not as an override
@@ -72,6 +79,7 @@ class SaveTests(unittest.TestCase):
         self.assertEqual(s.players[0].overrides, {"handicap": "human", "auto": {"un_vote": False}})
         self.assertEqual(s.players[1].auto, {**ALL_ON, "conquest": False})
 
+    @python_engine_only("every_fixture_converts_with_counts_and_ids_kept_and_round_trips")
     def test_saves_from_before_the_split_derive_them_from_the_controller(self):
         d = game({"controller": "llm"}, {"controller": "bot"}).s.to_dict()
         for pd in d["players"]:
@@ -82,6 +90,7 @@ class SaveTests(unittest.TestCase):
 
 
 class AutoDecisionTests(unittest.TestCase):
+    @python_engine_only("the_vote_counts_everyone_as_its_seat_decides")
     def test_un_votes_are_cast_only_for_civs_whose_votes_are_automatic(self):
         g = game({"controller": "human"}, {"controller": "bot"}, {"controller": "bot", "auto": {"un_vote": False}},
                  city_states=0, map_size="small")
@@ -94,6 +103,7 @@ class AutoDecisionTests(unittest.TestCase):
         g.meet(2, 1)
         self.assertIsNone(victory._ai_vote(g, g.player(2)))
 
+    @python_engine_only("tests/rules/combat_auto_conquest.toml")
     def test_conquered_cities_are_decided_only_when_conquest_is_automatic(self):
         for auto, expected in ((True, 1), (False, 0)):
             with self.subTest(auto=auto):
@@ -106,6 +116,7 @@ class AutoDecisionTests(unittest.TestCase):
                 self.assertEqual(auto_conquer.call_count, expected)
                 self.assertEqual(city.owner, 0)
 
+    @python_engine_only("tests/rules/controllers_free_picks.toml")
     def test_free_picks_are_made_only_when_they_are_automatic(self):
         for auto, left in ((True, 0), (False, 1)):
             with self.subTest(auto=auto):
@@ -115,6 +126,7 @@ class AutoDecisionTests(unittest.TestCase):
                 triggers.trigger(g, Unique("Free Technology"), 0)
                 self.assertEqual(p.free_techs, left)
 
+    @python_engine_only("tests/rules/controllers_free_picks.toml")
     def test_free_great_people_are_chosen_only_when_picks_are_automatic(self):
         from citar.engine import great_people
         for auto in (True, False):
@@ -129,6 +141,9 @@ class AutoDecisionTests(unittest.TestCase):
 
 
 class SeatTests(unittest.TestCase):
+    """The facade-level controller tests: a session's seat changes reach the engine, and a scenario's seats take
+    the controller's settings, on either backend."""
+
     def test_changing_a_seat_changes_the_engine_controller(self):
         from citar.server.session import SessionManager, SAVE_DIR
         import shutil
@@ -151,12 +166,13 @@ class SeatTests(unittest.TestCase):
             shutil.rmtree(SAVE_DIR / s.id, ignore_errors=True)
 
     def test_scenarios_accept_hybrid_seats_and_their_settings(self):
-        from citar.engine import scenario
-        g = game({"controller": "human"}, {"controller": "bot"})
-        seats = scenario.normalize_seats(g, [{"type": "hybrid", "handicap": "human", "auto": {"un_vote": False}}])
+        from citar.engine_api import EngineGame
+        g = EngineGame.new({"map_size": "duel", "seed": 21, "barbarians": "normal", "city_states": 1,
+                            "players": [{"controller": "human"}, {"controller": "bot"}]})
+        seats = g.normalize_seats([{"type": "hybrid", "handicap": "human", "auto": {"un_vote": False}}])
         self.assertEqual(seats[0]["type"], "hybrid")
         self.assertEqual((seats[0]["handicap"], seats[0]["auto"]), ("human", {"un_vote": False}))
-        over = scenario.overview(g)["players"][0]
+        over = g.scenario_overview()["players"][0]
         self.assertEqual((over["handicap"], over["auto"]), ("human", ALL_OFF))
 
 

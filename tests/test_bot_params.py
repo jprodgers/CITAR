@@ -21,6 +21,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from tests.backends import python_engine_only
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "crates" / "citar-bot" / "params" / "basic-1.json"
@@ -222,6 +223,7 @@ RUST_TYPES = {"f64": "float", "i32": "int", "u32": "int", "usize": "int", "bool"
               "ProductionMode": "choice", "GarrisonMode": "choice"}
 
 
+@python_engine_only("the_schema_is_the_file_verbatim_and_the_table_follows_it")
 class ParameterSchema(unittest.TestCase):
     """basic-1.json is PARAM_GROUPS without the two cache parameters, spec for spec, with 41 ints typed float."""
 
@@ -305,6 +307,7 @@ class ParameterSchema(unittest.TestCase):
         self.assertEqual(status, 0, out.getvalue())
 
 
+@python_engine_only("clean_matches_the_clean_params_table")
 class CleanParams(unittest.TestCase):
     """tests/data/clean_params_cases.json is what Python's clean_params gives today."""
 

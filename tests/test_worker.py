@@ -215,11 +215,16 @@ class PooledWork(unittest.TestCase):
 
     def test_an_eliminated_model_frees_its_machine(self):
         from citar.pool import seats
-        game = self.manager.create({"map_size": "duel", "seed": 3},
-                                   [{"type": "llm", "llm": {"server_id": self.server_id, "model": "m1"}}, {"type": "bot"}])
+        # two bots, so the game goes on without the model: eliminating it in a duel would end the game, and a game
+        # that is over frees its machine whatever its seats are
+        game = self.manager.create({"map_size": "small", "seed": 3},
+                                   [{"type": "llm", "llm": {"server_id": self.server_id, "model": "m1"}},
+                                    {"type": "bot"}, {"type": "bot"}])
         game.suspend()
         self.assertEqual(len(seats.occupied(self.server_id)), 1)
-        game.game.python_game.player(0).alive = False       # the bots play on; the model will never be asked again
+        game.game.test_ops([{"op": "eliminate", "player": 0}])   # the bots play on; the model is never asked again
+        self.assertEqual(game.game.phase, "playing")
+        self.assertFalse(game.game.is_alive(0))
         self.assertEqual(seats.occupied(self.server_id), [])
 
     def _bare_runner(self):

@@ -7,8 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from citar.bots import basic, profiles, ratings
+from tests.backends import rust_pending
 
 
+@rust_pending("2-10")
 class ParameterTests(unittest.TestCase):
     def test_every_parameter_the_code_reads_is_declared(self):
         """P["x"] / self.p["x"] anywhere in the bot must be a declared parameter, or a profile can't reach it."""
@@ -62,6 +64,7 @@ class ParameterTests(unittest.TestCase):
         self.assertEqual(bot.p["u_food"], basic.DEFAULT_PARAMS["u_food"])
 
 
+@rust_pending("2-10")
 class ProfileTests(unittest.TestCase):
     def tearDown(self):
         for p in profiles.list_profiles():
@@ -125,6 +128,7 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("frozen_7149efb1", ids)
 
 
+@rust_pending("2-10")
 class LabProfileTests(unittest.TestCase):
     def test_profile_seats_are_frozen_into_the_experiment(self):
         from citar import lab
@@ -163,6 +167,7 @@ class LabProfileTests(unittest.TestCase):
             (lab.QUEUE / "api-ab.json").unlink(missing_ok=True)
 
 
+@rust_pending("2-10")
 class NegotiationTests(unittest.TestCase):
     def test_a_refused_counter_still_ends_the_bots_move(self):
         """A live game waited 90 s on a bot whose counter-offer the rules refused (2026-09-22)."""
@@ -191,6 +196,7 @@ class NegotiationTests(unittest.TestCase):
         self.assertNotEqual((neg["status"], neg["awaiting"]), ("open", a), neg)
 
 
+@rust_pending("2-10")
 class BestBotTests(unittest.TestCase):
     def test_best_is_pinned_when_a_game_is_created(self):
         from unittest import mock

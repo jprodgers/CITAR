@@ -400,7 +400,7 @@ class SessionTests(unittest.TestCase):
         playing = self.manager.create({"map_size": "duel", "seed": 11}, [{"type": "human"}, {"type": "bot"}], name="playing")
         for s in (done, watched):
             with s.lock:
-                s.game.python_game.s.phase = "over"
+                s.game.test_ops([{"op": "end_game"}])
         watched.subscribers.append(lambda msg: None)
         t0 = time.time()
         self.assertEqual(self.manager.close_finished(t0), [], "players get a few minutes to see the result")
