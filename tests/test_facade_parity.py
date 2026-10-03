@@ -3,24 +3,29 @@
 Both backend modules are imported side by side: ``citar.engine.facade`` (the Python engine) and
 ``citar._facade_rust`` (the Rust engine, skipped when the extension is not built). Each plays the same seeded duel and
 the same small game, and every original name of the facade and every EngineGame method is called on each with the same
-arguments; their answers are compared by shape under type classes (tests/parity_shapes.py): int and float are one
-number class, None matches any type, an empty collection matches any element type, records keep their key sets, maps
-their key kind. The two engines play different games from one seed, so values are never compared, except where a
-behaviour test pins them: a bot's diplomacy switch and whom it then answers, a crashing bot's record and
-``raise_errors``, and the events a game hands its subscribers, in order and each once.
+arguments; each answer is compared with the same call's answer on the other backend, by shape under type classes
+(tests/parity_shapes.py): int and float are one number class, None matches any type, an empty collection matches any
+element type, records keep their key sets, maps their key kind. A key some records of one answer lack is optional in
+that answer alone, and only for the side that has it; the keys a record has only in some states (a unit's own
+detail) are listed in CONDITIONAL, each with why. An answer that is vacant (None, empty, or holding only those) on one
+backend and not on the other would compare nothing, so that fails too unless VACANT lists it with why. The two
+engines play different games from one seed, so values are never compared, except where a behaviour test pins them: a
+bot's diplomacy switch and whom it then answers, a crashing bot's record and ``raise_errors``, and the events a game
+hands its subscribers, in order and each once.
 
 What differs on purpose is listed in DOCUMENTED, each with where it is decided; an entry that no longer differs fails
 the test, so the list cannot go stale. What a save holds (``to_save``, ``state_dict``) is each engine's own format and
 is compared through ``state_summary``, the only reading of it the facade promises.
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import copy
 import inspect
 import re
 import unittest
 
 from citar.engine import facade as PY
 from tests import rulescript
-from tests.parity_shapes import compare
+from tests.parity_shapes import compare, record_paths, shape, vacancies
 
 try:
     from citar import _facade_rust as RS
@@ -33,6 +38,29 @@ DOCUMENTED = {
     "found_city.at": "intended unit-results-give-tiles: Python gave the keys of the tile's coordinates, ['x', 'y']",
     "rules_version": "DESIGN.md 5.2 and P2.6.1: the ruleset's format and the start of its id ('2-0123456789ab'), a "
                      "str as the facade's annotation always said; Python returned the bare format number, 2",
+}
+#: The keys a record has only in some states, by the end of its path (as tests/parity_shapes.py names it), with why:
+#: either side may have them in all, some or none of its records. "*" makes every key so: a map by snake-case name.
+CONDITIONAL = {
+    ".units[]": ({"moves", "max_moves", "activity", "xp", "promotions", "can_promote", "promotion_ready",
+                  "attacks_made", "embarked", "fortified_turns", "return_offer", "status", "building", "goto",
+                  "religious_strength", "great_person", "religion"},
+                 "a unit's own detail, which another civilization's unit lacks, and what only some units have: a "
+                 "fortified unit's fortified_turns, a great person's flag, a worker's building, a religion "
+                 "(citar/engine/views.py unit_info)"),
+    ".per_turn_breakdown{}": ("*", "a source's yields by name, a zero left out (views.py empire_info)"),
+    "[type=negotiation].data": ({"awaiting", "status"},
+                                "a negotiation's event names whom it awaits while open and its status once closed "
+                                "(citar/engine/diplomacy.py)"),
+}
+#: Answers (by battery key, or a record's field below one) vacant on one backend alone, and why: their shapes
+#: compare nothing there. An entry that is no longer vacant on one side alone fails the test, so the list cannot go
+#: stale.
+VACANT = {
+    "EngineGame.bot_advice": "package 2-05 ports the advice: basic-1's is still 2-00a's stub, which advises nothing "
+                             "(crates/citar-bot/src/lib.rs, advice)",
+    "EngineGame.negotiation:answered.deal_id": "package 2-05 ports the answers: basic-1 still rejects every proposal, "
+                                               "so the bot's answer concludes no deal on Rust",
 }
 #: The facade's names and EngineGame's members this test does not call by shape, and why.
 NOT_BY_SHAPE = {
@@ -77,7 +105,8 @@ def _path_target(g, pid: int):
 def duel_battery(B) -> dict:
     """The seeded duel on backend B: a human seat (0) and a bot seat (1). Returns {key: answer}; a key is the name
     called (``EngineGame.name`` for a method), with ``:case`` when one name is called more than once, or a few words
-    for an answer of its own kind (a tool's result). Answers of one name are compared together (``compared``)."""
+    for an answer of its own kind (a tool's result). Each key's answer is compared with the same key's on the other
+    backend."""
     out = {}
     g = B.EngineGame.new(dict(DUEL))
     g.meet(0, 1)
@@ -107,6 +136,13 @@ def duel_battery(B) -> dict:
     probe = g.open_negotiation_as(1, 0, "A word, out of turn.")
     out["EngineGame.open_negotiation_as"] = probe
     out["EngineGame.close_negotiation"] = g.close_negotiation(probe["negotiation_id"], "expired", "(no reply in time)")
+    # A deal both engines conclude alike: seat 1 accepts a second gift itself (the bots answer differently until 2-05,
+    # so the first gift's answer is no deal on Rust).
+    gift = g.execute(0, "open_negotiation", {"to": 1, "message": "A gift between neighbours.",
+                                            "give": [{"type": "gold", "amount": 20}]})["negotiation_id"]
+    out["execute respond_negotiation accept"] = g.execute(1, "respond_negotiation", {
+        "negotiation_id": gift, "action": "accept", "message": "Done."})
+    out["EngineGame.negotiation:accepted"] = g.negotiation(gift)
     for _ in range(6):
         if g.current == 0:
             g.execute(0, "end_turn")
@@ -138,7 +174,8 @@ def duel_battery(B) -> dict:
     out["EngineGame.negotiations"] = g.negotiations()
     out["EngineGame.max_chat_messages"] = g.max_chat_messages()
     deals = [n["deal_id"] for n in g.negotiations() if n.get("deal_id") is not None]
-    out["EngineGame.deal"] = [g.deal(d) for d in deals] + [g.deal(9999)]
+    out["EngineGame.deal"] = [g.deal(d) for d in deals]
+    out["EngineGame.deal:none"] = g.deal(9999)
     out["EngineGame.describe_items"] = g.describe_items([{"type": "gold", "amount": 50},
                                                          {"type": "open_borders", "turns": 30}])
     out["EngineGame.scenario_overview"] = g.scenario_overview()
@@ -232,17 +269,22 @@ def module_battery(B) -> dict:
     return out
 
 
-def compared(answers: dict) -> dict:
-    """The answers by name: those of one name's cases (``EngineGame.view:god``, ``EngineGame.view:player``) as one
-    list, so a key one view lacks and another has (a fortified unit's ``fortified_turns``) reads as optional."""
-    by_name: dict = {}
-    for key, value in answers.items():
-        by_name.setdefault(key.split(":")[0], []).append(value)
-    return {name: values[0] if len(values) == 1 else _Cases(values) for name, values in by_name.items()}
+CONDITIONAL_KEYS = {end: keys for end, (keys, _why) in CONDITIONAL.items()}
 
 
-class _Cases(list):
-    """Several answers of one name, compared as one collection of them."""
+def shape_differences(py: dict, rs: dict) -> list[str]:
+    """Where the two backends' answers differ in shape, key by key, as "path: what" lines."""
+    return [d for key in sorted(py) for d in compare(py[key], rs[key], key, CONDITIONAL_KEYS)]
+
+
+def vacant_differences(py: dict, rs: dict) -> list[str]:
+    """Where one backend's answer is vacant and the other's is not, as "path: what" lines."""
+    return [d for key in sorted(py) for d in vacancies(py[key], rs[key], key)]
+
+
+def _paths_of(lines: list[str]) -> set:
+    # a difference reads "path: what"; a battery key may hold a colon, never a colon and a space
+    return {d.split(": ", 1)[0] for d in lines}
 
 
 @unittest.skipIf(RS is None, "citar._engine is not built (cargo xtask develop)")
@@ -257,14 +299,60 @@ class ParityTests(unittest.TestCase):
 
     def test_every_answer_has_the_same_shape(self):
         self.assertEqual(sorted(self.answers[RS]), sorted(self.answers[PY]))
-        py, rs = compared(self.answers[PY]), compared(self.answers[RS])
-        found = [d for name in sorted(py) for d in compare(py[name], rs[name], name)]
-        # a difference reads "path: what"; a battery key may hold a colon, never a colon and a space
-        documented = [d for d in found if d.split(": ", 1)[0] in DOCUMENTED]
+        found = shape_differences(self.answers[PY], self.answers[RS])
         undocumented = [d for d in found if d.split(": ", 1)[0] not in DOCUMENTED]
         self.assertEqual(undocumented, [], "the backends' answers differ in shape:\n" + "\n".join(undocumented))
-        stale = sorted(set(DOCUMENTED) - {d.split(": ", 1)[0] for d in documented})
+        stale = sorted(set(DOCUMENTED) - _paths_of(found))
         self.assertEqual(stale, [], "documented differences that no longer differ: remove them")
+
+    def test_no_answer_is_vacant_on_one_side_alone(self):
+        found = vacant_differences(self.answers[PY], self.answers[RS])
+        unlisted = [d for d in found if d.split(": ", 1)[0] not in VACANT]
+        self.assertEqual(unlisted, [], "answers whose shapes compare nothing on one backend:\n" + "\n".join(unlisted))
+        stale = sorted(set(VACANT) - _paths_of(found))
+        self.assertEqual(stale, [], "VACANT entries that are no longer vacant on one side alone: remove them")
+
+    def test_each_conditional_entry_names_records_the_battery_has(self):
+        paths = {p for B in (PY, RS) for key, answer in self.answers[B].items()
+                 for p in record_paths(shape(answer), key)}
+        for end in CONDITIONAL:
+            self.assertTrue(any(p.endswith(end) for p in paths), f"CONDITIONAL {end!r} names no record compared")
+
+    def test_faults_put_back_are_caught(self):
+        # Faults a Rust backend could have, put into its answers: the comparison must find each where it is.
+        def faulty(change) -> set:
+            rs = copy.deepcopy(self.answers[RS])
+            change(rs)
+            return _paths_of(shape_differences(self.answers[PY], rs)) - set(DOCUMENTED)
+
+        def drop(keys, *answers):
+            def change(rs):
+                for a in answers:
+                    for k in keys:
+                        rs[a].pop(k)
+            return change
+
+        def drop_from_one_unit(rs):
+            rs["EngineGame.view:god"]["units"][0].pop("hp")
+
+        def drop_from_every_unit(rs):
+            for u in rs["EngineGame.view:player"]["units"]:
+                u.pop("hp")
+
+        def ids_as_text(rs):
+            rs["EngineGame.standings"] = {str(k): v for k, v in rs["EngineGame.standings"].items()}
+        faults = {
+            "a player view's own keys": (drop(("empire", "diplomacy", "alerts", "notes"), "EngineGame.view:player",
+                                              "EngineGame.view:small player"), "EngineGame.view:player"),
+            "a god view's own keys": (drop(("empires", "stats", "negotiations", "messages", "thoughts"),
+                                           "EngineGame.view:god", "EngineGame.view:small god"), "EngineGame.view:god"),
+            "a key of one unit": (drop_from_one_unit, "EngineGame.view:god.units[]"),
+            "a key of every unit": (drop_from_every_unit, "EngineGame.view:player.units[]"),
+            "ids as text": (ids_as_text, "EngineGame.standings"),
+        }
+        for name, (change, where) in faults.items():
+            with self.subTest(fault=name):
+                self.assertIn(where, faulty(change))
 
     def test_every_original_name_is_compared(self):
         called = {k.split(":")[0] for k in self.answers[PY]}
@@ -416,7 +504,36 @@ class ShapeTests(unittest.TestCase):
         self.assertTrue(compare({1: {"s": 1}}, {2: {"t": 1}}), "a map's values are records")
         self.assertEqual(compare({"Base": 1, "Nation": 2}, {"Base": 3}), [], "a map keyed by names")
         self.assertEqual(compare([{"a": 1, "f": 2}, {"a": 1}], [{"a": 3}]), [], "a key some records lack is optional")
+        self.assertEqual(compare([{"a": 3}], [{"a": 1, "f": 2}, {"a": 1}]), [], "... on the side that has it")
         self.assertTrue(compare([{"a": 1, "f": 2}], [{"a": 3}]), "a key every record has is not")
+        self.assertTrue(compare([{"id": 1, "x": 1}, {"id": 2, "x": 2}], [{"id": 1, "x": 1}, {"id": 2}]),
+                        "a key dropped from some records")
+        self.assertEqual(compare([{"a": 1, "f": 2}, {"a": 1}], [{"a": 1, "f": 3}, {"a": 2}]), [])
+
+    def test_optional_keys_are_learned_within_one_answer(self):
+        # One answer's two views: what the player's view alone has is no excuse for the god's view to lack a key.
+        player, god = {"units": [], "empire": {"gold": 1}}, {"units": [], "empires": {"Rome": 1}}
+        self.assertEqual(compare(player, player), [])
+        self.assertTrue(compare(god, {"units": []}), "a god view without its empires")
+        self.assertTrue(compare({"view": player}, {"view": {"units": []}}), "a player view without its empire")
+
+    def test_conditional_keys(self):
+        own, outside = {"id": 1, "moves": 2}, {"id": 2}
+        self.assertTrue(compare([own, outside], [own]))
+        self.assertEqual(compare([own, outside], [own], conditional={"[]": {"moves"}}), [])
+        self.assertEqual(compare([own], [outside], conditional={"[]": {"moves"}}), [])
+        self.assertTrue(compare([own], [{"x": 1}], conditional={"[]": {"moves"}}), "only the keys it names")
+        self.assertTrue(compare({"u": [own]}, {"u": [outside]}, conditional={".v[]": {"moves"}}), "only where")
+        self.assertEqual(compare({"y": {"gold": 1}}, {"y": {"science": 2}}, conditional={".y": "*"}), [])
+
+    def test_vacancies(self):
+        self.assertEqual(vacancies([None, {"a": 1}], [{"a": 2}]), [])
+        self.assertTrue(vacancies([None, {"a": 1}], [None]), "a list of None alone compares nothing")
+        self.assertTrue(vacancies({"deal_value": 3, "wants": []}, {"deal_value": None, "wants": []}))
+        self.assertEqual(vacancies({"a": None, "b": 1}, {"a": None, "b": 2}), [])
+        self.assertEqual(vacancies({"a": {"b": None}, "c": 1}, {"a": {"b": 2}, "c": 1}),
+                         ["$.a: vacant on the first alone"])
+        self.assertEqual(vacancies([1, None], [None, 1]), [], "not into a collection's elements")
 
     def test_tagged_records(self):
         ev = lambda t, **d: {"type": t, "data": d}  # noqa: E731

@@ -6,8 +6,10 @@ the same seed. A shape keeps what a caller relies on:
 - **Type classes.** int and float are one number class (JSON has one), bool is its own, str, bytes; ``None`` matches
   any type (a value the docstring makes optional is None in one game and set in the other).
 - **Records** (dicts with fixed keys) keep their key sets, which must be equal, and each key's shape. A key that some
-  of a collection's records have and others lack is optional there, and either side may lack it (a unit's
-  ``fortified_turns``, a fortified unit's alone).
+  of a collection's records have and others lack is optional there (a unit's ``fortified_turns``, a fortified
+  unit's alone). Optional keys are learned inside one value's own collections, never across two answers, and they
+  excuse one side only: a key one side lacks must be optional on the side that has it, and a key every record has
+  on one side must be in every record on the other (a key dropped from some records is a difference).
 - **Maps** (dicts keyed by ids, or by names that are no snake-case field: a ruleset's or a game's) keep the kind of
   their keys, int, id-as-text or name, which must agree, and their values' merged shape.
 - **Collections** (lists, tuples, sets) keep their elements' merged shape; an empty collection or map matches any
@@ -128,8 +130,28 @@ def show(s) -> str:
     return s[0]
 
 
-def differences(a, b, path: str = "$") -> list[str]:
-    """Where two shapes disagree, as "path: what" lines; none when they match under the type classes."""
+#: Every key of a record is free: it is a map by name whose keys are snake case (a source's yields, a zero left out).
+ALL = object()
+
+
+def _free_keys(conditional, path: str):
+    """The keys a record at ``path`` has in some states alone (``conditional``: a path's end, the keys or "*"), or
+    ALL when its keys are names, not fields."""
+    out: set = set()
+    for end, keys in (conditional or {}).items():
+        if path.endswith(end):
+            if keys == "*":
+                return ALL
+            out |= set(keys)
+    return out
+
+
+def differences(a, b, path: str = "$", conditional=None) -> list[str]:
+    """Where two shapes disagree, as "path: what" lines; none when they match under the type classes.
+
+    ``conditional`` maps the end of a record's path (``".units[]"``, ``"[type=negotiation].data"``) to the keys such a
+    record has only in some states (a unit's own detail, which another civilization's unit lacks), or to "*" when its
+    keys are names: either side may have those keys in all, some or none of its records."""
     if a == NONE or b == NONE or a == b:
         return []
     if a == EMPTY or b == EMPTY:
@@ -144,29 +166,79 @@ def differences(a, b, path: str = "$") -> list[str]:
     kind = a[0]
     if kind == "dict":
         out = []
-        optional = a[2] | b[2]
-        only_a = sorted(set(a[1]) - set(b[1]) - optional)
-        only_b = sorted(set(b[1]) - set(a[1]) - optional)
-        if only_a or only_b:
-            out.append(f"{path}: keys only on the first: {only_a}; only on the second: {only_b}")
+        free = _free_keys(conditional, path)
+        if free is not ALL:
+            # A key one side lacks is excused only when the side that has it lacks it in some records too.
+            only_a = sorted(set(a[1]) - set(b[1]) - a[2] - free)
+            only_b = sorted(set(b[1]) - set(a[1]) - b[2] - free)
+            if only_a or only_b:
+                out.append(f"{path}: keys only on the first: {only_a}; only on the second: {only_b}")
+            # A key both have, in every record on one side and in only some on the other: dropped from some.
+            both = set(a[1]) & set(b[1])
+            some_a = sorted(k for k in both - free if k in a[2] and k not in b[2])
+            some_b = sorted(k for k in both - free if k in b[2] and k not in a[2])
+            if some_a or some_b:
+                out.append(f"{path}: keys in only some records on the first: {some_a}; on the second: {some_b}")
         for k in sorted(set(a[1]) & set(b[1])):
-            out += differences(a[1][k], b[1][k], f"{path}.{k}")
+            out += differences(a[1][k], b[1][k], f"{path}.{k}", conditional)
         return out
     if kind in ("list", "set"):
-        return differences(a[1], b[1], f"{path}[]")
+        return differences(a[1], b[1], f"{path}[]", conditional)
     if kind == "map":
         out = [] if a[1] == b[1] else [f"{path}: keys are {a[1]} against {b[1]}"]
-        return out + differences(a[2], b[2], f"{path}{{}}")
+        return out + differences(a[2], b[2], f"{path}{{}}", conditional)
     if kind == "tagged":
         out = []
         for t in sorted(set(a[1]) & set(b[1])):
-            out += differences(a[1][t], b[1][t], f"{path}[type={t}]")
+            out += differences(a[1][t], b[1][t], f"{path}[type={t}]", conditional)
         return out
     if kind == "union":
         return [] if _same_members(a, b) else [f"{path}: {show(a)} against {show(b)}"]
     return [f"{path}: {show(a)} against {show(b)}"]
 
 
-def compare(a: Any, b: Any, path: str = "$") -> list[str]:
-    """Where two values' shapes disagree."""
-    return differences(shape(a), shape(b), path)
+def compare(a: Any, b: Any, path: str = "$", conditional=None) -> list[str]:
+    """Where two values' shapes disagree (``conditional`` as for :func:`differences`)."""
+    return differences(shape(a), shape(b), path, conditional)
+
+
+def record_paths(s, path: str = "$"):
+    """The path of every record in a shape, as :func:`differences` names them."""
+    if s[0] == "dict":
+        yield path
+        for k, x in s[1].items():
+            yield from record_paths(x, f"{path}.{k}")
+    elif s[0] in ("list", "set"):
+        yield from record_paths(s[1], f"{path}[]")
+    elif s[0] == "map":
+        yield from record_paths(s[2], f"{path}{{}}")
+    elif s[0] == "tagged":
+        for t, x in s[1].items():
+            yield from record_paths(x, f"{path}[type={t}]")
+    elif s[0] == "union":
+        for x in s[1]:
+            yield from record_paths(x, path)
+
+
+def vacant(v: Any) -> bool:
+    """Whether a value holds nothing a shape could be compared on: None, an empty text or collection, or one of
+    those alone (``[None]``, ``{"path": None}``)."""
+    if v is None or v == "" or v == b"":
+        return True
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return all(vacant(x) for x in v)
+    if isinstance(v, dict):
+        return all(vacant(x) for x in v.values())
+    return False
+
+
+def vacancies(a: Any, b: Any, path: str = "$") -> list[str]:
+    """Where one value is vacant and the other is not, so that their shapes compare nothing ("path: what"): at the
+    top, and down through records' fields (not into collections, whose elements are each game's own)."""
+    if vacant(a) != vacant(b):
+        return [f"{path}: vacant on the {'first' if vacant(a) else 'second'} alone"]
+    out = []
+    if isinstance(a, dict) and isinstance(b, dict) and all(isinstance(k, str) and _FIELD.fullmatch(k) for k in a):
+        for k in sorted(set(a) & set(b)):
+            out += vacancies(a[k], b[k], f"{path}.{k}")
+    return out
