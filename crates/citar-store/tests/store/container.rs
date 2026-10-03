@@ -176,6 +176,28 @@ fn a_write_replaces_the_old_save_whole() {
     assert_eq!(c.state(), big.as_bytes());
 }
 
+/// A crashed write leaves its temporary file, and a later process is often given the same id (a
+/// service restarted at boot, or pid 1 in a container). Its first write must not trip over that
+/// file, and must leave it: on a shared folder another machine's process may own it.
+#[test]
+fn a_write_passes_over_temporary_files_a_crash_left() {
+    let dir = Dir::new("stale-tmp");
+    let path = dir.join("autosave.citar");
+    let pid = std::process::id();
+    let mut stale: Vec<String> = (0..8).map(|n| format!("autosave.citar.{pid}.{n}.tmp")).collect();
+    stale.extend((0..8).map(|n| format!("autosave.citar.{pid}-00000000.{n}.tmp")));
+    for name in &stale {
+        std::fs::write(dir.join(name), b"left by a crash").expect("writes");
+    }
+    write_container(&path, &common::header(None), &Body::small().parts()).expect("writes");
+    write_container(&path, &common::header(None), &Body::small().parts()).expect("and again");
+    assert_eq!(read_header(&path).expect("reads"), common::header(None));
+    let mut want = stale.clone();
+    want.push("autosave.citar".to_owned());
+    want.sort();
+    assert_eq!(dir.names(), want, "the left files stay, and no new one is left");
+}
+
 #[test]
 fn listing_reads_the_header_without_the_body() {
     // Damage deep in the body: the header still reads, the container does not.

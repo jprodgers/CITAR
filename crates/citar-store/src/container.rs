@@ -35,7 +35,7 @@
 //! byte where the bad part starts. A header or body given to [`write_container`] that breaks
 //! the format is [`StoreError::Invalid`], and nothing is written.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::ops::Range;
 use std::path::Path;
@@ -264,9 +264,7 @@ pub fn write_container(
         return Err(invalid(format!("a body of {total} bytes is over the limit of {MAX_BODY}")));
     }
 
-    let tmp = disk::temp_beside(path);
-    let file =
-        OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| io_err(path, e))?;
+    let (file, tmp) = disk::create_temp(path).map_err(|e| io_err(path, e))?;
     let cleanup = Cleanup::new(&tmp);
     write_file(file, &head, head_len, &pieces, total).map_err(|e| io_err(path, e))?;
     disk::retry(Retry::DEFAULT, || std::fs::rename(&tmp, path)).map_err(|e| io_err(path, e))?;

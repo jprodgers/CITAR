@@ -2,11 +2,12 @@
 //! program holds for a moment, the OS locks, temporary names beside a target, and making a new
 //! name durable.
 
-use std::fs::{File, TryLockError};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::StoreError;
 
@@ -89,13 +90,51 @@ pub(crate) fn lock(file: &File, path: &Path, kind: Lock) -> Result<(), StoreErro
     }
 }
 
-/// A name for a temporary file beside `path` that no other writer uses: its name, this
-/// process's id and a counter, ending in `.tmp` so no listing of `*.citar` or `*.cjnl` sees it.
+/// How many names [`create_temp`] passes over, each a file that is there already, before it gives
+/// up.
+const MAX_TAKEN: u32 = 64;
+
+/// A name for a temporary file beside `path`: its name, this process's id and [`tag`], and a
+/// counter, ending in `.tmp` so no listing of `*.citar` or `*.cjnl` sees it. The tag is there
+/// because ids are reused: a service restarted at boot (or in a container, as pid 1) is often
+/// given the id of the run that crashed and left its temporary file behind.
 pub(crate) fn temp_beside(path: &Path) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let name = path.file_name().map_or_else(|| "save".into(), |f| f.to_string_lossy());
-    path.with_file_name(format!("{name}.{}.{n}.tmp", std::process::id()))
+    path.with_file_name(format!("{name}.{}-{}.{n}.tmp", std::process::id(), tag()))
+}
+
+/// This process's tag, 8 hex digits: the low 32 bits of the time it first named a temporary
+/// file, in nanoseconds, so another process given the same id names other files.
+fn tag() -> &'static str {
+    static TAG: OnceLock<String> = OnceLock::new();
+    TAG.get_or_init(|| {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        format!("{:08x}", u32::try_from(nanos & u128::from(u32::MAX)).unwrap_or(0))
+    })
+}
+
+/// Creates a new temporary file beside `path` ([`temp_beside`]) for writing, and returns it with
+/// its name. It never opens a file that is there already: such a name is one a crashed process
+/// left (its id and tag both reused), and the next name is tried, up to [`MAX_TAKEN`] of them. A
+/// left file is not removed, because a process elsewhere with the same id (on a shared folder)
+/// may still be writing it.
+pub(crate) fn create_temp(path: &Path) -> io::Result<(File, PathBuf)> {
+    create_first_new(|| temp_beside(path))
+}
+
+/// The first of `names` that can be created new, after at most [`MAX_TAKEN`] that are there.
+fn create_first_new(mut names: impl FnMut() -> PathBuf) -> io::Result<(File, PathBuf)> {
+    let mut taken = 0;
+    loop {
+        let p = names();
+        match OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(f) => return Ok((f, p)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && taken < MAX_TAKEN => taken += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Makes a new name in `path`'s folder durable: on Unix the folder itself is synced, since a
@@ -227,6 +266,68 @@ mod tests {
         assert_eq!(a.parent(), p.parent());
         let name = a.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         assert!(name.starts_with("autosave.citar.") && name.ends_with(".tmp"), "{name}");
+        let id = format!(".{}-{}.", std::process::id(), tag());
+        assert!(name.contains(&id), "{name} names the process by its id and its tag");
+        assert!(is_hex(tag(), 8), "{}", tag());
+    }
+
+    /// A folder of its own under the system's temporary folder, removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "citar-store-{name}-{}-{}",
+                std::process::id(),
+                tag()
+            ));
+            let _stale = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            Self(p)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _best_effort = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A process that is given a crashed one's id (and, by chance, its tag) finds that run's
+    /// temporary files where its own names start: it passes over them, and leaves them be.
+    #[test]
+    fn temporary_files_a_crashed_process_left_are_passed_over() {
+        let dir = Scratch::new("taken");
+        let name = |i: u32| dir.0.join(format!("autosave.citar.7-0.{i}.tmp"));
+        for i in 0..10 {
+            std::fs::write(name(i), b"left by a crash").expect("writes");
+        }
+        let mut next = 0;
+        let (mut f, p) = create_first_new(|| {
+            next += 1;
+            name(next - 1)
+        })
+        .expect("a free name");
+        assert_eq!(p, name(10));
+        io::Write::write_all(&mut f, b"new").expect("writes");
+        drop(f);
+        for i in 0..10 {
+            assert_eq!(std::fs::read(name(i)).expect("still there"), b"left by a crash");
+        }
+
+        // Past MAX_TAKEN names that are there, it gives up rather than look for ever.
+        for i in 11..=11 + MAX_TAKEN {
+            std::fs::write(name(i), b"left by a crash").expect("writes");
+        }
+        let mut next = 11;
+        let err = create_first_new(|| {
+            next += 1;
+            name(next - 1)
+        })
+        .map(|(_, p)| p)
+        .expect_err("every name is taken");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(next, 11 + MAX_TAKEN + 1, "the first try and MAX_TAKEN more");
     }
 
     #[test]
