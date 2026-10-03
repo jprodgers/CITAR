@@ -37,7 +37,7 @@ use crate::game::diplomacy::actions::RespondNegotiation;
 use crate::game::error::{ActionError, ErrCode};
 use crate::game::events::EventBatch;
 use crate::game::pending::SightSource;
-use crate::game::{Action, DriveOptions, DriverOutcome, Drivers, Game, Porting, SeatDriver, Stop};
+use crate::game::{Action, DriveOptions, DriverOutcome, Drivers, Game, Porting, SeatDriver};
 use crate::save::journal::JournalCursor;
 use crate::state::cities::Constructible;
 use crate::state::players::{AutoDecision, Controller, DriverMemory, SeatOverrides};
@@ -651,18 +651,10 @@ fn drive(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
         d = d.with(*p, a);
     }
     let (stop, _) = g.drive(&mut d, DriveOptions::default().with_seat_limit(limit))?;
-    let (name, player, nids): (&str, Option<PlayerId>, Vec<u32>) = match stop {
-        Stop::External(p) => ("external", Some(p), Vec::new()),
-        Stop::HybridDiplomat(p) => ("hybrid_diplomat", Some(p), Vec::new()),
-        Stop::AwaitingReply { pid, nids } => {
-            ("awaiting_reply", Some(pid), nids.iter().map(|n| n.get()).collect())
-        }
-        Stop::SeatLimit => ("seat_limit", None, Vec::new()),
-        _ => ("game_over", None, Vec::new()),
-    };
+    let nids: Vec<u32> = stop.negotiations().iter().map(|n| n.get()).collect();
     Ok(json!({
-        "stop": name,
-        "player": player.map(|p| p.0),
+        "stop": stop.name(),
+        "player": stop.player().map(|p| p.0),
         "negotiations": nids,
         "turn": g.turn(),
         "current": g.current().0,

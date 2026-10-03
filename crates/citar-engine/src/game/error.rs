@@ -45,6 +45,48 @@ pub enum ErrCode {
     Poisoned,
 }
 
+impl ErrCode {
+    /// Every code.
+    pub const ALL: [Self; 14] = [
+        Self::UnknownTool,
+        Self::InvalidPlayer,
+        Self::Eliminated,
+        Self::GameOver,
+        Self::NotYourTurn,
+        Self::MissingParam,
+        Self::BadParam,
+        Self::OffMap,
+        Self::NoSuchUnit,
+        Self::NoSuchCity,
+        Self::NoPath,
+        Self::Negotiation,
+        Self::Rule,
+        Self::Poisoned,
+    ];
+
+    /// Its name, as a host reads it (the bindings' `ActionError.code`, DESIGN.md P2.6.3):
+    /// `not_your_turn`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::UnknownTool => "unknown_tool",
+            Self::InvalidPlayer => "invalid_player",
+            Self::Eliminated => "eliminated",
+            Self::GameOver => "game_over",
+            Self::NotYourTurn => "not_your_turn",
+            Self::MissingParam => "missing_param",
+            Self::BadParam => "bad_param",
+            Self::OffMap => "off_map",
+            Self::NoSuchUnit => "no_such_unit",
+            Self::NoSuchCity => "no_such_city",
+            Self::NoPath => "no_path",
+            Self::Negotiation => "negotiation",
+            Self::Rule => "rule",
+            Self::Poisoned => "poisoned",
+        }
+    }
+}
+
 /// A refused action or command: a code, and the text the caller reads.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -132,6 +174,15 @@ pub enum EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_code_has_its_own_snake_case_name() {
+        let names: std::collections::BTreeSet<&str> =
+            ErrCode::ALL.iter().map(|c| c.name()).collect();
+        assert_eq!(names.len(), ErrCode::ALL.len());
+        assert!(names.iter().all(|n| n.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')));
+        assert_eq!(ErrCode::NotYourTurn.name(), "not_your_turn");
+    }
 
     #[test]
     fn a_refusal_reads_as_a_sentence_a_model_can_use() {
