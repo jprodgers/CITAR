@@ -117,8 +117,9 @@ tests`; CI's `test-rust` job does. A test that cannot pass there says why, with 
 `tests/backends.py`: `@python_engine_only("<successor>")` for a test of the Python engine's
 internals, naming the rule script, Rust test or Python test that holds the same behaviour now;
 `@rust_pending("<package>")` for one a named Phase 2 package makes pass; `@rust_only` for a test
-of a name only the Rust backend has. `tests/test_backends.py` checks that every successor exists,
-and `tests/test_facade_parity.py` that both backends answer every call in the same shapes.
+of a name only the Rust backend has. `tests/test_backends.py` checks that every successor exists
+and runs on Rust (a rule script still waiting on its bot package is listed in its output), and
+`tests/test_facade_parity.py` that both backends answer every call in the same shapes.
 
 ## Rust
 
