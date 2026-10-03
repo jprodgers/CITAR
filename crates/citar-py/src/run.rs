@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use crate::Bytes;
 use crate::bot::seat_bots;
-use crate::calls::detached;
+use crate::calls::{self, detached};
 use crate::errors::{Failure, caught, parse};
 
 impl From<SimError> for Failure {
@@ -212,6 +212,9 @@ pub fn run_game(
     }
     if let Some(hook) = &on_turn {
         let first = to_py_json(&runner.round_info());
+        // The hooks run Python from inside this call: counted, so an exiting interpreter waits
+        // for them (crate::calls).
+        let _held = calls::hold(py);
         deliver_one(py, hook, &first)?;
     }
     let mut shown = runner.game().turn();
@@ -232,11 +235,14 @@ pub fn run_game(
             });
             Ok::<_, Failure>(Delivery { events, round: round.flatten() })
         })?;
-        if let (Some(hook), Some(rows)) = (&on_event, &delivery.events) {
-            deliver_each(py, hook, rows)?;
-        }
-        if let (Some(hook), Some(row)) = (&on_turn, &delivery.round) {
-            deliver_one(py, hook, row)?;
+        if delivery.events.is_some() || delivery.round.is_some() {
+            let _held = calls::hold(py);
+            if let (Some(hook), Some(rows)) = (&on_event, &delivery.events) {
+                deliver_each(py, hook, rows)?;
+            }
+            if let (Some(hook), Some(row)) = (&on_turn, &delivery.round) {
+                deliver_one(py, hook, row)?;
+            }
         }
     }
     // Moved in: a game is `Send`, never `Sync`.

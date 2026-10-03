@@ -10,8 +10,10 @@ version; it needs only ``citar._engine`` (built by ``cargo xtask develop`` or un
     python tests/engine_exit_child.py long|short [--unguarded]
 
 ``long``: the thread is inside one long drive (a whole game in a call) when the interpreter exits; ``short``: it drives
-one seat per call, so it is as likely to be between calls, or entering one, as inside one. ``--unguarded`` takes the
-atexit hook away, to show what it guards against. Prints ``exiting`` and exits 0; anything else is a failure.
+one seat per call, so it is as likely to be between calls, or entering one, as inside one. Finalization releases the
+GIL for a moment (an object whose ``__del__`` sleeps, as a closing log handler or socket may), which is when a waiting
+thread would re-attach. ``--unguarded`` takes the atexit hook away, to show what it guards against. Prints ``exiting``
+and exits 0; anything else is a failure.
 """
 import atexit
 import json
@@ -40,6 +42,16 @@ def _drive(seat_limit: int):
         seed += 1
 
 
+class _SlowToGo:
+    """Releases the GIL for a moment while the interpreter finalizes, when the module's globals are cleared."""
+
+    def __init__(self):
+        self.sleep = time.sleep
+
+    def __del__(self):
+        self.sleep(0.2)
+
+
 def main(argv: list) -> int:
     mode = argv[0] if argv else "long"
     if "--unguarded" in argv:
@@ -53,6 +65,8 @@ def main(argv: list) -> int:
         time.sleep(0.001)
     if mode != "long":
         time.sleep(0.05)
+    global _slow
+    _slow = _SlowToGo()
     print("exiting", flush=True)
     return 0
 

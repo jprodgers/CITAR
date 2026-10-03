@@ -2,20 +2,26 @@
 //! finalizing (DESIGN.md P2.6.2, P2.6.4).
 //!
 //! Every heavy call runs through [`detached`]: the GIL is released for it, so other Python
-//! threads run and two games use two cores, and it is counted while it runs. Nothing inside it
-//! touches Python.
+//! threads run and two games use two cores. Nothing inside it touches Python.
 //!
 //! **Interpreter exit.** A daemon thread (a session's driver) may be inside a call when Python
 //! exits. Re-attaching it to a finalizing interpreter ends the thread from inside
 //! `PyEval_RestoreThread` (`pthread_exit` on Python 3.11 to 3.13), an unwind through the Rust
-//! frames below it that aborts the process. So the module registers [`shutdown`] with `atexit`
-//! at import: it marks the process as exiting and waits, up to its timeout, for the calls in
-//! flight. Atexit runs after the non-daemon threads are joined and before the interpreter
-//! starts to finalize, so from then on every other thread is a daemon thread: one whose call
-//! ends, or that starts a call, parks forever with the GIL released instead of re-attaching, and
-//! the process ends around it. The thread that called `shutdown` (the main thread) goes on
-//! calling as before, so other exit hooks may still save games. Python 3.14 hangs such threads
-//! itself; this makes every supported version behave so.
+//! frames below it that aborts the process. So:
+//! - a call counts as in flight from when it releases the GIL until it has it back, and Python
+//!   code that runs from inside a Rust call (`run_game`'s hooks) counts too ([`hold`]): either
+//!   is a thread with Rust frames on its stack that may need the GIL;
+//! - the module registers [`shutdown`] with `atexit` at import. Atexit runs once the non-daemon
+//!   threads are joined and before the interpreter starts to finalize: `shutdown` marks the
+//!   process as exiting and waits, with the GIL released and up to its timeout, for the counts
+//!   to reach zero;
+//! - from then on any other thread (a daemon thread) that starts a call, ends one, or comes back
+//!   to a hook parks for good with the GIL released, instead of re-attaching, and the process
+//!   ends around it. A thread waiting for the GIL to come back from a call is counted, so the
+//!   wait lets it through before the interpreter finalizes, and it parks at its next call. The
+//!   thread that called `shutdown` (the main thread) goes on calling as before, so other exit
+//!   hooks may still save games. Python 3.14 hangs such threads itself; this makes every
+//!   supported version behave so.
 
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread::ThreadId;
@@ -45,8 +51,8 @@ fn barred(f: &Flight) -> bool {
     f.exiting.is_some_and(|t| t != std::thread::current().id())
 }
 
-/// Parks this thread for good: its call must not re-attach to a finalizing interpreter, and the
-/// process ends around it.
+/// Parks this thread for good: it must not re-attach to a finalizing interpreter, and the
+/// process ends around it. Called with the GIL released.
 fn park_forever() -> ! {
     loop {
         std::thread::park();
@@ -54,9 +60,11 @@ fn park_forever() -> ! {
 }
 
 /// One call in flight, counted until dropped (also when its work unwinds).
-struct InFlight;
+pub struct InFlight(());
 
 impl InFlight {
+    /// Counts a call, unless the process is exiting under another thread: then the caller,
+    /// which has released the GIL, parks.
     fn enter() -> Self {
         let mut f = flight();
         if barred(&f) {
@@ -64,7 +72,7 @@ impl InFlight {
             park_forever();
         }
         f.calls += 1;
-        Self
+        Self(())
     }
 }
 
@@ -78,22 +86,43 @@ impl Drop for InFlight {
     }
 }
 
-/// Runs `work` with the GIL released, counted as a call in flight. A call that starts or ends
-/// once another thread has begun the shutdown parks instead of returning to Python.
+/// Runs `work` with the GIL released, counted as a call in flight until the GIL is back. A
+/// call that starts or ends once another thread has begun the shutdown parks instead of going
+/// back to Python.
 pub fn detached<T, F>(py: Python<'_>, work: F) -> T
 where
     F: FnOnce() -> T + Send,
     T: Send,
 {
-    py.detach(|| {
+    let (out, counted) = py.detach(|| {
         let counted = InFlight::enter();
         let out = work();
-        drop(counted);
         if barred(&flight()) {
+            drop(counted);
             park_forever();
         }
-        out
-    })
+        (out, counted)
+    });
+    // Counted until here: a thread waiting for the GIL to come back has Rust frames below it.
+    drop(counted);
+    out
+}
+
+/// Parks this thread, with the GIL released, if another thread has begun the shutdown: for a
+/// Rust call about to run Python code (a hook) that must not run into a finalizing interpreter.
+pub fn checkpoint(py: Python<'_>) {
+    if barred(&flight()) {
+        py.detach(|| park_forever());
+    }
+}
+
+/// Counts Python code that runs from inside a Rust call (`run_game`'s hooks) as in flight, so
+/// the shutdown waits for it; parks first if another thread has begun the shutdown.
+pub fn hold(py: Python<'_>) -> InFlight {
+    checkpoint(py);
+    let mut f = flight();
+    f.calls += 1;
+    InFlight(())
 }
 
 /// How many calls are in flight now.
@@ -116,8 +145,9 @@ pub fn shutdown(py: Python<'_>, timeout: f64) -> bool {
     } else {
         Duration::ZERO
     };
-    // With the GIL released, a daemon thread between calls runs on to its next call and parks
-    // there; the calls in flight need nothing of Python to finish.
+    // With the GIL released, a thread waiting for it to come back from a call gets it, and a
+    // daemon thread between calls runs on to its next call and parks there; the calls in flight
+    // need nothing of Python to finish.
     py.detach(|| {
         let deadline = Instant::now() + wait;
         let mut f = flight();
