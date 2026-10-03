@@ -281,11 +281,11 @@ def delete_scenario(sid: str):
 # ----------------------------------------------------------------------------
 # Bots (Rust: bots are compiled in, named by version, and take parameter-only profiles)
 # ----------------------------------------------------------------------------
-_BOT_ENGINE = re.compile(r"^(basic|idle|frozen_\w+|snapshot\w*)$")
+_BOT_ENGINE = re.compile(r"^(basic|basic-1|idle|frozen_\w+|snapshot\w*)$")
 
 
 def bot_instance(engine: str = "basic", *, seed: Optional[int] = None, aggression: float = 0.4,
-                 params: Optional[dict] = None):
+                 params: Optional[dict] = None, fixed_aggression: Optional[float] = None):
     """A bot to seat in a game: ``engine`` is "basic" (the live bot), "idle", or a frozen snapshot's module name.
 
     The bot is an opaque handle: give it to :meth:`EngineGame.play_bot_turn` or :func:`run_game`, never call it.
@@ -293,9 +293,17 @@ def bot_instance(engine: str = "basic", *, seed: Optional[int] = None, aggressio
     them. Raises ValueError for a name that is not a bot engine. (Profiles resolve to one of these in
     citar.bots.profiles.)
     Rust: a bot spec (version, parameters, seed) for run_ai / bot_turn.
+
+    Package 2-10 aligned the signature with the Rust backend's, so that profiles (citar.bots.profiles) make their
+    bots alike on both without asking which runs: ``fixed_aggression``, a profile's own, wins over ``aggression``,
+    the seat's; and "basic-1" names the live bot too, being the Rust bot version that ports basic.py.
     """
     if not _BOT_ENGINE.match(engine or ""):
         raise ValueError(f"'{engine}' is not a bot engine (basic, idle or a frozen_<hash> snapshot).")
+    if engine == "basic-1":
+        engine = "basic"
+    if fixed_aggression is not None:
+        aggression = fixed_aggression
     if engine == "idle":
         from ..bots.idle import IdleBot
         return IdleBot()
