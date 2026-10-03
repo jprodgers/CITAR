@@ -1,11 +1,16 @@
-"""Every rule script in tests/rules/ on the Python engine, one test each (tests/rulescript.py is the runner, and
-tests/rules/README.md the language), and the table of tool-argument coercions both engines must agree on."""
+"""Every rule script in tests/rules/ on the facade's backend, one test each (tests/rulescript.py is the runner, and
+tests/rules/README.md the language), and the table of tool-argument coercions both engines must agree on.
+
+On the Rust backend the same runner plays every script through the bindings, the ``intended`` steps included; a script
+whose ``needs`` names a package is skipped there, as the Rust harness ignores it, until that package removes the
+header. The checks of the Python engine's own recordings are that engine's alone."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import json
 import unittest
 from pathlib import Path
 
 from tests import rulescript
+from tests.backends import RUST, has_test_ops, python_engine_only
 
 
 class RuleScripts(unittest.TestCase):
@@ -15,7 +20,12 @@ class RuleScripts(unittest.TestCase):
         names = [p.stem for p in rulescript.discover()]
         self.assertIn("_selftest", names)
         self.assertGreater(len(names), 4)
+        # every script in the directory is a test of this class, counted from the directory
+        tests_here = {n[len("test_script_"):] for n in dir(type(self)) if n.startswith("test_script_")}
+        self.assertEqual(tests_here, {n.lstrip("_") for n in names})
+        self.assertEqual(len(tests_here), len(list(rulescript.RULES.glob("*.toml"))) - 1, "intended.toml aside")
 
+    @python_engine_only("the_operations_are_sorted_and_described_in_one_line")
     def test_every_test_operation_runs_its_own_function(self):
         # Two @op decorators stacked on one function register it under both names, and the other op's function is
         # lost (refresh_visibility once ran set_difficulty): each op must be the function named after it, once.
@@ -87,6 +97,12 @@ class RuleScripts(unittest.TestCase):
 
 def _script_test(path: Path):
     def test(self):
+        if RUST:
+            needs = rulescript.load(path).needs
+            if needs is not None:
+                self.skipTest(f"needs package {needs} on the Rust engine")
+            if not has_test_ops():
+                self.skipTest("the scripts need a build of citar._engine with the test operations")
         try:
             rulescript.run(path)
         except rulescript.ScriptError as e:
@@ -99,6 +115,7 @@ for _path in rulescript.discover():
     setattr(RuleScripts, f"test_script_{_path.stem.lstrip('_')}", _script_test(_path))
 
 
+@python_engine_only("arguments_are_coerced_as_python_coerced_them")
 class Normalize(unittest.TestCase):
     """tests/rules/normalize.json through tools.execute, the coercion the Rust engine's api::tools::normalize ports
     (tools.py:113-127): each case's tool is registered for the test, as a query that hands back what it received. A
@@ -136,6 +153,7 @@ class Normalize(unittest.TestCase):
                 tools.REGISTRY.pop(n, None)
 
 
+@python_engine_only("the_schemas_equal_python_s_tool_list")
 class ToolList(unittest.TestCase):
     """tests/rules/tool_list.json is the Python engine's tool list as it stands, which the Rust registry's schemas
     must equal apart from its listed fixes (scripts/refcheck/tool_list.py; crates/citar-testkit/tests/engine/tools.rs).
@@ -150,6 +168,7 @@ class ToolList(unittest.TestCase):
         self.assertEqual(status, 0, out.getvalue())
 
 
+@python_engine_only("the_query_tools_answer_as_python_s_did")
 class QueryTools(unittest.TestCase):
     """refcheck/query_tools.json.gz is the Python engine's answers to the view queries on the committed fixtures, which
     the Rust engine's must equal apart from its listed fixes (scripts/refcheck/query_tools.py;
@@ -165,6 +184,7 @@ class QueryTools(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
+@python_engine_only("the_bot_chooses_as_pythons_did_on_the_committed_states")
 class BotDecisions(unittest.TestCase):
     """refcheck/bot_decisions.json.gz is the Python bot's deterministic sub-decisions on the committed fixtures, which
     the Rust bot's are checked against (scripts/refcheck/bot_dump.py; DESIGN.md P2.3.11). The recording runs with
