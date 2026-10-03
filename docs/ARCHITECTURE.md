@@ -342,7 +342,7 @@ right way.
 | A new kind of rule | The engine module that owns the system, plus `unique_types.py` |
 | A new player action | `engine/tools.py` — it reaches all three interfaces at once |
 | Something the server needs from a game | `engine_api.py`, then the engine behind it |
-| How the bot plays | `bots/basic.py`, and A/B it ([BOTS.md](BOTS.md)) |
+| How the bot plays | `crates/citar-bot`, as a new version (`basic-N`) when existing results must not move, or a profile's parameters; A/B it ([BOTS.md](BOTS.md)) |
 | What a model is told | `agents/prompts.py` and `engine/briefing.py` |
 | A screen in the browser | `web/js/`, no build step |
 | Who may do what | `auth/access.py`, and only there |
