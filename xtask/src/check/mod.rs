@@ -6,6 +6,8 @@
 //! - only refcheck, testkit and bench build the engine with `legacy`, which never ships; the bot,
 //!   the store and the runner never turn on `test-ops`, and citar-py only through its own
 //!   `test-ops` feature, which forwards;
+//! - pyproject.toml's maturin table builds citar-py with no feature that reaches `test-ops` or
+//!   `legacy`, and takes the version from Cargo;
 //! - the workspace version equals `__version__` in `citar/__init__.py`;
 //! - each layer of the engine uses only the layers below it;
 //! - only `game/mutate.rs`, `save/` and `compat/` call `State`'s mutable accessors;
@@ -26,6 +28,7 @@ mod graph;
 mod layers;
 mod metadata;
 mod pending;
+mod pyproject;
 mod source;
 mod sources;
 mod version;
@@ -91,6 +94,7 @@ fn run_all(root: &Path) -> Result<(Vec<Finding>, String), String> {
     findings.extend(graph::check(&meta));
     findings.extend(features::check(&meta));
     findings.extend(version::check(root, &meta)?);
+    findings.extend(pyproject::check(root, &meta)?);
     findings.extend(layers::check(&tree));
     findings.extend(access::check(&tree));
     findings.extend(sources::check_bot(&bot));

@@ -28,21 +28,21 @@ const CHECK: &str = "features";
 const ENGINE: &str = "citar-engine";
 
 /// The engine's features that never ship.
-const TEST_ONLY: &[&str] = &["legacy"];
+pub const TEST_ONLY: &[&str] = &["legacy"];
 
 /// The crates that may turn them on: the tools and tests, none of which ships.
 pub const TEST_CRATES: &[&str] = &["citar-refcheck", "citar-testkit", "citar-bench"];
 
 /// The engine's test operations, which only the tools and tests and the bindings' test builds
 /// turn on.
-const TEST_OPS: &str = "test-ops";
+pub const TEST_OPS: &str = "test-ops";
 
 /// The bindings: they may turn on [`TEST_OPS`] through their own feature of that name.
 pub const BINDINGS: &str = "citar-py";
 
 /// The engine's features that turn on one of `roots`, those included: their closure under the
 /// engine's own feature table.
-fn closure(engine: Option<&Package>, roots: &[&str]) -> BTreeSet<String> {
+pub fn closure(engine: Option<&Package>, roots: &[&str]) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = roots.iter().map(|&f| f.to_owned()).collect();
     let Some(engine) = engine else { return out };
     loop {
