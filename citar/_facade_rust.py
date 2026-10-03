@@ -407,7 +407,7 @@ def run_game(spec: dict, on_turn: Optional[Callable[[dict], None]] = None,
     difficulty and score, 0 once eliminated), "errors" (a line and a traceback per crash)}.
     """
     run = {k: v for k, v in spec.items() if k != "bots"}
-    run["config"] = _run_config(spec.get("config") or {})
+    run["config"] = _run_config(spec["config"])
     bots = {int(pid): _bot(b) for pid, b in (spec.get("bots") or {}).items() if b is not None}
     return json.loads(_E.run_game(_dumps(run), bots, on_turn, on_event))
 
@@ -786,7 +786,10 @@ class EngineGame:
             models = False
             for nid in r["negotiations"]:
                 n = self.negotiation(nid)
-                if n["status"] == "open" and n["awaiting"] != pid and bot.owns_negotiation(_dumps(n)):
+                if n["status"] != "open":
+                    continue
+                # one waiting on the seat itself is one its bot left to the model
+                if n["awaiting"] != pid and bot.owns_negotiation(_dumps(n)):
                     self.close_negotiation(nid, "expired", "No answer came before the turn ended.")
                 else:
                     models = True
