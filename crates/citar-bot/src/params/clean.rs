@@ -22,9 +22,9 @@
 //!   rather than refused. Any other key basic-1 lacks is refused.
 //! - **retyped.** The 41 parameters basic-1 types `float` that Python typed `int` by their
 //!   default's literal give a float: `4` becomes `4.0`.
-//! - **Finite numbers.** `"inf"` and `"nan"` are refused for an `int` (where Python's `int()`
-//!   raised an `OverflowError` that `clean_params` did not catch) and for a `float` (where Python
-//!   kept a value no JSON can hold).
+//! - **Finite numbers.** `"inf"` is refused for an `int`, where Python's `int()` raised an
+//!   `OverflowError` that `clean_params` did not catch (`"nan"` it refused); `"inf"` and `"nan"`
+//!   are refused for a `float`, where Python kept a value no JSON can hold.
 //! - **Overrides are an object** (or `null`, none); Python's `dict()` of anything else raised a
 //!   `TypeError` or a `ValueError` the caller did not expect.
 
