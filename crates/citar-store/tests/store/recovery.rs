@@ -51,6 +51,7 @@ fn fifty() -> &'static Fifty {
         let refs = write_journal(&path, &chunks);
         let bytes = std::fs::read(&path).expect("reads");
         assert_eq!(refs.len(), 51);
+        println!("the gate's journal: 50 records, {} bytes", bytes.len());
         Fifty { chunks, bytes, refs }
     })
 }
