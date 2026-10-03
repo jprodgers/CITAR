@@ -131,20 +131,19 @@ impl SeatDriver for PanicAt {
     }
 }
 
-/// Calls `hook` with each element of the JSON list `rows`, decoded by Python's `json.loads`.
-fn deliver_each(py: Python<'_>, hook: &Bound<'_, PyAny>, rows: &[u8]) -> PyResult<()> {
-    let loads = py.import("json")?.getattr("loads")?;
-    let list = loads.call1((PyBytes::new(py, rows),))?;
+/// Calls `hook` with each element of the JSON list `rows`, decoded by `loads` (Python's
+/// `json.loads`).
+fn deliver_each(loads: &Bound<'_, PyAny>, hook: &Bound<'_, PyAny>, rows: &[u8]) -> PyResult<()> {
+    let list = loads.call1((PyBytes::new(loads.py(), rows),))?;
     for item in list.try_iter()? {
         hook.call1((item?,))?;
     }
     Ok(())
 }
 
-/// Calls `hook` with the JSON object `row`, decoded by Python's `json.loads`.
-fn deliver_one(py: Python<'_>, hook: &Bound<'_, PyAny>, row: &[u8]) -> PyResult<()> {
-    let loads = py.import("json")?.getattr("loads")?;
-    hook.call1((loads.call1((PyBytes::new(py, row),))?,))?;
+/// Calls `hook` with the JSON object `row`, decoded by `loads` (Python's `json.loads`).
+fn deliver_one(loads: &Bound<'_, PyAny>, hook: &Bound<'_, PyAny>, row: &[u8]) -> PyResult<()> {
+    hook.call1((loads.call1((PyBytes::new(loads.py(), row),))?,))?;
     Ok(())
 }
 
@@ -210,41 +209,47 @@ pub fn run_game(
         ))
         .into());
     }
+    let loads = py.import("json")?.getattr("loads")?;
     if let Some(hook) = &on_turn {
         let first = to_py_json(&runner.round_info());
         // The hooks run Python from inside this call: counted, so an exiting interpreter waits
         // for them (crate::calls).
         let _held = calls::hold(py);
-        deliver_one(py, hook, &first)?;
+        deliver_one(&loads, hook, &first)?;
     }
     let mut shown = runner.game().turn();
+    let (want_events, want_rounds) = (on_event.is_some(), on_turn.is_some());
     while !runner.is_over() {
-        let want_events = on_event.is_some();
-        let want_rounds = on_turn.is_some();
+        // The runner catches a drive's panic as a crash record; this catches the rest.
         let delivery = detached(py, || {
-            let step = caught(|| runner.step()).map_err(Failure::Crash)?.map_err(Failure::from)?;
-            let g = runner.game();
-            let events = (want_events && !step.events.is_empty()).then(|| {
-                let rows: Vec<Value> =
-                    step.events.events().iter().map(|e| g.event_json(e, None)).collect();
-                to_py_json(&rows)
-            });
-            let round = (g.turn() != shown).then(|| {
-                shown = g.turn();
-                want_rounds.then(|| to_py_json(&runner.round_info()))
-            });
-            Ok::<_, Failure>(Delivery { events, round: round.flatten() })
+            caught(|| {
+                let step = runner.step()?;
+                let g = runner.game();
+                let events = (want_events && !step.events.is_empty()).then(|| {
+                    let rows: Vec<Value> =
+                        step.events.events().iter().map(|e| g.event_json(e, None)).collect();
+                    to_py_json(&rows)
+                });
+                let round = (g.turn() != shown).then(|| {
+                    shown = g.turn();
+                    want_rounds.then(|| to_py_json(&runner.round_info()))
+                });
+                Ok::<_, SimError>(Delivery { events, round: round.flatten() })
+            })
+            .map_err(Failure::Crash)?
+            .map_err(Failure::from)
         })?;
         if delivery.events.is_some() || delivery.round.is_some() {
             let _held = calls::hold(py);
             if let (Some(hook), Some(rows)) = (&on_event, &delivery.events) {
-                deliver_each(py, hook, rows)?;
+                deliver_each(&loads, hook, rows)?;
             }
             if let (Some(hook), Some(row)) = (&on_turn, &delivery.round) {
-                deliver_one(py, hook, row)?;
+                deliver_one(&loads, hook, row)?;
             }
         }
     }
     // Moved in: a game is `Send`, never `Sync`.
-    Ok(detached(py, move || Bytes(to_py_json(&runner.result()))))
+    let result = detached(py, move || caught(|| Bytes(to_py_json(&runner.result()))));
+    Ok(result.map_err(Failure::Crash)?)
 }
