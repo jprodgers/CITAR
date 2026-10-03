@@ -208,6 +208,7 @@ dependencies = [
  "citar-store",
  "citar-testkit",
  "core_affinity",
+ "cpu-time",
  "criterion",
  "flate2",
  "gungraun",

@@ -24,7 +24,7 @@ use cpu_time::ThreadTime;
 
 use super::spec::GameSpec;
 use super::{BaselineCiv, BaselineCrash, BaselineGame, BaselineLine, CheckpointRow};
-use crate::runner::{RunSpec, Runner, SimError};
+use crate::runner::{RunSpec, Runner, Seats, SimError};
 
 /// The code that plays a run: written on every line, and a run refuses to add to a file another
 /// code wrote.
@@ -57,6 +57,18 @@ pub fn aggression(pid: PlayerId, seed: u64) -> f64 {
     let step = (u64::from(pid.0) * 37 + seed) % 10;
     // step < 10, exact in an f64.
     0.25 + 0.5 * (step as f64) / 9.0
+}
+
+/// A bot of `version` with `tuning` in every major's seat of `g`, its aggression spread by seat
+/// and `seed` ([`aggression`]): the baseline's seats, and the game benchmarks'.
+#[must_use]
+pub fn bot_seats(g: &Game, seed: u64, version: VersionId, tuning: &Arc<Tuning>) -> Seats {
+    g.majors(false)
+        .map(|p| {
+            let s = BotSpec::new(version, Arc::clone(tuning), None, Some(aggression(p.id(), seed)));
+            (p.id(), Box::new(Bot::new(Arc::new(s))) as Box<dyn SeatDriver>)
+        })
+        .collect()
 }
 
 /// One civilization's war and capture totals so far.
@@ -194,17 +206,8 @@ fn play(
         debug: cx.checks.then_some(DebugOptions { invariants: true, verify_caches: false }),
         ..RunSpec::default()
     };
-    let mut aggr = BTreeMap::new();
-    let mut r = Runner::new_with(cx.rules, run, |g| {
-        g.majors(false)
-            .map(|p| {
-                let a = aggression(p.id(), spec.seed);
-                aggr.insert(p.id(), a);
-                let s = BotSpec::new(cx.version, Arc::clone(&cx.tuning), None, Some(a));
-                (p.id(), Box::new(Bot::new(Arc::new(s))) as Box<dyn SeatDriver>)
-            })
-            .collect()
-    })?;
+    let mut r =
+        Runner::new_with(cx.rules, run, |g| bot_seats(g, spec.seed, cx.version, &cx.tuning))?;
     let majors: Vec<PlayerId> = r.game().majors(false).map(|p| p.id()).collect();
     let mut tally = Tally::default();
     // Checkpoint turn -> the totals at the end of that turn.
@@ -265,7 +268,8 @@ fn play(
             end.turn = u32::try_from(last).ok();
             at.insert("end".to_owned(), end);
         }
-        let a = aggr.get(&pid).copied().unwrap_or(BotSpec::DEFAULT_AGGRESSION);
+        // What its bot plays with: in 0..1 already, so the spec held it as it is.
+        let a = aggression(pid, spec.seed);
         civs.push(BaselineCiv {
             pid: u32::from(pid.0),
             nation: g.rules().name(p.nation).unwrap_or("?").to_owned(),

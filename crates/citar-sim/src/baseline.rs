@@ -23,7 +23,7 @@ pub mod play;
 pub mod run;
 pub mod spec;
 
-pub use self::play::{Code, Context, Tally, Totals, aggression, play_one};
+pub use self::play::{Code, Context, Tally, Totals, aggression, bot_seats, play_one};
 pub use self::run::{CHECKS_BUILT, Outcome, code_of, existing, run};
 pub use self::spec::{
     CHECKPOINTS, GameSpec, IDENTITY, MAP_TYPES, Options, SMOKE_CHECKPOINTS, game_spec,
