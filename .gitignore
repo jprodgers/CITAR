@@ -9,6 +9,8 @@ citar/_engine*.so
 .Python
 build/
 dist/
+# The wheels the Docker image installs (Dockerfile); built, never source.
+wheelhouse/
 *.egg-info/
 .eggs/
 .venv/
