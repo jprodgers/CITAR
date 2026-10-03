@@ -18,6 +18,11 @@
 //! prelude of the rule scripts runs), `create_camp` and `sack_city`; package 1c-09 `debug` and
 //! `set_difficulty`, the host's commands of those names, and `drive`, the host's drive with a
 //! test driver at the seats named. Every test operation is ported.
+//!
+//! Package 2-06a adds three for the hosts' tests, which no rule script needs: `eliminate` and
+//! `end_game`, which replace the Python tests' pokes of a player's `alive` and the game's
+//! `phase` (`citar/engine/testops.py` has them too), and `panic`, which only the Rust engine has:
+//! it exists for the bindings' tests of a caught panic (DESIGN.md P2.6.3).
 
 use serde_json::{Map, Value, json};
 
@@ -156,6 +161,23 @@ pub static TEST_OPS: &[TestOp] = &[
         run: drive,
     },
     TestOp {
+        name: "eliminate",
+        params: "player (a living civilization or city-state): its turn ends first if it is its \
+                 turn, then its cities are destroyed, its units removed, and it is eliminated as \
+                 a defeat eliminates a civilization; a game left with no major civilization ends \
+                 with no winner",
+        porting: Porting::Ported,
+        run: eliminate,
+    },
+    TestOp {
+        name: "end_game",
+        params: "optional winner (a living major civilization), victory (a victory's name; it \
+                 needs a winner): the game ends now, won by the winner, by that victory or none, \
+                 or with no winner",
+        porting: Porting::Ported,
+        run: end_game,
+    },
+    TestOp {
         name: "end_round",
         params: "every remaining turn of the round ends, and the round with them",
         porting: Porting::Ported,
@@ -199,6 +221,13 @@ pub static TEST_OPS: &[TestOp] = &[
         params: "player, to, message; optional give, receive: opens a negotiation out of turn",
         porting: Porting::Ported,
         run: open_negotiation_as,
+    },
+    TestOp {
+        name: "panic",
+        params: "the engine panics inside the call, for the tests of what a host does with a \
+                 panic (the bindings poison the game and raise EngineCrash)",
+        porting: Porting::Ported,
+        run: panic_now,
     },
     TestOp {
         name: "progress_builds",
@@ -1036,6 +1065,122 @@ fn add_quest(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
 fn sack_city(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
     let c = city_param(g, o)?;
     Ok(crate::game::barbarians::sack_city(g, c).to_json())
+}
+
+/// Where the game stands once a test operation ended a civilization or the game.
+fn standing(g: &Game) -> Value {
+    use crate::game::victory::won_by;
+    let c = g.state().clock();
+    json!({
+        "turn": c.turn,
+        "current": c.current.0,
+        "phase": if c.phase == Phase::Playing { "playing" } else { "over" },
+        "winner": c.winner.map(|p| p.0),
+        "victory": won_by(g).map(|w| w.name(g.rules())),
+    })
+}
+
+/// Ends a game in which no major civilization is left, with no winner, as a turn limit with the
+/// Time victory off ends one (`victory.py:363-365`): nobody is left to play its turns.
+fn end_without_majors(g: &mut Game) {
+    use crate::state::chronicle::{EngineEvent, EventData};
+    if g.phase() != Phase::Playing || g.majors(true).next().is_some() {
+        return;
+    }
+    let c = *g.state().clock();
+    g.set_clock(TurnClock { phase: Phase::Over, ..c });
+    let text = "No major civilization is left. The game ends with no winner.";
+    g.emit(EngineEvent::GameOver, text, None, None, EventData::default(), &[]);
+}
+
+/// Eliminates a civilization or city-state now, as eleven Python tests poked
+/// `player.alive = False` (DESIGN.md P2.6.1). If it is its turn, the turn ends first, as the
+/// host's `end_turn` ends it, so that the game keeps a living player whose turn it is (invariant
+/// TURN-1); then its cities are destroyed and its units removed, and it is eliminated as a
+/// defeat eliminates one (`victory::check_elimination`): its negotiations cancelled, its deals
+/// ended, its spies home, everyone told, and the last major civilization standing may have won.
+/// A game left with no major civilization ends with no winner.
+fn eliminate(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    use crate::game::{cities::lifecycle, units, victory};
+    use crate::state::players::Player;
+    let p = pid(g, o.get("player"), false)?;
+    let alive = |g: &Game| g.player(p).is_some_and(Player::alive);
+    if !alive(g) {
+        return Err(bad(format!("Player {} has been eliminated already.", p.0)));
+    }
+    if g.phase() == Phase::Playing && g.current() == p {
+        g.end_turn_now(p)?;
+    }
+    // Ending its turn may have ended a round whose eliminations took it.
+    if alive(g) {
+        let cities: Vec<CityId> = g.state().cities().of(p).to_vec();
+        for c in cities {
+            lifecycle::destroy_city(g, c);
+        }
+        let gone: Vec<UnitId> = g.state().units().of(p).to_vec();
+        for u in gone {
+            units::remove_unit(g, u);
+        }
+        // Destroying its last city has eliminated it already if it had founded one
+        // (`destroy_city` ends with the elimination check); one that had not goes here.
+        if alive(g) && !victory::check_elimination(g, p, None) {
+            return Err(ActionError::rule(format!(
+                "Player {} could not be eliminated: it is not defeated without its cities and \
+                 units.",
+                p.0
+            )));
+        }
+    }
+    end_without_majors(g);
+    let mut out = standing(g);
+    if let Some(m) = out.as_object_mut() {
+        m.insert("eliminated".into(), json!(p.0));
+    }
+    Ok(out)
+}
+
+/// Ends the game now, as five Python tests poked `phase = "over"` (DESIGN.md P2.6.1): won by
+/// `winner` (by `victory` when one is named, else with no victory type, as `Triggers victory`
+/// wins) with the winner's announcement (`victory::declare_winner`), or with no winner, as a turn
+/// limit with the Time victory off ends a game.
+fn end_game(g: &mut Game, o: &Params) -> Result<Value, ActionError> {
+    use crate::base::ids::VictoryId;
+    use crate::game::victory::{Won, declare_winner};
+    use crate::state::chronicle::{EngineEvent, EventData};
+    use crate::state::players::Player;
+    if g.phase() != Phase::Playing {
+        return Err(ActionError::new(ErrCode::GameOver, "The game is over."));
+    }
+    let winner = match given(o, "winner") {
+        None => None,
+        Some(v) => Some(pid(g, Some(v), true)?),
+    };
+    if let Some(w) = winner
+        && !g.player(w).is_some_and(Player::alive)
+    {
+        return Err(bad(format!("Player {} has been eliminated.", w.0)));
+    }
+    let victory = match given(o, "victory") {
+        None => None,
+        Some(v) => Some(resolve::<VictoryId>(g, Some(v))?),
+    };
+    match (winner, victory) {
+        (Some(w), v) => declare_winner(g, w, v.map_or(Won::Neutral, Won::Victory), None),
+        (None, Some(_)) => return Err(bad("A victory needs a winner.")),
+        (None, None) => {
+            let c = *g.state().clock();
+            g.set_clock(TurnClock { phase: Phase::Over, ..c });
+            let text = "The game has been ended with no winner.";
+            g.emit(EngineEvent::GameOver, text, None, None, EventData::default(), &[]);
+        }
+    }
+    Ok(standing(g))
+}
+
+/// Panics, as a bug in the engine would, for the tests of what a host does with a panic: the
+/// bindings poison the game and raise `EngineCrash`, and the process lives (DESIGN.md P2.6.3).
+fn panic_now(_: &mut Game, _: &Params) -> Result<Value, ActionError> {
+    panic!("the panic test operation panicked, as it was asked to");
 }
 
 #[cfg(test)]

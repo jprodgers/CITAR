@@ -34,9 +34,17 @@
 //! - [`maps`]: the map editor's document checked, made blank, summed up, and taken from a game
 //!   (`maps.py:30-257`);
 //! - [`scenario`]: the scenario editor's overview, seats and summaries (`scenario.py:503-645`).
+//!
+//! From package 2-06a:
+//! - [`host`]: what a host reads in the facade's shapes (`summary`, the players, the lobby's
+//!   settings, the negotiations, the events, statistics and thoughts as Python's rows, a save of
+//!   the state with its whole history), and [`host::Heads`], the small copy of where a game
+//!   stands that the bindings serve without waiting for the game (DESIGN.md P2.6.1-P2.6.2);
+//! - `testops` gains `eliminate`, `end_game` and `panic` for the hosts' tests.
 
 pub mod briefing;
 pub mod game;
+pub mod host;
 pub mod maps;
 pub mod scenario;
 pub mod text;

@@ -321,6 +321,15 @@ What a script does that no player or editor may. `{ what = "ops" }` lists them.
 
 `automate` and `progress_builds` (package 1c-04) are described by `{ what = "ops" }`.
 
+Three more exist for the hosts' tests (package 2-06a), where the Python tests poked the engine;
+no script needs them:
+
+| Op | Takes | Does |
+|---|---|---|
+| `eliminate` | `player` (a living civilization or city-state) | if it is its turn, the turn ends first, as the host's `end_turn` ends it; then its cities are destroyed, its units removed, and it is eliminated as a defeat eliminates one: its negotiations cancelled, its deals ended, everyone told, and the last major civilization standing may win by Domination. A game left with no major civilization ends with no winner. Gives `turn`, `current`, `phase`, `winner`, `victory` and `eliminated` |
+| `end_game` | optionally `winner` (a living major civilization), `victory` (a victory's name, read loosely; it needs a winner) | the game ends now: won by the winner, by that victory or by none (`Neutral`), with the winner's announcement, or with no winner. Refused in a game that is over. Gives `turn`, `current`, `phase`, `winner`, `victory` |
+| `panic` | | the Rust engine panics inside the call (the Python engine has no such operation): the bindings' tests of a caught panic, which poisons the game and raises `EngineCrash` |
+
 ## Maps
 
 `maps/arena.json` is 24 by 16 tiles, odd-r (odd rows shifted right), with no wrapping: an editor

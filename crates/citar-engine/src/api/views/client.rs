@@ -115,6 +115,32 @@ pub struct ClientView<'a> {
     pub rest: Map<String, Value>,
 }
 
+impl ClientView<'_> {
+    /// The keys of the view's own fields, in the order they are written. A host that adds keys
+    /// of its own to the view (the server's `seat`, `session`, `version` and `spectator`, through
+    /// `rest`) must not repeat one of these, or the JSON would hold it twice.
+    pub const FIELDS: [&'static str; 18] = [
+        "turn",
+        "year",
+        "current_player",
+        "phase",
+        "winner",
+        "victory",
+        "you",
+        "width",
+        "height",
+        "wrap_x",
+        "wrap_y",
+        "tiles",
+        "units",
+        "cities",
+        "players",
+        "turn_limit",
+        "config",
+        "events",
+    ];
+}
+
 /// A city in the client view: one the viewer sees, or one it remembers from when it last saw it
 /// (`stale`).
 #[derive(Clone, Debug, PartialEq, Serialize)]

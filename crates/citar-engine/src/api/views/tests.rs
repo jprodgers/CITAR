@@ -276,3 +276,16 @@ fn views_write_floats_as_python_did() {
     let values = [4.0_f64, 4.0, 0.0, 2.5, 1e16];
     assert!(kinds.iter().zip(values).all(|(k, x)| k.as_f64().to_bits() == x.to_bits()));
 }
+
+#[test]
+fn a_views_own_keys_are_the_ones_it_names_before_the_rest() {
+    use super::ClientView;
+    let g = game();
+    for viewer in [Some(ROME), None] {
+        let v: Value = serde_json::from_slice(&g.view_json(viewer, 10)).expect("json");
+        let keys: Vec<&str> =
+            v.as_object().expect("an object").keys().map(String::as_str).collect();
+        assert_eq!(keys[..ClientView::FIELDS.len()], ClientView::FIELDS, "{viewer:?}");
+        assert!(keys[ClientView::FIELDS.len()..].iter().all(|k| !ClientView::FIELDS.contains(k)));
+    }
+}
