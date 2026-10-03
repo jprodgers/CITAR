@@ -9,7 +9,6 @@ these call the module itself.
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -46,15 +45,6 @@ def small(seed: int, turn_limit: int = 60):
 
 def idle_bots(n: int = 4) -> dict:
     return {p: E.Bot("idle") for p in range(n)}
-
-
-def play_out(g, bots: dict, seat_limit: int = 1) -> int:
-    """Drives a game to its end; how many drives it took."""
-    n = 0
-    while g.phase == "playing":
-        g.drive(bots, seat_limit)
-        n += 1
-    return n
 
 
 @needs_engine
@@ -390,6 +380,16 @@ class GameTests(unittest.TestCase):
         self.assertEqual(json.loads(actions), {"1": {}})
         with self.assertRaises(TypeError):
             g.drive({1: object()})
+        # A bot keyed to a player that is no major civilization is a mistake of the host's, refused as run_game
+        # refuses it, before anything moves.
+        players = json.loads(g.summary())["players"]
+        city_state = next(p["id"] for p in players if p["kind"] == "city_state")
+        rev = g.revision
+        with self.assertRaises(ValueError):
+            g.drive({city_state: E.Bot("idle")})
+        with self.assertRaises(ValueError):
+            g.drive({1: E.Bot("idle"), 77: E.Bot("idle")})
+        self.assertEqual((g.revision, g.poisoned), (rev, None))
         g.execute(0, "end_turn")
         stop, events, _ = g.drive(bots, 1)
         self.assertIn(json.loads(stop)["stop"], ("seat_limit", "external"))
@@ -445,6 +445,9 @@ class TestOperationTests(unittest.TestCase):
         self.assertIn("testops.rs", str(crash), "where it happened")
         self.assertIsNotNone(g.poisoned)
         self.assertGreaterEqual(g.revision, before)
+        # The game is poisoned and its lock is not: the panic was caught inside it. (Reads alone cannot tell, since
+        # the binding reads through a poisoned lock.)
+        self.assertFalse(g._lock_poisoned())
         # Every command is refused with EngineCrash, never ActionError: a crash is not a refusal.
         for call in (lambda: g.execute(0, "end_turn"), lambda: g.end_turn(0), lambda: g.meet(0, 1),
                      lambda: g.drive({1: E.Bot("idle")}), lambda: g.test_ops(dumps([{"op": "set_turn", "turn": 2}])),
@@ -522,11 +525,18 @@ class RunGameTests(unittest.TestCase):
         ids = [e["id"] for e in seen]
         self.assertEqual(ids, sorted(set(ids)), "each once, in order")
         self.assertTrue(ids)
-        # Every event after the game's creation: the chronicle's from the first one delivered.
+        # Every event after the game's creation, to the last: the same game played as the runner plays it, one
+        # driven seat a step through Game.drive, holds exactly these in its chronicle, the last step's included.
         g = E.Game.new(json.dumps(json.loads(self.spec())["config"]).encode())
         created = len(json.loads(g.events()))
+        replay_bots = {0: E.Bot("idle"), 1: E.Bot("basic")}
+        while g.phase == "playing":
+            stop = json.loads(g.drive(replay_bots, 1)[0])["stop"]
+            self.assertIn(stop, ("seat_limit", "game_over"), "both seats have bots: nothing waits on the host")
+        chronicle = json.loads(g.events())
+        self.assertEqual(json.loads(g.stats()), out["stats"], "the same game")
         self.assertEqual(ids[0], created + 1)
-        self.assertEqual(len(ids), ids[-1] - created)
+        self.assertEqual(seen, chronicle[created:])
         turns = [r["turn"] for r in rounds]
         self.assertEqual(turns, list(range(1, 27)), "the first turn, each new one, and the one it ended on")
         self.assertEqual(rounds[-1]["phase"], "over")
@@ -549,6 +559,77 @@ class RunGameTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             E.run_game(self.spec(), {0: E.Bot("idle")}, on_turn=boom)
 
+    def test_a_listener_that_raises_hears_every_event_and_the_game_plays_on(self):
+        # on_event is a listener, as headless.play made it: Game.emit swallowed a listener's Exception, so the lab's
+        # listen, which indexes each event's data, never ended a game over one event. Rust reports it instead.
+        quiet = []
+        E.run_game(self.spec(), {0: E.Bot("idle"), 1: E.Bot("idle")}, on_event=lambda ev: quiet.append(ev["id"]))
+        heard, reported = [], []
+
+        def listen(ev):
+            heard.append(ev["id"])
+            if ev["id"] % 2:
+                raise KeyError("era")
+
+        hook = sys.unraisablehook
+        sys.unraisablehook = reported.append
+        try:
+            out = json.loads(E.run_game(self.spec(), {0: E.Bot("idle"), 1: E.Bot("idle")}, on_event=listen))
+        finally:
+            sys.unraisablehook = hook
+        self.assertEqual(out["phase"], "over")
+        self.assertEqual(heard, quiet, "every event, after each one that raised too")
+        self.assertEqual(len(reported), sum(1 for i in heard if i % 2))
+        self.assertTrue(all(isinstance(r.exc_value, KeyError) and r.object is listen for r in reported))
+
+        class Stop(BaseException):
+            pass
+
+        def stop(_):
+            raise Stop()
+        with self.assertRaises(Stop, msg="a BaseException that is no Exception ends the run"):
+            E.run_game(self.spec(), {0: E.Bot("idle"), 1: E.Bot("idle")}, on_event=stop)
+
+    def test_ctrl_c_stops_a_run_with_no_hooks_within_a_step(self):
+        # balance.py's games and citar sim's long ones: no Python runs between steps, so the run checks for signals.
+        import _thread
+        import signal
+
+        class Interrupted(Exception):
+            pass
+
+        fired, sent, done = [], [], threading.Event()
+
+        def handler(signum, frame):
+            fired.append(time.perf_counter())
+            raise Interrupted()
+
+        def interrupt():
+            # Once the run is stepping (its steps are calls in flight), and a little more.
+            while E.calls_in_flight() == 0 and not done.is_set():
+                time.sleep(0.0005)
+            time.sleep(0.05)
+            if not done.is_set():
+                sent.append(time.perf_counter())
+                _thread.interrupt_main(signal.SIGINT)
+
+        # 500 rounds of a 4-bot small game: about a second on the laptop, so a run that did not check would hear
+        # the signal only at its end.
+        spec = dumps({"config": {"seed": 3, "map_size": "small", "players": [{"controller": "bot"}] * 4,
+                                 "turn_limit": 500}})
+        old = signal.signal(signal.SIGINT, handler)
+        t = threading.Thread(target=interrupt)
+        try:
+            t.start()
+            with self.assertRaises(Interrupted):
+                E.run_game(spec, idle_bots())
+        finally:
+            done.set()
+            t.join(30)
+            signal.signal(signal.SIGINT, old)
+        self.assertEqual(len(sent), 1)
+        self.assertLess(fired[0] - sent[0], 0.1, "the run stopped within a step of the signal")
+
     @needs_test_ops
     def test_a_crash_is_recorded_or_raised(self):
         spec = self.spec(labels={"0": "careless"}, test_panic={"player": 0, "turn": 4})
@@ -568,15 +649,19 @@ class ParallelismTests(unittest.TestCase):
     """The GIL is released for every heavy call (DESIGN.md P2.6.2, package 2-06a's gate 2)."""
 
     def test_two_games_on_two_threads_use_two_cores(self):
-        # Each thread plays 60-round games of its own until a second has passed, so the CPU clock's tick (16 ms on
-        # Windows) is small beside the window.
+        # Each thread plays 60-round games of its own, a seat per call, until a second has passed, so the CPU clock's
+        # tick (16 ms on Windows) is small beside the window. Both stop at the same moment, within a call of it: a
+        # thread still finishing a game alone would count wall time on one core.
         def worker(seed):
-            until = time.perf_counter() + 1.0
+            bots = idle_bots()
             while time.perf_counter() < until:
-                play_out(small(seed), idle_bots())
+                g = small(seed)
+                while g.phase == "playing" and time.perf_counter() < until:
+                    g.drive(bots, 1)
                 seed += 2
 
         cpu0, wall0 = time.process_time(), time.perf_counter()
+        until = wall0 + 1.0
         threads = [threading.Thread(target=worker, args=(s,)) for s in (101, 102)]
         for t in threads:
             t.start()
@@ -596,12 +681,11 @@ class ParallelismTests(unittest.TestCase):
         stop = threading.Event()
 
         def drive():
-            seed = 200
+            # A whole game in each call (about 0.1 s): a drive that held the GIL would starve the counter for all of
+            # it, not for one switch interval at a time.
+            seed, bots = 200, idle_bots()
             while not stop.is_set():
-                g = small(seed)
-                bots = idle_bots()
-                while g.phase == "playing" and not stop.is_set():
-                    g.drive(bots, 1)
+                small(seed).drive(bots, 0)
                 seed += 1
 
         t = threading.Thread(target=drive)
@@ -656,9 +740,9 @@ class StubTests(unittest.TestCase):
                 classes[node.name] = {n.name for n in node.body if isinstance(n, ast.FunctionDef)}
         public = {n for n in dir(E) if not n.startswith("_")}
         self.assertEqual(top, public)
-        test_only = {"inspect", "test_ops", "set_checks"}
+        test_only = {"inspect", "test_ops", "set_checks", "_lock_poisoned"}
         for cls in ("Game", "Bot"):
-            have = {n for n in dir(getattr(E, cls)) if not n.startswith("_")}
+            have = {n for n in dir(getattr(E, cls)) if not n.startswith("__")}
             stubbed = classes[cls] - {"__init__"}
             if not E.HAS_TEST_OPS:
                 stubbed -= test_only
@@ -680,18 +764,18 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(E.calls_in_flight(), 0)
 
     def test_the_shutdown_parks_other_threads_and_lets_its_own_go_on(self):
-        run = subprocess.run([sys.executable, str(ROOT / "tests" / "engine_exit_child.py"), "barred"],
-                             capture_output=True, text=True, timeout=120)
-        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
-        self.assertIn("barred ok", run.stdout)
+        from tests import engine_exit_child as child
+        ok, line = child.run("barred")
+        self.assertTrue(ok, line)
 
     def test_the_interpreter_exits_cleanly_with_a_daemon_thread_inside_a_call(self):
+        # Each child exits mid-drive and opens the window during finalization, a finalizer that releases the GIL
+        # while any call ends; it passes only if that window opened, with no call in flight in it, and exit code 0.
+        from tests import engine_exit_child as child
         for mode in ("long", "short"):
             with self.subTest(mode=mode):
-                run = subprocess.run([sys.executable, str(ROOT / "tests" / "engine_exit_child.py"), mode],
-                                     capture_output=True, text=True, timeout=120)
-                self.assertEqual(run.returncode, 0, run.stderr[-2000:])
-                self.assertIn("exiting", run.stdout)
+                ok, line = child.run(mode)
+                self.assertTrue(ok, line)
 
 
 if __name__ == "__main__":

@@ -128,8 +128,10 @@ def run_game(spec_json: bytes, bots: dict[int, Bot], on_turn: Optional[Callable[
     spec_json: config (as for Game.new), labels ({pid: text}), raise_errors (raise the first crash as EngineCrash),
     traceback_limit (5); max_errors is ignored; test_panic ({player, turn}) with test operations only. on_turn hears
     {turn, phase, turn_limit, last_stats} on the first turn, each new one and the one the game ended on; on_event
-    every event after the game's creation, each step's before that step's on_turn. An exception from a hook stops the
-    run and is raised."""
+    every event after the game's creation, each step's before that step's on_turn. on_event is a listener, as it was
+    on the Python engine: an Exception it raises is reported through sys.unraisablehook and the next event is still
+    delivered. An exception from on_turn ends the run and is raised, and so does a KeyboardInterrupt (checked for
+    between steps) or any other BaseException from either hook."""
 
 
 # ---------------------------------------------------------------------------- one game
@@ -241,7 +243,8 @@ class Game:
     # bots
     def drive(self, bots: dict[int, Bot], seat_limit: int = 0) -> tuple[bytes, bytes, bytes]:
         """(the stop {stop, player, negotiations}, the events, each bot's actions {pid: {tool: [taken, refused]}}).
-        stop: external, hybrid_diplomat, awaiting_reply, seat_limit or game_over. TypeError for a Python bot."""
+        stop: external, hybrid_diplomat, awaiting_reply, seat_limit or game_over. TypeError for a Python bot,
+        ValueError for a bot keyed to a player that is no major civilization."""
     def answer(self, pid: int, nid: int, bot: Bot) -> tuple[str, bytes, bytes]:
         """("done" or "deferred", the events, the bot's actions). ActionError when the negotiation does not wait on
         pid."""
@@ -252,3 +255,5 @@ class Game:
     def inspect(self, query_json: bytes) -> bytes: ...
     def test_ops(self, ops_json: bytes) -> tuple[bytes, bytes]: ...
     def set_checks(self, on: bool) -> None: ...
+    def _lock_poisoned(self) -> bool:
+        """Whether the game's own lock is poisoned (never: a panic is caught inside it). Test operations only."""
