@@ -7,6 +7,16 @@
 //! panics is the runner's crash record, `T<turn> P<player> <label>: panic: ...` with where it
 //! happened, in the result's `errors`; with `raise_errors` it is raised as `EngineCrash`
 //! instead. A Rust bot does not raise, so there is no `max_errors`: a crash ends the game.
+//!
+//! The hooks keep `headless.play`'s contract (`citar/bots/headless.py`): `on_event` was one of
+//! the game's listeners, and `Game.emit` swallowed a listener's `Exception`
+//! (`citar/engine/game.py`, `emit`), so a listener that trips over one event's data hears the
+//! rest and the game plays on; here such an exception is reported through
+//! `sys.unraisablehook` (printed, by default) rather than dropped unseen. `on_turn` was called
+//! directly, so its exceptions end the run and are raised. A `BaseException` that is no
+//! `Exception` (`KeyboardInterrupt`, `SystemExit`) ends the run from either hook. Between steps
+//! the binding checks for signals, so Ctrl-C stops a run with no hooks within a step, as it
+//! stopped Python's loop at once.
 
 use std::collections::BTreeMap;
 
@@ -17,6 +27,7 @@ use citar_engine::base::py as pyish;
 use citar_engine::game::SeatDriver;
 use citar_engine::rules::Ruleset;
 use citar_sim::{RunSpec, Runner, Seats, SimError, TRACEBACK_LIMIT};
+use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use serde_json::Value;
@@ -24,7 +35,7 @@ use serde_json::Value;
 use crate::Bytes;
 use crate::bot::seat_bots;
 use crate::calls::{self, detached};
-use crate::errors::{Failure, caught, parse};
+use crate::errors::{Failure, caught, parse, shielded};
 
 impl From<SimError> for Failure {
     fn from(e: SimError) -> Self {
@@ -132,11 +143,19 @@ impl SeatDriver for PanicAt {
 }
 
 /// Calls `hook` with each element of the JSON list `rows`, decoded by `loads` (Python's
-/// `json.loads`).
+/// `json.loads`), as the game called a listener: an `Exception` the hook raises is reported
+/// (`sys.unraisablehook`) and the next event is still delivered; any other `BaseException`
+/// (`KeyboardInterrupt`, `SystemExit`) is raised.
 fn deliver_each(loads: &Bound<'_, PyAny>, hook: &Bound<'_, PyAny>, rows: &[u8]) -> PyResult<()> {
-    let list = loads.call1((PyBytes::new(loads.py(), rows),))?;
+    let py = loads.py();
+    let list = loads.call1((PyBytes::new(py, rows),))?;
     for item in list.try_iter()? {
-        hook.call1((item?,))?;
+        if let Err(e) = hook.call1((item?,)) {
+            if !e.is_instance_of::<PyException>(py) {
+                return Err(e);
+            }
+            e.write_unraisable(py, Some(hook));
+        }
     }
     Ok(())
 }
@@ -158,7 +177,10 @@ fn deliver_one(loads: &Bound<'_, PyAny>, hook: &Bound<'_, PyAny>, row: &[u8]) ->
 /// `max_errors` is read and ignored. `bots`: `{pid: Bot}`; a major with none passes its turns.
 /// `on_turn(info)` hears the first turn, each turn as it begins and the turn the game ended on
 /// if it ended on a new one, with `{turn, phase, turn_limit, last_stats}`; `on_event(event)`
-/// hears every event after the game's creation, each step's before that step's `on_turn`.
+/// hears every event after the game's creation, each step's before that step's `on_turn`. An
+/// `Exception` from `on_event` is reported (`sys.unraisablehook`) and play goes on, as a
+/// listener's was; one from `on_turn` ends the run and is raised, and so does a
+/// `KeyboardInterrupt`, which the run checks for between steps.
 #[pyfunction]
 #[pyo3(signature = (spec_json, bots, on_turn = None, on_event = None))]
 pub fn run_game(
@@ -211,7 +233,7 @@ pub fn run_game(
     }
     let loads = py.import("json")?.getattr("loads")?;
     if let Some(hook) = &on_turn {
-        let first = to_py_json(&runner.round_info());
+        let first = shielded(|| Ok(to_py_json(&runner.round_info())))?;
         // The hooks run Python from inside this call: counted, so an exiting interpreter waits
         // for them (crate::calls).
         let _held = calls::hold(py);
@@ -248,6 +270,10 @@ pub fn run_game(
                 deliver_one(&loads, hook, row)?;
             }
         }
+        // A run with no hooks runs no Python between steps, so Ctrl-C would wait for the
+        // game's end (minutes on a gargantuan map) without this. Off the main thread it is a
+        // no-op: only that thread handles signals.
+        py.check_signals()?;
     }
     // Moved in: a game is `Send`, never `Sync`.
     let result = detached(py, move || caught(|| Bytes(to_py_json(&runner.result()))));
