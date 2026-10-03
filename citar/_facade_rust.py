@@ -477,12 +477,15 @@ class EngineGame:
 
     @classmethod
     def _load(cls, state: dict, journal: Optional[str]) -> "EngineGame":
+        """A game from a state and, for a save, the journal chunk of its history. What the load found is logged: a
+        game another ruleset made, and a save whose history did not come back whole. A state alone (a scenario, an
+        undo) has no history to miss."""
         g, report = _E.Game.load(_dumps(state), [base64.b64decode(journal)] if journal else [])
         r = json.loads(report)
         if r.get("rules_changed"):
             _log.warning("This game was made with another ruleset (%s, engine %s): it plays on with this one's.",
                          *r["rules_changed"])
-        if r.get("chronicle_incomplete"):
+        if journal and r.get("chronicle_incomplete"):
             _log.warning("This game's history did not come back whole: its replay and statistics are incomplete.")
         return cls(g)
 
@@ -595,8 +598,12 @@ class EngineGame:
         return json.loads(result)
 
     def view(self, pid: Optional[int], event_limit: int = 150) -> dict:
-        """The game as one player sees it (None: everything), which is what the browser renders from."""
-        return json.loads(self._g.view_json(pid, event_limit))
+        """The game as one player sees it (None: everything), which is what the browser renders from. The god view's
+        ``empires`` is keyed by player id, as Python's was (JSON has it as text: view_json)."""
+        v = json.loads(self._g.view_json(pid, event_limit))
+        if isinstance(v.get("empires"), dict):
+            v["empires"] = _int_keys(v["empires"])
+        return v
 
     def view_json(self, pid: Optional[int], extra: Optional[dict] = None, event_limit: int = 150) -> bytes:
         """:meth:`view` as JSON bytes, with ``extra``'s keys (the server's ``seat``, ``session``, ``version``,
@@ -894,8 +901,14 @@ class EngineGame:
     # ------------------------------------------------------------------ replay
     def replay_data(self) -> dict:
         """Everything the recap needs: the map, the players, and the whole game's frames, stats, events, messages,
-        thoughts, negotiations and deals."""
-        return json.loads(self._g.replay_data("full"))
+        thoughts, negotiations and deals, and the game's ``config`` as :attr:`config` gives it. (The engine's own
+        replay, which replay_json serves, carries the settings the client reads, its ``format`` and the unit palette
+        a client of its delta frames needs.)"""
+        data = json.loads(self._g.replay_data("full"))
+        data.pop("format", None)
+        data.pop("unit_ids", None)
+        data["config"] = self.config
+        return data
 
     def replay_json(self, extra: Optional[dict] = None) -> bytes:
         """:meth:`replay_data` as JSON bytes for a route to return as they are, ``extra``'s ``id`` and ``name`` first
