@@ -2,9 +2,9 @@
 //! founded or enhanced with, and what faith buys once there is a religion: the buildings the
 //! beliefs allow (a Pagoda for Pagodas) before missionaries, one purchase a turn.
 //!
-//! [`choose_beliefs`] is asked when a great prophet founds or enhances a religion, which package
-//! 2-03 ports (`basic1/units/special.rs`); `belief_mode = "unciv"` leaves the choice to the
-//! engine's AI (`religion::found::ai_choose_beliefs`).
+//! [`choose_beliefs`] is asked when a great prophet founds or enhances a religion
+//! (`basic1/units/special.rs`); `belief_mode = "unciv"` leaves the choice to the engine's AI
+//! (`religion::found::ai_choose_beliefs`).
 
 use citar_engine::base::ids::{BeliefId, PlayerId};
 use citar_engine::base::stats::Stat;
@@ -30,13 +30,6 @@ use crate::params::BeliefMode;
 /// first place of a belief counting. The places are worked out once per ruleset
 /// ([`Resolved::belief_place`](crate::params::Resolved::belief_place)), so the choice compares
 /// ids only.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "package 2-03's great prophets found and enhance religions with it"
-    )
-)]
 pub(crate) fn choose_beliefs(
     g: &Game,
     pid: PlayerId,

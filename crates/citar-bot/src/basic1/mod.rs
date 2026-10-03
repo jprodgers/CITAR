@@ -13,9 +13,11 @@
 //! - [`units`]: `manage_units`' order and dispatch (1771-1805), with [`settlers`] (1835-1857,
 //!   1879-1888), [`workers`] and work boats (1927-1949) and scouts (2054-2063).
 //!
-//! Package 2-03 ports units and fighting (the dispatch's other branches, promotions, escorts);
-//! 2-05 diplomacy, spies, city-state gifts, [`respond`] and the advice. What Python's turn did
-//! around the phases is the drive's now:
+//! Package 2-03 ports units and fighting: the dispatch's other branches (great people, religious
+//! units and spaceship parts, aircraft, ships and the army), the garrisons, promotions, the
+//! settlers' escorts and retreats, attacks and the war plan (1806-1833, 1858-1925, 1951-2052,
+//! 2065-2389). Package 2-05 ports diplomacy, spies, city-state gifts, [`respond`] and the
+//! advice. What Python's turn did around the phases is the drive's now:
 //! - `handle_negotiations` (745): `Game::drive` puts every negotiation that waits on a driven
 //!   seat to its driver's [`respond`] before the seat plays, and again as answers come back;
 //! - `_settle_chats` and `end_turn` (754-757): the drive ends the turn, and a chat the bot

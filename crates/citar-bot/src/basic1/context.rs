@@ -36,10 +36,6 @@ pub(crate) struct Context {
     /// The enemy weight near each city, as `cities` lists them.
     pub threat: Vec<f64>,
     /// The enemies within `threat_radius` of each city, as `cities` lists them.
-    #[expect(
-        dead_code,
-        reason = "package 2-03's defence of threatened cities reads it (basic.py:2205)"
-    )]
     pub near_enemies: Vec<SmallVec<[UnitId; 4]>>,
     /// Gold per turn.
     pub gpt: f64,

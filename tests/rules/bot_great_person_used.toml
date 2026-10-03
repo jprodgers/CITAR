@@ -4,7 +4,6 @@ spends itself on its triggered ability (a golden age), and a great engineer with
 walks next to the capital and builds its great improvement there.
 """
 from = "citar/bots/basic.py:1951-2037 (handle_special)"
-needs = "2-03"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

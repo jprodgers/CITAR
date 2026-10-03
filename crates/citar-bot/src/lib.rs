@@ -17,8 +17,8 @@
 //! its phases in Python's order. 2-01b ported the economy (the context, research, policies,
 //! great people and the pantheon, production through the engine's advisor, gold, faith,
 //! settlers, workers and scouts) and [`decisions`], the sub-decisions the reference checks ask;
-//! 2-03 ports units and fighting, and 2-05 diplomacy, [`advice`] and [`evaluate`], which return
-//! neutral values until then. DESIGN.md P2.3.10 maps every line of `basic.py` to its home.
+//! 2-03 ported units and fighting (with the second stage of the decisions), and 2-05 ports
+//! diplomacy, [`advice`] and [`evaluate`], which return neutral values until then. DESIGN.md P2.3.10 maps every line of `basic.py` to its home.
 
 #![forbid(unsafe_code)]
 
