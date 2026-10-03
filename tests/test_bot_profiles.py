@@ -112,6 +112,14 @@ class StorageTests(unittest.TestCase):
             with self.assertRaises(profiles.ProfileError):
                 profiles.check_engine(bad)
 
+    def test_an_aggression_is_a_number_held_to_0_1_or_none(self):
+        for given, kept in ((None, None), ("", None), (0.3, 0.3), ("0.6", 0.6), (1.7, 1.0), (-2, 0.0),
+                            (float("inf"), 1.0)):
+            self.assertEqual(profiles.clean_aggression(given), kept, given)
+        for bad in ("high", float("nan"), True, [0.5], {}):
+            with self.assertRaises(profiles.ProfileError, msg=bad):
+                profiles.clean_aggression(bad)
+
     def test_a_stored_profile_on_a_frozen_engine_is_listed_but_never_plays(self):
         # A laptop's profiles from 0.1.5 may name a snapshot: the history stays readable, the profile refuses to
         # play, and a lobby seat that names it plays Standard (BotAgent).
@@ -349,6 +357,34 @@ class LabTests(unittest.TestCase):
         with self.assertRaises(profiles.ProfileError):
             lab.normalize({"name": "f2", "factors": {"site_candidates": [8, 8.5]}})
 
+    def test_a_best_seat_is_queued_as_the_profile_it_stands_for(self):
+        """Ratings attribute a game to the profile its results record, so "best" is recorded as the profile it
+        stood for when the experiment was queued, not as "best" (which is no profile)."""
+        from citar import lab
+        with mock.patch.object(ratings, "best_profile", return_value="classic-production"):
+            spec = lab.normalize({"name": "best", "seats": [{"profile": "best"}, {"profile": "standard"}]})
+            factorial = lab.normalize({"name": "best-f", "factors": {"war_prep_rate": [1.0, 2.0]},
+                                       "profile": "best"})
+        self.assertEqual([(s["profile"], s["label"], s["params"]) for s in spec["seats"]],
+                         [("classic-production", "Classic production", {"prod_mode": "classic"}),
+                          ("standard", "Standard", {})])
+        self.assertEqual(factorial["profile"], "classic-production")
+        self.assertEqual({s["profile"] for s in lab.game_spec(factorial, 0)["seats"]}, {"classic-production"})
+
+    def test_a_seats_aggression_is_held_to_0_1_when_queued(self):
+        from citar import lab
+        spec = lab.normalize({"name": "agg", "seats": [{"bot": "basic", "aggression": 1.7},
+                                                       {"profile": "standard", "aggression": -2},
+                                                       {"bot": "basic", "aggression": "0.3"}, {"bot": "basic"}]})
+        self.assertEqual([s["aggression"] for s in spec["seats"]], [1.0, 0.0, 0.3, None])
+        factorial = lab.normalize({"name": "agg-f", "factors": {"war_prep_rate": [1.0, 2.0]}, "aggression": 3})
+        self.assertEqual(factorial["aggression"], 1.0)
+        for bad in ("high", float("nan")):
+            with self.assertRaises(profiles.ProfileError, msg=bad):
+                lab.normalize({"name": "bad", "seats": [{"bot": "basic", "aggression": bad}]})
+            with self.assertRaises(profiles.ProfileError, msg=bad):
+                lab.normalize({"name": "bad", "seats": [{"profile": "standard", "aggression": bad}]})
+
     def test_api_queues_an_ab_experiment(self):
         from citar import lab
         from citar.server import bots_api
@@ -397,6 +433,47 @@ class LabTests(unittest.TestCase):
         self.assertEqual(sorted(p for p, _, _ in positions), [0, 1], "standard played both positions")
         self.assertNotEqual(positions[0][1], positions[1][1], "with each position's aggression")
         self.assertEqual(len({f for _, _, f in positions}), 1, "and one fingerprint")
+
+    def test_a_played_seat_records_the_aggression_that_played(self):
+        """A seat's fixed aggression is recorded as its bot played it and its fingerprint hashed it, even when the
+        queued value was out of range (an experiment queued before seats were held to 0..1)."""
+        from citar import lab
+        spec = lab.normalize({"name": "agg-played", "games": 1, "size": "duel", "maps": ["pangaea"], "turns": 3,
+                              "barbarians": "off", "seats": [{"bot": "basic"}, {"bot": "basic"}]})
+        game = lab.game_spec(spec, 0)
+        game["seats"][0]["aggression"] = 1.7
+        r = lab.play(game)
+        fixed, open_ = r["players"]["0"], r["players"]["1"]
+        self.assertEqual((fixed["fixed_aggression"], fixed["aggression"]), (1.0, 1.0))
+        self.assertEqual(fixed["fingerprint"], profiles.fingerprint(_latest(), {}, 1.0))
+        self.assertIsNone(open_["fixed_aggression"])
+        self.assertEqual(open_["fingerprint"], profiles.fingerprint(_latest(), {}, None))
+
+
+class LabCommandTests(unittest.TestCase):
+    def test_run_and_submit_need_the_rust_engine(self):
+        """On a backend without a build id (the Python engine, until 2-12) the lab stops at once with the facade's
+        message, rather than queueing what no game can play or starting each queued game three times to crash."""
+        import contextlib
+        import io
+        import tempfile
+        from citar import lab
+        refusal = engine_api.BackendError("build_info: Rust backend only (set CITAR_ENGINE=rust).")
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "spec.json"
+            path.write_text(json.dumps({"name": "never-queued", "seats": [{"bot": "basic"}, {"bot": "basic"}]}),
+                            encoding="utf-8")
+            for argv in (["submit", str(path)], ["run", "--exit-when-idle"]):
+                err = io.StringIO()
+                with mock.patch.object(engine_api, "build_info", side_effect=refusal), \
+                        mock.patch.object(lab, "run") as run, contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as stop:
+                        lab.main(argv)
+                self.assertEqual(stop.exception.code, 2, argv)
+                self.assertIn("needs the Rust engine", err.getvalue())
+                self.assertIn("CITAR_ENGINE=rust", err.getvalue())
+                run.assert_not_called()
+        self.assertFalse((lab.QUEUE / "never-queued.json").exists())
 
 
 class RatingTests(unittest.TestCase):

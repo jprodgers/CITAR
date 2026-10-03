@@ -152,6 +152,21 @@ def clean_params(engine: str, params: Optional[dict]) -> dict:
         raise _refused(e) from None
 
 
+def clean_aggression(value) -> Optional[float]:
+    """A fixed aggression as a profile or a seat stores it: None (empty: the seat decides) or a number held to 0..1,
+    as the bot holds it. ProfileError for anything else; a NaN is no number (Python's max(0, min(1, nan)) made it
+    1.0, the most aggressive bot)."""
+    if value is None or value == "":
+        return None
+    try:
+        a = math.nan if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError):
+        a = math.nan
+    if math.isnan(a):
+        raise ProfileError("Aggression is a number from 0 to 1, or empty to let the seat decide.")
+    return max(0.0, min(1.0, a))
+
+
 def fingerprint(engine: str, params: Optional[dict], aggression: Optional[float]) -> str:
     """What plays, hashed: the build, the version ``engine`` plays now, the overrides as cleaned and the profile's
     fixed ``aggression`` (None: set by the seat). ``basic`` and the version it names give the same fingerprint, and
@@ -249,18 +264,7 @@ def save(data: dict, user: Optional[str] = None, note: str = "") -> dict:
         raise ProfileError("A profile needs a name.")
     engine = check_engine(data.get("engine") or LATEST)
     version(engine)                               # compiled in here?
-    agg = data.get("aggression")
-    if agg is None or agg == "":
-        agg = None
-    else:
-        try:
-            agg = float(agg)
-        except (TypeError, ValueError):
-            agg = math.nan
-        # a NaN is no number: Python's max(0, min(1, nan)) made it 1.0, the most aggressive bot
-        if math.isnan(agg):
-            raise ProfileError("Aggression is a number from 0 to 1, or empty to let the seat decide.")
-        agg = max(0.0, min(1.0, agg))
+    agg = clean_aggression(data.get("aggression"))
     params = clean_params(engine, data.get("params"))
     now = datetime.now().isoformat(timespec="seconds")
     existing = None
@@ -322,9 +326,10 @@ def resolve(ref, *, pin: bool = False) -> dict:
     ``ref`` is a profile id, or a seat-like dict with "profile" (and optionally "params" to layer on top and
     "aggression"), or a raw seat {"bot": engine, "params": ...} without a profile. ``engine`` is as the profile names
     it (``basic`` follows the latest version) and ``version`` the version that plays now; with ``pin`` the engine is
-    that version, which is what a lab experiment records when it is submitted. ``aggression`` is the profile's fixed
-    one (or the seat's "aggression"), None when the seat decides. The overrides are cleaned against the version's
-    schema; a raw seat's that do not clean are refused too.
+    that version, which is what a lab experiment records when it is submitted. ``profile`` is the profile's id ("best"
+    resolved to the profile it stands for now). ``aggression`` is the profile's fixed one (or the seat's
+    "aggression"), held to 0..1, None when the seat decides. The overrides are cleaned against the version's schema;
+    a raw seat's that do not clean are refused too.
 
     On the Python backend (until package 2-12) there are no versions to resolve to and no schema or build to clean
     and fingerprint against: ``version`` and ``fingerprint`` are None and the overrides are passed on as stored, which
@@ -347,9 +352,9 @@ def resolve(ref, *, pin: bool = False) -> dict:
     if not isinstance(extra, dict):
         raise ProfileError("A seat's parameter overrides are an object of names and values.")
     params.update(extra)
-    agg = ref.get("aggression")
+    agg = clean_aggression(ref.get("aggression"))
     if agg is None and prof is not None:
-        agg = prof.get("aggression")
+        agg = clean_aggression(prof.get("aggression"))
     try:
         ver = version(engine)
         params = clean_params(engine, params)
