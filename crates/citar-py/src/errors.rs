@@ -10,7 +10,9 @@
 //! | `LoadError` | `LoadError(ValueError)` |
 //!
 //! A call fails with a [`Failure`] made without the GIL, which becomes the exception once the
-//! GIL is back.
+//! GIL is back. Every entry point reaches engine, bot or runner code through a panic guard: a
+//! game's calls through its lock ([`caught`], which poisons the game), the rest through
+//! [`guarded`] (the GIL released) or [`shielded`] (the GIL held).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -19,6 +21,8 @@ use citar_engine::save::LoadError as EngineLoad;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::{PyErr, create_exception};
+
+use crate::calls::detached;
 
 create_exception!(
     citar._engine,
@@ -140,6 +144,24 @@ pub fn caught<T>(work: impl FnOnce() -> T) -> Result<T, String> {
     // A trace left by a panic caught earlier on this thread is not this call's.
     citar_sim::panics::forget();
     catch_unwind(AssertUnwindSafe(work)).map_err(|p| panic_text(p.as_ref()))
+}
+
+/// Runs `work` with the GIL held, a panic caught as an `EngineCrash`: the way every call that
+/// holds no game and is too cheap to release the GIL reaches engine or bot code. Uncaught, a
+/// panic would surface as PyO3's `PanicException`, a `BaseException` that the server's and the
+/// lab's `except Exception` let through.
+pub fn shielded<T>(work: impl FnOnce() -> Result<T, Failure>) -> Result<T, Failure> {
+    caught(work).map_err(Failure::Crash)?
+}
+
+/// Runs `work` with the GIL released ([`detached`]), a panic caught as an `EngineCrash`: the
+/// way every heavy call that holds no game goes (a game's calls catch inside its lock, to
+/// poison it).
+pub fn guarded<T: Send>(
+    py: Python<'_>,
+    work: impl FnOnce() -> Result<T, Failure> + Send,
+) -> Result<T, Failure> {
+    detached(py, || shielded(work))
 }
 
 /// Parses JSON bytes the caller sent; `what` names them in the error.

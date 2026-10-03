@@ -18,15 +18,14 @@ use serde_json::{Map, Value, json};
 
 use crate::Bytes;
 use crate::bot::Bot;
-use crate::calls::detached;
-use crate::errors::{Failure, caught, parse, parse_opt};
+use crate::errors::{Failure, guarded, parse, parse_opt, shielded};
 
 /// Runs `work` against the process's ruleset with the GIL released, a panic caught as a crash.
 fn ruled<T: Send>(
     py: Python<'_>,
     work: impl FnOnce(&'static Ruleset) -> Result<T, Failure> + Send,
 ) -> PyResult<T> {
-    Ok(detached(py, || caught(|| work(Ruleset::shared())).map_err(Failure::Crash)?)?)
+    Ok(guarded(py, || work(Ruleset::shared()))?)
 }
 
 // ---- The ruleset ---------------------------------------------------------------------------
@@ -114,7 +113,7 @@ pub fn ruleset_counts(py: Python<'_>) -> PyResult<Bytes> {
 #[pyfunction]
 #[pyo3(signature = (kind = None))]
 pub fn tool_list(kind: Option<&str>) -> PyResult<Bytes> {
-    match kind {
+    Ok(shielded(|| match kind {
         None => Ok(Bytes(tools::schemas_json().as_bytes().to_vec())),
         Some(k) => {
             let k = tools::ToolKind::from_name(k).ok_or_else(|| {
@@ -122,13 +121,13 @@ pub fn tool_list(kind: Option<&str>) -> PyResult<Bytes> {
             })?;
             Ok(Bytes(to_py_json(&tools::schemas(Some(k)))))
         }
-    }
+    })?)
 }
 
 /// Whether a tool is an `action` or a `query`; `None` for a name that is no tool.
 #[pyfunction]
-pub fn tool_kind(name: &str) -> Option<&'static str> {
-    tools::kind(name).map(tools::ToolKind::name)
+pub fn tool_kind(name: &str) -> PyResult<Option<&'static str>> {
+    Ok(shielded(|| Ok(tools::kind(name).map(tools::ToolKind::name)))?)
 }
 
 // ---- Saves, maps and scenarios as values ---------------------------------------------------
@@ -137,9 +136,9 @@ pub fn tool_kind(name: &str) -> Option<&'static str> {
 /// bytes (`engine_api.state_summary`). `LoadError` for one that does not read.
 #[pyfunction]
 pub fn state_summary(py: Python<'_>, state_json: &[u8]) -> PyResult<Bytes> {
-    Ok(detached(py, || {
+    Ok(guarded(py, || {
         let s = citar_engine::save::summary(state_json)?;
-        Ok::<_, Failure>(Bytes(to_py_json(&s)))
+        Ok(Bytes(to_py_json(&s)))
     })?)
 }
 
@@ -193,17 +192,17 @@ pub fn generate_map(py: Python<'_>, seed: u64, settings_json: Option<&[u8]>) -> 
 
 /// Every scenario edit operation with its parameters, as JSON bytes.
 #[pyfunction]
-pub fn scenario_ops_help() -> Bytes {
-    Bytes(to_py_json(&scenario::ops_help()))
+pub fn scenario_ops_help() -> PyResult<Bytes> {
+    Ok(shielded(|| Ok(Bytes(to_py_json(&scenario::ops_help()))))?)
 }
 
 /// A scenario's headline facts, for lists, as JSON bytes. `ActionError` for a document that is
 /// no scenario.
 #[pyfunction]
 pub fn scenario_summary(py: Python<'_>, doc_json: &[u8]) -> PyResult<Bytes> {
-    Ok(detached(py, || {
+    Ok(guarded(py, || {
         let doc = parse(doc_json, "The scenario")?;
-        Ok::<_, Failure>(Bytes(to_py_json(&scenario::scenario_summary(&doc)?)))
+        Ok(Bytes(to_py_json(&scenario::scenario_summary(&doc)?)))
     })?)
 }
 
@@ -213,8 +212,8 @@ pub fn scenario_summary(py: Python<'_>, doc_json: &[u8]) -> PyResult<Bytes> {
 /// `peace`). The item is as the game stores it. `ValueError` for one that does not read.
 #[pyfunction]
 pub fn item_category(py: Python<'_>, item_json: &[u8]) -> PyResult<&'static str> {
-    let item = parse(item_json, "The item")?;
     ruled(py, |r| {
+        let item = parse(item_json, "The item")?;
         let i = DealItem::from_json(&item, r).map_err(|e| Failure::Value(e.0))?;
         Ok(category_of(i.kind()).name())
     })
@@ -224,8 +223,8 @@ pub fn item_category(py: Python<'_>, item_json: &[u8]) -> PyResult<&'static str>
 /// negotiation that is only talk). The terms are as the game stores them.
 #[pyfunction]
 pub fn proposal_categories(py: Python<'_>, proposal_json: &[u8]) -> PyResult<Vec<&'static str>> {
-    let p = parse(proposal_json, "The proposal")?;
     ruled(py, |r| {
+        let p = parse(proposal_json, "The proposal")?;
         let terms = match &p {
             Value::Null => None,
             t => Some(Terms::from_json(t, r).map_err(|e| Failure::Value(e.0))?),
@@ -239,25 +238,29 @@ pub fn proposal_categories(py: Python<'_>, proposal_json: &[u8]) -> PyResult<Vec
 /// Every bot version compiled in, the latest first, as JSON bytes: `{id, label, description,
 /// latest, memory_kind}` each.
 #[pyfunction]
-pub fn bot_versions() -> Bytes {
-    let rows: Vec<Value> = citar_bot::versions()
-        .iter()
-        .map(|v| {
-            json!({
-                "id": v.id.id(), "label": v.label, "description": v.description,
-                "latest": v.latest, "memory_kind": v.memory_kind,
+pub fn bot_versions() -> PyResult<Bytes> {
+    Ok(shielded(|| {
+        let rows: Vec<Value> = citar_bot::versions()
+            .iter()
+            .map(|v| {
+                json!({
+                    "id": v.id.id(), "label": v.label, "description": v.description,
+                    "latest": v.latest, "memory_kind": v.memory_kind,
+                })
             })
-        })
-        .collect();
-    Bytes(to_py_json(&rows))
+            .collect();
+        Ok(Bytes(to_py_json(&rows)))
+    })?)
 }
 
 /// A version's parameter schema, `{engine, groups}` (the Bots page's shape), as JSON bytes;
 /// `basic` names the latest. `ValueError` for an unknown version.
 #[pyfunction]
 pub fn bot_schema(version: &str) -> PyResult<Bytes> {
-    let s = citar_bot::schema(version).map_err(|e| Failure::Value(e.to_string()))?;
-    Ok(Bytes(s.as_bytes().to_vec()))
+    Ok(shielded(|| {
+        let s = citar_bot::schema(version).map_err(|e| Failure::Value(e.to_string()))?;
+        Ok(Bytes(s.as_bytes().to_vec()))
+    })?)
 }
 
 /// Parameter overrides cleaned against a version's schema, as JSON bytes: unknown keys
@@ -266,15 +269,16 @@ pub fn bot_schema(version: &str) -> PyResult<Bytes> {
 #[pyfunction]
 #[pyo3(signature = (version, params_json = None))]
 pub fn bot_clean_params(version: &str, params_json: Option<&[u8]>) -> PyResult<Bytes> {
-    let params = parse_opt(params_json, "The bot's parameters")?;
-    let clean = citar_bot::clean(version, &params).map_err(|e| Failure::Value(e.message))?;
-    Ok(Bytes(to_py_json(&clean.to_json())))
+    Ok(shielded(|| {
+        let params = parse_opt(params_json, "The bot's parameters")?;
+        let clean = citar_bot::clean(version, &params).map_err(|e| Failure::Value(e.message))?;
+        Ok(Bytes(to_py_json(&clean.to_json())))
+    })?)
 }
 
 /// A bot's fingerprint: 12 hex digits over the build id, its version, its overrides and the
 /// profile's fixed aggression (DESIGN.md P2.8.6).
 #[pyfunction]
-pub fn bot_fingerprint(py: Python<'_>, bot: &Bound<'_, Bot>) -> String {
-    let spec = bot.get().snapshot();
-    detached(py, || citar_bot::fingerprint(&spec, &citar_bot::build_id(Ruleset::shared())))
+pub fn bot_fingerprint(py: Python<'_>, bot: &Bound<'_, Bot>) -> PyResult<String> {
+    bot.get().fingerprint_now(py)
 }

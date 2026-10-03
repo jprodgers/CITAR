@@ -19,8 +19,7 @@ use pyo3::types::PyDict;
 use serde_json::Value;
 
 use crate::Bytes;
-use crate::calls::detached;
-use crate::errors::{Failure, parse, parse_opt};
+use crate::errors::{Failure, guarded, parse, parse_opt, shielded};
 
 /// A bot to seat in a game or a headless run (`engine_api.bot_instance`).
 #[pyclass(frozen, module = "citar._engine", name = "Bot")]
@@ -37,6 +36,15 @@ impl Bot {
     /// The spec as it stands now: what a drive or an answer plays.
     pub fn snapshot(&self) -> Arc<BotSpec> {
         Arc::clone(&self.spec())
+    }
+
+    /// The fingerprint of what plays now (`Bot.fingerprint`, `bot_fingerprint`), off the GIL:
+    /// the build id needs the ruleset, which its first use compiles.
+    pub fn fingerprint_now(&self, py: Python<'_>) -> PyResult<String> {
+        let spec = self.snapshot();
+        Ok(guarded(py, || {
+            Ok(citar_bot::fingerprint(&spec, &citar_bot::build_id(Ruleset::shared())))
+        })?)
     }
 }
 
@@ -73,14 +81,16 @@ impl Bot {
         aggression: Option<f64>,
         fixed_aggression: Option<f64>,
     ) -> PyResult<Self> {
-        let v = VersionId::resolve(version).ok_or_else(|| {
-            Failure::Value(citar_bot::BotError::UnknownVersion(version.to_owned()).to_string())
+        let spec = shielded(|| {
+            let v = VersionId::resolve(version).ok_or_else(|| {
+                Failure::Value(citar_bot::BotError::UnknownVersion(version.to_owned()).to_string())
+            })?;
+            let params = parse_opt(params_json, "The bot's parameters")?;
+            let overrides =
+                citar_bot::clean(version, &params).map_err(|e| Failure::Value(e.message))?;
+            let tuning = Arc::new(Tuning::new(v, overrides));
+            Ok(BotSpec::new(v, tuning, fixed_aggression, aggression))
         })?;
-        let params = parse_opt(params_json, "The bot's parameters")?;
-        let overrides =
-            citar_bot::clean(version, &params).map_err(|e| Failure::Value(e.message))?;
-        let tuning = Arc::new(Tuning::new(v, overrides));
-        let spec = BotSpec::new(v, tuning, fixed_aggression, aggression);
         Ok(Self { spec: Mutex::new(Arc::new(spec)) })
     }
 
@@ -89,11 +99,13 @@ impl Bot {
     /// (`engine_api.bot_set_diplomacy`). `ValueError` for an unknown category or owner.
     #[pyo3(signature = (owners_json = None))]
     fn set_diplomacy(&self, owners_json: Option<&[u8]>) -> PyResult<()> {
-        let owners = Owners::from_json(&parse_opt(owners_json, "The diplomacy owners")?)
-            .map_err(|e| Failure::Value(e.0))?;
-        let mut spec = self.spec();
-        let next = BotSpec::clone(&spec).with_owners(owners);
-        *spec = Arc::new(next);
+        let owners = shielded(|| {
+            Owners::from_json(&parse_opt(owners_json, "The diplomacy owners")?)
+                .map_err(|e| Failure::Value(e.0))
+        })?;
+        // The new spec is made outside the handle's lock, so a panic there cannot poison it.
+        let next = shielded(|| Ok(Arc::new(BotSpec::clone(&self.snapshot()).with_owners(owners))))?;
+        *self.spec() = next;
         Ok(())
     }
 
@@ -101,21 +113,23 @@ impl Bot {
     /// hands that kind of diplomacy to (`engine_api.bot_owns_negotiation`). The negotiation is
     /// its record as `Game.negotiation` gives it.
     fn owns_negotiation(&self, py: Python<'_>, negotiation_json: &[u8]) -> PyResult<bool> {
-        let n = parse(negotiation_json, "The negotiation")?;
-        if !n.is_object() {
-            return Err(Failure::Value(
-                "The negotiation must be its record, an object.".to_owned(),
-            )
-            .into());
-        }
         let spec = self.snapshot();
         // The ruleset's first use compiles it: off the GIL.
-        let terms = detached(py, || match n.get("proposal") {
-            None | Some(Value::Null) => Ok(None),
-            Some(p) => Terms::from_json(p, Ruleset::shared()).map(Some),
-        })
-        .map_err(|e| Failure::Value(e.0))?;
-        Ok(spec.owners.owns_terms(terms.as_ref()))
+        Ok(guarded(py, || {
+            let n = parse(negotiation_json, "The negotiation")?;
+            if !n.is_object() {
+                return Err(Failure::Value(
+                    "The negotiation must be its record, an object.".to_owned(),
+                ));
+            }
+            let terms = match n.get("proposal") {
+                None | Some(Value::Null) => None,
+                Some(p) => {
+                    Some(Terms::from_json(p, Ruleset::shared()).map_err(|e| Failure::Value(e.0))?)
+                }
+            };
+            Ok(spec.owners.owns_terms(terms.as_ref()))
+        })?)
     }
 
     /// The aggression it plays with, 0 to 1.
@@ -138,21 +152,22 @@ impl Bot {
 
     /// Who decides each kind of diplomacy, `{category: "bot" | "llm"}`, as JSON bytes.
     #[getter]
-    fn owners(&self) -> Bytes {
-        Bytes(to_py_json(&self.spec().owners.to_json()))
+    fn owners(&self) -> PyResult<Bytes> {
+        let spec = self.snapshot();
+        Ok(shielded(|| Ok(Bytes(to_py_json(&spec.owners.to_json()))))?)
     }
 
     /// The cleaned parameter overrides, as JSON bytes.
     #[getter]
-    fn params(&self) -> Bytes {
-        Bytes(to_py_json(&self.spec().tuning.overrides().to_json()))
+    fn params(&self) -> PyResult<Bytes> {
+        let spec = self.snapshot();
+        Ok(shielded(|| Ok(Bytes(to_py_json(&spec.tuning.overrides().to_json()))))?)
     }
 
     /// What actually plays, hashed: 12 hex digits over the build id, the version, the
     /// overrides and the profile's fixed aggression (DESIGN.md P2.8.6).
-    fn fingerprint(&self, py: Python<'_>) -> String {
-        let spec = self.snapshot();
-        detached(py, || citar_bot::fingerprint(&spec, &citar_bot::build_id(Ruleset::shared())))
+    fn fingerprint(&self, py: Python<'_>) -> PyResult<String> {
+        self.fingerprint_now(py)
     }
 
     fn __repr__(&self) -> String {

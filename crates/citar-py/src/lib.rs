@@ -9,10 +9,12 @@
 //! - **The GIL is released for every heavy call** (`calls::detached`), with the game's lock
 //!   taken inside, so no thread waits for a game while holding the GIL, and games on two threads
 //!   use two cores. Cheap reads come from `Heads` with the GIL held (`game`).
-//! - **Panics never cross the boundary.** Each call catches them inside the game's lock: the
-//!   game is poisoned, its lock is not, and the caller gets `EngineCrash` (`errors`).
-//! - **Interpreter exit is safe:** the module registers `shutdown` with `atexit`, so no thread
-//!   re-attaches to a finalizing interpreter (`calls`).
+//! - **Panics never cross the boundary.** A game's calls catch them inside the game's lock: the
+//!   game is poisoned, its lock is not, and the caller gets `EngineCrash`. Every other entry
+//!   point catches them too, as an `EngineCrash` (`errors`).
+//! - **Interpreter exit waits for the calls in flight:** the module registers `shutdown` with
+//!   `atexit`, so a daemon thread's call completes and the thread then parks, never
+//!   re-attaching to a finalizing interpreter (`calls`).
 //!
 //! Modules: `game` (`Game`), `bot` (`Bot`), `run` (`run_game`), `funcs` (the ruleset, tools,
 //! maps, scenarios, categories and bot versions), `errors` (the exceptions) and `calls` (the
@@ -34,8 +36,7 @@ use citar_engine::rules::Ruleset;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 
-use crate::calls::detached;
-use crate::errors::{ActionError, EngineCrash, Failure, LoadError, MapError};
+use crate::errors::{ActionError, EngineCrash, Failure, LoadError, MapError, guarded};
 
 /// JSON bytes for Python: a value that would be a dict or a list, which the facade decodes.
 pub struct Bytes(pub Vec<u8>);
@@ -56,9 +57,11 @@ impl<'py> IntoPyObject<'py> for Bytes {
 fn build_info(py: Python<'_>) -> PyResult<Bytes> {
     // The first call in a process parses and compiles the embedded ruleset for its id, a heavy
     // call, so it runs with the GIL released (DESIGN.md P2.6.2) like every other.
-    let bytes = detached(py, || serde_json::to_vec(&citar_bot::build_info(Ruleset::shared())))
-        .map_err(|e| Failure::Runtime(e.to_string()))?;
-    Ok(Bytes(bytes))
+    Ok(guarded(py, || {
+        serde_json::to_vec(&citar_bot::build_info(Ruleset::shared()))
+            .map(Bytes)
+            .map_err(|e| Failure::Runtime(e.to_string()))
+    })?)
 }
 
 /// The module.

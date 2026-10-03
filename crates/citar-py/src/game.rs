@@ -43,7 +43,7 @@ use serde_json::{Map, Value, json};
 use crate::Bytes;
 use crate::bot::Bot;
 use crate::calls::detached;
-use crate::errors::{Failure, caught, parse, parse_opt};
+use crate::errors::{Failure, caught, guarded, parse, parse_opt};
 
 /// One game (DESIGN.md P2.6.1). Frozen, so it must be `Sync`: the engine's `Game` is `Send` and
 /// not `Sync`, and the lock around it makes it shareable.
@@ -188,9 +188,20 @@ impl Game {
         F: FnOnce(&EngineGame) -> Result<T, Failure> + Send,
         T: Send,
     {
+        self.tend(py, |g| f(g))
+    }
+
+    /// Takes something the game keeps for its host, which is no command (a poisoned game hands
+    /// it over too), with the GIL released, under its lock. A panic poisons the game and is an
+    /// `EngineCrash`.
+    fn tend<T, F>(&self, py: Python<'_>, f: F) -> Result<T, Failure>
+    where
+        F: FnOnce(&mut EngineGame) -> Result<T, Failure> + Send,
+        T: Send,
+    {
         detached(py, || {
             let mut g = self.lock();
-            match caught(|| f(&g)) {
+            match caught(|| f(&mut g)) {
                 Ok(done) => done,
                 Err(crash) => {
                     g.poison(&crash);
@@ -242,17 +253,13 @@ impl Game {
     /// not make a game, `MapError` for a map that does not.
     #[staticmethod]
     fn new(py: Python<'_>, config_json: &[u8]) -> PyResult<Self> {
-        let made = detached(py, || {
-            caught(|| {
-                let rules = Ruleset::shared();
-                let config = parse(config_json, "The settings")?;
-                let setup = config_from_value(rules, config)?;
-                let (game, _created) = EngineGame::new(rules, &setup)?;
-                Ok::<_, Failure>(game)
-            })
-            .map_err(Failure::Crash)?
-        })?;
-        Ok(Self::wrap(made))
+        Ok(guarded(py, || {
+            let rules = Ruleset::shared();
+            let config = parse(config_json, "The settings")?;
+            let setup = config_from_value(rules, config)?;
+            let (game, _created) = EngineGame::new(rules, &setup)?;
+            Ok(Self::wrap(game))
+        })?)
     }
 
     /// A game from a save: its state JSON and the journal chunks that rebuild its history
@@ -266,20 +273,16 @@ impl Game {
         state_json: &[u8],
         chunks: Vec<PyBackedBytes>,
     ) -> PyResult<(Self, Bytes)> {
-        let (game, report) = detached(py, || {
-            caught(|| {
-                let mut it = chunks.iter().map(|c| &**c);
-                let (game, report) = EngineGame::load(Ruleset::shared(), state_json, &mut it)?;
-                let report = json!({
-                    "rules_changed": report.rules_changed.map(|(id, engine)| json!([id.to_hex(), engine])),
-                    "chronicle_incomplete": report.chronicle_incomplete,
-                    "engine": report.engine,
-                });
-                Ok::<_, Failure>((game, Bytes(to_py_json(&report))))
-            })
-            .map_err(Failure::Crash)?
-        })?;
-        Ok((Self::wrap(game), report))
+        Ok(guarded(py, || {
+            let mut it = chunks.iter().map(|c| &**c);
+            let (game, report) = EngineGame::load(Ruleset::shared(), state_json, &mut it)?;
+            let report = json!({
+                "rules_changed": report.rules_changed.map(|(id, engine)| json!([id.to_hex(), engine])),
+                "chronicle_incomplete": report.chronicle_incomplete,
+                "engine": report.engine,
+            });
+            Ok((Self::wrap(game), Bytes(to_py_json(&report))))
+        })?)
     }
 
     /// The game as one save until package 2-11's container (`EngineGame.to_save`): the state
@@ -551,10 +554,7 @@ impl Game {
     /// What the game's checks have found since the last call, as text (DESIGN.md 9.4): nothing
     /// in a build without them (a release wheel).
     fn take_violations(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        Ok(detached(py, || {
-            let mut g = self.lock();
-            g.take_violations().iter().map(ToString::to_string).collect()
-        }))
+        Ok(self.tend(py, |g| Ok(g.take_violations().iter().map(ToString::to_string).collect()))?)
     }
 
     // ---- Tools and views -------------------------------------------------------------------
@@ -958,7 +958,8 @@ impl Game {
     /// the game is over (`Game::drive`); `seat_limit` driven turns at most, 0 for no limit.
     /// Returns the stop (`{"stop", "player", "negotiations"}`), the events, and each bot's
     /// actions as `{pid: {tool: [taken, refused]}}`. Each handle's spec is taken once, at the
-    /// start: a `set_diplomacy` during the drive applies to the next one.
+    /// start: a `set_diplomacy` during the drive applies to the next one. A bot keyed to a
+    /// player that is no major civilization is a `ValueError`, as in `run_game`.
     #[pyo3(signature = (bots, seat_limit = 0))]
     fn drive(
         &self,
@@ -970,7 +971,7 @@ impl Game {
         Ok(self.write(py, |g| {
             let mut drivers: Vec<(PlayerId, Driver)> = Vec::with_capacity(specs.len());
             for (pid, spec) in specs {
-                drivers.push((player_of(g, pid)?, Driver::new(spec)));
+                drivers.push((major_of(g, pid)?, Driver::new(spec)));
             }
             let mut d = Drivers::none(g.state().players().len());
             for (p, b) in &mut drivers {
@@ -1050,6 +1051,15 @@ impl Game {
             let (done, batch) = citar_engine::api::testops::apply(g, &ops)?;
             Ok((Bytes(to_py_json(&done)), events_json(g, &batch)))
         })?)
+    }
+
+    /// Whether the game's own lock is poisoned, which a panic caught inside it never leaves it:
+    /// for the bindings' tests (`Game::lock` reads through a poisoned lock, so reads alone
+    /// cannot tell). With the `test-ops` feature only.
+    #[cfg(feature = "test-ops")]
+    #[pyo3(name = "_lock_poisoned")]
+    fn lock_poisoned(&self) -> bool {
+        self.game.is_poisoned()
     }
 
     /// Turns every check of DESIGN.md 9.4 on (the invariants and the cache oracle at every
