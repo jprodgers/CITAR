@@ -214,6 +214,13 @@ fn basic1() -> Bot {
     Bot::new(Arc::new(BotSpec::new(VersionId::Basic1, tuning, None, None)))
 }
 
+/// Seat 0's warrior taken off the map: a warrior in the capital is its garrison, which basic-1
+/// remembers (`memory.garrisons`, package 2-03), so a seat with one always has something to keep.
+fn without_the_warrior(g: &mut Game) {
+    let warrior = g.player_units(PlayerId(0)).map(|u| u.id()).max().expect("the warrior");
+    g.apply_ops(&json!([{"op": "remove_units", "unit": warrior.get()}])).expect("removed");
+}
+
 /// A driver that only leaves the seat the memory it is given, as a bot of an earlier session
 /// would have.
 struct Plant(Option<DriverMemory>);
@@ -259,12 +266,13 @@ fn clean(g: &mut Game) {
 #[test]
 fn a_seat_that_remembers_nothing_keeps_no_memory() {
     let mut g = arena();
+    without_the_warrior(&mut g);
     let mut bot = basic1();
     for _ in 0..3 {
         one_turn(&mut g, &mut bot);
     }
     assert_eq!(seat_memory(&g), None, "nothing to remember, nothing kept");
-    assert_eq!(g.player_cities(PlayerId(0)).count(), 1, "the capital, until 2-01b's settlers");
+    assert_eq!(g.player_cities(PlayerId(0)).count(), 1, "the capital");
     clean(&mut g);
 }
 
@@ -300,11 +308,12 @@ fn the_drive_prunes_a_seats_memory_and_keeps_the_rest() {
 
     let mut bot = basic1();
     one_turn(&mut g, &mut bot);
-    // The settler founded the capital (the stand-in until 2-01b) and is gone, so its escort
-    // entry went with it at the next turn's start; this turn's start pruned the rest.
+    // This turn's start pruned the escorts of units gone or not the seat's, and the garrison of
+    // a city that is not; the settler then founded the capital, and its escort, finding it gone,
+    // let it go (basic.py:2149-2155).
     let kept = Memory::decode(&seat_memory(&g).expect("basic-1's memory"));
     let mut want = m.clone();
-    want.escorts.retain(|&s, _| s == settler);
+    want.escorts.clear();
     want.garrisons.clear();
     want.retreats.remove(&TileIdx(11));
     want.bad_sites.remove(&TileIdx(21));
@@ -329,6 +338,7 @@ fn the_drive_prunes_a_seats_memory_and_keeps_the_rest() {
 #[test]
 fn a_foreign_memory_reads_as_none_and_the_idle_bot_keeps_none() {
     let mut g = arena();
+    without_the_warrior(&mut g);
     let foreign = DriverMemory::new(7, 3, b"not ours".to_vec()).expect("small");
     one_turn(&mut g, &mut Plant(Some(foreign.clone())));
     assert_eq!(seat_memory(&g).as_ref(), Some(&foreign));

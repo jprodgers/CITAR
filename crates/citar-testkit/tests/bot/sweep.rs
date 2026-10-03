@@ -5,7 +5,8 @@
 //! spaceship parts, navies) in minutes, where whole games would take hours to reach them.
 //!
 //! The twelve committed states always; the 250 of the corpus as well when
-//! `CITAR_REFCHECK_CORPUS` names its folder, the states on threads side by side. Each state's
+//! `CITAR_REFCHECK_CORPUS` names its folder, the states on threads side by side (nextest counts
+//! each test as taking every test thread, `.config/nextest.toml`). Each state's
 //! refusals are reported: the most refusals of one tool in one bot turn, and the actions taken
 //! and refused over the round. A bot that proposes freely is refused often (P2.3.6), so the
 //! report is for reading; the test fails only on a turn that loops on a refusal, more than

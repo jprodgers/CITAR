@@ -11,12 +11,15 @@
 //! - **Barbarian games** (gate 4): four bots, 10 games of 330 rounds, to the game's end at its
 //!   turn limit: no panic or violation, and every game ends.
 //!
-//! The games play on threads side by side, in about ten seconds in the ci profile on the laptop.
+//! The games play on as many threads as there are cores, in about twenty seconds in the ci
+//! profile on the laptop; nextest counts each test as taking every test thread
+//! (`.config/nextest.toml`), so that the games do not starve the other whole-game tests.
 //! With `CITAR_BOT_CHECKS=all` the cache oracle runs at every settle as well
 //! (`DebugOptions::ALL`), which makes each game about sixty times slower: a check to run by hand
 //! after a change to the engine's caches, not on every build.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use citar_engine::base::ids::{NegotiationId, PlayerId, Turn};
 use citar_engine::game::victory::score::score;
@@ -166,14 +169,30 @@ fn play(run: &Run) -> Played {
     out
 }
 
-/// Plays each of `runs` on its own thread.
+/// Plays `runs` on as many threads as the machine has cores, each thread a game at a time, and
+/// gives what each showed in the runs' order.
 fn play_all(runs: &[Run]) -> Vec<Played> {
+    let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    let next = AtomicUsize::new(0);
     // The engine runs no threads (DESIGN.md 6.13); games do run side by side, one a thread.
     #[allow(clippy::disallowed_methods, reason = "threads of the test's, not of the engine")]
-    std::thread::scope(|s| {
-        let handles: Vec<_> = runs.iter().map(|run| s.spawn(move || play(run))).collect();
-        handles.into_iter().map(|h| h.join().expect("a game's thread")).collect()
-    })
+    let mut played: Vec<(usize, Played)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads.min(runs.len()))
+            .map(|_| {
+                s.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(run) = runs.get(i) else { return out };
+                        out.push((i, play(run)));
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().expect("a game's thread")).collect()
+    });
+    played.sort_by_key(|&(i, _)| i);
+    played.into_iter().map(|(_, p)| p).collect()
 }
 
 #[test]
