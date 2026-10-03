@@ -84,25 +84,30 @@ fn split_frames(bt: &str) -> Vec<Frame<'_>> {
     out
 }
 
-/// Where the code that panicked starts in `frames`: past the capture, this module's hook and
-/// the runtime's panic handling down to the panic's entry point (`panic_fmt` for `panic!`, an
-/// `unwrap` or an index; `begin_panic` for a payload that is no message), and past the standard
-/// library's frames that raised it (`unwrap_failed`, an index's bounds check). The frames of a
-/// `catch_unwind` that the panic unwinds into lie below the code that panicked and are never
-/// taken for the machinery. A backtrace without the names (no symbols) is kept from its first
-/// frame that is not the capture or the hook.
+/// Where the code that panicked starts in `frames`: past the capture and this module's hook,
+/// past the runtime's handling of the panic from its first frame down to the panic's entry
+/// point (`panic_fmt` for `panic!`, an `unwrap` or an index; `begin_panic` for a payload that is
+/// no message), and past the standard library's frames that raised it (`unwrap_failed`, an
+/// index's bounds check).
+///
+/// The capture and the hook are skipped by position, not by name: without debug information
+/// (the ci and release profiles on Windows) a frame of ours takes the name of the nearest public
+/// symbol, and the hook's closure has been seen named `std::rt::lang_start`. The runtime's own
+/// frames keep their names, since the standard library ships its symbols. The `catch_unwind`
+/// frames that the panic unwinds into lie below the code that panicked, so the first runtime
+/// frame from the top is never one of them. A backtrace without the runtime's names (no
+/// symbols) is kept from its first frame that is not the capture or the hook.
 fn first_frame_of_the_panic(frames: &[Frame<'_>]) -> usize {
-    // The frames above the outermost catch or thread start: the panic's own are among them.
-    let above = frames.iter().position(|f| is_catch(f.symbol)).unwrap_or(frames.len());
-    let entry = frames[..above].iter().rposition(|f| is_panic_machinery(f.symbol));
-    let Some(entry) = entry else {
+    let Some(runtime) = frames.iter().position(|f| is_panic_runtime(f.symbol)) else {
         return frames.iter().position(|f| !is_capture(f.symbol)).unwrap_or(0);
     };
-    let past = entry + 1;
-    let first = (past..above).find(|&i| !is_standard_library(frames[i].symbol));
-    // A panic raised inside the standard library from a frame we cannot name: keep its frames
-    // rather than none.
-    first.unwrap_or(past)
+    let raised = |f: &Frame<'_>| is_panic_runtime(f.symbol) || is_standard_library(f.symbol);
+    let first = frames[runtime..].iter().position(|f| !raised(f)).map(|i| runtime + i);
+    // Nothing but the standard library below the runtime: keep the frames below its last rather
+    // than none.
+    first.unwrap_or_else(|| {
+        frames.iter().rposition(|f| is_panic_runtime(f.symbol)).map_or(runtime, |e| e + 1)
+    })
 }
 
 /// A frame of the capture or of this module's hook: the boxed hook's call included, which is
@@ -119,15 +124,12 @@ fn is_capture(symbol: &str) -> bool {
     PREFIXES.iter().any(|p| s.starts_with(p))
 }
 
-/// A frame of the capture, the hook or the runtime's handling of a panic, down to the panic's
-/// entry point: names that never stand in a stack that is not panicking. A boxed closure's call
-/// may (ours call through them too), and so may `std::panicking`'s `catch_unwind` and `try`,
-/// which lie below the code that panicked.
-fn is_panic_machinery(symbol: &str) -> bool {
+/// A frame of the runtime's handling of a panic, from the hook's caller down to the panic's entry
+/// point: names that never stand in a stack that is not panicking. `std::panicking`'s
+/// `catch_unwind` and `try` are not among them: they lie below the code that panicked.
+fn is_panic_runtime(symbol: &str) -> bool {
     let s = symbol.trim_start_matches('<');
-    const PREFIXES: [&str; 9] = [
-        "std::backtrace",
-        "citar_sim::panics::install",
+    const PREFIXES: [&str; 7] = [
         "core::panicking::",
         "std::panicking::begin_panic",
         "std::panicking::rust_panic",
@@ -140,16 +142,6 @@ fn is_panic_machinery(symbol: &str) -> bool {
         || s.contains("__rust_end_short_backtrace")
         || s.ends_with("rust_begin_unwind")
         || s == "rust_panic"
-}
-
-/// A frame that a panic unwinds into, or a thread's start: the code that panicked lies above it.
-fn is_catch(symbol: &str) -> bool {
-    let s = symbol.trim_start_matches('<');
-    s.contains("catch_unwind")
-        || s.starts_with("std::panicking::try")
-        || s.starts_with("std::panicking::r#try")
-        || s.contains("__rust_begin_short_backtrace")
-        || s.starts_with("std::rt::lang_start")
 }
 
 /// A frame of the standard library: `core::...`, `alloc::...` or `std::...`, an impl of one of
@@ -336,6 +328,33 @@ mod tests {
             first(ours).as_deref(),
             Some("   1: <citar_engine::X as core::fmt::Display>::fmt")
         );
+        // Without debug information on Windows a frame of ours takes the nearest public
+        // symbol's name, a hook's closure once `std::rt::lang_start` (the ci profile with every
+        // feature): the runtime's first frame still starts the cut.
+        let misnamed = "   3: std::backtrace::Backtrace::force_capture
+   4: std::rt::lang_start::<()>::{closure#0}
+   5: std::panicking::panic_with_hook
+   6: std::panicking::panic_handler::closure$0
+   7: std::sys::backtrace::__rust_end_short_backtrace<std::panicking::panic_handler::closure_env$0,never$>
+   8: std::panicking::panic_handler
+   9: core::panicking::panic_fmt
+  10: <serde_json::value::de::KeyClassifier as serde_core::de::DeserializeSeed>::deserialize
+  11: citar_sim::panics::tests::a_test
+  12: <&str as core::fmt::Debug>::fmt
+  13: core::ops::function::FnOnce::call_once
+  14: std::panicking::catch_unwind
+";
+        assert_eq!(
+            trace(misnamed).text(2).lines().skip(1).collect::<Vec<_>>(),
+            [
+                "  10: <serde_json::value::de::KeyClassifier as serde_core::de::DeserializeSeed>::deserialize",
+                "  11: citar_sim::panics::tests::a_test"
+            ]
+        );
+        // Nothing but the standard library below the runtime: the frames below it are kept.
+        let all_std = "   0: core::panicking::panic_fmt\n   1: core::option::unwrap_failed\n   \
+                       2: std::panicking::catch_unwind\n";
+        assert_eq!(first(all_std).as_deref(), Some("   1: core::option::unwrap_failed"));
         // Without names, everything but the capture is kept.
         let unnamed =
             "   0: std::backtrace::Backtrace::capture\n   1: <unknown>\n   2: <unknown>\n";
