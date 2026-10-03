@@ -1,5 +1,9 @@
 //! The idle bot (`citar/bots/idle.py`): founds its capital, then does nothing, and rejects every
 //! negotiation. A control for what the real bot is worth, and a punching bag in conquest tests.
+//! It keeps no memory and takes no parameters, no diplomacy owners and no advice.
+//!
+//! Python founded through `unit_action` with `found_city`; here it is the typed `FoundCity`, the
+//! same rule under its own tool name.
 
 use citar_engine::base::ids::{NegotiationId, UnitId};
 use citar_engine::game::Action;
@@ -9,9 +13,18 @@ use serde_json::json;
 
 use crate::driver::Turn;
 
-/// Its turn: while it has no city, each unit in id order tries to found one (`IdleBot.play_turn`).
+/// Its turn (`IdleBot.play_turn`): found the capital.
 pub(crate) fn play_turn(t: &mut Turn<'_>) {
+    found_capital(t);
+}
+
+/// While the seat has no city, each of its units in id order tries to found one; a unit that
+/// cannot is refused and the next tries.
+pub(crate) fn found_capital(t: &mut Turn<'_>) {
     let pid = t.pid();
+    if t.game().player_cities(pid).next().is_some() {
+        return;
+    }
     let units: Vec<UnitId> = t.game().player_units(pid).map(|u| u.id()).collect();
     for u in units {
         if t.game().player_cities(pid).next().is_some() {

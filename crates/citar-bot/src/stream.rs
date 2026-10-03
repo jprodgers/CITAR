@@ -8,9 +8,10 @@
 //! (`Purpose::Advisor`, shared with automatic production). The words live here so that the
 //! engine holds no bot vocabulary and `golden/rng.json` stays as it is.
 
-use citar_engine::base::ids::PlayerId;
+use citar_engine::base::ids::{PlayerId, Turn};
 use citar_engine::base::rng::{KeyPart, Purpose, Rng};
 use citar_engine::game::Game;
+use smallvec::SmallVec;
 
 /// A kind of decision the bot draws for: the first key word under `Purpose::BotBase`. The
 /// discriminants are frozen: changing one moves every game a bot plays.
@@ -44,9 +45,16 @@ impl Stream {
     /// `more` (the tech, the spy and target, the other player).
     #[must_use]
     pub fn rng(self, g: &Game, pid: PlayerId, more: &[u64]) -> Rng {
-        let mut keys = Vec::with_capacity(3 + more.len());
-        keys.extend([self.word(), pid.key(), g.turn().key()]);
+        self.keyed(g.state().seed(), pid, g.turn(), more)
+    }
+
+    /// The generator for one decision of `pid` on turn `turn` of the game seeded `seed`:
+    /// `Rng::keyed(seed, Purpose::BotBase, [word, pid, turn, more...])`.
+    #[must_use]
+    pub fn keyed(self, seed: u64, pid: PlayerId, turn: Turn, more: &[u64]) -> Rng {
+        let mut keys: SmallVec<[u64; 6]> = SmallVec::with_capacity(3 + more.len());
+        keys.extend([self.word(), pid.key(), turn.key()]);
         keys.extend_from_slice(more);
-        Rng::keyed(g.state().seed(), Purpose::BotBase, &keys)
+        Rng::keyed(seed, Purpose::BotBase, &keys)
     }
 }

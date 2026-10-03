@@ -11,15 +11,16 @@
 //! The bot reads the game through `&Game` and acts only through `Game::act`: `&mut Game` appears
 //! in `driver.rs` alone (`cargo xtask check`), whose `Turn` is the one holder of it.
 //!
-//! Package 2-00a wrote these signatures with stub bodies, so that the runner and the bindings
-//! could be written beside the port: the stub [`Bot`] plays every version as `idle`, [`advice`]
-//! and [`evaluate`] return neutral values, and `basic-1`'s parameter schema and cleaning wait for
-//! packages 2-00b and 2-01a ([`BotError::NotYet`]). The ports land in 2-01a (parameters,
-//! versions, owners, memory, streams, the driver), 2-01b (the economy), 2-03 (units) and 2-05
-//! (diplomacy, advice, valuation); DESIGN.md P2.3.10 maps every line of `basic.py` to its home.
+//! Package 2-00a wrote these signatures, so that the runner and the bindings could be written
+//! beside the port; 2-01a filled in the parameters (their schema, generated struct, cleaning and
+//! resolution), the versions, owners, memory, streams and the driver, whose `basic-1` turn calls
+//! its phases in Python's order. The phases come with 2-01b (the economy), 2-03 (units) and 2-05
+//! (diplomacy, [`advice`] and [`evaluate`], which return neutral values until then); DESIGN.md
+//! P2.3.10 maps every line of `basic.py` to its home.
 
 #![forbid(unsafe_code)]
 
+mod basic1;
 mod driver;
 mod idle;
 pub mod memory;
@@ -40,7 +41,7 @@ use serde_json::Value;
 
 pub use self::memory::Memory;
 pub use self::owners::{Owner, Owners, OwnersError};
-pub use self::params::{Overrides, ParamError, Params, Resolved, Tuning};
+pub use self::params::{NameList, Overrides, ParamError, Params, Resolved, Tuning};
 pub use self::stream::Stream;
 pub use self::versions::{LATEST, Version, VersionId};
 
@@ -61,10 +62,6 @@ pub enum BotError {
     /// Diplomacy owners that do not parse.
     #[error(transparent)]
     Owners(#[from] OwnersError),
-    /// What a later package of DESIGN.md Appendix C writes (`basic-1`'s schema, from 2-00b and
-    /// 2-01a); 2-01a removes the variant.
-    #[error("not built yet: {0}")]
-    NotYet(&'static str),
 }
 
 /// Everything about how a seat's bot plays (DESIGN.md P2.3.1).
@@ -202,19 +199,20 @@ pub fn versions() -> &'static [Version] {
 /// page's shape, DESIGN.md P2.3.2). `basic` names the latest version.
 ///
 /// # Errors
-/// An unknown version; `basic-1`'s schema until packages 2-00b and 2-01a bring it.
+/// An unknown version.
 pub fn schema(v: &str) -> Result<&'static str, BotError> {
     let id = VersionId::resolve(v).ok_or_else(|| BotError::UnknownVersion(v.to_owned()))?;
-    params::schema::of(id)
-        .ok_or(BotError::NotYet("basic-1's parameter schema comes with packages 2-00b and 2-01a"))
+    Ok(params::schema::of(id))
 }
 
 /// Overrides for version `v` cleaned against its schema: unknown keys refused, values coerced to
 /// their parameter's type, values equal to the default dropped, keys sorted (DESIGN.md P2.3.2,
-/// `profiles.clean_params`). `null` is no overrides.
+/// `profiles.clean_params`, with its two laxities fixed: `params/clean.rs`). `null` is no
+/// overrides; the idle bot takes none and ignores any.
 ///
 /// # Errors
-/// An unknown version, overrides that are not an object, or a value its parameter refuses.
+/// An unknown version, overrides that are not an object, or a value its parameter refuses, with
+/// Python's message naming the version as `v` does.
 pub fn clean(v: &str, overrides: &Value) -> Result<Overrides, ParamError> {
     params::clean::clean(v, overrides)
 }
@@ -445,12 +443,14 @@ mod tests {
     }
 
     #[test]
-    fn versions_schemas_and_cleaning_of_the_skeleton() {
+    fn versions_schemas_and_cleaning() {
         let ids: Vec<&str> = versions().iter().map(|v| v.id.id()).collect();
         assert_eq!(ids, ["basic-1", "idle"]);
         assert!(versions()[0].latest);
         assert_eq!(schema("idle"), Ok(r#"{"engine":"idle","groups":[]}"#));
-        assert!(matches!(schema("basic"), Err(BotError::NotYet(_))));
+        let basic: Value = serde_json::from_str(schema("basic").expect("basic-1's")).expect("JSON");
+        assert_eq!(basic["engine"], "basic-1");
+        assert_eq!(schema("basic"), schema("basic-1"), "basic names the latest");
         let e = schema("frozen_abc").expect_err("no such version");
         assert_eq!(
             e.to_string(),
@@ -458,7 +458,8 @@ mod tests {
         );
         assert_eq!(clean("idle", &serde_json::json!({"anything": 1})), Ok(Overrides::default()));
         assert_eq!(clean("basic-1", &Value::Null), Ok(Overrides::default()));
-        assert!(clean("basic-1", &serde_json::json!({"tech_noise": 0})).is_err());
+        let o = clean("basic-1", &serde_json::json!({"tech_noise": 0})).expect("cleans");
+        assert_eq!(o.to_json(), serde_json::json!({"tech_noise": 0.0}));
         assert!(clean("basic-1", &serde_json::json!([1])).is_err());
         assert!(clean("nope", &Value::Null).is_err());
     }

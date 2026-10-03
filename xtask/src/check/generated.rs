@@ -1,8 +1,10 @@
 //! Generated files stay in step with their generators.
 //!
 //! Each committed generated file is listed in [`FILES`] with the function that produces it; the
-//! check regenerates it in memory and fails on any difference. So far there is one:
-//! `crates/citar-engine/src/unique/gen.rs`, from `cargo xtask gen-uniques` (package 1a-05).
+//! check regenerates it in memory and fails on any difference. There are two:
+//! `crates/citar-engine/src/unique/gen.rs`, from `cargo xtask gen-uniques` (package 1a-05), and
+//! `crates/citar-bot/src/params/gen.rs`, from `cargo xtask gen-params` (package 2-01a, rule 4 of
+//! DESIGN.md P2.2).
 
 use super::Finding;
 use std::path::Path;
@@ -22,12 +24,20 @@ pub struct Generated {
 }
 
 /// Every generated file in the workspace.
-pub const FILES: &[Generated] = &[Generated {
-    path: crate::gen_uniques::OUT,
-    command: "cargo xtask gen-uniques",
-    generate: crate::gen_uniques::generate,
-    inputs: &[crate::gen_uniques::TSV, crate::gen_uniques::TOML],
-}];
+pub const FILES: &[Generated] = &[
+    Generated {
+        path: crate::gen_uniques::OUT,
+        command: "cargo xtask gen-uniques",
+        generate: crate::gen_uniques::generate,
+        inputs: &[crate::gen_uniques::TSV, crate::gen_uniques::TOML],
+    },
+    Generated {
+        path: crate::gen_params::OUT,
+        command: "cargo xtask gen-params",
+        generate: crate::gen_params::generate,
+        inputs: &[crate::gen_params::SCHEMA],
+    },
+];
 
 pub fn check(root: &Path, files: &[Generated]) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -96,8 +106,37 @@ mod tests {
     }
 
     #[test]
-    fn the_unique_types_are_generated() {
+    fn the_unique_types_and_the_bot_parameters_are_generated() {
         let paths: Vec<&str> = FILES.iter().map(|g| g.path).collect();
-        assert_eq!(paths, ["crates/citar-engine/src/unique/gen.rs"]);
+        assert_eq!(
+            paths,
+            ["crates/citar-engine/src/unique/gen.rs", "crates/citar-bot/src/params/gen.rs"]
+        );
+    }
+
+    /// Rule 4 of DESIGN.md P2.2: the bot's parameter struct is held to its schema, so a hand
+    /// edit of the committed file, or a schema changed without regenerating, is a finding.
+    #[test]
+    fn the_committed_files_are_fresh_and_a_hand_edit_fails() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        assert_eq!(check(&root, FILES), [], "every generated file is up to date");
+        let dir = scratch("params");
+        let out = dir.join("crates/citar-bot/src/params");
+        let schema = dir.join("crates/citar-bot/params");
+        std::fs::create_dir_all(&out).expect("dirs");
+        std::fs::create_dir_all(&schema).expect("dirs");
+        std::fs::copy(root.join(crate::gen_params::SCHEMA), schema.join("basic-1.json"))
+            .expect("the schema");
+        let fresh = std::fs::read_to_string(root.join(crate::gen_params::OUT)).expect("gen.rs");
+        let only_params = &FILES[1..];
+        std::fs::write(out.join("gen.rs"), &fresh).expect("write");
+        assert_eq!(check(&dir, only_params), []);
+        let edited = fresh.replacen("pub tech_noise: f64,", "pub tech_noise: f32,", 1);
+        assert_ne!(edited, fresh, "the edit lands");
+        std::fs::write(out.join("gen.rs"), edited).expect("write");
+        let found = check(&dir, only_params);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("run `cargo xtask gen-params`"), "{found:?}");
+        std::fs::remove_dir_all(dir).ok();
     }
 }
