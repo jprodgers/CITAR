@@ -31,7 +31,13 @@ use crate::params::resolve::names_of;
 /// the kind's order, unranked ones last, then by name; a kind whose order is written empty is
 /// ranked by the four orders one after another (pantheon, founder, follower, enhancer), the
 /// first place of a belief counting.
-#[expect(dead_code, reason = "package 2-03's great prophets found and enhance religions with it")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "package 2-03's great prophets found and enhance religions with it"
+    )
+)]
 pub(crate) fn choose_beliefs(
     g: &Game,
     pid: PlayerId,
@@ -156,4 +162,88 @@ pub(crate) fn buy(
         currency: faith.then(|| json!("Faith")),
     }))
     .is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use citar_engine::base::ids::PlayerId;
+    use citar_engine::game::setup::config_from_value;
+    use citar_engine::rules::Ruleset;
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::memory::Memory;
+    use crate::params::{Overrides, Tuning};
+    use crate::versions::VersionId;
+    use crate::{BotSpec, clean};
+
+    fn game() -> Game {
+        let r = Ruleset::shared();
+        let cfg = json!({"seed": 3, "map_size": "duel", "players": [{}, {}]});
+        Game::new(r, &config_from_value(r, cfg).expect("settings")).expect("a game").0
+    }
+
+    fn spec(params: &Value) -> BotSpec {
+        let o = if params.is_null() {
+            Overrides::default()
+        } else {
+            clean("basic-1", params).expect("parameters")
+        };
+        BotSpec::new(VersionId::Basic1, Arc::new(Tuning::new(VersionId::Basic1, o)), None, None)
+    }
+
+    /// The beliefs `params`' bot chooses for one founder and one follower belief.
+    fn choose(g: &Game, params: &Value) -> Vec<BeliefId> {
+        let spec = spec(params);
+        let resolved = spec.tuning.resolved(g.rules());
+        let mut memory = Memory::default();
+        let seat = Seat::new(&spec, &resolved, &mut memory);
+        let needed: BeliefCounts = [
+            (BeliefKind::Type(BeliefType::Founder), 1),
+            (BeliefKind::Type(BeliefType::Follower), 1),
+        ]
+        .into_iter()
+        .collect();
+        choose_beliefs(g, PlayerId(0), &seat, &needed)
+    }
+
+    fn named(g: &Game, names: &[&str]) -> Vec<BeliefId> {
+        names.iter().map(|n| g.rules().lookup::<BeliefId>(n).expect(n)).collect()
+    }
+
+    #[test]
+    fn beliefs_are_chosen_by_their_order_else_by_the_four_orders_else_by_name() {
+        let g = game();
+        // The orders as given, the first of each.
+        let mine = json!({"beliefs_founder": ["Tithe", "Pilgrimage"],
+                          "beliefs_follower": ["Pagodas", "Mosques"]});
+        assert_eq!(choose(&g, &mine), named(&g, &["Tithe", "Pagodas"]));
+        // Names the order lacks come after it, by name; and a founder order written empty ranks
+        // by the four orders one after another, which name no founder belief: all by name.
+        let by_name = |g: &Game| {
+            let mut founders: Vec<(String, BeliefId)> =
+                beliefs_available(g, BeliefKind::Type(BeliefType::Founder))
+                    .into_iter()
+                    .map(|b| (g.rules().name(b).unwrap_or_default().to_owned(), b))
+                    .collect();
+            founders.sort();
+            founders[0].1
+        };
+        let one = json!({"beliefs_founder": ["Tithe"], "beliefs_follower": ["Pagodas"]});
+        assert_eq!(choose(&g, &one)[0], named(&g, &["Tithe"])[0]);
+        assert_ne!(by_name(&g), named(&g, &["Tithe"])[0], "the order comes before the names");
+        let empty = json!({"beliefs_founder": [], "beliefs_follower": ["Pagodas"]});
+        assert_eq!(choose(&g, &empty), vec![by_name(&g), named(&g, &["Pagodas"])[0]]);
+        // The unciv mode is the engine's AI.
+        let unciv = json!({"belief_mode": "unciv"});
+        let needed: BeliefCounts = [
+            (BeliefKind::Type(BeliefType::Founder), 1),
+            (BeliefKind::Type(BeliefType::Follower), 1),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(choose(&g, &unciv), ai_choose_beliefs(&g, PlayerId(0), &needed));
+    }
 }
