@@ -52,8 +52,11 @@ export async function renderBots(root, rules, sub) {
 // ---------------------------------------------------------------------------------------------------------------------
 // profiles list
 // ---------------------------------------------------------------------------------------------------------------------
+// The engine list only labels each profile's code: without it (the Python backend answers 501) the ids stand in.
+const engineList = () => api.botEngines().catch(() => ({ engines: [] }));
+
 async function drawProfiles(body, rules) {
-  const [{ profiles }, { engines }] = await Promise.all([api.botProfiles(), api.botEngines()]);
+  const [{ profiles }, { engines }] = await Promise.all([api.botProfiles(), engineList()]);
   const eng = Object.fromEntries(engines.map((e) => [e.id, e]));
   const card = el("div", { class: "card" });
   const table = el("table", { class: "list jobs" }, el("tr", {},
@@ -282,13 +285,18 @@ function ratingChart(series) {
 // ---------------------------------------------------------------------------------------------------------------------
 async function renderProfile(page, rules, pid) {
   let info, engines;
-  try { [info, { engines }] = await Promise.all([api.botProfile(pid), api.botEngines()]); }
+  try { [info, { engines }] = await Promise.all([api.botProfile(pid), engineList()]); }
   catch (e) { page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots"))); return {}; }
   const saved = info.profile;
-  const editable = !saved.builtin && isAdmin();
+  // A profile whose code the engine refuses (a frozen snapshot of 0.1.5, or no Rust engine on this server) has no
+  // schema: it is shown read-only with the refusal, and its owner can still delete it.
+  let schema, refused = null;
+  try { schema = await api.botSchema(saved.engine); }
+  catch (e) { refused = e.message; schema = { engine: saved.engine, groups: [] }; }
+  const owner = !saved.builtin && isAdmin();
+  const editable = owner && !refused;
   const draft = { name: saved.name, description: saved.description || "", tags: [...(saved.tags || [])], engine: saved.engine,
     aggression: saved.aggression, params: JSON.parse(JSON.stringify(saved.params || {})), archived: !!saved.archived, parent: saved.parent };
-  let schema = await api.botSchema(draft.engine);
   let filter = "", changedOnly = false;
   const openGroups = new Set();
   const head = el("div", { class: "card" });
@@ -308,15 +316,16 @@ async function renderProfile(page, rules, pid) {
     head.append(
       el("div", { class: "row" }, el("a", { href: "#/bots" }, "← Bots"), el("span", { class: "grow" }),
         saved.builtin ? el("span", { class: "pill muted" }, "built-in: fork it to change it") : el("span", { class: "pill" }, `revision ${saved.rev}`),
-        el("button", { onclick: () => forkProfile(saved) }, "Fork"),
-        el("button", { onclick: () => abDialog(rules, [saved.id]) }, "A/B test…"),
-        editable ? el("button", { class: "danger", onclick: async () => {
+        refused ? null : el("button", { onclick: () => forkProfile(saved) }, "Fork"),
+        refused ? null : el("button", { onclick: () => abDialog(rules, [saved.id]) }, "A/B test…"),
+        owner ? el("button", { class: "danger", onclick: async () => {
           if (!(await confirmBox("Delete profile", `Delete ${saved.name}? Its games stay in the rankings under its fingerprint.`))) return;
           try { await api.deleteBotProfile(saved.id); location.hash = "#/bots"; } catch (e) { toast(e.message, "error"); }
         } }, "Delete") : null),
+      refused ? el("p", { class: "bad" }, refused) : null,
       el("div", { class: "profile-grid" },
         field("Name", el("input", { value: draft.name, disabled: !editable, oninput: (e) => { draft.name = e.target.value; drawSave(); } })),
-        field("Code", el("select", { disabled: !editable, onchange: async (e) => {
+        field("Code", refused ? el("input", { value: draft.engine, disabled: true }) : el("select", { disabled: !editable, onchange: async (e) => {
           const next = e.target.value;
           const nextSchema = await api.botSchema(next);
           const keys = new Set(nextSchema.groups.flatMap((g) => g.params.map((p) => p.key)));
@@ -375,6 +384,11 @@ async function renderProfile(page, rules, pid) {
     groupsBox);
     function drawGroups() {
       clear(groupsBox);
+      if (refused) {
+        groupsBox.append(el("p", { class: "muted" }, "The parameters can't be shown, for the reason above. The stored overrides:"),
+          el("pre", { class: "small" }, JSON.stringify(saved.params || {}, null, 1)));
+        return;
+      }
       if (!schema.groups.length) { groupsBox.appendChild(el("p", { class: "muted" }, "This code has no parameters.")); return; }
       for (const g of schema.groups) {
         const ps = g.params.filter((p) => (!changedOnly || p.key in draft.params)
