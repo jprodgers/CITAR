@@ -432,18 +432,15 @@ def resolve(ref, *, freeze_code: bool = False) -> dict:
 
 
 def make_bot(ref=None, *, seed: Optional[int] = None, aggression: Optional[float] = None):
-    """A bot instance for a profile reference (see resolve). ``aggression`` applies when the profile leaves it open;
-    with neither, 0.4."""
+    """A bot for a profile reference (see resolve), made by the engine's facade (``engine_api.bot_instance``), so it
+    is the backend's own: a Python bot object, or a compiled bot's handle on the Rust engine. ``aggression`` applies
+    when the profile leaves it open; with neither, 0.4."""
+    from .. import engine_api
     r = resolve(ref)
     if r["engine"] == "idle":
-        from .idle import IdleBot
-        return IdleBot()
+        return engine_api.bot_instance("idle")
     agg = r["aggression"] if r["aggression"] is not None else (aggression if aggression is not None else 0.4)
-    mod = module(r["engine"])
-    try:
-        return mod.BasicBot(aggression=float(agg), seed=seed, params=r["params"])
-    except TypeError:                     # snapshots from before parameters existed
-        return mod.BasicBot(aggression=float(agg), seed=seed)
+    return engine_api.bot_instance(r["engine"], seed=seed, aggression=float(agg), params=r["params"])
 
 
 def revision_fingerprints() -> dict:

@@ -124,12 +124,15 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_a_job_ends_when_its_model_is_eliminated(self):
         sch = self.scheduler()
-        run = sch.create_run(dry_suite(models=("dry-a",), turn_limit=200, delay=0.05))
+        suite = dry_suite(models=("dry-a",), turn_limit=200, delay=0.05)
+        # two bots, so the game goes on without the model: eliminating it in a duel would end the game
+        suite["scenarios"][0].update(opponents=2, map_size="small")
+        run = sch.create_run(suite)
         job = run["jobs"][0]
         self.assertTrue(wait_for(lambda: job["status"] == "running" and self.manager.get(job["game_id"]), sch=sch))
         s = self.manager.get(job["game_id"])
         with s.lock:
-            s.game.python_game.player(0).alive = False
+            s.game.test_ops([{"op": "eliminate", "player": 0}])
         self.assertTrue(wait_for(lambda: job["status"] == "done", sch=sch, timeout=30))
         self.assertEqual(job["result"]["outcome"], "eliminated")
         self.assertEqual(job["result"]["performance"], 0)
