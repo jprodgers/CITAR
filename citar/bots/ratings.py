@@ -21,9 +21,10 @@ finished up to the end of each day.
 **Where the games come from.** The lab's results (``saves/lab/results``). Each result records per seat what played,
 taken when the game was played: the fingerprint, the build id, the bot version, the profile, its revision and name,
 the overrides and the profile's fixed aggression. Entries are keyed and named from those records alone, so
-collecting them needs neither the bot's code nor the engine: no fingerprint is re-derived. A game in which a seat
-recorded no fingerprint (0.1.5's oldest results, archived with the rest of its lab history) is not rated. The ladder
-of 0.1.6 starts empty.
+collecting them needs neither the bot's code nor the engine: no fingerprint is re-derived. A game is rated only if
+every seat records its fingerprint, build and version. 0.1.5's results record no build or version (their
+fingerprints hash the Python bot, frozen snapshots among them), so none of them is rated, even where an upgraded
+install still keeps them under ``saves/lab/results``: the ladder of 0.1.6 starts empty (DESIGN.md P2.8.7).
 """
 from __future__ import annotations
 
@@ -76,11 +77,15 @@ def _signature() -> tuple:
     return tuple(sorted(sig))
 
 
-def _entry(eid: str, fp: str, diff: str, r: dict, pl: dict, factorial: bool) -> dict:
-    """A new entry, from what a result records about one of its seats."""
-    return {"id": eid, "fingerprint": fp, "difficulty": diff,
-            # 0.1.5's results named the code in "bot" and the engine's hash in "engine", and recorded no overrides
-            "version": pl.get("version") or pl.get("bot"), "build": pl.get("build") or r.get("engine"),
+def _recorded(pl) -> bool:
+    """Whether a seat's result records what played as 0.1.6's lab does: its fingerprint, build and version. 0.1.5's
+    seats record a fingerprint of the Python bot but no build or version, so their games are not rated."""
+    return isinstance(pl, dict) and all(isinstance(pl.get(k), str) and pl[k] for k in ("fingerprint", "build", "version"))
+
+
+def _entry(eid: str, fp: str, diff: str, pl: dict, factorial: bool) -> dict:
+    """A new entry, from what a result records about one of its seats (one that :func:`_recorded` accepts)."""
+    return {"id": eid, "fingerprint": fp, "difficulty": diff, "version": pl["version"], "build": pl["build"],
             "params": pl.get("params"), "aggression": pl.get("fixed_aggression"),
             "profile": pl.get("profile"), "profile_rev": pl.get("profile_rev"), "profile_name": pl.get("profile_name"),
             "labels": Counter(), "experiments": set(), "factorial": factorial, "first": None, "last": None}
@@ -102,7 +107,7 @@ def collect() -> tuple[list[dict], dict]:
                 continue
             if r.get("crash") or not r.get("players") or len(r["players"]) < 2:
                 continue
-            if not all(isinstance(pl, dict) and pl.get("fingerprint") for pl in r["players"].values()):
+            if not all(_recorded(pl) for pl in r["players"].values()):
                 continue
             seats = []
             for k, pl in r["players"].items():
@@ -111,7 +116,7 @@ def collect() -> tuple[list[dict], dict]:
                 eid = f"{fp}@{diff}"
                 e = entries.get(eid)
                 if e is None:
-                    e = entries[eid] = _entry(eid, fp, diff, r, pl, factorial)
+                    e = entries[eid] = _entry(eid, fp, diff, pl, factorial)
                 e["labels"][pl.get("label") or "?"] += 1
                 e["experiments"].add(exp["name"])
                 e["factorial"] = e["factorial"] and factorial
@@ -412,7 +417,7 @@ def profile_rating(p: dict, board: list) -> dict:
     same = None
     if current is None and p.get("engine") == profiles.LATEST:
         agg = p.get("aggression")
-        # an entry whose results recorded no overrides (0.1.5's) cannot be said to have the same settings
+        # an entry whose results recorded no overrides cannot be said to have the same settings
         cands = [b for b in rated if b["difficulty"] == "Prince" and b.get("params") is not None
                  and b["params"] == (p.get("params") or {})
                  and (b.get("aggression") is None and agg is None
@@ -440,13 +445,23 @@ def ranked_profiles(board: Optional[list] = None) -> list[dict]:
     return out
 
 
+def _plays(p: dict) -> bool:
+    """Whether a profile's engine is one a seat may play (see profiles.check_engine)."""
+    try:
+        profiles.check_engine(p.get("engine"))
+        return True
+    except profiles.ProfileError:
+        return False
+
+
 def best_profile(board: Optional[list] = None) -> str:
     """The id "Best bot" stands for: the highest-rated profile whose rating describes its current settings (its
     current revision, or the same settings on an earlier build of the latest version), else the highest-rated at
-    all, else Standard. Never the idle bot or an archived profile."""
+    all, else Standard. Never the idle bot, an archived profile or one that cannot play (a saved profile on a frozen
+    snapshot of 0.1.5)."""
     try:
         ranked = [p for p in ranked_profiles(board) if p["engine"] != "idle" and not p.get("archived")
-                  and p["rating"] and p["rating"].get("rated")]
+                  and _plays(p) and p["rating"] and p["rating"].get("rated")]
     except Exception:           # ratings must never stop a game from being created
         return profiles.DEFAULT_PROFILE
     current = [p for p in ranked if p["rating_same_settings"]]

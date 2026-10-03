@@ -503,6 +503,30 @@ class LadderTests(unittest.TestCase):
         renamed = {b["fingerprint"]: b for b in ratings.rankings()["entries"]}
         self.assertEqual(renamed["gone"]["name"], "Back again r2", "a profile is called what it is called now")
 
+    def test_results_of_0_1_5_are_not_rated(self):
+        """The ladder of 0.1.6 starts empty (DESIGN.md P2.8.7): an upgraded install keeps 0.1.5's results, whose
+        seats record a fingerprint of the Python bot (frozen snapshots among them) but no build or version, and
+        none of their games is rated, nor can they make a 0.1.5 profile the best bot."""
+        def old(fp, share, rank, profile, name, bot):
+            return {"label": name, "bot": bot, "difficulty": "Prince", "alive": True, "levels": None,
+                    "profile": profile, "profile_rev": 1, "fingerprint": fp, "aggression": 0.25,
+                    "score_share": share, "rank": rank, "techs": 50, "cities": 5, "events": {}}
+        p = profiles.PROFILES_DIR
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "v2-candidate-a.json").write_text(json.dumps(
+            {"id": "v2-candidate-a", "name": "v2 candidate A", "engine": "frozen_4f6e040a", "params": {},
+             "aggression": None, "rev": 1}), encoding="utf-8")
+        rows = [{**self._game(i, old("8c1f0e2a9b3d", 0.8, 0, "v2-candidate-a", "v2 candidate A", "frozen_4f6e040a"),
+                              old("1d2c3b4a5f6e", 0.2, 1, "standard", "Standard", "frozen_de161146"), i + 1),
+                 "engine": "e7427f9dc8"} for i in range(4)]
+        # a seat of 0.1.6 does not make a game with a seat of 0.1.5 rated
+        rows.append(self._game(4, self._seat("new-std", 0.6, 0, "standard", name="Standard"),
+                               old("1d2c3b4a5f6e", 0.4, 1, "standard", "Standard", "frozen_de161146"), 5))
+        self._experiment("league-0-1-5", rows)
+        r = ratings.rankings()
+        self.assertEqual([b for b in r["entries"] if "league-0-1-5" in b["experiments"]], [])
+        self.assertEqual(ratings.best_profile(), "standard")
+
 
 class BestBotTests(unittest.TestCase):
     def tearDown(self):
@@ -543,8 +567,22 @@ class BestBotTests(unittest.TestCase):
         self.assertEqual(ratings.best_profile(board), "standard", "a rating of different settings doesn't count")
         board[1]["params"] = None
         self.assertEqual(ratings.best_profile(board), "classic-production",
-                         "a result that recorded no overrides (0.1.5's) describes no settings: the best that does wins")
+                         "a result that recorded no overrides describes no settings: the best that does wins")
         self.assertEqual(ratings.best_profile([]), "standard")
+
+    def test_best_skips_a_profile_that_cannot_play(self):
+        # a saved profile on a frozen snapshot of 0.1.5 is refused wherever it would play, so it is never the best
+        p = profiles.PROFILES_DIR
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "old-tuned.json").write_text(json.dumps({"id": "old-tuned", "name": "Old tuned", "rev": 1,
+                                                      "engine": "frozen_d95d50cb", "params": {}, "aggression": None}),
+                                          encoding="utf-8")
+        # neither rating describes its profile's current settings, so the highest-rated profile that plays wins
+        board = [{"profile": "old-tuned", "fingerprint": "old", "difficulty": "Prince", "rated": True,
+                  "rating": 2100, "params": {}, "aggression": None, "last": "2026-10-02T00:00:00"},
+                 {"profile": "classic-production", "fingerprint": "cls", "difficulty": "Prince", "rated": True,
+                  "rating": 1600, "params": None, "aggression": None, "last": "2026-10-02T00:00:00"}]
+        self.assertEqual(ratings.best_profile(board), "classic-production")
 
     @rust_only
     def test_the_current_revision_is_flagged(self):
