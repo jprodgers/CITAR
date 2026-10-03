@@ -64,6 +64,73 @@ fn labels_of(v: Option<&Value>) -> Result<BTreeMap<PlayerId, String>, Failure> {
     Ok(out)
 }
 
+/// The seat and turn of the spec's `test_panic`, whose bot then panics on that turn or later:
+/// the crash record's way through `run_game`, for the bindings' tests. Builds without the test
+/// operations refuse it.
+fn test_panic(v: Option<&Value>) -> Result<Option<(PlayerId, i32)>, Failure> {
+    let Some(v) = v.filter(|v| !v.is_null()) else { return Ok(None) };
+    if !cfg!(feature = "test-ops") {
+        return Err(Failure::Value(
+            "test_panic needs a build with the test operations.".to_owned(),
+        ));
+    }
+    let n = |k: &str| v.get(k).and_then(Value::as_i64);
+    let (Some(p), Some(t)) = (n("player").and_then(|p| u8::try_from(p).ok()), n("turn")) else {
+        return Err(Failure::Value("test_panic is {\"player\": id, \"turn\": n}.".to_owned()));
+    };
+    Ok(Some((PlayerId(p), i32::try_from(t).unwrap_or(i32::MAX))))
+}
+
+/// The driver of seat `p`: its bot, which panics from the turn `test_panic` names if it names
+/// the seat.
+#[cfg(feature = "test-ops")]
+fn seat_driver(bot: Driver, p: PlayerId, panic_at: Option<(PlayerId, i32)>) -> Box<dyn SeatDriver> {
+    match panic_at {
+        Some((who, turn)) if who == p => Box::new(PanicAt { bot, turn }),
+        _ => Box::new(bot),
+    }
+}
+
+/// The driver of a seat: its bot (a build without the test operations refuses `test_panic`).
+#[cfg(not(feature = "test-ops"))]
+fn seat_driver(bot: Driver, _: PlayerId, _: Option<(PlayerId, i32)>) -> Box<dyn SeatDriver> {
+    Box::new(bot)
+}
+
+/// A seat's bot that panics once the game reaches a turn (`test_panic`).
+#[cfg(feature = "test-ops")]
+struct PanicAt {
+    bot: Driver,
+    turn: i32,
+}
+
+#[cfg(feature = "test-ops")]
+impl SeatDriver for PanicAt {
+    fn play_turn(
+        &mut self,
+        g: &mut citar_engine::game::Game,
+        pid: PlayerId,
+        mem: &mut citar_engine::state::players::DriverMemory,
+    ) -> citar_engine::game::DriverOutcome {
+        assert!(
+            g.turn() < self.turn,
+            "the test bot panics on turn {}, as it was asked to",
+            g.turn()
+        );
+        self.bot.play_turn(g, pid, mem)
+    }
+
+    fn respond(
+        &mut self,
+        g: &mut citar_engine::game::Game,
+        pid: PlayerId,
+        nid: citar_engine::base::ids::NegotiationId,
+        mem: &mut citar_engine::state::players::DriverMemory,
+    ) -> citar_engine::game::DriverOutcome {
+        self.bot.respond(g, pid, nid, mem)
+    }
+}
+
 /// Calls `hook` with each element of the JSON list `rows`, decoded by Python's `json.loads`.
 fn deliver_each(py: Python<'_>, hook: &Bound<'_, PyAny>, rows: &[u8]) -> PyResult<()> {
     let loads = py.import("json")?.getattr("loads")?;
@@ -122,20 +189,17 @@ pub fn run_game(
         traceback_limit,
         ..RunSpec::default()
     };
-    let mut seats: Vec<(PlayerId, Driver)> = Vec::new();
+    let panic_at = test_panic(spec.get("test_panic"))?;
+    let mut seats: Seats = Vec::new();
     for (pid, s) in seat_bots(bots)? {
         let p = u8::try_from(pid)
             .map_err(|_| Failure::Value(format!("bots: {pid} is not a player id.")))?;
-        seats.push((PlayerId(p), Driver::new(s)));
+        seats.push((PlayerId(p), seat_driver(Driver::new(s), PlayerId(p), panic_at)));
     }
     let wanted: Vec<PlayerId> = seats.iter().map(|(p, _)| *p).collect();
     let mut runner = detached(py, || {
-        caught(|| {
-            let drivers: Seats =
-                seats.into_iter().map(|(p, b)| (p, Box::new(b) as Box<dyn SeatDriver>)).collect();
-            Runner::new(Ruleset::shared(), run, drivers).map_err(Failure::from)
-        })
-        .map_err(Failure::Crash)?
+        caught(|| Runner::new(Ruleset::shared(), run, seats).map_err(Failure::from))
+            .map_err(Failure::Crash)?
     })?;
     if let Some(p) =
         wanted.iter().find(|&&p| !runner.game().player(p).is_some_and(|x| x.is_major()))
