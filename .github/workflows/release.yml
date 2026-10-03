@@ -32,6 +32,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Release packaging is Phase 5
+        # Every job below needs this one, so nothing is built or published past this step. 0.1.6
+        # builds the package with its Rust extension (maturin, crates/citar-engine/DESIGN.md
+        # P2.6.7), and these jobs do not know how yet: one wheel for every platform from a Linux
+        # runner, a Windows bundle and a helper without the extension, an image built from the
+        # source. Phase 5 rebuilds them (a maturin wheel per platform, the image from wheels) and
+        # removes this step. Until then it fails every run, a tag's or a dry run's, while
+        # __version__ is 0.1.6 or earlier: 0.1.5 is what the branch carries until its release
+        # bumps it.
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          text = open("citar/__init__.py", encoding="utf-8").read()
+          version = re.search(r'^__version__ = "([^"]+)"', text, re.M).group(1)
+          release = tuple(int(n) for n in re.match(r"(\d+)\.(\d+)\.(\d+)", version).groups())
+          if release <= (0, 1, 6):
+              print("::error::release packaging is Phase 5")
+              print(f"__version__ is {version}: this workflow cannot package the Rust engine yet, and "
+                    "Phase 5 replaces it (crates/citar-engine/DESIGN.md P2.6.8)")
+              sys.exit(1)
+          print(f"__version__ is {version}, past 0.1.6")
+          PY
+
       - uses: actions/setup-python@v7
         with: { python-version: "3.12", cache: pip }
       - run: pip install -e ".[all]"
