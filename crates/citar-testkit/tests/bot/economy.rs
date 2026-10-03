@@ -170,6 +170,8 @@ fn play(i: u32, reload: Option<u32>) -> Played {
 
 /// Plays each of `runs` (a game's index and the round to reload it at) on its own thread.
 fn play_all(runs: &[(u32, Option<u32>)]) -> Vec<Played> {
+    // The engine runs no threads (DESIGN.md 6.13); games do run side by side, one a thread.
+    #[allow(clippy::disallowed_methods, reason = "threads of the test's, not of the engine")]
     std::thread::scope(|s| {
         let handles: Vec<_> =
             runs.iter().map(|&(i, reload)| s.spawn(move || play(i, reload))).collect();
