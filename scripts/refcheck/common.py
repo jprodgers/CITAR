@@ -70,7 +70,9 @@ def _hash_files(paths) -> str:
 
 @functools.cache
 def engine_hash() -> str:
-    """A hash of the engine and ruleset (the same recipe as citar.lab.engine_hash, so the two agree).
+    """A hash of the Python engine's sources and the ruleset, which labels the Python recordings. It is 0.1.5's
+    citar.lab.engine_hash recipe; the lab's engine_hash is now the Rust build id (engine_api.build_info), so the two
+    are unrelated.
 
     Taken once per process: a worker imports the engine once and plays every later game with that code, so its
     first reading is the one that describes all its games, even if the files change on disk meanwhile.

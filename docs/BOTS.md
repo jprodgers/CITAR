@@ -57,7 +57,8 @@ game keeps its bot when the rankings change. Benchmarks default to Standard.
 
 The frozen snapshots of 0.1.5 (`frozen_<hash>`, and the built-in profiles v0, v1 and 22 Sep that
 played them) were archived with 0.1.5: a profile, seat or experiment that names one is refused with
-a message saying so.
+a message saying so. A saved profile of 0.1.5 on a snapshot stays listed: its page shows it read-only
+with that message, an administrator can delete it, and it is never the Best bot.
 
 The **Bots** page lists them, edits them and ranks them:
 
@@ -89,19 +90,25 @@ The **Bots** page lists them, edits them and ranks them:
   finishing ahead. Two drawn games against a 1500 anchor keep thin entries near 1500. The standard
   error ignores the correlation between pairs from one game, so read it as a lower bound.
 - **The ladder of 0.1.6 starts empty.** 0.1.5's lab history played Python bots that no longer run and
-  was archived; the first entries come from new experiments.
+  was archived; the first entries come from new experiments. A game is rated only when every seat's
+  result records its fingerprint, build and version, so 0.1.5's results, which record no build or
+  version, are never rated, even where an install upgraded in place still keeps them under
+  `saves/lab/results`.
 - **Over time.** The chart refits the ratings on the games finished by the end of each day. A
   profile on `basic` gets a new entry whenever a build changes the bot (the fingerprint changes), so
   the Standard line is the history of the bot itself.
 
 From the command line, a profile id works anywhere a bot name does: `citar balance --bots
 standard,my-profile`, or `{"profile": "my-profile"}` as a lab seat (with optional `"params"` layered
-on top), or `"profile"` as the base of a factorial experiment.
+on top), or `"profile"` as the base of a factorial experiment. `"best"` works there too, and is
+queued as the profile it stands for at submission, so its games are rated as that profile's.
 
 Versions, schemas, cleaning, fingerprints and the build id come from the Rust engine
 (`citar.engine_api`). While a development build still defaults to the Python engine, run the Bots
-page's editor, the lab and the rankings with `CITAR_ENGINE=rust`; on the Python engine a lobby seat
-still plays its profile, and the rest answers that it needs the Rust engine.
+page's editor, the lab and the rankings with `CITAR_ENGINE=rust`. On the Python engine a lobby seat
+still plays its profile and the Bots page lists the profiles and shows each read-only; `citar lab run`
+and `citar lab submit` stop at once with a message saying they need the Rust engine (exit 2), and the
+rest answers the same.
 
 HTTP (signed in; changes need an administrator): `GET /api/bots/profiles`, `GET|PUT|DELETE
 /api/bots/profiles/{id}`, `POST /api/bots/profiles`, `POST /api/bots/profiles/{id}/fork`,
@@ -127,7 +134,9 @@ citar balance --games 22 --players 2 --size duel --bots basic,idle    # can it b
 ```
 
 `--bots` takes profile ids and bot versions (`basic`, `basic-N`, `idle`); a name that is neither,
-or a frozen snapshot of 0.1.5, stops the run before it starts. The bots draw from each game's seed.
+or a frozen snapshot of 0.1.5, stops the run before it starts. One seed plays one game: the Rust bot
+draws from the game's seed, and the Python engine's bot (until it is removed) from a seed each seat
+is given from it.
 To A/B test a change of parameters, make a profile with it and run `--bots standard,<profile>`; to
 A/B test a change of code, make it in a new version and run `--bots basic-1,basic-2`. Both sides
 play in the same games, on the same maps, which removes map luck from the comparison — the single
@@ -172,9 +181,10 @@ profile (`"profile"`). **Versions are pinned when an experiment is submitted**: 
 version it names then, so a version added later cannot contaminate a queued experiment (use
 `"bot": "live"` to opt out and play the latest version at play time). A seat's overrides are
 checked against its version's schema at submission, so a misspelt parameter is refused then, not
-after a day of games. Every result records per seat the build that played it, the version, the
-profile and revision, the overrides and the fingerprint, so a queued experiment that a newer build
-finishes is labelled with that build.
+after a day of games; so is an `"aggression"` that is no number, and one outside 0 to 1 is held to
+it. Every result records per seat the build that played it, the version, the profile and revision,
+the overrides, the fixed aggression its bot played and the fingerprint, so a queued experiment that
+a newer build finishes is labelled with that build.
 
 **Factorial experiments** (`"factors"`) screen many parameters at once: each seat plays with its own
 mix of factor levels, spread evenly across seats and shuffled per game, so each factor's effect can

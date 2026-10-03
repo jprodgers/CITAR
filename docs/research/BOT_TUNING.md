@@ -45,7 +45,9 @@ Targets for four equal **Prince** bots on a Small map at Quick speed:
   then, so a version added later never contaminates a queued experiment. (0.1.5 froze a copy of `basic.py` into
   `citar/bots/frozen_<hash>.py` instead; such seats are now refused as archived.) Every result records per seat the
   build id, the version, the profile and revision, the overrides and the fingerprint, as they were when the game was
-  played. The lab needs the Rust engine (`CITAR_ENGINE=rust` while a development build defaults to Python).
+  played; only such results are rated, so 0.1.5's results left in `saves/lab/results` are not. The lab needs the Rust
+  engine (`CITAR_ENGINE=rust` while a development build defaults to Python): without it `run` and `submit` stop at
+  once (exit 2).
 - `python -m citar.lab status` shows progress. `python -m citar.lab report NAME...` shows per-label win share,
   score share with a 95% CI, techs and cities at turns 100/200/300, and head-to-head score-share differences
   (`*` = significant).
