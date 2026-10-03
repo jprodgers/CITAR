@@ -1,7 +1,9 @@
 about = """
 The bot step itself: a seat's bot plays its turn and ends it, answers a negotiation that waits on
 the seat (or leaves it to the seat's model), and the runners refuse a bot step that is not well
-formed. A turn step must pin the bot's draws, and its params must be parameters of basic-1.
+formed. A turn step must pin the bot's draws, and its params must be parameters of basic-1. A turn
+that a negotiation the seat's model owns keeps open cannot end, and both runners say why in
+end_turn's words.
 """
 from = "tests/rules/README.md (the bot step)"
 
@@ -132,23 +134,65 @@ diplomacy = { trade = "llm" }
 must_fail = "diplomacy"
 
 [[step]]
+note = """
+What the seat's language model owns, its bot leaves to it, and such a negotiation keeps the turn
+from ending: the step fails with the reason end_turn gives, which names first the one that waits
+on the seat.
+"""
+op = "open_negotiation_as"
+args = { player = 1, to = 0, message = "Gold for maps?", give = [{ type = "share_map" }], receive = [{ type = "gold", amount = 10 }] }
+as = "asked"
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=calm"
+diplomacy = { trades = "llm" }
+must_fail = "the bot's turn did not end: Answer Civilization 2 in negotiation #1 first: respond_negotiation(negotiation_id=1, action='accept', 'counter', 'reply' or 'reject', message=...). You cannot end your turn while a negotiation waits on you."
+
+[[step]]
+check = { what = "negotiation", negotiation = "=asked.negotiation_id" }
+subset = { status = "open", awaiting = 0 }
+
+[[step]]
+tool = "respond_negotiation"
+player = 0
+args = { negotiation_id = "=asked.negotiation_id", action = "reject", message = "Another time." }
+
+[[step]]
+note = "The bot's turns above may have spent the gold the next offer gives."
+ops = [{ op = "set_player", player = 0, gold = 100 }]
+
+[[step]]
 tool = "open_negotiation"
 player = 0
 args = { to = 1, message = "Maps for gold?", give = [{ type = "gold", amount = 10 }], receive = [{ type = "share_map" }] }
 as = "opened"
 
 [[step]]
+note = "One the seat has put to a seat nobody drives holds the turn too, while the model owns it."
+bot = "turn"
+player = 0
+params = "=calm"
+diplomacy = { trades = "llm" }
+must_fail = "the bot's turn did not end: You are waiting for Civilization 2 to answer negotiation #2. End your turn after they reply, or withdraw it with respond_negotiation(negotiation_id=2, action='reject', message=...)."
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+subset = { status = "open", awaiting = 1 }
+
+[[step]]
 note = "A negotiation that waits on another seat is not the bot's to answer."
 bot = "respond"
 player = 0
 negotiation = "=opened.negotiation_id"
-error = true
+error = "Negotiation 2 does not wait on player 0."
 
 [[step]]
 bot = "respond"
 player = 1
 negotiation = 99
-error = true
+error = "No negotiation with id 99."
 
 [[step]]
 note = "One that waits on the seat is answered."
@@ -170,3 +214,10 @@ len = 2
 check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
 path = "history[1].by"
 eq = 1
+
+[[step]]
+note = "Answered, it waits on the seat no longer: settled, or countered and waiting on the other side."
+bot = "respond"
+player = 1
+negotiation = "=opened.negotiation_id"
+error = "Negotiation 2 does not wait on player 1."

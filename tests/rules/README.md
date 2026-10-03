@@ -227,12 +227,14 @@ What each gives, to `as`:
   alone with a seat limit of 1. A negotiation the seat is in that waits on a seat nobody drives stops that
   drive; the Rust runner closes it, as a host does when its wait runs out, and drives on (Python's bot
   withdrew it). One the bot leaves to the seat's model keeps the turn from ending on both runners, and the
-  step fails. It gives `turn` and `current` after it. A turn on a seat whose turn it is not is refused.
+  step fails with `end_turn`'s reason (`end_turn_refusal`, in the same words on both). It gives `turn` and
+  `current` after it. A turn on a seat whose turn it is not is refused.
 - **`respond`** gives `outcome`: `done` once the bot has answered, or `deferred` when the negotiation touches a
   category the seat's model owns (one such item makes the deal the model's, and talk with nothing on the
   table is the model's when it owns `chat`): the bot leaves it, and it still waits on the seat. A negotiation
-  that does not wait on the seat is refused (Python: `bot_respond` behind `bot_owns_negotiation`; Rust:
-  `Game::answer`).
+  that does not exist is refused with "No negotiation with id N.", and one that is settled or waits on
+  another seat with "Negotiation N does not wait on player P." (Python: `bot_respond` behind
+  `bot_owns_negotiation`; Rust: `Game::answer`, after the same checks).
 - **`advice`** gives the advice, `deal_value`, `war_readiness`, `spare_luxuries` and `wants`.
 
 A seat keeps its bot from step to step while its version, aggression and params stay the same, so what the

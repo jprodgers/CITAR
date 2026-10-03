@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use citar_bot::{Bot, BotSpec, Owners, Tuning, VersionId};
 use citar_engine::api::{ActionError, inspect, testops};
-use citar_engine::base::ids::{NegotiationId, PlayerId};
+use citar_engine::base::ids::PlayerId;
 use citar_engine::base::py;
 use citar_engine::game::diplomacy::negotiation;
 use citar_engine::game::{DebugOptions, DriveOptions, DriverOutcome, Drivers, Game, Stop};
@@ -353,11 +353,18 @@ impl<'s> Runner<'s> {
         let done = match ask.as_str() {
             "turn" => self.bot_turn(&mut bot, pid, label)?,
             "respond" => {
-                // A respond step names its negotiation (checked above).
+                // A respond step names its negotiation (checked above). The Python runner's own
+                // checks and messages come first; `Game::answer` then refuses only a game that
+                // is over or poisoned.
                 let nid = nid.unwrap_or_default();
-                match NegotiationId::new(u32::try_from(nid).unwrap_or(0)) {
-                    None => Err(format!("Negotiation {nid} does not exist.")),
-                    Some(id) => match self.game.answer(pid, id, &mut bot) {
+                match negotiation::get(&self.game, nid).map(|n| (n.id, n.status, n.awaiting)) {
+                    Err(e) => Err(e.message),
+                    Ok((_, status, awaiting))
+                        if status != NegStatus::Open || awaiting != Some(pid) =>
+                    {
+                        Err(format!("Negotiation {nid} does not wait on player {}.", pid.0))
+                    }
+                    Ok((id, ..)) => match self.game.answer(pid, id, &mut bot) {
                         Ok((DriverOutcome::Deferred, _)) => Ok(json!({"outcome": "deferred"})),
                         Ok(_) => Ok(json!({"outcome": "done"})),
                         Err(e) => Err(e.message),
@@ -386,7 +393,8 @@ impl<'s> Runner<'s> {
     /// (`AwaitingReply`); the runner closes it, as a host does when its wait runs out, and drives
     /// on (Python's bot withdrew it before ending its turn, `_settle_chats`). One that touches
     /// what the seat's language model owns, waiting on either side, is not the bot's to settle:
-    /// the turn does not end, as Python's `end_turn` then refused.
+    /// the turn does not end, and the step fails with the reason Python's `end_turn` then gave
+    /// (`end_turn_refusal`, over what is left open once the bot's own chats are closed).
     fn bot_turn(
         &mut self,
         bot: &mut Bot,
@@ -407,16 +415,16 @@ impl<'s> Runner<'s> {
             match stop {
                 Stop::HybridDiplomat(_) => {}
                 Stop::AwaitingReply { nids, .. } => {
+                    let mut models = false;
                     for nid in nids {
-                        let models = self
+                        // One waiting on the seat itself is one its bot left to the model.
+                        let bots = self
                             .game
                             .negotiation(nid)
-                            .is_some_and(|x| x.awaiting == Some(pid) || !bot.spec().owners.owns(x));
-                        if models {
-                            return Err(format!(
-                                "{label}: the bot's turn did not end: negotiation {} waits on                                  the seat's language model",
-                                nid.get()
-                            ));
+                            .is_some_and(|x| x.awaiting != Some(pid) && bot.spec().owners.owns(x));
+                        if !bots {
+                            models = true;
+                            continue;
                         }
                         self.game
                             .close_negotiation(
@@ -426,6 +434,12 @@ impl<'s> Runner<'s> {
                                 None,
                             )
                             .map_err(|e| format!("{label}: {}", e.message))?;
+                    }
+                    if models {
+                        let why = self.game.end_turn_refusal(pid).unwrap_or_else(|| {
+                            "a negotiation waits on the seat's language model".to_owned()
+                        });
+                        return Err(format!("{label}: the bot's turn did not end: {why}"));
                     }
                 }
                 _ => {
