@@ -12,7 +12,8 @@
 //!
 //! ```text
 //! PROPTEST_CASES=1000  cargo nextest run -p citar-store --test store -E 'test(round_trip)'
-//! PROPTEST_CASES=10000 cargo nextest run -p citar-store --test store --profile nightly //!     -E 'test(/^store::fuzz::/)'
+//! PROPTEST_CASES=10000 cargo nextest run -p citar-store --test store --profile nightly \
+//!     -E 'test(/^store::fuzz::/)'
 //! ```
 //!
 //! (The nightly profile lets a test run past the default profile's five minutes: on the laptop
