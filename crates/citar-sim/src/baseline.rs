@@ -1,16 +1,33 @@
-//! The statistical baseline's line (DESIGN.md P2.4.1): one JSON line per game, in the shape
-//! `scripts/refcheck/baseline.py` writes and `scripts/refcheck/summarize.py` reads, so the Rust
-//! runs and the committed Python baselines (`refcheck/baseline/python/*.jsonl`) compare line for
-//! line. The types refuse unknown keys, so the schema cannot drift: every committed Python line
-//! reads back to the same JSON value.
+//! The statistical baseline (DESIGN.md P2.4.1, P2.4.4): many seeded all-bot games, one JSON line
+//! per game, in the shape `scripts/refcheck/baseline.py` writes and `scripts/refcheck/summarize.py`
+//! reads, so the Rust runs and the committed Python baselines (`refcheck/baseline/python/*.jsonl`)
+//! compare line for line. Replaces `baseline.py` and the parts of `scripts/refcheck/common.py` it
+//! uses.
 //!
-//! A finished game carries its identity (`IDENTITY`: `i`, `seed`, `size`, `map_type`,
-//! `barbarians`, `speed`, `turn_limit`), how it ended, and each major's rows at the checkpoints
-//! (`"100"`, `"200"`, `"300"`, or `"10"`... for a smoke run) and at `"end"`; a crashed game, its
-//! identity and the crash.
+//! - The line, [`BaselineLine`]: a finished game carries its identity ([`IDENTITY`]: `i`, `seed`,
+//!   `size`, `map_type`, `barbarians`, `speed`, `turn_limit`), how it ended, and each major's
+//!   rows at the checkpoints (`"100"`, `"200"`, `"300"`, or `"10"`... for a smoke run) and at
+//!   `"end"`; a crashed game, its identity and the crash. The types refuse unknown keys, so the
+//!   schema cannot drift: every committed Python line reads back to the same JSON value.
+//! - [`spec`]: the options and the game each index stands for (the rotation, `seed + i`, the
+//!   budgets);
+//! - [`play`]: one game played and summed up ([`Tally`], the checkpoints, the crash line);
+//! - [`run`](mod@run): the run (resuming, refusing another build's file, the workers).
 //!
-//! Package 2-00a wrote the line's types; package 2-04 writes the writer (the rotation, the tally,
-//! resuming, refusing another build's file, the workers).
+//! Two things differ from Python's lines, both by design: `engine` is `citar_bot::build_id`
+//! (Python wrote its engine's source hash) and `bot` is `basic-1` (Python wrote its bot's source
+//! hash); and `bot_errors` is always 0, since a bot that panics ends its game as a crash line
+//! where a Python bot's error cost it the rest of its turn.
+
+pub mod play;
+pub mod run;
+pub mod spec;
+
+pub use self::play::{Code, Context, Tally, Totals, aggression, play_one};
+pub use self::run::{CHECKS_BUILT, Outcome, code_of, existing, run};
+pub use self::spec::{
+    CHECKPOINTS, GameSpec, IDENTITY, MAP_TYPES, Options, SMOKE_CHECKPOINTS, game_spec,
+};
 
 use std::collections::BTreeMap;
 
