@@ -164,19 +164,75 @@ pub struct Recovered {
 pub struct JournalWriter {
     path: PathBuf,
     file: File,
-    /// The records written, so the next append's sequence number.
+    /// The records it holds, and where the next goes.
+    tail: Tail,
+    /// Where corruption starts, if open found it: appends are refused.
+    corrupt: Option<u64>,
+    retry: Retry,
+}
+
+/// Where a writer stands in its file: the records it holds, and each one's end and hash. The
+/// file is never shorter than `bytes`, where the next record goes, and it holds nothing past
+/// that unless `dirty`.
+#[derive(Debug)]
+struct Tail {
+    /// The records, so the next append's sequence number.
     records: u32,
     /// Where they end.
     bytes: u64,
     /// The last record's hash (zeros before record 0).
     head: [u8; 8],
-    /// Each record's end and hash, so a prefix can be checked and truncated to.
+    /// Each record's end and hash, so a prefix can be checked and cut back to.
     ends: Vec<(u64, [u8; 8])>,
-    /// Where corruption starts, if open found it: appends are refused.
-    corrupt: Option<u64>,
-    /// Whether a failed append may have left bytes past `bytes`, to cut before the next.
+    /// Whether the file may hold bytes past `bytes`, which are cut before the next write: a write
+    /// that failed part way, or a cut that failed.
     dirty: bool,
-    retry: Retry,
+}
+
+impl Tail {
+    /// A journal with no records: its header alone.
+    const fn empty() -> Self {
+        Self { records: 0, bytes: HEADER_LEN, head: [0; 8], ends: Vec::new(), dirty: false }
+    }
+
+    /// Writes `record`, whose hash is `hash`, as the next record. On an error the tail and the
+    /// file's first `bytes` are as they were, so the same record can be pushed again.
+    fn push(
+        &mut self,
+        file: &mut impl Media,
+        record: &[u8],
+        hash: [u8; 8],
+        retry: Retry,
+    ) -> io::Result<()> {
+        write_at(file, self.bytes, record, &mut self.dirty, retry)?;
+        self.bytes += record.len() as u64;
+        self.records += 1;
+        self.head = hash;
+        self.ends.push((self.bytes, hash));
+        Ok(())
+    }
+
+    /// Cuts the file back to its first `k` records (at most the ones it holds) and syncs it.
+    ///
+    /// The tail moves to record `k` before the file is touched, and stays `dirty` until the cut
+    /// is made. So when the cut fails, or its sync does, the next push makes the cut first: a
+    /// record is never written past the end of the file, which would leave a gap of zeros that
+    /// reads as corruption, and a container naming that record could never load.
+    fn cut(&mut self, file: &mut impl Media, k: u32, retry: Retry) -> io::Result<()> {
+        let k = k.min(self.records);
+        let (end, head) = match k.checked_sub(1) {
+            None => (HEADER_LEN, [0; 8]),
+            Some(i) => self.ends.get(i as usize).copied().unwrap_or((self.bytes, self.head)),
+        };
+        self.ends.truncate(k as usize);
+        self.records = k;
+        self.bytes = end;
+        self.head = head;
+        self.dirty = true;
+        disk::retry(retry, || file.set_len_to(end))?;
+        self.dirty = false;
+        disk::retry(retry, || file.sync_to_disk())
+    }
 }
 
 impl JournalWriter {
@@ -212,17 +268,8 @@ impl JournalWriter {
             })
             .map_err(io)?;
             disk::sync_parent(path);
-            let writer = Self {
-                path: path.to_owned(),
-                file,
-                records: 0,
-                bytes: HEADER_LEN,
-                head: [0; 8],
-                ends: Vec::new(),
-                corrupt: None,
-                dirty: false,
-                retry,
-            };
+            let writer =
+                Self { path: path.to_owned(), file, tail: Tail::empty(), corrupt: None, retry };
             let torn = (len > 0).then_some(len);
             return Ok((
                 writer,
@@ -252,17 +299,9 @@ impl JournalWriter {
         file.seek(SeekFrom::Start(scan.bytes)).map_err(io)?;
         let recovered =
             Recovered { records: scan.records, bytes: scan.bytes, torn, corrupt_at: corrupt };
-        let writer = Self {
-            path: path.to_owned(),
-            file,
-            records: scan.records,
-            bytes: scan.bytes,
-            head: scan.head,
-            ends,
-            corrupt,
-            dirty: false,
-            retry,
-        };
+        let tail =
+            Tail { records: scan.records, bytes: scan.bytes, head: scan.head, ends, dirty: false };
+        let writer = Self { path: path.to_owned(), file, tail, corrupt, retry };
         Ok((writer, recovered))
     }
 
@@ -284,46 +323,23 @@ impl JournalWriter {
                 why: "appends are refused after corruption: fork the good prefix".to_owned(),
             });
         }
-        if seq != self.records {
-            return Err(StoreError::OutOfOrder { want: self.records, got: seq });
+        if seq != self.tail.records {
+            return Err(StoreError::OutOfOrder { want: self.tail.records, got: seq });
         }
-        let Some(next) = self.records.checked_add(1) else {
+        if seq == u32::MAX {
             return Err(StoreError::Invalid {
                 path: self.path.clone(),
                 why: "the journal holds as many records as a sequence number counts".to_owned(),
             });
-        };
+        }
         if chunk.len() as u64 > MAX_CHUNK {
             return Err(StoreError::Invalid {
                 path: self.path.clone(),
                 why: format!("a chunk of {} bytes is over the limit of {MAX_CHUNK}", chunk.len()),
             });
         }
-        let packed = (chunk.len() >= COMPRESS_FROM)
-            .then(|| zstd::bulk::compress(chunk, LEVEL).ok())
-            .flatten()
-            .filter(|z| z.len() < chunk.len());
-        let (codec, payload) = match &packed {
-            Some(z) => (Codec::Zstd, z.as_slice()),
-            None => (Codec::Raw, chunk),
-        };
-        let hash =
-            record_hash(&self.head, seq, RecordKind::EngineChunk as u8, codec as u8, payload);
-        let mut record = Vec::with_capacity(RECORD_HEAD as usize + payload.len());
-        let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
-        record.extend_from_slice(&len.to_le_bytes());
-        record.extend_from_slice(&seq.to_le_bytes());
-        record.push(RecordKind::EngineChunk as u8);
-        record.push(codec as u8);
-        record.extend_from_slice(&hash);
-        record.extend_from_slice(payload);
-        write_at(&mut self.file, self.bytes, &record, &mut self.dirty, self.retry)
-            .map_err(|e| io_err(&self.path, e))?;
-        self.bytes += record.len() as u64;
-        self.records = next;
-        self.head = hash;
-        self.ends.push((self.bytes, hash));
-        Ok(())
+        let (record, hash) = encode(&self.tail.head, seq, chunk);
+        self.tail.push(&mut self.file, &record, hash, self.retry).map_err(|e| io_err(&self.path, e))
     }
 
     /// Flushes what was appended to the disk (`File::sync_data`).
@@ -340,8 +356,11 @@ impl JournalWriter {
     ///
     /// # Errors
     /// [`StoreError::Mismatch`] when `r` is not a prefix of this journal (another count, end or
-    /// head); [`StoreError::Corrupt`] when open found corruption (fork instead);
-    /// [`StoreError::Io`] when the file system refuses.
+    /// head), and nothing changes; [`StoreError::Corrupt`] when open found corruption (fork
+    /// instead); [`StoreError::Io`] when the file system refuses past the retries. The writer
+    /// then stands at `r` all the same (its [`reference`](Self::reference) is `r`, and the next
+    /// append is record `r.records`): the cut is made again before that append writes, so no
+    /// record is ever written past the end of the file.
     pub fn truncate_to(&mut self, r: &JournalRef) -> Result<(), StoreError> {
         if let Some(at) = self.corrupt {
             return Err(StoreError::Corrupt {
@@ -356,8 +375,8 @@ impl JournalWriter {
         }
         let (end, head) = match r.records {
             0 => (HEADER_LEN, [0; 8]),
-            n => *self.ends.get(n as usize - 1).ok_or_else(|| {
-                mismatch(format!("the journal holds {} records, not {n}", self.records))
+            n => *self.tail.ends.get(n as usize - 1).ok_or_else(|| {
+                mismatch(format!("the journal holds {} records, not {n}", self.tail.records))
             })?,
         };
         if end != r.bytes {
@@ -375,18 +394,7 @@ impl JournalWriter {
                 r.head
             )));
         }
-        disk::retry(self.retry, || {
-            self.file.set_len(end)?;
-            self.file.sync_data()
-        })
-        .map_err(|e| io_err(&self.path, e))?;
-        self.file.seek(SeekFrom::Start(end)).map_err(|e| io_err(&self.path, e))?;
-        self.records = r.records;
-        self.bytes = end;
-        self.head = head;
-        self.ends.truncate(r.records as usize);
-        self.dirty = false;
-        Ok(())
+        self.tail.cut(&mut self.file, r.records, self.retry).map_err(|e| io_err(&self.path, e))
     }
 
     /// The prefix written so far, for the container that names it (with corruption, the good
@@ -395,8 +403,9 @@ impl JournalWriter {
     pub fn reference(&self) -> JournalRef {
         let file =
             self.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        let head = if self.records == 0 { String::new() } else { disk::hex(&self.head) };
-        JournalRef { file, records: self.records, bytes: self.bytes, head }
+        let t = &self.tail;
+        let head = if t.records == 0 { String::new() } else { disk::hex(&t.head) };
+        JournalRef { file, records: t.records, bytes: t.bytes, head }
     }
 
     /// The journal's path.
@@ -406,11 +415,36 @@ impl JournalWriter {
     }
 }
 
+/// Record `seq` holding `chunk`, after the record whose hash is `prev`: its bytes and its hash.
+/// The chunk is stored as zstd when it is long enough to gain and the frame is smaller.
+fn encode(prev: &[u8; 8], seq: u32, chunk: &[u8]) -> (Vec<u8>, [u8; 8]) {
+    let packed = (chunk.len() >= COMPRESS_FROM)
+        .then(|| zstd::bulk::compress(chunk, LEVEL).ok())
+        .flatten()
+        .filter(|z| z.len() < chunk.len());
+    let (codec, payload) = match &packed {
+        Some(z) => (Codec::Zstd, z.as_slice()),
+        None => (Codec::Raw, chunk),
+    };
+    let kind = RecordKind::EngineChunk as u8;
+    let hash = record_hash(prev, seq, kind, codec as u8, payload);
+    let mut record = Vec::with_capacity(RECORD_HEAD as usize + payload.len());
+    let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    record.extend_from_slice(&len.to_le_bytes());
+    record.extend_from_slice(&seq.to_le_bytes());
+    record.push(kind);
+    record.push(codec as u8);
+    record.extend_from_slice(&hash);
+    record.extend_from_slice(payload);
+    (record, hash)
+}
+
 /// Writes `record` at byte `at` of `file`, tried again on a [`disk::transient`] error. A write
 /// that fails part way leaves `dirty` set and is cut back to `at` before the next try (and,
 /// best effort, before returning), so a retried or later append never follows half a record.
+/// A `dirty` file is cut back to `at` before the first try too.
 fn write_at(
-    file: &mut (impl Write + Seek + SetLen),
+    file: &mut impl Media,
     at: u64,
     record: &[u8],
     dirty: &mut bool,
@@ -433,14 +467,21 @@ fn write_at(
     done
 }
 
-/// A file's length can be set: a [`File`], or a test's stand-in.
-trait SetLen {
+/// What a writer needs of its file: a [`File`], or a test's stand-in that fails on cue.
+trait Media: Write + Seek {
+    /// Sets the file's length (`File::set_len`).
     fn set_len_to(&mut self, len: u64) -> io::Result<()>;
+    /// Flushes the file's bytes to the disk (`File::sync_data`).
+    fn sync_to_disk(&mut self) -> io::Result<()>;
 }
 
-impl SetLen for File {
+impl Media for File {
     fn set_len_to(&mut self, len: u64) -> io::Result<()> {
         self.set_len(len)
+    }
+
+    fn sync_to_disk(&mut self) -> io::Result<()> {
+        self.sync_data()
     }
 }
 
@@ -950,9 +991,12 @@ mod tests {
                 Ok(self.pos)
             }
         }
-        impl SetLen for Flaky {
+        impl Media for Flaky {
             fn set_len_to(&mut self, len: u64) -> io::Result<()> {
                 self.data.truncate(len as usize);
+                Ok(())
+            }
+            fn sync_to_disk(&mut self) -> io::Result<()> {
                 Ok(())
             }
         }
@@ -970,6 +1014,110 @@ mod tests {
         assert!(got.is_err());
         assert_eq!(f.data, b"0123456789");
         assert!(!dirty);
+    }
+
+    /// A file in memory, as a [`File`] behaves (a write past its end fills the gap with zeros),
+    /// whose next length change or sync can be made to fail.
+    struct Mem {
+        data: Vec<u8>,
+        pos: u64,
+        /// The next `set_len_to` fails: before the length changes (`Some(false)`) or after it
+        /// (`Some(true)`).
+        fail_set_len: Option<bool>,
+        /// The next `sync_to_disk` fails.
+        fail_sync: bool,
+    }
+
+    impl Write for Mem {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let at = self.pos as usize;
+            let end = at + buf.len();
+            if self.data.len() < end {
+                self.data.resize(end, 0);
+            }
+            self.data[at..end].copy_from_slice(buf);
+            self.pos = end as u64;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for Mem {
+        fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+            if let SeekFrom::Start(p) = to {
+                self.pos = p;
+            }
+            Ok(self.pos)
+        }
+    }
+
+    impl Media for Mem {
+        fn set_len_to(&mut self, len: u64) -> io::Result<()> {
+            match self.fail_set_len.take() {
+                Some(false) => Err(io::Error::other("the length is not changed")),
+                Some(true) => {
+                    self.data.resize(len as usize, 0);
+                    Err(io::Error::other("the length changed, then an error"))
+                }
+                None => {
+                    self.data.resize(len as usize, 0);
+                    Ok(())
+                }
+            }
+        }
+        fn sync_to_disk(&mut self) -> io::Result<()> {
+            if std::mem::take(&mut self.fail_sync) {
+                return Err(io::Error::other("the sync fails"));
+            }
+            Ok(())
+        }
+    }
+
+    /// The tail a writer opening `bytes` (a clean journal) stands at.
+    fn tail_of(bytes: &[u8]) -> Tail {
+        let mut ends = Vec::new();
+        let mut c = Cursor::new(bytes);
+        let s = scan(&mut c, bytes.len() as u64, u32::MAX, |_, end, h, _| {
+            ends.push((end, h.hash));
+            Ok(())
+        })
+        .expect("in memory");
+        assert_eq!(s.end, End::Clean);
+        Tail { records: s.records, bytes: s.bytes, head: s.head, ends, dirty: false }
+    }
+
+    /// `truncate_to` cuts through a [`Tail`]. However the cut fails (its length change refused,
+    /// or made and then reported as an error, or its sync refused), the record appended next
+    /// follows the kept records directly: never past the end of the file with zeros between,
+    /// which would read as corruption at that record.
+    #[test]
+    fn a_cut_that_fails_never_leads_to_a_write_past_the_end() {
+        let cs = chunks();
+        let b = journal(&cs);
+        let fast = Retry { tries: 3, wait: std::time::Duration::from_millis(1) };
+        let kept = tail_of(&b).ends[2].0 as usize;
+        for (how, set_len, sync) in [
+            ("its length change is refused", Some(false), false),
+            ("its length changes, then an error", Some(true), false),
+            ("its sync is refused", None, true),
+            ("nothing fails", None, false),
+        ] {
+            let mut tail = tail_of(&b);
+            let mut f = Mem { data: b.clone(), pos: 0, fail_set_len: set_len, fail_sync: sync };
+            let got = tail.cut(&mut f, 3, fast);
+            assert_eq!(got.is_err(), how != "nothing fails", "{how}");
+            assert_eq!((tail.records, tail.bytes), (3, kept as u64), "{how}: it stands at 3");
+            let (record, hash) = encode(&tail.head, 3, b"after the cut");
+            tail.push(&mut f, &record, hash, fast).expect(how);
+            assert_eq!(&f.data[..kept], &b[..kept], "{how}: the kept records are untouched");
+            assert_eq!(&f.data[kept..], record.as_slice(), "{how}: the new record follows them");
+            let s = scanned(&f.data);
+            assert_eq!((s.records, s.bytes, s.end), (4, f.data.len() as u64, End::Clean), "{how}");
+            assert_eq!((tail.records, tail.bytes, tail.dirty), (4, s.bytes, false), "{how}");
+            assert_eq!(tail.head, s.head, "{how}");
+        }
     }
 
     #[test]
