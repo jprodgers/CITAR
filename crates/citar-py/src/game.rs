@@ -62,6 +62,16 @@ fn player_of(g: &EngineGame, pid: i64) -> Result<PlayerId, Failure> {
         .ok_or_else(|| Failure::Value(format!("No player {pid}.")))
 }
 
+/// A major civilization of the game: the briefing and the empire's summary are a major's.
+fn major_of(g: &EngineGame, pid: i64) -> Result<PlayerId, Failure> {
+    let p = player_of(g, pid)?;
+    if g.player(p).is_some_and(|x| x.is_major()) {
+        Ok(p)
+    } else {
+        Err(Failure::Value(format!("Player {pid} is not a major civilization.")))
+    }
+}
+
 /// A player id for a command whose own refusal names an unknown player (`execute`): a number
 /// no game has is refused as the tools refuse one.
 fn caller_of(pid: i64) -> Result<PlayerId, Failure> {
@@ -106,7 +116,7 @@ fn items_of(g: &EngineGame, v: &Value) -> Result<Vec<DealItem>, Failure> {
 }
 
 /// The event data a host may attach to an event of its own: the players it concerns, and the
-/// unit, city, deal, negotiation or message it is about, by id.
+/// unit, city, deal or negotiation it is about, by id.
 fn host_data(v: &Value) -> Result<EventData, Failure> {
     let mut d = EventData::default();
     let Some(m) = v.as_object() else {
@@ -604,19 +614,19 @@ impl Game {
 
     /// A language model's start-of-turn briefing (`EngineGame.briefing`).
     fn briefing(&self, py: Python<'_>, pid: i64) -> PyResult<String> {
-        Ok(self.read(py, |g| Ok(g.briefing(player_of(g, pid)?)))?)
+        Ok(self.read(py, |g| Ok(g.briefing(major_of(g, pid)?)))?)
     }
 
     /// What is still unhandled this turn, as a short note (`EngineGame.turn_progress`).
     fn turn_progress(&self, py: Python<'_>, pid: i64) -> PyResult<String> {
-        Ok(self.read(py, |g| Ok(g.turn_progress(player_of(g, pid)?)))?)
+        Ok(self.read(py, |g| Ok(g.turn_progress(major_of(g, pid)?)))?)
     }
 
     /// The empire at a glance, with its city count, whom it is at war with and its notebook
     /// (`EngineGame.empire_summary`).
     fn empire_summary(&self, py: Python<'_>, pid: i64) -> PyResult<Bytes> {
         Ok(self.read(py, |g| {
-            let p = player_of(g, pid)?;
+            let p = major_of(g, pid)?;
             Ok(Bytes(to_py_json(&g.empire_summary(p).map(|s| s.to_json()))))
         })?)
     }

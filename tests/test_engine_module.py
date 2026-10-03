@@ -225,6 +225,33 @@ class GameTests(unittest.TestCase):
             g.emit("x", "y", None, dumps({"weather": 1}))
         self.assertEqual(g.take_violations(), [])
 
+    def test_reads_of_every_player_answer_without_poisoning_the_game(self):
+        g = duel()
+        for _ in range(4):
+            g.end_turn(g.current)
+        players = json.loads(g.summary())["players"]
+        self.assertEqual({p["kind"] for p in players}, {"major", "city_state", "barbarian"})
+        for p in players:
+            pid = p["id"]
+            with self.subTest(pid=pid, kind=p["kind"]):
+                json.loads(g.player(pid))
+                json.loads(g.standing(pid))
+                json.loads(g.view_json(pid, 5))
+                json.loads(g.open_negotiations(pid))
+                g.end_turn_refusal(pid)
+                g.has_met(0, pid)
+                json.loads(g.path_preview(pid, 1, 3, 3))
+                if p["kind"] == "major":
+                    self.assertTrue(g.briefing(pid) and g.turn_progress(pid))
+                    json.loads(g.empire_summary(pid))
+                else:
+                    for call in (g.briefing, g.turn_progress, g.empire_summary):
+                        with self.assertRaises(ValueError):
+                            call(pid)
+                for ev in json.loads(g.events(5)):
+                    json.loads(g.event_view(ev["id"], pid))
+        self.assertIsNone(g.poisoned)
+
     def test_tools_views_and_text(self):
         g = duel()
         result, events = g.execute(0, "get_empire")

@@ -102,6 +102,12 @@ impl Bot {
     /// its record as `Game.negotiation` gives it.
     fn owns_negotiation(&self, py: Python<'_>, negotiation_json: &[u8]) -> PyResult<bool> {
         let n = parse(negotiation_json, "The negotiation")?;
+        if !n.is_object() {
+            return Err(Failure::Value(
+                "The negotiation must be its record, an object.".to_owned(),
+            )
+            .into());
+        }
         let spec = self.snapshot();
         // The ruleset's first use compiles it: off the GIL.
         let terms = detached(py, || match n.get("proposal") {
