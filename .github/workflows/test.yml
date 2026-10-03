@@ -91,6 +91,9 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     needs: build-ext
+    # A failed build on one OS fails this job on that OS alone, at the download of its missing
+    # wheel: without this condition a matrix need skips the job on every OS when any leg fails.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -160,6 +163,8 @@ jobs:
     # flight. tests/engine_exit_child.py says how it checks. The Linux test wheel's one abi3
     # library serves every version; the check needs nothing else installed.
     needs: build-ext
+    # It needs only the Linux wheel, so a Windows or macOS build failing does not skip it.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -342,6 +347,9 @@ jobs:
   installer:
     name: install.sh works
     needs: build-ext
+    # A failed build on one OS fails this job on that OS alone, at the download of its missing
+    # wheel: without this condition a matrix need skips the job on every OS when any leg fails.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
