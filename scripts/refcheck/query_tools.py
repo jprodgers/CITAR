@@ -105,8 +105,9 @@ def call(g, pid: int, tool: str, args: dict) -> dict:
 
 def record(name: str, path: Path, first: bool = False) -> dict:
     """One state's answers; the ruleset's own, which every state shares, on the ``first`` only."""
-    from citar import engine_api
     from citar.engine import maps, scenario, views
+    # The Python engine's facade whatever CITAR_ENGINE says: this records the Python engine's answers.
+    from citar.engine.facade import EngineGame
     from citar.engine.game import ActionError
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         doc = json.load(fh)
@@ -150,7 +151,7 @@ def record(name: str, path: Path, first: bool = False) -> dict:
     god = json.loads(common.dumps(views.client_view(g, None)))
     god.pop("events", None)
     god["tiles"] = god["tiles"][::GOD_TILES]
-    eg = engine_api.EngineGame(g)
+    eg = EngineGame(g)
     facade = {"empire_summary": {str(pid): json.loads(common.dumps(eg.empire_summary(pid))) for pid in majors},
               "standings": json.loads(common.dumps({str(k): v for k, v in eg.standings().items()})),
               "path_preview": []}
