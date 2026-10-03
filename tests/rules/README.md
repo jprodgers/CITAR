@@ -224,8 +224,10 @@ What each gives, to `as`:
 
 - **`turn`** plays as a host plays a bot seat: the Python runner calls `play_bot_turn(end_turn = True)` (the
   bot settles its chats and ends its turn; the runner ends the idle bot's), the Rust runner drives that seat
-  alone with a seat limit of 1. It gives `turn` and `current` after it. A turn on a seat whose turn it is not is
-  refused.
+  alone with a seat limit of 1. A negotiation the seat is in that waits on a seat nobody drives stops that
+  drive; the Rust runner closes it, as a host does when its wait runs out, and drives on (Python's bot
+  withdrew it). One the bot leaves to the seat's model keeps the turn from ending on both runners, and the
+  step fails. It gives `turn` and `current` after it. A turn on a seat whose turn it is not is refused.
 - **`respond`** gives `outcome`: `done` once the bot has answered, or `deferred` when the negotiation touches a
   category the seat's model owns (one such item makes the deal the model's, and talk with nothing on the
   table is the model's when it owns `chat`): the bot leaves it, and it still waits on the seat. A negotiation
@@ -254,12 +256,13 @@ it, a host would let it expire. Read its opening entry (`history[0]`), not its s
 
 `bot_*.toml` pin down the bot. They were written and checked on the Python runner before the bot was
 ported (package 2-00b), and each names in `needs` the package of the port that makes it pass on Rust:
-`2-01a` (the step itself, the idle bot, deferring to the model), `2-01b` (research, policies, cities, gold,
-faith, settlers, workers, scouts), `2-03` (units and fighting) or `2-05` (diplomacy). The Python runner
-plays a script whatever its `needs`; the Rust runner refuses it, and its harness lists it as ignored. A
-package's gate is that no script names it any more: it removes the header from the scripts it makes pass.
-`bot_selftest.toml` is the bot step's own self-test, with its must-fail steps; it stays apart from
-`_selftest.toml`, which the Rust runner plays today, until the Rust runner has the step.
+`2-01b` (research, policies, cities, gold, faith, settlers, workers, scouts), `2-03` (units and fighting) or
+`2-05` (diplomacy). The Python runner plays a script whatever its `needs`; the Rust runner refuses it, and
+its harness lists it as ignored. A package's gate is that no script names it any more: it removes the
+header from the scripts it makes pass. Package 2-01a (the step itself, the idle bot, deferring to the model)
+removed its own: both runners play `bot_selftest.toml`, `bot_idle_rejects.toml` and
+`bot_model_owned_deferred.toml`. `bot_selftest.toml` is the bot step's own self-test, with its must-fail
+steps, kept apart from `_selftest.toml`.
 
 ## Values
 

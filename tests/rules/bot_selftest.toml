@@ -4,7 +4,6 @@ the seat (or leaves it to the seat's model), and the runners refuse a bot step t
 formed. A turn step must pin the bot's draws, and its params must be parameters of basic-1.
 """
 from = "tests/rules/README.md (the bot step)"
-needs = "2-01a"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
