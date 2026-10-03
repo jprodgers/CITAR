@@ -111,7 +111,7 @@ pub(crate) fn next(g: &Game, pid: PlayerId, s: &Seat<'_>, ctx: &Context) -> Opti
         let along: Vec<f64> = before.iter().map(|&x| value(g, pid, x, s, ctx, &mut memo)).collect();
         v += p.tech_path_value * num::py_sum(along);
         // A noise of 0 draws nothing: every factor would be 1.
-        let noise = if hi > lo {
+        let noise = if (hi - lo).abs() > 0.0 {
             lo + (hi - lo) * Stream::Research.rng(g, pid, &[t.key()]).unit()
         } else {
             1.0

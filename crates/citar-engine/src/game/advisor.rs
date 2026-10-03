@@ -1657,7 +1657,7 @@ impl Advisor {
         }
     }
 
-    /// Where the civilization would found its next cities, best first ([`expansion_sites`],
+    /// Where the civilization would found its next cities, best first (`expansion_sites`,
     /// `BasicBot.expansion_sites`, `basic.py:1069-1111`), computed the first time they are asked
     /// and kept for the advisor's turn. A site may since have become one no city can be founded
     /// on (`found_check`): Python's cache dropped those as it read them, and so must a caller
