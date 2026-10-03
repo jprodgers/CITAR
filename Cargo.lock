@@ -208,6 +208,7 @@ dependencies = [
  "citar-store",
  "citar-testkit",
  "core_affinity",
+ "cpu-time",
  "criterion",
  "flate2",
  "gungraun",
@@ -283,6 +284,7 @@ dependencies = [
  "citar-bot",
  "citar-engine",
  "clap",
+ "cpu-time",
  "serde",
  "serde_json",
  "thiserror",
@@ -376,6 +378,16 @@ checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
 dependencies = [
  "libc",
  "num_cpus",
+ "winapi",
+]
+
+[[package]]
+name = "cpu-time"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9e393a7668fe1fad3075085b86c781883000b4ede868f43627b34a87c8b7ded"
+dependencies = [
+ "libc",
  "winapi",
 ]
 

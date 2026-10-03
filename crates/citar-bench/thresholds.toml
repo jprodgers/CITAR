@@ -1,6 +1,7 @@
-# The performance budgets of crates/citar-engine/DESIGN.md 10, one per measure the criterion
-# suites record (citar-bench: benches/kernels, turns.rs, io.rs). From package 1e-03 on they are
-# hard: a measure above `hard` times its budget fails its suite and `cargo xtask perf`.
+# The performance budgets of crates/citar-engine/DESIGN.md 10 and P2.4.2, one per measure the
+# suites record (citar-bench: benches/kernels, turns.rs, io.rs, games.rs). From package 1e-03 on
+# they are hard: a measure above `hard` times its budget fails its suite and `cargo xtask perf`,
+# unless its row is `report_only` (the games rows, until package 2-07).
 #
 # Figures are for one P-core of the laptop (i5-13420H), the bench profile (release: fat LTO, one
 # codegen unit, no overflow checks), on corpus states where a row names one. Each suite takes the
@@ -225,6 +226,26 @@ id = "game/random_small_330"
 suite = "turns"
 budget = "10 s"
 row = "An engine-only RandomAgent small game of 330 turns (the Phase 1 gate)"
+
+# ---- games -----------------------------------------------------------------------------------
+# Whole bot games through citar-sim's runner (DESIGN.md P2.4.2), from the game's creation to its
+# end, single-threaded and pinned: the baseline's games, a basic-1 bot in every major's seat.
+# Report-only until package 2-07 makes them hard (hard limits 24 s and 270 s); the plan's floors
+# are 25 s and 279 s, its targets 5 s and 90 s. `cargo xtask perf --suite games` runs them.
+
+[[budget]]
+id = "game/bot_small_330"
+suite = "games"
+budget = "16 s"
+row = "A small 4-bot Quick game to 330 rounds, the median of seeds 5000-5002 (floor 25 s)"
+report_only = true
+
+[[budget]]
+id = "game/bot_gargantuan_330"
+suite = "games"
+budget = "180 s"
+row = "A gargantuan 24-bot Quick game to 330 rounds, seed 5000 (floor 279 s)"
+report_only = true
 
 # ---- I/O -------------------------------------------------------------------------------------
 

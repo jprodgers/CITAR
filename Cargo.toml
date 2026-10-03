@@ -58,6 +58,10 @@ zstd = { version = "0.13", default-features = false }
 pyo3 = { version = "0.29", features = ["abi3-py311"] }
 # citar-py's build script: the extension's link arguments on macOS (crates/citar-py/build.rs).
 pyo3-build-config = "0.29"
+# The baseline writer's `cpu_s`: the CPU time of the thread that played a game (citar-sim), as
+# Python's `time.process_time()` gave its worker process's. Safe wrappers over GetThreadTimes and
+# clock_gettime, so citar-sim keeps `forbid(unsafe_code)`; libc and winapi are already locked.
+cpu-time = "1.0"
 # tools and tests only
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1.1"

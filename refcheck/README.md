@@ -264,9 +264,24 @@ games, is in CONTRIBUTING.md ("Rust").
 python scripts/refcheck/baseline.py --smoke                     # 2 short duel games, a few seconds
 python scripts/refcheck/baseline.py --games 300                 # small maps, the five map types in turn
 python scripts/refcheck/baseline.py --games 150 --sizes duel,standard --name python-mixed
+cargo run --release -p citar-sim -- baseline --smoke            # the same, on the Rust engine and bot
+cargo run --release -p citar-sim -- baseline --games 120 --workers 6
 python scripts/refcheck/summarize.py refcheck/baseline/python-<hash>.jsonl
-python scripts/refcheck/summarize.py refcheck/baseline/python-<hash>.jsonl refcheck/baseline/rust-<hash>.jsonl
+python scripts/refcheck/summarize.py refcheck/baseline/python/small.jsonl refcheck/baseline/rust-<build id>-basic-1.jsonl
 ```
+
+**The Rust writer.** `citar-sim baseline` (crates/citar-sim, package 2-04) writes `baseline.py`'s lines from
+the Rust engine's own records, with the same options, rotation, tally, checkpoints, resuming and refusals; its
+default file is `rust-<build id>-<bot>.jsonl`. Its lines differ from Python's only where the engines do:
+
+- `engine` is the build id (`citar_bot::build_id`, which covers the engine, the bot and the ruleset) and `bot`
+  the bot version, `basic-1` (with its parameters' fingerprint after a `+` when `--params` overrides any);
+- `bot_errors` is always 0: a bot that panics ends its game as a crash line, with where it panicked as its
+  `trace` (Python's bot errors cost the bot the rest of its turn);
+- `cpu_s` is the CPU time of the thread that played the game (Python's, its worker process's);
+- games play on threads (`--workers`), and a game is checked against its budget between seats rather than at
+  the start of each round. `--checks` runs the engine's invariants at every settle and writes a game that
+  breaks one as a crash line (`InvariantViolation`); debug and ci builds run them anyway.
 
 **The committed Python baselines.** Nothing can write them again once the Python engine is gone, so the four
 runs of 2026-09-23 (engine `5287456aff`, bot `a01652e3a2`) are committed in `refcheck/baseline/python/` exactly as
@@ -340,6 +355,9 @@ Both scripts run unattended for hours, so no game may hold a run up:
   cannot be interrupted (inside C code). The same happens if a worker process dies. The run then stops: the
   games caught in it are reported as crashes (the baseline also writes them as crash lines), the workers are
   terminated, and the script exits with 1. Run the same command again to resume.
+- **The Rust writer** has the budget and the stall limit, but no in-turn watchdog: a thread cannot be
+  interrupted from outside, so a game stuck inside a turn is caught by the stall limit, written as a crash
+  line, and ends with the process.
 
 ## Caveats
 
