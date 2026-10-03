@@ -5,7 +5,6 @@ that improves it highly: with marble beside a large capital it starts on Mining,
 and the quarry, where alone it would have started on Pottery.
 """
 from = "citar/bots/basic.py:876-998 (choose_research, _tech_value)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

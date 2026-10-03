@@ -3,7 +3,6 @@ With the faith for a pantheon, the bot founds one with the first belief of its p
 nobody has taken: beliefs_pantheon in the prefs mode, pantheon_unciv in the unciv mode.
 """
 from = "citar/bots/basic.py:1034-1039 (empire_choices)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

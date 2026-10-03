@@ -44,6 +44,12 @@ pub struct Resolved {
     /// Names the ruleset lacks, skipped: a policy that is no branch, a belief or a great person
     /// it does not have, a promotion line no promotion's name starts with.
     pub unknown_names: u32,
+    /// Each policy's place among the policies by name, by id: the last key of the policy the
+    /// bot adopts (`empire_choices`' `rank`, basic.py:1028), so that names are compared once.
+    policy_rank: Vec<u16>,
+    /// Each belief's place among the beliefs by name, by id (`choose_beliefs`' sort,
+    /// basic.py:1708).
+    belief_rank: Vec<u16>,
 }
 
 impl Resolved {
@@ -113,6 +119,8 @@ impl Resolved {
         };
         let promo_in_city = lines("promo_in_city", &params.promo_in_city);
         let promo_lines = lines("promo_lines", &params.promo_lines);
+        let policy_rank = name_ranks(rules.policies().iter().map(|(_, p)| &*p.name));
+        let belief_rank = name_ranks(rules.beliefs().iter().map(|(_, b)| &*b.name));
         Self {
             policy_order_peaceful,
             policy_order_aggressive,
@@ -126,8 +134,35 @@ impl Resolved {
             promo_in_city,
             promo_lines,
             unknown_names: unknown,
+            policy_rank,
+            belief_rank,
         }
     }
+
+    /// Policy `p`'s place among the ruleset's policies by name (Python's order of `str`, by code
+    /// point, which is UTF-8's byte order).
+    #[must_use]
+    pub fn policy_rank(&self, p: PolicyId) -> u16 {
+        self.policy_rank.get(usize::from(p.0)).copied().unwrap_or(u16::MAX)
+    }
+
+    /// Belief `b`'s place among the ruleset's beliefs by name.
+    #[must_use]
+    pub fn belief_rank(&self, b: BeliefId) -> u16 {
+        self.belief_rank.get(usize::from(b.0)).copied().unwrap_or(u16::MAX)
+    }
+}
+
+/// The place of each of `names` (given in id order) among them sorted, by id.
+fn name_ranks<'a>(names: impl Iterator<Item = &'a str>) -> Vec<u16> {
+    let names: Vec<&str> = names.collect();
+    let mut by_name: Vec<usize> = (0..names.len()).collect();
+    by_name.sort_by(|&a, &b| names[a].cmp(names[b]).then(a.cmp(&b)));
+    let mut rank = vec![0u16; names.len()];
+    for (place, id) in by_name.into_iter().enumerate() {
+        rank[id] = u16::try_from(place).unwrap_or(u16::MAX);
+    }
+    rank
 }
 
 /// The names `list` gives for parameter `key` (DESIGN.md P2.3.2, [`NameList`]): its own; a

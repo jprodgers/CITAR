@@ -3,7 +3,6 @@ The bot automates its workers. A work boat makes for the nearest sea resource it
 and improves it; one with no such resource in reach is disbanded.
 """
 from = "citar/bots/basic.py:1784-1788 (manage_units), 1927-1949 (handle_work_boat)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

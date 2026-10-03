@@ -20,7 +20,7 @@ pub(crate) fn play_turn(t: &mut Turn<'_>) {
 
 /// While the seat has no city, each of its units in id order tries to found one; a unit that
 /// cannot is refused and the next tries.
-pub(crate) fn found_capital(t: &mut Turn<'_>) {
+fn found_capital(t: &mut Turn<'_>) {
     let pid = t.pid();
     if t.game().player_cities(pid).next().is_some() {
         return;

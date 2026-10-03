@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod basic1;
+pub mod decisions;
 mod driver;
 mod idle;
 pub mod memory;

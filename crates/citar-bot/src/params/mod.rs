@@ -20,7 +20,7 @@ pub(crate) mod clean;
 #[rustfmt::skip]
 #[path = "gen.rs"]
 mod generated;
-mod resolve;
+pub(crate) mod resolve;
 pub(crate) mod schema;
 
 use std::collections::BTreeMap;
