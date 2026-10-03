@@ -4,6 +4,7 @@
 //! streams, owners and idle; 2-01b adds the economy; 2-03 units, war and the fixture sweep.
 
 mod bot {
+    mod economy;
     mod idle;
     mod memory;
     mod owners;
