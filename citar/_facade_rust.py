@@ -502,8 +502,9 @@ class EngineGame:
         return cls._load(state, None)
 
     def to_save(self) -> dict:
-        """The game's part of a save: {"state" (the state, as state_dict gives it), "journal" (the whole history as
-        one journal chunk, base64 text, or None before there is any)}, built fresh under the game's lock."""
+        """The game's part of a save: {"state" (the state as state_dict gives it, its journal position counting the
+        chunk), "journal" (the whole history as one journal chunk, base64 text, or None before there is any)}, built
+        fresh under the game's lock."""
         state, chunk = self._g.save()
         return {"state": json.loads(state), "journal": None if chunk is None else base64.b64encode(chunk).decode()}
 
