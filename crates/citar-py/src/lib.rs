@@ -6,7 +6,7 @@
 //! - **Values cross as bytes or small Python values.** Every value that would be a dict comes
 //!   back as JSON bytes (floats as Python writes them), decoded by the facade; counts, ids and
 //!   names come back as ints and strs. JSON arguments go in as bytes.
-//! - **The GIL is released for every heavy call** ([`calls::detached`]), with the game's lock
+//! - **The GIL is released for every heavy call** (`calls::detached`), with the game's lock
 //!   taken inside, so no thread waits for a game while holding the GIL, and games on two threads
 //!   use two cores. Cheap reads come from `Heads` with the GIL held (`game`).
 //! - **Panics never cross the boundary.** Each call catches them inside the game's lock: the
@@ -14,9 +14,9 @@
 //! - **Interpreter exit is safe:** the module registers `shutdown` with `atexit`, so no thread
 //!   re-attaches to a finalizing interpreter (`calls`).
 //!
-//! Modules: [`game`] (`Game`), [`bot`] (`Bot`), [`run`] (`run_game`), [`funcs`] (the ruleset,
-//! tools, maps, scenarios, categories and bot versions), [`errors`] (the exceptions) and
-//! [`calls`] (the GIL, the calls in flight and the shutdown).
+//! Modules: `game` (`Game`), `bot` (`Bot`), `run` (`run_game`), `funcs` (the ruleset, tools,
+//! maps, scenarios, categories and bot versions), `errors` (the exceptions) and `calls` (the
+//! GIL, the calls in flight and the shutdown).
 
 mod bot;
 mod calls;
