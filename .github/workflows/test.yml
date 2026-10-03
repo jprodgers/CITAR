@@ -415,7 +415,7 @@ jobs:
           echo "the container never answered:"
           docker logs citar-ci
           exit 1
-      - name: The image's engine is the wheel's
+      - name: The image's engine has no test operations
         run: |
           docker run --rm --entrypoint python citar:ci -c "
           import citar._engine as E
