@@ -5,7 +5,8 @@
 
 Games run in parallel (one process per game). `--bots` assigns bots to seats in rotation, each a bot profile's id or
 a bot version (basic, the latest; basic-N; idle), and the seat order is rotated between games so no bot always gets
-the same start. The bots draw from each game's seed. The report covers pacing (techs, eras, cities,
+the same start. One seed plays one game: the Rust bot draws from the game's seed, and the Python backend's bot
+(until package 2-12) from a seed each seat is given from it. The report covers pacing (techs, eras, cities,
 population by turn), economy (bankruptcy, unhappiness, starvation), conflict (wars, captures, eliminations,
 barbarians), what gets built, victory types, and win rates per bot type. A JSON copy is written to saves/balance/.
 """
@@ -25,14 +26,14 @@ STAT_KEYS = ("score", "cities", "population", "land", "techs", "era", "military"
              "production", "happiness", "units")
 
 
-def make_bot(kind: str, aggression: float):
+def make_bot(kind: str, seed: int, aggression: float):
     """The bot ``kind`` names: a bot profile's id, else a bot version (basic, the latest; basic-N; idle), with the
     seat's ``aggression`` where the profile leaves it open. ProfileError for anything else: an unknown name, or a
-    frozen snapshot of 0.1.5 (archived), which no longer fall back to the live bot unannounced."""
+    frozen snapshot of 0.1.5 (archived), which no longer fall back to the live bot unannounced. ``seed`` reaches only
+    the Python backend's bot (the Rust bot draws from the game's seed)."""
     from .bots import profiles
-    if profiles.exists(kind):
-        return profiles.make_bot(kind, aggression=aggression)
-    return profiles.make_bot({"profile": None, "bot": kind}, aggression=aggression)
+    ref = kind if profiles.exists(kind) else {"profile": None, "bot": kind}
+    return profiles.make_bot(ref, seed=seed, aggression=aggression)
 
 
 def play_game(spec: dict) -> dict:
@@ -42,7 +43,8 @@ def play_game(spec: dict) -> dict:
     n = spec["players"]
     # the majors are the first n players of a new game
     kinds = {pid: spec["seat_bots"][pid % len(spec["seat_bots"])] for pid in range(n)}
-    bots = {pid: make_bot(k, 0.25 + 0.5 * ((pid * 37 + spec["seed"]) % 10) / 9) for pid, k in kinds.items()}
+    bots = {pid: make_bot(k, spec["seed"] * 101 + pid, 0.25 + 0.5 * ((pid * 37 + spec["seed"]) % 10) / 9)
+            for pid, k in kinds.items()}
     events = defaultdict(Counter)       # pid -> counter
     built = defaultdict(Counter)        # pid -> item counter
     era_turn = defaultdict(dict)        # pid -> {era: turn}
@@ -269,7 +271,7 @@ def main():
     from .bots import profiles
     for kind in set(bot_types):                 # a misspelt bot stops the run here, not in every worker
         try:
-            make_bot(kind, 0.5)
+            make_bot(kind, 0, 0.5)
         except profiles.ProfileError as e:
             ap.error(f"--bots {kind}: {e}")
     specs = []

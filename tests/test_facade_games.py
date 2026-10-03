@@ -86,6 +86,22 @@ class HeadlessTests(unittest.TestCase):
         self.assertEqual(r["phase"], "over")
         self.assertTrue(all(p["cities"] >= 1 for p in r["players"] if p["kind"] == "major" and p["alive"]))
 
+    def test_one_seed_plays_one_game(self):
+        # citar sim and citar balance play the same game for the same seed on either backend: the Rust bot draws
+        # from the game's seed, the Python one from the seed each seat is given (a seedless Python bot seeds itself
+        # from the OS, and three bots' tech picks then part within 25 turns)
+        from citar import balance, sim
+        runs = [sim.run(players=3, turns=25, map_size="duel", seed=4, verbose=False) for _ in range(2)]
+        self.assertEqual(runs[0]["stats"], runs[1]["stats"])
+        self.assertEqual(runs[0]["players"], runs[1]["players"])
+        spec = {"seed": 4, "map_type": "continents", "size": "duel", "players": 3, "turns": 25, "speed": "Quick",
+                "barbarians": "normal", "seat_bots": ["standard", "classic-production"]}
+        games = [balance.play_game(spec) for _ in range(2)]
+        for g in games:
+            self.assertEqual(g.pop("errors"), [])
+            g.pop("seconds")
+        self.assertEqual(games[0], games[1])
+
 
 if __name__ == "__main__":
     unittest.main()
