@@ -12,14 +12,16 @@
 //! **The format, exactly.**
 //! - The 8-byte magic `CITARSV2`, then the header's length in bytes as a little-endian `u32`
 //!   (at most [`MAX_HEADER`]), then the header: a UTF-8 JSON object with exactly the keys of
-//!   [`Header`]. `format` is `citar-save` and `version` 2; `rules` is 64 lower-case hex digits;
-//!   `summary` is an object; `journal` is null or a [`JournalRef`] (a plain file name, and a
-//!   head that is empty exactly when the prefix has no records).
+//!   [`Header`], every one of them there (none is optional, though `journal` may be null).
+//!   `format` is `citar-save` and `version` 2; `rules` is 64 lower-case hex digits; `summary` is
+//!   an object; `journal` is null or a [`JournalRef`] (a plain file name, and a head that is
+//!   empty exactly when the prefix has no records).
 //! - Then one zstd frame (level 3) and nothing after it. The frame records its content size,
 //!   at most [`MAX_BODY`], and a content checksum, so a damaged body is found when it is read.
 //! - The body is a JSON object with exactly the keys `session`, `metrics`, `state` and `chain`,
 //!   in that order when written. The first three are JSON objects spliced in as the writer was
-//!   given them (without surrounding white space); `chain` is null or a [`ChainRef`].
+//!   given them (without surrounding white space); `chain` is null or a [`ChainRef`], and its
+//!   key is there either way.
 //!
 //! The header is uncompressed and small, so listing saves reads only headers, never a gargantuan
 //! state's 6 MB. The body is zstd level 3, about 10x on this JSON; the state is spliced in raw
@@ -106,8 +108,21 @@ pub struct Header {
     /// The engine's summary of the state (`save::summary`), a JSON object.
     pub summary: Value,
     pub session: SessionRef,
-    /// The prefix of its journal the save was taken with; `None` for a save with no history.
+    /// The prefix of its journal the save was taken with; `None` (null) for a save with no
+    /// history. The key is required like every other.
+    #[serde(deserialize_with = "required")]
     pub journal: Option<JournalRef>,
+}
+
+/// An `Option` whose key must be there, null or a value. serde reads a missing key of an `Option`
+/// field as `None`, but the format names every key, so a header or a body without one is not a
+/// container's (a field with `deserialize_with` and no default is an error when missing).
+fn required<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d)
 }
 
 impl Header {
@@ -481,6 +496,7 @@ fn body_parts(body: &[u8]) -> Result<Parts, String> {
         metrics: &'a RawValue,
         #[serde(borrow)]
         state: &'a RawValue,
+        #[serde(deserialize_with = "required")]
         chain: Option<ChainRef>,
     }
     let doc: Doc<'_> = serde_json::from_slice(body).map_err(|e| e.to_string())?;
@@ -558,9 +574,47 @@ mod tests {
             br#"{"session":{},"metrics":{},"state":{},"state":{},"chain":null}"#,
             br#"{"session":{},"metrics":{},"state":{},"chain":{"head":"ab","rounds":1}}"#,
             br#"{"session":{},"metrics":{},"state":{}"#,
+            // Every key is required, `chain` too, though it may be null.
+            br#"{"session":{},"metrics":{},"state":{}}"#,
+            br#"{"metrics":{},"state":{},"chain":null}"#,
             b"[]",
         ] {
             assert!(body_parts(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
+    }
+
+    /// The header and the body name every key: `journal` and `chain` may be null, but a header
+    /// or body without them is not a container's, as the format says.
+    #[test]
+    fn every_key_is_required_and_the_optional_ones_may_be_null() {
+        let path = Path::new("a.citar");
+        let header = serde_json::json!({
+            "format": FORMAT, "version": VERSION, "saved_at": "now", "engine_build": "b",
+            "rules": "0".repeat(64), "summary": {},
+            "session": {"id": "g", "name": "G", "benchmark": false}, "journal": null,
+        });
+        let text = serde_json::to_vec(&header).expect("JSON");
+        let read = parse_header(path, &text).expect("a header");
+        assert_eq!(read.journal, None);
+        let keys: Vec<String> =
+            header.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+        for key in &keys {
+            let mut less = header.clone();
+            if let Some(o) = less.as_object_mut() {
+                o.remove(key);
+            }
+            let text = serde_json::to_vec(&less).expect("JSON");
+            let err = parse_header(path, &text).expect_err("a key is missing");
+            let want =
+                if matches!(key.as_str(), "format" | "version") { "Format" } else { "Corrupt" };
+            let got = match &err {
+                StoreError::Format { .. } => "Format",
+                StoreError::Corrupt { why, .. } if why.contains(key.as_str()) => "Corrupt",
+                _ => "something else",
+            };
+            assert_eq!(got, want, "without {key}: {err}");
+        }
+        let body = br#"{"session":{},"metrics":{},"state":{},"chain":null}"#;
+        assert!(body_parts(body).is_ok_and(|p| p.chain.is_none()));
     }
 }

@@ -364,6 +364,20 @@ fn what_is_not_a_container_is_refused_by_kind() {
     extra.extend_from_slice(&good[12 + n..]);
     let (h, _) = both_errors(&extra);
     assert!(matches!(&h, StoreError::Corrupt { why, .. } if why.contains("new_key")), "{h}");
+    // A header without one of its keys, even `journal`, which may be null but must be there.
+    let mut fewer = head.clone();
+    if let Some(o) = fewer.as_object_mut() {
+        o.remove("new_key");
+        o.remove("journal");
+    }
+    let text = serde_json::to_vec(&fewer).expect("JSON");
+    let mut missing = b"CITARSV2".to_vec();
+    missing.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    missing.extend_from_slice(&text);
+    missing.extend_from_slice(&good[12 + n..]);
+    let (h, c) = both_errors(&missing);
+    assert!(matches!(&h, StoreError::Corrupt { why, .. } if why.contains("journal")), "{h}");
+    assert!(matches!(c, StoreError::Corrupt { .. }), "{c}");
     // Bytes after the frame, and a second frame.
     let mut trailing = good.clone();
     trailing.push(0);
@@ -383,6 +397,22 @@ fn what_is_not_a_container_is_refused_by_kind() {
     std::fs::write(&path, &odd).expect("writes");
     let err = read_container(&path).map(|_| ()).expect_err("refused");
     assert!(matches!(err, StoreError::Corrupt { .. }), "{err}");
+    // A body without its `chain`, which may be null but must be there.
+    let frame = zstd::bulk::compress(b"{\"session\":{},\"metrics\":{},\"state\":{}}", 3)
+        .expect("compresses");
+    let mut chainless = good[..12 + n].to_vec();
+    chainless.extend_from_slice(&frame);
+    std::fs::write(&path, &chainless).expect("writes");
+    assert!(read_header(&path).is_ok(), "the header is whole");
+    let err = read_container(&path).map(|_| ()).expect_err("refused");
+    assert!(matches!(&err, StoreError::Corrupt { why, .. } if why.contains("chain")), "{err}");
+    let frame =
+        zstd::bulk::compress(b"{\"session\":{},\"metrics\":{},\"state\":{},\"chain\":null}", 3)
+            .expect("compresses");
+    let mut null_chain = good[..12 + n].to_vec();
+    null_chain.extend_from_slice(&frame);
+    std::fs::write(&path, &null_chain).expect("writes");
+    assert_eq!(read_container(&path).map(|c| c.chain().cloned()).ok(), Some(None), "null reads");
     // A missing file.
     let gone = dir.join("missing.citar");
     assert!(matches!(read_header(&gone), Err(StoreError::Io { .. })));
