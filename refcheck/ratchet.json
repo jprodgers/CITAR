@@ -17,7 +17,8 @@
     "deal_checks": 0,
     "tool_errors": 0,
     "views": 0,
-    "briefing": 0
+    "briefing": 0,
+    "bot_decisions": 0
   },
   "failed": {}
 }

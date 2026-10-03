@@ -310,6 +310,25 @@ rate, the items saying something of those asked (`CHOICES` in the script). Advic
 differs from advice without one only in `deal_value`, the bot's `evaluate` of the proposal, rounded, which
 `deal_checks`' `bot_value` holds.
 
+**Checking the Rust bot** (package 2-01b, stage 1):
+
+```
+cargo refcheck run --groups bot_decisions            # the values, on the committed states (enforced)
+cargo refcheck bot-agreement                         # the choices' agreement, each miss with its cause
+CITAR_BOT_DUMP=C:/dev/bot_decisions-corpus.json.gz cargo refcheck bot-agreement --fixtures refcheck/corpus
+```
+
+The group `bot_decisions` reads the recording beside the fixtures, the committed file first, then
+`CITAR_BOT_DUMP`'s (or `refcheck/corpus/bot_decisions.json.gz`); a state neither holds is a failed answer. It
+compares each living major's `context`, both modes' `tech_values`, and each city's threat and defence of
+`cities`, with the Rust answers of `citar_bot::decisions` (the same bot: `basic-1`, `tech_noise` 0, aggression
+0.4, a fresh memory). Its intended differences are the engine's: the `potential` tech values weigh a
+building's production percentage by the empire's production, which `marble-bonus-in-its-own-city` moves.
+`bot-agreement` prints each kind's agreement over the items either engine says something about, and exits 1
+when a kind is under 95% or a miss has no cause; a miss's cause is the civilization's `bot_decisions` values
+that differ, named. At package 2-01b every stage-1 kind agrees on every item considered, on the committed
+states and on the corpus (zero misses), and the group has no unexplained difference on either.
+
 ## The statistical baseline
 
 ```

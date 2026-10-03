@@ -13,7 +13,7 @@
 #   reason  one line: what Python did, and what Rust does instead
 #   where   the places it covers: [{ group = "...", path = "..." }, ...]
 #           group: uniques, state_echo, fixed_point, tile_yields, city_stats, civs, buildable, movement, visible,
-#                  combat_previews, deal_checks, tool_errors, views, briefing
+#                  combat_previews, deal_checks, tool_errors, views, briefing, bot_decisions
 #           path:  in the path grammar, matched against the whole path of a difference:
 #                  .key  ["any key"]  [3]  [pid=0] (a keyed list)  [#0=12] (keyed by tuple position)
 #                  [*] (any list element)  .* (any key)  .** (any depth, none included)
@@ -76,6 +76,8 @@ where = [
   { group = "views", path = "civs[*].view.cities[*].queue[*].turns" },
   { group = "briefing", path = "civs[*].briefing.cities[*].prod" },
   { group = "briefing", path = "civs[*].briefing.cities[*].build.turns" },
+  # The bot weighs a building's production percentage by the empire's production (basic.py:936-938).
+  { group = "bot_decisions", path = "majors[*].tech_values.potential.*" },
 ]
 cases = [
   "duel-archipelago-normal-s1022/t120",

@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agreement;
 pub mod answer;
 pub mod compare;
 pub mod enforced;

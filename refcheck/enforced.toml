@@ -97,3 +97,10 @@ group = "views"
 # every group is enforced.
 [[enforce]]
 group = "briefing"
+
+# bot_decisions (package 2-01b, DESIGN.md P2.3.11): the bot's sub-decisions of stage 1 against the Python bot's,
+# recorded beside the fixtures by scripts/refcheck/bot_dump.py (refcheck/bot_decisions.json.gz; the corpus's where
+# CITAR_BOT_DUMP says): each living major's turn context, every tech value in both modes, and each city's threat
+# and defence. The choices are agreement rates (`cargo refcheck bot-agreement`), not differences.
+[[enforce]]
+group = "bot_decisions"

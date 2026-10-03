@@ -257,6 +257,9 @@ impl CompareSpec {
                 .multiset("civs[*].briefing.alerts")
                 .multiset("civs[*].briefing.poi")
                 .multiset("civs[*].briefing.players"),
+            // Each living major by id, its cities by id; the context's lists are sorted on both
+            // sides, and the tech values are objects keyed by name.
+            Group::BotDecisions => spec.keyed("majors", "player").keyed("majors[*].cities", "city"),
         }
     }
 }
