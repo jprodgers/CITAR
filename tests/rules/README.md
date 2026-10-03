@@ -264,7 +264,10 @@ its harness lists it as ignored. A package's gate is that no script names it any
 header from the scripts it makes pass. Package 2-01a (the step itself, the idle bot, deferring to the model)
 removed its own: both runners play `bot_selftest.toml`, `bot_idle_rejects.toml` and
 `bot_model_owned_deferred.toml`. `bot_selftest.toml` is the bot step's own self-test, with its must-fail
-steps, kept apart from `_selftest.toml`.
+steps, kept apart from `_selftest.toml`. Package 2-01b (the economy) removed its nine: both runners play
+`bot_research_beeline`, `bot_policies_finish_branches`, `bot_buys_defender_in_danger`,
+`bot_disbands_in_deficit`, `bot_settler_founds_at_site`, `bot_faith_buildings_first`, `bot_scouts_explore`,
+`bot_workers_automate` and `bot_pantheon_by_preference`.
 
 ## Values
 

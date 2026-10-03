@@ -5,7 +5,6 @@ production the bot queued before the purchase (a defender) is the item the purch
 cannot see it after the turn.
 """
 from = "citar/bots/basic.py:1591-1606 (manage_gold), 869-871 (in_danger)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

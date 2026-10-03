@@ -7,11 +7,13 @@
 //! cargo refcheck ratchet [--update]
 //! cargo refcheck changelog [--write | --check]
 //! cargo refcheck list [--fixtures DIR]... [--case GLOB]...
+//! cargo refcheck bot-agreement [--fixtures DIR]... [--case GLOB]... [--misses N]
 //! ```
 //!
 //! Exit codes: 0 clean; 1 unexplained differences (or a ratchet that rose or is out of date, or a
-//! CHANGELOG whose rule fixes lag behind the intended lists); 2 a load failure, a bad configuration
-//! file or a usage error; 3 stale intended entries under `--strict`.
+//! CHANGELOG whose rule fixes lag behind the intended lists, or a bot choice under its floor or
+//! a miss no cause explains); 2 a load failure, a bad configuration file or a usage error; 3
+//! stale intended entries under `--strict`.
 
 #![forbid(unsafe_code)]
 
@@ -86,6 +88,17 @@ enum Command {
         /// Exit 1 when CHANGELOG.md's list differs from the intended lists
         #[arg(long)]
         check: bool,
+    },
+    /// How often the bot's choices agree with the Python bot's (DESIGN.md P2.3.11), each miss
+    /// with its cause; the recording is refcheck/bot_decisions.json.gz, or CITAR_BOT_DUMP's
+    BotAgreement {
+        #[arg(long = "fixtures", value_name = "DIR")]
+        fixtures: Vec<PathBuf>,
+        #[arg(long = "case", value_name = "GLOB")]
+        cases: Vec<String>,
+        /// Misses printed; 0 prints them all
+        #[arg(long, default_value_t = 0)]
+        misses: usize,
     },
     /// List the fixtures, and the groups with their state
     List {
@@ -198,6 +211,18 @@ fn execute(cli: Cli) -> Result<u8> {
             }
         }
         Command::List { fixtures, cases } => list(&root, &fixtures, &cases, &answers),
+        Command::BotAgreement { fixtures, cases, misses } => {
+            let set = case_globs(&cases)?;
+            let found =
+                citar_refcheck::agreement::run(&root, &fixture_sets(&root, &fixtures), |r| {
+                    set.as_ref().is_none_or(|s| s.is_match(&r.name))
+                })?;
+            print!("{}", found.report(misses));
+            if !found.skipped.is_empty() {
+                return Ok(2);
+            }
+            Ok(if found.holds() { 0 } else { 1 })
+        }
     }
 }
 
@@ -244,6 +269,20 @@ fn options(root: &Path, s: &Selection) -> Result<RunOptions> {
     opts.cases.clone_from(&s.cases);
     opts.with_bot = s.with_bot;
     Ok(opts)
+}
+
+/// The `--case` globs as a set, or `None` for every fixture.
+fn case_globs(cases: &[String]) -> Result<Option<globset::GlobSet>> {
+    if cases.is_empty() {
+        return Ok(None);
+    }
+    let mut b = globset::GlobSetBuilder::new();
+    for c in cases {
+        b.add(
+            globset::Glob::new(c).map_err(|e| Error::new(format!("bad --case glob `{c}`: {e}")))?,
+        );
+    }
+    b.build().map(Some).map_err(|e| Error::new(e.to_string()))
 }
 
 fn ratchet(root: &Path, update: bool, answers: &dyn Answers) -> Result<u8> {

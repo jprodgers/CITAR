@@ -14,13 +14,16 @@
 //! Package 2-00a wrote these signatures, so that the runner and the bindings could be written
 //! beside the port; 2-01a filled in the parameters (their schema, generated struct, cleaning and
 //! resolution), the versions, owners, memory, streams and the driver, whose `basic-1` turn calls
-//! its phases in Python's order. The phases come with 2-01b (the economy), 2-03 (units) and 2-05
-//! (diplomacy, [`advice`] and [`evaluate`], which return neutral values until then); DESIGN.md
-//! P2.3.10 maps every line of `basic.py` to its home.
+//! its phases in Python's order. 2-01b ported the economy (the context, research, policies,
+//! great people and the pantheon, production through the engine's advisor, gold, faith,
+//! settlers, workers and scouts) and [`decisions`], the sub-decisions the reference checks ask;
+//! 2-03 ports units and fighting, and 2-05 diplomacy, [`advice`] and [`evaluate`], which return
+//! neutral values until then. DESIGN.md P2.3.10 maps every line of `basic.py` to its home.
 
 #![forbid(unsafe_code)]
 
 mod basic1;
+pub mod decisions;
 mod driver;
 mod idle;
 pub mod memory;

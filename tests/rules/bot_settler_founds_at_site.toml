@@ -4,7 +4,6 @@ the bot's cities) and founds the city there once it arrives, rather than where i
 incense, wheat and cattle make one site the clear best.
 """
 from = "citar/bots/basic.py:1069-1111 (expansion_sites), 1835-1857 and 1879-1888 (handle_settler)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

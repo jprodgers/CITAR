@@ -68,7 +68,7 @@ fn with_memory(
         memory.prune(t.game(), t.pid(), params.site_blacklist_turns, params.c_boat_retry_turns);
     }
     let resolved = spec.tuning.resolved(t.game().rules());
-    let mut seat = Seat { spec, params, resolved: &resolved, memory: &mut memory };
+    let mut seat = Seat::new(spec, &resolved, &mut memory);
     f(t, &mut seat);
     if mem.kind() != MEMORY_KIND && memory == Memory::default() {
         return;

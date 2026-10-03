@@ -28,6 +28,8 @@
 //! - [`views`] (package 1d-02): what the browser receives for two civilizations of each state.
 //! - [`briefing`] (package 1d-03): the turn briefing and the turn's progress a model reads, for
 //!   two civilizations of each state.
+//! - [`bot_decisions`] (package 2-01b): the bot's sub-decisions of stage 1, their values
+//!   against the recording of `scripts/refcheck/bot_dump.py` (DESIGN.md P2.3.11).
 //!
 //! Each fixture's state is loaded once, through `Game::from_python` (package 1b-01: the converter
 //! of 1a-10, then a settle), and handed to every group in [`Ctx::game`]. A game's queries take
@@ -43,6 +45,7 @@ use serde_json::Value;
 use crate::Group;
 use crate::fixture::Fixture;
 
+pub mod bot_decisions;
 pub mod briefing;
 pub mod buildable;
 pub mod city_stats;
@@ -131,6 +134,7 @@ static MODULES: &[&dyn AnswerModule] = &[
     &tool_errors::ToolErrors,
     &views::Views,
     &briefing::Briefing,
+    &bot_decisions::BotDecisions,
 ];
 
 /// The answers of the Rust engine.

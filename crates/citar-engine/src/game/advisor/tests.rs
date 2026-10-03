@@ -292,7 +292,8 @@ fn aggression_is_held_to_zero_to_one() {
             |x: f64| AdvisorParams { aggression: x, prod_mode: mode, ..AdvisorParams::default() };
         for (wild, held) in [(5.0, 1.0_f64), (-1.0, 0.0), (f64::NAN, 1.0), (f64::INFINITY, 1.0)] {
             assert_eq!(at(wild).aggr().to_bits(), held.to_bits(), "{wild}");
-            let (x, y) = (situation(&g, ROME, &at(wild)), situation(&g, ROME, &at(held)));
+            let (x, y) =
+                (situation(&g, ROME, &at(wild), false), situation(&g, ROME, &at(held), false));
             assert_eq!(x.army_target, y.army_target, "{wild}");
             for c in [a, b] {
                 let wild_pick = advise_production(&g, ROME, c, &at(wild));
@@ -394,4 +395,169 @@ fn a_city_picks_its_production_with_its_citizens_placed() {
     assert_eq!(city_now.queue.first().copied(), Some(want));
     g.settle();
     clean(&mut g);
+}
+
+// ---- What the bot remembers (BotFacts, package 2-01b) -------------------------------------------
+
+/// Grants Rome `names`.
+fn grant(g: &mut Game, names: &[&str]) {
+    let ids: Vec<TechId> =
+        names.iter().map(|n| g.rules().lookup::<TechId>(n).expect("a tech")).collect();
+    if let Some(p) = g.player_mut(ROME, PlayerTouch::INDEX) {
+        for t in ids {
+            p.tech.known.insert(t);
+        }
+    }
+    g.settle();
+}
+
+fn is_military(g: &Game, x: Option<Constructible>) -> bool {
+    matches!(x, Some(Constructible::Unit(u)) if g.rules().base_units()[u].military)
+}
+
+fn ask(g: &Game, pp: &AdvisorParams, f: &BotFacts<'_>, c: CityId) -> Option<Constructible> {
+    Advisor::with_facts(g, ROME, pp, f).advise(g, c)
+}
+
+#[test]
+fn automatic_production_asks_with_no_facts() {
+    // `new` is `with_facts(NONE)`, which is the bot automatic production always asked: Phase 1's
+    // picks (the gate's corpus comparison holds every pick of 262 states).
+    let mut g = testing::duel();
+    let a = city(&mut g, TileIdx(22), "Roma", 4);
+    let b = city(&mut g, TileIdx(26), "Antium", 2);
+    every_tech(&mut g);
+    for mode in [ProductionMode::Unciv, ProductionMode::Classic] {
+        let pp = AdvisorParams { prod_mode: mode, ..AdvisorParams::default() };
+        for c in [a, b] {
+            assert_eq!(Advisor::new(&g, ROME, &pp).advise(&g, c), ask(&g, &pp, &BotFacts::NONE, c));
+        }
+    }
+}
+
+#[test]
+fn a_war_being_prepared_builds_an_army() {
+    // In the classic mode an army is built only when it is affordable or for offense: with a
+    // gold per turn no city reaches, only a war being prepared asks for one.
+    let mut g = testing::duel();
+    let c = city(&mut g, TileIdx(22), "Roma", 4);
+    grant(&mut g, &["Bronze Working", "Archery"]);
+    let pp = AdvisorParams {
+        prod_mode: ProductionMode::Classic,
+        c_military_min_gpt: 1e9,
+        c_building_scale: 0.01,
+        ..AdvisorParams::default()
+    };
+    let peace = ask(&g, &pp, &BotFacts::NONE, c);
+    assert!(!is_military(&g, peace), "{peace:?}");
+    let war = ask(&g, &pp, &BotFacts { preparing_war: true, ..BotFacts::NONE }, c);
+    assert!(is_military(&g, war), "{war:?}");
+    let adv =
+        Advisor::with_facts(&g, ROME, &pp, &BotFacts { preparing_war: true, ..BotFacts::NONE });
+    let calm = Advisor::new(&g, ROME, &pp);
+    assert!(adv.s.offense && !calm.s.offense);
+    assert!(adv.s.army_target > calm.s.army_target, "the war's extra units");
+}
+
+#[test]
+fn garrisons_are_no_field_army() {
+    // Preparing a war with two warriors in the field, the city builds siege (too few for the
+    // field army's size); with both warriors garrisoning cities, the field has no melee unit to
+    // take a city, and it builds one.
+    let mut g = testing::duel();
+    let c = city(&mut g, TileIdx(22), "Roma", 4);
+    grant(&mut g, &["Bronze Working", "Archery", "Mathematics", "The Wheel"]);
+    let w1 = testing::unit(&mut g, ROME, "Warrior", TileIdx(33));
+    let w2 = testing::unit(&mut g, ROME, "Warrior", TileIdx(34));
+    g.settle();
+    let pp = AdvisorParams {
+        prod_mode: ProductionMode::Classic,
+        c_building_scale: 0.01,
+        ranged_chance: 1.0,
+        ..AdvisorParams::default()
+    };
+    let field = BotFacts { preparing_war: true, ..BotFacts::NONE };
+    let siege = ask(&g, &pp, &field, c);
+    let Some(Constructible::Unit(s)) = siege else { panic!("{siege:?}") };
+    assert_eq!(g.rules().derived().advisor.siege, Some(g.rules().base_units()[s].unit_type));
+    let held = [w1, w2];
+    let melee = ask(&g, &pp, &BotFacts { garrisons: &held, ..field }, c);
+    let Some(Constructible::Unit(m)) = melee else { panic!("{melee:?}") };
+    let d = &g.rules().base_units()[m];
+    assert!(d.military && !d.ranged, "{}", d.name);
+}
+
+#[test]
+fn a_settler_waiting_for_its_escort_gets_a_defender_in_both_modes() {
+    let mut g = testing::duel();
+    let c = city(&mut g, TileIdx(22), "Roma", 4);
+    grant(&mut g, &["Bronze Working", "Archery"]);
+    let at = TileIdx(22);
+    for mode in [ProductionMode::Unciv, ProductionMode::Classic] {
+        let pp = AdvisorParams { prod_mode: mode, ..AdvisorParams::default() };
+        let defender =
+            Advisor::best_military(&g, c, Role { prefer_ranged: true, ..Role::default() }, &pp)
+                .map(Constructible::Unit);
+        assert!(defender.is_some());
+        let alone = ask(&g, &pp, &BotFacts::NONE, c);
+        assert_ne!(alone, defender, "{mode:?}");
+        let waiting = ask(&g, &pp, &BotFacts { need_escort: Some(at), ..BotFacts::NONE }, c);
+        assert_eq!(waiting, defender, "{mode:?}");
+        // Waiting in another city changes nothing here.
+        let elsewhere =
+            ask(&g, &pp, &BotFacts { need_escort: Some(TileIdx(5)), ..BotFacts::NONE }, c);
+        assert_eq!(elsewhere, alone, "{mode:?}");
+    }
+}
+
+#[test]
+fn a_city_that_queued_a_work_boat_waits_before_another() {
+    // Fish on a coast tile of Rome's, beside its city: in the classic mode the city builds work
+    // boats, unless it queued some within `c_boat_retry_turns`.
+    let mut g = testing::duel();
+    let coast = g.rules().lookup::<crate::base::ids::TerrainId>("Coast").expect("coast");
+    let fish = g.rules().lookup::<crate::base::ids::ResourceId>("Fish").expect("fish");
+    let sea = TileIdx(23);
+    g.set_terrain(sea, coast).expect("a tile");
+    g.set_resource(sea, Some(fish), 1).expect("a tile");
+    let c = city(&mut g, TileIdx(22), "Roma", 4);
+    grant(&mut g, &["Sailing"]);
+    let pp = AdvisorParams {
+        prod_mode: ProductionMode::Classic,
+        c_boat: 10_000.0,
+        ..AdvisorParams::default()
+    };
+    let boats = g.rules().derived().advisor.boats;
+    let fresh = ask(&g, &pp, &BotFacts::NONE, c);
+    assert!(matches!(fresh, Some(Constructible::Unit(u)) if boats.contains(u)), "{fresh:?}");
+    let turn = g.turn();
+    let queued: BTreeMap<CityId, crate::base::ids::Turn> = [(c, turn)].into();
+    let waits = ask(&g, &pp, &BotFacts { boat_turns: &queued, ..BotFacts::NONE }, c);
+    assert!(!matches!(waits, Some(Constructible::Unit(u)) if boats.contains(u)), "{waits:?}");
+    // Long enough ago, it builds them again.
+    let long_ago: BTreeMap<CityId, crate::base::ids::Turn> =
+        [(c, turn - pp.c_boat_retry_turns - 1)].into();
+    let again = ask(&g, &pp, &BotFacts { boat_turns: &long_ago, ..BotFacts::NONE }, c);
+    assert_eq!(again, fresh);
+}
+
+#[test]
+fn a_site_given_up_on_is_no_expansion_site() {
+    let mut g = testing::duel();
+    let _ = city(&mut g, TileIdx(22), "Roma", 4);
+    if let Some(pl) = g.player_mut(ROME, PlayerTouch::OTHER) {
+        for i in 0..u32::from(testing::W) * u32::from(testing::H) {
+            pl.explored.insert(i);
+        }
+    }
+    g.settle();
+    let pp = AdvisorParams { site_min_distance: 3, site_spacing: 2, ..AdvisorParams::default() };
+    let sites = Advisor::new(&g, ROME, &pp).sites(&g).to_vec();
+    let first = *sites.first().expect("a site on open grassland");
+    let blocked = [first];
+    let adv =
+        Advisor::with_facts(&g, ROME, &pp, &BotFacts { blocked_sites: &blocked, ..BotFacts::NONE });
+    let left = adv.sites(&g);
+    assert!(!left.contains(&first), "{left:?}");
+    assert!(!left.is_empty(), "the others are still sites");
 }

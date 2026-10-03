@@ -4,7 +4,6 @@ opened before it opens another: a peaceful bot opens Tradition, the first of its
 opened Liberty already, when it takes a Liberty policy; an aggressive one opens Honor.
 """
 from = "citar/bots/basic.py:1003-1033 (_policy_order, empire_choices)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

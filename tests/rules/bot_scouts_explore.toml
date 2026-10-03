@@ -3,7 +3,6 @@ The bot keeps its scouts exploring. A scout with nothing left to explore sleeps,
 once the game is past scout_disband_turn (or its owner is at its unit supply).
 """
 from = "citar/bots/basic.py:2054-2063 (handle_scout)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

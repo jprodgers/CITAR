@@ -12,6 +12,7 @@
 use citar_engine::base::ids::{BaseUnitId, BeliefId, PolicyId};
 use citar_engine::base::sets::PromotionSet;
 use citar_engine::rules::Ruleset;
+use citar_engine::rules::defs::BeliefKind;
 
 use super::{NameList, Params, Spec, spec};
 
@@ -23,10 +24,11 @@ pub struct Resolved {
     pub policy_order_peaceful: Vec<PolicyId>,
     pub policy_order_aggressive: Vec<PolicyId>,
     /// The beliefs of each kind in order of preference, for `belief_mode = "prefs"`. An empty
-    /// order stays empty here, and its user gives it Python's meaning: `choose_beliefs` ranks by
-    /// the four orders one after another when a kind's order is empty (basic.py:1707), and
-    /// `empire_choices` takes the first pantheon available (1036). Python asked whether the
-    /// order as written was empty, not whether the ruleset had its names.
+    /// order stays empty here, and its user gives it Python's meaning: `empire_choices` takes
+    /// the first pantheon available (1036). `choose_beliefs` ranks by
+    /// [`belief_place`](Self::belief_place) instead, which keeps the places of the names the
+    /// ruleset lacks and ranks a kind whose order is written empty by the four orders one after
+    /// another (basic.py:1707).
     pub beliefs_pantheon: Vec<BeliefId>,
     pub beliefs_founder: Vec<BeliefId>,
     pub beliefs_follower: Vec<BeliefId>,
@@ -44,6 +46,20 @@ pub struct Resolved {
     /// Names the ruleset lacks, skipped: a policy that is no branch, a belief or a great person
     /// it does not have, a promotion line no promotion's name starts with.
     pub unknown_names: u32,
+    /// Each policy's place among the policies by name, by id: the last key of the policy the
+    /// bot adopts (`empire_choices`' `rank`, basic.py:1028), so that names are compared once.
+    policy_rank: Vec<u16>,
+    /// Each belief's place among the beliefs by name, by id (`choose_beliefs`' sort,
+    /// basic.py:1708).
+    belief_rank: Vec<u16>,
+    /// Each belief's place in the order `choose_beliefs` ranks a kind by (basic.py:1707), by
+    /// the kind's slot ([`BeliefKind::index`]) and then by id; `None` where the order does not
+    /// name the belief. A place counts in the order as written, names the ruleset lacks
+    /// included, as Python's `index` counted them, and a belief's first place counts. A kind
+    /// written empty, and `Any`, are ranked by the four orders one after another (pantheon,
+    /// founder, follower, enhancer): Python asked whether the order as written was empty, not
+    /// whether the ruleset had its names.
+    belief_places: [Vec<Option<u32>>; BeliefKind::COUNT],
 }
 
 impl Resolved {
@@ -76,20 +92,28 @@ impl Resolved {
             branches("policy_order_peaceful", &params.policy_order_peaceful);
         let policy_order_aggressive =
             branches("policy_order_aggressive", &params.policy_order_aggressive);
-        let mut beliefs = |key: &str, list: &NameList| -> Vec<BeliefId> {
+        let mut beliefs = |names: &[String]| -> Vec<BeliefId> {
             let mut out = Vec::new();
-            for n in names_of(key, list) {
-                let id = rules.lookup::<BeliefId>(&n);
+            for n in names {
+                let id = rules.lookup::<BeliefId>(n);
                 count(id.is_some());
                 out.extend(id);
             }
             out
         };
-        let beliefs_pantheon = beliefs("beliefs_pantheon", &params.beliefs_pantheon);
-        let beliefs_founder = beliefs("beliefs_founder", &params.beliefs_founder);
-        let beliefs_follower = beliefs("beliefs_follower", &params.beliefs_follower);
-        let beliefs_enhancer = beliefs("beliefs_enhancer", &params.beliefs_enhancer);
-        let pantheon_unciv = beliefs("pantheon_unciv", &params.pantheon_unciv);
+        // The four orders as written, in `BeliefType::ALL`'s order (Python's `prefs`).
+        let written = [
+            names_of("beliefs_pantheon", &params.beliefs_pantheon),
+            names_of("beliefs_founder", &params.beliefs_founder),
+            names_of("beliefs_follower", &params.beliefs_follower),
+            names_of("beliefs_enhancer", &params.beliefs_enhancer),
+        ];
+        let beliefs_pantheon = beliefs(&written[0]);
+        let beliefs_founder = beliefs(&written[1]);
+        let beliefs_follower = beliefs(&written[2]);
+        let beliefs_enhancer = beliefs(&written[3]);
+        let pantheon_unciv = beliefs(&names_of("pantheon_unciv", &params.pantheon_unciv));
+        let belief_places = belief_places(rules, &written);
         let mut great = |name: &str| {
             let id = rules.lookup::<BaseUnitId>(name);
             count(id.is_some());
@@ -113,6 +137,8 @@ impl Resolved {
         };
         let promo_in_city = lines("promo_in_city", &params.promo_in_city);
         let promo_lines = lines("promo_lines", &params.promo_lines);
+        let policy_rank = name_ranks(rules.policies().iter().map(|(_, p)| &*p.name));
+        let belief_rank = name_ranks(rules.beliefs().iter().map(|(_, b)| &*b.name));
         Self {
             policy_order_peaceful,
             policy_order_aggressive,
@@ -126,8 +152,67 @@ impl Resolved {
             promo_in_city,
             promo_lines,
             unknown_names: unknown,
+            policy_rank,
+            belief_rank,
+            belief_places,
         }
     }
+
+    /// Policy `p`'s place among the ruleset's policies by name (Python's order of `str`, by code
+    /// point, which is UTF-8's byte order).
+    #[must_use]
+    pub fn policy_rank(&self, p: PolicyId) -> u16 {
+        self.policy_rank.get(usize::from(p.0)).copied().unwrap_or(u16::MAX)
+    }
+
+    /// Belief `b`'s place among the ruleset's beliefs by name.
+    #[must_use]
+    pub fn belief_rank(&self, b: BeliefId) -> u16 {
+        self.belief_rank.get(usize::from(b.0)).copied().unwrap_or(u16::MAX)
+    }
+
+    /// Belief `b`'s place in the order `choose_beliefs` ranks kind `kind` by: the kind's own
+    /// order, or the four together when it was written empty or the kind is `Any`. `None` when
+    /// that order does not name it.
+    #[must_use]
+    pub fn belief_place(&self, kind: BeliefKind, b: BeliefId) -> Option<u32> {
+        self.belief_places[kind.index()].get(usize::from(b.0)).copied().flatten()
+    }
+}
+
+/// The places [`Resolved::belief_place`] gives, from the four orders as written.
+fn belief_places(
+    rules: &Ruleset,
+    written: &[Vec<String>; 4],
+) -> [Vec<Option<u32>>; BeliefKind::COUNT] {
+    let places = |names: &[String]| {
+        let mut out = vec![None; rules.beliefs().len()];
+        for (i, n) in names.iter().enumerate() {
+            if let Some(slot) =
+                rules.lookup::<BeliefId>(n).and_then(|b| out.get_mut(usize::from(b.0)))
+                && slot.is_none()
+            {
+                *slot = Some(u32::try_from(i).unwrap_or(u32::MAX));
+            }
+        }
+        out
+    };
+    let together = places(&written.concat());
+    let own = |k: usize| if written[k].is_empty() { together.clone() } else { places(&written[k]) };
+    // In `BeliefKind::index` order: the four types, then `Any`.
+    [own(0), own(1), own(2), own(3), together.clone()]
+}
+
+/// The place of each of `names` (given in id order) among them sorted, by id.
+fn name_ranks<'a>(names: impl Iterator<Item = &'a str>) -> Vec<u16> {
+    let names: Vec<&str> = names.collect();
+    let mut by_name: Vec<usize> = (0..names.len()).collect();
+    by_name.sort_by(|&a, &b| names[a].cmp(names[b]).then(a.cmp(&b)));
+    let mut rank = vec![0u16; names.len()];
+    for (place, id) in by_name.into_iter().enumerate() {
+        rank[id] = u16::try_from(place).unwrap_or(u16::MAX);
+    }
+    rank
 }
 
 /// The names `list` gives for parameter `key` (DESIGN.md P2.3.2, [`NameList`]): its own; a

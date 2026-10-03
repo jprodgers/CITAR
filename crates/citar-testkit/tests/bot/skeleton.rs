@@ -1,8 +1,8 @@
 //! The bot skeleton of package 2-00a: a `Bot` drives seats through `Game::drive` and answers
 //! through `Game::answer`, counting what it took and had refused, and leaving to the host a
-//! negotiation its seat's model owns. Both versions found their capital (basic-1's units phase as
-//! the idle bot does until package 2-01b ports its settlers) and reject what they are offered
-//! (basic-1 with Python's own lines until 2-05 ports its answers).
+//! negotiation its seat's model owns. Both versions found their capital (basic-1's settler through
+//! `unit_action`, Python's tool, since package 2-01b; the idle bot through `found_city`) and
+//! reject what they are offered (basic-1 with Python's own lines until 2-05 ports its answers).
 
 use std::sync::Arc;
 
@@ -63,7 +63,8 @@ fn the_skeleton_founds_its_capital_and_rejects_what_it_is_offered() {
     for p in [PlayerId(0), PlayerId(1)] {
         assert_eq!(g.player_cities(p).count(), 1, "player {} founded its capital", p.0);
     }
-    assert_eq!(a.refusals().of("found_city"), (1, 0));
+    assert_eq!(a.refusals().of("unit_action"), (1, 0));
+    assert_eq!(b.refusals().of("found_city"), (1, 0));
     // The host's seat offers something; the bot's driver rejects it on the next drive.
     let offer = OpenNegotiation { to: 0, message: json!("Friends?"), give: None, receive: None };
     let (out, _) = g.act(PlayerId(2), Action::OpenNegotiation(offer)).expect("it opens");

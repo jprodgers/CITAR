@@ -4,7 +4,6 @@ Pagoda for Pagodas) before it buys missionaries, one purchase a turn; with faith
 buys a missionary instead.
 """
 from = "citar/bots/basic.py:1712-1737 (_spend_faith)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

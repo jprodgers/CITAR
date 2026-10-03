@@ -1,7 +1,9 @@
 //! The refcheck groups, in dependency order (DESIGN.md 9.2).
 //!
 //! Eleven groups were recorded by `scripts/refcheck/queries.py` (`GROUPS`); three are synthetic,
-//! derived by their answer modules rather than read from a fixture's `queries`. Reports list the
+//! derived by their answer modules rather than read from a fixture's `queries`; and one,
+//! `bot_decisions`, reads the bot's recording (`scripts/refcheck/bot_dump.py`, Phase 2) beside
+//! the fixtures. Reports list the
 //! groups in this order, so the first difference a reader meets is the one most likely to cause
 //! the others: a wrong unique text shows up again in every yield and stat built on it.
 
@@ -28,6 +30,8 @@ pub enum Group {
     ToolErrors,
     Views,
     Briefing,
+    /// The bot's sub-decisions, recorded beside the fixtures by `bot_dump.py` (package 2-01b).
+    BotDecisions,
 }
 
 /// What a group is compared once per: each fixture, or the whole run.
@@ -41,7 +45,7 @@ pub enum Scope {
 
 impl Group {
     /// Every group, in dependency order.
-    pub const ALL: [Group; 14] = [
+    pub const ALL: [Group; 15] = [
         Group::Uniques,
         Group::StateEcho,
         Group::FixedPoint,
@@ -56,6 +60,7 @@ impl Group {
         Group::ToolErrors,
         Group::Views,
         Group::Briefing,
+        Group::BotDecisions,
     ];
 
     /// The case name a run-scope group reports under.
@@ -85,6 +90,7 @@ impl Group {
             Group::ToolErrors => "tool_errors",
             Group::Views => "views",
             Group::Briefing => "briefing",
+            Group::BotDecisions => "bot_decisions",
         }
     }
 
@@ -101,9 +107,9 @@ impl Group {
     }
 
     /// Whether the Python answer was recorded in each fixture's `queries`, rather than derived
-    /// by the answer module.
+    /// by the answer module or read from a recording beside the fixtures.
     pub fn is_recorded(self) -> bool {
-        !matches!(self, Group::Uniques | Group::StateEcho | Group::FixedPoint)
+        !matches!(self, Group::Uniques | Group::StateEcho | Group::FixedPoint | Group::BotDecisions)
     }
 
     pub fn scope(self) -> Scope {

@@ -4,7 +4,6 @@ its spare units (one per gold of deficit, at least one), keeping a unit for each
 spare it keeps them all.
 """
 from = "citar/bots/basic.py:1607-1613 (manage_gold), 1739-1766 (_spare_units)"
-needs = "2-01b"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
