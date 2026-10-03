@@ -1,9 +1,9 @@
 //! The bot's choices against the Python bot's on the committed states (package 2-01b, gate 2;
 //! DESIGN.md P2.3.11): every kind of stage 1 at its floor of 95% over the items where either
 //! engine says something, and every miss with a cause. The values are refcheck's
-//! `bot_decisions` group, which `cargo refcheck run` enforces. A recording edited by hand shows
-//! that a miss is found, and that its cause is named when one of the civilization's values
-//! differs and left unattributed otherwise.
+//! `bot_decisions` group, which `cargo refcheck run` enforces. Recordings edited by hand show
+//! that a miss is found, that items are matched by what names them, and that a miss is put down
+//! to an intended entry only when the entry explains a value that choice weighs.
 //!
 //! Set `CITAR_REFCHECK_CORPUS` to the corpus and `CITAR_BOT_DUMP` to its recording to hold the
 //! corpus to the same floors.
@@ -12,10 +12,12 @@ use std::path::{Path, PathBuf};
 
 use citar_engine::game::Game;
 use citar_engine::rules::Ruleset;
-use citar_refcheck::agreement::{self, Cause, Choice, FLOOR};
+use citar_refcheck::agreement::{self, Cause, Choice, FLOOR, Miss, Tally};
 use citar_refcheck::answer::bot_decisions::recorded;
 use citar_refcheck::fixture::{self, Fixture, FixtureSet};
+use citar_refcheck::intended::Intended;
 use citar_refcheck::ratchet::DEFAULT_FIXTURES;
+use citar_refcheck::run::INTENDED;
 use serde_json::{Value, json};
 
 fn root() -> PathBuf {
@@ -25,6 +27,11 @@ fn root() -> PathBuf {
 fn committed() -> Vec<FixtureSet> {
     let root = root();
     DEFAULT_FIXTURES.iter().map(|d| FixtureSet::new(&root.join(d), &root)).collect()
+}
+
+/// The repository's intended list.
+fn intended() -> Intended {
+    Intended::load(&root().join(INTENDED)).expect("the intended list")
 }
 
 fn holds(sets: &[FixtureSet], what: &str) {
@@ -71,48 +78,195 @@ fn the_bot_chooses_as_pythons_did_on_the_corpus() {
     holds(&[FixtureSet::new(Path::new(&dir), &root())], "the corpus");
 }
 
-/// The recording of the duel at turn 50, and its game loaded as refcheck loads it.
-fn duel_50() -> (Game, Vec<Value>) {
+/// A committed state's recording, and its game loaded as refcheck loads it.
+fn state(name: &str) -> (Game, Vec<Value>) {
     let sets = committed();
     let r = fixture::discover(&sets)
         .expect("the fixtures")
         .into_iter()
-        .find(|r| r.name == "duel-continents-normal/t50")
-        .expect("the duel at turn 50");
+        .find(|r| r.name == name)
+        .unwrap_or_else(|| panic!("no fixture {name}"));
     let f = Fixture::load(&r, &sets).expect("it loads");
     let rows = recorded(&root(), &f.meta.case, f.meta.turn).expect("recorded").to_vec();
     let (g, _) = Game::from_python(Ruleset::shared(), f.state.get().as_bytes()).expect("a game");
     (g, rows)
 }
 
+const DUEL: &str = "duel-continents-normal/t50";
+/// A state of the intended entry `marble-bonus-in-its-own-city`: player 2's potential values of
+/// the four technologies it names differ, as the group's run shows; player 3's do not.
+const MARBLE: &str = "scenario-small-continents-s3001/t61";
+
+/// The misses of one choice.
+fn of(misses: &[Miss], c: Choice) -> Vec<&Miss> {
+    misses.iter().filter(|m| m.choice == c).collect()
+}
+
+fn tally(tallies: &[(Choice, Tally)], c: Choice) -> Tally {
+    tallies.iter().find(|(x, _)| *x == c).map(|(_, t)| *t).unwrap_or_default()
+}
+
+/// The row of player `pid` in `rows`.
+fn row(rows: &mut [Value], pid: u64) -> &mut Value {
+    rows.iter_mut().find(|r| r["player"] == json!(pid)).expect("the player's row")
+}
+
 #[test]
-fn a_choice_that_differs_is_a_miss_with_its_cause() {
-    let (g, rows) = duel_50();
-    let (_, misses) = agreement::compare_state(&g, "duel", &rows);
+fn a_choice_that_differs_is_a_miss_and_a_value_it_does_not_weigh_is_no_cause() {
+    let (g, rows) = state(DUEL);
+    let list = intended();
+    let (_, misses) = agreement::compare_state(&g, DUEL, &rows, &list);
     assert!(misses.is_empty(), "{misses:?}");
-    // Another preferred policy: a miss, and nothing in the values explains it.
+    // Another preferred policy: a miss, and nothing explains it.
     let mut edited = rows.clone();
     edited[0]["empire"]["preferred_policy"] = json!("Honor");
-    let (tallies, misses) = agreement::compare_state(&g, "duel", &edited);
+    let (tallies, misses) = agreement::compare_state(&g, DUEL, &edited, &list);
     assert_eq!(misses.len(), 1, "{misses:?}");
     assert_eq!(misses[0].choice, Choice::PreferredPolicy);
-    assert_eq!(misses[0].python, json!("Honor"));
+    assert_eq!(misses[0].python, Some(json!("Honor")));
     assert_eq!(misses[0].cause, Cause::Unattributed);
-    let t = tallies.iter().find(|(c, _)| *c == Choice::PreferredPolicy).map(|(_, t)| *t);
-    assert_eq!(t.map(|t| (t.considered, t.agree)), Some((2, 1)));
-    // With a value of the same civilization differing too, the miss is put down to it.
+    let t = tally(&tallies, Choice::PreferredPolicy);
+    assert_eq!((t.considered, t.agree), (2, 1));
+    // A value of the same civilization differing too explains nothing: the policy does not
+    // weigh the supply, and no intended entry covers it.
     edited[0]["context"]["supply"] = json!(-7);
-    let (_, misses) = agreement::compare_state(&g, "duel", &edited);
-    let Cause::Named(why) = &misses[0].cause else { panic!("{misses:?}") };
-    assert!(why.contains("context.supply"), "{why}");
+    let (_, misses) = agreement::compare_state(&g, DUEL, &edited, &list);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert_eq!(misses[0].cause, Cause::Unattributed);
+}
+
+#[test]
+fn a_miss_is_put_down_to_an_intended_difference_in_a_value_its_choice_weighs() {
+    let (g, rows) = state(DUEL);
+    // A list that explains, on this state alone, player 0's classic value of Acoustics and its
+    // supply.
+    let list = Intended::parse(&format!(
+        r#"
+[[differences]]
+id = "a-classic-value"
+reason = "a test's"
+where = [{{ group = "bot_decisions", path = "majors[*].tech_values.classic.Acoustics" }}]
+cases = ["{DUEL}"]
+
+[[differences]]
+id = "a-supply"
+reason = "a test's"
+where = [{{ group = "bot_decisions", path = "majors[*].context.supply" }}]
+cases = ["{DUEL}"]
+"#
+    ))
+    .expect("a list");
+    let mut edited = rows.clone();
+    let r = row(&mut edited, 0);
+    let acoustics = r["tech_values"]["classic"]["Acoustics"].as_f64().expect("a value");
+    r["tech_values"]["classic"]["Acoustics"] = json!(acoustics + 5.0);
+    r["context"]["supply"] = json!(-7);
+    r["next_research"]["classic"]["tech"] = json!("Pottery");
+    r["next_research"]["potential"]["tech"] = json!("Pottery");
+    r["empire"]["preferred_policy"] = json!("Honor");
+    let (_, misses) = agreement::compare_state(&g, DUEL, &edited, &list);
+    let research = of(&misses, Choice::NextResearch);
+    assert_eq!(research.len(), 2, "{misses:?}");
+    // The classic path weighs the classic values: the entry explaining one is its cause.
+    let classic = research.iter().find(|m| m.item == "classic").expect("the classic miss");
+    assert_eq!(
+        classic.cause,
+        Cause::Intended {
+            ids: vec!["a-classic-value".to_owned()],
+            places: vec!["majors[player=0].tech_values.classic.Acoustics".to_owned()],
+        }
+    );
+    // The potential path does not weigh it, and the policy weighs neither it nor the supply.
+    let potential = research.iter().find(|m| m.item == "potential").expect("the potential miss");
+    assert_eq!(potential.cause, Cause::Unattributed);
+    assert_eq!(of(&misses, Choice::PreferredPolicy)[0].cause, Cause::Unattributed);
+    // With the repository's list the classic value is a difference nothing explains, so it is
+    // no cause either: the group's own run reports it.
+    let (_, misses) = agreement::compare_state(&g, DUEL, &edited, &intended());
+    assert!(
+        of(&misses, Choice::NextResearch).iter().all(|m| m.cause == Cause::Unattributed),
+        "{misses:?}"
+    );
+}
+
+#[test]
+fn the_marble_entry_explains_its_four_technologies_and_no_other() {
+    let (g, rows) = state(MARBLE);
+    let list = intended();
+    let (_, misses) = agreement::compare_state(&g, MARBLE, &rows, &list);
+    assert!(misses.is_empty(), "{misses:?}");
+    // Player 2's potential path, had it differed: the four values the entry moves explain it.
+    let mut edited = rows.clone();
+    row(&mut edited, 2)["next_research"]["potential"]["tech"] = json!("Pottery");
+    let (_, misses) = agreement::compare_state(&g, MARBLE, &edited, &list);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    let Cause::Intended { ids, places } = &misses[0].cause else { panic!("{misses:?}") };
+    assert_eq!(ids, &["marble-bonus-in-its-own-city".to_owned()]);
+    let mut places = places.clone();
+    places.sort();
+    assert_eq!(
+        places,
+        [
+            "majors[player=2].tech_values.potential.Ecology",
+            "majors[player=2].tech_values.potential.Industrialization",
+            "majors[player=2].tech_values.potential[\"Metal Casting\"]",
+            "majors[player=2].tech_values.potential[\"Nuclear Fission\"]",
+        ]
+    );
+    // Player 3's values agree. Another potential value of its differing would be a pure bot
+    // difference, which the entry does not cover; one of the four would be the entry's.
+    let mut edited = rows.clone();
+    let r = row(&mut edited, 3);
+    r["next_research"]["potential"]["tech"] = json!("Pottery");
+    let math = r["tech_values"]["potential"]["Mathematics"].as_f64().expect("a value");
+    r["tech_values"]["potential"]["Mathematics"] = json!(math + 5.0);
+    let (_, misses) = agreement::compare_state(&g, MARBLE, &edited, &list);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert_eq!(misses[0].cause, Cause::Unattributed);
+    let r = row(&mut edited, 3);
+    let ecology = r["tech_values"]["potential"]["Ecology"].as_f64().expect("a value");
+    r["tech_values"]["potential"]["Ecology"] = json!(ecology + 5.0);
+    let (_, misses) = agreement::compare_state(&g, MARBLE, &edited, &list);
+    let Cause::Intended { ids, places } = &misses[0].cause else { panic!("{misses:?}") };
+    assert_eq!(ids, &["marble-bonus-in-its-own-city".to_owned()]);
+    assert_eq!(places, &["majors[player=3].tech_values.potential.Ecology".to_owned()]);
+}
+
+#[test]
+fn cities_are_matched_by_id_and_one_only_one_engine_names_is_a_miss() {
+    let (g, rows) = state(DUEL);
+    let list = intended();
+    let (before, _) = agreement::compare_state(&g, DUEL, &rows, &list);
+    // In another order, the same cities agree.
+    let mut edited = rows.clone();
+    let cities = edited[0]["cities"].as_array_mut().expect("the cities");
+    assert!(cities.len() >= 2);
+    cities.reverse();
+    let (tallies, misses) = agreement::compare_state(&g, DUEL, &edited, &list);
+    assert!(misses.is_empty(), "{misses:?}");
+    assert_eq!(tally(&tallies, Choice::Danger), tally(&before, Choice::Danger));
+    // A city Python's answer lacks: considered, and a miss, for each per-city kind.
+    let gone = edited[0]["cities"].as_array_mut().expect("the cities").remove(0);
+    let (tallies, misses) = agreement::compare_state(&g, DUEL, &edited, &list);
+    let key = format!("city {}", gone["city"]);
+    for c in [Choice::Danger, Choice::Garrison] {
+        let m = of(&misses, c);
+        assert_eq!(m.len(), 1, "{}: {misses:?}", c.name());
+        assert_eq!((m[0].item.as_str(), m[0].python.as_ref()), (key.as_str(), None));
+        assert!(m[0].rust.is_some());
+        assert_eq!(m[0].cause, Cause::Unattributed);
+        let (t, b) = (tally(&tallies, c), tally(&before, c));
+        assert_eq!(t.asked, b.asked, "{}", c.name());
+        assert_eq!(t.agree + 1, t.considered, "{}", c.name());
+    }
 }
 
 #[test]
 fn an_answer_that_says_nothing_on_both_sides_is_not_counted() {
-    let (g, rows) = duel_50();
-    let (tallies, _) = agreement::compare_state(&g, "duel", &rows);
-    let t = |c: Choice| tallies.iter().find(|(x, _)| *x == c).map(|(_, t)| *t).unwrap_or_default();
+    let (g, rows) = state(DUEL);
+    let (tallies, _) = agreement::compare_state(&g, DUEL, &rows, &intended());
+    let t = tally(&tallies, Choice::FreeNow);
     // Nobody holds a free technology at turn 50: asked of both, considered for neither.
-    assert_eq!((t(Choice::FreeNow).asked, t(Choice::FreeNow).considered), (4, 0));
-    assert_eq!(t(Choice::FreeNow).rate().to_bits(), 1f64.to_bits());
+    assert_eq!((t.asked, t.considered), (4, 0));
+    assert_eq!(t.rate().to_bits(), 1f64.to_bits());
 }

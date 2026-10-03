@@ -7,13 +7,18 @@
 //! and as if it could, which cities it counts in danger or wanting a garrison, its best three
 //! sites, its spare units. A choice counts only on the items where either engine's answer says
 //! something (a choice that is not null, a list that is not empty, a flag that is true), so a
-//! port that never answers cannot pass; `bot_dump.py`'s `CHOICES` named the same items.
+//! port that never answers cannot pass; `bot_dump.py`'s `CHOICES` named the same items. The
+//! items are matched by what names them (a tech mode, a city's id), never by their place in the
+//! answer; an item only one engine names is considered, and is a miss.
 //!
-//! Every choice that differs is attributed to a cause ([`Cause`]): a value the choice weighs that
-//! differs between the engines (the `bot_decisions` group's values of that civilization, each
-//! named, which `refcheck/intended.toml` explains or the group's run reports). A miss no cause
-//! explains is listed as unattributed and fails the command, as does a kind under its floor of
-//! 95%.
+//! Every choice that differs is attributed to a cause ([`Cause`]). The one cause there is today:
+//! an intended engine difference (`refcheck/intended.toml`) moved a value the choice weighs.
+//! Each kind names the recorded values it weighs ([`Choice::weighs`]): the research path its
+//! mode's tech values, a city's danger that city's threat and defence, and so on. A miss is put
+//! down to an entry only when one of those values differs between the engines and the entry
+//! explains that difference on that state; a value the choice does not read, or a difference no
+//! entry explains (which the group's own run reports), explains nothing. A miss with no cause is
+//! listed as unattributed and fails the command, as does a kind under its floor of 95%.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -22,11 +27,13 @@ use citar_bot::decisions::{Question, ask};
 use citar_engine::game::Game;
 use citar_engine::rules::Ruleset;
 use rayon::prelude::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::answer::bot_decisions::{answer_row, player, raised, recorded, values_of};
-use crate::compare::{self, CompareSpec, Options};
+use crate::compare::{self, CompareSpec, Diff, Options, Pattern};
 use crate::fixture::{self, Fixture, FixtureRef, FixtureSet};
+use crate::intended::Intended;
+use crate::run::INTENDED;
 use crate::{Error, Group, Result};
 
 /// The agreement each kind must reach (P2.3.11).
@@ -55,6 +62,16 @@ pub enum Choice {
     Sites,
     /// The spare units, in order.
     Spare,
+}
+
+/// One item a choice is compared on: the name that matches it across the engines (and that the
+/// report prints), the place its own values have in the recording (a tech mode, a city's id),
+/// and the choice.
+#[derive(Clone, Debug)]
+struct Item {
+    key: String,
+    at: Option<String>,
+    choice: Value,
 }
 
 impl Choice {
@@ -110,17 +127,55 @@ impl Choice {
         }
     }
 
-    /// The items one answer of its question holds: a key naming the item, and the choice.
-    fn items(self, answer: &Value) -> Vec<(String, Value)> {
+    /// The places of the `bot_decisions` group (in its paths, `majors[...]` first) whose values
+    /// the choice of the item at `at` weighs: a difference there can explain a miss, a
+    /// difference elsewhere cannot.
+    ///
+    /// - The research path ranks every technology by its mode's tech value for its cost
+    ///   (basic.py:888-909). The context reaches it only through those values, which the
+    ///   recording holds for every technology the path may take, so they are its places.
+    /// - The great person goes by the era (1031-1033).
+    /// - A city's danger compares its threat with its defence (869-871); a garrison is wanted
+    ///   in the exposed cities (865-867); the spare units are the military outside the
+    ///   threatened cities (1739-1766). A city only one engine has is a place of each.
+    /// - The free technology (the most expensive available), the policy, the pantheon and the
+    ///   sites read no value the recording holds: no difference explains their misses.
+    pub fn weighs(self, at: Option<&str>) -> Vec<String> {
+        let city = |field: &str| at.map(|c| format!("majors[*].cities[city={c}]{field}"));
+        let places: Vec<Option<String>> = match self {
+            Self::NextResearch => vec![at.map(|mode| format!("majors[*].tech_values.{mode}.*"))],
+            Self::GreatPerson | Self::PreferredGreatPerson => {
+                vec![Some("majors[*].context.era".to_owned())]
+            }
+            Self::Danger => vec![city(""), city(".threat"), city(".defense")],
+            Self::Garrison => vec![city(""), Some("majors[*].context.exposed.**".to_owned())],
+            Self::Spare => vec![
+                Some("majors[*].context.military.**".to_owned()),
+                Some("majors[*].cities[*]".to_owned()),
+                Some("majors[*].cities[*].threat".to_owned()),
+            ],
+            Self::FreeNow
+            | Self::PreferredFree
+            | Self::Policy
+            | Self::PreferredPolicy
+            | Self::Pantheon
+            | Self::PreferredPantheon
+            | Self::Sites => Vec::new(),
+        };
+        places.into_iter().flatten().collect()
+    }
+
+    /// The items one answer of its question holds.
+    fn items(self, answer: &Value) -> Vec<Item> {
+        let one = |choice: Value| vec![Item { key: String::new(), at: None, choice }];
         let at = |k: &str| answer.get(k).cloned().unwrap_or(Value::Null);
         let modes = |key: &str| {
             ["classic", "potential"]
                 .iter()
-                .map(|m| {
-                    (
-                        (*m).to_owned(),
-                        answer.get(*m).and_then(|x| x.get(key)).cloned().unwrap_or(Value::Null),
-                    )
+                .map(|&m| Item {
+                    key: m.to_owned(),
+                    at: Some(m.to_owned()),
+                    choice: answer.get(m).and_then(|x| x.get(key)).cloned().unwrap_or(Value::Null),
                 })
                 .collect()
         };
@@ -129,32 +184,53 @@ impl Choice {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|c| {
-                    (format!("city {}", c["city"]), c.get(key).cloned().unwrap_or(Value::Null))
+                .map(|c| Item {
+                    key: format!("city {}", c["city"]),
+                    at: Some(c["city"].to_string()),
+                    choice: c.get(key).cloned().unwrap_or(Value::Null),
                 })
                 .collect()
         };
         match self {
             Self::NextResearch => modes("tech"),
             Self::FreeNow => modes("free"),
-            Self::PreferredFree => vec![(String::new(), at("preferred_free"))],
-            Self::Policy => vec![(String::new(), at("policy"))],
-            Self::PreferredPolicy => vec![(String::new(), at("preferred_policy"))],
-            Self::GreatPerson => vec![(String::new(), at("great_person"))],
-            Self::PreferredGreatPerson => vec![(String::new(), at("preferred_great_person"))],
-            Self::Pantheon => vec![(String::new(), at("pantheon"))],
-            Self::PreferredPantheon => vec![(String::new(), at("preferred_pantheon"))],
+            Self::PreferredFree => one(at("preferred_free")),
+            Self::Policy => one(at("policy")),
+            Self::PreferredPolicy => one(at("preferred_policy")),
+            Self::GreatPerson => one(at("great_person")),
+            Self::PreferredGreatPerson => one(at("preferred_great_person")),
+            Self::Pantheon => one(at("pantheon")),
+            Self::PreferredPantheon => one(at("preferred_pantheon")),
             Self::Danger => cities("danger"),
             Self::Garrison => cities("garrison"),
             Self::Sites => {
                 let mut top: Vec<Value> =
                     answer.as_array().into_iter().flatten().take(3).cloned().collect();
                 top.sort_by_key(Value::to_string);
-                vec![(String::new(), Value::Array(top))]
+                one(Value::Array(top))
             }
-            Self::Spare => vec![(String::new(), answer.clone())],
+            Self::Spare => one(answer.clone()),
         }
     }
+}
+
+/// The items of both answers matched by their names: Python's in its order, then those only
+/// Rust names. An engine that does not name an item has `None` there.
+fn paired(python: Vec<Item>, rust: Vec<Item>) -> Vec<(Item, Option<Value>, Option<Value>)> {
+    let mut rust: BTreeMap<String, Item> = rust.into_iter().map(|i| (i.key.clone(), i)).collect();
+    let mut out: Vec<(Item, Option<Value>, Option<Value>)> = python
+        .into_iter()
+        .map(|p| {
+            let r = rust.remove(&p.key).map(|r| r.choice);
+            let choice = p.choice.clone();
+            (p, Some(choice), r)
+        })
+        .collect();
+    out.extend(rust.into_values().map(|r| {
+        let choice = r.choice.clone();
+        (r, None, Some(choice))
+    }));
+    out
 }
 
 /// Whether an item's answer says something: a choice that is not null, a list that is not
@@ -168,12 +244,34 @@ fn says(v: &Value) -> bool {
 /// Why a choice differs.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Cause {
-    /// Values the civilization's choices weigh differ between the engines: the `bot_decisions`
-    /// group's places that differ, named (an intended engine difference explains them, or the
-    /// group's run reports them).
-    Named(String),
+    /// Intended engine differences moved values the choice weighs: the entries of
+    /// `refcheck/intended.toml` that explain them on this state, and the places that differ.
+    Intended { ids: Vec<String>, places: Vec<String> },
     /// Nothing explains it.
     Unattributed,
+}
+
+impl Cause {
+    /// The cause without its places, as the report counts misses by it.
+    pub fn name(&self) -> String {
+        match self {
+            Cause::Intended { ids, .. } => format!("intended {}", ids.join(", ")),
+            Cause::Unattributed => "UNATTRIBUTED".to_owned(),
+        }
+    }
+
+    /// The cause with the first places it moved.
+    pub fn text(&self) -> String {
+        match self {
+            Cause::Intended { places, .. } => {
+                let shown: Vec<&str> = places.iter().take(3).map(String::as_str).collect();
+                let more = places.len().saturating_sub(shown.len());
+                let tail = if more > 0 { format!(" and {more} more") } else { String::new() };
+                format!("{}: {}{tail}", self.name(), shown.join(", "))
+            }
+            Cause::Unattributed => self.name(),
+        }
+    }
 }
 
 /// One choice that differs.
@@ -183,8 +281,9 @@ pub struct Miss {
     pub player: u8,
     pub choice: Choice,
     pub item: String,
-    pub python: Value,
-    pub rust: Value,
+    /// Each engine's choice, `None` when it does not name the item.
+    pub python: Option<Value>,
+    pub rust: Option<Value>,
     pub cause: Cause,
 }
 
@@ -254,15 +353,17 @@ impl Agreement {
                 t.asked
             ));
         }
-        let mut causes: BTreeMap<&Cause, u64> = BTreeMap::new();
+        let mut causes: BTreeMap<String, u64> = BTreeMap::new();
         for m in &self.misses {
-            *causes.entry(&m.cause).or_default() += 1;
+            *causes.entry(m.cause.name()).or_default() += 1;
         }
         out.push_str(&format!("misses: {}\n", self.misses.len()));
         for (c, n) in &causes {
-            out.push_str(&format!("  {n:>5}  {}\n", c.text()));
+            out.push_str(&format!("  {n:>5}  {c}\n"));
         }
         let shown = if misses == 0 { self.misses.len() } else { misses };
+        let side =
+            |v: &Option<Value>| v.as_ref().map_or_else(|| "(none)".to_owned(), Value::to_string);
         for m in self.misses.iter().take(shown) {
             out.push_str(&format!(
                 "  {} player {} {} {}: python {} rust {} ({})\n",
@@ -270,8 +371,8 @@ impl Agreement {
                 m.player,
                 m.choice.name(),
                 m.item,
-                m.python,
-                m.rust,
+                side(&m.python),
+                side(&m.rust),
                 m.cause.text()
             ));
         }
@@ -282,31 +383,23 @@ impl Agreement {
     }
 }
 
-impl Cause {
-    /// How the report names it.
-    pub fn text(&self) -> &str {
-        match self {
-            Cause::Named(s) => s,
-            Cause::Unattributed => "UNATTRIBUTED",
-        }
-    }
-}
-
 /// The agreement of the Rust bot with the recording on the fixtures of `sets` that `keep`
-/// selects.
+/// selects, misses explained by `root`'s intended list.
 ///
 /// # Errors
-/// A fixture folder that cannot be read.
+/// A fixture folder that cannot be read, or an intended list that does not load.
 pub fn run(
     root: &Path,
     sets: &[FixtureSet],
     keep: impl Fn(&FixtureRef) -> bool + Sync,
 ) -> Result<Agreement> {
+    let intended = Intended::load(&root.join(INTENDED))?;
     let refs: Vec<FixtureRef> = fixture::discover(sets)?.into_iter().filter(|r| keep(r)).collect();
     if refs.is_empty() {
         return Err(Error::new("no fixture matches"));
     }
-    let per: Vec<StateResult> = refs.par_iter().map(|r| one_state(root, r, sets)).collect();
+    let per: Vec<StateResult> =
+        refs.par_iter().map(|r| one_state(root, r, sets, &intended)).collect();
     let mut out = Agreement::default();
     for p in per {
         match p {
@@ -333,34 +426,44 @@ pub fn run(
 type StateResult = std::result::Result<(usize, Vec<(Choice, Tally)>, Vec<Miss>), String>;
 
 /// One state: every major's choices against the recording.
-fn one_state(root: &Path, r: &FixtureRef, sets: &[FixtureSet]) -> StateResult {
+fn one_state(root: &Path, r: &FixtureRef, sets: &[FixtureSet], intended: &Intended) -> StateResult {
     let f = Fixture::load(r, sets).map_err(|e| format!("{}: {e}", r.name))?;
     let rows = recorded(root, &f.meta.case, f.meta.turn).map_err(|e| format!("{}: {e}", r.name))?;
     let (g, _) = Game::from_python(Ruleset::shared(), f.state.get().as_bytes())
         .map_err(|e| format!("{}: does not load: {e}", r.name))?;
-    let (tallies, misses) = compare_state(&g, &r.name, &rows);
+    let (tallies, misses) = compare_state(&g, &r.name, &rows, intended);
     Ok((rows.len(), tallies, misses))
 }
 
-/// The choices of the majors recorded in `rows` on game `g` (state `state`), each against the
-/// Rust bot's: the tallies by kind, and the misses with their causes.
+/// The choices of the majors recorded in `rows` on game `g` (fixture `state`, as the intended
+/// list's `cases` name it), each against the Rust bot's: the tallies by kind, and the misses
+/// with their causes, explained by `intended`.
 #[must_use]
-pub fn compare_state(g: &Game, state: &str, rows: &[Value]) -> (Vec<(Choice, Tally)>, Vec<Miss>) {
+pub fn compare_state(
+    g: &Game,
+    state: &str,
+    rows: &[Value],
+    intended: &Intended,
+) -> (Vec<(Choice, Tally)>, Vec<Miss>) {
+    let scoped = intended.scoped(Group::BotDecisions, state);
     let mut tallies: BTreeMap<Choice, Tally> = BTreeMap::new();
     let mut misses = Vec::new();
     for row in rows {
         let Some(pid) = player(row) else { continue };
         let mut answers: BTreeMap<Question, Value> = BTreeMap::new();
-        let mut cause: Option<Cause> = None;
+        // The civilization's explained value differences, worked out at its first miss.
+        let mut explained: Option<Vec<(Diff, String)>> = None;
         for c in Choice::ALL {
             let q = c.question();
             let Some(py) = row.get(q.name()).filter(|v| !raised(v)) else { continue };
-            let rust = answers.entry(q).or_insert_with(|| ask(g, pid, q)).clone();
-            let (pi, ri) = (c.items(py), c.items(&rust));
+            let rust = answers.entry(q).or_insert_with(|| ask(g, pid, q));
             let t = tallies.entry(c).or_default();
-            for ((key, p), (_, x)) in pi.iter().zip(&ri) {
+            for (item, p, x) in paired(c.items(py), c.items(rust)) {
                 t.asked += 1;
-                if !(says(p) || says(x)) {
+                // An item counts when either engine says something about it, or only one names
+                // it at all.
+                let silent = |v: &Option<Value>| v.as_ref().is_some_and(|v| !says(v));
+                if silent(&p) && silent(&x) {
                     continue;
                 }
                 t.considered += 1;
@@ -368,15 +471,16 @@ pub fn compare_state(g: &Game, state: &str, rows: &[Value]) -> (Vec<(Choice, Tal
                     t.agree += 1;
                     continue;
                 }
-                let cause = cause.get_or_insert_with(|| values_differ(g, row)).clone();
+                let diffs =
+                    explained.get_or_insert_with(|| explained_values(g, row, &scoped, intended));
                 misses.push(Miss {
                     state: state.to_owned(),
                     player: pid.0,
                     choice: c,
-                    item: key.clone(),
-                    python: p.clone(),
-                    rust: x.clone(),
-                    cause,
+                    item: item.key.clone(),
+                    python: p,
+                    rust: x,
+                    cause: cause(diffs, &c.weighs(item.at.as_deref())),
                 });
             }
         }
@@ -384,19 +488,125 @@ pub fn compare_state(g: &Game, state: &str, rows: &[Value]) -> (Vec<(Choice, Tal
     (tallies.into_iter().collect(), misses)
 }
 
-/// What explains a civilization's misses: the values of its `bot_decisions` answers (its turn's
-/// context, its tech values, its cities' threats and defences) that differ between the engines.
-fn values_differ(g: &Game, row: &Value) -> Cause {
-    let python = values_of(row);
-    let Ok(rust) = answer_row(g, row) else { return Cause::Unattributed };
+/// The differences between the engines' `bot_decisions` values of one civilization (its turn's
+/// context, its tech values, its cities' threats and defences) that an intended entry explains
+/// on this state, each with the entry's id. Paths are the group's own (`majors[player=N]...`),
+/// so the entries' places match them as the group's run matches them.
+fn explained_values(
+    g: &Game,
+    row: &Value,
+    scoped: &crate::intended::Scoped<'_>,
+    intended: &Intended,
+) -> Vec<(Diff, String)> {
+    let Ok(rust) = answer_row(g, row) else { return Vec::new() };
     let spec = CompareSpec::for_group(Group::BotDecisions);
-    let diffs = compare::compare(&spec, &python, &rust, &Options { with_bot: false, grid: None });
-    if diffs.is_empty() {
-        return Cause::Unattributed;
+    let python = json!({ "majors": [values_of(row)] });
+    let rust = json!({ "majors": [rust] });
+    compare::compare(&spec, &python, &rust, &Options { with_bot: false, grid: None })
+        .into_iter()
+        .filter(|d| !d.kind.is_accepted())
+        .filter_map(|d| {
+            let by = scoped.explain(&d).by.first().copied()?;
+            Some((d, intended.entries()[by].id.clone()))
+        })
+        .collect()
+}
+
+/// What explains a miss whose choice weighs the places `weighs`: the explained differences at
+/// those places, else nothing.
+fn cause(explained: &[(Diff, String)], weighs: &[String]) -> Cause {
+    let places: Vec<Pattern> = weighs.iter().filter_map(|w| Pattern::parse(w).ok()).collect();
+    let mut ids: Vec<String> = Vec::new();
+    let mut at: Vec<String> = Vec::new();
+    for (d, id) in explained {
+        if !places.iter().any(|p| p.matches(&d.path)) {
+            continue;
+        }
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+        at.push(d.path.to_string());
     }
-    let mut places: Vec<String> = diffs.iter().map(|d| d.path.to_string()).collect();
-    places.truncate(3);
-    let more = diffs.len().saturating_sub(places.len());
-    let tail = if more > 0 { format!(" and {more} more") } else { String::new() };
-    Cause::Named(format!("bot_decisions values differ: {}{tail}", places.join(", ")))
+    if ids.is_empty() { Cause::Unattributed } else { Cause::Intended { ids, places: at } }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_place_a_choice_weighs_is_a_pattern() {
+        for c in Choice::ALL {
+            for at in [None, Some("classic"), Some("7")] {
+                for w in c.weighs(at) {
+                    assert!(Pattern::parse(&w).is_ok(), "{}: {w}", c.name());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn items_are_paired_by_name_not_by_place() {
+        let python = json!([{"city": 3, "danger": true}, {"city": 5, "danger": false}]);
+        let rust = json!([{"city": 5, "danger": false}, {"city": 3, "danger": true},
+                          {"city": 9, "danger": false}]);
+        let pairs = paired(Choice::Danger.items(&python), Choice::Danger.items(&rust));
+        let got: Vec<(String, Option<Value>, Option<Value>)> =
+            pairs.into_iter().map(|(i, p, r)| (i.key, p, r)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("city 3".to_owned(), Some(json!(true)), Some(json!(true))),
+                ("city 5".to_owned(), Some(json!(false)), Some(json!(false))),
+                ("city 9".to_owned(), None, Some(json!(false))),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_report_counts_misses_by_cause_and_names_the_places() {
+        let miss = |item: &str, python: Option<Value>, cause: Cause| Miss {
+            state: "s/t1".to_owned(),
+            player: 2,
+            choice: Choice::NextResearch,
+            item: item.to_owned(),
+            python,
+            rust: Some(json!("Mathematics")),
+            cause,
+        };
+        let places: Vec<String> = (0..5).map(|i| format!("majors[player=2].x{i}")).collect();
+        let found = Agreement {
+            states: 1,
+            civilizations: 1,
+            tallies: BTreeMap::from([(
+                Choice::NextResearch,
+                Tally { asked: 2, considered: 2, agree: 0 },
+            )]),
+            misses: vec![
+                miss("classic", None, Cause::Unattributed),
+                miss(
+                    "potential",
+                    Some(json!("Pottery")),
+                    Cause::Intended { ids: vec!["an-entry".to_owned()], places },
+                ),
+            ],
+            skipped: Vec::new(),
+        };
+        assert!(!found.holds());
+        let text = found.report(0);
+        assert!(text.contains("BELOW THE FLOOR"), "{text}");
+        assert!(text.contains("      1  UNATTRIBUTED\n"), "{text}");
+        assert!(text.contains("      1  intended an-entry\n"), "{text}");
+        assert!(
+            text.contains("classic: python (none) rust \"Mathematics\" (UNATTRIBUTED)"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "potential: python \"Pottery\" rust \"Mathematics\" (intended an-entry: \
+                 majors[player=2].x0, majors[player=2].x1, majors[player=2].x2 and 2 more)"
+            ),
+            "{text}"
+        );
+    }
 }

@@ -322,12 +322,20 @@ The group `bot_decisions` reads the recording beside the fixtures, the committed
 `CITAR_BOT_DUMP`'s (or `refcheck/corpus/bot_decisions.json.gz`); a state neither holds is a failed answer. It
 compares each living major's `context`, both modes' `tech_values`, and each city's threat and defence of
 `cities`, with the Rust answers of `citar_bot::decisions` (the same bot: `basic-1`, `tech_noise` 0, aggression
-0.4, a fresh memory). Its intended differences are the engine's: the `potential` tech values weigh a
-building's production percentage by the empire's production, which `marble-bonus-in-its-own-city` moves.
+0.4, a fresh memory). Its intended differences are the engine's: the `potential` tech values of the four
+technologies whose buildings add a production percentage (Metal Casting, Industrialization, Ecology,
+Nuclear Fission) weigh it by the empire's production, which `marble-bonus-in-its-own-city` moves; that entry
+names those four places and no other tech value.
 `bot-agreement` prints each kind's agreement over the items either engine says something about, and exits 1
-when a kind is under 95% or a miss has no cause; a miss's cause is the civilization's `bot_decisions` values
-that differ, named. At package 2-01b every stage-1 kind agrees on every item considered, on the committed
-states and on the corpus (zero misses), and the group has no unexplained difference on either.
+when a kind is under 95% or a miss has no cause. Items are matched by what names them (a tech mode, a city's
+id); a city only one engine lists is considered, and is a miss. A miss's cause is an intended entry: one
+that explains, on that state, a difference in a value the choice weighs (the research path its mode's tech
+values; a city's danger that city's threat and defence; its garrison the exposed cities; the spare units
+the military and the cities' threats; the great person the era). The free technology, the policy, the
+pantheon and the sites weigh no recorded value, so nothing explains their misses; nor does a difference no
+entry explains, which the group's own run reports. At package 2-01b every stage-1 kind agrees on every item
+considered, on the committed states and on the corpus (zero misses), and the group has no unexplained
+difference on either.
 
 ## The statistical baseline
 
