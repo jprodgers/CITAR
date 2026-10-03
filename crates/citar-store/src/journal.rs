@@ -28,14 +28,23 @@
 //!   was damaged, which is corruption. A file shorter than the 10-byte header that is the start
 //!   of one (a crash while it was created) is a fresh journal.
 //! - A **complete record that fails its hash, breaks the sequence, or has an unknown kind or
-//!   codec** is corruption (bit rot, a sync conflict). `open` then truncates nothing and refuses
-//!   to append; [`Recovered`] says where the good prefix ends, from which the session forks.
+//!   codec** is corruption (bit rot, a sync conflict), and so is a head that claims more than
+//!   [`MAX_CHUNK`] bytes or a zero head followed by anything but zeros: no writer makes those.
+//!   `open` then truncates nothing and refuses to append; [`Recovered`] says where the good
+//!   prefix ends, from which the session forks.
 //!
 //! [`JournalWriter::append`] refuses a sequence number that is not the next, so records are
 //! exactly the engine's chunks 0, 1, 2, ...; a `PermissionDenied` is tried again as a
 //! container's rename is, and a failed append leaves the file as it was before it. A container
 //! names its journal by [`JournalRef`]; [`read_upto`] reads exactly that prefix and refuses one
 //! whose last record does not hash to its head. [`fork`] copies a prefix to a new file.
+//! [`JournalWriter::truncate_to`] drops the records past one of its own prefixes, for a session
+//! that continues the timeline from an older save (DESIGN.md P2.5.3).
+//!
+//! **Where it differs from DESIGN.md P2.5.2.** The design hashed the payload alone. The hash
+//! here also covers the head's seq, kind and codec, so a damaged codec byte (which would make
+//! a raw chunk read as zstd) is found at open like any other byte, and it is chained, so a head
+//! names a whole history and not only its last chunk. The format is otherwise the design's.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -179,10 +188,7 @@ impl JournalWriter {
     /// [`StoreError::Locked`] when another writer holds the file; [`StoreError::Format`] when it
     /// is not a journal of this version; [`StoreError::Io`] when the file system refuses.
     pub fn open(path: &Path) -> Result<(Self, Recovered), StoreError> {
-        Self::open_with(path, Retry::DEFAULT)
-    }
-
-    pub(crate) fn open_with(path: &Path, retry: Retry) -> Result<(Self, Recovered), StoreError> {
+        let retry = Retry::DEFAULT;
         let io = |e| io_err(path, e);
         let mut file = disk::retry(retry, || {
             OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)

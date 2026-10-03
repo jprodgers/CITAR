@@ -226,16 +226,6 @@ pub fn write_container(
     header: &Header,
     body: &BodyParts<'_>,
 ) -> Result<(), StoreError> {
-    write_with(path, header, body, Retry::DEFAULT)
-}
-
-/// [`write_container`] under another retry policy.
-pub(crate) fn write_with(
-    path: &Path,
-    header: &Header,
-    body: &BodyParts<'_>,
-    policy: Retry,
-) -> Result<(), StoreError> {
     let invalid = |why: String| StoreError::Invalid { path: path.to_owned(), why };
     if header.format != FORMAT || header.version != VERSION {
         return Err(invalid(format!(
@@ -279,7 +269,7 @@ pub(crate) fn write_with(
         OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| io_err(path, e))?;
     let cleanup = Cleanup::new(&tmp);
     write_file(file, &head, head_len, &pieces, total).map_err(|e| io_err(path, e))?;
-    disk::retry(policy, || std::fs::rename(&tmp, path)).map_err(|e| io_err(path, e))?;
+    disk::retry(Retry::DEFAULT, || std::fs::rename(&tmp, path)).map_err(|e| io_err(path, e))?;
     cleanup.keep();
     disk::sync_parent(path);
     Ok(())

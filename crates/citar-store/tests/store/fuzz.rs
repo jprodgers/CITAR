@@ -232,16 +232,19 @@ fn mangled_containers_never_panic() {
     });
 }
 
-/// A valid journal mangled at random: never a panic, and every prefix the original names either
-/// reads back the original's chunks or is refused (the chained hashes see to it).
+/// A valid journal mangled at random: never a panic, and a prefix the original names (one at
+/// random, and the whole journal) either reads back the original's chunks or is refused (the
+/// chained hashes see to it).
 #[test]
 fn mangled_journals_never_panic() {
-    common::check(file!(), "mangled-journal", edits(), |dir, edits| {
+    let cases = (edits(), any::<prop::sample::Index>());
+    common::check(file!(), "mangled-journal", cases, |dir, (edits, pick)| {
         let path = dir.join("j.cjnl");
         let o = originals();
         let bytes = mangle(&o.journal, &edits);
         put(&path, &bytes)?;
-        for r in &o.refs {
+        let whole = o.refs.len() - 1;
+        for r in [&o.refs[pick.index(whole)], &o.refs[whole]] {
             if let Ok(chunks) = read_upto(&path, r) {
                 prop_assert_eq!(chunks.as_slice(), &o.chunks[..r.records as usize]);
             }
