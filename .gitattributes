@@ -68,3 +68,4 @@ citar/bots/frozen_*.py linguist-generated=true
 wiki/* linguist-generated=true
 Cargo.lock linguist-generated=true
 crates/citar-engine/src/unique/gen.rs linguist-generated=true
+crates/citar-bot/src/params/gen.rs linguist-generated=true

@@ -4,7 +4,9 @@
 //! file the checks read but the filters miss can break a rule unseen: until 2-06b's fix round
 //! `pyproject.toml` was such a file, and a pull request could have listed `legacy` in its maturin
 //! features without any check running. Every file the checks read must therefore be matched by
-//! the filter of each event that has one (an event without `paths` runs on every change).
+//! the filter of each event that has one (an event without `paths` runs on every change). So
+//! must the files of [`TEST_READS`], which rust.yml's tests read from outside the trees its
+//! filters already take whole.
 //!
 //! The workflow is read as text, not as YAML: the `on:` block's events at two spaces, their
 //! `paths:` at four and the patterns at six, as rust.yml writes them. A pattern is GitHub's glob,
@@ -20,6 +22,13 @@ const CHECK: &str = "triggers";
 
 /// The workflow that runs `cargo xtask check`.
 pub const WORKFLOW: &str = ".github/workflows/rust.yml";
+
+/// Data files a Rust test reads from outside the trees rust.yml's filters take whole (`crates/`,
+/// `tests/rules/`, `refcheck/`, `citar/data/`), which another tool rewrites on its own:
+/// citar-testkit's bot params test holds `clean()` to 2-00b's clean-params table, and
+/// `python -m tests.test_bot_params --record` re-records it after a change to Python's profiles.
+/// A change to one alone must run the tests.
+pub const TEST_READS: &[&str] = &["tests/data/clean_params_cases.json"];
 
 pub fn check(root: &Path, reads: &[String]) -> Result<Vec<Finding>, String> {
     let path = root.join(WORKFLOW);
@@ -41,7 +50,7 @@ pub fn check_text(text: &str, reads: &[String]) -> Vec<Finding> {
             if !patterns.iter().any(|p| glob_matches(p, file)) {
                 out.push(say(format!(
                     "the `{event}` paths filter does not match `{file}`, which cargo xtask check \
-                     reads, so a change to it alone would never run the checks: add it"
+                     or a test reads, so a change to it alone would never run them: add it"
                 )));
             }
         }
@@ -224,17 +233,24 @@ concurrency:
         let reads = super::super::reads(&super::super::metadata::Metadata::load(&root).unwrap());
         assert!(reads.contains(&"pyproject.toml".to_owned()), "{reads:?}");
         assert!(reads.contains(&"crates/citar-py/Cargo.toml".to_owned()), "{reads:?}");
+        for file in TEST_READS {
+            assert!(reads.contains(&(*file).to_owned()), "{file}: {reads:?}");
+            assert!(root.join(file).is_file(), "{file} is gone: take it out of TEST_READS");
+        }
         let found = check(&root, &reads).unwrap();
         assert!(found.is_empty(), "{found:?}");
-        // The check can fail on the real file: without its pyproject.toml lines, both events miss it.
+        // The check can fail on the real file: without its lines for a file the checks read, or
+        // for one a test reads, both events miss it.
         let text = std::fs::read_to_string(root.join(WORKFLOW)).unwrap();
-        let without: String = text
-            .lines()
-            .filter(|l| !l.contains("\"pyproject.toml\""))
-            .map(|l| format!("{l}\n"))
-            .collect();
-        let found = check_text(&without, &reads);
-        assert_eq!(found.len(), 2, "{found:?}");
-        assert!(found.iter().all(|f| f.message.contains("`pyproject.toml`")), "{found:?}");
+        for file in ["pyproject.toml", TEST_READS[0]] {
+            let without: String = text
+                .lines()
+                .filter(|l| !l.contains(&format!("\"{file}\"")))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            let found = check_text(&without, &reads);
+            assert_eq!(found.len(), 2, "{found:?}");
+            assert!(found.iter().all(|f| f.message.contains(&format!("`{file}`"))), "{found:?}");
+        }
     }
 }

@@ -3,7 +3,6 @@ The idle bot founds its capital with its settler, moves nothing else, and reject
 put to it, whatever is on the table.
 """
 from = "citar/bots/idle.py"
-needs = "2-01a"
 
 [[step]]
 ops = [

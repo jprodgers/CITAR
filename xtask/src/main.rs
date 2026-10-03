@@ -28,7 +28,7 @@ commands:
            unique_supported.toml (exit 0 written, 2 could not)
   gen-params
            write crates/citar-bot/src/params/gen.rs from crates/citar-bot/params/basic-1.json
-           (exit 0 written, 2 could not; the generator comes with package 2-01a)
+           (exit 0 written, 2 could not)
   develop [--release] [--venv DIR]
            build citar._engine (ci profile and test-ops, or the release profile) into
            $CARGO_TARGET_DIR/citar-ext for this worktree's venv, outside the checkout

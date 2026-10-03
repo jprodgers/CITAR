@@ -1,7 +1,8 @@
 //! The bot skeleton of package 2-00a: a `Bot` drives seats through `Game::drive` and answers
-//! through `Game::answer`, playing every version as the idle bot (it founds its capital and
-//! rejects every negotiation), counting what it took and had refused, and leaving to the host a
-//! negotiation its seat's model owns.
+//! through `Game::answer`, counting what it took and had refused, and leaving to the host a
+//! negotiation its seat's model owns. Both versions found their capital (basic-1's units phase as
+//! the idle bot does until package 2-01b ports its settlers) and reject what they are offered
+//! (basic-1 with Python's own lines until 2-05 ports its answers).
 
 use std::sync::Arc;
 

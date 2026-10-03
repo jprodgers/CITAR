@@ -56,9 +56,21 @@ impl Owners {
     /// none named (`set_diplomacy`, basic.py:709-723).
     ///
     /// # Errors
-    /// Not an object; an unknown category; an owner that is neither `bot` nor `llm`. The
-    /// messages are Python's.
+    /// As [`set`](Self::set).
     pub fn from_json(v: &Value) -> Result<Self, OwnersError> {
+        let mut out = Self::ALL_BOT;
+        out.set(v)?;
+        Ok(out)
+    }
+
+    /// Says who decides each category, as `set_diplomacy` did (basic.py:709-723): every category
+    /// `v` names goes to its owner, and every other to the bot. `null` names none.
+    ///
+    /// # Errors
+    /// Not an object; an unknown category; an owner that is neither `bot` nor `llm`. The
+    /// messages are Python's, naming every unknown category, then every bad owner, at once. A
+    /// refusal changes nothing.
+    pub fn set(&mut self, v: &Value) -> Result<(), OwnersError> {
         let empty = Map::new();
         let map = match v {
             Value::Null => &empty,
@@ -91,20 +103,23 @@ impl Owners {
                 bad.join(", ")
             )));
         }
-        let mut out = Self::ALL_BOT;
+        let mut next = Self::ALL_BOT;
         for (k, o) in map {
             if let (Some(c), Some(o)) =
                 (Category::from_name(k), o.as_str().and_then(Owner::from_name))
             {
-                out.set(c, o);
+                next.0[slot(c)] = o;
             }
         }
-        Ok(out)
+        *self = next;
+        Ok(())
     }
 
-    /// Hands category `c` to `owner`.
-    pub fn set(&mut self, c: Category, owner: Owner) {
+    /// These owners with category `c` handed to `owner`.
+    #[must_use]
+    pub fn with(mut self, c: Category, owner: Owner) -> Self {
         self.0[slot(c)] = owner;
+        self
     }
 
     /// Who decides category `c`.
