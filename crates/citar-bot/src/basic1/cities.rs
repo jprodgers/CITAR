@@ -3,7 +3,7 @@
 //! empire is unhappy, and every city's free shot.
 //!
 //! Production is the advisor's (`game::advisor`, DESIGN.md P2.3.7), asked with what the bot
-//! remembers ([`super::facts`]): one `Advisor` for the turn's cities, told what each started so
+//! remembers ([`super::advisor`]): one `Advisor` for the turn's cities, told what each started so
 //! the next sees it, as `manage_cities` counted them. The advisor reads only, so the bot keeps
 //! its own records: the turn a city queued a work boat (`memory.boat_turns`), and the waiting
 //! settler's escort, cleared once the city it waits in picks a military unit (Python's

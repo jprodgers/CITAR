@@ -3,7 +3,7 @@
 //!
 //! [`play_turn`] is `BasicBot.play_turn` (basic.py:740-757): the phases of a turn in Python's
 //! order. Package 2-01b ports the economy:
-//! - [`context`]: the facts a turn's decisions share (777-871);
+//! - [`context`](mod@context): the facts a turn's decisions share (777-871);
 //! - [`research`]: research and the tech values, in both modes (876-998);
 //! - [`empire`]: policies, a free great person, the pantheon (1003-1041);
 //! - [`cities`]: production through the engine's advisor, focus, growth, city bombardment

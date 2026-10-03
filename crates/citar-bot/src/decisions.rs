@@ -130,7 +130,7 @@ fn with_seat<T>(
 pub fn ask(g: &Game, pid: PlayerId, q: Question) -> Value {
     let [plain, classic, potential] = specs();
     match q {
-        Question::Context => with_seat(g, pid, plain, |s, ctx| context_json(g, s, ctx)),
+        Question::Context => with_seat(g, pid, plain, |_, ctx| context_json(g, ctx)),
         Question::TechValues => {
             let values = |spec: &BotSpec| {
                 with_seat(g, pid, spec, |s, ctx| {
@@ -213,8 +213,7 @@ pub fn ask(g: &Game, pid: PlayerId, q: Question) -> Value {
 }
 
 /// The context as the recording wrote it.
-fn context_json(g: &Game, s: &Seat<'_>, ctx: &Context) -> Value {
-    let _ = s;
+fn context_json(g: &Game, ctx: &Context) -> Value {
     let sorted = |mut v: Vec<u32>| {
         v.sort();
         v
