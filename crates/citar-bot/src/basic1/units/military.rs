@@ -11,7 +11,8 @@
 //! - at war, follows the war plan ([`war_target`]): gathers at the rally point, then advances on
 //!   the target city, ranged units and a siege that is ready closing in, melee units otherwise
 //!   standing off `melee_standoff` tiles;
-//! - while a war is prepared, gathers at its rally point (`memory.war_prep`, package 2-05);
+//! - while a war is prepared, gathers at its rally point (`memory.war_prep`, which
+//!   `diplomacy::war` keeps);
 //! - clears a barbarian camp near the seat's cities, walks to ancient ruins near it;
 //! - after `seek_after_turn`, explores to find a rival's city when none is known and no other
 //!   unit of the army explores;

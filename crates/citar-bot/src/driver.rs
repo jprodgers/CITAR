@@ -10,7 +10,8 @@
 //! A `basic-1` seat's turn decodes the seat's memory, prunes it, plays the phases in Python's
 //! order (`basic1::play_turn`) and keeps what it then remembers; a seat that has remembered
 //! nothing yet is left without memory, so a seat's save carries none until there is something
-//! to keep. An answer decodes the memory too (2-05's valuation reads war plans) and keeps it.
+//! to keep. An answer decodes the memory too (a deal's worth reads the war the seat plans or
+//! prepares) and keeps it.
 //! The idle bot keeps none.
 
 use std::sync::Arc;

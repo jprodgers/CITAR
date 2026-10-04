@@ -271,7 +271,13 @@ removed its own: both runners play `bot_selftest.toml`, `bot_idle_rejects.toml` 
 steps, kept apart from `_selftest.toml`. Package 2-01b (the economy) removed its nine: both runners play
 `bot_research_beeline`, `bot_policies_finish_branches`, `bot_buys_defender_in_danger`,
 `bot_disbands_in_deficit`, `bot_settler_founds_at_site`, `bot_faith_buildings_first`, `bot_scouts_explore`,
-`bot_workers_automate` and `bot_pantheon_by_preference`.
+`bot_workers_automate` and `bot_pantheon_by_preference`. Package 2-03 (units and fighting) removed its six
+(`bot_settler_waits_for_escort`, `bot_garrison_fortifies`, `bot_holds_losing_attack`,
+`bot_ranged_siege_first`, `bot_great_person_used`, `bot_spaceship_part_to_capital`), and package 2-05
+(diplomacy), the last, its eleven: the six `bot_switch_*` scripts, `bot_counter_merges_gold`,
+`bot_counter_capped_by_treasury`, `bot_counter_rounds`, `bot_offer_stands_once` and `bot_advice_plain_data`.
+No script names a package now: both runners play every bot script, and the Python runner plays them on the
+Rust backend too. The header stays, for a bot package to come.
 
 ## Values
 

@@ -115,8 +115,8 @@ impl Memory {
     ///
     /// War plans name players and tiles, which the war code weighs each turn: it forgets a plan
     /// whose city is no longer an enemy's as the units' turn starts (`units::war_plan`), and a
-    /// prepared war is diplomacy's (package 2-05). A settler's waiting tile is the advisor's to
-    /// read. So they stay.
+    /// prepared war is diplomacy's, which gives it up when it no longer makes sense
+    /// (`diplomacy::war`). A settler's waiting tile is the advisor's to read. So they stay.
     pub fn prune(&mut self, g: &Game, pid: PlayerId, blacklist_turns: i32, boat_retry_turns: i32) {
         let turn = g.turn();
         let ours_u = |u: UnitId| g.unit(u).is_some_and(|x| x.owner() == pid);
