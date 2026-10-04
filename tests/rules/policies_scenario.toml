@@ -1,0 +1,86 @@
+about = """
+The scenario operation adopt_policy adopts policies without culture, opening their branches and
+adopting the policies they need first; each counts toward the next policy's cost, and what is
+already adopted is passed over. The last member of a branch brings its finisher. The result lists
+what each civilization adopted by name, the branches and prerequisites aside.
+
+Python checked a later era's branch again inside the adoption and refused it; the Rust engine
+adopts it whatever the era, as the operation says (intended: scenario-adopt-policy-skips-the-era).
+"""
+from = "citar/engine/scenario.py: _adopt_policy, _adopt_counted"
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma" }
+
+[[step]]
+op = "adopt_policy"
+args = { player = 0, policy = "Aristocracy" }
+as = "one"
+
+[[step]]
+check = "one"
+eq = { adopted = { "0" = ["Aristocracy"] } }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { policies = ["Aristocracy", "Tradition"], culture = 0, free_policies = 0 }
+
+[[step]]
+note = "Two adopted, both counted."
+check = { what = "costs", player = 0 }
+subset = { policy = 60 }
+
+[[step]]
+op = "adopt_policy"
+args = { player = 0, policies = ["Tradition", "Legalism", "Landed Elite", "Monarchy", "Oligarchy"] }
+as = "rest"
+
+[[step]]
+check = "rest"
+eq = { adopted = { "0" = ["Legalism", "Landed Elite", "Monarchy", "Oligarchy"] } }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+eq = ["Aristocracy", "Landed Elite", "Legalism", "Monarchy", "Oligarchy", "Tradition", "Tradition Complete"]
+
+[[step]]
+check = { what = "events", type = "policy" }
+any = { subset = { text = "Civilization 1 adopted Tradition Complete.", audience = "=null" } }
+
+[[step]]
+check = { what = "costs", player = 0 }
+subset = { policy = 355 }
+
+[[step]]
+op = "adopt_policy"
+args = { player = 0, policy = "Nonsense" }
+error = "Operation 1 (adopt_policy): Unknown policy 'Nonsense'."
+
+[[step]]
+note = "Liberty's Collective Rule needs Republic, which is adopted first; all players at once."
+op = "adopt_policy"
+args = { player = "all", policy = "Collective Rule" }
+as = "all"
+
+[[step]]
+check = "all"
+eq = { adopted = { "0" = ["Collective Rule"], "1" = ["Collective Rule"] } }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "policies"
+eq = ["Collective Rule", "Liberty", "Republic"]
+
+[[step]]
+note = "A branch of a later era: Rust adopts it."
+op = "adopt_policy"
+args = { player = 1, policy = "Rationalism" }
+intended = "scenario-adopt-policy-skips-the-era"
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "policies"
+contains = "Rationalism"
+intended = "scenario-adopt-policy-skips-the-era"

@@ -1,0 +1,119 @@
+about = """
+The alerts at the top of a model's briefing: each problem of its turn with the tool call that deals
+with it. A city with nothing in production, research not set, an enemy in reach of a city that can
+bombard it, a treasury running dry, a free technology and a policy to choose; each alert goes once
+it is dealt with. Whose turn it is, when it is another's, is named only once the reader has met them.
+"""
+from = "citar/engine/briefing.py: alert_items, alerts, briefing"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B>e" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id" }
+
+[[step]]
+op = "unmeet"
+args = { a = 0, b = 1 }
+
+[[step]]
+note = "Nothing is being built and nothing researched."
+check = { what = "briefing", player = 0 }
+path = "alerts"
+subset = ["No research set: set_research tech=<name>."]
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "alerts"
+any = { matches = "^City Roma #[0-9]+ has nothing in production: set_production\\.$" }
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+contains = "\nALERTS (handle these first):\n  ! "
+
+[[step]]
+note = "The turn is the first seat's: the second reads whose, once it knows them."
+check = { what = "briefing", player = 1 }
+path = "text"
+contains = "waiting (Unknown Civilization's turn)"
+intended = "briefing-names-only-known-players"
+
+[[step]]
+op = "meet"
+args = { a = 0, b = 1 }
+
+[[step]]
+check = { what = "briefing", player = 1 }
+path = "text"
+contains = "waiting (Civilization 1's turn) ==="
+
+[[step]]
+note = "At war, a warrior two tiles away can be bombarded."
+ops = [
+  { op = "add_unit", player = 1, unit = "Warrior", at = "H" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "alerts"
+any = { matches = "^City Roma #[0-9]+ \\(HP [0-9]+\\) is threatened by 1 hostile unit\\(s\\): Civilization 2 Warrior \\(7,5\\) hp 100\\. Garrison: NONE\\. Bombard now: city_attack city_id=[0-9]+ x=7 y=5 \\(~[0-9]+ damage\\)\\.$" }
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "progress"
+matches = "cities that can still bombard \\(city_attack\\): Roma #[0-9]+ -> \\(7,5\\)"
+
+[[step]]
+tool = "set_research"
+args = { tech = "Pottery" }
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=roma", item = "Warrior" }
+
+[[step]]
+tool = "city_attack"
+args = { city_id = "=roma", at = "H" }
+
+[[step]]
+note = "The warrior still threatens Roma, which has fired this turn."
+check = { what = "briefing", player = 0 }
+path = "alerts"
+len = 1
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "alerts[0]"
+matches = "is threatened by 1 hostile unit\\(s\\): Civilization 2 Warrior \\(7,5\\) hp [0-9]+\\. Garrison: NONE\\.$"
+
+[[step]]
+note = "An empty treasury paying for buildings, a free technology and a free policy."
+ops = [
+  { op = "set_city", city = "=roma", add_buildings = ["Monument", "Barracks", "Walls", "Temple", "Library", "Granary", "Colosseum", "Castle"] },
+  { op = "set_player", player = 0, gold = 0, free_techs = 1, free_policies = 1 },
+]
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "alerts"
+any = { matches = "^The treasury is empty and gold is falling \\(-[0-9]+/turn\\): science suffers, and at -200 gold units are disbanded\\. Fix: disband obsolete units" }
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "alerts"
+subset = [
+  "Free technology available: choose_free_tech tech=<an available tech>.",
+  "You can adopt a social policy: adopt_policy policy=<name> (get_policies lists options).",
+]
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+contains = "\nTO DO: adopt a social policy (adopt_policy). Call end_turn when finished."

@@ -48,7 +48,7 @@ def register(session, gs, owner: Optional[User], *, kind: str = "game",
     # A game inherits the owner's default, so somebody who has opted out of pooling does not have to
     # remember to opt out again for every game they start.
     row.data_sharing = data_sharing or (owner.data_sharing if owner is not None else "pool")
-    row.status = getattr(gs.game.s, "phase", "setup") or "setup"
+    row.status = getattr(gs.game, "phase", "setup") or "setup"
     row.turn = getattr(gs.game, "turn", 0)
     if save_path:
         row.save_path = save_path
@@ -63,7 +63,7 @@ def sync(session, gs) -> Optional[GameRow]:
     if row is None:
         return None
     row.turn = getattr(gs.game, "turn", row.turn)
-    phase = getattr(gs.game.s, "phase", None)
+    phase = getattr(gs.game, "phase", None)
     if phase:
         row.status = phase
         if phase == "finished" and row.finished_at is None:

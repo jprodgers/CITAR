@@ -770,17 +770,27 @@ export async function openDiplomacy(game, focusPid = null) {
     right.appendChild(text);
     if (neg) {
       const box = el("div", { class: "card", style: { marginBottom: 0 } },
-        el("div", {}, el("b", {}, `Negotiation #${neg.id}`), ` (${neg.exchanges}/${neg.max_exchanges} exchanges) — `,
+        el("div", {}, el("b", {}, `Negotiation #${neg.id}`), ` (${neg.messages}/${neg.max_messages} messages) — `,
           neg.your_move ? el("span", { class: "warn" }, "your move") : el("span", { class: "muted" }, `waiting for ${p.name}`)),
         neg.current_proposal ? el("div", {}, `Proposal by ${neg.proposal_by_you ? "you" : p.name}: `, el("b", {}, neg.current_proposal.summary)) : el("div", { class: "muted" }, "No concrete proposal on the table."));
-      if (neg.your_move) {
-        const respond = async (action, extra = {}) => {
-          const res = await game.tool("respond_negotiation", { negotiation_id: neg.id, action, message: text.value || undefined, ...extra });
-          if (!res) return;
-          // answering settles the matter: close the window rather than leave it open while play goes on
-          if (action === "accept" || action === "reject") { toast(action === "accept" ? "Deal accepted" : "Proposal rejected"); m.close(); return; }
-          text.value = ""; state.give = []; state.receive = []; setTimeout(draw, 300);
-        };
+      // every answer carries a message; the quick buttons say something plain when the box is empty
+      const DEFAULT_LINES = { accept: "Agreed.", reject: "No deal.", counter: "How about this instead?" };
+      const respond = async (action, extra = {}) => {
+        const message = text.value.trim() || DEFAULT_LINES[action];
+        const res = await game.tool("respond_negotiation", { negotiation_id: neg.id, action, message, ...extra });
+        if (!res) return;
+        // answering settles the matter: close the window rather than leave it open while play goes on
+        if (action === "accept" || action === "reject") {
+          toast(action === "accept" ? "Deal accepted" : neg.your_move ? "Proposal rejected" : "Negotiation withdrawn");
+          m.close(); return;
+        }
+        text.value = ""; state.give = []; state.receive = []; setTimeout(draw, 300);
+      };
+      if (!neg.your_move) {
+        // End Turn is refused while this is open: withdrawing is the way out of waiting
+        box.appendChild(el("div", { class: "btn-grid" },
+          el("button", { class: "danger", onclick: () => respond("reject") }, "Withdraw")));
+      } else {
         box.appendChild(el("div", { class: "btn-grid" },
           el("button", { class: "primary", disabled: !neg.current_proposal || neg.proposal_by_you, onclick: () => respond("accept") }, "Accept"),
           el("button", { class: "danger", onclick: () => respond("reject") }, "Reject / end"),

@@ -7,6 +7,7 @@ from citar.engine.state import GameState
 from citar.engine.hexmap import HexGrid
 from citar.engine.mapgen import MAP_TYPES
 from citar.engine.rules import get_rules
+from tests.backends import python_engine_only
 
 
 def new_game(**kw):
@@ -34,6 +35,7 @@ def end_round(g):
 
 
 class HexTests(unittest.TestCase):
+    @python_engine_only("hex_grid_matches_python")
     def test_neighbors_are_distance_one(self):
         grid = HexGrid(20, 15)
         for idx in range(grid.size):
@@ -41,6 +43,7 @@ class HexTests(unittest.TestCase):
                 self.assertEqual(grid.distance(idx, n), 1)
             self.assertEqual(len(grid.ring(idx, 1)), len(grid.neighbors(idx)))
 
+    @python_engine_only("hex_grid_matches_python")
     def test_line_endpoints(self):
         grid = HexGrid(20, 15)
         line = grid.line(grid.idx(2, 3), grid.idx(10, 9))
@@ -51,6 +54,7 @@ class HexTests(unittest.TestCase):
 
 
 class RulesTests(unittest.TestCase):
+    @python_engine_only("the_shipped_tables_have_the_census_sizes")
     def test_ruleset_loaded(self):
         R = get_rules()
         self.assertIn("Warrior", R.units)
@@ -61,24 +65,28 @@ class RulesTests(unittest.TestCase):
         self.assertGreater(len(R.city_state_nations), 20)
         self.assertEqual(R.max_turns["Quick"], 330)
 
+    @python_engine_only("tests.test_facade_games.RulesetTests.test_the_benchmark_civilization_has_no_abilities")
     def test_benchmark_civ_has_no_abilities(self):
         R = get_rules()
         self.assertEqual(R.nations["BenchmarkCiv"].get("uniques", []), [])
         self.assertEqual(R.unique_units.get("BenchmarkCiv", []), [])
         self.assertEqual(R.unique_buildings.get("BenchmarkCiv", []), [])
 
+    @python_engine_only("resolve_matches_python_for_every_name_and_id")
     def test_resolve_names_and_ids(self):
         R = get_rules()
         self.assertEqual(R.resolve("tech", "bronze_working"), "Bronze Working")
         self.assertEqual(R.resolve("tech", "Bronze Working"), "Bronze Working")
         self.assertIsNone(R.resolve("tech", "Warp Drive"))
 
+    @python_engine_only("placeholders_and_parameters")
     def test_unique_placeholders(self):
         u = uniques.Unique("[+15]% Strength <when attacking>", "test", "x")
         self.assertEqual(u.ph, "[]% Strength")
         self.assertEqual(u.n(0), 15)
         self.assertEqual(u.mods[0].ph, "when attacking")
 
+    @python_engine_only("conjunctions_and_negations_parse_as_multi_filter_read_them")
     def test_multi_filter(self):
         self.assertTrue(uniques.multi_filter("{Military} {Land}", lambda s: s in ("Military", "Land")))
         self.assertFalse(uniques.multi_filter("{Military} {Water}", lambda s: s in ("Military", "Land")))
@@ -86,6 +94,7 @@ class RulesTests(unittest.TestCase):
 
 
 class MapTests(unittest.TestCase):
+    @python_engine_only("a_new_small_game_is_sound_on_every_map_type")
     def test_all_map_types_generate(self):
         for mt in MAP_TYPES:
             g = new_game(map_type=mt, map_size="small", players=[{}, {}, {}, {}])
@@ -96,6 +105,7 @@ class MapTests(unittest.TestCase):
             self.assertTrue({"Ocean", "Coast"} <= terrains)
             self.assertTrue(terrains & {"Grassland", "Plains"})
 
+    @python_engine_only("small_continents_keep_their_properties")
     def test_rivers_resources_wonders_ruins(self):
         g = new_game(map_size="small", players=[{}, {}, {}, {}])
         self.assertTrue(any(t.river for t in g.s.tiles))
@@ -105,6 +115,7 @@ class MapTests(unittest.TestCase):
                             g.rules.resources[t.resource]["resourceType"] == "Strategic"))
         self.assertTrue(any(t.improvement == "Ancient ruins" for t in g.s.tiles))
 
+    @python_engine_only("rivers_lie_on_both_sides_of_an_edge_and_never_along_water")
     def test_river_edges_are_symmetric(self):
         g = new_game(map_size="small", players=[{}, {}, {}, {}])
         for i, t in enumerate(g.s.tiles):
@@ -114,10 +125,12 @@ class MapTests(unittest.TestCase):
                     self.assertIsNotNone(n)
                     self.assertTrue(g.s.tiles[n].river & (1 << ((d + 3) % 6)))
 
+    @python_engine_only("a_seed_makes_the_same_map_every_time")
     def test_deterministic_seed(self):
         a, b = new_game(), new_game()
         self.assertEqual([t.to_list() for t in a.s.tiles], [t.to_list() for t in b.s.tiles])
 
+    @python_engine_only("tests/rules/setup_settings.toml")
     def test_city_states_and_nations(self):
         g = new_game(map_size="small", players=[{"nation": "Rome"}, {"nation": "BenchmarkCiv"}, {}, {}])
         self.assertEqual(g.player(0).nation, "Rome")
@@ -129,6 +142,7 @@ class MapTests(unittest.TestCase):
 class MapOptionTests(unittest.TestCase):
     """Map edges, ice, wrapping, rivers and the resource settings."""
 
+    @python_engine_only("hex_distance_is_a_metric_equal_to_a_search_over_the_neighbours")
     def test_wrapping_grid_distances_match_walking(self):
         from citar.engine.hexmap import HexGrid
         for wx, wy in ((True, False), (False, True), (True, True)):
@@ -145,6 +159,7 @@ class MapOptionTests(unittest.TestCase):
         self.assertEqual(grid.distance(grid.idx(0, 4), grid.idx(13, 4)), 1)
         self.assertEqual(grid.line(grid.idx(12, 4), grid.idx(1, 4)), [grid.idx(x, 4) for x in (12, 13, 0, 1)])
 
+    @python_engine_only("edges_by_name_and_their_wraps")
     def test_edges(self):
         for edges, wrap_x, wrap_y, ice in (("ice_caps", False, False, True), ("wrap_x", True, False, True),
                                            ("wrap_y", False, True, False), ("wrap_both", True, True, False),
@@ -169,6 +184,7 @@ class MapOptionTests(unittest.TestCase):
             from citar.engine.state import GameState
             self.assertEqual(Game(GameState.from_dict(g.s.to_dict())).grid.wrap_x, wrap_x)
 
+    @python_engine_only("small_continents_keep_their_properties")
     def test_rivers_reach_the_sea_and_never_cross(self):
         for seed, mt in ((3, "continents"), (4, "pangaea"), (5, "fractal")):
             g = new_game(map_size="small", map_type=mt, seed=seed, river_density=2, players=[{}, {}, {}])
@@ -204,6 +220,7 @@ class MapOptionTests(unittest.TestCase):
         g = new_game(map_size="small", river_density=0, players=[{}, {}])
         self.assertFalse(any(t.river for t in g.s.tiles))
 
+    @python_engine_only("a_share_sets_a_resource_s_part_of_its_kind")
     def test_resource_rules(self):
         def count(g, name):
             return sum(1 for t in g.s.tiles if t.resource == name)
@@ -229,6 +246,7 @@ class MapOptionTests(unittest.TestCase):
 
 
 class TurnTests(unittest.TestCase):
+    @python_engine_only("tests/rules/production_completes.toml")
     def test_found_city_and_production(self):
         g = new_game()
         c = found(g, 0, "Alpha")
@@ -243,11 +261,13 @@ class TurnTests(unittest.TestCase):
         self.assertIn("Pottery", g.player(0).techs)
         self.assertGreater(c.pop, 1)
 
+    @python_engine_only("tests.test_facade_games.SettingsTests.test_a_speed_sets_the_turn_limit_and_the_calendar_starts_in_4000_bc")
     def test_year_and_speed(self):
         g = new_game(speed="Quick")
         self.assertEqual(g.total_turns(), 330)
         self.assertEqual(g.year_text(), "4000 BC")
 
+    @python_engine_only("tests/rules/units_explore.toml")
     def test_move_without_moves_is_an_error(self):
         g = new_game()
         w = next(u for u in g.player_units(0) if u.type == "Warrior")
@@ -259,11 +279,13 @@ class TurnTests(unittest.TestCase):
         self.assertIn("no moves left", str(ctx.exception))
         self.assertEqual(w.activity, "explore")
 
+    @python_engine_only("tests/rules/turns_not_your_turn.toml")
     def test_not_your_turn(self):
         g = new_game()
         with self.assertRaises(ActionError):
             tools.execute(g, 1, "end_turn", {})
 
+    @python_engine_only("tests/rules/found_city_refusals.toml")
     def test_city_min_distance(self):
         g = new_game()
         s = settler_of(g, 0)
@@ -272,6 +294,7 @@ class TurnTests(unittest.TestCase):
             if g.is_land(i):
                 self.assertIsNotNone(cities.found_check(g, 0, i))
 
+    @python_engine_only("the_settle_on_load_changes_nothing_yet_and_a_save_round_trips")
     def test_save_roundtrip(self):
         g = new_game()
         found(g, 0)
@@ -281,6 +304,7 @@ class TurnTests(unittest.TestCase):
         self.assertEqual(g2.s.to_dict(), d)
         tools.execute(g2, g2.s.current, "end_turn", {})
 
+    @python_engine_only("tests/rules/workers_turn_flow.toml")
     def test_worker_builds_farm(self):
         g = new_game()
         c = found(g, 0)
@@ -308,6 +332,7 @@ class CombatTests(unittest.TestCase):
         g.meet(0, 1)
         return g, a, b
 
+    @python_engine_only("tests/rules/combat_melee.toml")
     def test_requires_war(self):
         g, a, b = self.setup_war()
         x, y = g.grid.xy(b.idx)
@@ -320,6 +345,7 @@ class CombatTests(unittest.TestCase):
         self.assertIn("damage_to_defender", res)
         self.assertTrue(b.hp < 100 or res.get("defender_killed"))
 
+    @python_engine_only("tests/rules/combat_melee.toml")
     def test_stronger_attacker_deals_more(self):
         g, a, b = self.setup_war()
         tools.execute(g, 0, "declare_war", {"player_id": 1})
@@ -332,6 +358,7 @@ class CombatTests(unittest.TestCase):
 
 
 class DiplomacyTests(unittest.TestCase):
+    @python_engine_only("tests/rules/diplomacy_maps_for_gold.toml")
     def test_negotiation_and_deal(self):
         g = new_game()
         g.meet(0, 1)
@@ -350,6 +377,7 @@ class DiplomacyTests(unittest.TestCase):
         self.assertEqual(g.player(0).gold, 60)
         self.assertEqual(g.player(1).gold, before + 40)
 
+    @python_engine_only("tests/rules/diplomacy_tech_trade.toml")
     def test_tech_trade(self):
         g = new_game()
         g.meet(0, 1)
@@ -357,9 +385,11 @@ class DiplomacyTests(unittest.TestCase):
         research.add_tech_silently(g, 0, "Calendar")
         research.add_tech_silently(g, 1, "Pottery")
         r = tools.execute(g, 0, "open_negotiation", {"to": 1, "message": "tech", "give": [{"type": "tech", "tech": "Calendar"}]})
-        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept"})
+        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept",
+                                                    "message": "Agreed."})
         self.assertIn("Calendar", g.player(1).techs)
 
+    @python_engine_only("tests/rules/diplomacy_embassies_and_friendship.toml")
     def test_embassies_and_friendship(self):
         g = new_game()
         g.meet(0, 1)
@@ -374,24 +404,28 @@ class DiplomacyTests(unittest.TestCase):
         tools.execute(g, 1, "end_turn", {})
         r = tools.execute(g, 0, "open_negotiation", {"to": 1, "message": "Embassies?", "give": [{"type": "embassy"}],
                                                      "receive": [{"type": "embassy"}, {"type": "declaration_of_friendship"}]})
-        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept"})
+        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept",
+                                                    "message": "Agreed."})
         from citar.engine import diplomacy
         self.assertTrue(diplomacy.shared_embassies(g, 0, 1))
         self.assertTrue(diplomacy.is_friends(g, 0, 1))
 
+    @python_engine_only("tests/rules/diplomacy_war_and_peace.toml")
     def test_war_and_peace(self):
         g = new_game()
         g.meet(0, 1)
         tools.execute(g, 0, "declare_war", {"player_id": 1, "message": "For glory!"})
         self.assertTrue(g.at_war(0, 1))
         r = tools.execute(g, 0, "open_negotiation", {"to": 1, "message": "peace?", "give": [{"type": "peace_treaty"}]})
-        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept"})
+        tools.execute(g, 1, "respond_negotiation", {"negotiation_id": r["negotiation_id"], "action": "accept",
+                                                    "message": "Agreed."})
         self.assertFalse(g.at_war(0, 1))
         with self.assertRaises(ActionError):
             tools.execute(g, 0, "declare_war", {"player_id": 1})
 
 
 class VisibilityTests(unittest.TestCase):
+    @python_engine_only("tests/rules/views_what_a_player_sees.toml")
     def test_fog_hides_other_units(self):
         from citar.engine.views import client_view
         g = new_game()
@@ -400,6 +434,7 @@ class VisibilityTests(unittest.TestCase):
         self.assertEqual(others, [])
         self.assertLess(len(v["tiles"]), g.grid.size // 2)
 
+    @python_engine_only("a_forest_hides_what_lies_behind_it_and_a_hill_sees_over")
     def test_hills_see_further(self):
         from citar.engine import visibility
         # a patch of open grassland; which seed has one depends on the map generator, so look at a few
@@ -413,14 +448,6 @@ class VisibilityTests(unittest.TestCase):
         self.assertIsNotNone(flat, "no open grassland on any of the maps tried")
         seen = visibility.viewable_from(g, flat, 2)
         self.assertEqual(len(seen), len(g.grid.within(flat, 2)))
-
-
-class SimulationTests(unittest.TestCase):
-    def test_bot_game_runs(self):
-        from citar import sim
-        g = sim.run(players=3, turns=60, map_size="duel", seed=4, verbose=False)
-        self.assertEqual(g.s.phase, "over")
-        self.assertTrue(all(len(g.player_cities(p.id)) >= 1 for p in g.majors()))
 
 
 if __name__ == "__main__":

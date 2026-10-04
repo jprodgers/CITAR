@@ -71,7 +71,7 @@
     }
   },
   "diplomacy": {
-    "max_negotiation_exchanges": 12,
+    "max_chat_messages": 30,
     "negotiations_per_pair_per_turn": 2
   }
 }

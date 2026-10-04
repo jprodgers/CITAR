@@ -1,0 +1,134 @@
+about = """
+A civilization with the faith a pantheon costs founds one with a pantheon belief nobody has taken:
+the faith is spent, the pantheon is named by its belief, everyone is told, and its pressure takes
+the civilization's cities. A great prophet in one of its cities then founds a religion with a
+founder and a follower belief: the religion keeps the pantheon's belief, the city becomes its holy
+city and follows it, the prophet is spent, and everyone is told. A belief of another kind, a second
+pantheon and a religion founded twice are refused.
+"""
+from = "tests/test_mechanics.py::ReligionTests::test_pantheon_and_religion"
+
+[[step]]
+note = "The other civilization keeps a unit, so that the game goes on."
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", antium = "=made[1].city_id" }
+
+[[step]]
+check = { what = "religion", player = 0 }
+subset = { state = "none", religion = "=null", beliefs = [], pantheon_cost = 10, prophets_earned = 0 }
+
+[[step]]
+tool = "found_pantheon"
+args = { belief = "God of the Sea" }
+error = "A pantheon costs 10 faith; you have 0."
+
+[[step]]
+op = "set_player"
+args = { player = 0, faith = 25 }
+
+[[step]]
+tool = "found_pantheon"
+args = { belief = "Monarchy" }
+error = "'Monarchy' is not a pantheon belief. Available: Ancestor Worship, Dance of the Aurora"
+
+[[step]]
+tool = "found_pantheon"
+args = { belief = "god of the sea" }
+as = "pantheon"
+
+[[step]]
+check = "pantheon"
+eq = { pantheon = "God of the Sea", faith_left = 15 }
+
+[[step]]
+check = { what = "religion", player = 0 }
+subset = { state = "pantheon", religion = "God of the Sea", display = "God of the Sea", beliefs = ["God of the Sea"] }
+
+[[step]]
+note = "The next pantheon costs more, and the belief is taken."
+check = { what = "religion", player = 1 }
+subset = { pantheon_cost = 15 }
+
+[[step]]
+note = "Two hundred pressure a citizen: the city follows the pantheon."
+check = { what = "religion", city = "=roma" }
+eq = { majority = "God of the Sea", followers = { "God of the Sea" = 1 }, pressures = { "None" = 100, "God of the Sea" = 200 }, holy_city_of = "=null" }
+
+[[step]]
+check = { what = "events", type = "pantheon" }
+path = "[0]"
+subset = { text = "Civilization 1 founded the God of the Sea pantheon.", audience = "=null" }
+
+[[step]]
+check = { what = "events", type = "religion" }
+path = "[0]"
+subset = { text = "Roma converted to God of the Sea.", audience = [0] }
+
+[[step]]
+tool = "found_pantheon"
+args = { belief = "God of War" }
+error = "A pantheon costs 15 faith; you have 15."
+
+[[step]]
+op = "add_unit"
+args = { player = 0, unit = "Great Prophet", at = "A" }
+as = "prophet"
+
+[[step]]
+op = "found_religion"
+args = { unit = "=prophet.unit_ids[0]", name = "The Way", beliefs = ["Ceremonial Burial"] }
+error = "Choose 1 Follower belief(s). Available Follower beliefs: Asceticism, Cathedrals"
+
+[[step]]
+op = "found_religion"
+args = { unit = "=prophet.unit_ids[0]", name = "The Way", beliefs = ["Ceremonial Burial", "Feed the World"] }
+as = "founded"
+
+[[step]]
+check = "founded"
+subset = { founded = "The Way", holy_city = "Roma" }
+
+[[step]]
+check = "founded"
+path = "beliefs"
+eq = ["God of the Sea", "Ceremonial Burial", "Feed the World"]
+
+[[step]]
+check = { what = "religion", player = 0 }
+subset = { state = "religion", display = "The Way", holy_city = "=roma" }
+
+[[step]]
+check = { what = "religion", player = 0 }
+path = "beliefs"
+eq = ["Ceremonial Burial", "Feed the World", "God of the Sea"]
+
+[[step]]
+note = "Five hundred pressure a citizen from the holy city: it follows the new religion."
+check = { what = "religion", city = "=roma" }
+subset = { holy_city_of = "=founded.religion", majority = "=founded.religion" }
+
+[[step]]
+note = "The prophet is spent."
+check = { what = "units", player = 0 }
+len = 0
+
+[[step]]
+check = { what = "events", type = "religion_founded" }
+path = "[0]"
+subset = { text = "Civilization 1 founded The Way in Roma!", audience = "=null" }
+
+[[step]]
+op = "add_unit"
+args = { player = 0, unit = "Great Prophet", at = "A" }
+as = "again"
+
+[[step]]
+op = "found_religion"
+args = { unit = "=again.unit_ids[0]", name = "Another", beliefs = ["Pagodas"] }
+error = "You have already founded a religion."

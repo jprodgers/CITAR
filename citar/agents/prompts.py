@@ -1,7 +1,7 @@
 """System prompts for language-model players. Kept static so provider-side prompt caching works."""
 from __future__ import annotations
 
-from ..engine.views import RULES_OVERVIEW
+from ..engine_api import RULES_OVERVIEW, MAP_LEGEND
 
 SYSTEM_PROMPT = """You are the leader of a civilization in CITAR, a turn-based strategy game in the style of Civilization V,
 competing against other leaders who may be humans or other AI models. Play to win.
@@ -45,7 +45,11 @@ DIPLOMACY
 - Messages (send_message) are free text and non-binding. Others may bluff or lie; so may you.
 - Binding agreements go through negotiations: open_negotiation (on your turn) or respond_negotiation (whenever it
   is your move, even outside your turn). Proposals are from YOUR perspective: give = what you hand over,
-  receive = what you get. The other side replies right away; the tool result shows their answer.
+  receive = what you get. Every entry needs a message, including accept and reject.
+- The other side answers in its own time. The tool waits a while and shows their answer if it comes; otherwise it
+  appears in get_diplomacy and your briefing. You cannot end your turn while a negotiation you are in is open:
+  answer the ones waiting on you, and wait for (or withdraw, with action reject) the ones waiting on them. A
+  negotiation closes by itself when it reaches its message limit (get_diplomacy shows it).
 - Deals can include gold, resources, open borders, embassies, declarations of friendship, research agreements,
   defensive pacts, cities and (if enabled) technologies. While at war, any deal must include a peace treaty.
 - You may name your civilization, leader and cities anything you like (set_civ_name, found_city name, rename_city).
@@ -73,7 +77,6 @@ def system_prompt(persona: str | None = None) -> str:
     the only way to act, that the briefing is the state of the world, and that the turn ends when it
     says so. Everything else it might infer from the tools themselves.
     """
-    from ..engine.briefing import MAP_LEGEND
     text = SYSTEM_PROMPT.format(rules=RULES_OVERVIEW, legend=MAP_LEGEND)
     if persona:
         text += PERSONA_BLOCK.format(persona=persona.strip())
@@ -101,5 +104,6 @@ Your empire at a glance:
 {summary}
 
 Decide how to respond, then call respond_negotiation with action accept, reject, counter (with give/receive from your
-perspective and a message) or reply (message only). You may first look things up (get_diplomacy, get_empire,
-get_players, get_map, read_notes). Consider noting important agreements in your notebook with write_notes."""
+perspective; at least one item) or reply (message only). Every action needs a message. You may first look things up
+(get_diplomacy, get_empire, get_players, get_map, read_notes). Consider noting important agreements in your notebook
+with write_notes."""

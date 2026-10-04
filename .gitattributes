@@ -35,6 +35,9 @@ Dockerfile  text eol=lf
 *.mjs       text eol=lf
 *.css       text eol=lf
 *.html      text eol=lf
+*.rs        text eol=lf
+*.tsv       text eol=lf
+Cargo.lock  text eol=lf
 env.example text eol=lf
 .env.docker.example text eol=lf
 
@@ -43,6 +46,10 @@ env.example text eol=lf
 *.iss       text eol=crlf
 *.bat       text eol=crlf
 *.cmd       text eol=crlf
+
+# The Python baselines (DESIGN.md P2.4.3), byte for byte as the laptop wrote them, CRLF and all:
+# nothing can write them again once the Python engine is gone.
+refcheck/baseline/python/*.jsonl -text
 
 # Never touched
 *.png  binary
@@ -59,3 +66,6 @@ citar/data/ruleset/*.json linguist-generated=true
 citar/engine/unique_types.py linguist-generated=true
 citar/bots/frozen_*.py linguist-generated=true
 wiki/* linguist-generated=true
+Cargo.lock linguist-generated=true
+crates/citar-engine/src/unique/gen.rs linguist-generated=true
+crates/citar-bot/src/params/gen.rs linguist-generated=true

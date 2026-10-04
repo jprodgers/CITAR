@@ -1,0 +1,36 @@
+about = """
+A carrier takes the aircraft it carries along when it moves: they stay on board, on its tile.
+"""
+from = "citar/engine/game.py: place_unit; citar/engine/movement.py: step"
+
+[[step]]
+note = "A carrier and a fighter at sea, then the fighter on board."
+ops = [
+  { op = "add_unit", player = 0, unit = "Carrier", at = "(1,8)" },
+  { op = "add_unit", player = 0, unit = "Fighter", at = "(1,8)" },
+]
+as = "made"
+
+[[step]]
+set = { carrier = "=made[0].unit_ids[0]", fighter = "=made[1].unit_ids[0]" }
+
+[[step]]
+op = "set_unit"
+args = { unit = "=fighter", carrier = "=carrier" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=carrier", x = 1, y = 12 }
+as = "moved"
+
+[[step]]
+check = "moved"
+subset = { to = { x = 1, y = 12 }, arrived = true }
+
+[[step]]
+check = { what = "unit", unit = "=fighter" }
+subset = { x = 1, y = 12, carried_by = "=carrier" }
+
+[[step]]
+check = { what = "units", x = 1, y = 12 }
+len = 2

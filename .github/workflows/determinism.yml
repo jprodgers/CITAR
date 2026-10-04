@@ -1,0 +1,181 @@
+# The determinism matrix: the golden sets on all five targets (crates/citar-engine/DESIGN.md 2.6
+# and 9.6).
+#
+# Each target runs `cargo golden check --out golden-<target>.json`, which hashes the answers that
+# build computes and compares them with the files committed in crates/citar-testkit/golden/. The
+# compare job then fails in two cases:
+#   - the targets disagree with each other: a determinism bug;
+#   - they agree with each other but not with the committed files: a behaviour change. If it is
+#     deliberate, run `cargo golden bless` and commit the files, saying why.
+# linux-x64 also runs the check in the release profile, since the ci profile (debug assertions,
+# no LTO) must play the same game as what ships.
+#
+# When the targets disagree, the compare job names, for each target that parts from the others,
+# the first row of each list where it does (a game and its turn for the whole-game sets). Each
+# target whose check failed also uploads the state where each of its games first left the
+# committed file (`golden check --states`); the compare job then plays the same games to the same
+# rounds on linux-x64 (`golden dump`), compares the states place by place (`golden diff`), and
+# uploads both with the diffs as the `divergence` artifact. The comparison is
+# .github/scripts/golden_compare.py, which nightly.yml runs on the long set too.
+#
+# The golden sets grow with the engine (DESIGN.md 9.6): package 1a-02 brought rng, libm and pyfmt,
+# 1a-03 the RulesetId of the embedded ruleset (ruleset), 1a-05 every compiled unique (uniques), and
+# 1a-06 every compiled filter (filters) and the map-generation, AI and victory tables (gen),
+# 1a-09 the digests of three checked-in states (states), 1a-10 the digests of the twelve
+# committed refcheck fixtures as the Python-state converter reads them (convert), 1b-03 a game on
+# the arena played to its turn limit (turns), 1b-04 ten generated maps (maps), 1c-09 twelve new
+# games (newgame), and 1c-10 the fixtures after the settle on load (load), twenty rounds passed
+# from three of them (pass) and six RandomAgent games on generated maps (random). 1e-02 made the
+# reports name each row and added the states where games part; its long set (whole games on
+# every map size, about a minute a target) is nightly.yml's. The sets here take about 5 seconds
+# a target in the ci profile, so pull requests need no shorter set.
+name: determinism
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "xtask/**"
+      - "Cargo.*"
+      - "clippy.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "citar/data/**"
+      - "refcheck/fixtures-mini/**"
+      - "refcheck/fixtures-late/**"
+      - ".github/workflows/determinism.yml"
+      - ".github/scripts/golden_compare.py"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "xtask/**"
+      - "Cargo.*"
+      - "clippy.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "citar/data/**"
+      - "refcheck/fixtures-mini/**"
+      - "refcheck/fixtures-late/**"
+      - ".github/workflows/determinism.yml"
+      - ".github/scripts/golden_compare.py"
+  workflow_dispatch:
+
+concurrency:
+  group: determinism-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  golden:
+    name: golden (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-24.04, profile: ci }
+          - { target: linux-x64-release, os: ubuntu-24.04, profile: release }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, profile: ci }
+          - { target: windows-x64, os: windows-latest, profile: ci }
+          - { target: macos-arm64, os: macos-15, profile: ci }
+          # If this label is retired, run x86_64-apple-darwin under Rosetta on macos-15 instead.
+          - { target: macos-x64, os: macos-15-intel, profile: ci }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: golden-${{ matrix.profile }}
+
+      - name: Golden check
+        id: golden
+        shell: bash
+        # The report is uploaded whatever the result, so the compare job can tell a determinism
+        # bug (targets disagree) from a behaviour change (targets agree, files differ).
+        run: |
+          set +e
+          cargo run --locked --package citar-testkit --bin golden --profile ${{ matrix.profile }} -- \
+            check --out golden-${{ matrix.target }}.json --states golden-states
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: golden-report-${{ matrix.target }}
+          path: golden-${{ matrix.target }}.json
+          if-no-files-found: error
+
+      - name: Keep the states where games left the committed files
+        if: steps.golden.outputs.status != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-states-${{ matrix.target }}
+          path: golden-states
+          if-no-files-found: ignore
+
+      - name: Result
+        if: steps.golden.outputs.status != '0'
+        run: exit 1
+
+  compare:
+    needs: golden
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      # The committed files name the rows where targets part, and the script is the repository's.
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: golden-report-*
+          merge-multiple: true
+          path: reports
+
+      - name: Compare the targets
+        id: compare
+        run: >
+          python .github/scripts/golden_compare.py compare reports
+          --expect linux-x64,linux-x64-release,linux-arm64,windows-x64,macos-arm64,macos-x64
+          --odd odd.json
+
+      # The rest only when the targets disagree: the same games played to the same rounds here,
+      # and each odd target's state compared with this one's place by place.
+      - name: Toolchain
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        with:
+          shared-key: golden-ci
+
+      - uses: actions/download-artifact@v8
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        with:
+          pattern: golden-states-*
+          path: states
+
+      - name: Compare the states where the targets part
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        run: |
+          cargo build --locked --package citar-testkit --bin golden --profile ci
+          python .github/scripts/golden_compare.py states states odd.json target/ci/golden divergence
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && steps.compare.outputs.diverged == 'true' }}
+        with:
+          name: divergence
+          path: |
+            odd.json
+            states
+            divergence
+          if-no-files-found: ignore

@@ -1,0 +1,8 @@
+# Made by scripts/refcheck (see README.md): the full fixture corpus and baseline runs are regenerated, never
+# committed. Only fixtures-mini/ and the three corpus states copied into fixtures-late/ are.
+corpus/
+# Baseline runs and their logs are made again from a build, and stay out. The Python baselines in
+# baseline/python/ cannot be once the Python engine is gone, so they are committed (DESIGN.md
+# P2.4.3).
+baseline/*
+!baseline/python/

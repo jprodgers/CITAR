@@ -1,0 +1,47 @@
+about = """
+City-states take the sites an editor map gives them, then as many more as there is room for: the
+most fertile tiles at least four apart and six from every civilization's start. A city-state for
+which no site is left is left out of the game.
+"""
+from = "citar/engine/maps.py: prepare, _fill_starts"
+start = "full"
+
+[config]
+city_states = 3
+barbarians = "off"
+ruins = false
+
+[[step]]
+note = "The arena gives one city-state site, CS; the other two are chosen."
+check = { what = "game" }
+subset = { majors = [0, 1], city_states = [2, 3, 4] }
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "units[0]"
+as = "first"
+absent = false
+
+[[step]]
+check = { what = "unit", unit = "=first" }
+subset = { owner = 2, x = 11, y = 7 }
+
+[[step]]
+check = { what = "player", player = 3 }
+path = "units[0]"
+as = "second"
+absent = false
+
+[[step]]
+check = { what = "unit", unit = "=second" }
+subset = { owner = 3, x = 13, y = 12 }
+
+[[step]]
+check = { what = "player", player = 4 }
+path = "units[0]"
+as = "third"
+absent = false
+
+[[step]]
+check = { what = "unit", unit = "=third" }
+subset = { owner = 4, x = 14, y = 5 }

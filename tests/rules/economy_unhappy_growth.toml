@@ -1,0 +1,148 @@
+about = """
+An unhappy civilization's cities grow slower: a quarter of their surplus food between -1 and -10
+happiness, none below -10, where their production is halved too. Each city founded costs
+happiness.
+
+The Rust engine's cities read the happiness committed at the start and the end of their owner's
+turn, where Python's read it live: a city founded in the middle of a turn slows its siblings'
+growth from the end of that turn on (intended: happiness-seen-committed).
+"""
+from = "citar/data/ruleset/global_uniques.json; citar/engine/economy.py: happiness"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 2, claim_radius = 2 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { city = "=made[0].city_id" }
+
+[[step]]
+note = "Roma's two citizens stay on its food tiles, whatever the ranking makes of growth"
+tool = "work_tile"
+args = { city_id = "=city", at = "L" }
+
+[[step]]
+tool = "work_tile"
+args = { city_id = "=city", at = "R>e" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { worked = [[4, 3], [7, 4]], locked = [[4, 3], [7, 4]] }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = 4 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.food"
+eq = 2
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.production"
+eq = 4
+
+[[step]]
+note = "two more cities: 4 happiness less for each"
+ops = [
+  { op = "found_city", player = 0, x = 12, y = 3, name = "Antium", pop = 1 },
+  { op = "found_city", player = 0, x = 16, y = 3, name = "Cumae", pop = 1 },
+]
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = -4 }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "happiness_seen"
+gt = 0
+intended = "happiness-seen-committed"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.food"
+eq = 2
+intended = "happiness-seen-committed"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.production"
+eq = 4
+
+[[step]]
+note = "the end of the turn commits it"
+op = "end_turn"
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = -4, happiness_seen = -4 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.food"
+eq = 0.5
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.production"
+eq = 4
+
+[[step]]
+note = "on the second seat's turn, two cities more: the first seat is past -10"
+ops = [
+  { op = "found_city", player = 0, x = 12, y = 10, name = "Neapolis", pop = 1 },
+  { op = "found_city", player = 0, x = 12, y = 14, name = "Ostia", pop = 1 },
+]
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = -12 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness_seen = -4 }
+intended = "happiness-seen-committed"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.food"
+eq = 0.5
+intended = "happiness-seen-committed"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.production"
+eq = 4
+intended = "happiness-seen-committed"
+
+[[step]]
+note = "the start of the first seat's next turn commits it"
+op = "end_turn"
+
+[[step]]
+check = { what = "game" }
+subset = { turn = 2, current = 0 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = -12, happiness_seen = -12 }
+
+[[step]]
+note = "the growth nullified, the production halved"
+check = { what = "city", city = "=city" }
+path = "yields.food"
+eq = 0
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.production"
+eq = 2
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { worked = [[4, 3], [7, 4]] }

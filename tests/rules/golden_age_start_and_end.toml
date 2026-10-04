@@ -1,0 +1,83 @@
+about = """
+A golden age: a policy that brings one starts it at once, ten turns long at standard speed, and
+the civilization is told; it counts down at the end of each of the civilization's turns, and the
+civilization is told when it ends. Out of a golden age, the civilization's happiness piles up
+toward the next one.
+"""
+from = "citar/engine/great_people.py: enter_golden_age, golden_age_end_turn"
+
+[[step]]
+note = "The other civilization keeps a unit, so that the game goes on."
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+check = { what = "great_people", player = 0 }
+subset = { golden_age_turns = 0, golden_ages = 0, golden_age_points = 0, golden_age_needed = 505 }
+
+[[step]]
+note = "Representation (Liberty, after Citizenship) brings a golden age with it."
+op = "adopt_policy"
+args = { player = 0, policies = ["Citizenship", "Representation"] }
+
+[[step]]
+check = { what = "great_people", player = 0 }
+subset = { golden_age_turns = 10, golden_ages = 0 }
+
+[[step]]
+check = { what = "events", type = "golden_age" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "golden_age" }
+path = "[0]"
+subset = { turn = 1, text = "Civilization 1 has entered a Golden Age!", audience = [0] }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+note = "Counted down at the end of the civilization's turn; no happiness piles up meanwhile."
+check = { what = "great_people", player = 0 }
+subset = { golden_age_turns = 9, golden_age_points = 0 }
+
+[[step]]
+repeat = 8
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "great_people", player = 0 }
+subset = { golden_age_turns = 1 }
+
+[[step]]
+check = { what = "events", type = "golden_age_end" }
+len = 0
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "great_people", player = 0 }
+subset = { golden_age_turns = 0, golden_age_points = 0 }
+
+[[step]]
+check = { what = "events", type = "golden_age_end" }
+path = "[0]"
+subset = { turn = 10, text = "Civilization 1's Golden Age has ended.", audience = [0] }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "happiness"
+as = "happy"
+absent = false
+
+[[step]]
+note = "Out of it, the turn's happiness piles up toward the next."
+op = "end_round"
+
+[[step]]
+check = { what = "great_people", player = 0 }
+path = "golden_age_points"
+eq = "=happy"

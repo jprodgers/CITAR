@@ -567,9 +567,9 @@ def civ_matches(g: "Game", pid: int, f: str, viewer: Optional[int] = None, multi
         if s in ALL:
             return True
         if s == "Human player":
-            return p.controller in ("human", "llm", "mcp")
+            return p.handicap == "human"
         if s == "AI player":
-            return p.controller not in ("human", "llm", "mcp")
+            return p.handicap != "human"
         if s == "Major":
             return p.kind == "major"
         if s in ("City-States", "City-State"):

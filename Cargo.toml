@@ -1,0 +1,130 @@
+# The Rust side of CITAR: the engine and the tools that test and measure it.
+# crates/citar-engine/DESIGN.md is the design; section 2 covers this file.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/citar-engine",
+    "crates/citar-bot",
+    "crates/citar-store",
+    "crates/citar-sim",
+    "crates/citar-py",
+    "crates/citar-testkit",
+    "crates/citar-refcheck",
+    "crates/citar-bench",
+    "xtask",
+]
+exclude = ["crates/citar-engine/fuzz"]
+
+[workspace.package]
+# cargo xtask check: this must equal __version__ in citar/__init__.py, so a release bumps both.
+version = "0.1.5"
+edition = "2024"
+rust-version = "1.98"
+license = "MPL-2.0"
+publish = false
+
+[workspace.dependencies]
+citar-engine  = { path = "crates/citar-engine", default-features = false }
+# Without its `checks` feature, which the testkit crate's own builds turn on by default, so that
+# `cargo bench -p citar-bench` compiles no check. A command that also selects testkit (a plain
+# `cargo bench` at the root) unifies the feature back on, so each benchmark's game also turns its
+# checks off (`citar_bench::unchecked`, DESIGN.md 9.4).
+citar-testkit = { path = "crates/citar-testkit", default-features = false }
+# Phase 2 (DESIGN.md P2.2): cargo xtask check holds each crate to its row of the crate graph.
+citar-bot     = { path = "crates/citar-bot" }
+citar-store   = { path = "crates/citar-store" }
+citar-sim     = { path = "crates/citar-sim" }
+# engine (the xtask allow-list: exactly these, plus their transitive closure)
+serde        = { version = "1.0.229", features = ["derive"] }
+serde_json   = { version = "1.0.151", features = ["preserve_order", "float_roundtrip"] }
+indexmap     = { version = "2.14", features = ["serde"] }
+rustc-hash   = "2.1"
+smallvec     = { version = "1.15", features = ["union", "const_generics", "serde"] }
+# Exact pin, and no `arch` feature: its hardware sqrt/fma/rint are correctly rounded anyway, but
+# turning them off means no libm bump ever has to re-argue that. A bump re-blesses the goldens.
+libm         = { version = "=0.2.16", default-features = false }
+blake3       = { version = "1.8", default-features = false, features = ["std", "pure"] }
+thiserror    = "2.0"
+base64       = "0.23"
+aho-corasick = "1.1"
+bitflags     = "2.13"
+# hosts: the store, the runner and the bindings (DESIGN.md P2.2)
+# 0.13, MIT: 0.14 moved to BSD-3-Clause. No default features: neither legacy zstd formats nor
+# dictionaries are read or written.
+zstd = { version = "0.13", default-features = false }
+# One abi3 extension per OS for Python 3.11 and up (DESIGN.md P2.6.1). PyO3 0.29 links Windows
+# through raw-dylib and deprecated `generate-import-lib`, which is no longer needed.
+pyo3 = { version = "0.29", features = ["abi3-py311"] }
+# citar-py's build script: the extension's link arguments on macOS (crates/citar-py/build.rs).
+pyo3-build-config = "0.29"
+# The baseline writer's `cpu_s`: the CPU time of the thread that played a game (citar-sim), as
+# Python's `time.process_time()` gave its worker process's. Safe wrappers over GetThreadTimes and
+# clock_gettime, so citar-sim keeps `forbid(unsafe_code)`; libc and winapi are already locked.
+cpu-time = "1.0"
+# tools and tests only
+clap = { version = "4.6", features = ["derive"] }
+flate2 = "1.1"
+toml = "1.1"
+globset = "0.4"
+similar = "3.2"
+rayon = "1"
+# The `re:` value constraints of refcheck/intended.toml. globset already builds its engine.
+regex = "1.13"
+libtest-mimic = "0.8"
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+arbitrary = "1.4"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+gungraun = "0.19"         # the successor of iai-callgrind
+# The criterion suites pin their thread to one core (DESIGN.md 9.7).
+core_affinity = "0.8"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+# A dropped `Change` is a write whose revision bump was lost (DESIGN.md section 6.4).
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# unused_must_use sees only a bare `g.set_x();`. This adds `let _ = g.set_x();`. `_ = ...`,
+# `let _x = ...` and `drop(...)` still get past both, so they are review items (README.md).
+let_underscore_must_use = "deny"
+# Hash order differs between two maps in one process, so iterating one can fork a game.
+iter_over_hash_type = "deny"
+float_cmp = "warn"
+lossy_float_literal = "warn"
+mem_forget = "deny"
+# Hosts turn a panic into one poisoned game; exiting takes the whole process with it.
+exit = "deny"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+[profile.dev]
+opt-level = 1                      # whole-game tests are 10-30x slower at 0
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.release]                  # ships: wheel extension, helper, citar-sim
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"                   # never abort: hosts turn a panic into one poisoned game
+# Off: the 1e-03 bench report measured 5-9% on pass rounds (DESIGN.md 10, "As built in 1e-03"),
+# over the 3% the design allowed. The ci profile, which every test, golden and chaos run uses,
+# keeps them, so an overflow still fails a test.
+overflow-checks = false
+
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = false
+debug-assertions = true
+overflow-checks = true
+
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"

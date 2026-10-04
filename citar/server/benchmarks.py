@@ -81,8 +81,8 @@ def default_scenario(**kw) -> dict:
 
 def _scenario_speed(sc: dict) -> str:
     """The game speed a scenario runs at, defaulting to Quick."""
-    from ..engine.rules import get_rules
-    return get_rules().resolve("speed", sc.get("speed")) or BENCH_SPEED
+    from .. import engine_api
+    return engine_api.resolve_name("speed", sc.get("speed")) or BENCH_SPEED
 
 
 def _seat_nations(sc: dict, n: int) -> list:
@@ -670,7 +670,7 @@ class BenchmarkScheduler:
                         pending = True
                         continue
                     s = self.manager.get(job["game_id"]) if job["game_id"] else None
-                    mid_turn = bool(s and s.game.s.current == (s.benchmark or {}).get("llm_player", 0)
+                    mid_turn = bool(s and s.game.current == (s.benchmark or {}).get("llm_player", 0)
                                     and s.agent_status.get((s.benchmark or {}).get("llm_player", 0)) == "thinking")
                     if mid_turn and _now() - st["since"] < grace:
                         pending = True
@@ -707,7 +707,7 @@ class BenchmarkScheduler:
                 job.update({"status": "cancelled", "error": "The game was closed.", "finished": _now()})
                 self._touch(run)
                 continue
-            if s.game.s.phase != "playing" or not s.game.player((s.benchmark or {}).get("llm_player", 0)).alive:
+            if s.game.phase != "playing" or not s.game.is_alive((s.benchmark or {}).get("llm_player", 0)):
                 # once the model is eliminated the result is settled (performance 0), and the bots playing
                 # on would only hold the machine and the CPU for nothing
                 self._finish_job(run, job, s)
@@ -753,7 +753,7 @@ class BenchmarkScheduler:
                     self._touch(run)
                 return
             pid = (s.benchmark or {}).get("llm_player", 0)
-            mid_turn = s.game.s.current == pid and s.agent_status.get(pid) == "thinking"
+            mid_turn = s.game.current == pid and s.agent_status.get(pid) == "thinking"
             since = job.setdefault("preempt_since", _now())
             if mid_turn and _now() - since < self.PREEMPT_GRACE:
                 if job.get("pause_pending") != "preempted":
@@ -941,7 +941,7 @@ class BenchmarkScheduler:
             s.ai_delay = 0
             s.benchmark = {"run_id": run["id"], "job_id": job["id"], "run_name": run["name"], "suite_id": run["suite_id"],
                            "scenario": sc["name"], "scenario_id": sc["id"], "model": job["model"], "server": job["server_name"],
-                           "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.total_turns(),
+                           "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.turn_limit,
                            "server_id": job["server_id"], "profile": job.get("profile")}
             self.manager.track(s)
             s.autosave(force=True)
@@ -990,7 +990,7 @@ class BenchmarkScheduler:
         self._record_progress(run, job, s)
         job["result"] = job["progress"]
         job.update({"status": "done", "finished": _now(), "pause_reason": None})
-        if s.game.s.phase == "playing":
+        if s.game.phase == "playing":
             s.stop()                # the model was eliminated: stop the bots playing out a settled game
         try:
             s.save("benchmark")
@@ -1052,29 +1052,32 @@ def performance(scores: dict, llm: int, phase: str, winner, alive: dict) -> Opti
 
 def game_progress(s: GameSession) -> dict:
     """Live progress of a benchmark game (called with the session lock held)."""
-    from ..engine.victory import score
     g = s.game
     llm = (s.benchmark or {}).get("llm_player", 0)
-    majors = [p for p in g.s.players if p.kind == "major"]
-    scores = {p.id: (score(g, p.id)["total"] if p.alive else 0) for p in majors}
-    alive = {p.id: p.alive for p in majors}
-    rep = s.metrics.summary({llm: {"name": g.player(llm).name, "controller": "llm", "model": (s.benchmark or {}).get("model")}})[llm]
-    best_opp = max((scores[p.id] for p in majors if p.id != llm), default=0)
+    summ = g.summary()
+    majors = [p for p in summ["players"] if p["kind"] == "major"]
+    standings = g.standings()
+    scores = {p["id"]: (standings[p["id"]]["score"] if p["alive"] else 0) for p in majors}
+    alive = {p["id"]: p["alive"] for p in majors}
+    mine = standings[llm]
+    phase, winner, victory = summ["phase"], summ["winner"], summ["victory"]
+    rep = s.metrics.summary({llm: {"name": g.player_name(llm), "controller": "llm", "model": (s.benchmark or {}).get("model")}})[llm]
+    best_opp = max((scores[p["id"]] for p in majors if p["id"] != llm), default=0)
     outcome = "eliminated" if not alive.get(llm) else None
-    if g.s.phase != "playing":
-        outcome = "won" if g.s.winner == llm else ("eliminated" if not alive.get(llm) else f"lost ({g.s.victory or 'game over'})")
+    if phase != "playing":
+        outcome = "won" if winner == llm else ("eliminated" if not alive.get(llm) else f"lost ({victory or 'game over'})")
     series = [{"turn": e["turn"], "llm": (e["players"].get(str(llm)) or {}).get("score", 0),
                "best_bot": max([(v or {}).get("score", 0) for k, v in e["players"].items() if k != str(llm)] or [0])}
-              for e in g.s.stats[-400:]]
+              for e in g.stats(last=400)]
     status = s.agent_status.get(llm)
-    last_thought = next((t for t in reversed(g.s.thoughts) if t.get("player") == llm and t.get("kind") in (None, "reasoning", "system")), None)
+    last_thought = next((t for t in reversed(g.thoughts(llm)) if t.get("kind") in (None, "reasoning", "system")), None)
     return {
-        "turn": g.turn, "turn_limit": g.total_turns(), "phase": g.s.phase, "current_player": g.s.current,
-        "llm_to_move": g.s.current == llm and g.s.phase == "playing", "agent_status": status, "paused": s.paused,
-        "civ": g.player(llm).name, "score": scores.get(llm), "best_bot_score": best_opp, "alive": alive.get(llm),
-        "cities": len(g.player_cities(llm)), "techs": len(g.player(llm).techs),
-        "population": sum(c.pop for c in g.player_cities(llm)), "winner": g.s.winner, "victory": g.s.victory,
-        "outcome": outcome, "performance": performance(scores, llm, g.s.phase, g.s.winner, alive),
+        "turn": summ["turn"], "turn_limit": summ["turn_limit"], "phase": phase, "current_player": summ["current"],
+        "llm_to_move": summ["current"] == llm and phase == "playing", "agent_status": status, "paused": s.paused,
+        "civ": g.player_name(llm), "score": scores.get(llm), "best_bot_score": best_opp, "alive": alive.get(llm),
+        "cities": mine["cities"], "techs": mine["techs"],
+        "population": mine["population"], "winner": winner, "victory": victory,
+        "outcome": outcome, "performance": performance(scores, llm, phase, winner, alive),
         "turns_played": rep.get("turns", 0), "avg_turn_s": rep.get("avg_turn_s"), "max_turn_s": rep.get("max_turn_s"),
         "avg_errors": rep.get("avg_errors"), "avg_repeats": rep.get("avg_repeats"), "avg_tool_calls": rep.get("avg_tool_calls"),
         "malformed_calls": rep.get("malformed_calls"), "end_reasons": rep.get("end_reasons", {}),

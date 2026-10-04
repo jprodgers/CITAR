@@ -184,7 +184,7 @@ def conquer(g: "Game", city: "City", unit: "Unit") -> dict:
         city.puppet = True
         city.queue = []
         result["result"] = "puppet"
-        if g.player(attacker).controller == "bot":
+        if g.player(attacker).auto.get("conquest"):
             _auto_conquer(g, attacker, city)
             result["result"] = "razing" if city.razing else ("annexed" if not city.puppet else "puppet")
     result["gold_plundered"] = gold

@@ -1,0 +1,139 @@
+about = """
+The scenario operations on research: granting a tech grants its missing prerequisites first, in
+prerequisite order; granting an era grants every tech of the eras before it; removing a tech
+removes every known tech that needs it; setting research to a far tech queues the path to it.
+Each announces what it granted to its civilization only.
+
+The Rust engine announces a granted tech as "Rome was granted Pottery." and reads a techs string as
+one name (intended: scenario-tech-announcement-wording, scenario-techs-string-is-one-name).
+"""
+from = "citar/engine/scenario.py: grant_tech, grant_era, remove_tech, set_research"
+
+[[step]]
+note = "A bare game's civilizations start with the Ancient era's starting tech."
+check = { what = "player", player = 0 }
+path = "techs"
+eq = ["Agriculture"]
+
+[[step]]
+op = "grant_tech"
+args = { player = 0, tech = "writing" }
+as = "granted"
+
+[[step]]
+check = "granted"
+eq = { techs_added = { "0" = ["Pottery", "Writing"] } }
+
+[[step]]
+op = "grant_tech"
+args = { player = 0, techs = ["Philosophy"] }
+as = "granted"
+
+[[step]]
+check = "granted"
+path = "techs_added.0"
+eq = ["Calendar", "Philosophy"]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "techs"
+eq = ["Agriculture", "Calendar", "Philosophy", "Pottery", "Writing"]
+
+[[step]]
+check = { what = "events", type = "tech" }
+len = 4
+
+[[step]]
+note = "Nobody else hears of it."
+check = { what = "events", type = "tech", player = 1 }
+eq = []
+
+[[step]]
+note = "Python announced 'Civilization 1 scenario Pottery.'"
+check = { what = "events", type = "tech", player = 0 }
+path = "[0].text"
+matches = '^Civilization 1 was granted Pottery\.'
+intended = "scenario-tech-announcement-wording"
+
+[[step]]
+op = "grant_tech"
+args = { player = 0, tech = "Philosophy" }
+as = "again"
+
+[[step]]
+check = "again"
+eq = { techs_added = { "0" = [] } }
+
+[[step]]
+op = "remove_tech"
+args = { player = 0, tech = "Pottery" }
+as = "removed"
+
+[[step]]
+check = "removed"
+eq = { techs_removed = { "0" = ["Calendar", "Philosophy", "Pottery", "Writing"] } }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "techs"
+eq = ["Agriculture"]
+
+[[step]]
+op = "set_research"
+args = { player = 0, tech = "Writing" }
+as = "research"
+
+[[step]]
+check = "research"
+subset = { researching = "Pottery", queue = ["Pottery", "Writing"], goal = "Writing", path = ["Pottery", "Writing"] }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "research"
+subset = { queue = ["Pottery", "Writing"], goal = "Writing", progress = {} }
+
+[[step]]
+op = "set_research"
+args = { player = 0, tech = "Agriculture" }
+error = "You already know Agriculture."
+
+[[step]]
+op = "grant_era"
+args = { player = 1, era = "Classical era" }
+as = "era"
+
+[[step]]
+check = "era"
+eq = { techs_added = { "1" = 11 } }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "techs"
+eq = ["Agriculture", "Animal Husbandry", "Archery", "Bronze Working", "Calendar", "Masonry", "Mining", "Pottery", "Sailing", "The Wheel", "Trapping", "Writing"]
+
+[[step]]
+op = "grant_tech"
+args = { player = 0, tech = "Nonsense" }
+error = "Operation 1 (grant_tech): Unknown tech 'Nonsense'."
+
+[[step]]
+op = "grant_era"
+args = { player = "all", era = "Ancient era", include = true }
+as = "all"
+
+[[step]]
+note = "The Ancient era's own techs: the eleven the first civilization lacked, and none for the second."
+check = "all"
+eq = { techs_added = { "0" = 11, "1" = 0 } }
+
+[[step]]
+note = "A techs string is one tech's name, where Python read it letter by letter (Unknown tech 'P')."
+op = "grant_tech"
+args = { player = 1, techs = "Philosophy" }
+as = "one"
+intended = "scenario-techs-string-is-one-name"
+
+[[step]]
+check = "one"
+eq = { techs_added = { "1" = ["Philosophy"] } }
+intended = "scenario-techs-string-is-one-name"

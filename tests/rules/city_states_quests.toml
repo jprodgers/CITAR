@@ -1,0 +1,213 @@
+about = """
+A city-state rewards a quest once it is done. Gold given for Give Gold and a pledge for Pledge to
+Protect pay at once, 20 influence each. A camp cleared pays whoever cleared it (50), and the camp's
+quests end for everyone else. A quest that ran out is dropped at the end of the city-state's turn,
+and a contest that ran out is decided. Bullying a city-state completes the Bully City State quests
+about it (40), then the bullied city-state cancels the bully's individual quests and its
+investment, but not a contest.
+"""
+from = "citar/engine/city_states.py: _assign, _complete_quests, _quest_event, _reward, camp_cleared, _quests_end_turn, _bullied"
+
+[config]
+city_states = 1
+barbarians = "normal"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "CS" },
+  { op = "meet", a = 0, b = 2 },
+  { op = "meet", a = 1, b = 2 },
+  { op = "set_player", player = 0, gold = 1000 },
+  { op = "set_influence", city_state = 2, player = 0, amount = 20 },
+  { op = "add_unit", player = 0, unit = "Swordsman", at = "CS>e>e" },
+  { op = "add_unit", player = 0, unit = "Swordsman", at = "CS>w>w" },
+  { op = "add_unit", player = 0, unit = "Swordsman", at = "CS>ne>ne" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "(8,3)" },
+]
+as = "made"
+
+[[step]]
+set = { warrior = "=made[10].unit_ids[0]" }
+
+[[step]]
+op = "add_quest"
+args = { city_state = 0, player = 1, quest = "Route" }
+error = "Player 0 is not a city-state."
+
+[[step]]
+op = "add_quest"
+args = { city_state = 2, player = 0, quest = "Slay the Dragon" }
+error = "Unknown quest 'Slay the Dragon'."
+
+[[step]]
+note = """
+The bully's quests: two it loses, a contest it keeps, and a quest to bully a city-state. The arena
+has one city-state start, so that quest names the city-state that gives it.
+"""
+op = "add_quest"
+args = { city_state = 2, player = 0, quest = "Find Player", target = 1 }
+as = "find"
+
+[[step]]
+check = "find"
+eq = { quest = "Find Player (Civilization 2)" }
+
+[[step]]
+op = "add_quest"
+args = { city_state = 2, player = 0, quest = "Invest" }
+as = "invest"
+
+[[step]]
+check = "invest"
+eq = { quest = "Invest (gold gifts give 50% more influence)" }
+
+[[step]]
+op = "add_quest"
+args = { city_state = 2, player = 0, quest = "Contest Culture" }
+
+[[step]]
+op = "add_quest"
+args = { city_state = 2, player = 0, quest = "Bully City State", target = 2 }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "quests"
+eq = [
+  { name = "Find Player", assignee = 0, scope = "individual" },
+  { name = "Invest", assignee = 0, scope = "global" },
+  { name = "Contest Culture", assignee = 0, scope = "global" },
+  { name = "Bully City State", assignee = 0, scope = "individual" },
+]
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 0 }
+any = { path = "text", matches = "assigned you a new quest: Find Player \\(Civilization 2\\)\\.$" }
+
+[[step]]
+note = "Tribute: 15 influence lost, 40 won by the bully quest."
+tool = "city_state_action"
+args = { player_id = 2, action = "tribute_gold" }
+as = "paid"
+
+[[step]]
+check = "paid"
+eq = { tribute = "50 gold" }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+subset = { influence = { "0" = 45, "1" = 0 }, quests = [{ name = "Contest Culture", assignee = 0, scope = "global" }] }
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 0 }
+any = { path = "text", matches = "rewarded you with 40 influence for completing the Bully City State quest\\.$" }
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 0 }
+any = { path = "text", matches = "cancelled its quests for you because you demanded tribute\\.$" }
+
+[[step]]
+note = "Give Gold is done as the gold is given: 25 influence for the gift, 20 for the quest."
+op = "add_quest"
+args = { city_state = 2, player = 0, quest = "Give Gold", target = 1 }
+as = "give"
+
+[[step]]
+check = "give"
+eq = { quest = "Give Gold (Civilization 2)" }
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "gift_gold", amount = 250 }
+as = "gift"
+
+[[step]]
+check = "gift"
+subset = { influence_gained = 25, influence = 90.0 }
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 0 }
+any = { path = "text", matches = "rewarded you with 20 influence for completing the Give Gold quest\\.$" }
+
+[[step]]
+note = "Pledge to Protect is done as the pledge is made."
+op = "add_quest"
+args = { city_state = 2, player = 0, quest = "Pledge to Protect", target = 1 }
+
+[[step]]
+tool = "city_state_action"
+args = { player_id = 2, action = "pledge" }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+subset = { ally = 0, protectors = [0], influence = { "0" = 110, "1" = 0 }, quests = [{ name = "Contest Culture", assignee = 0, scope = "global" }] }
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 0 }
+any = { path = "text", matches = "rewarded you with 20 influence for completing the Pledge to Protect quest\\.$" }
+
+[[step]]
+note = "A camp both were asked to clear: the one that clears it is paid, the other's quest ends."
+op = "create_camp"
+args = { at = "(9,3)" }
+
+[[step]]
+op = "add_quest"
+args = { city_state = 2, player = 0, quest = "Clear Barbarian Camp", at = "(9,3)" }
+as = "camp"
+
+[[step]]
+check = "camp"
+eq = { quest = "Clear Barbarian Camp (camp at (9,3))" }
+
+[[step]]
+op = "add_quest"
+args = { city_state = 2, player = 1, quest = "Clear Barbarian Camp", at = "(9,3)" }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "quests"
+len = 3
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=warrior", at = "(9,3)" }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+subset = { influence = { "0" = 160, "1" = 0 }, quests = [{ name = "Contest Culture", assignee = 0, scope = "global" }] }
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 0 }
+any = { path = "text", matches = "rewarded you with 50 influence for completing the Clear Barbarian Camp quest\\.$" }
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 1 }
+none = { path = "text", matches = "rewarded you" }
+
+[[step]]
+note = "Quests given on turn 1 that last 30 turns have run out by the end of turn 31."
+op = "add_quest"
+args = { city_state = 2, player = 1, quest = "Give Gold", target = 0 }
+
+[[step]]
+op = "set_turn"
+args = { turn = 31 }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "quests"
+eq = []
+
+[[step]]
+check = { what = "events", type = "cs_quest", player = 1 }
+any = { path = "text", matches = "no longer needs your help with the Give Gold quest\\.$" }
+
+[[step]]
+note = "The contest is decided, whether its culture won it or not."
+check = { what = "events", type = "cs_quest", player = 0 }
+any = { path = "text", matches = "Contest Culture quest" }

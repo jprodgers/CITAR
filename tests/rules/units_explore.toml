@@ -1,0 +1,104 @@
+about = """
+A unit told to explore heads for the explored tile with the most unexplored ground around it for its
+distance, keeps the order, and goes on exploring at the start of each of its turns until nothing is
+left to explore nearby. A move order also goes on at the start of the next turn, and a unit that
+arrives drops it.
+"""
+from = "tests/test_engine.py::TurnTests::test_move_without_moves_is_an_error; citar/engine/automation.py: explore, run_unit_orders"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+]
+as = "made"
+
+[[step]]
+set = { scout = "=made[2].unit_ids[0]", walker = "=made[3].unit_ids[0]" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "explored"
+as = "seen_before"
+ge = 0
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=scout", order = "explore" }
+as = "first"
+
+[[step]]
+check = "first"
+eq = { exploring = true, moved = true }
+
+[[step]]
+check = { what = "unit", unit = "=scout" }
+subset = { activity = "explore", moves = 0 }
+as = "after_first"
+
+[[step]]
+check = "after_first"
+subset = { x = 4, y = 6 }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "explored"
+gt = "=seen_before"
+
+[[step]]
+note = "With no moves left, a move is refused with why."
+tool = "move_unit"
+args = { unit_id = "=scout", x = 5, y = 5 }
+error = "Warrior #"
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=scout", x = 5, y = 5 }
+error = "has no moves left this turn (its explore order already moved it this turn). Nothing happened. Moves refresh next turn."
+
+[[step]]
+note = "A move order far away: one turn's worth now."
+tool = "move_unit"
+args = { unit_id = "=walker", x = 5, y = 12 }
+as = "walk"
+
+[[step]]
+check = "walk"
+subset = { arrived = false, order_kept = true }
+
+[[step]]
+check = { what = "unit", unit = "=walker" }
+subset = { activity = "goto", goto = { x = 5, y = 12 } }
+as = "walk_now"
+
+[[step]]
+note = "The next turn: movement back, and the orders go on."
+op = "set_unit"
+args = { unit = "=scout", moves = 60 }
+
+[[step]]
+op = "set_unit"
+args = { unit = "=walker", moves = 60 }
+
+[[step]]
+op = "automate"
+args = { player = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=scout" }
+subset = { activity = "explore", moves = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=scout" }
+subset = { x = 3, y = 7 }
+
+[[step]]
+check = { what = "unit", unit = "=walker" }
+subset = { activity = "goto", goto = { x = 5, y = 12 }, moves = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=walker" }
+path = "y"
+gt = "=walk_now.y"

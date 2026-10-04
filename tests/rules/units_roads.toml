@@ -1,0 +1,52 @@
+about = """
+A road makes a step between two tiles that both have one cost half a movement point, and a railroad
+a tenth.
+"""
+from = "citar/engine/movement.py: route_at, has_connection, enter_cost"
+
+[[step]]
+ops = [
+  { op = "set_tile", at = "(5,11)", route = "Road" },
+  { op = "set_tile", at = "(6,11)", route = "Road" },
+  { op = "set_tile", at = "(7,11)", route = "Road" },
+  { op = "set_tile", at = "(8,11)", route = "Road" },
+  { op = "set_tile", at = "(9,11)", route = "Road" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "(5,11)" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[5].unit_ids[0]" }
+
+[[step]]
+note = "Four road steps for two movement points: it arrives with nothing left."
+tool = "move_unit"
+args = { unit_id = "=w", x = 9, y = 11 }
+as = "road"
+
+[[step]]
+check = "road"
+subset = { to = { x = 9, y = 11 }, arrived = true, moves_left = 0 }
+
+[[step]]
+ops = [
+  { op = "set_tile", at = "(5,11)", route = "Railroad" },
+  { op = "set_tile", at = "(6,11)", route = "Railroad" },
+  { op = "set_tile", at = "(7,11)", route = "Railroad" },
+  { op = "set_tile", at = "(8,11)", route = "Railroad" },
+  { op = "set_tile", at = "(9,11)", route = "Railroad" },
+]
+
+[[step]]
+op = "set_unit"
+args = { unit = "=w", at = "(5,11)", moves = 120 }
+
+[[step]]
+note = "Four railroad steps cost six sixtieths each."
+tool = "move_unit"
+args = { unit_id = "=w", x = 9, y = 11 }
+as = "rail"
+
+[[step]]
+check = "rail"
+subset = { to = { x = 9, y = 11 }, arrived = true, moves_left = 1.6 }

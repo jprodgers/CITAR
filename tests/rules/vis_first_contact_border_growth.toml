@@ -1,0 +1,61 @@
+about = """
+Two civilizations meet the moment one of them sees a tile of the other's: here a border grows into
+a warrior's sight. A tile that changes hands out of sight meets nobody. First contact is announced
+to both.
+"""
+from = "citar/engine/visibility.py: refresh (first contact); DESIGN.md 6.9"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "met"
+eq = false
+
+[[step]]
+note = "Four tiles east of the warrior, past its sight on flat land: nobody sees the claim."
+op = "set_tile"
+args = { at = "A>e>e>e>e", owner = 1 }
+
+[[step]]
+check = { what = "tile", at = "A>e>e>e>e" }
+path = "visible"
+eq = []
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "met"
+eq = false
+
+[[step]]
+note = "Two tiles south-east of the warrior: in sight."
+op = "set_tile"
+args = { at = "A>se>se", owner = 1 }
+
+[[step]]
+check = { what = "tile", at = "A>se>se" }
+path = "visible"
+eq = [0]
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "met"
+eq = true
+
+[[step]]
+check = { what = "events", type = "first_contact" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "first_contact" }
+path = "[0]"
+subset = { audience = [0, 1] }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "met"
+eq = [0]

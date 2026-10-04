@@ -1,0 +1,83 @@
+about = """
+A civilization's military unit that walks into a barbarian camp clears it: the camp is destroyed
+(it lingers 15 turns, keeping new camps away), and the civilization loots its difficulty's reward,
+25 gold on Prince at the standard speed. A camp attacked spawns sooner: its countdown halves.
+"""
+from = "citar/engine/barbarians.py: clear_camp, camp_attacked; citar/engine/movement.py: on_enter_tile"
+
+[config]
+barbarians = "normal"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "(8,3)" },
+  { op = "set_player", player = 0, gold = 100 },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[1].unit_ids[0]" }
+
+[[step]]
+op = "create_camp"
+args = { at = "(9,3)" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=w", at = "(9,3)" }
+
+[[step]]
+check = { what = "tile", at = "(9,3)" }
+subset = { improvement = "=null" }
+
+[[step]]
+check = { what = "camps" }
+path = "[0]"
+subset = { x = 9, y = 3, destroyed = true, countdown = 15 }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = 125
+
+[[step]]
+check = { what = "events", type = "camp_cleared" }
+len = 1
+
+[[step]]
+note = "A camp attacked halves its countdown: the guard spawned at turn 50 is attacked."
+ops = [
+  { op = "add_unit", player = 0, unit = "Archer", at = "(13,3)" },
+]
+as = "archer"
+
+[[step]]
+op = "create_camp"
+args = { at = "(14,2)" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 50 }
+
+[[step]]
+op = "barbarian_act"
+
+[[step]]
+check = { what = "camps" }
+path = "[x=14]"
+subset = { spawned = 0 }
+as = "before"
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=archer[0].unit_ids[0]" }
+
+[[step]]
+op = "attack_as"
+args = { unit = "=archer[0].unit_ids[0]", at = "(14,2)" }
+
+[[step]]
+check = { what = "camps" }
+path = "[x=14].countdown"
+eq = "=before.countdown // 2"

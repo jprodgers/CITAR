@@ -1,0 +1,64 @@
+about = """
+A timed unique: the Autocracy branch's finisher gives `[+25]% Strength <when attacking> <for
+[Military] units> <for [50] turns>`, which the civilization holds for fifty turns, counted down at
+the end of each of its turns, and then no more.
+
+Python asked the unique's own conditionals when it was granted, so `<when attacking>` never held
+and the bonus was never granted; the Rust engine grants a timed unique whatever its conditionals,
+which are its effect's (intended: timed-uniques-granted-whatever-their-conditionals).
+"""
+from = "citar/engine/triggers.py: trigger (timed); citar/engine/turns.py: _temp_uniques_end_turn"
+
+[[step]]
+note = "The other civilization keeps a unit, so that the game goes on."
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+note = "Autocracy opens in the Industrial era."
+op = "grant_era"
+args = { player = 0, era = "Industrial era" }
+
+[[step]]
+op = "adopt_policy"
+args = { player = 0, policies = ["Populism", "Militarism", "Fascism", "Police State", "Total War"] }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+contains = "Autocracy Complete"
+
+[[step]]
+intended = "timed-uniques-granted-whatever-their-conditionals"
+check = { what = "great_people", player = 0 }
+path = "temp_uniques"
+eq = [{ text = "[+25]% Strength <when attacking> <for [Military] units> <for [50] turns>", turns = 50 }]
+
+[[step]]
+op = "end_round"
+
+[[step]]
+intended = "timed-uniques-granted-whatever-their-conditionals"
+check = { what = "great_people", player = 0 }
+path = "temp_uniques[0].turns"
+eq = 49
+
+[[step]]
+repeat = 48
+steps = [{ op = "end_round" }]
+
+[[step]]
+intended = "timed-uniques-granted-whatever-their-conditionals"
+check = { what = "great_people", player = 0 }
+path = "temp_uniques[0].turns"
+eq = 1
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "great_people", player = 0 }
+path = "temp_uniques"
+eq = []

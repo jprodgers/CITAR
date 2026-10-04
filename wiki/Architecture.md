@@ -5,6 +5,7 @@ What the pieces are, why they are separated the way they are, and where to chang
 ```
 citar/
   engine/     the rules. No I/O, no network, no database
+  engine_api.py  the only door to the engine: everything outside engine/ and bots/ goes through it
   bots/       the scripted opponent
   agents/     adapters that let a model take a seat
   server/     FastAPI app, sessions, turn driver, benchmark scheduler
@@ -33,9 +34,29 @@ Everything else follows from that:
   them.
 - The bot, the LLM adapter and the HTTP API are all *callers*, none of them privileged. A model
   cannot do anything a human could not, because there is only one set of actions.
-- Tests are fast and deterministic. 272 of them run in ninety seconds with no fixtures.
+- Tests are fast and deterministic. 456 of them run in about four minutes with no fixtures.
 
 The ruleset is loaded once at import, which is the one exception, and it is read-only.
+
+## The one door
+
+**Outside `citar/engine/` and `citar/bots/`, nothing imports the engine except
+`citar/engine_api.py`.** The server, the agents, probes, benchmarks, the lab, balance runs and
+`citar sim` hold an `EngineGame` and call its methods; they never touch `Game`, the state or a bot's
+internals, and they read a saved game's state only through `engine_api.state_summary`. The facade's
+`__all__` is its whole public surface. `tests/test_engine_boundary.py` reads every module and fails on
+a way round it, including a name taken from the facade that is not in `__all__`.
+
+The reason is the Rust engine that replaces this one: with a single door, the swap is a new backend
+behind `engine_api.py` rather than a change to two hundred call sites. So the facade is shaped like
+the coarse Rust API — create, load and save a game; execute a tool; views, briefings and
+negotiations; bot turns and whole headless games (`run_game`); scenario, map and debug operations;
+the tool schemas — and returns plain data, never live engine objects. The module's docstring maps
+each method to the Rust call it becomes.
+
+`citar/bots/profiles.py` and `ratings.py` are bookkeeping about bots and may be imported from
+anywhere. Tests may import the engine directly; `EngineGame.python_game` exists for them and for
+engine-side tools such as `scripts/refcheck`.
 
 ---
 
@@ -193,6 +214,7 @@ right way.
 | A rule that has a unique | `citar/data/` — the interpreter handles it |
 | A new kind of rule | The engine module that owns the system, plus `unique_types.py` |
 | A new player action | `engine/tools.py` — it reaches all three interfaces at once |
+| Something the server needs from a game | `engine_api.py`, then the engine behind it |
 | How the bot plays | `bots/basic.py`, and A/B it ([BOTS.md](Scripted-bots)) |
 | What a model is told | `agents/prompts.py` and `engine/briefing.py` |
 | A screen in the browser | `web/js/`, no build step |

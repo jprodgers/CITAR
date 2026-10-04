@@ -1,0 +1,44 @@
+about = """
+A map that wraps, in a model's briefing and map: the briefing says which edges meet, and a window
+narrower than the map runs across its edge, its columns numbered as they are on the map and its
+seam said; a window as wide as the map is clamped to it.
+"""
+from = "citar/engine/briefing.py: ascii_map, briefing"
+map = "arena_wrap"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+contains = "\nThe map (24x16) wraps east-west and north-south: moving off one edge comes back on the opposite edge (x=23 is next to x=0; y=15 is next to y=0). Distances are measured the short way round.\n"
+
+[[step]]
+tool = "get_map"
+player = 0
+args = { x = 1, y = 1, radius = 3 }
+as = "seam"
+
+[[step]]
+check = "seam"
+matches = "^Map around \\(1,1\\), x 19-7, y 14-4 \\(the map wraps: this window runs across its edge\\):\n      19             0              5\ny=14\ny=15\ny=0\ny=1\ny=2\ny=3                               G\\.\\$G\\. Gr\ny=4                              G\\. G\\. Gr Gr\nIn this window:\n  resource Cotton \\(4,3\\)$"
+
+[[step]]
+tool = "get_map"
+player = 0
+args = { x = 12, y = 8 }
+as = "wide"
+
+[[step]]
+check = "wide"
+matches = "^Map around \\(12,8\\), x 0-23, y 0-15:\n"
+
+[[step]]
+note = "The local map around Roma, five rows each way, runs across the east-west seam."
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\nLOCAL MAP \\(legend: get_map legend=true\\):\nMap around \\(5,5\\), x 19-15, y 0-10 \\(the map wraps: this window runs across its edge\\):\n      19             0              5              10             15\n"

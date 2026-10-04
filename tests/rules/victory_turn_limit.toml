@@ -1,0 +1,98 @@
+about = """
+When the last turn has passed, the civilization with the highest score wins the Time victory. With
+the Time victory off, the game ends there with no winner. A score counts cities, citizens, the land
+the cities own, wonders and techs, more for each on a map this small.
+"""
+from = "citar/engine/victory.py: score, check_turn_limit, milestone_done (Have highest score after max turns)"
+
+[config]
+turn_limit = 3
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 3 },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "grant_tech", player = 1, techs = ["Pottery", "Mining"] },
+]
+
+[[step]]
+note = "a city, three citizens, its land and a tech, each scaled up on this small map"
+check = { what = "victory", player = 0 }
+path = "score"
+eq = { cities = 17.7, population = 16.0, tiles = 12.4, wonders = 0, technologies = 4.0, future_tech = 0.0, total = 50 }
+
+[[step]]
+check = { what = "victory", player = 1 }
+path = "score"
+eq = { cities = 17.7, population = 5.3, tiles = 12.4, wonders = 0, technologies = 12.0, future_tech = 0.0, total = 47 }
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "progress.Time"
+eq = { milestones = [{ milestone = "Have highest score after max turns", done = false }], total = 1, completed = 0 }
+
+[[step]]
+op = "set_turn"
+args = { turn = 3 }
+
+[[step]]
+op = "end_round"
+as = "round"
+
+[[step]]
+check = "round"
+eq = { turn = 4, current = 1 }
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over", winner = 0, victory = "Time" }
+
+[[step]]
+check = { what = "events", type = "victory" }
+path = "[0].text"
+eq = "The final turn has passed. Civilization 1 wins with the highest score — Time Victory!"
+
+[[step]]
+check = { what = "victory", player = 1 }
+path = "progress.Time.completed"
+eq = 0
+
+[[step]]
+note = "the same game with the Time victory off"
+new_game = { turn_limit = 3, victories = { Time = false } }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 3 },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+]
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "progress"
+absent = false
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "progress.Time"
+absent = true
+
+[[step]]
+op = "set_turn"
+args = { turn = 3 }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over", winner = "=null", victory = "=null" }
+
+[[step]]
+check = { what = "events", type = "game_over" }
+path = "[0].text"
+eq = "The turn limit has been reached. The game ends with no winner."
+
+[[step]]
+check = { what = "events", type = "victory" }
+len = 0

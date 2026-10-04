@@ -5,6 +5,15 @@
 # version each, because what they catch is platform behaviour (path separators, file locking, the
 # console encoding) and not version differences, and three full matrices for that is a lot of
 # runner minutes for very little.
+#
+# The Rust extension, citar._engine, is built once per OS (build-ext) and every job that needs it
+# takes that build rather than compiling its own: the test jobs unpack it into the checkout, so the
+# checkout's own sources run with it and the three Linux Pythons share one abi3 library, and the
+# installer jobs install its wheel. The package and docker jobs use a release wheel without the
+# test operations instead, as a release would ship it (crates/citar-engine/DESIGN.md P2.6.8).
+#
+# The facade (citar/engine_api.py) has two backends, chosen by CITAR_ENGINE: the test jobs run the
+# suite on the default one, and test-rust runs it once more on the Rust engine.
 name: tests
 
 on:
@@ -21,9 +30,77 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artefacts are never reused on a fresh runner; they only slow the cache down.
+  CARGO_INCREMENTAL: 0
+  # The maturin every wheel and source distribution here is built with: the version tested, moved on
+  # deliberately. Left to itself maturin-action takes the newest release that pyproject.toml's
+  # `maturin>=1.15,<2` allows, and how maturin reads the include and exclude lists has changed
+  # between minor releases; scripts/ci/check_dist.py then holds what it built to the checkout.
+  MATURIN_VERSION: v1.15.0
+
 jobs:
+  build-ext:
+    name: build-ext (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        # rust-toolchain.toml pins the exact release; maturin-action reads the same file.
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-ext
+
+      - uses: actions/setup-python@v7
+        # PyO3 reads an interpreter's configuration when it builds; any Python of 3.11 or later
+        # does for an abi3 build.
+        with:
+          python-version: "3.12"
+
+      - name: Build the test wheel
+        # The ci profile with the test operations, as `cargo xtask develop` builds it: the suite's
+        # engine tests need them, and the ci profile keeps the debug assertions. This is also where
+        # the extension links on each OS (Windows through raw-dylib, macOS with `-undefined
+        # dynamic_lookup` from crates/citar-py/build.rs). On Linux it builds on the runner itself
+        # (`manylinux: off`, a plain `linux` tag), so the cache above serves it; the package job
+        # builds the manylinux wheel.
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: build
+          args: --profile ci --features test-ops --locked --out wheels
+          manylinux: "off"
+
+      - name: One abi3 wheel, holding the package and the extension
+        # The installer jobs install this wheel, so what it holds matters as much as the package
+        # job's: one cp311-abi3 tag, this OS's library, the files git tracks under citar/ and
+        # nothing else but the dist-info.
+        shell: bash
+        run: |
+          ls -l wheels
+          python scripts/ci/check_dist.py wheel wheels --library "citar/_engine${{ runner.os == 'Windows' && '.pyd' || '.abi3.so' }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ext-${{ runner.os }}
+          path: wheels/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    needs: build-ext
+    # A failed build on one OS fails this job on that OS alone, at the download of its missing
+    # wheel: without this condition a matrix need skips the job on every OS when any leg fails.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,10 +119,22 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: ext-${{ runner.os }}
+          path: ext
+
       - name: Install
+        # The dependencies alone, since installing the package would build the extension again:
+        # the build-ext job's library goes into the checkout instead, and the unpacking fails
+        # unless it imports with the test operations, so the engine's tests can never be skipped
+        # here unnoticed.
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[all]"
+          python scripts/ci/requirements.py all > "$RUNNER_TEMP/requirements.txt"
+          pip install -r "$RUNNER_TEMP/requirements.txt"
+          python scripts/ci/unpack_ext.py ext --test-ops
 
       - name: Tests
         # Not pytest: the suite is unittest and is run the same way here as on a laptop, so a
@@ -74,6 +163,84 @@ jobs:
         # says the same thing five times.
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: python scripts/check_links.py --strict
+
+  test-rust:
+    # The same suite with the facade on the Rust engine (CITAR_ENGINE=rust; DESIGN.md P2.6.6, P2.7.4),
+    # once, on the server's platform. A test the Rust backend cannot pass yet says why
+    # (tests/backends.py): Python-engine-only with its successor, pending a named package, or Rust-only,
+    # which the Python jobs skip. From package 2-09 the default flips and this becomes the main run.
+    name: ubuntu-latest / Python 3.12 / Rust engine
+    needs: build-ext
+    # It needs only the Linux wheel, so a Windows or macOS build failing does not skip it.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      CITAR_ENGINE: rust
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ext-Linux
+          path: ext
+
+      - name: Install
+        # As the test jobs install: the dependencies, then the build-ext library with the test
+        # operations into the checkout.
+        run: |
+          python -m pip install --upgrade pip
+          python scripts/ci/requirements.py all > "$RUNNER_TEMP/requirements.txt"
+          pip install -r "$RUNNER_TEMP/requirements.txt"
+          python scripts/ci/unpack_ext.py ext --test-ops
+
+      - name: Tests on the Rust engine
+        run: python -m unittest discover -s tests -v
+
+  interpreter-exit:
+    # DESIGN.md P2.6.4: the interpreter exits while a daemon thread is inside a call to
+    # citar._engine, on each Python from 3.11, and the process must exit 0 with no call left in
+    # flight. tests/engine_exit_child.py says how it checks. The Linux test wheel's one abi3
+    # library serves every version; the check needs nothing else installed.
+    needs: build-ext
+    # It needs only the Linux wheel, so a Windows or macOS build failing does not skip it.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        # Every version is installed; the last is the default.
+        with:
+          python-version: |
+            3.11
+            3.12
+            3.13
+            3.14
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ext-Linux
+          path: ext
+
+      - name: Unpack the extension
+        run: python scripts/ci/unpack_ext.py ext --test-ops
+
+      - name: Exit mid-drive on each Python
+        run: |
+          set -u
+          failed=0
+          for v in 3.11 3.12 3.13 3.14; do
+            echo "::group::Python $v"
+            "python$v" --version
+            "python$v" tests/engine_exit_child.py check || { failed=1; echo "::error::the check failed on Python $v"; }
+            echo "::endgroup::"
+          done
+          exit $failed
 
   lint:
     runs-on: ubuntu-latest
@@ -119,19 +286,47 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Build
+      - name: Toolchain
+        # For the source distribution, which asks cargo for the crates' files on the runner.
+        run: rustup toolchain install
+
+      - name: The source distribution
+        # Before the wheel: the container below leaves target/ owned by root.
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: sdist
+          args: --out dist
+
+      - name: Build the release wheel
+        # As a release ships it: the release profile, and pyproject.toml's features, which never
+        # include the test operations. In the manylinux_2_28 container, so the wheel installs on
+        # any glibc from 2.28: the Docker image's Debian 12 (2.36) and the VPS. The container
+        # installs rust-toolchain.toml's toolchain itself.
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          command: build
+          args: --release --locked --out dist
+          manylinux: "2_28"
+
+      - name: One abi3 manylinux_2_28 wheel, and both files hold what the checkout says
+        # The wheel: its one tag, its library, exactly the files git tracks under citar/ and the
+        # dist-info. The source distribution: only tracked files, all of citar/ and everything its
+        # includes name. scripts/ci/check_dist.py lists any difference.
         run: |
-          pip install build
-          python -m build
+          ls -l dist
+          python scripts/ci/check_dist.py wheel dist --tag cp311-abi3-manylinux_2_28_x86_64 --library citar/_engine.abi3.so
+          python scripts/ci/check_dist.py sdist dist
 
       - name: Install the wheel into a clean environment
         run: |
           python -m venv /tmp/fresh
           /tmp/fresh/bin/pip install --quiet dist/*.whl
 
-      - name: It runs, and its data came with it
-        # The failure this catches is a packaging change that drops the ruleset or the web client:
-        # the wheel installs, the command runs, and the first game fails with a missing file.
+      - name: It runs, and its data and its engine came with it
+        # The failure this catches is a packaging change that drops the ruleset, the web client or
+        # the extension: the wheel installs, the command runs, and the first game fails.
         #
         # Run from /tmp, and with -P. `python -c` puts the current directory at the front of
         # sys.path, so running this from the checkout imported the *source tree* and asserted
@@ -142,9 +337,16 @@ jobs:
           /tmp/fresh/bin/citar where
           /tmp/fresh/bin/citar doctor --quiet
           /tmp/fresh/bin/python -P -c "
+          import json
           from citar import paths
+          from citar import _engine
           from citar.engine.rules import get_rules
           assert 'site-packages' in paths.PACKAGE.as_posix(), f'not testing the wheel: {paths.PACKAGE}'
+          assert 'site-packages' in _engine.__file__, f'the extension is not from the wheel: {_engine.__file__}'
+          assert not _engine.HAS_TEST_OPS, 'the release wheel carries the test operations'
+          info = json.loads(_engine.build_info())
+          assert info['version'] == __import__('citar').__version__, info
+          print('extension', _engine.__file__, info)
           assert (paths.package_data() / 'ruleset').is_dir(), 'ruleset missing from the wheel'
           assert (paths.web_dir() / 'index.html').is_file(), 'web client missing from the wheel'
           assert (paths.migrations_dir() / 'env.py').is_file(), 'migrations missing from the wheel'
@@ -171,8 +373,20 @@ jobs:
           pip install twine
           twine check dist/*
 
+      - uses: actions/upload-artifact@v7
+        # For the docker job, which builds the image from this wheel.
+        with:
+          name: wheel-manylinux
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
   installer:
     name: install.sh works
+    needs: build-ext
+    # A failed build on one OS fails this job on that OS alone, at the download of its missing
+    # wheel: without this condition a matrix need skips the job on every OS when any leg fails.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -183,15 +397,16 @@ jobs:
       - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
 
-      - name: Build a wheel for the installer to use
+      - uses: actions/download-artifact@v8
         # --from lets the script install a local wheel instead of PyPI, so the installer is tested
-        # on the code in the pull request rather than on the last release.
-        run: |
-          pip install build
-          python -m build --wheel
+        # on the code in the pull request rather than on the last release: here the build-ext
+        # job's wheel for this OS.
+        with:
+          name: ext-${{ runner.os }}
+          path: wheels
 
       - name: Install
-        run: bash install.sh --from "$(ls dist/*.whl)" --no-setup
+        run: bash install.sh --from "$(ls wheels/*.whl)" --no-setup
 
       - name: It installed, and it runs
         run: |
@@ -212,9 +427,15 @@ jobs:
           echo "uninstall is clean"
 
   docker:
+    needs: package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        # The Dockerfile installs the package from wheelhouse/, never building Rust in the image.
+        with:
+          name: wheel-manylinux
+          path: wheelhouse
       - uses: docker/setup-buildx-action@v4
       - name: Build the image
         uses: docker/build-push-action@v7
@@ -239,3 +460,10 @@ jobs:
           echo "the container never answered:"
           docker logs citar-ci
           exit 1
+      - name: The image's engine has no test operations
+        run: |
+          docker run --rm --entrypoint python citar:ci -c "
+          import citar._engine as E
+          assert not E.HAS_TEST_OPS, 'the image carries the test operations'
+          print('engine', E.build_info())
+          "

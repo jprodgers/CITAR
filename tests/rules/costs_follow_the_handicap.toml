@@ -1,0 +1,78 @@
+about = """
+What techs, policies, buildings and units cost follows the seat's handicap: a humanlike seat pays
+the difficulty's research, policy, building and unit modifiers, and an AI seat the difficulty's AI
+modifiers for buildings and units and none for research and policies. On Settler a human pays 90%
+for research and half for policies, buildings and units, and an AI 160% for buildings and 175% for
+units. costs and buildable show them; so does what a tech takes to research.
+"""
+from = "citar/engine/research.py: tech_cost; citar/engine/policies.py: culture_cost; citar/engine/cities.py: production_cost"
+
+[[step]]
+new_game = { difficulty = "Settler", players = [{ controller = "human" }, { controller = "bot" }] }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Athens" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", athens = "=made[1].city_id" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { handicap = "human", difficulty = "Settler" }
+
+[[step]]
+check = { what = "player", player = 1 }
+subset = { handicap = "ai", difficulty = "Settler" }
+
+[[step]]
+check = { what = "costs", player = 0 }
+path = "tech.Pottery"
+eq = 31
+
+[[step]]
+check = { what = "costs", player = 0 }
+path = "policy"
+eq = 10
+
+[[step]]
+check = { what = "costs", player = 1 }
+path = "tech.Pottery"
+eq = 35
+
+[[step]]
+check = { what = "costs", player = 1 }
+path = "policy"
+eq = 25
+
+[[step]]
+check = { what = "buildable", city = "=roma" }
+path = "production.Monument"
+eq = 20
+
+[[step]]
+check = { what = "buildable", city = "=athens" }
+path = "production.Monument"
+eq = 64
+
+[[step]]
+check = { what = "buildable", city = "=roma" }
+path = "production.Warrior"
+eq = 20
+
+[[step]]
+check = { what = "buildable", city = "=athens" }
+path = "production.Warrior"
+eq = 70
+
+[[step]]
+tool = "set_research"
+args = { tech = "Pottery" }
+as = "set"
+
+[[step]]
+check = "set"
+subset = { researching = "Pottery", turns = 8 }

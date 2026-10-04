@@ -1,0 +1,84 @@
+about = """
+A city's food: its surplus goes into the store at the end of its turn, and a store that reaches
+what the next citizen needs grows the city by one, keeping what is left over, which its owner
+hears of. A city whose citizens eat more than it grows is starving, which its owner hears of each
+turn; once the store is empty it loses a citizen a turn, and never its last. set_city sets the
+store, which is never below nothing, and the city's health; a damaged city heals at the end of its
+turn.
+"""
+from = "citar/engine/cities.py: end_turn, _grow, food_to_next_pop"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium", pop = 9 },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", antium = "=made[1].city_id" }
+
+[[step]]
+op = "set_city"
+args = { city = "=roma", food = 14, health = 50 }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+subset = { pop = 1, food = 14, health = 50 }
+
+[[step]]
+check = { what = "city", city = "=roma" }
+path = "yields.food"
+eq = 2
+
+[[step]]
+op = "end_round"
+
+[[step]]
+note = "A damaged city heals 20 at the end of its turn."
+check = { what = "city", city = "=roma" }
+subset = { pop = 2, food = 1, health = 70 }
+
+[[step]]
+check = { what = "events", type = "city_growth" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "city_growth" }
+path = "[0]"
+subset = { turn = 1, text = "Roma grew to size 2.", audience = [0] }
+
+[[step]]
+note = "Antium eats more than it grows: in the same round its store emptied, and it lost a citizen."
+check = { what = "city", city = "=antium" }
+path = "yields.food"
+lt = 0
+
+[[step]]
+check = { what = "city", city = "=antium" }
+subset = { pop = 8, food = 0 }
+
+[[step]]
+check = { what = "events", type = "city_starving" }
+path = "[0]"
+subset = { turn = 1, text = "Antium is starving!", audience = [1] }
+
+[[step]]
+op = "set_city"
+args = { city = "=antium", food = -5 }
+
+[[step]]
+check = { what = "city", city = "=antium" }
+subset = { pop = 8, food = 0 }
+
+[[step]]
+repeat = 2
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "city", city = "=antium" }
+subset = { pop = 6, food = 0 }
+
+[[step]]
+check = { what = "events", type = "city_starving" }
+len = 3

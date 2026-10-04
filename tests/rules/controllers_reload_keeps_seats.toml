@@ -1,0 +1,37 @@
+about = """
+A save keeps each seat's controller, handicap, automatic decisions and explicit settings,
+including a decision changed during play, which is no explicit setting.
+"""
+from = "tests/test_controllers.py::SaveTests::test_round_trip_keeps_the_settings"
+
+[config]
+players = [
+  { controller = "hybrid", handicap = "human", auto = { un_vote = false } },
+  { controller = "bot" },
+]
+
+[[step]]
+note = "Changed during play, not as an override."
+op = "set_auto"
+args = { player = 1, decision = "conquest", on = false }
+
+[[step]]
+op = "reload"
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { controller = "hybrid", handicap = "human", auto = { un_vote = false, conquest = true, free_picks = true }, overrides = { handicap = "human", auto = { un_vote = false } } }
+
+[[step]]
+check = { what = "player", player = 1 }
+subset = { controller = "bot", handicap = "ai", auto = { un_vote = true, conquest = false, free_picks = true }, overrides = {} }
+
+[[step]]
+note = "A new controller re-derives the decision changed during play, which was no override."
+op = "set_controller"
+args = { player = 1, controller = "bot" }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "auto.conquest"
+eq = true

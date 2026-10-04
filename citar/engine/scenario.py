@@ -23,11 +23,11 @@ from ..fsutil import replace as _fs_replace
 from typing import Callable, Optional
 
 from .game import Game, ActionError
-from .state import GameState
+from .state import GameState, seat_overrides
 from .. import paths
 
 SCENARIO_DIR = paths.saves_path("scenarios")
-SEAT_TYPES = ("human", "llm", "bot", "mcp", "script")
+SEAT_TYPES = ("human", "llm", "bot", "mcp", "hybrid", "script")
 
 
 # ----------------------------------------------------------------------------
@@ -283,6 +283,12 @@ def _set_city_fields(g: Game, c, o: dict):
             t = g.s.tiles[i]
             if t.city is None and t.owner is None:
                 t.owner, t.city = c.owner, c.id
+    if o.get("health") is not None:
+        c.health = max(1, min(int(o["health"]), cities.max_health(g, c)))
+    if o.get("attacked") is not None:
+        c.attacked = bool(o["attacked"])
+    if o.get("food") is not None:
+        c.food = max(0.0, float(o["food"]))
     if o.get("production"):
         cities.set_production(g, c, o["production"])
     g.invalidate()
@@ -290,7 +296,7 @@ def _set_city_fields(g: Game, c, o: dict):
 
 
 @op("set_city", "city (id) or x, y; any of pop, add_buildings, remove_buildings, name, claim_radius (border radius), "
-                "production")
+                "health, attacked (bool), food, production")
 def _set_city(g: Game, o: dict):
     """Change an existing city: population, buildings, name, borders, production."""
     c = _city(g, o)
@@ -505,7 +511,7 @@ def overview(g: Game) -> dict:
         if p.kind == "barbarian":
             continue
         d = {"id": p.id, "name": p.name, "nation": p.nation, "kind": p.kind, "color": p.color, "alive": p.alive,
-             "controller": p.controller, "difficulty": p.difficulty}
+             "controller": p.controller, "handicap": p.handicap, "auto": dict(p.auto), "difficulty": p.difficulty}
         if p.kind == "major":
             d.update({"gold": int(p.gold), "faith": int(p.faith), "culture": int(p.culture), "techs": len(p.techs),
                       "era": R.era_list[research.player_era(g, p.id)], "policies": list(p.policies),
@@ -568,6 +574,10 @@ def normalize_seats(g: Game, seats: Optional[list]) -> list[dict]:
             for k in ("llm", "bot"):
                 if isinstance(s.get(k), dict):
                     base[i][k] = {kk: vv for kk, vv in s[k].items() if kk != "api_key"}
+            try:
+                base[i].update(seat_overrides(s.get("handicap"), s.get("auto")))
+            except ValueError as e:
+                raise ActionError(f"Seat {i}: {e}")
     return base
 
 

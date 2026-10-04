@@ -16,5 +16,6 @@ would bias a comparison between models therefore lives in the loop, which is ide
 them; swapping Anthropic for a local endpoint changes how the text is fetched and nothing else.
 
 None of this is privileged. An agent calls the same tools a browser does, through the same
-registry in :mod:`citar.engine.tools`, and is refused by the same rules.
+registry in :mod:`citar.engine.tools` (reached through :mod:`citar.engine_api`), and is refused by the
+same rules.
 """

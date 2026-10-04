@@ -12,10 +12,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..engine import tools
-from ..engine.game import Game, ActionError
-from ..engine.state import GameState
-from ..engine.rules import RULES_VERSION
+from .. import engine_api
+from ..engine_api import ActionError, EngineGame
 from .metrics import Metrics
 from .. import paths
 
@@ -33,7 +31,7 @@ class Seat:
     agent join a game with no account at all.
     """
     player: int
-    type: str = "bot"                 # human | mcp | llm | bot
+    type: str = "bot"                 # human | mcp | llm | bot (see SEAT_TYPES)
     token: str = field(default_factory=lambda: secrets.token_urlsafe(12))
     name: str = ""
     llm: dict = field(default_factory=dict)   # provider, model, base_url, api_key_env, tool_mode, persona, ...
@@ -63,7 +61,7 @@ class GameSession:
     HTTP request cannot interleave with an AI's turn. Readers that build a large payload take it too,
     which is why the replay is assembled under the lock rather than streamed.
     """
-    def __init__(self, game: Game, seats: list[Seat], name: str = "", session_id: Optional[str] = None):
+    def __init__(self, game: EngineGame, seats: list[Seat], name: str = "", session_id: Optional[str] = None):
         self.id = session_id or secrets.token_hex(4)
         self.name = name or f"Game {self.id}"
         self.game = game
@@ -89,7 +87,7 @@ class GameSession:
         self._metrics_current: Optional[tuple] = None
         self.benchmark: Optional[dict] = None   # {"run_id", "job_id", "suite", "scenario", "model", ...} for benchmark games
         self.usage_act: Optional[str] = None    # usage ledger activity id (usage.py)
-        game.listeners.append(self._on_event)
+        game.subscribe(self._on_event)
         self._track_turn()
 
     # ------------------------------------------------------------------
@@ -114,22 +112,24 @@ class GameSession:
         Only when the game is over or nobody human is playing. Otherwise a spectator link would be a way
         to see through the fog of war on somebody else's behalf.
         """
-        return self.game.s.phase != "playing" or not any(s.type == "human" for s in self.seats)
+        return self.game.phase != "playing" or not any(s.type == "human" for s in self.seats)
 
     def info(self, include_tokens: bool = False) -> dict:
         """The game's summary, as the lobby shows it."""
-        g = self.game
+        summ = self.game.summary()
+        config = self.game.config
         d = {
-            "id": self.id, "name": self.name, "turn": g.turn, "phase": g.s.phase, "current_player": g.s.current,
-            "winner": g.s.winner, "victory": g.s.victory, "paused": self.paused, "ai_delay": self.ai_delay,
+            "id": self.id, "name": self.name, "turn": summ["turn"], "phase": summ["phase"],
+            "current_player": summ["current"], "winner": summ["winner"], "victory": summ["victory"],
+            "paused": self.paused, "ai_delay": self.ai_delay,
             "pause_reason": self.pause_reason if self.paused else None,
-            "created": self.created, "config": {k: g.s.config.get(k) for k in (
+            "created": self.created, "config": {k: config.get(k) for k in (
                 "map_size", "map_type", "speed", "difficulty", "barbarian_difficulty", "barbarians", "barbarian_aggression", "turn_limit", "victories", "city_states", "religion",
                 "espionage", "tech_trading", "ruins", "seed", "map_edges", "wrap_x", "wrap_y", "river_density",
                 "resources", "on_disconnect", "reconnect_seconds")},
-            "players": [{"id": p.id, "name": p.name, "color": p.color, "alive": p.alive, "kind": p.kind,
-                         **({"difficulty": p.difficulty or g.s.config.get("difficulty")} if p.kind == "major" else {})}
-                        for p in g.s.players],
+            "players": [{"id": p["id"], "name": p["name"], "color": p["color"], "alive": p["alive"], "kind": p["kind"],
+                         **({"difficulty": p["difficulty"]} if p["kind"] == "major" else {})}
+                        for p in summ["players"]],
             "seats": [s.public(include_tokens) for s in self.seats],
             "agent_status": {str(k): v for k, v in self.agent_status.items()},
             "agent_errors": {str(k): a.last_error for k, a in self.agents.items() if getattr(a, "last_error", None)},
@@ -148,11 +148,11 @@ class GameSession:
         if self._stop:
             return {"ok": False, "error": "This game has been closed."}
         with self.lock:
-            before_turn, before_current = self.game.turn, self.game.s.current
-            kind = tools.REGISTRY[name].kind if name in tools.REGISTRY else "unknown"
+            before_turn, before_current = self.game.turn, self.game.current
+            kind = engine_api.tool_kind(name) or "unknown"
             t0 = time.perf_counter()
             try:
-                result = tools.execute(self.game, pid, name, args or {})
+                result = self.game.execute(pid, name, args or {})
                 ok = True
             except ActionError as e:
                 self.metrics.tool_call(pid, name, args or {}, kind, False, time.perf_counter() - t0, str(e))
@@ -163,7 +163,7 @@ class GameSession:
                 self.metrics.tool_call(pid, name, args or {}, kind, False, time.perf_counter() - t0, f"Internal error: {e}")
                 return {"ok": False, "error": f"Internal error: {e}"}
             self.metrics.tool_call(pid, name, args or {}, kind, True, time.perf_counter() - t0)
-            if tools.REGISTRY[name].kind == "action":
+            if kind == "action":
                 self._after_action(before_turn, before_current)
             if name in ("open_negotiation", "respond_negotiation") and isinstance(result, dict):
                 nid = result.get("negotiation_id") or (args or {}).get("negotiation_id")
@@ -174,23 +174,23 @@ class GameSession:
     def _track_turn(self):
         """Close the metrics record of the player whose turn ended and open one for the player now to move."""
         g = self.game
-        key = (g.turn, g.s.current, g.s.phase)
+        key = (g.turn, g.current, g.phase)
         if key == self._metrics_current:
             return
         if self._metrics_current is not None:
             _, prev, _ = self._metrics_current
             self.metrics.end_turn(prev)
         self._metrics_current = key
-        if g.s.phase == "playing" and g.s.current < len(self.seats) and g.player(g.s.current).alive:
-            seat = self.seats[g.s.current]
-            self.metrics.begin_turn(g.s.current, g.turn, seat.type, seat.llm.get("model") if seat.type == "llm" else None)
+        turn, current, phase = key
+        if phase == "playing" and current < len(self.seats) and g.is_alive(current):
+            seat = self.seats[current]
+            self.metrics.begin_turn(current, turn, seat.type, seat.llm.get("model") if seat.type == "llm" else None)
 
     def metrics_report(self) -> dict:
         """Per-seat metrics for this game, as the stats screen and reports use them."""
         players = {}
         for s in self.seats:
-            p = self.game.player(s.player)
-            players[s.player] = {"name": p.name, "controller": s.type,
+            players[s.player] = {"name": self.game.player_name(s.player), "controller": s.type,
                                  "model": s.llm.get("model") if s.type == "llm" else None,
                                  "settings": {k: s.llm.get(k) for k in ("provider", "base_url", "tool_mode", "reasoning_effort", "effort")}
                                  if s.type == "llm" else None}
@@ -203,33 +203,59 @@ class GameSession:
         g = self.game
         self._track_turn()
         self._dispatch_negotiation_interrupts()
-        if g.s.current != before_current or g.turn != before_turn:
+        if g.current != before_current or g.turn != before_turn:
             self.cond.notify_all()
-            self._broadcast({"type": "turn", "turn": g.turn, "current_player": g.s.current, "phase": g.s.phase})
-            if g.turn != self._last_round or g.s.phase != "playing":
+            self._broadcast({"type": "turn", "turn": g.turn, "current_player": g.current, "phase": g.phase})
+            if g.turn != self._last_round or g.phase != "playing":
                 self._last_round = g.turn
                 self.autosave()
         else:
             self.cond.notify_all()
-        self._broadcast({"type": "update", "version": self.version, "turn": g.turn, "current_player": g.s.current,
-                         "phase": g.s.phase})
+        self._broadcast({"type": "update", "version": self.version, "turn": g.turn, "current_player": g.current,
+                         "phase": g.phase})
+
+    def _await(self, done, timeout: float, halted=None, hold_paused: bool = False) -> float:
+        """Wait, with the lock held, until done() holds, the timeout passes, the session stops or halted() is true.
+
+        Returns the seconds of waiting that counted against the timeout. ``halted`` is how an agent that has been
+        cancelled (a seat change, quiet hours) stops waiting at once, rather than keeping the driver thread in a turn
+        that is no longer its own. With ``hold_paused``, time the game spends paused does not count: an agent's wait
+        is part of its turn, whose clock stops in a pause, and a person who pauses to think over an offer should not
+        lose the chat to the clock.
+        """
+        counted = 0.0
+        while not done() and not self._stop and not (halted is not None and halted()):
+            left = timeout - counted
+            if left <= 0:
+                break
+            t = time.time()
+            self.cond.wait(timeout=min(left, 1.0))
+            if not (hold_paused and self.paused):
+                counted += time.time() - t
+        return counted
+
+    def _await_reply(self, pid: int, nid: int, timeout: float, halted=None, hold_paused: bool = False) -> float:
+        """Wait, with the lock held, for the other side's answer in a negotiation (see _await, which it returns)."""
+        def answered():
+            """Whether the negotiation is settled or back with pid."""
+            n = self.game.negotiation_head(nid)
+            return n["status"] != "open" or n["awaiting"] == pid
+        return self._await(answered, timeout, halted, hold_paused)
 
     def _wait_negotiation_reply(self, pid: int, nid: int, timeout: float, result: dict) -> dict:
         """Block until the other side answers a negotiation, or the wait runs out."""
-        from ..engine.diplomacy import get_negotiation, negotiation_view
-        deadline = time.time() + timeout
-        while True:
-            n = get_negotiation(self.game, nid)
-            if n["status"] != "open" or n["awaiting"] == pid:
-                break
-            left = deadline - time.time()
-            if left <= 0:
-                result = dict(result)
-                result["note"] = "No reply yet. Continue your turn; the reply will show up in get_diplomacy/get_briefing."
-                return result
-            self.cond.wait(timeout=min(left, 1.0))
-        n = get_negotiation(self.game, nid)
-        view = negotiation_view(self.game, n, pid)
+        self._await_reply(pid, nid, timeout)
+        return self._reply_result(pid, nid, result)
+
+    def _reply_result(self, pid: int, nid: int, result: dict) -> dict:
+        """A negotiation tool's result with where the negotiation now stands: the other side's answer if one came,
+        else a note that none has yet."""
+        n = self.game.negotiation_head(nid)
+        if n["status"] == "open" and n["awaiting"] != pid:
+            result = dict(result)
+            result["note"] = "No reply yet. Continue your turn; the reply will show up in get_diplomacy/get_briefing."
+            return result
+        view = self.game.negotiation_view(nid, pid)
         last = view["history"][-1] if view["history"] else None
         result = dict(result)
         result["negotiation"] = {"id": nid, "status": n["status"], "your_move": n["awaiting"] == pid,
@@ -244,21 +270,23 @@ class GameSession:
         """Wake the seats that owe an answer to an open negotiation.
 
         This is why an agent should wait on ``wait_for_turn`` rather than polling for its own turn: a
-        negotiation opened on somebody else's turn blocks that turn until it is answered.
+        negotiation opened on somebody else's turn blocks that turn until it is answered. It runs after every
+        action, so it reads the negotiations' heads, not copies of their histories.
         """
-        for n in self.game.s.negotiations:
-            if n["status"] != "open" or n["awaiting"] is None:
+        current = self.game.current
+        for n in self.game.open_negotiation_heads():
+            if n["awaiting"] is None:
                 continue
             pid = n["awaiting"]
             seat = self.seats[pid] if pid < len(self.seats) else None
-            key = (n["id"], len(n["history"]))
+            key = (n["id"], n["entries"])
             if seat is None or key in self._responding:
                 continue
-            if seat.type in ("bot", "llm") and self.game.s.current != pid:
+            if seat.type in ("bot", "llm") and current != pid:
                 # the current player's own agent handles replies during its turn loop
                 self._responding.add(key)
                 threading.Thread(target=self._run_responder, args=(pid, n["id"], key), daemon=True).start()
-            elif seat.type in ("bot", "llm") and self.game.s.current == pid and n["initiator"] != pid:
+            elif seat.type in ("bot", "llm") and current == pid and n["initiator"] != pid:
                 self._responding.add(key)
                 threading.Thread(target=self._run_responder, args=(pid, n["id"], key), daemon=True).start()
 
@@ -279,17 +307,34 @@ class GameSession:
 
     def _reject_if_unanswered(self, pid: int, nid: int, key):
         """Reject a negotiation nobody answered, so the game cannot stall on it."""
-        from ..engine.diplomacy import get_negotiation
         with self.lock:
             try:
-                n = get_negotiation(self.game, nid)
-                if n["status"] == "open" and n["awaiting"] == pid and len(n["history"]) == key[1]:
+                n = self.game.negotiation_head(nid)
+                if n["status"] == "open" and n["awaiting"] == pid and n["entries"] == key[1]:
                     # agent failed to respond: reject so the other side isn't stuck
-                    tools.execute(self.game, pid, "respond_negotiation",
-                                  {"negotiation_id": nid, "action": "reject", "message": "(no response)"})
-                    self._after_action(self.game.turn, self.game.s.current)
+                    self.game.execute(pid, "respond_negotiation",
+                                      {"negotiation_id": nid, "action": "reject", "message": "(no response)"})
+                    self._after_action(self.game.turn, self.game.current)
             except ActionError:
                 pass
+
+    def close_negotiation(self, nid: int, status: str, note: str, by: Optional[int] = None) -> bool:
+        """Time a chat out or force it closed (diplomacy.close_negotiation), and tell everyone watching.
+
+        Returns False when there was nothing to close: the negotiation had been settled in the meantime.
+        """
+        with self.lock:
+            try:
+                self.game.close_negotiation(nid, status, note, by)
+            except ActionError:
+                return False
+            self._after_action(self.game.turn, self.game.current)
+            return True
+
+    def _close_open_chats(self, pid: int, note: str):
+        """Close, as expired, every open negotiation a seat is in. Called with the lock held."""
+        for n in self.game.open_negotiation_heads(pid):
+            self.close_negotiation(n["id"], "expired", note)
 
     # ------------------------------------------------------------------
     # Agents
@@ -304,14 +349,14 @@ class GameSession:
             from ..agents.bot_agent import BotAgent
             # seeded from the game, as the lab seeds its bots, so the same map seed plays the same game
             agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")},
-                             seed=int(self.game.s.config.get("seed") or 0) * 101 + pid)
+                             seed=int(self.game.config.get("seed") or 0) * 101 + pid)
         elif seat.type == "llm":
             from ..agents.llm_agent import LLMAgent
             from .. import servers
             try:
                 cfg = servers.resolve_llm(seat.llm)
             except servers.ServerError as e:
-                self.game.emit("agent_error", f"{self.game.player(pid).name}'s AI: {e} Pick a server for this seat.", None, player=pid)
+                self.game.emit("agent_error", f"{self.game.player_name(pid)}'s AI: {e} Pick a server for this seat.", None, player=pid)
                 cfg = dict(seat.llm)
             agent = LLMAgent(cfg)
         if agent is not None:
@@ -334,6 +379,30 @@ class GameSession:
         agent = self.agents.pop(pid, None)
         if agent is not None and hasattr(agent, "cancel"):
             agent.cancel()
+
+    def update_seat(self, pid: int, type: Optional[str] = None, llm: Optional[dict] = None,
+                    bot: Optional[dict] = None, name: Optional[str] = None):
+        """Change who controls a seat, or how, and abort a turn in progress so the new controller takes over.
+
+        A new seat type is also the civilization's new engine controller, so its difficulty numbers and the
+        decisions the engine takes for it follow the change (except any its seat set explicitly). Raises
+        ValueError for an unknown seat type.
+        """
+        with self.lock:
+            seat = self.seats[pid]
+            if type:
+                if type not in SEAT_TYPES:
+                    raise ValueError(f"Unknown seat type '{type}' (one of {', '.join(SEAT_TYPES)}).")
+                seat.type = type
+                self.game.set_controller(pid, type)
+            if llm is not None:
+                seat.llm = llm
+            if bot is not None:
+                seat.bot = bot
+            if name is not None:
+                seat.name = name
+            self.cancel_agent(pid)
+            self.cond.notify_all()
 
     def set_paused(self, paused: bool):
         """Pause or resume the AI players from the game screen.
@@ -407,7 +476,7 @@ class GameSession:
                     with self.lock:
                         if not self.paused or self.pause_reason is not reason:
                             return
-                        self.game.emit("game_resumed", f"{self.game.player(pid).name}'s model server is reachable "
+                        self.game.emit("game_resumed", f"{self.game.player_name(pid)}'s model server is reachable "
                                                        f"again; the game has resumed.", None, player=pid)
                     self.resume()
                     return
@@ -464,13 +533,13 @@ class GameSession:
 
     def queue_machine(self) -> Optional[str]:
         """The model machine this lobby game's AI plays on (the first live LLM seat's), for the shared queue."""
-        if self.benchmark or not getattr(self, "registered", False) or self.game.s.phase != "playing":
+        if self.benchmark or not getattr(self, "registered", False) or self.game.phase != "playing":
             return None
         for seat in self.seats:
             sid = (seat.llm or {}).get("server_id") if seat.type == "llm" else None
             if sid:
                 try:
-                    if not self.game.player(seat.player).alive:
+                    if not self.game.is_alive(seat.player):
                         continue
                 except Exception:
                     pass
@@ -546,10 +615,10 @@ class GameSession:
         while not self._stop:
             with self.lock:
                 g = self.game
-                if g.s.phase != "playing":
+                if g.phase != "playing":
                     self.cond.wait(timeout=2)
                     continue
-                pid = g.s.current
+                pid = g.current
                 seat = self.seats[pid] if pid < len(self.seats) else None
                 if self.paused or seat is None or seat.type in ("human", "mcp"):
                     self.cond.wait(timeout=1)
@@ -565,7 +634,7 @@ class GameSession:
             except Exception as e:
                 if not self._stop:
                     self.errors.append({"t": time.time(), "player": pid, "where": "play_turn", "trace": traceback.format_exc()})
-                    self.game.emit("agent_error", f"{self.game.player(pid).name}'s AI failed: {e}", [pid])
+                    self.game.emit("agent_error", f"{self.game.player_name(pid)}'s AI failed: {e}", [pid])
             if self._stop:
                 break
             if getattr(agent, "cancelled", False):
@@ -573,13 +642,16 @@ class GameSession:
             self.agent_status[pid] = "idle"
             self._broadcast({"type": "agent", "player": pid, "status": "idle"})
             with self.lock:
-                if (g.turn, g.s.current) == turn_marker and g.s.phase == "playing":
+                if (g.turn, g.current) == turn_marker and g.phase == "playing":
                     rec = self.metrics.current(pid)
                     if rec is not None and not rec["end_reason"]:
                         rec["end_reason"] = "end_turn" if seat.type == "bot" else "ended_by_server"
                     try:
-                        before = (g.turn, g.s.current)
-                        tools.execute(g, pid, "end_turn", {})
+                        before = (g.turn, g.current)
+                        # the end_turn tool refuses while a chat the seat is in is open, which would stall the
+                        # driver on this turn for good
+                        self._close_open_chats(pid, "(no reply in time)")
+                        g.execute(pid, "end_turn", {})
                         self._after_action(*before)
                     except ActionError:
                         pass
@@ -587,26 +659,50 @@ class GameSession:
                 time.sleep(self.ai_delay)
 
     def wait_for_turn(self, pid: int, timeout: float) -> dict:
-        """Long-poll: returns when it's pid's turn, a negotiation awaits pid, or the game ends."""
+        """Long-poll: returns when it's pid's turn, a negotiation awaits pid, or the game ends.
+
+        On pid's own turn with negotiations it is in still waiting on the other side, it waits for their answers
+        instead ("negotiation_update" when one comes, "waiting_for_reply" when none has by the timeout): the end_turn
+        tool refuses until they are settled, and this is how an agent playing over HTTP or MCP waits for a reply
+        without polling.
+        """
         deadline = time.time() + timeout
+        chats = None            # on pid's turn: the open negotiations it is in, as they stood when the wait began
         with self.lock:
             while True:
                 g = self.game
-                pending = [n["id"] for n in g.s.negotiations if n["status"] == "open" and n["awaiting"] == pid]
-                if g.s.phase != "playing":
-                    return {"status": "game_over", "winner": g.s.winner, "victory": g.s.victory}
-                if not g.player(pid).alive:
+                pending = [n["id"] for n in g.open_negotiation_heads(pid) if n["awaiting"] == pid]
+                if g.phase != "playing":
+                    return {"status": "game_over", "winner": g.winner, "victory": g.victory}
+                if not g.is_alive(pid):
                     return {"status": "eliminated"}
                 if pending:
                     return {"status": "negotiation", "negotiation_ids": pending,
-                            "your_turn": g.s.current == pid}
-                if g.s.current == pid:
-                    return {"status": "your_turn", "turn": g.turn}
+                            "your_turn": g.current == pid}
+                if g.current == pid:
+                    now = self._chat_marks(pid)
+                    if chats is None:
+                        chats = now
+                    changed = sorted(nid for nid, mark in chats.items() if now.get(nid) != mark)
+                    if changed:
+                        return {"status": "negotiation_update", "negotiation_ids": changed, "your_turn": True,
+                                "turn": g.turn}
+                    if not chats:
+                        return {"status": "your_turn", "turn": g.turn}
                 left = deadline - time.time()
                 if left <= 0:
-                    return {"status": "waiting", "turn": g.turn, "current_player": g.s.current,
-                            "current_player_name": g.player(g.s.current).name}
+                    if chats and g.current == pid:
+                        return {"status": "waiting_for_reply", "negotiation_ids": sorted(chats), "your_turn": True,
+                                "turn": g.turn,
+                                "note": "No answer yet. Call wait_for_turn again to keep waiting, or withdraw with "
+                                        "respond_negotiation(action='reject', message=...) and end your turn."}
+                    return {"status": "waiting", "turn": g.turn, "current_player": g.current,
+                            "current_player_name": g.player_name(g.current)}
                 self.cond.wait(timeout=min(left, 1.0))
+
+    def _chat_marks(self, pid: int) -> dict:
+        """The open negotiations pid is in, each as (awaiting, entries): what an answer changes."""
+        return {n["id"]: (n["awaiting"], n["entries"]) for n in self.game.open_negotiation_heads(pid)}
 
     # ------------------------------------------------------------------
     # Push
@@ -628,14 +724,12 @@ class GameSession:
     # ------------------------------------------------------------------
     def to_save(self) -> dict:
         """The whole session as a saveable document."""
-        g = self.game
-        g.save_rng()
         return {
-            "format": "citar-save", "version": 1, "rules_version": RULES_VERSION, "saved_at": time.time(),
+            "format": "citar-save", "version": 1, "rules_version": engine_api.rules_version(), "saved_at": time.time(),
             "session": {"id": self.id, "name": self.name, "created": self.created,
                         "seats": [{**asdict(s), "connected": False} for s in self.seats],
                         "spectator_token": self.spectator_token, "benchmark": self.benchmark, "usage_act": self.usage_act},
-            "state": g.s.to_dict(), "frames": g.frames, "action_log": g.action_log,
+            **self.game.to_save(),
             "metrics": self.metrics.data,
         }
 
@@ -680,7 +774,7 @@ class GameSession:
             if self._stop:
                 return
             try:
-                if self.benchmark or self.game.s.phase != "playing":
+                if self.benchmark or self.game.phase != "playing":
                     path.unlink(missing_ok=True)
                     return
                 # paused by the server (a disconnect, quiet hours) comes back running: the check that paused it runs again
@@ -708,7 +802,7 @@ class GameSession:
         if self._stop:
             return
         # all-AI games can finish a round many times a second; don't rewrite the save file that often
-        if not force and self.game.s.phase == "playing" and time.time() - getattr(self, "_last_autosave", 0) < self.AUTOSAVE_MIN_SECONDS:
+        if not force and self.game.phase == "playing" and time.time() - getattr(self, "_last_autosave", 0) < self.AUTOSAVE_MIN_SECONDS:
             return
         self._last_autosave = time.time()
         try:
@@ -720,10 +814,7 @@ class GameSession:
     @classmethod
     def from_save(cls, data: dict) -> "GameSession":
         """Rebuild a session from a save, including its seats and their tokens."""
-        state = GameState.from_dict(data["state"])
-        g = Game(state)
-        g.frames = data.get("frames", [])
-        g.action_log = data.get("action_log", [])
+        g = EngineGame.from_save(data)
         sess = data.get("session", {})
         seats = [Seat(**{k: v for k, v in s.items() if k in Seat.__dataclass_fields__}) for s in sess.get("seats", [])]
         s = cls(g, seats, sess.get("name", ""), sess.get("id"))
@@ -736,8 +827,6 @@ class GameSession:
             s.spectator_token = sess["spectator_token"]
         s.benchmark = sess.get("benchmark")
         s.usage_act = sess.get("usage_act")
-        from ..engine.visibility import refresh
-        refresh(g, force=True)
         return s
 
 
@@ -812,12 +901,13 @@ class SessionManager:
                 raise ValueError(f"Unknown seat type '{stype}'")
             players.append({"name": sc.get("civ_name") or None, "color": sc.get("color"),
                             "leader": sc.get("leader"), "nation": sc.get("nation"), "controller": stype,
+                            "handicap": sc.get("handicap"), "auto": sc.get("auto"),
                             "difficulty": sc.get("difficulty") or None})
             seats.append(Seat(player=i, type=stype, name=sc.get("name") or "", llm=sc.get("llm") or {},
                               bot=_pin_best(sc.get("bot") or {})))
         cfg = dict(config)
         cfg["players"] = players
-        game = Game.new(cfg)
+        game = EngineGame.new(cfg)
         s = GameSession(game, seats, name)
         s.registered = True
         with self.lock:
@@ -849,25 +939,24 @@ class SessionManager:
                              register: bool = True, start: bool = True) -> GameSession:
         """A new game from a scenario's saved state. Seats default to the scenario's; a "script" seat (probes) is
         driven from outside, so in a normal game it behaves like a human seat."""
-        from ..engine.scenario import game_from_state
-        g = game_from_state(scn["state"])
+        g = EngineGame.from_state(scn["state"])
         defaults = scn.get("seats") or []
         seats = []
         for p in g.majors():
-            sc = dict(defaults[p.id]) if p.id < len(defaults) else {}
-            if seats_cfg and p.id < len(seats_cfg) and seats_cfg[p.id]:
-                sc.update({k: v for k, v in seats_cfg[p.id].items() if v is not None})
+            pid = p["id"]
+            sc = dict(defaults[pid]) if pid < len(defaults) else {}
+            if seats_cfg and pid < len(seats_cfg) and seats_cfg[pid]:
+                sc.update({k: v for k, v in seats_cfg[pid].items() if v is not None})
             stype = sc.get("type") or "bot"
             if stype == "script":
                 stype = "human"
             if stype not in SEAT_TYPES:
                 raise ValueError(f"Unknown seat type '{stype}'")
-            p.controller = stype
+            g.set_controller(pid, stype, sc.get("handicap"), sc.get("auto"))
             if sc.get("difficulty"):
-                p.difficulty = g.rules.resolve("difficulty", sc["difficulty"]) or p.difficulty
-            seats.append(Seat(player=p.id, type=stype, name=sc.get("name") or sc.get("label") or "",
+                g.set_difficulty(pid, sc["difficulty"])
+            seats.append(Seat(player=pid, type=stype, name=sc.get("name") or sc.get("label") or "",
                               llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {})))
-        g.invalidate()
         s = GameSession(g, seats, name or scn.get("name") or "Scenario")
         if register:
             s.registered = True
@@ -909,7 +998,7 @@ class SessionManager:
                 if not save.exists() or mark.parent.name in self.sessions:
                     continue
                 s = self.load(save)
-                if s.benchmark or s.game.s.phase != "playing":
+                if s.benchmark or s.game.phase != "playing":
                     s.unmark_live()
                     continue
                 if not state.get("paused"):
@@ -931,7 +1020,7 @@ class SessionManager:
         now = now or time.time()
         closed = []
         for s in list(self.sessions.values()):
-            if s.benchmark or s.stopped or s.game.s.phase == "playing":
+            if s.benchmark or s.stopped or s.game.phase == "playing":
                 s.__dict__.pop("_over_since", None)
                 continue
             since = s.__dict__.setdefault("_over_since", now)
@@ -970,17 +1059,15 @@ class SessionManager:
         try:
             with gzip.open(p, "rt", encoding="utf-8") as fh:
                 data = json.load(fh)
-            s, sess = data.get("state", {}), data.get("session", {})
+            summ, sess = engine_api.state_summary(data.get("state", {})), data.get("session", {})
             seats = sess.get("seats", [])
-            majors = [pl for pl in s.get("players", []) if pl.get("kind") == "major"]
-            meta = {"game_name": sess.get("name"), "turn": s.get("turn"), "phase": s.get("phase"),
-                    "turn_limit": (s.get("config") or {}).get("turn_limit"),
-                    "benchmark": bool(sess.get("benchmark")),
-                    "players": [{"name": pl.get("name"), "alive": pl.get("alive", True),
-                                 "seat": seats[i].get("type") if i < len(seats) else None} for i, pl in enumerate(majors)]}
-            winner = s.get("winner")
-            if winner is not None and 0 <= winner < len(s.get("players", [])):
-                meta["winner"] = s["players"][winner].get("name")
+            meta = {"game_name": sess.get("name"), "turn": summ["turn"], "phase": summ["phase"],
+                    "turn_limit": summ["turn_limit"], "benchmark": bool(sess.get("benchmark")),
+                    "players": [{"name": pl["name"], "alive": pl["alive"],
+                                 "seat": seats[i].get("type") if i < len(seats) else None}
+                                for i, pl in enumerate(summ["majors"])]}
+            if summ["winner"] is not None:
+                meta["winner"] = summ["winner"]
         except Exception:
             meta = {"unreadable": True}
         cls._save_meta_cache[key] = (st.st_mtime, meta)

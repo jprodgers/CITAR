@@ -1,0 +1,133 @@
+about = """
+Adopting social policies with culture: a branch opens first, then its policies. Refused without
+the culture, with what it costs; refused for a policy whose branch is closed, one already adopted,
+a branch finisher and a branch of a later era. Each adoption spends the culture and raises the
+next one's cost, and a free policy is spent before culture. Adopting every member of a branch
+adopts its finisher too, which the whole world hears of. costs lists the next policy's cost and
+what is adoptable.
+"""
+from = "tests/test_mechanics.py::MechanicsTests::test_adopt_branch_and_policy; citar/engine/policies.py: adoptable, culture_cost, adopt"
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma", pop = 2 }
+as = "roma"
+
+[[step]]
+set = { city = "=roma.city_id" }
+
+[[step]]
+check = { what = "costs", player = 0 }
+subset = { policy = 25 }
+
+[[step]]
+check = { what = "costs", player = 0 }
+path = "adoptable"
+eq = ["Honor", "Liberty", "Tradition"]
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Tradition" }
+error = "Adopting a policy costs 25 culture; you have 0."
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Nonsense" }
+error = "Unknown policy 'Nonsense'. Use names like 'Tradition' or 'Aristocracy'."
+
+[[step]]
+op = "set_player"
+args = { player = 0, culture = 1000 }
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Aristocracy" }
+error = "Aristocracy requires Tradition."
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "tradition" }
+as = "opened"
+
+[[step]]
+check = "opened"
+eq = { adopted = "Tradition", culture_left = 975, next_cost = 30, free_policies = 0 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { policies = ["Tradition"], culture = 975 }
+
+[[step]]
+check = { what = "events", type = "policy" }
+path = "[0]"
+subset = { text = "Civilization 1 adopted Tradition.", audience = [0] }
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Tradition" }
+error = "Tradition is already adopted."
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Tradition Complete" }
+error = "Branch finishers are gained automatically when a branch is complete."
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Rationalism" }
+error = "The Rationalism branch unlocks in the Renaissance era."
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Aristocracy" }
+as = "aristocracy"
+
+[[step]]
+check = "aristocracy"
+eq = { adopted = "Aristocracy", culture_left = 945, next_cost = 60, free_policies = 0 }
+
+[[step]]
+note = "A free policy is spent before culture."
+op = "set_player"
+args = { player = 0, free_policies = 1 }
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Oligarchy" }
+as = "free"
+
+[[step]]
+check = "free"
+eq = { adopted = "Oligarchy", culture_left = 945, next_cost = 60, free_policies = 0 }
+
+[[step]]
+note = "The rest of the branch, and its finisher with the last."
+tool = "adopt_policy"
+args = { policy = "Legalism" }
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Landed Elite" }
+
+[[step]]
+tool = "adopt_policy"
+args = { policy = "Monarchy" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+eq = ["Aristocracy", "Landed Elite", "Legalism", "Monarchy", "Oligarchy", "Tradition", "Tradition Complete"]
+
+[[step]]
+check = { what = "events", type = "policy" }
+len = 7
+
+[[step]]
+check = { what = "events", type = "policy" }
+path = "[5]"
+subset = { text = "Civilization 1 adopted Tradition Complete.", audience = "=null" }
+
+[[step]]
+check = { what = "events", type = "policy" }
+path = "[6].text"
+eq = "Civilization 1 adopted Monarchy."

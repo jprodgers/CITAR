@@ -1,0 +1,111 @@
+about = """
+The research queue's tools: set_research with append adds a tech, and what it still needs, to
+the end of the queue, the last becoming the goal; dequeue_research takes a tech off it with every
+queued tech that needs it; choose_free_tech spends a free tech on one researchable now. Each
+refuses what it cannot do: an unknown name, a tech already known or queued, one not queued, no
+free tech to spend, and a tech not yet researchable.
+"""
+from = "citar/engine/research.py: set_research, dequeue_research, free_tech"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+tool = "set_research"
+args = { tech = "Pottery" }
+
+[[step]]
+tool = "set_research"
+args = { tech = "Writing", append = true }
+as = "appended"
+
+[[step]]
+check = "appended"
+eq = { researching = "Pottery", turns = 9, queue = ["Pottery", "Writing"], goal = "Writing", path = ["Pottery", "Writing"] }
+
+[[step]]
+tool = "set_research"
+args = { tech = "Philosophy", append = true }
+as = "far"
+
+[[step]]
+check = "far"
+subset = { queue = ["Pottery", "Writing", "Calendar", "Philosophy"], goal = "Philosophy" }
+
+[[step]]
+tool = "set_research"
+args = { tech = "pottery", append = true }
+error = "Pottery is already queued."
+
+[[step]]
+tool = "set_research"
+args = { tech = "Agriculture" }
+error = "You already know Agriculture."
+
+[[step]]
+tool = "set_research"
+args = { tech = "Nonsense" }
+error = "Unknown technology 'Nonsense'. Use names like 'Bronze Working'."
+
+[[step]]
+tool = "dequeue_research"
+args = { tech = "Calendar" }
+as = "dropped"
+
+[[step]]
+check = "dropped"
+eq = { removed = ["Calendar", "Philosophy"], researching = "Pottery", queue = ["Pottery", "Writing"] }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "research"
+subset = { queue = ["Pottery", "Writing"], goal = "Writing" }
+
+[[step]]
+tool = "dequeue_research"
+args = { tech = "Pottery" }
+as = "all"
+
+[[step]]
+check = "all"
+eq = { removed = ["Pottery", "Writing"], researching = "=null", queue = [] }
+
+[[step]]
+tool = "dequeue_research"
+args = { tech = "Pottery" }
+error = "Pottery is not in your research queue."
+
+[[step]]
+tool = "choose_free_tech"
+args = { tech = "Pottery" }
+error = "You have no free technologies to choose."
+
+[[step]]
+op = "set_player"
+args = { player = 0, free_techs = 1 }
+
+[[step]]
+tool = "choose_free_tech"
+args = { tech = "Writing" }
+error = "Writing cannot be chosen now (it must be researchable next)."
+
+[[step]]
+tool = "choose_free_tech"
+args = { tech = "pottery" }
+as = "free"
+
+[[step]]
+check = "free"
+eq = { learned = "Pottery", free_techs_left = 0 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { techs = ["Agriculture", "Pottery"], free_techs = 0 }
+
+[[step]]
+check = { what = "events", type = "tech" }
+path = "[0].text"
+eq = "Civilization 1 chose as a free technology Pottery. Unlocks buildings: Granary, Shrine."

@@ -1,0 +1,37 @@
+about = """
+A game on an editor map with no ancient ruins spreads them when the settings want ruins, as the
+map generator does: one land tile in forty that a unit can enter, bare or under hills, forest or
+jungle, none within two tiles of a start. Without the setting there are none.
+"""
+from = "citar/engine/maps.py: prepare"
+
+[config]
+ruins = true
+
+[[step]]
+note = "Where they lie is drawn at random, differently in each engine; how many is not."
+check = { what = "find_tiles", improvement = "Ancient ruins" }
+len = 7
+
+[[step]]
+check = { what = "find_tiles", improvement = "Ancient ruins", at = "A", radius = 2 }
+len = 0
+
+[[step]]
+check = { what = "find_tiles", improvement = "Ancient ruins", at = "B", radius = 2 }
+len = 0
+
+[[step]]
+note = "Five starts leave fewer tiles for them."
+new_game = { players = [{}, {}, {}, {}, {}] }
+
+[[step]]
+check = { what = "find_tiles", improvement = "Ancient ruins" }
+len = 6
+
+[[step]]
+new_game = { ruins = false }
+
+[[step]]
+check = { what = "find_tiles", improvement = "Ancient ruins" }
+len = 0

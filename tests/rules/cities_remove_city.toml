@@ -1,0 +1,74 @@
+about = """
+The scenario operation remove_city destroys a city: its tiles are no one's, the world hears that it
+was destroyed, and a capital destroyed moves the palace to the largest city left. The city's tile
+is left bare, unless ruins = true keeps the ruins a destroyed city leaves.
+"""
+from = "citar/engine/scenario.py: _remove_city; citar/engine/cities.py: destroy_city"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 2 },
+  { op = "found_city", player = 0, x = 5, y = 11, name = "Antium", pop = 5 },
+  { op = "found_city", player = 0, x = 11, y = 13, name = "Neapolis", pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", antium = "=made[1].city_id", neapolis = "=made[2].city_id" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { capital = "=roma" }
+
+[[step]]
+check = { what = "tile", at = "A" }
+subset = { owner = 0, city = "=roma" }
+
+[[step]]
+op = "remove_city"
+args = { city = "=roma" }
+as = "removed"
+
+[[step]]
+check = "removed"
+eq = { removed = "=roma" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { capital = "=antium", cities = ["=antium", "=neapolis"] }
+
+[[step]]
+check = { what = "city", city = "=antium" }
+path = "buildings"
+eq = ["Palace"]
+
+[[step]]
+check = { what = "tile", at = "A" }
+subset = { owner = "=null", city = "=null", improvement = "=null" }
+
+[[step]]
+check = { what = "tile", x = 6, y = 5 }
+subset = { owner = "=null" }
+
+[[step]]
+check = { what = "events", type = "city_destroyed" }
+path = "[0]"
+subset = { text = "Roma has been destroyed.", audience = "=null" }
+
+[[step]]
+op = "remove_city"
+args = { x = 11, y = 13, ruins = true }
+
+[[step]]
+check = { what = "tile", x = 11, y = 13 }
+subset = { owner = "=null", improvement = "City ruins" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { capital = "=antium", cities = ["=antium"] }
+
+[[step]]
+op = "remove_city"
+args = { city = "=roma" }
+error = "Operation 1 (remove_city): No such city."

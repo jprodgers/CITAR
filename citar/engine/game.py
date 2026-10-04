@@ -11,7 +11,8 @@ from typing import Callable, Optional
 
 from .hexmap import HexGrid
 from .rules import Rules, get_rules
-from .state import GameState, Player, Tile, Unit, City, PLAYER_COLORS, BARBARIAN_COLOR, CITY_STATE_COLORS
+from .state import (GameState, Player, Tile, Unit, City, PLAYER_COLORS, BARBARIAN_COLOR, CITY_STATE_COLORS,
+                    seat_overrides)
 
 _POSSESSIVE_S = re.compile(r"(?<=\w)s's\b")
 _COORDS = re.compile(r"\(-?\d+,\s*-?\d+\)")
@@ -54,7 +55,7 @@ DEFAULT_CONFIG = {
     "resources": None,              # resource density and per-resource off/cap/share (see mapgen.MapOptions)
     "on_disconnect": "pause",       # an AI model's server stays unreachable: "pause" the game or "skip" its turn
     "reconnect_seconds": 180,       # how long a seat keeps retrying an unreachable server before that applies
-    "players": [],                  # [{"name", "color", "leader", "nation", "controller"}]
+    "players": [],                  # [{"name", "color", "leader", "nation", "controller", "handicap", "auto"}]
 }
 
 
@@ -195,6 +196,8 @@ class Game:
         n = len(players_cfg)
         if not 1 <= n <= rules.const["max_players"]:
             raise ValueError(f"Games support 1 to {rules.const['max_players']} players")
+        # checked before the map is generated, so a bad seat setting costs nothing
+        overrides = [seat_overrides(pc.get("handicap"), pc.get("auto")) for pc in players_cfg]
         n_cs = cfg.get("city_states")
         if n_cs is None:
             n_cs = len(custom.get("cs_starts") or []) if custom else size.get("city_states", 0)
@@ -240,6 +243,7 @@ class Game:
                 leader=pc.get("leader") or nd.get("leaderName", ""), nation=chosen[i],
                 color=colors[i],
                 controller=pc.get("controller") or "human", explored=bytearray(width * height),
+                overrides=overrides[i],
                 difficulty=rules.resolve("difficulty", pc.get("difficulty")) or cfg["difficulty"]))
         for j, csn in enumerate(cs_nations[:len(cs_starts)]):
             nd = rules.nations[csn]
@@ -402,11 +406,12 @@ class Game:
         return self.rules.difficulty_index(self.difficulty_name(pid))
 
     def is_humanlike(self, pid: int) -> bool:
-        """Whether this seat is played by a human or something acting as one.
+        """Whether this seat gets a human's difficulty numbers (``Player.handicap == "human"``).
 
         The distinction that decides which difficulty bonuses apply. A language model playing a seat is
-        "humanlike": it gets a human's numbers, because giving it the AI's bonuses would make a benchmark
-        against the scripted bot meaningless.
+        "humanlike" by default: it gets a human's numbers, because giving it the AI's bonuses would make a
+        benchmark against the scripted bot meaningless. It follows the seat's handicap rather than who plays
+        it, so a hybrid seat can be given either.
         """
         from .economy import is_humanlike
         return is_humanlike(self, pid)

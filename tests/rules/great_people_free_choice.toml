@@ -1,0 +1,64 @@
+about = """
+A free great person: completing the Liberty branch grants one, which its civilization is told of,
+and choose_great_person takes it, born near the capital. A great person of no kind the civilization
+may choose, or a second one it was not granted, is refused.
+"""
+from = "citar/engine/great_people.py: choose_free; citar/engine/triggers.py: trigger (Free Great Person)"
+
+[[step]]
+note = "The other civilization keeps a unit, so that the game goes on."
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+tool = "choose_great_person"
+args = { great_person = "Great Scientist" }
+error = "You have no free Great Person to choose."
+
+[[step]]
+op = "adopt_policy"
+args = { player = 0, policies = ["Republic", "Citizenship", "Collective Rule", "Representation", "Meritocracy"] }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+contains = "Liberty Complete"
+
+[[step]]
+check = { what = "great_people", player = 0 }
+subset = { free = 1, earned = 0 }
+
+[[step]]
+check = { what = "events", type = "great_person_available" }
+path = "[0]"
+subset = { text = "Civilization 1 may choose a free Great Person (due to adopting Liberty Complete).", audience = [0] }
+
+[[step]]
+tool = "choose_great_person"
+args = { great_person = "Warrior" }
+error = "Choose one of: "
+
+[[step]]
+tool = "choose_great_person"
+args = { great_person = "great scientist" }
+as = "chosen"
+
+[[step]]
+check = "chosen"
+path = "great_person"
+eq = "Great Scientist"
+
+[[step]]
+check = { what = "unit", unit = "=chosen.unit_id" }
+subset = { owner = 0, type = "Great Scientist" }
+
+[[step]]
+check = { what = "great_people", player = 0 }
+subset = { free = 0 }
+
+[[step]]
+tool = "choose_great_person"
+args = { great_person = "Great Engineer" }
+error = "You have no free Great Person to choose."

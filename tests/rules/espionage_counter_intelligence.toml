@@ -1,0 +1,126 @@
+about = """
+A spy is moved with move_spy, by name in any case, to a city its civilization has explored, where it
+arrives at the end of the turn: in its own city it takes up counter-intelligence, for ten turns at a
+time. It may be recalled to its hideout. Without spies, with an unknown name, to a city not explored
+or to no city, move_spy is refused; so is anything with espionage off.
+"""
+from = "tests/test_mechanics.py::EspionageTests::test_spy_counter_intelligence; citar/engine/espionage.py: move_spy"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Veii" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", veii = "=made[1].city_id" }
+
+[[step]]
+tool = "move_spy"
+args = { spy = "Agent 1", city_id = "=roma" }
+error = "You have no spies. Spies are recruited when a civilization enters a new era (from the Renaissance) and from some wonders."
+
+[[step]]
+op = "add_spy"
+args = { player = 0 }
+as = "added"
+
+[[step]]
+check = "added"
+eq = { spy = "Agent 1" }
+
+[[step]]
+check = { what = "spies", player = 0 }
+eq = [{ name = "Agent 1", rank = 1, city = "=null", action = "None", turns = 0, progress = 0 }]
+
+[[step]]
+check = { what = "events", type = "spy", player = 0 }
+path = "[0]"
+subset = { text = "We have recruited Agent 1 as a spy!", audience = [0] }
+
+[[step]]
+tool = "move_spy"
+args = { spy = "Nobody", city_id = "=roma" }
+error = "No spy named 'Nobody'. Your spies: Agent 1."
+
+[[step]]
+tool = "move_spy"
+args = { spy = "Agent 1", city_id = "=veii" }
+error = "You have not explored that city."
+
+[[step]]
+tool = "move_spy"
+args = { spy = "Agent 1", city_id = 999 }
+error = "No city with id 999."
+
+[[step]]
+tool = "move_spy"
+args = { spy = " agent 1 ", city_id = "=roma" }
+as = "moved"
+
+[[step]]
+check = "moved"
+eq = { spy = "Agent 1", moving_to = "Roma", arrives_in_turns = 1 }
+
+[[step]]
+check = { what = "spies", player = 0 }
+path = "[0]"
+subset = { city = "=roma", action = "Moving", turns = 1 }
+
+[[step]]
+note = "Sent where it already is, it stays."
+tool = "move_spy"
+args = { spy = "Agent 1", city_id = "=roma" }
+as = "stay"
+
+[[step]]
+check = "stay"
+eq = { spy = "Agent 1", location = "Roma", action = "Moving" }
+
+[[step]]
+note = "It arrives as its civilization's turn ends, and guards its own city."
+op = "end_turn"
+
+[[step]]
+check = { what = "spies", player = 0 }
+path = "[0]"
+subset = { city = "=roma", action = "Counter-intelligence", turns = 10 }
+
+[[step]]
+op = "end_turn"
+
+[[step]]
+tool = "move_spy"
+args = { spy = "Agent 1", city_id = "hideout" }
+as = "home"
+
+[[step]]
+check = "home"
+eq = { spy = "Agent 1", location = "hideout" }
+
+[[step]]
+check = { what = "spies", player = 0 }
+path = "[0]"
+subset = { city = "=null", action = "None", turns = 0 }
+
+[[step]]
+op = "add_spy"
+args = { player = 0 }
+as = "second"
+
+[[step]]
+check = "second"
+eq = { spy = "Agent 2" }
+
+[[step]]
+new_game = { espionage = false }
+
+[[step]]
+op = "add_spy"
+args = { player = 0 }
+
+[[step]]
+tool = "move_spy"
+args = { spy = "Agent 1", city_id = "hideout" }
+error = "Espionage is disabled in this game."

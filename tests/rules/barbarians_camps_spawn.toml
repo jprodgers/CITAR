@@ -1,0 +1,114 @@
+about = """
+A barbarian camp spawns a unit on itself when its countdown runs out, then waits 8 to 12 turns at
+normal aggression on the standard speed before the next. Raging barbarians wait half as long, less
+for their greater aggression. A camp with a unit on it spawns beside it only from turn 10.
+"""
+from = "citar/engine/barbarians.py: update_camps, spawn_barbarian, _reset_countdown; tests/test_barbarians.py::TurnTests::test_raging_barbarians_play_turns"
+
+[config]
+barbarians = "normal"
+
+[[step]]
+check = { what = "camps" }
+len = 0
+
+[[step]]
+op = "create_camp"
+args = { at = "(14,2)" }
+
+[[step]]
+check = { what = "tile", at = "(14,2)" }
+subset = { improvement = "Barbarian encampment" }
+
+[[step]]
+check = { what = "camps" }
+path = "[0]"
+subset = { x = 14, y = 2, countdown = 0, spawned = -1, destroyed = false }
+
+[[step]]
+op = "set_turn"
+args = { turn = 50 }
+
+[[step]]
+op = "barbarian_act"
+
+[[step]]
+note = "The countdown was at 0: it spawned on the camp."
+check = { what = "units", at = "(14,2)" }
+len = 1
+
+[[step]]
+check = { what = "units", at = "(14,2)" }
+path = "[0]"
+subset = { owner = 2 }
+
+[[step]]
+check = { what = "camps" }
+path = "[x=14]"
+subset = { spawned = 0, destroyed = false }
+as = "camp"
+
+[[step]]
+check = "camp"
+path = "countdown"
+ge = 8
+
+[[step]]
+check = "camp"
+path = "countdown"
+le = 12
+
+[[step]]
+note = "Raging barbarians breed faster."
+new_game = { barbarians = "raging" }
+
+[[step]]
+op = "create_camp"
+args = { at = "(14,2)" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 50 }
+
+[[step]]
+op = "barbarian_act"
+
+[[step]]
+check = { what = "camps" }
+path = "[x=14]"
+subset = { spawned = 0 }
+as = "camp"
+
+[[step]]
+check = "camp"
+path = "countdown"
+ge = 3
+
+[[step]]
+check = "camp"
+path = "countdown"
+le = 4
+
+[[step]]
+note = "Early on, a camp whose own tile is taken does not spawn beside it."
+new_game = { barbarians = "normal" }
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "(14,2)" }
+
+[[step]]
+op = "create_camp"
+args = { at = "(14,2)" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 5 }
+
+[[step]]
+op = "barbarian_act"
+
+[[step]]
+check = { what = "camps" }
+path = "[x=14]"
+subset = { spawned = -1, countdown = 0 }

@@ -1,0 +1,109 @@
+about = """
+What a briefing says of the reader's civilization and its neighbours: its policies, the
+civilizations it has met with their standing and treaties, the city-states with their allies, and
+the messages it has received. It lists the civilizations by player id and the policies branch by
+branch, in the ruleset's order, where Python kept the order they were met and adopted in; and it
+names no ally the reader has not met.
+"""
+from = "citar/engine/briefing.py: briefing"
+
+[config]
+players = [{}, {}, {}]
+city_states = 1
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "C", name = "Athenai" },
+  { op = "found_city", player = 3, at = "CS" },
+  { op = "meet", a = 0, b = 2 },
+  { op = "meet", a = 0, b = 1 },
+  { op = "meet", a = 0, b = 3 },
+  { op = "meet", a = 2, b = 3 },
+  { op = "set_influence", city_state = 3, player = 2, amount = 70 },
+  { op = "adopt_policy", player = 0, policies = ["Liberty", "Tradition"] },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+  { op = "set_relation", a = 0, b = 2, friends = true, open_borders = true },
+]
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\nLuxuries: none · Score [0-9]+ · Policies: (Tradition, Liberty|Liberty, Tradition)\n"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+contains = " · Policies: Tradition, Liberty\n"
+intended = "lists-in-rule-order"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\n  - player 1 Civilization 2 \\(BenchmarkCiv\\): AT WAR; score [0-9]+; 1 cities\n"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\n  - player 2 Civilization 3 \\(BenchmarkCiv\\): peace; score [0-9]+; 1 cities; you grant open borders, they grant you open borders, friends\n"
+
+[[step]]
+note = "By player id, where Python listed them in the order they were met."
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\nDIPLOMACY:\n  - player 1 [^\n]*\n  - player 2 "
+intended = "lists-in-rule-order"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = "\n  City-states: [^\n]* #3 \\([A-Za-z]+, Neutral, influence 0, ally Civilization 3\\)\n"
+
+[[step]]
+tool = "send_message"
+player = 0
+args = { to = 1, text = "Surrender." }
+
+[[step]]
+check = { what = "briefing", player = 1 }
+path = "text"
+contains = "\n  ✉ T1 from Civilization 1: \"Surrender.\""
+
+[[step]]
+note = "A city-state allied to a civilization the reader has not met."
+new_game = { players = [{}, {}], city_states = 1 }
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "CS" },
+  { op = "meet", a = 0, b = 2 },
+  { op = "meet", a = 1, b = 2 },
+  { op = "set_influence", city_state = 2, player = 1, amount = 70 },
+]
+
+[[step]]
+op = "unmeet"
+args = { a = 0, b = 1 }
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+contains = "\n  You have not met any other civilization yet.\n"
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = ", ally Unknown Civilization\\)\n"
+intended = "briefing-names-only-known-players"
+
+[[step]]
+op = "meet"
+args = { a = 0, b = 1 }
+
+[[step]]
+check = { what = "briefing", player = 0 }
+path = "text"
+matches = ", ally Civilization 2\\)\n"

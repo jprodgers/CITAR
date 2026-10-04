@@ -102,7 +102,8 @@ A prompt that works:
 
 The bridge is `citar-mcp` (`citar_mcp.py` in a checkout). It exposes every game tool plus
 `wait_for_turn`, which blocks until it is that seat's turn or a negotiation needs an answer — so
-the agent waits rather than polling.
+the agent waits rather than polling. On the seat's own turn, after it opens a negotiation, it waits
+for the other side's answer, since `end_turn` is refused until the negotiation is settled.
 
 Any seat's controller can be switched mid-game from **Join / Seats**, including handing a human
 seat to a model or the reverse.

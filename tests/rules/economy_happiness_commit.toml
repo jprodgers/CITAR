@@ -1,0 +1,93 @@
+about = """
+A civilization's happiness is what its cities and citizens make it, now. What its cities and
+conditionals go by is the happiness committed at fixed points: when the game is set up, and at
+the start and the end of the civilization's own turn. Between those, no call moves it, however
+the empire changes. The end of each turn also writes the civilization's gold per turn.
+
+Python read happiness live everywhere, and never wrote the gold rate
+(intended: happiness-seen-committed, last-gold-rate-written).
+"""
+from = "citar/engine/economy.py: happiness; DESIGN.md 6.6 (crates/citar-engine)"
+
+[[step]]
+note = "a warrior keeps the second seat in the game across the round"
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 2, claim_radius = 2 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { city = "=made[0].city_id" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = 4 }
+
+[[step]]
+note = "committed when the game was set up, before Roma"
+check = { what = "player", player = 0 }
+subset = { happiness_seen = 9, gold_rate = 0 }
+intended = "happiness-seen-committed"
+
+[[step]]
+op = "set_city"
+args = { city = "=city", pop = 6 }
+
+[[step]]
+tool = "set_city_focus"
+args = { city_id = "=city", focus = "production" }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = 0 }
+
+[[step]]
+note = "neither the edit nor the call committed it"
+check = { what = "player", player = 0 }
+subset = { happiness_seen = 9 }
+intended = "happiness-seen-committed"
+
+[[step]]
+op = "end_turn"
+
+[[step]]
+note = "the end of the first seat's turn committed it"
+check = { what = "player", player = 0 }
+subset = { happiness = 0, happiness_seen = 0 }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold_rate"
+gt = 0
+intended = "last-gold-rate-written"
+
+[[step]]
+check = { what = "game" }
+subset = { turn = 1, current = 1 }
+
+[[step]]
+note = "Roma grows on the second seat's turn"
+op = "set_city"
+args = { city = "=city", pop = 8 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = -2 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness_seen = 0 }
+intended = "happiness-seen-committed"
+
+[[step]]
+op = "end_turn"
+
+[[step]]
+note = "the start of the first seat's next turn committed it"
+check = { what = "game" }
+subset = { turn = 2, current = 0 }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { happiness = -2, happiness_seen = -2 }

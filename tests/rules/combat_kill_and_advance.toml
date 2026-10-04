@@ -1,0 +1,69 @@
+about = """
+A melee unit that kills its enemy moves into the emptied tile, and the killed unit is announced to
+both sides. A melee attack on a civilian captures it instead: the capturer stays where it was and
+gets the civilian, with no movement left. A civilian cannot attack.
+"""
+from = "citar/engine/combat.py: resolve, _kill_unit, _take_damage"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Spearman", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "A>e", hp = 1 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "D" },
+  { op = "add_unit", player = 1, unit = "Worker", at = "D>e" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "D>w" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { spear = "=made[0].unit_ids[0]", enemy = "=made[1].unit_ids[0]", w = "=made[2].unit_ids[0]", worker = "=made[4].unit_ids[0]" }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=spear", at = "A>e" }
+as = "fight"
+
+[[step]]
+check = "fight"
+subset = { defender_killed = true, advanced = true, damage_to_defender = 1 }
+
+[[step]]
+check = { what = "unit", unit = "=spear" }
+subset = { x = 6, y = 5, xp = 5, moves = 0 }
+
+[[step]]
+check = { what = "units", player = 1, at = "A>e" }
+len = 0
+
+[[step]]
+check = { what = "events", type = "unit_killed" }
+any = { path = "audience", eq = [0, 1] }
+
+[[step]]
+note = "a civilian is captured, not killed"
+tool = "attack"
+args = { unit_id = "=w", at = "D>e" }
+as = "taken"
+
+[[step]]
+check = "taken"
+subset = { captured = "Worker", damage_to_defender = 0, damage_to_attacker = 0 }
+
+[[step]]
+check = "taken"
+path = "advanced"
+absent = true
+
+[[step]]
+check = { what = "units", at = "D>e" }
+any = { subset = { owner = 0, type = "Worker", moves = 0 } }
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { x = 5, y = 11, xp = 0 }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=worker", at = "D>w>w" }
+error = "Civilian units cannot attack."

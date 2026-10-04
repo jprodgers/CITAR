@@ -8,7 +8,10 @@ unit the whole benchmark is denominated in, and a unit nobody can inspect is not
 ``frozen_<hash>.py`` modules are snapshots taken when a lab experiment was submitted. They exist so
 that editing ``basic.py`` cannot change what a running experiment is measuring against half way
 through, and so that a result from last month can be reproduced next year. They are never edited,
-and the linter is told to leave them alone.
+and the linter is told to leave them alone. None is made any more: the bot is compiled into the Rust
+engine as versions, which the lab pins instead, and profiles, the lab and balance runs refuse a
+frozen copy as archived with 0.1.5. The copies, ``basic.py`` and the path below go with the Python
+engine in package 2-12.
 
 See ``docs/BOTS.md`` for what the bot does and how to change it without fooling yourself about the
 result.

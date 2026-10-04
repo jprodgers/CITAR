@@ -1,0 +1,50 @@
+about = """
+A new game's settings are checked before anything is made: a setting that names what the ruleset
+or the lobby does not have is refused with a message naming what is valid, where Python fell back
+to a default or drew at random; too many seats are refused by both engines.
+"""
+from = "citar/engine/game.py: Game.new"
+
+[[step]]
+new_game = { speed = "Warp" }
+error = "Unknown speed 'Warp'. Known: Quick, Standard, Epic, Marathon."
+intended = "config-refuses-unknown-names"
+
+[[step]]
+new_game = { difficulty = "Easy" }
+error = "Unknown difficulty 'Easy'."
+intended = "config-refuses-unknown-names"
+
+[[step]]
+new_game = { victories = { Space = false } }
+error = "Unknown victory 'Space'."
+intended = "config-refuses-unknown-names"
+
+[[step]]
+new_game = { players = [{ controller = "robot" }, {}] }
+error = "Unknown controller 'robot'."
+intended = "config-refuses-unknown-names"
+
+[[step]]
+new_game = { players = [{ nation = "Atlantis" }, {}] }
+error = "Unknown nation 'Atlantis'."
+intended = "config-refuses-unknown-names"
+
+[[step]]
+note = "A city-state's nation is no seat's: Python drew another at random."
+new_game = { players = [{ nation = "Kabul" }, {}] }
+error = "Kabul is not a civilization a seat can play"
+intended = "config-refuses-unknown-names"
+
+[[step]]
+note = "Names resolve loosely, as the tools resolve them, and an empty one is the default."
+new_game = { speed = "quick", difficulty = "", players = [{ nation = "babylon" }, {}] }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { nation = "Babylon", name = "Babylon" }
+
+[[step]]
+note = "The settings name the seats' number: the arena gives five starts."
+new_game = { players = [{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}] }
+error = "Games support 1 to 24 players"

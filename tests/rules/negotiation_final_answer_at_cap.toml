@@ -1,0 +1,48 @@
+about = """
+The cap stops a chat from growing, not from ending: at the cap, the side to move may still accept, and
+the deal is made.
+"""
+from = "tests/test_negotiation_chat.py::MessageCapTests::test_a_final_answer_still_fits_at_the_cap"
+
+[config]
+diplomacy = { max_chat_messages = 2 }
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?", give = [{ type = "gold", amount = 20 }] }
+
+[[step]]
+note = "Two messages: at the cap."
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "counter", message = "More.", receive = [{ type = "gold", amount = 30 }] }
+
+[[step]]
+tool = "respond_negotiation"
+args = { negotiation_id = 1, action = "accept", message = "Fine." }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { status = "accepted", deal = "Civilization 1 gives 30 gold; Civilization 2 gives nothing." }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "accepted", deal_id = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history"
+len = 3
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "gold"
+eq = 230

@@ -1,0 +1,91 @@
+about = """
+set_city_focus says what a city's citizens favour, and whether the city avoids growing: the
+citizens move at once, and the call says where they now work, as the city shows it afterwards.
+A production focus puts a lone citizen on the hill, a food focus on the best food tile; an
+unknown focus is refused and changes nothing.
+"""
+from = "citar/engine/tools.py: set_city_focus; citar/engine/cities.py: rank_stats_for_work"
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma", pop = 1, claim_radius = 2 }
+as = "roma"
+
+[[step]]
+set = { city = "=roma.city_id" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { focus = "balanced", avoid_growth = false }
+
+[[step]]
+tool = "set_city_focus"
+args = { city_id = "=city", focus = "production" }
+as = "production"
+
+[[step]]
+check = "production"
+subset = { focus = "production", avoid_growth = false, worked_tiles = [[7, 5]] }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { focus = "production", worked = [[7, 5]] }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields"
+absent = false
+as = "hill"
+
+[[step]]
+tool = "set_city_focus"
+args = { city_id = "=city", focus = "food" }
+as = "food"
+
+[[step]]
+check = "food"
+path = "worked_tiles"
+not_contains = [7, 5]
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+eq = "=food.worked_tiles"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.food"
+gt = "=hill.food"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "yields.production"
+lt = "=hill.production"
+
+[[step]]
+note = "avoiding growth alone keeps the focus"
+tool = "set_city_focus"
+args = { city_id = "=city", avoid_growth = true }
+as = "avoid"
+
+[[step]]
+check = "avoid"
+subset = { focus = "food", avoid_growth = true }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { focus = "food", avoid_growth = true }
+
+[[step]]
+tool = "set_city_focus"
+args = { city_id = "=city", focus = "fame" }
+error = "Focus must be one of balanced, manual, food, production, gold, science, culture, faith, happiness, gold_growth, production_growth."
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { focus = "food", avoid_growth = true }
+
+[[step]]
+tool = "set_city_focus"
+args = { city_id = 999, focus = "gold" }
+error = "You have no city with id 999. Your cities: #"

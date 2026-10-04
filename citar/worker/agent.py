@@ -42,6 +42,11 @@ WORKER_VERSION = "1.0"
 BACKOFF_START = 2.0
 BACKOFF_MAX = 60.0
 
+#: The request parameters a server may set. Where to connect, which provider and which key are this
+#: machine's settings; a server that could pass `base_url` or `api_key_env` in params could point the
+#: helper at another host on the owner's network, or have it send the owner's API key somewhere else.
+SERVER_PARAMS = ("temperature", "max_tokens", "reasoning_effort", "top_p", "seed")
+
 
 #: Where Linux distributions keep their CA bundle. A frozen helper carries its own OpenSSL, which only
 #: looks where the build machine kept it (Ubuntu's /usr/lib/ssl); Fedora, Arch and friends keep it
@@ -191,11 +196,27 @@ class Worker:
                 return True
         return False
 
+    def serves(self, model) -> bool:
+        """Whether this worker will run `model` for the server.
+
+        A configured list is the owner's allowlist and is enforced here, not just advertised: the
+        server only ever sees the list, and nothing stops it asking for something else. With no
+        list, the local endpoint decides.
+        """
+        if not self.cfg.models:
+            return True
+        return model in self.cfg.models
+
     # ------------------------------------------------------------------ handling work
     async def handle_request(self, websocket, data: dict):
         """Run one completion request and send back the result or the failure."""
         request_id = data.get("id") or ""
         try:
+            if not self.serves(data.get("model")):
+                await self._refuse(websocket, request_id, "unknown_model",
+                                   f"{self.hostname} does not serve {data.get('model')!r}.",
+                                   retryable=False)
+                return
             if self.quiet_now():
                 await self._refuse(websocket, request_id, "closed",
                                    f"{self.hostname} is in its local quiet hours.")
@@ -250,7 +271,9 @@ class Worker:
         }
         if self.cfg.api_key_env:
             cfg["api_key_env"] = self.cfg.api_key_env
-        cfg.update(data.get("params") or {})
+        params = data.get("params")
+        if isinstance(params, dict):
+            cfg.update({k: params[k] for k in SERVER_PARAMS if params.get(k) is not None})
 
         conversation = OpenAIConversation(cfg, system="", tools=data.get("tools") or [])
         # The server owns the conversation; replace the provider's freshly built message list with

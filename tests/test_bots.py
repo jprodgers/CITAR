@@ -4,6 +4,7 @@ import unittest
 
 from citar.engine.game import Game
 from citar.engine import tools, cities, briefing, automation, movement, visibility
+from tests.backends import python_engine_only
 
 
 def game(**kw):
@@ -26,6 +27,7 @@ def free_tile(g, center, pid, dist):
     raise AssertionError("no free tile")
 
 
+@python_engine_only("tests/rules/briefing_alerts.toml")
 class AlertTests(unittest.TestCase):
     def test_threatened_city_gets_bombard_hint(self):
         g = game(barbarians="normal")
@@ -51,6 +53,7 @@ class AlertTests(unittest.TestCase):
         self.assertTrue(any(a["type"] == "gold" for a in items), items)
 
 
+@python_engine_only("tests/rules/units_explore.toml")
 class ExploreTests(unittest.TestCase):
     def test_explorer_heads_for_distant_frontier(self):
         g = game()
@@ -77,6 +80,7 @@ class ExploreTests(unittest.TestCase):
         self.assertNotEqual(new_target, target)
 
 
+@python_engine_only("tests/rules/cities_growth_and_starvation.toml")
 class CityHealTests(unittest.TestCase):
     def test_city_heals_20_per_turn(self):
         g = game()
@@ -96,12 +100,13 @@ class BotTests(unittest.TestCase):
             self.assertGreaterEqual(p["checkpoints"][50]["cities"], 2)
             self.assertGreaterEqual(p["techs"], 6)
 
+    @python_engine_only("tests/rules/bot_ranged_siege_first.toml")
     def test_aggressive_bot_conquers_a_defenceless_neighbour(self):
         # Aggression 0.9, because since the v2 defaults a middling bot (0.5) out-expands its neighbour on this
         # map instead of attacking it: 19 cities by T200 and no war declared at all. See docs/research/BOT_TUNING.md.
         from citar.bots.basic import BasicBot
-        from citar.balance import IdleBot
-        from citar.sim import resolve_negotiations
+        from citar.bots.idle import IdleBot
+        from citar.bots.headless import resolve_negotiations
         g = Game.new({"map_type": "pangaea", "map_size": "duel", "seed": 1001, "barbarians": "normal",
                       "players": [{"controller": "bot"}, {"controller": "bot"}], "turn_limit": 200, "speed": "Quick"})
         bots = {0: BasicBot(aggression=0.9, seed=1), 1: IdleBot()}
@@ -134,6 +139,7 @@ print(hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).he
 
 
 class DeterminismTests(unittest.TestCase):
+    @python_engine_only("golden_sets_match_the_committed_files")
     def test_same_seed_same_game_under_any_hash_seed(self):
         """Set and dict ordering of strings changes with PYTHONHASHSEED; nothing the engine or bot decides may."""
         import os
@@ -151,6 +157,7 @@ class DeterminismTests(unittest.TestCase):
             out.append(stdout.strip())
         self.assertEqual(out[0], out[1])
 
+    @python_engine_only("a_games_stream_is_keyed_by_its_seed_and_turn")
     def test_live_bot_seats_are_seeded_from_the_game(self):
         """A bot seat in a live session draws from the game's seed, not the clock, so a seed replays the same game."""
         import random

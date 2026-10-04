@@ -186,6 +186,13 @@ python -m unittest discover -s tests
 citar serve --debug
 ```
 
+**Building from source needs a Rust toolchain.** CITAR's game engine is written in Rust and ships
+inside the package as a compiled extension, so `pip install` from a checkout (or from a source
+distribution) compiles it. Install [rustup](https://rustup.rs) first; on Windows, let its installer
+add the Visual Studio C++ build tools. The repository's `rust-toolchain.toml` names the exact Rust
+release, and rustup downloads it the first time. The first build takes a few minutes; later ones
+only rebuild what changed. The installer, pipx and the release wheels need none of this.
+
 A checkout keeps its state beside the code — `saves/`, `config/`, `benchmarks/` — rather than in
 your user directory, so a contributor's test games are visible, diffable and easy to delete.
 [CONTRIBUTING.md](https://github.com/jprodgers/CITAR/blob/main/CONTRIBUTING.md) has the rest.

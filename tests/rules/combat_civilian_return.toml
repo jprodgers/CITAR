@@ -1,0 +1,134 @@
+about = """
+A civilian the barbarians took from one civilization and another civilization takes back comes with
+an offer: return it to the civilization it was taken from, for its goodwill, or keep it. The offer
+lapses at the end of the captor's turn. A civilian of one's own comes back without a question.
+"""
+from = "tests/test_single_player.py::RecapturedCivilianTests; citar/engine/units.py: capture_civilian, return_civilian"
+
+[config]
+barbarians = "normal"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Worker", at = "B" },
+  { op = "add_unit", player = 1, unit = "Worker", at = "C" },
+  { op = "add_unit", player = 1, unit = "Worker", at = "E" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "D" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[0].unit_ids[0]" }
+
+[[step]]
+note = "the barbarians (player 2) take three of player 1's workers and one of player 0's"
+op = "capture_civilian"
+args = { player = 2, at = "B" }
+as = "held"
+
+[[step]]
+check = { what = "unit", unit = "=held.unit" }
+subset = { owner = 2, type = "Worker", original_owner = 1, return_offer = "=null" }
+
+[[step]]
+op = "capture_civilian"
+args = { player = 2, at = "C" }
+as = "held2"
+
+[[step]]
+op = "capture_civilian"
+args = { player = 2, at = "E" }
+as = "held3"
+
+[[step]]
+op = "capture_civilian"
+args = { player = 2, at = "D" }
+as = "own"
+
+[[step]]
+note = "player 0 frees the first: kept"
+op = "capture_civilian"
+args = { unit = "=w", at = "B" }
+as = "freed"
+
+[[step]]
+check = { what = "unit", unit = "=freed.unit" }
+subset = { owner = 0, type = "Worker", moves = 0, original_owner = 1, return_offer = 1 }
+
+[[step]]
+check = { what = "events", type = "civilian_recaptured" }
+len = 1
+
+[[step]]
+tool = "return_civilian"
+args = { unit_id = "=freed.unit", keep = true }
+as = "kept"
+
+[[step]]
+check = "kept"
+eq = { kept = "Worker", unit_id = "=freed.unit" }
+
+[[step]]
+check = { what = "unit", unit = "=freed.unit" }
+subset = { owner = 0, return_offer = "=null" }
+
+[[step]]
+tool = "return_civilian"
+args = { unit_id = "=freed.unit" }
+error = "is not a recaptured civilian that can be returned."
+
+[[step]]
+note = "the second: returned, for goodwill"
+op = "capture_civilian"
+args = { unit = "=w", at = "C" }
+as = "freed2"
+
+[[step]]
+tool = "return_civilian"
+args = { unit_id = "=freed2.unit" }
+as = "back"
+
+[[step]]
+check = "back"
+eq = { returned = "Worker", to = "Civilization 2" }
+
+[[step]]
+check = { what = "units", player = 0, at = "C" }
+len = 0
+
+[[step]]
+check = { what = "units", player = 1 }
+any = { subset = { type = "Worker", moves = 0 } }
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "opinion[1]"
+eq = 20
+
+[[step]]
+note = "player 0's own worker comes back with no offer"
+op = "capture_civilian"
+args = { unit = "=w", at = "D" }
+as = "mine"
+
+[[step]]
+check = { what = "unit", unit = "=mine.unit" }
+subset = { owner = 0, return_offer = "=null" }
+
+[[step]]
+note = "the third: the offer lapses when the turn ends"
+op = "capture_civilian"
+args = { unit = "=w", at = "E" }
+as = "freed3"
+
+[[step]]
+check = { what = "unit", unit = "=freed3.unit" }
+subset = { return_offer = 1 }
+
+[[step]]
+op = "end_turn"
+
+[[step]]
+check = { what = "unit", unit = "=freed3.unit" }
+subset = { owner = 0, return_offer = "=null" }

@@ -1,0 +1,60 @@
+about = """
+Every entry in a negotiation carries a message. A negotiation opened with only spaces is refused, and
+so is each answer that has none, whichever it is (accept, reject, counter or reply): the refusal names
+the negotiation and the missing message, and nothing is written, so the negotiation stays open.
+"""
+from = "tests/test_negotiation_chat.py::MessageTests::test_every_entry_needs_a_message_and_the_refusal_names_the_negotiation"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "   " }
+error = "Open a negotiation with a message: every entry in a negotiation carries one."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?", give = [{ type = "gold", amount = 20 }], receive = [] }
+as = "opened"
+
+[[step]]
+check = "opened"
+eq = { negotiation_id = 1, status = "open", awaiting = "Civilization 2" }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "accept", receive = [{ type = "gold", amount = 5 }] }
+error = "Every response in a negotiation carries a message, and your accept in negotiation #1 has none: add message='...' (a short line will do)."
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reject", receive = [{ type = "gold", amount = 5 }] }
+error = "your reject in negotiation #1 has none"
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "counter", receive = [{ type = "gold", amount = 5 }] }
+error = "your counter in negotiation #1 has none"
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "reply", message = "  ", receive = [{ type = "gold", amount = 5 }] }
+error = "your reply in negotiation #1 has none"
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+subset = { status = "open", awaiting = 1, initiator = 0, responder = 1, proposal_by = 0 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history"
+len = 1

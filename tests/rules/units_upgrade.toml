@@ -1,0 +1,65 @@
+about = """
+An upgrade needs the new type's tech, the unit in its owner's land with movement left, and the
+gold; it replaces the unit with one of the new type, which keeps its experience and has no movement
+left.
+"""
+from = "citar/engine/units.py: check_upgrade, upgrade_cost, upgrade"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Spearman", at = "D", xp = 7 },
+  { op = "set_player", player = 0, gold = 0 },
+]
+as = "made"
+
+[[step]]
+set = { s = "=made[0].unit_ids[0]" }
+
+[[step]]
+tool = "upgrade_unit"
+args = { unit_id = "=s" }
+error = "Pikeman requires Civil Service."
+
+[[step]]
+op = "grant_tech"
+args = { player = 0, tech = "Civil Service" }
+
+[[step]]
+tool = "upgrade_unit"
+args = { unit_id = "=s" }
+error = "Units can only upgrade inside your own territory."
+
+[[step]]
+op = "set_tile"
+args = { at = "D", owner = 0 }
+
+[[step]]
+tool = "upgrade_unit"
+args = { unit_id = "=s" }
+error = "Upgrading to Pikeman costs"
+
+[[step]]
+op = "set_player"
+args = { player = 0, gold = 500 }
+
+[[step]]
+tool = "upgrade_unit"
+args = { unit_id = "=s" }
+as = "up"
+
+[[step]]
+check = "up"
+subset = { upgraded = "Spearman", to = "Pikeman" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "gold"
+eq = "=500 - up.gold_spent"
+
+[[step]]
+check = { what = "unit", unit = "=up.unit_id" }
+subset = { type = "Pikeman", x = 5, y = 11, xp = 7, moves = 0 }
+
+[[step]]
+check = { what = "units", player = 0 }
+len = 1

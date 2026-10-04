@@ -1,0 +1,36 @@
+[package]
+name = "citar-sim"
+description = "The headless runner of CITAR games: run_game, the statistical baseline writer and the citar-sim CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Compiles the engine's invariants into a release build, for `citar-sim baseline --checks`
+# (debug and ci builds always have them). Never a test-only feature: cargo xtask check refuses
+# `legacy` and `test-ops` here.
+checks = ["citar-engine/checks"]
+
+# cargo xtask check: the engine and the bot only (DESIGN.md P2.2), neither with a test-only
+# feature, since the runner ships in the wheel (engine_api.run_game) and the helper.
+[dependencies]
+citar-engine = { workspace = true, features = ["embedded-ruleset"] }
+citar-bot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+cpu-time.workspace = true
+
+[lib]
+name = "citar_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "citar-sim"
+path = "src/main.rs"
+
+[lints]
+workspace = true

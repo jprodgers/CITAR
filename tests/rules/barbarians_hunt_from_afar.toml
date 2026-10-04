@@ -1,0 +1,45 @@
+about = """
+Bold barbarians look for targets far off: at aggression 100 a raider five tiles from a worker, with
+nothing in reach, heads for it.
+"""
+from = "tests/test_barbarians.py::AggressionTests::test_aggressive_barbarians_hunt_from_afar"
+
+[config]
+barbarians = "normal"
+barbarian_aggression = 100
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "(5,3)" },
+]
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "(10,3)" }
+as = "raider"
+
+[[step]]
+set = { b = "=raider.unit_id" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 200 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=b" }
+
+[[step]]
+op = "barbarian_act"
+args = { unit = "=b" }
+
+[[step]]
+check = { what = "unit", unit = "=b" }
+subset = { owner = 2 }
+as = "raider"
+
+[[step]]
+note = "It came closer: within three tiles of the worker, from five."
+check = { what = "find_tiles", at = "(5,3)", radius = 3 }
+any = { subset = { x = "=raider.x", y = "=raider.y" } }

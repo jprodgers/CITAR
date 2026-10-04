@@ -1,0 +1,54 @@
+about = """
+A wounded barbarian heals by pillaging, and loots what it values most among the tiles it can reach
+with movement to spare: an improvement on a luxury or strategic resource before any other
+improvement, and those before a road.
+"""
+from = "tests/test_barbarians.py::PillageTests::test_resource_improvements_first"
+
+[config]
+barbarians = "normal"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "set_tile", at = "A>w", improvement = "Farm", resource = "=null" },
+  { op = "set_tile", at = "A>nw", improvement = "Plantation", resource = "Cotton" },
+]
+
+[[step]]
+op = "add_barbarian"
+args = { unit = "Warrior", at = "A>nw>w", hp = 30 }
+as = "raider"
+
+[[step]]
+set = { b = "=raider.unit_id" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 200 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=b" }
+
+[[step]]
+op = "barbarian_act"
+args = { unit = "=b" }
+
+[[step]]
+check = { what = "tile", at = "A>nw" }
+subset = { improvement = "Plantation", pillaged = true }
+
+[[step]]
+check = { what = "tile", at = "A>w" }
+subset = { improvement = "Farm", pillaged = false }
+
+[[step]]
+note = "Pillaging heals."
+check = { what = "unit", unit = "=b" }
+path = "hp"
+gt = 30
+
+[[step]]
+check = { what = "events", type = "pillaged" }
+len = 1

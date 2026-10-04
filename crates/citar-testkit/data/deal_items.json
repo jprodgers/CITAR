@@ -1,0 +1,20 @@
+{"format": 1, "source": "citar/engine/diplomacy.py", "recorder": "scripts/refcheck/deal_items.py", "rows": [
+{"input":{"type":"gold","amount":100},"item":{"type":"gold","amount":100}},
+{"input":{"type":"gold_per_turn","amount":5,"turns":30},"item":{"type":"gold_per_turn","amount":5,"turns":30}},
+{"input":{"type":"resource","resource":"Iron","amount":1,"turns":30},"item":{"type":"resource","resource":"Iron","amount":1,"turns":30}},
+{"input":{"type":"open_borders","turns":30},"item":{"type":"open_borders","turns":30}},
+{"input":{"type":"embassy"},"item":{"type":"embassy"}},
+{"input":{"type":"peace_treaty"},"item":{"type":"peace_treaty"}},
+{"input":{"type":"declaration_of_friendship"},"item":{"type":"declaration_of_friendship"}},
+{"input":{"type":"research_agreement"},"item":{"type":"research_agreement"}},
+{"input":{"type":"defensive_pact"},"item":{"type":"defensive_pact"}},
+{"input":{"type":"declare_war","target":2},"item":{"type":"declare_war","target":2}},
+{"input":{"type":"city","city_id":12},"item":{"type":"city","city_id":12}},
+{"input":{"type":"share_map"},"item":{"type":"share_map"}},
+{"input":{"type":"tech","tech":"Bronze Working"},"item":{"type":"tech","tech":"Bronze Working"}},
+{"input":{"type":"gold_per_turn","amount":3},"item":{"type":"gold_per_turn","amount":3,"turns":30}},
+{"input":{"type":"open_borders"},"item":{"type":"open_borders","turns":30}},
+{"input":{"type":"resource","resource":"iron"},"item":{"type":"resource","resource":"Iron","turns":30,"amount":1}},
+{"input":{"type":"tech","tech":"bronze working"},"item":{"type":"tech","tech":"Bronze Working"}},
+{"input":{"type":"declare_war","target":"2"},"item":{"type":"declare_war","target":2}}
+]}

@@ -1,13 +1,13 @@
 """CITAR lab: a long-running, resumable queue of bot-vs-bot experiments for tuning the scripted bots.
 
     python -m citar.lab run [--workers N] [--night-workers M]   # the runner: keep it going for days; safe to restart
-    python -m citar.lab submit SPEC.json [...]                   # queue experiments (bot code is frozen at submit time)
+    python -m citar.lab submit SPEC.json [...]                   # queue experiments (bot versions pinned at submit)
     python -m citar.lab status                                   # what is running, progress per experiment
     python -m citar.lab report NAME [NAME ...]                   # results, per seat label and head to head
     python -m citar.lab stop                                     # ask the runner to exit (running games are redone later)
 
 Everything lives in saves/lab/: queue/NAME.json (experiments), results/NAME.jsonl (one line per finished game),
-frozen bot sources are citar/bots/frozen_<hash>.py, status.json and lab.log describe the runner.
+status.json and lab.log describe the runner.
 
 An experiment is a JSON object:
 
@@ -15,27 +15,41 @@ An experiment is a JSON object:
      "size": "small", "maps": ["continents", "pangaea"], "speed": "Quick", "turns": 0,
      "difficulty": "Prince", "barbarians": "normal", "barbarian_difficulty": null, "nation": "BenchmarkCiv",
      "seats": [{"label": "new", "bot": "basic", "difficulty": "Prince", "params": {}},
-               {"label": "old", "bot": "frozen_ab12cd34"}, {"profile": "my-profile"}, ...],
+               {"label": "old", "bot": "basic-1"}, {"profile": "my-profile"}, ...],
      "rotate": true}
 
-A seat can name a bot profile ("profile": id; see citar.bots.profiles) instead of a bot and parameters: the profile's
-engine, overrides and aggression are resolved and frozen into the experiment when it is submitted, so later edits to
-the profile don't change a queued experiment. "params" on such a seat are layered on top of the profile's. Factorial
-experiments may name a "profile" as their base bot in the same way.
+A seat names a bot version ("bot": "basic" for the latest, "basic-N", "idle") with parameter overrides, or a bot
+profile ("profile": id; see citar.bots.profiles): the profile's engine, overrides and aggression are resolved into
+the experiment when it is submitted, so later edits to the profile don't change a queued experiment. "params" on such
+a seat are layered on top of the profile's. Factorial experiments may name a "profile" as their base bot in the same
+way.
+
+Bot versions are pinned when an experiment is submitted: "basic" becomes the version it names then (basic-1), so a
+newer version compiled in later does not mix into a queued experiment (use "live" to opt out and play the latest
+version at play time). The Rust engine compiles its versions in, so nothing is copied: 0.1.5 froze a copy of
+basic.py instead, and a seat naming such a frozen_<hash> snapshot is refused, the snapshots having been archived with
+0.1.5. Every result records, per seat, what played: the build id (the engine's and the bot's code and the ruleset),
+the bot version, the profile and its revision, the overrides, the fixed aggression as the bot played it and the
+fingerprint, all taken when the game is played, so a game of a queued experiment that a newer build plays is labelled
+with that build. A seat queued as {"profile": "best"} is recorded as the profile "best" stood for at submission.
 
 Optional map generation keys pass straight to the generator: "map_edges" (ice_caps, wrap_x, wrap_y, wrap_both,
 boxed), "river_density" (1 = normal) and "resources" (densities and per-resource rules; see mapgen.MapOptions).
 
 Game i uses seed+i and maps[i % len(maps)]; with "rotate" the seat list is rotated by i so every label plays every
-start position. "turns" 0 plays to the speed's time-victory turn. Seats with "bot": "basic" are frozen when the
-experiment is submitted, so later edits to basic.py don't mix into a running experiment (use "live" to opt out).
+start position. "turns" 0 plays to the speed's time-victory turn. A seat's aggression, unless its profile fixes one
+(or the seat does, with "aggression", held to 0..1 at submission), comes from its start position and the seed, so
+rotation evens it out.
 During the restricted hours of the CITAR host server (Servers page) the runner uses --night-workers (fan noise).
 Every finished game is written to the usage ledger (saves/usage/lab-*.jsonl) so reports can cost experiments.
+
+The lab asks the engine for versions, parameters, fingerprints and the build id, which only the Rust engine has: it
+needs the Rust backend of ``citar.engine_api`` (until package 2-09 makes it the default, ``CITAR_ENGINE=rust``), and
+without it ``run`` and ``submit`` stop at once with exit 2.
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -53,7 +67,6 @@ from . import paths
 
 LAB = paths.saves_path("lab")
 QUEUE, RESULTS, DONE = LAB / "queue", LAB / "results", LAB / "done"
-BOTS = paths.PACKAGE / "bots"
 CHECKPOINTS = (50, 100, 150, 200, 250, 300)
 STAT_KEYS = ("score", "cities", "population", "techs", "era", "military", "gold", "gold_per_turn", "science",
              "production", "happiness", "culture")
@@ -75,18 +88,11 @@ def log(msg: str):
 
 
 def engine_hash() -> str:
-    """A hash of the engine and ruleset, recorded with every result.
-
-    So that a result from three weeks ago can be identified as having been produced by different code,
-    rather than silently compared against today's.
-    """
-    h = hashlib.sha1()
-    for d in (paths.PACKAGE / "engine", paths.package_data()):
-        for p in sorted(d.rglob("*")):
-            if p.suffix in (".py", ".json") and "__pycache__" not in p.parts:
-                h.update(p.name.encode())
-                h.update(p.read_bytes())
-    return h.hexdigest()[:10]
+    """The build id of the engine that plays (``engine_api.build_info``), recorded with every result: 12 hex digits
+    over the engine's and the bot's code and the ruleset, so that a result from three weeks ago can be identified as
+    having been produced by different code, rather than silently compared against today's."""
+    from . import engine_api
+    return engine_api.build_info()["build_id"]
 
 
 # ----------------------------------------------------------------------------
@@ -97,56 +103,58 @@ DEFAULTS = {"priority": 0, "games": 12, "seed": 1000, "size": "small", "maps": [
             "nation": "BenchmarkCiv", "city_states": None, "rotate": True}
 
 
-def freeze_bot(src: str = "basic") -> str:
-    """Copy the live bot to a frozen_<hash> module (see citar.bots.profiles.freeze) and return the module name."""
-    from .bots import profiles
-    return profiles.freeze(src)
-
-
 def _resolve_seat(seat: dict) -> dict:
-    """A seat as it will be played: a profile resolved into engine, parameters and aggression (frozen now), or a raw
-    bot seat with its live code frozen. Records the profile revision and the fingerprint of what plays."""
+    """A seat as it will be played: a profile resolved into its version, overrides and aggression, or a raw bot seat
+    with its version pinned, its overrides cleaned and its aggression held to 0..1 (a seat that names a frozen
+    snapshot, overrides its version does not have or an aggression that is no number is refused now rather than when
+    its game is played). Records the profile's id ("best" as the profile it stands for now, so that its games are
+    rated as that profile's), revision and name."""
     from .bots import profiles
     seat = dict(seat)
     if seat.get("profile"):
-        r = profiles.resolve(seat, freeze_code=True)
-        seat.update({"bot": r["engine"], "params": r["params"], "aggression": r["aggression"],
-                     "profile_rev": r["profile_rev"], "profile_name": r["profile_name"],
-                     "fingerprint": r["fingerprint"]})
-        seat.setdefault("label", r["profile_name"])
+        r = profiles.resolve(seat, pin=True)
+        seat.update({"profile": r["profile"], "bot": r["engine"], "params": r["params"], "aggression": r["aggression"],
+                     "profile_rev": r["profile_rev"], "profile_name": r["profile_name"]})
         if not seat.get("label"):
             seat["label"] = r["profile_name"]
         return seat
-    seat.setdefault("bot", "basic")
-    if seat["bot"] == "basic":
-        seat["bot"] = freeze_bot("basic")
-    elif seat["bot"] == "live":
-        seat["bot"] = "basic"
-    if seat["bot"] != "idle":
-        try:
-            seat["fingerprint"] = profiles.fingerprint(seat["bot"], seat.get("params"), seat.get("aggression"))
-        except profiles.ProfileError:
-            pass
+    seat["bot"] = _pin(seat.get("bot"))
+    seat["params"] = profiles.clean_params(seat["bot"], seat.get("params"))
+    seat["aggression"] = profiles.clean_aggression(seat.get("aggression"))
     return seat
 
 
+def _pin(bot) -> str:
+    """The version a seat's bot names now ("basic" is the latest), or "basic" for a seat that opted out of pinning
+    with "live", which then plays the latest version at play time."""
+    from .bots import profiles
+    return profiles.LATEST if bot == "live" else profiles.version(bot or profiles.LATEST)
+
+
 def normalize(spec: dict) -> dict:
-    """Validate an experiment and fill in its defaults, freezing the bot code it names."""
+    """Validate an experiment and fill in its defaults, pinning the bot versions it names."""
     s = dict(DEFAULTS)
     s.update(spec)
     if not s.get("name"):
         raise ValueError("An experiment needs a name.")
     if s.get("factors"):
+        from .bots import profiles
         if s.get("profile"):
-            from .bots import profiles
-            r = profiles.resolve(s["profile"], freeze_code=True)
+            r = profiles.resolve(s["profile"], pin=True)
+            s["profile"] = r["profile"]                 # "best" as the profile it stands for now
             s["bot"] = r["engine"]
             s["base_params"] = {**r["params"], **(s.get("base_params") or {})}
             if r["aggression"] is not None and s.get("aggression") is None:
                 s["aggression"] = r["aggression"]
             s["profile_rev"] = r["profile_rev"]
-        elif s.get("bot", "basic") == "basic":
-            s["bot"] = freeze_bot("basic")
+            s["profile_name"] = r["profile_name"]
+        else:
+            s["bot"] = _pin(s.get("bot"))
+        s["aggression"] = profiles.clean_aggression(s.get("aggression"))
+        # every level must be an override the version takes, on the base parameters: refused now, not mid-run
+        for f, levels in (s["factors"] or {}).items():
+            for level in levels:
+                profiles.clean_params(s["bot"], {**(s.get("base_params") or {}), f: level})
         s["seats"] = [{"label": "factorial"}]
     if not s.get("seats"):
         raise ValueError("An experiment needs seats.")
@@ -250,7 +258,8 @@ def factorial_seats(exp: dict, i: int) -> list[dict]:
     bot = exp.get("bot") or "basic"
     return [{"label": ",".join(f"{f}={v}" for f, v in seat_levels[j].items()), "bot": bot,
              "difficulty": exp.get("seat_difficulty"), "params": seat_params[j], "levels": seat_levels[j],
-             "aggression": exp.get("aggression"), "profile": exp.get("profile")}
+             "aggression": exp.get("aggression"), "profile": exp.get("profile"),
+             "profile_rev": exp.get("profile_rev"), "profile_name": exp.get("profile_name")}
             for j in range(n)]
 
 
@@ -277,55 +286,44 @@ def game_spec(exp: dict, i: int) -> dict:
 # ----------------------------------------------------------------------------
 # one game (runs in a worker process)
 # ----------------------------------------------------------------------------
-def make_bot(seat: dict, seed: int, aggression: float):
-    """Instantiate the bot a seat calls for, live or frozen."""
-    kind = seat.get("bot", "basic")
-    if kind == "idle":
-        from .balance import IdleBot
-        return IdleBot()
-    import importlib
-    mod = importlib.import_module(f"citar.bots.{kind}")
-    agg = seat["aggression"] if seat.get("aggression") is not None else aggression
+def make_bot(seat: dict, aggression: float):
+    """The bot a seat calls for: its version with its overrides, playing the seat's fixed aggression if it has one
+    (a profile's, which its fingerprint hashes) and ``aggression``, its start position's, otherwise."""
+    from . import engine_api
+    from .bots import profiles
+    bot = profiles.check_engine(seat.get("bot") or profiles.LATEST)
+    fixed = profiles.clean_aggression(seat.get("aggression"))
     try:
-        return mod.BasicBot(aggression=agg, seed=seed, params=seat.get("params") or {})
-    except TypeError:                     # bots frozen before params existed
-        return mod.BasicBot(aggression=agg, seed=seed)
-
-
-def _seat_fingerprint(seat: dict):
-    """The fingerprint of what a seat plays (recorded with its result, so ratings need not re-derive it)."""
-    if seat.get("fingerprint"):
-        return seat["fingerprint"]
-    if seat.get("bot") in (None, "idle"):
-        return "idle" if seat.get("bot") == "idle" else None
-    try:
-        from .bots import profiles
-        return profiles.fingerprint(seat["bot"], seat.get("params"), seat.get("aggression"))
-    except Exception:
-        return None
+        return engine_api.bot_instance(bot, aggression=aggression, params=seat.get("params") or {},
+                                       fixed_aggression=fixed)
+    except ValueError as e:
+        raise profiles.ProfileError(str(e)) from None
 
 
 def play(spec: dict) -> dict:
     """Play one lab game to the end and return its result."""
-    from .engine.game import Game
-    from .engine.victory import score
-    from .sim import resolve_negotiations
+    from . import engine_api
     t0 = time.time()
     cpu0 = time.process_time()
     seats = spec["seats"]
-    g = Game.new({"map_type": spec["map_type"], "map_size": spec["size"], "seed": spec["seed"],
-                  "barbarians": spec["barbarians"], "barbarian_difficulty": spec.get("barbarian_difficulty"),
-                  "difficulty": spec["difficulty"], "speed": spec["speed"], "city_states": spec.get("city_states"),
-                  "ai_base_values": spec.get("ai_base_values") or "unciv",
-                  "turn_limit": spec["turns"] or None,
-                  **{k: spec[k] for k in ("map_edges", "river_density", "resources") if spec.get(k) is not None},
-                  "players": [{"controller": "bot", "nation": seat.get("nation") or spec.get("nation"),
-                               "difficulty": seat.get("difficulty")} for seat in seats]})
+    config = {"map_type": spec["map_type"], "map_size": spec["size"], "seed": spec["seed"],
+              "barbarians": spec["barbarians"], "barbarian_difficulty": spec.get("barbarian_difficulty"),
+              "difficulty": spec["difficulty"], "speed": spec["speed"], "city_states": spec.get("city_states"),
+              "ai_base_values": spec.get("ai_base_values") or "unciv",
+              "turn_limit": spec["turns"] or None,
+              **{k: spec[k] for k in ("map_edges", "river_density", "resources") if spec.get(k) is not None},
+              "players": [{"controller": "bot", "nation": seat.get("nation") or spec.get("nation"),
+                           "difficulty": seat.get("difficulty")} for seat in seats]}
+    build = engine_hash()
     bots = {}
     for pid, seat in enumerate(seats):
         # aggression depends on the start position and seed, not the label, so rotation evens it out
         agg = 0.25 + 0.5 * ((pid * 37 + spec["seed"]) % 10) / 9
-        bots[pid] = make_bot(seat, spec["seed"] * 101 + pid, agg)
+        bots[pid] = make_bot(seat, agg)
+    # what each seat plays, as the build that plays it says: the experiment may have been queued on another build
+    played = {pid: {"build": build, "version": bot.version, "fingerprint": engine_api.bot_fingerprint(bot),
+                    "params": engine_api.bot_clean_params(bot.version, seats[pid].get("params") or {})}
+              for pid, bot in bots.items()}
     events = defaultdict(Counter)
     built = defaultdict(Counter)
     era_turn = defaultdict(dict)
@@ -350,58 +348,50 @@ def play(spec: dict) -> dict:
                                           "religion_founded", "golden_age", "great_person_born", "pillaged"):
             events[ev["players"][0]][t] += 1
 
-    g.listeners.append(listen)
-    limit = g.s.config.get("turn_limit")
-    shown = -1
-    while g.s.phase == "playing":
-        if g.turn != shown:
-            shown = g.turn
-            print(f"PROGRESS {g.turn} {limit or 0} {time.time() - t0:.0f}", flush=True)
-        pid = g.s.current
-        if pid in bots:
-            try:
-                bots[pid].play_turn(g, pid, end_turn=False)
-            except Exception as e:
-                errors.append(f"T{g.turn} P{pid}: {type(e).__name__}: {e}\n{traceback.format_exc(limit=5)}")
-                if len(errors) > 20:
-                    break
-            resolve_negotiations(g, bots)
-        if g.s.phase == "playing" and g.s.current == pid:
-            g.end_turn(pid)
+    def progress(info):
+        """The runner reads these lines from the game's process to show how far it has got."""
+        if info["phase"] == "playing":
+            print(f"PROGRESS {info['turn']} {info['turn_limit'] or 0} {time.time() - t0:.0f}", flush=True)
 
-    stats = {e["turn"]: e["players"] for e in g.s.stats}
-    majors = g.majors(alive_only=False)      # eliminated civs too: a lost seat is a result, not a missing row
-    final = {p.id: (score(g, p.id)["total"] if p.alive else 0) for p in majors}
+    r = engine_api.run_game({"config": config, "bots": bots}, on_turn=progress, on_event=listen)
+    errors.extend(r["errors"])
+    stats = {e["turn"]: e["players"] for e in r["stats"]}
+    majors = [p for p in r["players"] if p["kind"] == "major"]   # eliminated civs too: a lost seat is a result
+    final = {p["id"]: p["score"] for p in majors}
     total = sum(final.values()) or 1
     ranking = sorted(final, key=lambda q: -final[q])
     players = {}
     for p in majors:
-        k = str(p.id)
+        pid = p["id"]
+        k = str(pid)
         cps = {}
         for cp in CHECKPOINTS:
             row = stats.get(cp, {}).get(k)
             if row and row.get("alive"):
                 cps[cp] = {key: row.get(key) for key in STAT_KEYS if row.get(key) is not None}
         unhappy = sum(1 for row in stats.values() if row.get(k, {}).get("alive") and row[k].get("happiness", 0) < 0)
-        seat = seats[p.id]
+        seat = seats[pid]
+        ship = p["spaceship"]
         players[k] = {
-            "label": seat.get("label"), "bot": seat.get("bot"), "difficulty": p.difficulty, "alive": p.alive,
+            "label": seat.get("label"), "bot": seat.get("bot"), "difficulty": p["difficulty"], "alive": p["alive"],
             "levels": seat.get("levels"), "profile": seat.get("profile"), "profile_rev": seat.get("profile_rev"),
-            "fingerprint": _seat_fingerprint(seat), "aggression": round(bots[p.id].aggression, 3)
-            if hasattr(bots[p.id], "aggression") else None,
-            "score": final[p.id], "score_share": round(final[p.id] / total, 4), "rank": ranking.index(p.id),
-            "techs": len(p.techs), "cities": len(g.player_cities(p.id)), "policies": len(p.policies),
-            "religion": p.religion_state, "great_people": p.great_people_earned,
-            "spaceship": sum((g.s.spaceship.get(p.id) or {}).values()) if isinstance(g.s.spaceship.get(p.id), dict) else 0,
+            "profile_name": seat.get("profile_name"), **played[pid],
+            # the handle's own: what played and what the fingerprint hashed, not the value the seat asked for
+            "fixed_aggression": bots[pid].fixed_aggression, "aggression": round(bots[pid].aggression, 3),
+            "score": final[pid], "score_share": round(final[pid] / total, 4), "rank": ranking.index(pid),
+            "techs": p["techs"], "cities": p["cities"], "policies": p["policies"],
+            "religion": p["religion"], "great_people": p["great_people"],
+            "spaceship": sum((ship or {}).values()) if isinstance(ship, dict) else 0,
             "unhappy_share": round(unhappy / max(1, len(stats)), 3), "checkpoints": cps,
-            "era_turn": era_turn.get(p.id, {}), "events": dict(events.get(p.id, {})),
-            "built_top": dict(built.get(p.id, Counter()).most_common(25)),
+            "era_turn": era_turn.get(pid, {}), "events": dict(events.get(pid, {})),
+            "built_top": dict(built.get(pid, Counter()).most_common(25)),
         }
-    return {"exp": spec["exp"], "i": spec["i"], "seed": spec["seed"], "map": spec["map_type"], "turns": g.turn - 1,
-            "winner": g.s.winner, "winner_label": seats[g.s.winner]["label"] if g.s.winner is not None and
-            g.s.winner < len(seats) else None, "victory": g.s.victory, "players": players,
+    winner = r["winner"]
+    return {"exp": spec["exp"], "i": spec["i"], "seed": spec["seed"], "map": spec["map_type"], "turns": r["turns"],
+            "winner": winner, "winner_label": seats[winner]["label"] if winner is not None and
+            winner < len(seats) else None, "victory": r["victory"], "players": players,
             "seconds": round(time.time() - t0, 1), "started_ts": round(t0, 1),
-            "cpu_s": round(time.process_time() - cpu0, 1), "errors": errors, "engine": engine_hash(),
+            "cpu_s": round(time.process_time() - cpu0, 1), "errors": errors, "engine": build,
             "finished": datetime.now().isoformat(timespec="seconds")}
 
 
@@ -1048,6 +1038,19 @@ def _pid_alive(pid) -> bool:
         return False
 
 
+def _need_rust(cmd: str):
+    """Exit 2 with the facade's message unless the engine says what build it is. The lab asks the engine for bot
+    versions, parameters, fingerprints and the build id, which only the Rust backend has (until package 2-09 makes it
+    the default, ``CITAR_ENGINE=rust``): refused once here, rather than by every queued game's process, three times
+    each, as crashes."""
+    from . import engine_api
+    try:
+        engine_api.build_info()
+    except engine_api.BackendError as e:
+        print(f"citar lab {cmd} needs the Rust engine: {e}", file=sys.stderr)
+        raise SystemExit(2) from None
+
+
 def main(argv=None):
     """The ``citar lab`` command line."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1067,6 +1070,8 @@ def main(argv=None):
     sub.add_parser("status")
     sub.add_parser("stop")
     args = ap.parse_args(argv)
+    if args.cmd in ("run", "submit"):
+        _need_rust(args.cmd)
     if args.cmd == "run":
         run(args)
     elif args.cmd == "play":

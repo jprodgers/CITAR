@@ -131,8 +131,12 @@ class Metrics:
 
     # ------------------------------------------------------------------
     def tool_call(self, pid: int, name: str, args: dict, kind: str, ok: bool, seconds: float, error: Optional[str] = None,
-                  blocked_repeat: bool = False):
-        """Record one tool call: its result, timing, and whether it repeated an earlier one."""
+                  blocked_repeat: bool = False, expected: bool = False):
+        """Record one tool call: its result, timing, and whether it repeated an earlier one.
+
+        ``expected`` marks a refusal that is news rather than a mistake - an end_turn the agent held back because an
+        answer arrived while it waited - so it is not counted as an error against the model.
+        """
         rec = self.current(pid)
         if rec is None:
             return
@@ -144,7 +148,7 @@ class Metrics:
             rec["queries"] += 1
         elif ok:
             rec["actions_ok"] += 1
-        if not ok and not blocked_repeat:
+        if not ok and not blocked_repeat and not expected:
             rec["errors"] += 1
             t["errors"] += 1
             if error and len(rec["error_samples"]) < 12:

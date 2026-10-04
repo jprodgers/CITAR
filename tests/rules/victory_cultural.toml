@@ -1,0 +1,78 @@
+about = """
+A victory is won when all of its milestones are, in order: five policy branches completed, then the
+Utopia Project built, win the Cultural victory. Whether a civilization has won is checked as its
+turn ends, and a victory ends the game.
+"""
+from = "citar/engine/victory.py: milestone_done, victory_progress, victory_achieved, check_victory; citar/engine/turns.py: end_player_turn"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "grant_era", player = 0, era = "Medieval era" },
+  { op = "adopt_policy", player = 0, policies = [
+    "Aristocracy", "Legalism", "Oligarchy", "Landed Elite", "Monarchy",
+    "Republic", "Citizenship", "Collective Rule", "Representation", "Meritocracy",
+    "Warrior Code", "Discipline", "Military Tradition", "Military Caste", "Professional Army",
+    "Organized Religion", "Mandate Of Heaven", "Theocracy", "Reformation", "Free Religion",
+  ] },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id" }
+
+[[step]]
+note = "four branches: the first milestone is not done, and the second is not looked at"
+check = { what = "victory", player = 0 }
+path = "progress.Cultural"
+eq = { milestones = [{ milestone = "Complete [5] Policy branches", done = false }], total = 2, completed = 0 }
+
+[[step]]
+op = "adopt_policy"
+args = { player = 0, policies = ["Philantropy", "Aesthetics", "Scholasticism", "Cultural Diplomacy", "Educated Elite"] }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "policies"
+contains = "Patronage Complete"
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "progress.Cultural"
+eq = { milestones = [{ milestone = "Complete [5] Policy branches", done = true }, { milestone = "Build [Utopia Project]", done = false }], total = 2, completed = 1 }
+
+[[step]]
+op = "set_city"
+args = { city = "=roma", add_buildings = ["Utopia Project"] }
+
+[[step]]
+check = { what = "victory", player = 0 }
+subset = { achieved = "Cultural" }
+
+[[step]]
+check = { what = "victory", player = 1 }
+path = "achieved"
+is_null = true
+
+[[step]]
+note = "not yet: whether it has won is asked as its turn ends"
+check = { what = "game" }
+path = "phase"
+eq = "playing"
+
+[[step]]
+op = "add_unit"
+args = { player = 1, unit = "Warrior", at = "B>e" }
+
+[[step]]
+tool = "end_turn"
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over", winner = 0, victory = "Cultural", current = 0 }
+
+[[step]]
+check = { what = "events", type = "victory" }
+path = "[0].text"
+eq = "Civilization 1 completed the Utopia Project — Cultural Victory!"

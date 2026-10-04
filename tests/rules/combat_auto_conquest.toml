@@ -1,0 +1,84 @@
+about = """
+A seat that lets the engine decide its conquests razes a small city it takes (fewer than four
+citizens, not one it founded, not an original capital): the city burns a citizen a turn and is gone
+when the last one goes. With the decision its own, the conqueror keeps the city as a puppet.
+"""
+from = "citar/engine/conquest.py: conquer, _auto_conquer"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "C", name = "Carthago" },
+  { op = "found_city", player = 1, at = "B", name = "Tiny", pop = 2 },
+  { op = "found_city", player = 2, at = "E", name = "Athenai" },
+  { op = "found_city", player = 2, at = "CS", name = "Sparta", pop = 2 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "B>w" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "CS>w" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+  { op = "set_relation", a = 0, b = 2, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { tiny = "=made[2].city_id", sparta = "=made[4].city_id", w = "=made[5].unit_ids[0]", w2 = "=made[6].unit_ids[0]" }
+
+[[step]]
+op = "set_turn"
+args = { turn = 10 }
+
+[[step]]
+op = "set_city"
+args = { city = "=tiny", health = 1 }
+
+[[step]]
+op = "set_city"
+args = { city = "=sparta", health = 1 }
+
+[[step]]
+op = "set_auto"
+args = { player = 0, decision = "conquest", on = true }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w", at = "B" }
+as = "fight"
+
+[[step]]
+check = "fight"
+subset = { captured_city = "Tiny", result = "razing" }
+
+[[step]]
+check = { what = "city", city = "=tiny" }
+subset = { owner = 0, razing = true, puppet = false, pop = 1 }
+
+[[step]]
+op = "set_auto"
+args = { player = 0, decision = "conquest", on = false }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w2", at = "CS" }
+as = "fight2"
+
+[[step]]
+check = "fight2"
+subset = { captured_city = "Sparta", result = "puppet" }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "tile", at = "B" }
+path = "city"
+is_null = true
+
+[[step]]
+check = { what = "events", type = "city_razed" }
+len = 1
+
+[[step]]
+check = { what = "city", city = "=sparta" }
+subset = { owner = 0, razing = false, puppet = true }

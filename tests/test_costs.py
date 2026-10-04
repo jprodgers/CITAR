@@ -175,10 +175,10 @@ class LedgerAndReportTests(unittest.TestCase):
         s = mgr.create({"map_size": "duel", "map_type": "pangaea", "seed": 3, "turn_limit": 3, "barbarians": "off"}, seats, "metered")
         deadline = time.time() + 120
         tr = U.tracker()
-        while s.game.s.phase == "playing" and time.time() < deadline:
+        while s.game.phase == "playing" and time.time() < deadline:
             time.sleep(0.2)
             tr._sample()
-        self.assertNotEqual(s.game.s.phase, "playing")
+        self.assertNotEqual(s.game.phase, "playing")
         mgr.delete(s.id)
         tr.flush()
         led = U.read()

@@ -1,0 +1,125 @@
+about = """
+With the Apollo Program built, spaceship parts brought into the capital are added to the spaceship
+with the unit action add_to_spaceship, and leave the game; a part elsewhere is refused. Once every
+part the Scientific victory needs is added, its builder wins the Scientific victory.
+"""
+from = "citar/engine/victory.py: spaceship_status, add_to_spaceship, milestone_done; citar/engine/actions.py: add_to_spaceship"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", buildings = ["Apollo Program"] },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "add_unit", player = 0, unit = "SS Engine", at = "A>e" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", engine = "=made[2].unit_ids[0]" }
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "progress.Scientific"
+eq = { milestones = [{ milestone = "Build [Apollo Program]", done = true }, { milestone = "Add all [spaceship parts] in capital", done = false }], total = 2, completed = 1 }
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "spaceship"
+eq = { apollo_program = true, complete = false, parts = { "SS Engine" = { added = 0, needed = 1 }, "SS Stasis Chamber" = { added = 0, needed = 1 }, "SS Cockpit" = { added = 0, needed = 1 }, "SS Booster" = { added = 0, needed = 3 } } }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=engine", action = "add_to_spaceship" }
+error = "Move into your capital."
+
+[[step]]
+op = "set_unit"
+args = { unit = "=engine", at = "A" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=engine" }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=engine", action = "add_to_spaceship" }
+as = "added"
+
+[[step]]
+check = "added"
+subset = { added = "SS Engine" }
+
+[[step]]
+check = "added"
+path = "spaceship.parts"
+subset = { "SS Engine" = { added = 1, needed = 1 }, "SS Booster" = { added = 0, needed = 3 } }
+
+[[step]]
+check = { what = "units", player = 0 }
+len = 0
+
+[[step]]
+check = { what = "events", type = "spaceship" }
+path = "[0].text"
+eq = "Civilization 1 added a SS Engine to its spaceship."
+
+[[step]]
+repeat = 1
+steps = [
+  { op = "add_unit", args = { player = 0, unit = "SS Stasis Chamber", at = "A" }, as = "u" },
+  { op = "ready_unit", args = { unit = "=u.unit_ids[0]" } },
+  { tool = "unit_action", args = { unit_id = "=u.unit_ids[0]", action = "add_to_spaceship" } },
+  { op = "add_unit", args = { player = 0, unit = "SS Cockpit", at = "A" }, as = "u" },
+  { op = "ready_unit", args = { unit = "=u.unit_ids[0]" } },
+  { tool = "unit_action", args = { unit_id = "=u.unit_ids[0]", action = "add_to_spaceship" } },
+]
+
+[[step]]
+repeat = 2
+steps = [
+  { op = "add_unit", args = { player = 0, unit = "SS Booster", at = "A" }, as = "u" },
+  { op = "ready_unit", args = { unit = "=u.unit_ids[0]" } },
+  { tool = "unit_action", args = { unit_id = "=u.unit_ids[0]", action = "add_to_spaceship" } },
+]
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = 'spaceship.parts["SS Booster"]'
+eq = { added = 2, needed = 3 }
+
+[[step]]
+check = { what = "victory", player = 0 }
+path = "spaceship.complete"
+eq = false
+
+[[step]]
+check = { what = "game" }
+path = "phase"
+eq = "playing"
+
+[[step]]
+op = "add_unit"
+args = { player = 0, unit = "SS Booster", at = "A" }
+as = "last"
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=last.unit_ids[0]" }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=last.unit_ids[0]", action = "add_to_spaceship" }
+as = "done"
+
+[[step]]
+check = "done"
+path = "spaceship.complete"
+eq = true
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "over", winner = 0, victory = "Scientific" }
+
+[[step]]
+check = { what = "events", type = "victory" }
+path = "[0].text"
+eq = "Civilization 1 launched its spaceship to Alpha Centauri — Scientific Victory!"

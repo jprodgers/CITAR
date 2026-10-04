@@ -1,0 +1,62 @@
+about = """
+A land unit may not step onto water until its civilization knows Optics, and embarking takes all
+its movement; embarked, it moves as an embarked unit (two points), may not enter the ocean before
+Astronomy, and landing takes all its movement again.
+"""
+from = "tests/test_mechanics.py::test_embark_requires_optics; citar/engine/movement.py: terrain_reason, enter_cost"
+
+[[step]]
+note = "A warrior on the grassland next to the coast; the coast is in its sight, so it is known water."
+op = "add_unit"
+args = { player = 0, unit = "Warrior", at = "(3,4)" }
+as = "added"
+
+[[step]]
+set = { w = "=added.unit_ids[0]" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=w", x = 2, y = 4 }
+error = "No path from (3,4) to (2,4)."
+
+[[step]]
+op = "grant_tech"
+args = { player = 0, tech = "Optics" }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=w", x = 2, y = 4 }
+as = "moved"
+
+[[step]]
+check = "moved"
+subset = { to = { x = 2, y = 4 }, arrived = true, moves_left = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { embarked = true, max_moves = 120 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=w" }
+
+[[step]]
+note = "The ocean beside the coast is closed to embarked units without Astronomy."
+tool = "move_unit"
+args = { unit_id = "=w", x = 1, y = 4 }
+error = "No path from (2,4) to (1,4)."
+
+[[step]]
+note = "Back to land: disembarking takes all its movement too."
+tool = "move_unit"
+args = { unit_id = "=w", x = 3, y = 4 }
+as = "back"
+
+[[step]]
+check = "back"
+subset = { to = { x = 3, y = 4 }, arrived = true, moves_left = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+path = "embarked"
+eq = false

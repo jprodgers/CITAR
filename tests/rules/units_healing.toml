@@ -1,0 +1,76 @@
+about = """
+A unit that neither moves nor attacks heals at the end of its turn: 10 in the open, 20 in its own
+land. A fortified unit that stays put fortifies further each turn, up to two; a unit that moved
+neither heals nor stays fortified.
+"""
+from = "citar/engine/units.py: end_turn, heal_for_tile"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "D", hp = 50 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[0].unit_ids[0]" }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { hp = 60, fortify = 0 }
+
+[[step]]
+note = "In its own land, fortified."
+op = "set_tile"
+args = { at = "D", owner = 0 }
+
+[[step]]
+tool = "unit_order"
+args = { unit_id = "=w", order = "fortify" }
+as = "order"
+
+[[step]]
+check = "order"
+path = "ok"
+eq = true
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { hp = 80, fortify = 1, activity = "fortify" }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { hp = 100, fortify = 2 }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+path = "fortify"
+eq = 2
+
+[[step]]
+note = "Wounded again, it moves this turn: no healing, and no fortification either."
+op = "set_unit"
+args = { unit = "=w", hp = 50 }
+
+[[step]]
+tool = "move_unit"
+args = { unit_id = "=w", x = 6, y = 11 }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "unit", unit = "=w" }
+subset = { hp = 50, fortify = 0, activity = "=null" }

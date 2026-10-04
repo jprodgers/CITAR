@@ -1,0 +1,4 @@
+# Relaxed: this crate is a tool that reads files, prints reports and times things, so it replaces
+# the strict root clippy.toml (clippy uses the nearest file and does not merge them). The
+# workspace lints in Cargo.toml still apply, including iter_over_hash_type. Nothing in this crate
+# runs inside a game; the engine code it calls was checked under the strict rules.

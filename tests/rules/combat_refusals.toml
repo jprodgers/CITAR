@@ -1,0 +1,83 @@
+about = """
+What an attack is refused for, before anything happens: one's own unit, a melee attack on a tile not
+beside it, a land unit striking the water before its civilization may embark, a ranged attack on a
+city whose defences are down (only a melee unit takes it), and a unit that must set up without the
+movement to set up and fire. A unit that must set up does so when it attacks, for a move's worth of
+its movement.
+"""
+from = "citar/engine/combat.py: validate_attack, contains_attackable_enemy, attack"
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 0, unit = "Worker", at = "A>w" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "H" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "W>e" },
+  { op = "add_unit", player = 1, unit = "Trireme", at = "W" },
+  { op = "found_city", player = 1, at = "B", name = "Hollow" },
+  { op = "add_unit", player = 0, unit = "Archer", at = "B>w>w" },
+  { op = "add_unit", player = 0, unit = "Catapult", at = "B>w>sw" },
+  { op = "set_relation", a = 0, b = 1, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[0].unit_ids[0]", w2 = "=made[3].unit_ids[0]", archer = "=made[6].unit_ids[0]", cat = "=made[7].unit_ids[0]", hollow = "=made[5].city_id" }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w", at = "A>w" }
+error = "That is your own."
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w", at = "H" }
+error = "Melee units can only attack adjacent tiles (move next to the target first)."
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w2", at = "W" }
+error = "Land units cannot attack water tiles yet."
+
+[[step]]
+op = "set_city"
+args = { city = "=hollow", health = 1 }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=archer", at = "B" }
+error = "Hollow has no defenses left: attack with a melee unit to capture it."
+
+[[step]]
+check = { what = "preview", unit = "=archer", at = "B" }
+eq = { error = "Hollow has no defenses left: attack with a melee unit to capture it." }
+
+[[step]]
+op = "set_unit"
+args = { unit = "=cat", moves = 60 }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=cat", at = "B" }
+error = "Catapult must set up before attacking (needs 1 movement to set up and some left to fire)."
+
+[[step]]
+op = "set_city"
+args = { city = "=hollow", health = 100 }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=cat" }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=cat", at = "B" }
+as = "shot"
+
+[[step]]
+check = "shot"
+subset = { attacker = "Catapult", defender = "Hollow", ranged = true, damage_to_attacker = 0 }
+
+[[step]]
+check = { what = "unit", unit = "=cat" }
+subset = { set_up = true, moves = 0 }

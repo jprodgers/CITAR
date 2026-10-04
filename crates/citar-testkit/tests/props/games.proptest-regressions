@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1066853f655c3aa30d189322735f210bea38292dec4f0ad16bb91a58169f5176 # shrinks to start = Fixture(3), steps = [Call(ActionSpec { tool: 225, actor: 8, target: 0, coords: (0, 0), shape: Random(1441219040) })], seed = 0
+cc debdd6cdb254de054aa89ccb1cf0a6cc1283f25570a324c1d3a4bf1515e66a80 # shrinks to start = Fixture(0), steps = [Call(ActionSpec { tool: 164, actor: 0, target: 0, coords: (0, 0), shape: Random(3918495816) })]

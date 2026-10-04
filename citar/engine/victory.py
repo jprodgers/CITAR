@@ -172,7 +172,7 @@ def _ai_vote(g, p):
     from .diplomacy import opinion
     if p.kind == "city_state":
         return p.ally
-    if p.kind == "major" and p.controller in ("human", "llm", "mcp"):
+    if p.kind == "major" and not p.auto.get("un_vote"):
         return None
     known = [q.id for q in g.majors() if q.id != p.id and g.has_met(p.id, q.id)]
     if not known:
@@ -189,8 +189,8 @@ def hold_vote(g: "Game"):
     un = _un(g)
     for p in _voters(g):
         if str(p.id) not in un["votes"]:
-            if p.kind == "major" and p.controller in ("human", "llm", "mcp"):
-                un["votes"][str(p.id)] = None     # did not vote: abstain
+            if p.kind == "major" and not p.auto.get("un_vote"):
+                un["votes"][str(p.id)] = None     # decides for itself and did not vote: abstain
             else:
                 un["votes"][str(p.id)] = _ai_vote(g, p)
     owner = un_owner(g)
@@ -381,6 +381,7 @@ def is_defeated(g: "Game", pid: int) -> bool:
 def check_elimination(g: "Game", pid: int, by: Optional[int] = None):
     """Check whether any civilization has been eliminated, and record it."""
     from . import espionage, city_states
+    from .diplomacy import close_negotiation
     p = g.player(pid)
     if not p.alive or not is_defeated(g, pid):
         return
@@ -390,7 +391,7 @@ def check_elimination(g: "Game", pid: int, by: Optional[int] = None):
         g.remove_unit(u)
     for n in g.s.negotiations:
         if n["status"] == "open" and pid in (n["initiator"], n["responder"]):
-            n["status"] = "cancelled"
+            close_negotiation(g, n["id"], "cancelled", f"{p.name} has been eliminated.")
     for d in g.s.deals:
         if d.get("active") and pid in d["parties"]:
             d["active"] = False

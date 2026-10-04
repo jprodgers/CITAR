@@ -15,6 +15,9 @@ builds a picture of the empire (threats to each city, army size, economy, expans
 `aggression` (0-1) shifts army size and willingness to start wars. Every other number the bot uses is a named
 parameter in ``PARAM_GROUPS`` (label, explanation and sensible range included), so a bot profile can change any of
 them without touching code - which is what the Bots page edits and what lab experiments A/B test.
+
+``diplomacy`` hands categories of diplomacy (``citar.engine.diplomacy.CATEGORIES``) to a language model: the bot then
+leaves those decisions alone and plays everything else, which is what a hybrid seat is.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ from typing import Optional
 
 from ..engine import tools
 from ..engine import unique_types as U
+from ..engine.diplomacy import CATEGORIES, get_negotiation, proposal_categories
 from ..engine.game import Game, ActionError
 
 STAT_KEYS = ("food", "production", "gold", "science", "culture", "faith", "happiness")
@@ -542,8 +546,8 @@ PARAM_GROUPS: list[tuple[str, str, list[dict]]] = [
            "anyway.", 0, 1),
         _n("deal_war_mult", 1.3, "War cost multiplier", "... times (this - aggr x aggression).", 0, 5, "x"),
         _n("deal_war_mult_aggr", 0.6, "War cost per aggression", "", 0, 5),
-        _n("counter_rounds", 4, "Counter-offers up to", "Rounds of negotiation in which the bot still counters.",
-           0, 20),
+        _n("counter_rounds", 4, "Counter-offers up to", "Counter-offers the bot makes in one negotiation; after "
+           "that it rejects.", 0, 20),
         _n("counter_max_gap", 150, "Counter within", "Counter (ask for gold) when a deal is short by less than this.",
            0, 2000, "gold"),
         _n("counter_margin", 10, "Counter margin", "Gold added on top of the shortfall.", 0, 500, "gold"),
@@ -667,11 +671,15 @@ class BasicBot:
     five cities on a small map, and raising that is the open balance work.
     """
     def __init__(self, aggression: float = 0.4, seed: Optional[int] = None, target_cities: int = 0,
-                 params: Optional[dict] = None):
+                 params: Optional[dict] = None, diplomacy: Optional[dict] = None):
         self.aggression = max(0.0, min(1.0, aggression))
         self.p = dict(DEFAULT_PARAMS)
         self.p.update(params or {})
         self.rng = random.Random(seed)
+        # Diplomacy draws from its own stream, so handing a category to a language model changes no other choice
+        # the bot makes: a hybrid seat and the same bot alone play the same game apart from diplomacy.
+        self.rng_diplo = random.Random(seed * 7919 + 13 if seed is not None else None)
+        self.set_diplomacy(diplomacy)
         self.target_cities = target_cities or self.p["target_cities"]     # 0 = expand while there is room
         self._sites_cache: dict = {}
         self._bad_sites: dict = {}                  # (pid, idx) -> turn a settler failed to reach it
@@ -698,6 +706,37 @@ class BasicBot:
         except ActionError:
             return None
 
+    def set_diplomacy(self, owners: Optional[dict]):
+        """Say who decides each category of diplomacy: "bot" (the default for any not named) or "llm".
+
+        A category the language model owns is one the bot leaves alone; see owns_negotiation for how that extends
+        to negotiations. Raises ValueError for an unknown category or owner.
+        """
+        owners = dict(owners or {})
+        bad = [k for k in owners if k not in CATEGORIES]
+        if bad:
+            raise ValueError(f"Unknown diplomacy categor{'y' if len(bad) == 1 else 'ies'} {', '.join(bad)} "
+                             f"(the categories are {', '.join(CATEGORIES)}).")
+        bad = [k for k, v in owners.items() if v not in ("bot", "llm")]
+        if bad:
+            raise ValueError(f"Diplomacy categories are owned by 'bot' or 'llm' ({', '.join(bad)} is neither).")
+        self.diplomacy = {c: owners.get(c, "bot") for c in CATEGORIES}
+
+    def _llm(self, category: str) -> bool:
+        """Whether the seat's language model decides this category of diplomacy, not the bot."""
+        return self.diplomacy[category] == "llm"
+
+    def owns_negotiation(self, n: dict) -> bool:
+        """Whether the bot answers this negotiation itself.
+
+        Not when the proposal on the table touches a category the language model owns - a deal is answered whole,
+        so one LLM-owned item makes it the model's - nor, with no proposal on the table, when the model owns chat.
+        """
+        touched = proposal_categories(n.get("proposal"))
+        if not touched:
+            return not self._llm("chat")
+        return not any(self._llm(c) for c in touched)
+
     def play_turn(self, g: Game, pid: int, end_turn: bool = True):
         """Play one complete turn."""
         if g.s.phase != "playing" or g.s.current != pid:
@@ -714,7 +753,23 @@ class BasicBot:
         self.manage_gold(g, pid, ctx)
         self.consider_diplomacy(g, pid, ctx)
         if end_turn and g.s.current == pid and g.s.phase == "playing":
+            self._settle_chats(g, pid)
             tools.execute(g, pid, "end_turn", {})
+
+    def _settle_chats(self, g: Game, pid: int):
+        """Before ending the turn on its own: answer what waits on us, withdraw what waits on the other side.
+
+        The end_turn tool refuses while a negotiation we are in is open, and a bot ending its own turn has nobody
+        to wait for. Negotiations the language model owns are left to it.
+        """
+        for n in list(g.s.negotiations):
+            if n["status"] != "open" or pid not in (n["initiator"], n["responder"]) or not self.owns_negotiation(n):
+                continue
+            if n["awaiting"] == pid:
+                self.respond(g, pid, n["id"])
+            if n["status"] == "open":
+                self.ex(g, pid, "respond_negotiation", negotiation_id=n["id"], action="reject",
+                        message="We will speak again another time.")
 
     # ------------------------------------------------------------------
     # situation
@@ -982,7 +1037,7 @@ class BasicBot:
             pick = next((b for b in prefs if b in avail), avail[0] if avail else None)
             if pick:
                 self.ex(g, pid, "found_pantheon", belief=pick)
-        if g.espionage_enabled:
+        if g.espionage_enabled and not self._llm("espionage"):
             self._spies(g, pid, ctx)
 
     def _spies(self, g: Game, pid: int, ctx: dict):
@@ -999,7 +1054,7 @@ class BasicBot:
                 cap = g.city(q.capital) if q.capital is not None else None
                 if cap and p.explored[cap.idx] and cap.id not in taken:
                     lead = len(q.techs) - len(p.techs)
-                    targets.append((lead + self.rng.random(), cap.id))
+                    targets.append((lead + self.rng_diplo.random(), cap.id))
             if targets:
                 _, cid = max(targets)
             else:
@@ -1538,7 +1593,7 @@ class BasicBot:
 
         Hoarding gold is one of the clearest failures of a naive bot, and one of the easiest to fix.
         """
-        from ..engine import cities as cm, units as unitmod, city_states as CS
+        from ..engine import cities as cm, units as unitmod
         P = self.p
         p = g.player(pid)
         cities = ctx["cities"]
@@ -1582,7 +1637,16 @@ class BasicBot:
                     and not (head in g.rules.buildings and g.rules.buildings[head].get("isWonder")):
                 if self.ex(g, pid, "buy", city_id=c.id, item=head) is not None:
                     self.manage_cities(g, pid)         # refill the emptied queue
-        # court a city-state with spare gold
+        if not self._llm("city_states"):
+            self._court_city_states(g, pid, ctx)
+        if g.religion_enabled:
+            self._spend_faith(g, pid, ctx)
+
+    def _court_city_states(self, g: Game, pid: int, ctx: dict):
+        """Court a city-state with spare gold."""
+        from ..engine import city_states as CS
+        P = self.p
+        p = g.player(pid)
         if P["cs_gift_mode"] == "typed":
             self._gift_city_state(g, pid, ctx)
         elif p.gold > P["cs_gift_gold"] + P["cs_gift_gold_per_era"] * ctx["era"] and not ctx["wars"]:
@@ -1591,8 +1655,6 @@ class BasicBot:
                 q = max(css, key=lambda q: (CS.influence(g, q.id, pid) >= P["cs_gift_focus_influence"],
                                             CS.influence(g, q.id, pid)))
                 self.ex(g, pid, "city_state_action", player_id=q.id, action="gift_gold", amount=P["cs_gift_amount"])
-        if g.religion_enabled:
-            self._spend_faith(g, pid, ctx)
 
     def _gift_city_state(self, g: Game, pid: int, ctx: dict):
         """Gift gold where it buys the most: the city-state type we need (Mercantile when unhappy, Maritime for
@@ -2330,13 +2392,19 @@ class BasicBot:
         return military_strength(g, pid) + 1
 
     def consider_diplomacy(self, g: Game, pid: int, ctx: Optional[dict] = None):
-        """Decide on wars, peace, denunciations and friendships."""
+        """Decide on wars, peace and friendships, and offer trades.
+
+        Each kind of decision is skipped when the seat's language model owns its category. The bot still defends
+        itself and fights every war it is in, whoever declared it.
+        """
         from ..engine import diplomacy as D
         P = self.p
         a = self.aggression
         ctx = ctx or self.context(g, pid)
         p = g.player(pid)
         mine = self.military_power(g, pid)
+        if self._llm("war"):
+            self._war_prep.pop(pid, None)      # a war being prepared is the model's call now
         for q in list(p.met):
             if not g.player(q).alive or g.player(q).kind != "major":
                 continue
@@ -2355,29 +2423,31 @@ class BasicBot:
                     near = sum(1 for m in ctx["military"] if g.grid.distance(m.idx, tc.idx) <= P["siege_progress_radius"])
                     if near >= P["siege_progress_units"] and tc.health < cm.max_health(g, tc) * P["siege_progress_health"]:
                         long_war = False            # the siege is progressing: keep going
-                if g.turn - rel["since"] >= P["peace_min_turns"] and (losing or long_war) \
-                        and self.rng.random() < P["peace_offer_chance"]:
+                if not self._llm("peace") and g.turn - rel["since"] >= P["peace_min_turns"] and (losing or long_war) \
+                        and self.rng_diplo.random() < P["peace_offer_chance"]:
                     self.ex(g, pid, "open_negotiation", to=q, message="This war profits no one. Let us make peace.",
                             give=[{"type": "peace_treaty"}], receive=[])
                 continue
             every = P["diplo_every"]
-            if g.turn % every == (pid + q) % every:
+            if not self._llm("agreements") and g.turn % every == (pid + q) % every:
                 # embassies first, then friendship with those we like
                 if not D.has_embassy(g, pid, q) and g.civ_has(pid, U.EnablesEmbassies) and g.civ_has(q, U.EnablesEmbassies):
                     self.ex(g, pid, "open_negotiation", to=q, message="Let us exchange embassies.",
                             give=[{"type": "embassy"}], receive=[{"type": "embassy"}])
                 elif not D.is_friends(g, pid, q) and D.opinion(g, pid, q) >= 0 and mine < theirs * P["friend_max_ratio"] \
-                        and self.rng.random() < P["friend_chance"] - P["friend_chance_aggr"] * a:
+                        and self.rng_diplo.random() < P["friend_chance"] - P["friend_chance_aggr"] * a:
                     self.ex(g, pid, "open_negotiation", to=q, message="Let us declare our friendship.",
                             give=[{"type": "declaration_of_friendship"}], receive=[])
                 elif D.is_friends(g, pid, q) and rel.get("ra_until", 0) < g.turn \
                         and p.gold > D.ra_cost(g, pid, q) + P["ra_gold_margin"] and g.civ_has(pid, U.EnablesResearchAgreements):
                     self.ex(g, pid, "open_negotiation", to=q, message="A research agreement would benefit us both.",
                             give=[{"type": "research_agreement"}], receive=[])
-            if g.turn > P["war_min_turn"] and not ctx["wars"] and pid not in self._war_prep and rel["treaty_until"] < g.turn \
+            if not self._llm("war") and g.turn > P["war_min_turn"] and not ctx["wars"] and pid not in self._war_prep \
+                    and rel["treaty_until"] < g.turn \
                     and sum(ctx["threat"].values()) < mine * P["war_max_threat"] and not D.is_friends(g, pid, q):
                 if mine > theirs * (P["war_power_ratio"] - P["war_power_ratio_aggr"] * a) \
-                        and self.rng.random() < (P["war_chance"] + P["war_chance_aggr"] * a) * P["war_prep_rate"] \
+                        and self.rng_diplo.random() < (P["war_chance"] + P["war_chance_aggr"] * a) \
+                        * P["war_prep_rate"] \
                         and self._reachable_city(g, pid, q, ctx) is not None:
                     self._war_prep[pid] = {"player": q, "since": g.turn}
         prep = self._war_prep.get(pid)
@@ -2413,7 +2483,7 @@ class BasicBot:
         elif prep:
             self._war_prep.pop(pid, None)
         k = max(1, int(P["lux_trade_every"]))
-        if g.turn % k == pid % k:
+        if not self._llm("trades") and g.turn % k == pid % k:
             self.trade_luxuries(g, pid)
 
     def _reachable_city(self, g: Game, pid: int, q: int, ctx: dict):
@@ -2573,45 +2643,129 @@ class BasicBot:
         return cost * (P["deal_war_mult"] - P["deal_war_mult_aggr"] * self.aggression)
 
     def handle_negotiations(self, g: Game, pid: int):
-        """Answer every negotiation waiting on this civilization."""
+        """Answer every negotiation waiting on this civilization, except those its language model owns."""
         for n in list(g.s.negotiations):
-            if n["status"] == "open" and n["awaiting"] == pid:
+            if n["status"] == "open" and n["awaiting"] == pid and self.owns_negotiation(n):
                 self.respond(g, pid, n["id"])
 
     def respond(self, g: Game, pid: int, nid: int):
-        """Accept, reject or counter one negotiation."""
-        from ..engine.diplomacy import get_negotiation
+        """Accept, reject or counter one negotiation, always with a line of text.
+
+        The bot reads only the items, never the words, and it never loops: it counters at most counter_rounds times,
+        says "Our offer stands." once when its proposal is answered with talk alone, and after that rejects.
+        """
         P = self.p
         n = get_negotiation(g, nid)
         if n["status"] != "open" or n["awaiting"] != pid:
             return
+
+        def answer(action, message, **items):
+            """Send one response; None when the rules refuse it."""
+            return self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action=action, message=message, **items)
+
         other = n["responder"] if pid == n["initiator"] else n["initiator"]
+        ours = [h for h in n["history"] if h["by"] == pid]
         if not n["proposal"]:
-            if n["exchanges"] >= 3:
-                self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="reject",
-                        message="We have nothing further to discuss.")
+            if any(h["action"] == "reply" for h in ours):
+                answer("reject", "We have nothing further to discuss.")
             else:
-                self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="reply",
-                        message="Words are wind. Make a concrete proposal.")
+                answer("reply", "Words are wind. Make a concrete proposal.")
             return
         if n["proposal_by"] == pid:
-            self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="reply", message="Our offer stands.")
+            # our proposal stands and they answered with words alone: say so once, then close
+            made = max((i for i, h in enumerate(n["history"]) if h["by"] == pid and h["proposal"]), default=0)
+            since = n["history"][made:]
+            if any(h["by"] == pid and h["action"] == "reply" for h in since):
+                answer("reject", "Then we have no deal.")
+            else:
+                answer("reply", "Our offer stands.")
             return
         give = n["proposal"].get(str(pid), [])
         receive = n["proposal"].get(str(other), [])
         value = self.evaluate(g, pid, other, give, receive)
+        countered = sum(1 for h in ours if h["action"] == "counter")
         if value >= 0:
-            if self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="accept", message="Agreed.") is None:
-                self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="reject",
-                        message="We cannot fulfil those terms.")
-        elif n["exchanges"] < P["counter_rounds"] and value > -P["counter_max_gap"] and g.player(other).gold >= -value:
-            ask = int(-value) + P["counter_margin"]
-            if self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="counter",
-                       message=f"Add {ask} gold and we have a deal.", give=give,
-                       receive=receive + [{"type": "gold", "amount": ask}]) is None:
-                # a counter the rules refuse (we can't pay what they asked, say) must still end our move, or the
-                # negotiation stays open waiting on us until it times out
-                self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="reject",
-                        message="That does not interest us.")
+            if answer("accept", "Agreed.") is None:
+                answer("reject", "We cannot fulfil those terms.")
+            return
+        # ask for more of the gold already on the table rather than adding a second gold line, and never for more
+        # than they hold in all: the rules check only our side of a counter, so an ask they cannot pay would fail
+        # only when they accepted it
+        asked = [dict(it) for it in receive]
+        lump = next((it for it in asked if it["type"] == "gold"), None)
+        on_table = lump["amount"] if lump is not None else 0
+        ask = min(int(-value) + P["counter_margin"], int(g.player(other).gold) - on_table)
+        if countered < P["counter_rounds"] and value > -P["counter_max_gap"] and ask >= -value \
+                and not self._llm("trades"):                 # asking for gold is a trade: the model's call then
+            if lump is not None:
+                lump["amount"] += ask
+            else:
+                asked.append({"type": "gold", "amount": ask})
+            if answer("counter", f"Add {ask} gold and we have a deal.", give=give, receive=asked) is None:
+                # a counter the rules refuse must still end our move, or the negotiation stays open waiting on us
+                answer("reject", "That does not interest us.")
         else:
-            self.ex(g, pid, "respond_negotiation", negotiation_id=nid, action="reject", message="That does not interest us.")
+            answer("reject", "That does not interest us." if not countered else "That is our last word, then. No deal.")
+
+    # ------------------------------------------------------------------
+    # advice for a hybrid seat's language model
+    # ------------------------------------------------------------------
+    def advice(self, g: Game, pid: int, negotiation=None) -> dict:
+        """What the bot makes of the diplomatic situation, as plain data for a language model to weigh.
+
+        - ``deal_value``: evaluate() of the proposal on the table in ``negotiation`` (a negotiation or its id), in
+          gold from this civilization's side; None without one;
+        - ``war_readiness``: for each civilization we are at war with or preparing war on, our power over theirs
+          and whether our army has gathered;
+        - ``spare_luxuries``: luxuries we could trade away without losing their happiness;
+        - ``wants``: a short list of what the bot would ask for.
+
+        Reads only: it changes neither the game nor the bot's plans.
+        """
+        from ..engine import economy
+        P = self.p
+        p = g.player(pid)
+        mine = self.military_power(g, pid)
+        out = {"deal_value": None, "war_readiness": [], "spare_luxuries": [], "wants": []}
+        n = get_negotiation(g, int(negotiation)) if isinstance(negotiation, (int, str)) else negotiation
+        if n and n.get("proposal") and pid in (n["initiator"], n["responder"]):
+            other = n["responder"] if pid == n["initiator"] else n["initiator"]
+            out["deal_value"] = round(self.evaluate(g, pid, other, n["proposal"].get(str(pid), []),
+                                                    n["proposal"].get(str(other), [])), 1)
+        prep = self._war_prep.get(pid)
+        plan = self._war_plan.get(pid)
+        field = [u for u in g.player_units(pid) if _ud(g, u)["_military"] and not _is_recon(_ud(g, u))
+                 and _ud(g, u)["_domain"] == "Land" and not self._is_garrison(u)]
+        targets = [q for q in p.met if g.player(q).kind == "major" and g.player(q).alive and g.at_war(pid, q)]
+        if prep and prep["player"] not in targets and g.player(prep["player"]).alive:
+            targets.append(prep["player"])
+        for q in targets:
+            theirs = self.military_power(g, q)
+            planned = g.city_at(plan["city"]) if plan else None
+            if planned is not None and planned.owner == q:
+                gathered = bool(plan.get("advance"))
+            elif prep and prep["player"] == q and prep.get("rally") is not None:
+                need = max(P["war_need_min"], min(P["war_need_max"], len(g.player_cities(pid)) // P["war_need_city_div"]
+                                                  + P["war_need_base"]))
+                ready = sum(1 for u in field if g.grid.distance(u.idx, prep["rally"]) <= P["prep_gather_radius"])
+                gathered = ready >= need
+            else:
+                gathered = False
+            out["war_readiness"].append({"player": q, "name": g.player(q).name, "at_war": g.at_war(pid, q),
+                                         "preparing": bool(prep and prep["player"] == q),
+                                         "power_ratio": round(mine / theirs, 2), "army_gathered": gathered})
+        lux = economy.luxury_resources(g, pid)
+        out["spare_luxuries"] = sorted(r for r, d in lux.items() if d["net"] >= P["lux_spare_at"])
+        for q in p.met:
+            other = g.player(q)
+            if other.kind != "major" or not other.alive or g.at_war(pid, q):
+                continue
+            theirs = economy.luxury_resources(g, q)
+            for r in sorted(r for r, d in theirs.items() if d["net"] >= P["lux_spare_at"] and lux[r]["net"] <= 0):
+                if not any(w.get("resource") == r for w in out["wants"]):
+                    out["wants"].append({"type": "resource", "resource": r, "from": q})
+        for w in out["war_readiness"]:
+            if w["at_war"] and w["power_ratio"] < P["losing_ratio"]:
+                out["wants"].append({"type": "peace_treaty", "with": w["player"]})
+        out["wants"] = out["wants"][:5]
+        return out

@@ -1,0 +1,79 @@
+about = """
+Research: the turn's science goes into the tech at the front of the queue at the end of each of
+the civilization's turns, and a tech whose cost it pays for is learned, told to its civilization
+alone, with what was left over kept for the next. set_research answers with the turns it will
+take at the science of the moment. With nothing queued, a human civilization is asked to choose
+at the start of its turn.
+"""
+from = "citar/engine/research.py: set_research, turns_left, end_turn, add_science, add_tech"
+
+[[step]]
+note = "The other civilization keeps a unit, so that the game goes on."
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+check = { what = "costs", player = 0 }
+path = "tech"
+eq = { "Animal Husbandry" = 35, Archery = 35, Mining = 35, Pottery = 35 }
+
+[[step]]
+tool = "set_research"
+args = { tech = "pottery" }
+as = "set"
+
+[[step]]
+check = "set"
+eq = { researching = "Pottery", turns = 9, queue = ["Pottery"] }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "research"
+subset = { queue = ["Pottery"], progress = { Pottery = 4 } }
+
+[[step]]
+repeat = 8
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "techs"
+eq = ["Agriculture", "Pottery"]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "research"
+subset = { queue = [], progress = {} }
+
+[[step]]
+check = { what = "events", type = "tech" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "tech" }
+path = "[0]"
+subset = { turn = 9, text = "Civilization 1 researched Pottery. Unlocks buildings: Granary, Shrine.", audience = [0] }
+
+[[step]]
+note = "Nothing is queued now, and a human civilization is asked to choose at the start of its turn."
+op = "end_round"
+
+[[step]]
+check = { what = "events", type = "research_needed" }
+path = "[0]"
+subset = { audience = [0] }
+
+[[step]]
+note = "A goal beyond what can be researched now queues the path to it."
+tool = "set_research"
+args = { tech = "Philosophy" }
+as = "goal"
+
+[[step]]
+check = "goal"
+eq = { researching = "Calendar", turns = 11, queue = ["Calendar", "Writing", "Philosophy"], goal = "Philosophy", path = ["Calendar", "Writing", "Philosophy"] }

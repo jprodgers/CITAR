@@ -1,0 +1,75 @@
+about = """
+Players take their turns in seat order, and a round ends after the last of them: ending a turn
+hands the game to the next major civilization and begins its turn, and the end of the round moves
+the turn number on and gives the first seat its turn.
+"""
+from = "citar/engine/game.py: Game.end_turn"
+
+[config]
+players = [{}, {}, {}]
+
+[[step]]
+note = "A civilization with no unit and no city is eliminated when a round ends: each keeps a warrior."
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "add_unit", player = 2, unit = "Warrior", at = "C" },
+]
+
+[[step]]
+note = "A new game starts at the first seat's turn, begun and announced."
+check = { what = "game" }
+subset = { turn = 1, current = 0, phase = "playing" }
+
+[[step]]
+check = { what = "events", type = "turn_start" }
+len = 1
+any = { path = "text", eq = "Turn 1 (4000 BC): Civilization 1's turn." }
+
+[[step]]
+op = "end_turn"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 1, current = 1 }
+
+[[step]]
+check = { what = "events", type = "turn_end" }
+len = 1
+any = { path = "text", eq = "Civilization 1 ended their turn." }
+
+[[step]]
+check = { what = "events", type = "turn_start" }
+len = 2
+any = { path = "text", eq = "Turn 1 (4000 BC): Civilization 2's turn." }
+
+[[step]]
+op = "end_turn"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 1, current = 2 }
+
+[[step]]
+note = "The last seat ends its turn: the round ends, and the first seat's next turn begins."
+op = "end_turn"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 2, current = 0 }
+
+[[step]]
+check = { what = "game" }
+subset = { turn = 2, current = 0, phase = "playing" }
+
+[[step]]
+check = { what = "events", type = "turn_start" }
+len = 4
+any = { path = "text", eq = "Turn 2 (3960 BC): Civilization 1's turn." }
+
+[[step]]
+check = { what = "events", type = "turn_end" }
+len = 3

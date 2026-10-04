@@ -1,0 +1,82 @@
+about = """
+The turn number moves on once a round, and each turn's announcement dates it by the speed's
+calendar; a forced turn starts at once, with the turn number unchanged.
+"""
+from = "citar/engine/turns.py: end_round; citar/engine_api.py: force_turn"
+
+[config]
+players = [{}, {}]
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+op = "set_turn"
+args = { turn = 9 }
+
+[[step]]
+op = "end_turn"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 9, current = 1 }
+
+[[step]]
+check = { what = "events", type = "turn_start" }
+any = { path = "text", eq = "Turn 9 (3680 BC): Civilization 2's turn." }
+
+[[step]]
+op = "end_turn"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 10, current = 0 }
+
+[[step]]
+check = { what = "events", type = "turn_start" }
+any = { path = "text", eq = "Turn 10 (3640 BC): Civilization 1's turn." }
+
+[[step]]
+repeat = 3
+steps = [{ op = "end_round" }]
+
+[[step]]
+check = { what = "game" }
+subset = { turn = 13, current = 0 }
+
+[[step]]
+note = "A forced turn: the second seat's, begun at once."
+op = "force_turn"
+args = { player = 1 }
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 13, current = 1 }
+
+[[step]]
+check = { what = "events", type = "turn_start" }
+any = { path = "text", eq = "Turn 13 (3520 BC): Civilization 2's turn." }
+
+[[step]]
+note = "Forcing the turn a player already has changes nothing."
+op = "force_turn"
+args = { player = 1 }
+as = "again"
+
+[[step]]
+check = "again"
+eq = { turn = 13, current = 1 }
+
+[[step]]
+op = "end_turn"
+as = "after"
+
+[[step]]
+check = "after"
+eq = { turn = 14, current = 0 }

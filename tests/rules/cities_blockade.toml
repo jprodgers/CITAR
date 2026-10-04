@@ -1,0 +1,97 @@
+about = """
+An enemy military unit standing on a city's tile blockades it: the city cannot work the tile
+while the two are at war, and can again once peace is made. A lock on the tile goes with the
+blockade, and the citizen goes to another tile.
+
+The Rust engine moves the city's citizens as soon as the blockade begins; Python moved them at
+the end of the city's turn (intended: citizens-follow-a-blockade-at-once).
+"""
+from = "citar/engine/cities.py: workable_tiles, _unassign_extra"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma", pop = 1, claim_radius = 2 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+as = "made"
+
+[[step]]
+set = { city = "=made[0].city_id" }
+
+[[step]]
+tool = "work_tile"
+args = { city_id = "=city", at = "F" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { worked = [[3, 5]], locked = [[3, 5]] }
+
+[[step]]
+note = "a warrior at peace blockades nothing"
+op = "add_unit"
+args = { player = 1, unit = "Warrior", at = "F" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "workable"
+contains = [3, 5]
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { worked = [[3, 5]] }
+
+[[step]]
+op = "set_relation"
+args = { a = 0, b = 1, state = "war" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "workable"
+not_contains = [3, 5]
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+not_contains = [3, 5]
+intended = "citizens-follow-a-blockade-at-once"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 1
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+not_contains = [3, 5]
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { locked = [] }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "worked"
+len = 1
+
+[[step]]
+note = "peace lifts the blockade"
+op = "set_relation"
+args = { a = 0, b = 1, state = "peace" }
+
+[[step]]
+check = { what = "city", city = "=city" }
+path = "workable"
+contains = [3, 5]
+
+[[step]]
+tool = "work_tile"
+args = { city_id = "=city", at = "F" }
+as = "back"
+
+[[step]]
+check = "back"
+eq = { locked_tiles = [[3, 5]], worked_tiles = [[3, 5]] }

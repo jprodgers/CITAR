@@ -1,0 +1,107 @@
+about = """
+A civilization with no city is eliminated once it has nothing left: at once when another's attack
+kills its last unit, and at the end of the round when it simply has no unit. An eliminated
+civilization's units go, its open negotiations are cancelled with a note, and everyone is told; it
+takes no more turns. With two civilizations left the game goes on.
+"""
+from = "citar/engine/victory.py: is_defeated, check_elimination; citar/engine/turns.py: end_round"
+
+[config]
+players = [{}, {}, {}, {}]
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "C>w" },
+  { op = "add_unit", player = 2, unit = "Warrior", at = "C", hp = 1 },
+  { op = "add_unit", player = 3, unit = "Scout", at = "E" },
+  { op = "meet", a = 0, b = "all" },
+  { op = "meet", a = 1, b = 2 },
+  { op = "set_relation", a = 0, b = 2, state = "war" },
+]
+as = "made"
+
+[[step]]
+set = { w = "=made[2].unit_ids[0]", scout = "=made[4].unit_ids[0]" }
+
+[[step]]
+op = "open_negotiation_as"
+args = { player = 1, to = 2, message = "Shall we talk?" }
+as = "talk"
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=w", at = "C" }
+
+[[step]]
+note = "its only unit killed on another's turn, a civilization that never founded a city is eliminated at once"
+check = { what = "player", player = 2 }
+subset = { alive = false, units = [] }
+
+[[step]]
+check = { what = "events", type = "eliminated" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "eliminated" }
+path = "[0].text"
+eq = "Civilization 3 has been destroyed!"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=talk.negotiation_id" }
+subset = { status = "cancelled", awaiting = "=null" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=talk.negotiation_id" }
+path = "history[1]"
+subset = { action = "close", by = "=null", note = "Civilization 3 has been eliminated." }
+
+[[step]]
+note = "a civilization with no city whose last unit goes otherwise lives on until the round ends"
+op = "remove_units"
+args = { unit = "=scout" }
+
+[[step]]
+check = { what = "player", player = 3 }
+path = "alive"
+eq = true
+
+[[step]]
+op = "end_round"
+as = "round"
+
+[[step]]
+check = "round"
+eq = { turn = 2, current = 0 }
+
+[[step]]
+check = { what = "player", player = 3 }
+path = "alive"
+eq = false
+
+[[step]]
+check = { what = "events", type = "eliminated" }
+len = 2
+
+[[step]]
+check = { what = "events", type = "eliminated" }
+path = "[1].text"
+eq = "Civilization 4 has been destroyed!"
+
+[[step]]
+check = { what = "game" }
+subset = { phase = "playing", winner = "=null" }
+
+[[step]]
+note = "the dead play no more turns: the round passes over them"
+op = "end_round"
+as = "next"
+
+[[step]]
+check = "next"
+eq = { turn = 3, current = 0 }
+
+[[step]]
+check = { what = "events", type = "turn_start" }
+none = { path = "text", matches = "^Turn [23] .*Civilization [34]'s turn" }

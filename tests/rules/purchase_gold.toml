@@ -1,0 +1,109 @@
+about = """
+Buying with gold: a building or unit the city could build costs (30 x its production cost)^0.75
+gold, rounded down to ten, and is finished at once; a bought building leaves the queue, and a
+bought unit stands in the city. Refused, with what it costs, for want of gold; refused for a unit
+whose kind already stands in the city, for what the city cannot build, for a wonder, and with
+faith for what only gold buys. The treasury left is in the result.
+"""
+from = "tests/test_mechanics.py::EconomyTests::test_buy_and_happiness; citar/engine/cities.py: purchase_check, buy_cost, purchase"
+
+[[step]]
+op = "found_city"
+args = { player = 0, at = "A", name = "Roma", pop = 2 }
+as = "roma"
+
+[[step]]
+set = { city = "=roma.city_id" }
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "Monument" }
+error = "Monument costs 280 Gold; you have 0."
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "Monument", currency = "faith" }
+error = "Monument cannot be bought with Faith."
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "Monument", currency = "silver" }
+error = "currency must be Gold or Faith."
+
+[[step]]
+op = "set_player"
+args = { player = 0, gold = 1000 }
+
+[[step]]
+tool = "set_production"
+args = { city_id = "=city", item = "Monument" }
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "monument" }
+as = "bought"
+
+[[step]]
+check = "bought"
+eq = { bought = "Monument", cost = 280, stat = "Gold", left = 720 }
+
+[[step]]
+check = { what = "city", city = "=city" }
+subset = { buildings = ["Monument", "Palace"], queue = [] }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { gold = 720 }
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "Monument" }
+error = "Roma already has Monument."
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "Warrior" }
+as = "warrior"
+
+[[step]]
+check = "warrior"
+eq = { bought = "Warrior", cost = 200, stat = "Gold", left = 520 }
+
+[[step]]
+check = { what = "units", x = 5, y = 5 }
+path = "[0].type"
+eq = "Warrior"
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "Warrior" }
+error = "Move the unit out of Roma first: a bought Warrior appears in the city."
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "Library" }
+error = "Library requires Writing."
+
+[[step]]
+op = "grant_tech"
+args = { player = 0, tech = "Calendar" }
+
+[[step]]
+note = "A wonder is never bought with gold."
+tool = "buy"
+args = { city_id = "=city", item = "Stonehenge" }
+error = "Stonehenge cannot be bought with Gold."
+
+[[step]]
+note = "Nothing a unique does not name is bought with faith."
+op = "set_player"
+args = { player = 0, faith = 500 }
+
+[[step]]
+tool = "buy"
+args = { city_id = "=city", item = "Worker", currency = "Faith" }
+error = "Worker cannot be bought with Faith."
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { gold = 520, faith = 500 }

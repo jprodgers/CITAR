@@ -1,0 +1,66 @@
+about = """
+Influence drifts toward its resting point, 0 by default, at the end of each of the city-state's
+turns: down by 1 a turn from above (1.5 for a hostile city-state), up by 1 from below. At 30 a
+major is a friend; one that drops below is told the relationship degraded.
+"""
+from = "citar/engine/city_states.py: end_turn, resting_point, _degrade, _recovery, relationship"
+
+[config]
+city_states = 1
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Carthago" },
+  { op = "found_city", player = 2, at = "CS" },
+  { op = "set_influence", city_state = 2, player = 0, amount = 50 },
+  { op = "set_influence", city_state = 2, player = 1, amount = -20 },
+]
+
+[[step]]
+check = { what = "city_state", player = 2 }
+subset = { ally = "=null", relationship = { "0" = "Friend", "1" = "Enemy" } }
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "resting_point"
+eq = { "0" = 0, "1" = 0 }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "influence.0"
+ge = 48.5
+as = "friend"
+
+[[step]]
+check = "friend"
+le = 49
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "influence.1"
+eq = -19
+
+[[step]]
+note = "Just above the friend level: a turn later it is below, and the major is told."
+op = "set_influence"
+args = { city_state = 2, player = 0, amount = 30.5 }
+
+[[step]]
+op = "end_round"
+
+[[step]]
+check = { what = "city_state", player = 2 }
+path = "relationship.0"
+eq = "Neutral"
+
+[[step]]
+check = { what = "events", type = "cs_relationship", player = 0 }
+len = 1
+
+[[step]]
+check = { what = "events", type = "cs_relationship", player = 1 }
+len = 0

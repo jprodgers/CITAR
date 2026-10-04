@@ -1,0 +1,46 @@
+about = """
+A city-state meets a civilization it sees, and one that sees it, as a civilization does. (Two
+city-states never meet each other: the arena has one city-state start, so the engine's unit tests
+pin that.)
+"""
+from = "citar/engine/visibility.py: refresh (visibility.py:151-165)"
+
+[config]
+city_states = 1
+
+[[step]]
+note = "The city-state's warrior beside the second seat's."
+ops = [
+  { op = "add_unit", player = 2, unit = "Warrior", at = "E" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "E>e>e" },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+]
+
+[[step]]
+check = { what = "tile", at = "E" }
+path = "visible"
+eq = [1, 2]
+
+[[step]]
+check = { what = "player", player = 2 }
+path = "met"
+eq = [1]
+
+[[step]]
+check = { what = "relation", a = 0, b = 2 }
+path = "met"
+eq = false
+
+[[step]]
+note = "The first seat's warrior walks up on the other side: it meets the city-state, and not the second seat, three tiles off on flat land."
+op = "add_unit"
+args = { player = 0, unit = "Warrior", at = "E>w" }
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "met"
+eq = [2]
+
+[[step]]
+check = { what = "events", type = "first_contact" }
+len = 2

@@ -148,8 +148,8 @@ using UnCiv terrain names, events, and diplomacy. After each batch of actions th
 Messages are free text and never binding. Deals are binding and enforced by the engine. They can include gold,
 gold per turn, resources, open borders, embassies, peace, declarations of friendship, research agreements,
 defensive pacts, declaring war on a third party, cities, maps and technologies. The other side is interrupted
-out of turn to accept, reject, counter or reply. The exchange repeats until one side accepts or walks away, or
-the round cap is reached.
+out of turn to accept, reject, counter or reply, always with a message. The exchange repeats until one side accepts
+or walks away, or the message cap is reached, and neither side can end its turn while it is open.
 
 ---
 

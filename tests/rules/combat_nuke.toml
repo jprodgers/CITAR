@@ -1,0 +1,77 @@
+about = """
+A nuclear missile on an explored tile in range: war on the civilization it hits, every unit within
+its blast destroyed (a strength 2 weapon deals 100 damage), fallout on ground zero, and the missile
+spent. Every civilization that knows its owner thinks worse of it.
+"""
+from = "citar/engine/combat.py: nuke, _nuke_tile, _pillage_and_fallout"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "add_unit", player = 0, unit = "Nuclear Missile", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "A>e>e>e>e>e>e" },
+  { op = "add_unit", player = 1, unit = "Worker", at = "A>e>e>e>e>e>e>e" },
+  { op = "meet", a = 0, b = 1 },
+]
+as = "made"
+
+[[step]]
+set = { missile = "=made[1].unit_ids[0]" }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=missile", at = "A" }
+error = "A nuke cannot target its own tile."
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=missile", at = "A>e>e>e>e>e>e" }
+error = "Target an explored tile."
+
+[[step]]
+op = "reveal"
+args = { player = 0 }
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=missile", x = 23, y = 5 }
+error = "Target out of range (12)."
+
+[[step]]
+tool = "attack"
+args = { unit_id = "=missile", at = "A>e>e>e>e>e>e" }
+as = "boom"
+
+[[step]]
+check = "boom"
+eq = { nuke = "Nuclear Missile", target = { x = 11, y = 5 }, declared_war_on = ["Civilization 2"] }
+
+[[step]]
+check = { what = "units", player = 1 }
+len = 0
+
+[[step]]
+check = { what = "units", player = 0 }
+len = 0
+
+[[step]]
+check = { what = "tile", at = "A>e>e>e>e>e>e" }
+path = "features"
+contains = "Fallout"
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+subset = { war = true, war_declared_by = 0 }
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+path = "opinion[1]"
+eq = -50
+
+[[step]]
+check = { what = "events", type = "nuke" }
+len = 1
+
+[[step]]
+check = { what = "events", type = "war_declared" }
+len = 1

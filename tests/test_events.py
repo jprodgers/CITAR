@@ -5,6 +5,7 @@ from citar.engine import cities, tools
 from citar.engine.briefing import briefing as turn_briefing
 from citar.engine.game import Game
 from citar.engine.views import client_view
+from tests.backends import python_engine_only
 
 
 def new_game():
@@ -38,6 +39,7 @@ class EventScrubbingTest(unittest.TestCase):
     def text_for(self, pid):
         return next(e for e in self.g.events_for(pid) if e["id"] == self.ev["id"])
 
+    @python_engine_only("coordinates_are_scrubbed_with_the_names")
     def test_unmet_civ_is_unknown(self):
         ev = self.text_for(0)
         self.assertNotIn(self.rome, ev["text"])
@@ -51,12 +53,14 @@ class EventScrubbingTest(unittest.TestCase):
         self.assertIn(self.rome, self.ev["text"])
         self.assertEqual(self.ev["data"]["player"], 1)
 
+    @python_engine_only("coordinates_are_scrubbed_with_the_names")
     def test_own_civ_is_named(self):
         ev = self.text_for(1)
         self.assertIn(self.rome, ev["text"])
         self.assertIn("Omega", ev["text"])
         self.assertEqual(ev["idx"], self.city.idx)
 
+    @python_engine_only("coordinates_are_scrubbed_with_the_names")
     def test_named_once_met(self):
         self.g.meet(0, 1)
         ev = self.text_for(0)
@@ -64,11 +68,13 @@ class EventScrubbingTest(unittest.TestCase):
         self.assertNotIn("Unknown", ev["text"])
         self.assertEqual(ev["idx"], self.city.idx)
 
+    @python_engine_only("possessives_names_outside_ascii_and_coordinates")
     def test_spectator_sees_everything(self):
         ev = self.text_for(None)
         self.assertIn(self.rome, ev["text"])
         self.assertEqual(ev["data"]["player"], 1)
 
+    @python_engine_only("tests/rules/briefing_events.toml")
     def test_views_briefings_and_tools_are_scrubbed(self):
         g = self.g
         view_text = " ".join(e["text"] for e in client_view(g, 0)["events"])
@@ -79,6 +85,7 @@ class EventScrubbingTest(unittest.TestCase):
         self.assertIn("Unknown Civilization", turn_briefing(g, 0))
         self.assertIn(self.rome, " ".join(e["text"] for e in client_view(g, None)["events"]))
 
+    @python_engine_only("possessives_names_outside_ascii_and_coordinates")
     def test_possessive_and_sentence_start(self):
         g = self.g
         g.player(1).name = "Aztecs"
@@ -88,6 +95,7 @@ class EventScrubbingTest(unittest.TestCase):
         self.assertEqual(seen, "Unknown Civilization's Warrior attacked at an unknown location. "
                                "An unknown city is burning.")
 
+    @python_engine_only("unmet_city_states_and_capitals_at_a_sentence_start")
     def test_city_state_is_unknown_city_state(self):
         g = self.g
         cs = next((p for p in g.s.players if p.kind == "city_state"), None)
@@ -98,6 +106,7 @@ class EventScrubbingTest(unittest.TestCase):
         ev = g.emit("era", f"{cs.name} has entered the Classical era.", None, player=cs.id)
         self.assertEqual(g.event_view(ev, 0)["text"], "Unknown City-State has entered the Classical era.")
 
+    @python_engine_only("a_renamed_civilization_is_named_through_its_mention")
     def test_renamed_civ_old_name_is_hidden(self):
         g = self.g
         g.s.current = 1
