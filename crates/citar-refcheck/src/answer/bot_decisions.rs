@@ -14,15 +14,22 @@
 //! picks, the danger and garrison flags, the sites, the spare units; stage 2's attacks and war
 //! targets) are agreement rates, which `cargo refcheck bot-agreement` reports
 //! ([`crate::agreement`]); a choice that differs is no difference here. The Rust side is
-//! `citar_bot::decisions::ask` of the same bot ([`ask_recorded`]). Stage 2 records no value of
-//! its own: what an attack weighs is the combat preview, which `combat_previews` compares.
+//! `citar_bot::decisions::ask` of the same bot ([`ask_recorded`]). Stages 2 and 3 record no value
+//! of their own: what an attack weighs is the combat preview, which `combat_previews` compares,
+//! and the worth of a negotiation's proposal in the advice is `deal_checks`' `bot_value`.
+//!
+//! Stage 3's luxury trades and advice visit the civilizations met in an order: Python's in the
+//! order they were met, which its state records (`players[*].met`, [`met_orders`]), the Rust
+//! bot's in player-id order, since the engine keeps no such order
+//! (`met-lists-in-player-id-order`). The agreement asks them in Python's order, so that a choice
+//! differs only where the bot decides differently.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use citar_bot::decisions::{Question, ask, fighters};
+use citar_bot::decisions::{Question, ask, ask_in_order, fighters};
 use citar_engine::api::testops;
 use citar_engine::base::ids::PlayerId;
 use citar_engine::game::Game;
@@ -107,14 +114,49 @@ pub fn recorded(root: &Path, case: &str, turn: u32) -> Result<Arc<Vec<Value>>, A
     )))
 }
 
+/// Each player's civilizations met, in the order Python's state lists them (the order they
+/// were met), by player, from a state's JSON (`GameState.to_dict()`). Empty for a state that
+/// does not parse.
+#[must_use]
+pub fn met_orders(state: &str) -> MetOrders {
+    let Ok(doc) = serde_json::from_str::<Value>(state) else { return MetOrders::new() };
+    let ids = |v: &Value| -> Vec<PlayerId> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_u64)
+            .filter_map(|q| u8::try_from(q).ok())
+            .map(PlayerId)
+            .collect()
+    };
+    doc.get("players")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let pid = p.get("id").and_then(Value::as_u64).or_else(|| u64::try_from(i).ok())?;
+            let pid = PlayerId(u8::try_from(pid).ok()?);
+            Some((pid, ids(p.get("met").unwrap_or(&Value::Null))))
+        })
+        .collect()
+}
+
+/// The civilizations each player has met, in Python's order ([`met_orders`]).
+pub type MetOrders = BTreeMap<PlayerId, Vec<PlayerId>>;
+
 /// The Rust bot's answer to question `q` of major `pid` on `g`, asked as `bot_dump.py` asked it:
 /// for the attacks, each of the civilization's [`fighters`] readied first (the `ready_unit` test
 /// operation, on a copy of the game: its full movement, no orders, no attack made this turn),
-/// since a state saved at one civilization's turn holds the others' units spent.
+/// since a state saved at one civilization's turn holds the others' units spent; stage 3's
+/// questions visit the civilizations met in Python's order where `met` gives it.
 #[must_use]
-pub fn ask_recorded(g: &Game, pid: PlayerId, q: Question) -> Value {
+pub fn ask_recorded(g: &Game, pid: PlayerId, q: Question, met: &MetOrders) -> Value {
     if q != Question::Attacks {
-        return ask(g, pid, q);
+        return match met.get(&pid) {
+            Some(order) => ask_in_order(g, pid, q, order),
+            None => ask(g, pid, q),
+        };
     }
     let ops: Vec<Value> =
         fighters(g, pid).iter().map(|u| json!({"op": "ready_unit", "unit": u.get()})).collect();

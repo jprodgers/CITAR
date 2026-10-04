@@ -20,6 +20,10 @@ threads-required = 5
 filter = 'binary_id(citar-testkit::bot) & test(/^bot::economy::a_bot_game_saved/)'
 threads-required = 2
 
+[[profile.default.overrides]]
+filter = 'binary_id(citar-testkit::bot) & test(/^bot::diplomacy::a_bot_game_saved/)'
+threads-required = 2
+
 [profile.ci]
 # No retries: a test that passes on a second try is a determinism bug, not a flake.
 retries = 0

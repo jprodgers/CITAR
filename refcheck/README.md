@@ -192,7 +192,8 @@ city_stats, civs, buildable, movement, visible, combat_previews, deal_checks, to
 - lists in order, unless the group's compare spec (`compare/spec.rs`) says otherwise: keyed by a field or tuple
   position (`cities[id=9]`, `reachable[#0=412]`), a multiset (lists that are sets in meaning, such as
   `workable`, `detailed_resources`, `adoptable_policies` and the lists in `buildable.items`), or custom;
-- `fn`, which names the Python functions, is not compared, and `deal_checks`' `bot_value` only with `--with-bot`.
+- `fn`, which names the Python functions, is not compared, and `deal_checks`' `bot_value` only with `--with-bot`
+  (since package 2-05 the Rust bot answers it, `citar_bot::evaluate`; CI's run and the ratchet pass the flag).
 
 The custom rule is for routes (`movement.paths`): a different route is `path_equivalent`, accepted without an
 entry, when it starts and ends on Python's tiles, steps between adjacent tiles, and has the same turns and summed
@@ -310,12 +311,13 @@ rate, the items saying something of those asked (`CHOICES` in the script). Advic
 differs from advice without one only in `deal_value`, the bot's `evaluate` of the proposal, rounded, which
 `deal_checks`' `bot_value` holds.
 
-**Checking the Rust bot** (packages 2-01b and 2-03, stages 1 and 2):
+**Checking the Rust bot** (packages 2-01b, 2-03 and 2-05, stages 1 to 3):
 
 ```
 cargo refcheck run --groups bot_decisions            # the values, on the committed states (enforced)
 cargo refcheck bot-agreement                         # the choices' agreement, each miss with its cause
 CITAR_BOT_DUMP=C:/dev/bot_decisions-corpus.json.gz cargo refcheck bot-agreement --fixtures refcheck/corpus
+cargo refcheck run --groups deal_checks --with-bot   # the bot's deal valuations (enforced)
 ```
 
 The group `bot_decisions` reads the recording beside the fixtures, the committed file first, then
@@ -345,6 +347,18 @@ preview, which the `combat_previews` group compares, and no value of this group,
 its misses. `war_target` compares the whole plan (the city, the rally point, `advance`, `siege_ready`)
 made from none; it weighs the civilization's wars and its military. At package 2-03 both agree on every
 item considered: 19 attacks and 8 war targets on the committed states, 675 and 151 on the corpus.
+
+Stage 3 (package 2-05) adds three choices and no value: `reachable`, matched rival by rival (`rival <id>`),
+which weighs no recorded value; `lux_trade`, the offers in order, which weighs the luxuries the civilization
+owns, its happiness and its gold per turn; and `advice.wants`, the advice's wants without a negotiation, which
+weigh the luxuries owned, the wars and the military. The luxury trades and the advice visit the civilizations
+met in an order: Python's in the order they were met, which its state lists (`players[*].met`), the Rust bot's
+in player-id order (the engine keeps no such order, `met-lists-in-player-id-order`). `bot-agreement` asks them
+in Python's order (`citar_bot::decisions::ask_in_order`), so a choice differs only where the bot decides
+differently; asked in player-id order the corpus has 21 trades and 10 wants to someone else, or in another
+order. The worth of a negotiation's proposal in the advice is `deal_checks`' `bot_value`, which `--with-bot`
+compares. At package 2-05 every kind agrees on every item considered: 45 reachable cities, 1 trade and 4
+wants on the committed states, 1,737, 57 and 168 on the corpus; `bot_value` is clean on both.
 
 ## The statistical baseline
 
@@ -458,4 +472,6 @@ Both scripts run unattended for hours, so no game may hold a run up:
   Windows.
 - **Deal valuations.** The `bot_value` in `deal_checks` comes from a fresh `BasicBot` with default parameters
   and no memory of past turns, so its war-plan terms are always empty. It is a reference for the Phase 2 bot
-  port, not for the engine.
+  port, not for the engine: the Rust side asks `citar_bot::evaluate` of a `basic-1` seat in the same
+  conditions (the states hold no bot memory). The bot's tests (`crates/citar-testkit/tests/bot/deals.rs`)
+  cover the terms a memory moves.
