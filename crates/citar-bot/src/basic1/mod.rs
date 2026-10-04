@@ -16,15 +16,23 @@
 //! Package 2-03 ports units and fighting: the dispatch's other branches (great people, religious
 //! units and spaceship parts, aircraft, ships and the army), the garrisons, promotions, the
 //! settlers' escorts and retreats, attacks and the war plan (1806-1833, 1858-1925, 1951-2052,
-//! 2065-2389). Package 2-05 ports diplomacy, spies, city-state gifts, [`respond`] and the
-//! advice. What Python's turn did around the phases is the drive's now:
+//! 2065-2389). Package 2-05 ports the rest:
+//! - [`diplomacy`]: peace, agreements, wars prepared and declared, luxury trades
+//!   (`consider_diplomacy`, 2394-2556), city-state gifts at the end of the gold phase
+//!   (1645-1694), spies at the end of the empire's choices (1043-1064), what a deal is worth
+//!   (`evaluate`, 2558-2643) and the answers to negotiations ([`respond`], 2651-2708);
+//! - [`advice`]: the advice for a hybrid seat's language model (2713-2771).
+//!
+//! What Python's turn did around the phases is the drive's now:
 //! - `handle_negotiations` (745): `Game::drive` puts every negotiation that waits on a driven
 //!   seat to its driver's [`respond`] before the seat plays, and again as answers come back;
 //! - `_settle_chats` and `end_turn` (754-757): the drive ends the turn, and a chat the bot
 //!   opened that still waits on a seat nobody drives stops it for the host (P2.3.8).
 
+pub(crate) mod advice;
 pub(crate) mod cities;
 pub(crate) mod context;
+pub(crate) mod diplomacy;
 pub(crate) mod empire;
 pub(crate) mod faith;
 pub(crate) mod gold;
@@ -34,11 +42,8 @@ pub(crate) mod units;
 pub(crate) mod workers;
 
 use citar_engine::base::ids::{NegotiationId, PlayerId, TileIdx, UnitId};
-use citar_engine::game::Action;
 use citar_engine::game::Game;
 use citar_engine::game::advisor::{Advisor, AdvisorParams, BotFacts};
-use citar_engine::game::diplomacy::actions::RespondNegotiation;
-use serde_json::json;
 
 use self::context::Context;
 use crate::BotSpec;
@@ -101,7 +106,7 @@ pub(crate) fn play_turn(t: &mut Turn<'_>, s: &mut Seat<'_>) {
     let ctx = context(t, s);
     cities::manage_cities(t, s, &ctx);
     gold::manage_gold(t, s, &ctx);
-    consider_diplomacy(t, s, &ctx);
+    diplomacy::consider_diplomacy(t, s, &ctx);
 }
 
 /// `context` (basic.py:777-835), as the game is now.
@@ -109,25 +114,8 @@ fn context(t: &Turn<'_>, s: &Seat<'_>) -> Context {
     context::build(t.game(), t.pid(), s)
 }
 
-/// `consider_diplomacy` (basic.py:2394-2556): package 2-05.
-fn consider_diplomacy(t: &mut Turn<'_>, s: &mut Seat<'_>, ctx: &Context) {
-    let _ = (t, s, ctx);
-}
-
 /// Its answer to negotiation `nid`, which waits on the seat and which the bot owns (the driver
-/// has left the model's to the host): `BasicBot.respond` (basic.py:2651-2708), which package
-/// 2-05 ports. Until then it says no with Python's own lines: to talk with nothing on the
-/// table, "We have nothing further to discuss."; to a proposal, "That does not interest us."
+/// has left the model's to the host): `BasicBot.respond` (basic.py:2651-2708).
 pub(crate) fn respond(t: &mut Turn<'_>, s: &mut Seat<'_>, nid: NegotiationId) {
-    let _ = s;
-    let talk = t.game().negotiation(nid).is_some_and(|n| n.proposal.is_none());
-    let line =
-        if talk { "We have nothing further to discuss." } else { "That does not interest us." };
-    t.act(Action::RespondNegotiation(RespondNegotiation {
-        negotiation_id: i64::from(nid.get()),
-        action: json!("reject"),
-        message: Some(json!(line)),
-        give: None,
-        receive: None,
-    }));
+    diplomacy::respond::respond(t, s, nid);
 }

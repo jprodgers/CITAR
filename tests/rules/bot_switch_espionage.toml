@@ -3,7 +3,6 @@ The espionage switch. While the bot owns espionage it sends an idle spy to a riv
 (here the only one); when the seat's model owns espionage the spy stays in its hideout.
 """
 from = "citar/bots/basic.py:1040-1064 (empire_choices, _spies)"
-needs = "2-05"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }

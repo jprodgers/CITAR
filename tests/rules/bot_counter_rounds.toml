@@ -3,7 +3,6 @@ The bot never haggles forever: it counters at most counter_rounds times in one n
 rejects with a last word. With counter_rounds 2, the third shortfall offer is rejected.
 """
 from = "tests/test_bot_diplomacy.py::CounterTests::test_the_bot_stops_countering_after_counter_rounds"
-needs = "2-05"
 
 [[step]]
 set = { short = { counter_rounds = 2 } }

@@ -274,7 +274,8 @@ pub fn shared_embassies(g: &Game, a: PlayerId, b: PlayerId) -> bool {
 }
 
 /// Whether a civilization-wide unique of this type holds for `p` (`Game.civ_has`).
-pub(crate) fn civ_has(g: &Game, p: PlayerId, ty: UniqueType) -> bool {
+#[must_use]
+pub fn civ_has(g: &Game, p: PlayerId, ty: UniqueType) -> bool {
     let v = g.view();
     uq::any(uq::civ(&v, p, ty, &Ctx::civ(p)))
 }

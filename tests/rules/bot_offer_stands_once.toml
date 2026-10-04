@@ -4,7 +4,6 @@ rejects the next time. It reads only the items, never the words. Talk with nothi
 one invitation to make a proposal, then a rejection.
 """
 from = "tests/test_bot_diplomacy.py::CounterTests::test_our_offer_stands_once_then_the_bot_rejects"
-needs = "2-05"
 
 [[step]]
 ops = [

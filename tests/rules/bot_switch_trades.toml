@@ -5,7 +5,6 @@ owns trades the bot offers no trade, and, since asking for gold is a trade, it a
 but values below nothing with a plain rejection.
 """
 from = "tests/test_bot_diplomacy.py::TradeSwitchTests (test_no_trade_offers_when_the_model_owns_trades, test_no_gold_counter_when_the_model_owns_trades, test_a_game_with_trades_owned_by_the_model_has_no_bot_trades)"
-needs = "2-05"
 
 [[step]]
 set = { trading = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0, lux_trade_every = 1 } }

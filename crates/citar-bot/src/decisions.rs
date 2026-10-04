@@ -11,8 +11,14 @@
 //! units, lists sorted as the recording sorted them.
 //!
 //! Stage 1 (package 2-01b) is the economy's; stage 2 (package 2-03) the fighting's: the attack
-//! each unit would make and the war plan ([`Question`]). Stage 3 (diplomacy) comes with package
-//! 2-05.
+//! each unit would make and the war plan; stage 3 (package 2-05) the diplomacy's: the city of
+//! each rival the bot could reach, the luxury trades it would offer, and its advice
+//! ([`Question`]).
+//!
+//! The recorder refused every action, so the luxury trades are what the bot would offer were
+//! each refused: one sale, or each purchase in turn. Stage 3 visits the civilizations met in
+//! player-id order, as the bot does (`met-lists-in-player-id-order`); [`ask_in_order`] asks in
+//! another order, Python's, the order they were met, which a state from Python records.
 //!
 //! The recorder readied every unit it asked about the attack of (the `ready_unit` test
 //! operation: its full movement, no orders, no attack made this turn), since a state saved at the
@@ -28,18 +34,21 @@ use citar_engine::game::advisor::is_army;
 use citar_engine::game::diplomacy::category::Category;
 use citar_engine::game::religion::found::can_found_pantheon;
 use citar_engine::rules::defs::Domain;
+use citar_engine::state::diplo::NegStatus;
 use serde_json::{Map, Value, json};
 
 use crate::basic1::context::{self, Context, city_defense, in_danger, needs_garrison};
+use crate::basic1::diplomacy::evaluate::Mind;
+use crate::basic1::diplomacy::{met_majors, trade, war};
 use crate::basic1::units::{attack, war_plan};
-use crate::basic1::{Seat, empire, gold, research};
+use crate::basic1::{Seat, advice, empire, gold, research};
 use crate::memory::Memory;
 use crate::owners::Owner;
 use crate::params::{Overrides, Tuning};
 use crate::versions::VersionId;
 use crate::{BotSpec, clean};
 
-/// A question of stage 1 or 2, as `bot_dump.py` names its kind.
+/// A question of stage 1, 2 or 3, as `bot_dump.py` names its kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Question {
     /// `BasicBot.context`: the army target, the unit supply, gold per turn, happiness, the era,
@@ -68,11 +77,19 @@ pub enum Question {
     /// point, whether the army advances and whether the siege is ready; null in peace or with no
     /// target.
     WarTarget,
+    /// `_reachable_city` for every other living major, by its id: a city id or null.
+    Reachable,
+    /// The negotiations `trade_luxuries` would open were each refused (`to`, `give`,
+    /// `receive`), in order.
+    LuxTrade,
+    /// `advice` without a negotiation (`none`), and with each open negotiation the civilization
+    /// is a party to (`negotiations`, by id).
+    Advice,
 }
 
 impl Question {
-    /// Every question of stages 1 and 2, in `bot_dump.py`'s order.
-    pub const ALL: [Self; 9] = [
+    /// Every question, in `bot_dump.py`'s order.
+    pub const ALL: [Self; 12] = [
         Self::Context,
         Self::TechValues,
         Self::NextResearch,
@@ -82,6 +99,9 @@ impl Question {
         Self::Spare,
         Self::Attacks,
         Self::WarTarget,
+        Self::Reachable,
+        Self::LuxTrade,
+        Self::Advice,
     ];
 
     /// Its kind's name in the recording.
@@ -97,6 +117,9 @@ impl Question {
             Self::Spare => "spare",
             Self::Attacks => "attacks",
             Self::WarTarget => "war_target",
+            Self::Reachable => "reachable",
+            Self::LuxTrade => "lux_trade",
+            Self::Advice => "advice",
         }
     }
 
@@ -166,6 +189,21 @@ pub fn fighters(g: &Game, pid: PlayerId) -> Vec<UnitId> {
 /// The answer of `q` for major `pid` of `g`, in the recording's shape.
 #[must_use]
 pub fn ask(g: &Game, pid: PlayerId, q: Question) -> Value {
+    ask_in_order(g, pid, q, &met_majors(g, pid))
+}
+
+/// [`ask`], with the civilizations `pid` has met visited in `met`'s order where stage 3's
+/// questions visit them (the luxury trades and the advice), as Python visited them in the order
+/// they were met. Only the living majors of `met` that `pid` has met count.
+#[must_use]
+pub fn ask_in_order(g: &Game, pid: PlayerId, q: Question, met: &[PlayerId]) -> Value {
+    let met: Vec<PlayerId> = met
+        .iter()
+        .copied()
+        .filter(|&x| {
+            x != pid && g.has_met(pid, x) && g.player(x).is_some_and(|p| p.alive() && p.is_major())
+        })
+        .collect();
     let [plain, classic, potential] = specs();
     match q {
         Question::Context => with_seat(g, pid, plain, |_, ctx| context_json(g, ctx)),
@@ -269,6 +307,35 @@ pub fn ask(g: &Game, pid: PlayerId, q: Question) -> Value {
                     "siege_ready": plan.siege_ready,
                 })
             })
+        }),
+        Question::Reachable => with_seat(g, pid, plain, |s, ctx| {
+            let mut out = Map::new();
+            for other in g.majors(true).map(|x| x.id()).filter(|&x| x != pid) {
+                let c = war::reachable_city(g, pid, s, ctx, other);
+                out.insert(other.0.to_string(), json!(c.map(|c| c.get())));
+            }
+            Value::Object(out)
+        }),
+        Question::LuxTrade => with_seat(g, pid, plain, |s, _| {
+            let offers: Vec<Value> = trade::plan(g, pid, s, &met)
+                .offers()
+                .into_iter()
+                .map(|o| json!({"to": o.to.0, "give": o.give, "receive": o.receive}))
+                .collect();
+            Value::Array(offers)
+        }),
+        Question::Advice => with_seat(g, pid, plain, |s, _| {
+            let mind = Mind { spec: s.spec, params: s.params, memory: &*s.memory };
+            let one = |nid| serde_json::to_value(advice::advice(g, mind, pid, nid, &met));
+            let mut negotiations = Map::new();
+            for n in g.negotiations() {
+                let party = n.initiator == pid || n.responder == pid;
+                if n.status == NegStatus::Open && party {
+                    negotiations
+                        .insert(n.id.get().to_string(), one(Some(n.id)).unwrap_or(Value::Null));
+                }
+            }
+            json!({"none": one(None).unwrap_or(Value::Null), "negotiations": negotiations})
         }),
     }
 }

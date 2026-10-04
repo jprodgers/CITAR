@@ -4,10 +4,15 @@
 //! them, and the research agreement's cost (`scripts/refcheck/queries.py::deal_checks`).
 //!
 //! Python sampled the pairs and the proposals and wrote them next to each answer, so the Rust side
-//! reads the same `give` and `receive` through `game::diplomacy::deals`. The fresh bot's
-//! valuation (`bot_value`) is the Phase 2 bot's, compared only with `--with-bot`, and not answered
-//! here.
+//! reads the same `give` and `receive` through `game::diplomacy::deals`. Each side's valuation by
+//! a fresh bot (`bot_value`: `BasicBot(seed=0).evaluate`, default parameters, aggression 0.4, no
+//! memory of wars planned) is `citar_bot::evaluate` of a `basic-1` seat in the same conditions
+//! (package 2-05, DESIGN.md P2.3.11 point 2). The states hold no bot memory, so the seat's is
+//! fresh. It is compared only with `--with-bot`.
 
+use std::sync::{Arc, OnceLock};
+
+use citar_bot::{BotSpec, Overrides, Tuning, VersionId};
 use citar_engine::base::ids::PlayerId;
 use citar_engine::game::Game;
 use citar_engine::game::diplomacy::deals::{
@@ -90,6 +95,26 @@ fn deal(g: &Game, e: &Value) -> Result<Value, AnswerError> {
         describe.insert(a.0.to_string(), json!(describe_items(g, t.gives(a))));
         describe.insert(b.0.to_string(), json!(describe_items(g, t.gives(b))));
         out.insert("describe".into(), Value::Object(describe));
+        let spec = fresh_bot();
+        let mut value = Map::new();
+        value.insert(
+            a.0.to_string(),
+            json!(citar_bot::evaluate(g, spec, a, b, t.gives(a), t.gives(b))),
+        );
+        value.insert(
+            b.0.to_string(),
+            json!(citar_bot::evaluate(g, spec, b, a, t.gives(b), t.gives(a))),
+        );
+        out.insert("bot_value".into(), Value::Object(value));
     }
     Ok(Value::Object(out))
+}
+
+/// The bot Python asked: `basic-1` at its defaults and the default aggression.
+fn fresh_bot() -> &'static BotSpec {
+    static SPEC: OnceLock<BotSpec> = OnceLock::new();
+    SPEC.get_or_init(|| {
+        let tuning = Arc::new(Tuning::new(VersionId::Basic1, Overrides::default()));
+        BotSpec::new(VersionId::Basic1, tuning, None, None)
+    })
 }

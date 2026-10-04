@@ -34,7 +34,7 @@ use serde_json::{Map, Value};
 use smallvec::SmallVec;
 
 pub use self::generated::*;
-pub use self::resolve::Resolved;
+pub use self::resolve::{CityStateKind, Resolved};
 pub use self::schema::{Fixed, Kind, Spec};
 use crate::versions::VersionId;
 

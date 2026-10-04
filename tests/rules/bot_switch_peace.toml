@@ -3,7 +3,6 @@ The peace switch. While the bot owns peace it offers peace in a long war (or one
 peace_min_turns have passed; when the seat's model owns peace it offers none, and the war goes on.
 """
 from = "citar/bots/basic.py:2415-2430 (consider_diplomacy)"
-needs = "2-05"
 
 [[step]]
 set = { peaceful = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 1, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0 } }
