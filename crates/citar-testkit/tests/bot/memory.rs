@@ -306,11 +306,17 @@ fn the_drive_prunes_a_seats_memory_and_keeps_the_rest() {
     let planted = seat_memory(&g).expect("the plant left it");
     assert_eq!(Memory::decode(&planted), m, "the seat keeps what its driver left");
 
+    // Pruning keeps the war records: a war being prepared is diplomacy's to give up.
+    let mut pruned = m.clone();
+    pruned.prune(&g, PlayerId(0), 30, 1_000);
+    assert_eq!(pruned.war_prep, m.war_prep, "war records stay");
+
     let mut bot = basic1();
     one_turn(&mut g, &mut bot);
     // This turn's start pruned the escorts of units gone or not the seat's, and the garrison of
     // a city that is not; the settler then founded the capital, and its escort, finding it gone,
-    // let it go (basic.py:2149-2155).
+    // let it go (basic.py:2149-2155). The turn's diplomacy gave up the war prepared on a
+    // civilization it knows no city of to reach (basic.py:2458-2462).
     let kept = Memory::decode(&seat_memory(&g).expect("basic-1's memory"));
     let mut want = m.clone();
     want.escorts.clear();
@@ -318,12 +324,13 @@ fn the_drive_prunes_a_seats_memory_and_keeps_the_rest() {
     want.retreats.remove(&TileIdx(11));
     want.bad_sites.remove(&TileIdx(21));
     want.boat_turns.clear();
+    want.war_prep = None;
     assert_eq!(kept, want);
 
     one_turn(&mut g, &mut bot);
     let kept = Memory::decode(&seat_memory(&g).expect("basic-1's memory"));
     assert!(kept.escorts.is_empty(), "the settler founded a city and is gone: {kept:?}");
-    assert_eq!(kept.war_prep, want.war_prep, "war records stay");
+    assert_eq!(kept.war_prep, None);
     assert_eq!(kept.need_escort, Some(TileIdx(40)));
     assert_eq!(
         kept.bad_sites,

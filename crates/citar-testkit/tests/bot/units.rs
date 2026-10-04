@@ -26,9 +26,11 @@ use citar_engine::api::testops;
 use citar_engine::base::ids::{BaseUnitId, CityId, PlayerId, ReligionId, TileIdx, UnitId};
 use citar_engine::game::setup::config_from_value;
 use citar_engine::game::{
-    Action, DebugOptions, DriveOptions, DriverOutcome, Drivers, Game, SeatDriver, religion, units,
+    Action, DebugOptions, DriveOptions, DriverOutcome, Drivers, Game, SeatDriver, Stop, religion,
+    units,
 };
 use citar_engine::rules::Ruleset;
+use citar_engine::state::diplo::NegStatus;
 use citar_engine::state::players::DriverMemory;
 use citar_engine::state::units::{Activity, Unit};
 use citar_testkit::rulesets::{files_of, kitchen_sink, overlay};
@@ -129,12 +131,21 @@ impl SeatDriver for Remembering<'_> {
     }
 }
 
-/// My turn played by `d`, every check holding after it.
+/// My turn played by `d`, every check holding after it. A negotiation the bot opens with a seat
+/// nobody drives stops the drive (its diplomacy, package 2-05): it is closed as a host closes
+/// one whose wait runs out, and the drive goes on to the turn's end.
 fn turn(g: &mut Game, d: &mut dyn SeatDriver) {
     let n = g.state().players().len();
-    let mut drivers = Drivers::none(n).with(ME, d);
-    g.drive(&mut drivers, DriveOptions::default().with_seat_limit(1)).expect("live");
-    drop(drivers);
+    for _ in 0..100 {
+        let mut drivers = Drivers::none(n).with(ME, &mut *d);
+        let (stop, _) =
+            g.drive(&mut drivers, DriveOptions::default().with_seat_limit(1)).expect("live");
+        drop(drivers);
+        let Stop::AwaitingReply { nids, .. } = stop else { break };
+        for nid in nids {
+            g.close_negotiation(nid, NegStatus::Expired, "No answer came.", None).expect("open");
+        }
+    }
     let v = g.take_violations();
     assert!(v.is_empty(), "{v:?}");
     assert!(g.check_invariants().is_empty(), "{:?}", g.check_invariants());
