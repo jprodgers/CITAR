@@ -65,9 +65,8 @@ fn classic(g: &Game, pid: PlayerId, s: &Seat<'_>, ctx: &Context) -> Option<(Play
     for q in courted(g, pid) {
         let inf = influence(g, q, pid);
         let key = (inf >= f64::from(p.cs_gift_focus_influence), inf);
-        let better = best.is_none_or(|(_, (bf, bi))| {
-            key.0 > bf || (key.0 == bf && key.1.total_cmp(&bi).is_gt())
-        });
+        let better =
+            best.is_none_or(|(_, (bf, bi))| key.0.cmp(&bf).then(key.1.total_cmp(&bi)).is_gt());
         if better {
             best = Some((q, key));
         }

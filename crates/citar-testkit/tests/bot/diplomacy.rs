@@ -68,7 +68,7 @@ impl SeatDriver for Seat {
                         if g.has_met(pid, b) && !g.at_war(pid, b) {
                             let declare = DeclareWar { player_id: i64::from(b.0), message: None };
                             // A treaty may still hold: the agent tries again next turn.
-                            let _ = g.act(pid, Action::DeclareWar(declare));
+                            g.act(pid, Action::DeclareWar(declare)).ok();
                         }
                     }
                 }
