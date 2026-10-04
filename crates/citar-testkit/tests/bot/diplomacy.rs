@@ -5,8 +5,8 @@
 //! - **The switches** (gate 4): four `basic-1` seats whose every diplomacy category the seat's
 //!   language model owns, beside two `RandomAgent`s that declare war on every bot they have met
 //!   from turn 60, 200 rounds on a small map. The bots open no negotiation, declare no war, give
-//!   no city-state anything and move no spy: they never even try (no such action taken or
-//!   refused). Every negotiation put to them they defer to the host (`DriverOutcome::Deferred`),
+//!   no city-state anything and move no spy (each is given one at round 100, and they meet
+//!   city-states): they never even try (no such action taken or refused). Every negotiation put to them they defer to the host (`DriverOutcome::Deferred`),
 //!   which closes it when the drive stops for it, as a host does when its wait runs out. They
 //!   still fight the wars the agents declare on them: with the barbarians off, every attack they
 //!   make is in such a war.
@@ -22,11 +22,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use citar_bot::{BotSpec, Overrides, Owner, Owners, Tuning, VersionId};
+use citar_engine::api::testops;
 use citar_engine::base::ids::{NegotiationId, PlayerId};
 use citar_engine::game::diplomacy::actions::DeclareWar;
 use citar_engine::game::diplomacy::category::CATEGORIES;
 use citar_engine::game::{
-    Action, DebugOptions, DriveOptions, DriverOutcome, Drivers, Game, SeatDriver, Stop,
+    Action, DebugOptions, DriveOptions, DriverOutcome, Drivers, Game, SeatDriver, Stop, espionage,
 };
 use citar_engine::state::Phase;
 use citar_engine::state::chronicle::{EngineEvent, EventType};
@@ -196,6 +197,12 @@ fn bots_whose_model_owns_diplomacy_make_none_and_still_fight_the_wars_declared_o
     let mut wars: BTreeMap<(u8, u8), u32> = BTreeMap::new();
     let mut hook = |g: &mut Game, round: Round| -> Result<(), String> {
         checked(g, round)?;
+        if round.0 == 100 {
+            // A spy each, idle in its hideout: the bots are never to move them.
+            let spies: Vec<Value> =
+                bots.iter().map(|b| json!({"op": "add_spy", "player": b.0})).collect();
+            testops::apply(g, &Value::Array(spies)).map_err(|e| e.message)?;
+        }
         for e in g.events(seen, usize::MAX) {
             if e.kind == EventType::Engine(EngineEvent::WarDeclared)
                 && let Some(d) = &e.data
@@ -238,6 +245,16 @@ fn bots_whose_model_owns_diplomacy_make_none_and_still_fight_the_wars_declared_o
     );
     let opened = g.negotiations().iter().filter(|n| bots.contains(&n.initiator)).count();
     assert_eq!(opened, 0, "negotiations opened by bots");
+    // The bots could have sent spies and courted city-states, and did neither.
+    for &b in &bots {
+        let spies = espionage::spies(&g, b);
+        assert!(!spies.is_empty(), "bot {} has a spy", b.0);
+        assert!(spies.iter().all(|s| s.city.is_none()), "bot {} moved a spy", b.0);
+    }
+    let courted = |b: PlayerId| g.city_states(false).filter(|cs| g.has_met(b, cs.id())).count();
+    let met: Vec<usize> = bots.iter().map(|&b| courted(b)).collect();
+    eprintln!("city-states met by each bot {met:?}");
+    assert!(met.iter().any(|&n| n > 0), "no bot met a city-state");
     assert!(
         wars.keys().all(|(a, _)| !bots.contains(&PlayerId(*a))),
         "a bot declared war: {wars:?}"
