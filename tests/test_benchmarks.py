@@ -11,6 +11,7 @@ from unittest import mock
 from citar import servers as REG
 from citar.server.benchmarks import BenchmarkScheduler, normalize_suite, performance
 from citar.server.session import SessionManager, SAVE_DIR
+from tests.backends import has_test_ops, rust_only
 
 
 def dry_server(i, models, max_parallel=1, delay=0.0, restricted=None):
@@ -137,6 +138,37 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(job["result"]["outcome"], "eliminated")
         self.assertEqual(job["result"]["performance"], 0)
         self.assertTrue(s.stopped, "the bots should not play out a settled game")
+
+    @rust_only
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
+    def test_a_job_whose_engine_stops_fails_and_frees_its_machine(self):
+        """A crashed game (GameSession._crashed) takes no more moves: its job fails with the crash, its machine's slot
+        is freed for the next job, and the run finishes; a crashed game is never resumed."""
+        sch = self.scheduler()
+        run = sch.create_run(dry_suite(models=("c", "d"), turn_limit=4, delay=0.05))
+        first, second = run["jobs"]
+        self.assertEqual(started(sch, run, first), "running", why(sch, run))
+        s = self.manager.get(first["game_id"])
+
+        def panics(bots, seat_limit=0):           # the bot's next drive panics, as a bug in the engine or bot would
+            return s.game.test_ops([{"op": "panic"}])
+
+        with mock.patch.object(s.game, "drive", side_effect=panics):
+            self.assertTrue(wait_for(lambda: s.crashed is not None, sch=sch, timeout=30), why(sch, run))
+            self.assertTrue(wait_for(lambda: first["status"] == "failed", sch=sch, timeout=10), why(sch, run))
+        self.assertIn(f"The engine stopped on turn {s.crashed['turn']}", first["error"])
+        self.assertIn("panic", first["error"])
+        self.assertIsNone(first["pause_reason"])
+        self.assertTrue(s.stopped)
+        with self.assertRaises(ValueError):
+            sch.control_job(run["id"], first["id"], "resume")
+        # its slot is free: the next job of this sequential run plays on the same machine, and the run finishes
+        self.assertTrue(wait_for(lambda: run["status"] == "done", sch=sch, timeout=120), why(sch, run))
+        self.assertEqual((first["status"], second["status"]), ("failed", "done"), why(sch, run))
+        # the job's game, opened later, is the game as the engine stopped it
+        sch.manager.delete(s.id)
+        opened = sch.open_job_game(run["id"], first["id"])
+        self.assertEqual(opened.crashed["turn"], s.crashed["turn"])
 
     def test_sequential_run_plays_each_model_to_the_turn_limit(self):
         sch = self.scheduler()

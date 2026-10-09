@@ -566,7 +566,9 @@ class BenchmarkScheduler:
             if s is not None:
                 return s
             folder = SAVE_DIR / job["game_id"]
-            for name in ("benchmark.citar", "autosave.citar"):
+            # a game the engine stopped shows as it stopped (its crash save loads read-only), not as its last autosave
+            crashes = sorted(p.name for p in folder.glob("crash-*.citar"))
+            for name in ("benchmark.citar", *crashes[-1:], "autosave.citar"):
                 if (folder / name).exists():
                     s = self.manager.load(folder / name)
                     if job["status"] in ("done", "failed", "cancelled"):
@@ -706,6 +708,9 @@ class BenchmarkScheduler:
             if s is None:
                 job.update({"status": "cancelled", "error": "The game was closed.", "finished": _now()})
                 self._touch(run)
+                continue
+            if s.crashed:
+                self._fail_crashed(run, job, s)
                 continue
             if s.game.phase != "playing" or not s.game.is_alive((s.benchmark or {}).get("llm_player", 0)):
                 # once the model is eliminated the result is settled (performance 0), and the bots playing
@@ -969,6 +974,8 @@ class BenchmarkScheduler:
             s = self.manager.get(job["game_id"])
             if s is None:
                 job.update({"status": "cancelled", "error": "The game was closed.", "finished": _now()})
+            elif s.crashed:
+                self._fail_crashed(run, job, s)
             elif self._machine(job) in self._restricted or run["status"] != "running":
                 job["status"], job["pause_reason"] = "paused", "restricted" if self._machine(job) in self._restricted else "user"
             else:
@@ -984,6 +991,24 @@ class BenchmarkScheduler:
             job["progress"] = game_progress(s)
         self._progress_at[job["id"]] = _now()
         self._progress_dirty.add(run["id"])
+
+    def _fail_crashed(self, run: dict, job: dict, s: GameSession):
+        """Fail a job whose game the engine stopped (``GameSession._crashed``), and free its machine.
+
+        A crashed game takes no more moves, so the job can neither finish nor resume: left as an ordinary pause it
+        would hold its machine's slot and keep its run open for good, and a restart would replay it from its last
+        good autosave into the same crash. Its crash save stays in the game's folder for whoever debugs it, and
+        retrying the job plays a new game."""
+        try:
+            self._record_progress(run, job, s)       # reads still answer on a crashed game; the job fails regardless
+        except Exception:
+            self._log(f"{job['label']}: no progress read after the crash: {traceback.format_exc(limit=2)}")
+        crash = s.crashed or {}
+        job.update({"status": "failed", "finished": _now(), "pause_reason": None,
+                    "error": f"The engine stopped on turn {crash.get('turn')}: {str(crash.get('message') or '')[:300]}"})
+        s.stop()
+        self._log(f"{job['label']} on {job['scenario_name']}: the engine stopped on turn {crash.get('turn')}.")
+        self._touch(run)
 
     def _finish_job(self, run: dict, job: dict, s: GameSession):
         """Finish a job: final score, timing, and release the game."""
