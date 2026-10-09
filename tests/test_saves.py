@@ -543,6 +543,30 @@ class FormatTests(SavesCase):
         with self.assertRaises(ValueError):
             self.m.load(old)
 
+    def test_a_save_that_does_not_load_brings_the_running_game_back(self):
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 4)
+        early = s.save("turn-early")
+        bad = s.folder / "bad.citar"
+        data = bytearray(early.read_bytes())
+        data[-6] ^= 0xFF                         # its header reads; its body does not
+        bad.write_bytes(bytes(data))
+        engine_api.save_header(bad)
+        s.set_paused(False)                      # the game runs
+        with self.assertRaises(ValueError):
+            self.m.load(bad)
+        self.assertTrue(s.stopped, "the running game was stopped to read the save")
+        back = self.m.get(s.id)
+        self.assertIsNotNone(back, "and came back from its autosave")
+        self.assertIsNot(back, s)
+        self.assertFalse(back.paused, "running, as it was")
+        self.assertGreaterEqual(back.game.turn, 4)
+        # a game closed before a failed load stays closed
+        self.m.delete(back.id)
+        with self.assertRaises(ValueError):
+            self.m.load(bad)
+        self.assertIsNone(self.m.get(s.id))
+
     def test_deleting_saves_removes_the_journals_no_save_names_but_never_a_session_s(self):
         s = self.game([{"type": "bot"}] * 2)
         self.play_to(s, 6)

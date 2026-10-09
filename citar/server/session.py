@@ -1419,13 +1419,15 @@ class SessionManager:
             sid = engine_api.save_header(path)["session"]["id"] or path.parent.name
             with self.lock:
                 live = self.sessions.get(sid)
+            running = live is not None and not live.stopped
+            paused = live is not None and live.paused       # stop() pauses it
             if live is not None:
                 live.stop()
             try:
                 s = GameSession.from_save(path)
             except BaseException:
-                if live is not None:
-                    self._reopen(live)
+                if running:                      # a game closed before the load stays closed
+                    self._reopen(live, paused)
                 raise
             self._register_loaded(s)
             return s
@@ -1440,7 +1442,7 @@ class SessionManager:
         self.track(s)
         s.mark_live()
 
-    def _reopen(self, live: GameSession):
+    def _reopen(self, live: GameSession, paused: bool):
         """Bring back a game ``load`` stopped for a save that then did not load: from its own autosave, paused or not
         as it was. If that fails too the game stays closed."""
         with self.lock:
@@ -1452,7 +1454,7 @@ class SessionManager:
             traceback.print_exc()
             return
         self._register_loaded(s)
-        if not live.paused:
+        if not paused:
             s.resume()
 
     def restore_live(self) -> list[str]:
