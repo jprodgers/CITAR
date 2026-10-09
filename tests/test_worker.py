@@ -17,6 +17,7 @@ from unittest import mock
 from pathlib import Path
 
 import tests  # noqa: F401
+from tests import has_test_ops
 
 _TMP = Path(tempfile.mkdtemp(prefix="citar_worker_"))
 os.environ["CITAR_DATA_DIR"] = str(_TMP)
@@ -213,6 +214,7 @@ class PooledWork(unittest.TestCase):
         finally:
             sch.stop()
 
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_an_eliminated_model_frees_its_machine(self):
         from citar.pool import seats
         # two bots, so the game goes on without the model: eliminating it in a duel would end the game, and a game

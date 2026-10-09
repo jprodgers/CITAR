@@ -1,5 +1,6 @@
 """Session-level tests: AI seats, negotiation interrupts between agents, saves. Uses a scripted mock model."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+from tests import has_test_ops
 import time
 import unittest
 from unittest import mock
@@ -395,6 +396,7 @@ class SessionTests(unittest.TestCase):
             for sid in list(after.sessions):
                 after.delete(sid)
 
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_finished_games_leave_the_list_by_themselves(self):
         """A finished game stayed under current games until someone pressed Close."""
         from citar.server.session import SAVE_DIR

@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 import tests  # noqa: F401
+from tests import has_test_ops
 
 _TMP = Path(tempfile.mkdtemp(prefix="citar_access_"))
 os.environ["CITAR_DATA_DIR"] = str(_TMP)
@@ -333,12 +334,14 @@ class GameRoutes(unittest.TestCase):
                 self.assertIn("errors", response.json())
 
     # ---------------------------------------------------------------- replay
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_stranger_gets_404_on_replay_of_a_finished_private_game(self):
         self.game.game.test_ops([{"op": "end_game"}])
         for who in (None, "other"):
             with self.subTest(who=who or "anonymous"):
                 self.assertEqual(self._get("/replay", who).status_code, 404)
 
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_viewers_read_the_replay_of_a_finished_game(self):
         self.game.game.test_ops([{"op": "end_game"}])
         for who in ("owner", "zara"):

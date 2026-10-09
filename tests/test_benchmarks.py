@@ -123,6 +123,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(any(t[3] for t in m["tiles"]))
         self.assertFalse(any(t[4] == "Uranium" for t in m["tiles"]))
 
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_a_job_ends_when_its_model_is_eliminated(self):
         sch = self.scheduler()
         suite = dry_suite(models=("dry-a",), turn_limit=200, delay=0.05)
