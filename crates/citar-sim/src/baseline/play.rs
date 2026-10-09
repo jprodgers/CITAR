@@ -46,7 +46,7 @@ pub struct Context {
     pub version: VersionId,
     /// The bots' parameters, shared by every seat so its resolution is made once per ruleset.
     pub tuning: Arc<Tuning>,
-    /// Whether the games run the engine's invariants.
+    /// Whether the games run the engine's invariants (`--checks`), which every line records.
     pub checks: bool,
 }
 
@@ -255,6 +255,7 @@ pub fn crash_line(
         turn_limit: spec.turn_limit,
         engine: cx.code.engine.clone(),
         bot: cx.code.bot.clone(),
+        checks: cx.checks,
         crash,
         trace,
         seconds: started.map(|t| round1(t.elapsed().as_secs_f64())),
@@ -346,6 +347,7 @@ fn play(
         bot_errors: 0,
         engine: cx.code.engine.clone(),
         bot: cx.code.bot.clone(),
+        checks: cx.checks,
         seconds: round1(t0.elapsed().as_secs_f64()),
         cpu_s: round1(cpu),
     })

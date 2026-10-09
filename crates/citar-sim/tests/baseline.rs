@@ -332,16 +332,39 @@ fn budgets_and_seeds_that_cannot_be_played_are_refused() {
 }
 
 /// With the checks on (a debug or ci build has them), the games run the invariants at every
-/// settle and finish clean.
+/// settle and finish clean, and every line says so (`"checks": true`, which
+/// `summarize.py --checked` asks of each line). A file of checked games and one of unchecked
+/// games are two samples: neither run adds to the other's file.
 #[test]
 fn a_run_with_the_checks_finishes_clean() {
     let dir = folder("checks");
     let o = Options { checks: true, ..duels(&dir, "checked", 2, 15) };
     let (outcome, said) = run(&o);
-    if baseline::CHECKS_BUILT {
-        assert_eq!(outcome, Outcome::Done, "{said:#?}");
-        assert_eq!(finished(&dir.join("checked.jsonl")).len(), 2);
-    } else {
+    if !baseline::CHECKS_BUILT {
         assert_eq!(outcome, Outcome::Refused);
+        return;
     }
+    assert_eq!(outcome, Outcome::Done, "{said:#?}");
+    let path = dir.join("checked.jsonl");
+    assert_eq!(finished(&path).len(), 2);
+    for l in lines(&path) {
+        let v: Value = serde_json::from_str(&l).expect("JSON");
+        assert_eq!(v.get("checks"), Some(&Value::Bool(true)), "{l}");
+    }
+    let unchecked = Options { checks: false, ..o.clone() };
+    let (outcome, said) = run(&unchecked);
+    assert_eq!(outcome, Outcome::Refused);
+    let all = said.join("\n");
+    let on_off = "was played with the engine's invariants on; this run has them off";
+    assert!(all.contains(on_off), "{all}");
+
+    let plain = duels(&dir, "plain", 1, 6);
+    assert_eq!(run(&plain).0, Outcome::Done);
+    let path = dir.join("plain.jsonl");
+    assert!(lines(&path).iter().all(|l| !l.contains("\"checks\"")), "no key when off");
+    let (outcome, said) = run(&Options { checks: true, ..plain });
+    assert_eq!(outcome, Outcome::Refused);
+    let all = said.join("\n");
+    let off_on = "was played with the engine's invariants off; this run has them on";
+    assert!(all.contains(off_on), "{all}");
 }

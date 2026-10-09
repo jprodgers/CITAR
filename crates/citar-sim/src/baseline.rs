@@ -101,6 +101,12 @@ pub struct BaselineGame {
     pub engine: String,
     /// The bot: `basic-1` (Python wrote its source hash).
     pub bot: String,
+    /// Whether the run was made with `--checks`, so the engine's invariants ran at every settle
+    /// and a broken one would have been this game's crash line; left out when not, so Python's
+    /// lines (which never had it) read back unchanged. `summarize.py --checked` accepts only
+    /// lines that say so.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub checks: bool,
     pub seconds: f64,
     pub cpu_s: f64,
 }
@@ -118,6 +124,9 @@ pub struct BaselineCrash {
     pub turn_limit: Option<u32>,
     pub engine: String,
     pub bot: String,
+    /// As a finished game's [`BaselineGame::checks`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub checks: bool,
     pub crash: String,
     pub trace: String,
     /// How long the game ran before it crashed. Absent when the worker itself died or stalled
@@ -132,6 +141,11 @@ pub struct BaselineCrash {
 pub enum BaselineLine {
     Game(BaselineGame),
     Crash(BaselineCrash),
+}
+
+/// Whether a flag is off: such a key is left out of a line (serde passes it by reference).
+const fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[cfg(test)]
@@ -160,6 +174,23 @@ mod tests {
             }
         }
         assert_eq!(lines, 60 + 24 + 2 + 2);
+    }
+
+    /// A line of a `--checks` run says so, and one without leaves the key out, so that a line
+    /// without it (every Python line) writes back unchanged.
+    #[test]
+    fn the_checks_flag_is_written_only_when_on() {
+        let line = r#"{"i":3,"seed":5003,"size":"small","map_type":"pangaea","barbarians":"normal",
+                       "speed":"Quick","turn_limit":null,"engine":"x","bot":"y","checks":true,
+                       "crash":"InvariantViolation: 1 violation on turn 4","trace":"","seconds":1.5}"#;
+        let value: serde_json::Value = serde_json::from_str(line).expect("JSON");
+        let typed: BaselineLine = serde_json::from_str(line).expect("a crash line");
+        assert!(matches!(typed, BaselineLine::Crash(ref c) if c.checks));
+        assert_eq!(serde_json::to_value(&typed).expect("serialises"), value);
+        let BaselineLine::Crash(mut off) = typed else { unreachable!("a crash line") };
+        off.checks = false;
+        let back = serde_json::to_value(&off).expect("serialises");
+        assert!(back.get("checks").is_none(), "{back}");
     }
 
     #[test]
