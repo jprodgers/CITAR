@@ -393,6 +393,51 @@ pub fn rebuild(
     (chron, complete)
 }
 
+/// The heads that count exactly what `chron` holds, in the order it was appended: the engine's
+/// running hash, counts and newest stats row, and the host's counts, as a [`Record`] that appended
+/// it all would have left them. `host`'s next event id and drive mark are kept (the ids already
+/// given stay given) and the journal count is 0: a new journal's, whose first chunk is all of
+/// `chron`. For a game whose state counts a history it does not hold (one made from a state
+/// alone), so that the history it goes on to keep rebuilds whole.
+///
+/// # Errors
+/// An entry with no canonical form, which a chronicle appended through a `Record` never holds.
+pub fn recount(
+    chron: &Chronicle,
+    host: &HostHeads,
+) -> Result<(ChronicleHeads, HostHeads), CanonError> {
+    let mut heads = ChronicleHeads::default();
+    let mut counted = HostHeads {
+        host_events: 0,
+        thoughts: 0,
+        actions: 0,
+        frames: 0,
+        journal_seq: 0,
+        ..host.clone()
+    };
+    let mut cursor = JournalCursor::default();
+    for entry in entries_since(chron, &mut cursor) {
+        match entry {
+            EntryRef::Event(ev) => {
+                if matches!(ev.kind, EventType::Engine(_)) {
+                    heads.absorb(EntryKind::Event, &canon::event_entry(ev)?);
+                } else {
+                    counted.host_events = counted.host_events.saturating_add(1);
+                }
+            }
+            EntryRef::Message(m) => heads.absorb(EntryKind::Message, &canon::message_entry(m)?),
+            EntryRef::Stats(s) => {
+                heads.absorb(EntryKind::Stats, &canon::stats_entry(s)?);
+                heads.last_stats = Some(s.clone());
+            }
+            EntryRef::Thought(_) => counted.thoughts = counted.thoughts.saturating_add(1),
+            EntryRef::Action(_) => counted.actions = counted.actions.saturating_add(1),
+            EntryRef::Frame(_) => counted.frames = counted.frames.saturating_add(1),
+        }
+    }
+    Ok((heads, counted))
+}
+
 // ---- Frames -----------------------------------------------------------------------------------
 
 /// Frames between keyframes.

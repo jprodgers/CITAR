@@ -449,6 +449,52 @@ class ListingTests(SavesCase):
         print(f"listing 50 gargantuan saves ({size / 1e6:.2f} MB each): {took * 1000:.0f} ms", flush=True)
 
 
+class StartingPointTests(SavesCase):
+    """Games that do not start as a new game: from a scenario's state (whose counts name a history it does not have),
+    and a save that carries its own journal (a probe case's copy)."""
+
+    def test_a_game_started_from_a_scenario_saves_and_loads(self):
+        src = self.game([{"type": "bot"}] * 2)
+        self.play_to(src, 6)
+        scn = {"name": "From turn 6", "state": src.game.state_dict(), "seats": [{"type": "bot"}] * 2}
+        s = self.m.create_from_scenario(scn, start=False)
+        self.ids.add(s.id)
+        self.play_to(s, s.game.turn + 4)
+        self.autosave_now(s)
+        self.assertEqual(s.errors, [], "its journal started over with the history the game holds")
+        self.assertEqual(self.header(s)["journal"]["file"], "journal.cjnl")
+        live = self.as_it_is(s)
+        # the state counted the history of the game it came from; from its first save it counts its own, so it
+        # loads whole
+        with self.assertNoLogs("citar.engine", level="WARNING"):
+            back = self.m.load(s.folder / "autosave.citar")
+        got = self.as_it_is(back)
+        self.assertEqual(got["digest"], live["digest"])
+        self.assertEqual(got["events"], live["events"])
+        self.assertEqual(got["stats"], live["stats"])
+
+    def test_a_copy_with_its_own_journal_loads_by_forking_into_its_games_folder(self):
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 6)
+        live = self.as_it_is(s)
+        elsewhere = sess.SAVE_DIR / f"copies-{s.id}"
+        self.ids.add(elsewhere.name)
+        copy = s.save_copy(elsewhere / "case-1.citar")
+        self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ["case-1.citar", "case-1.cjnl"])
+        self.assertEqual(engine_api.save_header(copy)["journal"]["records"], 1, "the whole history, one record")
+        self.assertEqual(s.journal.path.name, "journal.cjnl", "the game's own timeline is untouched")
+        self.play_to(s, s.game.turn + 2)              # and it saves on as before
+        self.assertEqual(s.errors, [])
+        back = self.m.load(copy)
+        self.assertEqual(back.id, s.id)
+        self.assertEqual(back.journal.path.parent, s.folder, "its timeline goes on in the game's own folder")
+        self.assertEqual(back.journal.path.name, "journal-2.cjnl")
+        got = self.as_it_is(back)
+        self.assertEqual(got["digest"], live["digest"])
+        self.assertEqual(got["events"], live["events"])
+        self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ["case-1.citar", "case-1.cjnl"])
+
+
 class FormatTests(SavesCase):
     def test_a_python_engine_save_is_refused_by_name(self):
         folder = sess.SAVE_DIR / "v1-game"

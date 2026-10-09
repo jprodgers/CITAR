@@ -10,7 +10,8 @@
 //!   one replaced) or a write that failed leaves its chunk queued, and the next write appends it,
 //!   in order. A journal with no records and none queued is a new one: the first snapshot starts
 //!   the game's journal over (`Game::restart_journal`), so its first chunk holds the whole
-//!   history the game keeps.
+//!   history the game keeps and the state counts exactly that history (a game made from a state
+//!   alone counted the history of the game the state came from).
 //! - **`SaveSnapshot`**: the engine's `Snapshot` and how many chunks its state counts. `write`
 //!   (the GIL released) appends the queued chunks up to that count and syncs them, then writes
 //!   the state's JSON, zstd and the container (a temporary file and a rename) naming exactly
@@ -227,23 +228,23 @@ impl Journal {
 
     /// Takes the game's snapshot for a save under the game's lock (`Game.save_snapshot`): the
     /// chunk of history since the last take goes into this journal's queue, and the snapshot
-    /// counts it. A journal with no records and none queued starts the game's journal over.
+    /// counts it. A journal with no records and none queued starts the game's journal over, so
+    /// the journal holds the history the game holds, whatever the game counted before.
     pub fn snapshot(&self, g: &mut citar_engine::game::Game) -> Result<SaveSnapshot, Failure> {
         if !self.open.load(Ordering::Acquire) {
             return Err(self.closed());
         }
         let mut q = self.queue();
         let seq = g.state().host().0.journal_seq;
-        if seq != q.next {
-            if q.next != 0 {
-                return Err(Failure::Runtime(format!(
-                    "This game's history goes on at chunk {seq}, and {} at {}: the journal of \
-                     another timeline.",
-                    name_of(&self.path),
-                    q.next
-                )));
-            }
-            g.restart_journal();
+        if q.next == 0 {
+            g.restart_journal().map_err(|e| Failure::Runtime(e.to_string()))?;
+        } else if seq != q.next {
+            return Err(Failure::Runtime(format!(
+                "This game's history goes on at chunk {seq}, and {} at {}: the journal of another \
+                 timeline.",
+                name_of(&self.path),
+                q.next
+            )));
         }
         let (snapshot, chunk) = g.save_snapshot().map_err(|e| Failure::Runtime(e.to_string()))?;
         if let Some(chunk) = chunk {

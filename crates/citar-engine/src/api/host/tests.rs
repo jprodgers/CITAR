@@ -322,36 +322,49 @@ fn snapshots_and_their_chunks_load_back_to_the_same_game_at_every_save() {
 
 #[test]
 fn a_restarted_journal_starts_at_zero_with_the_whole_history() {
+    // On a game that keeps its whole history, a restart changes no head and no digest, and the
+    // first chunk after it is all of the history.
+    let mut whole = duel();
+    end_turns(&mut whole, 4);
+    whole.add_thought(ROME, "A note.", None);
+    let _ = whole.take_journal_chunk().expect("a chunk");
+    let (heads, digest) = (whole.state().chronicle().clone(), whole.digest().ok());
+    let mut host = whole.state().host().0.clone();
+    whole.restart_journal().expect("it recounts");
+    assert_eq!(whole.state().chronicle(), &heads);
+    host.journal_seq = 0;
+    assert_eq!(whole.state().host().0, host, "the same counts, and the journal's from 0");
+    assert_eq!(whole.digest().ok(), digest);
+    let save = whole.save_whole().expect("it saves");
+    let (_, chunk) = whole.save_snapshot().expect("it saves");
+    assert_eq!(chunk.map(|c| c.json), save.history);
+
+    // A game made from its state alone counts a history it does not have: two chunks, and the
+    // events, stats and thoughts in them.
     let mut g = duel();
     end_turns(&mut g, 4);
     let _ = g.save_snapshot().expect("it saves");
     end_turns(&mut g, 2);
     let _ = g.save_snapshot().expect("it saves");
-    let digest = g.digest().ok();
-    // A game made from its state alone still counts two chunks it does not have.
     let state = g.snapshot().to_json().expect("it writes");
     let (mut alone, incomplete) = load_with(&g, &state, &[]);
     assert!(incomplete, "a state alone has no history");
     assert_eq!(alone.state().host().0.journal_seq, 2);
-    alone.restart_journal();
-    assert_eq!(alone.digest().ok(), digest, "the count is host data, never digested");
+    let next_id = alone.state().host().0.next_event_id;
+    alone.restart_journal().expect("it recounts");
+    assert_eq!(alone.state().host().0.next_event_id, next_id, "event ids given stay given");
+    assert_eq!(alone.state().chronicle().engine_events, 0, "it counts the history it has");
+    // From here its journal rebuilds it whole, load after load.
     end_turns(&mut alone, 2);
     let (snap, chunk) = alone.save_snapshot().expect("it saves");
     let chunk = chunk.expect("the history since the load");
     assert_eq!(chunk.seq, 0, "the new journal's first chunk");
     assert_eq!(snap.state().host().0.journal_seq, 1);
-    // The journal now holds what the game holds: it loads back to the same history.
-    let (back, _) = load_with(&g, &snap.to_json().expect("it writes"), &[chunk.json]);
+    let (back, incomplete) = load_with(&g, &snap.to_json().expect("it writes"), &[chunk.json]);
+    assert!(!incomplete, "the history it kept, whole");
+    assert_eq!(back.digest().ok(), alone.digest().ok());
     assert_eq!(back.event_rows(None), alone.event_rows(None));
     assert_eq!(back.stats_rows(None), alone.stats_rows(None));
-    // And on a game that keeps its whole history, the first chunk after a restart is all of it.
-    let mut whole = duel();
-    end_turns(&mut whole, 4);
-    let _ = whole.take_journal_chunk().expect("a chunk");
-    whole.restart_journal();
-    let save = whole.save_whole().expect("it saves");
-    let (_, chunk) = whole.save_snapshot().expect("it saves");
-    assert_eq!(chunk.map(|c| c.json), save.history);
 }
 
 #[test]
