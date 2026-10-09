@@ -640,11 +640,26 @@ def _runner_step(args, running, attempts, finished_times, flags, max_workers) ->
                                             creationflags=flags)
                 running[(exp["name"], i)] = (proc, time.time())
         _write_status(running, finished_times, target)
-        if not running:
-            if args.exit_when_idle and not load_queue():
+        if not running and args.exit_when_idle:
+            queue = load_queue()
+            if not queue:
                 log("queue empty: exiting")
                 return True
+            # A runner tries a game three times, so once every game left has crashed three times nothing will start
+            # again here, and waiting would be for ever. The next runner tries them again.
+            left = [(exp["name"], i) for exp in queue for i in _unplayed(exp)]
+            if left and all(attempts[key] >= 3 for key in left):
+                named = ", ".join(f"{n} #{i}" for n, i in left[:6]) + (", ..." if len(left) > 6 else "")
+                log(f"nothing left to play: {len(left)} game(s) crashed three times ({named}); exiting "
+                    "(crashes.log says why; the next runner tries them again)")
+                return True
     return False
+
+
+def _unplayed(exp: dict) -> list[int]:
+    """The games of a queued experiment with no result yet."""
+    done = {r["i"] for r in load_results(exp["name"])}
+    return [i for i in range(exp["games"]) if i not in done]
 
 
 def cmd_play(spec_path: str, out_path: str):

@@ -5,6 +5,8 @@ Versions, their schemas, cleaning, fingerprints and the build id are the engine'
 no engine.
 """
 import tests  # noqa: F401  (temporary saves folder; must be imported before citar)
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -13,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -458,6 +461,30 @@ class LabCommandTests(unittest.TestCase):
             self.assertIn(f"citar lab {argv[0]}: the engine does not load: cannot import name '_engine'", r.stderr)
         self.assertFalse((self.lab / "queue" / "queued.json").exists())
         self.assertFalse((self.lab / "crashes.log").exists())
+
+    def test_a_runner_left_with_games_it_gave_up_on_exits_when_idle(self):
+        """A runner tries a game three times; once every game left has crashed three times, `--exit-when-idle`
+        exits rather than wait for ever (the next runner tries them again)."""
+        from citar import lab
+        own = {name: self.lab / name.lower() for name in ("QUEUE", "RESULTS", "DONE", "JOBS")}
+        own["JOBS"].mkdir(parents=True)
+        with mock.patch.multiple(lab, LAB=self.lab, **own), mock.patch.object(lab, "quiet_now", return_value=False), \
+                mock.patch("subprocess.Popen", side_effect=AssertionError("no game may start")):
+            spec = lab.submit({"name": "gave-up", "games": 2, "size": "duel", "seats": [{"bot": "basic"}] * 2})
+            (lab.RESULTS / "gave-up.jsonl").write_text(json.dumps({"i": 0}) + "\n", encoding="utf-8")
+            gave_up = Counter({(spec["name"], 1): 3})
+            args = SimpleNamespace(workers=1, night_workers=1, exit_when_idle=True, max_minutes=1)
+            # without the flag the runner keeps going, and the experiment stays queued
+            self.assertFalse(lab._runner_step(SimpleNamespace(**{**vars(args), "exit_when_idle": False}), {},
+                                              gave_up, [], 0, 1))
+            with contextlib.redirect_stdout(io.StringIO()):     # log() prints each line too
+                self.assertTrue(lab._runner_step(args, {}, gave_up, [], 0, 1))
+            self.assertIn("nothing left to play: 1 game(s) crashed three times (gave-up #1)",
+                          (self.lab / "lab.log").read_text(encoding="utf-8"))
+            self.assertTrue((own["QUEUE"] / "gave-up.json").exists())
+            # a game it has yet to give up on keeps it waiting (here: one it would start, which this test refuses)
+            with self.assertRaisesRegex(AssertionError, "no game may start"):
+                lab._runner_step(args, {}, Counter({(spec["name"], 1): 2}), [], 0, 1)
 
 
 class RatingTests(unittest.TestCase):
