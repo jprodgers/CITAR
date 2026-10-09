@@ -5,8 +5,8 @@ with a test attribute) or a Python test that is neither Python-engine-only nor p
 A rule script whose ``needs`` names a bot package still to come (``backends.BOT_PACKAGES_TO_COME``) is the one
 exception: both runners skip it on Rust until that package lands and removes the header, so it holds only for such a
 package, and test_successors_waiting_on_a_package lists those successors in the run's output. Every
-``@rust_pending`` names a package still to come (2-11), so a package that lands removes its markers, and none names
-a package that has. The markers are read from the test modules without running them.
+``@rust_pending`` names a package still to come, so a package that lands removes its markers, and none names a
+package that has; none is left to come since 2-11. The markers are read from the test modules without running them.
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import functools

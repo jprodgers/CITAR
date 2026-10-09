@@ -1015,12 +1015,12 @@ class BenchmarkScheduler:
         self._record_progress(run, job, s)
         job["result"] = job["progress"]
         job.update({"status": "done", "finished": _now(), "pause_reason": None})
-        if s.game.phase == "playing":
-            s.stop()                # the model was eliminated: stop the bots playing out a settled game
         try:
-            s.save("benchmark")
+            s.save("benchmark")     # before any stop: a stopped game's writer is closed, and nothing saves after it
         except Exception as e:
             job["error"] = f"Could not save the finished game: {e}"
+        if s.game.phase == "playing":
+            s.stop()                # the model was eliminated: stop the bots playing out a settled game
         self._log(f"Finished {job['label']} on {job['scenario_name']}: {job['result'].get('outcome')}.")
         self._touch(run)
 

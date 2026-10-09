@@ -42,8 +42,12 @@ def _config_label(sv: Optional[dict], model: Optional[str]) -> str:
 
 
 def _game_details(game_id: str) -> Optional[dict]:
-    """Outcome and AI metrics of a saved game (benchmark.citar, else autosave.citar), cached by file time."""
-    from ..server.session import SAVE_DIR, load_save_file, GameSession
+    """Outcome and AI metrics of a game: the live session's while it runs in this process, else its save's
+    (benchmark.citar, else autosave.citar, opened only to be read), cached by file time."""
+    from ..server.session import SAVE_DIR, GameSession, all_sessions
+    live = next((s for s in all_sessions() if s.id == game_id and not s.stopped), None)
+    if live is not None:
+        return _details_of(game_id, live)
     folder = SAVE_DIR / game_id
     path = next((folder / n for n in ("benchmark.citar", "autosave.citar") if (folder / n).exists()), None)
     if path is None:
@@ -52,10 +56,18 @@ def _game_details(game_id: str) -> Optional[dict]:
     if key in _save_cache:
         return _save_cache[key]
     try:
-        data = load_save_file(path)
-        s = GameSession.from_save(data)
+        # read only: the history is read under the journal's shared lock, and nothing is written or forked
+        s = GameSession.from_save(path, read_only=True)
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
+    out = _details_of(game_id, s)
+    s.stop()
+    _save_cache[key] = out
+    return out
+
+
+def _details_of(game_id: str, s) -> dict:
+    """Outcome and AI metrics of a session's game, the benchmark's view of each model seat."""
     from ..server.benchmarks import game_progress
     llm_seats = [seat for seat in s.seats if seat.type == "llm"]
     out = {"game_id": game_id, "name": s.name, "turn": s.game.turn, "phase": s.game.phase, "victory": s.game.victory,
@@ -72,8 +84,6 @@ def _game_details(game_id: str) -> Optional[dict]:
         prog.pop("series", None)
         out["seats"].append({"player": seat.player, "server_id": seat.llm.get("server_id"), "model": seat.llm.get("model"),
                              "progress": prog, "metrics": summ})
-    s.stop()
-    _save_cache[key] = out
     return out
 
 

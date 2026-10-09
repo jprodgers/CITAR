@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 from citar.agents.providers.base import Conversation, StepResult, ToolCall
-from citar.server.session import SessionManager, GameSession, load_save_file
+from citar.server.session import SessionManager, GameSession
 
 
 class ScriptedConversation(Conversation):
@@ -424,10 +424,11 @@ class SessionTests(unittest.TestCase):
         while time.time() < deadline and s.game.current != 0:
             time.sleep(0.1)
         path = s.save("unit-test")
-        data = load_save_file(path)
-        s2 = GameSession.from_save(data)
+        s.stop()        # a session holds its journal, so its saves are read once it has stopped (manager.load does it)
+        s2 = GameSession.from_save(path)
         self.assertEqual(s2.game.turn, s.game.turn)
         self.assertEqual(s2.seats[0].token, s.seats[0].token)
+        s2.stop()
         path.unlink()
 
     def test_wait_for_turn(self):

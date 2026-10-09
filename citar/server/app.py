@@ -109,8 +109,14 @@ async def _close_finished_loop():
 
 @app.on_event("shutdown")
 def _shutdown():
-    """Flush the usage ledger and stop background work cleanly."""
+    """Flush the usage ledger, let every game's writer finish the saves it has taken, and stop background work
+    cleanly."""
     from .. import usage
+    for s in list(manager.sessions.values()):
+        try:
+            s.flush_saves(timeout=10.0)
+        except Exception:
+            pass
     try:
         for s in list(manager.sessions.values()):
             if s.usage_act:
@@ -1029,11 +1035,11 @@ def editor_open(body: EditorOpen):
             g = EngineGame.from_state(data["state"])
             meta.update({k: data.get(k) for k in ("id", "name", "description", "seats")})
         elif body.source == "save":
-            from .session import load_save_file
             p = (SAVE_DIR / (body.save or "")).resolve()
             if SAVE_DIR.resolve() not in p.parents or not p.exists():
                 raise HTTPException(404, "Save not found.")
-            g = EngineGame.from_state(load_save_file(p)["state"])
+            # the state alone: a scenario starts with no history, so its journal is never read
+            g = EngineGame.from_save(engine_api.read_save(p), history=False)
             meta["name"] = f"Scenario from {body.save}"
         elif body.source == "game":
             s = _session(body.game_id or "")
