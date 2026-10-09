@@ -1,4 +1,4 @@
-//! The state model (package 1a-08), against models, the Python sources and recorded answers:
+//! The state model (package 1a-08), against models and recorded answers:
 //! - `EntityStore` behaves as a `BTreeMap` under random inserts, removals and lookups, with
 //!   compaction (gate 1);
 //! - random unit spawns, moves, boardings, removals and owner changes keep the occupancy lists,
@@ -10,16 +10,17 @@
 //! - every deal item reads and writes as the Python dict `diplomacy._normalize_items` leaves
 //!   (`data/deal_items.json`, from `scripts/refcheck/deal_items.py`, gate 4);
 //! - a tile is 16 bytes and a tile memory 8 (gate 5);
-//! - `EngineEvent` covers every event type `citar/engine` emits, `is_private` is
+//! - `EngineEvent` covers every event type the Python engine emitted, `is_private` is its
 //!   `PRIVATE_EVENTS`, and `EventData` and the stats rows have every key Python passed or
-//!   recorded (gate 6).
+//!   recorded (gate 6), as `data/python_events.json` recorded them before package 2-12 deleted
+//!   the Python engine.
 //!
 //! Gate 7, the restricted accessors, is `cargo xtask check`'s, tested in `xtask/src/check`.
 //!
 //! The number of proptest cases follows `PROPTEST_CASES` (proptest's default is 256).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use citar_engine::base::ids::{BaseUnitId, CityId, Id, PlayerId, TileIdx, UnitId};
 use citar_engine::base::sets::PlayerSet;
@@ -742,223 +743,77 @@ fn a_tile_is_16_bytes_and_a_memory_8() {
     assert_eq!(Tile::from_canon_bytes(t.canon_bytes()), t);
 }
 
-// ---- Gate 6: events against the Python sources ------------------------------------------------
+// ---- Gate 6: events against the Python engine's, as recorded ---------------------------------
 
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+/// What the Python engine emitted and recorded (`data/python_events.json`): read from its
+/// sources by the scanner this test once had, before package 2-12 deleted them.
+struct PythonEvents {
+    /// Every event type an `emit` named.
+    emitted: BTreeSet<String>,
+    /// The keyword arguments `emit` was passed, but `idx`, `mentions` and `players`.
+    emit_keys: BTreeSet<String>,
+    /// `PRIVATE_EVENTS` (`game.py:808-812`).
+    private: BTreeSet<String>,
+    /// The keys of `victory.record_stats`' rows.
+    record_stats_keys: Vec<String>,
+    /// `scripts/refcheck/baseline.py`'s `STAT_KEYS`.
+    baseline_stat_keys: Vec<String>,
 }
 
-#[allow(clippy::disallowed_methods, reason = "reads the Python sources the test checks against")]
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-#[allow(clippy::disallowed_methods, reason = "lists the Python sources the test checks against")]
-fn engine_sources() -> Vec<(String, String)> {
-    let dir = repo().join("citar/engine");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "py"))
-        // The facade's Python backend (package 2-08) lives here but is no engine: its `emit`
-        // passes on whatever event the host names.
-        .filter(|p| p.file_name().is_none_or(|n| n != "facade.py"))
-        .collect();
-    files.sort();
-    files
-        .into_iter()
-        .map(|p| {
-            (p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), read(&p))
-        })
-        .collect()
-}
-
-/// Skips a Python string literal starting at `i` (its opening quote), returning the index after
-/// it and its contents. Handles one-character prefixes (f, r, b) by the caller skipping them,
-/// escapes, and triple quotes.
-fn skip_string(s: &[u8], i: usize) -> (usize, String) {
-    let q = s[i];
-    let triple = s.get(i..i + 3) == Some(&[q, q, q][..]);
-    let (mut j, close) = if triple { (i + 3, 3) } else { (i + 1, 1) };
-    let start = j;
-    while j < s.len() {
-        if s[j] == b'\\' {
-            j += 2;
-            continue;
-        }
-        if s[j] == q && (close == 1 || s.get(j..j + 3) == Some(&[q, q, q][..])) {
-            let text = String::from_utf8_lossy(&s[start..j]).into_owned();
-            return (j + close, text);
-        }
-        j += 1;
+fn python_events() -> PythonEvents {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/python_events.json");
+    #[allow(clippy::disallowed_methods, reason = "reads the recording the test checks against")]
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let v: Value = serde_json::from_str(&text).expect("the recording is JSON");
+    let list = |key: &str| -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is a list"))
+            .iter()
+            .map(|s| s.as_str().unwrap_or_else(|| panic!("{key} holds strings")).to_owned())
+            .collect()
+    };
+    PythonEvents {
+        emitted: list("emitted").into_iter().collect(),
+        emit_keys: list("emit_keys").into_iter().collect(),
+        private: list("private").into_iter().collect(),
+        record_stats_keys: list("record_stats_keys"),
+        baseline_stat_keys: list("baseline_stat_keys"),
     }
-    (s.len(), String::new())
-}
-
-/// Every `.emit(` call in a Python source: its first argument, if a string literal, and the
-/// keyword arguments at its top level.
-fn emit_calls(src: &str) -> Vec<(Option<String>, Vec<String>)> {
-    let s = src.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while let Some(off) = src[i..].find(".emit(") {
-        let mut j = i + off + ".emit(".len();
-        i = j;
-        while j < s.len() && s[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        let first = if j < s.len() && (s[j] == b'"' || s[j] == b'\'') {
-            Some(skip_string(s, j).1)
-        } else {
-            None
-        };
-        // Walk to the matching parenthesis, collecting `name=` at depth 1.
-        let mut depth = 1;
-        let mut kwargs = Vec::new();
-        while j < s.len() && depth > 0 {
-            let c = s[j];
-            if c == b'#' {
-                while j < s.len() && s[j] != b'\n' {
-                    j += 1;
-                }
-                continue;
-            }
-            if (c == b'f' || c == b'r' || c == b'b')
-                && matches!(s.get(j + 1), Some(b'"' | b'\''))
-                && !s[j - 1].is_ascii_alphanumeric()
-            {
-                j = skip_string(s, j + 1).0;
-                continue;
-            }
-            if c == b'"' || c == b'\'' {
-                j = skip_string(s, j).0;
-                continue;
-            }
-            match c {
-                b'(' | b'[' | b'{' => depth += 1,
-                b')' | b']' | b'}' => depth -= 1,
-                _ => {}
-            }
-            if depth == 1
-                && (c.is_ascii_alphabetic() || c == b'_')
-                && !s[j - 1].is_ascii_alphanumeric()
-                && s[j - 1] != b'_'
-                && s[j - 1] != b'.'
-            {
-                let mut k = j;
-                while k < s.len() && (s[k].is_ascii_alphanumeric() || s[k] == b'_') {
-                    k += 1;
-                }
-                if s.get(k) == Some(&b'=') && s.get(k + 1) != Some(&b'=') {
-                    kwargs.push(String::from_utf8_lossy(&s[j..k]).into_owned());
-                }
-                j = k;
-                continue;
-            }
-            j += 1;
-        }
-        out.push((first, kwargs));
-    }
-    out
-}
-
-/// The event types `PRIVATE_EVENTS` lists (`game.py:808-812`).
-fn private_events(game_py: &str) -> BTreeSet<String> {
-    let start = game_py.find("PRIVATE_EVENTS = frozenset({").expect("PRIVATE_EVENTS in game.py");
-    let end = start + game_py[start..].find("})").expect("the end of PRIVATE_EVENTS");
-    let s = &game_py.as_bytes()[start..end];
-    let mut out = BTreeSet::new();
-    let mut i = 0;
-    while i < s.len() {
-        if s[i] == b'"' {
-            let (j, text) = skip_string(s, i);
-            out.insert(text);
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-    out
 }
 
 #[test]
-fn engine_events_cover_every_type_the_python_engine_emits() {
-    let sources = engine_sources();
-    assert!(sources.len() > 20, "citar/engine is where it should be");
-    let mut types = BTreeSet::new();
-    let mut keys = BTreeSet::new();
-    for (file, src) in &sources {
-        for (first, kwargs) in emit_calls(src) {
-            if file == "game.py" && first.is_none() {
-                continue; // the definition, `def emit(self, etype, ...)`, is not a call with a dot
-            }
-            let t = first
-                .unwrap_or_else(|| panic!("{file}: an emit whose type is not a string literal"));
-            types.insert(t);
-            keys.extend(
-                kwargs
-                    .into_iter()
-                    .filter(|k| !matches!(k.as_str(), "idx" | "mentions" | "players")),
-            );
-        }
-    }
+fn engine_events_cover_every_type_the_python_engine_emitted() {
+    let py = python_events();
     let ours: BTreeSet<String> = EngineEvent::ALL.iter().map(|e| e.name().to_owned()).collect();
-    let missing: Vec<&String> = types.difference(&ours).collect();
-    let extra: Vec<&String> = ours.difference(&types).collect();
+    let missing: Vec<&String> = py.emitted.difference(&ours).collect();
+    let extra: Vec<&String> = ours.difference(&py.emitted).collect();
     assert!(missing.is_empty() && extra.is_empty(), "missing {missing:?}, never emitted {extra:?}");
-    assert_eq!(types.len(), 97);
+    assert_eq!(py.emitted.len(), 97);
 
-    let private = private_events(&read(&repo().join("citar/engine/game.py")));
     for &e in EngineEvent::ALL {
-        assert_eq!(e.is_private(), private.contains(e.name()), "{}", e.name());
+        assert_eq!(e.is_private(), py.private.contains(e.name()), "{}", e.name());
     }
-    // Two private types that nothing emits any more.
-    let dead: Vec<&String> = private.difference(&types).collect();
+    // Two private types that nothing emitted any more.
+    let dead: Vec<&String> = py.private.difference(&py.emitted).collect();
     assert_eq!(dead, ["build_cancelled", "city_razing"]);
 
     let data: BTreeSet<String> = EventData::KEYS.iter().map(|k| (*k).to_owned()).collect();
-    assert_eq!(keys, data, "EventData has a field for exactly the keys emit is passed");
+    assert_eq!(py.emit_keys, data, "EventData has a field for exactly the keys emit was passed");
 }
 
 #[test]
 fn stats_rows_carry_every_key_python_recorded() {
-    let victory = read(&repo().join("citar/engine/victory.py"));
-    let start = victory.find("def record_stats").expect("record_stats");
-    let body =
-        &victory[start..start + victory[start..].find("\ndef ").unwrap_or(victory.len() - start)];
+    let py = python_events();
     let ours: BTreeSet<&str> = CivStats::KEYS.iter().copied().collect();
-    for line in body.lines() {
-        let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix('"')
-            && let Some((key, _)) = rest.split_once("\":")
-        {
-            assert!(ours.contains(key), "record_stats key {key}");
-        }
+    assert!(py.record_stats_keys.len() >= 17, "record_stats' keys");
+    for key in &py.record_stats_keys {
+        assert!(ours.contains(key.as_str()), "record_stats key {key}");
     }
-    let baseline = read(&repo().join("scripts/refcheck/baseline.py"));
-    let line =
-        baseline.lines().find(|l| l.starts_with("STAT_KEYS = (")).expect("baseline STAT_KEYS");
-    let mut n = 0;
-    for key in line.split('"').skip(1).step_by(2) {
-        assert!(ours.contains(key), "baseline key {key}");
-        n += 1;
+    assert!(py.baseline_stat_keys.len() >= 8, "baseline.py's keys");
+    for key in &py.baseline_stat_keys {
+        assert!(ours.contains(key.as_str()), "baseline key {key}");
     }
-    assert!(n >= 8, "baseline.py lists its keys on one line");
-}
-
-/// The emit scanner reads Python calls as the AST would.
-#[test]
-fn the_emit_scanner_reads_nested_calls_strings_and_comments() {
-    let src = r#"
-        g.emit("a_type", f"x {d['k']} (y", [p], idx=c.idx, player=pid,  # a comment with gold=1
-               data=f(z=1), other=q == r)
-        self.emit('b', "t")
-    "#;
-    let calls = emit_calls(src);
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].0.as_deref(), Some("a_type"));
-    assert_eq!(calls[0].1, ["idx", "player", "data", "other"]);
-    assert_eq!(calls[1], (Some("b".to_owned()), Vec::new()));
 }
 
 #[test]
