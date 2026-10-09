@@ -167,7 +167,7 @@ class ServerSmokeTests(unittest.TestCase):
             self.assertEqual([seat["type"] for seat in ed["meta"]["seats"]][:1], ["human"], source)
             self.req("DELETE", f"/api/scenario-editor/{ed['editor_id']}")
         from citar.reports import data as report_data
-        details = report_data._game_details(gid)          # the reports read the interim saves through the facade
+        details = report_data._game_details(gid)          # a running game's report reads its live session
         self.assertNotIn("error", details)
         self.assertEqual((details["game_id"], details["turn"]), (gid, turn))
         # a save of the Python engine says why it does not load, and the running game is left alone

@@ -1075,10 +1075,13 @@ def performance(scores: dict, llm: int, phase: str, winner, alive: dict) -> Opti
     return round(min(share, 95.0) if phase != "playing" else share, 1)
 
 
-def game_progress(s: GameSession) -> dict:
-    """Live progress of a benchmark game (called with the session lock held)."""
+def game_progress(s: GameSession, llm_player: Optional[int] = None, model: Optional[str] = None) -> dict:
+    """Live progress of a benchmark game (called with the session lock held): of its model seat, ``s.benchmark``'s
+    ``llm_player`` and ``model`` unless given (the reports ask it of any model seat of any game). Reads only."""
     g = s.game
-    llm = (s.benchmark or {}).get("llm_player", 0)
+    bench = s.benchmark or {}
+    llm = bench.get("llm_player", 0) if llm_player is None else llm_player
+    model = bench.get("model") if model is None else model
     summ = g.summary()
     majors = [p for p in summ["players"] if p["kind"] == "major"]
     standings = g.standings()
@@ -1086,7 +1089,7 @@ def game_progress(s: GameSession) -> dict:
     alive = {p["id"]: p["alive"] for p in majors}
     mine = standings[llm]
     phase, winner, victory = summ["phase"], summ["winner"], summ["victory"]
-    rep = s.metrics.summary({llm: {"name": g.player_name(llm), "controller": "llm", "model": (s.benchmark or {}).get("model")}})[llm]
+    rep = s.metrics.summary({llm: {"name": g.player_name(llm), "controller": "llm", "model": model}})[llm]
     best_opp = max((scores[p["id"]] for p in majors if p["id"] != llm), default=0)
     outcome = "eliminated" if not alive.get(llm) else None
     if phase != "playing":
