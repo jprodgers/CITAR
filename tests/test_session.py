@@ -86,7 +86,10 @@ class SessionTests(unittest.TestCase):
             deadline = time.time() + 60
             while time.time() < deadline and not ready():
                 time.sleep(0.1)
-            s.paused = True
+            # Stopped, not only paused, while the scripted model is still patched in: the driver may already be past
+            # its look at the pause, and a turn it starts after the patch ends would ask for the unknown provider.
+            s.stop()
+            s._driver.join(10)
         self.assertGreaterEqual(s.game.turn, 3, s.errors)
         self.assertEqual(s.game.player_name(0), "Mockonia")
         negs = s.game.negotiations()
