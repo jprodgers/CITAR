@@ -388,8 +388,9 @@ default file is `rust-<build id>-<bot>.jsonl`. Its lines differ from Python's on
   `trace` (Python's bot errors cost the bot the rest of its turn);
 - `cpu_s` is the CPU time of the thread that played the game (Python's, its worker process's);
 - games play on threads (`--workers`), and a game is checked against its budget between seats rather than at
-  the start of each round. `--checks` runs the engine's invariants at every settle and writes a game that
-  breaks one as a crash line (`InvariantViolation`); debug and ci builds run them anyway.
+  the start of each round. `--checks` runs the engine's invariants at every settle, writes a game that
+  breaks one as a crash line (`InvariantViolation`) and marks each of its lines `"checks": true` (left out
+  otherwise, as Python's lines have it); debug and ci builds run the invariants anyway, unmarked.
 
 **The committed Python baselines.** Nothing can write them again once the Python engine is gone, so the four
 runs of 2026-09-23 (engine `5287456aff`, bot `a01652e3a2`) are committed in `refcheck/baseline/python/` exactly as
@@ -410,8 +411,10 @@ value, which a test checks. Every other run, the Rust ones included, stays out o
 again. One file is one sample:
 
 - the default output name carries the engine and bot hashes;
-- a run refuses to add to a file that holds games from other engine or bot code, or a game *i* with another
-  seed, size, map type, barbarian setting, speed or turn limit than this run's game *i*. Use another `--name`.
+- a run refuses to add to a file that holds games from other engine or bot code, games played with the
+  invariants on when it has them off or the other way round (the Rust writer's `checks`), or a game *i* with
+  another seed, size, map type, barbarian setting, speed or turn limit than this run's game *i*. Use another
+  `--name`.
 
 A run stopped mid-write leaves a torn last line. The next run starts on a fresh line, and `summarize.py` skips
 the torn one with a warning.
@@ -445,26 +448,36 @@ percentage points. `--split-half` compares a file's games with each other, half 
 
 | Gate | Small | Standard, large |
 |---|---|---|
-| G1 | no crash line in B, nor in any `--checked` run (games played with `--checks`) | same |
+| G1 | no crash line in B; every map size of A with at least `--min-games` finished games in B (by default as many as A has there); each `--checked` run with finished games, no crash line, and `"checks": true` on every line | same |
 | G2 | cities, population, techs and score at 100, 200 and 300 within 0.75-1.33x of A's, and B's rising | 0.67-1.5x |
 | G3 | a gap of 10% or more whose interval excludes 0 has an entry (an event only where A's mean is 1 or more) | 15% |
 | G4 | each rate within 25 points of A's, or an entry | 35 points |
 
+G1's count is there because comparing less passes more easily: a map size B lacks would not be compared at
+all, and a run cut short (a killed process writes no crash line) widens every interval until no gap is
+material. `citar-sim baseline --checks` writes `"checks": true` on each of its lines (and a run refuses to mix
+checked and unchecked games in one file), so an ordinary run cannot stand in for a checked one.
+
 `explained.toml` holds `[[gap]]` entries: `metric`, `checkpoint` (`"100"`, `"200"`, `"300"`, `"end"`, or
-`"game"` for a rate named `rate:<name>`), `stratum` and `reason`, and `pending = "<package>"` while a fix is
-still owed, which `--no-pending` (package 2-12's precondition) refuses. An entry whose gap no longer meets its
-rule is a warning, so a later run cannot fail on noise. The gates' commands:
+`"game"` for a rate named `rate:<name>`), `stratum` and `reason`; the band the gap was measured in, `ratio =
+[lo, hi]` (B's mean over A's) or for a rate `points = [lo, hi]` (B's share minus A's), outside which the entry
+fails as "the explained gap moved" rather than answering a gap its reason does not describe; and `pending =
+"<package>"` while a fix is still owed. `--no-pending` (package 2-12's precondition) fails on every entry marked
+pending, whether its gap is still material, under its rule in this run, or on a map size the command does not
+compare. An entry whose gap no longer meets its rule is a warning, so a later run cannot fail on noise. The
+gates' commands:
 
 ```
 python scripts/refcheck/summarize.py refcheck/baseline/python/small.jsonl <rust>/rust-small.jsonl \
-    --gate refcheck/baseline/explained.toml --checked <rust>/rust-checks-small.jsonl
+    --gate refcheck/baseline/explained.toml --min-games 120 --checked <rust>/rust-checks-small.jsonl
 python scripts/refcheck/summarize.py refcheck/baseline/python/std-large.jsonl <rust>/rust-std-large.jsonl \
-    --gate refcheck/baseline/explained.toml --checked <rust>/rust-checks-std-large.jsonl
+    --gate refcheck/baseline/explained.toml --min-games 25 --checked <rust>/rust-checks-std-large.jsonl
 ```
 
 The Rust runs are package 2-07's (DESIGN.md "As built in 2-07"): `citar-sim baseline` in release with 6
-workers, small x120 and standard,large x50, each with a `--checks` run of 10 games, gargantuan x2 for timing,
-and the calibration run (`--params '{"prod_mode": "classic"}'`, small x60).
+workers, small x120 and standard,large x50 (25 of each), each with a `--checks` run of 20 games (games 0-19 of
+the same seeds, from a build with `--features checks`), gargantuan x2 for timing, and the calibration run
+(`--params '{"prod_mode": "classic"}'`, small x60).
 
 ## Time budgets
 

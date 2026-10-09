@@ -2,7 +2,8 @@
 
     python scripts/refcheck/summarize.py refcheck/baseline/python/small.jsonl        # one run's tables
     python scripts/refcheck/summarize.py python.jsonl rust.jsonl                     # compared, stratum by stratum
-    python scripts/refcheck/summarize.py python.jsonl rust.jsonl --gate refcheck/baseline/explained.toml
+    python scripts/refcheck/summarize.py python.jsonl rust.jsonl --gate refcheck/baseline/explained.toml \
+        --min-games 120 --checked rust-checks.jsonl                                  # the gates G1-G4
     python scripts/refcheck/summarize.py rust.jsonl --split-half                     # the run's noise against itself
     python scripts/refcheck/summarize.py a.jsonl b.jsonl --first 60                  # only games 0-59 of each
     python scripts/refcheck/summarize.py a.jsonl --size small --map pangaea          # only those games
@@ -19,17 +20,23 @@ games with a war declared, with a city captured, ending before the turn limit, b
 eliminated.
 
 The gates (--gate FILE, A the Python run and B the Rust one; exit 1 when one fails):
-  G1  B has no crashed, poisoned or timed-out game (a crash line), nor has any --checked run (games played with
-      the engine's invariants on, where a broken invariant is a crash line).
+  G1  B has no crashed, poisoned or timed-out game (a crash line), and every map size of A has at least
+      --min-games finished games in B (by default as many as A has there), so a run cut short or missing a
+      stratum cannot pass by comparing less. Each --checked run (games played with `citar-sim baseline
+      --checks`, where a broken invariant is a crash line) has finished games, no crash line, and every line
+      says "checks": true.
   G2  cities, population, techs and score at turns 100, 200 and 300: B's mean within [0.75, 1.33] of A's on small
       maps ([0.67, 1.5] on any other), and B's means rising from 100 to 200 to 300.
   G3  every metric at every checkpoint: a gap of 10% or more (15% off small maps) whose interval excludes 0 needs
       an entry in FILE; an event metric only where A's mean is at least 1 a game.
   G4  every rate within 25 percentage points of A's (35 off small maps), or an entry in FILE.
 FILE holds [[gap]] entries: metric, checkpoint ("100", "200", "300" or "end"; "game" for a rate), stratum and
-reason, and optionally pending (the follow-up package that owes the fix). An entry whose gap no longer meets its
-rule is a warning, not a failure, so that a later run cannot fail on noise. --no-pending refuses pending entries
-(package 2-12's precondition).
+reason; optionally the band the explained gap was measured in (ratio = [lo, hi] for a metric, B's mean over A's;
+points = [lo, hi] for a rate, B's share minus A's), outside which an entry no longer answers its gap ("the
+explained gap moved"); and optionally pending (the follow-up package that owes the fix). An entry whose gap no
+longer meets its rule is a warning, not a failure, so that a later run cannot fail on noise. --no-pending fails
+on every entry marked pending, whether its gap is still material, under its rule or on a map size not compared
+(package 2-12's precondition: no fix may still be owed).
 
 Pure Python, standard library only: it stays after the Python engine is removed.
 """
@@ -59,7 +66,7 @@ RULES = {"small": {"ratio": (0.75, 1.33), "gap": 0.10, "rate_points": 25.0}}
 OTHER_RULES = {"ratio": (0.67, 1.5), "gap": 0.15, "rate_points": 35.0}
 # A rate's checkpoint in explained.toml.
 RATE_POINT = "game"
-GAP_KEYS = {"metric", "checkpoint", "stratum", "reason", "pending"}
+GAP_KEYS = {"metric", "checkpoint", "stratum", "reason", "pending", "ratio", "points"}
 
 
 def rules_for(stratum: str) -> dict:
@@ -102,8 +109,14 @@ def load(path: Path, size: str = None, map_type: str = None, first: int = None) 
     counts once among the finished: its last finished line. Every crash line is returned, replayed or not: G1
     counts a crash even when a later run finished the game.
     """
+    return split(read_lines(path), size, map_type, first)
+
+
+def split(lines: list[dict], size: str = None, map_type: str = None,
+          first: int = None) -> tuple[list[dict], list[dict]]:
+    """`load`'s finished games and crash lines, from lines already read."""
     finished, crashes = {}, []
-    for r in read_lines(path):
+    for r in lines:
         if not keep(r, size, map_type, first):
             continue
         if r.get("crash"):
@@ -111,6 +124,17 @@ def load(path: Path, size: str = None, map_type: str = None, first: int = None) 
         else:
             finished[tuple(r.get(k) for k in IDENTITY)] = r
     return sorted(finished.values(), key=lambda g: (g.get("i", 0), g.get("seed", 0))), crashes
+
+
+def load_checked(path: Path) -> dict:
+    """A run said to be played with the engine's invariants on (`--checked`): its finished games, its crash lines,
+    and every line that does not say `"checks": true`. citar-sim writes that key on each line of a `--checks`
+    run; without it a crash-free run played with the invariants off would pass for a checked one, since its
+    lines are otherwise the same."""
+    lines = read_lines(path)
+    games, crashes = split(lines)
+    return {"path": str(path), "games": games, "crashes": crashes,
+            "unflagged": [r for r in lines if r.get("checks") is not True]}
 
 
 # ---- Per-game values ----------------------------------------------------------------------------------------------
@@ -381,10 +405,18 @@ def read_explained(path: Path) -> list[dict]:
         if m.startswith("rate:"):
             if pt != RATE_POINT:
                 raise GapFileError(f"{where}: a rate's checkpoint is \"{RATE_POINT}\"")
+            if "ratio" in e:
+                raise GapFileError(f"{where}: a rate's band is `points` (B's share minus A's), not `ratio`")
+            if "points" in e:
+                band(e["points"], where, "points", lowest=-100.0, highest=100.0)
         elif m not in METRICS:
             raise GapFileError(f"{where}: no metric {m!r} (one of {', '.join(METRICS)}, or rate:<name>)")
         elif pt != "end" and not pt.isdigit():
             raise GapFileError(f"{where}: checkpoint {pt!r} is a turn or \"end\"")
+        elif "points" in e:
+            raise GapFileError(f"{where}: a metric's band is `ratio` (B's mean over A's), not `points`")
+        elif "ratio" in e:
+            band(e["ratio"], where, "ratio", lowest=0.0, positive=True)
         key = (m, pt, e["stratum"])
         if key in seen:
             raise GapFileError(f"{where}: {m} at {pt} on {e['stratum']} is explained twice")
@@ -393,15 +425,63 @@ def read_explained(path: Path) -> list[dict]:
     return out
 
 
-def gate(comparisons: list[dict], crashes: list[dict], checked: list[tuple[str, int, list[dict]]],
-         entries: list[dict], no_pending: bool) -> tuple[list[str], list[str], list[str]]:
-    """G1-G4 over the strata compared: the failures, the warnings and the notes (each a line)."""
+def band(v, where: str, key: str, lowest: float, highest: float = math.inf,
+         positive: bool = False) -> tuple[float, float]:
+    """An entry's band, `[lo, hi]`: two finite numbers with lo < hi, within [lowest, highest] (lo over 0 when
+    `positive`: a ratio)."""
+    ok = (isinstance(v, list) and len(v) == 2
+          and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v))
+    if not ok or not (lowest <= v[0] < v[1] <= highest) or (positive and v[0] <= 0):
+        bounds = (f"over {lowest:g}" if positive else f"from {lowest:g}") + (
+            f" to {highest:g}" if math.isfinite(highest) else "")
+        raise GapFileError(f"{where}: `{key}` is [lo, hi], two numbers {bounds} with lo < hi, not {v!r}")
+    return float(v[0]), float(v[1])
+
+
+def gate(comparisons: list[dict], crashes: list[dict], checked: list[dict], entries: list[dict],
+         no_pending: bool, games_a: dict[str, int], games_b: dict[str, int],
+         min_games: int = None) -> tuple[list[str], list[str], list[str]]:
+    """G1-G4 over the strata compared: the failures, the warnings and the notes (each a line).
+
+    `crashes` are B's crash lines; `checked` the runs `load_checked` read; `games_a` and `games_b` each file's
+    finished games by map size; `min_games` the least B must finish on each of A's sizes (None: A's own count
+    there)."""
     fail, warn, note = [], [], []
     for r in crashes:
         fail.append(f"G1: game {r.get('i')} (seed {r.get('seed')}, {r.get('size')}/{r.get('map_type')}) crashed: "
                     f"{r.get('crash')}")
-    for path, games, bad in checked:
-        note.append(f"G1: {path}: {games} games finished with the invariants on, {len(bad)} crash lines")
+    # A stratum B lacks, or holds few games of, would otherwise pass by comparing less: a missing stratum is
+    # left out of the comparison, and a run cut short (a killed process writes no crash line) widens every
+    # interval until no gap is material.
+    for s, na in games_a.items():
+        nb = games_b.get(s, 0)
+        least = na if min_games is None else min_games
+        if not nb:
+            fail.append(f"G1: {s}: B has no finished game on {s} maps (A has {na}), so {s} was not compared")
+        elif nb < least:
+            why = "--min-games" if min_games is not None else "as many as A has, without --min-games"
+            fail.append(f"G1: {s}: B has {nb} finished games on {s} maps, fewer than {least} ({why}): "
+                        f"a run cut short?")
+    for s, nb in games_b.items():
+        if s not in games_a:
+            warn.append(f"B's {nb} games on {s} maps have none in A to be compared with")
+    for c in checked:
+        path, games, bad, unflagged = c["path"], c["games"], c["crashes"], c["unflagged"]
+        sizes = ", ".join(f"{s} {n}" for s, n in Counter(g.get("size") for g in games).items()) or "none"
+        if unflagged:
+            note.append(f"G1: {path}: {len(games)} games finished ({sizes}), {len(bad)} crash lines, "
+                        f"{len(unflagged)} lines not marked as played with the invariants on")
+        else:
+            note.append(f"G1: {path}: {len(games)} games finished with the invariants on ({sizes}), "
+                        f"{len(bad)} crash lines")
+        if not games:
+            fail.append(f"G1: {path}: no finished game, so it shows nothing about the invariants")
+        if unflagged:
+            order = sorted(unflagged, key=lambda r: (0, r["i"], "") if isinstance(r.get("i"), int)
+                           else (1, 0, str(r.get("i"))))
+            ids = ", ".join(str(r.get("i")) for r in order[:10]) + (", ..." if len(order) > 10 else "")
+            fail.append(f"G1: {path}: {len(unflagged)} lines do not say \"checks\": true (games {ids}), so they "
+                        f"were not played with `citar-sim baseline --checks`")
         for r in bad:
             fail.append(f"G1: {path}: game {r.get('i')} (seed {r.get('seed')}) crashed with the invariants on: "
                         f"{r.get('crash')}")
@@ -433,7 +513,7 @@ def gate(comparisons: list[dict], crashes: list[dict], checked: list[tuple[str, 
                         f"({x['mean_a']:.2f} -> {x['mean_b']:.2f}, interval [{x['lo']:.2f}, {x['hi']:.2f}])")
                 if key in by_key:
                     used.add(key)
-                    explain(by_key[key], what, fail, note, no_pending)
+                    explain(by_key[key], "G3", what, x["ratio"], fail, note, no_pending)
                 else:
                     fail.append(f"G3: {what}: unexplained")
         for x in c["rates"]:
@@ -443,20 +523,35 @@ def gate(comparisons: list[dict], crashes: list[dict], checked: list[tuple[str, 
                         f"({x['points']:+.0f} points)")
                 if key in by_key:
                     used.add(key)
-                    explain(by_key[key], what, fail, note, no_pending)
+                    explain(by_key[key], "G4", what, x["points"], fail, note, no_pending)
                 else:
                     fail.append(f"G4: {what}: outside {r['rate_points']:.0f} points, unexplained")
     for key, e in by_key.items():
-        if key in used or e["stratum"] not in compared:
+        if key in used:
             continue
-        warn.append(f"stale: {e['metric']} at {e['checkpoint']} on {e['stratum']} no longer meets its rule "
-                    f"(\"{e['reason'][:60]}...\")")
+        cell = f"{e['metric']} at {e['checkpoint']} on {e['stratum']}"
+        if e["stratum"] in compared:
+            warn.append(f"stale: {cell} no longer meets its rule (\"{e['reason'][:60]}...\")")
+        # 2-12's precondition is that no fix is still owed, so an entry marked pending is refused whatever its
+        # gap does in this run: under its rule from noise, a short run or a partial fix, or on a map size this
+        # command does not compare.
+        if no_pending and e.get("pending"):
+            why = "its gap is under its rule in this run" if e["stratum"] in compared else \
+                f"{e['stratum']} is not compared by this command"
+            fail.append(f"pending: {cell} is still owed by {e['pending']} ({why}), which --no-pending refuses; "
+                        f"drop the entry, or its `pending` with the reason updated, once {e['pending']} is done")
     return fail, warn, note
 
 
-def explain(e: dict, what: str, fail: list, note: list, no_pending: bool):
-    """An entry used: a note, or with --no-pending a failure when the fix is still owed."""
-    if e.get("pending"):
+def explain(e: dict, label: str, what: str, observed: float, fail: list, note: list, no_pending: bool):
+    """An entry used: a note; a failure when the gap left the band the entry was measured in (then the entry
+    answers another gap than its reason does), or with --no-pending when the fix is still owed."""
+    key = "ratio" if "ratio" in e else "points" if "points" in e else None
+    if key and not e[key][0] <= observed <= e[key][1]:
+        unit = "x" if key == "ratio" else " points"
+        fail.append(f"{label}: {what}: the explained gap moved: {observed:.2f}{unit} is outside the entry's "
+                    f"{key} [{e[key][0]:g}, {e[key][1]:g}]")
+    elif e.get("pending"):
         if no_pending:
             fail.append(f"pending: {what}: explained as owed by {e['pending']}, which --no-pending refuses")
         else:
@@ -484,7 +579,11 @@ def main(argv: list[str] = None) -> int:
     ap.add_argument("--gate", type=Path, default=None, help="run G1-G4 against this explained.toml (two files)")
     ap.add_argument("--checked", type=Path, action="append", default=[],
                     help="a run played with the invariants on, whose crash lines fail G1 (with --gate)")
-    ap.add_argument("--no-pending", action="store_true", help="with --gate, refuse entries marked pending")
+    ap.add_argument("--min-games", type=int, default=None, metavar="N",
+                    help="with --gate, the least finished games B must have on each of A's map sizes (default: "
+                         "as many as A has there)")
+    ap.add_argument("--no-pending", action="store_true",
+                    help="with --gate, fail on every entry marked pending (package 2-12's precondition)")
     ap.add_argument("--json", action="store_true", help="print the numbers as JSON instead of tables")
     ap.add_argument("--per-game", action="store_true", help="with --json, each cell's per-game values too")
     a = ap.parse_args(argv)
@@ -492,8 +591,10 @@ def main(argv: list[str] = None) -> int:
         ap.error("give one file, or two to compare")
     if a.gate and len(a.files) != 2:
         ap.error("--gate compares two files: the Python run, then the Rust one")
-    if (a.checked or a.no_pending) and not a.gate:
-        ap.error("--checked and --no-pending go with --gate")
+    if (a.checked or a.no_pending or a.min_games is not None) and not a.gate:
+        ap.error("--checked, --min-games and --no-pending go with --gate")
+    if a.min_games is not None and a.min_games < 1:
+        ap.error("--min-games is at least 1")
     entries = []
     if a.gate:
         try:
@@ -518,12 +619,10 @@ def main(argv: list[str] = None) -> int:
         out["only_in_one"] = sorted(set(sa) ^ set(sb))
     result = 0
     if a.gate:
-        checked = []
-        for p in a.checked:
-            games, bad = load(p)
-            checked.append((str(p), len(games), bad))
-        fail, warn, note = gate(comps, loaded[1][1], checked, entries,
-                                a.no_pending)
+        checked = [load_checked(p) for p in a.checked]
+        counts = [{s: len(g) for s, g in strata(x[0]).items()} for x in loaded]
+        fail, warn, note = gate(comps, loaded[1][1], checked, entries, a.no_pending, counts[0], counts[1],
+                                a.min_games)
         if not comps:
             fail.append("no stratum is in both files: nothing was compared")
         out["gate"] = {"failures": fail, "warnings": warn, "notes": note, "passed": not fail}

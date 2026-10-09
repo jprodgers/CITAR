@@ -125,13 +125,55 @@ class GateTests(unittest.TestCase):
         self.assertIn("G1: game 3", out)
 
     def test_g1_reads_the_runs_with_the_invariants_on(self):
-        checked = write([game(0), {"i": 1, "seed": 5001, "size": "small", "map_type": "pangaea",
-                                   "barbarians": "normal", "speed": "Quick", "turn_limit": None,
-                                   "crash": "InvariantViolation: CITY-3", "trace": ""}],
+        checked = write([dict(game(0), checks=True),
+                         {"i": 1, "seed": 5001, "size": "small", "map_type": "pangaea", "barbarians": "normal",
+                          "speed": "Quick", "turn_limit": None, "checks": True,
+                          "crash": "InvariantViolation: CITY-3", "trace": ""}],
                         self.dir.name, "checked.jsonl")
         code, out = self.gate([game(i, jitter=1.0) for i in range(40)], extra=["--checked", checked])
         self.assertEqual(code, 1)
         self.assertIn("crashed with the invariants on: InvariantViolation", out)
+        self.assertNotIn("do not say", out)
+        clean = write([dict(game(i), checks=True) for i in range(3)], self.dir.name, "clean.jsonl")
+        code, out = self.gate([game(i, jitter=1.0) for i in range(40)], extra=["--checked", clean])
+        self.assertEqual(code, 0, out)
+        self.assertIn("3 games finished with the invariants on (small 3), 0 crash lines", out)
+
+    def test_g1_a_checked_run_must_say_its_lines_were_checked_and_hold_games(self):
+        # A crash-free run played without --checks has the same lines but for the flag, so it cannot stand in.
+        unchecked = write([game(i) for i in range(3)] + [dict(game(3), checks=True)], self.dir.name, "plain.jsonl")
+        code, out = self.gate([game(i, jitter=1.0) for i in range(40)], extra=["--checked", unchecked])
+        self.assertEqual(code, 1)
+        self.assertIn('3 lines do not say "checks": true (games 0, 1, 2)', out)
+        self.assertIn("4 games finished (small 4), 0 crash lines, 3 lines not marked as played with the "
+                      "invariants on", out)
+        empty = write([], self.dir.name, "none.jsonl")
+        code, out = self.gate([game(i, jitter=1.0) for i in range(40)], extra=["--checked", empty])
+        self.assertEqual(code, 1)
+        self.assertIn("no finished game, so it shows nothing about the invariants", out)
+
+    def test_g1_every_stratum_of_a_needs_games_in_b(self):
+        py = write([game(i, jitter=1.0) for i in range(40)] + [game(40 + i, size="large", jitter=1.0)
+                                                                for i in range(10)], self.dir.name, "py2.jsonl")
+        rust = write([game(i, jitter=1.0) for i in range(40)], self.dir.name, "rust2.jsonl")
+        code, out = run([py, rust, "--gate", self.empty])
+        self.assertEqual(code, 1, out)
+        self.assertIn("G1: large: B has no finished game on large maps (A has 10), so large was not compared", out)
+        # B's map sizes that A lacks are only a warning: A is the reference.
+        code, out = run([rust, py, "--gate", self.empty])
+        self.assertEqual(code, 0, out)
+        self.assertIn("warning: B's 10 games on large maps have none in A", out)
+
+    def test_g1_a_run_cut_short_fails(self):
+        # Ten games of forty: every interval widens and nothing is material, so without a count it would pass.
+        code, out = self.gate([game(i, jitter=1.0) for i in range(10)])
+        self.assertEqual(code, 1, out)
+        self.assertIn("G1: small: B has 10 finished games on small maps, fewer than 40", out)
+        code, out = self.gate([game(i, jitter=1.0) for i in range(10)], extra=["--min-games", 10])
+        self.assertEqual(code, 0, out)
+        code, out = self.gate([game(i, jitter=1.0) for i in range(40)], extra=["--min-games", 41])
+        self.assertEqual(code, 1, out)
+        self.assertIn("fewer than 41 (--min-games)", out)
 
     def test_g2_a_gross_gap_fails_and_cannot_be_explained(self):
         gross = "".join(f'[[gap]]\nmetric = "{m}"\ncheckpoint = "{t}"\nstratum = "small"\nreason = "r"\n\n'
@@ -216,15 +258,77 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("pending: small: military at 100", out)
 
+    def test_no_pending_refuses_a_pending_entry_whose_gap_is_under_its_rule(self):
+        # Noise, a short run or a partial fix can take the gap under G3's rule: the fix is still owed.
+        entry = ('[[gap]]\nmetric = "military"\ncheckpoint = "100"\nstratum = "small"\nreason = "r"\n'
+                 'pending = "2-07f"\n')
+        same = [game(i, jitter=1.0) for i in range(40)]
+        code, out = self.gate(same, entry)
+        self.assertEqual(code, 0, out)
+        self.assertIn("warning: stale: military at 100 on small", out)
+        code, out = self.gate(same, entry, extra=["--no-pending"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("pending: military at 100 on small is still owed by 2-07f (its gap is under its rule in "
+                      "this run), which --no-pending refuses", out)
+
+    def test_no_pending_refuses_a_pending_entry_of_a_map_size_not_compared(self):
+        entry = ('[[gap]]\nmetric = "wars_declared"\ncheckpoint = "end"\nstratum = "large"\nreason = "r"\n'
+                 'pending = "2-07f"\n')
+        code, out = self.gate([game(i, jitter=1.0) for i in range(40)], entry, extra=["--no-pending"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("(large is not compared by this command)", out)
+        code, out = self.gate([game(i, jitter=1.0) for i in range(40)], entry)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("stale", out)
+
+    def test_an_entry_answers_only_the_gap_in_its_band(self):
+        def scaled(k):
+            rust = []
+            for i in range(40):
+                g = game(i, jitter=1.0)
+                for c in g["civs"]:
+                    c["at"]["100"]["military"] *= k
+                rust.append(g)
+            return rust
+        entry = '[[gap]]\nmetric = "military"\ncheckpoint = "100"\nstratum = "small"\nreason = "r"\nratio = {}\n'
+        code, out = self.gate(scaled(1.2), entry.format("[1.1, 1.3]"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 explained", out)
+        # Twice as large, or the other way, is another gap than the one the reason measured.
+        for k, shown in ((1.6, "1.60x"), (0.8, "0.80x")):
+            code, out = self.gate(scaled(k), entry.format("[1.1, 1.3]"))
+            self.assertEqual(code, 1, out)
+            self.assertIn(f"G3: small: military at 100: {shown}", out)
+            self.assertIn(f"the explained gap moved: {shown} is outside the entry's ratio [1.1, 1.3]", out)
+
+    def test_a_rate_entry_answers_only_the_gap_in_its_points(self):
+        rust = [game(i, jitter=1.0, wars=0 if i % 2 else 1) for i in range(40)]
+        wars = "".join(f'[[gap]]\nmetric = "wars_declared"\ncheckpoint = "{t}"\nstratum = "small"\nreason = "r"\n\n'
+                       for t in ("100", "200", "300", "end"))
+        entry = '[[gap]]\nmetric = "rate:war"\ncheckpoint = "game"\nstratum = "small"\nreason = "r"\npoints = {}\n'
+        code, out = self.gate(rust, wars + entry.format("[-60, -40]"))
+        self.assertEqual(code, 0, out)
+        code, out = self.gate(rust, wars + entry.format("[-30, -26]"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("G4: small: rate war: 100% -> 50% (-50 points): the explained gap moved: -50.00 points is "
+                      "outside the entry's points [-30, -26]", out)
+
     def test_a_malformed_entry_is_refused(self):
+        head = '[[gap]]\nmetric = "cities"\ncheckpoint = "100"\nstratum = "small"\nreason = "r"\n'
+        rate = '[[gap]]\nmetric = "rate:war"\ncheckpoint = "game"\nstratum = "small"\nreason = "r"\n'
         for bad in ('[[gap]]\nmetric = "towers"\ncheckpoint = "100"\nstratum = "small"\nreason = "r"\n',
                     '[[gap]]\nmetric = "cities"\ncheckpoint = "100"\nstratum = "small"\n',
-                    '[[gap]]\nmetric = "cities"\ncheckpoint = "100"\nstratum = "small"\nreason = "r"\nwhy = 1\n',
+                    head + 'why = 1\n',
                     '[[gap]]\nmetric = "rate:war"\ncheckpoint = "100"\nstratum = "small"\nreason = "r"\n',
-                    '[[gap]]\nmetric = "cities"\ncheckpoint = "100"\nstratum = "small"\nreason = "r"\n'
-                    '[[gap]]\nmetric = "cities"\ncheckpoint = "100"\nstratum = "small"\nreason = "again"\n'):
+                    head + '[[gap]]\nmetric = "cities"\ncheckpoint = "100"\nstratum = "small"\nreason = "again"\n',
+                    head + 'ratio = [1.3, 1.1]\n', head + 'ratio = [0, 1.1]\n', head + 'ratio = [1.1]\n',
+                    head + 'ratio = "1.1-1.3"\n', head + 'ratio = [1, true]\n', head + 'points = [-10, 10]\n',
+                    rate + 'ratio = [0.8, 1.2]\n', rate + 'points = [-120, 0]\n', rate + 'points = [5, 5]\n'):
             code, _ = self.gate([game(i, jitter=1.0) for i in range(40)], bad)
             self.assertEqual(code, 2, bad)
+        for good in (head + 'ratio = [1, 2]\n', rate + 'points = [-100, 100]\n'):
+            code, out = self.gate([game(i, jitter=1.0) for i in range(40)], good)
+            self.assertEqual(code, 0, f"{good}\n{out}")
 
 
 class CommittedBaselineTests(unittest.TestCase):
@@ -243,6 +347,20 @@ class CommittedBaselineTests(unittest.TestCase):
     def test_the_explained_file_reads(self):
         entries = S.read_explained(EXPLAINED)
         self.assertTrue(all(e["reason"].strip() for e in entries))
+        # Each committed entry records the band its gap was measured in, so a later gap in its cell that the
+        # reason does not describe fails rather than passing as explained.
+        self.assertTrue(all("ratio" in e or "points" in e for e in entries), entries)
+
+    def test_no_pending_refuses_the_committed_pending_entries_even_against_itself(self):
+        # Python against itself has no material gap, so every entry is stale; one still owed fails all the same.
+        owed = [e for e in S.read_explained(EXPLAINED) if e.get("pending")]
+        for name in ("small", "std-large"):
+            code, out = run([PYTHON / f"{name}.jsonl", PYTHON / f"{name}.jsonl", "--gate", EXPLAINED,
+                             "--no-pending"])
+            self.assertEqual(code, 1 if owed else 0, out)
+            for e in owed:
+                self.assertIn(f"pending: {e['metric']} at {e['checkpoint']} on {e['stratum']} is still owed by "
+                              f"{e['pending']}", out)
 
 
 if __name__ == "__main__":
