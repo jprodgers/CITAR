@@ -40,7 +40,7 @@ pub use self::container::{
     BodyParts, ChainRef, Container, Header, SessionRef, read_container, read_header,
     write_container,
 };
-pub use self::journal::{JournalRef, JournalWriter, Recovered, fork, read_upto};
+pub use self::journal::{JournalRef, JournalWriter, Recovered, fork, in_use, read_upto};
 
 /// Why a store call failed.
 #[derive(Debug, thiserror::Error)]
