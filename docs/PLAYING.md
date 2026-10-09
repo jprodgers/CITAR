@@ -31,8 +31,10 @@ The lobby lists running games and saved ones.
 - **▶ Play** resumes a running game. **Watch** opens a game with no human seat with full vision.
 - **Delete** removes every save of a game.
 
-Games autosave every turn to `saves/<game id>/autosave.citar`. **Save** in the game screen writes a
-named save beside it.
+Games autosave every turn to `saves/<game id>/autosave.citar`, and whenever the game stops to wait
+for a person or a pause. A game of bots alone runs so fast that late in a large game its autosave
+skips a few turns, so that saving never takes more than a quarter of its time; it is never more than
+a second or so of play behind. **Save** in the game screen writes a named save beside it.
 
 ### Watching AI games
 

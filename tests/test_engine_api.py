@@ -282,6 +282,16 @@ class SelectorTests(unittest.TestCase):
         return subprocess.run([sys.executable, *args], capture_output=True, text=True, env=env, timeout=120,
                               cwd=Path(__file__).resolve().parent.parent)
 
+    def test_the_default_is_the_rust_engine(self):
+        # since package 2-09 (DESIGN.md P2.6.6): CITAR_ENGINE unset or empty chooses rust
+        for env in ({k: v for k, v in os.environ.items() if k != "CITAR_ENGINE"}, dict(os.environ, CITAR_ENGINE=" ")):
+            r = subprocess.run([sys.executable, "-c", "from citar import engine_api; print(engine_api.BACKEND)"],
+                               capture_output=True, text=True, env=env, timeout=120,
+                               cwd=Path(__file__).resolve().parent.parent)
+            if r.returncode != 0 and "_engine" in r.stderr:
+                self.skipTest("the extension is not built: the default backend cannot load")
+            self.assertEqual(r.stdout.strip(), "rust", r.stderr)
+
     def test_an_unknown_backend_is_refused_at_import(self):
         r = self.child("bogus", "-c", "import citar.engine_api")
         self.assertNotEqual(r.returncode, 0)

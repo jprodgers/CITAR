@@ -104,11 +104,10 @@ on top), or `"profile"` as the base of a factorial experiment. `"best"` works th
 queued as the profile it stands for at submission, so its games are rated as that profile's.
 
 Versions, schemas, cleaning, fingerprints and the build id come from the Rust engine
-(`citar.engine_api`). While a development build still defaults to the Python engine, run the Bots
-page's editor, the lab and the rankings with `CITAR_ENGINE=rust`. On the Python engine a lobby seat
-still plays its profile and the Bots page lists the profiles and shows each read-only; `citar lab run`
-and `citar lab submit` stop at once with a message saying they need the Rust engine (exit 2), and the
-rest answers the same.
+(`citar.engine_api`), the default backend since 0.1.6's package 2-09. With `CITAR_ENGINE=python`, the
+Python engine kept for its reference tests until 2-12, the Bots page lists the profiles and shows each
+read-only, and `citar lab run` and `citar lab submit` stop at once with a message saying they need the
+Rust engine (exit 2).
 
 HTTP (signed in; changes need an administrator): `GET /api/bots/profiles`, `GET|PUT|DELETE
 /api/bots/profiles/{id}`, `POST /api/bots/profiles`, `POST /api/bots/profiles/{id}/fork`,

@@ -111,15 +111,17 @@ Reserved handles (`admin`, `root`, `mod`, `guest`, …) are rejected, so fixture
 names.
 
 **Two engines behind one door.** Everything reaches the game through `citar/engine_api.py`, whose
-backend `CITAR_ENGINE` chooses: `python` (the default until the swap) or `rust` (the extension
-below). Run the suite on the Rust engine with `CITAR_ENGINE=rust python -m unittest discover -s
-tests`; CI's `test-rust` job does. A test that cannot pass there says why, with a marker from
-`tests/backends.py`: `@python_engine_only("<successor>")` for a test of the Python engine's
-internals, naming the rule script, Rust test or Python test that holds the same behaviour now;
-`@rust_pending("<package>")` for one a named Phase 2 package makes pass; `@rust_only` for a test
-of a name only the Rust backend has. `tests/test_backends.py` checks that every successor exists
-and runs on Rust (a rule script still waiting on its bot package is listed in its output), and
-`tests/test_facade_parity.py` that both backends answer every call in the same shapes.
+backend `CITAR_ENGINE` chooses: `rust` (the default since package 2-09; it needs the extension
+below) or `python`, the Python engine the Rust one was ported from, which goes in package 2-12.
+The suite runs on the Rust engine: `python -m unittest discover -s tests`. A test that cannot pass
+there says why, with a marker from `tests/backends.py`: `@python_engine_only("<successor>")` for a
+test of the Python engine's internals, naming the rule script, Rust test or Python test that holds
+the same behaviour now; `@rust_pending("<package>")` for one a named Phase 2 package makes pass;
+`@rust_only` for a test of a name only the Rust backend has. `tests/test_backends.py` checks that
+every successor exists and runs on Rust, and `tests/test_facade_parity.py` that both backends
+answer every call in the same shapes. On the Python engine only the tests that still check it
+run, those `tests/python_reference.txt` lists, as CI's `python-reference` job runs them:
+`CITAR_ENGINE=python python -m unittest -v $(sed -e 's/#.*//' tests/python_reference.txt)`.
 
 ## Rust
 

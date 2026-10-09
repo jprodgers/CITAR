@@ -422,7 +422,7 @@ def s_behavior(x: Ctx) -> str:
         cfg = next((a["config"] for a in d["acts"] if a["ref"].get("probe_run") == r["id"]), r["name"])
         for z in r["results"]:
             for c in z.get("tool_calls") or []:
-                tools[cfg][c["tool"]] += 1
+                tools[cfg][c["tool"]] += c.get("count", 1)      # a bot subject's calls are counted per tool
     out = [x.f("behavior")]
     if not tools and not reasons:
         return out[0] + '<p class="muted">No model behavior recorded in this scope.</p>'

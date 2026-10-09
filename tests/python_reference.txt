@@ -1,0 +1,17 @@
+# The Python reference subset (crates/citar-engine/DESIGN.md P2.6.6): what CI's Python-backend job runs, with
+# CITAR_ENGINE=python, since package 2-09 made the Rust engine the default backend of citar.engine_api.
+#
+# These are the tests that still check the Python engine itself, the reference the Rust engine was ported from: the
+# rest of the suite runs on the Rust engine (the default) and needs names only its backend has. Package 2-12 deletes
+# this list, the job and the Python engine together.
+#
+# One test module or test id per line, as `python -m unittest` takes them; `#` starts a comment.
+#   CITAR_ENGINE=python python -m unittest -v $(sed -e 's/#.*//' tests/python_reference.txt)
+
+# The rule scripts on the Python runner and the Python engine, and the Python engine's recordings (testops.OPS, the
+# normalize table, tool_list.json, query_tools.json.gz, the bot decisions)
+tests.test_rule_scripts
+# The two backends answer every call in the same shapes
+tests.test_facade_parity
+# The parameter schema basic-1.json was exported from, and the cleaning table recorded from the Python bot
+tests.test_bot_params

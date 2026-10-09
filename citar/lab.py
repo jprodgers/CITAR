@@ -44,8 +44,8 @@ During the restricted hours of the CITAR host server (Servers page) the runner u
 Every finished game is written to the usage ledger (saves/usage/lab-*.jsonl) so reports can cost experiments.
 
 The lab asks the engine for versions, parameters, fingerprints and the build id, which only the Rust engine has: it
-needs the Rust backend of ``citar.engine_api`` (until package 2-09 makes it the default, ``CITAR_ENGINE=rust``), and
-without it ``run`` and ``submit`` stop at once with exit 2.
+needs the Rust backend of ``citar.engine_api`` (the default; not ``CITAR_ENGINE=python``), and without it ``run`` and
+``submit`` stop at once with exit 2.
 """
 from __future__ import annotations
 
@@ -1040,8 +1040,8 @@ def _pid_alive(pid) -> bool:
 
 def _need_rust(cmd: str):
     """Exit 2 with the facade's message unless the engine says what build it is. The lab asks the engine for bot
-    versions, parameters, fingerprints and the build id, which only the Rust backend has (until package 2-09 makes it
-    the default, ``CITAR_ENGINE=rust``): refused once here, rather than by every queued game's process, three times
+    versions, parameters, fingerprints and the build id, which only the Rust backend has (the default; not
+    ``CITAR_ENGINE=python``): refused once here, rather than by every queued game's process, three times
     each, as crashes."""
     from . import engine_api
     try:

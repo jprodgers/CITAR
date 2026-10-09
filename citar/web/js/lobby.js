@@ -144,7 +144,7 @@ function renderGames(card, games, refresh, meta) {
     actions.appendChild(el("button", { class: "danger", onclick: async () => {
       if (await confirmBox("End game", `Stop "${g.name}"? (Saves on disk are kept.)`)) { await api.deleteGame(g.id); refresh(); }
     } }, "Close"));
-    const status = g.phase === "playing" ? (g.paused ? "paused" : "playing") :
+    const status = g.crashed ? `stopped by an engine error on turn ${g.crashed.turn}` : g.phase === "playing" ? (g.paused ? "paused" : "playing") :
       `over — ${g.players[g.winner] ? g.players[g.winner].name : "no one"} (${g.victory || ""})`;
     table.appendChild(el("tr", {},
       el("td", {}, el("div", {}, el("b", {}, g.name)), el("div", { class: "muted" }, `${g.config.map_type}, ${g.config.map_size}, ${status}`),
