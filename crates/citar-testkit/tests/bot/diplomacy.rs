@@ -15,13 +15,15 @@
 //!   same digest at the end of each of those rounds. The owners move no draw (the streams are
 //!   keyed by decision, DESIGN.md P2.3.5) and the bots remember the same things.
 //! - **Saves** (gate 6): a four-bot game saved and loaded at the end of every one of 120 rounds
-//!   plays on as the uninterrupted one, round digest by round digest: the bots' memory, war
-//!   plans and preparations included, is in the save.
+//!   plays on as the uninterrupted one, round digest by round digest (a seat's memory is in the
+//!   digest): the bots' memory, war plans and preparations included, is in the save. The game
+//!   is one whose bots both prepare a war and fight one by plan, and the test fails if it stops
+//!   holding either at the end of some round.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use citar_bot::{BotSpec, Overrides, Owner, Owners, Tuning, VersionId};
+use citar_bot::{BotSpec, Memory, Overrides, Owner, Owners, Tuning, VersionId};
 use citar_engine::api::testops;
 use citar_engine::base::ids::{NegotiationId, PlayerId};
 use citar_engine::game::diplomacy::actions::DeclareWar;
@@ -299,17 +301,43 @@ fn before_contact_whoever_owns_diplomacy_the_game_is_the_same() {
     assert_eq!(bots, models, "the owners moved the game before any contact");
 }
 
+/// The seed of the game saved and loaded at every round: one whose bots prepare a war at the end
+/// of 20 of its 120 rounds and fight one by plan at the end of 14 (seed 8000, the war games'
+/// first, prepares one and never declares it in 120 rounds).
+const SAVED_SEED: u64 = 8001;
+
+/// What a game's bots held in memory of their wars: the rounds at whose end some seat was
+/// preparing a war (`memory.war_prep`), and those at whose end some seat had a war plan
+/// (`memory.war_plan`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WarMemory {
+    preparing: u32,
+    planned: u32,
+}
+
+impl WarMemory {
+    /// Counts the round just ended, from each major seat's memory in the game.
+    fn count(&mut self, g: &Game) {
+        let held: Vec<Memory> =
+            g.majors(false).filter_map(|p| p.seat().driver()).map(Memory::decode).collect();
+        self.preparing += u32::from(held.iter().any(|m| m.war_prep.is_some()));
+        self.planned += u32::from(held.iter().any(|m| m.war_plan.is_some()));
+    }
+}
+
 /// Plays the four-bot baseline game of `seed` for `rounds` rounds, saving and loading it after
-/// every round when `reload`: each round's digest.
-fn baseline(seed: u64, rounds: u32, reload: bool) -> Vec<Round> {
+/// every round when `reload`: each round's digest, and what the bots held of their wars.
+fn baseline(seed: u64, rounds: u32, reload: bool) -> (Vec<Round>, WarMemory) {
     let mut g = small(seed, "continents", 4, &json!({"barbarians": "normal"}));
     let mut seats: Vec<CountingBot> =
         (0..g.state().players().len()).map(|_| CountingBot::new(bot_owned())).collect();
     let mut out = Vec::new();
+    let mut wars = WarMemory::default();
     let mut chunks: Vec<Vec<u8>> = Vec::new();
     let mut hook = |g: &mut Game, round: Round| -> Result<(), String> {
         checked(g, round)?;
         out.push(round);
+        wars.count(g);
         if reload {
             games::save_and_load(g, &mut chunks)?;
         }
@@ -318,7 +346,7 @@ fn baseline(seed: u64, rounds: u32, reload: bool) -> Vec<Round> {
     let (played, expired) =
         play_hosted(&mut g, &mut seats, rounds, &mut hook).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!((played, expired), (rounds, 0));
-    out
+    (out, wars)
 }
 
 #[test]
@@ -326,11 +354,15 @@ fn a_bot_game_saved_and_loaded_every_round_plays_as_the_uninterrupted_one() {
     let rounds = 120;
     // The engine runs no threads (DESIGN.md 6.13); the two games run side by side.
     #[allow(clippy::disallowed_methods, reason = "threads of the test's, not of the engine")]
-    let (whole, reloaded) = std::thread::scope(|s| {
-        let a = s.spawn(|| baseline(8000, rounds, false));
-        let b = s.spawn(|| baseline(8000, rounds, true));
+    let ((whole, held), (reloaded, held_too)) = std::thread::scope(|s| {
+        let a = s.spawn(|| baseline(SAVED_SEED, rounds, false));
+        let b = s.spawn(|| baseline(SAVED_SEED, rounds, true));
         (a.join().expect("the whole game"), b.join().expect("the reloaded game"))
     });
     assert_eq!(whole.len(), rounds as usize);
     assert_eq!(whole, reloaded);
+    assert_eq!(held, held_too);
+    // The save is shown to carry the bots' wars only if the game has some: a war prepared at the
+    // end of some rounds, and one fought for a city by plan at the end of others.
+    assert!(held.preparing > 0 && held.planned > 0, "no war prepared, or none planned: {held:?}");
 }
