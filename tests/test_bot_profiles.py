@@ -6,12 +6,20 @@ no engine.
 """
 import tests  # noqa: F401  (temporary saves folder; must be imported before citar)
 import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from citar import engine_api
 from citar.bots import profiles, ratings
+from tests.test_engine_api import ROOT, ruleset_copy, unknown_unique
 
 
 def _clear_profiles():
@@ -386,6 +394,70 @@ class LabTests(unittest.TestCase):
         self.assertEqual(fixed["fingerprint"], profiles.fingerprint(_latest(), {}, 1.0))
         self.assertIsNone(open_["fixed_aggression"])
         self.assertEqual(open_["fingerprint"], profiles.fingerprint(_latest(), {}, None))
+
+
+#: `citar lab ARGS...` in a process whose engine's extension cannot be found (as when it was never built).
+_NO_EXTENSION = """
+import sys
+class NoExtension:
+    def find_spec(self, name, path=None, target=None):
+        if name == "citar._engine":
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+sys.meta_path.insert(0, NoExtension())
+from citar import lab
+lab.main(sys.argv[1:])
+"""
+
+
+class LabCommandTests(unittest.TestCase):
+    """`citar lab run` and `submit` stop at once, exit 2, when the engine does not load (a CITAR_RULESET_DIR that does
+    not load, the extension missing). The runner never imports the engine itself, each game being a process of its
+    own: without the check it started every queued game three times to crash, then waited for ever."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="citar-lab-cmd-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.lab = self.tmp / "saves" / "lab"
+        self.spec = self.tmp / "spec.json"
+        self.spec.write_text(json.dumps({"name": "queued", "games": 2, "size": "duel", "turns": 3,
+                                         "seats": [{"bot": "basic"}, {"bot": "basic"}]}), encoding="utf-8")
+
+    def lab_command(self, *args: str, env=None) -> subprocess.CompletedProcess:
+        """A child running ``args`` with its saves in this test's folder; at most a minute, which a runner that
+        does not stop exceeds."""
+        base = {k: v for k, v in os.environ.items() if k != "CITAR_RULESET_DIR"}
+        return subprocess.run([sys.executable, *args], capture_output=True, text=True, cwd=ROOT, timeout=60,
+                              env={**base, "CITAR_SAVE_DIR": str(self.tmp / "saves"), **(env or {})})
+
+    def test_run_and_submit_stop_when_the_ruleset_does_not_load(self):
+        r = self.lab_command("-m", "citar.lab", "submit", str(self.spec))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.lab / "queue" / "queued.json").exists())
+        broken = {"CITAR_RULESET_DIR": str(ruleset_copy(self.tmp, {"ruleset/buildings.json": unknown_unique}))}
+        started = time.monotonic()
+        r = self.lab_command("-m", "citar.lab", "run", "--workers", "1", "--exit-when-idle", env=broken)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertLess(time.monotonic() - started, 30, "the runner stops before its first pass")
+        self.assertIn("citar lab run: the engine does not load: CITAR_RULESET_DIR=", r.stderr)
+        self.assertIn("Makes every turn a Tuesday", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        # no game was started, so none crashed, and the experiment waits in the queue for a runner that can play it
+        self.assertFalse((self.lab / "crashes.log").exists())
+        self.assertFalse((self.lab / "lab.log").exists())
+        self.assertTrue((self.lab / "queue" / "queued.json").exists())
+        (self.lab / "queue" / "queued.json").unlink()
+        r = self.lab_command("-m", "citar.lab", "submit", str(self.spec), env=broken)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("citar lab submit: the engine does not load: CITAR_RULESET_DIR=", r.stderr)
+        self.assertFalse((self.lab / "queue" / "queued.json").exists())
+
+    def test_run_and_submit_stop_without_the_extension(self):
+        for argv in (["run", "--exit-when-idle"], ["submit", str(self.spec)]):
+            r = self.lab_command("-c", _NO_EXTENSION, *argv)
+            self.assertEqual(r.returncode, 2, argv)
+            self.assertIn(f"citar lab {argv[0]}: the engine does not load: cannot import name '_engine'", r.stderr)
+        self.assertFalse((self.lab / "queue" / "queued.json").exists())
+        self.assertFalse((self.lab / "crashes.log").exists())
 
 
 class RatingTests(unittest.TestCase):

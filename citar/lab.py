@@ -42,6 +42,9 @@ start position. "turns" 0 plays to the speed's time-victory turn. A seat's aggre
 rotation evens it out.
 During the restricted hours of the CITAR host server (Servers page) the runner uses --night-workers (fan noise).
 Every finished game is written to the usage ledger (saves/usage/lab-*.jsonl) so reports can cost experiments.
+
+``run`` and ``submit`` load the engine before anything else and stop with exit 2 when it does not load (the extension
+missing or out of date, or a ``CITAR_RULESET_DIR`` that does not load): every game would fail the same way.
 """
 from __future__ import annotations
 
@@ -1034,6 +1037,18 @@ def _pid_alive(pid) -> bool:
         return False
 
 
+def _need_engine(cmd: str):
+    """Exit 2, saying why, unless the engine loads. The runner itself never imports it (each game is a process of
+    its own), so without this a runner whose engine cannot load would start each queued game three times to crash
+    and then wait for ever, and ``submit`` would end in a traceback."""
+    try:
+        from . import engine_api
+        engine_api.build_info()
+    except ImportError as e:
+        print(f"citar lab {cmd}: the engine does not load: {e}", file=sys.stderr)
+        raise SystemExit(2) from None
+
+
 def main(argv=None):
     """The ``citar lab`` command line."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1053,6 +1068,8 @@ def main(argv=None):
     sub.add_parser("status")
     sub.add_parser("stop")
     args = ap.parse_args(argv)
+    if args.cmd in ("run", "submit"):
+        _need_engine(args.cmd)
     if args.cmd == "run":
         run(args)
     elif args.cmd == "play":
