@@ -1,0 +1,10 @@
+# What explains each gap between the Rust engine's bot games and the Python baselines
+# (crates/citar-engine/DESIGN.md P2.4.4), read by
+#
+#   python scripts/refcheck/summarize.py refcheck/baseline/python/small.jsonl <rust small run> \
+#       --gate refcheck/baseline/explained.toml
+#
+# Each [[gap]] names a metric ("cities", ..., "wars_declared", "cities_captured", or "rate:<name>"),
+# a checkpoint ("100", "200", "300", "end", or "game" for a rate), a stratum (the map size) and the
+# reason: an intended engine fix by its id, a bot fix, or a measured cause with its evidence. A gap
+# still owed a fix carries `pending = "<package>"`, which package 2-12 refuses.
