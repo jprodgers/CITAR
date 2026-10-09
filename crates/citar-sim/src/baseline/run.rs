@@ -2,8 +2,9 @@
 //! written a line each as they finish (`baseline.py:163-249`, `common.py:205-286`).
 //!
 //! - **One file is one sample.** A run refuses to add to a file that holds a line from other
-//!   code (another build id or bot) or a game `i` whose identity differs from this run's game
-//!   `i`, and says which lines and why ([`existing`]).
+//!   code (another build id or bot), a line played with the invariants on when this run has them
+//!   off or the other way round, or a game `i` whose identity differs from this run's game `i`,
+//!   and says which lines and why ([`existing`]).
 //! - **Resumable.** Games already finished in the file are skipped; crashed ones are played
 //!   again. A run stopped mid-write leaves a torn last line: the next run starts on a fresh line,
 //!   and `summarize.py` skips the torn one.
@@ -91,9 +92,11 @@ pub fn code_of(rules: &Ruleset, o: &Options) -> Result<(Code, Arc<Tuning>), Stri
 }
 
 /// The games already finished in the file at `path`, and why this run may not add to it (empty
-/// if it may): a line from other code, or a game `i` whose identity differs from this run's
-/// game `i` (with options `o`, already effective), would mix two samples in one file
-/// (`baseline.existing`). Lines that are not JSON (a run stopped mid-write) are ignored.
+/// if it may): a line from other code, a line whose `checks` differs from this run's (a file
+/// `summarize.py --checked` reads must hold only games played with the invariants on), or a
+/// game `i` whose identity differs from this run's game `i` (with options `o`, already
+/// effective), would mix two samples in one file (`baseline.existing`). Lines that are not JSON
+/// (a run stopped mid-write) are ignored.
 ///
 /// # Errors
 /// The file exists and cannot be read.
@@ -128,6 +131,17 @@ pub fn existing(
                 plain(bot),
                 code.engine,
                 code.bot
+            ));
+            continue;
+        }
+        let checked = r.get("checks").is_some_and(truthy);
+        if checked != o.checks {
+            let on = |b: bool| if b { "on" } else { "off" };
+            clashes.push(format!(
+                "line {n} (game {i}) was played with the engine's invariants {}; this run has \
+                 them {}",
+                on(checked),
+                on(o.checks)
             ));
             continue;
         }

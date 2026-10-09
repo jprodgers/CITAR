@@ -55,7 +55,7 @@ harness = false
 
 # Whole bot games (DESIGN.md P2.4.2): the small 4-bot Quick game to 330 rounds and a gargantuan
 # 24-bot game, single-threaded and pinned, written for `cargo xtask perf --suite games`.
-# Report-only until package 2-07.
+# Hard from package 2-07 (thresholds.toml).
 [[bench]]
 name = "games"
 harness = false

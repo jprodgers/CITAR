@@ -27,8 +27,11 @@
 # games (newgame), and 1c-10 the fixtures after the settle on load (load), twenty rounds passed
 # from three of them (pass) and six RandomAgent games on generated maps (random). 1e-02 made the
 # reports name each row and added the states where games part; its long set (whole games on
-# every map size, about a minute a target) is nightly.yml's. The sets here take about 5 seconds
-# a target in the ci profile, so pull requests need no shorter set.
+# every map size, about a minute a target) is nightly.yml's. Package 2-07 adds the bot set (bot):
+# basic-1 in every major's seat, a duel, two small games and the late fixture played on, each
+# round's digest and every seat's memory hash, so a bot that plays differently on one target shows
+# here too; the long set gains a whole 4-bot game. The sets here take about 10 seconds a target in
+# the ci profile, so pull requests need no shorter set.
 name: determinism
 
 on:

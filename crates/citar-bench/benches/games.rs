@@ -14,7 +14,9 @@
 //! turns it played and the share of the wall time its thread had the CPU: a share well under 1
 //! means the machine was busy and the time is not to be trusted.
 //!
-//! Report-only until package 2-07. Timed runs pause the other lane (the orchestrator's job).
+//! Hard from package 2-07: over 1.5 times its budget, a measure fails `cargo xtask perf`, which
+//! also prints each against the plan's target. Timed runs pause the other lane (the
+//! orchestrator's job).
 //!
 //! ```text
 //! cargo bench -p citar-bench --bench games                    # both

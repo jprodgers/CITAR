@@ -64,6 +64,13 @@
 //! - **`long.json`**: a Quick game's 330 turns with `RandomAgent` in every seat on every map
 //!   size, duel to gargantuan, two kitchen-sink games and the three late fixtures passed on.
 //!
+//! Package 2-07 adds, in [`games`], the bot set, and one bot game to the long set:
+//! - **`bot.json`**: `basic-1` in every major's seat, with the statistical baseline's settings
+//!   and aggressions: a duel for 120 rounds, two small games for 100, and the late fixture played
+//!   on for 10 rounds, each round's digest chained and each major's memory hashed, so that a
+//!   game that leaves the file names the round and, when the bots' plans part first, the seat.
+//! - **`long.json`** gains a 4-bot small game of 330 rounds, played to its end.
+//!
 //! Each set's report carries a blake3 of the answers this build computed, and a short hash of
 //! every row of each of its lists. The determinism workflow compares those across targets (a
 //! determinism bug if they differ; `golden diff` names the first row where two reports part)
@@ -185,6 +192,7 @@ pub fn check_all() -> Vec<SetReport> {
         games::check_load(),
         games::check_pass(),
         games::check_random(),
+        games::check_bot(),
     ]
 }
 

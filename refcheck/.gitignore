@@ -6,3 +6,6 @@ corpus/
 # P2.4.3).
 baseline/*
 !baseline/python/
+# What explains each gap between the Rust runs and the Python baselines (DESIGN.md P2.4.4), which
+# summarize.py --gate reads, is committed with them.
+!baseline/explained.toml

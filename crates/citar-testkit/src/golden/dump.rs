@@ -4,14 +4,14 @@
 //! `golden check --states` wrote on one that does not, for `golden diff` to compare.
 //!
 //! The games are named as their sets' rows name them, after the set: `turns:arena`,
-//! `pass:<fixture>`, `random:<name>`, `long:<name>`, and, as they start, `newgame:<name>` and
-//! `load:<fixture>`. `golden dump --list` lists them.
+//! `pass:<fixture>`, `random:<name>`, `bot:<name>`, `long:<name>`, and, as they start,
+//! `newgame:<name>` and `load:<fixture>`. `golden dump --list` lists them.
 
 use citar_engine::base::ids::Turn;
 use citar_engine::game::{DebugOptions, Game};
 use citar_engine::save::Snapshot;
 
-use super::games::{LONG_GAMES, Play, pass_games, random_games};
+use super::games::{BOT_GAMES, LONG_GAMES, Play, pass_games, random_games};
 use super::{newgame, turns};
 use crate::fixtures;
 use crate::games;
@@ -25,9 +25,12 @@ const STOP: &str = "golden dump: the round asked for";
 /// If the fixtures or the arena cannot be read.
 pub fn names() -> Result<Vec<String>, String> {
     let mut out = vec!["turns:arena".to_owned()];
-    for (set, plays) in
-        [("pass", pass_games()), ("random", random_games()), ("long", LONG_GAMES.to_vec())]
-    {
+    for (set, plays) in [
+        ("pass", pass_games()),
+        ("random", random_games()),
+        ("bot", BOT_GAMES.to_vec()),
+        ("long", LONG_GAMES.to_vec()),
+    ] {
         out.extend(plays.iter().map(|p| format!("{set}:{}", p.name(set))));
     }
     out.extend(newgame::games()?.into_iter().map(|(name, _, _)| format!("newgame:{name}")));
@@ -60,10 +63,11 @@ pub fn dump(name: &str, turn: Option<Turn>) -> Result<Vec<u8>, String> {
                 }
             }
         }
-        "pass" | "random" | "long" => {
+        "pass" | "random" | "bot" | "long" => {
             let plays = match set {
                 "pass" => pass_games(),
                 "random" => random_games(),
+                "bot" => BOT_GAMES.to_vec(),
                 _ => LONG_GAMES.to_vec(),
             };
             let play = plays

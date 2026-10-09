@@ -9,10 +9,10 @@
 //!                                   that differs and at the round before
 //! cargo golden bless [SET]          rewrite rng.json, libm.json, ruleset.json, uniques.json,
 //!                                   filters.json, gen.json, states.json, convert.json,
-//!                                   turns.json, maps.json, newgame.json, load.json, pass.json
-//!                                   and random.json from this build, or only SET's file; `bless
-//!                                   long` writes long.json (about 80 s); a set that depends on a
-//!                                   stage still pending is refused
+//!                                   turns.json, maps.json, newgame.json, load.json, pass.json,
+//!                                   random.json and bot.json from this build, or only SET's
+//!                                   file; `bless long` writes long.json (about 80 s); a set that
+//!                                   depends on a stage still pending is refused
 //! cargo golden states               rewrite the checked-in states of testdata/states/ from the
 //!                                   generator (then bless); only when the save format changes
 //! cargo golden dump SET:GAME [TURN] [--out FILE]
@@ -26,7 +26,8 @@
 //! Exit codes: 0 all match, 1 something differs or a set named to bless is refused, 2 a usage
 //! or I/O error.
 //!
-//! A set that depends on the engine's stages (`turns`, `pass`, `random`, `long`) is blessed only
+//! A set that depends on the engine's stages (`turns`, `pass`, `random`, `bot`, `long`) is
+//! blessed only
 //! when none of them is pending (DESIGN.md 9.6): until then `check` computes it without
 //! comparing it, and `bless` leaves it out and says why, or refuses it by name.
 //!
@@ -154,7 +155,7 @@ fn check(long: bool, out: Option<&str>, states: Option<&str>) -> ExitCode {
         println!(
             "golden: a set differs from its committed file. If this build is right, `cargo golden \
              bless` (rng, libm, ruleset, uniques, filters, gen, states, convert, turns, maps, \
-             newgame, load, pass, random), `cargo golden bless long` (long) or \
+             newgame, load, pass, random, bot), `cargo golden bless long` (long) or \
              scripts/refcheck/pyfmt_vectors.py (pyfmt), and say why."
         );
         ExitCode::from(1)
