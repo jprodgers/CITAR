@@ -18,7 +18,7 @@ Thanks for looking. CITAR is a game and an instrument, and it needs help with bo
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
 pip install -e ".[dev]"                  # builds the Rust engine too, so it needs a Rust toolchain
-python -m unittest discover -s tests     # about 650 tests, a few minutes
+python -m unittest discover -s tests     # about 650 tests, a few minutes; about 200 of them skip
 citar serve --debug                      # http://127.0.0.1:8765
 ```
 
@@ -29,8 +29,10 @@ offers); `rust-toolchain.toml` pins the exact release, and rustup fetches it on 
 editable install builds the `ci` profile (release optimisation with debug assertions on), which
 takes a few minutes the first time and seconds after a small change; `pip install .` builds the
 release profile, which takes longer. Rebuild after a Rust change with the same command. Neither
-includes the engine's test operations, so `tests/test_engine_module.py` skips the tests that need
-them; the extension's own dev loop under [Rust](#rust) builds with them. Released wheels need no
+includes the engine's test operations, so about 200 of the suite's tests skip: every rule script
+of `tests/rules/` and the other tests that need them (see [Tests](#tests)). The extension's own dev
+loop under [Rust](#rust), `cargo xtask develop`, builds with them, and the whole suite runs with
+none skipped; run it that way before you send a change to the rules. Released wheels need no
 toolchain.
 
 A checkout keeps its state beside the code — `saves/`, `config/`, `benchmarks/` — rather than in
@@ -238,7 +240,8 @@ dependencies (`scripts/ci/requirements.py all`) and unpacks the wheel's library 
 (`scripts/ci/unpack_ext.py`, which fails unless it imports with the test operations), and the
 package job builds the release wheel as it would ship. Every wheel and the source distribution are
 built with one maturin, `MATURIN_VERSION` at the top of `test.yml`, and `scripts/ci/check_dist.py`
-holds each to the checkout: the files git tracks under `citar/`, the library, and nothing stray.
+holds each to the checkout: the files git tracks under `citar/`, the library, and nothing stray,
+and in the source distribution the ruleset the engine compiles in (`crates/citar-engine/data/`).
 After changing `[tool.maturin]`'s `include` or `exclude`, or moving that pin, run it on a local
 build (`python scripts/ci/check_dist.py wheel DIR`, or `sdist DIR`). To run the suite as a test job
 does:
