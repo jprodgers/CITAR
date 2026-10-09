@@ -16,9 +16,12 @@ Every name of the facade, with the shapes its docstrings promise, over the Rust 
   here, in the files Python wrote (``maps.py`` and ``scenario.py``'s storage functions, whose layout this keeps).
 - **Bots** are handles (``citar._engine.Bot``): compiled versions with parameters, never Python objects. A bot seat's
   turn is a one-seat drive; its answer to a negotiation is ``Game.answer``.
-- **Saves** are the Rust engine's own: ``to_save`` is ``{"state": <the state>, "journal": <the whole history as one
-  journal chunk, base64>}`` until package 2-11's container, and ``from_save`` reads it back. A save or scenario the
-  Python engine wrote does not load (``LoadError``, a ValueError).
+- **Saves** are the Rust engine's own (DESIGN.md P2.5): a ``.citar`` container (a small JSON header, the session's
+  record, its metrics and the state, zstd) beside the journal that holds the game's history, written by
+  ``EngineGame.save_snapshot`` and its ``write`` and read by ``read_save`` and ``from_save``; ``save_header`` reads a
+  header alone, which is what listing saves costs. ``to_save`` is the game as one value, ``{"state": <the state>,
+  "journal": <the whole history as one journal chunk, base64>}``, which ``from_save`` also reads. A save or scenario
+  the Python engine wrote does not load (``LoadError``, a ValueError).
 
 The other documented change: ``apply_ops`` is all or nothing (``atomic-apply-ops``), where Python left the operations
 before a failing one applied.
@@ -26,6 +29,7 @@ before a failing one applied.
 from __future__ import annotations
 
 import base64
+import datetime
 import gzip
 import json
 import logging
@@ -50,6 +54,7 @@ __all__ = [
     "bot_owns_negotiation", "run_game",
     "DEBUG_ACTIONS", "EngineGame",
     "EngineCrash", "BackendError", "build_info", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint",
+    "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
 ]
 
 _log = logging.getLogger("citar.engine")
@@ -445,6 +450,182 @@ def bot_fingerprint(bot) -> str:
 
 
 # ----------------------------------------------------------------------------
+# Saves v2 (package 2-11, DESIGN.md P2.5): the container and the journal
+# ----------------------------------------------------------------------------
+def _listing(summary: dict) -> dict:
+    """A header's summary with the player ids state_summary gives as ints."""
+    summary["names"] = _int_keys(summary.get("names") or {})
+    summary["scores"] = _int_keys(summary.get("scores") or {})
+    return summary
+
+
+def _header(raw: bytes) -> dict:
+    """A container's header, its summary's ids as ints."""
+    h = json.loads(raw)
+    _listing(h["summary"])
+    return h
+
+
+class Journal:
+    """One journal of a session's timeline (DESIGN.md P2.5.3), open for appending: it holds the file's OS lock until
+    :meth:`close`, so a second session opening it is refused, and the chunks of history the game's snapshots took
+    that are not on the disk yet (``pending``), which the next save appends first. Made by :func:`open_journal`."""
+
+    def __init__(self, raw):
+        self._j = raw
+
+    @property
+    def path(self) -> Path:
+        return Path(self._j.path)
+
+    @property
+    def records(self) -> int:
+        """The records on the disk."""
+        return self._j.records
+
+    @property
+    def pending(self) -> int:
+        """The chunks taken from the game and not yet appended (a failed or unwritten save leaves them here)."""
+        return self._j.pending
+
+    @property
+    def is_closed(self) -> bool:
+        return self._j.is_closed
+
+    def reference(self) -> dict:
+        """The prefix on the disk, {"file", "records", "bytes", "head"}: what a container names. Waits for a write in
+        progress; OSError once closed."""
+        return json.loads(self._j.reference())
+
+    def truncate_to(self, ref: dict):
+        """Cut the journal back to ``ref``, one of its own prefixes (a save's), dropping the records past it: the
+        chunks of a save that never completed. LoadError (a ValueError) for another timeline's prefix or a corrupt
+        journal; OSError when the disk refuses, after which the cut is made again before the next append."""
+        self._j.truncate_to(_dumps(ref))
+
+    def close(self) -> int:
+        """Let go of the file and its lock, after the write in progress: the chunks still pending, which no save
+        names. Closing twice is nothing."""
+        return self._j.close()
+
+    def _hooks(self, fail_appends: int = 0, stop_before_container: int = 0):
+        """For the tests (a build with the test operations): the next ``fail_appends`` saves fail at their first
+        append, the next ``stop_before_container`` stop once their chunks are on the disk, before the container."""
+        self._j._hooks(fail_appends, stop_before_container)
+
+    def __repr__(self) -> str:
+        return repr(self._j)
+
+
+def open_journal(path) -> tuple[Journal, dict]:
+    """Open (or create) the journal at ``path`` for appending, taking its OS lock. Returns the journal and what opening
+    found, {"records", "bytes", "torn" (the length of an incomplete tail it cut off: a crash mid-append), "corrupt_at"
+    (where a damaged record starts: nothing was cut, appends are refused, and the session forks from the good prefix),
+    "reference" (the good prefix)}. Raises LoadError (a ValueError) when another session holds it or it is no
+    journal."""
+    raw, found = _E.Journal.open(str(path))
+    return Journal(raw), json.loads(found)
+
+
+def fork_journal(path, ref: dict, new_path):
+    """Copy the prefix ``ref`` of the journal at ``path`` to a new journal at ``new_path``, which must not exist, and
+    sync it: a new timeline from a save. LoadError when the prefix cannot be read (a session holds the journal, it is
+    damaged inside the prefix, or of another timeline); OSError when the copy cannot be written (FileExistsError's
+    case included)."""
+    _E.fork_journal(str(path), _dumps(ref), str(new_path))
+
+
+def journal_in_use(path) -> bool:
+    """Whether a session (of this process or another) holds the journal at ``path`` now."""
+    return _E.journal_in_use(str(path))
+
+
+class SaveFile:
+    """A ``.citar`` container read back (:func:`read_save`): ``header`` (as :func:`save_header` gives it), ``journal``
+    (the prefix of its journal it names, or None), the session's record and metrics (``session``, ``metrics``), and
+    the state, which :meth:`EngineGame.from_save` loads."""
+
+    def __init__(self, raw):
+        self._raw = raw
+        self.path = Path(raw.path)
+        self.header = _header(raw.header())
+        self._session: Optional[dict] = None
+        self._metrics: Optional[dict] = None
+
+    @property
+    def journal(self) -> Optional[dict]:
+        return self.header["journal"]
+
+    @property
+    def summary(self) -> dict:
+        """The state's headline facts, as state_summary gives them, and "seats" (each seat's type, by seat)."""
+        return self.header["summary"]
+
+    @property
+    def session(self) -> dict:
+        if self._session is None:
+            self._session = json.loads(self._raw.session())
+        return self._session
+
+    @property
+    def metrics(self) -> dict:
+        if self._metrics is None:
+            self._metrics = json.loads(self._raw.metrics())
+        return self._metrics
+
+    def __repr__(self) -> str:
+        return f"<SaveFile {self.path.name} turn {self.summary.get('turn')}>"
+
+
+def read_save(path) -> SaveFile:
+    """Read the save at ``path``: its header and its body, decompressed and checked. Raises LoadError (a ValueError)
+    for a file that is damaged or no save of this version; a save of the Python engine (version 1) says so: "saved by
+    the Python engine; archived with 0.1.5"."""
+    return SaveFile(_E.read_save(str(path)))
+
+
+def save_header(path) -> dict:
+    """The header of the save at ``path``, without reading its body (what listing saves costs: never the state):
+    {"format", "version", "saved_at", "engine_build", "rules", "summary" (state_summary's keys, and "seats": each
+    seat's type), "session" ({"id", "name", "benchmark"}), "journal" ({"file", "records", "bytes", "head"} or
+    None)}. Raises LoadError as read_save."""
+    return _header(_E.save_header(str(path)))
+
+
+class SaveSnapshot:
+    """A game taken for a save under the session's lock (:meth:`EngineGame.save_snapshot`): a copy of its state, its
+    history since the last save queued in the journal, and the time it was taken. :meth:`write` writes it off the
+    lock."""
+
+    def __init__(self, raw):
+        self._s = raw
+        self.saved_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
+
+    @property
+    def turn(self) -> int:
+        return self._s.turn
+
+    @property
+    def records(self) -> int:
+        """The chunks of history its state counts: the journal records its container names."""
+        return self._s.records
+
+    def write(self, path, journal: Journal, session, metrics):
+        """Write the save to ``path`` beside ``journal`` (the GIL released): the journal's pending chunks up to this
+        snapshot appended and synced, then the container naming them, through a temporary file and a rename.
+        ``session`` and ``metrics`` are the session's record and metrics, as dicts or JSON bytes; the record's "id",
+        "name" and "benchmark" name the save's session in its header, and its seats' types go into the header's summary.
+        Raises OSError when the save was not written: its chunks stay pending for the next save, and the old file
+        stays."""
+        session = session if isinstance(session, bytes) else _dumps(session)
+        metrics = metrics if isinstance(metrics, bytes) else _dumps(metrics)
+        self._s.write(str(path), journal._j, session, metrics, self.saved_at)
+
+    def __repr__(self) -> str:
+        return repr(self._s)
+
+
+# ----------------------------------------------------------------------------
 # One game
 # ----------------------------------------------------------------------------
 class EngineGame:
@@ -476,23 +657,37 @@ class EngineGame:
         return cls(_E.Game.new(_dumps(_run_config(config))))
 
     @classmethod
-    def _load(cls, state: dict, journal: Optional[str]) -> "EngineGame":
-        """A game from a state and, for a save, the journal chunk of its history. What the load found is logged: a
-        game another ruleset made, and a save whose history did not come back whole. A state alone (a scenario, an
-        undo) has no history to miss."""
-        g, report = _E.Game.load(_dumps(state), [base64.b64decode(journal)] if journal else [])
+    def _loaded(cls, g, report: bytes, history: bool) -> "EngineGame":
+        """A loaded game, with what the load found logged: a game another ruleset made, and a save whose history did not
+        come back whole. A state alone (a scenario, an undo) has no history to miss."""
         r = json.loads(report)
         if r.get("rules_changed"):
             _log.warning("This game was made with another ruleset (%s, engine %s): it plays on with this one's.",
                          *r["rules_changed"])
-        if journal and r.get("chronicle_incomplete"):
+        if history and r.get("chronicle_incomplete"):
             _log.warning("This game's history did not come back whole: its replay and statistics are incomplete.")
         return cls(g)
 
     @classmethod
-    def from_save(cls, data: dict) -> "EngineGame":
-        """A game from a save's engine part, {"state", "journal"} (see to_save). Raises LoadError (a ValueError) for
-        one that does not load, a save of the Python engine's included."""
+    def _load(cls, state: dict, journal: Optional[str]) -> "EngineGame":
+        """A game from a state and, for a value save (to_save), the journal chunk of its history."""
+        g, report = _E.Game.load(_dumps(state), [base64.b64decode(journal)] if journal else [])
+        return cls._loaded(g, report, bool(journal))
+
+    @classmethod
+    def from_save(cls, data, journal=None, history: bool = True) -> "EngineGame":
+        """A game from a save: a ``.citar`` container (:func:`read_save`'s :class:`SaveFile`), or the game as one value
+        ({"state", "journal"}, see to_save). A container's history is read from the journal its header names, beside
+        it, or from ``journal`` (the path of a copy: a fork); with ``history=False`` it loads the state alone, with no
+        history (a scenario's start). Reading a journal takes a shared lock, so a journal a session is writing cannot be
+        read: stop that session first. Raises LoadError (a ValueError) for a save that does not load: one whose history
+        is missing, damaged inside the records it names or of another timeline, which never loads with a history it was
+        not saved with, and a save of the Python engine."""
+        if isinstance(data, SaveFile):
+            ref = data.journal if history else None
+            path = None if ref is None else Path(journal) if journal is not None else data.path.parent / ref["file"]
+            g, report = _E.Game.load_save(data._raw, None if path is None else str(path))
+            return cls._loaded(g, report, path is not None)
         return cls._load(data["state"], data.get("journal"))
 
     @classmethod
@@ -502,11 +697,20 @@ class EngineGame:
         return cls._load(state, None)
 
     def to_save(self) -> dict:
-        """The game's part of a save: {"state" (the state as state_dict gives it, its journal position counting the
+        """The game as one value: {"state" (the state as state_dict gives it, its journal position counting the
         chunk), "journal" (the whole history as one journal chunk, base64 text, or None before there is any)}, built
-        fresh under the game's lock."""
+        fresh under the game's lock; :meth:`from_save` reads it back. The game's own journal does not move. A session
+        saves through :meth:`save_snapshot` and the container instead."""
         state, chunk = self._g.save()
         return {"state": json.loads(state), "journal": None if chunk is None else base64.b64encode(chunk).decode()}
+
+    def save_snapshot(self, journal: Journal) -> SaveSnapshot:
+        """Take the game for a save, under the session's lock (DESIGN.md P2.5.3): its history since the last save goes
+        into ``journal``'s pending chunks, and the snapshot is a copy of the state, which :meth:`SaveSnapshot.write`
+        writes off the lock with the container. A journal with no records and none pending is a new one: the game's
+        journal starts over, its first chunk the whole history the game keeps. A crashed game is saved too, for
+        whoever debugs it. Raises OSError for a closed journal and RuntimeError for a journal of another timeline."""
+        return SaveSnapshot(self._g.save_snapshot(journal._j))
 
     def state_dict(self) -> dict:
         """An independent copy of the whole state (without its history), to undo to or to start a scenario from."""
