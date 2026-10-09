@@ -1041,11 +1041,12 @@ class SaveJob:
     """One save the writer writes: the snapshot taken under the lock, its journal, where it goes, and copies of the
     session's record and metrics as JSON. ``result`` waits for it."""
 
-    __slots__ = ("snap", "journal", "path", "autosave", "session", "metrics", "done", "error", "superseded")
+    __slots__ = ("snap", "journal", "path", "autosave", "session", "metrics", "done", "error", "superseded", "ticket")
 
     def __init__(self, snap, journal, path: Path, autosave: bool, session: bytes, metrics: bytes):
         self.snap, self.journal, self.path, self.autosave = snap, journal, path, autosave
         self.session, self.metrics = session, metrics
+        self.ticket = 0                  # its place in the writer's order (SaveWriter.submit)
         self.done = threading.Event()
         self.error: Optional[BaseException] = None
         self.superseded = False          # an autosave a newer one replaced before it was written
@@ -1080,7 +1081,8 @@ class SaveWriter:
         self._name = f"saves-{session.id}"
         self._cv = threading.Condition()
         self._jobs: deque = deque()
-        self._busy = False
+        self._submitted = 0                  # the saves taken so far
+        self._finished = 0                   # every save before this ticket is written or passed over
         self._closed = False
         self._thread: Optional[threading.Thread] = None
 
@@ -1089,6 +1091,8 @@ class SaveWriter:
         with self._cv:
             if self._closed:
                 raise RuntimeError("This game has been closed.")
+            job.ticket = self._submitted
+            self._submitted += 1
             self._jobs.append(job)
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
@@ -1102,6 +1106,7 @@ class SaveWriter:
             if job.autosave and any(j.autosave for j in self._jobs):
                 job.superseded = True
                 job.done.set()
+                self._finished = job.ticket + 1
                 continue
             return job
         return None
@@ -1115,7 +1120,6 @@ class SaveWriter:
                 if job is None:              # closed, and every save taken is written
                     self._cv.notify_all()
                     return
-                self._busy = True
             try:
                 job.write()
             except BaseException as e:       # recorded, and the writer goes on: the next save carries the history
@@ -1126,14 +1130,16 @@ class SaveWriter:
             finally:
                 job.done.set()
                 with self._cv:
-                    self._busy = False
+                    self._finished = job.ticket + 1
                     self._cv.notify_all()
 
     def drain(self, timeout: Optional[float] = None) -> bool:
-        """Wait until every save taken so far is written (or passed over); whether they were within ``timeout``."""
+        """Wait until every save taken before the call is written (or passed over); whether they were within
+        ``timeout``. Saves taken meanwhile are not waited for, so a game that plays on cannot keep it waiting."""
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._cv:
-            while self._jobs or self._busy:
+            target = self._submitted
+            while self._finished < target:
                 left = None if deadline is None else deadline - time.monotonic()
                 if left is not None and left <= 0:
                     return False

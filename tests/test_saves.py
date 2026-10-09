@@ -379,6 +379,39 @@ class OneWriterTests(SavesCase):
                          [f"round note {i}" for i in range(4)])
 
 
+    def test_flushing_waits_for_the_saves_taken_before_it_not_for_the_game_to_stop(self):
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 4)
+        real = sess.SaveJob.write
+
+        def slow(job):
+            time.sleep(0.15)
+            real(job)
+        stop = threading.Event()
+
+        def keep_saving():                       # a game that keeps taking autosaves faster than they are written
+            i = 0
+            while not stop.is_set():
+                with s.lock:
+                    s.game.add_thought(0, f"note {i}", "note")
+                    s.autosave(force=True)
+                i += 1
+                time.sleep(0.02)
+        with mock.patch.object(sess.SaveJob, "write", slow):
+            t = threading.Thread(target=keep_saving)
+            t.start()
+            try:
+                time.sleep(0.3)
+                t0 = time.perf_counter()
+                self.assertTrue(s.flush_saves(10))
+                took = time.perf_counter() - t0
+            finally:
+                stop.set()
+                t.join(10)
+        self.assertLess(took, 1.0, "the saves taken before the flush, a write or two")
+        self.assertTrue(s.flush_saves(10))
+
+
 @needs_test_ops
 class ListingTests(SavesCase):
     """Gates 6 and 7: a gargantuan game's snapshot under the lock, and listing 50 gargantuan saves by headers alone."""
