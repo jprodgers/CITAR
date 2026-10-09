@@ -7,18 +7,19 @@ from __future__ import annotations
 import asyncio
 import time
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect)
 from sqlalchemy.orm import Session as DbSession
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import engine_api
-from ..engine_api import ActionError, EngineGame
-from .session import SessionManager, GameSession, SAVE_DIR
+from ..engine_api import ActionError, EngineCrash, EngineGame
+from .session import CRASHED, SessionManager, GameSession, SAVE_DIR
 from .benchmarks import BenchmarkScheduler
 from .admin_api import router as admin_router
 from .setup_api import router as setup_router
@@ -43,6 +44,24 @@ app.include_router(setup_router)
 manager = SessionManager()
 scheduler: Optional[BenchmarkScheduler] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+@app.exception_handler(EngineCrash)
+async def _engine_crash(request: Request, exc: EngineCrash):
+    """An internal error of the engine that no route turned into its session's crash (``_crash_guard`` does): a 500
+    that says what happened, never a refusal the caller could fix (DESIGN.md P2.6.3)."""
+    return JSONResponse({"detail": CRASHED}, status_code=500)
+
+
+@contextmanager
+def _crash_guard(s: "GameSession"):
+    """Runs a route's calls into session ``s``'s game: an ``EngineCrash`` crashes the session (GameSession._crashed:
+    paused, its driver and agents stopped, the crash saved) and is a 500 saying so."""
+    try:
+        yield
+    except EngineCrash as e:
+        s._crashed(str(e))
+        raise HTTPException(500, CRASHED) from None
 
 
 @app.on_event("startup")
@@ -444,7 +463,7 @@ def game_summary(gid: str, request: Request, p: Principal = Depends(principal), 
     the fog of war would hide.
     """
     s, _row, perms = _gate(sdb, gid, p, access.VIEW, request)
-    with s.lock:
+    with s.lock, _crash_guard(s):
         g = s.game
         full = access.MANAGE in perms or s.god_view_allowed()
         seats = {seat.player: seat for seat in s.seats}
@@ -471,7 +490,7 @@ def game_summary(gid: str, request: Request, p: Principal = Depends(principal), 
         info = s.info()
         current = g.player_name(summ["current"]) if summ["phase"] == "playing" else None
         return {**{k: info[k] for k in ("id", "name", "turn", "phase", "winner", "victory", "paused", "pause_reason",
-                                        "ai_delay", "created", "config")},
+                                        "ai_delay", "created", "config", "crashed")},
                 "turn_limit": summ["turn_limit"], "current": current, "players": players, "events": events,
                 "full": full, "can_manage": access.MANAGE in perms}
 
@@ -586,32 +605,32 @@ def view(gid: str, request: Request, token: Optional[str] = None, as_player: Opt
 
     ``as_player`` is for spectators of AI-only games, who may look through any civilization's eyes -
     and is refused for anyone who is actually playing, since that would be seeing the whole map.
+
+    The engine writes the view as JSON with the server's keys (``seat`` or ``spectator``, ``session``,
+    ``version``) spliced in (``EngineGame.view_json``), and the route returns those bytes as they are: a
+    gargantuan god view would otherwise cost a parse and a re-dump of megabytes on every refresh.
     """
     s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
     tok = _token(request, token)
-    with s.lock:
+    with s.lock, _crash_guard(s):
         seat = s.seat_for_token(tok)
         if seat is not None:
-            v = s.game.view(seat.player)
-            v["seat"] = seat.public()
+            pid, extra = seat.player, {"seat": seat.public()}
         elif s.is_spectator(tok) or access.VIEW in perms:
             # Looking through one civilization's eyes is as revealing as the god view while a human is
             # playing: it shows that civ's private cities, units and diplomacy, and for the AI seats it
             # is a map of everything they have scouted. Both follow the same rule.
             if not s.god_view_allowed():
                 raise HTTPException(403, "Spectator views are disabled while humans are playing.")
-            if as_player is not None:
-                if not 0 <= as_player < len(s.seats):
-                    raise HTTPException(404, "No such player.")
-                v = s.game.view(as_player)
-            else:
-                v = s.game.view(None)
-            v["spectator"] = True
+            if as_player is not None and not 0 <= as_player < len(s.seats):
+                raise HTTPException(404, "No such player.")
+            pid, extra = as_player, {"spectator": True}
         else:
             raise HTTPException(403, "Invalid token.")  # unreachable: _gate already checked
-        v["session"] = s.info()
-        v["version"] = s.version
-        return JSONResponse(v)
+        extra["session"] = s.info()
+        extra["version"] = s.version
+        body = s.game.view_json(pid, extra)
+    return Response(body, media_type="application/json")
 
 
 class ToolCallBody(BaseModel):
@@ -641,7 +660,7 @@ def path_preview(gid: str, request: Request, unit_id: int, x: int, y: int,
     Read-only and not part of the AI tool set."""
     s, _row, _perms = _gate(sdb, gid, p, access.PLAY, request, token)
     pid = _seat_pid(s, _token(request, token))
-    with s.lock:
+    with s.lock, _crash_guard(s):
         return s.game.path_preview(pid, unit_id, x, y)
 
 
@@ -672,7 +691,7 @@ def debug_action(gid: str, action: str, request: Request, p: Principal = Depends
     if os.environ.get("CITAR_DEBUG") != "1":
         raise HTTPException(404, "Debug endpoints are disabled.")
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
-    with s.lock:
+    with s.lock, _crash_guard(s):
         g = s.game
         try:
             g.debug(action)
@@ -697,20 +716,20 @@ def game_metrics_csv(gid: str, request: Request, p: Principal = Depends(principa
     """The same metrics as CSV, for analysis outside CITAR."""
     import csv
     import io
-    from fastapi.responses import Response
+    from .metrics import bot_actions_text
     s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request)
-    with s.lock:
+    with s.lock, _crash_guard(s):
         rows = s.metrics.turn_rows()
         names = {p["id"]: p["name"] for p in s.game.summary()["players"]}
     cols = ["turn", "player", "civ", "controller", "model", "wall_s", "model_steps", "model_s", "input_tokens",
             "output_tokens", "reasoning_tokens", "tool_calls", "actions_ok", "queries", "errors", "repeats",
             "blocked_repeats", "malformed", "stall_nudges", "peak_prompt_tokens", "slowest_step_s", "context_length",
-            "model_loaded_at_start", "end_reason", "top_tools"]
+            "model_loaded_at_start", "end_reason", "top_tools", "bot_actions"]
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     w.writeheader()
     for r in rows:
-        w.writerow({**r, "civ": names.get(r["player"], "")})
+        w.writerow({**r, "civ": names.get(r["player"], ""), "bot_actions": bot_actions_text(r.get("bot_actions"))})
     return Response(buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="citar-{gid}-metrics.csv"'})
 
@@ -941,7 +960,7 @@ def maps_from_game(gid: str, request: Request, p: Principal = Depends(principal)
     this is exactly the kind of route that gets added and forgotten.
     """
     s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request)
-    with s.lock:
+    with s.lock, _crash_guard(s):
         return s.game.export_map(f"{s.name} terrain")
 
 
@@ -1409,16 +1428,16 @@ def replay(gid: str, request: Request, token: Optional[str] = None,
     tok = _token(request, token)
     if not (s.game.phase != "playing" or (s.is_spectator(tok) and s.god_view_allowed())):
         raise HTTPException(403, "The recap is available when the game is over (or to spectators of AI-only games).")
-    return _replay_payload(s)
+    return Response(_replay_payload(s), media_type="application/json")
 
 
-def _replay_payload(s: GameSession) -> dict:
-    """Build the replay, under the session lock so it cannot catch a half-applied turn."""
-    with s.lock:
-        data = s.game.replay_data()
-        for p in data["players"]:
-            p["seat"] = s.seats[p["id"]].public() if p["id"] < len(s.seats) else None
-        return {"id": s.id, "name": s.name, **data}
+def _replay_payload(s: GameSession) -> bytes:
+    """The replay as JSON bytes, built under the session lock so it cannot catch a half-applied turn: the engine
+    writes it with the game's ``id`` and ``name`` first and each player's ``seat`` (``EngineGame.replay_json``), and the
+    route returns those bytes as they are, as /view does."""
+    with s.lock, _crash_guard(s):
+        seats = [seat.public() for seat in s.seats]
+        return s.game.replay_json({"id": s.id, "name": s.name, "seats": seats})
 
 
 # ----------------------------------------------------------------------------

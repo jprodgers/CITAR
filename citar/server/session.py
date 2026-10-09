@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .. import engine_api
-from ..engine_api import ActionError, EngineGame
+from ..engine_api import ActionError, EngineCrash, EngineGame
 from .metrics import Metrics
 from .. import paths
 
@@ -21,6 +21,9 @@ from .. import paths
 # citar.paths decides the rest (a checkout writes beside the code, an install writes per-user).
 SAVE_DIR = paths.saves_path()
 SEAT_TYPES = ("human", "mcp", "llm", "bot")
+#: What a player is told when the engine has stopped after an internal error (GameSession._crashed).
+CRASHED = ("The game engine stopped after an internal error, so this game takes no more moves. It is paused as it "
+           "was: its last good autosave is kept, and the state at the crash was saved for debugging.")
 
 
 @dataclass
@@ -60,6 +63,10 @@ class GameSession:
     One lock guards the game. Every mutation takes it, including the driver's, so a tool call from an
     HTTP request cannot interleave with an AI's turn. Readers that build a large payload take it too,
     which is why the replay is assembled under the lock rather than streamed.
+
+    An internal error of the engine (``EngineCrash``, wherever it surfaces: a tool call, a bot's drive, a
+    responder, a view) stops the session for good (``_crashed``): the engine refuses every command of a
+    crashed game, so the session pauses it, stops its driver and agents, and keeps answering reads.
     """
     def __init__(self, game: EngineGame, seats: list[Seat], name: str = "", session_id: Optional[str] = None):
         self.id = session_id or secrets.token_hex(4)
@@ -87,6 +94,8 @@ class GameSession:
         self._metrics_current: Optional[tuple] = None
         self.benchmark: Optional[dict] = None   # {"run_id", "job_id", "suite", "scenario", "model", ...} for benchmark games
         self.usage_act: Optional[str] = None    # usage ledger activity id (usage.py)
+        self.crashed: Optional[dict] = None     # {"message", "turn", "at"} once the engine stopped (_crashed)
+        self._autosaved: Optional[tuple] = None  # (turn, phase) of the last autosave
         game.subscribe(self._on_event)
         self._track_turn()
 
@@ -135,6 +144,7 @@ class GameSession:
             "agent_errors": {str(k): a.last_error for k, a in self.agents.items() if getattr(a, "last_error", None)},
             "god_view_allowed": self.god_view_allowed(),
             "benchmark": self.benchmark,
+            "crashed": self.crashed,
         }
         if include_tokens:
             d["spectator_token"] = self.spectator_token
@@ -147,6 +157,8 @@ class GameSession:
         """Execute a tool for a player. Returns {"ok": bool, "result"|"error"}."""
         if self._stop:
             return {"ok": False, "error": "This game has been closed."}
+        if self.crashed:
+            return {"ok": False, "error": CRASHED}
         with self.lock:
             before_turn, before_current = self.game.turn, self.game.current
             kind = engine_api.tool_kind(name) or "unknown"
@@ -157,6 +169,10 @@ class GameSession:
             except ActionError as e:
                 self.metrics.tool_call(pid, name, args or {}, kind, False, time.perf_counter() - t0, str(e))
                 return {"ok": False, "error": str(e)}
+            except EngineCrash as e:  # the engine stopped: never a refusal the caller could fix
+                self.metrics.tool_call(pid, name, args or {}, kind, False, time.perf_counter() - t0, "engine crash")
+                self._crashed(str(e))
+                return {"ok": False, "error": CRASHED}
             except Exception as e:  # engine bug: report, don't crash the server
                 self.errors.append({"t": time.time(), "player": pid, "tool": name, "args": args,
                                     "trace": traceback.format_exc()})
@@ -213,6 +229,72 @@ class GameSession:
             self.cond.notify_all()
         self._broadcast({"type": "update", "version": self.version, "turn": g.turn, "current_player": g.current,
                          "phase": g.phase})
+
+    def drive_bots(self, pid: int) -> dict:
+        """One drive of the game's bot seats on ``pid``'s turn (``EngineGame.drive``, one seat's turn at most), with
+        every side effect an action has. Called with the lock held, by ``pid``'s BotAgent.
+
+        Every bot seat is passed, so a negotiation one bot opens with another is answered inside the drive. The drive's
+        action counts for ``pid`` go on its turn's metrics record (``bot_actions``), whose ``end_reason`` is
+        ``end_turn`` when the drive ended the turn; then ``_after_action`` runs: the version, the metrics turns, the
+        responders of the seats a chat now waits on, the broadcasts and the autosave. Returns the drive's stop
+        (``{"stop", "player", "negotiations", "actions"}``); ``{"stop": "crashed"}`` when the engine stopped, which
+        crashes the session (``_crashed``).
+        """
+        g = self.game
+        before = (g.turn, g.current)
+        bots = {}
+        for seat in self.seats:
+            if seat.type == "bot":
+                agent = self.get_agent(seat.player)
+                if agent is not None:
+                    bots[seat.player] = agent.bot
+        try:
+            stop = g.drive(bots, seat_limit=1)
+        except EngineCrash as e:
+            self._crashed(str(e))
+            return {"stop": "crashed", "player": pid, "negotiations": [], "actions": {}}
+        self.metrics.bot_actions(pid, stop["actions"].get(pid))
+        if (g.turn, g.current) != before or g.phase != "playing":
+            rec = self.metrics.current(pid)
+            if rec is not None and not rec["end_reason"]:
+                rec["end_reason"] = "end_turn"
+        self._after_action(*before)
+        return stop
+
+    # ------------------------------------------------------------------
+    # Crashes
+    # ------------------------------------------------------------------
+    def _crashed(self, message: str):
+        """The engine stopped after an internal error (``EngineCrash``): stop the session where it stands.
+
+        A crashed game refuses every command, so nothing may play on: the game is paused (``pause_reason`` kind
+        ``crashed``), the driver stops, every agent is cancelled and nothing is emitted on the game. Watchers get a
+        ``crashed`` broadcast, and ``info()`` (the lobby, the game screen) shows it. The state as the crash left it is
+        written once as ``crash-<turn>.citar`` for whoever debugs it; the autosave is never written again, so the last
+        good one is what a restart or a load comes back to. Reads (the summary, the views, the replay) still answer.
+        Idempotent; safe with or without the lock held.
+        """
+        with self.lock:
+            if self.crashed is not None:
+                return
+            turn = self.game.turn
+            self.crashed = {"message": str(message)[:4000], "turn": turn, "at": time.time()}
+            self.paused = True
+            self.pause_reason = {"kind": "crashed", "message": CRASHED, "since": time.time()}
+            self.metrics.pause()
+            for pid in list(self.agents):
+                self.cancel_agent(pid)
+            self.metrics.interrupt_open()
+            self._metrics_current = None
+            self.errors.append({"t": time.time(), "where": "engine", "trace": str(message)})
+            self.cond.notify_all()
+            try:
+                self.save(f"crash-{turn:03d}")
+            except Exception:
+                self.errors.append({"t": time.time(), "where": "crash save", "trace": traceback.format_exc()})
+        self.mark_live()
+        self._broadcast({"type": "crashed", "turn": turn, "message": CRASHED})
 
     def _await(self, done, timeout: float, halted=None, hold_paused: bool = False) -> float:
         """Wait, with the lock held, until done() holds, the timeout passes, the session stops or halted() is true.
@@ -291,18 +373,21 @@ class GameSession:
                 threading.Thread(target=self._run_responder, args=(pid, n["id"], key), daemon=True).start()
 
     def _run_responder(self, pid: int, nid: int, key):
-        """Run an AI seat's answer to a negotiation, off the turn driver."""
-        if self._stop:
+        """Run an AI seat's answer to a negotiation, off the turn driver. A bot seat answers through the engine
+        (``EngineGame.answer``, BotAgent.respond_negotiation), a model seat through its tool calls."""
+        if self._stop or self.crashed:
             return
         agent = self.get_agent(pid)
         try:
             if agent is not None:
                 agent.respond_negotiation(self, pid, nid)
+        except EngineCrash as e:
+            self._crashed(str(e))
         except Exception:
             self.errors.append({"t": time.time(), "player": pid, "where": "negotiation responder",
                                 "trace": traceback.format_exc()})
         finally:
-            if not self._stop:
+            if not self._stop and not self.crashed:
                 self._reject_if_unanswered(pid, nid, key)
 
     def _reject_if_unanswered(self, pid: int, nid: int, key):
@@ -317,16 +402,22 @@ class GameSession:
                     self._after_action(self.game.turn, self.game.current)
             except ActionError:
                 pass
+            except EngineCrash as e:
+                self._crashed(str(e))
 
     def close_negotiation(self, nid: int, status: str, note: str, by: Optional[int] = None) -> bool:
         """Time a chat out or force it closed (diplomacy.close_negotiation), and tell everyone watching.
 
-        Returns False when there was nothing to close: the negotiation had been settled in the meantime.
+        Returns False when there was nothing to close: the negotiation had been settled in the meantime, or the
+        engine has stopped (the session is then crashed).
         """
         with self.lock:
             try:
                 self.game.close_negotiation(nid, status, note, by)
             except ActionError:
+                return False
+            except EngineCrash as e:
+                self._crashed(str(e))
                 return False
             self._after_action(self.game.turn, self.game.current)
             return True
@@ -386,15 +477,20 @@ class GameSession:
 
         A new seat type is also the civilization's new engine controller, so its difficulty numbers and the
         decisions the engine takes for it follow the change (except any its seat set explicitly). Raises
-        ValueError for an unknown seat type.
+        ValueError for an unknown seat type, and EngineCrash on a game whose engine has stopped (the session is
+        then crashed, as everywhere).
         """
         with self.lock:
             seat = self.seats[pid]
             if type:
                 if type not in SEAT_TYPES:
                     raise ValueError(f"Unknown seat type '{type}' (one of {', '.join(SEAT_TYPES)}).")
+                try:
+                    self.game.set_controller(pid, type)
+                except EngineCrash as e:
+                    self._crashed(str(e))
+                    raise
                 seat.type = type
-                self.game.set_controller(pid, type)
             if llm is not None:
                 seat.llm = llm
             if bot is not None:
@@ -408,10 +504,11 @@ class GameSession:
         """Pause or resume the AI players from the game screen.
 
         A pause stops the game, clocks included: the turn in progress stops counting, and an AI that is
-        mid-turn holds before its next model call until play resumes (see LLMAgent.play_turn).
+        mid-turn holds before its next model call until play resumes (see LLMAgent.play_turn). A crashed game stays
+        paused (``_crashed``).
         """
         with self.lock:
-            if paused == self.paused:
+            if paused == self.paused or self.crashed:
                 return
             self.paused = paused
             self.pause_reason = None
@@ -426,8 +523,11 @@ class GameSession:
         The interrupted turn is excluded from metrics and replayed from its current state on resume().
 
         ``reason`` is shown on the game screen; any pause replaces the one before it, which is also how a
-        disconnect watcher knows that someone else has since paused the game for their own reasons."""
+        disconnect watcher knows that someone else has since paused the game for their own reasons. A crashed game
+        keeps its own pause."""
         with self.lock:
+            if self.crashed:
+                return
             self.paused = True
             self.pause_reason = reason
             self.metrics.pause()
@@ -440,8 +540,10 @@ class GameSession:
         self._broadcast({"type": "control", "paused": True, "ai_delay": self.ai_delay, "pause_reason": reason})
 
     def resume(self):
-        """Resume a paused game."""
+        """Resume a paused game; a crashed one stays paused (``_crashed``)."""
         with self.lock:
+            if self.crashed:
+                return
             self.paused = False
             self.pause_reason = None
             self.metrics.unpause()
@@ -610,9 +712,13 @@ class GameSession:
         """The turn driver: run each AI seat's turn to completion, then move on.
 
         The loop that makes a game with no humans in it play itself, and the one that must never die - a
-        failure in one seat's turn is recorded and skipped rather than ending the game.
+        failure in one seat's turn is recorded and skipped rather than ending the game. Only a crash of the engine
+        itself (``EngineCrash``) ends it (``_crashed``): the game then takes no more commands.
+
+        A bot seat's turn is driven by the engine and ends inside the drive (BotAgent.play_turn), so the check below
+        finds the turn already over and leaves it; any other turn an agent leaves open is closed here.
         """
-        while not self._stop:
+        while not self._stop and not self.crashed:
             with self.lock:
                 g = self.game
                 if g.phase != "playing":
@@ -631,11 +737,16 @@ class GameSession:
             self._broadcast({"type": "agent", "player": pid, "status": "thinking"})
             try:
                 agent.play_turn(self, pid)
+            except EngineCrash as e:
+                self._crashed(str(e))
             except Exception as e:
+                # Recorded and shown to watchers, never emitted on the game: an agent's failure is the server's news,
+                # and the game is the engine's to change.
                 if not self._stop:
                     self.errors.append({"t": time.time(), "player": pid, "where": "play_turn", "trace": traceback.format_exc()})
-                    self.game.emit("agent_error", f"{self.game.player_name(pid)}'s AI failed: {e}", [pid])
-            if self._stop:
+                    self._broadcast({"type": "agent_error", "player": pid,
+                                     "text": f"{g.player_name(pid)}'s AI failed: {e}"})
+            if self._stop or self.crashed:
                 break
             if getattr(agent, "cancelled", False):
                 continue  # controller changed mid-turn: let the new controller play this same turn
@@ -655,6 +766,9 @@ class GameSession:
                         self._after_action(*before)
                     except ActionError:
                         pass
+                    except EngineCrash as e:
+                        self._crashed(str(e))
+                        break
             if self.ai_delay > 0:
                 time.sleep(self.ai_delay)
 
@@ -723,28 +837,38 @@ class GameSession:
     # Saves
     # ------------------------------------------------------------------
     def to_save(self) -> dict:
-        """The whole session as a saveable document."""
+        """The whole session as a saveable document. The game's part is the engine's own (``EngineGame.to_save``:
+        on Rust its state and its whole history as one journal chunk, until package 2-11's container)."""
         return {
             "format": "citar-save", "version": 1, "rules_version": engine_api.rules_version(), "saved_at": time.time(),
             "session": {"id": self.id, "name": self.name, "created": self.created,
                         "seats": [{**asdict(s), "connected": False} for s in self.seats],
-                        "spectator_token": self.spectator_token, "benchmark": self.benchmark, "usage_act": self.usage_act},
+                        "spectator_token": self.spectator_token, "benchmark": self.benchmark, "usage_act": self.usage_act,
+                        "crashed": self.crashed},
             **self.game.to_save(),
             "metrics": self.metrics.data,
         }
 
-    def save(self, filename: Optional[str] = None) -> Path:
-        """Write a named save."""
+    #: The gzip level of the autosave, written every round under the lock: level 1 takes about a fifth of level 9's
+    #: time for files about 1.7 times as large. Named saves are written once and smaller.
+    AUTOSAVE_LEVEL = 1
+    SAVE_LEVEL = 6
+
+    def save(self, filename: Optional[str] = None, level: Optional[int] = None) -> Path:
+        """Write a named save (``turnNNN`` when none is given)."""
         with self.lock:
             data = self.to_save()
+            turn = self.game.turn
         folder = SAVE_DIR / self.id
         folder.mkdir(parents=True, exist_ok=True)
-        name = filename or f"turn{self.game.turn:03d}"
+        name = filename or f"turn{turn:03d}"
         name = "".join(ch for ch in name if ch.isalnum() or ch in "-_ ")[:60] or "save"
         path = folder / f"{name}.citar"
         tmp = path.with_suffix(".tmp")
-        with gzip.open(tmp, "wt", encoding="utf-8") as f:
-            json.dump(data, f)
+        # one write of the whole document: json.dump's many small writes through gzip cost twice as long
+        body = json.dumps(data).encode("utf-8")
+        with gzip.open(tmp, "wb", compresslevel=self.SAVE_LEVEL if level is None else level) as f:
+            f.write(body)
         for attempt in range(8):
             try:
                 tmp.replace(path)
@@ -756,7 +880,6 @@ class GameSession:
                 time.sleep(0.25)
         return path
 
-    AUTOSAVE_MIN_SECONDS = 3.0
     LIVE_MARK = "live.json"
 
     def mark_live(self):
@@ -794,19 +917,23 @@ class GameSession:
                 pass
 
     def autosave(self, force: bool = False):
-        """Write the autosave, at most once per turn unless forced.
+        """Write the autosave: once per round (and once when the game ends) unless forced.
 
-        This is what makes a benchmark survive a restart: the scheduler reloads from here, and a game
-        interrupted mid-run continues from the last completed turn.
+        This is what makes a game survive a restart: the scheduler reloads a benchmark from here, restore_live a
+        lobby game, and a game interrupted mid-run continues from the start of its round, at most one round behind.
+        Every round, however fast the round: on the Rust engine an all-bot round takes milliseconds, and a time
+        limit between autosaves would leave the autosave hundreds of rounds behind. A crashed game is never
+        autosaved again, so its autosave stays the last good state (``_crashed``).
         """
-        if self._stop:
+        if self._stop or self.crashed:
             return
-        # all-AI games can finish a round many times a second; don't rewrite the save file that often
-        if not force and self.game.phase == "playing" and time.time() - getattr(self, "_last_autosave", 0) < self.AUTOSAVE_MIN_SECONDS:
+        g = self.game
+        mark = (g.turn, g.phase)
+        if not force and mark == self._autosaved:
             return
-        self._last_autosave = time.time()
+        self._autosaved = mark
         try:
-            self.save("autosave")
+            self.save("autosave", level=self.AUTOSAVE_LEVEL)
         except Exception:
             self.errors.append({"t": time.time(), "where": "autosave", "trace": traceback.format_exc()})
         self.mark_live()
@@ -827,6 +954,11 @@ class GameSession:
             s.spectator_token = sess["spectator_token"]
         s.benchmark = sess.get("benchmark")
         s.usage_act = sess.get("usage_act")
+        if sess.get("crashed"):
+            # a crash save: the state as the crash left it, for whoever debugs it, never to play on
+            s.crashed = dict(sess["crashed"])
+            s.paused = True
+            s.pause_reason = {"kind": "crashed", "message": CRASHED, "since": s.crashed.get("at")}
         return s
 
 

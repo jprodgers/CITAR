@@ -176,6 +176,22 @@ class Metrics:
         rec["reasoning_tokens"] += reasoning_tokens or 0
         rec["malformed"] += malformed or 0
 
+    def bot_actions(self, pid: int, counts: Optional[dict]):
+        """Add a bot's actions to its turn's record: ``counts`` is ``{tool: [taken, refused]}``, what one drive or one
+        answer of the bot did (``EngineGame.drive``'s ``actions`` for the seat, or ``answer``'s).
+
+        A bot's actions never pass through the session's tool calls, so its turn has no per-tool rows (``by_tool``,
+        ``tool_calls``); these counts stand in for them. Kept per tool, summed over the turn's drives."""
+        rec = self.current(pid)
+        if rec is None or not counts:
+            return
+        acts = rec.setdefault("bot_actions", {})
+        for tool, pair in counts.items():
+            taken, refused = (list(pair) + [0, 0])[:2]
+            have = acts.setdefault(tool, [0, 0])
+            have[0] += int(taken or 0)
+            have[1] += int(refused or 0)
+
     def bump(self, pid: int, field: str, n: int = 1):
         """Increment a counter on the current turn."""
         rec = self.current(pid)
@@ -223,6 +239,7 @@ class Metrics:
                 agg["per_turn"] = round(agg["count"] / n, 2)
                 agg["avg_ms"] = round(agg["seconds"] / max(1, agg["count"]) * 1000, 1)
                 agg["seconds"] = round(agg["seconds"], 2)
+            bot = _bot_totals(turns)
             out[pid] = {
                 **info,
                 "turns": n,
@@ -255,6 +272,14 @@ class Metrics:
                                       key=lambda d: -d["max_times_in_a_turn"])[:10],
                 "top_errors": sorted(({"error": k, "count": v} for k, v in errors.items()), key=lambda d: -d["count"])[:10],
             }
+            if bot:
+                taken = sum(a["taken"] for a in bot.values())
+                refused = sum(a["refused"] for a in bot.values())
+                for agg in bot.values():
+                    agg["per_turn"] = round(agg["taken"] / n, 2)
+                out[pid]["bot_actions"] = bot
+                out[pid]["avg_bot_actions"] = round(taken / n, 2)
+                out[pid]["bot_refusal_rate"] = round(refused / max(1, taken + refused), 3)
             negs = [x for x in self.data["negotiations"] if x["player"] == pid]
             if negs:
                 out[pid]["negotiation_replies"] = len(negs)
@@ -262,10 +287,37 @@ class Metrics:
         return out
 
     def turn_rows(self) -> list[dict]:
-        """Every turn as a row, which is what the CSV export and the charts are built from."""
+        """Every turn as a row, which is what the CSV export and the charts are built from. A bot's turn has no
+        per-tool rows: its ``top_tools`` are its actions taken (``bot_actions``), and ``bot_actions`` is kept as the
+        record has it, ``{tool: [taken, refused]}``."""
         rows = []
         for r in self.data["turns"]:
             row = {k: v for k, v in r.items() if k not in ("signatures", "by_tool", "error_samples")}
-            row["top_tools"] = ", ".join(f"{k}x{v['count']}" for k, v in sorted(r["by_tool"].items(), key=lambda kv: -kv[1]["count"])[:6])
+            if r.get("by_tool"):
+                row["top_tools"] = ", ".join(f"{k}x{v['count']}" for k, v in sorted(r["by_tool"].items(), key=lambda kv: -kv[1]["count"])[:6])
+            else:
+                acts = r.get("bot_actions") or {}
+                row["top_tools"] = ", ".join(f"{k}x{v[0]}" for k, v in sorted(acts.items(), key=lambda kv: -kv[1][0])[:6] if v[0])
             rows.append(row)
         return rows
+
+
+def _bot_totals(turns: list[dict]) -> dict:
+    """A bot seat's actions over its turns, by tool: {"taken", "refused", "max_in_turn"}; empty for a seat that is no
+    bot (or a bot recorded before its actions were counted)."""
+    out: dict = {}
+    for r in turns:
+        for tool, (taken, refused) in (r.get("bot_actions") or {}).items():
+            agg = out.setdefault(tool, {"taken": 0, "refused": 0, "max_in_turn": 0})
+            agg["taken"] += taken
+            agg["refused"] += refused
+            agg["max_in_turn"] = max(agg["max_in_turn"], taken)
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]["taken"]))
+
+
+def bot_actions_text(acts: Optional[dict]) -> str:
+    """A turn's ``bot_actions`` as one line for the CSV: "move_unit 12 (2 refused), found_city 1"."""
+    parts = []
+    for tool, (taken, refused) in sorted((acts or {}).items(), key=lambda kv: -kv[1][0]):
+        parts.append(f"{tool} {taken}" + (f" ({refused} refused)" if refused else ""))
+    return ", ".join(parts)
