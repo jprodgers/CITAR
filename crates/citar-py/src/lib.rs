@@ -16,9 +16,10 @@
 //!   `atexit`, so a daemon thread's call completes and the thread then parks, never
 //!   re-attaching to a finalizing interpreter (`calls`).
 //!
-//! Modules: `game` (`Game`), `bot` (`Bot`), `run` (`run_game`), `funcs` (the ruleset, tools,
-//! maps, scenarios, categories and bot versions), `errors` (the exceptions) and `calls` (the
-//! GIL, the calls in flight and the shutdown).
+//! Modules: `game` (`Game`), `bot` (`Bot`), `run` (`run_game`), `save` (`Journal`,
+//! `SaveSnapshot`, `Save` and the save files: saves v2, package 2-11), `funcs` (the ruleset,
+//! tools, maps, scenarios, categories and bot versions), `errors` (the exceptions) and `calls`
+//! (the GIL, the calls in flight and the shutdown).
 
 mod bot;
 mod calls;
@@ -26,6 +27,7 @@ mod errors;
 mod funcs;
 mod game;
 mod run;
+mod save;
 
 use std::convert::Infallible;
 
@@ -74,6 +76,9 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<game::Game>()?;
     m.add_class::<bot::Bot>()?;
+    m.add_class::<save::Journal>()?;
+    m.add_class::<save::SaveSnapshot>()?;
+    m.add_class::<save::Save>()?;
     m.add("ActionError", py.get_type::<ActionError>())?;
     m.add("MapError", py.get_type::<MapError>())?;
     m.add("LoadError", py.get_type::<LoadError>())?;
@@ -83,6 +88,12 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calls::calls_in_flight, m)?)?;
     m.add_function(wrap_pyfunction!(calls::shutdown, m)?)?;
     m.add_function(wrap_pyfunction!(run::run_game, m)?)?;
+    m.add_function(wrap_pyfunction!(save::read_save, m)?)?;
+    m.add_function(wrap_pyfunction!(save::save_header, m)?)?;
+    m.add_function(wrap_pyfunction!(save::fork_journal, m)?)?;
+    m.add_function(wrap_pyfunction!(save::journal_in_use, m)?)?;
+    #[cfg(feature = "test-ops")]
+    m.add_function(wrap_pyfunction!(save::saves_read, m)?)?;
     for f in [
         wrap_pyfunction!(funcs::rules_version, m)?,
         wrap_pyfunction!(funcs::rules_client, m)?,

@@ -71,7 +71,9 @@ NOT_BY_SHAPE = {
 #: The names Phase 2 added, which the Python backend refuses: not compared, only checked to refuse.
 PHASE2 = {"EngineCrash", "BackendError", "build_info", "bot_versions", "bot_schema", "bot_clean_params",
           "bot_fingerprint", "EngineGame.drive", "EngineGame.answer", "EngineGame.view_json",
-          "EngineGame.replay_json"}
+          "EngineGame.replay_json",
+          # saves v2 (package 2-11): the .citar container and its journal
+          "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header", "EngineGame.save_snapshot"}
 
 DUEL = {"map_size": "duel", "seed": 21, "players": [{"controller": "human"}, {"controller": "bot"}]}
 SMALL = {"map_size": "small", "seed": 7, "turn_limit": 12, "players": [{"controller": "bot"}] * 4}
@@ -374,7 +376,10 @@ class ParityTests(unittest.TestCase):
         calls = [lambda: PY.build_info(), lambda: PY.bot_versions(), lambda: PY.bot_schema("basic"),
                  lambda: PY.bot_clean_params("basic", {}), lambda: PY.bot_fingerprint(PY.bot_instance("idle")),
                  lambda: g.drive({1: PY.bot_instance("idle")}), lambda: g.answer(1, 1, PY.bot_instance("idle")),
-                 lambda: g.view_json(0), lambda: g.replay_json({})]
+                 lambda: g.view_json(0), lambda: g.replay_json({}),
+                 lambda: PY.open_journal("journal.cjnl"), lambda: PY.fork_journal("a.cjnl", {}, "b.cjnl"),
+                 lambda: PY.journal_in_use("journal.cjnl"), lambda: PY.read_save("autosave.citar"),
+                 lambda: PY.save_header("autosave.citar"), lambda: g.save_snapshot(None)]
         for call in calls:
             with self.assertRaises(PY.BackendError):
                 call()

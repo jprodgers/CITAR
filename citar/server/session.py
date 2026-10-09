@@ -1,13 +1,13 @@
 """Game sessions: seats, turn driver thread, AI agents, negotiation interrupts, push updates and saves."""
 from __future__ import annotations
 
-import gzip
 import json
 import secrets
 import threading
 import time
 import traceback
 import weakref
+from collections import deque
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -62,7 +62,9 @@ class GameSession:
 
     One lock guards the game. Every mutation takes it, including the driver's, so a tool call from an
     HTTP request cannot interleave with an AI's turn. Readers that build a large payload take it too,
-    which is why the replay is assembled under the lock rather than streamed.
+    which is why the replay is assembled under the lock rather than streamed. Saves are not: a save takes a
+    snapshot under the lock (a copy of the state, and the history since the last save) and the session's writer
+    thread writes it off the lock, into the game's folder, beside the journal that holds its history (``save``).
 
     An internal error of the engine (``EngineCrash``, wherever it surfaces: a tool call, a bot's drive, a
     responder, a view) stops the session for good (``_crashed``): the engine refuses every command of a
@@ -96,9 +98,11 @@ class GameSession:
         self.usage_act: Optional[str] = None    # usage ledger activity id (usage.py)
         self.crashed: Optional[dict] = None     # {"message", "turn", "at"} once the engine stopped (_crashed)
         self._autosaved: Optional[tuple] = None  # (turn, phase) of the last autosave
-        self._autosave_began = 0.0               # when the last autosave began (perf_counter), and how long it took
-        self._autosave_cost = 0.0
-        self._autosave_due = False               # a round's autosave was put off (autosave's cost bound)
+        self.read_only = False                   # opened only to be read (from_save(read_only=True)): never saved
+        self.journal = None                      # this session's timeline, opened at its first save (_timeline)
+        # what the saves cost under the lock (_snapshot): {"saves", "total_s", "max_s", "last_s"}; P2.5.3's budget is 10 ms
+        self.save_lock = {"saves": 0, "total_s": 0.0, "max_s": 0.0, "last_s": 0.0}
+        self._writer = SaveWriter(self)
         game.subscribe(self._on_event)
         self._track_turn()
 
@@ -294,7 +298,8 @@ class GameSession:
             self.errors.append({"t": time.time(), "where": "engine", "trace": str(message)})
             self.cond.notify_all()
             try:
-                self.save(f"crash-{turn:03d}")
+                # through the writer like any save; not waited for, so the lock is let go at once
+                self.save(f"crash-{turn:03d}", wait=False)
             except Exception:
                 self.errors.append({"t": time.time(), "where": "crash save", "trace": traceback.format_exc()})
         self.mark_live()
@@ -518,7 +523,6 @@ class GameSession:
             self.pause_reason = None
             if paused:
                 self.metrics.pause()
-                self.flush_autosave()
             else:
                 self.metrics.unpause()
             self.cond.notify_all()
@@ -698,20 +702,43 @@ class GameSession:
         threading.Thread(target=watch, name=f"queue-{self.id}-{pid}", daemon=True).start()
         return True
 
-    def stop(self):
-        """Close the game: halt the driver and abort any AI turn (including in-flight model requests)."""
+    def stop(self, save_as: Optional[str] = None) -> Optional[Path]:
+        """Close the game: halt the driver and abort any AI turn (including in-flight model requests), then let the
+        writer finish the saves already taken and close the journal (DESIGN.md P2.5.3). Returns only once the write in
+        flight is on the disk, so a session loaded next never shares the journal with this one (and the journal's OS
+        lock would refuse it). Nothing is saved after it.
+
+        ``save_as`` takes a last named save in the same hold of the lock that stops the game, so it is the timeline's
+        last save: no autosave of a round played after it names more of the journal, which would make every later load of
+        it fork a copy of the history (the benchmark scheduler's final save of a job whose game would play on). Returns
+        its path once written; what stopped it is raised once the game is closed."""
         if self.usage_act and not self._stop:
             from .. import usage
             try:
                 usage.finish_session(self)
             except Exception:
                 pass
-        self._stop = True
-        self.paused = True
+        final, failed = None, None
+        with self.lock:                 # no autosave is between its check and its snapshot as the writer closes
+            if save_as is not None:
+                try:
+                    if self.read_only:
+                        raise RuntimeError("This game was opened to be read, not saved.")
+                    final = self._snapshot(_save_name(save_as), autosave=False)   # refused once it was stopped
+                except Exception as e:
+                    failed = e
+            self._stop = True
+            self.paused = True
         for pid in list(self.agents):
             self.cancel_agent(pid)
         with self.lock:
             self.cond.notify_all()
+        self._writer.close()
+        if self.journal is not None:
+            self.journal.close()
+        if failed is not None:
+            raise failed
+        return final.result() if final is not None else None
 
     def _drive(self):
         """The turn driver: run each AI seat's turn to completion, then move on.
@@ -732,7 +759,6 @@ class GameSession:
                 pid = g.current
                 seat = self.seats[pid] if pid < len(self.seats) else None
                 if self.paused or seat is None or seat.type in ("human", "mcp"):
-                    self.flush_autosave()          # the game waits: the autosave catches up (autosave's cost bound)
                     self.cond.wait(timeout=1)
                     continue
                 turn_marker = (g.turn, pid)
@@ -850,50 +876,83 @@ class GameSession:
                 pass
 
     # ------------------------------------------------------------------
-    # Saves
+    # Saves (DESIGN.md P2.5.3)
     # ------------------------------------------------------------------
-    def to_save(self) -> dict:
-        """The whole session as a saveable document. The game's part is the engine's own (``EngineGame.to_save``:
-        on Rust its state and its whole history as one journal chunk, until package 2-11's container)."""
-        return {
-            "format": "citar-save", "version": 1, "rules_version": engine_api.rules_version(), "saved_at": time.time(),
-            "session": {"id": self.id, "name": self.name, "created": self.created,
-                        "seats": [{**asdict(s), "connected": False} for s in self.seats],
-                        "spectator_token": self.spectator_token, "benchmark": self.benchmark, "usage_act": self.usage_act,
-                        "crashed": self.crashed},
-            **self.game.to_save(),
-            "metrics": self.metrics.data,
-        }
+    @property
+    def folder(self) -> Path:
+        """The game's folder: its saves (``autosave.citar``, ``turnNNN.citar``, ...) and its journals."""
+        return SAVE_DIR / self.id
 
-    #: The gzip level of the autosave, written every round under the lock: level 1 takes about a fifth of level 9's
-    #: time for files about 1.7 times as large. Named saves are written once and smaller.
-    AUTOSAVE_LEVEL = 1
-    SAVE_LEVEL = 6
+    def _session_record(self) -> dict:
+        """The session's own record, as a save keeps it: what ``from_save`` rebuilds the session from."""
+        return {"id": self.id, "name": self.name, "created": self.created,
+                "seats": [{**asdict(s), "connected": False} for s in self.seats],
+                "spectator_token": self.spectator_token, "benchmark": self.benchmark, "usage_act": self.usage_act,
+                "crashed": self.crashed}
 
-    def save(self, filename: Optional[str] = None, level: Optional[int] = None) -> Path:
-        """Write a named save (``turnNNN`` when none is given)."""
+    def _timeline(self):
+        """The session's journal, its timeline: opened at a new game's first save (``journal.cjnl``, or the first free
+        ``journal-N.cjnl``), or by ``from_save``, which continues or forks the save's. Lock held."""
+        if self.journal is None:
+            self.journal = _new_journal(self.folder)
+        return self.journal
+
+    def _snapshot(self, name: str, autosave: bool) -> "SaveJob":
+        """Take a save under the lock and hand it to the writer: the game's snapshot (a copy of its state, and its
+        history since the last save, pending in the journal), copies of the session's record and its metrics (the
+        metrics as JSON pieces, mostly encoded by earlier saves: ``Metrics.json_parts``), and where it goes. Well under
+        a millisecond on a small map, about two at the end of a 24-player gargantuan game (P2.5.3's budget is 10 ms);
+        the write itself happens off the lock. What it took is added to ``save_lock``."""
         with self.lock:
-            data = self.to_save()
-            turn = self.game.turn
-        folder = SAVE_DIR / self.id
-        folder.mkdir(parents=True, exist_ok=True)
-        name = filename or f"turn{turn:03d}"
-        name = "".join(ch for ch in name if ch.isalnum() or ch in "-_ ")[:60] or "save"
-        path = folder / f"{name}.citar"
-        tmp = path.with_suffix(".tmp")
-        # one write of the whole document: json.dump's many small writes through gzip cost twice as long
-        body = json.dumps(data).encode("utf-8")
-        with gzip.open(tmp, "wb", compresslevel=self.SAVE_LEVEL if level is None else level) as f:
-            f.write(body)
-        for attempt in range(8):
-            try:
-                tmp.replace(path)
-                break
-            except PermissionError:
-                # a sync client (OneDrive) or virus scanner briefly holds the previous save open
-                if attempt == 7:
-                    raise
-                time.sleep(0.25)
+            t0 = time.perf_counter()
+            if self._stop:
+                raise RuntimeError("This game has been closed.")
+            journal = self._timeline()
+            snap = self.game.save_snapshot(journal)
+            job = SaveJob(snap, journal, self.folder / f"{name}.citar", autosave,
+                          json.dumps(self._session_record()).encode(), self.metrics.json_parts())
+            self._writer.submit(job)
+            took = time.perf_counter() - t0
+            st = self.save_lock
+            st["saves"] += 1
+            st["total_s"] += took
+            st["last_s"] = took
+            st["max_s"] = max(st["max_s"], took)
+            return job
+
+    def save(self, filename: Optional[str] = None, wait: bool = True) -> Path:
+        """Write a named save (``turnNNN`` when none is given), ``crash-NNN`` included: the snapshot is taken under the
+        lock and written by the session's writer, after the saves already taken, while the game plays on. With
+        ``wait`` (the save route), returns once it is on the disk and raises what stopped it (an ``OSError``: the old
+        file stays, and the history it would have named goes into the next save); call it without the lock held, or the
+        game waits for the disk too."""
+        if self.read_only:
+            raise RuntimeError("This game was opened to be read, not saved.")
+        job = self._snapshot(_save_name(filename or f"turn{self.game.turn:03d}"), autosave=False)
+        if wait:
+            job.result()
+        return job.path
+
+    def save_copy(self, path: Path) -> Path:
+        """Write the game as it stands to ``path`` with a journal of its own beside it (``<name>.cjnl``, the whole
+        history as one record): a save that stands apart from the game's folder and its timeline, as a probe case's.
+        Built under the lock (the whole history, once), written off it. Loading it later forks its journal into the
+        loaded game's folder. Replaces any copy already at ``path``."""
+        path = Path(path)
+        journal_path = path.with_suffix(".cjnl")
+        with self.lock:
+            value = self.game.to_save()
+            record = json.dumps(self._session_record()).encode()
+            metrics = self.metrics.json_parts()
+        metrics = b"".join(metrics)
+        copy = EngineGame.from_save(value)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        journal_path.unlink(missing_ok=True)
+        journal, _ = engine_api.open_journal(journal_path)
+        try:
+            copy.save_snapshot(journal).write(path, journal, record, metrics)
+        finally:
+            journal.close()
         return path
 
     LIVE_MARK = "live.json"
@@ -932,61 +991,58 @@ class GameSession:
             except OSError:
                 pass
 
-    #: The share of a session's time its autosaves may take, and the cost under which an autosave is written every
-    #: round regardless (about one large view's time under the lock): see ``autosave``.
-    AUTOSAVE_SHARE = 0.25
-    AUTOSAVE_FREE_SECONDS = 0.020
-
     def autosave(self, force: bool = False):
-        """Write the autosave: once per round (and once when the game ends) unless forced, within a cost bound.
+        """Write the autosave: once per round (and once when the game ends) unless forced.
 
         This is what makes a game survive a restart: the scheduler reloads a benchmark from here, restore_live a
-        lobby game, and a game interrupted mid-run continues from where its autosave stands. On the Rust engine an
-        all-bot round takes milliseconds, so the 3-second spacing Python's autosave had would leave it hundreds of
-        rounds behind; but until package 2-11's journal a save is the whole history, written under the lock, and an
-        autosave every round would cost an all-bot game most of its time (85% on a small map by turn 300, 78% on a
-        huge one by turn 250). So a round's autosave is written when the last one took under
-        ``AUTOSAVE_FREE_SECONDS``, or at most ``AUTOSAVE_SHARE`` of the time since it began; otherwise it is put off
-        to a later round, which keeps the autosave about four times its own cost of play behind at most. A put-off autosave
-        is written as soon as the game waits (a pause, a person's or an MCP client's turn: ``flush_autosave``); the
-        end of the game and a forced autosave are never put off. A crashed game is never autosaved again, so its
-        autosave stays the last good state (``_crashed``).
+        lobby game, and a game interrupted mid-run continues from where its autosave stands. Every round's is taken:
+        under the lock it costs a snapshot of the state and the round's history (about a millisecond on a gargantuan
+        map), and the writer writes it off the lock. Autosaves the writer has not begun when a newer one comes are
+        not written (their history goes into the newer one), so a fast game never queues up a backlog. A crashed game
+        is never autosaved again, so its autosave stays the last good state (``_crashed``); a game opened only to be
+        read is never saved.
         """
-        if self._stop or self.crashed:
+        if self._stop or self.crashed or self.read_only:
             return
-        g = self.game
-        mark = (g.turn, g.phase)
-        if not force and mark == self._autosaved:
-            return
-        began = time.perf_counter()
-        if (not force and g.phase == "playing" and self._autosave_cost > self.AUTOSAVE_FREE_SECONDS
-                and self._autosave_cost > self.AUTOSAVE_SHARE * (began - self._autosave_began)):
-            self._autosave_due = True
-            return
-        self._autosaved = mark
-        self._autosave_due = False
-        try:
-            self.save("autosave", level=self.AUTOSAVE_LEVEL)
-        except Exception:
-            self.errors.append({"t": time.time(), "where": "autosave", "trace": traceback.format_exc()})
-        self._autosave_began = began
-        self._autosave_cost = time.perf_counter() - began
+        with self.lock:
+            g = self.game
+            mark = (g.turn, g.phase)
+            if not force and mark == self._autosaved:
+                return
+            self._autosaved = mark
+            try:
+                self._snapshot("autosave", autosave=True)
+            except Exception:
+                if not self._stop:
+                    self.errors.append({"t": time.time(), "where": "autosave", "trace": traceback.format_exc()})
         self.mark_live()
 
-    def flush_autosave(self):
-        """Write an autosave that the cost bound put off (``autosave``), now that the game waits. Lock held."""
-        if self._autosave_due:
-            self.autosave(force=True)
+    def flush_saves(self, timeout: Optional[float] = None) -> bool:
+        """Wait, at most ``timeout`` seconds, until the writer has written every save taken so far; whether it has.
+        Never call it with the lock held by a thread the writer waits on (it waits on none)."""
+        return self._writer.drain(timeout)
 
     @classmethod
-    def from_save(cls, data: dict) -> "GameSession":
-        """Rebuild a session from a save, including its seats and their tokens."""
-        g = EngineGame.from_save(data)
-        sess = data.get("session", {})
+    def from_save(cls, source, read_only: bool = False, game: Optional[EngineGame] = None) -> "GameSession":
+        """Rebuild a session from a save (its path, or ``engine_api.read_save``'s), its seats and their tokens included.
+
+        The game is loaded with the history the save's container names (``EngineGame.from_save``), unless ``game`` is
+        that game already loaded (``SessionManager.load`` loads it before it stops a running session). A session to play
+        on then takes that journal as its timeline (``_open_timeline``): it continues it when the save is in the game's
+        own folder, the journal opens clean and no other save in the folder names more of it, cutting off the records a
+        save that never completed left; otherwise (an older save, corruption, a save from elsewhere) it forks the
+        save's prefix into a new journal, so every other save that names the old one stays valid. Raises ``ValueError``
+        (``LoadError``) for a save that does not load, and when another session holds its journal: stop that session
+        first (``SessionManager.load`` does). ``read_only`` reads the history and opens no journal: such a session is
+        never saved.
+        """
+        doc = engine_api.read_save(Path(source)) if isinstance(source, (str, Path)) else source
+        sess = doc.session
+        g = game if game is not None else EngineGame.from_save(doc)
         seats = [Seat(**{k: v for k, v in s.items() if k in Seat.__dataclass_fields__}) for s in sess.get("seats", [])]
-        s = cls(g, seats, sess.get("name", ""), sess.get("id"))
-        if data.get("metrics"):
-            s.metrics = Metrics(data["metrics"])
+        s = cls(g, seats, sess.get("name", ""), sess.get("id") or doc.path.parent.name)
+        if doc.metrics:
+            s.metrics = Metrics(doc.metrics)
             s._metrics_current = None
             s._track_turn()
         s.created = sess.get("created", time.time())
@@ -1001,13 +1057,289 @@ class GameSession:
             s.pause_reason = {"kind": "crashed", "message": CRASHED, "since": s.crashed.get("at")}
             s.metrics.interrupt_open()           # no turn of it is played again: none is left in progress
             s._metrics_current = None
+        if read_only:
+            s.read_only = True
+        else:
+            s.journal = _open_timeline(s.folder, doc)
         return s
 
 
-def load_save_file(path: Path) -> dict:
-    """Read a gzipped save file."""
-    with gzip.open(path, "rt", encoding="utf-8") as f:
-        return json.load(f)
+class SaveJob:
+    """One save the writer writes: the snapshot taken under the lock, its journal, where it goes, and copies of the
+    session's record and metrics as JSON (the metrics in pieces, joined off the lock). ``result`` waits for it."""
+
+    __slots__ = ("snap", "journal", "path", "autosave", "session", "metrics", "done", "error", "superseded", "ticket")
+
+    def __init__(self, snap, journal, path: Path, autosave: bool, session: bytes, metrics):
+        self.snap, self.journal, self.path, self.autosave = snap, journal, path, autosave
+        self.session, self.metrics = session, metrics
+        self.ticket = 0                  # its place in the writer's order (SaveWriter.submit)
+        self.done = threading.Event()
+        self.error: Optional[BaseException] = None
+        self.superseded = False          # an autosave a newer one replaced before it was written
+
+    def write(self):
+        """Write it (the writer thread): the journal's pending history up to the snapshot, then the container."""
+        metrics = self.metrics if isinstance(self.metrics, bytes) else b"".join(self.metrics)
+        self.snap.write(self.path, self.journal, self.session, metrics)
+
+    def release(self):
+        """Let go of what the write needed, once it is written or passed over: the snapshot is a copy of the whole
+        state (tens of megabytes on a late gargantuan map), and the journal must close with its session. Waiting on it
+        (``result``) needs only ``done``, ``error`` and ``path``."""
+        self.snap = self.journal = self.session = self.metrics = None
+
+    def result(self, timeout: Optional[float] = None) -> Path:
+        """Wait until it is written, and raise what stopped it."""
+        if not self.done.wait(timeout):
+            raise TimeoutError(f"{self.path.name} is not written yet")
+        if self.error is not None:
+            raise self.error
+        return self.path
+
+
+class SaveWriter:
+    """A session's one writer thread (DESIGN.md P2.5.3): it writes the saves the session takes under its lock, in the
+    order they were taken, off the lock.
+
+    Autosaves coalesce: one the writer has not begun is passed over when a newer autosave is queued, since the newer
+    one's journal records carry its history too (every chunk is appended, in order; only the newest autosave's
+    container is written). A named save is always written, and its caller may wait for it (``SaveJob.result``). A save
+    that fails is recorded in the session's errors (an autosave's) or raised to whoever waits (a named one's); its
+    history stays pending in the journal for the next. The thread starts with the first save and ends when the
+    session closes it (``close``, from ``GameSession.stop``), after the saves already taken.
+    """
+
+    def __init__(self, session: "GameSession"):
+        self._session = weakref.ref(session)
+        self._name = f"saves-{session.id}"
+        self._cv = threading.Condition()
+        self._jobs: deque = deque()
+        self._submitted = 0                  # the saves taken so far
+        self._finished = 0                   # every save before this ticket is written or passed over
+        self._closed = False
+        self._thread: Optional[threading.Thread] = None
+        # A session dropped without stop() (a test's, an error path's) ends its thread too, once the saves it took are
+        # written; the thread keeps nothing of the session's (``SaveJob.release``), so its journal closes with it.
+        weakref.finalize(session, self._abandon)
+
+    def submit(self, job: SaveJob):
+        """Queue a save; starts the thread with the first."""
+        with self._cv:
+            if self._closed:
+                raise RuntimeError("This game has been closed.")
+            job.ticket = self._submitted
+            self._submitted += 1
+            self._jobs.append(job)
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self._thread.start()
+            self._cv.notify_all()
+
+    def _take(self) -> Optional[SaveJob]:
+        """The next save to write, passing over autosaves a newer queued one replaces. Condition held."""
+        while self._jobs:
+            job = self._jobs.popleft()
+            if job.autosave and any(j.autosave for j in self._jobs):
+                job.superseded = True
+                job.release()                # its history is in the journal's queue, which the newer one appends
+                job.done.set()
+                self._finished = job.ticket + 1
+                continue
+            return job
+        return None
+
+    def _run(self):
+        while True:
+            with self._cv:
+                while not self._jobs and not self._closed:
+                    self._cv.wait()
+                job = self._take()
+                if job is None:              # closed, and every save taken is written
+                    self._cv.notify_all()
+                    return
+            try:
+                job.write()
+            except BaseException as e:       # recorded, and the writer goes on: the next save carries the history
+                job.error = e
+                s = self._session()
+                if s is not None and job.autosave:
+                    s.errors.append({"t": time.time(), "where": "autosave", "trace": traceback.format_exc()})
+                s = None
+            finally:
+                # nothing of a written save is kept while the thread waits for the next (an idle game's may never come)
+                job.release()
+                job.done.set()
+                with self._cv:
+                    self._finished = job.ticket + 1
+                    self._cv.notify_all()
+                job = None
+
+    def _abandon(self):
+        """The session is gone without being stopped: write what it took, then end. Never waits (a finalizer)."""
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+
+    def drain(self, timeout: Optional[float] = None) -> bool:
+        """Wait until every save taken before the call is written (or passed over); whether they were within
+        ``timeout``. Saves taken meanwhile are not waited for, so a game that plays on cannot keep it waiting."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._cv:
+            target = self._submitted
+            while self._finished < target:
+                left = None if deadline is None else deadline - time.monotonic()
+                if left is not None and left <= 0:
+                    return False
+                self._cv.wait(left)
+        return True
+
+    def close(self):
+        """Take no more saves, write the ones taken, and end the thread. Waits for the write in flight."""
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+
+
+#: A game folder's journals: ``journal.cjnl``, then ``journal-2.cjnl``, ``journal-3.cjnl``, ...
+JOURNAL = "journal"
+JOURNAL_SUFFIX = ".cjnl"
+
+
+#: How many journal names a folder is tried for before a new timeline gives up: far more than a game makes.
+MAX_JOURNALS = 10_000
+
+
+def _journal_names(folder: Path):
+    """The journal names of a folder in order, ``journal.cjnl`` first."""
+    yield folder / f"{JOURNAL}{JOURNAL_SUFFIX}"
+    for n in range(2, MAX_JOURNALS + 1):
+        yield folder / f"{JOURNAL}-{n}{JOURNAL_SUFFIX}"
+
+
+def _no_journal_name(folder: Path) -> OSError:
+    """The error when every journal name of a folder is taken."""
+    return OSError(f"{folder} has no free journal name left (journal-{MAX_JOURNALS}.cjnl is taken).")
+
+
+def _new_journal(folder: Path):
+    """A new timeline's journal: the first of the folder's journal names that is not taken, opened (DESIGN.md
+    P2.5.3). A file that is there already belongs to another timeline, whatever it holds, and is never reused."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for path in _journal_names(folder):
+        if path.exists():
+            continue
+        try:
+            journal, found = engine_api.open_journal(path)
+        except ValueError:
+            if engine_api.journal_in_use(path):  # another session took it between the look and the open
+                continue
+            raise
+        if found["records"]:                 # written between the look and the open: another timeline's
+            journal.close()
+            continue
+        return journal
+    raise _no_journal_name(folder)
+
+
+def _names_more_of(folder: Path, ref: dict) -> bool:
+    """Whether a save in ``folder`` names more of the journal ``ref`` names than ``ref`` does: a later save of the same
+    timeline, whose records a continued timeline would overwrite. A save whose header cannot be read might, so it
+    counts (forking is always safe)."""
+    for p in folder.glob("*.citar"):
+        try:
+            other = engine_api.save_header(p)["journal"]
+        except Exception:
+            if _is_v1(p):
+                continue                     # a Python engine's save names no journal
+            return True
+        if other and other["file"] == ref["file"] and other["records"] > ref["records"]:
+            return True
+    return False
+
+
+def _save_name(name: str) -> str:
+    """A named save's file name, without its suffix: letters, digits, '-', '_' and spaces, at most 60."""
+    return "".join(ch for ch in name if ch.isalnum() or ch in "-_ ")[:60] or "save"
+
+
+def _load_ahead(doc) -> Optional[EngineGame]:
+    """What of a save (``engine_api.read_save``'s) can be loaded while a running session of its game plays on
+    (``SessionManager.load``): the whole game, history included, when no session holds the journal it names; else (the
+    running game's own timeline) its state alone, as a check whose game is not kept, and None. Raises ``ValueError``
+    (``LoadError``) for a save that does not load."""
+    ref = doc.journal
+    if ref is not None:
+        try:
+            held = engine_api.journal_in_use(doc.path.parent / ref["file"])
+        except OSError:
+            held = True                      # cannot tell: read it once the running session has let go, as a held one
+        if held:
+            EngineGame.from_save(doc, history=False)
+            return None
+    return EngineGame.from_save(doc)
+
+
+def _is_v1(path: Path) -> bool:
+    """Whether a file is a version 1 save (gzip JSON, the Python engine's), which names no journal."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
+def _open_timeline(folder: Path, doc):
+    """The journal a session loaded from ``doc`` (``engine_api.read_save``'s) goes on writing (DESIGN.md P2.5.3).
+
+    It continues the save's own journal when the save is in the game's folder, no save in the folder names more of
+    that journal, and the journal opens clean: the records past the save's (a save that never completed) are cut
+    off. Otherwise (an older save of a timeline that went on, corruption anywhere in the journal, a save from another
+    folder) the save's prefix is forked into a new journal in the game's folder, and the old journal is left as it
+    is, so every save that names it still loads. A save that names no journal starts a new one. Call it once the
+    game is loaded: reading the history takes the journal's shared lock, which a writer's excludes.
+    """
+    ref = doc.journal
+    if ref is None:
+        return _new_journal(folder)
+    source = doc.path.parent / ref["file"]
+    folder.mkdir(parents=True, exist_ok=True)
+    if _same_folder(doc.path.parent, folder) and not _names_more_of(folder, ref):
+        # by the game's own folder's path, which its saves are written under (the save's may be another spelling of it)
+        journal, found = engine_api.open_journal(folder / ref["file"])
+        if found["corrupt_at"] is None:
+            try:
+                journal.truncate_to(ref)
+            except OSError:
+                pass                         # the journal stands at ref all the same, and cuts before it appends
+            except BaseException:
+                journal.close()
+                raise
+            return journal
+        journal.close()                      # corrupt: left as it is, and the save's prefix forked
+    for path in _journal_names(folder):
+        if path.exists():
+            continue
+        try:
+            engine_api.fork_journal(source, ref, path)
+        except OSError:
+            if path.exists():                # made between the look and the fork: try the next name
+                continue
+            raise
+        journal, _ = engine_api.open_journal(path)
+        return journal
+    raise _no_journal_name(folder)
+
+
+def _same_folder(a: Path, b: Path) -> bool:
+    """Whether two paths name one folder (a symlink, a junction or an 8.3 name included)."""
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
 
 
 _MANAGERS: Optional[weakref.WeakSet] = None
@@ -1055,6 +1387,7 @@ class SessionManager:
         global _MANAGERS
         self.sessions: dict[str, GameSession] = {}
         self.lock = threading.Lock()
+        self._loading = threading.Lock()     # one load at a time: a load stops, reads and replaces a session
         if _MANAGERS is None:
             _MANAGERS = weakref.WeakSet()
         _MANAGERS.add(self)
@@ -1143,32 +1476,79 @@ class SessionManager:
         return s
 
     def load(self, path: Path) -> GameSession:
-        """Load a save into a live session."""
-        data = load_save_file(path)
-        s = GameSession.from_save(data)
+        """Load a save into a live session, paused.
+
+        The save is read first, while a running session of its game plays on, and as much of it is loaded as can be
+        without that session's journal (``_load_ahead``): a save that is damaged, of another version, or whose state
+        does not load is refused with the running game untouched, and so is one whose history (in a journal no session
+        holds) cannot be read. A save of a game running here is usually on that game's timeline, whose journal the
+        running session holds (the OS lock keeps every other reader and writer out): its history is read once that
+        session is stopped, its writer drained and its journal closed. If it then does not load, the running game comes
+        back from its own autosave, so a bad save never closes a game. Raises what stopped the load (``ValueError`` for
+        a save that does not load).
+        """
+        path = Path(path)
+        with self._loading:
+            doc = engine_api.read_save(path)
+            sid = doc.header["session"]["id"] or path.parent.name
+            with self.lock:
+                live = self.sessions.get(sid)
+            running = live is not None and not live.stopped
+            paused = live is not None and live.paused       # stop() pauses it
+            game = _load_ahead(doc) if running else None
+            if live is not None:
+                live.stop()
+            try:
+                if live is not None and engine_api.save_header(path) != doc.header:
+                    doc, game = engine_api.read_save(path), None    # the stopped session's writer has written it since
+                s = GameSession.from_save(doc, game=game)
+            except BaseException:
+                if running:                      # a game closed before the load stays closed
+                    self._reopen(live, paused)
+                raise
+            self._register_loaded(s)
+            return s
+
+    def _register_loaded(self, s: GameSession):
+        """A loaded session joins the live ones, paused, its driver started."""
         s.registered = True
         with self.lock:
-            if s.id in self.sessions:
-                self.sessions[s.id].stop()
             self.sessions[s.id] = s
         s.paused = True
         s.start()
         self.track(s)
         s.mark_live()
-        return s
+
+    def _reopen(self, live: GameSession, paused: bool):
+        """Bring back a game ``load`` stopped for a save that then did not load (its history, in the journal the game
+        held, damaged or of another timeline; its timeline not opened): from its own autosave, paused or not as it was.
+        If that fails too the game stays closed."""
+        with self.lock:
+            if self.sessions.get(live.id) is live:
+                del self.sessions[live.id]
+        try:
+            s = GameSession.from_save(live.folder / "autosave.citar")
+        except Exception:
+            traceback.print_exc()
+            return
+        self._register_loaded(s)
+        if not paused:
+            s.resume()
 
     def restore_live(self) -> list[str]:
         """Bring back the lobby games that were open when the server last stopped.
 
         Every open lobby game keeps a mark beside its autosave (see ``GameSession.mark_live``). Each is
         reloaded from that autosave - so a restart costs at most the turn in progress - and resumed
-        unless it was paused. Benchmark games are the scheduler's to reload, and are not marked.
+        unless it was paused. Benchmark games are the scheduler's to reload, and are not marked. A game whose autosave
+        the Python engine wrote (a server upgraded from 0.1.5) never loads: it is named once and its mark removed, so it
+        is not tried again at every start.
         """
         restored = []
         for mark in sorted(SAVE_DIR.glob(f"*/{GameSession.LIVE_MARK}")):
+            save = mark.parent / "autosave.citar"
             try:
                 state = json.loads(mark.read_text(encoding="utf-8"))
-                save = mark.parent / "autosave.citar"
                 if not save.exists() or mark.parent.name in self.sessions:
                     continue
                 s = self.load(save)
@@ -1178,6 +1558,15 @@ class SessionManager:
                 if not state.get("paused"):
                     s.resume()
                 restored.append(f"{s.name} (turn {s.game.turn}{', paused' if state.get('paused') else ''})")
+            except ValueError as e:
+                if not _is_v1(save):
+                    traceback.print_exc()
+                    continue
+                print(f"Game {mark.parent.name} is not restored: {e}", flush=True)
+                try:
+                    mark.unlink(missing_ok=True)
+                except OSError:
+                    pass
             except Exception:
                 traceback.print_exc()
         return restored
@@ -1200,10 +1589,9 @@ class SessionManager:
             since = s.__dict__.setdefault("_over_since", now)
             if now - since >= self.FINISHED_GRACE_SECONDS and not s.subscribers:
                 try:
-                    s.save("final")
+                    self.delete(s.id, save_as="final")
                 except Exception:
                     pass
-                self.delete(s.id)
                 closed.append(s.name)
         return closed
 
@@ -1211,19 +1599,23 @@ class SessionManager:
         """A session by id, or None."""
         return self.sessions.get(sid)
 
-    def delete(self, sid: str):
-        """Delete a game and every save of it."""
+    def delete(self, sid: str, save_as: Optional[str] = None):
+        """Close a game: its session stops and leaves the list; its saves stay. ``save_as`` takes a last named save as it
+        stops (``GameSession.stop``), whose error is raised once the game is closed."""
         with self.lock:
             s = self.sessions.pop(sid, None)
         if s:
-            s.stop()
-            s.unmark_live()
+            try:
+                s.stop(save_as)
+            finally:
+                s.unmark_live()
 
     _save_meta_cache: dict = {}
 
     @classmethod
     def save_meta(cls, p: Path) -> dict:
-        """Game name, turn and players of a save file (cached by modification time)."""
+        """Game name, turn and players of a save file (cached by modification time), from its header alone: never the
+        state (DESIGN.md P2.5.1). A save this version cannot read says why."""
         st = p.stat()
         key = str(p)
         hit = cls._save_meta_cache.get(key)
@@ -1231,19 +1623,18 @@ class SessionManager:
             return hit[1]
         meta: dict = {}
         try:
-            with gzip.open(p, "rt", encoding="utf-8") as fh:
-                data = json.load(fh)
-            summ, sess = engine_api.state_summary(data.get("state", {})), data.get("session", {})
-            seats = sess.get("seats", [])
+            header = engine_api.save_header(p)
+            summ, sess = header["summary"], header["session"]
+            seats = summ.get("seats") or []
             meta = {"game_name": sess.get("name"), "turn": summ["turn"], "phase": summ["phase"],
                     "turn_limit": summ["turn_limit"], "benchmark": bool(sess.get("benchmark")),
                     "players": [{"name": pl["name"], "alive": pl["alive"],
-                                 "seat": seats[i].get("type") if i < len(seats) else None}
+                                 "seat": seats[i] if i < len(seats) else None}
                                 for i, pl in enumerate(summ["majors"])]}
             if summ["winner"] is not None:
                 meta["winner"] = summ["winner"]
-        except Exception:
-            meta = {"unreadable": True}
+        except Exception as e:
+            meta = {"unreadable": True, "error": str(e)[:300]}
         cls._save_meta_cache[key] = (st.st_mtime, meta)
         return meta
 
@@ -1258,9 +1649,15 @@ class SessionManager:
                         "name": p.stem, "modified": p.stat().st_mtime, "size": p.stat().st_size, **cls.save_meta(p)})
         return out
 
-    @staticmethod
-    def delete_save(rel_path: str, whole_game: bool = False) -> list[str]:
-        """Delete one save."""
+    #: How old a temporary file beside a save must be before a deletion removes it: a fresher one may be a write in
+    #: progress, of this process or of another sharing the folder.
+    STALE_TEMP_SECONDS = 300.0
+
+    @classmethod
+    def delete_save(cls, rel_path: str, whole_game: bool = False) -> list[str]:
+        """Delete one save, or every save of its game, and the journals no save left in the folder names (DESIGN.md
+        P2.5.3), except one a session is writing (a new timeline's, which no save names yet). Returns the saves
+        deleted."""
         # Two paths to the same file, on purpose. `p` stays rooted at SAVE_DIR as written, so the
         # names reported back can be made relative to it; `p.resolve()` is what the containment
         # check has to use, because that is what stops a `..` in rel_path escaping the directory.
@@ -1277,12 +1674,35 @@ class SessionManager:
         for q in targets:
             q.unlink()
             removed.append(str(q.relative_to(SAVE_DIR)).replace("\\", "/"))
-        if whole_game or not any(p.parent.iterdir()):
-            try:
-                for rest in p.parent.iterdir():
-                    if rest.suffix == ".tmp":
-                        rest.unlink()
+        cls._delete_unnamed_journals(p.parent)
+        try:
+            now = time.time()
+            for rest in p.parent.iterdir():
+                if rest.suffix == ".tmp" and now - rest.stat().st_mtime > cls.STALE_TEMP_SECONDS:
+                    rest.unlink()
+            if not any(p.parent.iterdir()):
                 p.parent.rmdir()
+        except OSError:
+            pass
+        return removed
+
+    @staticmethod
+    def _delete_unnamed_journals(folder: Path):
+        """Remove the journals of ``folder`` that no save there names and no session holds. When a save's header cannot
+        be read, what it names cannot be told, and every journal stays."""
+        named = set()
+        for q in folder.glob("*.citar"):
+            try:
+                ref = engine_api.save_header(q)["journal"]
+            except Exception:
+                if _is_v1(q):
+                    continue
+                return
+            if ref:
+                named.add(ref["file"])
+        for j in folder.glob(f"*{JOURNAL_SUFFIX}"):
+            try:
+                if j.name not in named and not engine_api.journal_in_use(j):
+                    j.unlink()
             except OSError:
                 pass
-        return removed

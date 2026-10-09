@@ -259,6 +259,27 @@ impl Game {
         journal::take_chunk(self.rules, &self.chron, &mut self.journal, host)
     }
 
+    /// Starts the journal over (DESIGN.md P2.5.3): the next chunk is numbered 0 and holds the whole
+    /// history the game keeps, and the state's history heads are recounted from that history
+    /// ([`journal::recount`]), so the new journal rebuilds it whole. A host calls it when it begins
+    /// a new journal for the game. For a game that kept its whole history (a new game, a loaded
+    /// one) the heads come out as they were and the digest stands; a game made from a state alone
+    /// counted the history of the game the state was taken from, which it does not have, and from
+    /// here it counts its own (the digest, which covers the engine's heads, moves with them).
+    ///
+    /// # Errors
+    /// History with no canonical form, which a chronicle appended through a `Record` never holds;
+    /// nothing changes then.
+    pub fn restart_journal(&mut self) -> Result<(), SaveError> {
+        let (heads, host) =
+            journal::recount(&self.chron, &self.st.host().0).map_err(SaveError::NonFinite)?;
+        let (h, x) = self.st.heads_mut();
+        *h = heads;
+        *x = host;
+        self.journal = JournalCursor::default();
+        Ok(())
+    }
+
     /// Which checks run at every settle.
     #[must_use]
     pub const fn debug_options(&self) -> DebugOptions {

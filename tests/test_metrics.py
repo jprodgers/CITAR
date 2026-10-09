@@ -1,5 +1,7 @@
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import json
 import unittest
+from unittest import mock
 
 from citar.server.metrics import Metrics
 
@@ -73,6 +75,80 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(s["error_rate"], 0)
         compared = compare_models(None, {"g": {"name": "G", "turn": 3, "summary": {0: s}}})
         self.assertEqual([(r["model"], r["turns"]) for r in compared], [("bot", 2)])
+
+
+class JsonPartsTests(unittest.TestCase):
+    """``Metrics.json_parts``: a save's metrics, joined, are exactly ``json.dumps(data)``, while each settled record is
+    encoded once (a save under the session's lock costs the records since the last one, not the game's)."""
+
+    def same(self, m: Metrics):
+        self.assertEqual(b"".join(m.json_parts()), json.dumps(m.data).encode())
+
+    def test_the_parts_join_to_the_whole_as_the_records_change(self):
+        m = Metrics()
+        self.same(m)
+        for turn in range(1, 4):
+            for pid in range(3):
+                m.begin_turn(pid, turn, "bot")
+                self.same(m)                                    # the open record, encoded afresh
+                m.bot_actions(pid, {"move_unit": [turn, 0]})
+                self.same(m)
+                m.end_turn(pid)
+            self.same(m)
+        m.negotiation(0, 1.5, 2, 100, 20)
+        self.same(m)
+        # an open record in the middle: the settled prefix stops at it, and the ones after it are encoded afresh
+        m.begin_turn(0, 4, "llm", "a-model")
+        m.begin_turn(1, 4, "bot")
+        m.end_turn(1)
+        m.begin_turn(2, 4, "bot")
+        m.end_turn(2)
+        self.same(m)
+        done = m._encoded["turns"].done
+        m.tool_call(0, "get_briefing", {}, "query", True, 0.01)  # the open one changes: the next save has it
+        self.same(m)
+        self.assertEqual(m._encoded["turns"].done, done, "nothing past the open record is cached")
+        m.pause()
+        m.interrupt_open()                                     # suspended: no turn is open now
+        self.same(m)
+        self.assertEqual(m._encoded["turns"].done, len(m.data["turns"]))
+        m.negotiation(1, 0.5, 1, 10, 2)
+        self.same(m)
+
+    def test_settled_records_are_encoded_once(self):
+        m = Metrics()
+        for turn in range(1, 51):
+            m.begin_turn(0, turn, "bot")
+            m.end_turn(0)
+            m.json_parts()
+        calls = []
+        real = json.dumps
+
+        def counting(obj, *a, **k):
+            calls.append(obj)
+            return real(obj, *a, **k)
+        m.begin_turn(0, 51, "bot")
+        with mock.patch("citar.server.metrics.json.dumps", counting):
+            parts = m.json_parts()
+        self.assertEqual(len([c for c in calls if isinstance(c, dict)]), 1, "only the open turn's record")
+        self.assertEqual(b"".join(parts), json.dumps(m.data).encode())
+
+    def test_loaded_replaced_and_unusual_data(self):
+        m = Metrics()
+        m.begin_turn(0, 1, "bot")
+        m.end_turn(0)
+        m.begin_turn(1, 1, "bot")                              # open when the game was saved
+        loaded = Metrics(json.loads(b"".join(m.json_parts())))
+        self.assertTrue(loaded.data["turns"][1]["interrupted"])
+        self.same(loaded)
+        loaded.begin_turn(1, 1, "bot")
+        loaded.end_turn(1)
+        self.same(loaded)
+        loaded.data["turns"] = loaded.data["turns"][:1]        # a list replaced: encoded again from its start
+        self.same(loaded)
+        loaded.data["extra"] = {"note": "kept", "n": [1, 2.5, None]}
+        self.same(loaded)
+        self.same(Metrics({"turns": [], "negotiations": [], 3: "an int key"}))
 
 
 if __name__ == "__main__":

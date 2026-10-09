@@ -76,8 +76,9 @@ __all__ = [
     "bot_owns_negotiation", "run_game",
     # one game
     "DEBUG_ACTIONS", "EngineGame",
-    # Phase 2's names (package 2-08), Rust-only: here each raises BackendError
+    # Phase 2's names (packages 2-08 and 2-11), Rust-only: here each raises BackendError
     "EngineCrash", "BackendError", "build_info", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint",
+    "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
 ]
 
 
@@ -406,6 +407,31 @@ def bot_clean_params(version: str, params: Optional[dict] = None) -> dict:
 def bot_fingerprint(bot) -> str:
     """What a bot plays, hashed. Rust backend only."""
     raise _rust_only("bot_fingerprint")
+
+
+def open_journal(path):
+    """A save journal opened for appending (saves v2). Rust backend only."""
+    raise _rust_only("open_journal")
+
+
+def fork_journal(path, ref: dict, new_path):
+    """A new journal from a prefix of another (saves v2). Rust backend only."""
+    raise _rust_only("fork_journal")
+
+
+def journal_in_use(path) -> bool:
+    """Whether a session holds a save journal (saves v2). Rust backend only."""
+    raise _rust_only("journal_in_use")
+
+
+def read_save(path):
+    """A .citar container read back (saves v2). Rust backend only."""
+    raise _rust_only("read_save")
+
+
+def save_header(path) -> dict:
+    """A .citar container's header (saves v2). Rust backend only."""
+    raise _rust_only("save_header")
 
 
 # ----------------------------------------------------------------------------
@@ -894,3 +920,7 @@ class EngineGame:
     def replay_json(self, extra: Optional[dict] = None) -> bytes:
         """The replay as JSON bytes, the host's keys spliced in. Rust backend only."""
         raise _rust_only("EngineGame.replay_json")
+
+    def save_snapshot(self, journal):
+        """The game taken for a v2 save under the session's lock. Rust backend only."""
+        raise _rust_only("EngineGame.save_snapshot")

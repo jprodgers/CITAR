@@ -58,12 +58,14 @@ class Recorder:
 
 
 def autosave_turn(s) -> int:
-    """The turn the session's autosave on disk holds (read again if it is being replaced as it is read)."""
+    """The turn the session's autosave on disk holds, once its writer has written the saves taken so far (read from its
+    header, again if it is being replaced as it is read)."""
+    assert s.flush_saves(60), "the writer caught up"
     path = sess.SAVE_DIR / s.id / "autosave.citar"
     for _ in range(40):
         try:
-            return engine_api.state_summary(sess.load_save_file(path)["state"])["turn"]
-        except (OSError, EOFError, ValueError):
+            return engine_api.save_header(path)["summary"]["turn"]
+        except (OSError, ValueError):
             time.sleep(0.05)
     raise AssertionError(f"the autosave of {s.id} could not be read")
 
@@ -113,13 +115,14 @@ class SideEffectTests(ServerCase):
         s.subscribers.append(rec)
         s.start()
         self.assertTrue(wait(lambda: s.game.turn >= 21, 180), f"20 rounds in 3 minutes ({s.game.turn}): {s.errors}")
-        # after 20 rounds the autosave is at most one round behind, while the game plays on
+        # after 20 rounds, while the game plays on, every round's autosave has been taken: once the writer has caught
+        # up, the autosave holds the round the game was in, or a later one
         turn = s.game.turn
-        self.assertGreaterEqual(autosave_turn(s), turn - 1)
+        self.assertGreaterEqual(autosave_turn(s), turn)
         s.set_paused(True)
         with s.lock:                                   # the turn in progress has finished
             turn = s.game.turn
-        self.assertGreaterEqual(autosave_turn(s), turn - 1)
+        self.assertEqual(autosave_turn(s), turn)
         self.assertEqual(s.errors, [])
 
         # the session version rises every round, with an update per bot turn: a drive a turn, each through _after_action
@@ -258,8 +261,10 @@ class CrashTests(ServerCase):
         s = self.game({"map_size": "duel", "seed": 7, "barbarians": "off"}, [{"type": "bot"}] * 2)
         self.assertTrue(wait(lambda: s.game.turn >= 3, 60), s.errors)
         s.set_paused(True)
-        with s.lock:                               # the turn in progress has finished, its autosave written
-            good = (sess.SAVE_DIR / s.id / "autosave.citar").read_bytes()
+        with s.lock:                               # the turn in progress has finished
+            pass
+        self.assertTrue(s.flush_saves(30))         # and its autosave is written
+        good = (sess.SAVE_DIR / s.id / "autosave.citar").read_bytes()
         return s, good
 
     def _check_crashed(self, s, good: bytes):
@@ -270,22 +275,16 @@ class CrashTests(ServerCase):
         s._driver.join(10)
         self.assertFalse(s._driver.is_alive(), "the driver stopped")
         self.assertEqual(s.agents, {}, "the agents were cancelled")
-        # the last good autosave is intact, and nothing autosaves over it
+        # the last good autosave is intact, and nothing autosaves over it; the crash save goes through the writer
         folder = sess.SAVE_DIR / s.id
-        self.assertEqual((folder / "autosave.citar").read_bytes(), good)
         s.autosave(force=True)
+        self.assertTrue(s.flush_saves(30))
         self.assertEqual((folder / "autosave.citar").read_bytes(), good)
-        restored = sess.GameSession.from_save(sess.load_save_file(folder / "autosave.citar"))
-        self.assertIsNone(restored.crashed)
         # the crash save is written once, with the crash in it
         crash = folder / f"crash-{s.crashed['turn']:03d}.citar"
         self.assertTrue(crash.exists())
         self.assertEqual(sorted(p.name for p in folder.glob("crash-*.citar")), [crash.name])
-        self.assertEqual(sess.load_save_file(crash)["session"]["crashed"]["turn"], s.crashed["turn"])
-        loaded = sess.GameSession.from_save(sess.load_save_file(crash))
-        self.assertTrue(loaded.crashed and loaded.paused)
-        self.assertEqual([p for p in range(len(loaded.seats)) if loaded.metrics.current(p)], [],
-                         "a crash save loads with no turn in progress")
+        self.assertEqual(engine_api.read_save(crash).session["crashed"]["turn"], s.crashed["turn"])
         # reads still answer
         info = s.info()
         self.assertEqual(info["crashed"]["turn"], s.crashed["turn"])
@@ -307,6 +306,15 @@ class CrashTests(ServerCase):
         s.resume()
         self.assertTrue(s.paused)
         self.assertEqual([e["where"] for e in s.errors], ["engine"])
+        # both saves load once the crashed session has let go of its journal: the autosave to play on, the crash save
+        # as a crashed session, to read
+        s.stop()
+        restored = sess.GameSession.from_save(folder / "autosave.citar", read_only=True)
+        self.assertIsNone(restored.crashed)
+        loaded = sess.GameSession.from_save(crash, read_only=True)
+        self.assertTrue(loaded.crashed and loaded.paused)
+        self.assertEqual([p for p in range(len(loaded.seats)) if loaded.metrics.current(p)], [],
+                         "a crash save loads with no turn in progress")
 
     def test_a_panic_in_a_tool_call(self):
         s, good = self._all_bots_paused()
@@ -348,89 +356,6 @@ class CrashTests(ServerCase):
         self.assertEqual(r.status_code, 500)
         self.assertEqual(r.json()["detail"], sess.CRASHED)
         self.assertEqual(s.crashed["message"], "panic: in a view")
-
-
-@rust_only
-class AutosaveCostTests(ServerCase):
-    """The autosave's cost bound (``GameSession.autosave``): every round while it is cheap, at most a share of the
-    session's time once it is not, and caught up as soon as the game waits."""
-
-    def setUp(self):
-        super().setUp()
-        self.s = self.game({"map_size": "duel", "seed": 3, "barbarians": "off"}, [{"type": "human"}, {"type": "bot"}],
-                           start=False)
-        self.writes = []
-        real = self.s.save
-
-        def save(filename=None, level=None):
-            if filename == "autosave":
-                self.writes.append(self.s.game.turn)
-            return real(filename, level)
-        self.s.save = save
-
-    def took(self, seconds: float, ago: float = 0.0):
-        """As if the last autosave took ``seconds`` and began ``ago`` seconds before its end."""
-        self.s._autosave_cost = seconds
-        self.s._autosave_began = time.perf_counter() - max(ago, seconds)
-
-    def next_round(self):
-        self.s._autosaved = None                 # the mark a new round's autosave sees
-
-    def test_a_cheap_autosave_is_written_every_round(self):
-        s = self.s
-        for _ in range(3):
-            self.took(s.AUTOSAVE_FREE_SECONDS / 2)
-            self.next_round()
-            with s.lock:
-                s.autosave()
-        self.assertEqual(len(self.writes), 3)
-        self.assertFalse(s._autosave_due)
-
-    def test_a_costly_autosave_waits_for_its_share_or_for_the_game_to_wait(self):
-        s = self.s
-        self.took(1.0)
-        self.next_round()
-        with s.lock:
-            s.autosave()
-        self.assertEqual(self.writes, [], "a second's autosave right after the last one is put off")
-        self.assertTrue(s._autosave_due)
-        self.took(1.0, ago=1.0 / s.AUTOSAVE_SHARE)
-        with s.lock:
-            s.autosave()
-        self.assertEqual(len(self.writes), 1, "written once it is the share of the time since the last one began")
-        self.assertFalse(s._autosave_due)
-        # put off again, and written by the pause
-        self.took(1.0)
-        self.next_round()
-        with s.lock:
-            s.autosave()
-        self.assertEqual(len(self.writes), 1)
-        s.set_paused(True)
-        self.assertEqual(len(self.writes), 2, "a pause writes the autosave put off")
-        self.assertFalse(s._autosave_due)
-        # a forced autosave and the end of the game are never put off
-        self.took(1.0)
-        with s.lock:
-            s.autosave(force=True)
-        self.assertEqual(len(self.writes), 3)
-        if has_test_ops():
-            self.took(1.0)
-            with s.lock:
-                s.game.test_ops([{"op": "end_game"}])
-                s.autosave()
-            self.assertEqual(len(self.writes), 4, "the end of the game")
-
-    def test_the_driver_writes_a_put_off_autosave_when_the_game_waits(self):
-        s = self.s
-        self.assertEqual(s.seats[s.game.current].type, "human")
-        self.took(1.0)
-        self.next_round()
-        with s.lock:
-            s.autosave()
-        self.assertTrue(s._autosave_due)
-        s.start()                                    # the driver waits for the person's turn, and catches up first
-        self.assertTrue(wait(lambda: not s._autosave_due, 10))
-        self.assertEqual(len(self.writes), 1)
 
 
 @rust_only
@@ -533,17 +458,17 @@ class LongGameTests(ServerCase):
             dispatched.append(1)
             return real(self_)
 
-        autosaves = []
-        real_save = s.save
+        autosaves = []                  # each autosave's time under the lock: its snapshot (the writer does the rest)
+        real_snapshot = s._snapshot
 
-        def save(filename=None, level=None):
+        def snapshot(name, autosave):
             t = time.perf_counter()
             try:
-                return real_save(filename, level)
+                return real_snapshot(name, autosave)
             finally:
-                if filename == "autosave":
+                if autosave:
                     autosaves.append(time.perf_counter() - t)
-        s.save = save
+        s._snapshot = snapshot
 
         with mock.patch.object(sess.GameSession, "_dispatch_negotiation_interrupts", dispatch):
             t0 = time.perf_counter()
@@ -560,12 +485,14 @@ class LongGameTests(ServerCase):
         self.assertGreaterEqual(len(rounds), 100 if s.game.phase == "playing" else 1)
         print(f"\n100 rounds of 4 bots on small under the session driver: {starts[min(last, 101)] - t0:.1f} s, "
               f"slowest round {max(rounds):.2f} s, median {statistics.median(rounds) * 1000:.0f} ms; "
-              f"{len(autosaves)} autosaves, {sum(autosaves):.2f} s in all", flush=True)
+              f"{len(autosaves)} autosaves, {sum(autosaves) * 1000:.0f} ms under the lock in all", flush=True)
         self.assertLess(max(rounds), 10.0)
         self.assertGreaterEqual(len(dispatched), 400, "the responders were dispatched after every drive")
         self.assertEqual(s.errors, [])
+        self.assertGreaterEqual(len(autosaves), 100, "every round's autosave was taken")
         with s.lock:
-            self.assertEqual(autosave_turn(s), s.game.turn, "the pause brought the autosave up to the game")
+            turn = s.game.turn
+        self.assertEqual(autosave_turn(s), turn, "once written, the autosave is the round the game is in")
 
 
 if __name__ == "__main__":

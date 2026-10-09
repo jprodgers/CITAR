@@ -138,6 +138,15 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(job["result"]["outcome"], "eliminated")
         self.assertEqual(job["result"]["performance"], 0)
         self.assertTrue(s.stopped, "the bots should not play out a settled game")
+        # Its last save is taken as it stops: no round the bots played after it was autosaved past it, so opening the
+        # job's game later goes on in its journal rather than forking a copy of the history.
+        from citar import engine_api
+        last = engine_api.save_header(s.folder / "benchmark.citar")["journal"]
+        for p in s.folder.glob("*.citar"):
+            self.assertLessEqual(engine_api.save_header(p)["journal"]["records"], last["records"], p.name)
+        self.manager.delete(s.id)
+        view = sch.open_job_game(run["id"], job["id"])
+        self.assertEqual(view.journal.path.name, "journal.cjnl")
 
     @rust_only
     @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")

@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use citar_store::journal::JournalWriter;
-use citar_store::{StoreError, fork, read_upto};
+use citar_store::{StoreError, fork, in_use, read_upto};
 
 use super::common::{Dir, write_journal};
 
@@ -40,6 +40,22 @@ fn a_second_writer_is_refused_while_the_first_holds_the_journal() {
     assert_eq!((rec.records, rec.torn, rec.corrupt_at), (3, None, None));
     drop(second);
     assert_eq!(read_upto(&path, &r).expect("reads").len(), 3);
+}
+
+#[test]
+fn a_journal_is_in_use_exactly_while_a_writer_holds_it() {
+    let dir = Dir::new("in-use");
+    let path = dir.join("journal.cjnl");
+    assert!(!in_use(&path).expect("a missing file"), "a missing journal is in nobody's use");
+    let refs = write_journal(&path, &[b"a".to_vec()]);
+    assert!(!in_use(&path).expect("it reads"));
+    let (writer, _) = JournalWriter::open(&path).expect("opens");
+    assert!(in_use(&path).expect("it reads"), "a session writes it");
+    drop(writer);
+    assert!(!in_use(&path).expect("it reads"));
+    // Asking takes nothing: a writer opens straight after, and a reader too.
+    assert!(JournalWriter::open(&path).is_ok());
+    assert_eq!(read_upto(&path, &refs[1]).expect("reads").len(), 1);
 }
 
 #[test]

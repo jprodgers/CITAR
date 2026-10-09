@@ -70,7 +70,23 @@ Look at **📊 AI stats** for that seat:
 ### It was working and now it is not
 
 A server restart drops in-memory games. Reload from the autosave in the lobby — next to nothing is
-lost: autosaves are written every turn (a game of bots alone may be a second or so of play behind).
+lost: autosaves are written every turn. A game that was open when a version 0.1.5 server stopped is
+not brought back on the first start of this version (its autosave is the Python engine's); the
+server's log names it once.
+
+### A save does not load
+
+The lobby lists such a save without its turn or players, and **Load** says why:
+
+| The message says | Means |
+|---|---|
+| saved by the Python engine; archived with 0.1.5 | A save of version 0.1.5 or earlier, which this version does not read |
+| ...'s history ... cannot be read | Its journal (`journal.cjnl` beside it) is missing, or damaged in a part this save needs. An earlier save of the game may still load: each needs only the history up to its own turn |
+| is in use by another session | Another server, or another game open in this one, is writing that game. Close it first |
+
+Loading a save never costs the game it would replace: a save that does not load is refused with that
+game still playing as it was. A damaged journal is never repaired in place: loading a save from
+before the damage starts a new journal from the good part, and the damaged file is left as it is.
 
 ---
 

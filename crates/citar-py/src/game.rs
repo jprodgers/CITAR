@@ -15,6 +15,7 @@
 //! - Every command returns the events it appended as JSON bytes, each in Python's dict shape,
 //!   which the facade fans out to its subscribers after the call.
 
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use citar_bot::Bot as Driver;
@@ -32,6 +33,7 @@ use citar_engine::game::{
     Game as EngineGame, SeatDriver,
 };
 use citar_engine::rules::Ruleset;
+use citar_engine::save::LoadReport;
 use citar_engine::state::chronicle::EventData;
 use citar_engine::state::diplo::{DealItem, NegStatus, Terms};
 use citar_engine::state::players::{Controller, SeatOverrides};
@@ -44,6 +46,7 @@ use crate::Bytes;
 use crate::bot::Bot;
 use crate::calls::detached;
 use crate::errors::{Failure, caught, guarded, parse, parse_opt};
+use crate::save::{self, Journal, Save, SaveSnapshot};
 
 /// One game (DESIGN.md P2.6.1). Frozen, so it must be `Sync`: the engine's `Game` is `Send` and
 /// not `Sync`, and the lock around it makes it shareable.
@@ -237,6 +240,17 @@ impl Game {
     }
 }
 
+/// What loading found, as JSON bytes: `rules_changed` (the save's ruleset id and engine, when
+/// another ruleset made it), `chronicle_incomplete` and `engine`.
+fn load_report(report: &LoadReport) -> Bytes {
+    let v = json!({
+        "rules_changed": report.rules_changed.as_ref().map(|(id, engine)| json!([id.to_hex(), engine])),
+        "chronicle_incomplete": report.chronicle_incomplete,
+        "engine": report.engine,
+    });
+    Bytes(to_py_json(&v))
+}
+
 /// `{pid: {tool: [taken, refused]}}` for the bots of a drive, by seat.
 fn action_counts(drivers: &[(PlayerId, Driver)]) -> Bytes {
     let m: Map<String, Value> =
@@ -276,23 +290,59 @@ impl Game {
         Ok(guarded(py, || {
             let mut it = chunks.iter().map(|c| &**c);
             let (game, report) = EngineGame::load(Ruleset::shared(), state_json, &mut it)?;
-            let report = json!({
-                "rules_changed": report.rules_changed.map(|(id, engine)| json!([id.to_hex(), engine])),
-                "chronicle_incomplete": report.chronicle_incomplete,
-                "engine": report.engine,
-            });
-            Ok((Self::wrap(game), Bytes(to_py_json(&report))))
+            Ok((Self::wrap(game), load_report(&report)))
         })?)
     }
 
-    /// The game as one save until package 2-11's container (`EngineGame.to_save`): the state
-    /// JSON, and the whole history as one journal chunk (`None` before there is any), which
-    /// `Game.load` reads back to the same game.
+    /// The game as one value (`EngineGame.to_save`): the state JSON, and the whole history as one
+    /// journal chunk (`None` before there is any), which `Game.load` reads back to the same
+    /// game. The game's own journal does not move. A session saves through `save_snapshot`.
     fn save(&self, py: Python<'_>) -> PyResult<(Bytes, Option<Bytes>)> {
         Ok(self.read(py, |g| {
             let s = g.save_whole().map_err(|e| Failure::Runtime(e.to_string()))?;
             Ok((Bytes(s.state), s.history.map(Bytes)))
         })?)
+    }
+
+    /// A game from a v2 save (`EngineGame.from_save`): the container `save` (`read_save`) and the
+    /// history its header names, read from `journal` (the journal file beside it, or a fork of
+    /// it). With no `journal`, the state alone, with no history: a scenario's start. Returns the
+    /// game and what loading found, as `Game.load`. `LoadError` for a save whose history cannot be
+    /// read (missing, damaged inside the prefix it names, or of another timeline), which never
+    /// loads with a history it was not saved with.
+    #[staticmethod]
+    #[pyo3(signature = (save, journal = None))]
+    fn load_save(
+        py: Python<'_>,
+        save: &Bound<'_, Save>,
+        journal: Option<PathBuf>,
+    ) -> PyResult<(Self, Bytes)> {
+        let (path, container) = save.get().parts();
+        let path = path.to_owned();
+        Ok(guarded(py, || {
+            let chunks = match &journal {
+                Some(j) => save::history(&path, container.header(), j)?,
+                None => Vec::new(),
+            };
+            let mut it = chunks.iter().map(Vec::as_slice);
+            let (game, report) = EngineGame::load(Ruleset::shared(), container.state(), &mut it)?;
+            Ok((Self::wrap(game), load_report(&report)))
+        })?)
+    }
+
+    /// Takes the game for a save under its lock (DESIGN.md P2.5.3): the history since the last
+    /// take goes into `journal`'s queue as a chunk, and the snapshot is a copy of the state that
+    /// counts it, which `SaveSnapshot.write` writes off the lock. A journal with no records and
+    /// none queued starts the game's journal over, its first chunk the whole history the game
+    /// keeps. A poisoned game is saved too. `OSError` for a closed journal; `RuntimeError` for a
+    /// journal of another timeline.
+    fn save_snapshot(
+        &self,
+        py: Python<'_>,
+        journal: &Bound<'_, Journal>,
+    ) -> PyResult<SaveSnapshot> {
+        let journal = journal.get();
+        Ok(self.tend(py, |g| journal.snapshot(g))?)
     }
 
     /// The state alone as JSON (`EngineGame.state_dict`): a scenario's or an undo's starting

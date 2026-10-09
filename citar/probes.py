@@ -367,11 +367,7 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                                                        "cache_read_input_tokens", "cache_creation_input_tokens") if k in usage}
         if save_path is not None:
             try:
-                data = s.to_save()
-                import gzip
-                save_path.parent.mkdir(parents=True, exist_ok=True)
-                with gzip.open(save_path, "wt", encoding="utf-8") as f:
-                    json.dump(data, f)
+                s.save_copy(save_path)      # beside it, its own journal: the case's game stands apart from the run's
                 rec["save"] = str(save_path)
             except Exception:
                 pass

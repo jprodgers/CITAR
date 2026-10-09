@@ -7,7 +7,8 @@
 //! | `ErrCode::Poisoned`, `EngineError::Poisoned`, a caught panic | `EngineCrash(RuntimeError)`, never `ActionError` |
 //! | `EngineError::Config`, a bad argument | `ValueError` |
 //! | `EngineError::Map`, a map refusal | `MapError(ValueError)` |
-//! | `LoadError` | `LoadError(ValueError)` |
+//! | `LoadError`; a `StoreError` reading a save or its journal | `LoadError(ValueError)` |
+//! | a `StoreError` writing a save | `OSError`: the save was not written |
 //!
 //! A call fails with a [`Failure`] made without the GIL, which becomes the exception once the
 //! GIL is back. Every entry point reaches engine, bot or runner code through a panic guard: a
@@ -18,7 +19,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use citar_engine::game::{ActionError as EngineAction, EngineError, ErrCode};
 use citar_engine::save::LoadError as EngineLoad;
-use pyo3::exceptions::{PyException, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyException, PyOSError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::{PyErr, create_exception};
 
@@ -64,6 +65,8 @@ pub enum Failure {
     Map(String),
     /// A save that does not load: `LoadError`.
     Load(String),
+    /// A save that was not written (the disk, a held file, a closed journal): `OSError`.
+    Os(String),
     /// An argument of the wrong kind: `TypeError`.
     Type(String),
     /// Something the engine rules out happened anyway (a state that does not write).
@@ -118,6 +121,7 @@ impl From<Failure> for PyErr {
             Failure::Value(m) => PyValueError::new_err(m),
             Failure::Map(m) => MapError::new_err(m),
             Failure::Load(m) => LoadError::new_err(m),
+            Failure::Os(m) => PyOSError::new_err(m),
             Failure::Type(m) => PyTypeError::new_err(m),
             Failure::Runtime(m) => PyRuntimeError::new_err(m),
         }

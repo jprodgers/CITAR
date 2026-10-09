@@ -9,8 +9,9 @@ use std::io::Read;
 
 use citar_engine::game::Game;
 use citar_engine::rules::Ruleset;
+use citar_engine::save::journal::{FrameWriter, FullFrame, Record};
 use citar_engine::state::State;
-use citar_engine::state::chronicle::Chronicle;
+use citar_engine::state::chronicle::{Chronicle, ChronicleHeads, HostHeads};
 use citar_testkit::fixtures::{self as tk, Fixture};
 use citar_testkit::states::{self, Shape};
 
@@ -108,6 +109,30 @@ pub const LATE: (&str, u32) = ("small-continents-normal-s1025", 280);
 #[must_use]
 pub fn gargantuan_state() -> State {
     states::build(Ruleset::shared(), 2026, &Shape::GARGANTUAN)
+}
+
+/// The synthetic gargantuan state as a game whose chronicle holds one round of history not yet
+/// taken into the journal: 300 entries of every kind (`states::history`) and the state's own
+/// keyframe, the largest frame a round records (a delta is a few kilobytes). What a session's
+/// save takes under its lock after a round (package 2-11): the round's chunk and the state.
+/// The checks are off ([`crate::unchecked`]).
+///
+/// # Panics
+///
+/// If the synthetic state is not sound, which the testkit's own tests rule out.
+#[must_use]
+pub fn gargantuan_round_game() -> Game {
+    let r = Ruleset::shared();
+    let mut parts = gargantuan_state().into_parts();
+    let (mut heads, mut host) = (ChronicleHeads::default(), HostHeads::default());
+    let mut chron = Chronicle::new();
+    states::history(r, 2026, 300, &mut heads, &mut host, &mut chron);
+    parts.chronicle = heads;
+    parts.host.0 = host;
+    let mut st = State::from_parts(parts).expect("the synthetic state fits");
+    let key = FrameWriter::new().push(&FullFrame::capture(r, &st, (0, 0)));
+    Record::of(&mut st, &mut chron).frame(key);
+    crate::unchecked(Game::from_state(r, st, chron).expect("a sound state"))
 }
 
 /// The synthetic gargantuan state as a game, its checks off ([`crate::unchecked`]).

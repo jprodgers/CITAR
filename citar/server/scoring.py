@@ -16,13 +16,14 @@ from typing import Optional
 
 from .. import engine_api
 from .metrics import Metrics
-from .session import SAVE_DIR, SessionManager, load_save_file
+from .session import SAVE_DIR, SessionManager
 
 _digest_cache: dict[str, tuple[float, dict]] = {}
 
 
 def _digest_save(path: Path) -> Optional[dict]:
-    """Extract what scoring needs from a save file (cached by modification time)."""
+    """Extract what scoring needs from a save file (cached by modification time): the state's summary from its header,
+    the session's record and metrics from its body (never the history)."""
     key = str(path)
     try:
         mtime = path.stat().st_mtime
@@ -32,16 +33,16 @@ def _digest_save(path: Path) -> Optional[dict]:
     if hit and hit[0] == mtime:
         return hit[1]
     try:
-        data = load_save_file(path)
+        doc = engine_api.read_save(path)
+        sess, metrics = doc.session, doc.metrics
     except Exception:
         return None
-    sess = data.get("session", {})
     seats = sess.get("seats", [])
     # the save's engine part is read through the facade, which is all that knows its layout
-    state = engine_api.state_summary(data["state"])
+    state = doc.summary
     summary = {}
-    if data.get("metrics"):
-        m = Metrics(data["metrics"])
+    if metrics:
+        m = Metrics(metrics)
         summary = m.summary({st["player"]: {"name": state["names"][st["player"]], "controller": st["type"],
                                             "model": (st.get("llm") or {}).get("model") if st["type"] == "llm" else None}
                              for st in seats})
@@ -57,7 +58,8 @@ def _digest_save(path: Path) -> Optional[dict]:
 
 
 def _benchmark_from_state(sess: dict, seats: list, state: dict) -> Optional[dict]:
-    """Extract a benchmark result from a saved game: ``state`` is engine_api.state_summary of its state."""
+    """Extract a benchmark result from a saved game: ``state`` is the summary of its state (its header's, as
+    engine_api.state_summary gives it)."""
     from .benchmarks import performance
     bench = sess.get("benchmark")
     name = sess.get("name", "")

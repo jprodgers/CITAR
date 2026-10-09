@@ -550,10 +550,10 @@ class BenchmarkScheduler:
         if s is not None:
             self._record_progress(run, job, s)
             try:
-                s.save("benchmark")
+                # saved as it stops, so no round its bots play after it is autosaved past it (GameSession.stop)
+                self.manager.delete(s.id, save_as="benchmark")
             except Exception:
                 pass
-            self.manager.delete(s.id)
         job.update({"status": "cancelled", "finished": _now(), "error": why, "pause_reason": None})
 
     def open_job_game(self, run_id: str, job_id: str) -> GameSession:
@@ -1015,10 +1015,14 @@ class BenchmarkScheduler:
         self._record_progress(run, job, s)
         job["result"] = job["progress"]
         job.update({"status": "done", "finished": _now(), "pause_reason": None})
-        if s.game.phase == "playing":
-            s.stop()                # the model was eliminated: stop the bots playing out a settled game
         try:
-            s.save("benchmark")
+            if s.game.phase == "playing":
+                # The model was eliminated: stop the bots playing out a settled game, saved in the same hold of the lock
+                # (GameSession.stop). Saved first and stopped after, a round they played in between was autosaved past
+                # benchmark.citar, and every later opening of the job's game forked a copy of its history.
+                s.stop(save_as="benchmark")
+            else:
+                s.save("benchmark")
         except Exception as e:
             job["error"] = f"Could not save the finished game: {e}"
         self._log(f"Finished {job['label']} on {job['scenario_name']}: {job['result'].get('outcome')}.")
@@ -1075,10 +1079,13 @@ def performance(scores: dict, llm: int, phase: str, winner, alive: dict) -> Opti
     return round(min(share, 95.0) if phase != "playing" else share, 1)
 
 
-def game_progress(s: GameSession) -> dict:
-    """Live progress of a benchmark game (called with the session lock held)."""
+def game_progress(s: GameSession, llm_player: Optional[int] = None, model: Optional[str] = None) -> dict:
+    """Live progress of a benchmark game (called with the session lock held): of its model seat, ``s.benchmark``'s
+    ``llm_player`` and ``model`` unless given (the reports ask it of any model seat of any game). Reads only."""
     g = s.game
-    llm = (s.benchmark or {}).get("llm_player", 0)
+    bench = s.benchmark or {}
+    llm = bench.get("llm_player", 0) if llm_player is None else llm_player
+    model = bench.get("model") if model is None else model
     summ = g.summary()
     majors = [p for p in summ["players"] if p["kind"] == "major"]
     standings = g.standings()
@@ -1086,7 +1093,7 @@ def game_progress(s: GameSession) -> dict:
     alive = {p["id"]: p["alive"] for p in majors}
     mine = standings[llm]
     phase, winner, victory = summ["phase"], summ["winner"], summ["victory"]
-    rep = s.metrics.summary({llm: {"name": g.player_name(llm), "controller": "llm", "model": (s.benchmark or {}).get("model")}})[llm]
+    rep = s.metrics.summary({llm: {"name": g.player_name(llm), "controller": "llm", "model": model}})[llm]
     best_opp = max((scores[p["id"]] for p in majors if p["id"] != llm), default=0)
     outcome = "eliminated" if not alive.get(llm) else None
     if phase != "playing":

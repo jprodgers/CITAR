@@ -27,7 +27,8 @@ Rules for callers, on either backend:
 
 The Rust backend differs from the Python one in two documented ways: ``apply_ops`` is all or nothing (a failing
 operation leaves the game as it was), and a subscriber hears a call's events after the call returns rather than
-during it. Its saves (``to_save``, ``state_dict``) are the Rust engine's own format.
+during it. Its saves (``to_save``, ``state_dict``, and the ``.citar`` container with its journal: ``save_snapshot``,
+``read_save``, ``save_header``, ``open_journal``) are the Rust engine's own format.
 """
 # The names come from the backend's star import below, which the import-time check holds to __all__.
 # ruff: noqa: F405
@@ -56,6 +57,8 @@ __all__ = [
     "DEBUG_ACTIONS", "EngineGame",
     # Phase 2 (package 2-08): the errors both backends define, and the names only the Rust backend has
     "EngineCrash", "BackendError", "build_info", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint",
+    # Phase 2 (package 2-11), Rust-only: saves v2, the .citar container and its journal
+    "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
     # which backend this is
     "BACKEND",
 ]

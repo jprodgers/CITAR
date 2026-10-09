@@ -37,7 +37,8 @@
 //! exactly the engine's chunks 0, 1, 2, ...; a `PermissionDenied` is tried again as a
 //! container's rename is, and a failed append leaves the file as it was before it. A container
 //! names its journal by [`JournalRef`]; [`read_upto`] reads exactly that prefix and refuses one
-//! whose last record does not hash to its head. [`fork`] copies a prefix to a new file.
+//! whose last record does not hash to its head. [`fork`] copies a prefix to a new file, and
+//! [`in_use`] says whether a writer holds a journal.
 //! [`JournalWriter::truncate_to`] drops the records past one of its own prefixes, for a session
 //! that continues the timeline from an older save (DESIGN.md P2.5.3).
 //!
@@ -539,6 +540,26 @@ pub fn fork(path: &Path, r: &JournalRef, new: &Path) -> Result<(), StoreError> {
     cleanup.keep();
     disk::sync_parent(new);
     Ok(())
+}
+
+/// Whether a writer holds the journal at `path` now: a session is writing it. A cleanup asks
+/// before it removes a journal no container names (DESIGN.md P2.5.3), since the journal a session
+/// has just begun is named by none until its first save. A missing file is in nobody's use. The
+/// shared lock it tries is let go before it returns.
+///
+/// # Errors
+/// [`StoreError::Io`] when the file is there but cannot be opened or locked.
+pub fn in_use(path: &Path) -> Result<bool, StoreError> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(io_err(path, e)),
+    };
+    match disk::lock(&file, path, Lock::Shared) {
+        Ok(()) => Ok(false),
+        Err(StoreError::Locked { .. }) => Ok(true),
+        Err(e) => Err(e),
+    }
 }
 
 /// The journal at `path` opened for reading the prefix `r`, under a shared lock, its header

@@ -7,6 +7,11 @@
 //!   lock, of the synthetic gargantuan state (24 majors and 32 city-states on 160 by 100 tiles,
 //!   400 cities, 2,500 units, most of the map explored and remembered, about 4 MB of canonical
 //!   bytes). Budget 10 ms (the plan's floor is 100 ms, gate 3 of package 1e-03).
+//! - `save_snapshot/gargantuan`: `Game::save_snapshot`, all a session's save holds the lock for
+//!   (package 2-11, DESIGN.md P2.5.3): a round's journal chunk taken and the state copied, on the
+//!   synthetic gargantuan game with a round of history (`fixtures::gargantuan_round_game`: 300
+//!   entries and the state's keyframe, the largest frame a round records). Budget 10 ms (gate 6
+//!   of 2-11: never above 100 ms).
 //! - `to_json/small_t280` and `to_json/gargantuan`: the save written from a snapshot, off the
 //!   lock. Budgets 20 ms and 100 ms.
 //! - `load/small_t280`: `Game::load` of the late fixture's save: the state read and validated,
@@ -36,7 +41,7 @@
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use citar_bench::{Suite, fixtures, median};
+use citar_bench::{Suite, fixtures, median, median_on_copies};
 use citar_engine::game::Game;
 use citar_engine::rules::{Ruleset, embedded};
 use citar_engine::save::journal::{self as chunks, JournalCursor};
@@ -148,11 +153,35 @@ fn main() {
             }),
         );
     }
+    if s.wants("save_snapshot") {
+        save_snapshot(&mut s, &mut c);
+    }
     if s.wants("container") || s.wants("journal") {
         store(&mut s, &mut c, r);
     }
     c.final_summary();
     s.finish();
+}
+
+/// What a session's save holds its lock for (package 2-11): `Game::save_snapshot` on the
+/// gargantuan game with a round of history, each timing on a fresh copy of the game (the copy
+/// untimed), so each takes the round's chunk.
+fn save_snapshot(s: &mut Suite, c: &mut criterion::Criterion) {
+    let g = fixtures::gargantuan_round_game();
+    let chunk = g.clone().save_snapshot().expect("it saves").1.map_or(0, |c| c.json.len());
+    println!("a gargantuan round's journal chunk (with a keyframe): {:.0} KB", chunk as f64 / 1e3);
+    let mut grp = c.benchmark_group("io");
+    grp.sample_size(20);
+    grp.bench_function("save_snapshot/gargantuan", |b| {
+        b.iter_batched(
+            || g.clone(),
+            |mut g| black_box(g.save_snapshot().expect("it saves")),
+            criterion::BatchSize::LargeInput,
+        );
+    });
+    grp.finish();
+    let take = |g: &mut Game| drop(black_box(g.save_snapshot().expect("it saves")));
+    s.put("save_snapshot/gargantuan", median_on_copies(&g, 15, take));
 }
 
 /// The store's cases, in a folder of their own under cargo's temporary folder for benchmarks.
