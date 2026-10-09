@@ -649,17 +649,20 @@ class ParallelismTests(unittest.TestCase):
     """The GIL is released for every heavy call (DESIGN.md P2.6.2, package 2-06a's gate 2)."""
 
     def test_two_games_on_two_threads_use_two_cores(self):
-        # Each thread plays 60-round games of its own, a seat per call, until a second has passed, so the CPU clock's
-        # tick (16 ms on Windows) is small beside the window. Both stop at the same moment, within a call of it: a
-        # thread still finishing a game alone would count wall time on one core.
-        # The best of three such seconds is the measure: a shared CI runner (macOS's has three cores) can lend a core
-        # away for part of one (1.58 once), while a drive that held the GIL would stay near 1.0 in every one.
+        # Each thread plays 60-round games of its own, a round (four seats) per call, until a second has passed, so the
+        # CPU clock's tick (16 ms on Windows) is small beside the window. Both stop at the same moment, within a call
+        # of it (about 1.3 ms on the laptop): a thread still finishing a game alone would count wall time on one core.
+        # A round rather than a seat per call takes the GIL back a quarter as often, so a slow wake-up on a virtual
+        # runner costs the measure less.
+        # The best of five such seconds is the measure: a shared CI runner (macOS's has three cores) can lend a core
+        # away for part of one (1.58 once; 1.33, 1.57 and 1.21 in three running), while a drive that held the GIL
+        # would stay near 1.0 in every one.
         def worker(seed, until):
             bots = idle_bots()
             while time.perf_counter() < until:
                 g = small(seed)
                 while g.phase == "playing" and time.perf_counter() < until:
-                    g.drive(bots, 1)
+                    g.drive(bots, 4)
                 seed += 2
 
         def one_second():
@@ -672,7 +675,7 @@ class ParallelismTests(unittest.TestCase):
             return time.process_time() - cpu0, time.perf_counter() - wall0
 
         tries = []
-        while len(tries) < 3 and not any(cpu / wall >= 1.6 for cpu, wall in tries):
+        while len(tries) < 5 and not any(cpu / wall >= 1.6 for cpu, wall in tries):
             tries.append(one_second())
         cpu, wall = max(tries, key=lambda t: t[0] / t[1])
         self.assertGreaterEqual(cpu / wall, 1.6, f"CPU {cpu:.2f} s in {wall:.2f} s of wall time, the best of "
