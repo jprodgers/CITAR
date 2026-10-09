@@ -116,6 +116,7 @@ files.
 - Python listed a civilization's policies, the civilizations it had met, a city's specialists and buildings and a religion's beliefs in the order they were adopted, met, assigned, built and chosen, a history no state keeps; Rust lists them in the ruleset's order, branch by branch for the policies, and by player id, in the briefing and the scenario editor's overview (`lists-in-rule-order`)
 - A map's summary counted as land every tile whose terrain was not called Ocean, Coast or Lakes; Rust counts the tiles whose terrain the ruleset makes water, so a ruleset's own water terrains count as water (`map-summary-reads-water-by-rule`)
 - The scenario editor's overview gave a city-state's influence with the civilizations whose influence had ever been set; Rust gives its influence with every civilization, 0 where there is none (`scenario-overview-lists-every-influence`)
+- A civilization's great people were born at the start of its turn for as long as its points covered the threshold, all at once, and for ever on points no game earns (a save's 1e300, which paying a threshold leaves where it was), hanging the game; Rust makes one great person of each kind a turn from its points, and one from its combat points, and the rest wait for the turns after (`one-great-person-of-a-kind-a-turn`)
 <!-- rule fixes: end -->
 
 ## [0.1.5] - 2026-09-22

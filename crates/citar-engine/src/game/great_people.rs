@@ -6,8 +6,9 @@
 //!   friendships under `... with declared friendships`, and by `[great person] is earned [n]%
 //!   faster`, each rounded to a whole point in fixed point (`great_people.py:35-62`).
 //! - **Births** (`start_turn`, stage S2): a great person whose points reach their threshold is
-//!   born in the capital; a pool's threshold doubles with each (`great_people.py:65-140`). Combat
-//!   points ([`add_combat_points`], for package 1c-03) have thresholds of their own, rising by 50.
+//!   born in the capital, one of each kind a turn; a pool's threshold doubles with each
+//!   (`great_people.py:65-140`). Combat points ([`add_combat_points`], for package 1c-03) have
+//!   thresholds of their own, rising by 50.
 //! - **Free great people** ([`ChooseGreatPerson`], the tool `choose_great_person`, and
 //!   [`ai_choose_free`]), and **the Maya long count** ([`maya_long_count`], stage S2): a free
 //!   great person at the end of every b'ak'tun once the tech is known, each kind once.
@@ -31,7 +32,11 @@
 //! - either `Can speed up construction of a building` or `Can speed up the construction of a
 //!   wonder` hurries construction, the second only while the city builds a wonder, where Python
 //!   offered the second and then refused it (`actions.py:87`, `great_people.py:313`);
-//! - reading a threshold writes nothing, where Python stored the default it read.
+//! - reading a threshold writes nothing, where Python stored the default it read;
+//! - a kind's points pay for one great person a turn, and what is left waits for the next, where
+//!   Python's births went on while the points covered the threshold (`great_people.py:120-140`),
+//!   for ever on points no game earns: 1e300 less a threshold is 1e300, and a pool's threshold,
+//!   doubled, stops at the largest number it holds.
 
 use serde_json::{Value, json};
 use smallvec::SmallVec;
@@ -171,14 +176,23 @@ pub fn great_people_types(g: &Game, p: PlayerId) -> Vec<BaseUnitId> {
     out
 }
 
+/// The points that have paid for a great person this turn: `(true, kind)` for a kind's combat
+/// points, `(false, kind)` for its other points.
+type Paid = SmallVec<[(bool, BaseUnitId); 4]>;
+
 /// The great person a civilization has just earned, if any, its points paid
 /// (`great_people._new_great_person`, `great_people.py:100-117`): combat points first, each
 /// kind's threshold 200 at first and 50 more each time; then the others, each pool's threshold
-/// doubling.
-fn new_great_person(g: &mut Game, p: PlayerId) -> Option<BaseUnitId> {
+/// doubling. Points that have paid this turn (`paid`, which records the payment) wait.
+fn new_great_person(g: &mut Game, p: PlayerId, paid: &mut Paid) -> Option<BaseUnitId> {
     let pl = g.player(p)?;
-    let combat: Vec<(BaseUnitId, f64)> =
-        pl.gp.combat_points.iter().map(|(&u, &v)| (u, v)).collect();
+    let combat: Vec<(BaseUnitId, f64)> = pl
+        .gp
+        .combat_points
+        .iter()
+        .filter(|&(&u, _)| !paid.contains(&(true, u)))
+        .map(|(&u, &v)| (u, v))
+        .collect();
     for (u, value) in combat {
         let need = g
             .player(p)
@@ -190,15 +204,22 @@ fn new_great_person(g: &mut Game, p: PlayerId) -> Option<BaseUnitId> {
         if reached {
             if let Some(x) = g.player_mut(p, PlayerTouch::OTHER) {
                 #[allow(clippy::cast_precision_loss, reason = "a threshold is far below 2^53")]
-                let paid = need as f64;
-                *x.gp.combat_points.entry(u).or_insert(0.0) -= paid;
-                x.gp.combat_threshold.insert(u, need + 50);
+                let cost = need as f64;
+                *x.gp.combat_points.entry(u).or_insert(0.0) -= cost;
+                x.gp.combat_threshold.insert(u, need.saturating_add(50));
             }
+            paid.push((true, u));
             return Some(u);
         }
     }
-    let points: Vec<(BaseUnitId, f64)> =
-        g.player(p)?.gp.points.iter().map(|(&u, &v)| (u, v)).collect();
+    let points: Vec<(BaseUnitId, f64)> = g
+        .player(p)?
+        .gp
+        .points
+        .iter()
+        .filter(|&(&u, _)| !paid.contains(&(false, u)))
+        .map(|(&u, &v)| (u, v))
+        .collect();
     for (u, value) in points {
         let need = points_required(g, p, u);
         #[allow(clippy::cast_precision_loss, reason = "a threshold is far below 2^53")]
@@ -210,6 +231,7 @@ fn new_great_person(g: &mut Game, p: PlayerId) -> Option<BaseUnitId> {
                 let t = x.gp.pool_threshold.get(&key).copied().unwrap_or(100);
                 x.gp.pool_threshold.insert(key, t.saturating_mul(2));
             }
+            paid.push((false, u));
             return Some(u);
         }
     }
@@ -220,11 +242,19 @@ fn new_great_person(g: &mut Game, p: PlayerId) -> Option<BaseUnitId> {
 /// person a major has earned is born in its capital, where `upon gaining a [unit]` fires once, as
 /// for any unit made in a city. Python fired it a second time for a great person, and then every
 /// such unique of the civilization whatever unit it named.
+///
+/// A kind's points pay for one great person a turn, its combat points for another: the loop pays
+/// at most twice for each kind, whatever the points and thresholds hold. Python went on while
+/// the points covered the threshold, which on points no game earns was for ever (a save's 1e300
+/// less 200 is 1e300; a pool's threshold, doubled, stops at `i64::MAX`), and on a large surplus
+/// made every great person it paid for at once; here the rest come one a turn.
 pub(crate) fn start_turn(g: &mut Game, p: PlayerId) {
     if !g.player(p).is_some_and(crate::state::players::Player::is_major) {
         return;
     }
-    while let Some(gp) = new_great_person(g, p) {
+    // refcheck: one-great-person-of-a-kind-a-turn
+    let mut paid = Paid::new();
+    while let Some(gp) = new_great_person(g, p, &mut paid) {
         let Some(cap) = g.player(p).and_then(|x| x.capital).filter(|&c| g.city(c).is_some()) else {
             break;
         };
@@ -801,4 +831,74 @@ pub fn apply_trade_mission(
         &[],
     );
     json!({ "gold": gold, "influence": influence, "city_state": name })
+}
+
+#[cfg(all(test, feature = "embedded-ruleset"))]
+mod tests {
+    use super::*;
+    use crate::base::ids::TileIdx;
+    use crate::game::core::testing;
+
+    const ROME: PlayerId = PlayerId(0);
+
+    /// The duel with Rome's capital founded, and the kinds of great person under test.
+    fn rome() -> (Game, BaseUnitId, BaseUnitId) {
+        let mut g = testing::duel();
+        testing::city(&mut g, ROME, TileIdx(44), "Roma");
+        g.settle();
+        let r = g.rules();
+        let general = r.lookup::<BaseUnitId>("Great General").expect("a general");
+        let scientist = r.lookup::<BaseUnitId>("Great Scientist").expect("a scientist");
+        (g, general, scientist)
+    }
+
+    fn born(g: &Game, kind: BaseUnitId) -> usize {
+        g.player_units(ROME).filter(|u| u.base == kind).count()
+    }
+
+    #[test]
+    fn points_no_game_earns_bring_one_great_person_of_a_kind_a_turn() {
+        // refcheck: one-great-person-of-a-kind-a-turn
+        // A save may hold points no game earns: 1e300 less a threshold is 1e300, and a pool's
+        // threshold, doubled, stops at i64::MAX. The births went on for ever: the first end of
+        // turn on the synthetic gargantuan state (citar-testkit's states) never returned.
+        let (mut g, general, scientist) = rome();
+        let pool = pool_key(&g, ROME, scientist);
+        if let Some(x) = g.player_mut(ROME, PlayerTouch::OTHER) {
+            x.gp.combat_points.insert(general, 1e300);
+            x.gp.combat_threshold.insert(general, i64::MAX - 10);
+            x.gp.points.insert(scientist, 1e300);
+            x.gp.pool_threshold.insert(pool, i64::MAX);
+        }
+        for turn in 1..=3 {
+            start_turn(&mut g, ROME);
+            g.settle();
+            assert_eq!((born(&g, general), born(&g, scientist)), (turn, turn), "turn {turn}");
+        }
+        let pl = g.player(ROME).expect("Rome");
+        assert_eq!(pl.gp.earned, 6);
+        assert_eq!(pl.gp.combat_points.get(&general), Some(&1e300));
+        assert_eq!(pl.gp.combat_threshold.get(&general), Some(&i64::MAX), "saturated");
+        assert_eq!(pl.gp.points.get(&scientist), Some(&1e300));
+        assert_eq!(pl.gp.pool_threshold.get(&pool), Some(&i64::MAX));
+    }
+
+    #[test]
+    fn points_that_pay_for_two_great_people_bring_the_second_a_turn_later() {
+        // refcheck: one-great-person-of-a-kind-a-turn
+        // 350 points pay 100 for one scientist this turn and 200 for the next one the turn after,
+        // where Python made both at once; the 50 left wait for a threshold of 400.
+        let (mut g, _, scientist) = rome();
+        if let Some(x) = g.player_mut(ROME, PlayerTouch::OTHER) {
+            x.gp.points.insert(scientist, 350.0);
+        }
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            start_turn(&mut g, ROME);
+            g.settle();
+            let left = g.player(ROME).and_then(|x| x.gp.points.get(&scientist).copied());
+            seen.push((born(&g, scientist), left, points_required(&g, ROME, scientist)));
+        }
+        assert_eq!(seen, [(1, Some(250.0), 200), (2, Some(50.0), 400), (2, Some(50.0), 400)]);
+    }
 }

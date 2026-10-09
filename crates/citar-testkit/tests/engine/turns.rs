@@ -10,7 +10,8 @@
 //! - `Game::new` on an editor map: the settings, the nations, the players and their seats, the
 //!   starting techs, the first turn; and what it refuses;
 //! - a chain of round digests, and a driver's memory kept in the save and in its seat all turn;
-//! - a driver does not end its own turn: `drive` does, so the chain is the same whoever asks.
+//! - a driver does not end its own turn: `drive` does, so the chain is the same whoever asks;
+//! - the benchmarks' synthetic gargantuan state, which holds what no game reaches, ends a turn.
 
 use citar_engine::api::{ErrCode, inspect, testops};
 use citar_engine::base::ids::{NationId, NegotiationId, PlayerId, TechId};
@@ -22,11 +23,13 @@ use citar_engine::game::{
 use citar_engine::rules::Ruleset;
 use citar_engine::save::chain::DigestChain;
 use citar_engine::state::Phase;
+use citar_engine::state::chronicle::Chronicle;
 use citar_engine::state::config::MapSource;
 use citar_engine::state::players::DriverMemory;
 use citar_testkit::agents::RandomAgent;
 use citar_testkit::rulesets;
 use citar_testkit::script::map_doc;
+use citar_testkit::states::{self, Shape};
 use serde_json::{Map, Value, json};
 
 /// Settings on the arena with `extra` on top, as a lobby sends them.
@@ -552,4 +555,23 @@ fn the_host_forces_a_turn_on_a_player_the_game_has() {
     let e = g.force_turn(PlayerId(9)).expect_err("no such player");
     assert_eq!((e.code, e.message.as_str()), (ErrCode::InvalidPlayer, "No player 9."));
     clean(&mut g);
+}
+
+#[test]
+fn the_synthetic_gargantuan_state_ends_a_turn() {
+    // refcheck: one-great-person-of-a-kind-a-turn
+    // citar-bench's gargantuan fixture: its current player holds great person points of 1e300,
+    // which paying a threshold leaves where they were, and its first end of turn never returned.
+    let r = Ruleset::shared();
+    let st = states::build(r, 2026, &Shape::GARGANTUAN);
+    let mut g = Game::from_state(r, st, Chronicle::new()).expect("a sound state");
+    // Random values break invariants no turn is needed to break: only the turn is under test.
+    g.set_debug_options(DebugOptions::OFF);
+    let (turn, me) = (g.turn(), g.current());
+    assert_eq!((turn, me, g.phase()), (74, PlayerId(4), Phase::Playing));
+    let earned = |g: &Game| g.player(me).map(|p| p.gp.earned);
+    let before = earned(&g);
+    g.end_turn(me).expect("the current player's turn");
+    assert_ne!((g.turn(), g.current()), (turn, me), "the turn passed on");
+    assert!(earned(&g) > before, "great people were born: {before:?}, then {:?}", earned(&g));
 }
