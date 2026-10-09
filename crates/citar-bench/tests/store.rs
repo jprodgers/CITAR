@@ -1,12 +1,14 @@
 //! Gate 1 of package 2-02 at full size: the synthetic gargantuan state saved as a `.citar` v2
 //! container beside a journal of 330 chunks, read back through citar-store and loaded by the
-//! engine, equal to what was saved, history and all (DESIGN.md P2.5).
+//! engine, equal to what was saved, history and all (DESIGN.md P2.5). And gate 6 of package 2-11:
+//! what a session's save holds its lock for on that state stays far under 100 ms.
 //!
 //! It lives here because citar-bench is the one crate the crate graph lets reach both the
 //! testkit's synthetic states and the store (DESIGN.md P2.2, "As built in 2-00a"); the store's
 //! own tests (`crates/citar-store/tests/store.rs`) cover everything else at small sizes.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use citar_engine::rules::Ruleset;
 use citar_engine::save::journal::{self, JournalCursor};
@@ -19,6 +21,38 @@ use citar_store::{
     write_container,
 };
 use citar_testkit::states::{self, Shape};
+
+#[test]
+fn a_gargantuan_rounds_save_snapshot_holds_the_lock_far_under_100_ms() {
+    // Package 2-11's gate 6 (DESIGN.md P2.5.3): `Game::save_snapshot` is everything a session's save
+    // does under its lock (the binding adds a queue push). The budget, 10 ms, is the io suite's
+    // (`cargo xtask perf --suite io`, the bench profile on an idle core); here, in whatever profile
+    // and on whatever machine the tests run, the hard line of 100 ms holds, on a round's chunk with
+    // a keyframe, the largest a round's chunk is.
+    let g = citar_bench::fixtures::gargantuan_round_game();
+    let mut best = Duration::MAX;
+    let mut size = 0;
+    for _ in 0..5 {
+        let mut copy = g.clone();
+        let t = Instant::now();
+        let (snap, chunk) = copy.save_snapshot().expect("it saves");
+        best = best.min(t.elapsed());
+        let chunk = chunk.expect("the round's history");
+        assert_eq!(
+            (chunk.seq, snap.state().host().0.journal_seq),
+            (0, 1),
+            "the snapshot counts it"
+        );
+        size = chunk.json.len();
+    }
+    println!(
+        "save_snapshot of the gargantuan state with a round's chunk ({} KB): {:.2} ms",
+        size / 1000,
+        best.as_secs_f64() * 1e3
+    );
+    assert!(size > 100_000, "the round's chunk carries the keyframe: {size} bytes");
+    assert!(best < Duration::from_millis(100), "{best:?} under the lock");
+}
 
 /// The rounds a whole game journals: one chunk each.
 const ROUNDS: u32 = 330;

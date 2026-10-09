@@ -262,6 +262,12 @@ budget = "10 ms"
 row = "snapshot() under the lock, gargantuan (the plan: 100 ms)"
 
 [[budget]]
+id = "save_snapshot/gargantuan"
+suite = "io"
+budget = "10 ms"
+row = "save_snapshot() under a session's lock (a round's journal chunk, a keyframe's, and the state's copy), gargantuan (package 2-11: never above 100 ms)"
+
+[[budget]]
 id = "to_json/small_t280"
 suite = "io"
 budget = "20 ms"
