@@ -73,11 +73,13 @@ ratio = [1.04, 1.29]
 # wars as Python's did (0.95x, t = -0.7); from turn 1 on the same maps, 0.80x (t = -2.6). So the
 # late game's logic answers a given position as Python's did, and the gap grows from the positions
 # the Rust bots' own early game reaches. The escort fix is not it: with Python's rule put back the
-# Rust bots declare fewer wars still (3.05 a game over 600 games). Owed to a follow-up package.
+# Rust bots declare fewer wars still (3.05 a game over 600 games). Accepted by the owner on
+# 2026-10-09, with the conquests below, rather than chased in a package 2-07f: the bots are
+# retrained in 0.1.7, which sets their aggression anew.
 #
 # Fewer wars also mean fewer conquests, which no entry here needs (G3 judges an event metric only
 # where Python's mean is at least 1 a game, and at the end the interval runs through 0), but which
-# accepting this gap would accept too. Cities captured a game on small maps, Python (60 games)
+# accepting this gap accepts too. Cities captured a game on small maps, Python (60 games)
 # against Rust, ratio and the 90% interval of B - A:
 #   120 games: at 200 0.28 -> 0.13, 0.47x [-0.31, 0.00]; at 300 0.98 -> 0.62, 0.63x [-0.75, -0.05];
 #              at the end 1.22 -> 0.88, 0.72x [-0.78, 0.06]
@@ -91,8 +93,7 @@ ratio = [1.04, 1.29]
 metric = "wars_declared"
 checkpoint = "200"
 stratum = "small"
-reason = "Measured, not yet attributed (see the block above): Rust's small games declare about 18% fewer wars past turn 130 (600 games, 3.25 against 3.97 at the end); the war pipeline agrees with Python's stage by stage to turn 130 and from Python's turn-120 positions. Captures fall with them (0.38x at 200, 0.64x at 300 over 600 games)."
-pending = "2-07f"
+reason = "Accepted (owner, 2026-10-09; the bots are retrained in 0.1.7), measured, not attributed (see the block above): Rust's small games declare about 18% fewer wars past turn 130 (600 games, 3.25 against 3.97 at the end); the war pipeline agrees with Python's stage by stage to turn 130 and from Python's turn-120 positions. Captures fall with them (0.38x at 200, 0.64x at 300 over 600 games)."
 # Measured 0.81x, interval of the ratio [0.62, 0.99] (120 games; 600 games: 0.78x, [0.62, 0.93]).
 ratio = [0.56, 1.05]
 
@@ -100,8 +101,7 @@ ratio = [0.56, 1.05]
 metric = "wars_declared"
 checkpoint = "300"
 stratum = "small"
-reason = "Measured, not yet attributed: as at 200 (the block above)."
-pending = "2-07f"
+reason = "Accepted (owner, 2026-10-09), measured, not attributed: as at 200 (the block above)."
 # Measured 0.81x, interval of the ratio [0.67, 0.95] (120 games; 600 games: 0.78x, [0.65, 0.90]).
 ratio = [0.62, 1.00]
 
@@ -109,7 +109,6 @@ ratio = [0.62, 1.00]
 metric = "wars_declared"
 checkpoint = "end"
 stratum = "small"
-reason = "Measured, not yet attributed: as at 200 (the block above)."
-pending = "2-07f"
+reason = "Accepted (owner, 2026-10-09), measured, not attributed: as at 200 (the block above)."
 # Measured 0.83x, interval of the ratio [0.70, 0.95] (120 games; 600 games: 0.82x, [0.71, 0.93]).
 ratio = [0.65, 1.01]
