@@ -1,24 +1,28 @@
 # Known issues and limitations
 
-What is broken, missing or misleading in 0.1.0. Written plainly, because finding this out after
+What is broken, missing or misleading in 0.1.5. Written plainly, because finding this out after
 installing something is worse than reading it first.
 
 ---
 
-## The scripted bot stalls at two to five cities
+## The scripted bot expands instead of fighting
 
 **The big one**, because the bot is what every model score is measured against.
 
-On a Quick Small map the bot reaches two to five cities by about turn 150 and stops expanding. It
-is limited by happiness: it will not settle into unhappiness, and it does not push hard enough on
-the things that would fix that.
+The 0.1.4 bot no longer stalls: on a Quick Small map it reaches 12 to 13 cities by turn 300 (0.1.3:
+two to five by turn 150), finishes the tech tree and wins by science often enough to see. What it
+does not do is fight. It captures about 0.08 cities per game, where the old defaults captured 0.42,
+and a bot of middling aggression may play a whole game without declaring war at all.
 
-What it means for a score: a model that beats the bot has beaten a competent but self-limiting
-opponent, not a good Civ player. A model that loses badly to it is genuinely struggling.
+What it means for a score: a model that beats the bot has beaten a strong builder that will mostly
+leave it alone, not an opponent that will punish a weak army. A model that loses badly to it is
+genuinely struggling. Unhappiness is still a real limit — bots are unhappy on 41 to 52% of turns.
 
 Work in progress — the campaign log is [docs/research/BOT_TUNING.md](Bot-tuning-log).
 Scores are comparable within a release and **not across releases where the bot changed**; the
 changelog says when that is.
+0.1.5 did not change the bot, but it made barbarians far more aggressive and stopped the event feed
+naming civilizations an agent has not met, so 0.1.5 scores are not comparable with 0.1.4 either.
 
 ## Models are not very good at this yet
 
@@ -37,6 +41,15 @@ far apart in strength can finish close on score.
 **Speed is hardware.** The 15% speed component of the overall score measures the machine as much as
 the model. Reports separate them; the single score does not.
 
+**Energy on helper machines is estimated.** The CITAR helper does not report power draw, so a
+machine on the Servers page is costed from the watts entered under Power & costs (idle, and extra
+while the model generates). Only the machine CITAR itself runs on is sampled live. A plug-in meter
+reading makes the energy and cost-per-task figures far better than the hardware-class guesses.
+
+**Priority takes effect at a safe point.** Work moved to the top of a machine's queue waits for the
+running work to reach its next safe point: the end of the model's turn (at most 15 minutes) for a
+game or benchmark job, the end of the case for a probe run. A report already being written finishes.
+
 ---
 
 ## Platforms and packaging
@@ -46,8 +59,10 @@ run it, and some antivirus products flag PyInstaller output on sight. SHA-256 ha
 for every asset and every build is a public CI run. See
 [packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md#code-signing).
 
-**macOS binaries are not notarised**, for the same reason. The `pip`, `pipx` and Homebrew routes
-are unaffected.
+**macOS binaries are not notarised**, for the same reason — including the CITAR helper, which
+needs `xattr -d com.apple.quarantine` before macOS will run it. The `pip`, `pipx` and Homebrew routes
+are unaffected. There is no helper build for Intel Macs; `pipx install "citar[worker]"` and
+`citar worker` do the same job there.
 
 **Homebrew, Scoop and winget lag the release** by a day or so — each needs the GitHub release to
 exist before its manifest can be updated.
@@ -76,8 +91,9 @@ own mail server is out of scope.
 
 ## Game rules
 
-**19 of 402 unique types are unreferenced.** Mostly map-generation region hints. A rule using one
-of them is silently inert rather than an error; `scripts/check_uniques.py` lists them.
+**14 of the 402 unique types the ruleset uses are inert.** Mostly map-generation region hints. A
+rule using one of them compiles and does nothing, as it did in the Python engine;
+`crates/citar-engine/unique_supported.toml` lists them, each with its reason.
 
 **Some UnCiv mechanics are simplified.** The ruleset data is faithful; a few interactions between
 systems are approximations. Where a difference is known it is noted in the engine module's
@@ -97,8 +113,10 @@ most changes.
 **The browser client assumes a recent browser.** ES modules, no transpilation, no polyfills.
 Current Chrome, Firefox, Safari and Edge.
 
-**Mobile is not supported.** The layout adapts, but a hex map and a city screen on a phone are not
-something anyone should endure.
+**Phones get a check-in site, not the game.** On a phone the server shows games, standings, AI
+status, benchmarks, reports and machines, with pause and resume. Playing still wants a bigger
+screen: a hex map and a city screen on a phone are not something anyone should endure. Tablets get
+the full site.
 
 ---
 

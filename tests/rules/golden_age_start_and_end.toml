@@ -4,7 +4,7 @@ the civilization is told; it counts down at the end of each of the civilization'
 civilization is told when it ends. Out of a golden age, the civilization's happiness piles up
 toward the next one.
 """
-from = "citar/engine/great_people.py: enter_golden_age, golden_age_end_turn"
+from = "engine/great_people.py: enter_golden_age, golden_age_end_turn"
 
 [[step]]
 note = "The other civilization keeps a unit, so that the game goes on."

@@ -2,7 +2,7 @@ about = """
 A road makes a step between two tiles that both have one cost half a movement point, and a railroad
 a tenth.
 """
-from = "citar/engine/movement.py: route_at, has_connection, enter_cost"
+from = "engine/movement.py: route_at, has_connection, enter_cost"
 
 [[step]]
 ops = [

@@ -3,7 +3,7 @@ A civilization names itself and its leader, keeps a private notebook and logs it
 any time. Names are plain text, at most 48 characters, and unique whatever their case; a name that
 changes nothing is refused. The notebook keeps its last 8,000 characters.
 """
-from = "citar/engine/tools.py: set_civ_name, write_notes, log_thought"
+from = "engine/tools.py: set_civ_name, write_notes, log_thought"
 
 [config]
 players = [{}, { name = "Rome" }]

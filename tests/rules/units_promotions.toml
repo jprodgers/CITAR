@@ -2,7 +2,7 @@ about = """
 Experience buys promotions: ten points for the first, twenty for the second. A promotion must be
 one the unit's type may take; Heal Instantly heals fifty health and is not kept.
 """
-from = "tests/test_mechanics.py::test_upgrade_and_promotion; citar/engine/units.py: promote, add_promotion"
+from = "tests/test_mechanics.py::test_upgrade_and_promotion; engine/units.py: promote, add_promotion"
 
 [[step]]
 op = "add_unit"

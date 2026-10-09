@@ -4,7 +4,7 @@ its capital that outweighs the capital's own. Paying costs the bully 15 influenc
 gives 50 gold at the start of a standard game, and it pays nobody again for a while. Demanding a
 worker from a small city-state is refused.
 """
-from = "citar/engine/city_states.py: tribute_modifiers, tribute_willingness, demand_tribute, _bullied"
+from = "engine/city_states.py: tribute_modifiers, tribute_willingness, demand_tribute, _bullied"
 
 [config]
 city_states = 1

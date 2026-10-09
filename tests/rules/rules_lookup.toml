@@ -5,7 +5,7 @@ with what it unlocks; a city-state type as the bonuses it gives; the deal items;
 combat in brief. An unknown topic is refused with the topics there are, and a name the topic has no
 entry for is refused by name.
 """
-from = "citar/engine/views.py: rules_lookup, RULES_OVERVIEW, RULES_COMBAT; citar/engine/tools.py: get_rules"
+from = "engine/views.py: rules_lookup, RULES_OVERVIEW, RULES_COMBAT; engine/tools.py: get_rules"
 
 [[step]]
 tool = "get_rules"

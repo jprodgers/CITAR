@@ -3,7 +3,7 @@ A trigger: Babylon's `Free [Great Scientist] appears <upon discovering [Writing]
 when Babylon learns Writing, and a Great Scientist appears in its capital, as its owner is told.
 Learning another tech fires nothing, and neither does another civilization learning Writing.
 """
-from = "citar/engine/triggers.py: fire, trigger; citar/engine/research.py: add_tech"
+from = "engine/triggers.py: fire, trigger; engine/research.py: add_tech"
 
 [config]
 players = [{ nation = "Babylon" }, {}]

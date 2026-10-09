@@ -3,7 +3,7 @@ When the last turn has passed, the civilization with the highest score wins the 
 the Time victory off, the game ends there with no winner. A score counts cities, citizens, the land
 the cities own, wonders and techs, more for each on a map this small.
 """
-from = "citar/engine/victory.py: score, check_turn_limit, milestone_done (Have highest score after max turns)"
+from = "engine/victory.py: score, check_turn_limit, milestone_done (Have highest score after max turns)"
 
 [config]
 turn_limit = 3

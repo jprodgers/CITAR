@@ -22,17 +22,18 @@ In practice this means:
 
 | Part | Relationship to UnCiv |
 |---|---|
-| `citar/data/ruleset/` | Generated from UnCiv's "Civ V - Gods & Kings" ruleset by `scripts/import_unciv.py`. Numeric values and rule ("unique") text only. |
-| `citar/engine/` | Ported logic. Each module's docstring names the UnCiv classes it derives from — for example `cities.py` ports `City`, `CityStats`, `CityPopulationManager` and `CityConstructions`. |
-| `citar/engine/unique_types.py` | Generated from UnCiv's `UniqueType` enum by `scripts/gen_unique_types.py`. |
+| `crates/citar-engine/data/ruleset/` | Generated from UnCiv's "Civ V - Gods & Kings" ruleset by `scripts/import_unciv.py`. Numeric values and rule ("unique") text only. |
+| `crates/citar-engine/src/` | Ported logic: a port of CITAR's Python engine of 0.1.5 (the tag `python-engine-0.1.6` keeps it), which ported UnCiv's. Each Python module's docstring named the UnCiv classes it derived from — for example `cities.py` ported `City`, `CityStats`, `CityPopulationManager` and `CityConstructions` — and each Rust module names the Python lines it replaces. |
+| `crates/citar-engine/unique_types.tsv` | Generated from UnCiv's `UniqueType` enum by `scripts/gen_unique_types.py`. |
 
 **Not** taken from UnCiv: graphics, sounds, music, fonts, civilopedia articles, leader dialogue,
 quotations, tutorials and all other flavour text. CITAR ships no UnCiv art assets of any kind.
 
-`citar/data/custom/` holds CITAR's own additions (such as `BenchmarkCiv`) in the same format.
+`crates/citar-engine/data/custom/` holds CITAR's own additions (such as `BenchmarkCiv`) in the same
+format.
 
 To move to a newer UnCiv release, point `scripts/import_unciv.py` at a checkout of it and regenerate
-`citar/data/ruleset/`. See [docs/MODDING.md](docs/MODDING.md).
+`crates/citar-engine/data/ruleset/`. See [docs/MODDING.md](docs/MODDING.md).
 
 ## Trademarks
 

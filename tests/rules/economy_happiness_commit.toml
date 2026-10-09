@@ -7,7 +7,7 @@ the empire changes. The end of each turn also writes the civilization's gold per
 Python read happiness live everywhere, and never wrote the gold rate
 (intended: happiness-seen-committed, last-gold-rate-written).
 """
-from = "citar/engine/economy.py: happiness; DESIGN.md 6.6 (crates/citar-engine)"
+from = "engine/economy.py: happiness; DESIGN.md 6.6 (crates/citar-engine)"
 
 [[step]]
 note = "a warrior keeps the second seat in the game across the round"

@@ -7,7 +7,7 @@ Python asked the unique's own conditionals when it was granted, so `<when attack
 and the bonus was never granted; the Rust engine grants a timed unique whatever its conditionals,
 which are its effect's (intended: timed-uniques-granted-whatever-their-conditionals).
 """
-from = "citar/engine/triggers.py: trigger (timed); citar/engine/turns.py: _temp_uniques_end_turn"
+from = "engine/triggers.py: trigger (timed); engine/turns.py: _temp_uniques_end_turn"
 
 [[step]]
 note = "The other civilization keeps a unit, so that the game goes on."

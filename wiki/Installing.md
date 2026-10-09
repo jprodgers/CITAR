@@ -30,7 +30,7 @@ until enough people have run it. Click **More info → Run anyway**, or check th
 SHA-256 published on the release page first:
 
 ```powershell
-Get-FileHash .\CITAR-0.1.0-setup.exe -Algorithm SHA256
+Get-FileHash .\CITAR-0.1.5-setup.exe -Algorithm SHA256
 ```
 
 Every artifact is built in a [public CI run](https://github.com/jprodgers/CITAR/actions) whose log
@@ -185,6 +185,13 @@ pip install -e ".[dev]"
 python -m unittest discover -s tests
 citar serve --debug
 ```
+
+**Building from source needs a Rust toolchain.** CITAR's game engine is written in Rust and ships
+inside the package as a compiled extension, so `pip install` from a checkout (or from a source
+distribution) compiles it. Install [rustup](https://rustup.rs) first; on Windows, let its installer
+add the Visual Studio C++ build tools. The repository's `rust-toolchain.toml` names the exact Rust
+release, and rustup downloads it the first time. The first build takes a few minutes; later ones
+only rebuild what changed. The installer, pipx and the release wheels need none of this.
 
 A checkout keeps its state beside the code — `saves/`, `config/`, `benchmarks/` — rather than in
 your user directory, so a contributor's test games are visible, diffable and easy to delete.

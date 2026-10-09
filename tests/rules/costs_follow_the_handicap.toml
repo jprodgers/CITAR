@@ -5,7 +5,7 @@ modifiers for buildings and units and none for research and policies. On Settler
 for research and half for policies, buildings and units, and an AI 160% for buildings and 175% for
 units. costs and buildable show them; so does what a tech takes to research.
 """
-from = "citar/engine/research.py: tech_cost; citar/engine/policies.py: culture_cost; citar/engine/cities.py: production_cost"
+from = "engine/research.py: tech_cost; engine/policies.py: culture_cost; engine/cities.py: production_cost"
 
 [[step]]
 new_game = { difficulty = "Settler", players = [{ controller = "human" }, { controller = "bot" }] }

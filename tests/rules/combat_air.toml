@@ -6,7 +6,7 @@ following meets none; a sweep of a tile no one guards meets nothing; an enemy fi
 meets fights the sweeper, and each earns 5 experience. An aircraft moves by rebasing to another
 city of its owner, if it has not acted this turn.
 """
-from = "citar/engine/combat.py: try_intercept, air_strike, air_sweep, rebase"
+from = "engine/combat.py: try_intercept, air_strike, air_sweep, rebase"
 
 [[step]]
 ops = [

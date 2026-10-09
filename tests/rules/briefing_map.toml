@@ -5,7 +5,7 @@ cell its terrain, feature and marker; then what it sees in the window. A centre 
 refused rather than drawn somewhere else; the radius is held between 2 and 20; the legend comes
 first when asked for. The local map of the briefing is the same, five rows each way.
 """
-from = "citar/engine/briefing.py: ascii_map, MAP_LEGEND; citar/engine/tools.py: get_map"
+from = "engine/briefing.py: ascii_map, MAP_LEGEND; engine/tools.py: get_map"
 
 [[step]]
 ops = [

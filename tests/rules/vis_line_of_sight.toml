@@ -3,7 +3,7 @@ Sight follows the ground: a forest hides the tile behind it, a mountain hides th
 but is itself seen from three tiles off, and a unit standing on a hill looks over a forest.
 Every tile in sight is explored.
 """
-from = "citar/engine/visibility.py: viewable_from (UnCiv's TileMap.getViewableTiles)"
+from = "engine/visibility.py: viewable_from (UnCiv's TileMap.getViewableTiles)"
 
 [config]
 players = [{}, {}, {}]

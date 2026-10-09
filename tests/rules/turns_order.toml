@@ -3,7 +3,7 @@ Players take their turns in seat order, and a round ends after the last of them:
 hands the game to the next major civilization and begins its turn, and the end of the round moves
 the turn number on and gives the first seat its turn.
 """
-from = "citar/engine/game.py: Game.end_turn"
+from = "engine/game.py: Game.end_turn"
 
 [config]
 players = [{}, {}, {}]

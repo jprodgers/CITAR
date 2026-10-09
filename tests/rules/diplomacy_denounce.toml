@@ -3,7 +3,7 @@ A civilization denounces another it has met, publicly, for 30 turns: their frien
 denounced thinks worse of the denouncer, and so do the denounced's friends. It may not denounce twice,
 nor a civilization it is at war with; while it stands, the two cannot be friends.
 """
-from = "citar/engine/diplomacy.py: denounce"
+from = "engine/diplomacy.py: denounce"
 
 [config]
 players = [{}, {}, {}]

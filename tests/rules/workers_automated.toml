@@ -5,7 +5,7 @@ started, and once the job is done it looks for the next: with nothing worth buil
 city not linked to the capital makes a road toward it a job. Only units that build improvements can
 be automated, and a civilian cannot explore.
 """
-from = "citar/engine/automation.py: automate_worker, worker_jobs, _best_job"
+from = "engine/automation.py: automate_worker, worker_jobs, _best_job"
 
 [[step]]
 ops = [

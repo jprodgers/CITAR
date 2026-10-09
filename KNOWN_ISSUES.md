@@ -91,8 +91,9 @@ own mail server is out of scope.
 
 ## Game rules
 
-**19 of 402 unique types are unreferenced.** Mostly map-generation region hints. A rule using one
-of them is silently inert rather than an error; `scripts/check_uniques.py` lists them.
+**14 of the 402 unique types the ruleset uses are inert.** Mostly map-generation region hints. A
+rule using one of them compiles and does nothing, as it did in the Python engine;
+`crates/citar-engine/unique_supported.toml` lists them, each with its reason.
 
 **Some UnCiv mechanics are simplified.** The ruleset data is faithful; a few interactions between
 systems are approximations. Where a difference is known it is noted in the engine module's

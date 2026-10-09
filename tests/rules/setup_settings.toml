@@ -3,7 +3,7 @@ A new game's settings are checked before anything is made: a setting that names 
 or the lobby does not have is refused with a message naming what is valid, where Python fell back
 to a default or drew at random; too many seats are refused by both engines.
 """
-from = "citar/engine/game.py: Game.new"
+from = "engine/game.py: Game.new"
 
 [[step]]
 new_game = { speed = "Warp" }

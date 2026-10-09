@@ -8,7 +8,7 @@ The Rust engine refuses a name of the wrong kind for a tile, a number that does 
 and a parameter of the wrong type with a sentence (intended: scenario-set-tile-checks-kinds,
 scenario-numbers-finite-and-in-range, scenario-errors-are-sentences).
 """
-from = "citar/engine/scenario.py: set_player, set_tile, reveal"
+from = "engine/scenario.py: set_player, set_tile, reveal"
 
 [[step]]
 op = "set_player"

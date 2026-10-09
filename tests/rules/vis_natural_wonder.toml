@@ -2,7 +2,7 @@ about = """
 A civilization that sees a natural wonder discovers it and is told so; the first to find El Dorado
 is granted 500 gold, and the second none. City-states discover nothing.
 """
-from = "citar/engine/visibility.py: _discover_natural_wonders"
+from = "engine/visibility.py: _discover_natural_wonders"
 
 [config]
 city_states = 1

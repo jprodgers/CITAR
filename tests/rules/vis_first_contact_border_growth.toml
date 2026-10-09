@@ -3,7 +3,7 @@ Two civilizations meet the moment one of them sees a tile of the other's: here a
 a warrior's sight. A tile that changes hands out of sight meets nobody. First contact is announced
 to both.
 """
-from = "citar/engine/visibility.py: refresh (first contact); DESIGN.md 6.9"
+from = "engine/visibility.py: refresh (first contact); DESIGN.md 6.9"
 
 [[step]]
 ops = [

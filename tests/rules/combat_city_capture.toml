@@ -5,7 +5,7 @@ the civilians in it; the conqueror plunders gold and moves in, and the loser thi
 conqueror may then raze it, stop razing it, keep it a puppet or annex it; a city one founded may be
 none of these, and an original capital is never razed.
 """
-from = "tests/test_mechanics.py::CaptureTests::test_capture_city_and_domination, test_puppet_annex_and_raze_rules; citar/engine/conquest.py"
+from = "tests/test_mechanics.py::CaptureTests::test_capture_city_and_domination, test_puppet_annex_and_raze_rules; engine/conquest.py"
 
 [[step]]
 ops = [

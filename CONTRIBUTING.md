@@ -18,7 +18,7 @@ Thanks for looking. CITAR is a game and an instrument, and it needs help with bo
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
 pip install -e ".[dev]"                  # builds the Rust engine too, so it needs a Rust toolchain
-python -m unittest discover -s tests     # 456 tests, about four minutes
+python -m unittest discover -s tests     # about 650 tests, a few minutes
 citar serve --debug                      # http://127.0.0.1:8765
 ```
 
@@ -59,9 +59,10 @@ CI runs all of this on Linux, Windows and macOS.
 
 These are not style preferences; each one exists because breaking it caused a real problem.
 
-- **The engine does no I/O.** `citar/engine/` must not read files at runtime, open sockets or touch
-  the database. That property is what makes games serialisable, tests fast and the same engine
-  usable from four different interfaces.
+- **The engine does no I/O.** `crates/citar-engine` must not read files, open sockets, read the
+  clock or touch the database. That property is what makes games serialisable, tests fast and the
+  same engine usable from four different interfaces. The bindings (`crates/citar-py`) and the
+  facade (`citar/engine_api.py`) do the I/O around it.
 - **`citar/auth/access.py` is the only place that answers "may this viewer do this".** Never
   hand-roll a permission check.
 - **Refusals are 404 when the caller cannot see the object**, not 403. A 403 confirms it exists and
@@ -101,8 +102,9 @@ that skips it writes test games into the real `saves/`.
 
 What is worth testing:
 
-- **Rules** — `tests/test_mechanics.py`. A rule with no test will eventually be broken by a
-  refactor.
+- **Rules** — a rule script in `tests/rules/` ([its README](tests/rules/README.md)), which both the
+  Rust harness and the Python suite play, or a Rust test in `crates/citar-testkit`. A rule with no
+  test will eventually be broken by a refactor.
 - **Permissions** — `tests/test_access.py`. Every new object kind needs its "a stranger gets 404"
   test.
 - **Anything that was a bug.** The test is the part that stops it coming back.
@@ -110,22 +112,17 @@ What is worth testing:
 Reserved handles (`admin`, `root`, `mod`, `guest`, …) are rejected, so fixtures must use other
 names.
 
-**Two engines behind one door.** Everything reaches the game through `citar/engine_api.py`, whose
-backend `CITAR_ENGINE` chooses: `rust` (the default since package 2-09; it needs the extension
-below) or `python`, the Python engine the Rust one was ported from, which goes in package 2-12.
-The suite runs on the Rust engine: `python -m unittest discover -s tests`. A test that cannot pass
-there says why, with a marker from `tests/backends.py`: `@python_engine_only("<successor>")` for a
-test of the Python engine's internals, naming the rule script, Rust test or Python test that holds
-the same behaviour now; `@rust_pending("<package>")` for one a named Phase 2 package makes pass;
-`@rust_only` for a test of a name only the Rust backend has. `tests/test_backends.py` checks that
-every successor exists and runs on Rust, and `tests/test_facade_parity.py` that both backends
-answer every call in the same shapes. On the Python engine only the tests that still check it
-run, those `tests/python_reference.txt` lists, as CI's `python-reference` job runs them:
-`CITAR_ENGINE=python python -m unittest -v $(sed -e 's/#.*//' tests/python_reference.txt)`.
+**One door to the engine.** Everything reaches the game through `citar/engine_api.py`, over the
+extension `citar._engine`, so the suite needs the extension built (see [Rust](#rust)). The tests
+that need the engine's test operations (the rule scripts, `EngineGame.inspect` and `test_ops`) skip
+in a build without them (`tests.has_test_ops()`): `cargo xtask develop` and CI's test builds have
+them, a release wheel does not. The Python engine the Rust one was ported from was removed in 0.1.6
+(package 2-12); the tag `python-engine-0.1.6` keeps it, with its own tests and the recorders of
+`scripts/refcheck/`.
 
 ## Rust
 
-The Rust engine is being built in `crates/` to replace `citar/engine/` in 0.1.6.
+The engine is the Rust workspace in `crates/`.
 [crates/citar-engine/README.md](crates/citar-engine/README.md) has the rules every change to it
 follows, and [crates/citar-engine/DESIGN.md](crates/citar-engine/DESIGN.md) the design.
 
@@ -148,15 +145,15 @@ on every OS. CI also lints the engine
 alone in each feature set, because the workspace build turns on features the shipped engine
 does not have (testkit enables `legacy` and `test-ops`). When you change what a feature gates, run
 `cargo clippy -p citar-engine --all-targets -- -D warnings` and again with
-`--no-default-features`. The later tools join the loop as they land:
-`cargo refcheck run --fixtures refcheck/fixtures-mini` (answers compared with the Python engine)
-and `cargo xtask perf` (benchmarks against their budgets).
+`--no-default-features`. Two more tools join the loop: `cargo refcheck run` (the engine's answers
+against the Python engine's, recorded on the committed fixtures; `refcheck/README.md`) and `cargo
+xtask perf` (benchmarks against their budgets).
 
 **Goldens.** `crates/citar-testkit/golden/` holds answers that must come out identical on all five
 targets; the determinism workflow checks them on each. When a change is meant to move them (a new
 RNG `Purpose`, a `libm` or toolchain bump), run `cargo golden bless` and say why in the commit.
-`pyfmt.json` is Python's own answers, so only `scripts/refcheck/pyfmt_vectors.py` writes it;
-`scripts/refcheck/hex_vectors.py` records the hex-grid answers the same way. `long.json`, whole
+`pyfmt.json` is Python's own answers, and the hex-grid answers (`crates/citar-testkit/data/`) the
+Python engine's, recorded by scripts the tag `python-engine-0.1.6` keeps: no bless writes them. `long.json`, whole
 games on every map size, is the nightly run's: `cargo golden check --long` checks it (about a
 minute) and `cargo golden bless long` writes it, so bless it too when a change moves the games.
 
@@ -222,7 +219,8 @@ python -m unittest discover -s tests                      # imports the extensio
 
 `develop` refuses a venv another worktree already uses (its `citar-dev.pth` names that worktree),
 installs the project's dependencies into the venv whenever `pyproject.toml` has changed, builds
-`citar-py` into `$CARGO_TARGET_DIR/develop` with the build label from `git describe`, copies the
+`citar-py` into `$CARGO_TARGET_DIR/develop` with the build label from `git describe` (of the nearest
+`v*` tag), copies the
 library to `$CARGO_TARGET_DIR/citar-ext/`, and writes `citar-dev.pth` into the venv: the checkout
 on `sys.path` and `CITAR_EXT_DIR`, which `citar/__init__.py` puts first on the package's path. It
 writes nothing under the checkout. Rebuild after every Rust change you want Python to see. On

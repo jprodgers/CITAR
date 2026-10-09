@@ -3,7 +3,7 @@ Taking a civilization's last city eliminates it at once: it is gone, and everyon
 civilization that holds every original capital wins the Domination victory, which ends the game:
 here the second capture, which also eliminates the last rival.
 """
-from = "tests/test_mechanics.py::CaptureTests::test_capture_city_and_domination; citar/engine/victory.py: check_elimination, check_domination"
+from = "tests/test_mechanics.py::CaptureTests::test_capture_city_and_domination; engine/victory.py: check_elimination, check_domination"
 
 [config]
 players = [{}, {}, {}]

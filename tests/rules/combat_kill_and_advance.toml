@@ -3,7 +3,7 @@ A melee unit that kills its enemy moves into the emptied tile, and the killed un
 both sides. A melee attack on a civilian captures it instead: the capturer stays where it was and
 gets the civilian, with no movement left. A civilian cannot attack.
 """
-from = "citar/engine/combat.py: resolve, _kill_unit, _take_damage"
+from = "engine/combat.py: resolve, _kill_unit, _take_damage"
 
 [[step]]
 ops = [

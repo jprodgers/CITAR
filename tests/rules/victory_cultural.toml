@@ -3,7 +3,7 @@ A victory is won when all of its milestones are, in order: five policy branches 
 Utopia Project built, win the Cultural victory. Whether a civilization has won is checked as its
 turn ends, and a victory ends the game.
 """
-from = "citar/engine/victory.py: milestone_done, victory_progress, victory_achieved, check_victory; citar/engine/turns.py: end_player_turn"
+from = "engine/victory.py: milestone_done, victory_progress, victory_achieved, check_victory; engine/turns.py: end_player_turn"
 
 [[step]]
 ops = [

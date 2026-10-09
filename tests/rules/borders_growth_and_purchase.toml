@@ -6,7 +6,7 @@ the borders, within the city's working distance, is bought with gold for 50 a st
 first and 5 a tile claimed; bought or grown into, it is the city's. What cannot be bought is
 refused with the rule.
 """
-from = "citar/engine/cities.py: culture_to_next_tile, rank_tile_for_expansion, expand_borders, buy_tile"
+from = "engine/cities.py: culture_to_next_tile, rank_tile_for_expansion, expand_borders, buy_tile"
 
 [[step]]
 ops = [

@@ -7,7 +7,7 @@ what each civilization adopted by name, the branches and prerequisites aside.
 Python checked a later era's branch again inside the adoption and refused it; the Rust engine
 adopts it whatever the era, as the operation says (intended: scenario-adopt-policy-skips-the-era).
 """
-from = "citar/engine/scenario.py: _adopt_policy, _adopt_counted"
+from = "engine/scenario.py: _adopt_policy, _adopt_counted"
 
 [[step]]
 op = "found_city"

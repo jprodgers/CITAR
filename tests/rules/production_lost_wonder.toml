@@ -3,7 +3,7 @@ A wonder race lost: when another civilization finishes a wonder a city was build
 drops it from its queue at its next turn and its stored production comes back as gold, which its
 owner hears of. A finished wonder is told to the whole world, and nobody may build it again.
 """
-from = "citar/engine/cities.py: _validate_progress, validate_queue, complete_construction"
+from = "engine/cities.py: _validate_progress, validate_queue, complete_construction"
 
 [[step]]
 ops = [

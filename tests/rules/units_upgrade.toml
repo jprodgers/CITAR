@@ -3,7 +3,7 @@ An upgrade needs the new type's tech, the unit in its owner's land with movement
 gold; it replaces the unit with one of the new type, which keeps its experience and has no movement
 left.
 """
-from = "citar/engine/units.py: check_upgrade, upgrade_cost, upgrade"
+from = "engine/units.py: check_upgrade, upgrade_cost, upgrade"
 
 [[step]]
 ops = [

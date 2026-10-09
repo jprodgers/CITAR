@@ -31,7 +31,7 @@ Left-drag paints, right-drag pans, the wheel zooms, `Ctrl+Z` undoes. **Check** l
 a start position on ice, a civilization with no fresh water — and saving fixes what it can.
 
 Maps are plain JSON in `saves/maps/<id>.json`; the format is documented at the top of
-`citar/engine/maps.py`. Choose a saved map under *Map* in the lobby. Seats without a start position
+`crates/citar-engine/src/mapgen/document.rs`. Choose a saved map under *Map* in the lobby. Seats without a start position
 get one assigned.
 
 ---

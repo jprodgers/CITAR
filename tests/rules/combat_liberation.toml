@@ -5,7 +5,7 @@ founder thinks better of its liberator and opens its borders to it, and the libe
 city leave it. (Python eliminated the founder when it lost its last city, on its own turn here, and
 revived it; the Rust engine eliminates the player whose turn it is as the round ends.)
 """
-from = "citar/engine/conquest.py: liberate, conquer"
+from = "engine/conquest.py: liberate, conquer"
 
 [config]
 players = [{}, {}, {}]

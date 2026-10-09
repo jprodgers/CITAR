@@ -6,9 +6,10 @@ effort. It records the goal, the method, every experiment and what was decided. 
 work starts here.**
 
 **From 0.1.6 the bot is compiled into the Rust engine as versions** (`crates/citar-bot`; `basic-1` ports
-`citar/bots/basic.py` as it stood at the swap, with its 373 parameters in 17 groups in
-`crates/citar-bot/params/basic-1.json`). The experiment log below is the Python bot's and names its frozen copies
-(`frozen_<hash>`); those were archived with 0.1.5 along with the lab history, and the ladder of 0.1.6 starts empty.
+the Python bot, `basic.py`, as it stood at the swap, with its 373 parameters in 17 groups in
+`crates/citar-bot/params/basic-1.json`; the tag `python-engine-0.1.6` keeps `basic.py`). The experiment log below
+is the Python bot's and names its frozen copies by their hashes; those were archived with 0.1.5 along with the lab
+history, and the ladder of 0.1.6 starts empty.
 A parameter change is a profile; a code change that should not move existing results is a new version (copy
 `src/basic1/` and `params/basic-1.json` to `basic2` and `basic-2`, add its row to the version table).
 
@@ -43,10 +44,9 @@ Targets for four equal **Prince** bots on a Small map at Quick speed:
 - `python -m citar.lab submit saves/lab/specs/NNN-*.json` queues experiments. A seat names a bot version (`basic`,
   `basic-N`, `idle`) or a profile, and **versions are pinned at submit time**: `basic` becomes the version it names
   then, so a version added later never contaminates a queued experiment. (0.1.5 froze a copy of `basic.py` into
-  `citar/bots/frozen_<hash>.py` instead; such seats are now refused as archived.) Every result records per seat the
+  the package instead; seats naming such a copy are now refused as archived.) Every result records per seat the
   build id, the version, the profile and revision, the overrides and the fingerprint, as they were when the game was
-  played; only such results are rated, so 0.1.5's results left in `saves/lab/results` are not. The lab needs the Rust
-  engine (the default; not `CITAR_ENGINE=python`): without it `run` and `submit` stop at once (exit 2).
+  played; only such results are rated, so 0.1.5's results left in `saves/lab/results` are not.
 - `python -m citar.lab status` shows progress. `python -m citar.lab report NAME...` shows per-label win share,
   score share with a 95% CI, techs and cities at turns 100/200/300, and head-to-head score-share differences
   (`*` = significant).

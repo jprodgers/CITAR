@@ -7,7 +7,7 @@ Each announces what it granted to its civilization only.
 The Rust engine announces a granted tech as "Rome was granted Pottery." and reads a techs string as
 one name (intended: scenario-tech-announcement-wording, scenario-techs-string-is-one-name).
 """
-from = "citar/engine/scenario.py: grant_tech, grant_era, remove_tech, set_research"
+from = "engine/scenario.py: grant_tech, grant_era, remove_tech, set_research"
 
 [[step]]
 note = "A bare game's civilizations start with the Ancient era's starting tech."

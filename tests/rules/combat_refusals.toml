@@ -5,7 +5,7 @@ city whose defences are down (only a melee unit takes it), and a unit that must 
 movement to set up and fire. A unit that must set up does so when it attacks, for a move's worth of
 its movement.
 """
-from = "citar/engine/combat.py: validate_attack, contains_attackable_enemy, attack"
+from = "engine/combat.py: validate_attack, contains_attackable_enemy, attack"
 
 [[step]]
 ops = [

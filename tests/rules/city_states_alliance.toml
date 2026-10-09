@@ -4,7 +4,7 @@ ally's wars. A civilization may pledge to protect a city-state, which raises its
 by 10, and may not withdraw the pledge for 10 turns. Attacking a city-state angers its protectors
 and its ally, and it asks the civilizations at peace with it to kill the attacker's units.
 """
-from = "citar/engine/city_states.py: update_ally, pledge, withdraw_protection, on_attacked; citar/engine/diplomacy.py: set_war"
+from = "engine/city_states.py: update_ally, pledge, withdraw_protection, on_attacked; engine/diplomacy.py: set_war"
 
 [config]
 players = [{}, {}, {}]

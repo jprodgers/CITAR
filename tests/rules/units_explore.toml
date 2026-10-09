@@ -4,7 +4,7 @@ distance, keeps the order, and goes on exploring at the start of each of its tur
 left to explore nearby. A move order also goes on at the start of the next turn, and a unit that
 arrives drops it.
 """
-from = "tests/test_engine.py::TurnTests::test_move_without_moves_is_an_error; citar/engine/automation.py: explore, run_unit_orders"
+from = "tests/test_engine.py::TurnTests::test_move_without_moves_is_an_error; engine/automation.py: explore, run_unit_orders"
 
 [[step]]
 ops = [

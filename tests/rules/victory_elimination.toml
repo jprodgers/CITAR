@@ -4,7 +4,7 @@ kills its last unit, and at the end of the round when it simply has no unit. An 
 civilization's units go, its open negotiations are cancelled with a note, and everyone is told; it
 takes no more turns. With two civilizations left the game goes on.
 """
-from = "citar/engine/victory.py: is_defeated, check_elimination; citar/engine/turns.py: end_round"
+from = "engine/victory.py: is_defeated, check_elimination; engine/turns.py: end_round"
 
 [config]
 players = [{}, {}, {}, {}]

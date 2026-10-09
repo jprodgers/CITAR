@@ -4,7 +4,7 @@ coup against the city-state's ally at the end of its civilization's turn. The ch
 gap between the ally's influence and its own: against an ally at 100, from -60, it is nil, and the
 spy is caught and killed.
 """
-from = "citar/engine/espionage.py: can_coup, coup_chance, stage_coup, _initiate_coup, spy_end_turn"
+from = "engine/espionage.py: can_coup, coup_chance, stage_coup, _initiate_coup, spy_end_turn"
 
 [config]
 city_states = 1

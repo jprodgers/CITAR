@@ -5,7 +5,7 @@ queued tech that needs it; choose_free_tech spends a free tech on one researchab
 refuses what it cannot do: an unknown name, a tech already known or queued, one not queued, no
 free tech to spend, and a tech not yet researchable.
 """
-from = "citar/engine/research.py: set_research, dequeue_research, free_tech"
+from = "engine/research.py: set_research, dequeue_research, free_tech"
 
 [[step]]
 ops = [

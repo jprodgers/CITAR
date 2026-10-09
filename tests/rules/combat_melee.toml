@@ -4,7 +4,7 @@ grassland, and the damage each side takes at the lowest and highest roll; the at
 in that range both ways, spends the attacker's attack and movement, and earns experience, 5 for the
 attacker and 4 for the defender. A stronger attacker deals more.
 """
-from = "tests/test_engine.py::CombatTests::test_stronger_attacker_deals_more; citar/engine/combat.py: preview, resolve"
+from = "tests/test_engine.py::CombatTests::test_stronger_attacker_deals_more; engine/combat.py: preview, resolve"
 
 [[step]]
 ops = [

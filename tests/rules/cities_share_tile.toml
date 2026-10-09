@@ -6,7 +6,7 @@ Python refused only the tiles their own territory's city worked, so a city could
 tile of its own territory that a sibling worked, and both worked it
 (intended: cities-never-share-a-tile).
 """
-from = "citar/engine/cities.py: workable_tiles"
+from = "engine/cities.py: workable_tiles"
 
 [[step]]
 ops = [

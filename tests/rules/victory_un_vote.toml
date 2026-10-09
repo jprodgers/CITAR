@@ -5,7 +5,7 @@ the United Nations' builder counts twice. The vote is counted as its round ends:
 of the votes needed is not elected, and the next vote comes fifteen turns later. Elected, a
 civilization that built the United Nations wins the Diplomatic victory.
 """
-from = "citar/engine/victory.py: schedule_vote, cast_vote, votes_needed, hold_vote, un_owner; citar/engine/tools.py: un_vote"
+from = "engine/victory.py: schedule_vote, cast_vote, votes_needed, hold_vote, un_owner; engine/tools.py: un_vote"
 
 [config]
 players = [{}, {}, {}]

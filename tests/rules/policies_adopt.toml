@@ -6,7 +6,7 @@ next one's cost, and a free policy is spent before culture. Adopting every membe
 adopts its finisher too, which the whole world hears of. costs lists the next policy's cost and
 what is adoptable.
 """
-from = "tests/test_mechanics.py::MechanicsTests::test_adopt_branch_and_policy; citar/engine/policies.py: adoptable, culture_cost, adopt"
+from = "tests/test_mechanics.py::MechanicsTests::test_adopt_branch_and_policy; engine/policies.py: adoptable, culture_cost, adopt"
 
 [[step]]
 op = "found_city"

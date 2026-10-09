@@ -4,7 +4,7 @@ see it. A wonder built by a civilization it has not met is told of an unknown ci
 unknown city; its builder reads its own names. Once the reader's turn has ended, what came before
 is no longer news.
 """
-from = "tests/test_events.py::EventScrubbingTest::test_views_briefings_and_tools_are_scrubbed; citar/engine/briefing.py: briefing"
+from = "tests/test_events.py::EventScrubbingTest::test_views_briefings_and_tools_are_scrubbed; engine/briefing.py: briefing"
 
 [[step]]
 ops = [

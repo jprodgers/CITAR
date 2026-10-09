@@ -3,7 +3,7 @@ A civilian the barbarians took from one civilization and another civilization ta
 an offer: return it to the civilization it was taken from, for its goodwill, or keep it. The offer
 lapses at the end of the captor's turn. A civilian of one's own comes back without a question.
 """
-from = "tests/test_single_player.py::RecapturedCivilianTests; citar/engine/units.py: capture_civilian, return_civilian"
+from = "tests/test_single_player.py::RecapturedCivilianTests; engine/units.py: capture_civilian, return_civilian"
 
 [config]
 barbarians = "normal"

@@ -1,7 +1,7 @@
 # HTTP and tool API
 
-Everything a player can do is a **tool**. Tools are registered once, in `citar/engine/tools.py`,
-and reach three interfaces automatically: the browser client, MCP clients, and the LLM adapter.
+Everything a player can do is a **tool**. Tools are registered once, in the engine's tool registry
+(`crates/citar-engine/src/api/tools/`), and reach three interfaces automatically: the browser client, MCP clients, and the LLM adapter.
 There is no fourth set of actions hiding anywhere, and no interface can do something another
 cannot.
 

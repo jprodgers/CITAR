@@ -5,7 +5,8 @@ against it, so what the bot does is the unit the whole benchmark is denominated 
 
 It is deliberately not a neural anything: a few thousand lines of heuristics that can be read,
 reasoned about, and changed on purpose. It is compiled into the Rust engine (`crates/citar-bot`) as
-**bot versions**: `basic-1` is the port of 0.1.5's Python bot (`citar/bots/basic.py`), and `idle`
+**bot versions**: `basic-1` is the port of 0.1.5's Python bot (`basic.py`, which the tag
+`python-engine-0.1.6` keeps), and `idle`
 founds a capital and does nothing else. A change to the bot that should not move existing results is
 a new version, a deliberate copy (`src/basic1/` and `params/basic-1.json` to `basic2` and
 `basic-2`) with its own row in the version table; `basic` names the latest version wherever it is
@@ -55,8 +56,8 @@ parameters and aggression on an earlier build of the latest version; falling bac
 all, then Standard; never Idle). It is resolved when the game is created and recorded in the seat, so a
 game keeps its bot when the rankings change. Benchmarks default to Standard.
 
-The frozen snapshots of 0.1.5 (`frozen_<hash>`, and the built-in profiles v0, v1 and 22 Sep that
-played them) were archived with 0.1.5: a profile, seat or experiment that names one is refused with
+The frozen snapshots of 0.1.5's Python bot (and the built-in profiles v0, v1 and 22 Sep that played
+them) were archived with 0.1.5: a profile, seat or experiment that names one is refused with
 a message saying so. A saved profile of 0.1.5 on a snapshot stays listed: its page shows it read-only
 with that message, an administrator can delete it, and it is never the Best bot.
 
@@ -103,11 +104,10 @@ standard,my-profile`, or `{"profile": "my-profile"}` as a lab seat (with optiona
 on top), or `"profile"` as the base of a factorial experiment. `"best"` works there too, and is
 queued as the profile it stands for at submission, so its games are rated as that profile's.
 
-Versions, schemas, cleaning, fingerprints and the build id come from the Rust engine
-(`citar.engine_api`), the default backend since 0.1.6's package 2-09. With `CITAR_ENGINE=python`, the
-Python engine kept for its reference tests until 2-12, the Bots page lists the profiles and shows each
-read-only, and `citar lab run` and `citar lab submit` stop at once with a message saying they need the
-Rust engine (exit 2).
+Versions, schemas, cleaning, fingerprints and the build id come from the engine
+(`citar.engine_api`). A process that plays a modded ruleset (`CITAR_RULESET_DIR`,
+[MODDING.md](MODDING.md#playing-a-modded-ruleset)) has its own build id, so its fingerprints and
+ratings are its own.
 
 HTTP (signed in; changes need an administrator): `GET /api/bots/profiles`, `GET|PUT|DELETE
 /api/bots/profiles/{id}`, `POST /api/bots/profiles`, `POST /api/bots/profiles/{id}/fork`,
@@ -133,9 +133,8 @@ citar balance --games 22 --players 2 --size duel --bots basic,idle    # can it b
 ```
 
 `--bots` takes profile ids and bot versions (`basic`, `basic-N`, `idle`); a name that is neither,
-or a frozen snapshot of 0.1.5, stops the run before it starts. One seed plays one game: the Rust bot
-draws from the game's seed, and the Python engine's bot (until it is removed) from a seed each seat
-is given from it.
+or a frozen snapshot of 0.1.5, stops the run before it starts. One seed plays one game: the bots draw
+from the game's seed.
 To A/B test a change of parameters, make a profile with it and run `--bots standard,<profile>`; to
 A/B test a change of code, make it in a new version and run `--bots basic-1,basic-2`. Both sides
 play in the same games, on the same maps, which removes map luck from the comparison — the single

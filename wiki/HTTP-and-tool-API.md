@@ -1,7 +1,7 @@
 # HTTP and tool API
 
-Everything a player can do is a **tool**. Tools are registered once, in `citar/engine/tools.py`,
-and reach three interfaces automatically: the browser client, MCP clients, and the LLM adapter.
+Everything a player can do is a **tool**. Tools are registered once, in the engine's tool registry
+(`crates/citar-engine/src/api/tools/`), and reach three interfaces automatically: the browser client, MCP clients, and the LLM adapter.
 There is no fourth set of actions hiding anywhere, and no interface can do something another
 cannot.
 
@@ -124,7 +124,8 @@ The loop:
 3. Act. Read the result of each call; the guard rails refuse an identical successful action twice
    in one turn, and repeating a query that has not changed returns "unchanged".
 4. `end_turn`.
-5. Repeat.
+5. Repeat until `wait` says `game_over` or `eliminated`, or `crashed`: the engine stopped the game after an
+   internal error, and it takes no more moves.
 
 Worth knowing:
 

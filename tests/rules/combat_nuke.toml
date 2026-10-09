@@ -3,7 +3,7 @@ A nuclear missile on an explored tile in range: war on the civilization it hits,
 its blast destroyed (a strength 2 weapon deals 100 damage), fallout on ground zero, and the missile
 spent. Every civilization that knows its owner thinks worse of it.
 """
-from = "citar/engine/combat.py: nuke, _nuke_tile, _pillage_and_fallout"
+from = "engine/combat.py: nuke, _nuke_tile, _pillage_and_fallout"
 
 [[step]]
 ops = [

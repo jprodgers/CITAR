@@ -7,7 +7,7 @@ city-state's ally, and the recipients of a message, are named only to a caller t
 Python hid the ally in the player list but named it in get_city_states, and named every recipient
 in get_diplomacy.
 """
-from = "citar/engine/views.py: client_view, players_overview, city_states_info, diplomacy_info, great_people_info"
+from = "engine/views.py: client_view, players_overview, city_states_info, diplomacy_info, great_people_info"
 
 [config]
 city_states = 1
