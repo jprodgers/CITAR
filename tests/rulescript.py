@@ -539,7 +539,7 @@ def load(path: Path) -> Script:
 
 
 class Runner:
-    """Plays one script on the facade's backend."""
+    """Plays one script through the facade."""
 
     def __init__(self, script: Script):
         self.script = script

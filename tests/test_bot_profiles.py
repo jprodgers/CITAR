@@ -417,8 +417,7 @@ class RatingTests(unittest.TestCase):
 
 
 class LadderTests(unittest.TestCase):
-    """Entries keyed and named from the results' own records (DESIGN.md P2.8.7), on either backend: nothing here
-    asks the engine."""
+    """Entries keyed and named from the results' own records (DESIGN.md P2.8.7): nothing here asks the engine."""
 
     def setUp(self):
         from citar import lab

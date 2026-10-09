@@ -52,7 +52,7 @@ export async function renderBots(root, rules, sub) {
 // ---------------------------------------------------------------------------------------------------------------------
 // profiles list
 // ---------------------------------------------------------------------------------------------------------------------
-// The engine list only labels each profile's code: without it (the Python backend answers 501) the ids stand in.
+// The engine list only labels each profile's code: without it (a request that failed) the ids stand in.
 const engineList = () => api.botEngines().catch(() => ({ engines: [] }));
 
 async function drawProfiles(body, rules) {
@@ -288,8 +288,8 @@ async function renderProfile(page, rules, pid) {
   try { [info, { engines }] = await Promise.all([api.botProfile(pid), engineList()]); }
   catch (e) { page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots"))); return {}; }
   const saved = info.profile;
-  // A profile whose code the engine refuses (a frozen snapshot of 0.1.5, or no Rust engine on this server) has no
-  // schema: it is shown read-only with the refusal, and its owner can still delete it.
+  // A profile whose code the engine refuses (a frozen snapshot of 0.1.5) has no schema: it is shown read-only with
+  // the refusal, and its owner can still delete it.
   let schema, refused = null;
   try { schema = await api.botSchema(saved.engine); }
   catch (e) { refused = e.message; schema = { engine: saved.engine, groups: [] }; }

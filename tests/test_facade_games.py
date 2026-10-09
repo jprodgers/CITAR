@@ -87,9 +87,7 @@ class HeadlessTests(unittest.TestCase):
         self.assertTrue(all(p["cities"] >= 1 for p in r["players"] if p["kind"] == "major" and p["alive"]))
 
     def test_one_seed_plays_one_game(self):
-        # citar sim and citar balance play the same game for the same seed on either backend: the Rust bot draws
-        # from the game's seed, the Python one from the seed each seat is given (a seedless Python bot seeds itself
-        # from the OS, and three bots' tech picks then part within 25 turns)
+        # citar sim and citar balance play the same game for the same seed: the bots draw from the game's seed
         from citar import balance, sim
         runs = [sim.run(players=3, turns=25, map_size="duel", seed=4, verbose=False) for _ in range(2)]
         self.assertEqual(runs[0]["stats"], runs[1]["stats"])
