@@ -208,6 +208,27 @@ class BotAgentTests(unittest.TestCase):
         self.assertIsNotNone(rec)
         self.assertTrue(rec.get("bot_actions"), "the drive's action counts are on the bot's turn row")
 
+    def test_the_driver_ends_a_turn_its_models_chat_held_open(self):
+        """The session's driver closes the chat the bot left to its model and ends the turn, as for any turn an agent
+        leaves open (a session seat has no model of its own until Phase 3's hybrid seats)."""
+        from citar import engine_api
+        with self.s.lock:
+            self.s.game.execute(0, "end_turn", {})
+        trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
+        engine_api.bot_set_diplomacy(self.s.get_agent(1).bot, {"trades": "llm", "agreements": "llm"})
+        with mock.patch.object(self.s, "_dispatch_negotiation_interrupts"):
+            self.s.start()
+            t0 = time.time()
+            while time.time() - t0 < 30 and (self.s.game.turn, self.s.game.current) != (2, 0):
+                time.sleep(0.05)
+            self.s.set_paused(True)
+        self.assertEqual((self.s.game.turn, self.s.game.current), (2, 0), self.s.errors)
+        n = self.s.game.negotiation(trade)
+        self.assertEqual((n["status"], n["history"][-1]["note"]), ("expired", "(no reply in time)"))
+        rec = next(r for r in self.s.metrics.data["turns"] if (r["player"], r["turn"]) == (1, 1))
+        self.assertEqual(rec["end_reason"], "end_turn")
+        self.assertEqual(self.s.errors, [])
+
     @python_engine_only("tests.test_engine_api.BotTests.test_bots_are_compiled_versions")
     def test_a_frozen_bot_answers_everything(self):
         """The archived bots predate the switch: BotAgent falls back to answering every negotiation. (No profile
