@@ -26,9 +26,8 @@ way.
 
 Bot versions are pinned when an experiment is submitted: "basic" becomes the version it names then (basic-1), so a
 newer version compiled in later does not mix into a queued experiment (use "live" to opt out and play the latest
-version at play time). The Rust engine compiles its versions in, so nothing is copied: 0.1.5 froze a copy of
-basic.py instead, and a seat naming such a frozen_<hash> snapshot is refused, the snapshots having been archived with
-0.1.5. Every result records, per seat, what played: the build id (the engine's and the bot's code and the ruleset),
+version at play time). The engine compiles its versions in, so nothing is copied: 0.1.5 froze a copy of its Python
+bot instead, and a seat naming one of those snapshots is refused, the snapshots having been archived with 0.1.5. Every result records, per seat, what played: the build id (the engine's and the bot's code and the ruleset),
 the bot version, the profile and its revision, the overrides, the fixed aggression as the bot played it and the
 fingerprint, all taken when the game is played, so a game of a queued experiment that a newer build plays is labelled
 with that build. A seat queued as {"profile": "best"} is recorded as the profile "best" stood for at submission.
@@ -42,10 +41,6 @@ start position. "turns" 0 plays to the speed's time-victory turn. A seat's aggre
 rotation evens it out.
 During the restricted hours of the CITAR host server (Servers page) the runner uses --night-workers (fan noise).
 Every finished game is written to the usage ledger (saves/usage/lab-*.jsonl) so reports can cost experiments.
-
-The lab asks the engine for versions, parameters, fingerprints and the build id, which only the Rust engine has: it
-needs the Rust backend of ``citar.engine_api`` (the default; not ``CITAR_ENGINE=python``), and without it ``run`` and
-``submit`` stop at once with exit 2.
 """
 from __future__ import annotations
 
@@ -1038,19 +1033,6 @@ def _pid_alive(pid) -> bool:
         return False
 
 
-def _need_rust(cmd: str):
-    """Exit 2 with the facade's message unless the engine says what build it is. The lab asks the engine for bot
-    versions, parameters, fingerprints and the build id, which only the Rust backend has (the default; not
-    ``CITAR_ENGINE=python``): refused once here, rather than by every queued game's process, three times
-    each, as crashes."""
-    from . import engine_api
-    try:
-        engine_api.build_info()
-    except engine_api.BackendError as e:
-        print(f"citar lab {cmd} needs the Rust engine: {e}", file=sys.stderr)
-        raise SystemExit(2) from None
-
-
 def main(argv=None):
     """The ``citar lab`` command line."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1070,8 +1052,6 @@ def main(argv=None):
     sub.add_parser("status")
     sub.add_parser("stop")
     args = ap.parse_args(argv)
-    if args.cmd in ("run", "submit"):
-        _need_rust(args.cmd)
     if args.cmd == "run":
         run(args)
     elif args.cmd == "play":

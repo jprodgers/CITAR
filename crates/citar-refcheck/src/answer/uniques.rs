@@ -38,7 +38,8 @@ impl AnswerModule for Uniques {
         let path = cx.root.join(RECORDING);
         let bytes = read_gz(&path).map_err(|e| {
             AnswerError::new(format!(
-                "{}: {e} (record it with scripts/refcheck/uniques_dump.py)",
+                "{}: {e} (the committed recording of the Python engine, which \
+                 scripts/refcheck/uniques_dump.py wrote: the tag python-engine-0.1.6 keeps it)",
                 path.display()
             ))
         })?;

@@ -1,21 +1,19 @@
 # Rule scripts
 
 A rule script pins down one behaviour of the game engine: it sets a game up, acts, and checks
-what the engine then says. The same script runs on both engines:
+what the engine then says. Two runners play every script:
 
-- the Rust engine, through `crates/citar-testkit/src/script` (`cargo nextest run -p citar-testkit
-  --test rules`, one test per script);
-- the Python engine, through `tests/rulescript.py` (`python -m unittest tests.test_rule_scripts`),
-  which drives `citar.engine_api` only: `EngineGame`, and the bot functions for the `bot` step.
+- the Rust runner, `crates/citar-testkit/src/script`, on the engine itself (`cargo nextest run -p
+  citar-testkit --test rules`, one test per script);
+- the Python runner, `tests/rulescript.py` (`python -m unittest tests.test_rule_scripts`), through
+  the bindings (`citar._engine`), driving `citar.engine_api` only: `EngineGame`, and the bot
+  functions for the `bot` step.
 
-The Python runner runs on the facade's backend, so with `CITAR_ENGINE=rust` it plays every script on
-the Rust engine through the bindings (`citar._engine`) as well: the `intended` steps included, and
-the scripts whose `needs` names a package left out, as the Rust harness leaves them.
-
-Scripts replace the Python tests that poked the engine's internals (DESIGN.md 9.3 in
-`crates/citar-engine/`). They play on hand-made maps with named places instead of generated ones,
-so a script means the same thing on both engines and before and after a system is ported. A
-script lands with the package that ports what it tests, and passes on Python first.
+Scripts replaced the Python tests that poked the Python engine's internals (DESIGN.md 9.3 in
+`crates/citar-engine/`) while the Rust engine was ported, and passed on both engines; the Python
+engine was removed in 0.1.6 (package 2-12; the tag `python-engine-0.1.6` keeps it). They play on
+hand-made maps with named places instead of generated ones, so a script means the same thing however
+the map generator changes.
 
 `_selftest.toml` tests the runners themselves, including checks that must fail. Keep the two
 runners in step: a change to the language changes both, this file, and the self-test.
@@ -41,7 +39,6 @@ eq = "human"
 |---|---|
 | `about` | required: what the script pins down, in a sentence or two |
 | `from` | the Python test it ports, if any |
-| `needs` | the Phase 2 package that makes it pass on the Rust engine, as `"2-01a"` (see [Bot scripts](#bot-scripts)) |
 | `map` | the map, `arena` by default |
 | `start` | `bare` or `full` |
 | `config` | settings, as `EngineGame.new` takes them |
@@ -96,7 +93,7 @@ other key, so a misplaced one never passes unread):
 | `as = "name"` | `op`, `ops`, `tool`, `check` and `bot` only: binds the step's result (an op's or tool's return value, a check's subject at its path, what a bot step gives) |
 | `error = "text"` | `op`, `ops`, `tool`, `new_game` and `bot` only: the step must be refused with `text` in its message; `error = true`: refused with any message |
 | `must_fail = true` or `"text"` | the step itself must fail (for the self-test): a check that does not hold, an unexpected error, a refused script |
-| `intended = "id"` | the expected value is the Rust engine's, which differs from Python's on purpose: the Python runner skips the step on the Python engine (and runs it on the Rust one). The id is listed in `refcheck/intended.toml` or `tests/rules/intended.toml` |
+| `intended = "id"` | the expected value is one the Rust engine gives on purpose where the Python engine it replaced gave another. The id is listed in `refcheck/intended.toml` or `tests/rules/intended.toml` |
 | `coerce = true` | the step types numbers as strings on purpose (see [Numbers](#numbers)) |
 
 ### `op`
@@ -226,19 +223,18 @@ The seat's bot acts (DESIGN.md P2.3.11 in `crates/citar-engine/`). Its keys:
 
 What each gives, to `as`:
 
-- **`turn`** plays as a host plays a bot seat: the Python runner calls `play_bot_turn(end_turn = True)` (the
-  bot settles its chats and ends its turn; the runner ends the idle bot's; on the Rust backend that is the
-  one-seat drive below), the Rust runner drives that seat alone with a seat limit of 1. A negotiation the seat is in that waits on a seat nobody drives stops that
-  drive; the Rust runner closes it, as a host does when its wait runs out, and drives on (Python's bot
-  withdrew it). One the bot leaves to the seat's model keeps the turn from ending on both runners, and the
-  step fails with `end_turn`'s reason (`end_turn_refusal`, in the same words on both). It gives `turn` and
-  `current` after it. A turn on a seat whose turn it is not is refused.
+- **`turn`** plays as a host plays a bot seat: both runners drive that seat alone with a seat limit of 1 (the
+  Python runner through `play_bot_turn(end_turn = True)`, the one-seat drive). A negotiation the seat is in
+  that waits on a seat nobody drives stops that drive; the runner closes it, as a host does when its wait
+  runs out, and drives on (Python's bot withdrew it). One the bot leaves to the seat's model keeps the turn
+  from ending, and the step fails with `end_turn`'s reason (`end_turn_refusal`, in the same words on both
+  runners). It gives `turn` and `current` after it. A turn on a seat whose turn it is not is refused.
 - **`respond`** gives `outcome`: `done` once the bot has answered, or `deferred` when the negotiation touches a
   category the seat's model owns (one such item makes the deal the model's, and talk with nothing on the
   table is the model's when it owns `chat`): the bot leaves it, and it still waits on the seat. A negotiation
   that does not exist is refused with "No negotiation with id N.", and one that is settled or waits on
-  another seat with "Negotiation N does not wait on player P." (Python: `bot_respond` behind
-  `bot_owns_negotiation`; Rust: `Game::answer`, after the same checks).
+  another seat with "Negotiation N does not wait on player P." (`Game::answer`, which the Python runner
+  reaches through `bot_respond`).
 - **`advice`** gives the advice, `deal_value`, `war_readiness`, `spare_luxuries` and `wants`.
 
 A seat keeps its bot from step to step while its version, aggression and params stay the same, so what the
@@ -247,8 +243,8 @@ seat's `DriverMemory` whatever the step says, so a script that relies on memory 
 version, aggression and params in every step.
 
 **Draws are pinned.** The bot draws for a tech's noise, ranged or melee, a peace offer, a friendship and a
-war's preparation, and the two engines draw differently (Python from its own generators, Rust keyed by the
-game's seed). So a `turn` step's `params` must give `tech_noise = 0`; `ranged_chance`,
+war's preparation, keyed by the game's seed, and the scripts were checked on the Python bot too, which drew
+from its own generators. So a `turn` step's `params` must give `tech_noise = 0`; `ranged_chance`,
 `peace_offer_chance`, `friend_chance` and `war_chance` each 0 or 1; `friend_chance_aggr` and
 `war_chance_aggr` 0; and no `war_prep_rate` that puts the war chance strictly between 0 and 1. The runners
 refuse a turn that leaves a draw free. The spies' draw only breaks ties between capitals: a script that
@@ -260,24 +256,11 @@ it, a host would let it expire. Read its opening entry (`history[0]`), not its s
 
 ### Bot scripts
 
-`bot_*.toml` pin down the bot. They were written and checked on the Python runner before the bot was
-ported (package 2-00b), and each names in `needs` the package of the port that makes it pass on Rust:
-`2-01b` (research, policies, cities, gold, faith, settlers, workers, scouts), `2-03` (units and fighting) or
-`2-05` (diplomacy). The Python runner plays a script whatever its `needs` on the Python engine; the Rust
-runner refuses it, its harness lists it as ignored, and the Python runner skips it on the Rust backend. A package's gate is that no script names it any more: it removes the
-header from the scripts it makes pass. Package 2-01a (the step itself, the idle bot, deferring to the model)
-removed its own: both runners play `bot_selftest.toml`, `bot_idle_rejects.toml` and
-`bot_model_owned_deferred.toml`. `bot_selftest.toml` is the bot step's own self-test, with its must-fail
-steps, kept apart from `_selftest.toml`. Package 2-01b (the economy) removed its nine: both runners play
-`bot_research_beeline`, `bot_policies_finish_branches`, `bot_buys_defender_in_danger`,
-`bot_disbands_in_deficit`, `bot_settler_founds_at_site`, `bot_faith_buildings_first`, `bot_scouts_explore`,
-`bot_workers_automate` and `bot_pantheon_by_preference`. Package 2-03 (units and fighting) removed its six
-(`bot_settler_waits_for_escort`, `bot_garrison_fortifies`, `bot_holds_losing_attack`,
-`bot_ranged_siege_first`, `bot_great_person_used`, `bot_spaceship_part_to_capital`), and package 2-05
-(diplomacy), the last, its eleven: the six `bot_switch_*` scripts, `bot_counter_merges_gold`,
-`bot_counter_capped_by_treasury`, `bot_counter_rounds`, `bot_offer_stands_once` and `bot_advice_plain_data`.
-No script names a package now: both runners play every bot script, and the Python runner plays them on the
-Rust backend too. The header stays, for a bot package to come.
+`bot_*.toml` pin down the bot. They were written and checked on the Python runner and the Python bot before
+the bot was ported (package 2-00b); while the port went on, each named in a `needs` header the package that
+made it pass on the Rust bot (2-01b, 2-03 or 2-05), which removed the header. Both runners play every bot
+script; the header went with the Python engine (package 2-12). `bot_selftest.toml` is the bot step's own
+self-test, with its must-fail steps, kept apart from `_selftest.toml`.
 
 ## Values
 
@@ -321,15 +304,15 @@ Tools and operations coerce `"3"` to 3, as Python's did. So that this is tested 
 never by accident, the runners refuse a step whose `args`, `ops`, `check` query or `new_game`
 types a number as a string, unless the step says `coerce = true`.
 
-`normalize.json` is the table of how a tool's arguments are coerced (`tools.py:113-127`): both
-engines run every case, Python through `tools.execute` in `tests/test_rule_scripts.py`, Rust
-through `api::tools::normalize_with` in `crates/citar-testkit/tests/engine/tools.rs`. A case with
-an `"intended"` id is a deliberate difference, which only Rust runs, as with an `intended` step.
+`normalize.json` is the table of how a tool's arguments are coerced, recorded from the Python engine
+(`tools.py:113-127`): `api::tools::normalize_with` runs every case in
+`crates/citar-testkit/tests/engine/tools.rs`. A case with an `"intended"` id is one of the Rust engine's
+deliberate differences, as with an `intended` step.
 
 ## Inspect
 
 `{ what = ..., ... }` asks the engine (`EngineGame.inspect`, `api::inspect`). Every shape is the
-same from both engines, and every set in it is sorted.
+same through both runners, as it was from both engines, and every set in it is sorted.
 
 | `what` | Takes | Gives |
 |---|---|---|
@@ -355,7 +338,7 @@ same from both engines, and every set in it is sorted.
 | `events` | optionally `since` (an event id), `type`, `player` (only what that player hears of) | `id`, `turn`, `type`, `text`, `audience` (ids, or null for everyone) |
 | `find_tiles` | filters | `x`, `y`, `distance`, nearest first, then by row and column |
 | `ops` | | `scenario` and `test`: each operation with its `params` |
-| `pending` | | what the Rust engine has not ported yet: `kind` (`scenario_op`, `test_op`, `turn_stage`, `setup_stage`), `name`, `package` (Python: nothing). A turn stage is named by its table and stage, `player_start S2: research progress`. Nothing is pending since package 1d-03 |
+| `pending` | | what the Rust engine had not ported yet: `kind` (`scenario_op`, `test_op`, `turn_stage`, `setup_stage`), `name`, `package`. A turn stage is named by its table and stage, `player_start S2: research progress`. Nothing is pending since package 1d-03 |
 | `view` | optionally `player` (a major; none for a spectator) and `events` (how many, 150 by default) | the client view, what the browser receives (`views.client_view`): `turn`, `year`, `current_player`, `phase`, `winner`, `victory`, `you`, `width`, `height`, `wrap_x`, `wrap_y`, `tiles` (each explored tile as `[idx, terrain, features, natural wonder, river bits, resource, improvement, route, pillaged, route pillaged, owner, visible]`), `units` and `cities` (as `get_units` and `get_cities` show the viewer's, others' as the viewer sees them, remembered cities with `stale`), `players` (as `get_players`), `turn_limit`, `config`, `events` (each as emitted, scrubbed for the viewer); a player's `empire`, `diplomacy`, `notes` and `alerts` (`type`, `text`, and `x`, `y`, `city`, `unit`, `player`, `negotiation` where they apply); a spectator's `stats`, `empires`, `thoughts`, `messages` and `negotiations` |
 | `briefing` | `player` (a major) | what a model reads to play its turn: `text` (the briefing, `briefing.briefing`), `progress` (the turn's progress, `briefing.turn_progress`) and `alerts` (each problem of the turn with the tool call that deals with it, as the briefing lists them, `briefing.alerts`) |
 
@@ -403,20 +386,20 @@ What a script does that no player or editor may. `{ what = "ops" }` lists them.
 
 `automate` and `progress_builds` (package 1c-04) are described by `{ what = "ops" }`.
 
-Three more exist for the hosts' tests (package 2-06a), where the Python tests poked the engine;
-no script needs them:
+Three more exist for the hosts' tests (package 2-06a), where the Python tests poked the Python
+engine; no script needs them:
 
 | Op | Takes | Does |
 |---|---|---|
 | `eliminate` | `player` (a living civilization or city-state) | if it is its turn, the turn ends first, as the host's `end_turn` ends it; then its cities are destroyed, its units removed, and it is eliminated as a defeat eliminates one: its negotiations cancelled, its deals ended, everyone told, and the last major civilization standing may win by Domination. A game left with no major civilization ends with no winner. Gives `turn`, `current`, `phase`, `winner`, `victory` and `eliminated` |
 | `end_game` | optionally `winner` (a living major civilization), `victory` (a victory's name, read loosely; it needs a winner) | the game ends now: won by the winner, by that victory or by none (`Neutral`), with the winner's announcement, or with no winner. Refused in a game that is over. Gives `turn`, `current`, `phase`, `winner`, `victory` |
-| `panic` | | the Rust engine panics inside the call (the Python engine has no such operation): the bindings' tests of a caught panic, which poisons the game and raises `EngineCrash` |
+| `panic` | | the engine panics inside the call: the bindings' tests of a caught panic, which poisons the game and raises `EngineCrash` |
 
 ## Maps
 
 `maps/arena.json` is 24 by 16 tiles, odd-r (odd rows shifted right), with no wrapping: an editor
-map document (`citar/engine/maps.py`) with an `anchors` key the runners read and give the
-engines without. Grassland, but for an ocean along the west edge (`x` 0 and 1), coast beside it
+map document (`api::maps`, `engine_api.validate_map`) with an `anchors` key the runners read and
+give the engine without. Grassland, but for an ocean along the west edge (`x` 0 and 1), coast beside it
 (`x` 2), and plains around B (`x` 15 to 21, `y` 8 to 12).
 
 | Anchor | Tile | What |
@@ -435,7 +418,7 @@ engines without. Grassland, but for an ocean along the west edge (`x` 0 and 1), 
 | `M` | (5,7) | a mountain, 2 south of A |
 
 The generator is not kept: edit the file, keep every anchor where it is, and check with
-`maps.validate` that the document is its own clean form.
+`engine_api.validate_map` that the document is its own clean form.
 
 `maps/arena_wrap.json` is the same arena wrapping east-west and north-south (`map =
 "arena_wrap"`), for what a map that wraps changes: the tiles and anchors are the arena's, so an

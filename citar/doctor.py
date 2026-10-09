@@ -12,8 +12,8 @@ Checks, in the order a failure would stop you:
 3. **Directories** - where state lives and whether it is writable.
 4. **Configuration** - the mode, and in server mode the settings that must be present.
 5. **Database** - that it opens and its schema is current.
-6. **Engine** - which engine games run on, and for the Rust engine which build.
-7. **Ruleset** - that the packaged data loads and how much of it there is.
+6. **Engine** - that the engine loads, and which build it is.
+7. **Ruleset** - that the packaged ruleset loads, and how much of it there is.
 8. **Model providers** - every server in the registry that CITAR can reach right now.
 9. **Port** - whether the configured port is free, or already has a CITAR on it.
 """
@@ -215,25 +215,17 @@ def _check_database(r: Report) -> None:
 
 
 def _check_engine(r: Report) -> None:
-    """Which engine games run on (the facade's backend), and for the Rust engine which build: its build id names
-    the engine's and the bots' code and the ruleset, so it is what a bug report and a rating are pinned to."""
+    """That the engine loads, and which build it is: its build id names the engine's and the bots' code and the
+    ruleset, so it is what a bug report and a rating are pinned to."""
     r.section("Engine")
     try:
         from . import engine_api
     except ImportError as exc:
-        if exc.name == f"{__package__}.engine_api":
-            # the selector refused the backend asked for: the setting is wrong, not the installation
-            r.line(FAIL, "backend", str(exc), "Set that variable to one of those, or unset it for the default.")
-        else:
-            r.line(FAIL, "engine", f"does not load ({exc})", "The Rust engine's extension is missing or out of date: "
-                   "reinstall CITAR, or build it (cargo xtask develop).")
+        r.line(FAIL, "engine", f"does not load ({exc})", "The engine's extension (citar._engine) is missing or out "
+               "of date: reinstall CITAR, or build it (cargo xtask develop).")
         return
-    try:
-        info = engine_api.build_info()
-    except engine_api.BackendError:
-        r.line(OK, "backend", "python (the Python engine)")
-        return
-    r.line(OK, "backend", f"rust, build {info['build_id']} ({info['label']}), version {info['version']}")
+    info = engine_api.build_info()
+    r.line(OK, "engine", f"build {info['build_id']} ({info['label']}), version {info['version']}")
 
 
 def _check_ruleset(r: Report) -> None:

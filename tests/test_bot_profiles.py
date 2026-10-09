@@ -1,21 +1,17 @@
 """Bot profiles on the engine's bot versions, fingerprints, the Bots page's API, the lab's records and the ratings
 fit (crates/citar-engine/DESIGN.md P2.7.3, P2.8.5-P2.8.7).
 
-Versions, their schemas, cleaning, fingerprints and the build id are the Rust engine's (``engine_api``'s Phase 2
-names), so the tests of them are ``rust_only``. The rest run on either backend: storage and the ratings fit need no
-engine, and a profile still plays in a lobby seat on the Python backend until package 2-12 deletes it.
+Versions, their schemas, cleaning, fingerprints and the build id are the engine's; storage and the ratings fit need
+no engine.
 """
 import tests  # noqa: F401  (temporary saves folder; must be imported before citar)
-import ast
 import json
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from citar import engine_api
 from citar.bots import profiles, ratings
-from tests.backends import RUST, python_engine_only, rust_only
 
 
 def _clear_profiles():
@@ -29,57 +25,6 @@ def _latest() -> str:
 
 
 class ParameterTests(unittest.TestCase):
-    @python_engine_only("a_key_missing_from_either_side_fails")
-    def test_every_parameter_the_code_reads_is_declared(self):
-        """P["x"] / self.p["x"] anywhere in the bot must be a declared parameter, or a profile can't reach it."""
-        from citar.bots import basic
-        tree = ast.parse(Path(basic.__file__).read_text(encoding="utf-8"))
-        used = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" \
-                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "p" and node.args \
-                    and isinstance(node.args[0], ast.Constant):
-                used.add(node.args[0].value)
-            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) \
-                    and isinstance(node.slice.value, str):
-                v = node.value
-                if (isinstance(v, ast.Name) and v.id == "P") or \
-                        (isinstance(v, ast.Attribute) and v.attr == "p" and isinstance(v.value, ast.Name)
-                         and v.value.id == "self"):
-                    used.add(node.slice.value)
-        missing = used - set(basic.DEFAULT_PARAMS)
-        self.assertFalse(missing, f"used but not declared: {sorted(missing)}")
-        dynamic = {k for k in basic.DEFAULT_PARAMS if k.startswith(("tw_", "w_", "u_"))}
-        unused = set(basic.DEFAULT_PARAMS) - used - dynamic - {"policy_order_peaceful", "policy_order_aggressive",
-                                                                 "target_cities"}
-        self.assertFalse(unused, f"declared but never read: {sorted(unused)}")
-
-    @python_engine_only("the_defaults_deserialize_into_params")
-    def test_specs_are_well_formed(self):
-        from citar.bots import basic
-        keys = [s["key"] for s in basic.PARAM_SPECS]
-        self.assertEqual(len(keys), len(set(keys)))
-        for s in basic.PARAM_SPECS:
-            with self.subTest(key=s["key"]):
-                self.assertTrue(s["label"])
-                d = s["default"]
-                if s["type"] == "bool":
-                    self.assertIsInstance(d, bool)
-                elif s["type"] == "int":
-                    self.assertIsInstance(d, int)
-                elif s["type"] == "float":
-                    self.assertIsInstance(d, float)
-                elif s["type"] == "choice":
-                    self.assertIn(d, s["choices"])
-                if s["type"] in ("int", "float"):
-                    if s.get("min") is not None:
-                        self.assertLessEqual(s["min"], d)
-                    if s.get("max") is not None:
-                        self.assertGreaterEqual(s["max"], d)
-                if s["type"] in ("order", "list") and isinstance(d, list):
-                    self.assertTrue(set(d) <= set(s["options"]), set(d) - set(s["options"]))
-
-    @rust_only
     def test_a_parameter_changes_the_bot(self):
         bot = profiles.make_bot({"profile": None, "bot": "basic", "params": {"war_prep_rate": 3.0}})
         self.assertEqual(json.loads(bot.params), {"war_prep_rate": 3.0})
@@ -136,25 +81,20 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(BotAgent(profile="old-tuned").profile["profile"], "standard")
 
 
-class EitherBackendTests(unittest.TestCase):
+class LobbySeatTests(unittest.TestCase):
     def test_a_profile_plays_in_a_lobby_seat(self):
-        """On Rust a profile resolves to the version that plays and its fingerprint; on the Python backend (until
-        2-12) it still plays, with the stored overrides, and has neither."""
+        """A profile resolves to the version that plays and its fingerprint."""
         r = profiles.resolve("classic-production")
         self.assertEqual((r["engine"], r["params"], r["profile"], r["profile_rev"]),
                          ("basic", {"prod_mode": "classic"}, "classic-production", 1))
-        bot = profiles.make_bot("classic-production", seed=3, aggression=0.7)
+        bot = profiles.make_bot("classic-production", aggression=0.7)
         self.assertEqual(bot.aggression, 0.7)
-        if RUST:
-            self.assertEqual((r["version"], bot.version), (_latest(), _latest()))
-            self.assertEqual(r["fingerprint"], engine_api.bot_fingerprint(bot))
-        else:
-            self.assertEqual((r["version"], r["fingerprint"], bot.p["prod_mode"]), (None, None, "classic"))
-            with self.assertRaises(engine_api.BackendError):
-                profiles.resolve("standard", pin=True)
+        self.assertEqual((r["version"], bot.version), (_latest(), _latest()))
+        self.assertEqual(r["fingerprint"], engine_api.bot_fingerprint(bot))
+        with self.assertRaises(TypeError):
+            profiles.make_bot("standard", seed=3)        # a bot draws from its game's seed: it has none of its own
 
 
-@rust_only
 class ProfileTests(unittest.TestCase):
     def tearDown(self):
         _clear_profiles()
@@ -267,7 +207,6 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profiles.make_bot("idle").version, "idle")
 
 
-@rust_only
 class BotsPageTests(unittest.TestCase):
     """The Bots page's API (citar/server/bots_api.py) in the shapes the page reads."""
 
@@ -314,7 +253,6 @@ class BotsPageTests(unittest.TestCase):
         self.assertEqual(edited["rev"], 1, "the page sending back what it read is no new revision")
 
 
-@rust_only
 class LabTests(unittest.TestCase):
     def tearDown(self):
         _clear_profiles()
@@ -448,32 +386,6 @@ class LabTests(unittest.TestCase):
         self.assertEqual(fixed["fingerprint"], profiles.fingerprint(_latest(), {}, 1.0))
         self.assertIsNone(open_["fixed_aggression"])
         self.assertEqual(open_["fingerprint"], profiles.fingerprint(_latest(), {}, None))
-
-
-class LabCommandTests(unittest.TestCase):
-    def test_run_and_submit_need_the_rust_engine(self):
-        """On a backend without a build id (the Python engine, until 2-12) the lab stops at once with the facade's
-        message, rather than queueing what no game can play or starting each queued game three times to crash."""
-        import contextlib
-        import io
-        import tempfile
-        from citar import lab
-        refusal = engine_api.BackendError("build_info: Rust backend only (set CITAR_ENGINE=rust).")
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "spec.json"
-            path.write_text(json.dumps({"name": "never-queued", "seats": [{"bot": "basic"}, {"bot": "basic"}]}),
-                            encoding="utf-8")
-            for argv in (["submit", str(path)], ["run", "--exit-when-idle"]):
-                err = io.StringIO()
-                with mock.patch.object(engine_api, "build_info", side_effect=refusal), \
-                        mock.patch.object(lab, "run") as run, contextlib.redirect_stderr(err):
-                    with self.assertRaises(SystemExit) as stop:
-                        lab.main(argv)
-                self.assertEqual(stop.exception.code, 2, argv)
-                self.assertIn("needs the Rust engine", err.getvalue())
-                self.assertIn("CITAR_ENGINE=rust", err.getvalue())
-                run.assert_not_called()
-        self.assertFalse((lab.QUEUE / "never-queued.json").exists())
 
 
 class RatingTests(unittest.TestCase):
@@ -661,42 +573,12 @@ class BestBotTests(unittest.TestCase):
                   "rating": 1600, "params": None, "aggression": None, "last": "2026-10-02T00:00:00"}]
         self.assertEqual(ratings.best_profile(board), "classic-production")
 
-    @rust_only
     def test_the_current_revision_is_flagged(self):
         fp = profiles.resolve("classic-production")["fingerprint"]
         board = [{"profile": "classic-production", "fingerprint": fp, "difficulty": "Prince", "rated": True,
                   "rating": 1600, "params": {"prod_mode": "classic"}, "aggression": None, "last": "2026-10-02"}]
         p = ratings.profile_rating(profiles.get("classic-production"), board)
         self.assertEqual((p["fingerprint"], p["rating_is_current"], p["rating"]["rating"]), (fp, True, 1600))
-
-
-class NegotiationTests(unittest.TestCase):
-    @python_engine_only("tests/rules/bot_counter_capped_by_treasury.toml")
-    def test_a_refused_counter_still_ends_the_bots_move(self):
-        """A live game waited 90 s on a bot whose counter-offer the rules refused (2026-09-22)."""
-        from citar.engine.game import Game
-        from citar.engine import tools
-        g = Game.new({"map_size": "duel", "seed": 21, "barbarians": "off",
-                      "players": [{"controller": "bot"}, {"controller": "bot"}]})
-        a, b = 0, 1
-        g.player(a).met.add(b) if isinstance(g.player(a).met, set) else g.player(a).met.append(b)
-        g.player(b).met.add(a) if isinstance(g.player(b).met, set) else g.player(b).met.append(a)
-        g.player(a).gold = 50
-        n = tools.execute(g, a, "open_negotiation", {"to": b, "message": "Friends?",
-                                                     "give": [{"type": "gold", "amount": 40}], "receive": []})
-        nid = n.get("negotiation_id") or n.get("id") or g.s.negotiations[-1]["id"]
-        g.s.current = b
-        # B asks A for more gold than A has: any counter A builds from that proposal is refused
-        tools.execute(g, b, "respond_negotiation", {"negotiation_id": nid, "action": "counter", "message": "More.",
-                                                    "give": [], "receive": [{"type": "gold", "amount": 45}]})
-        g.s.current = a
-        g.player(b).gold = 1000                   # B can pay, so A counters rather than rejecting outright...
-        g.player(a).gold = 30                     # ...but A can no longer pay the 45 on the table: the counter is refused
-        bot = profiles.make_bot("standard", seed=1)
-        bot.p["counter_max_gap"] = 10 ** 6         # make it try to counter whatever the value
-        bot.respond(g, a, nid)
-        neg = next(x for x in g.s.negotiations if x["id"] == nid)
-        self.assertNotEqual((neg["status"], neg["awaiting"]), ("open", a), neg)
 
 
 if __name__ == "__main__":

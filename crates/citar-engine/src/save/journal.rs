@@ -47,7 +47,7 @@
 //! change of ruleset still read after it. A change of palette makes the next frame a keyframe,
 //! and a decoder refuses a position past its palette.
 //!
-//! Replaces `victory.record_frame` (`citar/engine/victory.py:458-485`) and the history parts of
+//! Replaces `victory.record_frame` (`victory.py:458-485`) and the history parts of
 //! `GameState.to_dict` (`state.py:352-356`).
 
 use serde::{Deserialize, Serialize};

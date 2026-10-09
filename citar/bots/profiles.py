@@ -16,15 +16,13 @@ Profiles are what lab experiments, lobby seats and benchmark opponents name. Two
   kept per fingerprint, so a profile that follows the latest version (``basic``) gets a new rating line whenever a
   build changes what the bot does, and two profiles that happen to be identical share one.
 
-Versions replace 0.1.5's frozen copies of ``basic.py``: a bot change that should not move existing results is a new
-version, a deliberate copy in the Rust engine, so nothing is copied here any more. A ``frozen_*`` engine is refused
-with :data:`ARCHIVED`: the snapshots were archived with 0.1.5.
+Versions replace 0.1.5's frozen copies of the Python bot: a bot change that should not move existing results is a new
+version, a deliberate copy in the engine, so nothing is copied here any more. A profile saved by 0.1.5 that names one
+of those snapshots (:data:`ARCHIVED_PREFIX`) is still listed, read-only, and refused with :data:`ARCHIVED` wherever
+it would play: the snapshots were archived with 0.1.5.
 
-Every question about a version - which exist, their parameters, cleaning, fingerprints - goes to the Rust engine
-through the facade. Until package 2-12 deletes it, the Python engine can still be the facade's backend, and it has
-none of those names (they raise ``engine_api.BackendError`` there): on it a profile still plays in a lobby seat
-(:func:`resolve` and :func:`make_bot` then pass the stored overrides to the Python bot as they are and give no
-fingerprint), but listing versions, editing profiles, the lab and the rankings' fingerprints need the Rust engine.
+Every question about a version - which exist, their parameters, cleaning, fingerprints - goes to the engine through
+the facade.
 
 Built-in profiles are defined here and cannot be edited, only forked. Saved ones live in
 ``saves/bots/profiles/<id>.json``.
@@ -50,6 +48,9 @@ ENGINE_RE = re.compile(r"^(basic|basic-\d+|idle)$")
 LATEST = "basic"
 DEFAULT_PROFILE = "standard"
 BEST = "best"                # a seat may ask for the best-ranked profile on this server (see ratings.best_profile)
+#: How 0.1.5 named a frozen snapshot of its Python bot (the prefix, then the code's hash): a saved profile or a
+#: queued seat may still name one.
+ARCHIVED_PREFIX = "frozen_"
 #: Why a frozen snapshot of 0.1.5's Python bot is refused.
 ARCHIVED = ("{engine} is a frozen snapshot of the Python bot, archived with 0.1.5: the bot is now a version "
             "compiled into the engine. Use basic (the latest version), a version such as basic-1, or idle.")
@@ -82,7 +83,7 @@ def check_engine(engine) -> str:
     """``engine`` if a profile may name it, else ProfileError: a frozen snapshot with :data:`ARCHIVED`, anything else
     that is no ``basic``, ``basic-N`` or ``idle`` as unknown. Whether a ``basic-N`` is compiled in is the facade's to
     say (:func:`version`)."""
-    if isinstance(engine, str) and engine.startswith("frozen_"):
+    if isinstance(engine, str) and engine.startswith(ARCHIVED_PREFIX):
         raise ProfileError(ARCHIVED.format(engine=engine))
     if not isinstance(engine, str) or not ENGINE_RE.match(engine):
         raise ProfileError(f"Unknown bot engine {engine}: a profile plays basic (the latest version), a version such "
@@ -330,11 +331,6 @@ def resolve(ref, *, pin: bool = False) -> dict:
     resolved to the profile it stands for now). ``aggression`` is the profile's fixed one (or the seat's
     "aggression"), held to 0..1, None when the seat decides. The overrides are cleaned against the version's schema;
     a raw seat's that do not clean are refused too.
-
-    On the Python backend (until package 2-12) there are no versions to resolve to and no schema or build to clean
-    and fingerprint against: ``version`` and ``fingerprint`` are None and the overrides are passed on as stored, which
-    lets a lobby seat play its profile there; ``pin`` raises the facade's BackendError, since only a version can be
-    pinned.
     """
     if isinstance(ref, str) or ref is None:
         ref = {"profile": ref or DEFAULT_PROFILE}
@@ -355,29 +351,23 @@ def resolve(ref, *, pin: bool = False) -> dict:
     agg = clean_aggression(ref.get("aggression"))
     if agg is None and prof is not None:
         agg = clean_aggression(prof.get("aggression"))
-    try:
-        ver = version(engine)
-        params = clean_params(engine, params)
-        fp = fingerprint(engine, params, agg)
-    except engine_api.BackendError:
-        if pin:
-            raise
-        ver = fp = None
+    ver = version(engine)
+    params = clean_params(engine, params)
+    fp = fingerprint(engine, params, agg)
     return {"engine": ver if pin else engine, "version": ver, "params": params, "aggression": agg,
             "profile": prof["id"] if prof else None, "profile_rev": prof.get("rev") if prof else None,
             "profile_name": prof["name"] if prof else None, "fingerprint": fp}
 
 
-def make_bot(ref=None, *, seed: Optional[int] = None, aggression: Optional[float] = None):
-    """A bot for a profile reference (see resolve), made by the engine's facade (``engine_api.bot_instance``), so it
-    is the backend's own: a compiled bot's handle on the Rust engine. The profile's fixed aggression wins and is what
-    its fingerprint hashes (``fixed_aggression``); ``aggression`` is the seat's, used when the profile leaves it
-    open; with neither, 0.4. ``seed`` reaches only the Python backend's bot: the Rust bot draws from the game's
-    seed."""
+def make_bot(ref=None, *, aggression: Optional[float] = None):
+    """A bot for a profile reference (see resolve): a compiled bot's handle (``engine_api.bot_instance``). The
+    profile's fixed aggression wins and is what its fingerprint hashes (``fixed_aggression``); ``aggression`` is the
+    seat's, used when the profile leaves it open; with neither, 0.4. A bot has no seed of its own: it draws from its
+    game's seed."""
     r = resolve(ref)
     seat = float(aggression) if aggression is not None else 0.4
     try:
-        return engine_api.bot_instance(r["engine"], seed=seed, aggression=seat, params=r["params"],
+        return engine_api.bot_instance(r["engine"], aggression=seat, params=r["params"],
                                        fixed_aggression=None if r["aggression"] is None else float(r["aggression"]))
     except ValueError as e:
         raise _refused(e) from None

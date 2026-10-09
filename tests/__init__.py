@@ -50,3 +50,10 @@ if not os.environ.get("CITAR_CONFIG_DIR"):
         ]}
     with open(os.path.join(_cfg, "servers.json"), "w", encoding="utf-8") as f:
         json.dump(TEST_REGISTRY, f)
+
+
+def has_test_ops() -> bool:
+    """Whether the engine's build has the test operations (rule scripts, ``EngineGame.inspect`` and ``test_ops``):
+    ``cargo xtask develop`` and CI's test builds do, a release wheel does not."""
+    from citar import _engine
+    return bool(_engine.HAS_TEST_OPS)

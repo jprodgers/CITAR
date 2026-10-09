@@ -110,8 +110,8 @@ pub fn recorded(root: &Path, case: &str, turn: u32) -> Result<Arc<Vec<Value>>, A
         }
     }
     Err(AnswerError::new(format!(
-        "no bot decisions recorded for {case}/t{turn} in {}; record them with \
-         scripts/refcheck/bot_dump.py and name the file in {ENV}",
+        "no bot decisions recorded for {case}/t{turn} in {}; the corpus's recording is \
+         archived (refcheck/README.md, \"The archive\"): name the file in {ENV}",
         tried.join(", ")
     )))
 }

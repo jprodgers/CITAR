@@ -159,7 +159,7 @@ exclude = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = ["citar/migrations/versions", "citar/bots/frozen_*.py"]
+extend-exclude = ["citar/migrations/versions"]
 
 [tool.ruff.lint]
 # Rules that find mistakes, not rules that find differences of opinion.

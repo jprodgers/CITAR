@@ -1,12 +1,12 @@
 //! What a language model reads to play its turn (DESIGN.md 8.1; package 1d-03): the briefing,
 //! the turn's progress and the ASCII map.
 //!
-//! Replaces `citar/engine/briefing.py`: [`briefing`] (`briefing.py:491-701`), [`turn_progress`]
-//! (`briefing.py:441-485`), [`alerts`] (`briefing.py:319-326`, the models' text of the alerts
-//! `api::views::alerts` builds) and [`map::ascii_map`] (`briefing.py:28-142`). The briefing is
-//! written to be sufficient: an agent that reads it should not need a dozen queries before it can
-//! act (`briefing.py:492-502`). Everything is `&Game`: reading a briefing changes nothing
-//! (property P8).
+//! Replaces the Python engine's `briefing.py`: [`briefing`] (`briefing.py:491-701`),
+//! [`turn_progress`] (`briefing.py:441-485`), [`alerts`] (`briefing.py:319-326`, the models' text
+//! of the alerts `api::views::alerts` builds) and [`map::ascii_map`] (`briefing.py:28-142`).
+//! The briefing is written to be sufficient: an agent that reads it should not need a dozen
+//! queries before it can act (`briefing.py:492-502`). Everything is `&Game`: reading a briefing
+//! changes nothing (property P8).
 //!
 //! What differs from Python, on purpose (each an entry of `refcheck/intended.toml` or
 //! `tests/rules/intended.toml`, cited where it is made):

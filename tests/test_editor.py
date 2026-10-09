@@ -8,7 +8,6 @@ from citar import engine_api as E
 from citar import probes as P
 from citar.engine_api import ActionError, EngineGame
 from citar.server.session import SessionManager
-from tests.backends import rust_only
 
 DRY = {"provider": "dryrun", "model": "dry-run", "dry_run_delay": 0}
 
@@ -179,7 +178,6 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(rec["passed"])
         self.assertIn("end_turn", [c["tool"] for c in rec["tool_calls"]])
 
-    @rust_only
     def test_the_bot_as_the_subject(self):
         """The scripted bot as the subject (the probes' baseline): its answers through EngineGame.answer, its turn as
         a drive of its seat."""
@@ -202,7 +200,6 @@ class ProbeTests(unittest.TestCase):
                          {**DRY, **bot})
         self.assertIs(rec["passed"], True, rec)
 
-    @rust_only
     def test_a_case_whose_engine_stops_is_an_error(self):
         """An internal error of the engine in a case (here in the bot's drive) is the case's error, never a pass."""
         bot = {"provider": "bot", "aggression": 0.4}

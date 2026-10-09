@@ -1,24 +1,15 @@
-"""The scripted opponent, and the frozen copies of it that old experiments still play against.
+"""Bookkeeping about the scripted opponent: its profiles (:mod:`citar.bots.profiles`) and its ratings
+(:mod:`citar.bots.ratings`).
 
-:mod:`citar.bots.basic` is the bot. It is deliberately not a learned model: a few thousand lines of
-heuristics that can be read, argued with and changed on purpose. That matters because the bot is
-the **yardstick** — every model score in CITAR is a comparison against it, so what it does is the
-unit the whole benchmark is denominated in, and a unit nobody can inspect is not much of a unit.
+The bot itself is compiled into the engine (``crates/citar-bot``): versions such as ``basic-1``, each a deliberate
+copy with its own parameter schema, which games reach through ``citar.engine_api`` (``bot_instance``). It is
+deliberately not a learned model: a few thousand lines of heuristics that can be read, argued with and changed on
+purpose. That matters because the bot is the **yardstick** - every model score in CITAR is a comparison against it,
+so what it does is the unit the whole benchmark is denominated in, and a unit nobody can inspect is not much of a
+unit.
 
-``frozen_<hash>.py`` modules are snapshots taken when a lab experiment was submitted. They exist so
-that editing ``basic.py`` cannot change what a running experiment is measuring against half way
-through, and so that a result from last month can be reproduced next year. They are never edited,
-and the linter is told to leave them alone. None is made any more: the bot is compiled into the Rust
-engine as versions, which the lab pins instead, and profiles, the lab and balance runs refuse a
-frozen copy as archived with 0.1.5. The copies, ``basic.py`` and the path below go with the Python
-engine in package 2-12.
+0.1.5's Python bot and its frozen snapshots were archived with 0.1.5 (the tag ``python-engine-0.1.6`` keeps them): a
+profile or lab seat that names a snapshot is refused as archived.
 
-See ``docs/BOTS.md`` for what the bot does and how to change it without fooling yourself about the
-result.
+See ``docs/BOTS.md`` for what the bot does and how to change it without fooling yourself about the result.
 """
-
-# Frozen copies made on a machine whose package directory is read-only (an installed server) are written to the
-# saves directory instead; adding it to the package path lets `citar.bots.frozen_<hash>` import from either place.
-from .. import paths as _paths
-
-__path__.append(str(_paths.saves_path("bots", "frozen")))

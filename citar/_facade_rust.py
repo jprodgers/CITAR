@@ -1,7 +1,8 @@
-"""The facade's Rust backend: ``citar.engine_api`` over the extension ``citar._engine`` (``CITAR_ENGINE=rust``).
+"""What ``citar.engine_api`` hands out: every name of the facade over the extension ``citar._engine``.
 
 Every name of the facade, with the shapes its docstrings promise, over the Rust engine's bindings
-(crates/citar-py; crates/citar-engine/DESIGN.md P2.6). What this layer does, and the binding does not:
+(crates/citar-py; crates/citar-engine/DESIGN.md P2.6). Only ``citar.engine_api`` imports this module, and only this
+module imports the extension (tests/test_engine_boundary.py). What this layer does, and the binding does not:
 
 - **Values.** The binding hands back every dict or list as JSON bytes; this decodes them, and turns the keys JSON
   could only write as text (``standings``, ``state_summary``'s ``names`` and ``scores``, a drive's actions) back into
@@ -41,19 +42,19 @@ from typing import Any, Callable, Optional
 
 from . import _engine as _E
 from . import paths
-from ._facade_shared import BackendError, python_only as _python_only
 from .fsutil import replace as _fs_replace
 
+# citar/engine_api.py's list, which its import holds this module to.
 __all__ = [
-    "ActionError", "MapError", "RULES_OVERVIEW", "MAP_LEGEND",
+    "ActionError", "MapError", "EngineCrash", "RULES_OVERVIEW", "MAP_LEGEND",
     "rules_version", "rules_client", "max_players", "map_sizes", "map_types", "speeds", "difficulties",
     "resolve_name", "ruleset_counts", "tool_list", "tool_kind", "state_summary",
     "list_maps", "load_map", "save_map", "delete_map", "validate_map", "map_summary", "blank_map", "generate_map",
     "scenario_ops_help", "list_scenarios", "load_scenario", "scenario_summary", "delete_scenario",
-    "bot_instance", "DIPLOMACY_CATEGORIES", "item_category", "proposal_categories", "bot_set_diplomacy",
-    "bot_owns_negotiation", "run_game",
+    "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
+    "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
+    "build_info",
     "DEBUG_ACTIONS", "EngineGame",
-    "EngineCrash", "BackendError", "build_info", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint",
     "open_journal", "fork_journal", "journal_in_use", "read_save", "save_header",
 ]
 
@@ -328,16 +329,16 @@ def delete_scenario(sid: str):
 # ----------------------------------------------------------------------------
 # Bots: compiled versions with parameters, as handles
 # ----------------------------------------------------------------------------
-def bot_instance(engine: str = "basic", *, seed: Optional[int] = None, aggression: float = 0.4,
-                 params: Optional[dict] = None, fixed_aggression: Optional[float] = None):
+def bot_instance(engine: str = "basic", *, aggression: float = 0.4, params: Optional[dict] = None,
+                 fixed_aggression: Optional[float] = None):
     """A bot to seat in a game: ``engine`` is a bot version, "basic" (the latest), "basic-N" or "idle".
 
     The bot is an opaque handle (``citar._engine.Bot``): give it to :meth:`EngineGame.play_bot_turn`,
     :meth:`EngineGame.drive` or :func:`run_game`. ``params`` are overrides of the version's parameters, cleaned
     against its schema (unknown names and fractional ints refused). ``aggression`` is the seat's; a profile that fixes
-    its own gives ``fixed_aggression``, which wins and is what :func:`bot_fingerprint` hashes. ``seed`` is ignored:
-    the Rust bot draws from the game's seed (DESIGN.md P2.3.5). Raises ValueError for a name that is no version
-    (the frozen snapshots were archived with 0.1.5) or parameters that do not clean.
+    its own gives ``fixed_aggression``, which wins and is what :func:`bot_fingerprint` hashes. A bot has no seed of
+    its own: it draws from the game's seed (DESIGN.md P2.3.5). Raises ValueError for a name that is no version (the
+    snapshots of the Python bot were archived with 0.1.5) or parameters that do not clean.
     """
     if not isinstance(engine, str) or not engine:
         raise ValueError(f"'{engine}' is not a bot engine (basic, basic-N or idle).")
@@ -716,11 +717,6 @@ class EngineGame:
         """An independent copy of the whole state (without its history), to undo to or to start a scenario from."""
         return json.loads(self._g.state_json())
 
-    @property
-    def python_game(self):
-        """The Python engine's live Game: the Rust backend has no such thing. Raises BackendError."""
-        raise _python_only("EngineGame.python_game")
-
     # ------------------------------------------------------------------ summary reads (Heads: never wait)
     @property
     def turn(self) -> int:
@@ -1090,20 +1086,20 @@ class EngineGame:
     # ------------------------------------------------------------------ rule scripts (tests only)
     def _test_ops_build(self, what: str):
         if not _E.HAS_TEST_OPS:
-            raise BackendError(f"EngineGame.{what}: this build of citar._engine has no test operations "
-                               "(cargo xtask develop, or a test-ops wheel).")
+            raise NotImplementedError(f"EngineGame.{what}: this build of citar._engine has no test operations "
+                                      "(cargo xtask develop, or a test-ops wheel).")
 
     def inspect(self, query: dict):
         """What a rule script reads of the game: ``query`` is ``{"what": ..., ...}`` and the answer a small shape, the
         same from both engines, as tests/rules/README.md documents. Reads only. Raises ActionError for a bad query.
-        For tests: only a build with the test operations has it (BackendError otherwise)."""
+        For tests: only a build with the test operations has it (NotImplementedError otherwise)."""
         self._test_ops_build("inspect")
         return json.loads(self._g.inspect(_dumps(query)))
 
     def test_ops(self, ops: list[dict]) -> list[dict]:
         """Apply test operations in order (``{"op": name, ...}``, see tests/rules/README.md), all or nothing: what a
         rule script does to a game that no player or editor may. Returns what each did. Raises ActionError naming the
-        first that fails. For tests: only a build with the test operations has it (BackendError otherwise)."""
+        first that fails. For tests: only a build with the test operations has it (NotImplementedError otherwise)."""
         self._test_ops_build("test_ops")
         done, events = self._g.test_ops(_dumps(ops or []))
         self._fan(events)
@@ -1127,4 +1123,4 @@ class EngineGame:
         return self._g.replay_json(None if extra is None else _dumps(extra))
 
     def __repr__(self) -> str:
-        return f"<EngineGame (rust) turn {self.turn} {self.phase}>"
+        return f"<EngineGame turn {self.turn} {self.phase}>"

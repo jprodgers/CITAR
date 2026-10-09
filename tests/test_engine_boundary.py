@@ -1,15 +1,10 @@
 """The engine has one door: citar/engine_api.py.
 
-Everything outside citar/engine and citar/bots reaches the game through the facade, so the Rust engine can replace the
-Python one by changing the facade's backend and nothing else. This test reads every module in the package and fails on
-a way round it: importing the engine or a bot module, importing one by name at run time, taking a name from the facade
-that is not in its ``__all__`` (the engine classes it imports for itself), or taking the Python game out of an
-EngineGame (python_game, which is for tests and engine-side tools, or the private _g behind it).
-
-Behind the door are the facade's modules (crates/citar-engine/DESIGN.md P2.6.6): the selector itself, its two
-backends and what they share. Only they import the Rust extension ``citar._engine`` or a backend, and only they and
-the tests read which backend runs (``BACKEND``, or the ``CITAR_ENGINE`` variable it comes from): the rest of the
-package, the engine's and the scripts' included, works the same on both.
+Everything in the package and the scripts reaches the game through the facade's public names (its ``__all__``). This
+test reads every module and fails on a way round it: importing the engine's extension (``citar._engine``) or the
+module behind the facade (``citar._facade_rust``), by name or at run time; taking a name from the facade that is not in
+its ``__all__``; or taking the engine's game out of an EngineGame (its private ``_g``). Only the facade's two modules
+import the extension; the tests may.
 """
 import ast
 import unittest
@@ -19,17 +14,12 @@ from typing import Optional
 PACKAGE = Path(__file__).resolve().parent.parent / "citar"
 SCRIPTS = PACKAGE.parent / "scripts"
 FACADE = PACKAGE / "engine_api.py"
-#: The facade's modules: the selector, its backends and what they share. Only they import citar._engine or a backend.
-FACADE_MODULES = {FACADE, PACKAGE / "_facade_rust.py", PACKAGE / "_facade_shared.py", PACKAGE / "engine" / "facade.py"}
-#: The modules behind the door, by name: the Rust extension and the backends. The scripts' recorders of the Python
-#: engine's answers may use the Python backend itself (BEHIND_FOR_SCRIPTS): what they record is that engine's.
-BEHIND = ("citar._engine", "citar._facade_rust", "citar._facade_shared", "citar.engine.facade")
-BEHIND_FOR_SCRIPTS = ("citar._engine", "citar._facade_rust", "citar._facade_shared")
-ENGINE_SIDE = (PACKAGE / "engine", PACKAGE / "bots")
-# bot profiles and ratings are bookkeeping about bots (names, parameters, results), not bots: anyone may use them
-PYTHON_SIDE_BOTS = {"citar.bots", "citar.bots.profiles", "citar.bots.ratings"}
-# the EngineGame attributes that hold the Python engine's live Game
-GAME_ATTRS = {"python_game", "_g"}
+#: The facade's modules: the door, and the module behind it that binds the extension.
+FACADE_MODULES = {FACADE, PACKAGE / "_facade_rust.py"}
+#: What only the facade imports: the extension and the module behind the door.
+BEHIND = ("citar._engine", "citar._facade_rust")
+#: The EngineGame attribute that holds the engine's game.
+GAME_ATTRS = {"_g"}
 
 
 def _facade_all() -> set:
@@ -43,15 +33,15 @@ def _facade_all() -> set:
 PUBLIC = _facade_all()
 
 
-def _forbidden(module: str) -> bool:
+def _behind(module: str) -> bool:
     """Whether importing this module goes round the facade."""
-    if module == "citar.engine" or module.startswith("citar.engine."):
-        return True
-    return module.startswith("citar.bots.") and module not in PYTHON_SIDE_BOTS
+    return any(module == b or module.startswith(b + ".") for b in BEHIND)
 
 
 def _module_name(path: Path) -> str:
-    """The dotted module name of a file in the package."""
+    """The dotted module name of a file in the package, or ``scripts.<name>`` for a script."""
+    if PACKAGE not in path.parents:
+        return "scripts." + path.stem
     rel = path.relative_to(PACKAGE.parent).with_suffix("")
     parts = list(rel.parts)
     if parts[-1] == "__init__":
@@ -72,16 +62,20 @@ def _resolve(module_name: str, is_package: bool, node: ast.ImportFrom) -> str:
 
 def _fixed_start(node: ast.AST) -> Optional[str]:
     """The part of a string expression known before it runs: an f-string's or a concatenation's leading text, or the
-    text a .format() or % is applied to. None when nothing about it is fixed."""
+    text a .format() or % is applied to, up to its first field. None when nothing about it is fixed."""
     if isinstance(node, ast.Constant):
         return node.value if isinstance(node.value, str) else None
     if isinstance(node, ast.JoinedStr):
         first = node.values[0] if node.values else None
         return str(first.value) if isinstance(first, ast.Constant) else None
-    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _fixed_start(node.left)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        start = _fixed_start(node.left)
+        return None if start is None else start.split("%", 1)[0]
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
-        return _fixed_start(node.func.value)
+        start = _fixed_start(node.func.value)
+        return None if start is None else start.split("{", 1)[0]
     return None
 
 
@@ -105,7 +99,7 @@ def _import_by_name(node: ast.Call) -> Optional[str]:
         start = _fixed_start(arg)
         name = None if start is None else start + "*"
     if name and name.startswith("."):
-        # a relative name, resolved against the package argument: import_module(".basic", "citar.bots")
+        # a relative name, resolved against the package argument: import_module("._engine", "citar")
         pkg = node.args[1] if len(node.args) > 1 else next((k.value for k in node.keywords if k.arg == "package"), None)
         if isinstance(pkg, ast.Constant) and isinstance(pkg.value, str):
             level = len(name) - len(name.lstrip("."))
@@ -117,8 +111,9 @@ def _import_by_name(node: ast.Call) -> Optional[str]:
 def _bad_name(name: str) -> bool:
     """Whether an import_module target goes round the facade (see _import_by_name for the trailing "*")."""
     if name.endswith("*"):
-        return name[:-1].startswith(("citar.engine", "citar.bots."))
-    return _forbidden(name)
+        start = name[:-1]
+        return any(b.startswith(start) or start.startswith(b) for b in BEHIND)
+    return _behind(name)
 
 
 def violations(source: str, module_name: str, is_package: bool = False) -> list[str]:
@@ -128,18 +123,16 @@ def violations(source: str, module_name: str, is_package: bool = False) -> list[
     facade = set()            # the local names bound to the facade module: `from .. import engine_api as api`
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            out += [f"{node.lineno}: import {a.name}" for a in node.names if _forbidden(a.name)]
+            out += [f"{node.lineno}: import {a.name}" for a in node.names if _behind(a.name)]
             facade |= {a.asname for a in node.names if a.name == "citar.engine_api" and a.asname}
         elif isinstance(node, ast.ImportFrom):
             target = _resolve(module_name, is_package, node)
-            if _forbidden(target):
+            if _behind(target):
                 out.append(f"{node.lineno}: from {target} import ...")
-            elif target in ("citar", "citar.bots"):
-                # the packages whose modules can be imported by name: `from citar import engine`, `from ..bots import basic`
-                out += [f"{node.lineno}: from {target} import {a.name}" for a in node.names
-                        if _forbidden(f"{target}.{a.name}")]
-                if target == "citar":
-                    facade |= {a.asname or a.name for a in node.names if a.name == "engine_api"}
+            elif target == "citar":
+                # the package whose modules can be imported by name: `from citar import _engine`
+                out += [f"{node.lineno}: from citar import {a.name}" for a in node.names if _behind(f"citar.{a.name}")]
+                facade |= {a.asname or a.name for a in node.names if a.name == "engine_api"}
             elif target == "citar.engine_api":
                 out += [f"{node.lineno}: from citar.engine_api import {a.name} (not in its __all__)"
                         for a in node.names if a.name != "*" and a.name not in PUBLIC]
@@ -165,63 +158,11 @@ def violations(source: str, module_name: str, is_package: bool = False) -> list[
     return out
 
 
-def backend_violations(source: str, module_name: str, is_package: bool = False, behind_ones=BEHIND) -> list[str]:
-    """Every way this module's source reaches behind the facade (citar._engine or a backend module, of
-    ``behind_ones``) or asks which backend runs (BACKEND, or the CITAR_ENGINE variable), as "line: what". For every
-    module but the facade's own."""
-    def _behind(module: str) -> bool:
-        return any(module == b or module.startswith(b + ".") for b in behind_ones)
-
-    tree = ast.parse(source)
-    out = []
-    facade = set()            # the local names bound to the facade module
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            out += [f"{node.lineno}: import {a.name}" for a in node.names if _behind(a.name)]
-            facade |= {a.asname for a in node.names if a.name == "citar.engine_api" and a.asname}
-        elif isinstance(node, ast.ImportFrom):
-            target = _resolve(module_name, is_package, node)
-            if _behind(target):
-                out.append(f"{node.lineno}: from {target} import ...")
-            elif target in ("citar", "citar.engine"):
-                out += [f"{node.lineno}: from {target} import {a.name}" for a in node.names
-                        if _behind(f"{target}.{a.name}")]
-                if target == "citar":
-                    facade |= {a.asname or a.name for a in node.names if a.name == "engine_api"}
-            elif target == "citar.engine_api":
-                out += [f"{node.lineno}: from citar.engine_api import BACKEND" for a in node.names
-                        if a.name == "BACKEND"]
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == "BACKEND" \
-                and (_dotted(node.value) in facade or _dotted(node.value) == "citar.engine_api"):
-            out.append(f"{node.lineno}: engine_api.BACKEND")
-        elif isinstance(node, ast.Constant) and node.value == "CITAR_ENGINE":
-            out.append(f"{node.lineno}: 'CITAR_ENGINE'")
-        elif isinstance(node, ast.Call):
-            fn = node.func
-            name = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
-            if name in ("import_module", "__import__") and node.args:
-                target = _import_by_name(node)
-                if target is None:
-                    continue
-                if target.endswith("*"):
-                    bad = any(b.startswith(target[:-1]) or target[:-1].startswith(b) for b in behind_ones)
-                else:
-                    bad = _behind(target)
-                if bad:
-                    out.append(f"{node.lineno}: {name}({ast.unparse(node.args[0])})")
-            elif name in ("getattr", "hasattr") and len(node.args) >= 2 \
-                    and (_dotted(node.args[0]) in facade or _dotted(node.args[0]) == "citar.engine_api") \
-                    and isinstance(node.args[1], ast.Constant) and node.args[1].value == "BACKEND":
-                out.append(f"{node.lineno}: {name}(..., 'BACKEND')")
-    return out
-
-
 class EngineBoundaryTests(unittest.TestCase):
-    def test_nothing_outside_the_engine_goes_round_the_facade(self):
+    def test_nothing_goes_round_the_facade(self):
         found = []
-        for path in sorted(PACKAGE.rglob("*.py")):
-            if path in FACADE_MODULES or any(side in path.parents for side in ENGINE_SIDE):
+        for path in sorted([*PACKAGE.rglob("*.py"), *SCRIPTS.rglob("*.py")]):
+            if path in FACADE_MODULES:
                 continue
             for v in violations(path.read_text(encoding="utf-8"), _module_name(path), path.name == "__init__.py"):
                 found.append(f"{path.relative_to(PACKAGE.parent).as_posix()}:{v}")
@@ -229,28 +170,27 @@ class EngineBoundaryTests(unittest.TestCase):
 
     def test_the_checker_catches_each_way_round(self):
         cases = [
-            "from ..engine import tools",                  # relative, the package
-            "from ..engine.game import Game",              # relative, a module
-            "from .. import engine",                       # the package by name
-            "import citar.engine.views",                   # absolute
-            "from citar.bots.basic import BasicBot",       # a bot
-            "from ..bots import headless, profiles",       # a bot module beside an allowed one
-            "importlib.import_module(f'citar.bots.{kind}')",           # a bot by name at run time
-            "importlib.import_module('citar.bots.' + kind)",           # ... by concatenation
-            "importlib.import_module('citar.bots.{}'.format(kind))",   # ... by format
-            "importlib.import_module('citar.bots.%s' % kind)",         # ... by %
-            "importlib.import_module('.basic', 'citar.bots')",         # ... relative to a package
-            "__import__('citar.engine.tools')",            # the builtin
-            "g = session.game.python_game",                # the Python game out of the facade
-            "g = session.game._g",                         # ... under its private name
+            "from .. import _engine",                      # the extension, relative
+            "import citar._engine as E",                   # ... absolute
+            "from citar._engine import Game",
+            "from .._facade_rust import EngineGame",       # the module behind the door
+            "import citar._facade_rust",
+            "importlib.import_module('citar._engine')",    # by name at run time
+            "importlib.import_module(f'citar._facade_{kind}')",        # ... by an f-string
+            "importlib.import_module('citar._' + kind)",               # ... by concatenation
+            "importlib.import_module('citar.{}'.format(kind))",        # ... by format
+            "importlib.import_module('citar.%s' % kind)",              # ... by %
+            "importlib.import_module('._engine', 'citar')",            # ... relative to a package
+            "__import__('citar._engine')",                 # the builtin
+            "g = session.game._g",                         # the engine's game out of the facade
             "g = getattr(session.game, '_g')",             # ... by name
-            "from ..engine_api import Game",               # an engine class the facade imports for itself
-            "from ..engine_api import GameState, get_rules",
-            "engine_api._tools.execute(g, 0, 'end_turn')", # the facade's own engine modules
-            "engine_api.Game.new({})",
-            "api._diplomacy.get_negotiation(g, 1)",        # the facade under another name
-            "citar.engine_api.RULES_VERSION",              # the facade by its full name
-            "getattr(engine_api, 'get_rules')()",
+            "from ..engine_api import Game",               # a name the facade does not hand out
+            "from ..engine_api import MAP_DIR, _E",
+            "engine_api._E.Game.new(b'{}')",               # the facade's own extension handle
+            "engine_api.MAP_DIR",
+            "api._loads(b'{}')",                           # the facade under another name
+            "citar.engine_api._dumps({})",                 # the facade by its full name
+            "getattr(engine_api, '_E')",
         ]
         header = ["import importlib", "import citar.engine_api", "from .. import engine_api",
                   "from .. import engine_api as api"]
@@ -258,98 +198,33 @@ class EngineBoundaryTests(unittest.TestCase):
             with self.subTest(case=case):
                 self.assertTrue(violations("\n".join(header + [case]), "citar.server.app"), case)
         found = violations("\n".join(header + cases), "citar.server.app")
-        self.assertFalse(any("profiles" in f for f in found), found)
-        # two violations on the GameState, get_rules line
+        # two violations on the MAP_DIR, _E line
         self.assertEqual(len(found), len(cases) + 1, found)
 
-    def test_python_side_modules_are_allowed(self):
+    def test_the_facade_and_bookkeeping_are_allowed(self):
         src = "\n".join(["from .. import engine_api", "from ..engine_api import ActionError, EngineGame",
                          "from ..bots import profiles, ratings", "from ..bots.ratings import best_profile",
                          "import citar.engine_api", "from .. import engine_api as api",
                          "engine_api.run_game(spec)", "api.bot_instance('basic')", "citar.engine_api.tool_list()",
                          "importlib.import_module(name)", "importlib.import_module('citar.bots.profiles')",
                          "importlib.import_module(f'citar.pool.{kind}')", "session.game.execute(0, 'end_turn')",
-                         "getattr(engine_api, 'map_sizes')()"])
+                         "getattr(engine_api, 'map_sizes')()", "x = engine_api.build_info()"])
         self.assertEqual(violations(src, "citar.server.session"), [])
 
-    def test_only_the_facade_reaches_the_backends_or_asks_which_runs(self):
-        # The engine and the bots too: nothing but the facade's own modules imports citar._engine or a backend, and
-        # nothing in the package or the scripts but the facade reads BACKEND (the tests may).
-        found = []
-        for path in sorted([*PACKAGE.rglob("*.py"), *SCRIPTS.rglob("*.py")]):
-            if path in FACADE_MODULES:
-                continue
-            in_package = PACKAGE in path.parents
-            name = _module_name(path) if in_package else "scripts." + path.stem
-            for v in backend_violations(path.read_text(encoding="utf-8"), name, path.name == "__init__.py",
-                                        BEHIND if in_package else BEHIND_FOR_SCRIPTS):
-                found.append(f"{path.relative_to(PACKAGE.parent).as_posix()}:{v}")
-        self.assertEqual(found, [], "these reach behind the facade or ask which backend runs:\n" + "\n".join(found))
-
-    def test_the_backend_checker_catches_each_way(self):
-        cases = [
-            "from .. import _engine",                      # the extension, relative
-            "import citar._engine as E",                   # ... absolute
-            "from citar._engine import Game",
-            "from .._facade_rust import EngineGame",       # a backend
-            "from ..engine import facade",                 # the Python backend by its package
-            "import citar._facade_shared",
-            "importlib.import_module('citar._engine')",    # by name at run time
-            "importlib.import_module(f'citar._facade_{kind}')",
-            "from ..engine_api import BACKEND",            # which backend runs
-            "engine_api.BACKEND",
-            "api.BACKEND == 'rust'",
-            "getattr(engine_api, 'BACKEND')",
-            "citar.engine_api.BACKEND",
-            "os.environ.get('CITAR_ENGINE')",              # ... from the variable itself
-        ]
-        header = ["import importlib", "import citar.engine_api", "from .. import engine_api",
-                  "from .. import engine_api as api"]
-        for case in cases:
-            with self.subTest(case=case):
-                self.assertTrue(backend_violations("\n".join(header + [case]), "citar.server.app"), case)
-        allowed = "\n".join(header + ["engine_api.EngineGame.new({})", "from ..engine_api import BackendError",
-                                       "x = engine_api.build_info()", "importlib.import_module(f'citar.pool.{k}')",
-                                       "os.environ.get('CITAR_ENGINE_X')"])
-        self.assertEqual(backend_violations(allowed, "citar.server.app"), [])
-
     def test_all_is_the_whole_public_surface(self):
-        # a public function or constant left out of __all__ would read as backend to the checker above
-        tree = ast.parse(FACADE.read_text(encoding="utf-8"))
-        defined = set()
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-                defined.add(node.name)
-            elif isinstance(node, ast.Assign):
-                defined |= {t.id for t in node.targets if isinstance(t, ast.Name)}
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                defined.add(node.target.id)
-        defined = {n for n in defined if not n.startswith("_")}
-        self.assertEqual(defined - PUBLIC, set(), "public in citar/engine_api.py but missing from its __all__")
-        from citar import engine_api
-        self.assertEqual({n for n in PUBLIC if not hasattr(engine_api, n)}, set(), "in __all__ but not defined")
-        self.assertFalse(PUBLIC & {"Game", "GameState", "get_rules", "RULES_VERSION"})
-
-    def test_both_backends_define_the_whole_surface(self):
-        # The selector checks the backend it loads at import; this holds both to the one list, the extension's side
-        # only where it is built.
+        # The door defines nothing of its own: every name is the module behind it's, which must have exactly the
+        # names of the door's __all__.
         import importlib
-        names = PUBLIC - {"BACKEND"}
-        modules = ["citar.engine.facade"]
-        try:
-            importlib.import_module("citar._engine")
-            modules.append("citar._facade_rust")
-        except ImportError:
-            pass
-        shared = importlib.import_module("citar._facade_shared")
-        for name in modules:
-            with self.subTest(backend=name):
-                mod = importlib.import_module(name)
-                self.assertEqual(set(mod.__all__), names, f"{name}.__all__ is not the facade's")
-                self.assertEqual({n for n in names if not hasattr(mod, n)}, set(), name)
-                self.assertTrue(issubclass(mod.EngineCrash, RuntimeError))
-                self.assertFalse(issubclass(mod.EngineCrash, mod.ActionError))
-                self.assertIs(mod.BackendError, shared.BackendError)
+        from citar import engine_api
+        behind = importlib.import_module("citar._facade_rust")
+        self.assertEqual(set(behind.__all__), PUBLIC, "citar/_facade_rust.py's __all__ is not citar/engine_api.py's")
+        self.assertEqual({n for n in PUBLIC if not hasattr(engine_api, n)}, set(), "in __all__ but not defined")
+        self.assertFalse(PUBLIC & {"Game", "GameState", "get_rules", "RULES_VERSION", "BACKEND", "BackendError"})
+        self.assertTrue(issubclass(engine_api.EngineCrash, RuntimeError))
+        self.assertFalse(issubclass(engine_api.EngineCrash, engine_api.ActionError))
+        tree = ast.parse(FACADE.read_text(encoding="utf-8"))
+        defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+        self.assertEqual(defined, set(), "citar/engine_api.py defines nothing of its own")
 
 
 if __name__ == "__main__":

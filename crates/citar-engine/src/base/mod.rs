@@ -6,7 +6,7 @@
 //! need no ruleset (`codec`, package 1a-09), and Python's reading of JSON values (`py`, package
 //! 1b-02). It depends on no other module of this crate.
 //!
-//! Replaces `citar/engine/hexmap.py:1-214`; the RNG sites `game.py:557-559` (`state_rng`),
+//! Replaces the Python engine's `hexmap.py:1-214`; the RNG sites `game.py:557-559` (`state_rng`),
 //! `118-122` and `995-1002` (`g.rng`, `save_rng`) and `mapgen.py:1476-1490` (`_side_rng`); the
 //! name normalisation of `rules.py:26-30`; and the possessives of `game.py:17-23`.
 

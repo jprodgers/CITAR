@@ -8,11 +8,11 @@
 //! happened, in the result's `errors`; with `raise_errors` it is raised as `EngineCrash`
 //! instead. A Rust bot does not raise, so there is no `max_errors`: a crash ends the game.
 //!
-//! The hooks keep `headless.play`'s contract (`citar/bots/headless.py`): `on_event` was one of
-//! the game's listeners, and `Game.emit` swallowed a listener's `Exception`
-//! (`citar/engine/game.py`, `emit`), so a listener that trips over one event's data hears the
-//! rest and the game plays on; here such an exception is reported through
-//! `sys.unraisablehook` (printed, by default) rather than dropped unseen. `on_turn` was called
+//! The hooks keep `headless.play`'s contract (the Python bots' `headless.py`): `on_event` was
+//! one of the game's listeners, and `Game.emit` swallowed a listener's `Exception` (the Python
+//! engine's `game.py`, `emit`), so a listener that trips over one event's data hears the rest and
+//! the game plays on; here such an exception is reported through `sys.unraisablehook` (printed,
+//! by default) rather than dropped unseen. `on_turn` was called
 //! directly, so its exceptions end the run and are raised. A `BaseException` that is no
 //! `Exception` (`KeyboardInterrupt`, `SystemExit`) ends the run from either hook. Between steps
 //! the binding checks for signals, so Ctrl-C stops a run with no hooks within a step, as it

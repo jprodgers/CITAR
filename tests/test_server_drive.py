@@ -21,7 +21,7 @@ from unittest import mock
 from citar import engine_api
 from citar.agents.bot_agent import BotAgent
 from citar.server import session as sess
-from tests.backends import has_test_ops, rust_only
+from tests import has_test_ops
 
 ROOT = Path(__file__).resolve().parent.parent
 #: The engine-format copy of the late fixture (small-continents-normal-s1025/t280), which
@@ -105,7 +105,6 @@ class ServerCase(unittest.TestCase):
         return self.client.get(f"/api/games/{s.id}{route}", params={"token": token or s.spectator_token})
 
 
-@rust_only
 class SideEffectTests(ServerCase):
     """Gate 2: what a turn does in the session, bot seats' turns included."""
 
@@ -252,7 +251,6 @@ class SideEffectTests(ServerCase):
         self.assertEqual(s.errors, [])
 
 
-@rust_only
 @needs_test_ops
 class CrashTests(ServerCase):
     """Gate 3: an internal error of the engine (the ``panic`` test operation) stops the session where it stands."""
@@ -358,7 +356,6 @@ class CrashTests(ServerCase):
         self.assertEqual(s.crashed["message"], "panic: in a view")
 
 
-@rust_only
 class ViewBytesTests(ServerCase):
     """Gate 4: /view and /replay return the engine's bytes, never parsed and dumped again."""
 
@@ -443,7 +440,6 @@ class ViewBytesTests(ServerCase):
         self.assertLessEqual(median, 0.060 if os.environ.get("CI") else 0.020)
 
 
-@rust_only
 class LongGameTests(ServerCase):
     """Gate 5: four bot seats on a small map play 100 rounds under the session driver, responders active."""
 

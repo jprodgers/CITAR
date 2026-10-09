@@ -48,16 +48,8 @@ const PINS: [&str; 7] = [
     "war_chance_aggr",
 ];
 
-/// Plays a script; the error says which step failed and why. A script that `needs` a package is
-/// refused: its steps use what that package brings to the bot, and until then the harness
-/// reports it as ignored ([`super::ignored`]).
+/// Plays a script; the error says which step failed and why.
 pub fn run(script: &Script) -> Result<(), String> {
-    if let Some(pkg) = &script.needs {
-        return Err(format!(
-            "{}: needs package {pkg}, which makes it pass on the Rust engine",
-            script.name
-        ));
-    }
     let mut r = Runner::start(script)?;
     for (i, step) in script.steps.iter().enumerate() {
         r.step(step, &format!("step {}", i + 1))?;

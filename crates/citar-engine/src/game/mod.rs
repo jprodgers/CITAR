@@ -4,7 +4,7 @@
 //! lazily; consequential writes happen only in settle (DESIGN.md 6). Rule systems may call each
 //! other freely inside this layer.
 //!
-//! Replaces the rules in `citar/engine/`: `game.py`, `turns.py`, `economy.py`, `tiles.py`,
+//! Replaces the rules of the Python engine: `game.py`, `turns.py`, `economy.py`, `tiles.py`,
 //! `cities.py`, `research.py`, `policies.py`, `religion.py`, `great_people.py`, `triggers.py`,
 //! `ruins.py`, `visibility.py`, `units.py`, `movement.py`, `combat.py`, `conquest.py`,
 //! `workers.py`, `actions.py`, `automation.py`, `diplomacy.py`, `espionage.py`,

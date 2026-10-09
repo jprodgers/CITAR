@@ -20,8 +20,8 @@ on:
       - ".config/nextest.toml"
       - "refcheck/**"
       - "tests/rules/**"
-      # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, which Python's
-      # tests re-record on their own (cargo xtask check's triggers rule holds this line in place).
+      # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, recorded from
+      # the Python bot (cargo xtask check's triggers rule holds this line in place).
       - "tests/data/clean_params_cases.json"
       - "citar/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.
@@ -42,8 +42,8 @@ on:
       - ".config/nextest.toml"
       - "refcheck/**"
       - "tests/rules/**"
-      # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, which Python's
-      # tests re-record on their own (cargo xtask check's triggers rule holds this line in place).
+      # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, recorded from
+      # the Python bot (cargo xtask check's triggers rule holds this line in place).
       - "tests/data/clean_params_cases.json"
       - "citar/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.

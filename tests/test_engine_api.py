@@ -5,10 +5,11 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from typing import Optional
 
 from citar import engine_api
 from citar.engine_api import ActionError, EngineGame
-from tests.backends import RUST, has_test_ops, python_engine_only, rust_only
+from tests import has_test_ops
 
 
 def duel(**kw) -> EngineGame:
@@ -147,17 +148,15 @@ class ToolAndOpTests(unittest.TestCase):
 class BotTests(unittest.TestCase):
     def test_bot_instances(self):
         idle = engine_api.bot_instance("idle")
-        bot = engine_api.bot_instance("basic", seed=3, aggression=0.7, params={"counter_rounds": 1})
+        bot = engine_api.bot_instance("basic", aggression=0.7, params={"counter_rounds": 1})
         self.assertEqual(bot.aggression, 0.7)
-        if RUST:
-            self.assertEqual((idle.version, bot.version), ("idle", "basic-1"))
-        else:
-            self.assertEqual((type(idle).__name__, bot.p["counter_rounds"]), ("IdleBot", 1))
-        for bad in ("os", "citar.engine", "../basic", ""):
+        self.assertEqual((idle.version, bot.version), ("idle", "basic-1"))
+        for bad in ("os", "basic.py", "../basic", ""):
             with self.assertRaises(ValueError):
                 engine_api.bot_instance(bad)
+        with self.assertRaises(TypeError):
+            engine_api.bot_instance("basic", seed=3)     # a bot draws from its game's seed: it has none of its own
 
-    @rust_only
     def test_bots_are_compiled_versions(self):
         # A bot is a version and its parameters (DESIGN.md P2.8.5): "basic" names the latest, which carries the
         # overrides cleaned against its schema; the frozen snapshots were archived with 0.1.5.
@@ -180,7 +179,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(set(info), {"version", "build_id", "label", "rules", "engine_code", "bot_code"})
 
     def test_the_diplomacy_switch(self):
-        bot = engine_api.bot_instance("basic", seed=1)
+        bot = engine_api.bot_instance("basic")
         engine_api.bot_set_diplomacy(bot, {"trades": "llm"})
         self.assertFalse(engine_api.bot_owns_negotiation(bot, {"proposal": {"0": [{"type": "gold", "amount": 5}],
                                                                            "1": []}}))
@@ -188,18 +187,11 @@ class BotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine_api.bot_set_diplomacy(bot, {"trade": "llm"})
 
-    @python_engine_only("tests.test_engine_api.BotTests.test_bots_are_compiled_versions")
-    def test_the_frozen_bots_predate_the_switch(self):
-        frozen = engine_api.bot_instance("frozen_d95d50cb", seed=1)
-        self.assertTrue(engine_api.bot_owns_negotiation(frozen, {"proposal": None}))
-        with self.assertRaises(ValueError):
-            engine_api.bot_set_diplomacy(frozen, {"trades": "llm"})
-
     def test_a_headless_game_runs_on_the_facade(self):
         turns, events = [], []
         r = engine_api.run_game({"config": {"map_size": "duel", "seed": 4, "barbarians": "off", "turn_limit": 12,
                                             "players": [{"controller": "bot"}, {"controller": "bot"}]},
-                                 "bots": {0: engine_api.bot_instance("basic", seed=1),
+                                 "bots": {0: engine_api.bot_instance("basic"),
                                           1: engine_api.bot_instance("idle")}},
                                 on_turn=lambda info: turns.append(info["turn"]), on_event=events.append)
         self.assertEqual((r["phase"], r["errors"]), ("over", []))
@@ -212,30 +204,9 @@ class BotTests(unittest.TestCase):
         self.assertTrue(all(p["cities"] >= 1 and p["score"] > 0 for p in majors))
         self.assertEqual(len(r["stats"]), r["turns"])
 
-    @python_engine_only("tests.test_engine_api.BotTests.test_a_panicking_bot_is_recorded_or_raised")
-    def test_a_crashing_bot_is_recorded_or_raised(self):
-        class Crasher:
-            def play_turn(self, g, pid, end_turn=False):
-                raise RuntimeError("simulated bot bug")
-
-            def respond(self, g, pid, nid):
-                raise RuntimeError("simulated bot bug")
-
-        def spec(**kw):
-            return {"config": {"map_size": "duel", "seed": 4, "barbarians": "off", "turn_limit": 4,
-                               "players": [{"controller": "bot"}, {"controller": "bot"}]},
-                    "bots": {0: Crasher(), 1: engine_api.bot_instance("idle")}, **kw}
-
-        r = engine_api.run_game(spec())
-        self.assertEqual(r["phase"], "over", "a crash costs the bot its turn, not the game")
-        self.assertTrue(r["errors"] and all("simulated bot bug" in e for e in r["errors"]), r["errors"])
-        with self.assertRaisesRegex(RuntimeError, "simulated bot bug"):
-            engine_api.run_game(spec(raise_errors=True))
-
-    @rust_only
     def test_a_panicking_bot_is_recorded_or_raised(self):
-        # The Rust bot does not raise: a panic is its crash, recorded as the runner's crash line, or raised as
-        # EngineCrash with raise_errors (never an ActionError: a crash is no refusal). Only Python bots are refused.
+        # A bot does not raise: a panic is its crash, recorded as the runner's crash line, or raised as EngineCrash
+        # with raise_errors (never an ActionError: a crash is no refusal). A bot that is no compiled one is refused.
         if not has_test_ops():
             self.skipTest("the panic needs a build with the test operations")
 
@@ -246,7 +217,7 @@ class BotTests(unittest.TestCase):
                     "test_panic": {"player": 0, "turn": 3}, **kw}
 
         r = engine_api.run_game(spec(labels={0: "careless"}))
-        self.assertEqual(r["phase"], "playing", "a crash ends a Rust game where it stands")
+        self.assertEqual(r["phase"], "playing", "a crash ends a game where it stands")
         self.assertEqual(len(r["errors"]), 1, r["errors"])
         self.assertTrue(r["errors"][0].startswith("T3 P0 careless: panic: "), r["errors"])
         with self.assertRaises(engine_api.EngineCrash) as e:
@@ -256,8 +227,8 @@ class BotTests(unittest.TestCase):
             engine_api.run_game({"config": spec()["config"], "bots": {0: object()}})
 
 
-#: What `citar doctor` says of the engine, run in a child whose backend is chosen by its environment. The child may
-#: first hide the Rust extension, as an install without it would be.
+#: What `citar doctor` says of the engine and the ruleset, run in a child. The child may first hide the extension, as an
+#: install without it would be.
 _DOCTOR = """
 import sys
 if sys.argv[1] == "hide":
@@ -273,53 +244,29 @@ doctor._check_ruleset(r)
 print("failures", r.failures, "warnings", r.warnings)
 """
 
+ROOT = Path(__file__).resolve().parent.parent
 
-class SelectorTests(unittest.TestCase):
-    """The backend switch: CITAR_ENGINE, read once at import, and what a wrong one says."""
 
-    def child(self, engine: str, *args: str) -> subprocess.CompletedProcess:
-        env = dict(os.environ, CITAR_ENGINE=engine)
-        return subprocess.run([sys.executable, *args], capture_output=True, text=True, env=env, timeout=120,
-                              cwd=Path(__file__).resolve().parent.parent)
+def child(*args: str, env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    """A Python child in the checkout, its environment this one's with ``env`` over it."""
+    return subprocess.run([sys.executable, *args], capture_output=True, text=True, env={**os.environ, **(env or {})},
+                          timeout=300, cwd=ROOT)
 
-    def test_the_default_is_the_rust_engine(self):
-        # since package 2-09 (DESIGN.md P2.6.6): CITAR_ENGINE unset or empty chooses rust
-        for env in ({k: v for k, v in os.environ.items() if k != "CITAR_ENGINE"}, dict(os.environ, CITAR_ENGINE=" ")):
-            r = subprocess.run([sys.executable, "-c", "from citar import engine_api; print(engine_api.BACKEND)"],
-                               capture_output=True, text=True, env=env, timeout=120,
-                               cwd=Path(__file__).resolve().parent.parent)
-            if r.returncode != 0 and "_engine" in r.stderr:
-                self.skipTest("the extension is not built: the default backend cannot load")
-            self.assertEqual(r.stdout.strip(), "rust", r.stderr)
 
-    def test_an_unknown_backend_is_refused_at_import(self):
-        r = self.child("bogus", "-c", "import citar.engine_api")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("ImportError: CITAR_ENGINE='bogus' is no engine backend: use 'python' or 'rust'.", r.stderr)
+class DoctorTests(unittest.TestCase):
+    """What `citar doctor` says of the engine: its build, or why it does not load."""
 
-    def test_the_doctor_names_a_wrong_choice_not_a_broken_install(self):
-        r = self.child("bogus", "-c", _DOCTOR, "as is")
-        self.assertIn("[ FAIL ] backend: CITAR_ENGINE='bogus' is no engine backend", r.stdout)
-        self.assertNotIn("extension", r.stdout)
+    def test_the_doctor_names_a_missing_extension(self):
+        r = child("-c", _DOCTOR, "hide")
+        self.assertIn("[ FAIL ] engine: does not load (cannot import name '_engine'", r.stdout)
+        self.assertIn("The engine's extension (citar._engine) is missing or out of date", r.stdout)
         self.assertIn("ruleset: not checked: the engine does not load", r.stdout)
         self.assertIn("failures 1 warnings 1", r.stdout)
 
-    def test_the_doctor_names_a_missing_extension(self):
-        r = self.child("rust", "-c", _DOCTOR, "hide")
-        self.assertIn("[ FAIL ] engine: does not load (cannot import name '_engine'", r.stdout)
-        self.assertIn("The Rust engine's extension is missing or out of date", r.stdout)
-        self.assertIn("failures 1 warnings 1", r.stdout)
-
-    def test_the_doctor_names_the_backend(self):
-        r = self.child("python", "-c", _DOCTOR, "as is")
-        self.assertIn("[  ok  ] backend: python (the Python engine)", r.stdout)
-        self.assertIn("failures 0 warnings 0", r.stdout)
-        try:
-            from citar import _facade_rust  # noqa: F401
-        except ImportError:
-            return                          # the extension is not built: the Rust line has nothing to name
-        r = self.child("rust", "-c", _DOCTOR, "as is")
-        self.assertRegex(r.stdout, r"\[  ok  \] backend: rust, build [0-9a-f]{12} \(.+\), version ")
+    def test_the_doctor_names_the_build_and_the_ruleset(self):
+        r = child("-c", _DOCTOR, "as is")
+        self.assertRegex(r.stdout, r"\[  ok  \] engine: build [0-9a-f]{12} \(.+\), version ")
+        self.assertIn("[  ok  ] loaded: ", r.stdout)
         self.assertIn("failures 0 warnings 0", r.stdout)
 
 

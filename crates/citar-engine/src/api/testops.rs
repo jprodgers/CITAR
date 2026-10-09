@@ -1,5 +1,5 @@
 //! Test operations: what a rule script does to a game that no player or editor may (DESIGN.md
-//! 9.3). Feature `test-ops`; `citar/engine/testops.py` is the Python side, and
+//! 9.3). Feature `test-ops`; the Python engine's `testops.py` was the Python side, and
 //! `tests/rules/README.md` documents each.
 //!
 //! They replace the internals Python's tests poked (`g.remove_unit`, `p.auto[...] = ...`,
@@ -21,8 +21,8 @@
 //!
 //! Package 2-06a adds three for the hosts' tests, which no rule script needs: `eliminate` and
 //! `end_game`, which replace the Python tests' pokes of a player's `alive` and the game's
-//! `phase` (`citar/engine/testops.py` has them too), and `panic`, which only the Rust engine has:
-//! it exists for the bindings' tests of a caught panic (DESIGN.md P2.6.3).
+//! `phase` (the Python engine's `testops.py` had them too), and `panic`, which only this engine
+//! has: it exists for the bindings' tests of a caught panic (DESIGN.md P2.6.3).
 
 use serde_json::{Map, Value, json};
 
@@ -607,8 +607,8 @@ impl SeatDriver for TestDriver {
 }
 
 /// The host drives the game (`Game::drive`), a test driver at each seat named (one that defers
-/// what waits on it to the host for those under `defer`, as `citar/engine/testops.py` mirrors
-/// it), until it stops:
+/// what waits on it to the host for those under `defer`, as the Python engine's `testops.py`
+/// mirrored it), until it stops:
 /// `stop` (`external`, `hybrid_diplomat`, `awaiting_reply`, `seat_limit`, `game_over`), the
 /// `player` it names (or null), the `negotiations` it waits on, and where the game is in time.
 fn drive(g: &mut Game, o: &Params) -> Result<Value, ActionError> {

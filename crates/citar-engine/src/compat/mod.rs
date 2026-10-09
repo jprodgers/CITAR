@@ -5,7 +5,7 @@
 //! ships: neither citar-py nor the helper turns `legacy` on, and `cargo xtask check` holds every
 //! other crate to that. It may use `save`, `state` and the layers below them.
 //!
-//! Replaces nothing at run time; it reads the format of `citar/engine/state.py`
+//! Replaces nothing at run time; it reads the format of the Python engine's `state.py`
 //! (`GameState.to_dict`).
 
 pub mod python;

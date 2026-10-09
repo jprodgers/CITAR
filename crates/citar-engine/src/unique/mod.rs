@@ -3,7 +3,7 @@
 //! Unique types, the compiler, filters, conditionals, countables, triggers and the unique
 //! indexes (DESIGN.md 5, packages 1a-05 to 1a-07). It shares layer 1 with [`crate::rules`].
 //!
-//! Replaces `citar/engine/unique_types.py`, `uniques.py:28-1083`, `economy.py:64-147`,
+//! Replaces the Python engine's `unique_types.py`, `uniques.py:28-1083`, `economy.py:64-147`,
 //! `triggers.py:13-74` and `cities.py:1169-1193`.
 //!
 //! - [`generated`] (`gen.rs`): written by `cargo xtask gen-uniques` from `unique_types.tsv` and

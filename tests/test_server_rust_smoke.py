@@ -4,8 +4,7 @@ A signed-in administrator creates a game of a human and two bots; the human play
 waits for its turn back, opens a chat that a bot answers, saves and loads the game and plays on; the views, the
 summary, the metrics, the path preview, the debug shortcuts and the map export answer; the recap is refused while the
 human plays. An all-bot game plays on its own and serves the god view and the recap to its spectator. Maps, the
-scenario editor and a scenario launched as a game round it off. Every engine call behind these routes is the Rust
-engine's (CITAR_ENGINE=rust, the default since this package).
+scenario editor and a scenario launched as a game round it off.
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import gzip
@@ -17,7 +16,6 @@ import unittest
 from unittest import mock
 
 from citar.server import session as sess
-from tests.backends import rust_only
 
 
 def wait(cond, timeout: float) -> bool:
@@ -29,7 +27,6 @@ def wait(cond, timeout: float) -> bool:
     return bool(cond())
 
 
-@rust_only
 class ServerSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

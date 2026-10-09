@@ -8,8 +8,8 @@
 //! - **`libm.json`**: about 2,000 inputs to the maths wrappers of `base::num`, with the output
 //!   bits. Written by `golden bless`; `check` recomputes the outputs for the committed inputs.
 //! - **`pyfmt.json`**: Python's `repr(x)`, `round(x)`, `repr(round(x, n))`, `format(x, ".nf")`,
-//!   `//` and `%`, recorded by `scripts/refcheck/pyfmt_vectors.py`. Never blessed: the engine
-//!   must reproduce Python, every string and every bit.
+//!   `//` and `%`, recorded by `scripts/refcheck/pyfmt_vectors.py` (the tag `python-engine-0.1.6`
+//!   keeps it). Never blessed: the engine must reproduce Python, every string and every bit.
 //!
 //! Package 1a-03 adds:
 //! - **`ruleset.json`**: the `RulesetId` of the embedded ruleset, a blake3 over a canonical walk

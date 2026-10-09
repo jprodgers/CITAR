@@ -31,8 +31,8 @@
 //! when none of them is pending (DESIGN.md 9.6): until then `check` computes it without
 //! comparing it, and `bless` leaves it out and says why, or refuses it by name.
 //!
-//! `pyfmt.json` holds Python's answers and is written only by `scripts/refcheck/pyfmt_vectors.py`;
-//! `bless` leaves it alone. Bless only after a deliberate change (a new `Purpose`, a `libm` or
+//! `pyfmt.json` holds Python's answers, recorded once by `scripts/refcheck/pyfmt_vectors.py` (the
+//! tag `python-engine-0.1.6` keeps it); `bless` leaves it alone. Bless only after a deliberate change (a new `Purpose`, a `libm` or
 //! toolchain bump, a change to the ruleset data), and say why in the commit.
 
 #![forbid(unsafe_code)]
@@ -155,8 +155,8 @@ fn check(long: bool, out: Option<&str>, states: Option<&str>) -> ExitCode {
         println!(
             "golden: a set differs from its committed file. If this build is right, `cargo golden \
              bless` (rng, libm, ruleset, uniques, filters, gen, states, convert, turns, maps, \
-             newgame, load, pass, random, bot), `cargo golden bless long` (long) or \
-             scripts/refcheck/pyfmt_vectors.py (pyfmt), and say why."
+             newgame, load, pass, random, bot) or `cargo golden bless long` (long), and say why; \
+             pyfmt is Python's own answers, never blessed."
         );
         ExitCode::from(1)
     } else {

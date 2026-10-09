@@ -10,8 +10,8 @@
 //! - the mutable accessors (`tiles_mut` and the rest), which only `game/mutate.rs`, `save/` and
 //!   `compat/` may call, and `cargo xtask check` enforces that.
 //!
-//! Replaces `citar/engine/state.py:13-405` (`GameState` and the classes it holds) and the config
-//! shape of `game.py:32-60`. Dropped from `GameState`: `rng_state` (every draw is keyed from the
+//! Replaces the Python engine's `state.py:13-405` (`GameState` and the classes it holds) and the
+//! config shape of `game.py:32-60`. Dropped from `GameState`: `rng_state` (every draw is keyed from the
 //! seed, DESIGN.md 7), and `barbarian_state`, `capture_ids` and `first_discovered`, which nothing
 //! outside `state.py` read or wrote. `next_id` became the per-kind [`IdCounters`]; `spaceship`
 //! moved to the players, `open_borders` into the relations; events, messages, thoughts and stats
