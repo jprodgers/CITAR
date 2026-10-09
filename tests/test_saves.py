@@ -495,6 +495,38 @@ class StartingPointTests(SavesCase):
         self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), ["case-1.citar", "case-1.cjnl"])
 
 
+class SpellingTests(SavesCase):
+    def test_a_save_loaded_by_another_spelling_of_its_folder_saves_on(self):
+        # The save route resolves the path it is given; the game's own folder is SAVE_DIR as configured, which may
+        # be another spelling of it (macOS's /var is /private/var; a Windows 8.3 name; a `..`).
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 4)
+        self.autosave_now(s)
+        other = sess.SAVE_DIR / s.id / ".." / s.id / "autosave.citar"
+        self.assertNotEqual(str(other.parent), str(s.folder))
+        back = self.m.load(other)
+        self.assertEqual(back.journal.path.parent, back.folder, "the journal by the game's own folder's path")
+        self.play_to(back, back.game.turn + 2)
+        self.autosave_now(back)
+        self.assertEqual(back.errors, [])
+        self.assertEqual(self.header(back)["summary"]["turn"], back.game.turn)
+
+    def test_a_save_is_written_beside_its_journal_however_the_folder_is_spelled(self):
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 3)
+        with s.lock:
+            snap = s.game.save_snapshot(s._timeline())
+        record, metrics = {"id": s.id, "name": "x", "seats": []}, {}
+        snap.write(s.folder / ".." / s.id / "spelled.citar", s.journal, record, metrics)
+        self.assertTrue((s.folder / "spelled.citar").exists())
+        elsewhere = sess.SAVE_DIR / f"{s.id}-elsewhere"
+        elsewhere.mkdir()
+        self.ids.add(elsewhere.name)
+        with self.assertRaises(ValueError):          # a container names its journal by a plain name beside it
+            snap.write(elsewhere / "lost.citar", s.journal, record, metrics)
+        self.assertFalse((elsewhere / "lost.citar").exists())
+
+
 class FormatTests(SavesCase):
     def test_a_python_engine_save_is_refused_by_name(self):
         folder = sess.SAVE_DIR / "v1-game"

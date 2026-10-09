@@ -401,7 +401,7 @@ impl SaveSnapshot {
         metrics_json: &[u8],
         saved_at: &str,
     ) -> Result<(), Failure> {
-        if path.parent() != journal.path.parent() {
+        if !same_folder(path.parent(), journal.path.parent()) {
             return Err(Failure::Value(format!(
                 "A save is written beside its journal: {} is not in {}'s folder.",
                 path.display(),
@@ -429,6 +429,21 @@ impl SaveSnapshot {
             StoreError::Invalid { .. } => Failure::Value(e.to_string()),
             other => write_failure(&other),
         })
+    }
+}
+
+/// Whether two paths' folders are one: the same text, or the same folder once resolved (a
+/// symlink such as macOS's `/var`, a Windows 8.3 name or a `..` on one side only).
+fn same_folder(a: Option<&Path>, b: Option<&Path>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) if a == b => true,
+        (Some(a), Some(b)) => {
+            let resolve = |p: &Path| {
+                std::fs::canonicalize(if p.as_os_str().is_empty() { Path::new(".") } else { p })
+            };
+            matches!((resolve(a), resolve(b)), (Ok(x), Ok(y)) if x == y)
+        }
+        _ => a == b,
     }
 }
 

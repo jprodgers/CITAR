@@ -1238,7 +1238,8 @@ def _open_timeline(folder: Path, doc):
     source = doc.path.parent / ref["file"]
     folder.mkdir(parents=True, exist_ok=True)
     if _same_folder(doc.path.parent, folder) and not _names_more_of(folder, ref):
-        journal, found = engine_api.open_journal(source)
+        # by the game's own folder's path, which its saves are written under (the save's may be another spelling of it)
+        journal, found = engine_api.open_journal(folder / ref["file"])
         if found["corrupt_at"] is None:
             try:
                 journal.truncate_to(ref)
