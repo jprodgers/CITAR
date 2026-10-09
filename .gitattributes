@@ -37,6 +37,7 @@ Dockerfile  text eol=lf
 *.html      text eol=lf
 *.rs        text eol=lf
 *.tsv       text eol=lf
+*.sha256    text eol=lf
 Cargo.lock  text eol=lf
 env.example text eol=lf
 .env.docker.example text eol=lf
