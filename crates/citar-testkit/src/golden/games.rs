@@ -137,9 +137,12 @@ impl Play {
     }
 }
 
-/// The settings of the statistical baseline's games (`citar_sim::baseline::GameSpec::config`,
-/// `common.game_config`): every seat the bot controller's with its nation drawn, Prince, Quick,
-/// barbarians normal, the map size's own number of players, and Quick's turn limit.
+/// The settings of the statistical baseline's games (`common.game_config`): every seat the bot
+/// controller's with its nation drawn, Prince, Quick, barbarians normal, the map size's own
+/// number of players, and no turn limit of the game's own (`null`: the speed's, 330 on Quick).
+///
+/// A copy of `citar_sim::baseline::GameSpec::config`, which testkit may not depend on;
+/// citar-bench's `tests/baseline_copies.rs` holds the two equal for every map size and type.
 #[must_use]
 pub fn baseline_settings(size: &str, map_type: &str, seed: u64) -> Value {
     let c = Ruleset::shared().constants();
@@ -152,14 +155,16 @@ pub fn baseline_settings(size: &str, map_type: &str, seed: u64) -> Value {
         "barbarians": "normal",
         "speed": "Quick",
         "difficulty": "Prince",
+        "turn_limit": null,
         "players": vec![seat; players],
     })
 }
 
 /// The aggression the statistical baseline gives seat `pid` of the game of `seed`:
-/// `0.25 + 0.5 * ((pid * 37 + seed) % 10) / 9` (`common.py:292`, and
-/// `citar_sim::baseline::aggression`, which testkit may not depend on), so that a golden game's
-/// bots play with the spread of aggressions the baseline's do.
+/// `0.25 + 0.5 * ((pid * 37 + seed) % 10) / 9` (`common.py:292`), so that a golden game's bots
+/// play with the spread of aggressions the baseline's do. A copy of
+/// `citar_sim::baseline::aggression`, which testkit may not depend on; citar-bench's
+/// `tests/baseline_copies.rs` holds the two equal.
 #[must_use]
 pub fn baseline_aggression(pid: PlayerId, seed: u64) -> f64 {
     let step = (u64::from(pid.0) * 37 + seed % 10) % 10;
