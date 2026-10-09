@@ -23,7 +23,7 @@ fn golden_sets_match_the_committed_files() {
         names,
         [
             "rng", "libm", "pyfmt", "ruleset", "uniques", "filters", "gen", "states", "convert",
-            "turns", "maps", "newgame", "load", "pass", "random"
+            "turns", "maps", "newgame", "load", "pass", "random", "bot"
         ]
     );
     let problems: Vec<String> = reports
@@ -52,10 +52,11 @@ fn blessing_reproduces_the_committed_files() {
 #[test]
 fn the_whole_game_sets_are_blessed_and_checked_with_no_stage_waiting() {
     // Package 1c-10's gate 4: the load, pass and random sets are blessed and checked like any
-    // other (the determinism workflow compares what the targets compute).
+    // other (the determinism workflow compares what the targets compute), and from package 2-07
+    // the bot set too.
     assert!(golden::games::refusals().is_empty(), "no stage waits");
     let files: Vec<&str> = golden::blessed_files().iter().map(|(file, _)| *file).collect();
-    for file in ["load.json", "pass.json", "random.json"] {
+    for file in ["load.json", "pass.json", "random.json", "bot.json"] {
         assert!(files.contains(&file), "bless writes {file}");
     }
     // `golden_sets_match_the_committed_files` compares what they compute with the files.
@@ -104,6 +105,55 @@ fn the_long_set_is_committed_with_a_row_for_each_of_its_games() {
         .filter_map(|r| r.get(2).and_then(serde_json::Value::as_u64))
         .sum();
     assert_eq!(rounds as u64, played, "a round row for every round each game played");
+}
+
+#[test]
+fn the_bot_set_hashes_every_seats_memory_each_round_and_dumps_its_games() {
+    // Package 2-07: each round row of bot.json carries a memory hash per major, the bots keep
+    // plans (some hash moves from round to round), and `golden dump` plays a bot game to a round
+    // whose state has the committed digest, as it does any whole-game set's.
+    use citar_testkit::golden::dump;
+    use citar_testkit::golden::games::BOT_GAMES;
+    let file = golden::committed("bot").expect("bot.json is committed");
+    let rows = file["round_rows"].as_array().expect("round rows");
+    for play in BOT_GAMES {
+        let name = play.name("bot");
+        let mine: Vec<&serde_json::Value> = rows.iter().filter(|r| r[0] == name.as_str()).collect();
+        assert!(!mine.is_empty(), "{name} has rounds");
+        let majors = mine[0][3].as_array().map_or(0, Vec::len);
+        assert!(majors >= 2, "{name}: a memory hash per major");
+        assert!(mine.iter().all(|r| r[3].as_array().map(Vec::len) == Some(majors)), "{name}");
+        let first = &mine[0][3];
+        assert!(mine.iter().any(|r| &r[3] != first), "{name}: the bots' memories move");
+    }
+    // A watch over the duel whose committed digest is wrong at round 30 finds every round before
+    // it as committed and writes round 30's state, which `golden dump` gives too.
+    use citar_testkit::golden::divergence;
+    use citar_testkit::golden::games::played;
+    let play = BOT_GAMES[0];
+    let name = play.name("bot");
+    let mut rows = file["round_rows"].clone();
+    let at = rows
+        .as_array_mut()
+        .expect("round rows")
+        .iter_mut()
+        .find(|r| r[0] == name.as_str() && r[1] == 30)
+        .expect("round 30");
+    at[2] = serde_json::Value::from("0".repeat(64));
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bot-divergence-test");
+    divergence::set_dir(Some(dir.clone())).expect("the folder");
+    let p = played("bot", &play, &[], Some(&rows));
+    divergence::set_dir(None).expect("no folder");
+    assert!(p.problems.is_empty(), "{:?}", p.problems);
+    #[allow(clippy::disallowed_methods, reason = "the artifacts are files")]
+    let list = std::fs::read_to_string(dir.join("divergence.jsonl")).expect("the list");
+    let first: serde_json::Value =
+        serde_json::from_str(list.lines().next().expect("an entry")).expect("a JSON line");
+    assert_eq!((first["turn"].as_i64(), first["agrees"].as_bool()), (Some(30), Some(false)));
+    #[allow(clippy::disallowed_methods, reason = "the artifacts are files")]
+    let written = std::fs::read(dir.join(first["file"].as_str().expect("a file"))).expect("state");
+    let dumped = dump::dump(&format!("bot:{name}"), Some(30)).expect("the bot game to round 30");
+    assert!(written == dumped, "golden dump gives the state the watch wrote");
 }
 
 // ---- same_process_twice (DESIGN.md 7.5) --------------------------------------------------------

@@ -30,7 +30,10 @@
 //!
 //! [`divergence`]: super::divergence
 
-use citar_engine::base::ids::Turn;
+use std::sync::Arc;
+
+use citar_bot::{Bot, BotSpec, Overrides, Tuning, VersionId};
+use citar_engine::base::ids::{PlayerId, Turn};
 use citar_engine::game::{DebugOptions, Game};
 use citar_engine::rules::Ruleset;
 use citar_engine::save::canon;
@@ -58,6 +61,12 @@ pub enum Play {
     KitchenSink { size: &'static str, seed: u64, turns: u32 },
     /// A committed fixture, every seat ending its turn with nothing played, for some rounds.
     Pass { fixture: &'static str, rounds: u32 },
+    /// `basic-1` in every major's seat on a generated map with the statistical baseline's
+    /// settings ([`baseline_settings`]), each seat's aggression the baseline's
+    /// ([`baseline_aggression`]), for `rounds` rounds or to the game's end at Quick's 330 turns.
+    Bots { size: &'static str, map_type: &'static str, seed: u64, rounds: u32 },
+    /// A committed fixture played on by `basic-1` in every major's seat, for some rounds.
+    BotPass { fixture: &'static str, rounds: u32 },
 }
 
 impl Play {
@@ -68,7 +77,17 @@ impl Play {
             Self::Random { size, map_type, seed, .. } => format!("{set}-{size}-{map_type}-s{seed}"),
             Self::KitchenSink { size, seed, .. } => format!("{set}-kitchen-sink-{size}-s{seed}"),
             Self::Pass { fixture, .. } => fixture.to_owned(),
+            Self::Bots { size, map_type, seed, .. } => {
+                format!("{set}-basic1-{size}-{map_type}-s{seed}")
+            }
+            Self::BotPass { fixture, .. } => format!("basic1-{fixture}"),
         }
+    }
+
+    /// Whether bots play it: its rounds then carry the seats' memory hashes.
+    #[must_use]
+    pub const fn has_bots(&self) -> bool {
+        matches!(self, Self::Bots { .. } | Self::BotPass { .. })
     }
 
     /// The game as it starts, its chain of rounds keyed by its set and name.
@@ -86,12 +105,15 @@ impl Play {
             Self::KitchenSink { size, seed, turns } => {
                 games::kitchen_sink_game(size, seed, turns, name.as_bytes(), debug)
             }
-            Self::Pass { fixture, .. } => {
+            Self::Pass { fixture, .. } | Self::BotPass { fixture, .. } => {
                 let f = found
                     .iter()
                     .find(|f| f.name == fixture)
                     .ok_or_else(|| format!("no committed fixture {fixture}"))?;
-                games::from_fixture(f, format!("golden:{set}:{fixture}").as_bytes(), debug)
+                games::from_fixture(f, format!("golden:{set}:{name}").as_bytes(), debug)
+            }
+            Self::Bots { size, map_type, seed, .. } => {
+                games::new_game(&baseline_settings(size, map_type, seed), name.as_bytes(), debug)
             }
         }
     }
@@ -107,8 +129,75 @@ impl Play {
                 games::play_random(g, &mut agents, turns, hook)
             }
             Self::Pass { rounds, .. } => games::pass_rounds(g, rounds, hook),
+            Self::Bots { rounds, .. } | Self::BotPass { rounds, .. } => {
+                let mut bots = bot_seats(g);
+                games::play_random(g, &mut bots, rounds, hook)
+            }
         }
     }
+}
+
+/// The settings of the statistical baseline's games (`citar_sim::baseline::GameSpec::config`,
+/// `common.game_config`): every seat the bot controller's with its nation drawn, Prince, Quick,
+/// barbarians normal, the map size's own number of players, and Quick's turn limit.
+#[must_use]
+pub fn baseline_settings(size: &str, map_type: &str, seed: u64) -> Value {
+    let c = Ruleset::shared().constants();
+    let players = c.map_size_id(size).map_or(2, |id| usize::from(c.map_sizes[id].players));
+    let seat = json!({"controller": "bot", "nation": null});
+    json!({
+        "seed": seed,
+        "map_size": size,
+        "map_type": map_type,
+        "barbarians": "normal",
+        "speed": "Quick",
+        "difficulty": "Prince",
+        "players": vec![seat; players],
+    })
+}
+
+/// The aggression the statistical baseline gives seat `pid` of the game of `seed`:
+/// `0.25 + 0.5 * ((pid * 37 + seed) % 10) / 9` (`common.py:292`, and
+/// `citar_sim::baseline::aggression`, which testkit may not depend on), so that a golden game's
+/// bots play with the spread of aggressions the baseline's do.
+#[must_use]
+pub fn baseline_aggression(pid: PlayerId, seed: u64) -> f64 {
+    let step = (u64::from(pid.0) * 37 + seed % 10) % 10;
+    // step < 10, exact in an f64.
+    0.25 + 0.5 * (step as f64) / 9.0
+}
+
+/// A `basic-1` bot at its defaults for every player of `g` (only the majors' are seated), each
+/// with the baseline's aggression for its seat and the game's seed.
+fn bot_seats(g: &Game) -> Vec<Bot> {
+    let tuning = Arc::new(Tuning::new(VersionId::Basic1, Overrides::default()));
+    let seed = g.state().seed();
+    (0..g.state().players().len())
+        .map(|i| {
+            let pid = PlayerId(u8::try_from(i).unwrap_or(u8::MAX));
+            let a = baseline_aggression(pid, seed);
+            Bot::new(Arc::new(BotSpec::new(VersionId::Basic1, Arc::clone(&tuning), None, Some(a))))
+        })
+        .collect()
+}
+
+/// A short hash of each major's driver memory, in seat order (`null` for a seat whose driver
+/// kept none): where a game that leaves its file first does so in a bot's plans rather than in
+/// the state the bots act on, these name the seat.
+#[must_use]
+pub fn memory_hashes(g: &Game) -> Value {
+    g.majors(false)
+        .map(|p| {
+            p.seat().driver().map_or(Value::Null, |m| {
+                let mut h = blake3::Hasher::new();
+                h.update(&m.kind().to_le_bytes());
+                h.update(&m.version().to_le_bytes());
+                h.update(&(m.bytes().len() as u64).to_le_bytes());
+                h.update(m.bytes());
+                Value::from(h.finalize().to_hex()[..16].to_owned())
+            })
+        })
+        .collect()
 }
 
 /// The fixtures `pass.json` passes from: early and late, a duel, raging barbarians, and a small
@@ -134,7 +223,7 @@ pub const RANDOM_GAMES: [(&str, &str, &str, u64, u32); 6] = [
 
 /// The games of `long.json`: every map size to a Quick game's 330 turns, two kitchen-sink games,
 /// and the three late fixtures passed on.
-pub const LONG_GAMES: [Play; 11] = [
+pub const LONG_GAMES: [Play; 12] = [
     Play::Random { size: "duel", map_type: "fractal", edges: "wrap_y", seed: 201, turns: 330 },
     Play::Random {
         size: "small",
@@ -164,6 +253,18 @@ pub const LONG_GAMES: [Play; 11] = [
     Play::Pass { fixture: "small-continents-normal-s1025/t280", rounds: 60 },
     Play::Pass { fixture: "standard-pangaea-normal-s1031/t120", rounds: 100 },
     Play::Pass { fixture: "scenario-small-continents-s3001/t61", rounds: 100 },
+    // Package 2-07: a whole 4-bot game, the baseline's game 4 (seed 5004, fractal), to its end.
+    Play::Bots { size: "small", map_type: "fractal", seed: 5004, rounds: 330 },
+];
+
+/// The games of `bot.json` (package 2-07): `basic-1` in every major's seat, a duel for 120
+/// rounds, two small games for 100 (the baseline's games 1 and 2: pangaea and archipelago), and
+/// the late fixture played on for 10 rounds.
+pub const BOT_GAMES: [Play; 4] = [
+    Play::Bots { size: "duel", map_type: "continents", seed: 5100, rounds: 120 },
+    Play::Bots { size: "small", map_type: "pangaea", seed: 5001, rounds: 100 },
+    Play::Bots { size: "small", map_type: "archipelago", seed: 5002, rounds: 100 },
+    Play::BotPass { fixture: "small-continents-normal-s1025/t280", rounds: 10 },
 ];
 
 /// The games of `pass.json`.
@@ -198,9 +299,17 @@ fn soundness(name: &str, g: &mut Game) -> Vec<String> {
     games::problems(g).into_iter().map(|p| format!("{name}: {p}")).collect()
 }
 
-/// The rows of a chained game: one per round, `[name, turn, digest]`.
-fn round_rows(name: &str, rounds: &[Round]) -> impl Iterator<Item = Value> {
-    rounds.iter().map(move |(turn, d)| json!([name, turn, d.to_hex()]))
+/// The rows of a chained game: one per round, `[name, turn, digest]`, and for a game bots play
+/// the seats' memory hashes after it (`[name, turn, digest, memories]`).
+fn round_rows<'a>(
+    name: &'a str,
+    rounds: &'a [Round],
+    memories: &'a [Value],
+) -> impl Iterator<Item = Value> + 'a {
+    rounds.iter().enumerate().map(move |(i, (turn, d))| match memories.get(i) {
+        Some(m) => json!([name, turn, d.to_hex(), m]),
+        None => json!([name, turn, d.to_hex()]),
+    })
 }
 
 /// The committed file, if `golden check --states` asked for divergent states: what each game's
@@ -215,6 +324,8 @@ pub struct Played {
     pub game: Option<Game>,
     pub start: Turn,
     pub rounds: Vec<Round>,
+    /// For a game bots play, each round's [`memory_hashes`]; empty for any other.
+    pub memories: Vec<Value>,
     pub problems: Vec<String>,
 }
 
@@ -230,6 +341,7 @@ pub fn played(set: &str, play: &Play, found: &[Fixture], committed: Option<&Valu
                 game: None,
                 start: 0,
                 rounds: Vec::new(),
+                memories: Vec::new(),
                 problems: vec![format!("{name} does not set up: {e}")],
             };
         }
@@ -238,12 +350,17 @@ pub fn played(set: &str, play: &Play, found: &[Fixture], committed: Option<&Valu
     let mut watch =
         committed.and_then(|rows| Watch::new(set, &name, Watch::rows_of(Some(rows), &name)));
     let mut rounds = Vec::new();
+    let mut memories = Vec::new();
     let mut problems = Vec::new();
+    let bots = play.has_bots();
     let mut hook = |g: &mut Game, (turn, d): Round| -> Result<(), String> {
         if let Some(w) = watch.as_mut() {
             w.round(g, turn, &d);
         }
         rounds.push((turn, d));
+        if bots {
+            memories.push(memory_hashes(g));
+        }
         Ok(())
     };
     if let Err(e) = play.play(&mut g, &mut hook) {
@@ -251,7 +368,7 @@ pub fn played(set: &str, play: &Play, found: &[Fixture], committed: Option<&Valu
     }
     problems.extend(watch.map(|w| w.problems).unwrap_or_default());
     problems.extend(soundness(&name, &mut g));
-    Played { game: Some(g), start, rounds, problems }
+    Played { game: Some(g), start, rounds, memories, problems }
 }
 
 // ---- load.json --------------------------------------------------------------------------------
@@ -353,7 +470,7 @@ fn pass_answers() -> (Value, Vec<String>) {
             g.chronicle().events().len(),
             g.phase() == Phase::Over,
         ]));
-        rounds_rows.extend(round_rows(&name, &p.rounds));
+        rounds_rows.extend(round_rows(&name, &p.rounds, &p.memories));
     }
     let v = json!({
         "format": 1,
@@ -402,7 +519,7 @@ fn random_answers() -> (Value, Vec<String>) {
             g.chronicle().events().len(),
             winner,
         ]));
-        rounds_rows.extend(round_rows(&name, &p.rounds));
+        rounds_rows.extend(round_rows(&name, &p.rounds, &p.memories));
     }
     let v = json!({
         "format": 1,
@@ -451,7 +568,7 @@ fn long_answers() -> (Value, Vec<String>) {
             g.phase() == Phase::Over,
             st.clock().winner.map(|p| p.0),
         ]));
-        rounds_rows.extend(round_rows(&name, &p.rounds));
+        rounds_rows.extend(round_rows(&name, &p.rounds, &p.memories));
     }
     let v = json!({
         "format": 1,
@@ -470,6 +587,59 @@ fn long_answers() -> (Value, Vec<String>) {
 pub fn check_long() -> SetReport {
     let (got, problems) = long_answers();
     compare("long", got, problems, turns::waiting(), &["game_rows", "round_rows"])
+}
+
+// ---- bot.json ---------------------------------------------------------------------------------
+
+fn bot_answers() -> (Value, Vec<String>) {
+    let r = Ruleset::shared();
+    let mut games_rows = Vec::new();
+    let mut rounds_rows = Vec::new();
+    let mut problems = Vec::new();
+    let found = match fixtures::committed() {
+        Ok(f) => f,
+        Err(e) => return (json!({"format": 1}), vec![e]),
+    };
+    let committed = watched("bot.json");
+    for play in BOT_GAMES {
+        let name = play.name("bot");
+        let p = played("bot", &play, &found, committed.as_ref().and_then(|c| c.get("round_rows")));
+        problems.extend(p.problems);
+        let Some(g) = p.game else { continue };
+        let st = g.state();
+        games_rows.push(json!([
+            name,
+            p.start,
+            p.rounds.len(),
+            g.chain().map(|c| c.head().to_hex()),
+            g.digest().map(|d| d.to_hex()).unwrap_or_default(),
+            [st.cities().len(), st.units().len(), st.diplo().deals.len()],
+            g.chronicle().events().len(),
+            g.phase() == Phase::Over,
+            st.clock().winner.map(|p| p.0),
+            memory_hashes(&g),
+        ]));
+        rounds_rows.extend(round_rows(&name, &p.rounds, &p.memories));
+    }
+    let v = json!({
+        "format": 1,
+        "bot": "basic-1 at its defaults in every major's seat, each seat's aggression the statistical baseline's",
+        "games": "[name, turn it starts on, rounds, chain head, final digest, [cities, units, deals], events, over, winner, each major's memory hash at the end]",
+        "rounds": "[name, the round's turn, the state's digest as it ended, each major's memory hash then]",
+        "ruleset_id": r.id().to_hex(),
+        "game_rows": games_rows,
+        "round_rows": rounds_rows,
+    });
+    (v, problems)
+}
+
+/// The `bot` set, checked against `bot.json` once nothing it depends on is pending: the bot's
+/// determinism on every target (package 2-07). A change to the bot that plays differently moves
+/// its rows, and is blessed on purpose, as a change to the engine's rules is.
+#[must_use]
+pub fn check_bot() -> SetReport {
+    let (got, problems) = bot_answers();
+    compare("bot", got, problems, turns::waiting(), &["game_rows", "round_rows"])
 }
 
 /// The file `golden bless long` writes, once nothing it depends on is pending.
@@ -510,8 +680,8 @@ fn compare(
     SetReport::new(name, &got, lists, problems, waiting)
 }
 
-/// The files `golden bless` writes: `load.json` always, `pass.json` and `random.json` once
-/// nothing they depend on is pending. `long.json` is [`blessed_long`]'s.
+/// The files `golden bless` writes: `load.json` always, `pass.json`, `random.json` and
+/// `bot.json` once nothing they depend on is pending. `long.json` is [`blessed_long`]'s.
 #[must_use]
 pub fn blessed() -> Vec<(&'static str, String)> {
     let mut out = vec![("load.json", render_rows(&load_answers().0, &["rows"]))];
@@ -519,17 +689,24 @@ pub fn blessed() -> Vec<(&'static str, String)> {
         let lists = ["game_rows", "round_rows"];
         out.push(("pass.json", render_rows(&pass_answers().0, &lists)));
         out.push(("random.json", render_rows(&random_answers().0, &lists)));
+        out.push(("bot.json", render_rows(&bot_answers().0, &lists)));
     }
     out
 }
 
-/// Why `golden bless` refuses `pass.json`, `random.json` and `long.json`, if it does.
+/// Why `golden bless` refuses `pass.json`, `random.json`, `bot.json` and `long.json`, if it
+/// does.
 #[must_use]
 pub fn refusals() -> Vec<(&'static str, String)> {
     turns::refusal()
         .map(|why| {
             let why = why.replacen("turns.json", "the whole-game sets", 1);
-            vec![("pass.json", why.clone()), ("random.json", why.clone()), ("long.json", why)]
+            vec![
+                ("pass.json", why.clone()),
+                ("random.json", why.clone()),
+                ("bot.json", why.clone()),
+                ("long.json", why),
+            ]
         })
         .unwrap_or_default()
 }
