@@ -8,8 +8,11 @@ a load continues the save's journal when nothing names more of it and it opens c
 names, and forks it otherwise. These tests play bot games under the session driver and check each guarantee.
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import gc
 import gzip
+import json
 import shutil
+import statistics
 import struct
 import threading
 import time
@@ -23,6 +26,8 @@ from tests.backends import has_test_ops, rust_only
 
 needs_test_ops = unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
 DUEL = {"map_size": "duel", "seed": 41, "barbarians": "off"}
+#: testkit's late server fixture: a game on a small map at turn 280 (test_server_drive's)
+LATE = Path(__file__).resolve().parent.parent / "crates" / "citar-testkit" / "testdata" / "server"
 
 
 def wait(cond, timeout: float) -> bool:
@@ -44,6 +49,17 @@ def records(path: Path) -> list[tuple[int, int]]:
         out.append((at, at + 18))
         at += 18 + length
     return out
+
+
+def with_journal(src: Path, dst: Path, name: str):
+    """A copy of the save ``src`` at ``dst`` whose header names the journal ``name`` instead, its records and head as
+    they were (DESIGN.md P2.5.1: magic, the header's length, the header, the body's frame)."""
+    data = src.read_bytes()
+    n = struct.unpack_from("<I", data, 8)[0]
+    header = json.loads(data[12:12 + n])
+    header["journal"]["file"] = name
+    raw = json.dumps(header).encode()
+    dst.write_bytes(data[:8] + struct.pack("<I", len(raw)) + raw + data[12 + n:])
 
 
 @rust_only
@@ -106,10 +122,9 @@ class AutosaveChainTests(SavesCase):
         real = s._snapshot
 
         def snapshot(name, autosave):
-            job = real(name, autosave)
-            if autosave:
-                taken.append(job.snap.turn)
-            return job
+            if autosave:                         # an autosave is taken with the lock held: this is its turn
+                taken.append(s.game.turn)
+            return real(name, autosave)
         s._snapshot = snapshot
         self.play_to(s, 101, timeout=600)
         self.assertEqual(s.game.phase, "playing")
@@ -323,6 +338,29 @@ class OneWriterTests(SavesCase):
         self.assertTrue(s.stopped and s.journal.is_closed)
         self.assertEqual(back.journal.path, s.journal.path)
 
+    def test_a_load_of_a_save_the_stopping_game_writes_loads_what_it_wrote(self):
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 4)
+        gate, real = threading.Event(), sess.SaveJob.write
+
+        def held(job):
+            gate.wait(10)
+            real(job)
+        loaded = []
+        with mock.patch.object(sess.SaveJob, "write", held):
+            with s.lock:
+                s.game.add_thought(0, "the newest", "note")
+                s.autosave(force=True)           # held: autosave.citar on the disk is still the one before it
+            t = threading.Thread(target=lambda: loaded.append(self.m.load(s.folder / "autosave.citar")))
+            t.start()
+            self.assertTrue(wait(lambda: s.stopped, 10), "the load stops the game, whose writer waits")
+            gate.set()
+            t.join(60)
+        self.assertEqual(len(loaded), 1)
+        back = loaded[0]
+        self.assertIn("the newest", [x["text"] for x in back.game.thoughts()], "the autosave as the stop left it")
+        self.assertEqual(back.journal.path.name, "journal.cjnl", "its timeline goes on: no fork")
+
     def test_stop_returns_only_after_the_write_in_flight(self):
         s = self.game([{"type": "bot"}] * 2)
         self.play_to(s, 4)
@@ -414,23 +452,27 @@ class OneWriterTests(SavesCase):
 
 @needs_test_ops
 class ListingTests(SavesCase):
-    """Gates 6 and 7: a gargantuan game's snapshot under the lock, and listing 50 gargantuan saves by headers alone."""
+    """Gate 7: listing 50 saves of a late game reads their headers alone (asserted by the binding's counters: no body
+    decoded). Each is the late fixture's state with the metrics of a late gargantuan game (24 seats' records for 330
+    turns, about 4 MB of JSON, the larger part of such a save's body); a save of a real one, played to turn 330, is
+    listed the same way in DESIGN.md's notes for 2-11."""
 
-    def test_listing_50_gargantuan_saves_reads_headers_only(self):
+    TOOLS = ("move_unit", "found_city", "set_research", "set_production", "attack", "fortify", "build_improvement",
+             "end_turn", "buy", "promote", "set_policy", "declare_war", "propose_deal", "embark", "pillage")
+
+    def test_listing_50_saves_of_a_late_game_reads_headers_only(self):
         from citar import _engine
-        g = engine_api.EngineGame.new({"map_size": "gargantuan", "seed": 4, "players": [{"controller": "bot"}] * 8})
-        s = sess.GameSession(g, [sess.Seat(player=p, type="bot") for p in range(8)], name="Gargantuan")
+        state = json.loads(gzip.decompress((LATE / "late-t280.state.json.gz").read_bytes()))
+        g = engine_api.EngineGame.from_state(state)
+        majors = g.majors(alive_only=False)
+        s = sess.GameSession(g, [sess.Seat(player=p["id"], type="bot") for p in majors], name="Late")
         self.ids.add(s.id)
-        times = []
-        for _ in range(5):                       # gate 6 in the binding: the snapshot is all the lock waits for
-            with s.lock:
-                s.game.add_thought(0, "a note", "note")
-                t0 = time.perf_counter()
-                s.game.save_snapshot(s._timeline())
-                times.append(time.perf_counter() - t0)
-        print(f"\nsave_snapshot of a gargantuan game at turn {g.turn}: best {min(times) * 1000:.2f} ms", flush=True)
-        self.assertLess(min(times), 0.100)
-        path = s.save("gargantuan")
+        for turn in range(1, 331):
+            for p in range(24):
+                s.metrics.begin_turn(p, turn, "bot")
+                s.metrics.bot_actions(p, {tool: [(i + turn) % 7 + 1, i % 3] for i, tool in enumerate(self.TOOLS)})
+                s.metrics.end_turn(p)
+        path = s.save("late")
         s.stop()
         size = path.stat().st_size
         for i in range(50):
@@ -444,9 +486,119 @@ class ListingTests(SavesCase):
         after = _engine._saves_read()
         self.assertEqual(after[1], bodies, "no save's body was decoded")
         self.assertGreaterEqual(after[0] - headers, 50)
-        self.assertEqual(len([e for e in listed if e["name"] == "gargantuan"]), 50)
-        self.assertTrue(all(e["turn"] == g.turn and len(e["players"]) == 8 for e in listed if "turn" in e))
-        print(f"listing 50 gargantuan saves ({size / 1e6:.2f} MB each): {took * 1000:.0f} ms", flush=True)
+        self.assertEqual(len([e for e in listed if e["name"] == "late"]), 50)
+        self.assertTrue(all(e["turn"] == 280 and len(e["players"]) == len(majors) for e in listed), listed[:1])
+        self.assertTrue(all(e["players"][0]["seat"] == "bot" for e in listed))
+        # a note, not a gate: the first listing after the copies also pays for the virus scanner reading each new file
+        print(f"\nlisting 50 saves of a late game ({size / 1e6:.2f} MB each): {took * 1000:.0f} ms", flush=True)
+
+
+class SaveLockTests(SavesCase):
+    """Gate 6 at the session's level: everything a save does under the session's lock (the engine's snapshot, the
+    session's record, the metrics) stays within P2.5.3's 10 ms budget to the end of a long game, every round's
+    autosave taken, and does not grow with the game: the metrics, a record a seat a turn, are encoded once each."""
+
+    def test_a_long_games_saves_hold_the_lock_within_the_budget(self):
+        s = self.game([{"type": "bot"}] * 4, {"map_size": "small", "seed": 5003})
+        held = []
+        real = s._snapshot
+
+        def snapshot(name, autosave):            # an autosave is taken with the lock held: this is all it holds it for
+            t0 = time.perf_counter()
+            job = real(name, autosave)
+            held.append((s.game.turn, time.perf_counter() - t0))
+            return job
+        s._snapshot = snapshot
+        self.play_to(s, 300, timeout=900)
+        self.autosave_now(s)
+        self.assertEqual(s.errors, [])
+        self.assertGreaterEqual(len(held), 150, "a long game")
+        late = [t for _, t in held[-50:]]
+        print(f"\nsaves under the lock to turn {s.game.turn} (small, 4 bots, {len(s.metrics.data['turns'])} metrics "
+              f"records): median of the last 50 {statistics.median(late) * 1000:.2f} ms, max "
+              f"{max(t for _, t in held) * 1000:.2f} ms, the session's own count {s.save_lock['saves']} saves, "
+              f"{s.save_lock['total_s'] * 1000:.0f} ms in all", flush=True)
+        self.assertLess(statistics.median(late), 0.010, "the budget")
+        self.assertLess(max(t for _, t in held), 0.100, "never above 100 ms")
+        self.assertEqual(s.save_lock["saves"], len(held) + 1, "and the new game's first, before the count above")
+        self.assertLess(s.save_lock["max_s"], 0.100)
+        # the metrics' records are encoded once each: a save encodes the open turn's (and any settled since the last),
+        # never the whole game's again
+        encoded = []
+        dumps = json.dumps
+
+        def counting(obj, *a, **k):
+            encoded.append(obj)
+            return dumps(obj, *a, **k)
+
+        def records(o) -> int:
+            if isinstance(o, dict) and isinstance(o.get("turns"), list):
+                return len(o["turns"])
+            return 1 if isinstance(o, dict) and "player" in o and "turn" in o else 0
+        with mock.patch("json.dumps", counting):
+            self.autosave_now(s)
+        self.assertLessEqual(sum(records(o) for o in encoded), len(s.seats))
+        # and what the saves wrote is the session's metrics, whole
+        saved = engine_api.read_save(s.folder / "autosave.citar").metrics
+        self.assertEqual(saved, json.loads(json.dumps(s.metrics.data)))
+
+
+class LiveReportTests(SavesCase):
+    def test_a_report_of_a_running_lobby_game_changes_nothing_of_it(self):
+        from citar.reports import data as report_data
+        seats = [{"type": "llm", "llm": {"provider": "mock", "model": "m1"}},
+                 {"type": "llm", "llm": {"provider": "mock", "model": "m2"}}, {"type": "bot"}]
+        s = self.game(seats, {"map_size": "small", "seed": 41, "barbarians": "off"})
+        self.assertTrue(s.registered)
+        details = report_data._game_details(s.id)
+        self.assertNotIn("error", details)
+        self.assertEqual([(x["player"], x["model"]) for x in details["seats"]], [(0, "m1"), (1, "m2")])
+        self.assertEqual([x["progress"]["civ"] for x in details["seats"]], [s.game.player_name(0), s.game.player_name(1)])
+        self.assertIsNone(s.benchmark, "a lobby game stays one")
+        s.mark_live()
+        self.assertTrue((s.folder / s.LIVE_MARK).exists(), "so a restart brings it back")
+        self.autosave_now(s)
+        self.assertFalse(self.header(s)["session"]["benchmark"])
+        # a benchmark game's record is left as it was too, whatever seat the report reads
+        s.benchmark = {"llm_player": 1, "model": "m2", "run_id": "r1"}
+        before = dict(s.benchmark)
+        details = report_data._game_details(s.id)
+        self.assertEqual(s.benchmark, before)
+        self.assertEqual([x["progress"]["civ"] for x in details["seats"]], [s.game.player_name(0), s.game.player_name(1)])
+
+
+class LettingGoTests(SavesCase):
+    def test_a_written_save_is_let_go_and_a_dropped_session_closes_its_journal(self):
+        g = engine_api.EngineGame.new({"map_size": "duel", "seed": 41, "players": [{"controller": "bot"}] * 2})
+        s = sess.GameSession(g, [sess.Seat(player=p, type="bot") for p in range(2)], name="dropped")
+        self.ids.add(s.id)
+        job = s._snapshot("first", autosave=False)
+        self.assertEqual(job.result(30), s.folder / "first.citar")
+        self.assertEqual((job.snap, job.journal, job.session, job.metrics), (None, None, None, None),
+                         "the writer keeps nothing of a written save")
+        path, thread = s.journal.path, s._writer._thread
+        self.assertTrue(engine_api.journal_in_use(path))
+        del s, g
+        gc.collect()
+        self.assertTrue(wait(lambda: not thread.is_alive(), 10), "its writer thread ends")
+        self.assertTrue(wait(lambda: not engine_api.journal_in_use(path), 10), "and its journal is let go")
+
+    def test_a_save_taken_as_the_game_stops_is_its_timelines_last(self):
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 4)
+        s.set_paused(False)                      # the bots play on as it stops
+        self.assertTrue(wait(lambda: s.game.turn >= 6, 60))
+        path = s.stop(save_as="benchmark")
+        self.assertEqual(path, s.folder / "benchmark.citar")
+        last = engine_api.save_header(path)["journal"]
+        self.assertEqual(last["records"], s.journal.records, "it names every record")
+        for p in s.folder.glob("*.citar"):
+            self.assertLessEqual(engine_api.save_header(p)["journal"]["records"], last["records"], p.name)
+        with self.assertRaises(RuntimeError):
+            s.stop(save_as="again")
+        back = self.m.load(path)
+        self.assertEqual(back.journal.path.name, "journal.cjnl", "a later load goes on in its journal: no fork")
+        self.assertEqual(sorted(p.name for p in s.folder.glob("*.cjnl")), ["journal.cjnl"])
 
 
 class StartingPointTests(SavesCase):
@@ -543,7 +695,7 @@ class FormatTests(SavesCase):
         with self.assertRaises(ValueError):
             self.m.load(old)
 
-    def test_a_save_that_does_not_load_brings_the_running_game_back(self):
+    def test_a_save_that_does_not_load_leaves_the_running_game_alone(self):
         s = self.game([{"type": "bot"}] * 2)
         self.play_to(s, 4)
         early = s.save("turn-early")
@@ -552,20 +704,82 @@ class FormatTests(SavesCase):
         data[-6] ^= 0xFF                         # its header reads; its body does not
         bad.write_bytes(bytes(data))
         engine_api.save_header(bad)
+        lost = s.folder / "lost.citar"          # it reads, and names a journal that is not there
+        with_journal(early, lost, "journal-9.cjnl")
+        engine_api.read_save(lost)
         s.set_paused(False)                      # the game runs
-        with self.assertRaises(ValueError):
-            self.m.load(bad)
-        self.assertTrue(s.stopped, "the running game was stopped to read the save")
-        back = self.m.get(s.id)
-        self.assertIsNotNone(back, "and came back from its autosave")
-        self.assertIsNot(back, s)
-        self.assertFalse(back.paused, "running, as it was")
-        self.assertGreaterEqual(back.game.turn, 4)
+        journal = s.journal
+        for refused in (bad, lost):
+            with self.assertRaises(ValueError) as cm:
+                self.m.load(refused)
+            self.assertIs(self.m.get(s.id), s, refused.name)
+            self.assertFalse(s.stopped or s.paused or journal.is_closed, f"{refused.name}: the game plays on")
+        self.assertIn("does not load", str(cm.exception))
+        turn = s.game.turn
+        self.assertTrue(wait(lambda: s.game.turn > turn, 60), "and its driver drives it")
         # a game closed before a failed load stays closed
-        self.m.delete(back.id)
+        self.m.delete(s.id)
         with self.assertRaises(ValueError):
             self.m.load(bad)
         self.assertIsNone(self.m.get(s.id))
+
+    def test_a_save_on_the_running_games_journal_that_does_not_load_brings_the_game_back(self):
+        # turn-late is put back after the timeline it names has gone another way: it names records of journal.cjnl
+        # (the running game's, whose OS lock keeps it from being read) that are not the ones there now
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 6)
+        early = s.save("turn-early")
+        self.play_to(s, s.game.turn + 6)
+        late = s.save("turn-late")
+        self.m.delete(s.id)
+        aside = sess.SAVE_DIR / f"{s.id}-aside"
+        aside.mkdir()
+        self.ids.add(aside.name)
+        for name in ("turn-late.citar", "autosave.citar"):
+            (s.folder / name).rename(aside / name)
+        a = self.m.load(early)                   # nothing names more of journal.cjnl: it goes on, cut to turn-early
+        self.assertEqual(a.journal.path.name, "journal.cjnl")
+        self.play_to(a, a.game.turn + 8)
+        self.autosave_now(a)
+        (aside / "turn-late.citar").rename(late)
+        a.set_paused(False)                      # the game runs
+        with self.assertRaises(ValueError) as cm:
+            self.m.load(late)
+        self.assertIn("turn-late.citar's history", str(cm.exception))
+        self.assertTrue(a.stopped, "the running game was stopped to read its journal")
+        back = self.m.get(a.id)
+        self.assertIsNotNone(back, "and came back from its autosave")
+        self.assertIsNot(back, a)
+        self.assertFalse(back.paused, "running, as it was")
+        self.assertGreaterEqual(back.game.turn, a.game.turn - 1)
+        turn = back.game.turn
+        self.assertTrue(wait(lambda: back.game.turn > turn, 60), "and its driver drives it")
+
+    def test_a_python_engine_autosave_is_not_restored_nor_tried_again(self):
+        import contextlib
+        import io
+        import tempfile
+        root = Path(tempfile.mkdtemp(prefix="citar-restore-"))
+        try:
+            folder = root / "v1-live"
+            folder.mkdir()
+            (folder / "autosave.citar").write_bytes(gzip.compress(b'{"format": "citar-save", "version": 1, "state": {}}'))
+            mark = folder / sess.GameSession.LIVE_MARK
+            mark.write_text(json.dumps({"paused": False, "name": "Old", "at": 0}), encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(sess, "SAVE_DIR", root), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                self.assertEqual(self.m.restore_live(), [])
+                self.assertEqual(self.m.restore_live(), [], "and not tried again")
+            self.assertEqual(err.getvalue(), "", "no traceback")
+            lines = out.getvalue().strip().splitlines()
+            self.assertEqual(len(lines), 1, lines)
+            self.assertIn("v1-live", lines[0])
+            self.assertIn("saved by the Python engine; archived with 0.1.5", lines[0])
+            self.assertFalse(mark.exists())
+            self.assertTrue((folder / "autosave.citar").exists(), "the save itself stays")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_deleting_saves_removes_the_journals_no_save_names_but_never_a_session_s(self):
         s = self.game([{"type": "bot"}] * 2)

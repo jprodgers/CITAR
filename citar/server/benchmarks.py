@@ -550,10 +550,10 @@ class BenchmarkScheduler:
         if s is not None:
             self._record_progress(run, job, s)
             try:
-                s.save("benchmark")
+                # saved as it stops, so no round its bots play after it is autosaved past it (GameSession.stop)
+                self.manager.delete(s.id, save_as="benchmark")
             except Exception:
                 pass
-            self.manager.delete(s.id)
         job.update({"status": "cancelled", "finished": _now(), "error": why, "pause_reason": None})
 
     def open_job_game(self, run_id: str, job_id: str) -> GameSession:
@@ -1016,11 +1016,15 @@ class BenchmarkScheduler:
         job["result"] = job["progress"]
         job.update({"status": "done", "finished": _now(), "pause_reason": None})
         try:
-            s.save("benchmark")     # before any stop: a stopped game's writer is closed, and nothing saves after it
+            if s.game.phase == "playing":
+                # The model was eliminated: stop the bots playing out a settled game, saved in the same hold of the lock
+                # (GameSession.stop). Saved first and stopped after, a round they played in between was autosaved past
+                # benchmark.citar, and every later opening of the job's game forked a copy of its history.
+                s.stop(save_as="benchmark")
+            else:
+                s.save("benchmark")
         except Exception as e:
             job["error"] = f"Could not save the finished game: {e}"
-        if s.game.phase == "playing":
-            s.stop()                # the model was eliminated: stop the bots playing out a settled game
         self._log(f"Finished {job['label']} on {job['scenario_name']}: {job['result'].get('outcome')}.")
         self._touch(run)
 
