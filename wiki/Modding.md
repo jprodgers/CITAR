@@ -126,7 +126,8 @@ directory when it loads, instead of the one compiled into it.
    `ruleset/*.json`, `custom/nations.json` and `game.json`.
 2. **Change it.** Add a civilization to `custom/nations.json`, or edit or add entries in the
    tables under `ruleset/`, in the same shape as the entries beside them. The engine reads exactly
-   these files: a file of another name is reported, not ignored.
+   these files: a `.json` file of another name in `ruleset/` or `custom/` is reported, not
+   ignored.
 3. **Check it.**
 
    ```bash
