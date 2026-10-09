@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use citar_bot::{BotSpec, Owners, Tuning, VersionId};
 use citar_engine::api::views::to_py_json;
-use citar_engine::rules::Ruleset;
 use citar_engine::state::diplo::Terms;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -43,7 +42,7 @@ impl Bot {
     pub fn fingerprint_now(&self, py: Python<'_>) -> PyResult<String> {
         let spec = self.snapshot();
         Ok(guarded(py, || {
-            Ok(citar_bot::fingerprint(&spec, &citar_bot::build_id(Ruleset::shared())))
+            Ok(citar_bot::fingerprint(&spec, &citar_bot::build_id(crate::rules::rules())))
         })?)
     }
 }
@@ -124,9 +123,9 @@ impl Bot {
             }
             let terms = match n.get("proposal") {
                 None | Some(Value::Null) => None,
-                Some(p) => {
-                    Some(Terms::from_json(p, Ruleset::shared()).map_err(|e| Failure::Value(e.0))?)
-                }
+                Some(p) => Some(
+                    Terms::from_json(p, crate::rules::rules()).map_err(|e| Failure::Value(e.0))?,
+                ),
             };
             Ok(spec.owners.owns_terms(terms.as_ref()))
         })?)

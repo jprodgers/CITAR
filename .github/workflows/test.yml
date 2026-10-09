@@ -300,6 +300,7 @@ jobs:
           assert not _engine.HAS_TEST_OPS, 'the release wheel carries the test operations'
           info = json.loads(_engine.build_info())
           assert info['version'] == __import__('citar').__version__, info
+          assert info['ruleset_dir'] is None, info
           print('extension', _engine.__file__, info)
           # The ruleset is compiled into the extension (crates/citar-engine/data): no file to find.
           counts = json.loads(_engine.ruleset_counts())

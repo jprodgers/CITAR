@@ -25,7 +25,6 @@ use citar_engine::api::views::to_py_json;
 use citar_engine::base::ids::PlayerId;
 use citar_engine::base::py as pyish;
 use citar_engine::game::SeatDriver;
-use citar_engine::rules::Ruleset;
 use citar_sim::{RunSpec, Runner, Seats, SimError, TRACEBACK_LIMIT};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -219,7 +218,7 @@ pub fn run_game(
     }
     let wanted: Vec<PlayerId> = seats.iter().map(|(p, _)| *p).collect();
     let mut runner = detached(py, || {
-        caught(|| Runner::new(Ruleset::shared(), run, seats).map_err(Failure::from))
+        caught(|| Runner::new(crate::rules::rules(), run, seats).map_err(Failure::from))
             .map_err(Failure::Crash)?
     })?;
     if let Some(p) =

@@ -208,7 +208,8 @@ class EngineBoundaryTests(unittest.TestCase):
                          "engine_api.run_game(spec)", "api.bot_instance('basic')", "citar.engine_api.tool_list()",
                          "importlib.import_module(name)", "importlib.import_module('citar.bots.profiles')",
                          "importlib.import_module(f'citar.pool.{kind}')", "session.game.execute(0, 'end_turn')",
-                         "getattr(engine_api, 'map_sizes')()", "x = engine_api.build_info()"])
+                         "getattr(engine_api, 'map_sizes')()", "x = engine_api.build_info()",
+                         "engine_api.check_ruleset(path)"])
         self.assertEqual(violations(src, "citar.server.session"), [])
 
     def test_all_is_the_whole_public_surface(self):

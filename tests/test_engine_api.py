@@ -1,8 +1,11 @@
 """The engine facade: what it hands out is plain data, saves round-trip through it, and headless games run on it."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -176,7 +179,8 @@ class BotTests(unittest.TestCase):
         self.assertRegex(fp, r"^[0-9a-f]{12}$")
         self.assertNotEqual(fp, engine_api.bot_fingerprint(engine_api.bot_instance("basic")))
         info = engine_api.build_info()
-        self.assertEqual(set(info), {"version", "build_id", "label", "rules", "engine_code", "bot_code"})
+        self.assertEqual(set(info), {"version", "build_id", "label", "rules", "engine_code", "bot_code",
+                                     "ruleset_dir"})
 
     def test_the_diplomacy_switch(self):
         bot = engine_api.bot_instance("basic")
@@ -248,8 +252,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def child(*args: str, env: Optional[dict] = None) -> subprocess.CompletedProcess:
-    """A Python child in the checkout, its environment this one's with ``env`` over it."""
-    return subprocess.run([sys.executable, *args], capture_output=True, text=True, env={**os.environ, **(env or {})},
+    """A Python child in the checkout, its environment this one's but CITAR_RULESET_DIR, with ``env`` over it."""
+    base = {k: v for k, v in os.environ.items() if k != "CITAR_RULESET_DIR"}
+    return subprocess.run([sys.executable, *args], capture_output=True, text=True, env={**base, **(env or {})},
                           timeout=300, cwd=ROOT)
 
 
@@ -266,8 +271,147 @@ class DoctorTests(unittest.TestCase):
     def test_the_doctor_names_the_build_and_the_ruleset(self):
         r = child("-c", _DOCTOR, "as is")
         self.assertRegex(r.stdout, r"\[  ok  \] engine: build [0-9a-f]{12} \(.+\), version ")
-        self.assertIn("[  ok  ] loaded: ", r.stdout)
+        rules = engine_api.build_info()["rules"][:12]
+        self.assertIn(f"compiled into the engine (ruleset {rules})", r.stdout)
         self.assertIn("failures 0 warnings 0", r.stdout)
+
+
+#: The ruleset the engine compiles in, in the data layout CITAR_RULESET_DIR names a copy of.
+DATA = ROOT / "crates" / "citar-engine" / "data"
+#: A civilization the shipped ruleset lacks, as a mod adds one (docs/MODDING.md).
+TESTLANDIA = {"name": "Testlandia", "leaderName": "Test Leader", "adjective": "Testlandian", "startBias": [],
+              "preferredVictoryType": "Neutral", "kind": "major",
+              "cities": ["Testopolis", "Mockford", "Stubton", "Fixture Bay", "Assertia", "Harness Hill"]}
+
+#: A process that plays the modded ruleset: what it is, a game that seats Testlandia and one that does not, saved.
+_MODDED = """
+import json, sys
+from pathlib import Path
+from citar import engine_api
+out = Path(sys.argv[1])
+config = {"map_size": "duel", "seed": 7, "barbarians": "off", "players": [{"controller": "bot"}, {"controller": "bot"}]}
+mod = engine_api.EngineGame.new(dict(config, players=[{"controller": "bot", "nation": "Testlandia"},
+                                                     {"controller": "bot", "nation": "Rome"}]))
+for _ in range(4):
+    mod.execute(mod.current, "end_turn")
+plain = engine_api.EngineGame.new(dict(config, players=[{"controller": "bot", "nation": "Rome"},
+                                                       {"controller": "bot", "nation": "Greece"}]))
+journal, _ = engine_api.open_journal(out / "journal.cjnl")
+mod.save_snapshot(journal).write(out / "testlandia.citar", journal, {"id": "mod", "name": "Testlandia"}, {})
+journal.close()
+json.dump({"info": engine_api.build_info(), "counts": engine_api.ruleset_counts(), "nation": mod.player(0)["nation"],
+           "turn": mod.turn, "fingerprint": engine_api.bot_fingerprint(engine_api.bot_instance("basic")),
+           "mod": mod.to_save(), "plain": plain.to_save()},
+          open(out / "modded.json", "w", encoding="utf-8"))
+"""
+
+
+def ruleset_copy(where: Path, edits: dict) -> Path:
+    """A copy of the shipped ruleset in ``where``, each file ``edits`` names changed by its function (on its JSON)."""
+    out = where / "ruleset"
+    shutil.copytree(DATA, out)
+    for name, edit in edits.items():
+        path = out / name
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        edit(doc)
+        path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+    return out
+
+
+def add_testlandia(nations: dict):
+    nations["Testlandia"] = dict(TESTLANDIA)
+
+
+def unknown_unique(buildings: dict):
+    buildings["Library"]["uniques"].append("Makes every turn a Tuesday")
+
+
+def broken_reference(units: dict):
+    units["Archer"]["requiredTech"] = "Time Travel"
+
+
+class RulesetDirTests(unittest.TestCase):
+    """A modded ruleset without a Rust toolchain (DESIGN.md P2.8.4, docs/MODDING.md): CITAR_RULESET_DIR names a copy of
+    the data that every game and ruleset function of the process uses, which build_info reports; `citar ruleset check`
+    says what is wrong with one."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="citar-ruleset-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_the_shipped_data_is_the_ruleset_compiled_in(self):
+        report = engine_api.check_ruleset(DATA)
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["id"], engine_api.build_info()["rules"])
+        self.assertEqual(report["version"], engine_api.rules_version())
+        self.assertEqual(report["counts"], engine_api.ruleset_counts())
+
+    def test_a_process_plays_the_ruleset_the_variable_names(self):
+        mod = ruleset_copy(self.tmp, {"custom/nations.json": add_testlandia})
+        r = child("-c", _MODDED, str(self.tmp), env={"CITAR_RULESET_DIR": str(mod)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads((self.tmp / "modded.json").read_text(encoding="utf-8"))
+        ours = engine_api.build_info()
+        # its own ruleset, and so its own build and fingerprints: results never mix with the shipped ruleset's
+        self.assertEqual(got["info"]["ruleset_dir"], str(mod))
+        self.assertNotEqual(got["info"]["rules"], ours["rules"])
+        self.assertEqual(got["info"]["rules"], engine_api.check_ruleset(mod)["id"])
+        self.assertNotEqual(got["info"]["build_id"], ours["build_id"])
+        self.assertEqual((got["info"]["engine_code"], got["info"]["bot_code"]), (ours["engine_code"], ours["bot_code"]))
+        self.assertNotEqual(got["fingerprint"], engine_api.bot_fingerprint(engine_api.bot_instance("basic")))
+        self.assertEqual(got["counts"]["nations"], engine_api.ruleset_counts()["nations"] + 1)
+        # a game seats the added nation and plays
+        self.assertEqual((got["nation"], got["turn"]), ("Testlandia", 3))
+        # its saves are refused by a process without it, naming what this one lacks
+        with self.assertRaisesRegex(ValueError, "Testlandia"):        # LoadError
+            EngineGame.from_save(got["mod"])
+        header = engine_api.save_header(self.tmp / "testlandia.citar")
+        self.assertEqual(header["rules"], got["info"]["rules"])
+        with self.assertRaisesRegex(ValueError, "Testlandia"):
+            EngineGame.from_save(engine_api.read_save(self.tmp / "testlandia.citar"))
+        # a save that names nothing the shipped ruleset lacks loads, with a warning
+        with self.assertLogs("citar.engine", "WARNING") as logs:
+            plain = EngineGame.from_save(got["plain"])
+        self.assertIn("made with another ruleset", "\n".join(logs.output))
+        self.assertEqual(plain.player(1)["nation"], "Greece")
+
+    def test_a_ruleset_that_does_not_load_stops_the_engine_saying_why(self):
+        bad = ruleset_copy(self.tmp, {"ruleset/buildings.json": unknown_unique})
+        r = child("-c", "import citar.engine_api", env={"CITAR_RULESET_DIR": str(bad)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ImportError: CITAR_RULESET_DIR=", r.stderr)
+        self.assertIn("Makes every turn a Tuesday", r.stderr)
+        r = child("-c", _DOCTOR, "as is", env={"CITAR_RULESET_DIR": str(bad)})
+        self.assertIn("[ FAIL ] ruleset: CITAR_RULESET_DIR=", r.stdout)
+        self.assertIn(f"Run `citar ruleset check {bad}`", r.stdout)
+        self.assertIn("failures 1 warnings 1", r.stdout)
+        # an empty value is no value: the ruleset compiled in
+        r = child("-c", "from citar import engine_api; print(engine_api.build_info()['ruleset_dir'])",
+                  env={"CITAR_RULESET_DIR": " "})
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "None"), r.stderr)
+
+    def test_the_check_command_reports_each_problem(self):
+        def check(directory, env=None):
+            return child("-m", "citar", "ruleset", "check", str(directory), env=env)
+
+        r = check(DATA)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"the ruleset loads: ruleset {engine_api.build_info()['rules'][:12]}", r.stdout)
+        unique = ruleset_copy(self.tmp / "u", {"ruleset/buildings.json": unknown_unique})
+        r = check(unique)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("the ruleset does not load: 1 problem", r.stdout)
+        self.assertRegex(r.stdout, r"- ruleset/buildings.json: Library: .*Makes every turn a Tuesday.* \[UnknownUnique\]")
+        reference = ruleset_copy(self.tmp / "r", {"ruleset/units.json": broken_reference})
+        r = check(reference)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"- ruleset/units.json: Archer: .*Time Travel.* \[UnknownReference\]")
+        # the variable is not the check's business: a broken one does not stop the check of another directory
+        r = check(DATA, env={"CITAR_RULESET_DIR": str(unique)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = check(self.tmp / "nowhere")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("not a directory", r.stderr)
 
 
 if __name__ == "__main__":

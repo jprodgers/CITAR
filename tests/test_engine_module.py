@@ -53,7 +53,9 @@ class ModuleFunctionTests(unittest.TestCase):
 
     def test_the_build_and_the_ruleset(self):
         info = json.loads(E.build_info())
-        self.assertEqual(set(info), {"version", "build_id", "label", "rules", "engine_code", "bot_code"})
+        self.assertEqual(set(info), {"version", "build_id", "label", "rules", "engine_code", "bot_code",
+                                     "ruleset_dir"})
+        self.assertIsNone(info["ruleset_dir"], "the suite plays the ruleset compiled in (tests/__init__.py)")
         self.assertEqual(len(info["build_id"]), 12)
         self.assertTrue(E.rules_version().startswith("2-"))
         self.assertIn("techs", json.loads(E.rules_client()))

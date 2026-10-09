@@ -48,7 +48,7 @@ from .fsutil import replace as _fs_replace
 __all__ = [
     "ActionError", "MapError", "EngineCrash", "RULES_OVERVIEW", "MAP_LEGEND",
     "rules_version", "rules_client", "max_players", "map_sizes", "map_types", "speeds", "difficulties",
-    "resolve_name", "ruleset_counts", "tool_list", "tool_kind", "state_summary",
+    "resolve_name", "ruleset_counts", "check_ruleset", "tool_list", "tool_kind", "state_summary",
     "list_maps", "load_map", "save_map", "delete_map", "validate_map", "map_summary", "blank_map", "generate_map",
     "scenario_ops_help", "list_scenarios", "load_scenario", "scenario_summary", "delete_scenario",
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
@@ -168,8 +168,20 @@ def resolve_name(kind: str, name) -> Optional[str]:
 
 
 def ruleset_counts() -> dict:
-    """How much the loaded ruleset holds, by kind (techs, units, buildings, nations, policies)."""
+    """How much the process's ruleset holds, by kind (techs, units, buildings, nations, policies)."""
     return json.loads(_E.ruleset_counts())
+
+
+def check_ruleset(directory) -> dict:
+    """Loads the ruleset in ``directory`` without playing on it (``citar ruleset check``): a folder in the data layout,
+    ``ruleset/`` (the UnCiv tables), ``custom/`` (CITAR's additions: ``custom/nations.json``) and ``game.json``, as
+    ``CITAR_RULESET_DIR`` names one. Returns {"dir", "id", "version", "counts", "errors"}: ``errors`` lists every
+    problem found, each {"kind", "file", "object", "text"}, and is empty when the ruleset loads, when ``id`` (its
+    RulesetId), ``version`` (as :func:`rules_version` gives it) and ``counts`` (as :func:`ruleset_counts`) say what it
+    holds; otherwise they are None. The loader checks in stages (the files, their fields, the references, the
+    uniques, the filters, ...) and stops after the first stage that finds a problem, so a later stage's problems
+    show once the earlier ones are fixed. Raises OSError for a directory that cannot be read."""
+    return json.loads(_E.check_ruleset(str(directory)))
 
 
 def tool_list(kind: Optional[str] = None) -> list[dict]:
@@ -423,7 +435,9 @@ def run_game(spec: dict, on_turn: Optional[Callable[[dict], None]] = None,
 # ----------------------------------------------------------------------------
 def build_info() -> dict:
     """What this build is: {"version", "build_id" (12 hex digits over the engine's and the bot's code and the
-    ruleset), "label" (the git describe it was built from, or "unknown"), "rules", "engine_code", "bot_code"}."""
+    process's ruleset), "label" (the git describe it was built from, or "unknown"), "rules" (the process's RulesetId),
+    "engine_code", "bot_code", "ruleset_dir" (the directory ``CITAR_RULESET_DIR`` gave the process its ruleset from,
+    or None for the ruleset compiled in)}."""
     return json.loads(_E.build_info())
 
 

@@ -6,6 +6,10 @@ game through this module and nothing else (``tests/test_engine_boundary.py`` enf
 The Python engine it replaced, the Python bots and the switch that chose between the two engines were removed in 0.1.6
 (package 2-12); the tag ``python-engine-0.1.6`` keeps them.
 
+The engine plays one ruleset a process: the one compiled into it, or the one in the directory ``CITAR_RULESET_DIR``
+names, read when the extension loads (:func:`build_info` reports which; :func:`check_ruleset` checks a directory
+without using it).
+
 Rules for callers:
 
 - What comes back is plain data - dicts, lists, strings, numbers - never a live engine object, so changing it changes
@@ -31,7 +35,7 @@ __all__ = [
     "ActionError", "MapError", "EngineCrash", "RULES_OVERVIEW", "MAP_LEGEND",
     # the ruleset and the tools
     "rules_version", "rules_client", "max_players", "map_sizes", "map_types", "speeds", "difficulties",
-    "resolve_name", "ruleset_counts", "tool_list", "tool_kind", "state_summary",
+    "resolve_name", "ruleset_counts", "check_ruleset", "tool_list", "tool_kind", "state_summary",
     # maps and scenarios on disk
     "list_maps", "load_map", "save_map", "delete_map", "validate_map", "map_summary", "blank_map", "generate_map",
     "scenario_ops_help", "list_scenarios", "load_scenario", "scenario_summary", "delete_scenario",
