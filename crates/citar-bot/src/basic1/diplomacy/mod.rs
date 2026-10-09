@@ -20,7 +20,8 @@
 //!   were met (the engine keeps every list of players in id order,
 //!   `met-lists-in-player-id-order`): the first civilization a luxury is offered to, or a war
 //!   prepared on, may differ when several qualify.
-//! - `diplo_every` and `lux_trade_every` below 1 read as 1, where Python's `%` by 0 raised.
+//! - `diplo_every` below 1 reads as 1, where Python's `%` by a `diplo_every` of 0 raised.
+//!   `lux_trade_every` keeps Python's `max(1, ...)` (basic.py:2485), which never divided by 0.
 //! - Units the turn disbanded since the context was built are no longer counted near a siege
 //!   or in the field: the context holds ids, read back from the game.
 

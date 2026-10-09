@@ -9,8 +9,8 @@
 //!   order in play, Python's order when the reference checks ask (`decisions::ask_in_order`).
 //! - Typed city-state gifts go where they buy the most; idle spies watch the capital furthest
 //!   ahead.
-//! - Parameters of 0 that divided in Python (`diplo_every`, `lux_trade_every`,
-//!   `war_need_city_div`) play a turn.
+//! - Parameters of 0 that Python divided by (`diplo_every`, `war_need_city_div`) play a turn,
+//!   with a `lux_trade_every` of 0, which Python's `max(1, ...)` already read as 1.
 
 use std::sync::Arc;
 
@@ -380,6 +380,8 @@ fn idle_spies_watch_the_capital_furthest_ahead_then_the_next() {
     assert_eq!(at, vec![Some(homes[2]), Some(homes[1])]);
 }
 
+/// A `diplo_every` and a `war_need_city_div` of 0, which Python divided by, play a turn; the
+/// `lux_trade_every` of 0 beside them is read as 1, as Python's `max(1, ...)` read it.
 #[test]
 fn parameters_of_zero_that_python_divided_by_play_a_turn() {
     let mut g = arena(2, 0);
