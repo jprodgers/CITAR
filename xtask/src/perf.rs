@@ -49,6 +49,10 @@ struct Budget {
     corpus: bool,
     #[serde(default)]
     report_only: bool,
+    /// The plan's target, below the budget: reported as a ratio, never checked (the games rows'
+    /// 5 s and 90 s, DESIGN.md P2.4.2).
+    #[serde(default)]
+    target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +332,9 @@ fn check_budgets(
                     "ok"
                 };
                 println!("{:<48} {:>11} {:>11} {:>7.2}  {s}", b.id, show(m.ns), b.budget, x);
+                if let Some(line) = target_line(b, m.ns)? {
+                    println!("{line}");
+                }
                 continue;
             }
             (Some(w), None) if b.corpus && !w.corpus => "skipped: needs the corpus",
@@ -344,6 +351,20 @@ fn check_budgets(
         println!("{:<48} {:>11} {:>11} {:>7}  {status}", b.id, "-", b.budget, "-");
     }
     Ok(problems)
+}
+
+/// The line under a measured budget that has a target: the measure against the plan's target,
+/// which only informs (the budget is what is checked).
+fn target_line(b: &Budget, ns: f64) -> Result<Option<String>, String> {
+    let Some(target) = &b.target else { return Ok(None) };
+    let t = parse_ns(target).ok_or_else(|| format!("{}: bad target {target}", b.id))?;
+    Ok(Some(format!(
+        "{:<48} {:>11} {:>11} {:>7.2}  against the plan's target",
+        "",
+        "",
+        target,
+        ns / t
+    )))
 }
 
 /// Checks the pass rounds; returns the problems.
@@ -589,6 +610,13 @@ mod tests {
         for b in &t.budget {
             assert!(SUITES.contains(&b.suite.as_str()), "{}: suite {}", b.id, b.suite);
             assert!(parse_ns(&b.budget).is_some(), "{}: {}", b.id, b.budget);
+            assert!(b.target.as_deref().is_none_or(|x| parse_ns(x).is_some()), "{}", b.id);
+        }
+        // Package 2-07 made the games rows hard, each with the plan's target beside it.
+        for id in ["game/bot_small_330", "game/bot_gargantuan_330"] {
+            let b = t.budget.iter().find(|b| b.id == id).expect("the games row");
+            assert!(!b.report_only, "{id} is hard");
+            assert!(b.target.is_some(), "{id} has the plan's target");
         }
         assert!(t.pass_round.backstop.iter().all(|b| parse_ns(&b.budget).is_some()));
         assert!(DEFAULT_SUITES.iter().all(|s| SUITES.contains(s)));
@@ -635,6 +663,43 @@ mod tests {
         assert_eq!(none.len(), 1, "a missing report-only measure fails nothing: {none:?}");
     }
 
+    #[test]
+    fn a_target_is_reported_and_never_fails() {
+        let t: Thresholds = toml::from_str(
+            r#"hard = 1.5
+               [[budget]]
+               id = "game/bot_small_330"
+               suite = "games"
+               budget = "16 s"
+               target = "5 s"
+               row = "a small bot game"
+               [pass_round]
+               ratio = 20.0
+               backstop = []
+               target = []"#,
+        )
+        .expect("it parses");
+        let b = &t.budget[0];
+        let line = target_line(b, 10e9).expect("a target that reads").expect("a line");
+        assert!(line.contains("5 s") && line.contains("2.00"), "{line}");
+        let mut measures = BTreeMap::new();
+        measures.insert("game/bot_small_330".to_owned(), Measure { ns: 10e9 });
+        let w = Written {
+            corpus: false,
+            overflow_checks: false,
+            core: Some(0),
+            run: None,
+            merged: false,
+            measures,
+        };
+        let results = BTreeMap::from([("games".to_owned(), w)]);
+        let problems = check_budgets(&t, &results, &SUITES).expect("checked");
+        assert!(problems.is_empty(), "twice the target, within the budget: {problems:?}");
+        let mut bad = t;
+        bad.budget[0].target = Some("soon".to_owned());
+        assert!(target_line(&bad.budget[0], 1.0).is_err());
+    }
+
     fn written(run: Option<&str>, measures: &[(&str, f64)]) -> Written {
         Written {
             corpus: true,
@@ -658,11 +723,17 @@ mod tests {
         let text = std::fs::read_to_string(root.join("crates/citar-bench/thresholds.toml"))
             .expect("thresholds.toml");
         let t: Thresholds = toml::from_str(&text).expect("it parses");
-        let games_only = BTreeMap::from([("games".to_owned(), written(Some("now"), &[]))]);
+        let measured = [("game/bot_small_330", 2e9), ("game/bot_gargantuan_330", 20e9)];
+        let games_only = BTreeMap::from([("games".to_owned(), written(Some("now"), &measured))]);
         let checked = checked_suites(Some("games"), false, &games_only);
         assert_eq!(checked, ["games"]);
         let problems = check_budgets(&t, &games_only, &checked).expect("checked");
         assert_eq!(problems, Vec::<String>::new());
+        // The games rows are hard from package 2-07: a games file without them fails.
+        let empty = BTreeMap::from([("games".to_owned(), written(Some("now"), &[]))]);
+        let missing = check_budgets(&t, &empty, &checked).expect("checked");
+        assert_eq!(missing.len(), 2, "{missing:?}");
+        assert!(missing.iter().all(|p| p.contains("games suite")), "{missing:?}");
         assert!(!checked.contains(&"turns"), "the pass rounds are the turns suite's");
         assert_eq!(checked_suites(Some("games"), true, &games_only), ["games"]);
         // Every other suite's budgets would be missing.
