@@ -159,6 +159,12 @@ class ServerSmokeTests(unittest.TestCase):
         listed = [x for x in self.req("GET", "/api/saves").json() if x["path"] == saved]
         self.assertEqual(len(listed), 1)
         self.assertEqual((listed[0]["turn"], listed[0].get("unreadable")), (turn, None))
+        # the scenario editor opens on the save and on the live game: both are the engine's own states
+        for source in ({"source": "save", "save": saved}, {"source": "game", "game_id": gid}):
+            ed = self.req("POST", "/api/scenario-editor", json=source).json()
+            self.assertIn(city, [c["id"] for c in ed["view"]["cities"]], source)
+            self.assertEqual([seat["type"] for seat in ed["meta"]["seats"]][:1], ["human"], source)
+            self.req("DELETE", f"/api/scenario-editor/{ed['editor_id']}")
         from citar.reports import data as report_data
         details = report_data._game_details(gid)          # the reports read the interim saves through the facade
         self.assertNotIn("error", details)

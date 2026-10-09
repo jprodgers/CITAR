@@ -28,6 +28,7 @@ fn folder() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata").join("server")
 }
 
+#[allow(clippy::disallowed_methods, reason = "the copy is a file")]
 fn gunzip(path: &PathBuf) -> Vec<u8> {
     let packed = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let mut out = Vec::new();
@@ -51,13 +52,14 @@ fn converted() -> (Vec<u8>, Vec<u8>) {
         .find(|f| f.case == LATE.0 && f.turn == LATE.1)
         .unwrap_or_else(|| panic!("no committed fixture {}/t{}", LATE.0, LATE.1));
     let bytes = fixtures::read_state(f).unwrap_or_else(|e| panic!("{e}"));
-    let (g, _) = Game::from_python(Ruleset::shared(), &bytes)
-        .unwrap_or_else(|e| panic!("{}: {e}", f.name));
+    let (g, _) =
+        Game::from_python(Ruleset::shared(), &bytes).unwrap_or_else(|e| panic!("{}: {e}", f.name));
     let whole = g.save_whole().unwrap_or_else(|e| panic!("{}: {e}", f.name));
     (whole.state, whole.history.expect("a fixture at turn 280 has a history"))
 }
 
 #[test]
+#[allow(clippy::disallowed_methods, reason = "the copy is files, and its rewrite a test's switch")]
 fn the_server_copy_of_the_late_fixture_loads() {
     let dir = folder();
     let (state_path, journal_path) =
