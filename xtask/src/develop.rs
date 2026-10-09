@@ -11,9 +11,10 @@
 //!    changed since the last time (`citar-dev.pyproject` in the venv keeps the copy it was
 //!    installed from);
 //! 3. builds `citar-py` with cargo, with the `test-ops` feature, in the `ci` profile (or with
-//!    `--release` the `release` one, for timing), with the build label from `git describe`. The
-//!    build goes to `$CARGO_TARGET_DIR/develop`: the label changes the engine's build, so
-//!    sharing the test builds' directory would rebuild the engine on every switch between them;
+//!    `--release` the `release` one, for timing), with the build label from `git describe` of
+//!    the nearest release tag (`v*`). The build goes to `$CARGO_TARGET_DIR/develop`: the label
+//!    changes the engine's build, so sharing the test builds' directory would rebuild the engine
+//!    on every switch between them;
 //! 4. copies the library to `$CARGO_TARGET_DIR/citar-ext/_engine.<ext>`, renaming a copy a
 //!    running process holds aside;
 //! 5. writes `citar-dev.pth` into the venv: the checkout on `sys.path`, and `CITAR_EXT_DIR`,
@@ -325,9 +326,13 @@ fn develop(root: &Path, args: &[String]) -> Result<(), Step> {
             .map_err(|e| Step::Failed(format!("{}: {e}", stamp.display())))?;
     }
 
-    // 3. The build.
+    // 3. The build. The label names the nearest release tag (`v*`): the archive tag
+    // `python-engine-0.1.6` (package 2-12) is nearer on this branch, and a Rust build labelled
+    // after the Python engine would say the opposite of what it is.
     let label = output(
-        Command::new("git").args(["describe", "--tags", "--always", "--dirty"]).current_dir(root),
+        Command::new("git")
+            .args(["describe", "--tags", "--match", "v*", "--always", "--dirty"])
+            .current_dir(root),
         "git describe",
     )
     .unwrap_or_else(|_| "unknown".to_owned());
