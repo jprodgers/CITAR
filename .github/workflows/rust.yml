@@ -23,7 +23,8 @@ on:
       # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, recorded from
       # the Python bot (cargo xtask check's triggers rule holds this line in place).
       - "tests/data/clean_params_cases.json"
-      - "citar/data/**"
+      # The ruleset the engine compiles in (crates/** takes it too; named so a narrower filter keeps it).
+      - "crates/citar-engine/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.
       - "citar/__init__.py"
       # cargo xtask check holds pyproject.toml's maturin table: its features never reach the test
@@ -45,7 +46,8 @@ on:
       # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, recorded from
       # the Python bot (cargo xtask check's triggers rule holds this line in place).
       - "tests/data/clean_params_cases.json"
-      - "citar/data/**"
+      # The ruleset the engine compiles in (crates/** takes it too; named so a narrower filter keeps it).
+      - "crates/citar-engine/data/**"
       # cargo xtask check holds the workspace version equal to this file's __version__.
       - "citar/__init__.py"
       # cargo xtask check holds pyproject.toml's maturin table: its features never reach the test

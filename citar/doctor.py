@@ -241,7 +241,7 @@ def _check_ruleset(r: Report) -> None:
         r.line(OK, "loaded", ", ".join(counts) or "ok")
     except Exception as exc:
         r.line(FAIL, "ruleset", f"{type(exc).__name__}: {exc}",
-               f"The packaged data should be at {paths.package_data()}. Reinstall CITAR.")
+               "The ruleset is compiled into the engine's extension (citar._engine): reinstall CITAR.")
 
 
 def _check_providers(r: Report) -> None:

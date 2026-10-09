@@ -7,4 +7,4 @@ UnCiv is licensed under the **Mozilla Public License, v. 2.0**; these derived fi
 license. A copy of the MPL 2.0 is available at https://mozilla.org/MPL/2.0/.
 
 Only numeric values and rule text were imported. UnCiv's graphics, sounds, quotes, civilopedia text, leader
-dialogue and tutorials are not included. Local additions live in `citar/data/custom/` (for example BenchmarkCiv).
+dialogue and tutorials are not included. Local additions live in `custom/` beside it (for example BenchmarkCiv).

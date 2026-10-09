@@ -4,8 +4,8 @@
 //! package 1a-03). It shares layer 1 with [`crate::unique`]: tables hold compiled uniques, and
 //! the unique compiler resolves names against the tables.
 //!
-//! Replaces the Python engine's `rules.py:37-342` and reads the ruleset's files (`citar/data/`,
-//! or a host's: [`RulesetFiles`]).
+//! Replaces the Python engine's `rules.py:37-342` and reads the ruleset's files (`data/`, or a
+//! host's: [`RulesetFiles`]).
 //!
 //! - [`source`]: the files as bytes ([`RulesetFiles`], [`embedded`]) and the [`RulesetId`];
 //! - `raw`: the files as written, read strictly;

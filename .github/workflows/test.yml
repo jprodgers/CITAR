@@ -301,9 +301,10 @@ jobs:
           info = json.loads(_engine.build_info())
           assert info['version'] == __import__('citar').__version__, info
           print('extension', _engine.__file__, info)
+          # The ruleset is compiled into the extension (crates/citar-engine/data): no file to find.
           counts = json.loads(_engine.ruleset_counts())
           assert counts['techs'] > 50 and counts['nations'] > 40, f'the ruleset did not load: {counts}'
-          assert (paths.package_data() / 'ruleset').is_dir(), 'ruleset missing from the wheel'
+          assert (paths.collectors_dir() / 'collect_hardware.sh').is_file(), 'collectors missing from the wheel'
           assert (paths.web_dir() / 'index.html').is_file(), 'web client missing from the wheel'
           assert (paths.migrations_dir() / 'env.py').is_file(), 'migrations missing from the wheel'
           assert list((paths.migrations_dir() / 'versions').glob('*.py')), 'no migrations in the wheel'

@@ -1,8 +1,10 @@
 //! Where a ruleset comes from, and what identifies it (DESIGN.md 5.2).
 //!
-//! The engine does no I/O, so a ruleset arrives as bytes: [`RulesetFiles`], the 24 files of
-//! `citar/data/` by name. [`embedded`] compiles the shipped files in; a host that loads a modded
-//! ruleset passes its own bytes. Python read the same files from disk (`rules.py:44-85`).
+//! The engine does no I/O, so a ruleset arrives as bytes: [`RulesetFiles`], the 24 files of the
+//! data layout (`ruleset/`, `custom/`, `game.json`) by name. [`embedded`] compiles in the shipped
+//! files, this crate's `data/`; a host that loads a modded ruleset passes its own bytes (the
+//! bindings read `CITAR_RULESET_DIR`'s). Python read the same files from disk
+//! (`rules.py:44-85`).
 //!
 //! A ruleset is identified by its [`RulesetId`], a blake3 over a canonical walk of the parsed
 //! JSON rather than over the bytes: a CRLF checkout or a reformatted file gives the same id, and
@@ -95,7 +97,7 @@ impl<'a> RulesetFiles<'a> {
     }
 }
 
-/// The shipped ruleset, compiled in: `citar/data/{ruleset,custom,game.json}`.
+/// The shipped ruleset, compiled in: this crate's `data/{ruleset,custom,game.json}`.
 #[cfg(feature = "embedded-ruleset")]
 #[must_use]
 pub fn embedded() -> RulesetFiles<'static> {
@@ -103,7 +105,7 @@ pub fn embedded() -> RulesetFiles<'static> {
         ($($name:literal),* $(,)?) => {
             vec![$((
                 $name,
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../citar/data/", $name))
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/data/", $name))
                     .as_slice(),
             )),*]
         };
