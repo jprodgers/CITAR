@@ -47,8 +47,9 @@ class Citar < Formula
   end
 
   test do
-    # `--version` proves the entry point works; `where` proves the package data (the ruleset and the
-    # web client) was installed alongside it, which is the failure a packaging mistake produces.
+    # `--version` proves the entry point works, and `where` that the package imports and finds its
+    # directories. `doctor` below loads the engine's extension, citar._engine, which has the ruleset
+    # compiled in: a build that left it out fails there.
     assert_match "CITAR #{version}", shell_output("#{bin}/citar --version")
     assert_match "saves", shell_output("#{bin}/citar where")
 

@@ -16,8 +16,8 @@
 #
 # One-folder rather than one-file, deliberately. A one-file build unpacks itself to a temporary
 # directory on every launch, which costs seconds on a cold start, trips antivirus heuristics, and
-# breaks any code that resolves a path relative to the executable. CITAR reads a ruleset and serves
-# a web client from disk, so it does the second of those constantly.
+# breaks any code that resolves a path relative to the executable. CITAR serves a web client and
+# runs its migrations from disk, so it does the second of those constantly.
 import sys
 from pathlib import Path
 
@@ -27,12 +27,12 @@ SPEC_DIR = Path(SPECPATH).resolve()
 ROOT = SPEC_DIR.parent
 sys.path.insert(0, str(ROOT))
 
-# Everything CITAR reads at runtime that is not Python: the ruleset JSON, the browser client, the
-# Alembic migration environment, the hardware collectors offered on the Servers page. `citar.paths`
-# resolves all of these relative to the package, which is why they have to land beside it here.
+# Everything CITAR reads at runtime that is not Python: the browser client, the Alembic migration
+# environment, the hardware collectors offered on the Servers page. `citar.paths` resolves all of
+# these relative to the package, which is why they have to land beside it here. The ruleset is no
+# longer among them: the engine compiles it into its extension, citar._engine (`_engine.pyd`),
+# which the bundle must carry instead (crates/citar-engine/DESIGN.md P2.9 leaves that to Phase 5).
 datas = collect_data_files("citar", includes=[
-    "data/**/*.json",
-    "data/**/*.md",
     "data/collectors/*",
     "web/**/*",
     "migrations/**/*.mako",
@@ -103,8 +103,8 @@ windowed_analysis = Analysis(
     noarchive=False,
 )
 
-# Both executables are collected into one folder, which deduplicates the DLLs, the ruleset and the
-# web client, so there is a single copy of Python and the libraries on disk.
+# Both executables are collected into one folder, which deduplicates the DLLs, the engine's
+# extension and the web client, so there is a single copy of Python and the libraries on disk.
 #
 # PyInstaller's MERGE() is the documented way to share dependencies between executables, and it is
 # not used here on purpose: it expects each executable to be COLLECTed into its own folder and to
