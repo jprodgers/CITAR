@@ -449,6 +449,49 @@ class OneWriterTests(SavesCase):
         self.assertLess(took, 1.0, "the saves taken before the flush, a write or two")
         self.assertTrue(s.flush_saves(10))
 
+    def test_a_flush_waits_for_the_newer_autosave_that_carries_one_it_passed_over(self):
+        # An autosave taken before the flush and passed over for a newer one is on the disk only once that newer one
+        # is written. Counting it done when it was passed over let the flush return with the autosave rounds behind
+        # the game (CI's windows runner, test_server_drive's all-bot game: turn 17 on the disk at turn 21).
+        s = self.game([{"type": "bot"}] * 2)
+        self.play_to(s, 4)
+        real = sess.SaveJob.write
+        entered, gates, written = threading.Event(), [threading.Event(), threading.Event()], []
+
+        def held(job):
+            entered.set()
+            gates[min(len(written), 1)].wait(10)
+            real(job)
+            written.append(job.path.name)
+
+        def note(i):
+            with s.lock:
+                s.game.add_thought(0, f"flush note {i}", "note")
+                s.autosave(force=True)
+        flushed, got = threading.Event(), []
+
+        def flush():
+            got.append(s.flush_saves(10))
+            flushed.set()
+        with mock.patch.object(sess.SaveJob, "write", held):
+            note(0)                              # in flight, held
+            self.assertTrue(entered.wait(10))
+            note(1)                              # queued before the flush
+            t = threading.Thread(target=flush)
+            t.start()
+            time.sleep(0.2)                      # the flush has counted the saves taken before it
+            note(2)                              # taken after the flush began: it carries note 1's history
+            gates[0].set()                       # note 0 is written, note 1 passed over for note 2, held
+            self.assertFalse(flushed.wait(0.3), "the flush waits for the save that carries the one it passed over")
+            gates[1].set()
+            self.assertTrue(flushed.wait(10))
+            t.join(10)
+        self.assertEqual(got, [True])
+        self.assertEqual(written, ["autosave.citar", "autosave.citar"])
+        back = self.m.load(s.folder / "autosave.citar")
+        self.assertEqual([t["text"] for t in back.game.thoughts() if t["text"].startswith("flush note")],
+                         [f"flush note {i}" for i in range(3)])
+
 
 @needs_test_ops
 class ListingTests(SavesCase):

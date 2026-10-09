@@ -1116,7 +1116,8 @@ class SaveWriter:
         self._cv = threading.Condition()
         self._jobs: deque = deque()
         self._submitted = 0                  # the saves taken so far
-        self._finished = 0                   # every save before this ticket is written or passed over
+        # every save before this ticket is written (or failed), or was passed over for one that is
+        self._finished = 0
         self._closed = False
         self._thread: Optional[threading.Thread] = None
         # A session dropped without stop() (a test's, an error path's) ends its thread too, once the saves it took are
@@ -1136,25 +1137,26 @@ class SaveWriter:
                 self._thread.start()
             self._cv.notify_all()
 
-    def _take(self) -> Optional[SaveJob]:
-        """The next save to write, passing over autosaves a newer queued one replaces. Condition held."""
+    def _take(self) -> tuple[Optional[SaveJob], list]:
+        """The next save to write, and the autosaves passed over for it (a newer queued autosave replaces them; the
+        last one queued is never passed over, so there are none without a save to write). Condition held."""
+        passed = []
         while self._jobs:
             job = self._jobs.popleft()
             if job.autosave and any(j.autosave for j in self._jobs):
                 job.superseded = True
                 job.release()                # its history is in the journal's queue, which the newer one appends
-                job.done.set()
-                self._finished = job.ticket + 1
+                passed.append(job)
                 continue
-            return job
-        return None
+            return job, passed
+        return None, passed
 
     def _run(self):
         while True:
             with self._cv:
                 while not self._jobs and not self._closed:
                     self._cv.wait()
-                job = self._take()
+                job, passed = self._take()
                 if job is None:              # closed, and every save taken is written
                     self._cv.notify_all()
                     return
@@ -1169,11 +1171,16 @@ class SaveWriter:
             finally:
                 # nothing of a written save is kept while the thread waits for the next (an idle game's may never come)
                 job.release()
+                # a passed-over autosave's history reaches the disk with this save's, so it is done only now, and
+                # counts as finished (``drain``) with it: its ticket is below this one's
+                for p in passed:
+                    p.error = job.error
+                    p.done.set()
                 job.done.set()
                 with self._cv:
                     self._finished = job.ticket + 1
                     self._cv.notify_all()
-                job = None
+                job = passed = None
 
     def _abandon(self):
         """The session is gone without being stopped: write what it took, then end. Never waits (a finalizer)."""
@@ -1182,8 +1189,10 @@ class SaveWriter:
             self._cv.notify_all()
 
     def drain(self, timeout: Optional[float] = None) -> bool:
-        """Wait until every save taken before the call is written (or passed over); whether they were within
-        ``timeout``. Saves taken meanwhile are not waited for, so a game that plays on cannot keep it waiting."""
+        """Wait until every save taken before the call is written, or passed over for a newer autosave that is written
+        (whose history is on the disk with it); whether they were within ``timeout``. Saves taken meanwhile are waited
+        for only as the carrier of one passed over: at most the write in flight and one more, so a game that plays on
+        cannot keep it waiting."""
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._cv:
             target = self._submitted
