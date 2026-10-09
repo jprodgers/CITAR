@@ -60,7 +60,7 @@ def python_engine_only(successor: str):
 def rust_pending(package: str):
     """Skip on Rust until ``package`` makes the test pass there."""
     if not isinstance(package, str) or not _PACKAGE.fullmatch(package):
-        raise ValueError(f"rust_pending names a package, as '2-11', not {package!r}")
+        raise ValueError(f"rust_pending names a package, as '2-12', not {package!r}")
 
     def deco(target):
         skipped = unittest.skipIf(RUST, f"passes on Rust from package {package}")(target)

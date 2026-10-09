@@ -139,8 +139,8 @@ class MarkerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 backends.rust_pending(bad)
 
-        class Probe(unittest.TestCase):
-            @backends.rust_pending("2-11")
+        class Probe(unittest.TestCase):          # "2-99" stands in for a package to come: none is left
+            @backends.rust_pending("2-99")
             @backends.python_engine_only("tests.test_backends.MarkerTests.test_pending_names_a_package_to_come")
             def test_x(self):
                 pass
@@ -179,7 +179,7 @@ class MarkerTests(unittest.TestCase):
         self.assertTrue(successor_holds(successor, rust))
 
         class Pending:
-            _backend = (("rust_pending", "2-11"),)
+            _backend = (("rust_pending", "2-99"),)
 
             def test_big_sizes_exist(self):
                 pass
