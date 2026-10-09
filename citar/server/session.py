@@ -777,6 +777,12 @@ class GameSession:
                         break
             if self.ai_delay > 0:
                 time.sleep(self.ai_delay)
+        if self.crashed:
+            # The driver makes a seat's agent after it looks at the game, without the lock: a crash in between has
+            # already cancelled the others, and this one goes the same way.
+            with self.lock:
+                for pid in list(self.agents):
+                    self.cancel_agent(pid)
 
     def wait_for_turn(self, pid: int, timeout: float) -> dict:
         """Long-poll: returns when it's pid's turn, a negotiation awaits pid, or the game ends ("game_over"), or at

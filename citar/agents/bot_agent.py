@@ -50,11 +50,17 @@ class BotAgent:
         :attr:`REPLY_WAIT_SECONDS` of unpaused time: once it is spent, the chats still waiting on others are closed
         as expired, through the session, and the turn is driven on to its end. A chat left waiting on the bot's own
         seat (one its model owns, which only a hybrid seat answers) is not waited for: the session's driver closes it
-        and ends the turn, as it ends any turn an agent leaves open.
+        and ends the turn, as it ends any turn an agent leaves open. A pause holds the turn before its first drive as
+        between drives.
         """
         g = session.game
         with session.lock:
-            if g.current != pid or g.phase != "playing" or session.crashed:
+            # The driver looks at the pause before it calls this, without the lock: a pause that lands in between
+            # would otherwise see the whole turn played, and autosaved, in a game already paused.
+            session._await(lambda: not session.paused, float("inf"),
+                           halted=lambda: self.cancelled or bool(session.crashed))
+            if (g.current != pid or g.phase != "playing" or session.crashed or session.stopped
+                    or self.cancelled):
                 return
             budget = float(self.REPLY_WAIT_SECONDS)
             stop = session.drive_bots(pid)
