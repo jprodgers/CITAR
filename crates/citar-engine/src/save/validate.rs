@@ -17,6 +17,10 @@
 //!   counters from 1 and within `MAX_ENTITY_ID`, the barbarian aggression a percentage, map
 //!   dimensions the grid takes, at most 256 founded religions;
 //! - **shape:** majors and only majors have major data, city-states and only city-states theirs;
+//!   a city-state's ally is a major, as the game makes it (`update_ally`): a civilization's stats
+//!   read those of the city-states allied with it, so a city-state allied with itself, or two
+//!   allied with each other, would read their own while computing them, a cycle the memos refuse
+//!   with a panic;
 //! - **floats:** every one finite, by the canonical walk (`save::canon::check_finite`);
 //! - a driver's memory within `DriverMemory::MAX_LEN`.
 //!
@@ -403,6 +407,9 @@ impl Check<'_> {
             self.players(&format!("{cp}.protectors"), cs.protectors);
             if let Some(a) = cs.ally() {
                 self.player(&format!("{cp}.ally"), a);
+                if st.players().get(a).is_some_and(|q| !q.is_major()) {
+                    self.err(format!("{cp}.ally"), format!("player {a} is not a major"));
+                }
             }
             for (i, q) in cs.quests.iter().enumerate() {
                 let qp = format!("{cp}.quests[{i}]");

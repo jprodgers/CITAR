@@ -988,9 +988,12 @@ pub fn build(r: &'static Ruleset, seed: u64, shape: &Shape) -> State {
         host: HostOnly(host),
     };
     let mut st = State::from_parts(parts).expect("the generated parts fit");
+    // An ally is a living major, as the game makes it: `save::validate` refuses any other.
+    let majors: Vec<PlayerId> =
+        living.iter().copied().filter(|&q| kind(q) == PlayerKind::Major).collect();
     for p in players.iter().copied().filter(|&p| kind(p) == PlayerKind::CityState) {
         if g.chance(50) {
-            let ally = g.pick(&living);
+            let ally = g.pick(&majors);
             let _changed = st.set_ally(p, Some(ally)).expect("a city-state");
         }
     }

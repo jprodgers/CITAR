@@ -9,7 +9,8 @@
 //! - the three checked-in states digest as the golden set `states` says (gate 5, which the
 //!   determinism workflow compares across the five targets);
 //! - the digest ignores map insertion order and the host's heads (gate 6);
-//! - NaN is refused by the save, the digest and validation (gate 7);
+//! - NaN is refused by the save, the digest and validation (gate 7), and so is a city-state
+//!   allied with anything but a major;
 //! - random chunk and frame sequences round-trip (gate 8);
 //! - `summary()` of the checked-in duel state matches `data/summary_duel.json` (gate 9).
 //!
@@ -550,6 +551,37 @@ fn validation_reaches_memories_opinions_and_counters() {
             },
             &format!("ids.{what}"),
         );
+    }
+}
+
+/// A city-state's ally is a major, dead or alive, as the game makes it. A civilization's stats
+/// read those of the city-states allied with it, so one allied with itself read its own while
+/// computing them and panicked on its first turn: the synthetic tiny state of seed 2026 did, when
+/// the generator drew allies among every living player.
+#[test]
+fn a_city_state_allied_with_anything_but_a_major_is_refused() {
+    let st = states::build(rules(), 53, &Shape::TINY);
+    let of = |kind: fn(&citar_engine::state::players::Player) -> bool| {
+        st.players().iter().find(|(_, p)| kind(p)).map(|(id, _)| id).expect("a player")
+    };
+    let cs = of(|p| p.is_city_state());
+    let barbarians = of(|p| !p.is_major() && !p.is_city_state());
+    let allied = |ally: PlayerId| {
+        let mut st = st.clone();
+        let _changed = st.set_ally(cs, Some(ally)).expect("a city-state");
+        save::validate(&st, rules())
+    };
+    for ally in [cs, barbarians] {
+        let errs = allied(ally).expect_err("not a major");
+        let want = format!("player {} is not a major", ally.0);
+        assert!(
+            errs.iter().any(|e| e.path.ends_with(".city_state.ally") && e.message == want),
+            "{errs:?}"
+        );
+    }
+    // Every major will do, the eliminated one included (Shape::TINY's last major).
+    for (major, p) in st.players().iter().filter(|(_, p)| p.is_major()) {
+        assert!(allied(major).is_ok(), "{major} (alive: {})", p.alive());
     }
 }
 

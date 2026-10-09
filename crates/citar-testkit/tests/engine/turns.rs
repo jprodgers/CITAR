@@ -11,7 +11,8 @@
 //!   starting techs, the first turn; and what it refuses;
 //! - a chain of round digests, and a driver's memory kept in the save and in its seat all turn;
 //! - a driver does not end its own turn: `drive` does, so the chain is the same whoever asks;
-//! - the benchmarks' synthetic gargantuan state, which holds what no game reaches, ends a turn.
+//! - synthetic states, which hold what no game reaches, play: the benchmarks' gargantuan state
+//!   ends a turn, and others, their clocks set back, play two rounds.
 
 use citar_engine::api::{ErrCode, inspect, testops};
 use citar_engine::base::ids::{NationId, NegotiationId, PlayerId, TechId};
@@ -22,10 +23,10 @@ use citar_engine::game::{
 };
 use citar_engine::rules::Ruleset;
 use citar_engine::save::chain::DigestChain;
-use citar_engine::state::Phase;
 use citar_engine::state::chronicle::Chronicle;
 use citar_engine::state::config::MapSource;
 use citar_engine::state::players::DriverMemory;
+use citar_engine::state::{Phase, State, TurnClock};
 use citar_testkit::agents::RandomAgent;
 use citar_testkit::rulesets;
 use citar_testkit::script::map_doc;
@@ -574,4 +575,51 @@ fn the_synthetic_gargantuan_state_ends_a_turn() {
     g.end_turn(me).expect("the current player's turn");
     assert_ne!((g.turn(), g.current()), (turn, me), "the turn passed on");
     assert!(earned(&g) > before, "great people were born: {before:?}, then {:?}", earned(&g));
+}
+
+/// Synthetic state `seed` of `shape` as a game in play: at turn 2, the first living major to
+/// move, no winner and no victory or turn limit to end it, every check off (random values break
+/// invariants no turn is needed to break).
+fn in_play(r: &'static Ruleset, seed: u64, shape: &Shape) -> Game {
+    let mut parts = states::build(r, seed, shape).into_parts();
+    let first = parts.players.iter().find(|(_, p)| p.is_major() && p.alive()).map(|(id, _)| id);
+    parts.clock = TurnClock {
+        turn: 2,
+        current: first.expect("a living major"),
+        turn_started: false,
+        phase: Phase::Playing,
+        winner: None,
+        victory: None,
+    };
+    parts.config.turn_limit = 10_000;
+    parts.config.disabled_victories = r.victories().iter().map(|(id, _)| id).collect();
+    let st = State::from_parts(parts).expect("the synthetic parts fit");
+    let mut g = Game::from_state(r, st, Chronicle::new()).expect("a sound state");
+    g.set_debug_options(DebugOptions::OFF);
+    g
+}
+
+#[test]
+fn synthetic_states_set_back_play_two_rounds() {
+    // Their great person points, units scattered anywhere and city-states' allies are what no game
+    // reaches; the tiny state of seed 2026 panicked on its first turn when a city-state could be
+    // allied with itself (its stats read its own while computing them).
+    let r = Ruleset::shared();
+    let cases =
+        [(Shape::TINY, 2026..2032), (Shape::DUEL, 2026..2029), (Shape::STANDARD, 2026..2028)];
+    for (shape, seeds) in cases {
+        for seed in seeds {
+            let mut g = in_play(r, seed, &shape);
+            let mut calls = 0;
+            while g.turn() < 4 && g.phase() == Phase::Playing {
+                calls += 1;
+                assert!(calls <= 2 * g.state().players().len(), "{shape:?} {seed}: no end");
+                let who = g.current();
+                if let Err(e) = g.end_turn(who) {
+                    panic!("{shape:?} {seed}, turn {}, {who:?}: {}", g.turn(), e.message);
+                }
+            }
+            assert_eq!((g.turn(), g.phase()), (4, Phase::Playing), "{shape:?} {seed}");
+        }
+    }
 }
