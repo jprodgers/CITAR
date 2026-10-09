@@ -15,8 +15,10 @@
 //! targets) are agreement rates, which `cargo refcheck bot-agreement` reports
 //! ([`crate::agreement`]); a choice that differs is no difference here. The Rust side is
 //! `citar_bot::decisions::ask` of the same bot ([`ask_recorded`]). Stages 2 and 3 record no value
-//! of their own: what an attack weighs is the combat preview, which `combat_previews` compares,
-//! and the worth of a negotiation's proposal in the advice is `deal_checks`' `bot_value`.
+//! of their own: what an attack weighs is the combat preview, which `combat_previews` compares;
+//! the advice's power ratios are held within the tolerance by the agreement, as part of its war
+//! readiness; and the worth of a negotiation's proposal in the advice is `deal_checks`'
+//! `bot_value`.
 //!
 //! Stage 3's luxury trades and advice visit the civilizations met in an order: Python's in the
 //! order they were met, which its state records (`players[*].met`, [`met_orders`]), the Rust

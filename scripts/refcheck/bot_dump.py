@@ -423,6 +423,11 @@ def _each(m: dict, kind: str):
     return None if isinstance(v, dict) and "error" in v else v
 
 
+def _advice(m: dict) -> dict:
+    """The advice without a negotiation (the states hold none), or nothing when the question raised."""
+    return (_each(m, "advice") or {}).get("none") or {}
+
+
 #: The choices an agreement rate is computed over, with the item each compares (P2.3.11): for one major's answers,
 #: the items as (key, answer). Values (tech values, defences, threats, the context's numbers) are compared with a
 #: tolerance instead.
@@ -444,7 +449,9 @@ CHOICES = {
     "war_target": ("civilization", lambda m: [("war_target", _each(m, "war_target"))]),
     "reachable": ("rival", lambda m: list((_each(m, "reachable") or {}).items())),
     "lux_trade": ("civilization", lambda m: [("lux_trade", _each(m, "lux_trade"))]),
-    "advice.wants": ("civilization", lambda m: [("wants", ((_each(m, "advice") or {}).get("none") or {}).get("wants"))]),
+    "advice.war_readiness": ("rival", lambda m: [(w["player"], w) for w in _advice(m).get("war_readiness") or []]),
+    "advice.spare_luxuries": ("civilization", lambda m: [("spare_luxuries", _advice(m).get("spare_luxuries"))]),
+    "advice.wants": ("civilization", lambda m: [("wants", _advice(m).get("wants"))]),
 }
 
 

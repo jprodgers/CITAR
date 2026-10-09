@@ -8,11 +8,16 @@
 //! and as if it could, which cities it counts in danger or wanting a garrison, its best three
 //! sites, its spare units; what each of its units would attack, and the city its war is fought
 //! for with the plan around it; the city of each rival it could reach, the luxury trades it would
-//! offer, and what its advice would ask for. A choice counts only on the items where either engine's answer says
-//! something (a choice that is not null, a list that is not empty, a flag that is true), so a
-//! port that never answers cannot pass; `bot_dump.py`'s `CHOICES` named the same items. The
-//! items are matched by what names them (a tech mode, a city's id), never by their place in the
-//! answer; an item only one engine names is considered, and is a miss.
+//! offer, and its advice: the war it fights or prepares on each rival (its power against theirs,
+//! whether its army has gathered), the luxuries it has to spare, and what it would ask for. A
+//! choice counts only on the items where either engine's answer says something (a choice that
+//! is not null, a list that is not empty, a flag that is true), so a port that never answers
+//! cannot pass; `bot_dump.py`'s `CHOICES` named the same items. The items are matched by what
+//! names them (a tech mode, a city's id), never by their place in the answer; an item only one
+//! engine names is considered, and is a miss. Two answers agree when they are equal under
+//! refcheck's number rule (integers exact, other numbers within its tolerance), which matters
+//! for the one number a choice holds that is no id, tile or count: the power ratio of the
+//! advice's war readiness, rounded to two decimals on each side.
 //!
 //! Every choice that differs is attributed to a cause ([`Cause`]). The one cause there is today:
 //! an intended engine difference (`refcheck/intended.toml`) moved a value the choice weighs.
@@ -35,7 +40,7 @@ use serde_json::{Value, json};
 use crate::answer::bot_decisions::{
     MetOrders, answer_row, ask_recorded, met_orders, player, raised, recorded, values_of,
 };
-use crate::compare::{self, CompareSpec, Diff, Options, Pattern};
+use crate::compare::{self, CompareSpec, Diff, Options, Pattern, value};
 use crate::fixture::{self, Fixture, FixtureRef, FixtureSet};
 use crate::intended::Intended;
 use crate::run::INTENDED;
@@ -76,6 +81,11 @@ pub enum Choice {
     Reachable,
     /// The luxury trades it would offer, in order.
     LuxTrade,
+    /// Per rival its advice names: the war it fights or prepares on them (whether at war,
+    /// whether preparing, the power ratio, whether the army has gathered).
+    AdviceWarReadiness,
+    /// The luxuries its advice has to spare, sorted.
+    AdviceSpareLuxuries,
     /// What its advice would ask for, in order (at most five).
     AdviceWants,
 }
@@ -92,7 +102,7 @@ struct Item {
 
 impl Choice {
     /// Every kind, in `bot_dump.py`'s `CHOICES` order.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
         Self::NextResearch,
         Self::FreeNow,
         Self::PreferredFree,
@@ -110,6 +120,8 @@ impl Choice {
         Self::WarTarget,
         Self::Reachable,
         Self::LuxTrade,
+        Self::AdviceWarReadiness,
+        Self::AdviceSpareLuxuries,
         Self::AdviceWants,
     ];
 
@@ -133,6 +145,8 @@ impl Choice {
             Self::WarTarget => "war_target",
             Self::Reachable => "reachable",
             Self::LuxTrade => "lux_trade",
+            Self::AdviceWarReadiness => "advice.war_readiness",
+            Self::AdviceSpareLuxuries => "advice.spare_luxuries",
             Self::AdviceWants => "advice.wants",
         }
     }
@@ -154,7 +168,9 @@ impl Choice {
             Self::WarTarget => Question::WarTarget,
             Self::Reachable => Question::Reachable,
             Self::LuxTrade => Question::LuxTrade,
-            Self::AdviceWants => Question::Advice,
+            Self::AdviceWarReadiness | Self::AdviceSpareLuxuries | Self::AdviceWants => {
+                Question::Advice
+            }
         }
     }
 
@@ -173,7 +189,9 @@ impl Choice {
     ///   and the army it counts gathered is its military (2291-2339).
     /// - The luxury trades weigh the luxuries it owns, and a purchase its happiness and gold per
     ///   turn (2505-2556); the advice's wants the luxuries it owns, its wars and its military,
-    ///   whose power the peace it would ask for weighs (2756-2770).
+    ///   whose power the peace it would ask for weighs (2756-2770); its war readiness its wars
+    ///   and its military, whose power over the rival's it shows (2736-2756); the luxuries it
+    ///   has to spare the luxuries it owns (2757-2758).
     /// - The city of a rival it could reach reads its cities, the map and what it has explored,
     ///   none of which the recording holds (2478-2492).
     /// - The free technology (the most expensive available), the policy, the pantheon and the
@@ -202,6 +220,11 @@ impl Choice {
                 Some("majors[*].context.hap".to_owned()),
                 Some("majors[*].context.gpt".to_owned()),
             ],
+            Self::AdviceWarReadiness => vec![
+                Some("majors[*].context.wars.**".to_owned()),
+                Some("majors[*].context.military.**".to_owned()),
+            ],
+            Self::AdviceSpareLuxuries => vec![Some("majors[*].context.lux_owned.**".to_owned())],
             Self::AdviceWants => vec![
                 Some("majors[*].context.lux_owned.**".to_owned()),
                 Some("majors[*].context.wars.**".to_owned()),
@@ -224,6 +247,8 @@ impl Choice {
     fn items(self, answer: &Value) -> Vec<Item> {
         let one = |choice: Value| vec![Item { key: String::new(), at: None, choice }];
         let at = |k: &str| answer.get(k).cloned().unwrap_or(Value::Null);
+        // The advice without a negotiation: the states hold none (P2.3.11 point 3).
+        let advice = |k: &str| answer.get("none").and_then(|a| a.get(k)).cloned();
         let modes = |key: &str| {
             ["classic", "potential"]
                 .iter()
@@ -286,9 +311,19 @@ impl Choice {
                     choice: city.clone(),
                 })
                 .collect(),
-            Self::AdviceWants => {
-                one(answer.get("none").and_then(|a| a.get("wants")).cloned().unwrap_or(Value::Null))
-            }
+            Self::AdviceWarReadiness => advice("war_readiness")
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|w| Item {
+                    key: format!("rival {}", w["player"]),
+                    at: Some(w["player"].to_string()),
+                    choice: w.clone(),
+                })
+                .collect(),
+            Self::AdviceSpareLuxuries => one(advice("spare_luxuries").unwrap_or(Value::Null)),
+            Self::AdviceWants => one(advice("wants").unwrap_or(Value::Null)),
         }
     }
 }
@@ -318,6 +353,12 @@ fn says(v: &Value) -> bool {
     !matches!(v, Value::Null | Value::Bool(false))
         && !v.as_array().is_some_and(Vec::is_empty)
         && !v.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+/// Whether two engines' choices of an item agree: both name it, and the choices are equal under
+/// refcheck's number rule (integers exact, other numbers within its tolerance).
+fn agree(python: Option<&Value>, rust: Option<&Value>) -> bool {
+    python.zip(rust).is_some_and(|(p, r)| value::values_equal(p, r))
 }
 
 /// Why a choice differs.
@@ -561,7 +602,7 @@ pub fn compare_state_in_order(
                     continue;
                 }
                 t.considered += 1;
-                if p == x {
+                if agree(p.as_ref(), x.as_ref()) {
                     t.agree += 1;
                     continue;
                 }

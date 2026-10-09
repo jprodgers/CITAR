@@ -348,17 +348,23 @@ its misses. `war_target` compares the whole plan (the city, the rally point, `ad
 made from none; it weighs the civilization's wars and its military. At package 2-03 both agree on every
 item considered: 19 attacks and 8 war targets on the committed states, 675 and 151 on the corpus.
 
-Stage 3 (package 2-05) adds three choices and no value: `reachable`, matched rival by rival (`rival <id>`),
+Stage 3 (package 2-05) adds five choices and no value: `reachable`, matched rival by rival (`rival <id>`),
 which weighs no recorded value; `lux_trade`, the offers in order, which weighs the luxuries the civilization
-owns, its happiness and its gold per turn; and `advice.wants`, the advice's wants without a negotiation, which
-weigh the luxuries owned, the wars and the military. The luxury trades and the advice visit the civilizations
+owns, its happiness and its gold per turn; and the advice without a negotiation, held whole in three kinds
+(its `deal_value` is null there): `advice.war_readiness`, matched rival by rival, each war it fights or
+prepares (at war, preparing, the power ratio, whether its army has gathered), which weighs the wars and the
+military; `advice.spare_luxuries`, which weighs the luxuries owned; and `advice.wants`, which weighs the
+luxuries owned, the wars and the military. Two answers agree when they are equal under refcheck's number rule
+(integers exact, other numbers within the tolerance), which matters only for the power ratio, rounded to two
+decimals on each side. The luxury trades and the advice visit the civilizations
 met in an order: Python's in the order they were met, which its state lists (`players[*].met`), the Rust bot's
 in player-id order (the engine keeps no such order, `met-lists-in-player-id-order`). `bot-agreement` asks them
 in Python's order (`citar_bot::decisions::ask_in_order`), so a choice differs only where the bot decides
 differently; asked in player-id order the corpus has 21 trades and 10 wants to someone else, or in another
 order. The worth of a negotiation's proposal in the advice is `deal_checks`' `bot_value`, which `--with-bot`
-compares. At package 2-05 every kind agrees on every item considered: 45 reachable cities, 1 trade and 4
-wants on the committed states, 1,737, 57 and 168 on the corpus; `bot_value` is clean on both.
+compares. At package 2-05 every kind agrees on every item considered: 45 reachable cities, 1 trade, 8 wars, 1
+civilization with luxuries to spare and 4 wants on the committed states; 1,737, 57, 160, 168 and 168 on the
+corpus; `bot_value` is clean on both.
 
 ## The statistical baseline
 
