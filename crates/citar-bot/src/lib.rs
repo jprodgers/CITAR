@@ -17,8 +17,10 @@
 //! its phases in Python's order. 2-01b ported the economy (the context, research, policies,
 //! great people and the pantheon, production through the engine's advisor, gold, faith,
 //! settlers, workers and scouts) and [`decisions`], the sub-decisions the reference checks ask;
-//! 2-03 ported units and fighting (with the second stage of the decisions), and 2-05 ports
-//! diplomacy, [`advice`] and [`evaluate`], which return neutral values until then. DESIGN.md P2.3.10 maps every line of `basic.py` to its home.
+//! 2-03 ported units and fighting (with the second stage of the decisions), and 2-05 diplomacy:
+//! peace, agreements, wars prepared and declared, trades, city-state gifts, spies, the answers to
+//! negotiations, [`advice`] and [`evaluate`] (with the third stage of the decisions). DESIGN.md
+//! P2.3.10 maps every line of `basic.py` to its home.
 
 #![forbid(unsafe_code)]
 
@@ -326,20 +328,24 @@ pub struct Advice {
 }
 
 /// The advice of `spec`'s bot for seat `pid`, about negotiation `nid` if one is given (DESIGN.md
-/// P2.3.8). It reads the game and the seat's memory and writes nothing.
-///
-/// The stub of package 2-00a advises nothing; 2-05 ports it.
+/// P2.3.8, `BasicBot.advice`, basic.py:2713-2771). It reads the game and the seat's memory and
+/// writes nothing. The idle bot advises nothing.
 #[must_use]
 pub fn advice(g: &Game, pid: PlayerId, spec: &BotSpec, nid: Option<NegotiationId>) -> Advice {
-    let _ = (g, pid, spec, nid);
-    Advice::default()
+    if spec.version != VersionId::Basic1 {
+        return Advice::default();
+    }
+    let memory = seat_memory(g, pid);
+    let mind =
+        basic1::diplomacy::evaluate::Mind { spec, params: spec.tuning.params(), memory: &memory };
+    let met = basic1::diplomacy::met_majors(g, pid);
+    basic1::advice::advice(g, mind, pid, nid, &met)
 }
 
 /// What `spec`'s bot, playing `pid`, makes of a deal with `other` in which it gives `give` and
-/// receives `receive`: its value in gold, from `pid`'s side (`BasicBot.evaluate`,
-/// basic.py:2558-2643).
-///
-/// The stub of package 2-00a values every deal at 0, neither good nor bad; 2-05 ports it.
+/// receives `receive`: its worth in gold, from `pid`'s side, positive for a deal worth accepting
+/// (`BasicBot.evaluate`, basic.py:2558-2643). It reads the seat's memory for the wars it plans
+/// or prepares. The idle bot values every deal at 0, neither good nor bad.
 #[must_use]
 pub fn evaluate(
     g: &Game,
@@ -349,8 +355,18 @@ pub fn evaluate(
     give: &[DealItem],
     receive: &[DealItem],
 ) -> f64 {
-    let _ = (g, spec, pid, other, give, receive);
-    0.0
+    if spec.version != VersionId::Basic1 {
+        return 0.0;
+    }
+    let memory = seat_memory(g, pid);
+    let mind =
+        basic1::diplomacy::evaluate::Mind { spec, params: spec.tuning.params(), memory: &memory };
+    basic1::diplomacy::evaluate::evaluate(g, mind, pid, other, give, receive)
+}
+
+/// The `basic-1` memory seat `pid` keeps in `g` (fresh if it keeps none, or another driver's).
+fn seat_memory(g: &Game, pid: PlayerId) -> Memory {
+    g.player(pid).and_then(|p| p.seat().driver()).map(Memory::decode).unwrap_or_default()
 }
 
 // The content code's helper, here so that its tests run with the bot's.

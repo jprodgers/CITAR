@@ -56,12 +56,7 @@ CONDITIONAL = {
 #: Answers (by battery key, or a record's field below one) vacant on one backend alone, and why: their shapes
 #: compare nothing there. An entry that is no longer vacant on one side alone fails the test, so the list cannot go
 #: stale.
-VACANT = {
-    "EngineGame.bot_advice": "package 2-05 ports the advice: basic-1's is still 2-00a's stub, which advises nothing "
-                             "(crates/citar-bot/src/lib.rs, advice)",
-    "EngineGame.negotiation:answered.deal_id": "package 2-05 ports the answers: basic-1 still rejects every proposal, "
-                                               "so the bot's answer concludes no deal on Rust",
-}
+VACANT: dict = {}
 #: The facade's names and EngineGame's members this test does not call by shape, and why.
 NOT_BY_SHAPE = {
     "EngineGame.python_game": "the Python engine's own game: the Rust backend has none, by design (BackendError)",
@@ -136,8 +131,7 @@ def duel_battery(B) -> dict:
     probe = g.open_negotiation_as(1, 0, "A word, out of turn.")
     out["EngineGame.open_negotiation_as"] = probe
     out["EngineGame.close_negotiation"] = g.close_negotiation(probe["negotiation_id"], "expired", "(no reply in time)")
-    # A deal both engines conclude alike: seat 1 accepts a second gift itself (the bots answer differently until 2-05,
-    # so the first gift's answer is no deal on Rust).
+    # A deal both engines conclude alike: seat 1 accepts a second gift itself (the bot accepted the first).
     gift = g.execute(0, "open_negotiation", {"to": 1, "message": "A gift between neighbours.",
                                             "give": [{"type": "gold", "amount": 20}]})["negotiation_id"]
     out["execute respond_negotiation accept"] = g.execute(1, "respond_negotiation", {

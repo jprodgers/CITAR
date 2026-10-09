@@ -207,10 +207,11 @@ jobs:
           shared-key: refcheck
 
       - name: Reference checks
-        # The committed fixtures (refcheck/fixtures-mini and fixtures-late) on every group. An
-        # unexplained difference fails the job where refcheck/enforced.toml covers it; elsewhere it
-        # is reported, and the ratchet below holds its count. The cargo refcheck alias, with --locked.
-        run: cargo run --locked --package citar-refcheck --profile ci -- run --json refcheck-report.json
+        # The committed fixtures (refcheck/fixtures-mini and fixtures-late) on every group, the
+        # bot's deal valuations included (--with-bot, package 2-05). An unexplained difference
+        # fails the job where refcheck/enforced.toml covers it; elsewhere it is reported, and the
+        # ratchet below holds its count. The cargo refcheck alias, with --locked.
+        run: cargo run --locked --package citar-refcheck --profile ci -- run --with-bot --json refcheck-report.json
 
       - name: Ratchet
         # No group's counts may rise above refcheck/ratchet.json, and the file must hold the current

@@ -5,7 +5,6 @@ the seat's model owns war the bot neither prepares nor declares one, but it stil
 model declares.
 """
 from = "tests/test_bot_diplomacy.py::WarSwitchTests::test_the_bot_never_declares_war_but_fights_the_war_it_is_given"
-needs = "2-05"
 
 [[step]]
 set = { eager = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 1, war_chance_aggr = 0, war_min_turn = 0, war_power_ratio = 0, war_power_ratio_aggr = 0, war_max_threat = 100, declare_ratio = 0, declare_ratio_aggr = 0, war_need_min = 1, war_need_max = 1, war_need_base = 1, prep_gather = false } }

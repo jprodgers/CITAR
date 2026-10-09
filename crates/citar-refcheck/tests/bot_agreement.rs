@@ -1,6 +1,6 @@
-//! The bot's choices against the Python bot's on the committed states (packages 2-01b and 2-03,
-//! gates 2 and 1; DESIGN.md P2.3.11): every kind of stages 1 and 2 at its floor of 95% over the
-//! items where either engine says something, and every miss with a cause. The values are refcheck's
+//! The bot's choices against the Python bot's on the committed states (packages 2-01b, 2-03 and
+//! 2-05, gates 2, 1 and 2; DESIGN.md P2.3.11): every kind of stages 1 to 3 at its floor of 95%
+//! over the items where either engine says something, and every miss with a cause. The values are refcheck's
 //! `bot_decisions` group, which `cargo refcheck run` enforces. Recordings edited by hand show
 //! that a miss is found, that items are matched by what names them, and that a miss is put down
 //! to an intended entry only when the entry explains a value that choice weighs.
@@ -10,10 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
+use citar_engine::base::ids::PlayerId;
 use citar_engine::game::Game;
 use citar_engine::rules::Ruleset;
 use citar_refcheck::agreement::{self, Cause, Choice, FLOOR, Miss, Tally};
-use citar_refcheck::answer::bot_decisions::recorded;
+use citar_refcheck::answer::bot_decisions::{MetOrders, met_orders, recorded};
 use citar_refcheck::fixture::{self, Fixture, FixtureSet};
 use citar_refcheck::intended::Intended;
 use citar_refcheck::ratchet::DEFAULT_FIXTURES;
@@ -67,6 +68,11 @@ fn the_bot_chooses_as_pythons_did_on_the_committed_states() {
     assert_eq!(considered(Choice::Spare), 21);
     assert_eq!(considered(Choice::Attacks), 19);
     assert_eq!(considered(Choice::WarTarget), 8);
+    assert_eq!(considered(Choice::Reachable), 45);
+    assert_eq!(considered(Choice::LuxTrade), 1);
+    assert_eq!(considered(Choice::AdviceWarReadiness), 8);
+    assert_eq!(considered(Choice::AdviceSpareLuxuries), 1);
+    assert_eq!(considered(Choice::AdviceWants), 4);
     holds(&committed(), "the committed states");
 }
 
@@ -82,6 +88,12 @@ fn the_bot_chooses_as_pythons_did_on_the_corpus() {
 
 /// A committed state's recording, and its game loaded as refcheck loads it.
 fn state(name: &str) -> (Game, Vec<Value>) {
+    let (g, rows, _) = state_and_order(name);
+    (g, rows)
+}
+
+/// [`state`], with the order Python's state lists each player's civilizations met in.
+fn state_and_order(name: &str) -> (Game, Vec<Value>, MetOrders) {
     let sets = committed();
     let r = fixture::discover(&sets)
         .expect("the fixtures")
@@ -91,12 +103,15 @@ fn state(name: &str) -> (Game, Vec<Value>) {
     let f = Fixture::load(&r, &sets).expect("it loads");
     let rows = recorded(&root(), &f.meta.case, f.meta.turn).expect("recorded").to_vec();
     let (g, _) = Game::from_python(Ruleset::shared(), f.state.get().as_bytes()).expect("a game");
-    (g, rows)
+    (g, rows, met_orders(f.state.get()))
 }
 
 const DUEL: &str = "duel-continents-normal/t50";
 /// A state of a war: both civilizations name a war target, and units of each would attack.
 const WAR: &str = "scenario-duel-fractal/t10";
+/// A state where a civilization would trade a luxury (player 3, Salt to player 4), and one wants
+/// it (player 4).
+const TRADE: &str = "standard-pangaea-normal-s1031/t120";
 /// A state of the intended entry `marble-bonus-in-its-own-city`: player 2's potential values of
 /// the four technologies it names differ, as the group's run shows; player 3's do not.
 const MARBLE: &str = "scenario-small-continents-s3001/t61";
@@ -338,4 +353,167 @@ cases = ["{WAR}"]
     let war = of(&misses, Choice::WarTarget);
     let Cause::Intended { ids, .. } = &war[0].cause else { panic!("{misses:?}") };
     assert_eq!(ids, &["an-army".to_owned()]);
+}
+
+#[test]
+fn stage_three_asks_in_pythons_order_of_meeting_and_a_trade_weighs_the_luxuries_owned() {
+    let (g, rows, met) = state_and_order(TRADE);
+    let list = intended();
+    let (tallies, misses) = agreement::compare_state_in_order(&g, TRADE, &rows, &list, &met);
+    assert!(misses.is_empty(), "{misses:?}");
+    assert_eq!(tally(&tallies, Choice::LuxTrade).considered, 1);
+    assert_eq!(tally(&tallies, Choice::AdviceWants).considered, 1);
+    // Python's state lists the civilizations met in the order they were met.
+    let three: Vec<u8> = met[&PlayerId(3)].iter().map(|p| p.0).collect();
+    assert_eq!(three, [6, 7, 12, 4, 14, 17, 8, 1]);
+    // A rival's city that differs is a miss of that rival, which nothing recorded explains.
+    let mut edited = rows.clone();
+    row(&mut edited, 3)["reachable"]["1"] = json!(999);
+    let (_, misses) = agreement::compare_state_in_order(&g, TRADE, &edited, &list, &met);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert_eq!((misses[0].choice, misses[0].item.as_str()), (Choice::Reachable, "rival 1"));
+    assert_eq!(misses[0].cause, Cause::Unattributed);
+    // A trade offered elsewhere is put down to an entry explaining a difference in the
+    // luxuries the civilization owns, and to none explaining its supply.
+    let explains = Intended::parse(&format!(
+        r#"
+[[differences]]
+id = "a-luxury"
+reason = "a test's"
+broad = true
+where = [{{ group = "bot_decisions", path = "majors[*].context.lux_owned.**" }}]
+cases = ["{TRADE}"]
+
+[[differences]]
+id = "a-supply"
+reason = "a test's"
+where = [{{ group = "bot_decisions", path = "majors[*].context.supply" }}]
+cases = ["{TRADE}"]
+"#
+    ))
+    .expect("a list");
+    let mut edited = rows.clone();
+    let r = row(&mut edited, 3);
+    r["lux_trade"][0]["to"] = json!(1);
+    r["context"]["supply"] = json!(-7);
+    let (_, misses) = agreement::compare_state_in_order(&g, TRADE, &edited, &explains, &met);
+    assert_eq!(of(&misses, Choice::LuxTrade)[0].cause, Cause::Unattributed, "{misses:?}");
+    let r = row(&mut edited, 3);
+    r["context"]["lux_owned"].as_array_mut().expect("the luxuries").push(json!("Silk"));
+    let (_, misses) = agreement::compare_state_in_order(&g, TRADE, &edited, &explains, &met);
+    let trade = of(&misses, Choice::LuxTrade);
+    let Cause::Intended { ids, .. } = &trade[0].cause else { panic!("{misses:?}") };
+    assert_eq!(ids, &["a-luxury".to_owned()]);
+}
+
+#[test]
+fn the_advice_is_held_whole_its_wars_rival_by_rival_within_the_tolerance() {
+    let (g, rows, met) = state_and_order(WAR);
+    let list = intended();
+    let (tallies, misses) = agreement::compare_state_in_order(&g, WAR, &rows, &list, &met);
+    assert!(misses.is_empty(), "{misses:?}");
+    // Each side's war on the other.
+    assert_eq!(tally(&tallies, Choice::AdviceWarReadiness).considered, 2);
+    let compared = |edited: &[Value], list: &Intended| {
+        agreement::compare_state_in_order(&g, WAR, edited, list, &met).1
+    };
+    // A power ratio within refcheck's tolerance agrees.
+    let mut edited = rows.clone();
+    let war = |rows: &mut [Value]| -> Value {
+        row(rows, 0)["advice"]["none"]["war_readiness"][0].clone()
+    };
+    let set = |rows: &mut [Value], field: &str, v: Value| {
+        row(rows, 0)["advice"]["none"]["war_readiness"][0][field] = v;
+    };
+    let before = war(&mut edited);
+    assert_eq!(before["player"], json!(1));
+    let ratio = before["power_ratio"].as_f64().expect("a ratio");
+    set(&mut edited, "power_ratio", json!(ratio + 1e-9));
+    assert!(compared(&edited, &list).is_empty());
+    // One rounded the other way is a miss of that rival, which nothing recorded explains; and
+    // so is a gathered army the other engine does not see.
+    set(&mut edited, "power_ratio", json!(ratio + 0.01));
+    let misses = compared(&edited, &list);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert_eq!(
+        (misses[0].choice, misses[0].item.as_str()),
+        (Choice::AdviceWarReadiness, "rival 1")
+    );
+    assert_eq!(misses[0].cause, Cause::Unattributed);
+    let mut gathered = rows.clone();
+    set(&mut gathered, "army_gathered", json!(true));
+    assert_eq!(of(&compared(&gathered, &list), Choice::AdviceWarReadiness).len(), 1);
+    // An entry explaining a difference in the army it counts is the miss's cause; one in a
+    // value the advice does not weigh (the supply) explains nothing.
+    let explains = Intended::parse(&format!(
+        r#"
+[[differences]]
+id = "an-army"
+reason = "a test's"
+broad = true
+where = [{{ group = "bot_decisions", path = "majors[*].context.military.**" }}]
+cases = ["{WAR}"]
+
+[[differences]]
+id = "a-supply"
+reason = "a test's"
+where = [{{ group = "bot_decisions", path = "majors[*].context.supply" }}]
+cases = ["{WAR}"]
+"#
+    ))
+    .expect("a list");
+    row(&mut edited, 0)["context"]["supply"] = json!(-7);
+    let misses = compared(&edited, &explains);
+    assert_eq!(of(&misses, Choice::AdviceWarReadiness)[0].cause, Cause::Unattributed);
+    row(&mut edited, 0)["context"]["military"]
+        .as_array_mut()
+        .expect("the army")
+        .push(json!(99_999));
+    let misses = compared(&edited, &explains);
+    let Cause::Intended { ids, .. } = &of(&misses, Choice::AdviceWarReadiness)[0].cause else {
+        panic!("{misses:?}")
+    };
+    assert_eq!(ids, &["an-army".to_owned()]);
+    // A war only the Rust bot's advice names is a miss with no Python answer.
+    let mut edited = rows.clone();
+    row(&mut edited, 0)["advice"]["none"]["war_readiness"] = json!([]);
+    let misses = compared(&edited, &list);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert_eq!((misses[0].python.as_ref(), misses[0].rust.as_ref()), (None, Some(&before)));
+}
+
+#[test]
+fn the_advice_s_luxuries_to_spare_weigh_the_luxuries_owned() {
+    let (g, rows, met) = state_and_order(TRADE);
+    let list = intended();
+    let (tallies, misses) = agreement::compare_state_in_order(&g, TRADE, &rows, &list, &met);
+    assert!(misses.is_empty(), "{misses:?}");
+    assert_eq!(tally(&tallies, Choice::AdviceSpareLuxuries).considered, 1);
+    assert_eq!(row(&mut rows.clone(), 3)["advice"]["none"]["spare_luxuries"], json!(["Salt"]));
+    let explains = Intended::parse(&format!(
+        r#"
+[[differences]]
+id = "a-luxury"
+reason = "a test's"
+broad = true
+where = [{{ group = "bot_decisions", path = "majors[*].context.lux_owned.**" }}]
+cases = ["{TRADE}"]
+"#
+    ))
+    .expect("a list");
+    // Another luxury to spare is a miss, which nothing explains until the luxuries the
+    // civilization owns differ under an entry.
+    let mut edited = rows.clone();
+    row(&mut edited, 3)["advice"]["none"]["spare_luxuries"] = json!(["Salt", "Silk"]);
+    let (_, misses) = agreement::compare_state_in_order(&g, TRADE, &edited, &explains, &met);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert_eq!(misses[0].choice, Choice::AdviceSpareLuxuries);
+    assert_eq!(misses[0].cause, Cause::Unattributed);
+    row(&mut edited, 3)["context"]["lux_owned"]
+        .as_array_mut()
+        .expect("the luxuries")
+        .push(json!("Silk"));
+    let (_, misses) = agreement::compare_state_in_order(&g, TRADE, &edited, &explains, &met);
+    let Cause::Intended { ids, .. } = &misses[0].cause else { panic!("{misses:?}") };
+    assert_eq!(ids, &["a-luxury".to_owned()]);
 }

@@ -7,14 +7,45 @@
 //! Names are looked up exactly, as Python's `in` and `==` compared them. A name the ruleset
 //! lacks (a mod's) is skipped and counted, never an error: the order keeps the names it has.
 //! The resources kept for the spaceship (`_space_res`, basic.py:856-860) are a fact of the
-//! ruleset alone, which it derives already (`derived().advisor.space_resources`).
+//! ruleset alone, which it derives already (`derived().advisor.space_resources`). So are the five
+//! city-state types the typed gifts weigh (`_gift_city_state`, basic.py:1670-1672), which the
+//! bot names as Python did and finds here by id ([`Resolved::city_state_kind`]).
 
-use citar_engine::base::ids::{BaseUnitId, BeliefId, PolicyId};
+use citar_engine::base::ids::{BaseUnitId, BeliefId, CityStateTypeId, PolicyId};
 use citar_engine::base::sets::PromotionSet;
 use citar_engine::rules::Ruleset;
 use citar_engine::rules::defs::BeliefKind;
 
 use super::{NameList, Params, Spec, spec};
+
+/// A city-state type the typed gifts weigh by name (`_gift_city_state`'s `type_w`,
+/// basic.py:1670-1672); any other type weighs 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CityStateKind {
+    Mercantile,
+    Maritime,
+    Cultured,
+    Religious,
+    Militaristic,
+}
+
+impl CityStateKind {
+    /// Every kind, in Python's order.
+    pub const ALL: [Self; 5] =
+        [Self::Mercantile, Self::Maritime, Self::Cultured, Self::Religious, Self::Militaristic];
+
+    /// The type's name in the ruleset.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Mercantile => "Mercantile",
+            Self::Maritime => "Maritime",
+            Self::Cultured => "Cultured",
+            Self::Religious => "Religious",
+            Self::Militaristic => "Militaristic",
+        }
+    }
+}
 
 /// The names of a [`Params`] as one ruleset's ids.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +91,8 @@ pub struct Resolved {
     /// founder, follower, enhancer): Python asked whether the order as written was empty, not
     /// whether the ruleset had its names.
     belief_places: [Vec<Option<u32>>; BeliefKind::COUNT],
+    /// The kind of each city-state type, by id: `None` for a type none of the five names.
+    city_state_kinds: Vec<Option<CityStateKind>>,
 }
 
 impl Resolved {
@@ -137,6 +170,11 @@ impl Resolved {
         };
         let promo_in_city = lines("promo_in_city", &params.promo_in_city);
         let promo_lines = lines("promo_lines", &params.promo_lines);
+        let city_state_kinds = rules
+            .city_state_types()
+            .iter()
+            .map(|(_, t)| CityStateKind::ALL.into_iter().find(|k| k.name() == &*t.name))
+            .collect();
         let policy_rank = name_ranks(rules.policies().iter().map(|(_, p)| &*p.name));
         let belief_rank = name_ranks(rules.beliefs().iter().map(|(_, b)| &*b.name));
         Self {
@@ -155,7 +193,14 @@ impl Resolved {
             policy_rank,
             belief_rank,
             belief_places,
+            city_state_kinds,
         }
+    }
+
+    /// The kind of city-state type `t`, if it is one of the five the typed gifts weigh.
+    #[must_use]
+    pub fn city_state_kind(&self, t: CityStateTypeId) -> Option<CityStateKind> {
+        self.city_state_kinds.get(usize::from(t.0)).copied().flatten()
     }
 
     /// Policy `p`'s place among the ruleset's policies by name (Python's order of `str`, by code

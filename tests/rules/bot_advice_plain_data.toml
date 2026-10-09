@@ -7,7 +7,6 @@ treaty, which the proposal lists on both sides, is worth deal_peace (120) on eac
 evaluate counts it, less the 50 gold.
 """
 from = "tests/test_bot_diplomacy.py::AdviceTests::test_advice_is_plain_data_and_changes_nothing"
-needs = "2-05"
 
 [[step]]
 ops = [

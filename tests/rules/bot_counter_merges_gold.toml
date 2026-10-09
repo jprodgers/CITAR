@@ -4,7 +4,6 @@ shortfall plus counter_margin in gold, added to the gold already on the table ra
 gold line, always with a message. Offered 10 gold for its map, which it values at 20, it asks for 30.
 """
 from = "tests/test_bot_diplomacy.py::CounterTests::test_a_counter_adds_to_the_gold_already_on_the_table"
-needs = "2-05"
 
 [[step]]
 ops = [

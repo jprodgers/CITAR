@@ -4,7 +4,6 @@ of embassies to a civilization it has none with, and friendship to one it has em
 likes. When the seat's model owns agreements it proposes neither.
 """
 from = "citar/bots/basic.py:2431-2444 (consider_diplomacy)"
-needs = "2-05"
 
 [[step]]
 set = { calm = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0, diplo_every = 1 } }

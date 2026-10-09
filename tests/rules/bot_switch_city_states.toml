@@ -4,7 +4,6 @@ city-state it knows (the classic gift: cs_gift_amount once over cs_gift_gold), a
 when the seat's model owns city-states it gifts nothing.
 """
 from = "citar/bots/basic.py:1640-1657 (manage_gold, _court_city_states)"
-needs = "2-05"
 
 [config]
 city_states = 1

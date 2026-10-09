@@ -1,5 +1,5 @@
-//! `cargo refcheck bot-agreement` (DESIGN.md P2.3.11 point 3, packages 2-01b and 2-03): how often
-//! the Rust bot makes the choices the Python bot made on the reference states, per kind of
+//! `cargo refcheck bot-agreement` (DESIGN.md P2.3.11 point 3, packages 2-01b, 2-03 and 2-05): how
+//! often the Rust bot makes the choices the Python bot made on the reference states, per kind of
 //! choice.
 //!
 //! The values of the bot's sub-decisions (tech values, threats, defences, the turn's context)
@@ -7,11 +7,17 @@
 //! here: which technology it researches, which policy, great person and pantheon it takes, now
 //! and as if it could, which cities it counts in danger or wanting a garrison, its best three
 //! sites, its spare units; what each of its units would attack, and the city its war is fought
-//! for with the plan around it. A choice counts only on the items where either engine's answer says
-//! something (a choice that is not null, a list that is not empty, a flag that is true), so a
-//! port that never answers cannot pass; `bot_dump.py`'s `CHOICES` named the same items. The
-//! items are matched by what names them (a tech mode, a city's id), never by their place in the
-//! answer; an item only one engine names is considered, and is a miss.
+//! for with the plan around it; the city of each rival it could reach, the luxury trades it would
+//! offer, and its advice: the war it fights or prepares on each rival (its power against theirs,
+//! whether its army has gathered), the luxuries it has to spare, and what it would ask for. A
+//! choice counts only on the items where either engine's answer says something (a choice that
+//! is not null, a list that is not empty, a flag that is true), so a port that never answers
+//! cannot pass; `bot_dump.py`'s `CHOICES` named the same items. The items are matched by what
+//! names them (a tech mode, a city's id), never by their place in the answer; an item only one
+//! engine names is considered, and is a miss. Two answers agree when they are equal under
+//! refcheck's number rule (integers exact, other numbers within its tolerance), which matters
+//! for the one number a choice holds that is no id, tile or count: the power ratio of the
+//! advice's war readiness, rounded to two decimals on each side.
 //!
 //! Every choice that differs is attributed to a cause ([`Cause`]). The one cause there is today:
 //! an intended engine difference (`refcheck/intended.toml`) moved a value the choice weighs.
@@ -31,8 +37,10 @@ use citar_engine::rules::Ruleset;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
-use crate::answer::bot_decisions::{answer_row, ask_recorded, player, raised, recorded, values_of};
-use crate::compare::{self, CompareSpec, Diff, Options, Pattern};
+use crate::answer::bot_decisions::{
+    MetOrders, answer_row, ask_recorded, met_orders, player, raised, recorded, values_of,
+};
+use crate::compare::{self, CompareSpec, Diff, Options, Pattern, value};
 use crate::fixture::{self, Fixture, FixtureRef, FixtureSet};
 use crate::intended::Intended;
 use crate::run::INTENDED;
@@ -69,6 +77,17 @@ pub enum Choice {
     /// The war plan: its city and rally point, whether the army advances, whether the siege is
     /// ready.
     WarTarget,
+    /// Per rival: the city of theirs it could reach.
+    Reachable,
+    /// The luxury trades it would offer, in order.
+    LuxTrade,
+    /// Per rival its advice names: the war it fights or prepares on them (whether at war,
+    /// whether preparing, the power ratio, whether the army has gathered).
+    AdviceWarReadiness,
+    /// The luxuries its advice has to spare, sorted.
+    AdviceSpareLuxuries,
+    /// What its advice would ask for, in order (at most five).
+    AdviceWants,
 }
 
 /// One item a choice is compared on: the name that matches it across the engines (and that the
@@ -82,8 +101,8 @@ struct Item {
 }
 
 impl Choice {
-    /// Every kind of stages 1 and 2, in `bot_dump.py`'s `CHOICES` order.
-    pub const ALL: [Self; 15] = [
+    /// Every kind, in `bot_dump.py`'s `CHOICES` order.
+    pub const ALL: [Self; 20] = [
         Self::NextResearch,
         Self::FreeNow,
         Self::PreferredFree,
@@ -99,6 +118,11 @@ impl Choice {
         Self::Spare,
         Self::Attacks,
         Self::WarTarget,
+        Self::Reachable,
+        Self::LuxTrade,
+        Self::AdviceWarReadiness,
+        Self::AdviceSpareLuxuries,
+        Self::AdviceWants,
     ];
 
     /// Its name, as `bot_dump.py` printed it.
@@ -119,6 +143,11 @@ impl Choice {
             Self::Spare => "spare",
             Self::Attacks => "attacks",
             Self::WarTarget => "war_target",
+            Self::Reachable => "reachable",
+            Self::LuxTrade => "lux_trade",
+            Self::AdviceWarReadiness => "advice.war_readiness",
+            Self::AdviceSpareLuxuries => "advice.spare_luxuries",
+            Self::AdviceWants => "advice.wants",
         }
     }
 
@@ -137,6 +166,11 @@ impl Choice {
             Self::Spare => Question::Spare,
             Self::Attacks => Question::Attacks,
             Self::WarTarget => Question::WarTarget,
+            Self::Reachable => Question::Reachable,
+            Self::LuxTrade => Question::LuxTrade,
+            Self::AdviceWarReadiness | Self::AdviceSpareLuxuries | Self::AdviceWants => {
+                Question::Advice
+            }
         }
     }
 
@@ -153,6 +187,13 @@ impl Choice {
     ///   threatened cities (1739-1766). A city only one engine has is a place of each.
     /// - The war plan aims at the enemy cities nearest the civilization's own among its wars,
     ///   and the army it counts gathered is its military (2291-2339).
+    /// - The luxury trades weigh the luxuries it owns, and a purchase its happiness and gold per
+    ///   turn (2505-2556); the advice's wants the luxuries it owns, its wars and its military,
+    ///   whose power the peace it would ask for weighs (2756-2770); its war readiness its wars
+    ///   and its military, whose power over the rival's it shows (2736-2756); the luxuries it
+    ///   has to spare the luxuries it owns (2757-2758).
+    /// - The city of a rival it could reach reads its cities, the map and what it has explored,
+    ///   none of which the recording holds (2478-2492).
     /// - The free technology (the most expensive available), the policy, the pantheon and the
     ///   sites read no value the recording holds, nor does an attack, which weighs the combat
     ///   preview (`combat_previews` compares it): no difference explains their misses.
@@ -174,6 +215,21 @@ impl Choice {
                 Some("majors[*].context.wars.**".to_owned()),
                 Some("majors[*].context.military.**".to_owned()),
             ],
+            Self::LuxTrade => vec![
+                Some("majors[*].context.lux_owned.**".to_owned()),
+                Some("majors[*].context.hap".to_owned()),
+                Some("majors[*].context.gpt".to_owned()),
+            ],
+            Self::AdviceWarReadiness => vec![
+                Some("majors[*].context.wars.**".to_owned()),
+                Some("majors[*].context.military.**".to_owned()),
+            ],
+            Self::AdviceSpareLuxuries => vec![Some("majors[*].context.lux_owned.**".to_owned())],
+            Self::AdviceWants => vec![
+                Some("majors[*].context.lux_owned.**".to_owned()),
+                Some("majors[*].context.wars.**".to_owned()),
+                Some("majors[*].context.military.**".to_owned()),
+            ],
             Self::FreeNow
             | Self::PreferredFree
             | Self::Policy
@@ -181,7 +237,8 @@ impl Choice {
             | Self::Pantheon
             | Self::PreferredPantheon
             | Self::Sites
-            | Self::Attacks => Vec::new(),
+            | Self::Attacks
+            | Self::Reachable => Vec::new(),
         };
         places.into_iter().flatten().collect()
     }
@@ -190,6 +247,8 @@ impl Choice {
     fn items(self, answer: &Value) -> Vec<Item> {
         let one = |choice: Value| vec![Item { key: String::new(), at: None, choice }];
         let at = |k: &str| answer.get(k).cloned().unwrap_or(Value::Null);
+        // The advice without a negotiation: the states hold none (P2.3.11 point 3).
+        let advice = |k: &str| answer.get("none").and_then(|a| a.get(k)).cloned();
         let modes = |key: &str| {
             ["classic", "potential"]
                 .iter()
@@ -241,7 +300,30 @@ impl Choice {
                     choice: a.get("target").cloned().unwrap_or(Value::Null),
                 })
                 .collect(),
-            Self::WarTarget => one(answer.clone()),
+            Self::WarTarget | Self::LuxTrade => one(answer.clone()),
+            Self::Reachable => answer
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(rival, city)| Item {
+                    key: format!("rival {rival}"),
+                    at: Some(rival.clone()),
+                    choice: city.clone(),
+                })
+                .collect(),
+            Self::AdviceWarReadiness => advice("war_readiness")
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|w| Item {
+                    key: format!("rival {}", w["player"]),
+                    at: Some(w["player"].to_string()),
+                    choice: w.clone(),
+                })
+                .collect(),
+            Self::AdviceSpareLuxuries => one(advice("spare_luxuries").unwrap_or(Value::Null)),
+            Self::AdviceWants => one(advice("wants").unwrap_or(Value::Null)),
         }
     }
 }
@@ -271,6 +353,12 @@ fn says(v: &Value) -> bool {
     !matches!(v, Value::Null | Value::Bool(false))
         && !v.as_array().is_some_and(Vec::is_empty)
         && !v.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+/// Whether two engines' choices of an item agree: both name it, and the choices are equal under
+/// refcheck's number rule (integers exact, other numbers within its tolerance).
+fn agree(python: Option<&Value>, rust: Option<&Value>) -> bool {
+    python.zip(rust).is_some_and(|(p, r)| value::values_equal(p, r))
 }
 
 /// Why a choice differs.
@@ -463,19 +551,34 @@ fn one_state(root: &Path, r: &FixtureRef, sets: &[FixtureSet], intended: &Intend
     let rows = recorded(root, &f.meta.case, f.meta.turn).map_err(|e| format!("{}: {e}", r.name))?;
     let (g, _) = Game::from_python(Ruleset::shared(), f.state.get().as_bytes())
         .map_err(|e| format!("{}: does not load: {e}", r.name))?;
-    let (tallies, misses) = compare_state(&g, &r.name, &rows, intended);
+    let met = met_orders(f.state.get());
+    let (tallies, misses) = compare_state_in_order(&g, &r.name, &rows, intended, &met);
     Ok((rows.len(), tallies, misses))
 }
 
 /// The choices of the majors recorded in `rows` on game `g` (fixture `state`, as the intended
 /// list's `cases` name it), each against the Rust bot's: the tallies by kind, and the misses
-/// with their causes, explained by `intended`.
+/// with their causes, explained by `intended`. Stage 3 visits the civilizations met in player-id
+/// order, the Rust bot's.
 #[must_use]
 pub fn compare_state(
     g: &Game,
     state: &str,
     rows: &[Value],
     intended: &Intended,
+) -> (Vec<(Choice, Tally)>, Vec<Miss>) {
+    compare_state_in_order(g, state, rows, intended, &MetOrders::new())
+}
+
+/// [`compare_state`], stage 3 visiting the civilizations each major met in `met`'s order
+/// (Python's, from its state: `met_orders`) where it gives one.
+#[must_use]
+pub fn compare_state_in_order(
+    g: &Game,
+    state: &str,
+    rows: &[Value],
+    intended: &Intended,
+    met: &MetOrders,
 ) -> (Vec<(Choice, Tally)>, Vec<Miss>) {
     let scoped = intended.scoped(Group::BotDecisions, state);
     let mut tallies: BTreeMap<Choice, Tally> = BTreeMap::new();
@@ -488,7 +591,7 @@ pub fn compare_state(
         for c in Choice::ALL {
             let q = c.question();
             let Some(py) = row.get(q.name()).filter(|v| !raised(v)) else { continue };
-            let rust = answers.entry(q).or_insert_with(|| ask_recorded(g, pid, q));
+            let rust = answers.entry(q).or_insert_with(|| ask_recorded(g, pid, q, met));
             let t = tallies.entry(c).or_default();
             for (item, p, x) in paired(c.items(py), c.items(rust)) {
                 t.asked += 1;
@@ -499,7 +602,7 @@ pub fn compare_state(
                     continue;
                 }
                 t.considered += 1;
-                if p == x {
+                if agree(p.as_ref(), x.as_ref()) {
                     t.agree += 1;
                     continue;
                 }

@@ -29,8 +29,8 @@ RUST = engine_api.BACKEND == "rust"
 PENDING_PACKAGES = ("2-09", "2-11")
 #: The bot packages still to come, whose rule scripts carry a ``needs`` header that both runners skip on Rust: a
 #: python_engine_only successor may be such a script until its package lands. A package removes itself here when it
-#: removes its headers (2-03, units and fighting, has).
-BOT_PACKAGES_TO_COME = ("2-05",)
+#: removes its headers. None is left: 2-05, diplomacy, the last, has, so every successor runs on Rust.
+BOT_PACKAGES_TO_COME: tuple = ()
 _PACKAGE = re.compile(r"[0-9]-[0-9]{2}[a-z]?")
 
 

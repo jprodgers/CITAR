@@ -162,12 +162,14 @@ class MarkerTests(unittest.TestCase):
         self.assertTrue(successor_holds("arguments_are_coerced_as_python_coerced_them", rust))
         self.assertFalse(successor_holds("no_such_rust_test_anywhere", rust))
         self.assertFalse(successor_holds("parse", rust), "a function that is no test")
-        # a script both runners skip on Rust holds only while the bot package it needs is still to come
-        waiting = next(p for p in rulescript.discover() if rulescript.load(p).needs is not None)
-        successor = f"tests/rules/{waiting.name}"
+        # a script both runners skip on Rust holds only while the bot package it needs is still to come (no script
+        # names one since 2-05, the last bot package, so a script's header is stood in for)
+        successor = "tests/rules/bot_selftest.toml"
         self.assertTrue(successor_holds(successor, rust))
-        with unittest.mock.patch.object(backends, "BOT_PACKAGES_TO_COME", ()):
+        with unittest.mock.patch(f"{__name__}._script_needs", return_value="2-05"):
             self.assertFalse(successor_holds(successor, rust))
+            with unittest.mock.patch.object(backends, "BOT_PACKAGES_TO_COME", ("2-05",)):
+                self.assertTrue(successor_holds(successor, rust))
         self.assertTrue(successor_holds("tests.test_facade_games.SettingsTests.test_a_seats_difficulty_survives_a_save",
                                         rust))
         # a successor that does not run on Rust is none: one Python-engine-only, one pending (by its class)

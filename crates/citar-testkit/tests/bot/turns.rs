@@ -15,9 +15,10 @@ use citar_bot::{Bot, BotSpec, Memory, Tuning, VersionId, clean};
 use citar_engine::api::testops;
 use citar_engine::base::ids::{CityId, PlayerId, TileIdx};
 use citar_engine::game::setup::config_from_value;
-use citar_engine::game::{DebugOptions, DriveOptions, Drivers, Game};
+use citar_engine::game::{DebugOptions, DriveOptions, Drivers, Game, Stop};
 use citar_engine::rules::Ruleset;
 use citar_engine::state::cities::{CityFocus, Constructible};
+use citar_engine::state::diplo::NegStatus;
 use citar_testkit::script::map_doc;
 use serde_json::{Value, json};
 
@@ -67,12 +68,19 @@ fn bot(params: &Value) -> Bot {
     Bot::new(Arc::new(BotSpec::new(VersionId::Basic1, tuning, None, None)))
 }
 
-/// Plays my turn with `b` alone, as the rule scripts' bot step does.
+/// Plays my turn with `b` alone, as the rule scripts' bot step does: a negotiation the bot opens
+/// with a seat nobody drives is closed when the drive stops for it, as a host's wait runs out.
 fn turn(g: &mut Game, b: &mut Bot) {
     let n = g.state().players().len();
-    let mut d = Drivers::none(n).with(ME, b);
-    g.drive(&mut d, DriveOptions::default().with_seat_limit(1)).expect("live");
-    drop(d);
+    for _ in 0..100 {
+        let mut d = Drivers::none(n).with(ME, &mut *b);
+        let (stop, _) = g.drive(&mut d, DriveOptions::default().with_seat_limit(1)).expect("live");
+        drop(d);
+        let Stop::AwaitingReply { nids, .. } = stop else { break };
+        for nid in nids {
+            g.close_negotiation(nid, NegStatus::Expired, "No answer came.", None).expect("open");
+        }
+    }
     let v = g.take_violations();
     assert!(v.is_empty(), "{v:?}");
     assert!(g.check_invariants().is_empty(), "{:?}", g.check_invariants());

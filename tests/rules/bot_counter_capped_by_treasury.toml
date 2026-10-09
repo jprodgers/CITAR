@@ -5,7 +5,6 @@ values at 120, the bot is 40 short and would ask 50 more: with 200 gold the othe
 all, with 125 it is asked all 125, and with 100 it cannot cover the shortfall and the bot rejects.
 """
 from = "tests/test_bot_diplomacy.py::CounterTests::test_a_counter_never_asks_for_more_gold_than_they_hold"
-needs = "2-05"
 
 [[step]]
 set = { pricey = { deal_map_give = 120 } }

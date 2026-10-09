@@ -1,15 +1,18 @@
-//! The bot at war (package 2-03, gates 3 and 4; DESIGN.md P2.3.11 point 6): whole games on
-//! small maps with the Python baseline's settings (the five map types in turn, Quick, Prince,
-//! barbarians normal), the invariants checked at every settle.
+//! The bot at war (packages 2-03, gates 3 and 4, and 2-05, gate 5; DESIGN.md P2.3.11 point 6):
+//! whole games on small maps with the Python baseline's settings (the five map types in turn,
+//! Quick, Prince, barbarians normal), the invariants checked at every settle.
 //!
-//! - **Mixed games** (gate 3): two `basic-1` bots against two `RandomAgent`s, which declare war
-//!   now and then after turn 50, 20 games of 200 rounds: no panic or violation; both bots
-//!   out-score both agents in at least 18 of the 20; the bots attack in every game, and take at
-//!   least one city across the twenty. The bots declare no war (that is package 2-05's
-//!   diplomacy), so their wars are the agents' and the barbarians'. The bots take the first two
-//!   seats in one game and the last two in the next.
-//! - **Barbarian games** (gate 4): four bots, 10 games of 330 rounds, to the game's end, at its
-//!   turn limit or by an earlier victory: no panic or violation, and every game ends.
+//! - **Mixed games** (2-03's gate 3): two `basic-1` bots against two `RandomAgent`s, which
+//!   declare war now and then after turn 50, 20 games of 200 rounds: no panic or violation; both
+//!   bots out-score both agents in at least 18 of the 20; the bots attack in every game, and take
+//!   at least one city across the twenty. The bots take the first two seats in one game and the
+//!   last two in the next.
+//! - **All-bot games** (2-03's gate 4, 2-05's gate 5): four bots, 20 games of 330 rounds, to the
+//!   game's end, at its turn limit or by an earlier victory: no panic or violation, every game
+//!   ends, and no drive stops for a reply (`play_random` fails on any stop but the seat limit and
+//!   the game's end), since every negotiation a bot opens waits on another bot, which answers it.
+//!   With the bots' diplomacy (package 2-05): a bot declares war in at least 30% of the games,
+//!   peace is made at least once, and a resource trade is carried out in at least half of them.
 //!
 //! The games play on as many threads as there are cores, in about twenty seconds in the ci
 //! profile on the laptop; nextest counts each test as taking every test thread
@@ -27,6 +30,7 @@ use citar_engine::game::victory::won_by;
 use citar_engine::game::{DebugOptions, DriverOutcome, Game, SeatDriver};
 use citar_engine::state::Phase;
 use citar_engine::state::chronicle::{EngineEvent, EventType};
+use citar_engine::state::diplo::DealItemKind;
 use citar_engine::state::players::DriverMemory;
 use citar_testkit::agents::RandomAgent;
 use citar_testkit::bots::CountingBot;
@@ -104,6 +108,12 @@ struct Played {
     captured: u32,
     /// The most refusals of one tool in one bot turn: how many, the tool, the turn.
     worst: (u32, &'static str, Turn),
+    /// Wars a bot declared on a major civilization.
+    bot_wars: u32,
+    /// Peace made between major civilizations.
+    peace: u32,
+    /// Deals carried out with a resource in them.
+    resource_trades: u32,
 }
 
 impl Played {
@@ -145,11 +155,33 @@ fn play(run: &Run) -> Played {
         if !problems.is_empty() {
             return Err(format!("round {}: {problems:?}", round.0));
         }
+        let major = |p: Option<PlayerId>| p.and_then(|p| g.player(p)).is_some_and(|x| x.is_major());
         for e in g.events(seen, usize::MAX) {
-            if e.kind == EventType::Engine(EngineEvent::CityCaptured)
-                && e.data.as_ref().and_then(|d| d.new_owner).is_some_and(|p| bots.contains(&p.0))
-            {
-                out.captured += 1;
+            let Some(d) = e.data.as_ref() else { continue };
+            match e.kind {
+                EventType::Engine(EngineEvent::CityCaptured)
+                    if d.new_owner.is_some_and(|p| bots.contains(&p.0)) =>
+                {
+                    out.captured += 1;
+                }
+                EventType::Engine(EngineEvent::WarDeclared)
+                    if d.attacker.is_some_and(|p| bots.contains(&p.0)) && major(d.defender) =>
+                {
+                    out.bot_wars += 1;
+                }
+                EventType::Engine(EngineEvent::Peace) if major(d.a) && major(d.b) => {
+                    out.peace += 1;
+                }
+                EventType::Engine(EngineEvent::Deal) => {
+                    let traded = d
+                        .deal
+                        .and_then(|id| g.deal(id))
+                        .is_some_and(|deal| deal.terms.has(DealItemKind::Resource));
+                    if traded {
+                        out.resource_trades += 1;
+                    }
+                }
+                _ => {}
             }
         }
         seen = g.events(0, 1).last().map_or(seen, |e| e.id.get());
@@ -236,8 +268,8 @@ fn two_bots_beat_two_random_agents_and_fight_their_wars() {
 
 #[test]
 #[allow(clippy::disallowed_macros, reason = "the test reports what it measured")]
-fn four_bots_play_330_rounds_with_the_barbarians_to_the_end() {
-    let runs: Vec<Run> = (0..10)
+fn four_bots_play_330_rounds_to_the_end_making_war_peace_and_trades() {
+    let runs: Vec<Run> = (0..20)
         .map(|i| Run {
             seed: 8000 + u64::try_from(i).unwrap_or(0),
             i,
@@ -246,12 +278,35 @@ fn four_bots_play_330_rounds_with_the_barbarians_to_the_end() {
             rounds: 331,
         })
         .collect();
-    for p in play_all(&runs) {
+    let played = play_all(&runs);
+    for p in &played {
         eprintln!(
-            "seed {}: {} rounds, over {} ({:?}); scores {:?}; {} attacks, {} cities taken; most \
-             refusals of a tool in a bot turn {:?}",
-            p.seed, p.rounds, p.over, p.victory, p.scores, p.attacks, p.captured, p.worst
+            "seed {}: {} rounds, over {} ({:?}); scores {:?}; {} attacks, {} cities taken; {} wars \
+             declared by bots, {} peace, {} resource trades; most refusals of a tool in a bot \
+             turn {:?}",
+            p.seed,
+            p.rounds,
+            p.over,
+            p.victory,
+            p.scores,
+            p.attacks,
+            p.captured,
+            p.bot_wars,
+            p.peace,
+            p.resource_trades,
+            p.worst
         );
         assert!(p.over, "seed {}: not over after {} rounds", p.seed, p.rounds);
     }
+    let n = played.len();
+    let wars = played.iter().filter(|p| p.bot_wars > 0).count();
+    let peace: u32 = played.iter().map(|p| p.peace).sum();
+    let trades = played.iter().filter(|p| p.resource_trades > 0).count();
+    eprintln!(
+        "games with a war a bot declared {wars} of {n}; peace made {peace} times; games with a \
+         resource trade {trades} of {n}"
+    );
+    assert!(wars * 10 >= n * 3, "a bot declared war in {wars} of {n} games");
+    assert!(peace >= 1, "no peace made in {n} games");
+    assert!(trades * 2 >= n, "a resource trade in {trades} of {n} games");
 }

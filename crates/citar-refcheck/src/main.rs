@@ -4,7 +4,7 @@
 //! cargo refcheck run [--fixtures DIR]... [--groups G,...] [--case GLOB]... [--json OUT] [--strict] [--with-bot]
 //! cargo refcheck explain <intended-id | group | group:path> [selection]
 //! cargo refcheck suggest [selection]
-//! cargo refcheck ratchet [--update]
+//! cargo refcheck ratchet [--update]                (compares the bot's valuations too)
 //! cargo refcheck changelog [--write | --check]
 //! cargo refcheck list [--fixtures DIR]... [--case GLOB]...
 //! cargo refcheck bot-agreement [--fixtures DIR]... [--case GLOB]... [--misses N]
@@ -291,7 +291,11 @@ fn ratchet(root: &Path, update: bool, answers: &dyn Answers) -> Result<u8> {
     let ratchet = if update && !path.exists() { Ratchet::default() } else { Ratchet::load(&path)? };
     let dirs: Vec<PathBuf> = ratchet.fixtures.iter().map(|d| root.join(d)).collect();
     let config = Config::load(root)?;
-    let run = run::run(RunOptions::new(root, fixture_sets(root, &dirs)), &config, answers)?;
+    // The bot's valuations are compared too (`--with-bot`), since the bot exists (package
+    // 2-05): their count is held like any other.
+    let mut opts = RunOptions::new(root, fixture_sets(root, &dirs));
+    opts.with_bot = true;
+    let run = run::run(opts, &config, answers)?;
     if !run.load_failures.is_empty() {
         for f in &run.load_failures {
             println!("load failure {}: {}", f.name, f.error);

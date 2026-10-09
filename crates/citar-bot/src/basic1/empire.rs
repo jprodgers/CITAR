@@ -1,6 +1,6 @@
 //! The empire's choices (`_policy_order` and `empire_choices`, basic.py:1003-1041): culture spent
-//! on policies, a free great person, and faith on a pantheon. Spies (1040-1064) are package
-//! 2-05's.
+//! on policies, a free great person, faith on a pantheon, and then the spies, with espionage the
+//! bot's (`diplomacy::spies`, 1040-1064).
 //!
 //! Each choice is a function of the game that writes nothing ([`policy_choice`],
 //! [`great_person_choice`], [`pantheon_choice`]), which the turn acts on and the reference
@@ -12,6 +12,7 @@
 //! is the same.
 
 use citar_engine::base::ids::{BeliefId, PlayerId, PolicyId};
+use citar_engine::game::diplomacy::category::Category;
 use citar_engine::game::great_people::ChooseGreatPerson;
 use citar_engine::game::policies::{AdoptPolicy, adoptable_policies, branch_of, can_adopt_any};
 use citar_engine::game::religion::beliefs_available;
@@ -22,10 +23,11 @@ use serde_json::json;
 
 use super::Seat;
 use super::context::Context;
+use super::diplomacy::spies::spies;
 use crate::driver::Turn;
 use crate::params::BeliefMode;
 
-/// `empire_choices` without spies (basic.py:1011-1039).
+/// `empire_choices` (basic.py:1011-1041).
 pub(crate) fn empire_choices(t: &mut Turn<'_>, s: &Seat<'_>, ctx: &Context) {
     let pid = t.pid();
     for _ in 0..s.params.policy_picks_per_turn.max(0) {
@@ -49,6 +51,9 @@ pub(crate) fn empire_choices(t: &mut Turn<'_>, s: &Seat<'_>, ctx: &Context) {
     {
         let name = t.game().rules().name(b).unwrap_or_default().to_owned();
         t.act(Action::FoundPantheon(FoundPantheon { belief: json!(name) }));
+    }
+    if t.game().espionage_enabled() && !s.spec.owners.llm(Category::Espionage) {
+        spies(t);
     }
 }
 

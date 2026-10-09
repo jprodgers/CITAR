@@ -1,8 +1,9 @@
 //! Gold (`manage_gold` and `_spare_units`, basic.py:1591-1643, 1739-1766): a defender bought
 //! for a city in danger with nobody in it; spare units disbanded and the biggest city on the gold
 //! focus in a deficit that would empty the treasury, the focus released once gold flows again;
-//! units upgraded with what is left over a reserve; and the cheapest-to-finish production bought
-//! where it pays. Faith follows (`faith.rs`); city-state gifts (1640-1641) are package 2-05's.
+//! units upgraded with what is left over a reserve; the cheapest-to-finish production bought
+//! where it pays; gifts to city-states, with city-states the bot's
+//! (`diplomacy::city_states`, 1640-1641). Faith follows (`faith.rs`).
 //!
 //! A fix: Python's danger purchase bought the defender `manage_cities` had just queued and
 //! nothing refilled the emptied queue that turn (a purchase of the queue's head refilled it only
@@ -15,6 +16,7 @@ use citar_engine::base::stats::Stat;
 use citar_engine::game::advisor::{Advisor, Role};
 use citar_engine::game::cities::purchase::purchase_check;
 use citar_engine::game::cities::stats::current_construction;
+use citar_engine::game::diplomacy::category::Category;
 use citar_engine::game::units::actions::{UnitOrder, UpgradeUnit};
 use citar_engine::game::units::upgrades::check_upgrade;
 use citar_engine::game::{Action, Game, advisor, query};
@@ -23,10 +25,11 @@ use citar_engine::state::cities::{CityFocus, Constructible};
 use super::Seat;
 use super::cities::{by_threat, manage_cities, set_focus};
 use super::context::{self, Context, breaks_space_reserve, in_danger};
+use super::diplomacy::city_states::court_city_states;
 use super::faith::{buy, spend_faith};
 use crate::driver::Turn;
 
-/// `manage_gold` without the city-state gifts (basic.py:1591-1643).
+/// `manage_gold` (basic.py:1591-1643).
 pub(crate) fn manage_gold(t: &mut Turn<'_>, s: &mut Seat<'_>, ctx: &Context) {
     let pid = t.pid();
     let p = s.params;
@@ -127,6 +130,9 @@ pub(crate) fn manage_gold(t: &mut Turn<'_>, s: &mut Seat<'_>, ctx: &Context) {
         {
             refill(t, s);
         }
+    }
+    if !s.spec.owners.llm(Category::CityStates) {
+        court_city_states(t, s, ctx);
     }
     if t.game().religion_enabled() {
         spend_faith(t, s, ctx);
