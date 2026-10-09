@@ -259,8 +259,11 @@ class CrashTests(ServerCase):
         replay = self.get(s, "/replay")
         self.assertEqual(replay.status_code, 200, replay.text)
         self.assertTrue(json.loads(replay.content)["frames"])
-        # nothing plays on
+        # nothing plays on, and an agent waiting for its turn is told so rather than waiting for good
         self.assertEqual(s.call_tool(0, "end_turn", {}), {"ok": False, "error": sess.CRASHED})
+        for pid in range(len(s.seats)):
+            self.assertEqual(s.wait_for_turn(pid, 1), {"status": "crashed", "turn": s.crashed["turn"],
+                                                       "message": sess.CRASHED})
         s.set_paused(False)
         s.resume()
         self.assertTrue(s.paused)

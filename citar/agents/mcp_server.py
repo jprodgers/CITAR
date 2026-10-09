@@ -34,7 +34,8 @@ HOW TO PLAY THROUGH THESE TOOLS
    with action reject.
 4. Keep long-term plans in your notebook (write_notes); it is shown in every briefing. Use log_thought to record your
    reasoning for the replay.
-5. Repeat until the game is over.
+5. Repeat until the game is over. If wait_for_turn returns 'crashed', the game engine has stopped this game after an
+   internal error and it takes no more moves: stop playing.
 The briefing already includes options for idle units and cities, available techs and a local map, so most turns need
 few extra lookups.
 
@@ -47,7 +48,8 @@ EXTRA_TOOLS = [
      "description": "Block until it is your turn, a negotiation awaits your reply, or the game ends (returns 'waiting' "
                     "after timeout_seconds; just call again). On your own turn, while a negotiation you are in waits "
                     "on the other side, it waits for their answer instead: 'negotiation_update' when one comes, "
-                    "'waiting_for_reply' when none has by the timeout.",
+                    "'waiting_for_reply' when none has by the timeout. 'crashed' means the game engine stopped the "
+                    "game for good: stop playing.",
      "input_schema": {"type": "object", "properties": {"timeout_seconds": {"type": "number", "description": "default 50"}},
                       "additionalProperties": False}},
 ]

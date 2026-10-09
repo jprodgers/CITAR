@@ -124,7 +124,8 @@ The loop:
 3. Act. Read the result of each call; the guard rails refuse an identical successful action twice
    in one turn, and repeating a query that has not changed returns "unchanged".
 4. `end_turn`.
-5. Repeat.
+5. Repeat until `wait` says `game_over` or `eliminated`, or `crashed`: the engine stopped the game after an
+   internal error, and it takes no more moves.
 
 Worth knowing:
 

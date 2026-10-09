@@ -774,7 +774,8 @@ class GameSession:
                 time.sleep(self.ai_delay)
 
     def wait_for_turn(self, pid: int, timeout: float) -> dict:
-        """Long-poll: returns when it's pid's turn, a negotiation awaits pid, or the game ends.
+        """Long-poll: returns when it's pid's turn, a negotiation awaits pid, or the game ends ("game_over"), or at
+        once with "crashed" when the engine has stopped the game (``_crashed``): no turn comes again.
 
         On pid's own turn with negotiations it is in still waiting on the other side, it waits for their answers
         instead ("negotiation_update" when one comes, "waiting_for_reply" when none has by the timeout): the end_turn
@@ -785,6 +786,9 @@ class GameSession:
         chats = None            # on pid's turn: the open negotiations it is in, as they stood when the wait began
         with self.lock:
             while True:
+                if self.crashed:
+                    # the game takes no more moves (_crashed): an agent that kept waiting or acting would loop for good
+                    return {"status": "crashed", "turn": self.crashed["turn"], "message": CRASHED}
                 g = self.game
                 pending = [n["id"] for n in g.open_negotiation_heads(pid) if n["awaiting"] == pid]
                 if g.phase != "playing":
