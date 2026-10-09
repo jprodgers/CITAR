@@ -652,7 +652,9 @@ class ParallelismTests(unittest.TestCase):
         # Each thread plays 60-round games of its own, a seat per call, until a second has passed, so the CPU clock's
         # tick (16 ms on Windows) is small beside the window. Both stop at the same moment, within a call of it: a
         # thread still finishing a game alone would count wall time on one core.
-        def worker(seed):
+        # The best of three such seconds is the measure: a shared CI runner (macOS's has three cores) can lend a core
+        # away for part of one (1.58 once), while a drive that held the GIL would stay near 1.0 in every one.
+        def worker(seed, until):
             bots = idle_bots()
             while time.perf_counter() < until:
                 g = small(seed)
@@ -660,15 +662,21 @@ class ParallelismTests(unittest.TestCase):
                     g.drive(bots, 1)
                 seed += 2
 
-        cpu0, wall0 = time.process_time(), time.perf_counter()
-        until = wall0 + 1.0
-        threads = [threading.Thread(target=worker, args=(s,)) for s in (101, 102)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(120)
-        cpu, wall = time.process_time() - cpu0, time.perf_counter() - wall0
-        self.assertGreaterEqual(cpu / wall, 1.6, f"CPU {cpu:.2f} s in {wall:.2f} s of wall time")
+        def one_second():
+            cpu0, wall0 = time.process_time(), time.perf_counter()
+            threads = [threading.Thread(target=worker, args=(s, wall0 + 1.0)) for s in (101, 102)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(120)
+            return time.process_time() - cpu0, time.perf_counter() - wall0
+
+        tries = []
+        while len(tries) < 3 and not any(cpu / wall >= 1.6 for cpu, wall in tries):
+            tries.append(one_second())
+        cpu, wall = max(tries, key=lambda t: t[0] / t[1])
+        self.assertGreaterEqual(cpu / wall, 1.6, f"CPU {cpu:.2f} s in {wall:.2f} s of wall time, the best of "
+                                                 f"{', '.join(f'{c / w:.2f}' for c, w in tries)}")
 
     def test_a_counting_thread_keeps_running_while_another_drives(self):
         def count(seconds: float) -> float:
