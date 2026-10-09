@@ -265,6 +265,11 @@ export class GameScreen {
       this.renderTopbar();
     } else if (m.type === "control") {
       this.scheduleRefresh(10);
+    } else if (m.type === "crashed") {
+      toast(m.message, "error", 20000);
+      this.scheduleRefresh(10);
+    } else if (m.type === "agent_error") {
+      toast(m.text, "error", 12000);
     }
   }
 
@@ -780,7 +785,7 @@ export class GameScreen {
         el("button", { class: "small", onclick: () => openVictory(this) }, "Victory"),
         el("button", { class: "small", onclick: () => openNotes(this) }, "Notes"));
     }
-    if (this.isSpectator || (v.session && v.session.seats.some((s) => s.type !== "human"))) {
+    if (!(v.session && v.session.crashed) && (this.isSpectator || (v.session && v.session.seats.some((s) => s.type !== "human")))) {
       const sess = v.session;
       // toggles the state the game is in now (not the one a held button was drawn with), and shows it at once:
       // while AIs are playing, the server can take a second or more to send a fresh view
@@ -863,6 +868,9 @@ export class GameScreen {
     if (v.phase !== "playing") {
       const w = v.players.find((p) => p.id === v.winner);
       b.textContent = `🏆 ${w ? w.name : "No one"} wins — ${v.victory || "game over"}`;
+      b.style.display = "block";
+    } else if (v.session && v.session.crashed) {
+      b.textContent = `⚠ ${v.session.pause_reason ? v.session.pause_reason.message : "The game engine stopped."} (turn ${v.session.crashed.turn})`;
       b.style.display = "block";
     } else if (v.session && v.session.paused) {
       const why = v.session.pause_reason;

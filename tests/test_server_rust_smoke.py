@@ -159,6 +159,10 @@ class ServerSmokeTests(unittest.TestCase):
         listed = [x for x in self.req("GET", "/api/saves").json() if x["path"] == saved]
         self.assertEqual(len(listed), 1)
         self.assertEqual((listed[0]["turn"], listed[0].get("unreadable")), (turn, None))
+        from citar.reports import data as report_data
+        details = report_data._game_details(gid)          # the reports read the interim saves through the facade
+        self.assertNotIn("error", details)
+        self.assertEqual((details["game_id"], details["turn"]), (gid, turn))
         loaded = self.req("POST", "/api/saves/load", json={"path": saved}).json()
         self.assertEqual((loaded["id"], loaded["turn"]), (gid, turn))
         s2 = self.app.manager.get(gid)
