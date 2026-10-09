@@ -10,7 +10,6 @@
 //! Replaces nothing in the engine, which does no I/O: Python read `citar/data/` at import
 //! (`rules.py:44-85`), and modders ran two scripts over it to find what it would not read.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -158,7 +157,7 @@ fn read_dir(dir: &Path) -> Result<DirFiles, String> {
 
 /// A path as the user wrote it, for messages.
 fn shown(path: &std::ffi::OsStr) -> String {
-    OsString::from(path).to_string_lossy().into_owned()
+    path.to_string_lossy().into_owned()
 }
 
 /// A failure's message, for an `ImportError` that carries it.
