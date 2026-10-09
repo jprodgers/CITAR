@@ -261,6 +261,25 @@ nothing (exit 3). The second plays five rounds from every corpus state with the 
 the cache oracle after the rounds; the third plays chaos from them. The soak that goes with them, 200 whole
 games, is in CONTRIBUTING.md ("Rust").
 
+### The archive
+
+Nothing can record the corpus or its dumps again once the Python engine is gone, so package 2-12 archived them
+on the laptop before deleting it, in the git-ignored `saves/_archive_2026-10_python-reference/` of the main
+checkout: `corpus/` (the 250 states, each fixture with the Python engine's answers) and the four corpus dumps the
+Rust tests read, each recorded once more by the Python engine at the tag `python-engine-0.1.6` and equal to the
+copy the gates were checked against (the advisor's but for its line endings):
+
+| File | Read through |
+|---|---|
+| `bot_decisions-corpus.json.gz` | `CITAR_BOT_DUMP` (the bot's decisions, `bot-agreement`) |
+| `advisor-corpus.json` | `CITAR_ADVISOR_DUMP` (testkit's advisor agreement) |
+| `worker_jobs-corpus.json` | `CITAR_WORKER_JOBS_CORPUS` (testkit's worker jobs) |
+| `query_tools-corpus.json.gz` | `CITAR_QUERY_TOOLS`, with `CITAR_REFCHECK_CORPUS` (refcheck's query tools) |
+
+`refcheck/corpus.sha256` (committed) is the sha256 of each of the 254 files; `sha256sum -c
+../../refcheck/corpus.sha256` in the archive checks them, and so does `sha256sum -c` of its `corpus/` lines in
+`refcheck/`, where the live copy of the corpus stays.
+
 ## The bot's decisions
 
 The Rust bot (`crates/citar-bot`, Phase 2) is checked against the Python bot's decisions where no draw decides
