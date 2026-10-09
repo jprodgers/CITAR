@@ -11,7 +11,7 @@ from citar.bots.idle import IdleBot
 from citar.bots.basic import BasicBot
 from citar.engine import diplomacy as D, tools
 from citar.engine.game import Game
-from tests.backends import python_engine_only, rust_pending
+from tests.backends import python_engine_only
 
 # Settings under which the bot prepares and declares war as soon as it can (a control for the war switch)
 EAGER_WAR = {"war_min_turn": 0, "war_chance": 1.0, "war_power_ratio": 0, "war_power_ratio_aggr": 0,
@@ -162,29 +162,37 @@ class BotAgentTests(unittest.TestCase):
         with self.s.lock:
             return self.s.game.open_negotiation_as(0, 1, "A proposal.", give, receive)["negotiation_id"]
 
-    @rust_pending("2-09")
     def test_an_interrupt_skips_what_the_model_owns(self):
+        from citar import engine_api
         from citar.agents.bot_agent import BotAgent
         agent = BotAgent(seed=1)
-        agent.bot.set_diplomacy({"trades": "llm"})
+        engine_api.bot_set_diplomacy(agent.bot, {"trades": "llm"})
         trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
-        agent.respond_negotiation(self.s, 1, trade)
+        version = self.s.version
+        agent.respond_negotiation(self.s, 1, trade)       # EngineGame.answer: left to the model, so nothing moved
         self.assertEqual(len(self.s.game.negotiation(trade)["history"]), 1)
+        self.assertEqual(self.s.version, version)
         with self.s.lock:
             self.s.game.execute(0, "respond_negotiation", {"negotiation_id": trade, "action": "reject",
                                                            "message": "Never mind."})
         talk = self._open(None, None)                   # no proposal, and the bot still owns chat
         agent.respond_negotiation(self.s, 1, talk)
         self.assertGreater(len(self.s.game.negotiation(talk)["history"]), 1)
+        self.assertGreater(self.s.version, version, "an answer goes through the session's side effects")
+        # an answer to a chat that no longer waits on the seat is refused by the engine, which is no error
+        agent.respond_negotiation(self.s, 1, talk)
 
-    @rust_pending("2-09")
     def test_the_end_of_turn_wait_skips_what_the_model_owns(self):
+        from citar import engine_api
         from citar.agents.bot_agent import BotAgent
-        trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
         with self.s.lock:
-            self.s.game.python_game.s.current = 1          # the bot's turn, without the start-of-turn processing
+            self.s.game.execute(0, "end_turn", {})         # the bot's turn
+        self.assertEqual(self.s.game.current, 1)
+        trade = self._open([{"type": "gold", "amount": 10}], [{"type": "share_map"}])
         agent = BotAgent(seed=1)
-        agent.bot.set_diplomacy({"trades": "llm"})
+        # the model owns the trade, and the agreements, so that the bot opens no chat of its own with the human
+        engine_api.bot_set_diplomacy(agent.bot, {"trades": "llm", "agreements": "llm"})
+        self.s.agents[1] = agent
         t0 = time.time()
         # only the turn's own wait loop is under test: the session's interrupt would answer (and, for a bot seat, reject
         # what nobody answered) on its own thread
@@ -193,6 +201,12 @@ class BotAgentTests(unittest.TestCase):
         self.assertLess(time.time() - t0, 60)           # it did not sit out its 90-second wait on the model's chat
         n = self.s.game.negotiation(trade)
         self.assertEqual((n["status"], len(n["history"])), ("open", 1))
+        # the drive played the bot's turn and stopped on the chat it left to the host: the turn is still the bot's,
+        # for the session's driver to close the chat and end
+        self.assertEqual((self.s.game.current, self.s.game.end_turn_refusal(1) is not None), (1, True))
+        rec = self.s.metrics.current(1)
+        self.assertIsNotNone(rec)
+        self.assertTrue(rec.get("bot_actions"), "the drive's action counts are on the bot's turn row")
 
     @python_engine_only("tests.test_engine_api.BotTests.test_bots_are_compiled_versions")
     def test_a_frozen_bot_answers_everything(self):

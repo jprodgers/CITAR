@@ -5,8 +5,8 @@ with a test attribute) or a Python test that is neither Python-engine-only nor p
 A rule script whose ``needs`` names a bot package still to come (``backends.BOT_PACKAGES_TO_COME``) is the one
 exception: both runners skip it on Rust until that package lands and removes the header, so it holds only for such a
 package, and test_successors_waiting_on_a_package lists those successors in the run's output. Every
-``@rust_pending`` names a package still to come (2-09 or 2-11), so a package that lands removes its markers, and
-none names a package that has. The markers are read from the test modules without running them.
+``@rust_pending`` names a package still to come (2-11), so a package that lands removes its markers, and none names
+a package that has. The markers are read from the test modules without running them.
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import functools
@@ -140,7 +140,7 @@ class MarkerTests(unittest.TestCase):
                 backends.rust_pending(bad)
 
         class Probe(unittest.TestCase):
-            @backends.rust_pending("2-09")
+            @backends.rust_pending("2-11")
             @backends.python_engine_only("tests.test_backends.MarkerTests.test_pending_names_a_package_to_come")
             def test_x(self):
                 pass
@@ -172,14 +172,51 @@ class MarkerTests(unittest.TestCase):
                 self.assertTrue(successor_holds(successor, rust))
         self.assertTrue(successor_holds("tests.test_facade_games.SettingsTests.test_a_seats_difficulty_survives_a_save",
                                         rust))
-        # a successor that does not run on Rust is none: one Python-engine-only, one pending (by its class)
+        # a successor that does not run on Rust is none: one Python-engine-only, one pending (by its class; no test is
+        # pending since 2-09, so a pending class is stood in for)
         self.assertFalse(successor_holds("tests.test_engine.HexTests.test_line_endpoints", rust))
-        self.assertFalse(successor_holds("tests.test_editor.MapTests.test_big_sizes_exist", rust))
+        successor = "tests.test_editor.MapTests.test_big_sizes_exist"
+        self.assertTrue(successor_holds(successor, rust))
+
+        class Pending:
+            _backend = (("rust_pending", "2-11"),)
+
+            def test_big_sizes_exist(self):
+                pass
+        real = _python_test
+        with unittest.mock.patch(f"{__name__}._python_test",
+                                 side_effect=lambda t: Pending if t.endswith(".MapTests") else real(t)):
+            self.assertFalse(successor_holds(successor, rust))
         self.assertIn("arguments_are_coerced_as_python_coerced_them", rust)
         self.assertNotIn("no_such_rust_test_anywhere", rust)
         self.assertIsNotNone(_python_test("tests.test_backends.MarkerTests.test_pending_names_a_package_to_come"))
         self.assertIsNone(_python_test("tests.test_backends.MarkerTests.test_nothing"))
         self.assertIsNone(_python_test("tests.no_such_module.Thing"))
+
+
+def python_reference() -> list[str]:
+    """What tests/python_reference.txt lists: a test module or test id per line, ``#`` starting a comment."""
+    text = (TESTS / "python_reference.txt").read_text(encoding="utf-8")
+    return [line.split("#", 1)[0].strip() for line in text.splitlines() if line.split("#", 1)[0].strip()]
+
+
+class PythonReferenceTests(unittest.TestCase):
+    """The Python reference subset CI's Python-backend job runs (DESIGN.md P2.6.6): what it lists is there."""
+
+    def test_every_entry_names_a_test_module_or_test(self):
+        listed = python_reference()
+        self.assertTrue(listed)
+        self.assertEqual(len(listed), len(set(listed)), "an entry listed twice")
+        for entry in listed:
+            with self.subTest(entry=entry):
+                self.assertTrue(entry.startswith("tests.test_"), entry)
+                self.assertIsNotNone(_python_test(entry), f"{entry} names no test module or test")
+
+    def test_it_holds_the_python_engines_own_checks(self):
+        # the design's three: the rule scripts' Python runner (with the Python engine's recordings), the parity test
+        # and the parameter-schema test
+        self.assertLessEqual({"tests.test_rule_scripts", "tests.test_facade_parity", "tests.test_bot_params"},
+                             set(python_reference()))
 
 
 if __name__ == "__main__":

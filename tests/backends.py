@@ -1,13 +1,15 @@
 """Markers for the suite's two backends (crates/citar-engine/DESIGN.md P2.7.4).
 
-The suite runs on whichever backend ``CITAR_ENGINE`` chooses (``citar.engine_api.BACKEND``). Most tests pass on both.
-The others say why they do not, with a marker that tests/test_backends.py holds to account:
+The suite runs on whichever backend ``CITAR_ENGINE`` chooses (``citar.engine_api.BACKEND``): the Rust engine by
+default since package 2-09, which makes CI's main run. On the Python backend CI runs only the reference subset
+(``tests/python_reference.txt``). Most tests pass on both. The others say why they do not, with a marker that
+tests/test_backends.py holds to account:
 
 - ``@python_engine_only("<successor>")``: the test pokes the Python engine, whose behaviour now lives in the named
   successor: a rule script (``tests/rules/<name>.toml``; one whose ``needs`` names a bot package still to come runs on
   Rust once that package lands), a Rust test (a ``fn`` of that name in ``crates/**/*.rs`` with a test attribute) or
   a Python test (``tests.<module>.<Class>.<test>``). Skipped on Rust; deleted with the Python engine in 2-12.
-- ``@rust_pending("<package>")``: a test the named package (2-09 or 2-11) makes pass on Rust. Skipped on Rust
+- ``@rust_pending("<package>")``: a test the named package (2-11, the last) makes pass on Rust. Skipped on Rust
   until then; that package's gate is that no marker names it any more, and it leaves ``PENDING_PACKAGES``.
 - ``@rust_only``: a test of a name only the Rust backend has. Skipped on Python.
 
@@ -25,8 +27,9 @@ from citar import engine_api
 #: Whether the suite runs on the Rust backend.
 RUST = engine_api.BACKEND == "rust"
 #: The packages a rust_pending marker may name: the ones still to finish the swap's Python side. A package leaves
-#: this list when it lands (2-10, the bots, the lab and the ladder, has), so no marker can name it again.
-PENDING_PACKAGES = ("2-09", "2-11")
+#: this list when it lands (2-09, the server, and 2-10, the bots, the lab and the ladder, have), so no marker can
+#: name it again.
+PENDING_PACKAGES = ("2-11",)
 #: The bot packages still to come, whose rule scripts carry a ``needs`` header that both runners skip on Rust: a
 #: python_engine_only successor may be such a script until its package lands. A package removes itself here when it
 #: removes its headers. None is left: 2-05, diplomacy, the last, has, so every successor runs on Rust.
@@ -56,7 +59,7 @@ def python_engine_only(successor: str):
 def rust_pending(package: str):
     """Skip on Rust until ``package`` makes the test pass there."""
     if not isinstance(package, str) or not _PACKAGE.fullmatch(package):
-        raise ValueError(f"rust_pending names a package, as '2-09', not {package!r}")
+        raise ValueError(f"rust_pending names a package, as '2-11', not {package!r}")
 
     def deco(target):
         skipped = unittest.skipIf(RUST, f"passes on Rust from package {package}")(target)

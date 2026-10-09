@@ -9,7 +9,8 @@ enforces it). Behind it are two backends with one surface (crates/citar-engine/D
   Python engine in package 2-12.
 - ``rust``: the Rust engine (``citar/_facade_rust.py`` over the extension ``citar._engine``), with every name.
 
-``CITAR_ENGINE`` chooses, read once at import: ``python`` (the default until package 2-09 flips it) or ``rust``.
+``CITAR_ENGINE`` chooses, read once at import: ``rust`` (the default since package 2-09) or ``python``, which only
+the Python reference tests (``tests/python_reference.txt``) still run on.
 Nothing outside the facade and the tests reads :data:`BACKEND`; a caller that needs a Phase 2 name uses it and lets a
 :class:`BackendError` say it runs on the wrong backend.
 
@@ -34,8 +35,8 @@ from __future__ import annotations
 
 import os
 
-#: Which engine is behind the door: "python" or "rust" (``CITAR_ENGINE``). For the facade and the tests only.
-BACKEND = os.environ.get("CITAR_ENGINE", "python").strip().lower() or "python"
+#: Which engine is behind the door: "rust" or "python" (``CITAR_ENGINE``). For the facade and the tests only.
+BACKEND = os.environ.get("CITAR_ENGINE", "rust").strip().lower() or "rust"
 
 # The whole public surface, the same on both backends. A name that is not here is backend, and
 # tests/test_engine_boundary.py fails a caller that reaches for it.

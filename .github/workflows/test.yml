@@ -13,7 +13,8 @@
 # test operations instead, as a release would ship it (crates/citar-engine/DESIGN.md P2.6.8).
 #
 # The facade (citar/engine_api.py) has two backends, chosen by CITAR_ENGINE: the test jobs run the
-# suite on the default one, and test-rust runs it once more on the Rust engine.
+# suite on the default one, the Rust engine (since package 2-09), and python-reference runs the few
+# tests that still check the Python engine itself (tests/python_reference.txt) on the Python one.
 name: tests
 
 on:
@@ -138,7 +139,8 @@ jobs:
 
       - name: Tests
         # Not pytest: the suite is unittest and is run the same way here as on a laptop, so a
-        # failure can be reproduced with the command in the contributing guide.
+        # failure can be reproduced with the command in the contributing guide. On the default
+        # backend, the Rust engine: a test that cannot pass there says why (tests/backends.py).
         run: python -m unittest discover -s tests -v
 
       - name: Route audit
@@ -164,18 +166,20 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: python scripts/check_links.py --strict
 
-  test-rust:
-    # The same suite with the facade on the Rust engine (CITAR_ENGINE=rust; DESIGN.md P2.6.6, P2.7.4),
-    # once, on the server's platform. A test the Rust backend cannot pass yet says why
-    # (tests/backends.py): Python-engine-only with its successor, pending a named package, or Rust-only,
-    # which the Python jobs skip. From package 2-09 the default flips and this becomes the main run.
-    name: ubuntu-latest / Python 3.12 / Rust engine
+  python-reference:
+    # The Python engine's own tests, on the facade's Python backend (CITAR_ENGINE=python; DESIGN.md
+    # P2.6.6), once, on the server's platform: only what tests/python_reference.txt lists (the Python
+    # runner of the rule scripts and the Python engine's recordings, the parity test of the two
+    # backends, the parameter-schema test). Since package 2-09 the Rust engine is the default and the
+    # test jobs above run the whole suite on it; the rest of the suite needs the Rust backend's names.
+    # Package 2-12 deletes this job with the Python engine.
+    name: ubuntu-latest / Python 3.12 / Python reference
     needs: build-ext
     # It needs only the Linux wheel, so a Windows or macOS build failing does not skip it.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     env:
-      CITAR_ENGINE: rust
+      CITAR_ENGINE: python
     steps:
       - uses: actions/checkout@v7
 
@@ -191,15 +195,16 @@ jobs:
 
       - name: Install
         # As the test jobs install: the dependencies, then the build-ext library with the test
-        # operations into the checkout.
+        # operations into the checkout (the parity test plays both backends).
         run: |
           python -m pip install --upgrade pip
           python scripts/ci/requirements.py all > "$RUNNER_TEMP/requirements.txt"
           pip install -r "$RUNNER_TEMP/requirements.txt"
           python scripts/ci/unpack_ext.py ext --test-ops
 
-      - name: Tests on the Rust engine
-        run: python -m unittest discover -s tests -v
+      - name: The Python reference tests on the Python engine
+        # One test module or test id per line; `#` starts a comment.
+        run: python -m unittest -v $(sed -e 's/#.*//' tests/python_reference.txt)
 
   interpreter-exit:
     # DESIGN.md P2.6.4: the interpreter exits while a daemon thread is inside a call to

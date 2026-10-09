@@ -243,6 +243,7 @@ class GameSession:
         """
         g = self.game
         before = (g.turn, g.current)
+        self._track_turn()          # pid's turn has its metrics record, however the turn came to it
         bots = {}
         for seat in self.seats:
             if seat.type == "bot":
