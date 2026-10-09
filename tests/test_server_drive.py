@@ -115,8 +115,11 @@ class SideEffectTests(ServerCase):
         s.start()
         self.assertTrue(wait(lambda: s.game.turn >= 21, 180), f"20 rounds in 3 minutes ({s.game.turn}): {s.errors}")
         # after 20 rounds, while the game plays on, every round's autosave has been taken: once the writer has caught
-        # up, the autosave holds the round the game was in, or a later one
-        turn = s.game.turn
+        # up, the autosave holds the round the game was in, or a later one. The turn is read under the lock: a drive
+        # and the autosave it ends with are one step there, while the game's own turn moves inside the drive, so read
+        # without the lock it can name a round whose autosave is still to be taken.
+        with s.lock:
+            turn = s.game.turn
         self.assertGreaterEqual(autosave_turn(s), turn)
         s.set_paused(True)
         with s.lock:                                   # the turn in progress has finished
