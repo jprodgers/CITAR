@@ -28,6 +28,7 @@ mod engine {
     mod rules;
     mod save;
     mod scenario;
+    mod server_fixture;
     mod setup;
     mod stability;
     mod state;
