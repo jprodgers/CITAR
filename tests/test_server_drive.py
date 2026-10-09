@@ -245,6 +245,8 @@ class CrashTests(ServerCase):
         self.assertEqual(sess.load_save_file(crash)["session"]["crashed"]["turn"], s.crashed["turn"])
         loaded = sess.GameSession.from_save(sess.load_save_file(crash))
         self.assertTrue(loaded.crashed and loaded.paused)
+        self.assertEqual([p for p in range(len(loaded.seats)) if loaded.metrics.current(p)], [],
+                         "a crash save loads with no turn in progress")
         # reads still answer
         info = s.info()
         self.assertEqual(info["crashed"]["turn"], s.crashed["turn"])

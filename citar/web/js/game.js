@@ -785,14 +785,16 @@ export class GameScreen {
         el("button", { class: "small", onclick: () => openVictory(this) }, "Victory"),
         el("button", { class: "small", onclick: () => openNotes(this) }, "Notes"));
     }
-    if (!(v.session && v.session.crashed) && (this.isSpectator || (v.session && v.session.seats.some((s) => s.type !== "human")))) {
+    if (this.isSpectator || (v.session && v.session.seats.some((s) => s.type !== "human"))) {
       const sess = v.session;
+      // a crashed game takes no more moves: nothing to pause, resume or slow down, but everything to look at
+      const stopped = !!sess.crashed;
       // toggles the state the game is in now (not the one a held button was drawn with), and shows it at once:
       // while AIs are playing, the server can take a second or more to send a fresh view
       const want = this._pauseWanted && Date.now() - this._pauseWanted.at < 5000 ? this._pauseWanted.paused : null;
       if (want === sess.paused) this._pauseWanted = null;             // the server has caught up
       const paused = want ?? sess.paused;
-      tb.append(el("button", { class: "small", onclick: () => {
+      if (!stopped) tb.append(el("button", { class: "small", onclick: () => {
         this._pauseWanted = { paused: !paused, at: Date.now() };
         this.renderTopbar();
         api.control(this.gid, { paused: !paused });
@@ -804,7 +806,8 @@ export class GameScreen {
           location.hash = `#/game/${this.gid}/${encodeURIComponent(this.token)}` + (ev.target.value !== "" ? `/${ev.target.value}` : "");
         } }, el("option", { value: "", selected: this.asPlayer == null }, "God view"),
           ...sess.players.filter((p) => p.kind === "major").map((p) => el("option", { value: p.id, selected: this.asPlayer === p.id }, `View as ${p.name}`)));
-        tb.append(delay, viewAs);
+        if (!stopped) tb.append(delay);
+        tb.append(viewAs);
         if (v.phase !== "playing" || sess.god_view_allowed) tb.append(el("button", { class: "small", onclick: () => { location.hash = `#/replay/${this.gid}/${encodeURIComponent(this.token)}`; } }, "Recap"));
       }
     }

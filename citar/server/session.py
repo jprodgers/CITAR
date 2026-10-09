@@ -960,6 +960,8 @@ class GameSession:
             s.crashed = dict(sess["crashed"])
             s.paused = True
             s.pause_reason = {"kind": "crashed", "message": CRASHED, "since": s.crashed.get("at")}
+            s.metrics.interrupt_open()           # no turn of it is played again: none is left in progress
+            s._metrics_current = None
         return s
 
 
