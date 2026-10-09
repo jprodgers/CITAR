@@ -69,8 +69,8 @@ Look at **📊 AI stats** for that seat:
 
 ### It was working and now it is not
 
-A server restart drops in-memory games. Reload from the autosave in the lobby — nothing is lost,
-autosaves are written every turn.
+A server restart drops in-memory games. Reload from the autosave in the lobby — next to nothing is
+lost: autosaves are written every turn (a game of bots alone may be a second or so of play behind).
 
 ---
 
