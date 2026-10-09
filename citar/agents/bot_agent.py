@@ -43,17 +43,20 @@ class BotAgent:
         """Play the bot's turn: drive it, and while it waits on another seat's answer, wait for that answer.
 
         The drive passes every bot seat of the game, so a negotiation one bot opens with another is answered inside
-        it. A drive that stops because a chat waits on a seat the session plays (a person, a model, an MCP client)
-        has already started that seat's responder (``_after_action``); this waits on the session's condition for
-        the answer, up to :attr:`REPLY_WAIT_SECONDS` of unpaused time, and drives again. A chat whose wait runs out
-        is closed as expired, through the session, and the turn is driven on to its end. A chat left waiting on the
-        bot's own seat (one its model owns, which only a hybrid seat answers) is not waited for: the session's driver
-        closes it and ends the turn, as it ends any turn an agent leaves open.
+        it. A drive that stops because chats wait on seats the session plays (a person, a model, an MCP client) has
+        already started those seats' responders (``_after_action``); this waits on the session's condition until any
+        of them answers (the chat is settled, or back with the bot) and drives again at once, so an answer is taken
+        up as it comes rather than when the slowest seat has answered. The turn has one budget for all its waits,
+        :attr:`REPLY_WAIT_SECONDS` of unpaused time: once it is spent, the chats still waiting on others are closed
+        as expired, through the session, and the turn is driven on to its end. A chat left waiting on the bot's own
+        seat (one its model owns, which only a hybrid seat answers) is not waited for: the session's driver closes it
+        and ends the turn, as it ends any turn an agent leaves open.
         """
         g = session.game
         with session.lock:
             if g.current != pid or g.phase != "playing" or session.crashed:
                 return
+            budget = float(self.REPLY_WAIT_SECONDS)
             stop = session.drive_bots(pid)
             for _ in range(10_000):
                 if session.stopped or session.crashed or self.cancelled:
@@ -67,15 +70,18 @@ class BotAgent:
                 theirs = self._waiting_on_others(session, pid, stop["negotiations"])
                 if not theirs:
                     return
-                session._await(lambda nids=theirs: not self._waiting_on_others(session, pid, nids),
-                               self.REPLY_WAIT_SECONDS, halted=lambda: self.cancelled, hold_paused=True)
+                if budget > 0:
+                    budget -= session._await(
+                        lambda nids=theirs: len(self._waiting_on_others(session, pid, nids)) < len(nids),
+                        budget, halted=lambda: self.cancelled, hold_paused=True)
                 # a pause holds the turn where it is: the game does not move on while paused
                 session._await(lambda: not session.paused, float("inf"),
                                halted=lambda: self.cancelled or bool(session.crashed))
                 if session.stopped or session.crashed or self.cancelled:
                     return
-                for nid in self._waiting_on_others(session, pid, theirs):
-                    session.close_negotiation(nid, "expired", "(no reply in time)")
+                if budget <= 0:
+                    for nid in self._waiting_on_others(session, pid, theirs):
+                        session.close_negotiation(nid, "expired", "(no reply in time)")
                 stop = session.drive_bots(pid)
             raise RuntimeError(f"player {pid}'s bot turn did not end after 10,000 drives")
 

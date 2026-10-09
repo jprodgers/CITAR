@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from citar import engine_api
+from citar.agents.bot_agent import BotAgent
 from citar.server import session as sess
 from tests.backends import has_test_ops, rust_only
 
@@ -183,6 +184,44 @@ class SideEffectTests(ServerCase):
         self.assertEqual(rec0["end_reason"], "end_turn")
         self.assertIn("open_negotiation", rec0["bot_actions"])
         self.assertLess(rec0["wall_s"], 30, "not the bot's 90-second wait")
+        self.assertEqual(s.errors, [])
+
+    def test_a_bot_takes_up_each_answer_as_it_comes_within_one_wait_for_its_turn(self):
+        """A chat that comes back to the bot is answered at once, not after its other chats have settled, and the
+        turn's waits share one budget (P2.7.1: the agent "drives again when woken")."""
+        s = self.game({"map_size": "small", "seed": 11, "barbarians": "off"},
+                      [{"type": "bot"}, {"type": "llm", "llm": dict(DRY, dry_run_negotiation="counter")},
+                       {"type": "mcp"}, {"type": "human"}], start=False)
+        with s.lock:
+            s.game.apply_ops([{"op": "meet", "a": 0, "b": 1}, {"op": "meet", "a": 0, "b": 2}])
+        s.get_agent(0).bot = engine_api.bot_instance("basic", params=EAGER_FRIENDSHIP)
+        closed = []                      # (negotiation, status, how many entries the model seat's chat had by then)
+        real = sess.GameSession.close_negotiation
+
+        def spy(self_, nid, status, note, by=None):
+            with self_.lock:
+                theirs = [n for n in self_.game.negotiations() if n["initiator"] == 0 and n["responder"] == 1]
+                closed.append((nid, status, len(theirs[0]["history"]) if theirs else 0))
+            return real(self_, nid, status, note, by)
+
+        budget = 3.0
+        with mock.patch.object(sess.GameSession, "close_negotiation", spy), \
+                mock.patch.object(BotAgent, "REPLY_WAIT_SECONDS", budget):
+            t0 = time.perf_counter()
+            s.start()
+            self.assertTrue(wait(lambda: s.game.current != 0 or s.game.turn > 1, 60), s.errors)
+            took = time.perf_counter() - t0
+            s.set_paused(True)
+        chats = {n["responder"]: n for n in s.game.negotiations() if n["initiator"] == 0}
+        self.assertEqual(sorted(chats), [1, 2], "the bot offered its friendship to both seats")
+        silent = chats[2]
+        self.assertEqual(silent["status"], "expired", silent)
+        expiry = next(c for c in closed if c[0] == silent["id"])
+        self.assertGreaterEqual(expiry[2], 3, "the model seat's counter was answered before the silent seat's chat "
+                                              f"expired: {closed}, {chats[1]['history']}")
+        self.assertLess(took, budget + 2.5, "the turn's waits share one budget")
+        rec0 = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
+        self.assertEqual(rec0["end_reason"], "end_turn")
         self.assertEqual(s.errors, [])
 
     def test_a_humans_proposal_answered_by_a_bot_is_broadcast(self):
