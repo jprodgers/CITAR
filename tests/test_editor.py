@@ -2,6 +2,7 @@
 (``citar.engine_api``), so they run on whichever engine is behind it."""
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import unittest
+from unittest import mock
 
 from citar import engine_api as E
 from citar import probes as P
@@ -185,8 +186,32 @@ class ProbeTests(unittest.TestCase):
         bot = {"provider": "bot", "aggression": 0.4}
         rec = self.case("gift", **bot)
         self.assertEqual(rec["outcome"], "accept", rec)
+        self.assertIn("respond_negotiation", [c["tool"] for c in rec["tool_calls"] if c["ok"]],
+                      "the bot's answer is recorded as its call")
         rec = self.case("turn", **bot)
-        self.assertEqual((rec["outcome"], rec["error"]), ("end_turn", None), rec)
+        self.assertEqual((rec["outcome"], rec["error"], rec["passed"]), ("end_turn", None, True), rec)
+        used = {c["tool"] for c in rec["tool_calls"] if c["ok"]}
+        self.assertIn("end_turn", used, "the drive ending the bot's turn is its end_turn")
+        self.assertTrue(used - {"end_turn"}, f"the drive's actions are recorded as the bot's calls: {rec['tool_calls']}")
+        self.assertTrue(all(c["count"] >= 1 for c in rec["tool_calls"]))
+        # what the bot did is what the case's expectations are checked against
+        forbid = {"id": "forbid", "kind": "turn", "forbid_tools": sorted(used - {"end_turn"})[:1]}
+        rec = P.run_case(self.mgr, self.scn, self.probe, forbid, {**DRY, **bot})
+        self.assertIs(rec["passed"], False, rec)
+        rec = P.run_case(self.mgr, self.scn, self.probe, {"id": "expect", "kind": "turn", "expect_tools": sorted(used)},
+                         {**DRY, **bot})
+        self.assertIs(rec["passed"], True, rec)
+
+    @rust_only
+    def test_a_case_whose_engine_stops_is_an_error(self):
+        """An internal error of the engine in a case (here in the bot's drive) is the case's error, never a pass."""
+        bot = {"provider": "bot", "aggression": 0.4}
+        with mock.patch.object(EngineGame, "drive", side_effect=E.EngineCrash("panic: in the bot")):
+            rec = self.case("turn", **bot)
+        self.assertEqual(rec["outcome"], "error", rec)
+        self.assertIs(rec["passed"], False)
+        self.assertIn("The engine stopped", rec["error"])
+        self.assertIn("panic: in the bot", rec["error"])
 
     def test_each_case_starts_fresh(self):
         def gold(state):

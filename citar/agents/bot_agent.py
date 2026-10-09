@@ -8,7 +8,7 @@ bot seat is watched, measured and saved as a model's seat is, though its actions
 from __future__ import annotations
 
 from .. import engine_api
-from ..engine_api import ActionError
+from ..engine_api import ActionError, EngineCrash
 from ..bots import profiles
 
 
@@ -106,16 +106,22 @@ class BotAgent:
         """Answer a negotiation that waits on this seat (``EngineGame.answer``), unless the seat's model owns it.
 
         A refused answer means the chat moved on before the bot got to it (answered, closed, or no longer waiting on
-        this seat), which is no error. An answer that did something goes through the session's side effects."""
+        this seat), which is no error. An answer that did something goes through the session's side effects, and an
+        engine that stops in it crashes the session (``_crashed``). Returns the answer (``{"outcome", "actions"}``,
+        which the probes record), or None when there was none."""
         with session.lock:
             if session.crashed or session.stopped:
-                return
+                return None
             g = session.game
             before = (g.turn, g.current)
             try:
                 r = g.answer(pid, nid, self.bot)
             except ActionError:
-                return
+                return None
+            except EngineCrash as e:          # the engine stopped: the session stops with it, as for a drive
+                session._crashed(str(e))
+                return None
             session.metrics.bot_actions(pid, r["actions"])
             if r["outcome"] == "done":
                 session._after_action(*before)
+            return r

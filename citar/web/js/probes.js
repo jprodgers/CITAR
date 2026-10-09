@@ -146,7 +146,7 @@ function drawResults(cell, d, ctx) {
     const c = cases[r.case] || {};
     const key = `${d.run.id}/${r.case}/${r.rep}`;
     const said = r.kind === "turn"
-      ? `${r.tool_calls.length} tool calls: ${[...new Set(r.tool_calls.filter((x) => x.ok !== false).map((x) => x.tool))].join(", ")}`
+      ? `${r.tool_calls.reduce((n, x) => n + (x.count || 1), 0)} tool calls: ${[...new Set(r.tool_calls.filter((x) => x.ok !== false).map((x) => x.tool))].join(", ")}`
       : [r.subject_messages.join(" / "), ...r.counter_offers.map((o) => `counter: ${o.text}`)].filter(Boolean).join(" — ");
     t.appendChild(el("tr", { class: "clickable", onclick: () => { openDetails.has(key) ? openDetails.delete(key) : openDetails.add(key); drawResults(cell, d, ctx); } },
       el("td", {}, el("b", {}, r.case), d.run.repeats > 1 ? el("span", { class: "muted" }, ` #${r.rep + 1}`) : null,

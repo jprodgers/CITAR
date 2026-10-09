@@ -232,6 +232,17 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                           "error": (res.get("error") or "")[:300] or None})
         return res
     s.call_tool = recording_call        # every call the model makes, queries and failures included
+    if is_bot:
+        # The bot's actions never pass through call_tool: its turn is a drive and its answers go through
+        # EngineGame.answer. Each drive's counts for the subject are recorded as its calls instead.
+        orig_drive = s.drive_bots
+
+        def recording_drive(pid):
+            """Record the subject's actions in each drive of its turn."""
+            stop = orig_drive(pid)
+            _record_bot_actions(calls, (stop.get("actions") or {}).get(subject))
+            return stop
+        s.drive_bots = recording_drive
     if live is not None:
         live.update({"case": case["id"], "session": s, "since": t0})
     try:
@@ -265,7 +276,9 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                 if should_stop():
                     rec["outcome"] = "stopped"
                     break
-                agent.respond_negotiation(s, subject, nid)
+                answer = agent.respond_negotiation(s, subject, nid)
+                if is_bot and isinstance(answer, dict):
+                    _record_bot_actions(calls, answer.get("actions"))
                 with s.lock:
                     n = g.negotiation(nid)
                     last = n["history"][-1] if n["history"] else {}
@@ -319,14 +332,21 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
             with s.lock:
                 g.force_turn(subject)
                 s._track_turn()
+                began = (g.turn, g.current)
             if is_bot:
                 # Nobody answers a chat in a turn case (the other seats are scripts): a chat the bot opens expires at
                 # once rather than after the bot's wait for a reply, and its turn goes on to its end.
                 agent.REPLY_WAIT_SECONDS = 0.0
             agent.play_turn(s, subject)
             with s.lock:
-                ended = any(c["tool"] == "end_turn" and c["ok"] for c in calls)
-                rec["end_reason"] = "end_turn" if ended or is_bot else \
+                if is_bot:
+                    # the drive ends the bot's turn itself, with no end_turn call: the turn moving on is its end_turn
+                    ended = not s.crashed and ((g.turn, g.current) != began or g.phase != "playing")
+                    if ended:
+                        calls.append({"tool": "end_turn", "args": None, "ok": True, "error": None, "count": 1})
+                else:
+                    ended = any(c["tool"] == "end_turn" and c["ok"] for c in calls)
+                rec["end_reason"] = "end_turn" if ended else \
                     ((s.metrics.current(subject) or {}).get("end_reason") or "no_end_turn")
             rec["outcome"] = rec["end_reason"]
         with s.lock:
@@ -356,8 +376,25 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
             except Exception:
                 pass
         s.stop()
+    if s.crashed:
+        # the engine stopped mid-case (GameSession._crashed): whatever the subject did before it, the case did not run
+        rec["outcome"] = "error"
+        rec["error"] = f"The engine stopped on turn {s.crashed['turn']}: {str(s.crashed['message'])[:300]}"
+        rec["passed"] = False
+        return rec
     rec["passed"] = _check(case, rec)
     return rec
+
+
+def _record_bot_actions(calls: list, counts) -> None:
+    """Add the bot subject's actions from one drive or one answer (``{tool: [taken, refused]}``) to a case's calls:
+    one entry per tool taken (``ok``, with its ``count``) and one per tool refused."""
+    for tool, pair in (counts or {}).items():
+        taken, refused = (list(pair) + [0, 0])[:2]
+        for ok, n in ((True, taken), (False, refused)):
+            if n and len(calls) < 400:
+                calls.append({"tool": tool, "args": None, "ok": ok, "error": None if ok else "refused by the engine",
+                              "count": int(n)})
 
 
 def _check(case: dict, rec: dict) -> Optional[bool]:
