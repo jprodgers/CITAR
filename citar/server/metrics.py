@@ -43,10 +43,15 @@ class Metrics:
     Counted per turn rather than per game on purpose. A model that loops for two hundred calls in one
     turn and behaves for the rest is a different problem from one that is slightly repetitive
     throughout, and a per-game average hides the difference.
+
+    Only an open turn's record changes: every change goes through ``current`` (or ``_open``), and a record that is
+    closed (ended, interrupted or superseded) is never changed again, nor is a negotiation's once it is recorded.
+    ``json_parts`` relies on it to encode each settled record once.
     """
     def __init__(self, data: Optional[dict] = None):
         self.data = data or {"turns": [], "negotiations": []}
         self._open: dict[int, dict] = {}
+        self._encoded: dict[str, _Encoded] = {}      # per list in ``data``: its settled records, encoded (json_parts)
         for rec in self.data["turns"]:
             if rec.get("ended") is None and not rec.get("interrupted"):
                 # A turn that was in progress when the game was saved: the server stopped mid-turn, so its timing
@@ -54,6 +59,45 @@ class Metrics:
                 # the turn is replayed and measured again from scratch.
                 rec["interrupted"] = True
                 rec["end_reason"] = "interrupted"
+
+    def json_parts(self) -> list[bytes]:
+        """The metrics as JSON in pieces, whose concatenation (``b"".join``) is ``json.dumps(self.data)``'s bytes: what a
+        save takes under the session's lock (``GameSession._snapshot``), and joins on its writer thread.
+
+        The records grow by one a seat a turn, so dumping them whole at every autosave cost time under the lock that
+        grew with the game (25 to 29 ms at the end of a 24-seat gargantuan game, against P2.5.3's 10 ms budget for
+        everything a save does under the lock). A record that is no longer open never changes again (see the class), so
+        each is encoded once, by the first save that finds it settled, and kept: a save encodes the records settled
+        since the last one and the open turn's, whatever the game's length. Called with the session's lock held.
+        """
+        if not all(isinstance(key, str) for key in self.data):
+            return [json.dumps(self.data).encode()]      # json's own spelling of other keys; never the server's
+        parts = [b"{"]
+        for i, (key, value) in enumerate(self.data.items()):
+            parts.append((", " if i else "").encode() + json.dumps(key).encode() + b": ")
+            if key in ("turns", "negotiations") and isinstance(value, list):
+                parts.extend(self._list_parts(key, value))
+            else:
+                parts.append(json.dumps(value).encode())
+        parts.append(b"}")
+        return parts
+
+    def _list_parts(self, key: str, records: list) -> list[bytes]:
+        """One of ``data``'s lists as JSON pieces: its settled prefix from the cache (extended by the records settled
+        since), then the rest encoded afresh (the open turn's record, and any after it)."""
+        enc = self._encoded.get(key)
+        if enc is None or enc.of is not records or enc.done > len(records):
+            enc = self._encoded[key] = _Encoded(records)      # a list replaced or cut: encoded again from the start
+        open_ids = {id(r) for r in self._open.values()} if key == "turns" else ()
+        k = enc.done
+        while k < len(records) and id(records[k]) not in open_ids:
+            k += 1
+        if k > enc.done:
+            block = ", ".join(json.dumps(r) for r in records[enc.done:k])
+            enc.blocks.append(((", " if enc.done else "") + block).encode())
+            enc.done = k
+        rest = [((", " if i else "") + json.dumps(r)).encode() for i, r in enumerate(records[k:], start=k)]
+        return [b"[", *enc.blocks, *rest, b"]"]
 
     @staticmethod
     def _valid(rec: dict) -> bool:
@@ -300,6 +344,16 @@ class Metrics:
                 row["top_tools"] = ", ".join(f"{k}x{v[0]}" for k, v in sorted(acts.items(), key=lambda kv: -kv[1][0])[:6] if v[0])
             rows.append(row)
         return rows
+
+
+class _Encoded:
+    """The settled prefix of one of a Metrics' lists, encoded (``Metrics.json_parts``): ``blocks`` joined are the JSON
+    of ``of[:done]`` without its brackets, each block holding the records one save found newly settled."""
+
+    __slots__ = ("of", "done", "blocks")
+
+    def __init__(self, of: list):
+        self.of, self.done, self.blocks = of, 0, []
 
 
 def _bot_totals(turns: list[dict]) -> dict:
