@@ -96,6 +96,9 @@ class GameSession:
         self.usage_act: Optional[str] = None    # usage ledger activity id (usage.py)
         self.crashed: Optional[dict] = None     # {"message", "turn", "at"} once the engine stopped (_crashed)
         self._autosaved: Optional[tuple] = None  # (turn, phase) of the last autosave
+        self._autosave_began = 0.0               # when the last autosave began (perf_counter), and how long it took
+        self._autosave_cost = 0.0
+        self._autosave_due = False               # a round's autosave was put off (autosave's cost bound)
         game.subscribe(self._on_event)
         self._track_turn()
 
@@ -515,6 +518,7 @@ class GameSession:
             self.pause_reason = None
             if paused:
                 self.metrics.pause()
+                self.flush_autosave()
             else:
                 self.metrics.unpause()
             self.cond.notify_all()
@@ -728,6 +732,7 @@ class GameSession:
                 pid = g.current
                 seat = self.seats[pid] if pid < len(self.seats) else None
                 if self.paused or seat is None or seat.type in ("human", "mcp"):
+                    self.flush_autosave()          # the game waits: the autosave catches up (autosave's cost bound)
                     self.cond.wait(timeout=1)
                     continue
                 turn_marker = (g.turn, pid)
@@ -921,14 +926,25 @@ class GameSession:
             except OSError:
                 pass
 
+    #: The share of a session's time its autosaves may take, and the cost under which an autosave is written every
+    #: round regardless (about one large view's time under the lock): see ``autosave``.
+    AUTOSAVE_SHARE = 0.25
+    AUTOSAVE_FREE_SECONDS = 0.020
+
     def autosave(self, force: bool = False):
-        """Write the autosave: once per round (and once when the game ends) unless forced.
+        """Write the autosave: once per round (and once when the game ends) unless forced, within a cost bound.
 
         This is what makes a game survive a restart: the scheduler reloads a benchmark from here, restore_live a
-        lobby game, and a game interrupted mid-run continues from the start of its round, at most one round behind.
-        Every round, however fast the round: on the Rust engine an all-bot round takes milliseconds, and a time
-        limit between autosaves would leave the autosave hundreds of rounds behind. A crashed game is never
-        autosaved again, so its autosave stays the last good state (``_crashed``).
+        lobby game, and a game interrupted mid-run continues from where its autosave stands. On the Rust engine an
+        all-bot round takes milliseconds, so the 3-second spacing Python's autosave had would leave it hundreds of
+        rounds behind; but until package 2-11's journal a save is the whole history, written under the lock, and an
+        autosave every round would cost an all-bot game most of its time (85% on a small map by turn 300, 78% on a
+        huge one by turn 250). So a round's autosave is written when the last one took under
+        ``AUTOSAVE_FREE_SECONDS``, or at most ``AUTOSAVE_SHARE`` of the time since it began; otherwise it is put off
+        to a later round, which keeps the autosave about four times its own cost of play behind at most. A put-off autosave
+        is written as soon as the game waits (a pause, a person's or an MCP client's turn: ``flush_autosave``); the
+        end of the game and a forced autosave are never put off. A crashed game is never autosaved again, so its
+        autosave stays the last good state (``_crashed``).
         """
         if self._stop or self.crashed:
             return
@@ -936,12 +952,25 @@ class GameSession:
         mark = (g.turn, g.phase)
         if not force and mark == self._autosaved:
             return
+        began = time.perf_counter()
+        if (not force and g.phase == "playing" and self._autosave_cost > self.AUTOSAVE_FREE_SECONDS
+                and self._autosave_cost > self.AUTOSAVE_SHARE * (began - self._autosave_began)):
+            self._autosave_due = True
+            return
         self._autosaved = mark
+        self._autosave_due = False
         try:
             self.save("autosave", level=self.AUTOSAVE_LEVEL)
         except Exception:
             self.errors.append({"t": time.time(), "where": "autosave", "trace": traceback.format_exc()})
+        self._autosave_began = began
+        self._autosave_cost = time.perf_counter() - began
         self.mark_live()
+
+    def flush_autosave(self):
+        """Write an autosave that the cost bound put off (``autosave``), now that the game waits. Lock held."""
+        if self._autosave_due:
+            self.autosave(force=True)
 
     @classmethod
     def from_save(cls, data: dict) -> "GameSession":

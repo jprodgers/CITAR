@@ -312,6 +312,89 @@ class CrashTests(ServerCase):
 
 
 @rust_only
+class AutosaveCostTests(ServerCase):
+    """The autosave's cost bound (``GameSession.autosave``): every round while it is cheap, at most a share of the
+    session's time once it is not, and caught up as soon as the game waits."""
+
+    def setUp(self):
+        super().setUp()
+        self.s = self.game({"map_size": "duel", "seed": 3, "barbarians": "off"}, [{"type": "human"}, {"type": "bot"}],
+                           start=False)
+        self.writes = []
+        real = self.s.save
+
+        def save(filename=None, level=None):
+            if filename == "autosave":
+                self.writes.append(self.s.game.turn)
+            return real(filename, level)
+        self.s.save = save
+
+    def took(self, seconds: float, ago: float = 0.0):
+        """As if the last autosave took ``seconds`` and began ``ago`` seconds before its end."""
+        self.s._autosave_cost = seconds
+        self.s._autosave_began = time.perf_counter() - max(ago, seconds)
+
+    def next_round(self):
+        self.s._autosaved = None                 # the mark a new round's autosave sees
+
+    def test_a_cheap_autosave_is_written_every_round(self):
+        s = self.s
+        for _ in range(3):
+            self.took(s.AUTOSAVE_FREE_SECONDS / 2)
+            self.next_round()
+            with s.lock:
+                s.autosave()
+        self.assertEqual(len(self.writes), 3)
+        self.assertFalse(s._autosave_due)
+
+    def test_a_costly_autosave_waits_for_its_share_or_for_the_game_to_wait(self):
+        s = self.s
+        self.took(1.0)
+        self.next_round()
+        with s.lock:
+            s.autosave()
+        self.assertEqual(self.writes, [], "a second's autosave right after the last one is put off")
+        self.assertTrue(s._autosave_due)
+        self.took(1.0, ago=1.0 / s.AUTOSAVE_SHARE)
+        with s.lock:
+            s.autosave()
+        self.assertEqual(len(self.writes), 1, "written once it is the share of the time since the last one began")
+        self.assertFalse(s._autosave_due)
+        # put off again, and written by the pause
+        self.took(1.0)
+        self.next_round()
+        with s.lock:
+            s.autosave()
+        self.assertEqual(len(self.writes), 1)
+        s.set_paused(True)
+        self.assertEqual(len(self.writes), 2, "a pause writes the autosave put off")
+        self.assertFalse(s._autosave_due)
+        # a forced autosave and the end of the game are never put off
+        self.took(1.0)
+        with s.lock:
+            s.autosave(force=True)
+        self.assertEqual(len(self.writes), 3)
+        if has_test_ops():
+            self.took(1.0)
+            with s.lock:
+                s.game.test_ops([{"op": "end_game"}])
+                s.autosave()
+            self.assertEqual(len(self.writes), 4, "the end of the game")
+
+    def test_the_driver_writes_a_put_off_autosave_when_the_game_waits(self):
+        s = self.s
+        self.assertEqual(s.seats[s.game.current].type, "human")
+        self.took(1.0)
+        self.next_round()
+        with s.lock:
+            s.autosave()
+        self.assertTrue(s._autosave_due)
+        s.start()                                    # the driver waits for the person's turn, and catches up first
+        self.assertTrue(wait(lambda: not s._autosave_due, 10))
+        self.assertEqual(len(self.writes), 1)
+
+
+@rust_only
 class ViewBytesTests(ServerCase):
     """Gate 4: /view and /replay return the engine's bytes, never parsed and dumped again."""
 
@@ -411,6 +494,18 @@ class LongGameTests(ServerCase):
             dispatched.append(1)
             return real(self_)
 
+        autosaves = []
+        real_save = s.save
+
+        def save(filename=None, level=None):
+            t = time.perf_counter()
+            try:
+                return real_save(filename, level)
+            finally:
+                if filename == "autosave":
+                    autosaves.append(time.perf_counter() - t)
+        s.save = save
+
         with mock.patch.object(sess.GameSession, "_dispatch_negotiation_interrupts", dispatch):
             t0 = time.perf_counter()
             s.start()
@@ -425,11 +520,13 @@ class LongGameTests(ServerCase):
         rounds = [starts[r + 1] - starts[r] for r in range(1, min(last, 101))]
         self.assertGreaterEqual(len(rounds), 100 if s.game.phase == "playing" else 1)
         print(f"\n100 rounds of 4 bots on small under the session driver: {starts[min(last, 101)] - t0:.1f} s, "
-              f"slowest round {max(rounds):.2f} s, median {statistics.median(rounds) * 1000:.0f} ms", flush=True)
+              f"slowest round {max(rounds):.2f} s, median {statistics.median(rounds) * 1000:.0f} ms; "
+              f"{len(autosaves)} autosaves, {sum(autosaves):.2f} s in all", flush=True)
         self.assertLess(max(rounds), 10.0)
         self.assertGreaterEqual(len(dispatched), 400, "the responders were dispatched after every drive")
         self.assertEqual(s.errors, [])
-        self.assertGreaterEqual(autosave_turn(s), s.game.turn - 1)
+        with s.lock:
+            self.assertEqual(autosave_turn(s), s.game.turn, "the pause brought the autosave up to the game")
 
 
 if __name__ == "__main__":
