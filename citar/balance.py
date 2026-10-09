@@ -5,8 +5,8 @@
 
 Games run in parallel (one process per game). `--bots` assigns bots to seats in rotation, each a bot profile's id or
 a bot version (basic, the latest; basic-N; idle), and the seat order is rotated between games so no bot always gets
-the same start. One seed plays one game: the bots draw from the game's seed. The report covers pacing (techs, eras, cities,
-population by turn), economy (bankruptcy, unhappiness, starvation), conflict (wars, captures, eliminations,
+the same start. One seed plays one game: the bots draw from the game's seed. The report covers pacing (techs, eras,
+cities, population by turn), economy (bankruptcy, unhappiness, starvation), conflict (wars, captures, eliminations,
 barbarians), what gets built, victory types, and win rates per bot type. A JSON copy is written to saves/balance/.
 """
 from __future__ import annotations

@@ -27,10 +27,11 @@ way.
 Bot versions are pinned when an experiment is submitted: "basic" becomes the version it names then (basic-1), so a
 newer version compiled in later does not mix into a queued experiment (use "live" to opt out and play the latest
 version at play time). The engine compiles its versions in, so nothing is copied: 0.1.5 froze a copy of its Python
-bot instead, and a seat naming one of those snapshots is refused, the snapshots having been archived with 0.1.5. Every result records, per seat, what played: the build id (the engine's and the bot's code and the ruleset),
-the bot version, the profile and its revision, the overrides, the fixed aggression as the bot played it and the
-fingerprint, all taken when the game is played, so a game of a queued experiment that a newer build plays is labelled
-with that build. A seat queued as {"profile": "best"} is recorded as the profile "best" stood for at submission.
+bot instead, and a seat naming one of those snapshots is refused, the snapshots having been archived with 0.1.5.
+Every result records, per seat, what played: the build id (the engine's and the bot's code and the ruleset), the bot
+version, the profile and its revision, the overrides, the fixed aggression as the bot played it and the fingerprint,
+all taken when the game is played, so a game of a queued experiment that a newer build plays is labelled with that
+build. A seat queued as {"profile": "best"} is recorded as the profile "best" stood for at submission.
 
 Optional map generation keys pass straight to the generator: "map_edges" (ice_caps, wrap_x, wrap_y, wrap_both,
 boxed), "river_density" (1 = normal) and "resources" (densities and per-resource rules; see mapgen.MapOptions).

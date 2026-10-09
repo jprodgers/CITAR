@@ -1,8 +1,8 @@
 """citar._engine: the Rust engine, its bots and its runner (crates/citar-py; DESIGN.md P2.6).
 
 Only the facade (citar/engine_api.py) imports it. The process's ruleset is the one compiled in, or the one in the
-directory CITAR_RULESET_DIR names, read at import (an ImportError when that directory does not load). Every value that would be a dict or a list comes back as JSON bytes,
-which the facade decodes; JSON arguments go in as bytes. Counts, ids and names are ints and strs. Heavy calls release the
+directory CITAR_RULESET_DIR names, read at import (an ImportError when that directory does not load). Every value that
+would be a dict or a list comes back as JSON bytes, which the facade decodes; JSON arguments go in as bytes. Counts, ids and names are ints and strs. Heavy calls release the
 GIL; the properties and the negotiation heads read a small copy of where the game stands and never wait for it.
 
 Errors: ActionError (a refusal, with .code), MapError and LoadError (both ValueError), EngineCrash (RuntimeError: a

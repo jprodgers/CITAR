@@ -401,7 +401,8 @@ class RulesetDirTests(unittest.TestCase):
         r = check(unique)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("the ruleset does not load: 1 problem", r.stdout)
-        self.assertRegex(r.stdout, r"- ruleset/buildings.json: Library: .*Makes every turn a Tuesday.* \[UnknownUnique\]")
+        self.assertRegex(r.stdout,
+                         r"- ruleset/buildings.json: Library: .*Makes every turn a Tuesday.* \[UnknownUnique\]")
         reference = ruleset_copy(self.tmp / "r", {"ruleset/units.json": broken_reference})
         r = check(reference)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
