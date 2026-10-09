@@ -134,6 +134,7 @@ TRACKED = {
     "citar/__init__.py", "citar/_engine.pyi", "citar/web/index.html", "citar/web/js/app.js",
     "citar/data/collectors/collect.sh", "tests/test_a.py", "tests/output/keep.txt", "scripts/ci/x.py",
     "pyproject.toml", "Cargo.toml", "Cargo.lock", "crates/citar-py/Cargo.toml", "crates/citar-py/src/lib.rs",
+    "crates/citar-engine/data/game.json", "crates/citar-engine/data/ruleset/units.json",
     "refcheck/intended.toml", "refcheck/README.md", "README.md",
 }
 MATURIN = {
@@ -247,6 +248,14 @@ class CheckDist(unittest.TestCase):
         self.assertEqual(check_dist.check_sdist(self.a_sdist(drop=["refcheck/README.md"]), TRACKED, MATURIN), [])
         self.assertEqual(check_dist.check_sdist(self.a_sdist(top="citar-0.1.4"), TRACKED, MATURIN)[0],
                          "citar-0.1.4/Cargo.lock is outside citar-0.1.5/")
+
+    def test_a_sdist_without_the_ruleset_fails_and_a_wheel_with_it_too(self):
+        """The engine compiles the ruleset in from crates/citar-engine/data/, which the source distribution must carry
+        though no include names it; a wheel carries none of it (citar/data holds only the collectors)."""
+        problems = check_dist.check_sdist(self.a_sdist(drop=["crates/citar-engine/data/game.json"]), TRACKED, MATURIN)
+        self.assertEqual(problems, ["missing (a build from it compiles it in): crates/citar-engine/data/game.json"])
+        problems = self.wheel_problems(self.a_wheel(add={"citar/data/ruleset/units.json": "{}"}))
+        self.assertEqual(problems, ["stray (git does not track it): citar/data/ruleset/units.json"])
 
     def test_globs_read_as_maturin_reads_them(self):
         def matches(pattern, path):

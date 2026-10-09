@@ -24,6 +24,8 @@ A source distribution must have:
 - every file git tracks under ``citar/``, every tracked file that an sdist ``include`` names and no ``exclude`` takes
   away, and the files a build from it starts from (``pyproject.toml``, the workspace's ``Cargo.toml`` and
   ``Cargo.lock``, ``crates/citar-py/Cargo.toml``);
+- every file git tracks under ``crates/citar-engine/data/``: the ruleset, which the engine compiles in and its build
+  id hashes, and which maturin carries with the crate rather than through an ``include``;
 - no member twice.
 
 ``WHEEL_OR_DIR`` and ``SDIST_OR_DIR`` are the file, or a directory holding exactly one ``*.whl`` or ``*.tar.gz``. The
@@ -50,6 +52,11 @@ PACKAGE = "citar/"
 LIBRARY = re.compile(r"citar/_engine\.(?:[^/]*\.)?(?:pyd|so)")
 #: Files a build from the source distribution cannot start without.
 SDIST_NEEDS = ("pyproject.toml", "Cargo.toml", "Cargo.lock", "crates/citar-py/Cargo.toml")
+#: Folders whose every tracked file a build from the source distribution compiles in: the ruleset, which
+#: ``rules::source::embedded()`` takes with include_bytes! and the engine's build script hashes into its build id.
+#: No include names it (maturin packs it with the crate), so without this a change to maturin, or to the crate's
+#: ``include`` or ``exclude``, could drop it and leave a source distribution that does not build.
+SDIST_NEEDS_TREES = ("crates/citar-engine/data/",)
 #: The one file in a source distribution that no checkout has: its metadata, which the build writes.
 SDIST_OWN = "PKG-INFO"
 
@@ -213,6 +220,8 @@ def check_sdist(path: Path, tracked: set[str], maturin: dict) -> list[str]:
     problems += listed("missing (git tracks it under citar/)", want - members)
     problems += listed("missing (an include names it)", named(tracked, maturin, "sdist") - members - want)
     problems += listed("missing (a build from it starts there)", set(SDIST_NEEDS) - members)
+    problems += listed("missing (a build from it compiles it in)",
+                       {p for p in tracked if p.startswith(SDIST_NEEDS_TREES)} - members)
     return problems
 
 
