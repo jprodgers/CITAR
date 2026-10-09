@@ -387,7 +387,10 @@ class ViewBytesTests(ServerCase):
         median = statistics.median(times)
         print(f"\nthe late fixture's god view through TestClient: median {median * 1000:.1f} ms, "
               f"max {max(times) * 1000:.1f} ms, {len(r.content) / 1e6:.2f} MB", flush=True)
-        self.assertLessEqual(median, 0.020)
+        # The budget is the laptop's (package 2-09's gate 4); a shared CI runner, two to three times slower and
+        # never idle, is held to three times it. A route that parses the view again is caught by the bytes test above,
+        # not by the clock.
+        self.assertLessEqual(median, 0.060 if os.environ.get("CI") else 0.020)
 
 
 @rust_only
