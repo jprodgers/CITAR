@@ -54,7 +54,9 @@ pub struct Context {
 /// (`common.make_bots`).
 #[must_use]
 pub fn aggression(pid: PlayerId, seed: u64) -> f64 {
-    let step = (u64::from(pid.0) * 37 + seed) % 10;
+    // Taken mod 10 before the sum: a seed near u64::MAX (which a run allows when its games stay
+    // under it) would overflow, a panic in a debug build and another step in a release one.
+    let step = (u64::from(pid.0) * 37 % 10 + seed % 10) % 10;
     // step < 10, exact in an f64.
     0.25 + 0.5 * (step as f64) / 9.0
 }
@@ -649,6 +651,13 @@ mod tests {
         assert!((round_ndigits(aggression(PlayerId(1), 5001), 3) - 0.694).abs() < 1e-12);
         assert!((aggression(PlayerId(0), 5000) - 0.25).abs() < 1e-12);
         assert!((aggression(PlayerId(0), 5009) - 0.75).abs() < 1e-12);
+        // The largest seed a run allows, in every seat: no overflow, and the formula's step,
+        // (pid * 37 + seed) % 10 taken without wrapping.
+        for pid in 0..=u8::MAX {
+            let step = (u128::from(pid) * 37 + u128::from(u64::MAX)) % 10;
+            let want = 0.25 + 0.5 * (step as f64) / 9.0;
+            assert!((aggression(PlayerId(pid), u64::MAX) - want).abs() < 1e-12, "seat {pid}");
+        }
     }
 
     #[test]
