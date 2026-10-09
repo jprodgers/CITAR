@@ -17,8 +17,9 @@
 //! - [`Game::event_by_id`], [`Game::event_rows`], [`Game::stats_rows`] and
 //!   [`Game::thought_rows`]: `event_view`'s event, `events`, `stats` and `thoughts`
 //!   (`engine_api.py:499-503, 631-655`), as Python's rows;
-//! - [`Game::save_whole`]: `to_save` and `state_dict` until the v2 saves of package 2-11, the
-//!   state and its whole history as one journal chunk.
+//! - [`Game::save_whole`]: `to_save`, the state and its whole history as one journal chunk;
+//! - [`Game::save_snapshot`]: what a session takes under its lock for a v2 save (package 2-11):
+//!   the chunk of history since the last take and a copy of the state.
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -28,8 +29,8 @@ use super::views::{players::kind_name, stored_negotiation, thought_json};
 use crate::base::ids::{EventId, NegotiationId, PlayerId, Turn};
 use crate::game::Game;
 use crate::game::victory::won_by;
-use crate::save::journal::{self, JournalCursor};
-use crate::save::{SaveError, to_json};
+use crate::save::journal::{self, JournalChunk, JournalCursor};
+use crate::save::{SaveError, Snapshot, to_json};
 use crate::state::Phase;
 use crate::state::chronicle::Event;
 use crate::state::config::{AiBaseValues, MapSource, ResourceKindOptions, ResourceRule};
@@ -125,8 +126,8 @@ impl Heads {
     }
 }
 
-/// A game's state and its whole history, as one save until the v2 container of package 2-11
-/// (DESIGN.md P2.7.1): what [`Game::load`] reads back.
+/// A game's state and its whole history, as one value ([`Game::save_whole`]): what
+/// [`Game::load`] reads back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WholeSave {
     /// The state: format v1 JSON.
@@ -379,10 +380,11 @@ impl Game {
         self.thoughts(pid, since).into_iter().map(thought_json).collect()
     }
 
-    /// The game as one save until package 2-11's container (`EngineGame.to_save` on Rust,
-    /// DESIGN.md P2.7.1): the state, and its whole history as one journal chunk, which
-    /// [`Game::load`] reads back to the same game. The game's own journal cursor does not move,
-    /// so a host that also takes chunks ([`Game::take_journal_chunk`]) misses none.
+    /// The game as one value (`EngineGame.to_save` on Rust, and a save that carries its own
+    /// journal, as a probe case's): the state, and its whole history as one journal chunk,
+    /// which [`Game::load`] reads back to the same game. The game's own journal cursor does not
+    /// move, so a host that also takes chunks ([`Game::take_journal_chunk`]) misses none. A
+    /// session saves through [`Game::save_snapshot`] instead (DESIGN.md P2.5.3).
     ///
     /// # Errors
     /// A state that does not write, which the engine's checks rule out.
@@ -394,6 +396,19 @@ impl Game {
         let chunk = journal::take_chunk(self.rules(), self.chronicle(), &mut cursor, host)?;
         let state = to_json(self.rules(), &st)?;
         Ok(WholeSave { state, history: chunk.map(|c| c.json) })
+    }
+
+    /// What a host takes under its lock to save the game off it (DESIGN.md P2.5.3): the history
+    /// gained since the last take, as a journal chunk (`None` if nothing was), then a copy of the
+    /// state, which counts that chunk. The host appends the chunk to its journal and writes the
+    /// state's JSON (`Snapshot::to_json`) with its container off the lock. A poisoned game is
+    /// saved too, for whoever debugs it.
+    ///
+    /// # Errors
+    /// History that does not write, which the engine's checks rule out.
+    pub fn save_snapshot(&mut self) -> Result<(Snapshot, Option<JournalChunk>), SaveError> {
+        let chunk = self.take_journal_chunk()?;
+        Ok((self.snapshot(), chunk))
     }
 }
 

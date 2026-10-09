@@ -259,6 +259,16 @@ impl Game {
         journal::take_chunk(self.rules, &self.chron, &mut self.journal, host)
     }
 
+    /// Starts the journal over: the next chunk is numbered 0 and holds the whole history the game
+    /// keeps (DESIGN.md P2.5.3). For a host that begins a new journal for a game whose chunks so
+    /// far went to no journal of its, as a game made from a state alone: its state still counts
+    /// the chunks of the game it was taken from, and the next chunk must be the new journal's
+    /// first. The history itself is unchanged, and so is the digest (the count is host data).
+    pub fn restart_journal(&mut self) {
+        self.journal = JournalCursor::default();
+        self.st.heads_mut().1.journal_seq = 0;
+    }
+
     /// Which checks run at every settle.
     #[must_use]
     pub const fn debug_options(&self) -> DebugOptions {
