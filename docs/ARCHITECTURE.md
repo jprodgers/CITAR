@@ -259,6 +259,13 @@ A `GameSession` owns one game and drives it: when the current player is an AI, i
 agent to completion, applies the orders, records metrics, autosaves, and moves on. Human seats wait
 for HTTP. MCP seats are woken by `wait_for_turn`.
 
+A save takes a snapshot of the game under the session's lock (a copy of the state, and the history
+since the last save, which goes into the game's journal), and the session's writer thread writes it
+off the lock: the journal's new records first, synced, then the save that names them. Autosaves the
+writer has not begun when a newer one comes are passed over. A session writes one journal, its
+timeline; loading an older save of a game that went on forks a new one, so every save stays
+loadable (crates/citar-engine/DESIGN.md P2.5.3).
+
 Negotiations interrupt: an AI that proposes a deal blocks until the other side answers, which is
 why `wait_for_turn` returns for a negotiation as well as for a turn.
 
@@ -323,7 +330,7 @@ right way.
 | Ruleset | `citar/data/ruleset/` | UnCiv-derived JSON, generated |
 | CITAR additions | `citar/data/custom/` | Same format |
 | Game settings | `citar/data/game.json` | Map sizes, lobby defaults, AI limits |
-| Saved games | `saves/<id>/*.citar` | Gzipped JSON |
+| Saved games | `saves/<id>/*.citar`, beside the game's journals `saves/<id>/journal*.cjnl` | A small JSON header and the state, zstd; the journal holds the history, one record per save |
 | Maps, scenarios, probes | `saves/maps`, `saves/scenarios`, `saves/probes` | JSON |
 | Server registry | `config/servers.json` | JSON |
 | Usage ledger | `saves/usage/*.jsonl` | One line per activity, no prices |

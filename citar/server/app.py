@@ -1511,7 +1511,10 @@ def load_save(body: LoadBody, request: Request, p: Principal = Depends(principal
     path = (SAVE_DIR / body.path).resolve()
     if SAVE_DIR.resolve() not in path.parents or not path.exists():
         raise HTTPException(404, "Save not found.")
-    s = manager.load(path)
+    try:
+        s = manager.load(path)
+    except ValueError as e:        # a save that does not load (LoadError): its message says why
+        raise HTTPException(400, str(e))
     # A save from before accounts existed has no owner; whoever loads it becomes one.
     row = ownership.row_for(sdb, s.id)
     if row is None:

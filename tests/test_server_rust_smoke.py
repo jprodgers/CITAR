@@ -8,6 +8,7 @@ scenario editor and a scenario launched as a game round it off. Every engine cal
 engine's (CITAR_ENGINE=rust, the default since this package).
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import gzip
 import json
 import os
 import shutil
@@ -169,6 +170,14 @@ class ServerSmokeTests(unittest.TestCase):
         details = report_data._game_details(gid)          # the reports read the interim saves through the facade
         self.assertNotIn("error", details)
         self.assertEqual((details["game_id"], details["turn"]), (gid, turn))
+        # a save of the Python engine says why it does not load, and the running game is left alone
+        old = sess.SAVE_DIR / gid / "python-era.citar"
+        old.write_bytes(gzip.compress(b'{"format": "citar-save", "version": 1, "state": {}}'))
+        refused = self.req("POST", "/api/saves/load", json={"path": f"{gid}/python-era.citar"}, ok=False)
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("saved by the Python engine; archived with 0.1.5", refused.json()["detail"])
+        self.assertIs(self.app.manager.get(gid), s)
+        old.unlink()
         loaded = self.req("POST", "/api/saves/load", json={"path": saved}).json()
         self.assertEqual((loaded["id"], loaded["turn"]), (gid, turn))
         s2 = self.app.manager.get(gid)
