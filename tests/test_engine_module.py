@@ -747,9 +747,11 @@ class StubTests(unittest.TestCase):
             if isinstance(node, ast.ClassDef):
                 classes[node.name] = {n.name for n in node.body if isinstance(n, ast.FunctionDef)}
         public = {n for n in dir(E) if not n.startswith("_")}
-        self.assertEqual(top, public)
-        test_only = {"inspect", "test_ops", "set_checks", "_lock_poisoned"}
-        for cls in ("Game", "Bot"):
+        self.assertEqual({n for n in top if not n.startswith("_")}, public)
+        self.assertEqual({n for n in top if n.startswith("_")}, {"_saves_read"}, "the test operations stubbed")
+        self.assertEqual(hasattr(E, "_saves_read"), E.HAS_TEST_OPS)
+        test_only = {"inspect", "test_ops", "set_checks", "_lock_poisoned", "_hooks"}
+        for cls in ("Game", "Bot", "Journal", "SaveSnapshot", "Save"):
             have = {n for n in dir(getattr(E, cls)) if not n.startswith("__")}
             stubbed = classes[cls] - {"__init__"}
             if not E.HAS_TEST_OPS:

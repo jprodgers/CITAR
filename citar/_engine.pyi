@@ -6,7 +6,7 @@ GIL; the properties and the negotiation heads read a small copy of where the gam
 
 Errors: ActionError (a refusal, with .code), MapError and LoadError (both ValueError), EngineCrash (RuntimeError: a
 panic poisoned the game, which then refuses every command and still answers reads and saves), ValueError for a bad
-argument, TypeError for a bot that is not a compiled one.
+argument, TypeError for a bot that is not a compiled one, OSError for a save that was not written.
 """
 from typing import Callable, Final, Optional
 
@@ -134,6 +134,82 @@ def run_game(spec_json: bytes, bots: dict[int, Bot], on_turn: Optional[Callable[
     between steps) or any other BaseException from either hook."""
 
 
+# ---------------------------------------------------------------------------- saves v2 (package 2-11)
+class Journal:
+    """One journal of a session's timeline, open for appending, holding its file's OS lock until closed, and the
+    chunks of history taken from the game (Game.save_snapshot) and not yet on the disk. A journal with no records and
+    none queued is a new one: the first snapshot starts the game's journal over, its first chunk the whole history."""
+
+    @staticmethod
+    def open(path: str) -> tuple["Journal", bytes]:
+        """(the journal, {records, bytes, torn, corrupt_at, reference}). An incomplete tail is cut off (torn, its
+        length); corruption (corrupt_at, the bad record's first byte) leaves the file as it is and refuses appends, and
+        reference is the good prefix. LoadError when another session holds it or it is no journal."""
+    @property
+    def path(self) -> str: ...
+    @property
+    def records(self) -> int:
+        """The records on the disk."""
+    @property
+    def pending(self) -> int:
+        """The chunks taken from the game and not yet appended."""
+    @property
+    def is_closed(self) -> bool: ...
+    def reference(self) -> bytes:
+        """{file, records, bytes, head}: the prefix on the disk (the good one, with corruption). OSError once
+        closed."""
+    def truncate_to(self, reference_json: bytes) -> None:
+        """Cuts the journal back to one of its own prefixes, synced. LoadError for another's prefix, a corrupt
+        journal or chunks queued; OSError when the disk refuses (the cut is made again before the next append)."""
+    def close(self) -> int:
+        """Lets go of the file and its lock after the write in progress: the chunks still queued, which no save
+        names."""
+    def _hooks(self, fail_appends: int = 0, stop_before_container: int = 0) -> None:
+        """The next fail_appends writes fail at their first append; the next stop_before_container writes stop
+        once their chunks are on the disk, before the container. Test operations only."""
+
+
+class SaveSnapshot:
+    """A game's state taken for a save under its lock (Game.save_snapshot), written off it."""
+
+    @property
+    def turn(self) -> int: ...
+    @property
+    def records(self) -> int:
+        """The chunks of history its state counts: the journal records its container names."""
+    def write(self, path: str, journal: Journal, session_json: bytes, metrics_json: bytes, saved_at: str) -> None:
+        """With the GIL released: the journal's chunks up to this snapshot appended and synced, then the container
+        (the state's JSON, zstd, a temporary file and a rename) naming that prefix, beside the journal. The session's
+        record names the save's session (id, name, benchmark) in the header and its seats' types go into the header's
+        summary. OSError when it was not written: the chunks stay queued and the old save stays."""
+
+
+class Save:
+    """A .citar container read back (read_save), which Game.load_save loads."""
+
+    @property
+    def path(self) -> str: ...
+    def header(self) -> bytes:
+        """{format, version, saved_at, engine_build, rules, summary (state_summary's, with the seats' types),
+        session: {id, name, benchmark}, journal: {file, records, bytes, head} | null}."""
+    def session(self) -> bytes: ...
+    def metrics(self) -> bytes: ...
+
+
+def read_save(path: str) -> Save:
+    """The container at path, its body decompressed and checked. LoadError for one that is damaged or no save of
+    this version (a version 1 save: "saved by the Python engine; archived with 0.1.5")."""
+def save_header(path: str) -> bytes:
+    """Save.header of the container at path, without reading its body. LoadError as read_save."""
+def fork_journal(path: str, reference_json: bytes, new_path: str) -> None:
+    """Copies a prefix of the journal at path to a new journal (which must not exist), synced. LoadError when the
+    prefix cannot be read; OSError when the copy cannot be written."""
+def journal_in_use(path: str) -> bool:
+    """Whether a session holds the journal at path now; a missing file is in nobody's use."""
+def _saves_read() -> tuple[int, int]:
+    """(headers read alone, whole saves read) in this process. Test operations only."""
+
+
 # ---------------------------------------------------------------------------- one game
 class Game:
     """One game behind a lock. Commands return the events they appended, as JSON bytes, each in Python's dict."""
@@ -145,8 +221,18 @@ class Game:
     def load(state_json: bytes, chunks: list[bytes] = ...) -> tuple["Game", bytes]:
         """A save's state and the journal chunks of its history: (the game, {rules_changed, chronicle_incomplete,
         engine}). LoadError."""
+    @staticmethod
+    def load_save(save: Save, journal: Optional[str] = None) -> tuple["Game", bytes]:
+        """A game from a v2 save and the history its header names, read from journal (the file beside it, or a
+        fork); with no journal, the state alone. As Game.load. LoadError for a save whose history cannot be read
+        (missing, damaged inside its prefix, or of another timeline)."""
+    def save_snapshot(self, journal: Journal) -> SaveSnapshot:
+        """Under the game's lock: the history since the last take queued in journal as a chunk, and a copy of the
+        state that counts it. A poisoned game is saved too. OSError for a closed journal; RuntimeError for a journal
+        of another timeline."""
     def save(self) -> tuple[bytes, Optional[bytes]]:
-        """(the state, the whole history as one journal chunk or None): what Game.load reads back."""
+        """(the state, the whole history as one journal chunk or None): what Game.load reads back. The game's own
+        journal does not move."""
     def state_json(self) -> bytes: ...
     def digest(self) -> str: ...
 
