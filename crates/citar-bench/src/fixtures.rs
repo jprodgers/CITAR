@@ -9,9 +9,8 @@ use std::io::Read;
 
 use citar_engine::game::Game;
 use citar_engine::rules::Ruleset;
-use citar_engine::save::journal::{FrameWriter, FullFrame, Record};
-use citar_engine::state::State;
-use citar_engine::state::chronicle::{Chronicle, ChronicleHeads, HostHeads};
+use citar_engine::state::chronicle::Chronicle;
+use citar_engine::state::{Phase, State};
 use citar_testkit::fixtures::{self as tk, Fixture};
 use citar_testkit::states::{self, Shape};
 
@@ -111,28 +110,45 @@ pub fn gargantuan_state() -> State {
     states::build(Ruleset::shared(), 2026, &Shape::GARGANTUAN)
 }
 
-/// The synthetic gargantuan state as a game whose chronicle holds one round of history not yet
-/// taken into the journal: 300 entries of every kind (`states::history`) and the state's own
-/// keyframe, the largest frame a round records (a delta is a few kilobytes). What a session's
-/// save takes under its lock after a round (package 2-11): the round's chunk and the state.
-/// The checks are off ([`crate::unchecked`]).
+/// The synthetic gargantuan state as a game that has just played a round, its history not yet
+/// taken into the journal: what a session's save takes under its lock as a round ends (package
+/// 2-11, DESIGN.md P2.5.3's "a round passed on the synthetic state"), the state and the round's
+/// chunk: the round's events, its stats row and its frame, a keyframe (a game's first frame, the
+/// largest a round records; a delta is a few kilobytes). The round is played at the state's turn
+/// from its first living major's turn to the next round's, every living major ending its turn
+/// once, with the victories off and the turn limit out of reach, since the synthetic state holds
+/// what no game reaches. Its first end of turn hung until `fbf1edc` (one great person of a kind a
+/// turn) and `af82e1b` (a city-state's ally is a major). The checks are off
+/// ([`crate::unchecked`]).
 ///
 /// # Panics
 ///
-/// If the synthetic state is not sound, which the testkit's own tests rule out.
+/// If the synthetic state is not sound, which the testkit's own tests rule out, or its round
+/// does not end.
 #[must_use]
 pub fn gargantuan_round_game() -> Game {
     let r = Ruleset::shared();
     let mut parts = gargantuan_state().into_parts();
-    let (mut heads, mut host) = (ChronicleHeads::default(), HostHeads::default());
-    let mut chron = Chronicle::new();
-    states::history(r, 2026, 300, &mut heads, &mut host, &mut chron);
-    parts.chronicle = heads;
-    parts.host.0 = host;
-    let mut st = State::from_parts(parts).expect("the synthetic state fits");
-    let key = FrameWriter::new().push(&FullFrame::capture(r, &st, (0, 0)));
-    Record::of(&mut st, &mut chron).frame(key);
-    crate::unchecked(Game::from_state(r, st, chron).expect("a sound state"))
+    let first = parts.players.iter().find(|(_, p)| p.is_major() && p.alive()).map(|(id, _)| id);
+    parts.clock.current = first.expect("a living major");
+    parts.clock.turn_started = false;
+    parts.config.turn_limit = 10_000;
+    parts.config.disabled_victories = r.victories().iter().map(|(id, _)| id).collect();
+    let seats = parts.players.len();
+    let st = State::from_parts(parts).expect("the synthetic state fits");
+    let mut g = crate::unchecked(Game::from_state(r, st, Chronicle::new()).expect("a sound state"));
+    let turn = g.turn();
+    for _ in 0..=seats {
+        if g.turn() != turn {
+            break;
+        }
+        let who = g.current();
+        if let Err(e) = g.end_turn(who) {
+            panic!("the gargantuan round, turn {turn}, {who:?}: {}", e.message);
+        }
+    }
+    assert_eq!((g.turn(), g.phase()), (turn + 1, Phase::Playing), "the round ended in play");
+    g
 }
 
 /// The synthetic gargantuan state as a game, its checks off ([`crate::unchecked`]).

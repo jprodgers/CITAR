@@ -27,9 +27,10 @@ fn a_gargantuan_rounds_save_snapshot_holds_the_lock_far_under_100_ms() {
     // Package 2-11's gate 6 (DESIGN.md P2.5.3): `Game::save_snapshot` is everything a session's save
     // does under its lock (the binding adds a queue push). The budget, 10 ms, is the io suite's
     // (`cargo xtask perf --suite io`, the bench profile on an idle core); here, in whatever profile
-    // and on whatever machine the tests run, the hard line of 100 ms holds, on a round's chunk with
-    // a keyframe, the largest a round's chunk is.
+    // and on whatever machine the tests run, the hard line of 100 ms holds, on a round passed on the
+    // synthetic state, whose chunk has a keyframe, the largest a round's chunk is.
     let g = citar_bench::fixtures::gargantuan_round_game();
+    let seq = g.state().host().0.journal_seq;
     let mut best = Duration::MAX;
     let mut size = 0;
     for _ in 0..5 {
@@ -40,7 +41,7 @@ fn a_gargantuan_rounds_save_snapshot_holds_the_lock_far_under_100_ms() {
         let chunk = chunk.expect("the round's history");
         assert_eq!(
             (chunk.seq, snap.state().host().0.journal_seq),
-            (0, 1),
+            (seq, seq + 1),
             "the snapshot counts it"
         );
         size = chunk.json.len();

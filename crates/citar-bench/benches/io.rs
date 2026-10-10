@@ -9,9 +9,10 @@
 //!   bytes). Budget 10 ms (the plan's floor is 100 ms, gate 3 of package 1e-03).
 //! - `save_snapshot/gargantuan`: `Game::save_snapshot`, all a session's save holds the lock for
 //!   (package 2-11, DESIGN.md P2.5.3): a round's journal chunk taken and the state copied, on the
-//!   synthetic gargantuan game with a round of history (`fixtures::gargantuan_round_game`: 300
-//!   entries and the state's keyframe, the largest frame a round records). Budget 10 ms (gate 6
-//!   of 2-11: never above 100 ms).
+//!   synthetic gargantuan game just after a round passed on it (`fixtures::gargantuan_round_game`:
+//!   every living major's end of turn once; the chunk, about 1.35 MB, is the round's events, its
+//!   stats row and its frame, a keyframe, the largest a round records). Budget 10 ms (gate 6 of
+//!   2-11: never above 100 ms).
 //! - `to_json/small_t280` and `to_json/gargantuan`: the save written from a snapshot, off the
 //!   lock. Budgets 20 ms and 100 ms.
 //! - `load/small_t280`: `Game::load` of the late fixture's save: the state read and validated,
@@ -164,8 +165,8 @@ fn main() {
 }
 
 /// What a session's save holds its lock for (package 2-11): `Game::save_snapshot` on the
-/// gargantuan game with a round of history, each timing on a fresh copy of the game (the copy
-/// untimed), so each takes the round's chunk.
+/// gargantuan game just after a round passed on it, each timing on a fresh copy of the game (the
+/// copy untimed), so each takes the round's chunk.
 fn save_snapshot(s: &mut Suite, c: &mut criterion::Criterion) {
     let g = fixtures::gargantuan_round_game();
     let chunk = g.clone().save_snapshot().expect("it saves").1.map_or(0, |c| c.json.len());
