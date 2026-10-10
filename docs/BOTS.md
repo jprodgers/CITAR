@@ -42,6 +42,14 @@ turn 150 and stops expanding. That is a real ceiling and it is the main open pie
 What it means for a score: the bot is a competent but limited opponent. Beating it is not the same
 as playing Civ well, and losing to it badly is meaningful.
 
+`basic-1` plays as the Python bot did, measured over whole games against that bot's own (cities,
+technologies, score and the rest at turns 100, 200 and 300, within the statistical gates of
+crates/citar-engine/DESIGN.md P2.4.4). The differences it has are explained: a fixed escort rule
+keeps more settlers alive, so it has more cities and units at turn 100 (gone by turn 200); and on
+Small maps it declares about 18% fewer wars from about turn 130 on, and so takes fewer cities. That
+last gap was accepted for 0.1.6, since the bots are trained again in 0.1.7; Standard and Large maps
+do not show it.
+
 ---
 
 ## Bot profiles and rankings
@@ -213,3 +221,27 @@ The workflow that works:
 
 The working log of this campaign — what has been tried, what worked, what the current numbers are —
 is in [research/BOT_TUNING.md](research/BOT_TUNING.md).
+
+### Checking a change to the code
+
+A new version, or any change under `crates/citar-bot`, has to keep the bot sound as well as make it
+better. With a Rust toolchain (CONTRIBUTING.md, "Rust"):
+
+```bash
+cargo nextest run -p citar-testkit --test bot         # the bot's tests: one turn's effects, whole
+                                                      # games, the fixture sweep, the stability runs
+cargo nextest run -p citar-testkit --test rules       # the rule scripts, the bot's (bot_*.toml) among them
+cargo golden check                                    # the bot set: four bot games, round by round
+cargo refcheck run --with-bot --strict                # deal values against the recorded Python bot's
+cargo soak --drivers bot --games 60 --sizes small     # whole bot games, every check on
+cargo chaos --drivers mixed --seconds 600             # bots and random agents among random calls
+```
+
+A change that plays differently moves the `bot` golden set (and the long set's bot game): bless it
+(`cargo golden bless bot`, `cargo golden bless long`) and say why in the commit. The soak fails a
+game in which a bot loops on a refused action (more than 200 refusals of one tool in one turn) and
+reports every bot's actions taken and refused. `cargo refcheck bot-agreement` compares `basic-1`'s
+decisions with the Python bot's on the recorded states; a new version is not held to it, which is
+the point of a new version, but its statistics are: `citar-sim baseline` and
+`scripts/refcheck/summarize.py` compare whole games ([refcheck/README.md](https://github.com/jprodgers/CITAR/blob/main/refcheck/README.md),
+"The statistical baseline").
