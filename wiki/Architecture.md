@@ -170,7 +170,7 @@ them on all five targets.
 | Reference checks (`cargo refcheck`) | 262 game states recorded from the Python engine before it was removed, each with its answers, loaded into the engine and asked the same questions in 14 groups (yields, city stats, paths, combat odds, tool errors, views, briefings and more), every group enforced. A deliberate difference is listed in `refcheck/intended.toml` with its reason, and the code that makes it cites the entry |
 | Rule scripts (`tests/rules/`) | TOML scripts over scenario operations, run by a Rust runner and, through the bindings, a Python one. Differences only a script or test shows are in `tests/rules/intended.toml` |
 | Invariants and the cache oracle | The invariants at every settle in every test build. The oracle at every settle in the rule scripts and the tests that set `DebugOptions::ALL`, every 10 steps and after the last in the properties and chaos, every 50 rounds and at the end in the soak |
-| Properties P1-P8, chaos, fuzzing and the soak | Random actions and whole random games, looking for panics, broken invariants, refusals that write and reads that change a game |
+| Properties P1-P8, chaos, fuzzing and the soak | Random actions and whole games, with `RandomAgent`s, bots or both in the seats, looking for panics, broken invariants, refusals that write, reads that change a game and bots that loop on a refusal |
 | Golden sets (`cargo golden`) | Digests on five targets, in two build profiles |
 | Benchmarks (`cargo xtask perf`) | Hard budgets on the laptop; instruction counts on every pull request |
 
@@ -187,6 +187,80 @@ The two intended lists are the changelog's list of rule fixes (`cargo refcheck c
 | A cache | `src/game/derive/`: a memo, the revisions it reads, and its check in the oracle |
 | Something that follows from a write | The settle (`src/game/turn/settle.rs`), never the write itself |
 | A rule that should answer otherwise than the Python engine's recorded answers | The fix, cited `// refcheck: <id>`, and its entry in one of the two intended lists |
+
+---
+
+## Bots and the bindings
+
+### A bot is a seat driver
+
+The engine plays seats through one trait, `SeatDriver`: `Game::drive` asks a seat's driver to play
+its turn, or to answer a negotiation that waits on it, and stops when a seat it has no driver for
+must act, a reply is awaited, or the game ends. A bot (`crates/citar-bot`) is such a driver, and so
+is the tests' `RandomAgent`; a model plays through tools instead, outside the drive.
+
+- **It reads, and acts only through tools.** A bot reads the game through `&Game`: its accessors,
+  the systems' read functions and the advisor (what a city would make with each building, the
+  sites worth settling, how a fight would go). It changes the game only through `Turn::act`, the
+  same tool calls a model makes, refused for the same reasons. `cargo xtask check` keeps
+  `&mut Game` to the bot's one driver file, so no bot code can reach a write any other way.
+- **It holds nothing between calls.** What it remembers (war plans, escorts, garrisons, sites given
+  up) is typed JSON in its seat's `DriverMemory`, at most 4 MiB, pruned every turn and saved with the
+  game. A bot built afresh for every call plays a loaded game as the one before the save would have.
+- **Its randomness is the game's.** Each kind of decision draws from its own stream, keyed by the
+  game's seed, the seat and the turn (`Purpose::BotBase`), so a bot game is as reproducible as any
+  other: the `bot` golden set holds four of them, round by round, on six targets.
+- **Its numbers are parameters.** Each version has one JSON schema (`params/basic-1.json`, 373
+  parameters for `basic-1`) generated into a struct; a profile overrides some of them, and its
+  fingerprint pins the build, the version, the overrides and the aggression, so a rating always
+  describes the bot that earned it ([BOTS.md](Scripted-bots)).
+- **It leaves room for a model.** Per-category diplomacy switches let a model own the seat's chats
+  while the bot plays the rest (the bot then answers `Deferred`), and `advice` tells that model
+  what the bot would do. Phase 3's hybrid seats build on both.
+
+### The extension
+
+`citar._engine` (`crates/citar-py`) is the engine as Python sees it: a PyO3 extension, one abi3
+build per OS for every Python from 3.11. `engine_api.py` is the only module that reaches it (the
+one door), through `citar/_facade_rust.py`.
+
+- **The GIL is released for every call that does work.** A game is a `Mutex` around the engine's
+  `Game`, and each heavy call (a tool, a drive, a view, a save) runs with the interpreter's lock
+  released, so two games play on two cores at once, and a slow turn never stops the server's other
+  requests. Cheap reads (the turn, whose move it is, the phase) come from heads the extension
+  updates after each call, without waiting for a drive under way.
+- **Data crosses as bytes.** Views, replays and saves come back as the engine's own JSON (or a save
+  file's bytes) and go to the client as they are: a gargantuan god view is never parsed and dumped
+  again in Python.
+- **A panic is a crashed game, not a dead server.** An engine panic poisons that game: every call on
+  it raises `EngineCrash`; the session pauses, keeps its last good autosave, writes a `crash-NNN`
+  save and stays readable, and the other games play on. A refused action is an `ActionError` with
+  the text a model reads.
+- **Saves are written off the lock** (crates/citar-store): the session takes a snapshot under its
+  lock, and its writer thread writes the journal's new records and then the `.citar` container
+  that names them (see [The turn driver](#the-turn-driver)).
+
+### Bots in the server, and without one
+
+A bot seat's `BotAgent` asks its session for a drive of the bot seats on its turn
+(`GameSession.drive_bots`): one seat's turn at most, every bot seat passed so a chat one bot opens
+with another is answered inside the drive. After the drive the session does what it does after any
+tool call: bumps the version, records the turn's metrics (the bot's actions, taken and refused),
+wakes the seats a chat now waits on, broadcasts the turn and autosaves at a new round. Headless
+games (`citar sim`, `citar balance`, the lab) run whole games through `engine_api.run_game`, the
+runner of `crates/citar-sim`, with the GIL released, so a lab runner plays one game a core.
+
+### How the bots are checked
+
+`basic-1` is a port, so it was first checked decision by decision against what the Python bot
+decided on the 262 recorded states (`cargo refcheck bot-agreement`: every kind of decision, every
+item), its deal values by `cargo refcheck run --with-bot`, and its play by the bot rule scripts.
+Then as a player: one bot round on each of the 262 states with every check on (the fixture sweep),
+whole bot games against the Python bot's statistics (`scripts/refcheck/summarize.py`, gates G1 to
+G4), the long runs with bots in the seats (the soak and chaos take `--drivers bot` or `mixed`, and
+property P8 runs with bot drivers: no read may change what a bot decides), and the server soak
+(`scripts/server_soak.py`): a lobby game of bots and a model seat played to its end through a
+restart. The numbers of the last full run are in DESIGN.md ("As built in 2-13").
 
 ---
 
@@ -228,7 +302,9 @@ for HTTP. MCP seats are woken by `wait_for_turn`.
 A save takes a snapshot of the game under the session's lock (a copy of the state, and the history
 since the last save, which goes into the game's journal), and the session's writer thread writes it
 off the lock: the journal's new records first, synced, then the save that names them. Autosaves the
-writer has not begun when a newer one comes are passed over. A session writes one journal, its
+writer has not begun when a newer one comes are passed over, and the turn that ends a round waits
+for the round's autosave to be written, so the disk is never more than the round in progress behind
+the game, and a restart costs at most that round. A session writes one journal, its
 timeline; loading an older save of a game that went on forks a new one, so every save stays
 loadable (crates/citar-engine/DESIGN.md P2.5.3).
 
@@ -256,7 +332,7 @@ reason. Run it after adding a route; CI runs it with `--strict`.
 |---|---|
 | `llm_agent.py` | The loop: briefing, tool calls, guard rails, limits, metrics |
 | `prompts.py` | What the model is told |
-| `bot_agent.py` | Wraps the scripted bot in the same interface |
+| `bot_agent.py` | Plays a bot seat: a drive of the engine's bots on its turn, and their answers to chats ([Bots and the bindings](#bots-in-the-server-and-without-one)) |
 | `mcp_server.py` | The MCP bridge |
 | `providers/anthropic_provider.py` | Thinking, prompt caching, refusal fallbacks |
 | `providers/openai_provider.py` | Native and JSON tool modes, for every OpenAI-compatible endpoint |

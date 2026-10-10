@@ -202,8 +202,9 @@ for k in 0 1 2 3; do cargo soak --games 200 --shard $k/4 --json soak-$k.json > s
 
 The corpus checks that go with them are in `refcheck/README.md` ("The nightly run and the
 corpus"). Before a release, the bots' soak runs at full size too: 1,000 small bot games in six
-shards (`--sizes small --games 1000 --drivers bot`, about 20 minutes) and 100 larger ones (40
-standard, 30 large, 20 huge, 10 gargantuan, each size a run of its own with `--sizes`).
+shards (`--sizes small --games 1000 --drivers bot`, about 15 minutes on the laptop) and 100 larger
+ones (40 standard, 30 large, 20 huge, 10 gargantuan, each size a run of its own with `--sizes`, the
+larger sizes in shards: about 10 minutes side by side).
 
 **The server soak** plays one lobby game the way people do, on a dev server of its own: a model
 seat and eight bots on a Standard map, played to the end through the MCP bridge, with a chat the
