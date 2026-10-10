@@ -303,9 +303,9 @@ A save takes a snapshot of the game under the session's lock (a copy of the stat
 since the last save, which goes into the game's journal), and the session's writer thread writes it
 off the lock: the journal's new records first, synced, then the save that names them. Autosaves the
 writer has not begun when a newer one comes are passed over, and the turn that ends a round waits
-for the round's autosave to be written, so the disk is never more than the round in progress behind
-the game, and a restart costs at most that round. A session writes one journal, its
-timeline; loading an older save of a game that went on forks a new one, so every save stays
+for the round's autosave to be written, so the autosave on the disk is never more than a round
+behind the game: a restart costs the round in progress and, while that round's own autosave is
+still being written, the one before it. A session writes one journal, its timeline; loading an older save of a game that went on forks a new one, so every save stays
 loadable (crates/citar-engine/DESIGN.md P2.5.3).
 
 Negotiations interrupt: an AI that proposes a deal blocks until the other side answers, which is

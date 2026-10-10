@@ -70,8 +70,10 @@ Look at **📊 AI stats** for that seat:
 ### It was working and now it is not
 
 A server restart, or a server that was killed, brings back the lobby games that were open, from
-their autosaves, running or paused as they were: an autosave is taken at the start of every round,
-so at most the round in progress is played again. A game closed on purpose stays closed; reload it
+their autosaves, running or paused as they were. An autosave is taken at the start of every round,
+and a round's last turn waits until it is written, so a game comes back at most a round behind: the
+round in progress is played again, and the round before it too when the server stopped while that
+round's autosave was still being written. A game closed on purpose stays closed; reload it
 from its saves in the lobby. A game that was open when a version 0.1.5 server stopped is not brought
 back on the first start of this version (its autosave is the Python engine's); the server's log
 names it once.
