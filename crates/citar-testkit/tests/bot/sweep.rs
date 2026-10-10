@@ -17,13 +17,9 @@ use std::collections::BTreeSet;
 use citar_engine::base::ids::{PlayerId, Turn};
 use citar_engine::game::{DebugOptions, DriveOptions, Drivers, Stop};
 use citar_engine::state::Phase;
-use citar_testkit::bots::CountingBot;
+use citar_testkit::bots::{CountingBot, LOOPING};
 use citar_testkit::fixtures::{self, Fixture};
 use citar_testkit::games;
-
-/// More refusals of one tool than this in one bot turn is a bot looping on a refused action:
-/// no turn of a reference state comes near it.
-const LOOPING: u32 = 200;
 
 /// What one state's round showed.
 #[derive(Debug)]
