@@ -23,6 +23,8 @@ and creates a lobby game (``POST /api/games``) of a model seat and N bots, the m
 
 Prints a line per step and a JSON summary, which ``--json`` also writes; exits 0 when every check passed, 1 when one
 failed, 2 when the server would not start. Never use the port or the directory of a server someone is playing on.
+It needs the extension (``cargo xtask develop``) and the ``mcp`` and ``worker`` extras (the MCP client, and the
+websockets the socket uses), which the ``dev`` extra includes.
 """
 from __future__ import annotations
 
