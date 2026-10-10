@@ -167,7 +167,7 @@ class GameSession:
         if self.crashed:
             return {"ok": False, "error": CRASHED}
         if name == "end_turn":
-            self._hold_for_autosave(pid)
+            self._hold_for_autosave(pid)     # only when it is pid's turn, and pid's ends the round
         with self.lock:
             before_turn, before_current = self.game.turn, self.game.current
             kind = engine_api.tool_kind(name) or "unknown"
@@ -903,10 +903,16 @@ class GameSession:
     def open_timeline(self):
         """Open a new game's journal before its first save, without the lock: creating the file and its folder takes
         milliseconds on Windows (a virus scanner looks at every new file), which the first save would otherwise spend
-        holding the game's lock (P2.5.3's budget for a save is 10 ms). Only for a session nothing else can save yet: a
-        new one, not started."""
-        if self.journal is None and not self.read_only:
+        holding the game's lock (P2.5.3's budget for a save is 10 ms). Only for a session nothing else can reach yet: a
+        new one, before it is registered or started, so nothing can save it meanwhile. Never raises: a journal that
+        will not open (a folder it cannot make, every name taken) is recorded in ``errors``, and the first save tries
+        again under the lock (``_timeline``), where the autosave records what stops it."""
+        if self.journal is not None or self.read_only:
+            return
+        try:
             self.journal = _new_journal(self.folder)
+        except Exception:
+            self.errors.append({"t": time.time(), "where": "open_timeline", "trace": traceback.format_exc()})
 
     def _snapshot(self, name: str, autosave: bool) -> "SaveJob":
         """Take a save under the lock and hand it to the writer: the game's snapshot (a copy of its state, and its
@@ -1044,9 +1050,13 @@ class GameSession:
         The autosave is taken as the round begins and written while its turns are played, so this waits only when a
         write is slower than the rest of the round (a busy disk, a scanner, a fast all-bot round). Without it the
         writer, which passes over autosaves it has not begun, could fall several rounds behind a fast game, and a
-        restart (``restore_live``) or a crash would cost all of them; with it the disk is never more than the round
-        in progress behind the game. A disk that stalls holds the round for ``AUTOSAVE_WAIT_SECONDS`` at most."""
-        if self.read_only or self.crashed or not self._ends_round(pid):
+        restart (``restore_live``) or a crash would cost all of them. With it the autosave on the disk is never more
+        than a round behind the game: the round in progress, and, while that round's own autosave is being written,
+        the one before it. A disk that stalls holds the round for ``AUTOSAVE_WAIT_SECONDS`` at most.
+
+        Only ``pid``'s own turn waits (``current`` is read without the lock): an ``end_turn`` sent out of turn is
+        refused, and never waits for the writer first."""
+        if self.read_only or self.crashed or self.game.current != pid or not self._ends_round(pid):
             return
         self.flush_saves(self.AUTOSAVE_WAIT_SECONDS)
 
@@ -1486,12 +1496,12 @@ class SessionManager:
         cfg["players"] = players
         game = EngineGame.new(cfg)
         s = GameSession(game, seats, name)
+        s.open_timeline()                    # before anything can reach the session, so before anything can save it
         s.registered = True
         with self.lock:
             self.sessions[s.id] = s
         if track:
             self.track(s)
-        s.open_timeline()
         s.autosave(force=True)
         if start:
             s.start()
@@ -1537,11 +1547,11 @@ class SessionManager:
                               llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {})))
         s = GameSession(g, seats, name or scn.get("name") or "Scenario")
         if register:
+            s.open_timeline()                # before anything can reach the session, so before anything can save it
             s.registered = True
             with self.lock:
                 self.sessions[s.id] = s
             self.track(s)
-            s.open_timeline()
             s.autosave(force=True)
         if start:
             s.start()
@@ -1611,8 +1621,9 @@ class SessionManager:
         """Bring back the lobby games that were open when the server last stopped.
 
         Every open lobby game keeps a mark beside its autosave (see ``GameSession.mark_live``). Each is
-        reloaded from that autosave - so a restart costs at most the round in progress, since a round's last turn waits
-        for the round's autosave (``GameSession._hold_for_autosave``) - and resumed
+        reloaded from that autosave, at most a round behind the game (a round's last turn waits for the round's
+        autosave, ``GameSession._hold_for_autosave``): a restart costs the round in progress and, while that round's own
+        autosave was still being written, the one before it. It is then resumed
         unless it was paused. Benchmark games are the scheduler's to reload, and are not marked. A game whose autosave
         the Python engine wrote (a server upgraded from 0.1.5) never loads: it is named once and its mark removed, so it
         is not tried again at every start.

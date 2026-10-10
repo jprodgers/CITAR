@@ -604,9 +604,47 @@ class FirstSaveTests(SavesCase):
         self.assertTrue(s.flush_saves(10))
         self.assertEqual(self.header(s)["journal"]["file"], "journal.cjnl")
 
+    def test_it_is_opened_before_the_game_is_registered_and_a_failure_is_left_to_the_first_save(self):
+        # Opened once the session is registered, the journal raced a save under the lock (two journals, one leaked
+        # with its OS lock), and a failure to open it escaped create(), leaving a registered game never started.
+        real = sess._new_journal
+        calls = []
+
+        def flaky(folder):
+            calls.append(len(self.m.sessions))
+            if len(calls) == 1:
+                raise OSError("the disk said no")
+            return real(folder)
+        with mock.patch.object(sess, "_new_journal", flaky):
+            s = self.game([{"type": "bot"}] * 2)
+        self.assertEqual(calls, [0, 1], "opened before the game was registered, then again by its first save")
+        self.assertIn(s.id, self.m.sessions)
+        self.assertEqual([e["where"] for e in s.errors], ["open_timeline"])
+        self.assertIn("the disk said no", s.errors[0]["trace"])
+        self.assertIsNotNone(s.journal)
+        self.assertTrue(s.flush_saves(10))
+        self.assertEqual(self.header(s)["journal"]["file"], "journal.cjnl")
+
+    def test_a_scenario_game_opens_its_journal_before_it_is_registered(self):
+        real = sess._new_journal
+        calls = []
+
+        def counted(folder):
+            calls.append(len(self.m.sessions))
+            return real(folder)
+        scn = {"state": self.game([{"type": "bot"}] * 2).game.state_dict(), "name": "from a scenario"}
+        before = len(self.m.sessions)
+        with mock.patch.object(sess, "_new_journal", counted):
+            s = self.m.create_from_scenario(scn, start=False)
+        self.ids.add(s.id)
+        self.assertEqual(calls, [before])
+        self.assertEqual(s.errors, [])
+        self.assertTrue(s.flush_saves(10))
+        self.assertEqual(self.header(s)["journal"]["file"], "journal.cjnl")
+
 
 class KeepingUpTests(SavesCase):
-    """Package 2-13: the autosave on the disk is never more than the round in progress behind the game. The writer
+    """Package 2-13: the autosave on the disk is never more than a round behind the game. The writer
     passes over autosaves it has not begun, so a writer slower than the rounds fell behind a fast game: the server soak
     killed a server whose game was at turn 11 and got it back at turn 8. A round's last turn now waits for the round's
     autosave (``GameSession._hold_for_autosave``): the bot driver's, and a seat's ``end_turn`` over the tools."""
@@ -659,6 +697,38 @@ class KeepingUpTests(SavesCase):
         self.assertEqual(s.errors, [])
         self.assertGreaterEqual(len(lags), 10, lags)
         self.assertLessEqual(max(lag for _, lag in lags), 1, f"rounds ahead of the disk: {lags}")
+
+    def test_an_end_turn_out_of_turn_is_refused_without_waiting_for_the_writer(self):
+        # The last seat's end_turn sent while another seat is to move cannot end the round: the engine refuses it,
+        # and it used to wait for the writer first, up to AUTOSAVE_WAIT_SECONDS a call on a stalled disk.
+        s = self.game([{"type": "bot"}, {"type": "mcp"}], {"map_size": "small", "seed": 5003})
+        self.assertTrue(s.flush_saves(10))
+        self.assertEqual(s.game.current, 0)
+        stall = threading.Event()
+        real = sess.SaveJob.write
+
+        def stalled(job):
+            stall.wait(30)
+            real(job)
+        try:
+            with (mock.patch.object(sess.SaveJob, "write", stalled),
+                  mock.patch.object(sess.GameSession, "AUTOSAVE_WAIT_SECONDS", 3.0)):
+                self.autosave_queued(s)
+                self.assertFalse(s.flush_saves(0.2), "the writer is stalled")
+                t0 = time.perf_counter()
+                result = s.call_tool(1, "end_turn")
+                took = time.perf_counter() - t0
+        finally:
+            stall.set()
+        self.assertFalse(result["ok"], result)
+        self.assertLess(took, 1.0, f"an end_turn out of turn waited {took:.2f} s for the writer")
+        self.assertTrue(s.flush_saves(30))
+
+    @staticmethod
+    def autosave_queued(s):
+        """An autosave taken and handed to the writer, not waited for."""
+        with s.lock:
+            s.autosave(force=True)
 
 
 class LiveReportTests(SavesCase):
