@@ -332,6 +332,7 @@ class GameRoutes(unittest.TestCase):
                 response = self._get("/debug/errors", who)
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertIn("errors", response.json())
+                self.assertEqual(set(response.json()["save_lock"]), {"saves", "total_s", "max_s", "last_s"})
 
     # ---------------------------------------------------------------- replay
     @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")

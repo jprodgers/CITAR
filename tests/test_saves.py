@@ -585,6 +585,82 @@ class SaveLockTests(SavesCase):
         self.assertEqual(saved, json.loads(json.dumps(s.metrics.data)))
 
 
+class FirstSaveTests(SavesCase):
+    """Package 2-13: a new game's journal is opened before its first save, off the lock. Creating the file and its folder
+    takes milliseconds on Windows (a virus scanner looks at every new file), and the first save spent them holding the
+    game's lock: 9 ms in 2-11's measure and 14 ms in 2-13's, against P2.5.3's budget of 10 ms."""
+
+    def test_a_new_games_journal_is_opened_before_its_first_save_off_the_lock(self):
+        real = sess._new_journal
+
+        def slow(folder):
+            time.sleep(0.05)
+            return real(folder)
+        with mock.patch.object(sess, "_new_journal", slow):
+            s = self.game([{"type": "bot"}] * 2)
+        self.assertIsNotNone(s.journal)
+        self.assertEqual(s.save_lock["saves"], 1, "the new game's first save")
+        self.assertLess(s.save_lock["max_s"], 0.05, "opening the journal is not the save's")
+        self.assertTrue(s.flush_saves(10))
+        self.assertEqual(self.header(s)["journal"]["file"], "journal.cjnl")
+
+
+class KeepingUpTests(SavesCase):
+    """Package 2-13: the autosave on the disk is never more than the round in progress behind the game. The writer
+    passes over autosaves it has not begun, so a writer slower than the rounds fell behind a fast game: the server soak
+    killed a server whose game was at turn 11 and got it back at turn 8. A round's last turn now waits for the round's
+    autosave (``GameSession._hold_for_autosave``): the bot driver's, and a seat's ``end_turn`` over the tools."""
+
+    WRITE_SECONDS = 0.06                         # far slower than a small map's rounds, which take a few milliseconds
+
+    def lags(self, s) -> list:
+        """At every round's start (its ``turn`` broadcast, before its autosave is taken), how many rounds the game is
+        ahead of the autosave on the disk."""
+        out = []
+
+        def watch(msg):
+            done = s.save_writer_stats()["autosave_turn"]
+            if msg.get("type") == "turn" and msg["phase"] == "playing" and done is not None:
+                out.append((msg["turn"], msg["turn"] - done))
+        s.subscribers.append(watch)
+        return out
+
+    def slow(self):
+        real = sess.SaveJob.write
+
+        def write(job):
+            time.sleep(self.WRITE_SECONDS)
+            real(job)
+        return mock.patch.object(sess.SaveJob, "write", write)
+
+    def test_a_writer_slower_than_the_rounds_holds_the_bots_back_instead_of_falling_behind(self):
+        s = self.game([{"type": "bot"}] * 4, {"map_size": "small", "seed": 5003})
+        lags = self.lags(s)
+        with self.slow():
+            self.play_to(s, 16, timeout=120)
+        self.assertEqual(s.errors, [])
+        self.assertGreaterEqual(len(lags), 10, lags)
+        self.assertLessEqual(max(lag for _, lag in lags), 1, f"rounds ahead of the disk: {lags}")
+        st = s.save_writer_stats()
+        self.assertEqual((st["failed"], st["queued"]), (0, 0), st)
+
+    def test_a_seat_that_ends_the_round_over_the_tools_waits_for_its_autosave(self):
+        # Two bots, then a model's seat (an MCP client's) that ends each round with the end_turn tool.
+        s = self.game([{"type": "bot"}, {"type": "bot"}, {"type": "mcp"}], {"map_size": "small", "seed": 5003})
+        lags = self.lags(s)
+        with self.slow():
+            s.start()
+            s.set_paused(False)
+            for _ in range(12):
+                self.assertTrue(wait(lambda: s.game.current == 2 or s.game.phase != "playing", 60), s.errors)
+                result = s.call_tool(2, "end_turn")
+                self.assertTrue(result["ok"], result)
+            self.settle(s)
+        self.assertEqual(s.errors, [])
+        self.assertGreaterEqual(len(lags), 10, lags)
+        self.assertLessEqual(max(lag for _, lag in lags), 1, f"rounds ahead of the disk: {lags}")
+
+
 class LiveReportTests(SavesCase):
     def test_a_report_of_a_running_lobby_game_changes_nothing_of_it(self):
         from citar.reports import data as report_data
