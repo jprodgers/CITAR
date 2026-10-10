@@ -3,7 +3,7 @@ A unit with an additional attack that kills keeps its movement and attacks again
 moves into the tile of what it killed; the Janissary's ability heals it by 50 after each kill (to
 full health at most) and gives it +25% when it attacks. Its second attack spends its movement.
 """
-from = "citar/engine/combat.py: _reduce_attacker_moves, _heal_after_kill; units.py: max_attacks"
+from = "engine/combat.py: _reduce_attacker_moves, _heal_after_kill; units.py: max_attacks"
 
 [[step]]
 ops = [

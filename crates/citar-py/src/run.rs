@@ -8,11 +8,11 @@
 //! happened, in the result's `errors`; with `raise_errors` it is raised as `EngineCrash`
 //! instead. A Rust bot does not raise, so there is no `max_errors`: a crash ends the game.
 //!
-//! The hooks keep `headless.play`'s contract (`citar/bots/headless.py`): `on_event` was one of
-//! the game's listeners, and `Game.emit` swallowed a listener's `Exception`
-//! (`citar/engine/game.py`, `emit`), so a listener that trips over one event's data hears the
-//! rest and the game plays on; here such an exception is reported through
-//! `sys.unraisablehook` (printed, by default) rather than dropped unseen. `on_turn` was called
+//! The hooks keep `headless.play`'s contract (the Python bots' `headless.py`): `on_event` was
+//! one of the game's listeners, and `Game.emit` swallowed a listener's `Exception` (the Python
+//! engine's `game.py`, `emit`), so a listener that trips over one event's data hears the rest and
+//! the game plays on; here such an exception is reported through `sys.unraisablehook` (printed,
+//! by default) rather than dropped unseen. `on_turn` was called
 //! directly, so its exceptions end the run and are raised. A `BaseException` that is no
 //! `Exception` (`KeyboardInterrupt`, `SystemExit`) ends the run from either hook. Between steps
 //! the binding checks for signals, so Ctrl-C stops a run with no hooks within a step, as it
@@ -25,7 +25,6 @@ use citar_engine::api::views::to_py_json;
 use citar_engine::base::ids::PlayerId;
 use citar_engine::base::py as pyish;
 use citar_engine::game::SeatDriver;
-use citar_engine::rules::Ruleset;
 use citar_sim::{RunSpec, Runner, Seats, SimError, TRACEBACK_LIMIT};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -219,7 +218,7 @@ pub fn run_game(
     }
     let wanted: Vec<PlayerId> = seats.iter().map(|(p, _)| *p).collect();
     let mut runner = detached(py, || {
-        caught(|| Runner::new(Ruleset::shared(), run, seats).map_err(Failure::from))
+        caught(|| Runner::new(crate::rules::rules(), run, seats).map_err(Failure::from))
             .map_err(Failure::Crash)?
     })?;
     if let Some(p) =

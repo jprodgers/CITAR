@@ -2,7 +2,7 @@ about = """
 The turn number moves on once a round, and each turn's announcement dates it by the speed's
 calendar; a forced turn starts at once, with the turn number unchanged.
 """
-from = "citar/engine/turns.py: end_round; citar/engine_api.py: force_turn"
+from = "engine/turns.py: end_round; citar/engine_api.py: force_turn"
 
 [config]
 players = [{}, {}]

@@ -1,6 +1,6 @@
 //! The strict converter from Python's `GameState.to_dict()` (DESIGN.md 4.12, package 1a-10).
 //!
-//! [`state_from_python`] reads a state the Python engine wrote (`citar/engine/state.py:315-405`,
+//! [`state_from_python`] reads a state the Python engine wrote (`state.py:315-405`,
 //! the `state` of a save or a refcheck fixture) into a [`State`] and the [`Chronicle`] of its
 //! history. It is strict: an unresolved name, an unknown key, an unknown event type or a NaN fails
 //! the conversion with its JSON path, and there is no lenient mode.

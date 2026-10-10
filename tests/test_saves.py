@@ -22,7 +22,7 @@ from unittest import mock
 
 from citar import engine_api
 from citar.server import session as sess
-from tests.backends import has_test_ops, rust_only
+from tests import has_test_ops
 
 needs_test_ops = unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
 DUEL = {"map_size": "duel", "seed": 41, "barbarians": "off"}
@@ -62,7 +62,6 @@ def with_journal(src: Path, dst: Path, name: str):
     dst.write_bytes(data[:8] + struct.pack("<I", len(raw)) + raw + data[12 + n:])
 
 
-@rust_only
 class SavesCase(unittest.TestCase):
     def setUp(self):
         self.m = sess.SessionManager()

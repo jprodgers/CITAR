@@ -6,7 +6,7 @@ and a contest that ran out is decided. Bullying a city-state completes the Bully
 about it (40), then the bullied city-state cancels the bully's individual quests and its
 investment, but not a contest.
 """
-from = "citar/engine/city_states.py: _assign, _complete_quests, _quest_event, _reward, camp_cleared, _quests_end_turn, _bullied"
+from = "engine/city_states.py: _assign, _complete_quests, _quest_event, _reward, camp_cleared, _quests_end_turn, _bullied"
 
 [config]
 city_states = 1

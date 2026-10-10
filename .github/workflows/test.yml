@@ -11,10 +11,6 @@
 # checkout's own sources run with it and the three Linux Pythons share one abi3 library, and the
 # installer jobs install its wheel. The package and docker jobs use a release wheel without the
 # test operations instead, as a release would ship it (crates/citar-engine/DESIGN.md P2.6.8).
-#
-# The facade (citar/engine_api.py) has two backends, chosen by CITAR_ENGINE: the test jobs run the
-# suite on the default one, the Rust engine (since package 2-09), and python-reference runs the few
-# tests that still check the Python engine itself (tests/python_reference.txt) on the Python one.
 name: tests
 
 on:
@@ -139,19 +135,13 @@ jobs:
 
       - name: Tests
         # Not pytest: the suite is unittest and is run the same way here as on a laptop, so a
-        # failure can be reproduced with the command in the contributing guide. On the default
-        # backend, the Rust engine: a test that cannot pass there says why (tests/backends.py).
+        # failure can be reproduced with the command in the contributing guide.
         run: python -m unittest discover -s tests -v
 
       - name: Route audit
         # Every HTTP route must declare a gate or be listed as public with a reason. This is the
         # check that a new route added in a hurry cannot quietly skip.
         run: python scripts/audit_routes.py --strict
-
-      - name: Ruleset integrity
-        run: |
-          python scripts/check_refs.py
-          python scripts/check_uniques.py
 
       - name: requirements.txt matches pyproject.toml
         # The server installs from requirements.txt while everything else installs the package.
@@ -165,46 +155,6 @@ jobs:
         # says the same thing five times.
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: python scripts/check_links.py --strict
-
-  python-reference:
-    # The Python engine's own tests, on the facade's Python backend (CITAR_ENGINE=python; DESIGN.md
-    # P2.6.6), once, on the server's platform: only what tests/python_reference.txt lists (the Python
-    # runner of the rule scripts and the Python engine's recordings, the parity test of the two
-    # backends, the parameter-schema test). Since package 2-09 the Rust engine is the default and the
-    # test jobs above run the whole suite on it; the rest of the suite needs the Rust backend's names.
-    # Package 2-12 deletes this job with the Python engine.
-    name: ubuntu-latest / Python 3.12 / Python reference
-    needs: build-ext
-    # It needs only the Linux wheel, so a Windows or macOS build failing does not skip it.
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    env:
-      CITAR_ENGINE: python
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: ext-Linux
-          path: ext
-
-      - name: Install
-        # As the test jobs install: the dependencies, then the build-ext library with the test
-        # operations into the checkout (the parity test plays both backends).
-        run: |
-          python -m pip install --upgrade pip
-          python scripts/ci/requirements.py all > "$RUNNER_TEMP/requirements.txt"
-          pip install -r "$RUNNER_TEMP/requirements.txt"
-          python scripts/ci/unpack_ext.py ext --test-ops
-
-      - name: The Python reference tests on the Python engine
-        # One test module or test id per line; `#` starts a comment.
-        run: python -m unittest -v $(sed -e 's/#.*//' tests/python_reference.txt)
 
   interpreter-exit:
     # DESIGN.md P2.6.4: the interpreter exits while a daemon thread is inside a call to
@@ -345,19 +295,21 @@ jobs:
           import json
           from citar import paths
           from citar import _engine
-          from citar.engine.rules import get_rules
           assert 'site-packages' in paths.PACKAGE.as_posix(), f'not testing the wheel: {paths.PACKAGE}'
           assert 'site-packages' in _engine.__file__, f'the extension is not from the wheel: {_engine.__file__}'
           assert not _engine.HAS_TEST_OPS, 'the release wheel carries the test operations'
           info = json.loads(_engine.build_info())
           assert info['version'] == __import__('citar').__version__, info
+          assert info['ruleset_dir'] is None, info
           print('extension', _engine.__file__, info)
-          assert (paths.package_data() / 'ruleset').is_dir(), 'ruleset missing from the wheel'
+          # The ruleset is compiled into the extension (crates/citar-engine/data): no file to find.
+          counts = json.loads(_engine.ruleset_counts())
+          assert counts['techs'] > 50 and counts['nations'] > 40, f'the ruleset did not load: {counts}'
+          assert (paths.collectors_dir() / 'collect_hardware.sh').is_file(), 'collectors missing from the wheel'
           assert (paths.web_dir() / 'index.html').is_file(), 'web client missing from the wheel'
           assert (paths.migrations_dir() / 'env.py').is_file(), 'migrations missing from the wheel'
           assert list((paths.migrations_dir() / 'versions').glob('*.py')), 'no migrations in the wheel'
-          assert len(get_rules().techs) > 50, 'the ruleset did not load'
-          print('package contents OK')
+          print('package contents OK', counts)
           "
 
       - name: An installed copy writes to the user directory, not site-packages

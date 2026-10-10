@@ -11,7 +11,7 @@ from unittest import mock
 from citar import servers as REG
 from citar.server.benchmarks import BenchmarkScheduler, normalize_suite, performance
 from citar.server.session import SessionManager, SAVE_DIR
-from tests.backends import has_test_ops, rust_only
+from tests import has_test_ops
 
 
 def dry_server(i, models, max_parallel=1, delay=0.0, restricted=None):
@@ -123,6 +123,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(any(t[3] for t in m["tiles"]))
         self.assertFalse(any(t[4] == "Uranium" for t in m["tiles"]))
 
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_a_job_ends_when_its_model_is_eliminated(self):
         sch = self.scheduler()
         suite = dry_suite(models=("dry-a",), turn_limit=200, delay=0.05)
@@ -148,7 +149,6 @@ class BenchmarkTests(unittest.TestCase):
         view = sch.open_job_game(run["id"], job["id"])
         self.assertEqual(view.journal.path.name, "journal.cjnl")
 
-    @rust_only
     @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_a_job_whose_engine_stops_fails_and_frees_its_machine(self):
         """A crashed game (GameSession._crashed) takes no more moves: its job fails with the crash, its machine's slot

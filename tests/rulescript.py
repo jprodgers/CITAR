@@ -1,11 +1,9 @@
 """The Python runner of the rule scripts in tests/rules/ (the language is tests/rules/README.md).
 
-It plays a script on the engine through ``citar.engine_api`` alone (``EngineGame`` and the bot functions), as the Rust
-runner (crates/citar-testkit/src/script) plays it on the Rust engine; tests/rules/_selftest.toml keeps the two in step.
-It runs on the facade's backend (``CITAR_ENGINE``): on the Python engine, steps marked ``intended`` expect the Rust
-engine's deliberate difference and are skipped; on the Rust backend, through the bindings, they run, as the Rust runner
-runs them. A script's ``needs`` names the package that makes it pass on Rust: the Python engine plays it regardless,
-and on the Rust backend tests/test_rule_scripts.py skips it, as the Rust harness ignores it.
+It plays a script on the engine through ``citar.engine_api`` alone (``EngineGame`` and the bot functions), through the
+bindings, as the Rust runner (crates/citar-testkit/src/script) plays it on the engine itself;
+tests/rules/_selftest.toml keeps the two in step. A step marked ``intended`` checks one of the engine's deliberate
+differences from the Python engine it replaced, and names its entry in an intended list.
 """
 from __future__ import annotations
 
@@ -18,14 +16,13 @@ from typing import Any, Optional
 
 from citar import engine_api
 from citar.engine_api import ActionError, EngineGame
-from tests.backends import RUST
 
 RULES = Path(__file__).resolve().parent / "rules"
 ROOT = RULES.parent.parent
 #: the parameter schema of the bot version basic-1, which bot steps' params are checked against
 BOT_SCHEMA = ROOT / "crates" / "citar-bot" / "params" / "basic-1.json"
 
-TOP = ("about", "from", "needs", "map", "start", "config", "step")
+TOP = ("about", "from", "map", "start", "config", "step")
 KINDS = ("op", "ops", "tool", "check", "new_game", "set", "repeat", "bot")
 # `as` and `error` belong to the kinds that use them, so a check that says `error` is refused rather than passing
 # without looking.
@@ -36,8 +33,6 @@ WITH = ("tol",)
 OWN = {"op": ("args", "as", "error"), "ops": ("as", "error"), "tool": ("player", "args", "as", "error"),
        "check": ("path", "as"), "new_game": ("error",), "repeat": ("steps",),
        "bot": ("player", "negotiation", "version", "aggression", "params", "diplomacy", "as", "error")}
-#: a script's `needs`: the Phase 2 package that makes it pass on the Rust engine
-NEEDS = re.compile(r"[0-9]-[0-9]{2}[a-z]?")
 #: what a bot step asks the seat's bot
 BOT_ASKS = ("turn", "respond", "advice")
 BOT_VERSIONS = ("basic-1", "idle")
@@ -533,12 +528,8 @@ class Script:
             raise ScriptError(f"{name}: config is a table")
         if not isinstance(steps, list):
             raise ScriptError(f"{name}: steps are [[step]] tables")
-        needs = doc.get("needs")
-        if needs is not None and not (isinstance(needs, str) and NEEDS.fullmatch(needs)):
-            raise ScriptError(f'{name}: needs names a package, as "2-01a"')
         self.name, self.about, self.map = name, about, doc.get("map", "arena")
         self.bare, self.config, self.steps = start == "bare", config, steps
-        self.needs = needs
 
 
 def load(path: Path) -> Script:
@@ -548,7 +539,7 @@ def load(path: Path) -> Script:
 
 
 class Runner:
-    """Plays one script on the facade's backend."""
+    """Plays one script through the facade."""
 
     def __init__(self, script: Script):
         self.script = script
@@ -613,8 +604,6 @@ class Runner:
             if s["intended"] not in self.intended:
                 raise ScriptError(f"{label}: intended = {json.dumps(s['intended'])} is in neither "
                                   f"refcheck/intended.toml nor tests/rules/intended.toml")
-            if not RUST:
-                return          # the Rust engine's deliberate difference: the Python engine gives the old answer
         if s.get("coerce") is not True:
             for key in ("args", "ops", "new_game", "params"):
                 if key in s:
@@ -836,14 +825,14 @@ class Runner:
         A game keeps its seats' bots from turn to turn, and what a bot remembers (an escort, a war it prepares, a
         site it gave up) lasts with it, as the Rust bot's memory lasts in the seat's DriverMemory whatever the
         handle. A script that relies on that memory gives a seat the same version, aggression and params in every
-        step. The seed is ignored on the Rust engine, which keys the bot's draws by the game's seed (DESIGN.md
-        P2.3.5); here it only has to be fixed, since a turn step pins every draw a script could see.
+        step. A bot has no seed of its own: its draws are keyed by the game's seed (DESIGN.md P2.3.5), and a turn
+        step pins every draw a script could see.
         """
         key = (pid, version, aggression, json.dumps(params, sort_keys=True))
         bot = self.bots.get(key)
         if bot is None:
             engine = "idle" if version == "idle" else "basic"
-            bot = engine_api.bot_instance(engine, seed=0, aggression=aggression, params=params or None)
+            bot = engine_api.bot_instance(engine, aggression=aggression, params=params or None)
             self.bots = {k: b for k, b in self.bots.items() if k[0] != pid}
             self.bots[key] = bot
         return bot

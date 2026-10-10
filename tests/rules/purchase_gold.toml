@@ -5,7 +5,7 @@ bought unit stands in the city. Refused, with what it costs, for want of gold; r
 whose kind already stands in the city, for what the city cannot build, for a wonder, and with
 faith for what only gold buys. The treasury left is in the result.
 """
-from = "tests/test_mechanics.py::EconomyTests::test_buy_and_happiness; citar/engine/cities.py: purchase_check, buy_cost, purchase"
+from = "tests/test_mechanics.py::EconomyTests::test_buy_and_happiness; engine/cities.py: purchase_check, buy_cost, purchase"
 
 [[step]]
 op = "found_city"

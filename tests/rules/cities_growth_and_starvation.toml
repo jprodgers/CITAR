@@ -6,7 +6,7 @@ turn; once the store is empty it loses a citizen a turn, and never its last. set
 store, which is never below nothing, and the city's health; a damaged city heals at the end of its
 turn.
 """
-from = "citar/engine/cities.py: end_turn, _grow, food_to_next_pop"
+from = "engine/cities.py: end_turn, _grow, food_to_next_pop"
 
 [[step]]
 ops = [

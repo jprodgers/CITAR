@@ -3,7 +3,7 @@ City-states take the sites an editor map gives them, then as many more as there 
 most fertile tiles at least four apart and six from every civilization's start. A city-state for
 which no site is left is left out of the game.
 """
-from = "citar/engine/maps.py: prepare, _fill_starts"
+from = "engine/maps.py: prepare, _fill_starts"
 start = "full"
 
 [config]

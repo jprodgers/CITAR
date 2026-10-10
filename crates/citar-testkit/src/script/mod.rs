@@ -10,9 +10,7 @@
 //! - [`new_game`] and [`map_doc`]: new games from settings and the maps of `tests/rules/maps/`,
 //!   through the engine's own setup (`Game::new`).
 //!
-//! `crates/citar-testkit/tests/rules.rs` runs every script as its own test, and reports a script
-//! whose `needs` names a Phase 2 package as ignored: the Python runner plays it today, and the
-//! package it names makes it pass here (DESIGN.md P2.3.11), so [`run`] refuses it until then.
+//! `crates/citar-testkit/tests/rules.rs` runs every script as its own test.
 
 pub mod expr;
 pub mod matchers;
@@ -67,9 +65,6 @@ pub struct Script {
     pub name: String,
     /// What it pins down.
     pub about: String,
-    /// The package that makes it pass on this engine, as `"2-01a"`, until that package removes
-    /// the header: such a script is ignored here (see [`ignored`]).
-    pub needs: Option<String>,
     /// The map it plays on: `tests/rules/maps/<map>.json`.
     pub map: String,
     /// Whether the bare prelude applies.
@@ -81,7 +76,7 @@ pub struct Script {
 }
 
 /// The top-level keys a script may have.
-const TOP: [&str; 7] = ["about", "from", "needs", "map", "start", "config", "step"];
+const TOP: [&str; 6] = ["about", "from", "map", "start", "config", "step"];
 
 /// Every script in [`rules_dir`], sorted by name.
 pub fn discover() -> Result<Vec<PathBuf>, String> {
@@ -124,11 +119,6 @@ pub fn parse(name: &str, text: &str) -> Result<Script, String> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| format!("{name}: `about` must say what the script pins down"))?
         .to_owned();
-    let needs = match doc.get("needs") {
-        None => None,
-        Some(Value::String(s)) if is_package(s) => Some(s.clone()),
-        Some(_) => return Err(format!("{name}: needs names a package, as \"2-01a\"")),
-    };
     let map = doc.get("map").and_then(Value::as_str).unwrap_or("arena").to_owned();
     let bare = match doc.get("start").map(|v| v.as_str()) {
         None | Some(Some("bare")) => true,
@@ -145,27 +135,7 @@ pub fn parse(name: &str, text: &str) -> Result<Script, String> {
         Some(Value::Array(a)) => a.clone(),
         Some(_) => return Err(format!("{name}: steps are [[step]] tables")),
     };
-    Ok(Script { name: name.to_owned(), about, needs, map, bare, config, steps })
-}
-
-/// Whether the script at `path` is reported as ignored: it reads, and its `needs` names the
-/// package that makes it pass on this engine. A script that does not read is not ignored, so its
-/// test fails and says why.
-#[must_use]
-pub fn ignored(path: &Path) -> bool {
-    load(path).is_ok_and(|s| s.needs.is_some())
-}
-
-/// A package's id, as `2-01a`: a digit, `-`, two digits and at most one lowercase letter.
-fn is_package(s: &str) -> bool {
-    match s.as_bytes() {
-        [a, b'-', b, c, rest @ ..]
-            if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() =>
-        {
-            matches!(rest, [] | [b'a'..=b'z'])
-        }
-        _ => false,
-    }
+    Ok(Script { name: name.to_owned(), about, map, bare, config, steps })
 }
 
 /// A TOML value as JSON. Dates have no JSON form and are refused.
@@ -239,24 +209,6 @@ fn looks_numeric(s: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn needs_names_a_package() {
-        let needs = |v: &str| parse("x", &format!("about = \"a\"\nneeds = {v}")).map(|s| s.needs);
-        assert_eq!(needs("\"2-01a\""), Ok(Some("2-01a".to_owned())));
-        assert_eq!(needs("\"2-03\""), Ok(Some("2-03".to_owned())));
-        assert_eq!(parse("x", "about = \"a\"").map(|s| s.needs), Ok(None));
-        for bad in ["\"2-1\"", "\"2-01ab\"", "\"2-01A\"", "\"later\"", "201", "true"] {
-            assert!(needs(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn a_script_that_needs_a_package_is_refused_by_the_runner() {
-        let s = parse("x", "about = \"a\"\nneeds = \"2-05\"").expect("a script");
-        let e = run(&s).expect_err("refused");
-        assert!(e.contains("needs package 2-05"), "{e}");
-    }
 
     #[test]
     fn numbers_typed_as_strings_are_found() {

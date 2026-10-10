@@ -16,16 +16,22 @@
 //!   `atexit`, so a daemon thread's call completes and the thread then parks, never
 //!   re-attaching to a finalizing interpreter (`calls`).
 //!
+//! - **One ruleset a process** (`rules`): the one compiled in, or the one in the directory
+//!   `CITAR_RULESET_DIR` names, read when the module loads (DESIGN.md P2.8.4). Every game,
+//!   ruleset function and fingerprint uses it, and `build_info` reports its id.
+//!
 //! Modules: `game` (`Game`), `bot` (`Bot`), `run` (`run_game`), `save` (`Journal`,
 //! `SaveSnapshot`, `Save` and the save files: saves v2, package 2-11), `funcs` (the ruleset,
-//! tools, maps, scenarios, categories and bot versions), `errors` (the exceptions) and `calls`
-//! (the GIL, the calls in flight and the shutdown).
+//! tools, maps, scenarios, categories and bot versions), `rules` (the process's ruleset and
+//! `check_ruleset`), `errors` (the exceptions) and `calls` (the GIL, the calls in flight and the
+//! shutdown).
 
 mod bot;
 mod calls;
 mod errors;
 mod funcs;
 mod game;
+mod rules;
 mod run;
 mod save;
 
@@ -34,7 +40,6 @@ use std::convert::Infallible;
 use citar_engine::api::game::DebugAction;
 use citar_engine::api::text::{MAP_LEGEND, RULES_OVERVIEW};
 use citar_engine::game::diplomacy::category::CATEGORIES;
-use citar_engine::rules::Ruleset;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyTuple};
 
@@ -54,15 +59,20 @@ impl<'py> IntoPyObject<'py> for Bytes {
 }
 
 /// What this build is, as JSON bytes: version, build id, label, ruleset id and both content
-/// codes (DESIGN.md P2.2.1).
+/// codes (DESIGN.md P2.2.1), all of the process's ruleset, and `ruleset_dir`, the directory
+/// `CITAR_RULESET_DIR` gave it (null for the ruleset compiled in).
 #[pyfunction]
 fn build_info(py: Python<'_>) -> PyResult<Bytes> {
     // The first call in a process parses and compiles the embedded ruleset for its id, a heavy
     // call, so it runs with the GIL released (DESIGN.md P2.6.2) like every other.
     Ok(guarded(py, || {
-        serde_json::to_vec(&citar_bot::build_info(Ruleset::shared()))
-            .map(Bytes)
-            .map_err(|e| Failure::Runtime(e.to_string()))
+        let mut info = serde_json::to_value(citar_bot::build_info(rules::rules()))
+            .map_err(|e| Failure::Runtime(e.to_string()))?;
+        let dir = rules::dir().map(|d| d.to_string_lossy().into_owned());
+        if let Some(map) = info.as_object_mut() {
+            map.insert("ruleset_dir".to_owned(), dir.into());
+        }
+        serde_json::to_vec(&info).map(Bytes).map_err(|e| Failure::Runtime(e.to_string()))
     })?)
 }
 
@@ -73,6 +83,8 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Where a caught panic happened, for its crash record (citar_sim::panics): process-wide,
     // chained to the hook it replaces, so the panic is still printed.
     citar_sim::panics::install();
+    // A modded ruleset is the process's from the start, or the import fails saying why.
+    rules::adopt_from_env(py)?;
 
     m.add_class::<game::Game>()?;
     m.add_class::<bot::Bot>()?;
@@ -85,6 +97,7 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("EngineCrash", py.get_type::<EngineCrash>())?;
 
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(rules::check_ruleset, m)?)?;
     m.add_function(wrap_pyfunction!(calls::calls_in_flight, m)?)?;
     m.add_function(wrap_pyfunction!(calls::shutdown, m)?)?;
     m.add_function(wrap_pyfunction!(run::run_game, m)?)?;

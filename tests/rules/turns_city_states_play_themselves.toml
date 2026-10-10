@@ -3,7 +3,7 @@ City-states play their own turns inside the call that ends the turn before their
 major civilization ends its turn, the city-state's turn is played and the round ends in the same
 call, and the next turn goes to the first major civilization. City-states announce no turn.
 """
-from = "citar/engine/game.py: Game.end_turn"
+from = "engine/game.py: Game.end_turn"
 
 [config]
 players = [{}, {}]

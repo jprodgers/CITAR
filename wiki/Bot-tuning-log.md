@@ -1,9 +1,17 @@
 # Bot tuning log
 
-The scripted bot (`citar/bots/basic.py`) is the yardstick that humans and AI models are measured against, so it
-has to play competently: expand, grow, research, fight, and win games in all the ways UnCiv allows. This file is
-the working log of that effort. It records the goal, the method, every experiment and what was decided. **Any
-session that continues this work starts here.**
+The scripted bot is the yardstick that humans and AI models are measured against, so it has to play competently:
+expand, grow, research, fight, and win games in all the ways UnCiv allows. This file is the working log of that
+effort. It records the goal, the method, every experiment and what was decided. **Any session that continues this
+work starts here.**
+
+**From 0.1.6 the bot is compiled into the Rust engine as versions** (`crates/citar-bot`; `basic-1` ports
+the Python bot, `basic.py`, as it stood at the swap, with its 373 parameters in 17 groups in
+`crates/citar-bot/params/basic-1.json`; the tag `python-engine-0.1.6` keeps `basic.py`). The experiment log below
+is the Python bot's and names its frozen copies by their hashes; those were archived with 0.1.5 along with the lab
+history, and the ladder of 0.1.6 starts empty.
+A parameter change is a profile; a code change that should not move existing results is a new version (copy
+`src/basic1/` and `params/basic-1.json` to `basic2` and `basic-2`, add its row to the version table).
 
 ## Goal and success criteria
 
@@ -33,8 +41,12 @@ Targets for four equal **Prince** bots on a Small map at Quick speed:
   writes its result, and the next runner collects it. During the quiet hours in `benchmarks/settings.json` (21:00–06:00, because of fan noise) it
   drops to the night worker count. Override this in `saves/lab/config.json`, e.g. `{"workers": 10, "night_workers": 2}`;
   the runner re-reads it continuously.
-- `python -m citar.lab submit saves/lab/specs/NNN-*.json` queues experiments. Bot code is **frozen at submit time**
-  into `citar/bots/frozen_<hash>.py`, so editing `basic.py` never contaminates a queued experiment.
+- `python -m citar.lab submit saves/lab/specs/NNN-*.json` queues experiments. A seat names a bot version (`basic`,
+  `basic-N`, `idle`) or a profile, and **versions are pinned at submit time**: `basic` becomes the version it names
+  then, so a version added later never contaminates a queued experiment. (0.1.5 froze a copy of `basic.py` into
+  the package instead; seats naming such a copy are now refused as archived.) Every result records per seat the
+  build id, the version, the profile and revision, the overrides and the fingerprint, as they were when the game was
+  played; only such results are rated, so 0.1.5's results left in `saves/lab/results` are not.
 - `python -m citar.lab status` shows progress. `python -m citar.lab report NAME...` shows per-label win share,
   score share with a 95% CI, techs and cities at turns 100/200/300, and head-to-head score-share differences
   (`*` = significant).
@@ -43,14 +55,15 @@ Targets for four equal **Prince** bots on a Small map at Quick speed:
   runner again if needed. Unfinished games are simply replayed.
 - `python -m citar.lab stop` stops the runner.
 - **Factorial experiments** (`"factors": {"knob": [level0, level1], ...}`, `"base_params"`, `"players": 4`): every
-  seat plays the frozen bot with its own mix of knob levels. Each factor's levels are spread evenly over the seats
+  seat plays the pinned version with its own mix of knob levels. Each factor's levels are spread evenly over the seats
   of every game, so the report measures each factor's effect *within games*, on score share, final techs, final
   cities and T200 techs. That screens many knobs with one batch of games; interactions are ignored. For named
   choices, use strings the bot understands (e.g. `policy_order_peaceful`: `default`, `rationalism_early`,
   `liberty_first`).
-- Throughput: a 330-turn, 4-bot Small game takes about 5 min on one core; with 10 in parallel, expect roughly
-  10–15 min per game.
-- The GPU is not useful here: the engine and bots are pure Python. LLM seats use the GPU, so an optional LLM-vs-bot
+- Throughput (0.1.5, the Python engine): a 330-turn, 4-bot Small game took about 5 min on one core; with 10 in
+  parallel, roughly 10–15 min per game. The Rust engine and bot are far faster (DESIGN.md P2.10's targets: a small
+  330-round 4-bot game in seconds).
+- The GPU is not useful here: the engine and bots run on the CPU. LLM seats use the GPU, so an optional LLM-vs-bot
   check game can run in the daytime.
 
 ## Method
@@ -58,8 +71,8 @@ Targets for four equal **Prince** bots on a Small map at Quick speed:
 1. Measure the baseline (`base-prince4`) and the difficulty ladder (`ladder-v0`).
 2. Diagnose the biggest weakness from reports plus single diagnostic games. Scratch scripts in the session
    scratchpad print per-civ state every 25 turns.
-3. Change `basic.py`, or expose a knob in `DEFAULT_PARAMS` and A/B the values.
-4. A/B test: two seats of the new bot against two seats of the previous frozen bot, rotated, for 20–24 games.
+3. Change the bot (from 0.1.6: a new version), or A/B the values of a parameter through profiles.
+4. A/B test: two seats of the new bot against two seats of the previous version, rotated, for 20–24 games.
    Accept if the score-share difference is significantly positive, or neutral while fixing a measured problem.
 5. Repeat. Rerun the ladder and baseline after big changes.
 
@@ -106,12 +119,53 @@ Record every experiment below: name, question, result, decision.
 | 6 | `fac2` (40 games, 200 turns, factorial) | Base `prod_mode=unciv`; screen 8 knobs | Significant: `u_happiness_low` 6 gives +1.1 cities (score +0.032). Not significant but positive: siege_city_pref 3 (+0.029), siege_move_first (+0.026), u_food 3.6 over 2.0 (+0.031), no small-city food focus (+0.022). Neutral or negative: typed CS gifts, worker knobs | `u_happiness_low=6`, `siege_city_pref=3`, `siege_move_first=True` |
 | 7 | **v1 defaults** (set in `DEFAULT_PARAMS`) | Above, plus `belief_mode=prefs` and `faith_buildings` (a functional test bought 8 Pagodas), and fixed war triggers: the field-army requirement is capped at max(4, min(8, cities/2+2)), or 2 units at 4x power. Wide empires had never gathered a field army of `cities` units. | The conquest test wins by domination at about T160 | → confirm |
 | 8 | `v1-vs-v0` (24 games, full length, 2v2) | Confirm v1 against v0 | **v1 wins 15/24** (v1 7 + v1b 8) against v0's 9. Score share 0.264 and 0.281 against 0.225 and 0.230 (v1b over v0 significant; pooled about +0.045). Techs at T330 62–63 vs 57–58; cities 15–17 vs 8; religions founded 0.5–0.7 vs 0.8; captures 0.12–0.21 | **Accepted: v1 is the new baseline** |
-| 8c | `base-v1` (20 games), `ladder-v1` (12/16 so far) | v1 pacing; difficulty ladder (Chieftain/Prince/Emperor/Deity, UnCiv values) | **base-v1:** Time 19/20, Diplomatic 1/20; median civ 20/39/59 techs and 3.8/7.8/12 cities at T100/200/300 (v0: 19/35/50 and 3.3/4.7/7); 65 techs at T330; unhappy on 47–57% of turns. **ladder-v1:** Deity wins 12/12 (Cultural 7, Domination 2, Time 3; share 0.72, 34 cities, 78 techs, 12 captures). Emperor 0.16, Chieftain 0.125, Prince 0.106. Chieftain has more cities than Prince (11.8 vs 6.5) and Prince is unhappy on 39% of turns, others under 8%. Games #5, #9, #11 and #15 took more than 150 minutes and were killed by `--max-minutes` (the logged "exit code 1" is the kill, not a crash) | Deity is far too strong for the v1 bot at every other level; the Chieftain/Prince inversion is confirmed. The runner now uses `--max-minutes 480` |
-| 8d | `ladder-v1-mono` (16) | Same with `ai_base_values=monotonic` | **First run invalid:** the runner was started before `ai_base_values` was passed into game specs, so it duplicated `ladder-v1`, identically up to T200. Results moved to `results/ladder-v1-mono-INVALID-noflag.jsonl.bak`; resubmitted 2026-09-19 03:27 | *running* |
+| 8c | `base-v1` (20 games), `ladder-v1` (12/16 so far) | v1 pacing; difficulty ladder (Chieftain/Prince/Emperor/Deity, UnCiv values) | **base-v1:** Time 19/20, Diplomatic 1/20; median civ 20/39/59 techs and 3.8/7.8/12 cities at T100/200/300 (v0: 19/35/50 and 3.3/4.7/7); 65 techs at T330; unhappy on 47–57% of turns. **ladder-v1:** Deity wins 12/12 (Cultural 7, Domination 2, Time 3; share 0.72, 34 cities, 78 techs, 12 captures). Emperor 0.16, Chieftain 0.125, Prince 0.106. Chieftain has more cities than Prince (11.8 vs 6.5) and Prince is unhappy on 39% of turns, others under 8%. Games #5, #9, #11 and #15 took more than 150 minutes and were killed by `--max-minutes` (the logged "exit code 1" is the kill, not a crash) | Deity is far too strong for the v1 bot at every other level. The runner now uses `--max-minutes 480`. **Corrected 2026-09-22:** results left out eliminated civs (see *Eliminated seats* below). With them restored: Deity 0.734, Emperor 0.154, Prince 0.065, Chieftain 0.047; eliminated in 62% (Chieftain), 38% (Prince), 6% (Emperor) of games. Emperor > Prince is significant (+0.089); Chieftain vs Prince is not (−0.019 ± 0.035). **The ladder is monotonic; the "inversion" was survivorship bias** |
+| 8d | `ladder-v1-mono` (16) | Same with `ai_base_values=monotonic` | **First run invalid:** the runner was started before `ai_base_values` was passed into game specs, so it duplicated `ladder-v1`, identically up to T200. Results moved to `results/ladder-v1-mono-INVALID-noflag.jsonl.bak`; resubmitted 2026-09-19 03:27. **Result (16 games, eliminated seats restored):** Deity 0.806 (16/16 wins: Time 5, Cultural 5, Diplomatic 3, Domination 3), Emperor 0.105, Prince 0.050, Chieftain 0.039; Prince and Chieftain eliminated in 56% of games | Monotonic base values don't improve the ladder over UnCiv's (Chieftain − Prince −0.011 ± 0.031). Keep `unciv` |
 | 8b | `ladder-v0` (4 games completed before it was dropped) | Old-bot ladder | Deity 0.416 (1 Cultural win at T322), Emperor 0.327, **Chieftain 0.143 > Prince 0.114**. Chieftain was unhappy 6% of turns, Prince 44% | UnCiv quirk: every non-Prince AI uses Chieftain base values (12 base happiness, ×0.6 unhappiness, +1 per luxury). Only the Prince AI uses Prince's strict values. Added option `ai_base_values="monotonic"` (easier AIs use Prince base values plus their penalties) → `ladder-v1-mono` |
-| 10 | `fac4` (40 games, full length, factorial on v1) | Wonders are worth 40 score each (UnCiv `scoreFromWonders`) against 4 per tech and about 5.6 per city on a Small map, so Time victories reward wonder building. Screen `u_wonder_bonus` [4, 12], `u_wonder_gate` [on, off], `u_faith` [1, 2], `bv_cache_turns` [5, 0], `war_prep_rate` [1, 2], `u_settler` [30, 15] | *queued* | |
-| 11 | `fac5` (40 games, full length, factorial on v1) | War trace (war_v1.txt): v1 declares about 2 wars per game but captures 0.17 cities. Armies of 3–6 mostly Spearmen and Catapults trickle in *after* the declaration, and wars end in peace after 25–28 turns. Unhappiness (−75% growth) persists on about 50% of turns. Screen `prep_gather` (assemble at a rally point before declaring, then advance at once), `unhappy_avoid_growth`, `settler_min_hap` [2, 5], `war_prep_rate` [1, 2] | *queued* | |
+| 10 | `fac4` (40 games, full length, factorial on v1) | Wonders are worth 40 score each (UnCiv `scoreFromWonders`) against 4 per tech and about 5.6 per city on a Small map, so Time victories reward wonder building. Screen `u_wonder_bonus` [4, 12], `u_wonder_gate` [on, off], `u_faith` [1, 2], `bv_cache_turns` [5, 0], `war_prep_rate` [1, 2], `u_settler` [30, 15] | Time 40/40. Significant: `u_wonder_bonus` 12 +0.052 score share; `u_wonder_gate` on −0.061 share and −1.5 techs; `bv_cache_turns` 5 −0.9 techs at T200 (the cache costs play). Others within noise | Candidates for v2: ungated wonders, bonus 12, no cache (`v2a-vs-standard`). Caveat: wonders are 40 score each, so part of the gain is the score formula |
+| 11 | `fac5` (40 games, full length, factorial on v1) | War trace (war_v1.txt): v1 declares about 2 wars per game but captures 0.17 cities. Armies of 3–6 mostly Spearmen and Catapults trickle in *after* the declaration, and wars end in peace after 25–28 turns. Unhappiness (−75% growth) persists on about 50% of turns. Screen `prep_gather` (assemble at a rally point before declaring, then advance at once), `unhappy_avoid_growth`, `settler_min_hap` [2, 5], `war_prep_rate` [1, 2] | Time 39, Diplomatic 1. `settler_min_hap` 5 −2.6 cities (significant), no score effect. `prep_gather` +0.031 ± 0.032 (borderline) | `prep_gather` into the v2 candidate |
+| 12 | `field-army-vs-standard`, `luxury-vs-standard`, `overseas-duels` (2026-09-22) | War settings (garrison only exposed cities, attack the nearest target within 12 tiles, a 4-unit field army, no power-ratio gate); luxury seeking; overseas wars | Field army: share −0.009 ± 0.040 (neutral) but 0.69 captures per game vs 0.19. Luxury seeker −0.015 ± 0.034 and more unhappy turns. Overseas duels +0.028 ± 0.199, captures 0.5 vs 0 | Field army and overseas into candidate C; luxury seeker rejected |
+| 13 | Spaceship (traced seed 302, resumed from T285) | Why no bot ever builds a spaceship | Four blockers: a per-civ limit bug dropped the last allowed part from the queue (engine, every player); Aluminum spent elsewhere; a parked Worker filled the capital's civilian slot, so parts could not enter; unit upgrades took the reserved Aluminum. All fixed | **First Scientific victory, T316** |
+| 14 | `lux-buyer-vs-standard` (24 games) | Buy a missing luxury from a neighbour for gold per turn (`lux_buy`) | −0.004 ± 0.044; unhappy turns 0.58 vs 0.53 | Rejected (neutral) |
+| 15 | `league-1` (24 games, one seat each, frozen_4f6e040a + v1) | v2c (v2a + war + space + lux_buy) vs v2a vs Standard vs v1 | Time 22, **Scientific 2** (v2a T323, v2c T311). Share v2a 0.317, v2c 0.295, Standard 0.210, v1 0.178. v2a and v2c each beat Standard and v1 significantly (+0.08 to +0.14); v2a − v2c +0.022 ± 0.084. v2c builds 1.67 spaceship parts per game vs v2a 0.58, with less military at T300 (865 vs 1,240) | v2a stays the best measured profile. Next: `league-2` separates war and space |
+| 16 | `league-2` (24 games, one seat each, frozen_4f6e040a) | 2x2 on v2a: war settings (field army, overseas) × space settings | Time 21, Scientific 3 (v2a, v2a+space, v2d). Share v2a+space 0.269, v2a+war 0.253, v2a 0.244, v2d 0.234; every pair within noise (largest +0.035 ± 0.068). Main effects: space +0.006, war −0.026. War raises captures (0.54 and 0.42 per game vs 0.08 and 0.17). Ratings: v2a+space 1642 ± 70, v2a 1623, v2c 1602, v2a+war 1586, v2d 1544 | Both bundles are neutral on share. Keep space (science wins, no cost) → base for `fac6`; keep war as an opt-in profile |
+| 17 | `fac6` (40 games, full length, factorial on v2a+space) | Screen `u_science` [2, 3], `u_happiness_low` [6, 10], `u_food` [3.6, 5], `settler_min_hap` [2, 0], `buy_cap_per_era` [60, 120], `gold_reserve` [60, 20], `u_gpp` [0.5, 1.5], `garrison_mode` [all, exposed] | Time 34, **Scientific 6** (3 of 24 in league-2, so the space base is working). `u_happiness_low` 10 is significantly bad: −0.045 ± 0.042 share, −3.4 techs, −1.6 techs by T200 (a high happiness weight crowds out science buildings). `u_gpp` 1.5 +0.039 ± 0.043 and `u_food` 5 +0.025 ± 0.043 (both starred at 39 games, borderline at 40). `u_science` 3 costs 2.7 cities with no tech gain; gold knobs, settler gate and garrison mode neutral | Keep `u_happiness_low` 6. Confirm `u_gpp` and `u_food` in `league-3` |
+| 18 | `league-3` (24 games, one seat each, frozen_4f6e040a) | Confirm fac6: v2 candidate E (v2a+space, `u_gpp` 1.5, `u_food` 5) and a GPP-only variant against v2a+space and Standard | Time 21, Scientific 3. Share: v2a+space+gpp 0.281, v2e 0.274, v2a+space 0.244, Standard 0.201. Both GPP seats beat Standard significantly (−0.080 ± 0.075 and −0.073 ± 0.052); GPP vs GPP+food is +0.007 ± 0.089, so the food change adds nothing. Captures: Standard 0.42 per game, v2a+space 0.08 | **`u_gpp` 1.5 adopted, `u_food` left at 3.6. These are the v2 defaults (see below)** |
 | 9 | `fac3` (40 games, 200 turns, factorial on v1) | Screen `war_prep_rate` [1, 2.5], `settler_min_hap` [2, 0], `u_culture` [1, 2], `u_production` [2, 3], `u_gold` [0.67, 1], `site_new_lux` [0, 8], `tech_cost_exp` [0.8, 0.5], `workers_per_city` [1.8, 2.5] | Only `settler_min_hap` 2 vs 0 is significant: −1.5 cities (−0.026 share, +0.8 techs). All other knobs are within noise: `site_new_lux` 8 +0.033, `u_culture` 2 +0.023, `u_gold` 1.0 −0.031, `war_prep_rate` 2.5 −0.024 | Keep `settler_min_hap` 0; `site_new_lux` and `u_culture` are candidates for v2 (weak positive) |
+
+### The v2 defaults (shipped in 0.1.4, 2026-09-22)
+
+`DEFAULT_PARAMS` changed in nine places. Every one was measured, and the package as a whole was the winning seat of
+`league-3`; Standard now plays exactly what that seat played.
+
+| Parameter | v1 | v2 | Evidence |
+|---|---|---|---|
+| `u_wonder_gate` | True | **False** | fac4: gating costs 0.061 share and 1.5 techs |
+| `u_wonder_bonus` | 4 | **12** | fac4: +0.052 share |
+| `bv_cache_turns` | 5 | **0** | fac4: the cache costs 0.9 techs by T200 |
+| `prep_gather` | False | **True** | fac5: +0.031 ± 0.032 (see the caveat below) |
+| `u_gpp` | 0.5 | **1.5** | fac6 +0.039 ± 0.043, confirmed in league-3 |
+| `u_spaceship` | 20 | **1500** | A part is 750 production; at 20 it was never worth building |
+| `u_space_program` | 0 | **1500** | Apollo is what unlocks the parts |
+| `u_victory_building` | 20 | **1500** | Same reasoning for Utopia and friends |
+| `space_reserve` | 0 | **3** | Keeps Aluminum for the parts, including against unit upgrades |
+
+Measured effect, in one place:
+
+- **v2 against Standard (v1 defaults): +0.08 to +0.10 share** across `v2a-vs-standard` (24 games), `league-1`
+  (24) and `league-3` (24). Ratings put the shipped configuration at about 1640 against Standard's 1500.
+- **Science victories exist now:** 0 in the project's whole history before 2026-09-22, then 2 of 24 (`league-1`),
+  3 of 24 (`league-2`), 6 of 40 (`fac6`), 3 of 24 (`league-3`). Four separate causes had to be fixed first
+  (row 13), one of them an engine bug that affected human players too.
+- **Unhappiness improved but is not solved:** 0.41-0.52 of turns against 0.53-0.60 for Standard.
+- Techs at T330 are unchanged (67-68). v2 wins on cities, wonders, great people and the endgame, not on pace.
+
+**The caveat, and the first job for the next version.** v2 barely fights: 0.08 captured cities per game in
+league-3, against Standard's 0.42. In the duel regression test a v2 bot at aggression 0.5 never declares war at
+all in 200 turns - it settles 19 cities and leaves its defenceless neighbour alone (at aggression 0.9 it still
+conquers, at T147). The suspect is `prep_gather` in a wide empire: the field army it must assemble before
+declaring scales with city count, so the gather may never finish. `v2-wars` (24 games, queued 2026-09-22) puts
+the shipped defaults against the same bot without `prep_gather`, with the war settings, and with both.
 
 ### Findings from single-game traces (2026-09-18)
 
@@ -147,6 +201,63 @@ Scratch tools: trace.py (per-turn decisions of one civ), settlers.py, prodexplai
   `small_city_focus`, `workers_per_city`, `worker_unimproved`. City-state gifts are now typed (`cs_gift_mode`). UnCiv's own AI researches almost at random among the cheapest techs, so research
   order is a minor lever.
 
+### Analysis of 2026-09-22: traced games, all recorded data
+
+Data: 12 fully traced games (8 four-player small Prince games, 4 duels on the benchmark maps) with every tool
+call, each bot's per-turn situation, and in a second batch of 4 the refusal messages, the happiness breakdown and
+the state of each siege; 352 laptop lab games, 42 server lab games, 13 LLM-vs-bot games (server and laptop), and
+154 CIGAR-era balance games. Tools (scratchpad, not in the repo): a tracer that wraps a bot's `ex` and `context`,
+a report over traces, and replay probes (games are deterministic, so a traced seed can be replayed to any turn and
+inspected unit by unit).
+
+**Eliminated seats were missing from every lab result** (the writer iterated living civs only), so every report
+showed 0 eliminations and averages skipped the civs that were wiped out. Fixed in `lab.play`; old results get the
+missing seats back from the experiment's seat list (`lab.complete_players`). This reversed the ladder conclusion
+(see 8c): the Chieftain/Prince "inversion" was survivorship.
+
+Findings, most important first:
+
+1. **Wars fail because the army never arrives.** 62 wars in the 8 four-player games, 8 took a city. In 69 traced
+   war plans the median number of the attacker's units within 3 tiles of the target was 0, and in most the target
+   never lost a hit point. Replays showed why:
+   * every city keeps a garrison, so at war 10-12 of 15 military units sit in cities and the field army is 1-6;
+   * "weak target" compared *total* power (garrisons included) and advanced with 2 field units;
+   * wars the bot did not choose aim at the enemy's nearest city however far away (32-36 tiles on a pangaea);
+     units march there on standing orders and the war times out into peace (about 25 turns) before they arrive;
+   * the war target it does choose is the rival's *smallest* reachable city, not its nearest.
+   New parameters (defaults unchanged): `garrison_mode` (all / exposed), `garrison_exposed_radius`,
+   `war_target_max_dist`, `war_target_pick` (smallest / nearest). Profile **Field army** switches them on with
+   `weak_power_ratio` 1000 and 4 units to advance → `field-army-vs-standard`.
+2. **No war across water.** 0 wars in 4 of 4 bot duels on the benchmark continents map, and none in the LLM globe
+   duels, although one side led 2-3x: `_reachable_city` only considers our own continent and ships only wait.
+   Not addressed yet.
+3. **Happiness is a ceiling the bot sits on.** Median happiness stays between -1 and +1.5 all game; it is below the
+   settler threshold (2) on 60% of turns before T200, and settlers are 8% of builds when happy, 0.7% when not:
+   4 cities by T78, 6 by T150. The breakdown: citizens -137 and cities -38 by T300 against buildings +108, policies
+   +34, religion +25 - and **luxuries +9 all game (2-3 types)**. Workers improve every luxury in the borders; there
+   just aren't more. Profile **Luxury seeker** (`site_new_lux` 8, typed city-state gifts) → `luxury-vs-standard`.
+4. **No science victories: spaceship parts are never built.** A v2a leader finished the tech tree by T306 and
+   built Apollo and a Spaceship Factory, then no parts: a part is worth `u_spaceship` 20 over 750 production, a
+   late building about 10x more per point. Profile **v2 candidate B** (v2a + `u_spaceship` 1500).
+5. **Wasted and refused actions.** Great Prophets retried "enhance religion" outside a city for the rest of a
+   game (400 refusals in one game) because the engine reported it available; missionaries without a religion
+   tried to spread one; moves onto a unit's own tile; long moves re-planned every turn and cancelled when a unit
+   stepped onto the route (721 "orders interrupted" in one game). Fixed (engine: action availability, move routes
+   kept; bot: prophets walk to a city). Refused calls per game 901 → 42, tool calls 7,282 → 4,048.
+6. **A live game could wait 90 s on a bot** whose counter-offer the rules refused (it had no reject fallback).
+   Fixed in the bot and in `BotAgent`.
+7. **v2a (fac4/fac5 winners) beats Standard decisively** (`v2a-vs-standard`, 24 games: 20 wins, share 0.301 vs
+   0.199, +0.10 ± 0.04). The score breakdown of two traced games: the winning v2a seat had half its score from
+   wonders (31-37 wonders, 1,240-1,480 points) but also 3x anyone's population and the whole tech tree; the second
+   v2a seat was ordinary. Real strength plus wonder snowballing.
+8. **LLM games.** The bot beats gemma-4-e2b/e4b every time and eliminates them in four-player games (T265, T407,
+   T433). The LLMs bank 1,000-2,600 gold and are unhappy 70-90% of turns in duels.
+9. **Gold** is spent (median 48 purchases per game, mostly buildings), but the balance still climbs to about 600
+   by T300. **Research and policies** look sane (Pottery/Mining first, Writing about 6th; Tradition or Honor by
+   aggression).
+10. **History:** unhappiness has been 40-60% of turns since the CIGAR bot of 2026-09-16; gold banked late went from
+    about 100-200 to about 600 with the UnCiv rules.
+
 ## LLM vs bot checks (GPU)
 
 - `python -m citar.bench --model M --opponents 3 --map-size small --turns N [--gpu max] [--load-context C]` plays one
@@ -174,15 +285,45 @@ Scratch tools: trace.py (per-turn decisions of one civ), settlers.py, prodexplai
     - A spare strategic resource was worth 12 gold at any era; it's now 12 × (era + 1). The Iron lowball goes from "add 24 gold" to "add 120 gold".
 - Future LLM runs: use the Benchmarks page (server scheduler) so the user can watch them. CLI runs must write to saves/lab/*.out, which the Lab page shows as side runs.
 
+## Server lab (citar.jimmieprodgers.com)
+
+The web server runs its own lab (one game at a time, about 6 small 4-bot games an hour on its single CPU; see the
+Queue and Lab pages). Its results are separate from the laptop's `saves/lab` above and use the 0.1.x map generator.
+
+Done: `v012-baseline-prince4` (12), `v012-ladder` (8), `v012-scarce-luxuries` (6). Running: `v012-globe-wrap` (6).
+
+Queued 2026-09-22, bot `frozen_d95d50cb` (basic.py as of that day, including the deal-pricing fixes above) unless
+stated. Highest priority first:
+
+| Experiment | Games | Question |
+|---|---|---|
+| `bench-mirror-globe`, `-boxed`, `-scarce` | 12 each | Bot vs bot on the three duel benchmark scenarios (game 0 of each is the exact benchmark map: seeds 7, 21, 33). The reference an LLM's result on that scenario is read against. |
+| `duel-chieftain-vs-prince`, `duel-king-vs-prince`, `duel-emperor-vs-prince` | 10 each | A difficulty ladder against the benchmarks' Prince bot on the globe duel, to place a model's result on ("plays like a King bot"). |
+| `current-vs-v1` | 24 | Current bot vs frozen v1 (`frozen_7149efb1`), 2v2, full length: has the yardstick moved since v1? |
+| `noise-prince4` | 24 | Four identical Prince bots, fresh seeds. With `v012-baseline-prince4`: the between-seat spread for sample-size and significance planning. |
+| `map-wrap-both`, `map-no-rivers`, `map-rich-resources`, `map-boxed` | 8 each | How map options move pace, victory mix and balance (vs the ice-cap baseline), before choosing benchmark scenarios. |
+
+Reports: Lab page, or `python -m citar.lab report NAME` on the server.
+
 ## Next steps (keep current)
 
 Progress of everything queued is on the web GUI **Lab page** (http://localhost:8765/#/lab): runner health, per-experiment progress and ETA, each game's current turn, side runs and the runner log. Click an experiment to see its report.
 
-1. When `fac4`, `fac5` and `ladder-v1-mono` finish, read them and fold significant knobs into `DEFAULT_PARAMS` as v2. Then confirm v2 with a full-length 2v2 against v1 (`frozen_7149efb1`).
-2. Ladder: Deity dominates (0.72 share), and the Chieftain AI beats the Prince AI. Present the unciv vs monotonic choice to the user once `ladder-v1-mono` is in.
-3. Investigate why ladder games #5, #9, #11 and #15 run more than 150 minutes (a turn-time trace with periodic stack dumps is in scratchpad `l5.*`). Likely late-game unit counts under Deity; possibly an engine hot spot to optimise.
-4. Next areas: happiness (Prince unhappy 39–57% of turns), war capture rate (`prep_gather` in fac5), endgame projects, gold spending.
-5. Optional (needs the user's OK): build UnCiv offline and run its AI simulation to calibrate the pace.
+1. **`v2-wars`** (queued 2026-09-22, 24 games, frozen_e744bbf8 = the 0.1.4 bot): the shipped defaults against
+   themselves without `prep_gather`, with the war settings, and with both. The bots stopped fighting; find out
+   which setting did it and what fighting is worth. See the caveat above.
+2. **Science pace.** Parts get built now, but only 3-6 games in 24-40 reach a launch by T330. The lever is
+   science per turn, not part values: the tech tree costs about 150k science and a bot makes about 21k by T300.
+3. **Gold still piles up** (about 600 by T300) and the city-state gift sink is untouched; `buy_cap_per_era` and
+   `gold_reserve` were both neutral in fac6, so the spending rule itself is what needs work, not its limits.
+4. **Difficulty ladder.** Deity is 0.73-0.81 share against Prince's 0.05-0.07: the handicaps, not the bot.
+5. **LLM side** (web server benchmarks): gemma-4-e2b on the Framework Desktop and a second Acer pass, both on the
+   Acer's seeds, to separate machine differences from game-to-game variation.
+2. Science wins are now possible but rare at the Quick 330-turn limit: v2c averages 1.67 of 6 parts. Pace (science
+   per turn) is the next lever, rather than part values.
+3. Remaining areas: gold banked late (about 600 at T300) and the city-state gift sink; bots trading luxuries away
+   too freely; Deity dominance; anchor seats in A/B tests.
+4. Deploy the branch to the web server once v2 is settled (its lab still runs pre-fix code with the spaceship bug).
 
 
 ---

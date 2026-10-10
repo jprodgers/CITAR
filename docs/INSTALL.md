@@ -193,6 +193,11 @@ add the Visual Studio C++ build tools. The repository's `rust-toolchain.toml` na
 release, and rustup downloads it the first time. The first build takes a few minutes; later ones
 only rebuild what changed. The installer, pipx and the release wheels need none of this.
 
+An editable install builds the engine without its test operations, so about 200 of the tests (the
+rule scripts among them) skip; the dev loop of
+[CONTRIBUTING.md](https://github.com/jprodgers/CITAR/blob/main/CONTRIBUTING.md#rust),
+`cargo xtask develop`, builds it with them and runs every test.
+
 A checkout keeps its state beside the code — `saves/`, `config/`, `benchmarks/` — rather than in
 your user directory, so a contributor's test games are visible, diffable and easy to delete.
 [CONTRIBUTING.md](https://github.com/jprodgers/CITAR/blob/main/CONTRIBUTING.md) has the rest.

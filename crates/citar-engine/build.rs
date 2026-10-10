@@ -21,7 +21,7 @@ fn main() {
     let version = std::env::var("CARGO_PKG_VERSION").expect("cargo sets it");
     // A folder is scanned whole for changes: the inputs, this script's helper, and the manifest
     // and lock file whose dependencies the code follows.
-    for path in ["src", "content_code.rs", "Cargo.toml", "../../citar/data", "../../Cargo.lock"] {
+    for path in ["src", "content_code.rs", "Cargo.toml", "data", "../../Cargo.lock"] {
         println!("cargo::rerun-if-changed={path}");
     }
     let code = code::crate_code(code::ENGINE_TAG, &version, &dir, &code::engine_inputs(&dir))

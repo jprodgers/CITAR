@@ -3,7 +3,7 @@ Standing orders: a civilian cannot fortify, sleeping and waking set and clear th
 spends the turn's movement, a siege unit sets up for one movement point, and an unknown order is
 refused with the list of orders. A move that is refused leaves the unit's order as it was.
 """
-from = "citar/engine/tools.py: unit_order"
+from = "engine/tools.py: unit_order"
 
 [[step]]
 ops = [

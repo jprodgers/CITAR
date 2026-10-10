@@ -4,7 +4,7 @@ not already at war, and not while a peace treaty holds. While at war, open borde
 a deal must include a peace treaty; one that does ends the war, and the treaty then holds for the
 speed's peace duration.
 """
-from = "tests/test_engine.py::DiplomacyTests::test_war_and_peace; citar/engine/diplomacy.py: can_declare_war, declare_war"
+from = "tests/test_engine.py::DiplomacyTests::test_war_and_peace; engine/diplomacy.py: can_declare_war, declare_war"
 
 [[step]]
 ops = [

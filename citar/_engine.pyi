@@ -1,7 +1,8 @@
 """citar._engine: the Rust engine, its bots and its runner (crates/citar-py; DESIGN.md P2.6).
 
-Only the facade (citar/engine_api.py) imports it. Every value that would be a dict or a list comes back as JSON bytes,
-which the facade decodes; JSON arguments go in as bytes. Counts, ids and names are ints and strs. Heavy calls release the
+Only the facade (citar/engine_api.py) imports it. The process's ruleset is the one compiled in, or the one in the
+directory CITAR_RULESET_DIR names, read at import (an ImportError when that directory does not load). Every value that
+would be a dict or a list comes back as JSON bytes, which the facade decodes; JSON arguments go in as bytes. Counts, ids and names are ints and strs. Heavy calls release the
 GIL; the properties and the negotiation heads read a small copy of where the game stands and never wait for it.
 
 Errors: ActionError (a refusal, with .code), MapError and LoadError (both ValueError), EngineCrash (RuntimeError: a
@@ -39,7 +40,12 @@ class EngineCrash(RuntimeError):
 
 # ---------------------------------------------------------------------------- the process
 def build_info() -> bytes:
-    """{version, build_id, label, rules, engine_code, bot_code}."""
+    """{version, build_id, label, rules, engine_code, bot_code, ruleset_dir}: ``rules`` is the process's ruleset id,
+    ``ruleset_dir`` the directory CITAR_RULESET_DIR gave it (None for the ruleset compiled in)."""
+def check_ruleset(dir: str) -> bytes:
+    """Loads the ruleset in a directory of the data layout (ruleset/, custom/, game.json) without adopting it: {dir, id,
+    version, counts, errors}, errors [{kind, file, object, text}] (none when it loads, and then id, version and counts
+    say what it holds). Problems are found stage by stage. OSError for a directory that cannot be read."""
 def calls_in_flight() -> int:
     """How many heavy calls are running now."""
 def shutdown(timeout: float = 5.0) -> bool:

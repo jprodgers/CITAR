@@ -2,7 +2,7 @@ about = """
 A step between two tiles that are both next to an enemy military unit costs all the movement a
 unit has left (a zone of control); at peace the same step costs its terrain.
 """
-from = "citar/engine/movement.py: zoc_between, enter_cost"
+from = "engine/movement.py: zoc_between, enter_cost"
 
 [[step]]
 note = "Our warrior at (6,11); theirs at (7,10), next to both (6,11) and (7,11)."

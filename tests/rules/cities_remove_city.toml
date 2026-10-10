@@ -3,7 +3,7 @@ The scenario operation remove_city destroys a city: its tiles are no one's, the 
 was destroyed, and a capital destroyed moves the palace to the largest city left. The city's tile
 is left bare, unless ruins = true keeps the ruins a destroyed city leaves.
 """
-from = "citar/engine/scenario.py: _remove_city; citar/engine/cities.py: destroy_city"
+from = "engine/scenario.py: _remove_city; engine/cities.py: destroy_city"
 
 [[step]]
 ops = [

@@ -35,7 +35,6 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Optional
 
-from .. import engine_api
 from . import profiles
 
 PRIOR_GAMES = 2.0            # drawn games against a 1500 anchor every entry starts with
@@ -401,16 +400,13 @@ def profile_rating(p: dict, board: list) -> dict:
       aggression) on an earlier build or version - the profile's own rating from before the last change of the bot,
       ``rating_same_settings``, the latest first;
     * else its best rated entry from an earlier revision (flagged by both being false).
-
-    Without the Rust engine (the Python backend, until package 2-12) there is no fingerprint to compare, so no
-    rating is current there.
     """
     mine = [b for b in board if b.get("profile") == p["id"]]
     rated = [b for b in mine if b.get("rated")]
     best = ([b for b in rated if b["difficulty"] == "Prince"] or rated or [None])[0]
     try:
         live = profiles.fingerprint(p["engine"], p.get("params"), p.get("aggression"))
-    except (profiles.ProfileError, engine_api.BackendError):     # an archived engine; the Python backend
+    except profiles.ProfileError:            # a snapshot archived with 0.1.5: it never plays, so nothing is current
         live = None
     current = next((b for b in mine if b["fingerprint"] == live and b["difficulty"] == "Prince" and b.get("rated")),
                    None)

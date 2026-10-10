@@ -1,7 +1,7 @@
 about = """
 A carrier takes the aircraft it carries along when it moves: they stay on board, on its tile.
 """
-from = "citar/engine/game.py: place_unit; citar/engine/movement.py: step"
+from = "engine/game.py: place_unit; engine/movement.py: step"
 
 [[step]]
 note = "A carrier and a fighter at sea, then the fighter on board."

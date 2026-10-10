@@ -1,4 +1,4 @@
-//! CITAR's constants: `citar/data/game.json`, typed (DESIGN.md 5.3), and the few constants the
+//! CITAR's constants: `data/game.json`, typed (DESIGN.md 5.3), and the few constants the
 //! client JSON carries from Python code rather than from the data.
 //!
 //! Python read `game.json` as a dict and its formula constants as `R.k["name"]`
@@ -291,11 +291,9 @@ mod tests {
             benchmark_speed: SpeedId(0),
             default_difficulty: DifficultyId(0),
             max_players: 24,
-            formulas: serde_json::from_str::<RawGame>(include_str!(
-                "../../../../citar/data/game.json"
-            ))
-            .expect("the shipped game.json")
-            .constants,
+            formulas: serde_json::from_str::<RawGame>(include_str!("../../data/game.json"))
+                .expect("the shipped game.json")
+                .constants,
             barbarian_levels: IdVec::new(),
             diplomacy: Diplomacy { max_chat_messages: 30, negotiations_per_pair_per_turn: 2 },
         };

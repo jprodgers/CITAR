@@ -3,7 +3,7 @@ A mountain is impassable, but Carthage's land units may cross mountains once it 
 first Great General. Python never recorded the units a civilization gained, so the crossing never
 opened there; in Rust it does.
 """
-from = "citar/engine/movement.py: terrain_reason (Carthage)"
+from = "engine/movement.py: terrain_reason (Carthage)"
 
 [config]
 players = [{ nation = "Carthage" }, {}]

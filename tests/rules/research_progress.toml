@@ -5,7 +5,7 @@ alone, with what was left over kept for the next. set_research answers with the 
 take at the science of the moment. With nothing queued, a human civilization is asked to choose
 at the start of its turn.
 """
-from = "citar/engine/research.py: set_research, turns_left, end_turn, add_science, add_tech"
+from = "engine/research.py: set_research, turns_left, end_turn, add_science, add_tech"
 
 [[step]]
 note = "The other civilization keeps a unit, so that the game goes on."

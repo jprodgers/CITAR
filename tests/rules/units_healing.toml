@@ -3,7 +3,7 @@ A unit that neither moves nor attacks heals at the end of its turn: 10 in the op
 land. A fortified unit that stays put fortifies further each turn, up to two; a unit that moved
 neither heals nor stays fortified.
 """
-from = "citar/engine/units.py: end_turn, heal_for_tile"
+from = "engine/units.py: end_turn, heal_for_tile"
 
 [[step]]
 ops = [

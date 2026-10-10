@@ -4,7 +4,7 @@ may be sent out of turn. The recipients must be major civilizations met, and the
 something. To all, the Rust engine writes to the civilizations met in player-id order, where Python
 kept the order they were met (intended: met-lists-in-player-id-order).
 """
-from = "citar/engine/diplomacy.py: send_message"
+from = "engine/diplomacy.py: send_message"
 
 [config]
 players = [{}, {}, {}]

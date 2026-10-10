@@ -21,7 +21,7 @@ from unittest import mock
 from citar import engine_api
 from citar.agents.bot_agent import BotAgent
 from citar.server import session as sess
-from tests.backends import has_test_ops, rust_only
+from tests import has_test_ops
 
 ROOT = Path(__file__).resolve().parent.parent
 #: The engine-format copy of the late fixture (small-continents-normal-s1025/t280), which
@@ -105,7 +105,6 @@ class ServerCase(unittest.TestCase):
         return self.client.get(f"/api/games/{s.id}{route}", params={"token": token or s.spectator_token})
 
 
-@rust_only
 class SideEffectTests(ServerCase):
     """Gate 2: what a turn does in the session, bot seats' turns included."""
 
@@ -116,8 +115,11 @@ class SideEffectTests(ServerCase):
         s.start()
         self.assertTrue(wait(lambda: s.game.turn >= 21, 180), f"20 rounds in 3 minutes ({s.game.turn}): {s.errors}")
         # after 20 rounds, while the game plays on, every round's autosave has been taken: once the writer has caught
-        # up, the autosave holds the round the game was in, or a later one
-        turn = s.game.turn
+        # up, the autosave holds the round the game was in, or a later one. The turn is read under the lock: a drive
+        # and the autosave it ends with are one step there, while the game's own turn moves inside the drive, so read
+        # without the lock it can name a round whose autosave is still to be taken.
+        with s.lock:
+            turn = s.game.turn
         self.assertGreaterEqual(autosave_turn(s), turn)
         s.set_paused(True)
         with s.lock:                                   # the turn in progress has finished
@@ -252,7 +254,6 @@ class SideEffectTests(ServerCase):
         self.assertEqual(s.errors, [])
 
 
-@rust_only
 @needs_test_ops
 class CrashTests(ServerCase):
     """Gate 3: an internal error of the engine (the ``panic`` test operation) stops the session where it stands."""
@@ -358,7 +359,6 @@ class CrashTests(ServerCase):
         self.assertEqual(s.crashed["message"], "panic: in a view")
 
 
-@rust_only
 class ViewBytesTests(ServerCase):
     """Gate 4: /view and /replay return the engine's bytes, never parsed and dumped again."""
 
@@ -443,7 +443,6 @@ class ViewBytesTests(ServerCase):
         self.assertLessEqual(median, 0.060 if os.environ.get("CI") else 0.020)
 
 
-@rust_only
 class LongGameTests(ServerCase):
     """Gate 5: four bot seats on a small map play 100 rounds under the session driver, responders active."""
 

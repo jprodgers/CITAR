@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from citar.engine_api import ActionError, EngineGame
-from tests.backends import has_test_ops
+from tests import has_test_ops
 
 #: Turns a standing order waits on a blocked step before it gives up (movement.ORDER_PATIENCE, both engines).
 ORDER_PATIENCE = 3

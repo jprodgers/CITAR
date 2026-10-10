@@ -2,7 +2,7 @@ about = """
 The Fountain of Youth: a military unit that moves next to it is promoted with Rejuvenation for the
 rest of the game.
 """
-from = "tests/test_mechanics.py::RuleGapTests::test_fountain_of_youth_promotes_adjacent_units; citar/engine/movement.py: on_enter_tile"
+from = "tests/test_mechanics.py::RuleGapTests::test_fountain_of_youth_promotes_adjacent_units; engine/movement.py: on_enter_tile"
 
 [[step]]
 ops = [

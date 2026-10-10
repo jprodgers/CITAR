@@ -12,14 +12,16 @@ Checks, in the order a failure would stop you:
 3. **Directories** - where state lives and whether it is writable.
 4. **Configuration** - the mode, and in server mode the settings that must be present.
 5. **Database** - that it opens and its schema is current.
-6. **Engine** - which engine games run on, and for the Rust engine which build.
-7. **Ruleset** - that the packaged data loads and how much of it there is.
+6. **Engine** - that the engine loads, and which build it is.
+7. **Ruleset** - which ruleset games use (the one compiled into the engine, or ``CITAR_RULESET_DIR``'s) and how much
+   of it there is.
 8. **Model providers** - every server in the registry that CITAR can reach right now.
 9. **Port** - whether the configured port is free, or already has a CITAR on it.
 """
 from __future__ import annotations
 
 import importlib
+import os
 import platform
 import socket
 import sys
@@ -214,30 +216,34 @@ def _check_database(r: Report) -> None:
         r.line(OK, "schema", f"{len(tables)} tables, migration history present")
 
 
+#: The variable naming a ruleset directory the engine plays instead of the one compiled into it (docs/MODDING.md).
+RULESET_DIR = "CITAR_RULESET_DIR"
+
+
 def _check_engine(r: Report) -> None:
-    """Which engine games run on (the facade's backend), and for the Rust engine which build: its build id names
-    the engine's and the bots' code and the ruleset, so it is what a bug report and a rating are pinned to."""
+    """That the engine loads, and which build it is: its build id names the engine's and the bots' code and the
+    ruleset, so it is what a bug report and a rating are pinned to."""
     r.section("Engine")
     try:
         from . import engine_api
     except ImportError as exc:
-        if exc.name == f"{__package__}.engine_api":
-            # the selector refused the backend asked for: the setting is wrong, not the installation
-            r.line(FAIL, "backend", str(exc), "Set that variable to one of those, or unset it for the default.")
+        ruleset_dir = (os.environ.get(RULESET_DIR) or "").strip()
+        if ruleset_dir and RULESET_DIR in str(exc):
+            # the extension is there: the modded ruleset it was told to play does not load
+            r.line(FAIL, "ruleset", str(exc).splitlines()[0],
+                   f"Run `citar ruleset check {ruleset_dir}` for every problem, or unset {RULESET_DIR} to play the "
+                   "ruleset CITAR ships with.")
         else:
-            r.line(FAIL, "engine", f"does not load ({exc})", "The Rust engine's extension is missing or out of date: "
-                   "reinstall CITAR, or build it (cargo xtask develop).")
+            r.line(FAIL, "engine", f"does not load ({exc})", "The engine's extension (citar._engine) is missing or out "
+                   "of date: reinstall CITAR, or build it (cargo xtask develop).")
         return
-    try:
-        info = engine_api.build_info()
-    except engine_api.BackendError:
-        r.line(OK, "backend", "python (the Python engine)")
-        return
-    r.line(OK, "backend", f"rust, build {info['build_id']} ({info['label']}), version {info['version']}")
+    info = engine_api.build_info()
+    r.line(OK, "engine", f"build {info['build_id']} ({info['label']}), version {info['version']}")
 
 
 def _check_ruleset(r: Report) -> None:
-    """That the packaged ruleset loads, and how much of it there is."""
+    """Which ruleset games use, and how much of it there is: the one compiled into the engine, or the one in
+    ``CITAR_RULESET_DIR``, whose id then differs from the shipped one's."""
     r.section("Ruleset")
     try:
         from . import engine_api
@@ -245,11 +251,16 @@ def _check_ruleset(r: Report) -> None:
         r.line(WARN, "ruleset", "not checked: the engine does not load (see Engine above)")
         return
     try:
-        counts = [f"{n} {kind}" for kind, n in engine_api.ruleset_counts().items()]
-        r.line(OK, "loaded", ", ".join(counts) or "ok")
+        info = engine_api.build_info()
+        counts = ", ".join(f"{n} {kind}" for kind, n in engine_api.ruleset_counts().items()) or "ok"
     except Exception as exc:
         r.line(FAIL, "ruleset", f"{type(exc).__name__}: {exc}",
-               f"The packaged data should be at {paths.package_data()}. Reinstall CITAR.")
+               "The ruleset is compiled into the engine's extension (citar._engine): reinstall CITAR.")
+        return
+    if info.get("ruleset_dir"):
+        r.line(OK, "loaded", f"{counts}, from {RULESET_DIR}={info['ruleset_dir']} (ruleset {info['rules'][:12]})")
+    else:
+        r.line(OK, "loaded", f"{counts}, compiled into the engine (ruleset {info['rules'][:12]})")
 
 
 def _check_providers(r: Report) -> None:

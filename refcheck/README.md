@@ -12,18 +12,18 @@ mistakes are caught in three ways instead:
    population, techs and score at turns 100/200/300, victory types, game length, wars and captures).
 3. **Rule tests**, rewritten against the scenario-ops API (Phase 1).
 
-This folder holds the data for the first two. The Python tools that make it are in `scripts/refcheck/`, and the
-Rust tool that checks the engine against it is `crates/citar-refcheck` ([Checking the Rust engine](#checking-the-rust-engine)).
+This folder holds the data for the first two, and the Rust tool that checks the engine against it is
+`crates/citar-refcheck` ([Checking the Rust engine](#checking-the-rust-engine)).
+
+**The data is frozen.** The Python tools that recorded it went with the Python engine in 0.1.6 (package 2-12);
+the tag `python-engine-0.1.6` keeps them, and the sections below that show their commands describe how the data
+was made. Nothing records it again: the fixtures, the recordings and the Python baselines are the reference the
+engine is held to, and a deliberate change that moves an answer is listed in an intended list, as before.
 
 | Path | What |
 |---|---|
-| `scripts/refcheck/record.py` | plays seeded all-bot games and writes the fixtures |
-| `scripts/refcheck/queries.py` | the questions, and the Python functions that answer them |
-| `scripts/refcheck/scenarios.py` | scenario setups for states ordinary games rarely reach |
-| `scripts/refcheck/baseline.py` | the statistical baseline: one JSON line per bot game |
-| `scripts/refcheck/summarize.py` | distribution tables, and the comparison of two baselines |
-| `scripts/refcheck/common.py` | the game loop, bots, hashing and file helpers they share |
-| `scripts/refcheck/bot_dump.py` | the Python bot's deterministic sub-decisions on each state ([The bot's decisions](#the-bots-decisions)) |
+| `scripts/refcheck/summarize.py` | distribution tables, and the comparison of two baselines (the one tool that stays) |
+| `scripts/refcheck/{record,queries,scenarios,baseline,common,bot_dump}.py` | the recorders, at the tag `python-engine-0.1.6`: the fixtures, the questions and Python's answers, the scenario setups, the Python baseline, the bot's decisions |
 | `crates/citar-refcheck/` | `cargo refcheck`: loads the fixtures, compares the Rust answers, reports |
 | `refcheck/fixtures-mini/` | the `--quick` fixtures (committed, under 1 MB) |
 | `refcheck/fixtures-late/` | three late corpus states, copied (committed, about 0.7 MB) |
@@ -35,10 +35,12 @@ Rust tool that checks the engine against it is `crates/citar-refcheck` ([Checkin
 | `refcheck/ratchet.json` | unexplained differences and failed answer modules per group, which may only fall |
 | `refcheck/bot_decisions.json.gz` | the Python bot's decisions on the 12 committed states (committed) |
 
-The tools use the Python engine directly and run their own game loop. They do not use `citar.sim`, `citar.lab`
-or `citar.balance`, so the fixtures don't change when those modules change.
+The recorders used the Python engine directly and ran their own game loop, not `citar.sim`, `citar.lab` or
+`citar.balance`.
 
-## Recording fixtures
+## Recording fixtures (until 0.1.6)
+
+The commands of the recorders, as they ran on the Python engine (the tag `python-engine-0.1.6`):
 
 ```
 python scripts/refcheck/record.py --quick            # 9 small states, about 15 s -> refcheck/fixtures-mini/
@@ -115,8 +117,8 @@ refreshing visibility again changes nothing. A few details of the format:
 
 **`meta`** fields:
 
-- `engine` and `bot` are hashes of `citar/engine` plus the ruleset, and of `citar/bots/basic.py`, at recording
-  time. `engine` uses the same recipe as `citar.lab.engine_hash`.
+- `engine` and `bot` are hashes of the Python engine's package plus the ruleset, and of its bot (`basic.py`), at
+  recording time, by the recipe 0.1.5's lab hashed engines with.
 - `config` is the `Game.new` configuration: all seats are `bot`, the speed is Quick and the difficulty is
   Prince. The bots are seeded with `seed * 101 + player id`.
 - `side_effects` names, for each query group, the top-level state fields that answering changed in Python.
@@ -177,8 +179,9 @@ Three groups are synthetic rather than recorded: `uniques` (every unique text co
 `state_echo` (the state reads back as it was written: a projection of the fixture's state, in Python's names, against
 the same projection built from the loaded game's public reads) and `fixed_point` (the settle on load changes
 no explored tile and no contact). The `uniques` group reads `refcheck/uniques.json.gz`, how the Python engine read each unique
-text (`PYTHONHASHSEED=0 python scripts/refcheck/uniques_dump.py`; record it again after any change to `citar/data`),
-and compares it with what the Rust compiler made of the same text: type, parameters, locality, timer and modifiers.
+text (recorded by `scripts/refcheck/uniques_dump.py`, at the tag), and compares it with what the Rust compiler made of
+the same text: type, parameters, locality, timer and modifiers. A deliberate change to a unique text of the ruleset
+(`crates/citar-engine/data/`) moves the answers at its position, which the change explains in `intended.toml`.
 A group whose Python answer crashed while recording is `python-crashed`: information,
 never a difference. Groups are reported in dependency order: uniques, state_echo, fixed_point, tile_yields,
 city_stats, civs, buildable, movement, visible, combat_previews, deal_checks, tool_errors, views, briefing.
@@ -261,11 +264,30 @@ nothing (exit 3). The second plays five rounds from every corpus state with the 
 the cache oracle after the rounds; the third plays chaos from them. The soak that goes with them, 200 whole
 games, is in CONTRIBUTING.md ("Rust").
 
+### The archive
+
+Nothing can record the corpus or its dumps again once the Python engine is gone, so package 2-12 archived them
+on the laptop before deleting it, in the git-ignored `saves/_archive_2026-10_python-reference/` of the main
+checkout: `corpus/` (the 250 states, each fixture with the Python engine's answers) and the four corpus dumps the
+Rust tests read, each recorded once more by the Python engine at the tag `python-engine-0.1.6` and equal to the
+copy the gates were checked against (the advisor's but for its line endings):
+
+| File | Read through |
+|---|---|
+| `bot_decisions-corpus.json.gz` | `CITAR_BOT_DUMP` (the bot's decisions, `bot-agreement`) |
+| `advisor-corpus.json` | `CITAR_ADVISOR_DUMP` (testkit's advisor agreement) |
+| `worker_jobs-corpus.json` | `CITAR_WORKER_JOBS_CORPUS` (testkit's worker jobs) |
+| `query_tools-corpus.json.gz` | `CITAR_QUERY_TOOLS`, with `CITAR_REFCHECK_CORPUS` (refcheck's query tools) |
+
+`refcheck/corpus.sha256` (committed) is the sha256 of each of the 254 files; `sha256sum -c
+../../refcheck/corpus.sha256` in the archive checks them, and so does `sha256sum -c` of its `corpus/` lines in
+`refcheck/`, where the live copy of the corpus stays.
+
 ## The bot's decisions
 
 The Rust bot (`crates/citar-bot`, Phase 2) is checked against the Python bot's decisions where no draw decides
-them (DESIGN.md P2.3.11 in `crates/citar-engine/`). `scripts/refcheck/bot_dump.py` records them before the
-Python engine goes; nothing can record them afterwards.
+them (DESIGN.md P2.3.11 in `crates/citar-engine/`). `scripts/refcheck/bot_dump.py` recorded them on the Python
+engine (the tag keeps it); nothing can record them again.
 
 ```
 python scripts/refcheck/bot_dump.py                  # the 12 committed states -> refcheck/bot_decisions.json.gz
@@ -277,8 +299,8 @@ CITAR_BOT_DUMP=C:/dev/bot_decisions-corpus.json.gz \
 The script re-runs itself with `PYTHONHASHSEED=0` and writes gzip with a zero timestamp, so two runs give the
 same bytes. The committed states take about 10 seconds, the corpus about ten minutes. Without `CITAR_BOT_DUMP`
 the corpus's file goes beside it (`refcheck/corpus/bot_decisions.json.gz`); the Rust side reads it from the
-same two places. Like the corpus, it stays local; it is archived with it before the Python engine is removed
-(package 2-12).
+same two places. Like the corpus, it stays local; package 2-12 archived it with the corpus ([The
+archive](#the-archive)).
 
 For every living major of each state, a fresh `BasicBot(seed=0)` with `tech_noise` 0, at the default aggression
 and parameters, answers each question with its tool calls recorded instead of made, from cleared caches.
@@ -369,9 +391,9 @@ corpus; `bot_value` is clean on both.
 ## The statistical baseline
 
 ```
-python scripts/refcheck/baseline.py --smoke                     # 2 short duel games, a few seconds
-python scripts/refcheck/baseline.py --games 300                 # small maps, the five map types in turn
-python scripts/refcheck/baseline.py --games 150 --sizes duel,standard --name python-mixed
+python scripts/refcheck/baseline.py --smoke                     # (at the tag) 2 short duel games, a few seconds
+python scripts/refcheck/baseline.py --games 300                 # (at the tag) small maps, the five map types in turn
+python scripts/refcheck/baseline.py --games 150 --sizes duel,standard --name python-mixed      # (at the tag)
 cargo run --release -p citar-sim -- baseline --smoke            # the same, on the Rust engine and bot
 cargo run --release -p citar-sim -- baseline --games 120 --workers 6
 python scripts/refcheck/summarize.py refcheck/baseline/python-<hash>.jsonl
@@ -501,9 +523,8 @@ Both scripts run unattended for hours, so no game may hold a run up:
 
 ## Caveats
 
-- **Answers depend on the Python engine at recording time.** Re-record when it changes on purpose;
-  `record.py --quick --check` says when that is needed. Once the Python engine is archived (Phase 2), the
-  fixtures are the frozen reference.
+- **Answers are the Python engine's at recording time.** Since the Python engine was archived (package 2-12),
+  the fixtures and recordings are the frozen reference: nothing re-records them.
 - **Platforms.** Python's floats are IEEE doubles, but `**` and `math` call the platform's C library, which can
   differ in the last bit between Windows, macOS and Linux. So `--check` on another platform could, in rare
   cases, flag a rounding difference that is not a real change. The committed fixtures were recorded on

@@ -3,7 +3,7 @@ A civilization's military unit that walks into a barbarian camp clears it: the c
 (it lingers 15 turns, keeping new camps away), and the civilization loots its difficulty's reward,
 25 gold on Prince at the standard speed. A camp attacked spawns sooner: its countdown halves.
 """
-from = "citar/engine/barbarians.py: clear_camp, camp_attacked; citar/engine/movement.py: on_enter_tile"
+from = "engine/barbarians.py: clear_camp, camp_attacked; engine/movement.py: on_enter_tile"
 
 [config]
 barbarians = "normal"

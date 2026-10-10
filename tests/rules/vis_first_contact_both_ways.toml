@@ -3,7 +3,7 @@ Contact goes both ways: a civilization that sees another's unit meets it even wh
 cannot see back, and the announcement names the one that saw first. A warrior on a hill is seen from three tiles off, while from the hill it does not
 see the flat tile three tiles away (the ring past its sight shows only higher ground).
 """
-from = "citar/engine/visibility.py: viewable_from, refresh; DESIGN.md 6.9"
+from = "engine/visibility.py: viewable_from, refresh; DESIGN.md 6.9"
 
 [config]
 players = [{}, {}, {}]

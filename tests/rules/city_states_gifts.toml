@@ -3,7 +3,7 @@ A civilization buys influence with a city-state with gifts: gold (250 gold buys 
 start of a standard game, less later on), or a military unit standing in the city-state's land (5
 influence; the unit changes hands). Civilians, units elsewhere, and gifts to an enemy are refused.
 """
-from = "citar/engine/city_states.py: gift_gold, influence_from_gold, gift_unit; citar/engine/tools.py: city_state_action"
+from = "engine/city_states.py: gift_gold, influence_from_gold, gift_unit; engine/tools.py: city_state_action"
 
 [config]
 city_states = 1

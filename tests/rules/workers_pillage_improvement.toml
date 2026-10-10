@@ -4,7 +4,7 @@ random amount up to twice its yield, drawn from the game's own stream) and heals
 pillaged, until a worker repairs it. One's own tile, a tile of a civilization one is not at war
 with, and a pillager out of movement are refused.
 """
-from = "citar/engine/workers.py: pillage, _loot, _set_pillaged"
+from = "engine/workers.py: pillage, _loot, _set_pillaged"
 
 [[step]]
 ops = [

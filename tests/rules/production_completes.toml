@@ -6,7 +6,7 @@ there, and is told to its owner alone; a finished building joins the city. A cit
 build says so to its human owner. set_city's production fills the queue as set_production does.
 A conversion of production to gold keeps none of the production for the next item.
 """
-from = "citar/engine/cities.py: end_turn_production, construct_if_enough, complete_construction"
+from = "engine/cities.py: end_turn_production, construct_if_enough, complete_construction"
 
 [[step]]
 ops = [

@@ -25,7 +25,7 @@ fn ruled<T: Send>(
     py: Python<'_>,
     work: impl FnOnce(&'static Ruleset) -> Result<T, Failure> + Send,
 ) -> PyResult<T> {
-    Ok(guarded(py, || work(Ruleset::shared()))?)
+    Ok(guarded(py, || work(crate::rules::rules()))?)
 }
 
 // ---- The ruleset ---------------------------------------------------------------------------

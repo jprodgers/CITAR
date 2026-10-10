@@ -7,6 +7,10 @@ import os
 import shutil
 import tempfile
 
+# The suite plays the ruleset compiled into the engine, whatever the shell says: a modded one (docs/MODDING.md) would
+# change what the tests read. The tests of the variable itself set it in children of their own.
+os.environ.pop("CITAR_RULESET_DIR", None)
+
 # The API test modules each point CITAR_DATA_DIR and CITAR_DB_URL at their own temporary database. This default is
 # for a module run on its own that builds the app without doing so: without it, the app opens the per-user database.
 if not os.environ.get("CITAR_DATA_DIR"):
@@ -50,3 +54,10 @@ if not os.environ.get("CITAR_CONFIG_DIR"):
         ]}
     with open(os.path.join(_cfg, "servers.json"), "w", encoding="utf-8") as f:
         json.dump(TEST_REGISTRY, f)
+
+
+def has_test_ops() -> bool:
+    """Whether the engine's build has the test operations (rule scripts, ``EngineGame.inspect`` and ``test_ops``):
+    ``cargo xtask develop`` and CI's test builds do, a release wheel does not."""
+    from citar import _engine
+    return bool(_engine.HAS_TEST_OPS)

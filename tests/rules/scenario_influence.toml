@@ -3,7 +3,7 @@ set_influence sets a civilization's influence with a city-state, meeting them fi
 below the floor of -60. The city-state's ally is the civilization with the most influence, if it
 has at least 60; a new ally, and the one it replaces, are told.
 """
-from = "citar/engine/scenario.py: set_influence; citar/engine/city_states.py: set_influence, update_ally"
+from = "engine/scenario.py: set_influence; engine/city_states.py: set_influence, update_ally"
 
 [config]
 city_states = 1

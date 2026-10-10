@@ -3,7 +3,7 @@ A game on an editor map with no ancient ruins spreads them when the settings wan
 map generator does: one land tile in forty that a unit can enter, bare or under hills, forest or
 jungle, none within two tiles of a start. Without the setting there are none.
 """
-from = "citar/engine/maps.py: prepare"
+from = "engine/maps.py: prepare"
 
 [config]
 ruins = true

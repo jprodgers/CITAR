@@ -17,10 +17,23 @@ Thanks for looking. CITAR is a game and an instrument, and it needs help with bo
 
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
-pip install -e ".[dev]"
-python -m unittest discover -s tests     # 456 tests, about four minutes
+pip install -e ".[dev]"                  # builds the Rust engine too, so it needs a Rust toolchain
+python -m unittest discover -s tests     # about 650 tests, a few minutes; about 200 of them skip
 citar serve --debug                      # http://127.0.0.1:8765
 ```
+
+**A Rust toolchain is needed to build from source.** The package includes the Rust engine as the
+extension module `citar._engine` (`crates/citar-py`), and installing from a checkout builds it with
+maturin. Install [rustup](https://rustup.rs) (on Windows with the MSVC build tools its installer
+offers); `rust-toolchain.toml` pins the exact release, and rustup fetches it on first use. An
+editable install builds the `ci` profile (release optimisation with debug assertions on), which
+takes a few minutes the first time and seconds after a small change; `pip install .` builds the
+release profile, which takes longer. Rebuild after a Rust change with the same command. Neither
+includes the engine's test operations, so about 200 of the suite's tests skip: every rule script
+of `tests/rules/` and the other tests that need them (see [Tests](#tests)). The extension's own dev
+loop under [Rust](#rust), `cargo xtask develop`, builds with them, and the whole suite runs with
+none skipped; run it that way before you send a change to the rules. Released wheels need no
+toolchain.
 
 A checkout keeps its state beside the code — `saves/`, `config/`, `benchmarks/` — rather than in
 your user directory, so your test games are where you can see and delete them.
@@ -48,9 +61,10 @@ CI runs all of this on Linux, Windows and macOS.
 
 These are not style preferences; each one exists because breaking it caused a real problem.
 
-- **The engine does no I/O.** `citar/engine/` must not read files at runtime, open sockets or touch
-  the database. That property is what makes games serialisable, tests fast and the same engine
-  usable from four different interfaces.
+- **The engine does no I/O.** `crates/citar-engine` must not read files, open sockets, read the
+  clock or touch the database. That property is what makes games serialisable, tests fast and the
+  same engine usable from four different interfaces. The bindings (`crates/citar-py`) and the
+  facade (`citar/engine_api.py`) do the I/O around it.
 - **`citar/auth/access.py` is the only place that answers "may this viewer do this".** Never
   hand-roll a permission check.
 - **Refusals are 404 when the caller cannot see the object**, not 403. A 403 confirms it exists and
@@ -90,14 +104,163 @@ that skips it writes test games into the real `saves/`.
 
 What is worth testing:
 
-- **Rules** — `tests/test_mechanics.py`. A rule with no test will eventually be broken by a
-  refactor.
+- **Rules** — a rule script in `tests/rules/` ([its README](https://github.com/jprodgers/CITAR/blob/main/tests/rules/README.md)), which both the
+  Rust harness and the Python suite play, or a Rust test in `crates/citar-testkit`. A rule with no
+  test will eventually be broken by a refactor.
 - **Permissions** — `tests/test_access.py`. Every new object kind needs its "a stranger gets 404"
   test.
 - **Anything that was a bug.** The test is the part that stops it coming back.
 
 Reserved handles (`admin`, `root`, `mod`, `guest`, …) are rejected, so fixtures must use other
 names.
+
+**One door to the engine.** Everything reaches the game through `citar/engine_api.py`, over the
+extension `citar._engine`, so the suite needs the extension built (see [Rust](#rust)). The tests
+that need the engine's test operations (the rule scripts, `EngineGame.inspect` and `test_ops`) skip
+in a build without them (`tests.has_test_ops()`): `cargo xtask develop` and CI's test builds have
+them, a release wheel does not. The Python engine the Rust one was ported from was removed in 0.1.6
+(package 2-12); the tag `python-engine-0.1.6` keeps it, with its own tests and the recorders of
+`scripts/refcheck/`.
+
+## Rust
+
+The engine is the Rust workspace in `crates/`.
+[crates/citar-engine/README.md](https://github.com/jprodgers/CITAR/blob/main/crates/citar-engine/README.md) has the rules every change to it
+follows, and [crates/citar-engine/DESIGN.md](https://github.com/jprodgers/CITAR/blob/main/crates/citar-engine/DESIGN.md) the design.
+
+`rust-toolchain.toml` pins the exact toolchain, and rustup installs it on first use. Then:
+
+```bash
+cargo nextest run --workspace --exclude citar-py    # tests (cargo install cargo-nextest)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo xtask check                                   # layering, dependencies, version, and more
+cargo golden check                                  # determinism goldens
+cargo fmt --all
+```
+
+These are what CI runs, on Linux, Windows and macOS. `citar-py` (the Python extension) has no
+Rust tests, since Python tests it, so the tests leave it out; clippy and the docs cover it, and
+building it needs a Python 3.11 or later on the `PATH` for PyO3. It does not need Python's
+development package: an extension never links libpython, and `.cargo/config.toml` sets
+`PYO3_BUILD_EXTENSION_MODULE` (as maturin does) so that a plain `cargo build` builds it that way
+on every OS. CI also lints the engine
+alone in each feature set, because the workspace build turns on features the shipped engine
+does not have (testkit enables `legacy` and `test-ops`). When you change what a feature gates, run
+`cargo clippy -p citar-engine --all-targets -- -D warnings` and again with
+`--no-default-features`. Two more tools join the loop: `cargo refcheck run` (the engine's answers
+against the Python engine's, recorded on the committed fixtures; `refcheck/README.md`) and `cargo
+xtask perf` (benchmarks against their budgets).
+
+**Goldens.** `crates/citar-testkit/golden/` holds answers that must come out identical on all five
+targets; the determinism workflow checks them on each. When a change is meant to move them (a new
+RNG `Purpose`, a `libm` or toolchain bump), run `cargo golden bless` and say why in the commit.
+`pyfmt.json` is Python's own answers, and the hex-grid answers (`crates/citar-testkit/data/`) the
+Python engine's, recorded by scripts the tag `python-engine-0.1.6` keeps: no bless writes them. `long.json`, whole
+games on every map size, is the nightly run's: `cargo golden check --long` checks it (about a
+minute) and `cargo golden bless long` writes it, so bless it too when a change moves the games.
+
+When the targets disagree, the determinism workflow's `divergence` artifact holds each odd
+target's state at the first round where a game parted from the committed file, the same state
+played on Linux, and the places where they differ. To look into one by hand:
+
+```bash
+cargo golden check --states states/                 # a game that differs leaves its state there
+                                                    # (each check clears the last one's list)
+cargo golden dump random:random-duel-continents-s101 57 --out here.json   # the same game, here
+cargo golden diff here.json states/random--random-duel-continents-s101--t57.json
+cargo golden dump --list                             # every game dump plays
+```
+
+**Long runs.** `nightly.yml` runs the properties at 10,000 cases, 20 minutes of chaos and a short
+soak on each OS, the long golden set on every target and, on Sundays, the benchmarks. Its schedule
+and a manual run need the workflow on the default branch; elsewhere, label a pull request `nightly`
+to run it there (`gh label create nightly` once; take the label off and add it again to run it
+again). A soak its time budget stops before its last game fails (exit 3). Locally:
+
+```bash
+cargo chaos --seconds 600                           # random games with tool calls of every kind
+cargo soak --games 12                               # whole games on every map size, checked
+PROPTEST_CASES=10000 cargo nextest run -p citar-testkit --test props --cargo-profile ci --profile nightly
+```
+
+The laptop soak is 200 games, 33 or 34 of each map size, each to its 330-turn limit: about 40
+minutes on one core, so split it over a few processes with `--shard K/N` (each takes the laps of
+the six sizes whose number is K modulo N: the same games whatever the split, every size in each
+shard). A failure names the game, and `cargo soak --seed S --game N` plays it again alone.
+
+```bash
+for k in 0 1 2 3; do cargo soak --games 200 --shard $k/4 --json soak-$k.json > soak-$k.log & done; wait
+```
+
+The corpus checks that go with them are in `refcheck/README.md` ("The nightly run and the
+corpus").
+
+**Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
+fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of
+build output. Point `CARGO_TARGET_DIR` somewhere else, one directory per checkout or worktree so
+parallel builds of different branches do not thrash each other:
+
+```bash
+export CARGO_TARGET_DIR=C:/dev/target/citar-main          # Git Bash; a Dev Drive is faster still
+$env:CARGO_TARGET_DIR = "C:\dev\target\citar-main"        # PowerShell
+```
+
+**The Python extension: the dev loop.** `citar._engine` (`crates/citar-py`) is the Rust engine
+as Python sees it. Build it with `cargo xtask develop`, not `maturin develop`, which would write
+the library into the checkout: inside a synced folder that fails mid-build, and a running server
+holds the file open. Give each checkout or worktree its own venv, outside the checkout:
+
+```bash
+python -m venv C:/dev/venv/citar-main                     # once; --system-site-packages reuses what is installed
+source C:/dev/venv/citar-main/Scripts/activate            # Git Bash; bin/activate on Linux and macOS
+export CARGO_TARGET_DIR=C:/dev/target/citar-main
+cargo xtask develop                                       # the ci profile with the test operations
+cargo xtask develop --release                             # the release profile, for timing
+python -m unittest discover -s tests                      # imports the extension just built
+```
+
+`develop` refuses a venv another worktree already uses (its `citar-dev.pth` names that worktree),
+installs the project's dependencies into the venv whenever `pyproject.toml` has changed, builds
+`citar-py` into `$CARGO_TARGET_DIR/develop` with the build label from `git describe` (of the nearest
+`v*` tag), copies the
+library to `$CARGO_TARGET_DIR/citar-ext/`, and writes `citar-dev.pth` into the venv: the checkout
+on `sys.path` and `CITAR_EXT_DIR`, which `citar/__init__.py` puts first on the package's path. It
+writes nothing under the checkout. Rebuild after every Rust change you want Python to see. On
+Windows, stop the dev server and the lab before a rebuild: a library a running process holds is
+renamed aside rather than replaced, and the process keeps the old engine until it restarts.
+`tests/test_engine_module.py` tests the extension itself and is skipped when it is not built.
+`pip install -e .` builds the extension too, into `citar/` and without the test operations: fine
+on Linux, macOS and in CI, and the thing to avoid in a synced folder.
+
+**The extension in CI.** `pyproject.toml` builds the package with maturin (`[tool.maturin]`), and
+its feature list never names `test-ops`: `cargo xtask check` refuses one that would turn on the
+test operations or `legacy`, so no wheel carries them. `test.yml`'s build-ext job builds a test
+wheel per OS (the ci profile with `--features test-ops`); each test job installs only the
+dependencies (`scripts/ci/requirements.py all`) and unpacks the wheel's library into the checkout
+(`scripts/ci/unpack_ext.py`, which fails unless it imports with the test operations), and the
+package job builds the release wheel as it would ship. Every wheel and the source distribution are
+built with one maturin, `MATURIN_VERSION` at the top of `test.yml`, and `scripts/ci/check_dist.py`
+holds each to the checkout: the files git tracks under `citar/`, the library, and nothing stray,
+and in the source distribution the ruleset the engine compiles in (`crates/citar-engine/data/`).
+After changing `[tool.maturin]`'s `include` or `exclude`, or moving that pin, run it on a local
+build (`python scripts/ci/check_dist.py wheel DIR`, or `sdist DIR`). To run the suite as a test job
+does:
+
+```bash
+maturin build --profile ci --features test-ops --out "$CARGO_TARGET_DIR/wheels"
+python scripts/ci/unpack_ext.py "$CARGO_TARGET_DIR/wheels" --test-ops   # citar/_engine.pyd or .abi3.so
+python -m unittest discover -s tests
+```
+
+The unpacked library is ignored by git. Delete it before going back to the dev loop, whose tests
+check that nothing was built into the checkout.
+
+**Building in WSL:** clone the repository into your Linux home directory (`~/`), not under
+`/mnt/c`, where every file access crosses the Windows boundary and builds crawl. Instruction-count
+benchmarks need valgrind, so they run there too.
+
+**On a busy machine**, `CARGO_BUILD_JOBS=4` keeps a build from starving everything else, and
+wall-clock benchmark numbers are only indicative.
 
 ## Pull requests
 
@@ -127,10 +290,11 @@ write to a wiki, and fine-grained tokens have no wiki permission to grant.
 
 ## Releasing
 
-For maintainers: bump `citar/__init__.py`, add the section to `CHANGELOG.md`, tag `vX.Y.Z` and
-push. CI checks that the tag, the source version and the changelog agree, then builds and publishes
-everything. [packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md) covers the manifests that need updating
-afterwards.
+For maintainers: bump `citar/__init__.py` and `[workspace.package] version` in `Cargo.toml`
+together (`cargo xtask check` fails if they differ), add the section to `CHANGELOG.md`, tag
+`vX.Y.Z` and push. CI checks that the tag, the source version and the changelog agree, then
+builds and publishes everything. [packaging/README.md](https://github.com/jprodgers/CITAR/blob/main/packaging/README.md) covers the manifests
+that need updating afterwards.
 
 ## Code of conduct
 

@@ -3,10 +3,11 @@
 What the pieces are, why they are separated the way they are, and where to change things.
 
 ```
+crates/       the engine, in Rust: the rules (no I/O, no network, no database), the bots, the
+              headless runner, saves, and citar._engine, the extension Python reaches it through
 citar/
-  engine/     the rules. No I/O, no network, no database
-  engine_api.py  the only door to the engine: everything outside engine/ and bots/ goes through it
-  bots/       the scripted opponent
+  engine_api.py  the only door to the engine: everything goes through it
+  bots/       bookkeeping about the scripted opponent: its profiles and ratings
   agents/     adapters that let a model take a seat
   server/     FastAPI app, sessions, turn driver, benchmark scheduler
   auth/       accounts, sessions, permissions
@@ -16,72 +17,69 @@ citar/
   worker/     the outbound agent that serves models from another machine
   web/        the browser client
   wizard/     first-time setup
-  data/       the ruleset, as JSON
+  data/       the hardware collectors the Servers page offers
 ```
 
 ---
 
 ## The one rule
 
-**`citar/engine/` does no I/O.** It does not read files at runtime, open sockets, touch the
-database or know what a request is. It takes a game state and an action and returns a new state or
-an error.
+**The engine does no I/O.** `crates/citar-engine` does not read files, open sockets, touch the
+database, read the clock or know what a request is. It takes a game state and an action and returns
+a new state or an error.
 
 Everything else follows from that:
 
 - The same engine runs a browser game, a benchmark, a headless simulation and a lab experiment.
-- A game is a value. Saving it is `json.dumps`; loading it is the reverse; the replay is a list of
-  them.
+- A game is a value. Saving it is writing its state; loading it is the reverse; the replay is its
+  history.
 - The bot, the LLM adapter and the HTTP API are all *callers*, none of them privileged. A model
   cannot do anything a human could not, because there is only one set of actions.
-- Tests are fast and deterministic. 456 of them run in about four minutes with no fixtures.
+- Tests are fast and deterministic.
 
-The ruleset is loaded once at import, which is the one exception, and it is read-only.
+The ruleset is compiled into the engine and loaded once, read-only; a host may give it another
+(`CITAR_RULESET_DIR`, read by the extension when it loads, which does the reading).
 
 ## The one door
 
-**Outside `citar/engine/` and `citar/bots/`, nothing imports the engine except
-`citar/engine_api.py`.** The server, the agents, probes, benchmarks, the lab, balance runs and
-`citar sim` hold an `EngineGame` and call its methods; they never touch `Game`, the state or a bot's
-internals, and they read a saved game's state only through `engine_api.state_summary`. The facade's
-`__all__` is its whole public surface. `tests/test_engine_boundary.py` reads every module and fails on
-a way round it, including a name taken from the facade that is not in `__all__`.
+**Nothing imports the engine except `citar/engine_api.py`.** The server, the agents, probes,
+benchmarks, the lab, balance runs and `citar sim` hold an `EngineGame` and call its methods; they
+never touch the extension `citar._engine` or the module behind the facade, and they read a saved
+game's state only through `engine_api.state_summary` and `save_header`. The facade's `__all__` is its
+whole public surface. `tests/test_engine_boundary.py` reads every module and fails on a way round
+it, including a name taken from the facade that is not in `__all__`.
 
-The reason is the Rust engine that replaces this one: with a single door, the swap is a new backend
-behind `engine_api.py` rather than a change to two hundred call sites. So the facade is shaped like
-the coarse Rust API — create, load and save a game; execute a tool; views, briefings and
-negotiations; bot turns and whole headless games (`run_game`); scenario, map and debug operations;
-the tool schemas — and returns plain data, never live engine objects. The module's docstring maps
-each method to the Rust call it becomes.
+The facade is shaped like the engine's coarse API — create, load and save a game; execute a tool;
+views, briefings and negotiations; drives of bot seats and whole headless games (`run_game`);
+scenario, map and debug operations; the tool schemas; bot versions, schemas and fingerprints — and
+returns plain data, never live engine objects. It was the seam the Rust engine replaced the Python
+engine of 0.1.5 through: the swap was a new backend behind `engine_api.py` rather than a change to
+two hundred call sites, and the Python engine was then removed (the tag `python-engine-0.1.6` keeps
+it).
 
 `citar/bots/profiles.py` and `ratings.py` are bookkeeping about bots and may be imported from
-anywhere. Tests may import the engine directly; `EngineGame.python_game` exists for them and for
-engine-side tools such as `scripts/refcheck`.
+anywhere.
 
 ---
 
-## The Rust engine (0.1.6)
+## The engine
 
-`crates/` holds the engine that replaces `citar/engine/` in this release. It was built beside
-the Python engine, which runs every game until the facade switches to the Rust backend; both sit
-behind `engine_api.py`. Its design is
+`crates/` holds the engine. Its design is
 [crates/citar-engine/DESIGN.md](https://github.com/jprodgers/CITAR/blob/main/crates/citar-engine/DESIGN.md),
-and the crate's README lists the rules a reviewer checks.
+and the crate's README lists the rules a reviewer checks. Building it needs a Rust toolchain
+(rustup reads `rust-toolchain.toml`); a wheel carries it compiled.
 
 | Crate | |
 |---|---|
 | `citar-engine` | The game. A library with no I/O, no threads, no clock, no C code and no `unsafe` |
-| `citar-bot` | The bots as compiled versions (`basic-1`, the port of `basic.py`, and `idle`) that play seats through the engine's `SeatDriver` |
+| `citar-bot` | The bots as compiled versions (`basic-1`, the port of 0.1.5's Python bot, and `idle`) that play seats through the engine's `SeatDriver` |
 | `citar-sim` | The headless runner: whole games with a bot in every seat, `run_game`, the statistical baseline, the `citar-sim` CLI |
 | `citar-store` | Save files: the `.citar` v2 container and the append-only journal beside it |
 | `citar-py` | `citar._engine`, the Python extension the facade backs onto (PyO3, one abi3 build per OS) |
 | `citar-testkit` | Every integration test, the rule-script runner, `RandomAgent`, and the `golden`, `chaos` and `soak` tools |
-| `citar-refcheck` | Compares the engine's answers with the Python engine's on 262 recorded game states |
+| `citar-refcheck` | Compares the engine's answers with the Python engine's, recorded on 262 game states |
 | `citar-bench` | Benchmarks: wall clock on the laptop against hard budgets, instruction counts on every pull request |
 | `xtask` | `cargo xtask check`: allowed dependencies, the crate graph, layering, generated files up to date, nothing left unported |
-
-The Phase 2 crates (bot, sim, store, py) are being filled in during 0.1.6; their design is
-DESIGN.md's "Phase 2".
 
 Inside the engine each top-level module is a layer, which may use only the layers below it:
 `base` (ids, sets, the keyed RNG, maths, hex geometry), `rules` and `unique` (the compiled
@@ -91,23 +89,28 @@ editors). `cargo xtask check` enforces it.
 
 ### The compiled ruleset
 
-The ruleset is the same JSON, `citar/data/`, embedded in the binary. Loading it compiles every
+The ruleset is JSON, `crates/citar-engine/data/`, embedded in the binary. Loading it compiles every
 unique once: the text is matched to its UnCiv type, each parameter becomes a typed value (a stat,
 an amount, an id, a compiled filter), and each conditional a typed condition. While a game runs,
 no rule parses or compares a string; it asks an index for the uniques of a type and reads their
 typed values.
 
+This is why most content is data. A new building with a known unique is a JSON entry; only a new
+*kind* of rule needs code.
+
 Loading is all or nothing. A misspelt unique or field, a parameter that does not read, a name
-nothing has, or a unique type the engine does not support stops the load, with every error at
-once, each naming its file, object and text. The Python engine's failure mode, a unique that
-silently does nothing, cannot happen.
+nothing has, or a unique type the engine does not support stops the load, with every error found,
+each naming its file, object and text. The Python engine's failure mode, a unique that silently
+does nothing, cannot happen. `citar ruleset check DIR` loads a modded copy the same way, and
+`CITAR_RULESET_DIR` plays one without a Rust toolchain ([MODDING.md](MODDING.md#playing-a-modded-ruleset)).
 
 A ruleset has an id, a hash of the parsed files (so line endings and formatting do not change
-it), which every save and every digest of a game's state includes.
+it), which every save, every digest of a game's state, the build id and every bot fingerprint
+include.
 
 The engine supports every unique type and conditional the Python engine handled: the 402 types
 the shipped ruleset uses and 125 more from other UnCiv rulesets, 527 of UnCiv's 637.
-[MODDING.md](MODDING.md#in-the-rust-engine-016) lists what that means for a mod.
+[MODDING.md](MODDING.md#what-the-engine-supports) lists what that means for a mod.
 
 ### State, writes and caches
 
@@ -164,8 +167,8 @@ them on all five targets.
 
 | | |
 |---|---|
-| Reference checks (`cargo refcheck`) | 262 game states recorded from the Python engine, loaded into the Rust engine and asked the same questions in 14 groups (yields, city stats, paths, combat odds, tool errors, views, briefings and more), every group enforced. A deliberate difference is listed in `refcheck/intended.toml` with its reason, and the code that makes it cites the entry |
-| Rule scripts (`tests/rules/`) | 142 TOML scripts over scenario operations, run by a Rust and a Python runner. Differences only a script or test shows are in `tests/rules/intended.toml` |
+| Reference checks (`cargo refcheck`) | 262 game states recorded from the Python engine before it was removed, each with its answers, loaded into the engine and asked the same questions in 14 groups (yields, city stats, paths, combat odds, tool errors, views, briefings and more), every group enforced. A deliberate difference is listed in `refcheck/intended.toml` with its reason, and the code that makes it cites the entry |
+| Rule scripts (`tests/rules/`) | TOML scripts over scenario operations, run by a Rust runner and, through the bindings, a Python one. Differences only a script or test shows are in `tests/rules/intended.toml` |
 | Invariants and the cache oracle | The invariants at every settle in every test build. The oracle at every settle in the rule scripts and the tests that set `DebugOptions::ALL`, every 10 steps and after the last in the properties and chaos, every 50 rounds and at the end in the soak |
 | Properties P1-P8, chaos, fuzzing and the soak | Random actions and whole random games, looking for panics, broken invariants, refusals that write and reads that change a game |
 | Golden sets (`cargo golden`) | Digests on five targets, in two build profiles |
@@ -174,68 +177,31 @@ them on all five targets.
 The two intended lists are the changelog's list of rule fixes (`cargo refcheck changelog
 --write`).
 
-### Where to change things in the Rust engine
+### Where to change things in the engine
 
 | To change | Go to |
 |---|---|
-| A rule | Its system's module under `crates/citar-engine/src/game/`; each names the Python lines it replaces |
-| A new kind of unique | `unique_supported.toml`, `cargo xtask gen-uniques`, then the systems that read it ([MODDING.md](MODDING.md#in-the-rust-engine-016)) |
+| A rule | Its system's module under `crates/citar-engine/src/game/`; each names the Python lines it replaced |
+| A new kind of unique | `unique_supported.toml`, `cargo xtask gen-uniques`, then the systems that read it ([MODDING.md](MODDING.md#adding-a-new-kind-of-rule)) |
 | A player action | Its system's `Action` and rule, then `src/api/tools/` for the tool's schema and text |
 | A cache | `src/game/derive/`: a memo, the revisions it reads, and its check in the oracle |
 | Something that follows from a write | The settle (`src/game/turn/settle.rs`), never the write itself |
-| A rule that should differ from the Python engine's | The fix, cited `// refcheck: <id>`, and its entry in one of the two intended lists |
-
----
-
-## Engine modules
-
-| Module | |
-|---|---|
-| `state.py` | The data. `GameState`, `Player`, `City`, `Unit`, `Tile` — plain dataclasses that serialise |
-| `game.py` | `Game`: the state plus the operations on it. `ActionError` is how a rule says no |
-| `rules.py` | Loads the ruleset JSON and answers questions about it |
-| `uniques.py`, `unique_types.py` | The rule interpreter. See below |
-| `hexmap.py`, `tiles.py`, `mapgen.py`, `maps.py` | Geometry, terrain, generation, saved maps |
-| `movement.py`, `combat.py`, `units.py`, `workers.py` | Units and fighting |
-| `cities.py`, `economy.py`, `research.py` | Cities, yields, growth, technology |
-| `policies.py`, `religion.py`, `great_people.py`, `espionage.py` | The social systems |
-| `diplomacy.py`, `city_states.py`, `conquest.py`, `victory.py` | Other players |
-| `visibility.py`, `views.py`, `briefing.py` | What a player can see, as data and as prose |
-| `tools.py` | The single registry of actions. Everything a player can do is here |
-| `turns.py`, `triggers.py`, `barbarians.py`, `ruins.py` | The turn cycle |
-
-### The unique interpreter
-
-UnCiv expresses rules as text on objects — `[+15]% Strength <when attacking>`,
-`[+2] [Food] from every [Lake]`. Rather than hard-coding each one, CITAR parses them into
-`Unique` objects with typed parameters and conditionals, and the systems that care ask
-`UniqueMap` what applies in a given context.
-
-This is why most content is data. A new building with a known unique is a JSON entry; only a new
-*kind* of rule needs code.
-
-`unique_types.py` is generated from UnCiv's `UniqueType` enum by `scripts/gen_unique_types.py`.
-`scripts/check_uniques.py` flags unique text matching no known type. Of the 402 unique types the
-ruleset uses, 19 are unreferenced in code, mostly map-generation region hints.
+| A rule that should answer otherwise than the Python engine's recorded answers | The fix, cited `// refcheck: <id>`, and its entry in one of the two intended lists |
 
 ---
 
 ## Tools: one registry, three interfaces
 
-```python
-@tool("found_city", "Found a city with a settler", ...)
-def found_city(game, player, unit_id, name=None):
-    ...
-```
-
-Registering an action makes it available to:
+Every action a player can take is a tool in one registry, `crates/citar-engine/src/api/tools/`: its
+name, the description a model reads, its parameters and JSON schema, whether it is a query or an
+action, and when it may be used. A tool reaches:
 
 - **the browser**, over `POST /api/games/{id}/tool`
 - **MCP clients**, through the bridge
 - **the LLM adapter**, as a tool definition with its JSON schema
 
 There is no second place to add an action, and no interface can drift from another. `GET /api/tools`
-returns the whole registry with schemas.
+returns the whole registry with schemas (`engine_api.tool_list`).
 
 ---
 
@@ -327,9 +293,10 @@ right way.
 
 | Kind | Where | Format |
 |---|---|---|
-| Ruleset | `citar/data/ruleset/` | UnCiv-derived JSON, generated |
-| CITAR additions | `citar/data/custom/` | Same format |
-| Game settings | `citar/data/game.json` | Map sizes, lobby defaults, AI limits |
+| Ruleset | `crates/citar-engine/data/ruleset/`, compiled in | UnCiv-derived JSON, generated |
+| CITAR additions | `crates/citar-engine/data/custom/` | Same format |
+| Game settings | `crates/citar-engine/data/game.json` | Map sizes, lobby defaults, AI limits |
+| A modded ruleset | the folder `CITAR_RULESET_DIR` names | The same layout |
 | Saved games | `saves/<id>/*.citar`, beside the game's journals `saves/<id>/journal*.cjnl` | A small JSON header and the state, zstd; the journal holds the history, one record per save |
 | Maps, scenarios, probes | `saves/maps`, `saves/scenarios`, `saves/probes` | JSON |
 | Server registry | `config/servers.json` | JSON |
@@ -344,12 +311,12 @@ right way.
 
 | To change | Go to |
 |---|---|
-| A number, a unit, a building | `citar/data/` — it is data |
-| A rule that has a unique | `citar/data/` — the interpreter handles it |
-| A new kind of rule | The engine module that owns the system, plus `unique_types.py` |
-| A new player action | `engine/tools.py` — it reaches all three interfaces at once |
-| Something the server needs from a game | `engine_api.py`, then the engine behind it |
+| A number, a unit, a building | `crates/citar-engine/data/` — it is data (or a modded copy: [MODDING.md](MODDING.md)) |
+| A rule that has a unique | `crates/citar-engine/data/` — the compiled ruleset handles it |
+| A new kind of rule | `unique_supported.toml` and the engine module that owns the system ([MODDING.md](MODDING.md#adding-a-new-kind-of-rule)) |
+| A new player action | `crates/citar-engine/src/api/tools/` — it reaches all three interfaces at once |
+| Something the server needs from a game | `engine_api.py`, then the engine behind it (`crates/citar-py`, `crates/citar-engine/src/api/`) |
 | How the bot plays | `crates/citar-bot`, as a new version (`basic-N`) when existing results must not move, or a profile's parameters; A/B it ([BOTS.md](BOTS.md)) |
-| What a model is told | `agents/prompts.py` and `engine/briefing.py` |
+| What a model is told | `agents/prompts.py` and the briefing, `crates/citar-engine/src/api/briefing/` |
 | A screen in the browser | `web/js/`, no build step |
 | Who may do what | `auth/access.py`, and only there |

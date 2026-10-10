@@ -7,7 +7,7 @@ The Rust engine's cities read the happiness committed at the start and the end o
 turn, where Python's read it live: a city founded in the middle of a turn slows its siblings'
 growth from the end of that turn on (intended: happiness-seen-committed).
 """
-from = "citar/data/ruleset/global_uniques.json; citar/engine/economy.py: happiness"
+from = "crates/citar-engine/data/ruleset/global_uniques.json; engine/economy.py: happiness"
 
 [[step]]
 ops = [

@@ -1,7 +1,7 @@
 //! The hex grid: neighbours, distance, areas, rings and lines on a map that may wrap
 //! (DESIGN.md 4.3).
 //!
-//! A port of `citar/engine/hexmap.py:1-214`. Tiles are addressed by "odd-r" offset coordinates
+//! A port of the Python engine's `hexmap.py:1-214`. Tiles are addressed by "odd-r" offset coordinates
 //! (x the column, y the row, odd rows shifted right by half a hex) and stored as a flat index
 //! `y * width + x`. Cube coordinates do the arithmetic. A map may wrap east-west, north-south or
 //! both; every method here accounts for it, so nothing that goes through [`HexGrid`] needs to.

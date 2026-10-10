@@ -9,7 +9,7 @@ every citizen is locked, where Python dropped the oldest lock
 then row, as the city shows them, where Python listed them in the order they were taken
 (intended: citizen-tools-list-tiles-sorted).
 """
-from = "citar/engine/tools.py: work_tile"
+from = "engine/tools.py: work_tile"
 
 [[step]]
 op = "found_city"

@@ -9,7 +9,7 @@ The Rust engine counts the scenario's opinion as the holder's own, within the -1
 reason keeps, and refuses a war with a treaty still in force (intended: scenario-opinion-counts,
 scenario-war-refuses-standing-treaties).
 """
-from = "citar/engine/scenario.py: meet, set_relation"
+from = "engine/scenario.py: meet, set_relation"
 
 [config]
 players = [{}, {}, {}]

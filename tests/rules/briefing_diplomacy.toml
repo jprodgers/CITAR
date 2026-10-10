@@ -5,7 +5,7 @@ the messages it has received. It lists the civilizations by player id and the po
 branch, in the ruleset's order, where Python kept the order they were met and adopted in; and it
 names no ally the reader has not met.
 """
-from = "citar/engine/briefing.py: briefing"
+from = "engine/briefing.py: briefing"
 
 [config]
 players = [{}, {}, {}]

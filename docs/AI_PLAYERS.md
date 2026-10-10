@@ -31,7 +31,8 @@ an earlier version made the model ask a dozen questions before it could act, and
 to fifteen minutes.
 
 Every tool a model can call is also available over HTTP and to MCP clients. They are registered
-once, in `citar/engine/tools.py`, and reach all three interfaces automatically. See
+once, in the engine's tool registry (`crates/citar-engine/src/api/tools/`), and reach all three
+interfaces automatically. See
 [API.md](API.md).
 
 ---

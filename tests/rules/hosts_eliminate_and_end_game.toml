@@ -4,7 +4,7 @@ phase: eliminate ends the civilization's turn first if it is its turn, takes its
 and eliminates it as a defeat does, the last civilization standing winning; end_game ends the game
 won by a civilization, by a victory or by none, or with no winner.
 """
-from = "tests/test_benchmarks.py, test_worker.py, test_access.py, test_session.py: the python_game pokes"
+from = "tests/test_benchmarks.py, test_worker.py, test_access.py, test_session.py: their pokes of the Python engine's game"
 
 [config]
 players = [{}, {}, {}]

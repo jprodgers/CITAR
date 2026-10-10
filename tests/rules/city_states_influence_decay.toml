@@ -3,7 +3,7 @@ Influence drifts toward its resting point, 0 by default, at the end of each of t
 turns: down by 1 a turn from above (1.5 for a hostile city-state), up by 1 from below. At 30 a
 major is a friend; one that drops below is told the relationship degraded.
 """
-from = "citar/engine/city_states.py: end_turn, resting_point, _degrade, _recovery, relationship"
+from = "engine/city_states.py: end_turn, resting_point, _degrade, _recovery, relationship"
 
 [config]
 city_states = 1

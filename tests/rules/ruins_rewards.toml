@@ -5,7 +5,7 @@ A civilian finds no training, a civilization with no city no survivors, one that
 techs no lost technology, and one that has explored the whole map no crude map; so with gold and
 culture left, the first ruins give one of them, the second the other, and the third nothing.
 """
-from = "citar/engine/ruins.py: enter, _possible; citar/engine/triggers.py: trigger"
+from = "engine/ruins.py: enter, _possible; engine/triggers.py: trigger"
 
 [[step]]
 note = "The other civilization keeps a unit, so that the game goes on."

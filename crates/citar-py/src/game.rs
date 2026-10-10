@@ -32,7 +32,6 @@ use citar_engine::game::{
     ActionError as EngineAction, DriveOptions, DriverOutcome, Drivers, ErrCode, EventBatch,
     Game as EngineGame, SeatDriver,
 };
-use citar_engine::rules::Ruleset;
 use citar_engine::save::LoadReport;
 use citar_engine::state::chronicle::EventData;
 use citar_engine::state::diplo::{DealItem, NegStatus, Terms};
@@ -268,7 +267,7 @@ impl Game {
     #[staticmethod]
     fn new(py: Python<'_>, config_json: &[u8]) -> PyResult<Self> {
         Ok(guarded(py, || {
-            let rules = Ruleset::shared();
+            let rules = crate::rules::rules();
             let config = parse(config_json, "The settings")?;
             let setup = config_from_value(rules, config)?;
             let (game, _created) = EngineGame::new(rules, &setup)?;
@@ -289,7 +288,7 @@ impl Game {
     ) -> PyResult<(Self, Bytes)> {
         Ok(guarded(py, || {
             let mut it = chunks.iter().map(|c| &**c);
-            let (game, report) = EngineGame::load(Ruleset::shared(), state_json, &mut it)?;
+            let (game, report) = EngineGame::load(crate::rules::rules(), state_json, &mut it)?;
             Ok((Self::wrap(game), load_report(&report)))
         })?)
     }
@@ -325,7 +324,8 @@ impl Game {
                 None => Vec::new(),
             };
             let mut it = chunks.iter().map(Vec::as_slice);
-            let (game, report) = EngineGame::load(Ruleset::shared(), container.state(), &mut it)?;
+            let (game, report) =
+                EngineGame::load(crate::rules::rules(), container.state(), &mut it)?;
             Ok((Self::wrap(game), load_report(&report)))
         })?)
     }

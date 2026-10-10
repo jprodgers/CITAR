@@ -6,6 +6,38 @@ and arguments may still change between minor versions, and the release notes wil
 
 ## [Unreleased]
 
+### Compatibility
+
+**The game engine is new.** The rules, the scripted bot and the headless runner are Rust
+(`crates/`), reached from Python through the extension `citar._engine`; the Python engine, the
+Python bot and its frozen snapshots are removed (the tag `python-engine-0.1.6` keeps them). What
+that means for an existing install:
+
+- **Saved games and scenarios of 0.1.5 and earlier do not load.** They are the Python engine's
+  format; loading one is refused with "saved by the Python engine; archived with 0.1.5", and a
+  game left running by 0.1.5 is not brought back on the first start. Saved maps (the editor's
+  documents) still load.
+- **Frozen bot snapshots are gone.** The `frozen_<hash>` copies of the Python bot, and the
+  built-in profiles v0, v1 and 22 Sep that played them, were archived with 0.1.5. The bot is now
+  a compiled version (`basic-1`, `idle`; `basic` is the latest), which the lab pins when an
+  experiment is queued. A saved profile on a snapshot is still listed, read-only, can be deleted,
+  and is never the Best bot; a seat or experiment that names a snapshot is refused as archived.
+- **The ladder starts empty.** 0.1.5's lab history does not carry over: results left in
+  `saves/lab/results` record no build or bot version, so they are never rated.
+- **Building from source needs a Rust toolchain** (rustup; `rust-toolchain.toml` pins the
+  release), since installing from a checkout builds the extension. Wheels and the Docker image
+  carry it compiled and need none.
+- **Modding moved.** The ruleset is compiled into the engine from `crates/citar-engine/data/`
+  (it was `citar/data/`). A modded copy plays without a Rust toolchain: check it with `citar
+  ruleset check DIR` (which replaces `scripts/check_uniques.py` and `scripts/check_refs.py`) and
+  point `CITAR_RULESET_DIR` at it. Its games, saves, build id and bot fingerprints carry its own
+  ruleset id; a save that names something another ruleset lacks is refused there.
+  [docs/MODDING.md](docs/MODDING.md#playing-a-modded-ruleset).
+- **For code on `citar.engine_api`:** `CITAR_ENGINE`, `BACKEND`, `BackendError` and
+  `EngineGame.python_game` are gone, and `check_ruleset` is new. A bot has no seed of its own: its
+  draws are keyed by its game's seed, and `bot_instance` and `profiles.make_bot` no longer take a
+  `seed`.
+
 ### Fixed
 
 **Rules the Rust engine fixes.** The new engine in `crates/citar-engine`, which replaces the Python

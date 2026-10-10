@@ -117,7 +117,7 @@ fn the_advisors_parameters_from_the_defaults_are_its_own() {
 }
 
 /// Every field of the advisor's parameters is held to its schema type (2-00b's
-/// `tests/test_bot_params.py` holds the same on the Python side): the keys it reads are found by
+/// `tests/test_bot_params.py` held the same on the Python side): the keys it reads are found by
 /// taking each away; a float key reads a fraction, an int key refuses one, a choice key refuses
 /// a name its enum lacks.
 #[test]
@@ -156,9 +156,10 @@ fn every_advisor_field_has_its_schema_type() {
 
 // ---- clean() against 2-00b's table ---------------------------------------------------------
 
-/// Gate 1: `clean()` answers every case of `tests/data/clean_params_cases.json` as Python's
-/// `clean_params` did, or as the case's `basic1` says where basic-1 differs on purpose (the
-/// table's fixes: int-integral, names-known, dropped, retyped).
+/// Gate 1: `clean()` answers every case of `tests/data/clean_params_cases.json` (recorded from
+/// the Python bot, package 2-00b) as Python's `clean_params` did, or as the case's `basic1` says
+/// where basic-1 differs on purpose (the table's fixes: int-integral, names-known, dropped,
+/// retyped).
 #[test]
 fn clean_matches_the_clean_params_table() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/clean_params_cases.json");

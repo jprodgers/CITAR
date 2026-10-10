@@ -3,7 +3,7 @@ A game on an editor map with more civilizations than the map gives start positio
 rest as the map generator chooses starts: the most fertile tiles, spread out from the starts the
 map gives. Each civilization's starting units stand on its start.
 """
-from = "citar/engine/maps.py: prepare, _fill_starts"
+from = "engine/maps.py: prepare, _fill_starts"
 start = "full"
 
 [config]

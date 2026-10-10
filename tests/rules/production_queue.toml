@@ -5,7 +5,7 @@ build is refused with the first reason why, and so is a building queued twice by
 change_queue moves, removes and clears entries, and refuses an unknown edit or a position off the
 queue. Each result is the queue as the city then has it, and the turns the first item takes.
 """
-from = "citar/engine/cities.py: resolve_item, set_production, change_queue; citar/engine/tools.py: set_production, change_queue"
+from = "engine/cities.py: resolve_item, set_production, change_queue; engine/tools.py: set_production, change_queue"
 
 [[step]]
 op = "found_city"

@@ -3,7 +3,7 @@ A city-state meets a civilization it sees, and one that sees it, as a civilizati
 city-states never meet each other: the arena has one city-state start, so the engine's unit tests
 pin that.)
 """
-from = "citar/engine/visibility.py: refresh (visibility.py:151-165)"
+from = "engine/visibility.py: refresh (visibility.py:151-165)"
 
 [config]
 city_states = 1

@@ -115,13 +115,12 @@ features = []
 # profile's time and still trips the engine's assertions. A wheel (`pip install .`, `maturin
 # build`) is a release build.
 editable-profile = "ci"
-# Data that must reach an installed copy: the ruleset, the browser client, the migration
-# environment, and the hardware collectors offered for download on the Servers page. The package
-# folder travels whole, less what .gitignore and `exclude` leave out; these are named so that an
-# ignore rule can never drop them.
+# Data that must reach an installed copy: the browser client, the migration environment, and the
+# hardware collectors offered for download on the Servers page. The package folder travels whole,
+# less what .gitignore and `exclude` leave out; these are named so that an ignore rule can never
+# drop them. The ruleset is no file of the package: the engine compiles it in from
+# crates/citar-engine/data/, which the source distribution carries with the crate.
 include = [
-    { path = "citar/data/**/*.json", format = ["sdist", "wheel"] },
-    { path = "citar/data/**/*.md", format = ["sdist", "wheel"] },
     { path = "citar/data/collectors/*", format = ["sdist", "wheel"] },
     { path = "citar/web/**/*", format = ["sdist", "wheel"] },
     { path = "citar/migrations/**/*.py", format = ["sdist", "wheel"] },
@@ -159,7 +158,7 @@ exclude = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = ["citar/migrations/versions", "citar/bots/frozen_*.py"]
+extend-exclude = ["citar/migrations/versions"]
 
 [tool.ruff.lint]
 # Rules that find mistakes, not rules that find differences of opinion.

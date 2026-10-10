@@ -7,7 +7,7 @@ slot goes with its building goes back to a tile.
 The Rust engine refuses a count that is not a number with a sentence, where Python raised a
 ValueError (intended: specialist-counts-must-be-numbers).
 """
-from = "citar/engine/tools.py: set_specialists; citar/engine/cities.py: max_specialists, _unassign_extra"
+from = "engine/tools.py: set_specialists; engine/cities.py: max_specialists, _unassign_extra"
 
 [[step]]
 op = "found_city"

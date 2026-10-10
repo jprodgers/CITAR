@@ -3,7 +3,7 @@ With the Apollo Program built, spaceship parts brought into the capital are adde
 with the unit action add_to_spaceship, and leave the game; a part elsewhere is refused. Once every
 part the Scientific victory needs is added, its builder wins the Scientific victory.
 """
-from = "citar/engine/victory.py: spaceship_status, add_to_spaceship, milestone_done; citar/engine/actions.py: add_to_spaceship"
+from = "engine/victory.py: spaceship_status, add_to_spaceship, milestone_done; engine/actions.py: add_to_spaceship"
 
 [[step]]
 ops = [

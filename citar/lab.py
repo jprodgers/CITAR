@@ -26,12 +26,12 @@ way.
 
 Bot versions are pinned when an experiment is submitted: "basic" becomes the version it names then (basic-1), so a
 newer version compiled in later does not mix into a queued experiment (use "live" to opt out and play the latest
-version at play time). The Rust engine compiles its versions in, so nothing is copied: 0.1.5 froze a copy of
-basic.py instead, and a seat naming such a frozen_<hash> snapshot is refused, the snapshots having been archived with
-0.1.5. Every result records, per seat, what played: the build id (the engine's and the bot's code and the ruleset),
-the bot version, the profile and its revision, the overrides, the fixed aggression as the bot played it and the
-fingerprint, all taken when the game is played, so a game of a queued experiment that a newer build plays is labelled
-with that build. A seat queued as {"profile": "best"} is recorded as the profile "best" stood for at submission.
+version at play time). The engine compiles its versions in, so nothing is copied: 0.1.5 froze a copy of its Python
+bot instead, and a seat naming one of those snapshots is refused, the snapshots having been archived with 0.1.5.
+Every result records, per seat, what played: the build id (the engine's and the bot's code and the ruleset), the bot
+version, the profile and its revision, the overrides, the fixed aggression as the bot played it and the fingerprint,
+all taken when the game is played, so a game of a queued experiment that a newer build plays is labelled with that
+build. A seat queued as {"profile": "best"} is recorded as the profile "best" stood for at submission.
 
 Optional map generation keys pass straight to the generator: "map_edges" (ice_caps, wrap_x, wrap_y, wrap_both,
 boxed), "river_density" (1 = normal) and "resources" (densities and per-resource rules; see mapgen.MapOptions).
@@ -43,9 +43,8 @@ rotation evens it out.
 During the restricted hours of the CITAR host server (Servers page) the runner uses --night-workers (fan noise).
 Every finished game is written to the usage ledger (saves/usage/lab-*.jsonl) so reports can cost experiments.
 
-The lab asks the engine for versions, parameters, fingerprints and the build id, which only the Rust engine has: it
-needs the Rust backend of ``citar.engine_api`` (the default; not ``CITAR_ENGINE=python``), and without it ``run`` and
-``submit`` stop at once with exit 2.
+``run`` and ``submit`` load the engine before anything else and stop with exit 2 when it does not load (the extension
+missing or out of date, or a ``CITAR_RULESET_DIR`` that does not load): every game would fail the same way.
 """
 from __future__ import annotations
 
@@ -641,11 +640,26 @@ def _runner_step(args, running, attempts, finished_times, flags, max_workers) ->
                                             creationflags=flags)
                 running[(exp["name"], i)] = (proc, time.time())
         _write_status(running, finished_times, target)
-        if not running:
-            if args.exit_when_idle and not load_queue():
+        if not running and args.exit_when_idle:
+            queue = load_queue()
+            if not queue:
                 log("queue empty: exiting")
                 return True
+            # A runner tries a game three times, so once every game left has crashed three times nothing will start
+            # again here, and waiting would be for ever. The next runner tries them again.
+            left = [(exp["name"], i) for exp in queue for i in _unplayed(exp)]
+            if left and all(attempts[key] >= 3 for key in left):
+                named = ", ".join(f"{n} #{i}" for n, i in left[:6]) + (", ..." if len(left) > 6 else "")
+                log(f"nothing left to play: {len(left)} game(s) crashed three times ({named}); exiting "
+                    "(crashes.log says why; the next runner tries them again)")
+                return True
     return False
+
+
+def _unplayed(exp: dict) -> list[int]:
+    """The games of a queued experiment with no result yet."""
+    done = {r["i"] for r in load_results(exp["name"])}
+    return [i for i in range(exp["games"]) if i not in done]
 
 
 def cmd_play(spec_path: str, out_path: str):
@@ -1038,16 +1052,15 @@ def _pid_alive(pid) -> bool:
         return False
 
 
-def _need_rust(cmd: str):
-    """Exit 2 with the facade's message unless the engine says what build it is. The lab asks the engine for bot
-    versions, parameters, fingerprints and the build id, which only the Rust backend has (the default; not
-    ``CITAR_ENGINE=python``): refused once here, rather than by every queued game's process, three times
-    each, as crashes."""
-    from . import engine_api
+def _need_engine(cmd: str):
+    """Exit 2, saying why, unless the engine loads. The runner itself never imports it (each game is a process of
+    its own), so without this a runner whose engine cannot load would start each queued game three times to crash
+    and then wait for ever, and ``submit`` would end in a traceback."""
     try:
+        from . import engine_api
         engine_api.build_info()
-    except engine_api.BackendError as e:
-        print(f"citar lab {cmd} needs the Rust engine: {e}", file=sys.stderr)
+    except ImportError as e:
+        print(f"citar lab {cmd}: the engine does not load: {e}", file=sys.stderr)
         raise SystemExit(2) from None
 
 
@@ -1071,7 +1084,7 @@ def main(argv=None):
     sub.add_parser("stop")
     args = ap.parse_args(argv)
     if args.cmd in ("run", "submit"):
-        _need_rust(args.cmd)
+        _need_engine(args.cmd)
     if args.cmd == "run":
         run(args)
     elif args.cmd == "play":

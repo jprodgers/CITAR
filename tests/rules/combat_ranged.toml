@@ -3,7 +3,7 @@ A ranged attack: an archer shoots a warrior on the hill two tiles off, which def
 +25%; it takes nothing back, and both sides earn 2 experience. A ranged unit needs line of sight: a
 forest hides the tile behind it, even where another unit of its owner sees that tile.
 """
-from = "citar/engine/combat.py: validate_attack, preview, resolve"
+from = "engine/combat.py: validate_attack, preview, resolve"
 
 [[step]]
 ops = [

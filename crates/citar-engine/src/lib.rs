@@ -19,8 +19,11 @@
 //! | 3 | [`game`] | all of the above |
 //! | 4 | [`api`] | everything |
 //!
-//! It replaces the Python engine in `citar/engine/` as of commit `4b5a912`, without bit parity:
-//! `refcheck/intended.toml` lists every deliberate rule difference.
+//! It replaced the Python engine, ported as of commit `4b5a912`, without bit parity:
+//! `refcheck/intended.toml` and `tests/rules/intended.toml` list every deliberate rule difference.
+//! The Python engine was removed in 0.1.6 (package 2-12), and the tag `python-engine-0.1.6` keeps
+//! it: the Python files the module docs cite (`game.py:557-559`, `briefing.py`) are its modules,
+//! in the `engine` folder of the `citar` package there.
 
 #![forbid(unsafe_code)]
 

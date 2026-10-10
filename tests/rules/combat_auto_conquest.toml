@@ -3,7 +3,7 @@ A seat that lets the engine decide its conquests razes a small city it takes (fe
 citizens, not one it founded, not an original capital): the city burns a citizen a turn and is gone
 when the last one goes. With the decision its own, the conqueror keeps the city as a puppet.
 """
-from = "citar/engine/conquest.py: conquer, _auto_conquer"
+from = "engine/conquest.py: conquer, _auto_conquer"
 
 [config]
 players = [{}, {}, {}]

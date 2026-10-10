@@ -4,7 +4,7 @@ citizens move at once, and the call says where they now work, as the city shows 
 A production focus puts a lone citizen on the hill, a food focus on the best food tile; an
 unknown focus is refused and changes nothing.
 """
-from = "citar/engine/tools.py: set_city_focus; citar/engine/cities.py: rank_stats_for_work"
+from = "engine/tools.py: set_city_focus; engine/cities.py: rank_stats_for_work"
 
 [[step]]
 op = "found_city"

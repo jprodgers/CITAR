@@ -1,6 +1,6 @@
 //! What rule scripts read of a game (DESIGN.md 9.3): small documented shapes, the same from
-//! both engines, with every set sorted. Feature `test-ops`; `citar/engine/inspect.py` is the
-//! Python side, and `tests/rules/README.md` documents each shape.
+//! both engines, with every set sorted. Feature `test-ops`; the Python engine's `inspect.py` was
+//! the Python side, and `tests/rules/README.md` documents each shape.
 //!
 //! A query is `{"what": ..., ...}`:
 //! - `game`: the turn, whose turn it is, the phase and winner, the map's size, and the players by

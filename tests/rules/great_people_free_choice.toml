@@ -3,7 +3,7 @@ A free great person: completing the Liberty branch grants one, which its civiliz
 and choose_great_person takes it, born near the capital. A great person of no kind the civilization
 may choose, or a second one it was not granted, is refused.
 """
-from = "citar/engine/great_people.py: choose_free; citar/engine/triggers.py: trigger (Free Great Person)"
+from = "engine/great_people.py: choose_free; engine/triggers.py: trigger (Free Great Person)"
 
 [[step]]
 note = "The other civilization keeps a unit, so that the game goes on."

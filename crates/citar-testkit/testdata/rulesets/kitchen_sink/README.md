@@ -6,7 +6,7 @@ does not use. These are the types marked `(extra)` in
 once, on an object where a ruleset would put it.
 
 Each file is a JSON merge patch (RFC 7396) over the shipped ruleset file of the same name in
-`citar/data/`. An object in a patch is added to its table, or merged into the object of the same
+`crates/citar-engine/data/`. An object in a patch is added to its table, or merged into the object of the same
 name. `citar_testkit::rulesets::kitchen_sink()` loads the result, and
 `tests/engine/kitchen_sink.rs` checks it.
 

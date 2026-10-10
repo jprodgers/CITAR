@@ -4,7 +4,7 @@ research, the cities with nothing in production, the units still needing orders 
 can found a city where it stands says so), and, once every one is handled, that it may end its
 turn. The briefing's unit list marks the units needing orders, and its to-do list goes with them.
 """
-from = "citar/engine/briefing.py: turn_progress, briefing"
+from = "engine/briefing.py: turn_progress, briefing"
 
 [[step]]
 note = "Nothing yet: a settler on open ground, and a warrior."

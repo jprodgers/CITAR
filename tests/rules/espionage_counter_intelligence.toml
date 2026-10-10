@@ -4,7 +4,7 @@ arrives at the end of the turn: in its own city it takes up counter-intelligence
 time. It may be recalled to its hideout. Without spies, with an unknown name, to a city not explored
 or to no city, move_spy is refused; so is anything with espionage off.
 """
-from = "tests/test_mechanics.py::EspionageTests::test_spy_counter_intelligence; citar/engine/espionage.py: move_spy"
+from = "tests/test_mechanics.py::EspionageTests::test_spy_counter_intelligence; engine/espionage.py: move_spy"
 
 [[step]]
 ops = [

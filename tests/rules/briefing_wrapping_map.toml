@@ -3,7 +3,7 @@ A map that wraps, in a model's briefing and map: the briefing says which edges m
 narrower than the map runs across its edge, its columns numbered as they are on the map and its
 seam said; a window as wide as the map is clamped to it.
 """
-from = "citar/engine/briefing.py: ascii_map, briefing"
+from = "engine/briefing.py: ascii_map, briefing"
 map = "arena_wrap"
 
 [[step]]

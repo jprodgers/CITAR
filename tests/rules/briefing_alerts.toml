@@ -4,7 +4,7 @@ with it. A city with nothing in production, research not set, an enemy in reach 
 bombard it, a treasury running dry, a free technology and a policy to choose; each alert goes once
 it is dealt with. Whose turn it is, when it is another's, is named only once the reader has met them.
 """
-from = "citar/engine/briefing.py: alert_items, alerts, briefing"
+from = "engine/briefing.py: alert_items, alerts, briefing"
 
 [[step]]
 ops = [

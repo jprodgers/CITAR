@@ -3,7 +3,7 @@ A list of scenario operations applies all or nothing: when one fails, the error 
 place and name, and the operations before it are undone too, so an editor never sees a game half
 edited. Python left the earlier ones applied.
 """
-from = "citar/engine/scenario.py: apply_ops"
+from = "engine/scenario.py: apply_ops"
 
 [[step]]
 ops = [

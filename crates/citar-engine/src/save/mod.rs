@@ -18,7 +18,7 @@
 //!
 //! Replaces the save path of `citar/session.py` (`GameState.to_dict` and `from_dict`), `save_rng`
 //! (`game.py:995-1002`), `engine_api.state_summary` (`engine_api.py:158-178`) and the frames of
-//! `victory.record_frame` (`citar/engine/victory.py:458-485`).
+//! `victory.record_frame` (`victory.py:458-485`).
 
 pub mod canon;
 pub mod chain;

@@ -4,7 +4,7 @@
 //! Landmass, terrain, rivers, starts, wonders, resources and ruins (DESIGN.md 6.14, packages
 //! 1b-04 and 1c-09). It may use `state` and the layers below it, but not `game`.
 //!
-//! Replaces `citar/engine/mapgen.py:1-1721` and `citar/engine/maps.py:48-60, 80-100, 124-248,
+//! Replaces the Python engine's `mapgen.py:1-1721` and `maps.py:48-60, 80-100, 124-248,
 //! 323-365`:
 //! - [`options`]: the map types, the edges and the lobby's river and resource settings
 //!   (`MAP_TYPES`, `EDGE_MODES`, `MapOptions`);

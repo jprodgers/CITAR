@@ -6,7 +6,7 @@ blockade, and the citizen goes to another tile.
 The Rust engine moves the city's citizens as soon as the blockade begins; Python moved them at
 the end of the city's turn (intended: citizens-follow-a-blockade-at-once).
 """
-from = "citar/engine/cities.py: workable_tiles, _unassign_extra"
+from = "engine/cities.py: workable_tiles, _unassign_extra"
 
 [[step]]
 ops = [

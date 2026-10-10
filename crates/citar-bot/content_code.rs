@@ -291,10 +291,10 @@ pub type Recipe = fn(&Path) -> Vec<Input>;
 pub const ENGINE_TAG: &str = "citar-engine-code-v1";
 
 /// The engine's inputs, from its manifest's folder: its sources and the ruleset files it embeds
-/// (`rules::source::embedded`, which reads `citar/data/`).
+/// (`rules::source::embedded`, which reads its `data/`).
 #[must_use]
 pub fn engine_inputs(dir: &Path) -> Vec<Input> {
-    let data = dir.join("../../citar/data");
+    let data = dir.join("data");
     vec![
         Input::Tree { label: "src/", dir: dir.join("src"), ext: "rs" },
         Input::Tree { label: "data/ruleset/", dir: data.join("ruleset"), ext: "json" },

@@ -3,7 +3,7 @@ A land unit may not step onto water until its civilization knows Optics, and emb
 its movement; embarked, it moves as an embarked unit (two points), may not enter the ocean before
 Astronomy, and landing takes all its movement again.
 """
-from = "tests/test_mechanics.py::test_embark_requires_optics; citar/engine/movement.py: terrain_reason, enter_cost"
+from = "tests/test_mechanics.py::test_embark_requires_optics; engine/movement.py: terrain_reason, enter_cost"
 
 [[step]]
 note = "A warrior on the grassland next to the coast; the coast is in its sight, so it is known water."

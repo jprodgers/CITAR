@@ -1,7 +1,7 @@
 //! The views: the game as one player may see it, in the shapes the web client and the query
 //! tools read (DESIGN.md 8.1, 8.4; package 1d-02).
 //!
-//! Replaces `citar/engine/views.py` (the `*_info` builders and `client_view`), the view-side
+//! Replaces the Python engine's `views.py` (the `*_info` builders and `client_view`), the view-side
 //! event scrubbing of `game.py:880-990` as JSON, `espionage.espionage_view`
 //! (`espionage.py:501-515`), `briefing.alert_items` (`briefing.py:168-316`, which the client view
 //! carries and package 1d-03's briefing reads), and the facade's `empire_summary`, `standings`,

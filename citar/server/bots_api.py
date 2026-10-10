@@ -6,8 +6,7 @@ are shared by everyone on the server (benchmarks are measured against them), and
 
 The bot versions, their parameter schemas, cleaning and fingerprints come from the engine through the facade
 (``engine_api.bot_versions``, ``bot_schema``, ``bot_clean_params``, ``bot_fingerprint``; DESIGN.md P2.7.3, P2.8.6),
-in the shapes this page always had. Only the Rust engine has them: on the Python backend (until package 2-12) a
-request that needs one is answered 501 with the facade's message, and the listing still works.
+in the shapes this page always had.
 """
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import engine_api
 from ..auth.deps import require_role, require_user
 from ..bots import profiles, ratings
 from ..db.models import User
@@ -26,18 +24,12 @@ router = APIRouter(prefix="/api/bots")
 EXP_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 
-#: What a request answers with when it needs the Rust engine and the facade runs on the Python one.
-NEEDS_RUST = 501
-
-
 def _fail(e: Exception, status: int = 400) -> HTTPException:
-    """An HTTP error carrying the message of a profile error, or 501 for a name the facade's backend lacks."""
-    if isinstance(e, engine_api.BackendError):
-        return HTTPException(NEEDS_RUST, str(e))
+    """An HTTP error carrying the message of a profile error."""
     return HTTPException(status, str(e))
 
 
-_REFUSED = (profiles.ProfileError, engine_api.BackendError)
+_REFUSED = (profiles.ProfileError,)
 
 
 def _with_rating(p: dict, board: list) -> dict:
@@ -127,10 +119,7 @@ def delete_profile(pid: str):
 def list_engines():
     """The bot code a profile can run: ``basic`` (the latest version), each bot version compiled into the engine
     (``engine_api.bot_versions``), the idle bot among them."""
-    try:
-        return {"engines": profiles.engines()}
-    except engine_api.BackendError as e:
-        raise _fail(e)
+    return {"engines": profiles.engines()}
 
 
 @router.get("/schema", dependencies=[Depends(require_user)])
