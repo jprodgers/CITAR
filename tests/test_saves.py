@@ -420,10 +420,13 @@ class OneWriterTests(SavesCase):
         s = self.game([{"type": "bot"}] * 2)
         self.play_to(s, 4)
         real = sess.SaveJob.write
+        writes = []                              # how long each write took, the slowing included
 
         def slow(job):
+            t = time.perf_counter()
             time.sleep(0.15)
             real(job)
+            writes.append(time.perf_counter() - t)
         stop = threading.Event()
 
         def keep_saving():                       # a game that keeps taking autosaves faster than they are written
@@ -445,7 +448,13 @@ class OneWriterTests(SavesCase):
             finally:
                 stop.set()
                 t.join(10)
-        self.assertLess(took, 1.0, "the saves taken before the flush, a write or two")
+        # The saves taken before the flush: the write in flight and one more. That is under a second, or on a disk that
+        # holds writes up (a virus scanner keeping the file open makes the store try again, 250 ms a try) twice the
+        # longest write; the bound follows the disk, not the game. Waiting for the game to stop times out above.
+        longest = max(writes)
+        self.assertLess(took, max(1.0, 2 * longest + 0.5),
+                        f"the saves taken before the flush, a write or two; the writes took "
+                        f"{[round(w, 2) for w in writes]} s ({s.save_writer_stats()})")
         self.assertTrue(s.flush_saves(10))
 
     def test_a_flush_waits_for_the_newer_autosave_that_carries_one_it_passed_over(self):
