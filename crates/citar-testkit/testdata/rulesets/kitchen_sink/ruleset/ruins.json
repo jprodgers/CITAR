@@ -1,0 +1,24 @@
+{
+  "a trap in the ruins wounds your unit": {
+    "name": "a trap in the ruins wounds your unit",
+    "uniques": ["[This Unit] takes [20] damage", "Unavailable <for [Civilian] units>"],
+    "id": "a_trap_in_the_ruins_wounds_your_unit"
+  },
+  "an old master trains your unit": {
+    "name": "an old master trains your unit",
+    "uniques": ["[This Unit] gains the [Kitchen Sink Veteran] promotion", "Unavailable <for [Civilian] units>"],
+    "weight": 3,
+    "id": "an_old_master_trains_your_unit"
+  },
+  "your unit finds better equipment": {
+    "name": "your unit finds better equipment",
+    "uniques": ["[This Unit] upgrades for free", "Only available <after turn number [20]>"],
+    "id": "your_unit_finds_better_equipment"
+  },
+  "your unit is lost in the ruins": {
+    "name": "your unit is lost in the ruins",
+    "excludedDifficulties": ["Settler", "Chieftain", "Warlord", "Prince"],
+    "uniques": ["[This Unit] is destroyed"],
+    "id": "your_unit_is_lost_in_the_ruins"
+  }
+}

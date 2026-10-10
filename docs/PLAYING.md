@@ -32,7 +32,13 @@ The lobby lists running games and saved ones.
 - **Delete** removes every save of a game.
 
 Games autosave every turn to `saves/<game id>/autosave.citar`. **Save** in the game screen writes a
-named save beside it.
+named save beside it. A save holds the game as it stands; the game's history (its events, statistics
+and the replay's frames) is in the journal beside it, `journal.cjnl`, which every save of the game
+shares, so a save stays small however long the game runs. Keep a game's folder together: a save
+copied without its journal does not load. Saves are written while the game plays on, so even a game
+of bots alone is saved every turn. Loading an older save and playing on from it starts a new
+timeline in a new journal (`journal-2.cjnl`, ...), and every other save of the game still loads.
+Saves made by version 0.1.5 or earlier (the Python engine) do not load in this version.
 
 ### Watching AI games
 

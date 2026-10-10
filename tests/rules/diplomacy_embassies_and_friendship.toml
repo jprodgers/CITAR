@@ -1,0 +1,85 @@
+about = """
+Embassies and a declaration of friendship in one deal. An embassy needs Writing on both sides and a
+capital to host it; a declaration of friendship on one side goes on both. Accepted, each side has an
+embassy with the other and sees the land around the other's capital, the two are friends for 30 turns
+and think better of each other, and everyone is told. Neither can be given again.
+"""
+from = "tests/test_engine.py::DiplomacyTests::test_embassies_and_friendship"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Embassies?", give = [{ type = "embassy" }] }
+error = "Embassies need Writing on both sides."
+
+[[step]]
+ops = [
+  { op = "grant_tech", player = [0, 1], tech = "Writing" },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Embassies?", give = [{ type = "embassy" }] }
+error = "Civilization 1 has no capital."
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Veii" },
+]
+
+[[step]]
+check = { what = "player", player = 0 }
+path = "explored"
+gt = 0
+as = "seen"
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Embassies?", give = [{ type = "embassy" }], receive = [{ type = "embassy" }, { type = "declaration_of_friendship" }] }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "proposal"
+eq = { "0" = [{ type = "embassy" }, { type = "declaration_of_friendship" }], "1" = [{ type = "embassy" }, { type = "declaration_of_friendship" }] }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "accept", message = "Agreed." }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { status = "accepted", deal = "Civilization 1 gives an embassy, a declaration of friendship; Civilization 2 gives an embassy, a declaration of friendship." }
+
+[[step]]
+check = { what = "relation", a = 0, b = 1 }
+subset = { embassy = [true, true], friends = true, friendship_until = 31, opinion = [35, 35], war = false }
+
+[[step]]
+check = { what = "events", type = "friendship" }
+path = "[0]"
+subset = { text = "Civilization 1 and Civilization 2 signed a Declaration of Friendship!", audience = "=null" }
+
+[[step]]
+note = "The embassy in the other's capital shows the land around it."
+check = { what = "player", player = 0 }
+path = "explored"
+gt = "=seen"
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Again?", give = [{ type = "embassy" }] }
+error = "Civilization 2 already has an embassy with Civilization 1."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Again?", give = [{ type = "declaration_of_friendship" }] }
+error = "You are already friends."

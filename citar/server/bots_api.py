@@ -3,6 +3,10 @@ experiments that pit profiles against each other.
 
 Reading is open to any signed-in account. Changing profiles and queueing experiments is for administrators: profiles
 are shared by everyone on the server (benchmarks are measured against them), and experiments use its CPU.
+
+The bot versions, their parameter schemas, cleaning and fingerprints come from the engine through the facade
+(``engine_api.bot_versions``, ``bot_schema``, ``bot_clean_params``, ``bot_fingerprint``; DESIGN.md P2.7.3, P2.8.6),
+in the shapes this page always had.
 """
 from __future__ import annotations
 
@@ -23,6 +27,9 @@ EXP_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 def _fail(e: Exception, status: int = 400) -> HTTPException:
     """An HTTP error carrying the message of a profile error."""
     return HTTPException(status, str(e))
+
+
+_REFUSED = (profiles.ProfileError,)
 
 
 def _with_rating(p: dict, board: list) -> dict:
@@ -70,7 +77,7 @@ def create_profile(body: ProfileBody, user: User = Depends(require_role("admin")
     """Save a new profile."""
     try:
         return profiles.save(body.model_dump(exclude={"note"}), user=user.handle, note=body.note or "created")
-    except profiles.ProfileError as e:
+    except _REFUSED as e:
         raise _fail(e)
 
 
@@ -80,7 +87,7 @@ def update_profile(pid: str, body: ProfileBody, user: User = Depends(require_rol
     try:
         profiles.get(pid)
         return profiles.save({"id": pid, **body.model_dump(exclude={"note"})}, user=user.handle, note=body.note)
-    except profiles.ProfileError as e:
+    except _REFUSED as e:
         raise _fail(e)
 
 
@@ -94,7 +101,7 @@ def fork_profile(pid: str, body: ForkBody, user: User = Depends(require_role("ad
     """Copy a profile (built-in or saved) into a new, editable one."""
     try:
         return profiles.fork(pid, body.name, user=user.handle)
-    except profiles.ProfileError as e:
+    except _REFUSED as e:
         raise _fail(e)
 
 
@@ -110,16 +117,18 @@ def delete_profile(pid: str):
 
 @router.get("/engines", dependencies=[Depends(require_user)])
 def list_engines():
-    """The bot code a profile can run: the live bot, frozen snapshots, the idle bot."""
+    """The bot code a profile can run: ``basic`` (the latest version), each bot version compiled into the engine
+    (``engine_api.bot_versions``), the idle bot among them."""
     return {"engines": profiles.engines()}
 
 
 @router.get("/schema", dependencies=[Depends(require_user)])
 def param_schema(engine: str = "basic"):
-    """An engine's parameters: groups, labels, help, defaults and ranges."""
+    """A version's parameters, {engine, groups}: groups, labels, help, defaults and ranges (``engine_api.bot_schema``;
+    ``basic`` is the latest version's). A frozen snapshot of 0.1.5 is refused as archived."""
     try:
         return profiles.schema(engine)
-    except profiles.ProfileError as e:
+    except _REFUSED as e:
         raise _fail(e, 404)
 
 
@@ -149,18 +158,17 @@ class ExperimentBody(BaseModel):
 def queue_experiment(body: ExperimentBody, user: User = Depends(require_role("admin"))):
     """Queue a lab experiment: the chosen profiles fill the seats in turn (A, B, A, B...) and rotate through the start
     positions, so each plays every position on the same maps and seeds."""
-    from .. import lab
-    from ..engine.mapgen import MAP_TYPES
-    from ..engine.rules import get_rules
-    R = get_rules()
-    if body.size not in R.const["map_sizes"]:
-        raise HTTPException(400, f"Map size is one of {', '.join(R.const['map_sizes'])}.")
-    if not body.maps or any(m not in MAP_TYPES for m in body.maps):
-        raise HTTPException(400, f"Maps are from {', '.join(MAP_TYPES)}.")
-    if body.speed not in R.speeds:
-        raise HTTPException(400, f"Speed is one of {', '.join(R.speeds)}.")
-    if body.difficulty not in R.difficulty_list:
-        raise HTTPException(400, f"Difficulty is one of {', '.join(R.difficulty_list)}.")
+    from .. import engine_api, lab
+    sizes, map_types = engine_api.map_sizes(), engine_api.map_types()
+    speeds, difficulties = engine_api.speeds(), engine_api.difficulties()
+    if body.size not in sizes:
+        raise HTTPException(400, f"Map size is one of {', '.join(sizes)}.")
+    if not body.maps or any(m not in map_types for m in body.maps):
+        raise HTTPException(400, f"Maps are from {', '.join(map_types)}.")
+    if body.speed not in speeds:
+        raise HTTPException(400, f"Speed is one of {', '.join(speeds)}.")
+    if body.difficulty not in difficulties:
+        raise HTTPException(400, f"Difficulty is one of {', '.join(difficulties)}.")
     try:
         resolved = [profiles.get(pid) for pid in body.profiles]
     except profiles.ProfileError as e:
@@ -181,7 +189,7 @@ def queue_experiment(body: ExperimentBody, user: User = Depends(require_role("ad
             "difficulty": body.difficulty, "seats": seats, "rotate": True, "submitted_by": user.handle}
     try:
         return lab.submit(spec)
-    except (ValueError, profiles.ProfileError) as e:
+    except (ValueError, *_REFUSED) as e:
         raise _fail(e)
 
 

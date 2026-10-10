@@ -34,6 +34,10 @@ os.environ.setdefault("CITAR_MODE", "local")
 
 #: Routes that are public on purpose, each with the reason. Anything not here and not gated is
 #: reported. The reason matters: it is what a reviewer checks against later.
+#:
+#: A route the audit already sees as gated does not belong here. An entry for it changes nothing
+#: today, and hides the route if its gate is ever removed: /debug/errors and /replay sat here as
+#: "visibility checked in the body" while their bodies checked nothing.
 INTENTIONALLY_PUBLIC = {
     "/": "the web client shell; it renders the sign-in screen for anonymous visitors",
     "/static": "the client's own JavaScript and CSS",
@@ -49,31 +53,15 @@ INTENTIONALLY_PUBLIC = {
     "/api/auth/verify/resend": "rate limited, and answers identically for unknown addresses",
     "/api/auth/password/forgot": "rate limited, and answers identically for unknown addresses",
     "/api/auth/password/reset": "the token in the link is the credential",
-    "/api/auth/password/change": "checks the session itself",
     "/api/auth/oauth/{provider}/start": "begins sign-in; rate limited",
     "/api/auth/oauth/{provider}/callback": "returns from the provider; state cookie is the check",
-    "/api/auth/oauth/{provider}/unlink": "checks the session itself",
     "/api/auth/sessions": "checks the session itself",
     "/auth/verify": "the token in the emailed link is the credential",
     "/auth/reset": "hands the token to the form; consumes nothing",
-    "/auth/change-email": "the token in the emailed link is the credential",
     "/api/invites/check": "lets the signup form validate a code before creating anything",
     "/api/games": "list is filtered per viewer; anonymous sees only public games",
-    "/api/games/{gid}": "visibility checked in the body via ownership.require()",
-    "/api/games/{gid}/view": "visibility checked in the body",
-    "/api/games/{gid}/sharing": "visibility checked in the body",
-    "/api/games/{gid}/metrics": "visibility checked in the body",
-    "/api/games/{gid}/metrics.csv": "visibility checked in the body",
-    "/api/games/{gid}/replay": "visibility checked in the body",
-    "/api/games/{gid}/tool": "seat token or play permission, checked in the body",
-    "/api/games/{gid}/wait": "seat token or play permission, checked in the body",
-    "/api/games/{gid}/path": "seat token or play permission, checked in the body",
-    "/api/games/{gid}/debug/errors": "visibility checked in the body",
     "/ws/games/{gid}": "seat token, share key or session, checked in the handler",
     "/ws/worker": "worker token is the credential, checked as the first frame",
-    "/r/{report_id}": "published reports; visibility checked in the body",
-    "/api/shared/reports": "list is filtered per viewer",
-    "/api/shared/reports/{report_id}": "visibility checked in the body",
     "/openapi.json": "FastAPI's own schema",
     "/docs": "FastAPI's docs UI",
     "/docs/oauth2-redirect": "FastAPI's docs UI",

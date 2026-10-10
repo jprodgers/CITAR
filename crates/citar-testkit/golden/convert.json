@@ -1,0 +1,17 @@
+{"format": 1,
+"digest": "blake3(CITAR-DIGEST, CANON_V1, RulesetId, canon(State)) of each committed fixture, converted (DESIGN.md 4.10, 4.12)",
+"ruleset_id": "3b89bbdfb807639c32c28f6c0ad8d1d2935355d61f86d43994fff824e5d8a389",
+"states": [
+["duel-continents-normal/t1","1b33213e73319d2b16c1929628fa6666f9bc6d08ef2d5fd4b26f5a6c3bdb148f",48105,1],
+["duel-continents-normal/t20","82ccd3dda9ed1e1650b64536626e71608ec0bbb3d65c951886181506e344d3e0",52016,20],
+["duel-continents-normal/t50","970c3ee3b666566aaa46c570992a5c6ed86da137d5e3b51afc0e9e2048ffb163",54739,45],
+["scenario-duel-fractal/t10","b5425381a9e6c906a5f8eb7ecc269f9ecc178c5c17ff2fd0ce1c050a4f6f3db6",50683,19],
+["scenario-duel-fractal/t11","919709bf4de602e9850d2489eeb7150397532e4a21f164cf87939c2e716da8e4",50680,23],
+["scenario-duel-fractal/t12","a83b0668e847c1fb1a1ad0f99c39962832e7b23b989174bbdea2045ae5af14c0",50554,24],
+["scenario-small-continents-s3001/t61","030724f268cc97f4edc20affd25b078e6961bd92a2bacb3b5d6e8b9760e81e0d",148234,118],
+["small-continents-normal-s1025/t280","3864958280bbfd9443436874b2113ecd1c1f759aa1bd3fa4ced18cb474d500ba",193099,827],
+["small-pangaea-raging/t1","46f20c8a2472a9dafa42ba90886a149704d1a9398e81956c3eceb6e10fb7d645",129362,2],
+["small-pangaea-raging/t12","76bc1459874e8d47eae309b97ba47a656c889048ac802ed6edd2e000532de5e9",135929,27],
+["small-pangaea-raging/t50","fa430528d7c2aa93a2f675a72e02f6b2e2fd17adef034ba98524ad4b075c61b4",140755,139],
+["standard-pangaea-normal-s1031/t120","7e7bc674150b919fbfbe5e32ec3571d4ebee3e9394b91ec2b21ca8b498590a38",316456,317]
+]}

@@ -1,0 +1,71 @@
+about = """
+A tech changes hands in a deal: the receiver learns it, as acquired through a deal. A side may give
+only a tech it knows, to a side that could research it now, and only while tech trading is on.
+"""
+from = "tests/test_engine.py::DiplomacyTests::test_tech_trade"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "grant_tech", player = 0, techs = ["Pottery", "Calendar"] },
+  { op = "grant_tech", player = 1, tech = "Pottery" },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Take this.", give = [{ type = "tech", tech = "Writing" }] }
+error = "Civilization 1 does not know Writing."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Take this.", give = [{ type = "tech", tech = "Pottery" }] }
+error = "Civilization 2 cannot receive Pottery (already known or missing prerequisites)."
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Take this.", give = [{ type = "tech", tech = "Warp Drive" }] }
+error = "Unknown tech 'Warp Drive'."
+
+[[step]]
+note = "Names are read loosely, as the ruleset's lookup reads them."
+tool = "open_negotiation"
+args = { to = 1, message = "Take this.", give = [{ type = "tech", tech = "calendar" }] }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "proposal"
+eq = { "0" = [{ type = "tech", tech = "Calendar" }], "1" = [] }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = 1, action = "accept", message = "Agreed." }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { status = "accepted", deal = "Civilization 1 gives the technology Calendar; Civilization 2 gives nothing." }
+
+[[step]]
+check = { what = "player", player = 1 }
+path = "techs"
+contains = "Calendar"
+
+[[step]]
+check = { what = "events", type = "tech", player = 1 }
+any = { path = "text", matches = "^Civilization 2 acquired through a deal Calendar\\." }
+
+[[step]]
+new_game = { tech_trading = false }
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "grant_tech", player = 0, techs = ["Pottery", "Calendar"] },
+  { op = "grant_tech", player = 1, tech = "Pottery" },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Take this.", give = [{ type = "tech", tech = "Calendar" }] }
+error = "Tech trading is disabled in this game."

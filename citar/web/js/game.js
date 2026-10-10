@@ -265,6 +265,11 @@ export class GameScreen {
       this.renderTopbar();
     } else if (m.type === "control") {
       this.scheduleRefresh(10);
+    } else if (m.type === "crashed") {
+      toast(m.message, "error", 20000);
+      this.scheduleRefresh(10);
+    } else if (m.type === "agent_error") {
+      toast(m.text, "error", 12000);
     }
   }
 
@@ -554,8 +559,10 @@ export class GameScreen {
       const u = this.view.units.find((x) => x.id === a.unit);
       if (u) { this.renderer.centerOn(u.x, u.y); this.selectUnit(u.id); return this.askReturnCivilian(u); }
     }
+    // a negotiation alert names the other side, so Diplomacy opens on that chat
+    if (a.type === "negotiation") return openDiplomacy(this, a.player ?? null);
     const open = { research: openTechTree, free_tech: openTechTree, policy: openPolicies, great_person: openGreatPeople,
-                   pantheon: openReligion, un_vote: openDiplomacy, negotiation: openDiplomacy }[a.type];
+                   pantheon: openReligion, un_vote: openDiplomacy }[a.type];
     if (open) return open(this);
     if (a.x != null) this.renderer.centerOn(a.x, a.y);
     if (a.city != null) this.selectCity(a.city);
@@ -780,12 +787,14 @@ export class GameScreen {
     }
     if (this.isSpectator || (v.session && v.session.seats.some((s) => s.type !== "human"))) {
       const sess = v.session;
+      // a crashed game takes no more moves: nothing to pause, resume or slow down, but everything to look at
+      const stopped = !!sess.crashed;
       // toggles the state the game is in now (not the one a held button was drawn with), and shows it at once:
       // while AIs are playing, the server can take a second or more to send a fresh view
       const want = this._pauseWanted && Date.now() - this._pauseWanted.at < 5000 ? this._pauseWanted.paused : null;
       if (want === sess.paused) this._pauseWanted = null;             // the server has caught up
       const paused = want ?? sess.paused;
-      tb.append(el("button", { class: "small", onclick: () => {
+      if (!stopped) tb.append(el("button", { class: "small", onclick: () => {
         this._pauseWanted = { paused: !paused, at: Date.now() };
         this.renderTopbar();
         api.control(this.gid, { paused: !paused });
@@ -797,7 +806,8 @@ export class GameScreen {
           location.hash = `#/game/${this.gid}/${encodeURIComponent(this.token)}` + (ev.target.value !== "" ? `/${ev.target.value}` : "");
         } }, el("option", { value: "", selected: this.asPlayer == null }, "God view"),
           ...sess.players.filter((p) => p.kind === "major").map((p) => el("option", { value: p.id, selected: this.asPlayer === p.id }, `View as ${p.name}`)));
-        tb.append(delay, viewAs);
+        if (!stopped) tb.append(delay);
+        tb.append(viewAs);
         if (v.phase !== "playing" || sess.god_view_allowed) tb.append(el("button", { class: "small", onclick: () => { location.hash = `#/replay/${this.gid}/${encodeURIComponent(this.token)}`; } }, "Recap"));
       }
     }
@@ -862,6 +872,9 @@ export class GameScreen {
       const w = v.players.find((p) => p.id === v.winner);
       b.textContent = `🏆 ${w ? w.name : "No one"} wins — ${v.victory || "game over"}`;
       b.style.display = "block";
+    } else if (v.session && v.session.crashed) {
+      b.textContent = `⚠ ${v.session.pause_reason ? v.session.pause_reason.message : "The game engine stopped."} (turn ${v.session.crashed.turn})`;
+      b.style.display = "block";
     } else if (v.session && v.session.paused) {
       const why = v.session.pause_reason;
       b.textContent = why && why.kind === "disconnect"
@@ -922,9 +935,9 @@ export class GameScreen {
       for (const a of alerts) {
         body.appendChild(el("div", { class: "event alert-item clickable", onclick: () => {
           if (a.x == null) {
+            if (a.type === "negotiation") { openDiplomacy(this, a.player ?? null); return; }
             const open = { gold: openEmpire, happiness: openEmpire, research: openTechTree, free_tech: openTechTree, policy: openPolicies,
-                           great_person: openGreatPeople, pantheon: openReligion, spy: openGreatPeople, un_vote: openDiplomacy,
-                           negotiation: openDiplomacy }[a.type];
+                           great_person: openGreatPeople, pantheon: openReligion, spy: openGreatPeople, un_vote: openDiplomacy }[a.type];
             if (open) open(this);
             return;
           }

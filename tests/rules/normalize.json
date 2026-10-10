@@ -1,0 +1,60 @@
+{
+  "about": "How a tool call's arguments are coerced (tools.py:113-127): both engines run every case, Python through tools.execute with the tool registered for the test, Rust through api::tools::normalize_with. A case gives the arguments sent and either what the tool receives or the refusal. A case with `intended` (an id of tests/rules/intended.toml) is the Rust engine's answer, which differs from Python's on purpose: only Rust runs it.",
+  "tools": {
+    "probe": {
+      "params": [["n", "integer"], ["flag", "boolean"], ["names", "array"], ["m", "integer"], ["text", "string"], ["loose", null]],
+      "required": ["n"]
+    },
+    "pair": {
+      "params": [["a", "integer"], ["b", "string"], ["c", "integer"]],
+      "required": ["b", "a"]
+    }
+  },
+  "cases": [
+    {"tool": "probe", "args": {"n": "3"}, "out": {"n": 3}},
+    {"tool": "probe", "args": {"n": 3.7}, "out": {"n": 3}},
+    {"tool": "probe", "args": {"n": -3.7}, "out": {"n": -3}},
+    {"tool": "probe", "args": {"n": " 4 "}, "out": {"n": 4}},
+    {"tool": "probe", "args": {"n": "\t-12\n"}, "out": {"n": -12}},
+    {"tool": "probe", "args": {"n": "+5"}, "out": {"n": 5}},
+    {"tool": "probe", "args": {"n": "1_000"}, "out": {"n": 1000}},
+    {"tool": "probe", "args": {"n": "٣"}, "out": {"n": 3}},
+    {"tool": "probe", "args": {"n": " 7"}, "out": {"n": 7}},
+    {"tool": "probe", "args": {"n": true}, "out": {"n": 1}},
+    {"tool": "probe", "args": {"n": 7}, "out": {"n": 7}},
+    {"tool": "probe", "args": {"n": "3.0"}, "error": "Parameter 'n' must be an integer."},
+    {"tool": "probe", "args": {"n": "1e3"}, "error": "Parameter 'n' must be an integer."},
+    {"tool": "probe", "args": {"n": "- 5"}, "error": "Parameter 'n' must be an integer."},
+    {"tool": "probe", "args": {"n": "\u001c4"}, "error": "Parameter 'n' must be an integer."},
+    {"tool": "probe", "args": {"n": ""}, "error": "Parameter 'n' must be an integer."},
+    {"tool": "probe", "args": {"n": [3]}, "error": "Parameter 'n' must be an integer."},
+    {"tool": "probe", "args": {"n": {"v": 3}}, "error": "Parameter 'n' must be an integer."},
+    {"tool": "probe", "args": {"n": 1, "m": "x"}, "error": "Parameter 'm' must be an integer."},
+    {"tool": "probe", "args": {"m": "y", "n": "x"}, "error": "Parameter 'n' must be an integer."},
+    {"tool": "probe", "args": {"n": 1, "m": null}, "out": {"n": 1, "m": null}},
+    {"tool": "probe", "args": {"n": 1, "flag": "Yes"}, "out": {"n": 1, "flag": true}},
+    {"tool": "probe", "args": {"n": 1, "flag": "TRUE"}, "out": {"n": 1, "flag": true}},
+    {"tool": "probe", "args": {"n": 1, "flag": "1"}, "out": {"n": 1, "flag": true}},
+    {"tool": "probe", "args": {"n": 1, "flag": "no"}, "out": {"n": 1, "flag": false}},
+    {"tool": "probe", "args": {"n": 1, "flag": "on"}, "out": {"n": 1, "flag": false}},
+    {"tool": "probe", "args": {"n": 1, "flag": " yes"}, "out": {"n": 1, "flag": false}},
+    {"tool": "probe", "args": {"n": 1, "flag": 0}, "out": {"n": 1, "flag": 0}},
+    {"tool": "probe", "args": {"n": 1, "flag": false}, "out": {"n": 1, "flag": false}},
+    {"tool": "probe", "args": {"n": 1, "names": "a,b"}, "out": {"n": 1, "names": ["a", "b"]}},
+    {"tool": "probe", "args": {"n": 1, "names": " a , ,b ,"}, "out": {"n": 1, "names": ["a", "b"]}},
+    {"tool": "probe", "args": {"n": 1, "names": "\u001ca\u001c, b"}, "out": {"n": 1, "names": ["a", "b"]}},
+    {"tool": "probe", "args": {"n": 1, "names": ""}, "out": {"n": 1, "names": []}},
+    {"tool": "probe", "args": {"n": 1, "names": ["x", "y"]}, "out": {"n": 1, "names": ["x", "y"]}},
+    {"tool": "probe", "args": {"n": 1, "text": "3"}, "out": {"n": 1, "text": "3"}},
+    {"tool": "probe", "args": {"n": 1, "loose": "4"}, "out": {"n": 1, "loose": "4"}},
+    {"tool": "probe", "args": {"n": 1, "junk": 5, "at": "(3,4)"}, "out": {"n": 1}},
+    {"tool": "probe", "args": {}, "error": "Missing required parameter(s): n."},
+    {"tool": "probe", "args": {"n": null}, "error": "Missing required parameter(s): n."},
+    {"tool": "probe", "args": {"m": "not a number", "junk": 1}, "error": "Missing required parameter(s): n."},
+    {"tool": "pair", "args": {"c": "x"}, "error": "Missing required parameter(s): b, a."},
+    {"tool": "pair", "args": {"a": "x", "c": 1}, "error": "Missing required parameter(s): b."},
+    {"tool": "pair", "args": {"a": "2", "b": 5, "c": 2.9}, "out": {"a": 2, "b": 5, "c": 2}},
+    {"tool": "probe", "args": {"n": "99999999999999999999"}, "error": "Parameter 'n' must be an integer.", "intended": "normalize-refuses-big-ints-and-non-objects"},
+    {"tool": "probe", "args": [["n", 3]], "error": "The arguments of 'probe' must be a JSON object.", "intended": "normalize-refuses-big-ints-and-non-objects"}
+  ]
+}

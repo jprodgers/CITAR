@@ -48,7 +48,7 @@ def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list
     from ..server.session import all_sessions
     out = []
     for s in all_sessions():
-        if s.id in exclude or s.stopped or s.game.s.phase != "playing":
+        if s.id in exclude or s.stopped or s.game.phase != "playing":
             continue
         # a game that paused to make way for higher-priority work gives the machine up until its turn comes
         if s.paused and (s.pause_reason or {}).get("kind") == "queue":
@@ -66,7 +66,7 @@ def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list
 def _alive(session, pid: int) -> bool:
     """Whether a seat's civilization is still in the game."""
     try:
-        return bool(session.game.player(pid).alive)
+        return session.game.is_alive(pid)
     except Exception:
         return True
 

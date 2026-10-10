@@ -1,0 +1,39 @@
+# The cargo-fuzz targets of the engine (DESIGN.md 9.5, the decision on fuzzing). Not a member of
+# the workspace (the root manifest excludes this folder) and no gate: libFuzzer needs a nightly
+# toolchain and runs in WSL at night. What each target does is in citar_testkit::fuzz, which the
+# stable tests run on a few inputs, so that the targets never rot. README.md says how to run them.
+[package]
+name = "citar-engine-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+# libFuzzer's C++ runtime, which cargo fuzz links. `--no-default-features` checks the targets on
+# a stable toolchain with no C++ compiler.
+default = ["libfuzzer"]
+libfuzzer = ["libfuzzer-sys/link_libfuzzer"]
+
+[dependencies]
+libfuzzer-sys = { version = "0.4", default-features = false }
+citar-testkit = { path = "../../citar-testkit" }
+
+[[bin]]
+name = "load_state"
+path = "fuzz_targets/load_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_one"
+path = "fuzz_targets/fuzz_one.rs"
+test = false
+doc = false
+bench = false
+
+# Its own workspace: the repository's excludes this folder.
+[workspace]

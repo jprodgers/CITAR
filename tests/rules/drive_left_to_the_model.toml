@@ -1,0 +1,167 @@
+about = """
+A hybrid seat's bot leaves a chat to the seat's language model (its driver defers it to the host).
+Until the chat moves, it waits on the host (rule T3): the driven seat in it does not end its turn,
+whether that is the other seat, out of the hybrid seat's turn, or the hybrid seat itself, in its
+own. The host has the model answer, or once its wait runs out has the bot decide by driving with a
+driver that answers. A driver that leaves a chat without deferring it has answered: the turn ends,
+and the chat expires with it.
+"""
+from = "crates/citar-engine/src/game/turn/drive.rs (plan-0.1.6 T3 and 6.1: HybridAgent)"
+
+[config]
+players = [{ controller = "hybrid" }, { controller = "bot" }]
+
+[[step]]
+ops = [
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+]
+
+[[step]]
+op = "drive"
+args = { drivers = [0, 1] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "hybrid_diplomat", player = 0, negotiations = [], turn = 1, current = 0 }
+
+[[step]]
+note = "With the bot's seat left to the host for a moment, the drive stops at its turn."
+op = "drive"
+args = { drivers = [0] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "external", player = 1, negotiations = [], turn = 1, current = 1 }
+
+[[step]]
+note = "On the bot's turn, it opens a chat with the hybrid seat."
+op = "open_negotiation_as"
+args = { player = 1, to = 0, message = "Shall we trade?" }
+as = "opened"
+
+[[step]]
+note = "The hybrid seat's driver leaves the chat to the model: the bot's turn waits for it."
+op = "drive"
+args = { drivers = [0, 1], defer = [0] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "awaiting_reply", player = 1, negotiations = ["=opened.negotiation_id"], turn = 1, current = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+subset = { status = "open", awaiting = 0 }
+
+[[step]]
+note = "Nothing has moved: the next drive asks the driver again, which leaves it again."
+op = "drive"
+args = { drivers = [0, 1], defer = [0] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "awaiting_reply", player = 1, negotiations = ["=opened.negotiation_id"], turn = 1, current = 1 }
+
+[[step]]
+note = "The model answers; the bot's driver replies, and the chat is the model's again."
+tool = "respond_negotiation"
+player = 0
+args = { negotiation_id = "=opened.negotiation_id", action = "reply", message = "What do you offer?" }
+
+[[step]]
+op = "drive"
+args = { drivers = [0, 1], defer = [0], answer = "reply" }
+as = "stop"
+
+[[step]]
+check = "stop"
+subset = { stop = "awaiting_reply", player = 1, current = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+subset = { status = "open", awaiting = 0 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history"
+len = 3
+
+[[step]]
+note = "The model ends the chat: the bot's turn ends, and the hybrid seat's next is played."
+tool = "respond_negotiation"
+player = 0
+args = { negotiation_id = "=opened.negotiation_id", action = "reject", message = "Not now." }
+
+[[step]]
+op = "drive"
+args = { drivers = [0, 1], defer = [0] }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "hybrid_diplomat", player = 0, negotiations = [], turn = 2, current = 0 }
+
+[[step]]
+note = "In its own turn, the model opens a chat with the bot."
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "Friends?" }
+as = "theirs"
+
+[[step]]
+note = "The bot's driver replies; the hybrid seat's driver leaves the reply to the model, and its turn waits."
+op = "drive"
+args = { drivers = [0, 1], defer = [0], answer = "reply" }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "awaiting_reply", player = 0, negotiations = ["=theirs.negotiation_id"], turn = 2, current = 0 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=theirs.negotiation_id" }
+subset = { status = "open", awaiting = 0 }
+
+[[step]]
+note = "The model's wait runs out: the host has the bot decide, and the turn ends."
+op = "drive"
+args = { drivers = [0, 1], answer = "reject", seat_limit = 1 }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "seat_limit", player = "=null", negotiations = [], turn = 2, current = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=theirs.negotiation_id" }
+subset = { status = "rejected" }
+
+[[step]]
+note = "A driver that leaves a chat without deferring it has answered: the bot's turn ends, and its chat expires."
+op = "open_negotiation_as"
+args = { player = 1, to = 0, message = "Again?" }
+as = "again"
+
+[[step]]
+op = "drive"
+args = { drivers = [0, 1], answer = "none" }
+as = "stop"
+
+[[step]]
+check = "stop"
+eq = { stop = "hybrid_diplomat", player = 0, negotiations = [], turn = 3, current = 0 }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=again.negotiation_id" }
+subset = { status = "expired" }
+
+[[step]]
+note = "A present answer must be one of the four names."
+op = "drive"
+args = { drivers = [0, 1], answer = 5 }
+error = "answer must be reject, accept, reply or none, not '5'."

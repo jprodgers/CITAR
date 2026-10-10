@@ -1,86 +1,130 @@
-"""Bot parameters, profiles, fingerprints, the lab's use of profiles, and the ratings fit."""
+"""Bot profiles on the engine's bot versions, fingerprints, the Bots page's API, the lab's records and the ratings
+fit (crates/citar-engine/DESIGN.md P2.7.3, P2.8.5-P2.8.7).
+
+Versions, their schemas, cleaning, fingerprints and the build id are the engine's; storage and the ratings fit need
+no engine.
+"""
 import tests  # noqa: F401  (temporary saves folder; must be imported before citar)
-import ast
+import contextlib
+import io
 import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 import unittest
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
-from citar.bots import basic, profiles, ratings
+from citar import engine_api
+from citar.bots import profiles, ratings
+from tests.test_engine_api import ROOT, ruleset_copy, unknown_unique
+
+
+def _clear_profiles():
+    for p in profiles.list_profiles():
+        if not p.get("builtin"):
+            profiles.delete(p["id"])
+
+
+def _latest() -> str:
+    return next(v["id"] for v in engine_api.bot_versions() if v["latest"])
 
 
 class ParameterTests(unittest.TestCase):
-    def test_every_parameter_the_code_reads_is_declared(self):
-        """P["x"] / self.p["x"] anywhere in the bot must be a declared parameter, or a profile can't reach it."""
-        tree = ast.parse(Path(basic.__file__).read_text(encoding="utf-8"))
-        used = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get" \
-                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "p" and node.args \
-                    and isinstance(node.args[0], ast.Constant):
-                used.add(node.args[0].value)
-            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) \
-                    and isinstance(node.slice.value, str):
-                v = node.value
-                if (isinstance(v, ast.Name) and v.id == "P") or \
-                        (isinstance(v, ast.Attribute) and v.attr == "p" and isinstance(v.value, ast.Name)
-                         and v.value.id == "self"):
-                    used.add(node.slice.value)
-        missing = used - set(basic.DEFAULT_PARAMS)
-        self.assertFalse(missing, f"used but not declared: {sorted(missing)}")
-        dynamic = {k for k in basic.DEFAULT_PARAMS if k.startswith(("tw_", "w_", "u_"))}
-        unused = set(basic.DEFAULT_PARAMS) - used - dynamic - {"policy_order_peaceful", "policy_order_aggressive",
-                                                                 "target_cities"}
-        self.assertFalse(unused, f"declared but never read: {sorted(unused)}")
-
-    def test_specs_are_well_formed(self):
-        keys = [s["key"] for s in basic.PARAM_SPECS]
-        self.assertEqual(len(keys), len(set(keys)))
-        for s in basic.PARAM_SPECS:
-            with self.subTest(key=s["key"]):
-                self.assertTrue(s["label"])
-                d = s["default"]
-                if s["type"] == "bool":
-                    self.assertIsInstance(d, bool)
-                elif s["type"] == "int":
-                    self.assertIsInstance(d, int)
-                elif s["type"] == "float":
-                    self.assertIsInstance(d, float)
-                elif s["type"] == "choice":
-                    self.assertIn(d, s["choices"])
-                if s["type"] in ("int", "float"):
-                    if s.get("min") is not None:
-                        self.assertLessEqual(s["min"], d)
-                    if s.get("max") is not None:
-                        self.assertGreaterEqual(s["max"], d)
-                if s["type"] in ("order", "list") and isinstance(d, list):
-                    self.assertTrue(set(d) <= set(s["options"]), set(d) - set(s["options"]))
-
     def test_a_parameter_changes_the_bot(self):
-        bot = profiles.make_bot({"profile": None, "bot": "basic", "params": {"war_prep_rate": 3.0}}, seed=1)
-        self.assertEqual(bot.p["war_prep_rate"], 3.0)
-        self.assertEqual(bot.p["u_food"], basic.DEFAULT_PARAMS["u_food"])
+        bot = profiles.make_bot({"profile": None, "bot": "basic", "params": {"war_prep_rate": 3.0}})
+        self.assertEqual(json.loads(bot.params), {"war_prep_rate": 3.0})
+        self.assertEqual(engine_api.bot_fingerprint(bot), profiles.fingerprint("basic", {"war_prep_rate": 3}, None))
+        self.assertNotEqual(engine_api.bot_fingerprint(bot), profiles.fingerprint("basic", {}, None))
+
+
+class StorageTests(unittest.TestCase):
+    """What needs no engine: the built-ins, the files, refusing what a profile may not name."""
+
+    def tearDown(self):
+        _clear_profiles()
+
+    def test_the_built_ins_are_standard_classic_production_and_idle(self):
+        self.assertEqual([(p["id"], p["engine"], p["params"]) for p in profiles.BUILTIN],
+                         [("standard", "basic", {}), ("classic-production", "basic", {"prod_mode": "classic"}),
+                          ("idle", "idle", {})])
+        self.assertEqual([p["id"] for p in profiles.list_profiles()], ["standard", "classic-production", "idle"])
+        for gone in ("v1", "v0", "snapshot-0922"):
+            with self.assertRaises(profiles.ProfileError):
+                profiles.get(gone)
+
+    def test_an_engine_is_basic_a_version_or_idle_and_a_frozen_one_is_archived(self):
+        for ok in ("basic", "basic-1", "basic-12", "idle"):
+            self.assertEqual(profiles.check_engine(ok), ok)
+        with self.assertRaises(profiles.ProfileError) as e:
+            profiles.check_engine("frozen_7149efb1")
+        self.assertIn("archived with 0.1.5", str(e.exception))
+        for bad in ("live", "basic-", "basic-x", "os", "", None, "../basic"):
+            with self.assertRaises(profiles.ProfileError):
+                profiles.check_engine(bad)
+
+    def test_an_aggression_is_a_number_held_to_0_1_or_none(self):
+        for given, kept in ((None, None), ("", None), (0.3, 0.3), ("0.6", 0.6), (1.7, 1.0), (-2, 0.0),
+                            (float("inf"), 1.0)):
+            self.assertEqual(profiles.clean_aggression(given), kept, given)
+        for bad in ("high", float("nan"), True, [0.5], {}):
+            with self.assertRaises(profiles.ProfileError, msg=bad):
+                profiles.clean_aggression(bad)
+
+    def test_a_stored_profile_on_a_frozen_engine_is_listed_but_never_plays(self):
+        # A laptop's profiles from 0.1.5 may name a snapshot: the history stays readable, the profile refuses to
+        # play, and a lobby seat that names it plays Standard (BotAgent).
+        profiles.PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+        (profiles.PROFILES_DIR / "old-tuned.json").write_text(json.dumps(
+            {"id": "old-tuned", "name": "Old tuned", "engine": "frozen_d95d50cb", "aggression": None,
+             "params": {"war_prep_rate": 2.0}, "rev": 3, "history": [], "builtin": False}), encoding="utf-8")
+        self.assertIn("old-tuned", [p["id"] for p in profiles.list_profiles()])
+        for use in (lambda: profiles.resolve("old-tuned"), lambda: profiles.make_bot("old-tuned")):
+            with self.assertRaises(profiles.ProfileError) as e:
+                use()
+            self.assertIn("archived with 0.1.5", str(e.exception))
+        from citar.agents.bot_agent import BotAgent
+        self.assertEqual(BotAgent(profile="old-tuned").profile["profile"], "standard")
+
+
+class LobbySeatTests(unittest.TestCase):
+    def test_a_profile_plays_in_a_lobby_seat(self):
+        """A profile resolves to the version that plays and its fingerprint."""
+        r = profiles.resolve("classic-production")
+        self.assertEqual((r["engine"], r["params"], r["profile"], r["profile_rev"]),
+                         ("basic", {"prod_mode": "classic"}, "classic-production", 1))
+        bot = profiles.make_bot("classic-production", aggression=0.7)
+        self.assertEqual(bot.aggression, 0.7)
+        self.assertEqual((r["version"], bot.version), (_latest(), _latest()))
+        self.assertEqual(r["fingerprint"], engine_api.bot_fingerprint(bot))
+        with self.assertRaises(TypeError):
+            profiles.make_bot("standard", seed=3)        # a bot draws from its game's seed: it has none of its own
 
 
 class ProfileTests(unittest.TestCase):
     def tearDown(self):
-        for p in profiles.list_profiles():
-            if not p["builtin"]:
-                profiles.delete(p["id"])
+        _clear_profiles()
 
     def test_clean_params_coerces_drops_defaults_and_refuses_unknown(self):
-        out = profiles.clean_params("basic", {"war_prep_rate": "2", "u_food": 3.6, "war_overseas": "true",
+        default_food = profiles.defaults("basic")["u_food"]
+        out = profiles.clean_params("basic", {"war_prep_rate": "2", "u_food": default_food, "war_overseas": "true",
                                               "site_candidates": 8.0})
-        self.assertEqual(out, {"war_prep_rate": 2.0, "war_overseas": True, "site_candidates": 8})
-        with self.assertRaises(profiles.ProfileError):
-            profiles.clean_params("basic", {"no_such_knob": 1})
-        with self.assertRaises(profiles.ProfileError):
-            profiles.clean_params("basic", {"prod_mode": "sideways"})
+        self.assertEqual(out, {"site_candidates": 8, "war_overseas": True, "war_prep_rate": 2.0})
+        self.assertEqual(list(out), sorted(out), "keys sorted")
+        for bad in ({"no_such_knob": 1}, {"prod_mode": "sideways"}, {"site_candidates": 8.5}):
+            with self.assertRaises(profiles.ProfileError, msg=bad):
+                profiles.clean_params("basic", bad)
+        self.assertEqual(profiles.clean_params("idle", {"anything": 1}), {})
 
     def test_save_revisions_and_history(self):
         p = profiles.save({"name": "Warlike", "engine": "basic", "aggression": 0.8, "params": {"war_prep_rate": 2}},
                           user="tester", note="first")
-        self.assertEqual((p["id"], p["rev"]), ("warlike", 1))
+        self.assertEqual((p["id"], p["rev"], p["params"]), ("warlike", 1, {"war_prep_rate": 2.0}))
         same = profiles.save({**p, "description": "only words changed"})
         self.assertEqual(same["rev"], 1, "a description edit is not a new revision")
         p2 = profiles.save({**p, "params": {"war_prep_rate": 3}}, note="more")
@@ -88,143 +132,359 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual([h["note"] for h in p2["history"]], ["first", "more"])
         with self.assertRaises(profiles.ProfileError):
             profiles.save({"id": "standard", "name": "x"})
+        for agg in ("loud", float("nan")):
+            with self.assertRaises(profiles.ProfileError):
+                profiles.save({"name": "Odd", "aggression": agg})
+        self.assertEqual(profiles.save({"name": "Hot", "aggression": 7})["aggression"], 1.0)
+
+    def test_a_saved_profile_round_trips_through_bot_clean_params(self):
+        raw = {"war_prep_rate": "2.5", "site_candidates": "8", "war_overseas": "yes", "tech_mode": "potential",
+               "policy_order_peaceful": "liberty_first"}
+        p = profiles.save({"name": "Round trip", "engine": "basic-1", "params": raw})
+        version = _latest()
+        self.assertEqual(p["params"], engine_api.bot_clean_params(version, raw))
+        self.assertEqual(engine_api.bot_clean_params(version, p["params"]), p["params"], "clean is idempotent")
+        back = profiles.get(p["id"])
+        self.assertEqual(back["params"], p["params"])
+        again = profiles.save(back)
+        self.assertEqual((again["rev"], again["params"]), (1, p["params"]), "saving it as read is no new revision")
+        self.assertEqual(json.loads(profiles.make_bot(p["id"]).params), p["params"])
 
     def test_fork_and_delete(self):
-        f = profiles.fork("v1", name="My v1")
-        self.assertEqual((f["engine"], f["parent"], f["builtin"]), ("frozen_7149efb1", "v1", False))
+        f = profiles.fork("classic-production", name="My production")
+        self.assertEqual((f["engine"], f["params"], f["parent"], f["builtin"]),
+                         ("basic", {"prod_mode": "classic"}, "classic-production", False))
+        self.assertEqual(f["tags"], [], "the control tag is the built-in's")
         profiles.delete(f["id"])
         with self.assertRaises(profiles.ProfileError):
             profiles.get(f["id"])
         with self.assertRaises(profiles.ProfileError):
             profiles.delete("standard")
 
+    def test_frozen_engines_are_refused_with_the_archive_message(self):
+        old = "frozen_7149efb1"
+        for use in (lambda: profiles.save({"name": "Old", "engine": old}), lambda: profiles.schema(old),
+                    lambda: profiles.resolve({"bot": old}), lambda: profiles.fingerprint(old, {}, None),
+                    lambda: profiles.make_bot({"bot": old})):
+            with self.assertRaises(profiles.ProfileError) as e:
+                use()
+            self.assertEqual(str(e.exception), profiles.ARCHIVED.format(engine=old))
+        with self.assertRaises(profiles.ProfileError) as e:
+            profiles.save({"name": "Future", "engine": "basic-99"})
+        self.assertIn("not a bot version", str(e.exception))
+
+    def test_engines_are_basic_then_the_versions(self):
+        versions = engine_api.bot_versions()
+        engines = profiles.engines()
+        self.assertEqual([e["id"] for e in engines], ["basic"] + [v["id"] for v in versions])
+        self.assertIn("idle", [e["id"] for e in engines])
+        self.assertEqual(engines[0]["code"], _latest())
+        for e in engines:
+            self.assertEqual(set(e), {"id", "label", "code", "latest", "created", "description"})
+
+    def test_basic_resolves_to_the_latest_version_at_use(self):
+        r = profiles.resolve("standard")
+        self.assertEqual((r["engine"], r["version"]), ("basic", _latest()))
+        pinned = profiles.resolve("standard", pin=True)
+        self.assertEqual((pinned["engine"], pinned["version"]), (_latest(), _latest()))
+        self.assertEqual(pinned["fingerprint"], r["fingerprint"], "basic and the version it names play alike")
+        self.assertEqual(profiles.resolve({"bot": "live"})["engine"], "basic", "0.1.5's live bot is the latest")
+
     def test_fingerprint_is_what_plays(self):
         a = profiles.fingerprint("basic", {"war_prep_rate": 2.0}, None)
+        self.assertRegex(a, r"^[0-9a-f]{12}$")
         self.assertEqual(a, profiles.fingerprint("basic", {"war_prep_rate": 2}, None))
-        self.assertEqual(a, profiles.fingerprint(profiles.code_id("basic"), {"war_prep_rate": 2.0}, None),
-                         "the live bot and its frozen copy are the same code")
+        self.assertEqual(a, profiles.fingerprint(_latest(), {"war_prep_rate": "2"}, None),
+                         "basic and the version it names are the same code")
         self.assertNotEqual(a, profiles.fingerprint("basic", {"war_prep_rate": 2.5}, None))
         self.assertNotEqual(a, profiles.fingerprint("basic", {"war_prep_rate": 2.0}, 0.5))
-        self.assertEqual(profiles.fingerprint("basic", {"u_food": basic.DEFAULT_PARAMS["u_food"]}, None),
+        default_food = profiles.defaults("basic")["u_food"]
+        self.assertEqual(profiles.fingerprint("basic", {"u_food": default_food}, None),
                          profiles.fingerprint("basic", {}, None), "a default value is not an override")
+        self.assertNotEqual(profiles.fingerprint("idle", {}, None), profiles.fingerprint("basic", {}, None))
 
-    def test_resolve_seat_aggression(self):
+    def test_the_seats_aggression_is_not_the_profiles(self):
+        """One profile is one entry however a seat plays it: the fingerprint hashes the profile's fixed aggression,
+        never the seat's (DESIGN.md P2.8.6)."""
         p = profiles.save({"name": "Calm", "engine": "basic", "aggression": 0.1, "params": {}})
-        self.assertEqual(profiles.make_bot(p["id"], aggression=0.9).aggression, 0.1, "the profile's wins")
-        self.assertEqual(profiles.make_bot("standard", aggression=0.9).aggression, 0.9, "the seat's when open")
-        self.assertEqual(type(profiles.make_bot("idle")).__name__, "IdleBot")
-
-    def test_old_snapshots_have_an_inferred_schema(self):
-        sch = profiles.schema("frozen_7149efb1")
-        keys = {p["key"] for g in sch["groups"] for p in g["params"]}
-        self.assertIn("w_food", keys)
-
-    def test_engines_list_the_live_bot_snapshots_and_idle(self):
-        ids = [e["id"] for e in profiles.engines()]
-        self.assertEqual((ids[0], ids[-1]), ("basic", "idle"))
-        self.assertIn("frozen_7149efb1", ids)
+        calm = profiles.make_bot(p["id"], aggression=0.9)
+        self.assertEqual((calm.aggression, calm.fixed_aggression), (0.1, 0.1), "the profile's wins")
+        low, high = profiles.make_bot("standard", aggression=0.2), profiles.make_bot("standard", aggression=0.8)
+        self.assertEqual((low.aggression, high.aggression, low.fixed_aggression), (0.2, 0.8, None),
+                         "the seat's when open")
+        self.assertEqual(engine_api.bot_fingerprint(low), engine_api.bot_fingerprint(high))
+        self.assertEqual(engine_api.bot_fingerprint(low), profiles.resolve("standard")["fingerprint"])
+        self.assertEqual(engine_api.bot_fingerprint(calm), profiles.fingerprint("basic", {}, 0.1))
+        self.assertEqual(profiles.make_bot("idle").version, "idle")
 
 
-class LabProfileTests(unittest.TestCase):
-    def test_profile_seats_are_frozen_into_the_experiment(self):
+class BotsPageTests(unittest.TestCase):
+    """The Bots page's API (citar/server/bots_api.py) in the shapes the page reads."""
+
+    admin = SimpleNamespace(handle="tester")
+
+    def tearDown(self):
+        _clear_profiles()
+
+    def test_engines_and_the_schema(self):
+        from citar.server import bots_api
+        engines = bots_api.list_engines()["engines"]
+        self.assertEqual([e["id"] for e in engines], ["basic"] + [v["id"] for v in engine_api.bot_versions()])
+        schema = bots_api.param_schema("basic")
+        self.assertEqual(list(schema), ["engine", "groups"])
+        self.assertEqual(schema["engine"], "basic-1")
+        self.assertEqual(len(schema["groups"]), 17)
+        self.assertEqual(sum(len(g["params"]) for g in schema["groups"]), 373)
+        self.assertEqual(bots_api.param_schema("basic-1"), schema)
+        self.assertEqual(bots_api.param_schema("idle"), {"engine": "idle", "groups": []})
+
+    def test_a_frozen_engine_is_refused_with_the_archive_message(self):
+        from fastapi import HTTPException
+        from citar.server import bots_api
+        with self.assertRaises(HTTPException) as e:
+            bots_api.param_schema("frozen_7149efb1")
+        self.assertEqual((e.exception.status_code, e.exception.detail),
+                         (404, profiles.ARCHIVED.format(engine="frozen_7149efb1")))
+        with self.assertRaises(HTTPException) as e:
+            bots_api.create_profile(bots_api.ProfileBody(name="Old", engine="frozen_7149efb1"), user=self.admin)
+        self.assertEqual((e.exception.status_code, e.exception.detail),
+                         (400, profiles.ARCHIVED.format(engine="frozen_7149efb1")))
+
+    def test_a_saved_profile_round_trips(self):
+        from citar.server import bots_api
+        body = bots_api.ProfileBody(name="Page made", engine="basic", aggression=0.6,
+                                    params={"war_prep_rate": "3", "lux_buy": "on"}, note="from the page")
+        made = bots_api.create_profile(body, user=self.admin)
+        self.assertEqual(made["params"], engine_api.bot_clean_params("basic", body.params))
+        shown = bots_api.get_profile(made["id"])["profile"]
+        self.assertEqual((shown["params"], shown["aggression"], shown["rev"]), (made["params"], 0.6, 1))
+        self.assertEqual(shown["fingerprint"], profiles.fingerprint("basic", made["params"], 0.6))
+        edited = bots_api.update_profile(made["id"], bots_api.ProfileBody(
+            name="Page made", engine="basic", aggression=0.6, params=shown["params"]), user=self.admin)
+        self.assertEqual(edited["rev"], 1, "the page sending back what it read is no new revision")
+
+
+class LabTests(unittest.TestCase):
+    def tearDown(self):
+        _clear_profiles()
+
+    def test_profile_seats_are_pinned_into_the_experiment(self):
         from citar import lab
-        p = profiles.save({"name": "Lab seat", "engine": "frozen_d95d50cb", "params": {"war_prep_rate": 2.0}})
-        try:
-            spec = lab.normalize({"name": "t", "seats": [{"profile": p["id"]}, {"profile": "v1"}]})
-            a, b = spec["seats"]
-            self.assertEqual((a["bot"], a["params"], a["label"], a["profile_rev"]),
-                             ("frozen_d95d50cb", {"war_prep_rate": 2.0}, "Lab seat", 1))
-            self.assertEqual(a["fingerprint"], profiles.fingerprint("frozen_d95d50cb", {"war_prep_rate": 2.0}, None))
-            self.assertEqual(b["bot"], "frozen_7149efb1")
-            # a later edit does not change the queued experiment
-            profiles.save({**p, "params": {"war_prep_rate": 3.0}})
-            self.assertEqual(lab.game_spec(spec, 0)["seats"][0]["params"], {"war_prep_rate": 2.0})
-            bot = lab.make_bot(lab.game_spec(spec, 0)["seats"][0], 1, 0.5)
-            self.assertEqual(bot.p["war_prep_rate"], 2.0)
-        finally:
-            profiles.delete(p["id"])
+        p = profiles.save({"name": "Lab seat", "engine": "basic", "params": {"war_prep_rate": 2.0}})
+        spec = lab.normalize({"name": "t", "seats": [{"profile": p["id"]}, {"profile": "classic-production"}]})
+        a, b = spec["seats"]
+        self.assertEqual((a["bot"], a["params"], a["label"], a["profile_rev"], a["profile_name"]),
+                         (_latest(), {"war_prep_rate": 2.0}, "Lab seat", 1, "Lab seat"))
+        self.assertEqual((b["bot"], b["params"], b["label"]), (_latest(), {"prod_mode": "classic"},
+                                                              "Classic production"))
+        # a later edit does not change the queued experiment
+        profiles.save({**p, "params": {"war_prep_rate": 3.0}})
+        seat = lab.game_spec(spec, 0)["seats"][0]
+        self.assertEqual(seat["params"], {"war_prep_rate": 2.0})
+        bot = lab.make_bot(seat, 0.5)
+        self.assertEqual((bot.version, json.loads(bot.params)), (_latest(), {"war_prep_rate": 2.0}))
+        self.assertEqual(engine_api.bot_fingerprint(bot), profiles.fingerprint(_latest(), {"war_prep_rate": 2}, None))
+
+    def test_raw_seats_pin_their_version(self):
+        from citar import lab
+        spec = lab.normalize({"name": "raw", "seats": [{"bot": "basic", "params": {"counter_rounds": "2"}},
+                                                        {"bot": "live"}, {"bot": "idle"}, {}]})
+        self.assertEqual([s["bot"] for s in spec["seats"]], [_latest(), "basic", "idle", _latest()])
+        self.assertEqual(spec["seats"][0]["params"], {"counter_rounds": 2})
+        self.assertEqual(spec["seats"][0]["label"], _latest())
+        for bad in ({"bot": "frozen_d95d50cb"}, {"bot": "basic", "params": {"no_such": 1}}, {"bot": "basic-99"}):
+            with self.assertRaises(profiles.ProfileError, msg=bad):
+                lab.normalize({"name": "bad", "seats": [bad]})
+
+    def test_factorial_experiments_pin_and_check_their_levels(self):
+        from citar import lab
+        s = lab.normalize({"name": "f", "factors": {"war_prep_rate": [1.0, 2.0]}, "profile": "classic-production"})
+        self.assertEqual((s["bot"], s["base_params"], s["profile_rev"]), (_latest(), {"prod_mode": "classic"}, 1))
+        seats = lab.game_spec(s, 0)["seats"]
+        self.assertEqual({x["params"]["war_prep_rate"] for x in seats}, {1.0, 2.0})
+        self.assertEqual({x["profile_name"] for x in seats}, {"Classic production"})
+        with self.assertRaises(profiles.ProfileError):
+            lab.normalize({"name": "f2", "factors": {"site_candidates": [8, 8.5]}})
+
+    def test_a_best_seat_is_queued_as_the_profile_it_stands_for(self):
+        """Ratings attribute a game to the profile its results record, so "best" is recorded as the profile it
+        stood for when the experiment was queued, not as "best" (which is no profile)."""
+        from citar import lab
+        with mock.patch.object(ratings, "best_profile", return_value="classic-production"):
+            spec = lab.normalize({"name": "best", "seats": [{"profile": "best"}, {"profile": "standard"}]})
+            factorial = lab.normalize({"name": "best-f", "factors": {"war_prep_rate": [1.0, 2.0]},
+                                       "profile": "best"})
+        self.assertEqual([(s["profile"], s["label"], s["params"]) for s in spec["seats"]],
+                         [("classic-production", "Classic production", {"prod_mode": "classic"}),
+                          ("standard", "Standard", {})])
+        self.assertEqual(factorial["profile"], "classic-production")
+        self.assertEqual({s["profile"] for s in lab.game_spec(factorial, 0)["seats"]}, {"classic-production"})
+
+    def test_a_seats_aggression_is_held_to_0_1_when_queued(self):
+        from citar import lab
+        spec = lab.normalize({"name": "agg", "seats": [{"bot": "basic", "aggression": 1.7},
+                                                       {"profile": "standard", "aggression": -2},
+                                                       {"bot": "basic", "aggression": "0.3"}, {"bot": "basic"}]})
+        self.assertEqual([s["aggression"] for s in spec["seats"]], [1.0, 0.0, 0.3, None])
+        factorial = lab.normalize({"name": "agg-f", "factors": {"war_prep_rate": [1.0, 2.0]}, "aggression": 3})
+        self.assertEqual(factorial["aggression"], 1.0)
+        for bad in ("high", float("nan")):
+            with self.assertRaises(profiles.ProfileError, msg=bad):
+                lab.normalize({"name": "bad", "seats": [{"bot": "basic", "aggression": bad}]})
+            with self.assertRaises(profiles.ProfileError, msg=bad):
+                lab.normalize({"name": "bad", "seats": [{"profile": "standard", "aggression": bad}]})
 
     def test_api_queues_an_ab_experiment(self):
         from citar import lab
         from citar.server import bots_api
         admin = SimpleNamespace(handle="tester")
-        spec = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["v1", "snapshot-0922"], games=2,
-                                                                 name="api-ab"), user=admin)
+        spec = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard", "classic-production"],
+                                                                 games=2, name="api-ab"), user=admin)
         try:
-            self.assertEqual([s["profile"] for s in spec["seats"]], ["v1", "snapshot-0922", "v1", "snapshot-0922"])
+            self.assertEqual([s["profile"] for s in spec["seats"]],
+                             ["standard", "classic-production", "standard", "classic-production"])
+            self.assertEqual({s["bot"] for s in spec["seats"]}, {_latest()})
             self.assertTrue((lab.QUEUE / "api-ab.json").exists())
-            again = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["v1"], name="api-ab"), user=admin)
+            again = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard"], name="api-ab"),
+                                              user=admin)
             self.assertEqual(again["name"], "api-ab-2", "names never overwrite an experiment")
             (lab.QUEUE / "api-ab-2.json").unlink()
             from fastapi import HTTPException
             with self.assertRaises(HTTPException):
-                bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["v1"], maps=["mars"]), user=admin)
+                bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard"], maps=["mars"]), user=admin)
         finally:
             (lab.QUEUE / "api-ab.json").unlink(missing_ok=True)
 
+    def test_the_engine_hash_is_the_build_id(self):
+        from citar import lab
+        self.assertEqual(lab.engine_hash(), engine_api.build_info()["build_id"])
 
-class NegotiationTests(unittest.TestCase):
-    def test_a_refused_counter_still_ends_the_bots_move(self):
-        """A live game waited 90 s on a bot whose counter-offer the rules refused (2026-09-22)."""
-        from citar.engine.game import Game
-        from citar.engine import tools
-        g = Game.new({"map_size": "duel", "seed": 21, "barbarians": "off",
-                      "players": [{"controller": "bot"}, {"controller": "bot"}]})
-        a, b = 0, 1
-        g.player(a).met.add(b) if isinstance(g.player(a).met, set) else g.player(a).met.append(b)
-        g.player(b).met.add(a) if isinstance(g.player(b).met, set) else g.player(b).met.append(a)
-        g.player(a).gold = 50
-        n = tools.execute(g, a, "open_negotiation", {"to": b, "message": "Friends?",
-                                                     "give": [{"type": "gold", "amount": 40}], "receive": []})
-        nid = n.get("negotiation_id") or n.get("id") or g.s.negotiations[-1]["id"]
-        g.s.current = b
-        # B asks A for more gold than A has: any counter A builds from that proposal is refused
-        tools.execute(g, b, "respond_negotiation", {"negotiation_id": nid, "action": "counter", "message": "More.",
-                                                    "give": [], "receive": [{"type": "gold", "amount": 45}]})
-        g.s.current = a
-        g.player(b).gold = 1000                   # B can pay, so A counters rather than rejecting outright...
-        g.player(a).gold = 30                     # ...but A can no longer pay the 45 on the table: the counter is refused
-        bot = profiles.make_bot("standard", seed=1)
-        bot.p["counter_max_gap"] = 10 ** 6         # make it try to counter whatever the value
-        bot.respond(g, a, nid)
-        neg = next(x for x in g.s.negotiations if x["id"] == nid)
-        self.assertNotEqual((neg["status"], neg["awaiting"]), ("open", a), neg)
+    def test_a_played_game_records_what_played(self):
+        """Each seat's result names the build, the version, the profile, its revision and the fingerprint, taken
+        at play time; a profile's seats at different positions share one fingerprint."""
+        from citar import lab
+        spec = lab.normalize({"name": "records", "games": 2, "size": "duel", "maps": ["pangaea"], "turns": 12,
+                              "barbarians": "off", "seats": [{"profile": "standard"},
+                                                             {"profile": "classic-production"}]})
+        build = engine_api.build_info()["build_id"]
+        fp = {"standard": profiles.resolve("standard")["fingerprint"],
+              "classic-production": profiles.resolve("classic-production")["fingerprint"]}
+        seen = {}
+        for i in range(2):
+            r = lab.play(lab.game_spec(spec, i))
+            self.assertEqual((r["engine"], r["errors"]), (build, []))
+            for k, pl in r["players"].items():
+                self.assertEqual((pl["build"], pl["version"], pl["profile_rev"]), (build, _latest(), 1))
+                self.assertEqual(pl["fingerprint"], fp[pl["profile"]])
+                self.assertEqual(pl["fixed_aggression"], None)
+                seen.setdefault(pl["profile"], []).append((int(k), pl["aggression"], pl["fingerprint"]))
+        positions = seen["standard"]
+        self.assertEqual(sorted(p for p, _, _ in positions), [0, 1], "standard played both positions")
+        self.assertNotEqual(positions[0][1], positions[1][1], "with each position's aggression")
+        self.assertEqual(len({f for _, _, f in positions}), 1, "and one fingerprint")
+
+    def test_a_played_seat_records_the_aggression_that_played(self):
+        """A seat's fixed aggression is recorded as its bot played it and its fingerprint hashed it, even when the
+        queued value was out of range (an experiment queued before seats were held to 0..1)."""
+        from citar import lab
+        spec = lab.normalize({"name": "agg-played", "games": 1, "size": "duel", "maps": ["pangaea"], "turns": 3,
+                              "barbarians": "off", "seats": [{"bot": "basic"}, {"bot": "basic"}]})
+        game = lab.game_spec(spec, 0)
+        game["seats"][0]["aggression"] = 1.7
+        r = lab.play(game)
+        fixed, open_ = r["players"]["0"], r["players"]["1"]
+        self.assertEqual((fixed["fixed_aggression"], fixed["aggression"]), (1.0, 1.0))
+        self.assertEqual(fixed["fingerprint"], profiles.fingerprint(_latest(), {}, 1.0))
+        self.assertIsNone(open_["fixed_aggression"])
+        self.assertEqual(open_["fingerprint"], profiles.fingerprint(_latest(), {}, None))
 
 
-class BestBotTests(unittest.TestCase):
-    def test_best_is_pinned_when_a_game_is_created(self):
-        from unittest import mock
-        from citar.bots import ratings as rt
-        from citar.server.session import SessionManager
-        with mock.patch.object(rt, "best_profile", return_value="v1"):
-            m = SessionManager()
-            s = m.create({"map_size": "duel", "seed": 5, "barbarians": "off"},
-                         [{"type": "human"}, {"type": "bot", "bot": {"profile": "best", "aggression": 0.4}}],
-                         track=False)
-            try:
-                self.assertEqual(s.seats[1].bot, {"profile": "v1", "aggression": 0.4, "chosen_as": "best"})
-                self.assertEqual(s.get_agent(1).profile["engine"], "frozen_7149efb1")
-            finally:
-                m.delete(s.id)
+#: `citar lab ARGS...` in a process whose engine's extension cannot be found (as when it was never built).
+_NO_EXTENSION = """
+import sys
+class NoExtension:
+    def find_spec(self, name, path=None, target=None):
+        if name == "citar._engine":
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+sys.meta_path.insert(0, NoExtension())
+from citar import lab
+lab.main(sys.argv[1:])
+"""
 
-    def test_best_skips_idle_and_prefers_a_rating_of_the_current_settings(self):
-        def entry(profile, fp, rating, params=None):
-            return {"profile": profile, "fingerprint": fp, "difficulty": "Prince", "rated": True, "rating": rating,
-                    "params": params or {}, "aggression": None, "last": "2026-09-22T00:00:00"}
-        idle_fp = profiles.fingerprint("idle", {}, None)
-        board = [entry("idle", idle_fp, 2000), entry("standard", "old-code", 1700),
-                 entry("v1", profiles.fingerprint("frozen_7149efb1", {}, None), 1500)]
-        self.assertEqual(ratings.best_profile(board), "standard",
-                         "same settings on earlier live code still describe Standard")
-        order = [p["id"] for p in ratings.ranked_profiles(board)]
-        self.assertEqual(order[:3], ["idle", "standard", "v1"])
-        p = profiles.save({"name": "Tuned", "engine": "basic", "params": {"war_prep_rate": 2.0}})
-        try:
-            board.append(entry(p["id"], "tuned-old-settings", 1900, params={"war_prep_rate": 3.0}))
-            self.assertEqual(ratings.best_profile(board), "standard", "a rating of different settings doesn't count")
-        finally:
-            profiles.delete(p["id"])
-        self.assertEqual(ratings.best_profile([]), "standard")
+
+class LabCommandTests(unittest.TestCase):
+    """`citar lab run` and `submit` stop at once, exit 2, when the engine does not load (a CITAR_RULESET_DIR that does
+    not load, the extension missing). The runner never imports the engine itself, each game being a process of its
+    own: without the check it started every queued game three times to crash, then waited for ever."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="citar-lab-cmd-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.lab = self.tmp / "saves" / "lab"
+        self.spec = self.tmp / "spec.json"
+        self.spec.write_text(json.dumps({"name": "queued", "games": 2, "size": "duel", "turns": 3,
+                                         "seats": [{"bot": "basic"}, {"bot": "basic"}]}), encoding="utf-8")
+
+    def lab_command(self, *args: str, env=None) -> subprocess.CompletedProcess:
+        """A child running ``args`` with its saves in this test's folder; at most a minute, which a runner that
+        does not stop exceeds."""
+        base = {k: v for k, v in os.environ.items() if k != "CITAR_RULESET_DIR"}
+        return subprocess.run([sys.executable, *args], capture_output=True, text=True, cwd=ROOT, timeout=60,
+                              env={**base, "CITAR_SAVE_DIR": str(self.tmp / "saves"), **(env or {})})
+
+    def test_run_and_submit_stop_when_the_ruleset_does_not_load(self):
+        r = self.lab_command("-m", "citar.lab", "submit", str(self.spec))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.lab / "queue" / "queued.json").exists())
+        broken = {"CITAR_RULESET_DIR": str(ruleset_copy(self.tmp, {"ruleset/buildings.json": unknown_unique}))}
+        started = time.monotonic()
+        r = self.lab_command("-m", "citar.lab", "run", "--workers", "1", "--exit-when-idle", env=broken)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertLess(time.monotonic() - started, 30, "the runner stops before its first pass")
+        self.assertIn("citar lab run: the engine does not load: CITAR_RULESET_DIR=", r.stderr)
+        self.assertIn("Makes every turn a Tuesday", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        # no game was started, so none crashed, and the experiment waits in the queue for a runner that can play it
+        self.assertFalse((self.lab / "crashes.log").exists())
+        self.assertFalse((self.lab / "lab.log").exists())
+        self.assertTrue((self.lab / "queue" / "queued.json").exists())
+        (self.lab / "queue" / "queued.json").unlink()
+        r = self.lab_command("-m", "citar.lab", "submit", str(self.spec), env=broken)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("citar lab submit: the engine does not load: CITAR_RULESET_DIR=", r.stderr)
+        self.assertFalse((self.lab / "queue" / "queued.json").exists())
+
+    def test_run_and_submit_stop_without_the_extension(self):
+        for argv in (["run", "--exit-when-idle"], ["submit", str(self.spec)]):
+            r = self.lab_command("-c", _NO_EXTENSION, *argv)
+            self.assertEqual(r.returncode, 2, argv)
+            self.assertIn(f"citar lab {argv[0]}: the engine does not load: cannot import name '_engine'", r.stderr)
+        self.assertFalse((self.lab / "queue" / "queued.json").exists())
+        self.assertFalse((self.lab / "crashes.log").exists())
+
+    def test_a_runner_left_with_games_it_gave_up_on_exits_when_idle(self):
+        """A runner tries a game three times; once every game left has crashed three times, `--exit-when-idle`
+        exits rather than wait for ever (the next runner tries them again)."""
+        from citar import lab
+        own = {name: self.lab / name.lower() for name in ("QUEUE", "RESULTS", "DONE", "JOBS")}
+        own["JOBS"].mkdir(parents=True)
+        with mock.patch.multiple(lab, LAB=self.lab, **own), mock.patch.object(lab, "quiet_now", return_value=False), \
+                mock.patch("subprocess.Popen", side_effect=AssertionError("no game may start")):
+            spec = lab.submit({"name": "gave-up", "games": 2, "size": "duel", "seats": [{"bot": "basic"}] * 2})
+            (lab.RESULTS / "gave-up.jsonl").write_text(json.dumps({"i": 0}) + "\n", encoding="utf-8")
+            gave_up = Counter({(spec["name"], 1): 3})
+            args = SimpleNamespace(workers=1, night_workers=1, exit_when_idle=True, max_minutes=1)
+            # without the flag the runner keeps going, and the experiment stays queued
+            self.assertFalse(lab._runner_step(SimpleNamespace(**{**vars(args), "exit_when_idle": False}), {},
+                                              gave_up, [], 0, 1))
+            with contextlib.redirect_stdout(io.StringIO()):     # log() prints each line too
+                self.assertTrue(lab._runner_step(args, {}, gave_up, [], 0, 1))
+            self.assertIn("nothing left to play: 1 game(s) crashed three times (gave-up #1)",
+                          (self.lab / "lab.log").read_text(encoding="utf-8"))
+            self.assertTrue((own["QUEUE"] / "gave-up.json").exists())
+            # a game it has yet to give up on keeps it waiting (here: one it would start, which this test refuses)
+            with self.assertRaisesRegex(AssertionError, "no game may start"):
+                lab._runner_step(args, {}, Counter({(spec["name"], 1): 2}), [], 0, 1)
 
 
 class RatingTests(unittest.TestCase):
@@ -254,33 +514,169 @@ class RatingTests(unittest.TestCase):
         self.assertAlmostEqual(pairs[("a", "b")][1], 1 / 3)
         self.assertAlmostEqual(sum(n for _, n in pairs.values()), 2.0, msg="4 seats x 3 pairs / 2 x 1/3")
 
-    def test_rankings_from_lab_results(self):
+
+class LadderTests(unittest.TestCase):
+    """Entries keyed and named from the results' own records (DESIGN.md P2.8.7): nothing here asks the engine."""
+
+    def setUp(self):
         from citar import lab
         lab._dirs()
-        spec = lab.normalize({"name": "rate-me", "seats": [{"profile": "v1"}, {"profile": "v0"}], "games": 3})
-        (lab.DONE / "rate-me.json").write_text(json.dumps(spec), encoding="utf-8")
-        rows = []
-        for i in range(3):
-            players = {}
-            for k, seat in enumerate(lab.game_spec(spec, i)["seats"]):
-                share = 0.7 if seat["profile"] == "v1" else 0.3
-                players[str(k)] = {"label": seat["label"], "bot": seat["bot"], "difficulty": "Prince", "alive": True,
-                                   "score_share": share, "rank": 0 if share > 0.5 else 1, "fingerprint": seat["fingerprint"],
-                                   "profile": seat["profile"], "profile_rev": 1, "techs": 50, "cities": 5, "events": {}}
-            rows.append(json.dumps({"exp": "rate-me", "i": i, "turns": 100, "winner": None, "victory": None,
-                                    "players": players, "finished": f"2026-09-2{i}T10:00:00"}))
-        (lab.RESULTS / "rate-me.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
-        try:
-            board = ratings.rankings()["entries"]
-            names = [b["name"] for b in board if "rate-me" in b["experiments"]]
-            self.assertEqual(names[:2], ["v1 (18 Sep)", "v0 (18 Sep)"])
-            v1 = next(b for b in board if b["name"] == "v1 (18 Sep)")
-            self.assertEqual((v1["seats"], v1["profile"]), (3, "v1"))
-            hist = ratings.rankings()["history"][v1["id"]]
-            self.assertEqual([h[0] for h in hist], ["2026-09-20", "2026-09-21", "2026-09-22"])
-        finally:
-            (lab.DONE / "rate-me.json").unlink()
-            (lab.RESULTS / "rate-me.jsonl").unlink()
+        self.written = []
+
+    def tearDown(self):
+        for p in self.written:
+            p.unlink(missing_ok=True)
+        _clear_profiles()
+
+    def _experiment(self, name, rows):
+        """An experiment and its results, as the lab writes them."""
+        from citar import lab
+        spec = {**lab.DEFAULTS, "name": name, "games": len(rows), "submitted": "2026-10-01T00:00:00",
+                "seats": [{"label": "A"}, {"label": "B"}]}
+        for path, text in ((lab.DONE / f"{name}.json", json.dumps(spec)),
+                           (lab.RESULTS / f"{name}.jsonl", "\n".join(json.dumps(r) for r in rows) + "\n")):
+            path.write_text(text, encoding="utf-8")
+            self.written.append(path)
+
+    @staticmethod
+    def _seat(fp, share, rank, profile=None, rev=1, name=None, label=None, build="b1", version="basic-1"):
+        return {"label": label or name or profile, "bot": version, "difficulty": "Prince", "alive": True,
+                "score_share": share, "rank": rank, "fingerprint": fp, "build": build, "version": version,
+                "profile": profile, "profile_rev": rev, "profile_name": name, "params": {},
+                "fixed_aggression": None, "techs": 50, "cities": 5, "events": {}}
+
+    def _game(self, i, a, b, day):
+        return {"exp": "x", "i": i, "turns": 100, "winner": None, "victory": None,
+                "players": {"0": a, "1": b}, "finished": f"2026-10-0{day}T10:00:00"}
+
+    def test_rankings_from_lab_results(self):
+        rows = [self._game(i, self._seat("f-std", 0.7, 0, "standard", name="Standard"),
+                           self._seat("f-cls", 0.3, 1, "classic-production", name="Classic production"), i + 1)
+                for i in range(3)]
+        self._experiment("rate-me", rows)
+        board = [b for b in ratings.rankings()["entries"] if "rate-me" in b["experiments"]]
+        self.assertEqual([b["name"] for b in board], ["Standard", "Classic production"])
+        std = board[0]
+        self.assertEqual((std["seats"], std["profile"], std["rev"], std["code"], std["build"]),
+                         (3, "standard", 1, "basic-1", "b1"))
+        hist = ratings.rankings()["history"][std["id"]]
+        self.assertEqual([h[0] for h in hist], ["2026-10-01", "2026-10-02", "2026-10-03"])
+
+    def test_entries_are_named_from_their_records(self):
+        rows = [
+            # one profile on two builds: told apart by build
+            self._game(0, self._seat("std-b1", 0.6, 0, "standard", name="Standard"),
+                       self._seat("std-b2", 0.4, 1, "standard", name="Standard", build="b2"), 1),
+            # a deleted profile keeps the name it played under; a later revision says so; no profile: the label
+            self._game(1, self._seat("gone", 0.6, 0, "deleted-one", rev=2, name="Since deleted"),
+                       self._seat("raw", 0.4, 1, None, label="raw seat"), 2),
+            # a seat that recorded no fingerprint (0.1.5's oldest results): the game is not rated
+            self._game(2, self._seat("std-b1", 0.6, 0, "standard", name="Standard"),
+                       {**self._seat(None, 0.4, 1, "standard"), "fingerprint": None}, 3),
+        ]
+        self._experiment("names", rows)
+        board = {b["fingerprint"]: b for b in ratings.rankings()["entries"] if "names" in b["experiments"]}
+        self.assertEqual(set(board), {"std-b1", "std-b2", "gone", "raw"})
+        self.assertEqual(board["std-b1"]["name"], "Standard · basic-1, build b1")
+        self.assertEqual(board["std-b2"]["name"], "Standard · basic-1, build b2")
+        self.assertEqual(board["gone"]["name"], "Since deleted r2")
+        self.assertEqual(board["raw"]["name"], "raw seat")
+        self.assertEqual(board["std-b1"]["seats"], 1, "the unrated game is not counted")
+        p = profiles.PROFILES_DIR
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "deleted-one.json").write_text(json.dumps({"id": "deleted-one", "name": "Back again", "engine": "basic",
+                                                        "params": {}, "aggression": None, "rev": 2}),
+                                            encoding="utf-8")
+        renamed = {b["fingerprint"]: b for b in ratings.rankings()["entries"]}
+        self.assertEqual(renamed["gone"]["name"], "Back again r2", "a profile is called what it is called now")
+
+    def test_results_of_0_1_5_are_not_rated(self):
+        """The ladder of 0.1.6 starts empty (DESIGN.md P2.8.7): an upgraded install keeps 0.1.5's results, whose
+        seats record a fingerprint of the Python bot (frozen snapshots among them) but no build or version, and
+        none of their games is rated, nor can they make a 0.1.5 profile the best bot."""
+        def old(fp, share, rank, profile, name, bot):
+            return {"label": name, "bot": bot, "difficulty": "Prince", "alive": True, "levels": None,
+                    "profile": profile, "profile_rev": 1, "fingerprint": fp, "aggression": 0.25,
+                    "score_share": share, "rank": rank, "techs": 50, "cities": 5, "events": {}}
+        p = profiles.PROFILES_DIR
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "v2-candidate-a.json").write_text(json.dumps(
+            {"id": "v2-candidate-a", "name": "v2 candidate A", "engine": "frozen_4f6e040a", "params": {},
+             "aggression": None, "rev": 1}), encoding="utf-8")
+        rows = [{**self._game(i, old("8c1f0e2a9b3d", 0.8, 0, "v2-candidate-a", "v2 candidate A", "frozen_4f6e040a"),
+                              old("1d2c3b4a5f6e", 0.2, 1, "standard", "Standard", "frozen_de161146"), i + 1),
+                 "engine": "e7427f9dc8"} for i in range(4)]
+        # a seat of 0.1.6 does not make a game with a seat of 0.1.5 rated
+        rows.append(self._game(4, self._seat("new-std", 0.6, 0, "standard", name="Standard"),
+                               old("1d2c3b4a5f6e", 0.4, 1, "standard", "Standard", "frozen_de161146"), 5))
+        self._experiment("league-0-1-5", rows)
+        r = ratings.rankings()
+        self.assertEqual([b for b in r["entries"] if "league-0-1-5" in b["experiments"]], [])
+        self.assertEqual(ratings.best_profile(), "standard")
+
+
+class BestBotTests(unittest.TestCase):
+    def tearDown(self):
+        _clear_profiles()
+
+    def test_best_is_pinned_when_a_game_is_created(self):
+        from citar.bots import ratings as rt
+        from citar.server.session import SessionManager
+        with mock.patch.object(rt, "best_profile", return_value="classic-production"):
+            m = SessionManager()
+            s = m.create({"map_size": "duel", "seed": 5, "barbarians": "off"},
+                         [{"type": "human"}, {"type": "bot", "bot": {"profile": "best", "aggression": 0.4}}],
+                         track=False)
+            try:
+                self.assertEqual(s.seats[1].bot, {"profile": "classic-production", "aggression": 0.4,
+                                                  "chosen_as": "best"})
+                agent = s.get_agent(1).profile
+                self.assertEqual((agent["engine"], agent["params"]), ("basic", {"prod_mode": "classic"}))
+            finally:
+                m.delete(s.id)
+
+    def test_best_skips_idle_and_prefers_a_rating_of_the_current_settings(self):
+        def entry(profile, fp, rating, params=None):
+            return {"profile": profile, "fingerprint": fp, "difficulty": "Prince", "rated": True, "rating": rating,
+                    "params": {} if params is None else params, "aggression": None, "last": "2026-10-02T00:00:00"}
+        board = [entry("idle", "idle-fp", 2000), entry("standard", "earlier-build", 1700),
+                 entry("classic-production", "cls-earlier", 1500, params={"prod_mode": "classic"})]
+        self.assertEqual(ratings.best_profile(board), "standard",
+                         "the same settings on an earlier build still describe Standard")
+        order = [p["id"] for p in ratings.ranked_profiles(board)]
+        self.assertEqual(order[:3], ["idle", "standard", "classic-production"])
+        p = profiles.PROFILES_DIR
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "tuned.json").write_text(json.dumps({"id": "tuned", "name": "Tuned", "engine": "basic", "rev": 1,
+                                                  "params": {"war_prep_rate": 2.0}, "aggression": None}),
+                                      encoding="utf-8")
+        board.append(entry("tuned", "tuned-old-settings", 1900, params={"war_prep_rate": 3.0}))
+        self.assertEqual(ratings.best_profile(board), "standard", "a rating of different settings doesn't count")
+        board[1]["params"] = None
+        self.assertEqual(ratings.best_profile(board), "classic-production",
+                         "a result that recorded no overrides describes no settings: the best that does wins")
+        self.assertEqual(ratings.best_profile([]), "standard")
+
+    def test_best_skips_a_profile_that_cannot_play(self):
+        # a saved profile on a frozen snapshot of 0.1.5 is refused wherever it would play, so it is never the best
+        p = profiles.PROFILES_DIR
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "old-tuned.json").write_text(json.dumps({"id": "old-tuned", "name": "Old tuned", "rev": 1,
+                                                      "engine": "frozen_d95d50cb", "params": {}, "aggression": None}),
+                                          encoding="utf-8")
+        # neither rating describes its profile's current settings, so the highest-rated profile that plays wins
+        board = [{"profile": "old-tuned", "fingerprint": "old", "difficulty": "Prince", "rated": True,
+                  "rating": 2100, "params": {}, "aggression": None, "last": "2026-10-02T00:00:00"},
+                 {"profile": "classic-production", "fingerprint": "cls", "difficulty": "Prince", "rated": True,
+                  "rating": 1600, "params": None, "aggression": None, "last": "2026-10-02T00:00:00"}]
+        self.assertEqual(ratings.best_profile(board), "classic-production")
+
+    def test_the_current_revision_is_flagged(self):
+        fp = profiles.resolve("classic-production")["fingerprint"]
+        board = [{"profile": "classic-production", "fingerprint": fp, "difficulty": "Prince", "rated": True,
+                  "rating": 1600, "params": {"prod_mode": "classic"}, "aggression": None, "last": "2026-10-02"}]
+        p = ratings.profile_rating(profiles.get("classic-production"), board)
+        self.assertEqual((p["fingerprint"], p["rating_is_current"], p["rating"]["rating"]), (fp, True, 1600))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+# Exactly this toolchain: a sort's tie order or a float formatting change in a new release could
+# move a digest, so a bump is its own pull request that re-blesses the goldens (DESIGN.md 7.5).
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -32,6 +32,7 @@ const HELP = {
   "Context": "Context length the model was loaded with (LM Studio). Below ~24k, models lose their briefing mid-turn.",
   "Slowest call": "Slowest single model request (model loading shows up here).",
   "Cold starts": "Turns where the model was not loaded when the turn began (LM Studio swapping models between seats).",
+  "Bot actions/turn": "Actions a scripted bot took per turn (its actions do not pass through tool calls, so the columns before are empty for it).",
   "Turn ends": "How turns ended: end_turn (clean), stalled, step_limit, time_limit, tool_limit, no_tool_calls, error, cancelled, ended_by_server. Turns interrupted by a server restart are excluded from all stats.",
 };
 
@@ -64,7 +65,7 @@ export async function openMetrics(gid) {
       th("Civ"), th("Controller"), th("Turns"), th("Avg turn"), th("Median"), th("Max"), th("Steps/turn"), th("Step time"),
       th("Calls/turn"), th("OK actions"), th("Errors/turn"), th("Repeats/turn"), th("Blocked"), th("Malformed"),
       th("Stall nudges"), th("Out tok/turn"), th("Tok/s"), th("Peak prompt"), th("Context"), th("Slowest call"),
-      th("Cold starts"), th("Turn ends")));
+      th("Cold starts"), th("Bot actions/turn"), th("Turn ends")));
     for (const s of seats) {
       const tr = el("tr", { style: { cursor: "pointer", background: s.pid === selected ? "#1d2c47" : "" }, onclick: () => { selected = s.pid; draw(); } },
         el("td", {}, el("span", { class: "swatch", style: { background: COLORS[s.pid % COLORS.length] } }), s.name),
@@ -82,6 +83,7 @@ export async function openMetrics(gid) {
           el("td", { class: s.context_length && s.context_length < 24000 ? "bad" : "" }, s.context_length ? s.context_length.toLocaleString() : "–"),
           el("td", {}, s.slowest_step_s ? secs(s.slowest_step_s) : "–"),
           el("td", { class: s.turns_model_not_loaded ? "warn" : "" }, s.turns_model_not_loaded ?? "–"),
+          el("td", {}, s.avg_bot_actions != null ? fmt(s.avg_bot_actions, 1) : "–"),
           el("td", {}, reasonsText(s.end_reasons)));
       }
       table.appendChild(tr);
@@ -100,6 +102,11 @@ export async function openMetrics(gid) {
         tools.appendChild(el("tr", {}, el("td", {}, name), el("td", {}, t.count), el("td", {}, t.per_turn),
           el("td", { class: t.max_in_turn >= 6 ? "warn" : "" }, t.max_in_turn), el("td", { class: t.errors ? "warn" : "" }, t.errors),
           el("td", {}, t.avg_ms)));
+      }
+      // a scripted bot's actions: taken and refused per tool (its turns have no tool calls)
+      for (const [name, a] of Object.entries(s.bot_actions || {})) {
+        tools.appendChild(el("tr", {}, el("td", {}, name), el("td", {}, a.taken), el("td", {}, a.per_turn),
+          el("td", {}, a.max_in_turn), el("td", { class: a.refused ? "warn" : "", title: "refused" }, a.refused), el("td", {}, "–")));
       }
       const repeats = el("div", { class: "col" }, ...(s.top_repeats.length ? s.top_repeats.map((r) =>
         el("div", {}, el("b", {}, `×${r.max_times_in_a_turn} `), el("code", {}, r.call))) : [el("span", { class: "muted" }, "No repeated identical calls.")]));

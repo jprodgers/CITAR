@@ -39,12 +39,14 @@ from pathlib import Path
 from .fsutil import replace as _fs_replace
 from typing import Optional
 
-from .engine.game import ActionError
-from . import paths
+from . import engine_api, paths
+from .engine_api import ActionError
 
 BASE = paths.saves_path("probes")
 RUNS = BASE / "runs"
 CASE_KINDS = ("offer", "message", "turn")
+# What the scripted counterparty says with each answer: every negotiation entry carries a message
+SCRIPT_LINES = {"accept": "Agreed.", "reject": "No deal.", "counter": "How about this instead?", "reply": "Noted."}
 
 
 class ProbeError(ValueError):
@@ -75,16 +77,15 @@ def _path(pid: str) -> Path:
 
 def validate(data: dict) -> dict:
     """Checks a probe's structure (not its deal items; those are checked by the game when a case runs)."""
-    from .engine import scenario as S
     if not isinstance(data, dict):
         raise ProbeError("A probe must be a JSON object.")
     if not data.get("scenario"):
         raise ProbeError("A probe needs a scenario id.")
     try:
-        scn = S.load_scenario(data["scenario"])
+        scn = engine_api.load_scenario(data["scenario"])
     except ActionError as e:
         raise ProbeError(str(e))
-    majors = [p["id"] for p in scn["state"]["players"] if p.get("kind") == "major"]
+    majors = [p["id"] for p in engine_api.state_summary(scn["state"])["majors"]]
     for k in ("subject", "counterparty"):
         if k in data and data[k] is not None and int(data[k]) not in majors:
             raise ProbeError(f"{k} must be a major civilization of the scenario ({majors}).")
@@ -189,9 +190,8 @@ def example_probe(scenario_id: str, subject: int = 1, counterparty: int = 0) -> 
 # ----------------------------------------------------------------------------
 def _items_text(g, items) -> str:
     """A deal's items as text, for the record of what was offered."""
-    from .engine.diplomacy import describe_items
     try:
-        return describe_items(g, items or [])
+        return g.describe_items(items or [])
     except Exception:
         return json.dumps(items)
 
@@ -199,7 +199,6 @@ def _items_text(g, items) -> str:
 def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_path: Optional[Path] = None,
              live: Optional[dict] = None, should_stop=lambda: False, usage_act: Optional[str] = None) -> dict:
     """Plays one case on a fresh copy of the scenario and returns its record."""
-    from .engine import scenario as S, diplomacy as D, tools
     subject, cp = probe["subject"], probe.get("counterparty")
     seats = [None] * len(scn.get("seats") or [])
     seats = [{} for _ in range(max(len(seats), subject + 1, (cp or 0) + 1))]
@@ -221,7 +220,7 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
            "outcome": None, "passed": None, "subject_messages": [], "counter_offers": [], "tool_calls": [],
            "thoughts": [], "error": None}
     t0 = time.time()
-    thought_mark = len(g.s.thoughts)
+    thought_mark = g.thought_count()
     calls: list = []
     orig_call = s.call_tool
 
@@ -233,47 +232,55 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                           "error": (res.get("error") or "")[:300] or None})
         return res
     s.call_tool = recording_call        # every call the model makes, queries and failures included
+    if is_bot:
+        # The bot's actions never pass through call_tool: its turn is a drive and its answers go through
+        # EngineGame.answer. Each drive's counts for the subject are recorded as its calls instead.
+        orig_drive = s.drive_bots
+
+        def recording_drive(pid):
+            """Record the subject's actions in each drive of its turn."""
+            stop = orig_drive(pid)
+            _record_bot_actions(calls, (stop.get("actions") or {}).get(subject))
+            return stop
+        s.drive_bots = recording_drive
     if live is not None:
         live.update({"case": case["id"], "session": s, "since": t0})
     try:
         with s.lock:
-            S.apply_ops(g, (probe.get("setup") or []) + (case.get("setup") or []))
+            g.apply_ops((probe.get("setup") or []) + (case.get("setup") or []))
         agent = s.get_agent(subject)
         if case["kind"] in ("offer", "message"):
             with s.lock:
                 if not g.has_met(cp, subject):
                     g.meet(cp, subject)
-                saved_current = g.s.current
-                g.s.current = cp            # negotiations are opened on the opener's turn
-                try:
-                    give = case.get("give") if case["kind"] == "offer" else None
-                    receive = case.get("receive") if case["kind"] == "offer" else None
-                    if case["kind"] == "offer":
-                        give, receive = give or [], receive or []
-                    r = D.open_negotiation(g, cp, subject, case["message"], give, receive)
-                finally:
-                    g.s.current = saved_current
+                give = case.get("give") if case["kind"] == "offer" else None
+                receive = case.get("receive") if case["kind"] == "offer" else None
+                if case["kind"] == "offer":
+                    give, receive = give or [], receive or []
+                r = g.open_negotiation_as(cp, subject, case["message"], give, receive)
                 rec["offer_text"] = None
                 nid = r["negotiation_id"]
-                prop = D.get_negotiation(g, nid)["proposal"]
+                prop = g.negotiation(nid)["proposal"]
                 if prop:
-                    rec["offer_text"] = (f"{g.player(cp).name} gives {_items_text(g, prop[str(cp)])}; "
-                                         f"{g.player(subject).name} gives {_items_text(g, prop[str(subject)])}")
+                    rec["offer_text"] = (f"{g.player_name(cp)} gives {_items_text(g, prop[str(cp)])}; "
+                                         f"{g.player_name(subject)} gives {_items_text(g, prop[str(subject)])}")
                     try:
                         # the subject's side too, so an impossible request is reported rather than "no response"
-                        D.validate_items(g, subject, cp, prop[str(subject)], prop)
+                        g.validate_items(subject, cp, prop[str(subject)], prop)
                     except ActionError as e:
                         rec["outcome"] = "invalid_case"
                         rec["error"] = f"The subject cannot give what the case asks: {e}"
                         raise _CaseInvalid()
             followups = list(case.get("followups") or [])
-            for _round in range(g.rules.const["diplomacy"]["max_negotiation_exchanges"] + 1):
+            for _round in range(g.max_chat_messages() + 1):
                 if should_stop():
                     rec["outcome"] = "stopped"
                     break
-                agent.respond_negotiation(s, subject, nid)
+                answer = agent.respond_negotiation(s, subject, nid)
+                if is_bot and isinstance(answer, dict):
+                    _record_bot_actions(calls, answer.get("actions"))
                 with s.lock:
-                    n = D.get_negotiation(g, nid)
+                    n = g.negotiation(nid)
                     last = n["history"][-1] if n["history"] else {}
                     if last.get("by") == subject:
                         if last.get("message"):
@@ -282,8 +289,8 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                             prop = last["proposal"]
                             rec["counter_offers"].append({
                                 "subject_gives": prop.get(str(subject), []), "subject_asks": prop.get(str(cp), []),
-                                "text": f"{g.player(subject).name} gives {_items_text(g, prop.get(str(subject)))}; "
-                                        f"{g.player(cp).name} gives {_items_text(g, prop.get(str(cp)))}"})
+                                "text": f"{g.player_name(subject)} gives {_items_text(g, prop.get(str(subject)))}; "
+                                        f"{g.player_name(cp)} gives {_items_text(g, prop.get(str(cp)))}"})
                     if n["status"] != "open":
                         rec["outcome"] = {"accepted": "accept"}.get(n["status"], n["status"])
                         if n["status"] == "rejected":
@@ -298,41 +305,53 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                     rec["outcome"] = last.get("action") or "reply"
                     if followups:
                         f = followups.pop(0)
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, **f})
+                        # every negotiation entry carries a message; a case written without one gets a plain line
+                        g.execute(cp, "respond_negotiation",
+                                  {"negotiation_id": nid, "message": SCRIPT_LINES.get(f.get("action"), "Noted."), **f})
                         continue
                     policy = case.get("on_counter", "leave" if case["kind"] == "message" else "reject")
                     if policy == "leave":
                         break
                     action = "accept" if policy == "accept" and n["proposal"] and n["proposal_by"] == subject else "reject"
                     try:
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, "action": action})
+                        g.execute(cp, "respond_negotiation", {"negotiation_id": nid, "action": action,
+                                                              "message": SCRIPT_LINES[action]})
                     except ActionError:
-                        tools.execute(g, cp, "respond_negotiation", {"negotiation_id": nid, "action": "reject"})
+                        g.execute(cp, "respond_negotiation", {"negotiation_id": nid, "action": "reject",
+                                                              "message": SCRIPT_LINES["reject"]})
                     if action == "accept":
                         rec["outcome"] = "counter_accepted_by_script"
                     break
             with s.lock:
-                n = D.get_negotiation(g, nid)
-                rec["negotiation"] = D.negotiation_view(g, n, cp)
+                n = g.negotiation(nid)
+                rec["negotiation"] = g.negotiation_view(nid, cp)
                 if n.get("deal_id") is not None:
-                    deal = next((d for d in g.s.deals if d.get("id") == n["deal_id"]), None)
+                    deal = g.deal(n["deal_id"])
                     rec["deal"] = deal.get("summary") if deal else None
         elif case["kind"] == "turn":
             with s.lock:
-                if g.s.current != subject:
-                    g.s.current = subject
-                    g.s.turn_started = False
-                    g.begin_turn()
+                g.force_turn(subject)
                 s._track_turn()
+                began = (g.turn, g.current)
+            if is_bot:
+                # Nobody answers a chat in a turn case (the other seats are scripts): a chat the bot opens expires at
+                # once rather than after the bot's wait for a reply, and its turn goes on to its end.
+                agent.REPLY_WAIT_SECONDS = 0.0
             agent.play_turn(s, subject)
             with s.lock:
-                ended = any(c["tool"] == "end_turn" and c["ok"] for c in calls)
-                rec["end_reason"] = "end_turn" if ended or is_bot else \
+                if is_bot:
+                    # the drive ends the bot's turn itself, with no end_turn call: the turn moving on is its end_turn
+                    ended = not s.crashed and ((g.turn, g.current) != began or g.phase != "playing")
+                    if ended:
+                        calls.append({"tool": "end_turn", "args": None, "ok": True, "error": None, "count": 1})
+                else:
+                    ended = any(c["tool"] == "end_turn" and c["ok"] for c in calls)
+                rec["end_reason"] = "end_turn" if ended else \
                     ((s.metrics.current(subject) or {}).get("end_reason") or "no_end_turn")
             rec["outcome"] = rec["end_reason"]
         with s.lock:
-            rec["thoughts"] = [{"kind": t.get("kind"), "text": t.get("text")} for t in g.s.thoughts[thought_mark:]
-                               if t.get("player") == subject][-40:]
+            rec["thoughts"] = [{"kind": t.get("kind"), "text": t.get("text")}
+                               for t in g.thoughts(subject, since=thought_mark)][-40:]
             rec["tool_calls"] = calls
     except _CaseInvalid:
         pass
@@ -348,17 +367,30 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                                                        "cache_read_input_tokens", "cache_creation_input_tokens") if k in usage}
         if save_path is not None:
             try:
-                data = s.to_save()
-                import gzip
-                save_path.parent.mkdir(parents=True, exist_ok=True)
-                with gzip.open(save_path, "wt", encoding="utf-8") as f:
-                    json.dump(data, f)
+                s.save_copy(save_path)      # beside it, its own journal: the case's game stands apart from the run's
                 rec["save"] = str(save_path)
             except Exception:
                 pass
         s.stop()
+    if s.crashed:
+        # the engine stopped mid-case (GameSession._crashed): whatever the subject did before it, the case did not run
+        rec["outcome"] = "error"
+        rec["error"] = f"The engine stopped on turn {s.crashed['turn']}: {str(s.crashed['message'])[:300]}"
+        rec["passed"] = False
+        return rec
     rec["passed"] = _check(case, rec)
     return rec
+
+
+def _record_bot_actions(calls: list, counts) -> None:
+    """Add the bot subject's actions from one drive or one answer (``{tool: [taken, refused]}``) to a case's calls:
+    one entry per tool taken (``ok``, with its ``count``) and one per tool refused."""
+    for tool, pair in (counts or {}).items():
+        taken, refused = (list(pair) + [0, 0])[:2]
+        for ok, n in ((True, taken), (False, refused)):
+            if n and len(calls) < 400:
+                calls.append({"tool": tool, "args": None, "ok": ok, "error": None if ok else "refused by the engine",
+                              "count": int(n)})
 
 
 def _check(case: dict, rec: dict) -> Optional[bool]:
@@ -581,10 +613,9 @@ class ProbeRunner:
 
     def _run(self, rid: str):
         """Execute one run: every case, in order, with the configured repeats."""
-        from .engine import scenario as S
         run = self.get_run(rid)
         probe = run["probe"]
-        scn = S.load_scenario(probe["scenario"])
+        scn = engine_api.load_scenario(probe["scenario"])
         done = {(r["case"], r.get("rep", 0)) for r in self.results(rid)}
         run["status"], run["started"] = "running", run.get("started") or time.time()
         self._write(run)
@@ -797,7 +828,7 @@ class ProbeRunner:
                 with s.lock:
                     subj = next((seat.player for seat in s.seats if seat.type == "llm"), None)
                     live["thoughts"] = [{"kind": t.get("kind"), "text": (t.get("text") or "")[:1500]}
-                                        for t in s.game.s.thoughts if t.get("player") == subj][-6:]
+                                        for t in (s.game.thoughts(subj) if subj is not None else [])][-6:]
             except Exception:
                 pass
         if live.get("since"):

@@ -1,0 +1,16 @@
+{
+  "Kitchen Sink Outpost": {
+    "name": "Kitchen Sink Outpost",
+    "terrainsCanBeBuiltOn": ["Plains", "Grassland"],
+    "gold": 1,
+    "turnsToBuild": 5,
+    "techRequired": "Construction",
+    "uniques": [
+      "Destroyed when pillaged",
+      "Pillaging this improvement yields [+20 Gold]",
+      "Costs [1] [Gold] per turn when in your territory",
+      "Obsolete with [Refrigeration]"
+    ],
+    "id": "kitchen_sink_outpost"
+  }
+}

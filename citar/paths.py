@@ -62,11 +62,6 @@ def _env(name: str) -> str:
 
 # --------------------------------------------------------------------------- package data
 
-def package_data() -> Path:
-    """The ruleset and other JSON shipped with the package (``citar/data``)."""
-    return PACKAGE / "data"
-
-
 def web_dir() -> Path:
     """The browser client served as static files (``citar/web``)."""
     return PACKAGE / "web"

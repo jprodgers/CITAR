@@ -1,0 +1,96 @@
+about = """
+When the bot's own proposal is answered with words alone, it says once that its offer stands, and
+rejects the next time. It reads only the items, never the words. Talk with nothing on the table gets
+one invitation to make a proposal, then a rejection.
+"""
+from = "tests/test_bot_diplomacy.py::CounterTests::test_our_offer_stands_once_then_the_bot_rejects"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+]
+
+[[step]]
+note = "Player 0 is the bot's seat: the proposal is its own."
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "From the bot.", give = [{ type = "gold", amount = 10 }], receive = [{ type = "share_map" }] }
+as = "opened"
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = "=opened.negotiation_id", action = "reply", message = "Hmm." }
+
+[[step]]
+bot = "respond"
+player = 0
+negotiation = "=opened.negotiation_id"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history[2]"
+subset = { by = 0, action = "reply", message = "Our offer stands." }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+subset = { status = "open", awaiting = 1 }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = "=opened.negotiation_id", action = "reply", message = "Hmm!" }
+
+[[step]]
+bot = "respond"
+player = 0
+negotiation = "=opened.negotiation_id"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+subset = { status = "rejected" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=opened.negotiation_id" }
+path = "history[4]"
+subset = { by = 0, action = "reject", message = "Then we have no deal." }
+
+[[step]]
+note = "Talk alone: one invitation, then a rejection."
+op = "open_negotiation_as"
+args = { player = 1, to = 0, message = "Hello." }
+as = "talk"
+
+[[step]]
+bot = "respond"
+player = 0
+negotiation = "=talk.negotiation_id"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=talk.negotiation_id" }
+path = "history[1]"
+subset = { by = 0, action = "reply", message = "Words are wind. Make a concrete proposal." }
+
+[[step]]
+tool = "respond_negotiation"
+player = 1
+args = { negotiation_id = "=talk.negotiation_id", action = "reply", message = "Still talking." }
+
+[[step]]
+bot = "respond"
+player = 0
+negotiation = "=talk.negotiation_id"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=talk.negotiation_id" }
+subset = { status = "rejected" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=talk.negotiation_id" }
+path = "history[3]"
+subset = { by = 0, action = "reject", message = "We have nothing further to discuss." }

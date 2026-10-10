@@ -1,0 +1,132 @@
+about = """
+A great prophet founds a religion through its unit action, and a second great prophet takes its
+civilization's new religion. Spreading it into another civilization's city adds its religious
+strength there as pressure: the city converts, both civilizations are told, and a use of the action
+is spent, the prophet keeping its others. A city that follows the religion already, and a unit with
+no religion to spread, are refused.
+"""
+from = "tests/test_mechanics.py::ReligionTests::test_pantheon_and_religion"
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", name = "Roma" },
+  { op = "found_city", player = 1, at = "B", name = "Antium" },
+  { op = "set_player", player = 0, faith = 25 },
+  { op = "add_unit", player = 0, unit = "Great Prophet", at = "A" },
+  { op = "add_unit", player = 0, unit = "Great Prophet", at = "A" },
+  { op = "add_unit", player = 0, unit = "Missionary", at = "A" },
+]
+as = "made"
+
+[[step]]
+set = { roma = "=made[0].city_id", antium = "=made[1].city_id", founder = "=made[3].unit_ids[0]", apostle = "=made[4].unit_ids[0]", missionary = "=made[5].unit_ids[0]" }
+
+[[step]]
+tool = "found_pantheon"
+args = { belief = "God of the Sea" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=founder" }
+
+[[step]]
+check = { what = "unit_actions", unit = "=founder" }
+any = { subset = { id = "found_religion", available = true } }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=founder", action = "found_religion", beliefs = ["Ceremonial Burial", "Feed the World"] }
+error = "Give the religion a name."
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=founder", action = "found_religion", name = "The Way", beliefs = ["Ceremonial Burial", "Feed the World"] }
+as = "founded"
+
+[[step]]
+check = "founded"
+subset = { founded = "The Way", holy_city = "Roma" }
+
+[[step]]
+check = { what = "units", player = 0 }
+none = { path = "id", eq = "=founder" }
+
+[[step]]
+note = "The missionary was made before the religion, in a city of no religion: it carries none."
+op = "ready_unit"
+args = { unit = "=missionary" }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=missionary", action = "spread_religion" }
+error = "This unit carries no religion."
+
+[[step]]
+note = "Roma follows the religion: the prophet cannot spread it there."
+op = "ready_unit"
+args = { unit = "=apostle" }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=apostle", action = "spread_religion" }
+error = "Roma already follows The Way."
+
+[[step]]
+note = "In Antium's land, next to it."
+op = "set_unit"
+args = { unit = "=apostle", at = "B>w" }
+
+[[step]]
+op = "ready_unit"
+args = { unit = "=apostle" }
+
+[[step]]
+check = { what = "unit_actions", unit = "=apostle" }
+any = { subset = { id = "spread_religion", name = "Spread The Way", available = true } }
+
+[[step]]
+tool = "unit_action"
+args = { unit_id = "=apostle", action = "spread_religion" }
+as = "spread"
+
+[[step]]
+check = "spread"
+eq = { spread = "The Way", city = "Antium", majority = "The Way" }
+
+[[step]]
+check = { what = "religion", city = "=antium" }
+subset = { majority = "=founded.religion", holy_city_of = "=null" }
+
+[[step]]
+check = { what = "religion", city = "=antium" }
+path = "followers"
+len = 1
+
+[[step]]
+check = { what = "events", type = "religion" }
+any = { subset = { text = "Civilization 1's Great Prophet converted Antium to The Way!", audience = [0, 1] } }
+
+[[step]]
+note = "The spread cost it its two movement points, and with none left it has no action."
+check = { what = "unit", unit = "=apostle" }
+path = "moves"
+eq = 0
+
+[[step]]
+check = { what = "unit_actions", unit = "=apostle" }
+len = 0
+
+[[step]]
+note = "With its movement back, it keeps its other uses."
+op = "set_unit"
+args = { unit = "=apostle", moves = 120 }
+
+[[step]]
+check = { what = "unit_actions", unit = "=apostle" }
+any = { subset = { id = "spread_religion", available = true } }
+
+[[step]]
+note = "Antium follows it now."
+tool = "unit_action"
+args = { unit_id = "=apostle", action = "spread_religion" }
+error = "Antium already follows The Way."

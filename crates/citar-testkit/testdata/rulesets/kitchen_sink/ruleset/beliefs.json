@@ -1,0 +1,14 @@
+{
+  "Kitchen Sink Faith": {
+    "name": "Kitchen Sink Faith",
+    "type": "Enhancer",
+    "uniques": [
+      "May buy [Great Prophet] units with [Faith] [in all cities]",
+      "May buy [Missionary] units for [200] [Faith] [in all cities]",
+      "May buy [Temple] buildings with [Faith] for [2] times their normal Production cost",
+      "[Faith] cost of purchasing [Temple] buildings [-25]%",
+      "May buy [Shrine] buildings for [100] [Faith] [in all cities] at an increasing price ([50])"
+    ],
+    "id": "kitchen_sink_faith"
+  }
+}

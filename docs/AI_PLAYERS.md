@@ -31,7 +31,8 @@ an earlier version made the model ask a dozen questions before it could act, and
 to fifteen minutes.
 
 Every tool a model can call is also available over HTTP and to MCP clients. They are registered
-once, in `citar/engine/tools.py`, and reach all three interfaces automatically. See
+once, in the engine's tool registry (`crates/citar-engine/src/api/tools/`), and reach all three
+interfaces automatically. See
 [API.md](API.md).
 
 ---
@@ -102,7 +103,8 @@ A prompt that works:
 
 The bridge is `citar-mcp` (`citar_mcp.py` in a checkout). It exposes every game tool plus
 `wait_for_turn`, which blocks until it is that seat's turn or a negotiation needs an answer — so
-the agent waits rather than polling.
+the agent waits rather than polling. On the seat's own turn, after it opens a negotiation, it waits
+for the other side's answer, since `end_turn` is refused until the negotiation is settled.
 
 Any seat's controller can be switched mid-game from **Join / Seats**, including handing a human
 seat to a model or the reverse.

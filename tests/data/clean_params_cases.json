@@ -1,0 +1,762 @@
+{
+  "format": 1,
+  "about": "profiles.clean_params(\"basic\", params) for each case: \"out\", the cleaned overrides, or \"error\", ProfileError's message. Python's live bot is named \"basic\" in its messages; it is the version basic-1. A case marked \"fix\" is one basic-1's clean() answers differently on purpose (see \"fixes\"), and its \"basic1\" is what basic-1's clean() gives instead, \"out\" or \"error\": \"int-integral\" and \"names-known\" are refused, \"dropped\" removes a retired cache parameter whatever its value, and \"retyped\" gives a parameter basic-1 types float as a float. Every other case is answered alike. Recorded by python -m tests.test_bot_params --record.",
+  "engine": "basic",
+  "version": "basic-1",
+  "fixes": {
+    "int-integral": "An int must be integral: 2, 2.0 and \"2\" are 2, and 2.5 is refused. Python kept a fractional value as a float, which turned the bot's // into float floor division.",
+    "names-known": "The names in an order or a list must be among the parameter's options (or a preset, \"default\" or null). Python accepted any string.",
+    "dropped": "site_cache_turns and bv_cache_turns tuned caches basic-1 does not keep (DESIGN.md P2.3.9, fixes 5 and 6). They are not parameters of basic-1, but stored profiles carry them, so clean() drops them whatever their value, as Python dropped them at their default, rather than refusing the profile.",
+    "retyped": "basic-1 types 41 parameters float that Python typed int by their default's literal (multipliers and the weights the engine's advisor holds as f64; scripts/bots/export_params.py RETYPED), so clean() gives their values as floats: 4 becomes 4.0."
+  },
+  "cases": [
+    {
+      "name": "no overrides",
+      "params": {},
+      "out": {}
+    },
+    {
+      "name": "null overrides",
+      "params": null,
+      "out": {}
+    },
+    {
+      "name": "an int",
+      "params": {
+        "counter_rounds": 2
+      },
+      "out": {
+        "counter_rounds": 2
+      }
+    },
+    {
+      "name": "an int from an integral float",
+      "params": {
+        "counter_rounds": 2.0
+      },
+      "out": {
+        "counter_rounds": 2
+      }
+    },
+    {
+      "name": "an int from a numeric string",
+      "params": {
+        "counter_rounds": "2"
+      },
+      "out": {
+        "counter_rounds": 2
+      }
+    },
+    {
+      "name": "an int from a numeric string with spaces",
+      "params": {
+        "counter_rounds": " 3 "
+      },
+      "out": {
+        "counter_rounds": 3
+      }
+    },
+    {
+      "name": "an int from an exponent string",
+      "params": {
+        "war_min_turn": "1e2"
+      },
+      "out": {
+        "war_min_turn": 100
+      }
+    },
+    {
+      "name": "a negative int",
+      "params": {
+        "war_min_turn": -1
+      },
+      "out": {
+        "war_min_turn": -1
+      }
+    },
+    {
+      "name": "an int that is fractional",
+      "params": {
+        "counter_rounds": 2.5
+      },
+      "out": {
+        "counter_rounds": 2.5
+      },
+      "fix": "int-integral",
+      "basic1": {
+        "error": "Counter-offers up to (counter_rounds): 2.5 is not a valid int."
+      }
+    },
+    {
+      "name": "an int from a fractional string",
+      "params": {
+        "counter_rounds": "2.5"
+      },
+      "out": {
+        "counter_rounds": 2.5
+      },
+      "fix": "int-integral",
+      "basic1": {
+        "error": "Counter-offers up to (counter_rounds): '2.5' is not a valid int."
+      }
+    },
+    {
+      "name": "an int equal to its default is dropped",
+      "params": {
+        "counter_rounds": 4
+      },
+      "out": {}
+    },
+    {
+      "name": "an int equal to its default as a float is dropped",
+      "params": {
+        "counter_rounds": 4.0
+      },
+      "out": {}
+    },
+    {
+      "name": "an int refuses a word",
+      "params": {
+        "counter_rounds": "x"
+      },
+      "error": "Counter-offers up to (counter_rounds): 'x' is not a valid int."
+    },
+    {
+      "name": "an int refuses a boolean",
+      "params": {
+        "counter_rounds": true
+      },
+      "error": "Counter-offers up to (counter_rounds): True is not a valid int."
+    },
+    {
+      "name": "an int refuses null",
+      "params": {
+        "counter_rounds": null
+      },
+      "error": "Counter-offers up to (counter_rounds): None is not a valid int."
+    },
+    {
+      "name": "an int refuses a list",
+      "params": {
+        "counter_rounds": [
+          1
+        ]
+      },
+      "error": "Counter-offers up to (counter_rounds): [1] is not a valid int."
+    },
+    {
+      "name": "a float",
+      "params": {
+        "tech_noise": 0.25
+      },
+      "out": {
+        "tech_noise": 0.25
+      }
+    },
+    {
+      "name": "a float from an int",
+      "params": {
+        "tech_noise": 1
+      },
+      "out": {
+        "tech_noise": 1.0
+      }
+    },
+    {
+      "name": "a float from a numeric string",
+      "params": {
+        "tech_noise": "0.3"
+      },
+      "out": {
+        "tech_noise": 0.3
+      }
+    },
+    {
+      "name": "a float equal to its default is dropped",
+      "params": {
+        "tech_noise": 0.1
+      },
+      "out": {}
+    },
+    {
+      "name": "a float zero",
+      "params": {
+        "tech_noise": 0
+      },
+      "out": {
+        "tech_noise": 0.0
+      }
+    },
+    {
+      "name": "a float refuses a boolean",
+      "params": {
+        "tech_noise": false
+      },
+      "error": "Randomness (tech_noise): False is not a valid float."
+    },
+    {
+      "name": "a float refuses a word",
+      "params": {
+        "tech_noise": "abc"
+      },
+      "error": "Randomness (tech_noise): 'abc' is not a valid float."
+    },
+    {
+      "name": "a bool true",
+      "params": {
+        "lux_buy": true
+      },
+      "out": {
+        "lux_buy": true
+      }
+    },
+    {
+      "name": "a bool from 1",
+      "params": {
+        "lux_buy": 1
+      },
+      "out": {
+        "lux_buy": true
+      }
+    },
+    {
+      "name": "a bool from \"1\"",
+      "params": {
+        "lux_buy": "1"
+      },
+      "out": {
+        "lux_buy": true
+      }
+    },
+    {
+      "name": "a bool from \"true\"",
+      "params": {
+        "lux_buy": "true"
+      },
+      "out": {
+        "lux_buy": true
+      }
+    },
+    {
+      "name": "a bool from \"TRUE\"",
+      "params": {
+        "lux_buy": "TRUE"
+      },
+      "out": {
+        "lux_buy": true
+      }
+    },
+    {
+      "name": "a bool from \"yes\"",
+      "params": {
+        "lux_buy": "yes"
+      },
+      "out": {
+        "lux_buy": true
+      }
+    },
+    {
+      "name": "a bool from \"on\"",
+      "params": {
+        "lux_buy": "on"
+      },
+      "out": {
+        "lux_buy": true
+      }
+    },
+    {
+      "name": "a bool from \"On\"",
+      "params": {
+        "lux_buy": "On"
+      },
+      "out": {
+        "lux_buy": true
+      }
+    },
+    {
+      "name": "a bool false is the default and is dropped",
+      "params": {
+        "lux_buy": false
+      },
+      "out": {}
+    },
+    {
+      "name": "a bool from \"false\"",
+      "params": {
+        "faith_buildings": "false"
+      },
+      "out": {
+        "faith_buildings": false
+      }
+    },
+    {
+      "name": "a bool from \"0\"",
+      "params": {
+        "faith_buildings": "0"
+      },
+      "out": {
+        "faith_buildings": false
+      }
+    },
+    {
+      "name": "a bool from \"no\"",
+      "params": {
+        "faith_buildings": "no"
+      },
+      "out": {
+        "faith_buildings": false
+      }
+    },
+    {
+      "name": "a bool from \"off\"",
+      "params": {
+        "faith_buildings": "off"
+      },
+      "out": {
+        "faith_buildings": false
+      }
+    },
+    {
+      "name": "a bool from 0",
+      "params": {
+        "faith_buildings": 0
+      },
+      "out": {
+        "faith_buildings": false
+      }
+    },
+    {
+      "name": "a bool from any other word is false",
+      "params": {
+        "faith_buildings": "maybe"
+      },
+      "out": {
+        "faith_buildings": false
+      }
+    },
+    {
+      "name": "a bool from 1.0 is false: its text is not \"1\"",
+      "params": {
+        "faith_buildings": 1.0
+      },
+      "out": {
+        "faith_buildings": false
+      }
+    },
+    {
+      "name": "a bool from null is false",
+      "params": {
+        "faith_buildings": null
+      },
+      "out": {
+        "faith_buildings": false
+      }
+    },
+    {
+      "name": "a bool true equal to its default is dropped",
+      "params": {
+        "faith_buildings": true
+      },
+      "out": {}
+    },
+    {
+      "name": "a choice",
+      "params": {
+        "tech_mode": "potential"
+      },
+      "out": {
+        "tech_mode": "potential"
+      }
+    },
+    {
+      "name": "a choice equal to its default is dropped",
+      "params": {
+        "tech_mode": "classic"
+      },
+      "out": {}
+    },
+    {
+      "name": "a choice refuses a name it does not list",
+      "params": {
+        "tech_mode": "random"
+      },
+      "error": "Valuation mode (tech_mode): 'random' is not a valid choice."
+    },
+    {
+      "name": "a choice refuses null when it does not list it",
+      "params": {
+        "tech_mode": null
+      },
+      "error": "Valuation mode (tech_mode): None is not a valid choice."
+    },
+    {
+      "name": "a choice of null, its default, is dropped",
+      "params": {
+        "small_city_focus": null
+      },
+      "out": {}
+    },
+    {
+      "name": "a choice that lists null takes a name",
+      "params": {
+        "small_city_focus": "food"
+      },
+      "out": {
+        "small_city_focus": "food"
+      }
+    },
+    {
+      "name": "a choice refuses the text \"none\"",
+      "params": {
+        "small_city_focus": "none"
+      },
+      "error": "Small city focus (small_city_focus): 'none' is not a valid choice."
+    },
+    {
+      "name": "a choice of a great person",
+      "params": {
+        "free_gp_early": "Great Engineer"
+      },
+      "out": {
+        "free_gp_early": "Great Engineer"
+      }
+    },
+    {
+      "name": "an order's preset",
+      "params": {
+        "policy_order_peaceful": "liberty_first"
+      },
+      "out": {
+        "policy_order_peaceful": "liberty_first"
+      }
+    },
+    {
+      "name": "an order's preset equal to its default is dropped",
+      "params": {
+        "policy_order_peaceful": "rationalism_early"
+      },
+      "out": {}
+    },
+    {
+      "name": "an order's \"default\"",
+      "params": {
+        "policy_order_peaceful": "default"
+      },
+      "out": {
+        "policy_order_peaceful": "default"
+      }
+    },
+    {
+      "name": "an order of null whose default is a preset",
+      "params": {
+        "policy_order_peaceful": null
+      },
+      "out": {
+        "policy_order_peaceful": null
+      }
+    },
+    {
+      "name": "an order of null, its default, is dropped",
+      "params": {
+        "policy_order_aggressive": null
+      },
+      "out": {}
+    },
+    {
+      "name": "an order's \"default\" where the default is null is kept",
+      "params": {
+        "policy_order_aggressive": "default"
+      },
+      "out": {
+        "policy_order_aggressive": "default"
+      }
+    },
+    {
+      "name": "an order's preset where the default is null",
+      "params": {
+        "policy_order_aggressive": "rationalism_early"
+      },
+      "out": {
+        "policy_order_aggressive": "rationalism_early"
+      }
+    },
+    {
+      "name": "an order refuses a preset it does not have",
+      "params": {
+        "policy_order_aggressive": "bogus"
+      },
+      "error": "Policy order (aggressive) (policy_order_aggressive): 'bogus' is not a valid order."
+    },
+    {
+      "name": "an order of names",
+      "params": {
+        "policy_order_aggressive": [
+          "Honor",
+          "Tradition",
+          "Liberty"
+        ]
+      },
+      "out": {
+        "policy_order_aggressive": [
+          "Honor",
+          "Tradition",
+          "Liberty"
+        ]
+      }
+    },
+    {
+      "name": "an order with a name it does not list",
+      "params": {
+        "policy_order_peaceful": [
+          "Tradition",
+          "Bogus"
+        ]
+      },
+      "out": {
+        "policy_order_peaceful": [
+          "Tradition",
+          "Bogus"
+        ]
+      },
+      "fix": "names-known",
+      "basic1": {
+        "error": "Policy order (peaceful) (policy_order_peaceful): ['Tradition', 'Bogus'] is not a valid order."
+      }
+    },
+    {
+      "name": "an order refuses a name that is no string",
+      "params": {
+        "policy_order_peaceful": [
+          "Tradition",
+          3
+        ]
+      },
+      "error": "Policy order (peaceful) (policy_order_peaceful): ['Tradition', 3] is not a valid order."
+    },
+    {
+      "name": "an order refuses a number",
+      "params": {
+        "policy_order_peaceful": 5
+      },
+      "error": "Policy order (peaceful) (policy_order_peaceful): 5 is not a valid order."
+    },
+    {
+      "name": "an order equal to its default is dropped",
+      "params": {
+        "beliefs_founder": [
+          "Ceremonial Burial",
+          "Tithe",
+          "Church Property",
+          "Peace Loving",
+          "Pilgrimage",
+          "Initiation Rites",
+          "Interfaith Dialogue",
+          "World Church",
+          "Papal Primacy"
+        ]
+      },
+      "out": {}
+    },
+    {
+      "name": "an order of fewer names",
+      "params": {
+        "beliefs_founder": [
+          "Tithe"
+        ]
+      },
+      "out": {
+        "beliefs_founder": [
+          "Tithe"
+        ]
+      }
+    },
+    {
+      "name": "an empty order",
+      "params": {
+        "beliefs_pantheon": []
+      },
+      "out": {
+        "beliefs_pantheon": []
+      }
+    },
+    {
+      "name": "a list of names",
+      "params": {
+        "promo_lines": [
+          "Drill",
+          "Shock"
+        ]
+      },
+      "out": {
+        "promo_lines": [
+          "Drill",
+          "Shock"
+        ]
+      }
+    },
+    {
+      "name": "a list with a name it does not list",
+      "params": {
+        "promo_in_city": [
+          "Cover",
+          "Bogus"
+        ]
+      },
+      "out": {
+        "promo_in_city": [
+          "Cover",
+          "Bogus"
+        ]
+      },
+      "fix": "names-known",
+      "basic1": {
+        "error": "Promotions in a city (promo_in_city): ['Cover', 'Bogus'] is not a valid list."
+      }
+    },
+    {
+      "name": "a list has no presets",
+      "params": {
+        "promo_in_city": "default"
+      },
+      "out": {
+        "promo_in_city": "default"
+      }
+    },
+    {
+      "name": "a list of null",
+      "params": {
+        "promo_in_city": null
+      },
+      "out": {
+        "promo_in_city": null
+      }
+    },
+    {
+      "name": "an unknown key",
+      "params": {
+        "no_such_parameter": 1
+      },
+      "error": "no_such_parameter is not a parameter of basic."
+    },
+    {
+      "name": "a cache parameter basic-1 drops is known to Python",
+      "params": {
+        "site_cache_turns": 8
+      },
+      "out": {
+        "site_cache_turns": 8
+      },
+      "fix": "dropped",
+      "basic1": {
+        "out": {}
+      }
+    },
+    {
+      "name": "a retired cache parameter at its default, as stored profiles carry it",
+      "params": {
+        "bv_cache_turns": 0
+      },
+      "out": {}
+    },
+    {
+      "name": "a retired cache parameter among overrides",
+      "params": {
+        "bv_cache_turns": 0,
+        "counter_rounds": 2
+      },
+      "out": {
+        "counter_rounds": 2
+      }
+    },
+    {
+      "name": "a retired cache parameter is dropped whatever its value",
+      "params": {
+        "site_cache_turns": "x"
+      },
+      "error": "Replan every (site_cache_turns): 'x' is not a valid int.",
+      "fix": "dropped",
+      "basic1": {
+        "out": {}
+      }
+    },
+    {
+      "name": "an unknown key among known ones",
+      "params": {
+        "counter_rounds": 2,
+        "bogus": 1
+      },
+      "error": "bogus is not a parameter of basic."
+    },
+    {
+      "name": "a multiplier typed int by its default's literal takes a fraction",
+      "params": {
+        "mil_war_mult": 1.5
+      },
+      "out": {
+        "mil_war_mult": 1.5
+      }
+    },
+    {
+      "name": "a retyped multiplier at its default is dropped",
+      "params": {
+        "mil_war_mult": 2
+      },
+      "out": {}
+    },
+    {
+      "name": "a retyped multiplier given an integer",
+      "params": {
+        "mil_war_mult": 4
+      },
+      "out": {
+        "mil_war_mult": 4
+      },
+      "fix": "retyped",
+      "basic1": {
+        "out": {
+          "mil_war_mult": 4.0
+        }
+      }
+    },
+    {
+      "name": "a retyped weight given an integer as a string",
+      "params": {
+        "c_danger": "800"
+      },
+      "out": {
+        "c_danger": 800
+      },
+      "fix": "retyped",
+      "basic1": {
+        "out": {
+          "c_danger": 800.0
+        }
+      }
+    },
+    {
+      "name": "a retyped weight takes a fraction",
+      "params": {
+        "c_danger": 999.5
+      },
+      "out": {
+        "c_danger": 999.5
+      }
+    },
+    {
+      "name": "several overrides, defaults dropped",
+      "params": {
+        "counter_rounds": "6",
+        "tech_noise": 0.1,
+        "lux_buy": "yes",
+        "tech_mode": "potential",
+        "policy_order_aggressive": "liberty_first"
+      },
+      "out": {
+        "counter_rounds": 6,
+        "lux_buy": true,
+        "tech_mode": "potential",
+        "policy_order_aggressive": "liberty_first"
+      }
+    }
+  ]
+}

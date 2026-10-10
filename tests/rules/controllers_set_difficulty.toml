@@ -1,0 +1,59 @@
+about = """
+The host gives one seat its own difficulty level, by name, as loosely as the lobby reads names; a
+name that is no level changes nothing, and the host is told so.
+"""
+from = "citar/engine_api.py: EngineGame.set_difficulty"
+
+[config]
+difficulty = "Prince"
+players = [{}, { difficulty = "King" }]
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { difficulty = "Prince" }
+
+[[step]]
+check = { what = "player", player = 1 }
+subset = { difficulty = "King" }
+
+[[step]]
+op = "set_difficulty"
+args = { player = 0, difficulty = "deity" }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { ok = true }
+
+[[step]]
+check = { what = "player", player = 0 }
+subset = { difficulty = "Deity" }
+
+[[step]]
+op = "set_difficulty"
+args = { player = 1, difficulty = "Grand Master" }
+as = "done"
+
+[[step]]
+check = "done"
+eq = { ok = false }
+
+[[step]]
+check = { what = "player", player = 1 }
+subset = { difficulty = "King" }
+
+[[step]]
+note = "Its costs follow the new level: a seat set to Settler pays less for its techs than one at Deity."
+op = "set_difficulty"
+args = { player = 1, difficulty = "Settler" }
+
+[[step]]
+check = { what = "costs", player = 0 }
+path = "tech.Pottery"
+as = "deity"
+absent = false
+
+[[step]]
+check = { what = "costs", player = 1 }
+path = "tech.Pottery"
+lt = "=deity"

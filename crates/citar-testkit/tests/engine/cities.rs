@@ -1,0 +1,715 @@
+//! Cities' stats, connectivity and citizens (package 1b-06), on the arena:
+//! - the kitchen sink's `[n]% Food consumption by specialists [cities]` in a city's food and its
+//!   citizens' choice, and its `Cost increases by [n] when built` and `[n]% production cost` in
+//!   what a building costs;
+//! - the flood fills that link cities to their capital agree with a plain port of Python's walk,
+//!   one search per city and medium, on random maps of roads, railroads, harbours, borders and
+//!   relations, and the memo agrees with both after edits (gate 3);
+//! - P8 in miniature (gate 5): queries and refused calls between two actions leave every digest
+//!   what it is without them;
+//! - the settle's stop for a city in a cycle (package 1e-02), on hand-built games whose plains
+//!   yield more beside a worked tile: a city takes back an assignment another city's move made
+//!   good again, and two neighbouring cities each in a cycle of its own both stop;
+//! - every check, the cache and citizen oracles among them, clean after each.
+
+use std::sync::OnceLock;
+
+use citar_engine::api::{ActionError, testops, tools};
+use citar_engine::base::ids::{
+    BarbarianLevelId, BuildingId, CityId, DifficultyId, EraId, MapSizeId, MapTypeId, NationId,
+    PlayerId, ResourceId, SpeedId, TerrainId, TileIdx,
+};
+use citar_engine::base::sets::PlayerVec;
+use citar_engine::base::stats::Stat;
+use citar_engine::game::cities::citizens::{RankCtx, rank_stats_for_work};
+use citar_engine::game::cities::connections::{connected_cities, connected_cities_naive};
+use citar_engine::game::cities::stats::{self as cstats, StatSource};
+use citar_engine::game::{Action, DebugOptions, Game, query};
+use citar_engine::rules::{Named, Ruleset};
+use citar_engine::state::chronicle::Chronicle;
+use citar_engine::state::cities::{Cities, City, Constructible};
+use citar_engine::state::config::{GameConfig, MapEdges, MapSource};
+use citar_engine::state::map::{MapInfo, Tile, Tiles};
+use citar_engine::state::players::{Controller, Player, PlayerKind, Rgb, Seat, SeatOverrides};
+use citar_engine::state::{IdCounters, State, TileClaim};
+use citar_testkit::rulesets::{files_of, kitchen_sink, overlay};
+use citar_testkit::script::{map_doc, new_game};
+use proptest::prelude::*;
+use serde_json::{Value, json};
+
+const ME: PlayerId = PlayerId(0);
+
+/// A bare game on the arena for `players` Benchmark civilizations: no unit, no city-state, no
+/// barbarian.
+fn arena(r: &'static Ruleset, players: usize) -> Game {
+    let (doc, _) = map_doc("arena").expect("the arena");
+    let seats: Vec<Value> = (0..players).map(|_| json!({"nation": "BenchmarkCiv"})).collect();
+    let cfg = json!({
+        "seed": 1,
+        "players": seats,
+        "city_states": 0,
+        "barbarians": "off",
+        "ruins": false,
+        "map": doc,
+    });
+    let mut g = new_game(r, cfg.as_object().expect("an object")).unwrap_or_else(|e| panic!("{e}"));
+    g.set_debug_options(DebugOptions::ALL);
+    testops::apply(&mut g, &json!([{"op": "clear_units", "player": "all"}])).expect("cleared");
+    g
+}
+
+fn clean(g: &mut Game) {
+    let v = g.take_violations();
+    assert!(v.is_empty(), "violations: {v:?}");
+    assert!(g.check_invariants().is_empty(), "{:?}", g.check_invariants());
+    assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
+}
+
+/// A tool call as a host makes one.
+fn tool(g: &mut Game, p: PlayerId, name: &str, args: &Value) -> Result<Value, ActionError> {
+    let mut fields = tools::normalize(name, args)?;
+    fields.insert("tool".into(), json!(name));
+    let action: Action = serde_json::from_value(Value::Object(fields)).expect("the arguments fit");
+    g.act(p, action).map(|(out, _)| out)
+}
+
+/// The id of the city an operation founded.
+fn founded(out: &Value) -> CityId {
+    out["city_id"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .and_then(CityId::new)
+        .unwrap_or_else(|| panic!("no city in {out}"))
+}
+
+/// What a city's citizens eat, as its stats' `Population` line holds it.
+fn population_food(g: &Game, c: CityId) -> f64 {
+    let s = query::city_stats(g, c);
+    s.breakdown
+        .iter()
+        .find(|(k, _)| *k == StatSource::Population)
+        .map_or(0.0, |(_, y)| y.stats[Stat::Food])
+}
+
+// ---- The kitchen sink ---------------------------------------------------------------------------
+
+#[test]
+fn specialists_eat_less_where_the_kitchen_sink_says() {
+    // `[-50]% Food consumption by specialists [in this city]` on the Kitchen Sink Works: a
+    // merchant eats one food where a citizen on a tile eats two.
+    let r = kitchen_sink();
+    let mut g = arena(r, 2);
+    let (out, _) = g
+        .apply_ops(&json!([{"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Roma",
+            "pop": 3, "claim_radius": 2, "buildings": ["Market"]}]))
+        .expect("a city");
+    let c = founded(&out[0]);
+    for (x, y) in [(4, 3), (7, 4)] {
+        tool(&mut g, ME, "work_tile", &json!({"city_id": c.get(), "x": x, "y": y})).expect("lock");
+    }
+    tool(
+        &mut g,
+        ME,
+        "set_specialists",
+        &json!({"city_id": c.get(), "specialists": {"Merchant": 1}}),
+    )
+    .expect("a merchant");
+    assert!((population_food(&g, c) + 6.0).abs() < 1e-9, "{}", population_food(&g, c));
+    let food = query::city_stats(&g, c).total[Stat::Food];
+    let rc = RankCtx::of(&g, c).expect("a city");
+    let merchant = cstats::specialist_stats(&g, c, r.lookup("Merchant").expect("a merchant"));
+    let plain = rank_stats_for_work(&rc, &merchant, true, -1.0);
+
+    g.apply_ops(
+        &json!([{"op": "set_city", "city": c.get(), "add_buildings": ["Kitchen Sink Works"]}]),
+    )
+    .expect("the works");
+    let city = g.city(c).expect("Roma");
+    assert_eq!(city.worked.len(), 2);
+    assert_eq!(city.specialists.iter().map(|&n| u32::from(n)).sum::<u32>(), 1);
+    assert!((population_food(&g, c) + 5.0).abs() < 1e-9, "{}", population_food(&g, c));
+    assert!((query::city_stats(&g, c).total[Stat::Food] - (food + 1.0)).abs() < 1e-9);
+    // A starving city values the food a specialist no longer eats, as a tile's food.
+    let rc = RankCtx::of(&g, c).expect("a city");
+    let cheaper = rank_stats_for_work(&rc, &merchant, true, -1.0);
+    assert!(cheaper > plain, "{cheaper} against {plain}");
+    clean(&mut g);
+}
+
+#[test]
+fn the_kitchen_sink_works_cost_less_and_more_with_each_built() {
+    // `[-10]% production cost` and `Cost increases by [30] when built`: 100 less a tenth, and 30
+    // more for each one the civilization built before, before the difficulty and the speed.
+    let r = kitchen_sink();
+    let mut g = arena(r, 2);
+    let (out, _) = g
+        .apply_ops(&json!([{"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Roma"}]))
+        .expect("a city");
+    let c = founded(&out[0]);
+    let works = Constructible::Building(r.lookup::<BuildingId>("Kitchen Sink Works").expect("it"));
+    let monument = Constructible::Building(r.lookup::<BuildingId>("Monument").expect("it"));
+    let d = &r.difficulties()[g.difficulty(Some(ME))];
+    let scale = d.building_cost_modifier * g.speed().production_cost_modifier;
+    let want = |base: f64| citar_engine::base::num::trunc_i32(base * scale);
+    assert_eq!(cstats::production_cost(&g, ME, works, Some(c)), want(100.0 * 0.9));
+    let plain = f64::from(r.buildings()[r.lookup::<BuildingId>("Monument").expect("it")].cost);
+    assert_eq!(cstats::production_cost(&g, ME, monument, Some(c)), want(plain));
+
+    // Two built before: the count lives with the civilization.
+    let mut parts = g.state().clone().into_parts();
+    if let Some(p) = parts.players.get_mut(ME) {
+        p.civ.built_increasing.insert(works, 2);
+        p.civ.built_increasing.insert(monument, 2);
+    }
+    let st = State::from_parts(parts).expect("the parts fit");
+    let mut g = Game::from_state(r, st, Chronicle::new()).expect("a sound state");
+    g.set_debug_options(DebugOptions::ALL);
+    assert_eq!(cstats::production_cost(&g, ME, works, Some(c)), want((100.0 + 60.0) * 0.9));
+    assert_eq!(cstats::production_cost(&g, ME, monument, Some(c)), want(plain), "no such unique");
+    let turns = cstats::turns_to_build(&g, c, works);
+    assert!(turns > 0, "{turns}");
+    clean(&mut g);
+}
+
+// ---- Connectivity (gate 3) ----------------------------------------------------------------------
+
+/// City sites on the arena, at least four tiles apart: the first three on the coast.
+const SITES: [(i32, i32); 12] = [
+    (3, 2),
+    (3, 8),
+    (3, 13),
+    (8, 2),
+    (8, 8),
+    (8, 13),
+    (13, 3),
+    (13, 8),
+    (13, 13),
+    (18, 3),
+    (18, 8),
+    (21, 12),
+];
+
+/// A random world of three civilizations: who founds at each site (0 nobody, else the player
+/// plus one), with what border radius and whether it has a harbour; routes laid from site to
+/// site, with gaps; which techs each knows; and how each pair gets on.
+#[derive(Clone, Debug)]
+struct World {
+    sites: Vec<(u8, u8, bool)>,
+    paths: Vec<(usize, usize, u8, u64)>,
+    /// The Wheel unless 0, and the railroad.
+    techs: Vec<(u8, bool)>,
+    /// For the pairs (0, 1), (0, 2), (1, 2): 0 strangers, 1 met, 2 open borders, 3 war.
+    relations: Vec<u8>,
+    /// Routes set or cleared afterwards: (site, steps toward the next site, route).
+    edits: Vec<(usize, u8, u8)>,
+}
+
+fn world() -> impl Strategy<Value = World> {
+    (
+        proptest::collection::vec((0u8..4, 1u8..3, any::<bool>()), SITES.len()),
+        proptest::collection::vec((0..SITES.len(), 0..SITES.len(), 0u8..3, any::<u64>()), 0..16),
+        proptest::collection::vec((0u8..4, any::<bool>()), 3),
+        proptest::collection::vec(0u8..4, 3),
+        proptest::collection::vec((0..SITES.len(), 0u8..6, 0u8..3), 0..6),
+    )
+        .prop_map(|(sites, paths, techs, relations, edits)| World {
+            sites,
+            paths,
+            techs,
+            relations,
+            edits,
+        })
+}
+
+/// The tiles of a walk from `a` toward `b`, a step at a time to the neighbour nearest `b`.
+fn walk(g: &Game, a: TileIdx, b: TileIdx) -> Vec<TileIdx> {
+    let grid = g.grid();
+    let mut out = vec![a];
+    let mut cur = a;
+    while cur != b && out.len() < 64 {
+        let Some(next) = grid.neighbors(cur).min_by_key(|&n| (grid.distance(n, b), n)) else {
+            break;
+        };
+        cur = next;
+        out.push(cur);
+    }
+    out
+}
+
+fn route_name(kind: u8) -> Value {
+    match kind {
+        0 => json!("Road"),
+        1 => json!("Railroad"),
+        _ => Value::Null,
+    }
+}
+
+/// Builds the world: every operation in one list, which must apply whole.
+fn build(w: &World) -> Game {
+    let mut g = arena(Ruleset::shared(), 3);
+    // The oracle runs once the world is built, not after every one of its operations.
+    g.set_debug_options(DebugOptions::OFF);
+    let mut ops = Vec::new();
+    for (i, &(who, radius, harbour)) in w.sites.iter().enumerate() {
+        if who == 0 {
+            continue;
+        }
+        let (x, y) = SITES[i];
+        let mut op = json!({"op": "found_city", "player": who - 1, "x": x, "y": y,
+            "claim_radius": radius});
+        if harbour && i < 3 {
+            op["buildings"] = json!(["Harbor"]);
+        }
+        ops.push(op);
+    }
+    for (p, &(wheel, rails)) in w.techs.iter().enumerate() {
+        let mut techs = Vec::new();
+        if wheel > 0 {
+            techs.push("The Wheel");
+        }
+        if rails {
+            techs.push("Railroads");
+        }
+        if !techs.is_empty() {
+            ops.push(json!({"op": "grant_tech", "player": p, "techs": techs}));
+        }
+    }
+    for (k, &(a, b)) in [(0u8, 1u8), (0, 2), (1, 2)].iter().enumerate() {
+        match w.relations[k] {
+            1 => ops.push(json!({"op": "meet", "a": a, "b": b})),
+            2 => ops.push(json!({"op": "set_relation", "a": a, "b": b, "open_borders": true})),
+            3 => ops.push(json!({"op": "set_relation", "a": a, "b": b, "state": "war"})),
+            _ => {}
+        }
+    }
+    let land = |g: &Game, t: TileIdx| {
+        !g.is_water(t) && g.tile(t).is_some_and(|x| !g.rules().terrains()[x.terrain()].impassable)
+    };
+    for &(a, b, kind, seed) in &w.paths {
+        let at = |i: usize| g.grid().idx(SITES[i].0, SITES[i].1).expect("on the map");
+        for (step, t) in walk(&g, at(a), at(b)).into_iter().enumerate() {
+            // A gap one step in sixteen, and now and then the other route.
+            let bits = seed.rotate_left(u32::try_from(step % 64).unwrap_or(0));
+            if bits & 15 == 0 || !land(&g, t) {
+                continue;
+            }
+            let route = if bits & 0x70 == 0x70 && kind < 2 { 1 - kind } else { kind };
+            let (x, y) = g.xy(t);
+            ops.push(json!({"op": "set_tile", "x": x, "y": y, "route": route_name(route)}));
+        }
+    }
+    g.apply_ops(&Value::Array(ops)).unwrap_or_else(|e| panic!("{e:?}"));
+    g
+}
+
+fn agree(g: &Game) -> Result<(), TestCaseError> {
+    for p in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+        let naive = connected_cities_naive(g, p);
+        prop_assert_eq!(&connected_cities(g, p), &naive, "the floods of player {}", p.0);
+        prop_assert_eq!(&query::connectivity(g, p), &naive, "the memo of player {}", p.0);
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn connectivity_agrees_with_a_search_from_every_city(w in world()) {
+        let mut g = build(&w);
+        agree(&g)?;
+        for &(site, steps, kind) in &w.edits {
+            let (x, y) = SITES[site];
+            let from = g.grid().idx(x, y).expect("on the map");
+            let (nx, ny) = SITES[(site + 1) % SITES.len()];
+            let to = g.grid().idx(nx, ny).expect("on the map");
+            let path = walk(&g, from, to);
+            let t = path[usize::from(steps).min(path.len() - 1)];
+            if g.is_water(t) || g.state().city_at(t).is_some() {
+                continue;
+            }
+            let (x, y) = g.xy(t);
+            // A mountain may refuse a route: then nothing changed, and they must agree still.
+            let impassable =
+                g.tile(t).is_some_and(|x| g.rules().terrains()[x.terrain()].impassable);
+            let edit = g.apply_ops(&json!([{"op": "set_tile", "x": x, "y": y, "route": route_name(kind)}]));
+            prop_assert!(edit.is_ok() || impassable, "{:?}", edit.err());
+            agree(&g)?;
+        }
+        g.set_debug_options(DebugOptions::ALL);
+        prop_assert!(g.verify_caches().is_empty(), "{:?}", g.verify_caches());
+        prop_assert!(g.check_invariants().is_empty(), "{:?}", g.check_invariants());
+    }
+}
+
+#[test]
+fn a_road_links_a_city_and_a_harbour_links_the_coast() {
+    // A hand-made case of each medium, so the property above is known to see links at all.
+    let mut g = arena(Ruleset::shared(), 2);
+    let road: Vec<Value> =
+        (4..8).map(|x| json!({"op": "set_tile", "x": x, "y": 2, "route": "Road"})).collect();
+    let mut ops = vec![
+        json!({"op": "found_city", "player": 0, "x": 3, "y": 2, "buildings": ["Harbor"]}),
+        json!({"op": "found_city", "player": 0, "x": 8, "y": 2}),
+        json!({"op": "found_city", "player": 0, "x": 3, "y": 13, "buildings": ["Harbor"]}),
+        json!({"op": "found_city", "player": 0, "x": 13, "y": 13}),
+        json!({"op": "grant_tech", "player": 0, "tech": "The Wheel"}),
+    ];
+    ops.extend(road);
+    let (out, _) = g.apply_ops(&Value::Array(ops)).unwrap_or_else(|e| panic!("{e:?}"));
+    let ids: Vec<CityId> = out[..4].iter().map(founded).collect();
+    let links = query::connectivity(&g, ME);
+    assert_eq!(links, connected_cities_naive(&g, ME));
+    let linked: Vec<CityId> = links.cities.iter().map(|&(c, _)| c).collect();
+    assert_eq!(linked, ids[..3], "the road links the second, the sea the third");
+    assert!(query::connected_to_capital(&g, ids[1]));
+    assert!(!query::connected_to_capital(&g, ids[3]));
+    // A gap in the road cuts the second off.
+    g.apply_ops(&json!([{"op": "set_tile", "x": 6, "y": 2, "route": null}])).expect("a gap");
+    assert!(!query::connected_to_capital(&g, ids[1]));
+    assert!(query::connected_to_capital(&g, ids[2]));
+    clean(&mut g);
+}
+
+// ---- P8 in miniature (gate 5) -------------------------------------------------------------------
+
+/// A game with two civilizations, a city each and a warrior: the first's city works tiles and
+/// has a merchant's slot.
+fn p8_game() -> (Game, CityId, CityId) {
+    let mut g = arena(Ruleset::shared(), 2);
+    let (out, _) = g
+        .apply_ops(&json!([
+            {"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Roma", "pop": 4,
+             "claim_radius": 2, "buildings": ["Market"]},
+            {"op": "found_city", "player": 1, "x": 18, "y": 10, "name": "Athens", "pop": 2},
+            {"op": "add_unit", "player": 1, "unit": "Warrior", "x": 17, "y": 10},
+            {"op": "add_unit", "player": 0, "unit": "Warrior", "x": 6, "y": 6},
+        ]))
+        .expect("the cities");
+    (g, founded(&out[0]), founded(&out[1]))
+}
+
+/// Fifty reads and refusals: every query of this package, inspections, and calls the engine
+/// refuses, from the player whose turn it is and from the other.
+fn fifty_reads(g: &mut Game, roma: CityId, athens: CityId) -> usize {
+    let mut n = 0;
+    let mut count = |ok: bool| {
+        assert!(ok, "read {} does not hold", n + 1);
+        n += 1;
+    };
+    for c in [roma, athens] {
+        count(query::city_stats(g, c).total[Stat::Production] > 0.0);
+        count(query::city_parts(g, c).tiles[Stat::Food] >= 0.0);
+        count(cstats::food_to_next_pop(g, c) > 0);
+        count(cstats::workable_tiles(g, c).len() < 40);
+        count(!query::connected_to_capital(g, c)); // a lone city has no route
+    }
+    for p in [PlayerId(0), PlayerId(1)] {
+        count(query::happiness(g, p).total.abs() < 100);
+        count(query::civ_stats(g, p).total[Stat::Gold].is_finite());
+        count(query::connectivity(g, p).cities.len() == 1);
+    }
+    for i in 0..10 {
+        let t = TileIdx(24 * 4 + 3 + i);
+        count(query::tile_yield(g, t, Some(ME), Some(roma))[Stat::Food] >= 0.0);
+        count(query::tile_yield(g, t, None, None)[Stat::Food] >= 0.0);
+    }
+    for q in [
+        json!({"what": "city", "city": roma.get()}),
+        json!({"what": "player", "player": 0}),
+        json!({"what": "units"}),
+        json!({"what": "tile", "x": 5, "y": 5}),
+        json!({"what": "game"}),
+        json!({"what": "city", "city": athens.get()}),
+    ] {
+        count(citar_engine::api::inspect::inspect(g, &q).is_ok());
+    }
+    let (idle, own) = if g.current() == ME { (PlayerId(1), athens) } else { (ME, roma) };
+    let refused = [
+        (ME, "work_tile", json!({"city_id": roma.get(), "x": 12, "y": 5})),
+        (ME, "work_tile", json!({"city_id": athens.get(), "x": 17, "y": 9})),
+        (ME, "set_city_focus", json!({"city_id": roma.get(), "focus": "fame"})),
+        (ME, "set_specialists", json!({"city_id": roma.get(), "specialists": {"Scientist": 1}})),
+        (ME, "set_specialists", json!({"city_id": roma.get(), "specialists": {"Merchant": 9}})),
+        // Whoever's turn it is not: their own city, refused as out of turn.
+        (idle, "set_city_focus", json!({"city_id": own.get(), "focus": "gold"})),
+        (idle, "work_tile", json!({"city_id": own.get(), "x": 17, "y": 11})),
+    ];
+    for (p, name, args) in refused {
+        count(tool(g, p, name, &args).is_err());
+    }
+    count(g.apply_ops(&json!([{"op": "set_tile", "x": 5, "y": 5, "terrain": "Nowhere"}])).is_err());
+    n
+}
+
+#[test]
+fn reads_and_refusals_between_two_actions_change_nothing() {
+    let run = |reads: bool| {
+        let (mut g, roma, athens) = p8_game();
+        let mut digests = Vec::new();
+        let mut outs = Vec::new();
+        outs.push(
+            tool(
+                &mut g,
+                ME,
+                "set_city_focus",
+                &json!({"city_id": roma.get(), "focus": "production"}),
+            )
+            .expect("a focus"),
+        );
+        digests.push(g.digest().expect("a digest"));
+        if reads {
+            assert_eq!(fifty_reads(&mut g, roma, athens), 50);
+            assert_eq!(digests.last(), Some(&g.digest().expect("a digest")), "reads changed it");
+        }
+        outs.push(
+            tool(
+                &mut g,
+                ME,
+                "set_specialists",
+                &json!({"city_id": roma.get(),
+                "specialists": {"Merchant": 1}}),
+            )
+            .expect("a merchant"),
+        );
+        digests.push(g.digest().expect("a digest"));
+        if reads {
+            fifty_reads(&mut g, roma, athens);
+        }
+        g.end_turn(ME).expect("my turn");
+        digests.push(g.digest().expect("a digest"));
+        if reads {
+            fifty_reads(&mut g, roma, athens);
+        }
+        g.end_turn(PlayerId(1)).expect("their turn");
+        digests.push(g.digest().expect("a digest"));
+        outs.push(json!(query::city_stats(&g, roma).total[Stat::Gold]));
+        clean(&mut g);
+        (digests, outs)
+    };
+    assert_eq!(run(true), run(false));
+}
+
+// ---- The settle's stop for a city in a cycle (package 1e-02) ------------------------------------
+
+/// The shipped ruleset with a Neighbourly nation, whose plains yield 3 more food beside a tile
+/// its own city works: a tile's yield reads the tiles around it, so one city's citizens can move
+/// another city's best tile, and a city's own citizens can move its own.
+fn neighbourly() -> &'static Ruleset {
+    static RULES: OnceLock<&'static Ruleset> = OnceLock::new();
+    RULES.get_or_init(|| {
+        let nation = json!({"Neighbourly": {
+            "name": "Neighbourly",
+            "kind": "major",
+            "leaderName": "Neighbourly Leader",
+            "adjective": "Neighbourly",
+            "preferredVictoryType": "Neutral",
+            "cities": ["Hither", "Thither", "Yonder"],
+            "uniques": [
+                "[+3 Food] from [Plains] tiles [in all cities] <in tiles adjacent to [worked] tiles>",
+            ],
+        }})
+        .to_string();
+        let files = overlay(&[("ruleset/nations.json", &nation)]).expect("the patch applies");
+        Ruleset::leak(&files_of(&files)).expect("the ruleset loads")
+    })
+}
+
+/// A city's place and the tile its one citizen works before the engine assigns it.
+type Placed = ((i32, i32), (i32, i32));
+
+/// A 16 by 10 grassland game for a Neighbourly civilization and a second with nothing, with
+/// `plains` and `cattle` (3 food) where given and a city of one citizen at each centre of
+/// `cities`, working the tile given: citizens as a converted state or a test leaves them, before
+/// this engine assigns them. Every tile within 4 of a centre is the nearest city's.
+fn neighbours(cities: &[Placed], plains: &[(i32, i32)], cattle: &[(i32, i32)]) -> Game {
+    fn id<I: Named>(r: &Ruleset, name: &str) -> I {
+        r.lookup::<I>(name).unwrap_or_else(|| panic!("the ruleset has {name}"))
+    }
+    const W: u16 = 16;
+    const H: u16 = 10;
+    let r = neighbourly();
+    let size = u32::from(W) * u32::from(H);
+    let player = |n: u8, nation: &str, controller: Controller| {
+        let seat = Seat::new(controller, SeatOverrides::default(), None);
+        let nation = id::<NationId>(r, nation);
+        let name = format!("Civ {n}").into();
+        Player::new(PlayerId(n), PlayerKind::Major, name, nation, Rgb::default(), seat, size)
+    };
+    let players: PlayerVec<Player> =
+        [player(0, "Neighbourly", Controller::Human), player(1, "BenchmarkCiv", Controller::Bot)]
+            .into_iter()
+            .collect();
+    let map = MapInfo { width: W, height: H, wrap_x: false, wrap_y: false, continents: Vec::new() };
+    let src = MapSource::Generated {
+        size: MapSizeId(0),
+        map_type: MapTypeId(0),
+        edges: MapEdges::IceCaps,
+        dims: None,
+    };
+    let cfg = GameConfig::new(
+        3,
+        src,
+        id::<SpeedId>(r, "Standard"),
+        id::<DifficultyId>(r, "Prince"),
+        EraId(0),
+        BarbarianLevelId(1),
+        500,
+    );
+    let grass = Tile::new(id::<TerrainId>(r, "Grassland"));
+    let st =
+        State::new(cfg, map, Tiles::new(vec![grass; size as usize]), players).expect("a new state");
+    let mut parts = st.into_parts();
+    let grid = parts.map.grid().expect("a grid");
+    let at = |(x, y): (i32, i32)| grid.idx(x, y).expect("on the map");
+    let mut tiles: Vec<Tile> = parts.tiles.as_slice().to_vec();
+    for &p in plains {
+        tiles[at(p).0 as usize] = Tile::new(id::<TerrainId>(r, "Plains"));
+    }
+    for &p in cattle {
+        tiles[at(p).0 as usize] = grass.with_resource(Some(id::<ResourceId>(r, "Cattle")), 0);
+    }
+    let ids: Vec<CityId> = (1..=cities.len())
+        .map(|n| u32::try_from(n).ok().and_then(CityId::new).expect("an id"))
+        .collect();
+    for t in grid.tiles() {
+        let nearest = cities
+            .iter()
+            .zip(&ids)
+            .map(|(&(centre, _), &c)| (grid.distance(at(centre), t), c))
+            .min_by_key(|&(d, c)| (d, c.get()));
+        if let Some((_, c)) = nearest.filter(|&(d, _)| d <= 4) {
+            tiles[t.0 as usize] = tiles[t.0 as usize].with_claim(TileClaim::city(ME, c));
+        }
+    }
+    parts.tiles = Tiles::new(tiles);
+    let mut made = Vec::new();
+    for (&(centre, works), &c) in cities.iter().zip(&ids) {
+        let mut city = City::new(c, format!("City {}", c.get()).into(), ME, at(centre), 1);
+        city.pop = 1;
+        city.worked = vec![at(works)];
+        made.push(city);
+    }
+    if let Some(p) = parts.players.get_mut(ME) {
+        p.capital = made.first().map(City::id);
+        p.original_capital = p.capital;
+    }
+    parts.cities = Cities::from_cities(made).expect("cities");
+    parts.ids = IdCounters::starting_at(u32::try_from(cities.len()).unwrap_or(0) + 1);
+    let st = State::from_parts(parts).expect("the parts fit");
+    let mut g = Game::from_state(r, st, Chronicle::new()).expect("a sound state");
+    g.set_debug_options(DebugOptions::ALL);
+    g
+}
+
+/// The tiles a city works, as `(x, y)`.
+fn works(g: &Game, c: CityId) -> Vec<(i32, i32)> {
+    g.city(c).map(|x| x.worked.iter().map(|&t| g.xy(t)).collect()).unwrap_or_default()
+}
+
+/// The distance between two places.
+fn apart(g: &Game, (ax, ay): (i32, i32), (bx, by): (i32, i32)) -> u32 {
+    let grid = g.grid();
+    match (grid.idx(ax, ay), grid.idx(bx, by)) {
+        (Some(a), Some(b)) => grid.distance(a, b),
+        _ => u32::MAX,
+    }
+}
+
+#[test]
+fn a_city_takes_back_an_assignment_another_citys_move_made_good_again() {
+    // From the review of package 1e-02: within one settle a city leaves its plains while the
+    // cattle beside them is not worked, and comes back when a neighbour takes the cattle; the
+    // settle's stop for a city in a cycle must not keep it from coming back.
+    //
+    // City 1 at (2, 4) works the plains at (5, 4): 4 food beside the cattle at (6, 4) when city 2
+    // works it, else 1 food and 1 production, against the cattle at (0, 4)'s 3 food. City 2 at
+    // (9, 4) works grassland at (10, 4), and the cattle at (6, 4) is its best tile. Both are
+    // flagged. City 1, first by id, finds the cattle beside its plains unworked and moves to
+    // (0, 4); city 2 then takes (6, 4), which flags city 1 again, whose plains are worth 4 food
+    // once more. It ends on them, and every oracle agrees.
+    let mut g = neighbours(&[((2, 4), (5, 4)), ((9, 4), (10, 4))], &[(5, 4)], &[(0, 4), (6, 4)]);
+    // What the layout rests on: city 1 reaches its plains and not the cattle beside them, city 2
+    // the cattle and not the plains, and each is a step past the other's working distance (a
+    // tile taken or released flags the cities within a step of their working distance of it).
+    assert_eq!((apart(&g, (2, 4), (5, 4)), apart(&g, (2, 4), (6, 4))), (3, 4));
+    assert_eq!((apart(&g, (9, 4), (6, 4)), apart(&g, (9, 4), (5, 4))), (3, 4));
+    g.assign_every_city_for_test();
+    let two = CityId::new(2).expect("an id");
+    assert_eq!(works(&g, two), [(6, 4)]);
+    assert_eq!(works(&g, CityId::FIRST), [(5, 4)], "city 1 is back on its plains");
+    clean(&mut g);
+}
+
+#[test]
+fn two_neighbouring_cities_each_in_its_own_cycle_both_stop() {
+    // Each city has two plains side by side and one citizen: whichever it works makes the other
+    // worth 4 food, so its best assignment is always the one it does not have (a cycle of its own
+    // citizens, as the kitchen sink's specialists made one in the soak). Each flip moves a tile
+    // within a step of the other city's working distance, so each flags the other at every
+    // flip: a stop that forgot what a city held whenever another city flagged it would flip both
+    // until the passes ran out (SETTLE-1). Both stop, and the citizen oracle accepts each in its
+    // cycle.
+    let mine = [(4, 2), (5, 2)];
+    let theirs = [(6, 6), (7, 6)];
+    let plains = [mine, theirs].concat();
+    let mut g = neighbours(&[((3, 4), mine[0]), ((8, 4), theirs[0])], &plains, &[]);
+    // Each city's plains are within its own working distance and out of the other's, with one
+    // of them a step past it; no plains of one city touches the other's.
+    for (centre, own, other) in [((3, 4), mine, theirs), ((8, 4), theirs, mine)] {
+        assert!(own.iter().all(|&p| apart(&g, centre, p) <= 3));
+        let far: Vec<u32> = other.iter().map(|&p| apart(&g, centre, p)).collect();
+        assert!(far.iter().all(|&d| d >= 4) && far.contains(&4), "{far:?}");
+        assert!(own.iter().all(|&p| other.iter().all(|&q| apart(&g, p, q) > 1)));
+    }
+    let two = CityId::new(2).expect("an id");
+    let both = |g: &Game| (works(g, CityId::FIRST), works(g, two));
+    // Each flips once, flagging the other, and stops when its next flip would be a return that
+    // does not stand.
+    g.assign_every_city_for_test();
+    assert_eq!(both(&g), (vec![mine[1]], vec![theirs[1]]));
+    clean(&mut g);
+    // What a settle held goes with it, so the next settle of both flips each once more, and
+    // stops it again.
+    g.assign_every_city_for_test();
+    assert_eq!(both(&g), (vec![mine[0]], vec![theirs[0]]));
+    clean(&mut g);
+}
+
+// ---- Locks and specialists by hand --------------------------------------------------------------
+
+/// A city with more citizens locked to tiles and set as specialists by hand than it has sheds
+/// the locks it cannot keep in one placement, so placing its citizens again leaves them where
+/// they are. Python shed one lock a placement and moved the city at every one; one placement of
+/// that kind left a lock past the city's one citizen in the soak (seed 1607, game 138), which the
+/// citizen oracle found.
+// refcheck: citizens-shed-locks-at-once
+#[test]
+fn a_city_sheds_the_locks_its_citizens_cannot_keep_in_one_placement() {
+    let mut g = arena(Ruleset::shared(), 2);
+    let (out, _) = g
+        .apply_ops(&json!([{"op": "found_city", "player": 0, "x": 5, "y": 5, "name": "Roma",
+            "pop": 3, "claim_radius": 2, "buildings": ["Market"]}]))
+        .expect("a city");
+    let c = founded(&out[0]);
+    let tiles: Vec<(i32, i32)> =
+        cstats::workable_tiles(&g, c).into_iter().take(3).map(|t| g.xy(t)).collect();
+    for &(x, y) in &tiles {
+        tool(&mut g, ME, "work_tile", &json!({"city_id": c.get(), "x": x, "y": y})).expect("lock");
+    }
+    g.apply_ops(&json!([{"op": "set_city", "city": c.get(), "pop": 2}])).expect("two citizens");
+    let city = g.city(c).expect("Roma");
+    assert_eq!((city.locked.len(), city.worked.len()), (3, 2), "a lock past the citizens stays");
+    clean(&mut g);
+    // A merchant by hand: of the two citizens one is left for the three locked tiles.
+    let merchant = json!({"city_id": c.get(), "specialists": {"Merchant": 1}});
+    tool(&mut g, ME, "set_specialists", &merchant).expect("a merchant");
+    let city = g.city(c).expect("Roma");
+    assert_eq!(city.specialists.iter().map(|&n| u32::from(n)).sum::<u32>(), 1);
+    assert_eq!(city.worked.len(), 1);
+    assert_eq!(city.locked, city.worked, "the locks no citizen can keep are gone at once");
+    clean(&mut g);
+    g.assign_every_city_for_test();
+    assert_eq!(g.city(c).map(|x| (x.worked.len(), x.locked.len())), Some((1, 1)));
+    clean(&mut g);
+}

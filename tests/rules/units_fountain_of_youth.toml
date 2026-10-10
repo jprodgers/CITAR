@@ -1,0 +1,33 @@
+about = """
+The Fountain of Youth: a military unit that moves next to it is promoted with Rejuvenation for the
+rest of the game.
+"""
+from = "tests/test_mechanics.py::RuleGapTests::test_fountain_of_youth_promotes_adjacent_units; engine/movement.py: on_enter_tile"
+
+[[step]]
+ops = [
+  { op = "set_tile", x = 12, y = 8, wonder = "Fountain of Youth" },
+  { op = "add_unit", player = 0, unit = "Warrior", x = 10, y = 8 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+]
+
+[[step]]
+note = "Two tiles from the wonder, the warrior has no promotion."
+check = { what = "units", player = 0 }
+path = "[0]"
+subset = { type = "Warrior", x = 10, y = 8, promotions = [] }
+as = "w"
+
+[[step]]
+tool = "move_unit"
+player = 0
+args = { unit_id = "=w.id", x = 11, y = 8 }
+
+[[step]]
+check = { what = "unit", unit = "=w.id" }
+subset = { x = 11, y = 8 }
+
+[[step]]
+check = { what = "unit", unit = "=w.id" }
+path = "promotions"
+contains = "Rejuvenation"

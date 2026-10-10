@@ -11,6 +11,7 @@ from unittest import mock
 from citar import servers as REG
 from citar.server.benchmarks import BenchmarkScheduler, normalize_suite, performance
 from citar.server.session import SessionManager, SAVE_DIR
+from tests import has_test_ops
 
 
 def dry_server(i, models, max_parallel=1, delay=0.0, restricted=None):
@@ -117,23 +118,66 @@ class BenchmarkTests(unittest.TestCase):
         run = sch.create_run(suite)
         job = run["jobs"][0]
         self.assertTrue(wait_for(lambda: job.get("game_id") and self.manager.get(job["game_id"]), sch=sch))
-        g = self.manager.get(job["game_id"]).game
-        self.assertTrue(g.grid.wrap_x)
-        self.assertFalse(any(t.river for t in g.s.tiles))
-        self.assertFalse(any(t.resource == "Uranium" for t in g.s.tiles))
+        m = self.manager.get(job["game_id"]).game.export_map()      # tiles as [terrain, features, wonder, river, resource, ...]
+        self.assertTrue(m["wrap_x"])
+        self.assertFalse(any(t[3] for t in m["tiles"]))
+        self.assertFalse(any(t[4] == "Uranium" for t in m["tiles"]))
 
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
     def test_a_job_ends_when_its_model_is_eliminated(self):
         sch = self.scheduler()
-        run = sch.create_run(dry_suite(models=("dry-a",), turn_limit=200, delay=0.05))
+        suite = dry_suite(models=("dry-a",), turn_limit=200, delay=0.05)
+        # two bots, so the game goes on without the model: eliminating it in a duel would end the game
+        suite["scenarios"][0].update(opponents=2, map_size="small")
+        run = sch.create_run(suite)
         job = run["jobs"][0]
         self.assertTrue(wait_for(lambda: job["status"] == "running" and self.manager.get(job["game_id"]), sch=sch))
         s = self.manager.get(job["game_id"])
         with s.lock:
-            s.game.player(0).alive = False
+            s.game.test_ops([{"op": "eliminate", "player": 0}])
         self.assertTrue(wait_for(lambda: job["status"] == "done", sch=sch, timeout=30))
         self.assertEqual(job["result"]["outcome"], "eliminated")
         self.assertEqual(job["result"]["performance"], 0)
         self.assertTrue(s.stopped, "the bots should not play out a settled game")
+        # Its last save is taken as it stops: no round the bots played after it was autosaved past it, so opening the
+        # job's game later goes on in its journal rather than forking a copy of the history.
+        from citar import engine_api
+        last = engine_api.save_header(s.folder / "benchmark.citar")["journal"]
+        for p in s.folder.glob("*.citar"):
+            self.assertLessEqual(engine_api.save_header(p)["journal"]["records"], last["records"], p.name)
+        self.manager.delete(s.id)
+        view = sch.open_job_game(run["id"], job["id"])
+        self.assertEqual(view.journal.path.name, "journal.cjnl")
+
+    @unittest.skipUnless(has_test_ops(), "needs the engine's test operations (a test-ops build)")
+    def test_a_job_whose_engine_stops_fails_and_frees_its_machine(self):
+        """A crashed game (GameSession._crashed) takes no more moves: its job fails with the crash, its machine's slot
+        is freed for the next job, and the run finishes; a crashed game is never resumed."""
+        sch = self.scheduler()
+        run = sch.create_run(dry_suite(models=("c", "d"), turn_limit=4, delay=0.05))
+        first, second = run["jobs"]
+        self.assertEqual(started(sch, run, first), "running", why(sch, run))
+        s = self.manager.get(first["game_id"])
+
+        def panics(bots, seat_limit=0):           # the bot's next drive panics, as a bug in the engine or bot would
+            return s.game.test_ops([{"op": "panic"}])
+
+        with mock.patch.object(s.game, "drive", side_effect=panics):
+            self.assertTrue(wait_for(lambda: s.crashed is not None, sch=sch, timeout=30), why(sch, run))
+            self.assertTrue(wait_for(lambda: first["status"] == "failed", sch=sch, timeout=10), why(sch, run))
+        self.assertIn(f"The engine stopped on turn {s.crashed['turn']}", first["error"])
+        self.assertIn("panic", first["error"])
+        self.assertIsNone(first["pause_reason"])
+        self.assertTrue(s.stopped)
+        with self.assertRaises(ValueError):
+            sch.control_job(run["id"], first["id"], "resume")
+        # its slot is free: the next job of this sequential run plays on the same machine, and the run finishes
+        self.assertTrue(wait_for(lambda: run["status"] == "done", sch=sch, timeout=120), why(sch, run))
+        self.assertEqual((first["status"], second["status"]), ("failed", "done"), why(sch, run))
+        # the job's game, opened later, is the game as the engine stopped it
+        sch.manager.delete(s.id)
+        opened = sch.open_job_game(run["id"], first["id"])
+        self.assertEqual(opened.crashed["turn"], s.crashed["turn"])
 
     def test_sequential_run_plays_each_model_to_the_turn_limit(self):
         sch = self.scheduler()
@@ -341,6 +385,18 @@ class BenchmarkTests(unittest.TestCase):
         self.assertGreaterEqual(row["benchmark_turns"], 3)
         self.assertIsNotNone(row["overall"])
         self.assertTrue(0 <= row["overall"] <= 100)
+        # once the game is only a save on disk, it scores the same (read through engine_api.state_summary)
+        from citar.server.scoring import _digest_save, _reports
+        live = _reports(self.manager)[game.id]
+        saved = _digest_save(game.save("scored"))
+        self.assertEqual((saved["turn"], set(saved["summary"])), (live["turn"], set(live["summary"])))
+        for k in ("model", "turns", "phase"):
+            self.assertEqual(saved["benchmark"][k], live["benchmark"][k], k)
+        # a save is scored from its last per-turn stats row (a running game from the score as it stands)
+        last = game.game.stats(1)[0]["players"]
+        self.assertEqual(saved["benchmark"]["score"], last["0"]["score"])
+        self.assertEqual(saved["benchmark"]["best_bot_score"], max(v["score"] for k, v in last.items() if k != "0"))
+        self.assertTrue(0 <= saved["benchmark"]["performance"] <= 100)
 
     def test_normalize_fills_defaults(self):
         s = normalize_suite({"servers": [{"server_id": "sv_x", "models": ["m_a", {"model_id": "m_b", "enabled": False}]},

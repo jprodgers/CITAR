@@ -1,9 +1,14 @@
+# maturin builds the package with its Rust extension, citar._engine (crates/citar-py), so building
+# from source needs a Rust toolchain: rust-toolchain.toml pins it, and rustup installs it on first
+# use. crates/citar-engine/DESIGN.md P2.6.7 is the design.
 [build-system]
-requires = ["hatchling>=1.24"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
 
 [project]
 name = "citar"
+# Cargo's: [workspace.package] version in Cargo.toml, which cargo xtask check holds equal to
+# __version__ in citar/__init__.py.
 dynamic = ["version"]
 description = "Civ Inspired Tool for AI Research - a Civilization V-style 4X game for benchmarking language models"
 readme = "README.md"
@@ -90,49 +95,62 @@ citar-mcp = "citar.agents.mcp_server:main"
 
 # --------------------------------------------------------------------------------- build
 
-[tool.hatch.version]
-path = "citar/__init__.py"
-
-[tool.hatch.build.targets.wheel]
-packages = ["citar"]
-
-[tool.hatch.build.targets.wheel.force-include]
-# Nothing here yet; data files are picked up by the include rules below.
-
-[tool.hatch.build.targets.sdist]
-# A source distribution should be able to build the wheel and run the tests, and nothing else needs
-# to travel: no operator notes, no saved games, no benchmark history.
+[tool.maturin]
+# The mixed layout: the Python package is ./citar, and the extension goes into it as
+# citar/_engine (DESIGN.md P2.6.7). The wheel holds the package and the extension, nothing else
+# from the root.
+python-source = "."
+module-name = "citar._engine"
+manifest-path = "crates/citar-py/Cargo.toml"
+# Never `test-ops`: no wheel carries the engine's test operations, and cargo xtask check refuses
+# a feature list that would turn them on (or the converter's `legacy`). The Python suite's builds
+# add it themselves: CI's build-ext job and `cargo xtask develop` pass --features test-ops.
+# maturin sets the extension-module build itself.
+features = []
+# No `locked = true`, though CI builds with --locked: the source distribution keeps only the five
+# crates the extension needs, so cargo prunes the other members' packages from its Cargo.lock
+# (the versions it keeps are unchanged), which --locked refuses.
+# `pip install -e .`, a working copy's build: the ci profile, which every Rust test uses (release
+# optimisation without fat LTO, debug assertions on), so it builds in a fraction of the release
+# profile's time and still trips the engine's assertions. A wheel (`pip install .`, `maturin
+# build`) is a release build.
+editable-profile = "ci"
+# Data that must reach an installed copy: the browser client, the migration environment, and the
+# hardware collectors offered for download on the Servers page. The package folder travels whole,
+# less what .gitignore and `exclude` leave out; these are named so that an ignore rule can never
+# drop them. The ruleset is no file of the package: the engine compiles it in from
+# crates/citar-engine/data/, which the source distribution carries with the crate.
 include = [
-    "/citar",
-    "/tests",
-    "/scripts",
-    "/docs",
-    "/deploy",
-    "/installer",
-    "/README.md",
-    "/LICENSE",
-    "/NOTICE.md",
-    "/CHANGELOG.md",
-    "/DESIGN.md",
-    "/alembic.ini",
-    "/pyproject.toml",
-]
-
-[tool.hatch.build]
-# Data that must reach an installed copy: the ruleset, the browser client, the migration
-# environment, and the hardware collectors offered for download on the Servers page.
-artifacts = [
-    "citar/data/**/*.json",
-    "citar/data/**/*.md",
-    "citar/data/collectors/*",
-    "citar/web/**/*",
-    "citar/migrations/**/*.py",
-    "citar/migrations/**/*.mako",
+    { path = "citar/data/collectors/*", format = ["sdist", "wheel"] },
+    { path = "citar/web/**/*", format = ["sdist", "wheel"] },
+    { path = "citar/migrations/**/*.py", format = ["sdist", "wheel"] },
+    { path = "citar/migrations/**/*.mako", format = ["sdist", "wheel"] },
+    # The source distribution builds the wheel with the pinned toolchain and runs the Python suite:
+    # beside the package and the five crates maturin takes, the tests, the scripts they run and
+    # refcheck's committed answers (never its local corpus), and the documents and deployment files
+    # a source release has always carried.
+    { path = "rust-toolchain.toml", format = "sdist" },
+    { path = "tests/**/*", format = "sdist" },
+    { path = "scripts/**/*", format = "sdist" },
+    { path = "refcheck/intended.toml", format = "sdist" },
+    { path = "refcheck/query_tools.json.gz", format = "sdist" },
+    { path = "refcheck/fixtures-mini/**/*", format = "sdist" },
+    { path = "refcheck/fixtures-late/**/*", format = "sdist" },
+    { path = "docs/**/*", format = "sdist" },
+    { path = "deploy/**/*", format = "sdist" },
+    { path = "installer/**/*", format = "sdist" },
+    { path = "CHANGELOG.md", format = "sdist" },
+    { path = "DESIGN.md", format = "sdist" },
+    { path = "alembic.ini", format = "sdist" },
 ]
 exclude = [
-    "**/__pycache__",
+    "**/__pycache__/**",
     "**/*.pyc",
     "**/.DS_Store",
+    # The installers' build output, which the include above would take: maturin's include globs
+    # match the files on disk, not git's index.
+    { path = "installer/output/**/*", format = "sdist" },
+    { path = "installer/build/**/*", format = "sdist" },
 ]
 
 # --------------------------------------------------------------------------------- lint
@@ -140,7 +158,7 @@ exclude = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = ["citar/migrations/versions", "citar/bots/frozen_*.py"]
+extend-exclude = ["citar/migrations/versions"]
 
 [tool.ruff.lint]
 # Rules that find mistakes, not rules that find differences of opinion.

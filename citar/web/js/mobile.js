@@ -42,6 +42,7 @@ function meter(label, used, total, text) {
 }
 
 function gameState(g) {
+  if (g.crashed) return ["bad", "engine error"];
   if (g.phase !== "playing") return ["over", g.winner != null ? "finished" : "over"];
   if (g.paused) return (g.pause_reason && g.pause_reason.kind === "disconnect") ? ["bad", "paused: server down"] : ["warn", "paused"];
   const st = Object.values(g.agent_status || {});
@@ -130,7 +131,8 @@ async function gamePage(gid) {
       el("span", { class: `m-pill ${cls}` }, label)),
     d.paused && d.pause_reason && d.pause_reason.kind === "disconnect"
       ? el("p", { class: "m-alert" }, `${d.pause_reason.message}. The game resumes by itself when it answers again.`) : null,
-    d.can_manage && d.phase === "playing"
+    d.crashed ? el("p", { class: "m-alert" }, `${d.pause_reason ? d.pause_reason.message : "The game engine stopped."} (turn ${d.crashed.turn})`) : null,
+    d.can_manage && d.phase === "playing" && !d.crashed
       ? el("div", { class: "row m-actions" },
           el("button", { class: d.paused ? "primary" : "", onclick: async (e) => {
             e.target.disabled = true;

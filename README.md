@@ -164,14 +164,20 @@ short version:
 
 ```bash
 git clone https://github.com/jprodgers/CITAR && cd CITAR
-pip install -e ".[dev]"
-python -m unittest discover -s tests     # 272 tests, about 90 seconds
+pip install -e ".[dev]"                  # builds the Rust engine: needs rustup (rustup.rs)
+python -m unittest discover -s tests     # about 650 tests, a few minutes; about 200 of them skip
 citar serve --debug
 ```
 
+The editable install builds the engine without its test operations, so the tests that need them
+(the rule scripts among them) skip; `cargo xtask develop`, the dev loop
+[CONTRIBUTING.md](CONTRIBUTING.md#rust) describes, builds it with them and runs the whole suite.
+
 Most content is data: the ruleset is UnCiv-style JSON, and a new unit or building is a JSON entry,
-not code. [docs/MODDING.md](docs/MODDING.md) covers that;
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) covers the rest.
+not code, which an installed CITAR plays from a folder of your own (`CITAR_RULESET_DIR`) without a
+Rust toolchain. [docs/MODDING.md](docs/MODDING.md) covers that;
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) covers the rest: the engine is Rust (`crates/`), and
+the server, agents and tools around it are Python.
 
 ## Licence and credits
 

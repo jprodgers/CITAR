@@ -1,10 +1,24 @@
-"""Test package. Games created by tests are saved to a temporary folder, not the real saves/ directory, and the server
-registry is a small temporary one (a host PC, the Anthropic API and the dry-run server), not config/servers.json."""
+"""Test package. Games created by tests are saved to a temporary folder, not the real saves/ directory, the server
+registry is a small temporary one (a host PC, the Anthropic API and the dry-run server), not config/servers.json, and
+the accounts database is a temporary one, never the per-user citar.db."""
 import atexit
 import json
 import os
 import shutil
 import tempfile
+
+# The suite plays the ruleset compiled into the engine, whatever the shell says: a modded one (docs/MODDING.md) would
+# change what the tests read. The tests of the variable itself set it in children of their own.
+os.environ.pop("CITAR_RULESET_DIR", None)
+
+# The API test modules each point CITAR_DATA_DIR and CITAR_DB_URL at their own temporary database. This default is
+# for a module run on its own that builds the app without doing so: without it, the app opens the per-user database.
+if not os.environ.get("CITAR_DATA_DIR"):
+    _data = tempfile.mkdtemp(prefix="citar-test-data-")
+    os.environ["CITAR_DATA_DIR"] = _data
+    atexit.register(shutil.rmtree, _data, ignore_errors=True)
+if not os.environ.get("CITAR_DB_URL"):
+    os.environ["CITAR_DB_URL"] = "sqlite:///" + os.path.join(os.environ["CITAR_DATA_DIR"], "test.db").replace("\\", "/")
 
 if not os.environ.get("CITAR_SAVE_DIR"):
     _tmp = tempfile.mkdtemp(prefix="citar-test-saves-")
@@ -40,3 +54,10 @@ if not os.environ.get("CITAR_CONFIG_DIR"):
         ]}
     with open(os.path.join(_cfg, "servers.json"), "w", encoding="utf-8") as f:
         json.dump(TEST_REGISTRY, f)
+
+
+def has_test_ops() -> bool:
+    """Whether the engine's build has the test operations (rule scripts, ``EngineGame.inspect`` and ``test_ops``):
+    ``cargo xtask develop`` and CI's test builds do, a release wheel does not."""
+    from citar import _engine
+    return bool(_engine.HAS_TEST_OPS)

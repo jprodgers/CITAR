@@ -1,0 +1,71 @@
+[package]
+name = "citar-bench"
+description = "Benchmarks of the CITAR engine: criterion wall clock and gungraun instruction counts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The gungraun suite (benches/iai.rs): instruction counts under valgrind, on Linux only, the
+# per-PR gate of rust.yml. Off by default so that `cargo bench` on Windows builds without it.
+iai = ["dep:gungraun"]
+
+[dependencies]
+# test-ops: the engine's benchmark hooks (`*_for_bench`, `step_unit_for_test`, the settle on its
+# own); legacy: the fixtures load through the Python converter.
+citar-engine = { workspace = true, features = ["embedded-ruleset", "legacy", "test-ops"] }
+# The fixtures, the synthetic states, and the games and agents of the macro benchmarks.
+citar-testkit.workspace = true
+# The bot games of the `games` suite, played by the runner (DESIGN.md P2.4.2).
+citar-bot.workspace = true
+citar-sim.workspace = true
+# The games suite prints each game's share of the CPU, which shows a busy machine.
+cpu-time.workspace = true
+# The io suite's container and journal (package 2-02, report-only).
+citar-store.workspace = true
+# The suites' shared runner (lib.rs) drives criterion and pins its thread.
+criterion.workspace = true
+core_affinity.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+# What Python recorded beside each fixture (the recorded paths and fights).
+flate2.workspace = true
+gungraun = { workspace = true, optional = true }
+
+# The kernels, one part per system (packages 1b-05 to 1c-07, gathered in 1e-03): budgets of
+# DESIGN.md 10 in thresholds.toml, hard at 1.5 times.
+[[bench]]
+name = "kernels"
+path = "benches/kernels/main.rs"
+harness = false
+
+# The macro benchmarks: pass rounds on every reference state (with Python's ratios), the client
+# views, and a whole engine-only game.
+[[bench]]
+name = "turns"
+harness = false
+
+# The digest, the snapshot under a host's lock, the save, the load and the ruleset.
+[[bench]]
+name = "io"
+harness = false
+
+# Whole bot games (DESIGN.md P2.4.2): the small 4-bot Quick game to 330 rounds and a gargantuan
+# 24-bot game, single-threaded and pinned, written for `cargo xtask perf --suite games`.
+# Hard from package 2-07 (thresholds.toml).
+[[bench]]
+name = "games"
+harness = false
+
+# Instruction counts (gungraun, valgrind): eight kernels and two macro benchmarks, the per-PR
+# gate of rust.yml against the base branch (+5% fails).
+[[bench]]
+name = "iai"
+harness = false
+required-features = ["iai"]
+
+[lints]
+workspace = true

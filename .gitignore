@@ -2,9 +2,15 @@
 __pycache__/
 *.py[cod]
 *.so
+# The engine's extension, built into the checkout by `pip install -e .` or maturin (DESIGN.md
+# P2.6.7): a 20 MB binary of one build, never source.
+citar/_engine*.pyd
+citar/_engine*.so
 .Python
 build/
 dist/
+# The wheels the Docker image installs (Dockerfile); built, never source.
+wheelhouse/
 *.egg-info/
 .eggs/
 .venv/
@@ -67,3 +73,13 @@ wiki/.git/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --------------------------------------------------------------------------- Rust
+# The laptop builds outside OneDrive through CARGO_TARGET_DIR (CONTRIBUTING.md, "Rust"); these
+# catch a build that did not.
+/target/
+**/*.rs.bk
+crates/citar-engine/fuzz/target/
+crates/citar-engine/fuzz/corpus/
+crates/citar-engine/fuzz/artifacts/
+crates/citar-engine/fuzz/coverage/

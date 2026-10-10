@@ -1,0 +1,124 @@
+about = """
+The trades switch. While the bot owns trades it offers a luxury it has to spare to a civilization that
+lacks it, and when an offer it owns falls short it counters by asking for gold. When the seat's model
+owns trades the bot offers no trade, and, since asking for gold is a trade, it answers a deal it owns
+but values below nothing with a plain rejection.
+"""
+from = "tests/test_bot_diplomacy.py::TradeSwitchTests (test_no_trade_offers_when_the_model_owns_trades, test_no_gold_counter_when_the_model_owns_trades, test_a_game_with_trades_owned_by_the_model_has_no_bot_trades)"
+
+[[step]]
+set = { trading = { tech_noise = 0, ranged_chance = 0, peace_offer_chance = 0, friend_chance = 0, friend_chance_aggr = 0, war_chance = 0, war_chance_aggr = 0, lux_trade_every = 1 } }
+
+[[step]]
+note = "Two improved cottons: one to spare. The other civilization has none."
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+  { op = "grant_tech", player = 0, tech = "Calendar" },
+  { op = "set_tile", at = "A>e", resource = "Cotton", improvement = "Plantation" },
+  { op = "set_tile", at = "A>w", resource = "Cotton", improvement = "Plantation" },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=trading"
+
+[[step]]
+note = "The offer was made; how it closed when the turn ended is the runner's business, so only its opening is read."
+check = { what = "negotiation", negotiation = 1 }
+subset = { initiator = 0, responder = 1 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = 'history[0].proposal["0"][0]'
+subset = { type = "resource", resource = "Cotton" }
+
+[[step]]
+note = "With trades the model's, the bot offers nothing."
+new_game = {}
+
+[[step]]
+ops = [
+  { op = "found_city", player = 0, at = "A", capital = true, pop = 3 },
+  { op = "add_unit", player = 0, unit = "Warrior", at = "A" },
+  { op = "found_city", player = 1, at = "B", capital = true, pop = 3 },
+  { op = "add_unit", player = 1, unit = "Warrior", at = "B" },
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = "all", gold = 300 },
+  { op = "grant_tech", player = 0, tech = "Calendar" },
+  { op = "set_tile", at = "A>e", resource = "Cotton", improvement = "Plantation" },
+  { op = "set_tile", at = "A>w", resource = "Cotton", improvement = "Plantation" },
+]
+
+[[step]]
+bot = "turn"
+player = 0
+params = "=trading"
+diplomacy = { trades = "llm" }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+len = 0
+
+[[step]]
+note = "Asked for its embassy for nothing, the bot owns the question (an agreement) and values it below nothing."
+op = "end_turn"
+args = { player = 1 }
+
+[[step]]
+op = "grant_tech"
+args = { player = "all", tech = "Writing" }
+
+[[step]]
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "An embassy?", receive = [{ type = "embassy" }] }
+as = "ask"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=ask.negotiation_id"
+diplomacy = { trades = "llm" }
+as = "answered"
+
+[[step]]
+check = "answered"
+eq = { outcome = "done" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=ask.negotiation_id" }
+subset = { status = "rejected" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=ask.negotiation_id" }
+path = "history[1].action"
+eq = "reject"
+
+[[step]]
+note = "The bot that owns trades counters with gold instead."
+tool = "open_negotiation"
+player = 0
+args = { to = 1, message = "An embassy, then?", receive = [{ type = "embassy" }] }
+as = "again"
+
+[[step]]
+bot = "respond"
+player = 1
+negotiation = "=again.negotiation_id"
+as = "answered"
+
+[[step]]
+check = { what = "negotiation", negotiation = "=again.negotiation_id" }
+path = "history[1]"
+subset = { by = 1, action = "counter" }
+
+[[step]]
+check = { what = "negotiation", negotiation = "=again.negotiation_id" }
+path = 'proposal["0"]'
+any = { path = "type", eq = "gold" }

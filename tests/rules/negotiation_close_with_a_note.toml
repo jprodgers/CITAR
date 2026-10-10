@@ -1,0 +1,70 @@
+about = """
+A host closes a negotiation from outside it when an answer does not come in time: the negotiation takes
+the status given, awaits nobody, and its history ends with a close entry carrying the note, by nobody;
+both sides are told, with the note. With nothing open, the turn ends; a closed negotiation cannot be
+closed again.
+"""
+from = "tests/test_negotiation_chat.py::CloseNegotiationTests::test_close_records_a_note_and_tells_both_sides"
+
+[[step]]
+ops = [
+  { op = "meet", a = 0, b = 1 },
+  { op = "set_player", player = 0, gold = 200 },
+  { op = "set_player", player = 1, gold = 200 },
+]
+
+[[step]]
+tool = "open_negotiation"
+args = { to = 1, message = "Shall we talk?" }
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = 1, status = "expired", note = "(no reply in time)" }
+as = "closed"
+
+[[step]]
+check = "closed"
+subset = { id = 1, status = "expired", awaiting = "=null" }
+
+[[step]]
+check = { what = "negotiation", negotiation = 1 }
+path = "history[1]"
+subset = { seq = 2, by = "=null", action = "close", note = "(no reply in time)" }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+path = "[1]"
+subset = { text = "Negotiation #1 between Civilization 1 and Civilization 2 expired. (no reply in time)", audience = [0, 1] }
+
+[[step]]
+note = "Nothing is open any more."
+tool = "end_turn"
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = 1, status = "expired", note = "again" }
+error = "Negotiation #1 is already expired."
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = 9, status = "expired", note = "again" }
+error = "No negotiation with id 9."
+
+[[step]]
+note = "Closed for a player, with no note: the event's text ends at the verb."
+op = "open_negotiation_as"
+args = { player = 1, to = 0, message = "Anyone?" }
+
+[[step]]
+op = "close_negotiation"
+args = { negotiation = 2, status = "rejected", note = "", by = 0 }
+
+[[step]]
+check = { what = "negotiation", negotiation = 2 }
+path = "history[1]"
+subset = { by = 0, action = "close", note = "=null" }
+
+[[step]]
+check = { what = "events", type = "negotiation" }
+path = "[3].text"
+eq = "Negotiation #2 between Civilization 2 and Civilization 1 was declined."

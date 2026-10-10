@@ -103,9 +103,10 @@ inherent, not a bug, and it is why:
 
 ## Can I use my own ruleset or mod?
 
-Yes. Most content is data. A mod entry in `citar/data/custom/` in UnCiv format works as long as the
-engine knows the uniques it uses. To move to a newer UnCiv release, point
-`scripts/import_unciv.py` at a checkout and regenerate. See [MODDING.md](MODDING.md).
+Yes. Most content is data. Copy the ruleset (`crates/citar-engine/data/`), change it in UnCiv's
+format, check it with `citar ruleset check DIR`, and point `CITAR_RULESET_DIR` at it: no Rust
+toolchain needed, as long as the engine knows the uniques it uses. To move to a newer UnCiv release,
+point `scripts/import_unciv.py` at a checkout and regenerate. See [MODDING.md](MODDING.md).
 
 ## Can I drive CITAR from my own code?
 

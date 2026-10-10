@@ -31,7 +31,8 @@ an earlier version made the model ask a dozen questions before it could act, and
 to fifteen minutes.
 
 Every tool a model can call is also available over HTTP and to MCP clients. They are registered
-once, in `citar/engine/tools.py`, and reach all three interfaces automatically. See
+once, in the engine's tool registry (`crates/citar-engine/src/api/tools/`), and reach all three
+interfaces automatically. See
 [API.md](HTTP-and-tool-API).
 
 ---
@@ -102,7 +103,8 @@ A prompt that works:
 
 The bridge is `citar-mcp` (`citar_mcp.py` in a checkout). It exposes every game tool plus
 `wait_for_turn`, which blocks until it is that seat's turn or a negotiation needs an answer — so
-the agent waits rather than polling.
+the agent waits rather than polling. On the seat's own turn, after it opens a negotiation, it waits
+for the other side's answer, since `end_turn` is refused until the negotiation is settled.
 
 Any seat's controller can be switched mid-game from **Join / Seats**, including handing a human
 seat to a model or the reverse.
@@ -140,8 +142,24 @@ A turn ends when the model calls `end_turn`, or when one of these is hit:
 A request cut off by the time limit is not retried. Every one of these is recorded in the metrics
 as the reason the turn ended, which is how you tell "played well" from "ran out of budget".
 
-If a model cannot be reached at all, the seat retries a few times, then skips the turn. You get a
-red notification in the game and the error appears beside that seat in the lobby.
+### When the model server goes away
+
+A model server that cannot be reached — LM Studio restarting, a worker reconnecting, Wi-Fi
+dropping, an API returning 503 — is waited out rather than punished. The seat keeps retrying with
+backoff for the **reconnect wait** (180 seconds by default; set per game in the lobby, or per seat),
+and the time spent waiting does not count against `max_turn_seconds`. While it waits the game
+shows the seat as *reconnecting*. A drop shorter than the wait costs nothing but the wait: the
+turn carries on where it was.
+
+If the server is still unreachable when the wait runs out, the game's **disconnect rule** applies:
+
+| Rule | What happens |
+|---|---|
+| **Pause** (default) | The whole game pauses — bots included, so nobody gets free turns — with a banner saying which server is down. It resumes by itself as soon as the server answers again (checked every ten seconds), or when you press Resume, and the interrupted turn is replayed. |
+| **Skip** | That seat's turn ends and play moves on. The next turn tries again, waiting out another reconnect wait first. |
+
+A model that answers with an error — a bad request, a context overflow — is not a disconnect: the
+turn ends straight away and the error appears beside the seat in the lobby.
 
 ---
 

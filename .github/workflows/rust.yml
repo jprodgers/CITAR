@@ -1,0 +1,300 @@
+# The Rust workspace: lint, tests on the three desktop platforms, and the reference checks.
+#
+# A separate workflow from test.yml, so a Python-only change skips it (the path filters below)
+# and the Rust results get their own summary. The five-target determinism matrix is
+# determinism.yml; the long runs are nightly.yml (crates/citar-engine/DESIGN.md 2.6). The perf
+# job counts instructions on pull requests against their base branch (DESIGN.md 9.7).
+name: rust
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "xtask/**"
+      - "Cargo.*"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "refcheck/**"
+      - "tests/rules/**"
+      # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, recorded from
+      # the Python bot (cargo xtask check's triggers rule holds this line in place).
+      - "tests/data/clean_params_cases.json"
+      # The ruleset the engine compiles in (crates/** takes it too; named so a narrower filter keeps it).
+      - "crates/citar-engine/data/**"
+      # cargo xtask check holds the workspace version equal to this file's __version__.
+      - "citar/__init__.py"
+      # cargo xtask check holds pyproject.toml's maturin table: its features never reach the test
+      # operations or `legacy`, it builds crates/citar-py, and the version stays dynamic.
+      - "pyproject.toml"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "xtask/**"
+      - "Cargo.*"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "refcheck/**"
+      - "tests/rules/**"
+      # citar-testkit's bot params test holds clean() to 2-00b's clean-params table, recorded from
+      # the Python bot (cargo xtask check's triggers rule holds this line in place).
+      - "tests/data/clean_params_cases.json"
+      # The ruleset the engine compiles in (crates/** takes it too; named so a narrower filter keeps it).
+      - "crates/citar-engine/data/**"
+      # cargo xtask check holds the workspace version equal to this file's __version__.
+      - "citar/__init__.py"
+      # cargo xtask check holds pyproject.toml's maturin table: its features never reach the test
+      # operations or `legacy`, it builds crates/citar-py, and the version stays dynamic.
+      - "pyproject.toml"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+    inputs:
+      chaos_seconds:
+        description: How long the chaos step plays on each OS (DESIGN.md 9.5; gate 2 of 1e-01 is 600)
+        default: "60"
+
+concurrency:
+  # A new push supersedes the run in flight for the same branch.
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artefacts are never reused on a fresh runner; they only slow the cache down.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        # rust-toolchain.toml pins the exact release; this installs it with rustfmt and clippy.
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      - uses: actions/setup-python@v7
+        # citar-py's PyO3 reads an interpreter's configuration when it builds; clippy and the docs
+        # below cover it (DESIGN.md P2.6.8). Any Python of 3.11 or later does for an abi3 build.
+        with:
+          python-version: "3.12"
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        # citar-py included: its cdylib is checked here, never linked.
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Clippy, the engine alone in each feature set
+        # Cargo unifies features across the workspace, and testkit turns on legacy and test-ops,
+        # so the run above never compiles the engine the way it ships. `-p` builds it alone.
+        # Default is what citar-py wheels and the helper ship; + test-ops is citar-py's CI build;
+        # + legacy is refcheck and bench; no default features keeps embedded-ruleset optional.
+        run: |
+          set -eu
+          for features in "--no-default-features" "" "--features test-ops" "--features legacy" \
+                          "--features checks" "--features stats"; do
+            echo "::group::citar-engine ${features:-default features}"
+            cargo clippy -p citar-engine --all-targets --locked $features -- -D warnings
+            echo "::endgroup::"
+          done
+
+      - name: Clippy, the engine as it ships
+        # A release build without the checks feature compiles no invariants and no cache oracle
+        # (DESIGN.md 9.4). The runs above are all dev builds, which always have them.
+        run: cargo clippy -p citar-engine --release --locked -- -D warnings
+
+      - name: Fuzz targets build
+        # Not a workspace member: its own lockfile. No libFuzzer here (that needs nightly and a
+        # C++ compiler); the targets' code is checked on stable.
+        run: cargo check --locked --no-default-features --bins --manifest-path crates/citar-engine/fuzz/Cargo.toml
+
+      - name: xtask check
+        # Dependency allow-list, version equality, layering, mutation access, generated files.
+        run: cargo xtask check
+
+      - name: Docs
+        # citar-py included.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple silicon; Intel macOS joins in determinism.yml.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - uses: actions/setup-python@v7
+        # For PyO3's build configuration, should anything the tests build reach citar-py; the
+        # steps below leave it out (DESIGN.md P2.6.8).
+        with:
+          python-version: "3.12"
+
+      - name: Tests
+        # The ci profile: release optimisation with debug assertions, so whole-game tests run
+        # fast and invariants still fire. No retries: a second-try pass is a determinism bug.
+        # Property tests run 64 cases here; the nightly run takes them to 10,000. citar-py is left
+        # out: its library has no Rust tests (Python tests it), and a test binary would link
+        # libpython.
+        env:
+          PROPTEST_CASES: 64
+        run: cargo nextest run --workspace --exclude citar-py --all-features --locked --cargo-profile ci --profile ci
+
+      - name: Doctests
+        # nextest does not run doctests. The ci profile reuses the libraries the step above built,
+        # instead of compiling the workspace a second time in the dev profile.
+        run: cargo test --workspace --exclude citar-py --all-features --locked --doc --profile ci
+
+      - name: Chaos
+        # RandomAgent games with tool calls of every kind mixed in, every step checked for the
+        # properties P1 to P7 (DESIGN.md 9.5). A minute on every push; a manual run takes the
+        # seconds it is given (600 for 1e-01's gate 2). The binary is the one the Tests step built
+        # for testkit's integration tests: `cargo run` would resolve the features again without
+        # the dev-dependencies and rebuild the engine and testkit. The seed is the run's number,
+        # so that every push plays other games; each failure leaves a replay file, which
+        # `cargo chaos --replay FILE` plays again whatever the seed.
+        shell: bash
+        run: ./target/ci/chaos --seconds "${{ inputs.chaos_seconds || '60' }}" --seed "${{ github.run_number }}" --out chaos-replays
+
+      - name: Keep the chaos replays
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chaos-replays-${{ matrix.os }}
+          path: chaos-replays
+          if-no-files-found: ignore
+
+  refcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: refcheck
+
+      - name: Reference checks
+        # The committed fixtures (refcheck/fixtures-mini and fixtures-late) on every group, the
+        # bot's deal valuations included (--with-bot, package 2-05). An unexplained difference
+        # fails the job where refcheck/enforced.toml covers it; elsewhere it is reported, and the
+        # ratchet below holds its count. The cargo refcheck alias, with --locked.
+        run: cargo run --locked --package citar-refcheck --profile ci -- run --with-bot --json refcheck-report.json
+
+      - name: Ratchet
+        # No group's counts may rise above refcheck/ratchet.json, and the file must hold the current
+        # counts (a fall or a newly compared group is recorded with --update and committed).
+        run: cargo run --locked --package citar-refcheck --profile ci -- ratchet
+
+      - name: Keep the report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: refcheck-report
+          path: refcheck-report.json
+          if-no-files-found: ignore
+
+  perf:
+    # Instruction counts (gungraun under valgrind's callgrind) of eight kernels and two macro
+    # benchmarks (crates/citar-bench/benches/iai.rs), on the base branch and on the pull request:
+    # a benchmark whose instructions rise more than 5% fails the job, unless the pull request
+    # carries the label `perf-accepted` (added after a failed run, then re-run the job: the step
+    # asks for the labels as they are when it ends, since a re-run keeps the event of the first
+    # run, labels and all). Counts are stable to about 0.1% on shared runners, where wall clock
+    # varies 10-20% (DESIGN.md 9.7). The wall-clock budgets are `cargo xtask perf`'s, on the
+    # laptop.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # The labels of the pull request, read when the counts rose.
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf
+
+      - name: Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - uses: taiki-e/install-action@v2
+        with:
+          # The runner's version must equal the gungraun library's in Cargo.lock.
+          tool: gungraun-runner@0.19.4
+
+      - name: Counts on the base branch
+        # A base without the suite (the pull request that adds it) leaves no baseline, and the
+        # run below then saves one instead of comparing.
+        env:
+          GUNGRAUN_HOME: ${{ github.workspace }}/target/gungraun
+        run: |
+          set -eu
+          git worktree add --detach ../base "${{ github.event.pull_request.base.sha }}"
+          if [ -f ../base/crates/citar-bench/benches/iai.rs ]; then
+            cd ../base
+            CARGO_TARGET_DIR="${{ github.workspace }}/target" \
+              cargo bench --locked -p citar-bench --features iai --bench iai -- --save-baseline=base
+          else
+            echo "the base branch has no iai suite: nothing to compare with"
+          fi
+
+      - name: Counts on the pull request, against the base
+        env:
+          GUNGRAUN_HOME: ${{ github.workspace }}/target/gungraun
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -u
+          if cargo bench --locked -p citar-bench --features iai --bench iai -- \
+              --baseline=base --callgrind-limits='ir=5%'; then
+            exit 0
+          fi
+          labels="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')"
+          if printf '%s\n' "$labels" | grep -qx perf-accepted; then
+            echo "::warning::instructions rose more than 5%, accepted by the label perf-accepted"
+            exit 0
+          fi
+          echo "::error::instructions rose more than 5% (or the suite failed); if the rise is" \
+            "accepted, add the label perf-accepted and re-run this job"
+          exit 1
