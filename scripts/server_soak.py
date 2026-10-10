@@ -7,7 +7,9 @@ plays a whole game the way people use it, with the side effects a turn has, and 
                                   [--chat-turn T] [--restart-turn T] [--json FILE]
 
 It starts ``scripts/dev_server.py`` (local mode, debug helpers on, everything under STATE_DIR, which it empties first)
-and creates a lobby game (``POST /api/games``) of a model seat and N bots, the model seat first. Then:
+and creates a lobby game (``POST /api/games``) of a model seat and N bots, the model seat first. STATE_DIR must be new,
+empty, or one an earlier soak left (it writes a ``.server-soak`` file there): any other directory is refused rather than
+emptied, and so is a ``--port`` something already listens on, or the dev server's own port (8799). Then:
 
 - **the broadcasts**: a spectator's socket (``/ws/games/<id>``) keeps every message; every bot turn the game's metrics
   record must have been announced by a ``turn`` broadcast;
@@ -22,7 +24,8 @@ and creates a lobby game (``POST /api/games``) of a model seat and N bots, the m
   restart and at the end; P2.1.3's budget is 10 ms.
 
 Prints a line per step and a JSON summary, which ``--json`` also writes; exits 0 when every check passed, 1 when one
-failed, 2 when the server would not start. Never use the port or the directory of a server someone is playing on.
+failed, 2 when the server would not start or the directory or the port was refused. Never use the port or the directory
+of a server someone is playing on.
 It needs the extension (``cargo xtask develop``) and the ``mcp`` and ``worker`` extras (the MCP client, and the
 websockets the socket uses), which the ``dev`` extra includes.
 """
@@ -31,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -48,6 +52,35 @@ from websockets.sync.client import connect
 
 ROOT = Path(__file__).resolve().parent.parent
 SAVE_LOCK_BUDGET_S = 0.010
+#: The file the soak leaves in its state directory: a later run may empty a directory that has it, and never one that
+#: holds anything without it (a dev server's data, a server's saves).
+MARKER = ".server-soak"
+#: ``scripts/dev_server.py``'s default port, where someone's own dev server may be running or start at any time.
+DEV_SERVER_PORT = 8799
+
+
+def claim_state(state: Path):
+    """Empty ``state`` for a run and mark it as the soak's. Raises SystemExit, touching nothing, unless it is new, empty,
+    or one an earlier soak left (its ``MARKER``)."""
+    if state.exists():
+        if not state.is_dir():
+            raise SystemExit(f"{state} is a file, not a state directory")
+        if any(state.iterdir()) and not (state / MARKER).is_file():
+            raise SystemExit(f"{state} holds files no soak left (it has no {MARKER}): refusing to empty it; name a new "
+                             f"or empty directory")
+        shutil.rmtree(state)
+    state.mkdir(parents=True)
+    (state / MARKER).write_text("scripts/server_soak.py empties this directory at each run.\n", encoding="utf-8")
+
+
+def check_port(port: int):
+    """Raise SystemExit for a port the soak must not take: the dev server's own, or one something listens on."""
+    if port == DEV_SERVER_PORT:
+        raise SystemExit(f"port {port} is the dev server's own, where someone may be playing: name another")
+    with socket.socket() as s:
+        s.settimeout(1.0)
+        if s.connect_ex(("127.0.0.1", port)) == 0:
+            raise SystemExit(f"something already listens on port {port}: name another")
 
 
 def free_port() -> int:
@@ -86,12 +119,13 @@ class Server:
         self.proc: Optional[subprocess.Popen] = None
         self.logs: list[Path] = []
 
-    def start(self, reset: bool) -> httpx.Client:
-        """Start the server (emptying its directory first when ``reset``) and return a client logged in to it."""
+    def start(self) -> httpx.Client:
+        """Start the server on its directory (``claim_state`` emptied it before the first start) and return a client
+        logged in to it."""
         log = self.state.parent / f"{self.state.name}-server-{len(self.logs) + 1}.log"
         self.logs.append(log)
         args = [sys.executable, str(ROOT / "scripts" / "dev_server.py"), "--port", str(self.port),
-                "--dir", str(self.state)] + (["--reset"] if reset else [])
+                "--dir", str(self.state)]
         out = open(log, "w", encoding="utf-8")
         self.proc = subprocess.Popen(args, cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT,
                                      env={**os.environ, "PYTHONUNBUFFERED": "1"})
@@ -243,7 +277,7 @@ class Soak:
         """Start the killed server again on its directory, and check what restore_live brought back."""
         last = self.killed_at
         self.client.close()
-        self.client = self.server.start(reset=False)
+        self.client = self.server.start()
         after = self.game()
         behind = last[0] - after["turn"]
         self.report.data["restart"] = {"killed_at": {"turn": last[0], "current": last[1]},
@@ -389,9 +423,10 @@ class Soak:
         """Play the game, check it, and report."""
         r = self.report
         state = self.server.state
-        state.parent.mkdir(parents=True, exist_ok=True)
+        check_port(self.server.port)
+        claim_state(state)
         try:
-            self.client = self.server.start(reset=True)
+            self.client = self.server.start()
             meta = self.client.get("/api/meta").json()
             r.data["server"] = {"port": self.server.port, "state": str(state), "engine": meta.get("engine")}
             seats = [{"type": "mcp", "name": "Soak model"}] + [{"type": "bot"}] * self.args.bots
@@ -513,8 +548,9 @@ def _find_negotiation(value, nid) -> Optional[dict]:
 def main(argv=None) -> int:
     """Run the soak."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("state", help="the state directory, emptied first (never a directory someone plays from)")
-    ap.add_argument("--port", type=int, default=0, help="a free port by default")
+    ap.add_argument("state", help="the state directory, emptied first: new, empty, or an earlier soak's (never a "
+                                  "directory someone plays from)")
+    ap.add_argument("--port", type=int, default=0, help="a free port by default; never 8799 or one in use")
     ap.add_argument("--size", default="standard")
     ap.add_argument("--bots", type=int, default=8)
     ap.add_argument("--seed", type=int, default=2613)

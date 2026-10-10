@@ -210,7 +210,8 @@ larger sizes in shards: about 10 minutes side by side).
 seat and eight bots on a Standard map, played to the end through the MCP bridge, with a chat the
 model opens with a bot, a restart that kills the server mid-round (the game must come back from its
 autosave at most a round behind), every bot turn broadcast, the replay at the end and the time each
-save held the game's lock. It takes a few minutes and empties the directory it is given:
+save held the game's lock. It takes a few minutes and empties the directory it is given, which must
+be new, empty or one an earlier soak left (it refuses any other, and the dev server's port 8799):
 
 ```bash
 python scripts/server_soak.py C:/dev/server-soak --json server-soak.json    # a free port, its own state
