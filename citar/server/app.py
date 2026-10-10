@@ -755,11 +755,18 @@ def errors(gid: str, request: Request, p: Principal = Depends(principal),
     Gated on managing the game, not just viewing it: these are server tracebacks and the tool
     arguments each seat sent, which show what a player was trying to do and are nobody else's
     business. It used to answer anyone who knew the game id.
+
+    ``save_lock`` is how long this session's saves held the game's lock since it was opened (its
+    saves, their total, the longest and the last, in seconds): a save is taken under the lock and
+    written off it, and a slow one stalls every reader and the turn driver (budget 10 ms).
+    ``save_writer`` is the writing, off the lock (``SaveWriter.stats``): how many saves were written,
+    passed over or failed, what the writes took, and the turn of the autosave on the disk.
     """
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     return {"errors": s.errors[-50:], "agents": {pid: {"usage": getattr(a, "usage_total", None),
                                                        "last_error": getattr(a, "last_error", None)}
-                                                 for pid, a in s.agents.items()}}
+                                                 for pid, a in s.agents.items()},
+            "save_lock": dict(s.save_lock), "save_writer": s.save_writer_stats()}
 
 
 # ----------------------------------------------------------------------------

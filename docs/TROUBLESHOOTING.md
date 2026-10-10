@@ -69,10 +69,14 @@ Look at **📊 AI stats** for that seat:
 
 ### It was working and now it is not
 
-A server restart drops in-memory games. Reload from the autosave in the lobby — next to nothing is
-lost: autosaves are written every turn. A game that was open when a version 0.1.5 server stopped is
-not brought back on the first start of this version (its autosave is the Python engine's); the
-server's log names it once.
+A server restart, or a server that was killed, brings back the lobby games that were open, from
+their autosaves, running or paused as they were. An autosave is taken at the start of every round,
+and a round's last turn waits until it is written, so a game comes back at most a round behind: the
+round in progress is played again, and the round before it too when the server stopped while that
+round's autosave was still being written. A game closed on purpose stays closed; reload it
+from its saves in the lobby. A game that was open when a version 0.1.5 server stopped is not brought
+back on the first start of this version (its autosave is the Python engine's); the server's log
+names it once.
 
 ### A save does not load
 
@@ -101,6 +105,12 @@ or raise the context only as far as you need.
 **The engine is slow.** Bot turns and large maps are CPU-bound and single-threaded per game. A
 Gargantuan map with 24 civilizations is slow no matter what hardware you have. On a small server,
 lower `default_max_concurrent_games`.
+
+**Saving holds the game up.** A save is taken under the game's lock, so nothing reads or plays the
+game meanwhile, and written to the disk after. `/api/games/<game id>/debug/errors` reports how long
+this game's saves held the lock (`save_lock`: the saves, their total, the longest and the last, in
+seconds). The longest should stay well under 10 ms; if it does not, the state is unusually large or
+the machine is very busy.
 
 ---
 

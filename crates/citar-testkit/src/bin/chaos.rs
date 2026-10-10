@@ -1,14 +1,16 @@
-//! `cargo chaos`: whole games of `RandomAgent` turns with tool calls of every kind mixed in, every
-//! step checked for the properties P1 to P7 (DESIGN.md 9.5; `citar_testkit::chaos`).
+//! `cargo chaos`: whole games of seat turns with tool calls of every kind mixed in, every step
+//! checked for the properties P1 to P7 (DESIGN.md 9.5; `citar_testkit::chaos`).
 //!
 //! ```text
 //! cargo chaos [--seconds N] [--seed S] [--from-fixtures] [--rounds R] [--calls C]
-//!             [--bug NAME] [--out DIR]
+//!             [--drivers random|bot|mixed] [--bug NAME] [--out DIR]
 //!                          play games for N seconds (60), from seed S (1), on generated maps
 //!                          or the fixtures (every city flagged for a citizen recheck), each
 //!                          for at most R rounds (30) with up to C calls (12) before each
-//!                          seat's turn; NAME plants a seeded bug (`game::seeded`); each
-//!                          failure is written to DIR (target/chaos) as a replay file
+//!                          seat's turn, the seats played by RandomAgents (random, the
+//!                          default), basic-1 bots (bot) or half of each (mixed); NAME plants
+//!                          a seeded bug (`game::seeded`); each failure is written to DIR
+//!                          (target/chaos) as a replay file
 //! cargo chaos --replay FILE
 //!                          play a replay file again and say whether it fails the same way
 //! ```
@@ -30,11 +32,13 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use citar_engine::game::seeded::SeededBug;
+use citar_testkit::bots::Lineup;
 use citar_testkit::chaos::{self, Settings};
 use citar_testkit::fixtures;
 
 const USAGE: &str = "usage: chaos [--seconds N] [--seed S] [--from-fixtures] [--rounds R] \
-                     [--calls C] [--bug NAME] [--out DIR] | chaos --replay FILE";
+                     [--calls C] [--drivers random|bot|mixed] [--bug NAME] [--out DIR] \
+                     | chaos --replay FILE";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -75,6 +79,12 @@ fn parse(args: &[String]) -> Result<Command, String> {
                     u32::try_from(number(value("a number")?)?).map_err(|e| e.to_string())?;
             }
             "--from-fixtures" => settings.from_fixtures = true,
+            "--drivers" => {
+                let name = value("random, bot or mixed")?;
+                let known: Vec<&str> = Lineup::ALL.iter().map(|l| l.name()).collect();
+                settings.options.drivers = Lineup::named(&name)
+                    .ok_or(format!("--drivers takes {}, not {name}", known.join(", ")))?;
+            }
             "--bug" => {
                 let name = value("a bug's name")?;
                 let known: Vec<&str> = SeededBug::ALL.iter().map(|b| b.name()).collect();
@@ -110,8 +120,10 @@ fn run(settings: &Settings, seconds: u64, out: &std::path::Path) -> ExitCode {
     };
     let from = if settings.from_fixtures { "fixtures" } else { "generated maps" };
     println!(
-        "chaos: seed {}, {from}{}: {} games, {} rounds, {} steps, {} calls ({} refused) in {:.0} s",
+        "chaos: seed {}, {from}, {} drivers{}: {} games, {} rounds, {} steps, {} calls ({} refused) \
+         in {:.0} s",
         settings.seed,
+        settings.options.drivers.name(),
         settings.bug.map(|b| format!(", bug {}", b.name())).unwrap_or_default(),
         report.games,
         report.rounds,

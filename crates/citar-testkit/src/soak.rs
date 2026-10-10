@@ -1,6 +1,8 @@
-//! The soak driver (DESIGN.md 9.5, 9.6): whole `RandomAgent` games on every map size, duel to
+//! The soak driver (DESIGN.md 9.5, 9.6, P2.1.3): whole games on every map size, duel to
 //! gargantuan, played to their turn limit with the invariants checked at every settle, each
-//! under `catch_unwind`. It reports what a long run finds that a short one does not:
+//! under `catch_unwind`, by `RandomAgent`s, `basic-1` bots or half of each in the majors' seats
+//! ([`Settings::drivers`], `--drivers random|bot|mixed`, package 2-13). It reports what a long
+//! run finds that a short one does not:
 //! - **panics**, with the game that panicked, which `soak --game N` plays again alone;
 //! - **violations**: what the checks reported at a settle, the invariants broken after a round,
 //!   the caches against a cold rebuild (the cache oracle) every `oracle_every` rounds and at the
@@ -9,7 +11,10 @@
 //! - **turn-time outliers**: rounds that took more than `outlier_factor` times their game's
 //!   median round, and more than `outlier_floor_ms`, so a round that is slow for its game shows
 //!   whatever the map's size;
-//! - **peak memory**: the most heap a game held, as the binary's allocator counts it.
+//! - **peak memory**: the most heap a game held, as the binary's allocator counts it;
+//! - **the bots' refusals** (DESIGN.md P2.3.6): the actions they took and had refused, and the
+//!   most refusals of one tool in one bot call, which fails the game past
+//!   [`LOOPING`](crate::bots::LOOPING): a bot looping on a refused action.
 //!
 //! Games are drawn from the run's seed in a fixed order ([`plan`]): the sizes in turn, the map
 //! types and edges rotating under them, and every fourth lap of the sizes the duel, small and
@@ -18,8 +23,11 @@
 //! plays the same games as one that is not: each shard takes whole laps of the sizes, so each
 //! plays every size alike and the shards take about as long as each other.
 //!
+//! A game is the same game whatever its drivers: `soak --drivers bot --game N` plays game `N`'s
+//! map and settings with bots in its seats.
+//!
 //! Time and memory come from the binary ([`Probe`]): the engine and this library read no clock.
-//! Panics, violations and errors fail the run; outliers and memory are reported. A run its time
+//! Panics, violations, a looping bot and errors fail the run; outliers and memory are reported. A run its time
 //! budget stopped before it played every game it was to play says so ([`Report::cut_short`]),
 //! and the binary fails it on its own exit code: a slower runner must not quietly shrink a run.
 
@@ -32,6 +40,7 @@ use citar_engine::save::canon;
 use citar_engine::state::Phase;
 use serde::Serialize;
 
+use crate::bots::{BotCounts, Lineup};
 use crate::games;
 
 /// Every map size, smallest first, and the turn limit a game of each plays to by default: a Quick
@@ -126,6 +135,8 @@ pub struct Settings {
     pub shard: (u32, u32),
     /// Play only this game.
     pub only: Option<u32>,
+    /// Who drives the majors' seats.
+    pub drivers: Lineup,
 }
 
 impl Default for Settings {
@@ -141,6 +152,7 @@ impl Default for Settings {
             outlier_floor_ms: 50.0,
             shard: (0, 1),
             only: None,
+            drivers: Lineup::Random,
         }
     }
 }
@@ -192,8 +204,11 @@ pub struct GameReport {
     /// Cities and units at the end, the city-states' and the barbarians' among them.
     pub cities: usize,
     pub units: usize,
+    /// What the bots in its seats did, if any sat in them (none when it panicked).
+    pub bots: Option<BotCounts>,
     /// What failed: violations, broken invariants, cache disagreements, a save that did not load
-    /// as saved, an engine refusal, a game that outlived its turn limit.
+    /// as saved, an engine refusal, a game that outlived its turn limit, a bot that looped on a
+    /// refused action.
     pub failures: Vec<String>,
     /// What a panic said, if the game panicked.
     pub panic: Option<String>,
@@ -238,8 +253,9 @@ impl Report {
             .map_or_else(|e| format!("{{\"error\": \"{e}\"}}"), |s| s + "\n")
     }
 
-    /// One line per size: games, rounds, the slowest median round, the slowest round and the
-    /// most heap any game held.
+    /// One line per size: games, rounds, the slowest median round, the slowest round, the most
+    /// heap any game held and, where bots played, their actions and the most refusals of one
+    /// tool in one call.
     #[must_use]
     pub fn by_size(&self) -> Vec<String> {
         SIZES
@@ -255,9 +271,21 @@ impl Report {
                 let max = of.iter().map(|g| g.max_round_ms).fold(0.0, f64::max);
                 let peak = of.iter().filter_map(|g| g.peak_bytes).max();
                 let outliers: usize = of.iter().map(|g| g.outliers.len()).sum();
+                let bots: Vec<&BotCounts> = of.iter().filter_map(|g| g.bots.as_ref()).collect();
+                let bots = if bots.is_empty() {
+                    String::new()
+                } else {
+                    let taken: u64 = bots.iter().map(|b| b.taken).sum();
+                    let refused: u64 = bots.iter().map(|b| b.refused).sum();
+                    let worst = bots.iter().map(|b| b.worst.0).max().unwrap_or(0);
+                    format!(
+                        "; bots took {taken} actions and had {refused} refused, at most {worst} \
+                         refusals of one tool in one call"
+                    )
+                };
                 Some(format!(
                     "{size:<10} {:>3} games {rounds:>6} rounds; median round up to {median:.1} ms, \
-                     slowest {max:.1} ms, {outliers} outliers; peak heap {}",
+                     slowest {max:.1} ms, {outliers} outliers; peak heap {}{bots}",
                     of.len(),
                     peak.map_or_else(|| "not counted".to_owned(), mib)
                 ))
@@ -350,6 +378,7 @@ struct Tally {
     rounds: Vec<(Turn, f64)>,
     failures: Vec<String>,
     chunks: Vec<Vec<u8>>,
+    bots: Option<BotCounts>,
 }
 
 /// Plays one game to its end, checking it as it goes; a failure is recorded and play goes on
@@ -367,7 +396,9 @@ fn play(
             return None;
         }
     };
-    let mut agents = games::agents_for(&g);
+    // Fresh seats play a game loaded from its save as the ones before would have: the agents
+    // draw from the game's seed and the bots keep their memory in the game.
+    let mut seats = settings.drivers.seats(&g, false);
     let mut last = probe.now_ns();
     let mut hook = |g: &mut Game, (turn, _): games::Round| -> Result<(), String> {
         let now = probe.now_ns();
@@ -390,8 +421,16 @@ fn play(
     };
     // A few rounds past the limit, so a game that outlives it is caught, not cut off.
     let cap = spec.turn_limit + 3;
-    if let Err(e) = games::play_random(&mut g, &mut agents, cap, &mut hook) {
+    let played = games::play_random(&mut g, &mut seats, cap, &mut hook);
+    if let Err(e) = played {
         t.failures.push(e);
+    }
+    t.bots = BotCounts::of(&seats);
+    if let Some(b) = t.bots.as_ref().filter(|b| b.looped()) {
+        t.failures.push(format!(
+            "turn {}: a bot looped on a refused action: {} refusals of {} in one call",
+            b.worst.2, b.worst.0, b.worst.1
+        ));
     }
     if g.phase() == Phase::Playing {
         t.failures.push(format!(
@@ -458,6 +497,7 @@ pub fn play_game(spec: &GameSpec, settings: &Settings, probe: &mut dyn Probe) ->
         journal_bytes: t.chunks.iter().map(Vec::len).sum(),
         cities,
         units,
+        bots: t.bots,
         failures: t.failures,
         panic,
     }

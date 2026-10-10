@@ -1,6 +1,8 @@
-//! The chaos driver (DESIGN.md 9.5): whole games of `RandomAgent` turns with tool calls of every
-//! kind, right and wrong, mixed in ([`ActionSpec`]s drawn at random), every step checked for
-//! the properties P1 to P7 ([`Run`]), under `catch_unwind`.
+//! The chaos driver (DESIGN.md 9.5): whole games of seat turns with tool calls of every kind,
+//! right and wrong, mixed in ([`ActionSpec`]s drawn at random), every step checked for the
+//! properties P1 to P7 ([`Run`]), under `catch_unwind`. The seats are `RandomAgent`s, `basic-1`
+//! bots or half of each (the run's lineup, [`Options::drivers`]; package 2-13): with bots, the
+//! calls put the bot's own empire in states no game of bots alone reaches.
 //!
 //! Each failure, a broken property or a panic, is kept as a [`Replay`]: how the game started, the
 //! bug planted if any, every step taken up to the one that failed, and what failed. The `chaos`
@@ -27,8 +29,10 @@ use crate::games;
 use crate::spec::ActionSpec;
 use crate::stability::{Options, Property, Run, Step};
 
-/// The version of the replay file format.
-pub const REPLAY_VERSION: u32 = 1;
+/// The version of the replay file format. Version 2 (package 2-13) records the lineup in the
+/// options; version 1 had none, and its seats were `RandomAgent`s, which is what a version-1
+/// file reads as.
+pub const REPLAY_VERSION: u32 = 2;
 
 /// How a chaos game starts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,7 +220,7 @@ fn guarded_finish(run: &mut Run) -> Result<(), Failure> {
 }
 
 /// Plays one chaos game from `start`: before each seat's turn up to `calls_per_turn` tool calls
-/// drawn at random, then the seat's turn played by a `RandomAgent`, until the game ends,
+/// drawn at random, then the seat's turn played by its driver, until the game ends,
 /// `rounds` rounds have passed or `keep_going` says to stop. Returns what it did, and the
 /// replay if it failed.
 ///
@@ -294,11 +298,12 @@ pub fn run(settings: &Settings, keep_going: &mut dyn FnMut() -> bool) -> Result<
 /// it failed this time, or `None` if it did not.
 ///
 /// # Errors
-/// A replay of another format version, or a start that cannot be built.
+/// A replay of a format version this build does not read (1 to [`REPLAY_VERSION`]), or a start
+/// that cannot be built.
 pub fn replay(r: &Replay) -> Result<Option<Failure>, String> {
-    if r.version != REPLAY_VERSION {
+    if !(1..=REPLAY_VERSION).contains(&r.version) {
         return Err(format!(
-            "a replay of version {}, where this build reads {REPLAY_VERSION}",
+            "a replay of version {}, where this build reads 1 to {REPLAY_VERSION}",
             r.version
         ));
     }

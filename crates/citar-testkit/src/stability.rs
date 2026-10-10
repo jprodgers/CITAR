@@ -19,8 +19,10 @@
 //!
 //! **P8**, reads are free, needs two runs of the same steps: [`reads_are_free`] plays them once
 //! quietly and once with [`noise`] (queries of every kind, views, the briefing, snapshots, saves
-//! and calls the game must refuse) before every step, and compares what each step returned and
-//! the digest after it.
+//! and calls the game must refuse) before every step, its drivers noisy too (reading and making
+//! refused calls inside their turns), and compares what each step returned and the digest after
+//! it. With bot drivers ([`Options::drivers`]) that asks whether any read changes what the bot
+//! decides (package 2-13).
 
 use core::fmt;
 
@@ -34,7 +36,8 @@ use citar_engine::state::Phase;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::agents::{self, RandomAgent};
+use crate::agents;
+use crate::bots::Lineup;
 use crate::spec::{ActionSpec, Shape};
 use crate::{checks, games};
 
@@ -46,7 +49,8 @@ pub enum Step {
     Call(ActionSpec),
     /// The host ends the turn of the player whose turn it is (`Game::end_turn`).
     EndTurn,
-    /// A `RandomAgent` plays the turn of the player whose turn it is, and the drive ends it.
+    /// The seat's driver plays the turn of the player whose turn it is, and the drive ends it: a
+    /// `RandomAgent`, or a `basic-1` bot where the run's lineup seats one ([`Options::drivers`]).
     Agent,
 }
 
@@ -116,14 +120,20 @@ pub struct Options {
     pub verify_every: usize,
     /// P6 every this many steps, 0 for never.
     pub save_every: usize,
-    /// Whether the agents of [`Step::Agent`] are noisy (`RandomAgent::noisy`).
+    /// Whether the drivers of [`Step::Agent`] are noisy (`RandomAgent::noisy`,
+    /// `CountingBot::noisy`).
     pub noisy_agents: bool,
+    /// Who drives the majors' seats at a [`Step::Agent`]: `RandomAgent`s, `basic-1` bots or half
+    /// of each (package 2-13). A replay written before there was a choice has none, and its
+    /// agents were random.
+    #[serde(default)]
+    pub drivers: Lineup,
 }
 
 impl Default for Options {
-    /// DESIGN.md 9.5: the caches every 10 actions, a save and a load every 25.
+    /// DESIGN.md 9.5: the caches every 10 actions, a save and a load every 25; `RandomAgent`s.
     fn default() -> Self {
-        Self { verify_every: 10, save_every: 25, noisy_agents: false }
+        Self { verify_every: 10, save_every: 25, noisy_agents: false, drivers: Lineup::Random }
     }
 }
 
@@ -287,22 +297,14 @@ impl Run {
         if found.is_empty() { Ok(()) } else { Err(Breach::new(Property::P4, at, found.join("; "))) }
     }
 
-    /// A `RandomAgent` in every major civilization's seat plays the turn of the one whose turn
-    /// it is; the drive ends it.
+    /// A driver of the run's lineup in every major civilization's seat plays the turn of the one
+    /// whose turn it is; the drive ends it. The others' answer any negotiation that waits on
+    /// them within the drive.
     fn agent_turn(&mut self) {
         let n = self.g.state().players().len();
-        let mut agents: Vec<RandomAgent> =
-            (0..n)
-                .map(|_| {
-                    if self.options.noisy_agents {
-                        RandomAgent::noisy()
-                    } else {
-                        RandomAgent::new()
-                    }
-                })
-                .collect();
+        let mut seats = self.options.drivers.seats(&self.g, self.options.noisy_agents);
         let mut d = Drivers::none(n);
-        for (i, a) in agents.iter_mut().enumerate() {
+        for (i, a) in seats.iter_mut().enumerate() {
             let p = PlayerId(u8::try_from(i).unwrap_or(u8::MAX));
             if self.g.player(p).is_some_and(|x| x.is_major()) {
                 d = d.with(p, a);
@@ -473,8 +475,8 @@ fn pick_tool(tools: &[usize], rng: &mut Rng) -> u8 {
 }
 
 /// P8: `steps` played on copies of `start` twice, quietly and with [`noise`] before every step
-/// (drawn from a stream keyed by `seed`), return the same and leave the same digest after every
-/// step. Both runs also check P2 to P7.
+/// (drawn from a stream keyed by `seed`) and noisy drivers of the same lineup, return the same
+/// and leave the same digest after every step. Both runs also check P2 to P7.
 ///
 /// # Errors
 /// The first property broken, P8 at the first step whose result or digest differs.
