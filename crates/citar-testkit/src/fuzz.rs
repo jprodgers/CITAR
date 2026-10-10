@@ -86,7 +86,8 @@ pub fn fuzz_one(data: &[u8]) {
     let mut u = Unstructured::new(data);
     let Ok(which) = u.arbitrary::<u8>() else { return };
     let Some(g) = start(usize::from(which) % starts()) else { return };
-    let mut run = Run::new(g, Options { verify_every: 16, save_every: 32, noisy_agents: false });
+    let options = Options { verify_every: 16, save_every: 32, ..Options::default() };
+    let mut run = Run::new(g, options);
     for _ in 0..MAX_STEPS {
         let Ok(tag) = u.arbitrary::<u8>() else { break };
         let step = match tag % 16 {

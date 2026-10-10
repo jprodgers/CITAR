@@ -1,23 +1,26 @@
-//! `cargo soak`: whole `RandomAgent` games on every map size with the invariants on, reporting
-//! panics, violations, turn-time outliers and peak memory (DESIGN.md 9.5; `citar_testkit::soak`).
+//! `cargo soak`: whole games on every map size with the invariants on, `RandomAgent`s, `basic-1`
+//! bots or both in the seats, reporting panics, violations, turn-time outliers, peak memory and
+//! the bots' refusals (DESIGN.md 9.5, P2.1.3; `citar_testkit::soak`).
 //!
 //! ```text
 //! cargo soak [--games N] [--seconds S] [--seed S] [--sizes a,b] [--max-rounds R]
 //!            [--oracle-every R] [--save-every R] [--outlier-factor F] [--outlier-floor-ms MS]
-//!            [--shard K/N] [--game I] [--json FILE]
+//!            [--shard K/N] [--game I] [--drivers random|bot|mixed] [--json FILE]
 //!                     play the run's first N games (12) from seed S (1), every size in turn,
 //!                     or only the sizes named; each to its turn limit, capped at R rounds; the
 //!                     cache oracle every R rounds (50) and a save and load every R (25), both
 //!                     also at each game's end; a round over F times its game's median (8) and
 //!                     over MS ms (50) is an outlier; start no game after S seconds; play only
-//!                     the laps of the sizes whose number is K modulo N, or only game I; write
-//!                     the report to FILE as JSON
+//!                     the laps of the sizes whose number is K modulo N, or only game I; seat
+//!                     RandomAgents (random, the default), basic-1 bots (bot) or half of each
+//!                     (mixed) in the majors' seats; write the report to FILE as JSON
 //! ```
 //!
 //! Exit codes: 0 every game clean, 1 a game panicked or failed a check, 2 a usage or I/O error,
 //! 3 the time budget ran out before every game asked for was played (and those played were
 //! clean): a run that covered less than it was asked to is not a pass. Outliers and memory are
-//! reported, never a failure.
+//! reported, never a failure; a bot that loops on a refused action (more than
+//! `citar_testkit::bots::LOOPING` refusals of one tool in one call) fails its game.
 //!
 //! Peak memory is the most heap the game held, counted by this binary's allocator (a thin
 //! wrapper of the system allocator that keeps a running total and its high-water mark), so it
@@ -35,6 +38,7 @@
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use citar_testkit::bots::Lineup;
 use citar_testkit::soak::{self, GameReport, Probe, Settings, mib};
 
 /// The heap high-water mark: the system allocator, counting.
@@ -111,7 +115,8 @@ static ALLOCATOR: counting::Counting = counting::Counting;
 
 const USAGE: &str = "usage: soak [--games N] [--seconds S] [--seed S] [--sizes a,b] \
                      [--max-rounds R] [--oracle-every R] [--save-every R] [--outlier-factor F] \
-                     [--outlier-floor-ms MS] [--shard K/N] [--game I] [--json FILE]";
+                     [--outlier-floor-ms MS] [--shard K/N] [--game I] \
+                     [--drivers random|bot|mixed] [--json FILE]";
 
 struct Clock {
     started: Instant,
@@ -180,11 +185,20 @@ fn parse(args: &[String]) -> Result<Command, String> {
                 settings.shard = (k, n);
             }
             "--game" => settings.only = Some(small(value)?),
+            "--drivers" => settings.drivers = lineup(&value?)?,
             "--json" => json = Some(value?),
             other => return Err(format!("unknown argument {other}")),
         }
     }
     Ok(Command { settings, seconds, json })
+}
+
+/// The lineup a `--drivers` value names.
+fn lineup(v: &str) -> Result<Lineup, String> {
+    Lineup::named(v).ok_or_else(|| {
+        let names: Vec<&str> = Lineup::ALL.iter().map(|l| l.name()).collect();
+        format!("--drivers takes {}, not {v}", names.join(", "))
+    })
 }
 
 /// One line for a game as it ends.
@@ -194,9 +208,15 @@ fn line(r: &GameReport) -> String {
         (None, 0) => "clean".to_owned(),
         (None, n) => format!("{n} FAILURES"),
     };
+    let bots = r.bots.as_ref().map_or_else(String::new, |b| {
+        format!(
+            "; bots {} turns, {} actions, {} refused, at most {} of {} in one call",
+            b.turns, b.taken, b.refused, b.worst.0, b.worst.1
+        )
+    });
     format!(
         "soak: {:<44} {:>3} rounds to turn {:>3}{} in {:>6.1} s; median round {:>6.1} ms, \
-         slowest {:>7.1} ms; peak {}; {status}",
+         slowest {:>7.1} ms; peak {}{bots}; {status}",
         r.game.label(),
         r.rounds,
         r.turn,
@@ -227,9 +247,10 @@ fn main() -> ExitCode {
     let s = &cmd.settings;
     let mut clock = Clock { started: Instant::now(), budget: cmd.seconds.map(Duration::from_secs) };
     println!(
-        "soak: seed {}, {} games{}{}, the oracle every {} rounds, a save every {}",
+        "soak: seed {}, {} games, {} drivers{}{}, the oracle every {} rounds, a save every {}",
         s.seed,
         s.games,
+        s.drivers.name(),
         s.max_rounds.map(|r| format!(", at most {r} rounds each")).unwrap_or_default(),
         if s.shard.1 > 1 {
             format!(", shard {} of {}", s.shard.0, s.shard.1)
@@ -297,9 +318,10 @@ fn main() -> ExitCode {
     }
     for g in failed {
         println!(
-            "soak: FAILED {} (play it again: soak --seed {} --game {})",
+            "soak: FAILED {} (play it again: soak --seed {} --drivers {} --game {})",
             g.game.label(),
             report.seed,
+            cmd.settings.drivers.name(),
             g.game.index
         );
         if let Some(p) = &g.panic {

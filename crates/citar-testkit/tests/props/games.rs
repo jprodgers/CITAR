@@ -2,6 +2,8 @@
 //! from [`ActionSpec`]s bound late, 70% valid, 20% of the wrong type, 10% random JSON; ends of
 //! turn; `RandomAgent` turns) played from committed fixtures or generated duel and small maps,
 //! on the shipped ruleset or the kitchen sink, every step checked by `citar_testkit::stability`.
+//! Package 2-13 adds P8 with bot drivers: `basic-1` in every major's seat, its turns played
+//! quietly and, in the noisy game, with reads before every step and noisy bots.
 //!
 //! The cases follow `PROPTEST_CASES`, 64 when it is unset (as in CI, `rust.yml`); the nightly run
 //! takes them to 10,000. A failure is saved by proptest beside this file, in
@@ -12,6 +14,7 @@ use std::cell::RefCell;
 
 use citar_engine::game::{DebugOptions, Game};
 use citar_testkit::agents::RandomAgent;
+use citar_testkit::bots::Lineup;
 use citar_testkit::spec::{ActionSpec, Shape, off_map};
 use citar_testkit::stability::{self, Breach, Options, Step, null_below_top};
 use citar_testkit::{fixtures, games};
@@ -140,6 +143,21 @@ pub fn steps() -> impl Strategy<Value = Vec<Step>> {
     prop::collection::vec(step(), 1..48)
 }
 
+/// A step of P8 with bot drivers: a seat's turn more often than among [`step`]'s, since a bot's
+/// turn is where a read could change a decision, with calls and ends of turn between them.
+pub fn bot_step() -> impl Strategy<Value = Step> {
+    prop_oneof![
+        12 => action_spec().prop_map(Step::Call),
+        2 => Just(Step::EndTurn),
+        3 => Just(Step::Agent),
+    ]
+}
+
+/// Up to 32 steps with bot turns among them.
+pub fn bot_steps() -> impl Strategy<Value = Vec<Step>> {
+    prop::collection::vec(bot_step(), 1..32)
+}
+
 /// A breach as a test case's failure, its property first so that a caller can tell which.
 pub fn failed(b: &Breach) -> TestCaseError {
     TestCaseError::fail(format!("{:?}: {b}", b.property))
@@ -171,6 +189,14 @@ proptest! {
     #[test]
     fn p8_reads_are_free(start in start(), steps in steps(), seed in any::<u64>()) {
         p8(&build(&start), &steps, seed, Options::default())?;
+    }
+
+    /// P8 with bot drivers (package 2-13): `basic-1` plays every seat's turn, and none of the
+    /// reads, snapshots, saves and refused calls before every step, nor those its noisy bots make
+    /// before and after their turns and answers, changes what it decides.
+    #[test]
+    fn p8_reads_are_free_with_bot_drivers(start in start(), steps in bot_steps(), seed in any::<u64>()) {
+        p8(&build(&start), &steps, seed, Options { drivers: Lineup::Bot, ..Options::default() })?;
     }
 }
 
