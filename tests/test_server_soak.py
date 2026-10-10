@@ -19,9 +19,14 @@ def load():
     return module
 
 
-soak = load()
+try:
+    soak, MISSING = load(), None
+except ModuleNotFoundError as e:        # the script's own needs: the mcp and worker extras, which the dev extra has
+    soak, MISSING = None, e.name
+needs_extras = unittest.skipIf(soak is None, f"scripts/server_soak.py needs the mcp and worker extras ({MISSING})")
 
 
+@needs_extras
 class StateDirectory(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="citar-soak-guard-"))
@@ -61,6 +66,7 @@ class StateDirectory(unittest.TestCase):
         self.assertEqual(f.read_text(), "not a directory")
 
 
+@needs_extras
 class Port(unittest.TestCase):
     def test_the_dev_servers_port_is_refused(self):
         with self.assertRaises(SystemExit) as refused:
