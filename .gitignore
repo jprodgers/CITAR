@@ -39,6 +39,8 @@ config/*.local.json
 *.db
 *.db-wal
 *.db-shm
+# A 0.1.5 database the migration tests rename aside (tests/test_migrations.py).
+!tests/data/citar-0.1.5.db
 
 # --------------------------------------------------------------------------- secrets
 citar.env
