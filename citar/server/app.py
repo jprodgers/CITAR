@@ -189,10 +189,20 @@ def _gate(sdb: DbSession, gid: str, p: Principal, permission: str, request: Requ
 
     Every game route goes through here. A seat token still works on its own — LLM players and MCP
     clients hold one and have no account — and it grants play on that seat alone.
+
+    A write by a caller that a session cookie signed in carries the session's CSRF token, as every
+    ``require_user`` route's does (``deps._enforce_csrf``): the cookie is ambient, so without it another
+    site the person visits could pause, reseat or delete their games behind SameSite's back. A request
+    that holds a valid seat or spectator token for this game, or an Authorization header, is not riding
+    a cookie and needs none; a made-up token does not excuse one.
     """
     s = _session(gid)
+    tok = _token(request, token)
+    if p.auth_session is not None and not (tok and (s.seat_for_token(tok) is not None or s.is_spectator(tok))):
+        from ..auth.deps import _enforce_csrf
+        _enforce_csrf(request, p)
     row, perms = ownership.require(sdb, s, p.user, permission,
-                                   slug=_share_key(request), seat_token=_token(request, token))
+                                   slug=_share_key(request), seat_token=tok)
     return s, row, perms
 
 

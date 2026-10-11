@@ -762,7 +762,7 @@ class SystemItemsAndAdoption(ItemCase):
             self.assertEqual(self.call(who, "GET", f"/api/maps/{ref}").status_code, 404, "nobody's until adopted")
         with db.session() as s:
             counts = items.adopt_orphans(s, items.first_admin(s))
-        self.assertEqual(counts.get("map"), 1)
+        self.assertGreaterEqual(counts.get("map", 0), 1)    # other suites' maps on the shared disk may be strays too
         row = self.row("map", ref)
         self.assertEqual((row.owner_id, row.visibility), (self.ids["admin"], "private"))
         with db.session() as s:
@@ -883,6 +883,30 @@ class BenchmarkGames(ItemCase):
                     if j.get("game_id") and self.manager.get(j["game_id"]):
                         self.manager.delete(j["game_id"])
             self.app.scheduler = saved
+
+
+class GameCsrf(ItemCase):
+    def test_a_cookie_callers_game_write_carries_the_csrf_token(self):
+        """3-01 left the game routes gated by ``_gate`` without the CSRF check ``require_user`` makes: a write by a
+        caller a session cookie signed in now needs the session's token; a valid seat token is a credential of its own
+        and needs none; a made-up one does not excuse the check."""
+        r = self.call("owner", "POST", "/api/games", {"name": "csrf", "config": CONFIG, "seats": BOTS})
+        self.assertEqual(r.status_code, 200, r.text)
+        gid = r.json()["id"]
+        try:
+            cookie_only = {k: v for k, v in self.headers["owner"].items() if k != sessions.CSRF_HEADER}
+            path = f"/api/games/{gid}/control"
+            self.assertEqual(self.client.post(path, json={"paused": True}, headers=cookie_only).status_code, 403)
+            self.assertEqual(self.client.post(path + "?token=made-up", json={"paused": True},
+                                              headers=cookie_only).status_code, 403)
+            self.assertEqual(self.call("owner", "POST", path, {"paused": True}).status_code, 200)
+            self.assertEqual(self.client.post(f"/api/games/{gid}/unpublish", json={},
+                                              headers=cookie_only).status_code, 403)
+            spectator = self.manager.get(gid).spectator_token
+            r = self.client.get(f"/api/games/{gid}/view?token={spectator}", headers=cookie_only)
+            self.assertEqual(r.status_code, 200, "a read needs no token")
+        finally:
+            self.manager.delete(gid)
 
 
 class CommandLine(ItemCase):
