@@ -335,6 +335,24 @@ class PublicReportPage(unittest.TestCase):
         self.assertNotIn("public_url", self.client.get(f"/api/items/report/{self.rid}/sharing",
                                                        headers=self.headers["alice"]).json())
 
+    def test_a_failed_reports_traceback_is_its_managers(self):
+        from citar.server import reports_api
+        folder = reports_api._runner.dir / self.rid
+        (folder / "spec.json").write_text(json.dumps({"title": "t", "narrative": {"enabled": False}}), encoding="utf-8")
+        (folder / "meta.json").write_text(json.dumps({"id": self.rid, "title": "t", "status": "failed", "created": 1,
+                                                      "error": "boom", "trace": "Traceback: C:/server/path.py",
+                                                      "owner_id": "u_x"}), encoding="utf-8")
+        self.set("link")
+        viewer = self.client.get(f"/api/reports/{self.rid}", headers={**self.headers["bob"], "x-citar-share-key": self.slug})
+        self.assertEqual(viewer.status_code, 200, viewer.text)
+        self.assertNotIn("trace", viewer.json()["meta"])
+        self.assertNotIn("owner_id", viewer.json()["meta"])
+        self.assertEqual(viewer.json()["meta"]["error"], "boom")
+        listed = self.client.get("/api/reports", headers={**self.headers["bob"], "x-citar-share-key": self.slug}).json()
+        self.assertNotIn("trace", next(m for m in listed if m["id"] == self.rid))
+        owner = self.client.get(f"/api/reports/{self.rid}", headers=self.headers["alice"]).json()["meta"]
+        self.assertIn("trace", owner)
+
     def test_the_old_report_routes_are_gone(self):
         for method, path in (("GET", "/api/shared/reports"), ("GET", f"/api/shared/reports/{self.rid}"),
                              ("PUT", f"/api/shared/reports/{self.rid}/sharing")):

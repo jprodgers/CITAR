@@ -86,7 +86,20 @@ def reports_list(request: Request, p: Principal = Depends(principal), s: Session
     seen = items.listed(s, "report", p.user, slug=key)
     out = [m for m in reports_runner().list() if seen is None or m.get("id") in seen]
     perms = items.permissions_by_ref(s, "report", p.user, [m["id"] for m in out], slug=key)
-    return [dict(m, **perms.get(m["id"], {})) for m in out]
+    return [_meta_for(dict(m, **perms.get(m["id"], {}))) for m in out]
+
+
+#: What a report's metadata keeps for its managers only: a failed build's traceback (the server's code and paths)
+#: and the account that owns it.
+MANAGERS_ONLY = ("trace", "owner_id")
+
+
+def _meta_for(meta: dict, manages: bool = None) -> dict:
+    """A report's metadata as a caller sees it: without ``MANAGERS_ONLY`` for one who does not manage it (a member it
+    is shared with, a visitor holding its link)."""
+    if manages is None:
+        manages = bool(meta.get("can_manage"))
+    return meta if manages else {k: v for k, v in meta.items() if k not in MANAGERS_ONLY}
 
 
 @router.get("/api/reports/options")
@@ -113,7 +126,8 @@ def reports_get(rid: str, request: Request, p: Principal = Depends(principal), s
     """One report's metadata and progress, for whoever may see it."""
     _row, perms = items.require(s, "report", rid, p.user, access.VIEW, slug=_key(request))
     r = reports_runner()
-    return {"meta": _call(r.meta, rid), "spec": _call(r.spec, rid), **perms.client()}
+    return {"meta": _meta_for(_call(r.meta, rid), access.MANAGE in perms), "spec": _call(r.spec, rid),
+            **perms.client()}
 
 
 @router.post("/api/reports/{rid}/rerun")
