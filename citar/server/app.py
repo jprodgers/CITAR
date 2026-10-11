@@ -212,15 +212,22 @@ def _game_limit(sdb: DbSession, user) -> None:
                             "Finish or delete one first, or ask an administrator to raise the limit.")
 
 
-def _member_seat(seat: dict, user) -> dict:
+#: The seat types that play a model, and so must name a machine when a game is made or a seat changed.
+MODEL_SEATS = ("llm",)
+
+
+def _member_seat(seat: dict, user, *, playing: bool = True) -> dict:
     """One seat from a person, its model block through ``servers.member_llm`` (P3.2.9): a member's seat names a
-    machine and never describes one. Returns the seat with its block cleaned; raises the refusal as HTTP."""
+    machine and never describes one. ``playing`` is for a seat of a game being made or changed, where a model seat
+    without a machine is refused too; a scenario's seats are defaults its launch may still fill in. Returns the seat
+    with its block cleaned; raises the refusal as HTTP."""
     from .. import servers
     llm = seat.get("llm")
-    if not llm:
+    required = playing and seat.get("type") in MODEL_SEATS
+    if not llm and not required:
         return seat
     try:
-        return {**seat, "llm": servers.member_llm(llm, user)}
+        return {**seat, "llm": servers.member_llm(llm, user, required=required)}
     except servers.SeatBlockError as e:
         raise HTTPException(e.status, str(e)) from None
 
@@ -618,12 +625,14 @@ def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
         raise HTTPException(404, "No such seat.")
     llm = body.llm
     seat = s.seats[pid]
-    if llm is not None:
-        llm = _member_seat({"llm": llm}, p.user).get("llm")
     new_type = body.type or seat.type
-    if new_type == "llm":
+    if llm is not None or new_type in MODEL_SEATS:
         # the block the seat will play with: the new one, or the one it has when only its type changes
-        _authorize_seats(sdb, p.user, [{"type": "llm", "llm": llm if llm is not None else dict(seat.llm)}])
+        checked = _member_seat({"type": new_type, "llm": llm if llm is not None else dict(seat.llm)}, p.user)
+        if new_type in MODEL_SEATS:
+            _authorize_seats(sdb, p.user, [checked])
+        if llm is not None:
+            llm = checked["llm"]
     try:
         # the session keeps the civilization's engine controller in step with the seat type
         s.update_seat(pid, type=body.type, llm=llm, bot=body.bot, name=body.name)
@@ -1177,7 +1186,7 @@ def editor_meta(eid: str, body: EditorMeta, me=Depends(require_user)):
     ed = _editor(eid)
     seats = None
     if body.seats is not None:
-        seats = [_member_seat(seat, me) if isinstance(seat, dict) else seat
+        seats = [_member_seat(seat, me, playing=False) if isinstance(seat, dict) else seat
                  for seat in ed["game"].normalize_seats(body.seats)]
     for k in ("id", "name", "description"):
         if getattr(body, k) is not None:
@@ -1195,7 +1204,8 @@ def editor_save(eid: str, body: EditorMeta, me=Depends(require_user)):
     ed = _editor(eid)
     editor_meta(eid, body, me)
     m = ed["meta"]
-    m["seats"] = [_member_seat(seat, me) if isinstance(seat, dict) else seat for seat in (m.get("seats") or [])]
+    m["seats"] = [_member_seat(seat, me, playing=False) if isinstance(seat, dict) else seat
+                  for seat in (m.get("seats") or [])]
     if not (m.get("id") or m.get("name")):
         raise HTTPException(400, "Give the scenario a name.")
     with ed["lock"]:

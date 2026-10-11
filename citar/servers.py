@@ -768,7 +768,7 @@ def _is_admin(user) -> bool:
         getattr(user, "status", None) in ("probation", "active")
 
 
-def member_llm(block: Optional[dict], user) -> dict:
+def member_llm(block: Optional[dict], user, *, required: bool = False) -> dict:
     """The one gate on a seat's model block from a person (P3.2.9): a member may name a machine, never describe one.
 
     An administrator's block is returned as it is: inline blocks (a provider, a base URL, a key variable) are how
@@ -782,10 +782,11 @@ def member_llm(block: Optional[dict], user) -> dict:
     * a ``server_id`` that names no machine is refused (400);
     * a pooled machine (a row) is kept, and ``pool.seats.authorize`` decides whether this member may use it.
 
-    An empty block is returned empty. Raises ``SeatBlockError`` with the status to answer.
+    An empty block is returned empty, unless ``required`` (the block of a model seat in a game being made or
+    changed: such a seat must name a machine). Raises ``SeatBlockError`` with the status to answer.
     """
     block = dict(block or {})
-    if not block or _is_admin(user):
+    if _is_admin(user) or (not block and not required):
         return block
     sid = block.get("server_id")
     if not sid:

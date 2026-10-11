@@ -202,6 +202,17 @@ class NewGames(SeatCase):
                 game = self.create("zara", llm, 200)
                 self.assertEqual(game["seats"][1]["llm"], llm)
 
+    def test_a_members_model_seat_must_name_a_machine(self):
+        for llm in ({}, None, {"server_id": None, "model_id": None, "model": "", "profile_id": None,
+                                "max_tool_calls_per_turn": 150, "persona": ""}):
+            with self.subTest(block=llm):
+                self.assertIn("Pick a machine", self.create("member", llm, 400)["detail"])
+        # a bot seat needs no machine, and an empty block on it is nothing
+        r = self.post("member", "/api/games", {"name": "bots", "config": CONFIG,
+                                               "seats": [{"type": "human"}, {"type": "bot", "llm": {}}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.games.append(r.json()["id"])
+
     def test_an_unknown_machine_is_refused(self):
         self.assertIn("no such machine", self.create("member", {"server_id": "sv_nowhere"}, 400)["detail"].lower())
 
@@ -225,6 +236,12 @@ class SeatChanges(SeatCase):
                 r = self.post("member", f"/api/games/{gid}/seats/1", {"type": "llm", "llm": llm})
                 self.assertEqual(r.status_code, 400, r.text)
                 self.assertEqual(self._seat(gid), ("bot", {}))
+
+    def test_a_model_seat_without_a_machine_is_refused_and_the_seat_kept(self):
+        gid = self._bot_game()
+        r = self.post("member", f"/api/games/{gid}/seats/1", {"type": "llm"})
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertEqual(self._seat(gid), ("bot", {}))
 
     def test_a_pooled_machine_without_a_grant_is_refused_and_the_seat_kept(self):
         with db.session() as s:
@@ -290,6 +307,14 @@ class Scenarios(SeatCase):
                       {"name": "members dry run", "seats": self._seats({"server_id": "sv_dryrun", "model": "dry-run"})})
         self.assertEqual(r.status_code, 200, r.text)
         self.scenarios.append(r.json()["id"])
+        # a scenario's model seat may leave its machine to the launch
+        r = self.post("member", f"/api/scenario-editor/{eid}/save",
+                      {"id": "members-open", "name": "members open seat", "seats": [{"type": "human"}, {"type": "llm"}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.scenarios.append(r.json()["id"])
+        r = self.post("member", f"/api/scenarios/{r.json()['id']}/launch", {"name": "no machine"})
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("Pick a machine", r.json()["detail"])
 
     def test_an_admins_inline_scenario_launches_for_a_member_only_once_it_names_a_machine(self):
         eid = self._editor("zara")
