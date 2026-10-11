@@ -460,6 +460,11 @@ class UserPublic(unittest.TestCase):
         self.assertNotIn("status", entry["user"])
 
 
+def sess_dir():
+    from citar.server import session
+    return session.SAVE_DIR
+
+
 class GameRoutes(unittest.TestCase):
     """The same rules at the HTTP layer, for routes that once skipped the gate, and the unpublish route.
 
@@ -478,7 +483,8 @@ class GameRoutes(unittest.TestCase):
         self.client = TestClient(app, base_url="https://citar.test")
         self.headers = {}
         with db.session() as s:
-            for handle, role in (("owner", "user"), ("other", "user"), ("maggie", "moderator"), ("zara", "admin")):
+            for handle, role in (("owner", "user"), ("other", "user"), ("maggie", "moderator"), ("zara", "admin"),
+                                 ("reader", "user")):
                 user = _user(s, handle, role=role)
                 row, raw = sessions.start(s, user)
                 self.headers[handle] = {"cookie": f"{sessions.COOKIE_NAME}={raw}", sessions.CSRF_HEADER: row.csrf_token,
@@ -490,10 +496,50 @@ class GameRoutes(unittest.TestCase):
                                        [{"type": "bot"}, {"type": "bot"}], "Private game",
                                        track=False, start=False)
             self.row = ownership.register(s, self.game, owner, visibility="private")
+            # an ACL viewer: may look, may change nothing
+            access.grant(s, self.row, accounts.by_handle(s, "reader"), access.VIEW, actor=owner)
 
     def tearDown(self):
         self.manager.delete(self.game.id)
         self.client.close()
+
+    # ---------------------------------------------------------------- the routes 3-01 added or changed (P3.9.1)
+    def test_each_changed_route_by_stranger_acl_viewer_owner_admin_and_anonymous(self):
+        """A private game: another member gets 404 for reads and writes, an anonymous caller 401 or 404, an ACL
+        viewer reads (200) and may write nothing (403), the owner and an administrator 200. DELETE (close) runs
+        last, on games of its own."""
+        gid = self.game.id
+        routes = [
+            ("read", "GET", f"/api/games/{gid}/sharing", None),
+            ("write", "POST", f"/api/games/{gid}/unpublish", {"reason": "test"}),
+            ("write", "POST", f"/api/games/{gid}/seats/1", {"name": "renamed"}),
+            ("write", "POST", "/api/scenario-editor", {"source": "game", "game_id": gid}),
+            ("write", "POST", "/api/scenario-editor", {"source": "save", "save": f"{gid}/kept.citar"}),
+            ("write", "POST", "/api/saves/delete", {"path": f"{gid}/kept.citar"}),
+        ]
+        expect = {"read": {None: (404,), "other": (404,), "reader": (200,), "owner": (200,), "zara": (200,)},
+                  "write": {None: (401, 404), "other": (404,), "reader": (403,), "owner": (200,), "zara": (200,)}}
+        for who in (None, "other", "reader", "zara", "owner"):
+            self.game.save("kept")                       # the owner and the admin each delete their own copy
+            for kind, method, path, body in routes:
+                with self.subTest(who=who or "anonymous", route=f"{method} {path} {body}"):
+                    r = self.client.request(method, path, json=body, headers=self.headers.get(who, {}))
+                    self.assertIn(r.status_code, expect[kind][who], r.text)
+        for who, want in ((None, (401, 404)), ("other", (404,)), ("reader", (403,)), ("owner", (200,)),
+                          ("zara", (200,))):
+            with self.subTest(close=who or "anonymous"):
+                r = self.client.delete(f"/api/games/{gid}", headers=self.headers.get(who, {}))
+                self.assertIn(r.status_code, want, r.text)
+                if r.status_code == 200:          # closed: put it back for the next caller
+                    self.manager.load(sess_dir() / gid / "autosave.citar")
+                    self._set_visibility("private")
+
+    def test_creating_and_launching_need_an_account(self):
+        for path, body in (("/api/games", {"seats": [{"type": "bot"}]}),
+                           ("/api/scenarios/none/launch", {}),
+                           ("/api/scenario-editor/none/meta", {}), ("/api/scenario-editor/none/save", {})):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, json=body).status_code, 401)
 
     def _get(self, path, who=None, **params):
         return self.client.get(f"/api/games/{self.game.id}{path}", params=params,
