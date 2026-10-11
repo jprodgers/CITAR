@@ -77,6 +77,12 @@ use is refused too, and until the registry merge the machines of `config/servers
 administrator's to seat (unless they are dry runs). The dry-run provider is the exception: it dials
 nothing, so anyone may use it.
 
+Only the seats that play a model are held to this. A bot, human or MCP seat may carry model settings
+left over from when it was an LLM seat; nothing plays them, so they are never a reason to refuse the
+game (a member's are dropped, or kept only as far as they name a machine). Making such a seat an LLM
+seat later checks the settings it then has. Renaming an LLM seat checks nothing: its settings were
+checked when they were set.
+
 Administrators, and the owner of a local install (who is one), can still give a seat a model
 configuration of its own, as tests and scripts do. A seat in a member's game that somehow has one
 plays no model at all: its turns are skipped and the game says the seat has no machine.

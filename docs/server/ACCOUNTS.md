@@ -128,8 +128,9 @@ object's plain address for `server` and `global`.
 A moderator's only extra permission is **moderate**: on a `global` object, and on a `link` object
 presented with its key, a moderator may view it and **unpublish** it
 (`POST /api/games/{gid}/unpublish`, with a reason). Unpublishing makes the object private, rotates
-its slug so every shared link dies, and writes an audit row with the reason, which the owner sees in
-the game's sharing panel. Every control (pause, seats, sharing, delete, stop, rerun) needs **manage**,
+its slug so every shared link dies, and writes an audit row with the reason. The owner sees the
+reason in the game's sharing panel, and that a moderator (or an administrator) took it down, never
+which one: administrators have the audit log. Every control (pause, seats, sharing, delete, stop, rerun) needs **manage**,
 which only the owner, an ACL manager and administrators have, so a moderator who has taken something
 down has no further way in. On a `server` object a moderator is a member like any other; below `link`,
 nothing.
@@ -143,7 +144,10 @@ loaded. The session's save writer keeps it, after each round's autosave is on th
 the session's stop: never under the game's lock. Only lobby games in `setup` or `playing` count
 against an account's `max_concurrent_games`; benchmark and probe games are limited by their own
 queues. At boot, a row still `playing` whose game did not come back is closed. Closing a game keeps
-its saves its owner's; deleting every save of it deletes the game.
+its saves its owner's; deleting every save of it deletes the game. A game loaded without a row (its
+database was set aside, or a probe's case opened to be looked at) gets one, owned by nobody, private
+and pooling nothing (only administrators reach it); the administrator who loads such a save from the
+Saves list owns it from then on, with their own pooling default.
 
 ### Data pooling
 
