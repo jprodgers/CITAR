@@ -95,13 +95,20 @@ USER_STATUSES = ("pending", "probation", "active", "suspended", "deleted")
 
 DATA_SHARING = ("pool", "private")
 
+#: Who a machine or an account is trusted as (P3.2.2): set by admins in Phase 3, automated in Phase 4.
+TRUST_TIERS = ("new", "provisional", "trusted", "quarantined")
+
+#: The profile fields whose visibility an account chooses (P3.2.6), and their defaults.
+USER_FIELD_DEFAULTS = {"profile": "server", "display_name": "server", "avatar": "server", "bio": "server",
+                       "links": "server", "items": "server", "ratio": "private"}
+
 #: Per-account permission switches, on top of the coarse role. The defaults for each role live in
 #: the runtime settings table so an admin sets policy once rather than per user; a value here is an
 #: explicit override for one account.
 CAPABILITIES = (
     "register_servers",     # may add inference servers and share them
     "run_reports",          # may build reports — required for private analysis to be useful
-    "publish_public",       # may make a game or report readable by the whole internet
+    "publish_global",       # may make a game, a report or another item readable by the whole internet
     "create_games",         # may start games at all
     "invite",               # may mint invite codes, up to invite_quota
 )
@@ -152,6 +159,21 @@ class User(Base):
     suspended_reason: Mapped[Optional[str]] = mapped_column(Text)
     invited_by: Mapped[Optional[str]] = mapped_column(String(40))
 
+    # The profile (design/phase3-features.md P3.2.6), filled in by package 3-04.
+    #: Free text, control characters stripped, at most 1,000 characters.
+    bio: Mapped[str] = mapped_column(Text, default="")
+    #: At most three {"label", "url"}, http or https.
+    links: Mapped[list] = mapped_column(JSON, default=list)
+    #: An uploaded avatar, relative to the data directory. `avatar_url` stays the sign-in provider's picture.
+    avatar_path: Mapped[Optional[str]] = mapped_column(String(200))
+    #: {field: private | server | global} for profile, display_name, avatar, bio, links, items and ratio; absent
+    #: fields take their defaults (USER_FIELD_DEFAULTS).
+    field_visibility: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: Whether the account appears in the members' directory. A hidden account still has its page.
+    listed: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: new | provisional | trusted | quarantined (TRUST_TIERS): set by admins in Phase 3, automated in Phase 4.
+    trust_tier: Mapped[str] = mapped_column(String(16), default="new")
+
     identities: Mapped[list["Identity"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
     @property
@@ -168,18 +190,25 @@ class User(Base):
         """Whether this account's role is at least the one named."""
         return ROLE_RANK.get(self.role, 0) >= ROLE_RANK[role]
 
-    def public(self, *, full: bool = False) -> dict:
-        """What the browser sees. `full` is the account's own view or a moderator's."""
-        d = {"id": self.id, "handle": self.handle, "display_name": self.name, "role": self.role,
-             "avatar_url": self.avatar_url, "status": self.status}
-        if full:
-            d.update(email=self.email, email_verified=self.email_verified, tz=self.tz,
-                     data_sharing=self.data_sharing, caps=dict(self.caps or {}),
-                     invite_quota=self.invite_quota, max_concurrent_games=self.max_concurrent_games,
-                     max_seats_per_game=self.max_seats_per_game,
-                     has_password=bool(self.password_hash),
-                     created_at=self.created_at.isoformat() if self.created_at else None,
-                     providers=[i.provider for i in self.identities])
+    def public(self) -> dict:
+        """How the account appears to other people, wherever it appears: seats, sharing, grants, owners.
+
+        No role and no status: whether somebody is a moderator, on probation or suspended is the account's own
+        business and the administrators', not every viewer's (`account` carries both).
+        """
+        return {"id": self.id, "handle": self.handle, "display_name": self.name, "avatar_url": self.avatar_url}
+
+    def account(self) -> dict:
+        """The account as its owner and administrators see it: `public` plus its role, status, settings and
+        limits. Never for anyone else."""
+        d = self.public()
+        d.update(role=self.role, status=self.status, email=self.email, email_verified=self.email_verified,
+                 tz=self.tz, data_sharing=self.data_sharing, caps=dict(self.caps or {}),
+                 invite_quota=self.invite_quota, max_concurrent_games=self.max_concurrent_games,
+                 max_seats_per_game=self.max_seats_per_game, trust_tier=self.trust_tier, listed=self.listed,
+                 has_password=bool(self.password_hash),
+                 created_at=self.created_at.isoformat() if self.created_at else None,
+                 providers=[i.provider for i in self.identities])
         return d
 
 
@@ -273,7 +302,15 @@ class EmailToken(Base):
 # ============================================================================ servers & sharing
 
 SERVER_PURPOSES = ("game", "benchmark", "probe", "scenario", "lab")
-VISIBILITY = ("private", "allowlist", "link", "public")
+
+#: The visibility ladder (design/phase3-features.md P3.2.3), narrowest first. `citar.auth.access` is the one place
+#: that interprets it (`access.VISIBILITY` is this tuple, `access.check_visibility` its validator):
+#:   private    the owner and admins
+#:   allowlist  and the accounts with an ACL entry
+#:   link       and anyone presenting the slug (never listed)
+#:   server     and every signed-in member in good standing (listed for members)
+#:   global     anyone on the internet (listed for everyone; needs `publish_global`)
+VISIBILITY = ("private", "allowlist", "link", "server", "global")
 
 
 class ServerGroup(Base):
@@ -281,7 +318,9 @@ class ServerGroup(Base):
     __tablename__ = "server_groups"
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("sg_"))
-    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    #: Null once its owner's account is gone: deleting an account never deletes what others were granted.
+    #: A group without an owner is managed by admins only.
+    owner_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text, default="")
     visibility: Mapped[str] = mapped_column(String(16), default="private")
@@ -294,6 +333,37 @@ class ServerGroup(Base):
     archived_at: Mapped[Optional[datetime]] = _ts(nullable=True)
 
 
+HARDWARE_KINDS = ("gpu", "cpu", "api")
+
+#: The classes every database starts with (P3.4.3): one default per kind, at the energy-proxy rates (an
+#: unclassified GPU generation-second 1.0 credit, a CPU core-second 0.05) and an online API's token cost at 1,000
+#: credits per unit of currency. The baseline revision seeds them (written out there, as a migration must be), and
+#: `citar.db.create_all` seeds a database made without migrations the same way.
+HARDWARE_CLASS_SEEDS = (
+    {"id": "hc_gpu", "kind": "gpu", "name": "GPU (unclassified)", "rate": 1.0},
+    {"id": "hc_cpu", "kind": "cpu", "name": "CPU core (unclassified)", "rate": 0.05},
+    {"id": "hc_api", "kind": "api", "name": "Online API", "rate": 1000.0},
+)
+
+
+class HardwareClass(Base):
+    """A price class for compute (P3.4.3): credits per generation-second (`gpu`), per core-second (`cpu`) or per
+    unit of the registry's currency of token cost (`api`). A machine takes the first class of each kind, by
+    priority, whose `match` fits its hardware, else the kind's default. Package 3-10 prices with it."""
+    __tablename__ = "hardware_classes"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("hc_"))
+    kind: Mapped[str] = mapped_column(String(8))                        # HARDWARE_KINDS
+    name: Mapped[str] = mapped_column(String(80))
+    rate: Mapped[float] = mapped_column(Float, default=0.0)
+    #: {"gpu_name": regex, "vram_gb_min": n, "cpu_name": regex, "cores_min": n}; empty matches everything.
+    match: Mapped[dict] = mapped_column(JSON, default=dict)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = _ts(default=now, onupdate=now)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(40))
+
+
 class Server(Base):
     """One machine or API endpoint that can run a model.
 
@@ -304,7 +374,9 @@ class Server(Base):
     __tablename__ = "servers"
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("sv_"))
-    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    #: Null once its owner's account is gone, and for the host and the site's API rows when nobody owns them:
+    #: deleting an account must never delete the host. A machine without an owner is managed by admins only.
+    owner_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     group_id: Mapped[Optional[str]] = mapped_column(ForeignKey("server_groups.id", ondelete="SET NULL"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     kind: Mapped[str] = mapped_column(String(16), default="owned")      # owned | leased | api | test
@@ -315,7 +387,32 @@ class Server(Base):
     #: `direct` means CITAR opens a connection to base_url itself (only sane on a trusted network).
     reach: Mapped[str] = mapped_column(String(16), default="worker")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: The site's one number for this machine's LLM slots (P3.2.8); a helper's own ceiling caps it.
     max_concurrent: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Filled in by the registry merge (3-05), the scheduler (3-07), the ledger (3-10) and the machine settings
+    # dialog (3-18); see design/phase3-features.md P3.2.2 and P3.8.2.
+    #: The machine running CITAR.
+    is_host: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: The site provides it (the host, an online API an admin registers), so it is the server's in the ledger.
+    server_resource: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: {"llm": {"enabled", "allow_swaps"}, "cpu": {"enabled", "threads", "cpu_percent", "memory_mb", "work"}}.
+    capabilities: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: auto | manual each: whether a helper's hello may change the hardware, the models and the power figures.
+    hardware_mode: Mapped[str] = mapped_column(String(8), default="auto")
+    models_mode: Mapped[str] = mapped_column(String(8), default="auto")
+    power_mode: Mapped[str] = mapped_column(String(8), default="manual")
+    #: The last hardware scan a helper reported, kept whatever the modes are, and when it came.
+    hardware_detected: Mapped[Optional[dict]] = mapped_column(JSON)
+    detected_at: Mapped[Optional[datetime]] = _ts(nullable=True)
+    gpu_class_id: Mapped[Optional[str]] = mapped_column(ForeignKey("hardware_classes.id", ondelete="SET NULL"))
+    cpu_class_id: Mapped[Optional[str]] = mapped_column(ForeignKey("hardware_classes.id", ondelete="SET NULL"))
+    #: An admin pinned the classes: a hardware change does not reclassify the machine.
+    class_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    trust_tier: Mapped[str] = mapped_column(String(16), default="new")             # TRUST_TIERS
+    #: Set by the scheduler: {"overreports": {"count", "last"}} for a helper whose reported time exceeds what the
+    #: server observed.
+    flags: Mapped[dict] = mapped_column(JSON, default=dict)
 
     created_at: Mapped[datetime] = _ts(default=now)
     updated_at: Mapped[datetime] = _ts(default=now, onupdate=now)
@@ -391,11 +488,15 @@ class AvailabilityWindow(Base):
 BUDGET_PERIODS = ("day", "week", "month", "total")
 
 
-class Budget(Base):
-    """A spend cap on a grant. Accounting and admission control only — no money moves anywhere.
+BUDGET_UNITS = ("credits",)
 
-    Spend is computed from the usage ledger priced by citar/costing.py, so correcting an electricity
-    rate or a token price later corrects every budget that was measured with it.
+
+class Budget(Base):
+    """A spend cap on a grant, in credits, the compute ledger's unit (P3.4.6). Accounting and admission control
+    only — no money moves anywhere.
+
+    Spend is what the ledger (`compute_events`, package 3-10) settles against the budget's entries, so a budget is
+    counted in the same unit as everything a member gives and uses.
     """
     __tablename__ = "budgets"
 
@@ -403,7 +504,7 @@ class Budget(Base):
     grant_id: Mapped[str] = mapped_column(ForeignKey("access_grants.id", ondelete="CASCADE"), index=True)
     period: Mapped[str] = mapped_column(String(12), default="month")
     amount: Mapped[float] = mapped_column(Float, default=0.0)
-    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    unit: Mapped[str] = mapped_column(String(8), default="credits")      # BUDGET_UNITS
     #: hard refuses to start work that would exceed the cap and pauses work that crosses it;
     #: soft warns and keeps going.
     behavior: Mapped[str] = mapped_column(String(8), default="hard")
@@ -412,7 +513,7 @@ class Budget(Base):
 
 
 class BudgetEntry(Base):
-    """One activity's claim on a budget: reserved at launch, trued up as the usage ledger lands.
+    """One activity's claim on a budget, in credits: reserved when work starts, settled as the ledger lands.
 
     Without the reservation a long game started with $2 of headroom could quietly spend $40 before
     anything noticed, because cost is only known after the fact.
@@ -438,8 +539,18 @@ Index("ix_budget_entries_budget_period", BudgetEntry.budget_id, BudgetEntry.peri
 
 # ============================================================================ shared objects
 
-OBJECT_TYPES = ("game", "report", "dataset", "server_group", "scenario", "map", "probe")
+#: The kinds of owned item (P3.2.4): one `owned_items` row per file-backed job, its files staying where they are.
+ITEM_KINDS = ("benchmark_suite", "benchmark_run", "probe", "probe_run", "lab_experiment", "scenario", "map",
+              "bot_profile", "report")
+
+#: What an ACL entry may name: a game, a server group, a server, or an owned item by its kind.
+OBJECT_TYPES = ("game", "server_group", "server") + ITEM_KINDS
 PERMISSIONS = ("view", "play", "manage")
+
+#: A game's index row (P3.2.5): `setup` before its first turn, `playing` while it is played or loaded, `finished`
+#: once it is over, `closed` when its session stopped before the end. Only lobby games (`kind = game`) in `setup` or
+#: `playing` count against an account's game limit.
+GAME_STATUSES = ("setup", "playing", "finished", "closed")
 
 
 class Game(Base):
@@ -461,7 +572,7 @@ class Game(Base):
     #: retroactively adds or withdraws this game from every aggregate.
     data_sharing: Mapped[str] = mapped_column(String(16), default="pool")
 
-    status: Mapped[str] = mapped_column(String(16), default="setup")  # setup | playing | finished | abandoned
+    status: Mapped[str] = mapped_column(String(16), default="setup")  # GAME_STATUSES
     turn: Mapped[int] = mapped_column(Integer, default=0)
     save_path: Mapped[Optional[str]] = mapped_column(String(512))
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -472,21 +583,30 @@ class Game(Base):
     deleted_at: Mapped[Optional[datetime]] = _ts(nullable=True)
 
 
-class Report(Base):
-    """A generated report. Same visibility ladder as games, set independently of the games it
-    draws on, so an analysis can be published while its source games stay private."""
-    __tablename__ = "reports"
+class OwnedItem(Base):
+    """One file-backed job and its owner (P3.2.4): a benchmark suite or run, a probe or probe run, a lab experiment,
+    a scenario, a map, a bot profile or a report. The files stay where they are (`path`, relative to the state
+    directory); this row carries who owns the item, who may see it and how it is shared, on the same ladder as a
+    game. A report's `scope` (own | pooled | both) and `spec` are in `meta`. `owner_id` is null for the shipped
+    items (built-in bot profiles and the like), which only admins manage. `citar/items.py` (package 3-02) is the
+    only writer."""
+    __tablename__ = "owned_items"
+    __table_args__ = (UniqueConstraint("kind", "ref", name="uq_owned_item_kind_ref"),)
 
-    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("r_"))
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: new_id("oi_"))
+    kind: Mapped[str] = mapped_column(String(24), index=True)          # ITEM_KINDS
+    #: The item's id on disk: a suite or run id, a profile id, an experiment name.
+    ref: Mapped[str] = mapped_column(String(120))
     owner_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     name: Mapped[str] = mapped_column(String(160), default="")
     visibility: Mapped[str] = mapped_column(String(16), default="private")
     slug: Mapped[str] = mapped_column(String(48), unique=True, index=True,
                                       default=lambda: secrets.token_urlsafe(16))
-    #: Whether this report was built from pooled data only, or includes the owner's private games.
-    scope: Mapped[str] = mapped_column(String(16), default="own")     # own | pooled | both
-    spec: Mapped[dict] = mapped_column(JSON, default=dict)
     path: Mapped[Optional[str]] = mapped_column(String(512))
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    #: The server's own data collection (only admins set it): its compute counts as given by whoever's machine
+    #: served it, and used by nobody (P3.4.2).
+    collection: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = _ts(default=now)
     updated_at: Mapped[datetime] = _ts(default=now, onupdate=now)
     deleted_at: Mapped[Optional[datetime]] = _ts(nullable=True)
@@ -505,6 +625,77 @@ class AclEntry(Base):
     permission: Mapped[str] = mapped_column(String(16), default="view")
     granted_by: Mapped[Optional[str]] = mapped_column(String(40))
     created_at: Mapped[datetime] = _ts(default=now)
+
+
+# ============================================================================ the compute ledger
+
+#: What compute an event measures, and which work it was (P3.4.2).
+COMPUTE_KINDS = ("gpu", "cpu", "api")
+TASK_CLASSES = ("full", "partial", "cpu")
+ACTIVITY_KINDS = ("game", "benchmark", "probe", "report", "lab", "test")
+VERIFICATION = ("unverified", "verified", "pending")
+
+
+class ComputeEvent(Base):
+    """One unit of compute, given by a machine's owner and used by an activity's owner (P3.4.2). Written by the
+    ledger's writer thread (package 3-10) from the scheduler's model steps and the host's measured CPU; never
+    updated except by an admin's reprice.
+
+    `consumer_id` is null for the server's own data collection and `provider_id` for a machine the site provides;
+    `self_use` marks the events counted on neither side. The machine is kept by id, not by a foreign key, so an
+    event outlives the machine it ran on.
+    """
+    __tablename__ = "compute_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: When the work ended.
+    at: Mapped[datetime] = _ts(default=now, index=True)
+    #: game:<id>, benchmark_run:<id>, probe_run:<id>, report:<id>, lab:<name> or test:<id>.
+    activity: Mapped[str] = mapped_column(String(160), index=True)
+    activity_kind: Mapped[str] = mapped_column(String(16))              # ACTIVITY_KINDS
+    task_class: Mapped[str] = mapped_column(String(8))                  # TASK_CLASSES
+    consumer_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    provider_id: Mapped[Optional[str]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    machine_id: Mapped[str] = mapped_column(String(40), index=True)
+    kind: Mapped[str] = mapped_column(String(8))                        # COMPUTE_KINDS
+    model: Mapped[Optional[str]] = mapped_column(String(200))
+    #: Generation seconds, bounded by what the server observed (P3.3.4), and CPU core-seconds.
+    gen_s: Mapped[float] = mapped_column(Float, default=0.0)
+    cpu_core_s: Mapped[float] = mapped_column(Float, default=0.0)
+    #: For a helper's model step: the helper's `Done.duration` and the server's own wall time from request to Done.
+    reported_s: Mapped[Optional[float]] = mapped_column(Float)
+    observed_s: Mapped[Optional[float]] = mapped_column(Float)
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_reasoning: Mapped[int] = mapped_column(Integer, default=0)
+    #: Priced when written, from the machine's hardware class of this kind.
+    credits: Mapped[float] = mapped_column(Float, default=0.0)
+    #: {"overreported", "capped_tokens", "unpriced"}.
+    flags: Mapped[dict] = mapped_column(JSON, default=dict)
+    self_use: Mapped[bool] = mapped_column(Boolean, default=False)
+    verification: Mapped[str] = mapped_column(String(16), default="unverified")   # VERIFICATION
+    request_id: Mapped[Optional[str]] = mapped_column(String(64))
+
+
+ROLLUP_SIDES = ("given", "used")
+
+
+class ComputeRollup(Base):
+    """An hour of one member's given or used compute of one kind (P3.4.5): the sums of `compute_events` for that
+    hour, recomputed whole whenever the hour is touched, so a read of complete hours never scans the events."""
+    __tablename__ = "compute_rollups"
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    #: The hour's start, UTC.
+    hour: Mapped[datetime] = mapped_column(UTCDateTime(), primary_key=True)
+    side: Mapped[str] = mapped_column(String(8), primary_key=True)     # ROLLUP_SIDES
+    kind: Mapped[str] = mapped_column(String(8), primary_key=True)     # COMPUTE_KINDS
+    gen_s: Mapped[float] = mapped_column(Float, default=0.0)
+    cpu_core_s: Mapped[float] = mapped_column(Float, default=0.0)
+    credits: Mapped[float] = mapped_column(Float, default=0.0)
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    events: Mapped[int] = mapped_column(Integer, default=0)
 
 
 # ============================================================================ operations

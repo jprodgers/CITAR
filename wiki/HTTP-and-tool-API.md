@@ -50,6 +50,22 @@ read by a model as often as by a person.
 
 Full schemas: `GET /api/tools`, or `/docs` for the generated OpenAPI browser.
 
+### Owning and sharing a game
+
+These take a signed-in account (a seat token is not one); see
+[the accounts design](Design-accounts-and-sharing#3-authorization) for who may do what.
+
+| Method and path | |
+|---|---|
+| `POST /api/games` | Create a game: `{"name", "config", "seats", "visibility", "data_sharing"}`. Counts against your game limit. A model seat names a machine (`{"llm": {"server_id", "model", ...}}`); a member's seat that describes one (a base URL, a key, a key variable) is refused with 400 |
+| `POST /api/games/{id}/seats/{player}` | Change a seat's type, model or name. A new model block, or a seat made an LLM seat, passes the same rule; a machine you may not use is 403, and the seat stays as it was. A new name alone checks nothing |
+| `DELETE /api/games/{id}` | Close the game (the lobby's End game): it stops, its saves stay yours, and it no longer counts against your limit |
+| `GET /api/games/{id}/sharing` | Its visibility (`private`, `allowlist`, `link`, `server`, `global`), its share link, who it is shared with, and its last unpublish (`at`, `reason`, and `by`: "you", "its owner", "an administrator", "a moderator" or "someone who manages it", never a handle) |
+| `PUT /api/games/{id}/sharing` | `{"visibility", "data_sharing", "rotate_slug"}`; `global` needs the `publish_global` permission |
+| `POST /api/games/{id}/sharing/users`, `DELETE .../sharing/users/{handle}` | Share with one account (`view`, `play` or `manage`), or stop |
+| `POST /api/games/{id}/unpublish` | `{"reason"}`: make it private and kill its links, for a moderator on a published game or for whoever manages it. The owner sees the reason |
+| `POST /api/scenarios/{id}/launch` | Start a game from a scenario: your game, under the same seat rule and game limit |
+
 ---
 
 ## The tools

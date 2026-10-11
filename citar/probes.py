@@ -197,8 +197,10 @@ def _items_text(g, items) -> str:
 
 
 def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_path: Optional[Path] = None,
-             live: Optional[dict] = None, should_stop=lambda: False, usage_act: Optional[str] = None) -> dict:
-    """Plays one case on a fresh copy of the scenario and returns its record."""
+             live: Optional[dict] = None, should_stop=lambda: False, usage_act: Optional[str] = None,
+             owner_id: Optional[str] = None) -> dict:
+    """Plays one case on a fresh copy of the scenario and returns its record. ``owner_id`` is the probe run's owner,
+    the case game's owner (``GameSession.owner_id``)."""
     subject, cp = probe["subject"], probe.get("counterparty")
     seats = [None] * len(scn.get("seats") or [])
     seats = [{} for _ in range(max(len(seats), subject + 1, (cp or 0) + 1))]
@@ -209,6 +211,7 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
     if cp is not None:
         seats[cp] = {"type": "script"}
     s = manager.create_from_scenario(scn, seats, name=f"probe {probe['id']}/{case['id']}", register=False, start=False)
+    s.owner_id = owner_id
     g = s.game
     if usage_act:
         # the case's model calls and the time it holds the servers go to the probe run's usage record
@@ -751,7 +754,7 @@ class ProbeRunner:
             self._set_live(rid, {"run": rid, "case": job["case"], "rep": job["rep"], "since": time.time()})
             rec = run_case(self.manager, scn, probe, cases[job["case"]], run["llm"],
                            save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar", live=self.lives[rid],
-                           should_stop=lambda: rid in self._stop_run, usage_act=act)
+                           should_stop=lambda: rid in self._stop_run, usage_act=act, owner_id=run.get("owner_id"))
             rec["rep"] = job["rep"]
             with open(self._run_dir(rid) / "results.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, default=str) + "\n")

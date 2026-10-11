@@ -207,22 +207,22 @@ class Capabilities(unittest.TestCase):
         user = self._user(status="probation")
         self.assertTrue(policy.can(user, "create_games"))
         self.assertFalse(policy.can(user, "register_servers"))
-        self.assertFalse(policy.can(user, "publish_public"))
+        self.assertFalse(policy.can(user, "publish_global"))
         self.assertFalse(policy.can(user, "invite"))
 
     def test_suspension_overrides_every_grant(self):
         user = self._user(status="active", role="admin")
-        self.assertTrue(policy.can(user, "publish_public"))
+        self.assertTrue(policy.can(user, "publish_global"))
         user.status = "suspended"
         # An explicit override must not resurrect a suspended account.
-        user.caps = {"publish_public": True}
-        self.assertFalse(policy.can(user, "publish_public"))
+        user.caps = {"publish_global": True}
+        self.assertFalse(policy.can(user, "publish_global"))
 
     def test_explicit_override_beats_the_role_default(self):
         user = self._user(status="active")
-        self.assertFalse(policy.can(user, "publish_public"))
-        user.caps = {"publish_public": True}
-        self.assertTrue(policy.can(user, "publish_public"))
+        self.assertFalse(policy.can(user, "publish_global"))
+        user.caps = {"publish_global": True}
+        self.assertTrue(policy.can(user, "publish_global"))
 
 
 class Invitations(unittest.TestCase):

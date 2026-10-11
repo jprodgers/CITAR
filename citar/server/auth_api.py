@@ -174,7 +174,7 @@ def login(body: LoginBody, request: Request, response: Response, s: Session = De
     row, raw = sessions.start(s, user, ip=ip, user_agent=_ua(request))
     sessions.set_cookie(response, raw)
     audit.record(s, "auth.login", actor=user, ip=ip, method="password")
-    return {"ok": True, "user": user.public(full=True), "csrf_token": row.csrf_token,
+    return {"ok": True, "user": user.account(), "csrf_token": row.csrf_token,
             "capabilities": policy.capabilities(user)}
 
 
@@ -535,7 +535,7 @@ def update_profile(body: ProfileBody, request: Request, p: Principal = Depends(p
             audit.record(s, "user.data_sharing", actor=user, object_type="user", object_id=user.id,
                          ip=p.ip, to=body.data_sharing)
         user.data_sharing = body.data_sharing
-    return {"ok": True, "user": user.public(full=True)}
+    return {"ok": True, "user": user.account()}
 
 
 @router.get("/api/auth/sessions")

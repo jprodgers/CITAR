@@ -571,6 +571,7 @@ class BenchmarkScheduler:
             for name in ("benchmark.citar", *crashes[-1:], "autosave.citar"):
                 if (folder / name).exists():
                     s = self.manager.load(folder / name)
+                    s.owner_id = run.get("owner_id") or s.owner_id
                     if job["status"] in ("done", "failed", "cancelled"):
                         job["closed_view_at"] = _now()
                     return s
@@ -613,7 +614,8 @@ class BenchmarkScheduler:
                                     "finished": _now()})
                     elif self.manager.get(job["game_id"]) is None:
                         try:
-                            self.manager.load(path)   # loads paused
+                            reloaded = self.manager.load(path)   # loads paused
+                            reloaded.owner_id = run.get("owner_id") or reloaded.owner_id
                         except Exception as e:
                             job.update({"status": "failed", "error": f"Could not reload the game: {e}", "finished": _now()})
                             continue
@@ -944,6 +946,7 @@ class BenchmarkScheduler:
                 self._flush()
                 return
             s.ai_delay = 0
+            s.owner_id = run.get("owner_id")    # the run's owner owns its games (package 3-02 records it)
             s.benchmark = {"run_id": run["id"], "job_id": job["id"], "run_name": run["name"], "suite_id": run["suite_id"],
                            "scenario": sc["name"], "scenario_id": sc["id"], "model": job["model"], "server": job["server_name"],
                            "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.turn_limit,

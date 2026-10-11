@@ -89,10 +89,18 @@ async def _startup():
     _probes()                                     # resumes probe runs that were queued or running
     from .admin_api import reports_runner
     reports_runner()                              # resumes queued reports (some wait for a model machine)
+    _close_orphan_rows()                          # now that everything that comes back is back
     asyncio.create_task(_close_finished_loop())   # finished lobby games leave the list after a while
     from .. import usage
     usage.start_power_sampler()                   # live power samples of this machine for cost reports
     usage.tracker().start()
+
+
+def _close_orphan_rows() -> list:
+    """Close every games-index row left `setup` or `playing` whose game has no live session (P3.2.5): run at boot
+    once the lobby games, the benchmarks and the probes are back. Returns the ids closed."""
+    from .session import all_sessions
+    return ownership.close_orphans(s.id for s in all_sessions())
 
 
 async def _close_finished_loop():
@@ -186,20 +194,64 @@ def _game_limit(sdb: DbSession, user) -> None:
     """Stop one account filling the server with games.
 
     The VPS runs every game, so concurrency is a shared resource: without a cap, one person starting
-    twenty 24-civ games is a denial of service against everybody else on the box.
+    twenty 24-civ games is a denial of service against everybody else on the box. Only lobby games
+    count (P3.2.5): a member's benchmark and probe games belong to their runs, which the benchmark and
+    probe queues limit, and a finished or closed game counts for nothing.
     """
     if user is None or user.role == "admin":
         return
     from ..db.models import Game as _GameRow
     from sqlalchemy import func, select as _select
     live = sdb.scalar(_select(func.count()).select_from(_GameRow).where(
-        _GameRow.owner_id == user.id, _GameRow.deleted_at.is_(None),
-        _GameRow.status.in_(("setup", "playing"))))
+        _GameRow.owner_id == user.id, _GameRow.deleted_at.is_(None), _GameRow.kind == "game",
+        _GameRow.status.in_(ownership.LIVE_STATUSES)))
     cap = max(1, user.max_concurrent_games or 2)
     if (live or 0) >= cap:
         raise HTTPException(429,
                             f"You already have {live} games running and your limit is {cap}. "
                             "Finish or delete one first, or ask an administrator to raise the limit.")
+
+
+#: The seat types that play a model, and so must name a machine when a game is made or a seat changed.
+MODEL_SEATS = ("llm",)
+
+
+def _member_seat(seat: dict, user, *, playing: bool = True) -> dict:
+    """One seat from a person, its model block through ``servers.member_llm`` (P3.2.9): a member's seat names a
+    machine and never describes one. ``playing`` is for a seat of a game being made or changed, where a model seat
+    without a machine is refused too; a scenario's seats are defaults its launch may still fill in. Returns the seat
+    with its block cleaned; raises the refusal as HTTP.
+
+    A seat that plays no model (a bot, a person, an MCP client) is never refused for its block, which nothing plays:
+    the lobby sends the block a seat had while it was a model seat, and a scenario's bot seats keep theirs. Such a
+    block is kept as the gate cleans it (an administrator's as it is, a member's to the machine it names), or dropped
+    where the gate would refuse it; making the seat a model seat later checks the block it then has
+    (``update_seat``). Only a block that is not an object at all is refused, on any seat."""
+    from .. import servers
+    try:
+        llm = servers.llm_block(seat.get("llm"))
+        model_seat = seat.get("type") in MODEL_SEATS
+        required = playing and model_seat
+        if not llm and not required:
+            return seat
+        try:
+            return {**seat, "llm": servers.member_llm(llm, user, required=required)}
+        except servers.SeatBlockError:
+            if model_seat:
+                raise
+            return {**seat, "llm": {}}
+    except servers.SeatBlockError as e:
+        raise HTTPException(e.status, str(e)) from None
+
+
+def _authorize_seats(sdb: DbSession, user, seats: list) -> None:
+    """Whether ``user`` may seat these models on the pooled machines they name (``pool.seats.authorize``), as HTTP:
+    a 403 with the admission's reason."""
+    from ..pool import seats as pool_seats
+    try:
+        pool_seats.authorize(sdb, user, seats)
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from None
 
 
 # ----------------------------------------------------------------------------
@@ -511,21 +563,27 @@ def create_game(body: CreateGame, request: Request,
     if len(body.seats) > max(1, me.max_seats_per_game or top):
         raise HTTPException(403, f"Your account is limited to {me.max_seats_per_game} seats per game.")
     _game_limit(sdb, me)
-    if body.visibility not in ("private", "allowlist", "link", "public"):
-        raise HTTPException(400, "Visibility is private, allowlist, link or public.")
-    from ..pool import seats as pool_seats
+    access.check_publish(me, body.visibility)
+    seats = [_member_seat(seat, me) for seat in body.seats]
+    _authorize_seats(sdb, me, seats)
     try:
-        pool_seats.authorize(sdb, me, body.seats)
-    except ValueError as e:
-        raise HTTPException(403, str(e))
-    try:
-        s = manager.create(body.config, body.seats, body.name)
+        # not started until it has its row and its owner: the first AI turn reads both
+        s = manager.create(body.config, seats, body.name, start=False, owner_id=me.id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    row = ownership.register(sdb, s, me, visibility="private", data_sharing=body.data_sharing)
-    if body.visibility != "private":
-        # Routed through set_visibility so publishing checks the publish_public capability.
-        access.set_visibility(sdb, row, body.visibility, actor=me)
+    try:
+        row = ownership.register(sdb, s, me, visibility=access.PRIVATE, data_sharing=body.data_sharing)
+        if body.visibility != access.PRIVATE:
+            # through set_visibility, for its audit row (check_publish above has refused what it would)
+            access.set_visibility(sdb, row, body.visibility, actor=me)
+        sdb.flush()
+    except BaseException:
+        # a game the index could not take is not left running unowned; the request's write is undone first, or
+        # the stop's own write of the row would wait behind it
+        sdb.rollback()
+        manager.delete(s.id)
+        raise
+    s.start()
     audit.record(sdb, "game.created", actor=me, object_type="game", object_id=s.id,
                  seats=len(body.seats), visibility=row.visibility)
     info = s.info(include_tokens=True)
@@ -551,10 +609,14 @@ def game_info(gid: str, request: Request, p: Principal = Depends(principal),
 @app.delete("/api/games/{gid}")
 def delete_game(gid: str, request: Request, p: Principal = Depends(principal),
                 sdb: DbSession = Depends(get_db)):
-    """Delete a game and every save of it."""
+    """Close a game (the lobby's "End game"): its session stops and leaves the list, its saves stay on disk, and its
+    row in the games index is `closed` (P3.2.5), or `finished` if it was over, so it no longer counts against its
+    owner's game limit and its saves load again. Deleting the saves (``/api/saves/delete`` of the whole game) is what
+    deletes the game."""
     _gate(sdb, gid, p, access.MANAGE, request)
-    ownership.delete(sdb, gid, actor=p.user)
     manager.delete(gid)
+    if p.user is not None:
+        audit.record(sdb, "game.closed", actor=p.user, object_type="game", object_id=gid)
     return {"deleted": gid}
 
 
@@ -569,13 +631,29 @@ class SeatUpdate(BaseModel):
 @app.post("/api/games/{gid}/seats/{pid}")
 def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
                 p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """Change who controls a seat (e.g. hand a bot seat to an MCP client, or take over as human)."""
+    """Change who controls a seat (e.g. hand a bot seat to an MCP client, or take over as human).
+
+    A new model block, or a seat made a model seat, goes through the same gates as a new game's (P3.2.9): a member's
+    block names a machine, and the caller must be admitted to a pooled machine it names. A refusal leaves the seat as
+    it was."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     if not 0 <= pid < len(s.seats):
         raise HTTPException(404, "No such seat.")
+    llm = body.llm
+    seat = s.seats[pid]
+    new_type = body.type or seat.type
+    if llm is not None or (new_type in MODEL_SEATS and new_type != seat.type):
+        # the block the seat will play with: the new one, or the one it has when only its type makes it a model seat.
+        # A change that leaves a model seat's block as it is (a new name) checks nothing: that block was checked when
+        # it was set, and a machine's window or budget must not stop its seat being renamed.
+        checked = _member_seat({"type": new_type, "llm": llm if llm is not None else dict(seat.llm)}, p.user)
+        if new_type in MODEL_SEATS:
+            _authorize_seats(sdb, p.user, [checked])
+        if llm is not None:
+            llm = checked["llm"]
     try:
         # the session keeps the civilization's engine controller in step with the seat type
-        s.update_seat(pid, type=body.type, llm=body.llm, bot=body.bot, name=body.name)
+        s.update_seat(pid, type=body.type, llm=llm, bot=body.bot, name=body.name)
     except ValueError:
         raise HTTPException(400, "Invalid seat type.")
     s.autosave(force=True)
@@ -1017,9 +1095,12 @@ class EditorOpen(BaseModel):
     players: list[dict] = []          # [{"nation", "difficulty", "type"}] for new games
 
 
-@app.post("/api/scenario-editor", dependencies=[Depends(require_user)])
-def editor_open(body: EditorOpen):
-    """Open a scenario editor and return its id."""
+@app.post("/api/scenario-editor")
+def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(principal),
+                sdb: DbSession = Depends(get_db)):
+    """Open a scenario editor and return its id. An editor opened on a live game or a save holds that game's whole
+    state, every civilization's included, so it needs what the game's god view does not: managing the game."""
+    require_user(request, p)
     meta = {"id": "", "name": "", "description": "", "seats": None}
     try:
         if body.source in ("map", "generate"):
@@ -1031,25 +1112,26 @@ def editor_open(body: EditorOpen):
             players = body.players or [{"type": "human"}, {"type": "llm"}]
             if len(players) > engine_api.max_players():
                 raise HTTPException(400, "Too many players.")
-            cfg["players"] = [{"nation": p.get("nation") or None, "difficulty": p.get("difficulty") or None,
-                               "controller": (p.get("type") if p.get("type") in ("human", "llm", "mcp", "bot") else "human"),
-                               "name": p.get("civ_name") or None} for p in players]
+            cfg["players"] = [{"nation": pl.get("nation") or None, "difficulty": pl.get("difficulty") or None,
+                               "controller": (pl.get("type") if pl.get("type") in ("human", "llm", "mcp", "bot") else "human"),
+                               "name": pl.get("civ_name") or None} for pl in players]
             g = EngineGame.new(cfg)
-            meta["seats"] = [{"type": p.get("type") or "bot"} for p in players]
+            meta["seats"] = [{"type": pl.get("type") or "bot"} for pl in players]
             meta["name"] = f"Scenario on {cfg.get('map') or cfg.get('map_type', 'a new map')}"
         elif body.source == "scenario":
             data = engine_api.load_scenario(body.scenario or "")
             g = EngineGame.from_state(data["state"])
             meta.update({k: data.get(k) for k in ("id", "name", "description", "seats")})
         elif body.source == "save":
-            p = (SAVE_DIR / (body.save or "")).resolve()
-            if SAVE_DIR.resolve() not in p.parents or not p.exists():
+            _require_save_access(sdb, p, body.save or "", access.MANAGE)
+            path = (SAVE_DIR / (body.save or "")).resolve()
+            if SAVE_DIR.resolve() not in path.parents or not path.exists():
                 raise HTTPException(404, "Save not found.")
             # the state alone: a scenario starts with no history, so its journal is never read
-            g = EngineGame.from_save(engine_api.read_save(p), history=False)
+            g = EngineGame.from_save(engine_api.read_save(path), history=False)
             meta["name"] = f"Scenario from {body.save}"
         elif body.source == "game":
-            s = _session(body.game_id or "")
+            s, _row, _perms = _gate(sdb, body.game_id or "", p, access.MANAGE, request)
             with s.lock:
                 g = EngineGame.from_state(s.game.state_dict())
             meta["name"] = f"Scenario from {s.name} turn {g.turn}"
@@ -1116,24 +1198,32 @@ class EditorMeta(BaseModel):
     seats: Optional[list] = None
 
 
-@app.post("/api/scenario-editor/{eid}/meta", dependencies=[Depends(require_user)])
-def editor_meta(eid: str, body: EditorMeta):
-    """Rename the scenario being edited."""
+@app.post("/api/scenario-editor/{eid}/meta")
+def editor_meta(eid: str, body: EditorMeta, me=Depends(require_user)):
+    """Rename the scenario being edited, or set its seats (a member's model blocks name machines, P3.2.9)."""
     ed = _editor(eid)
+    seats = None
+    if body.seats is not None:
+        seats = [_member_seat(seat, me, playing=False) if isinstance(seat, dict) else seat
+                 for seat in ed["game"].normalize_seats(body.seats)]
     for k in ("id", "name", "description"):
         if getattr(body, k) is not None:
             ed["meta"][k] = getattr(body, k)
-    if body.seats is not None:
-        ed["meta"]["seats"] = ed["game"].normalize_seats(body.seats)
+    if seats is not None:
+        ed["meta"]["seats"] = seats
     return {"meta": ed["meta"]}
 
 
-@app.post("/api/scenario-editor/{eid}/save", dependencies=[Depends(require_user)])
-def editor_save(eid: str, body: EditorMeta):
-    """Save the scenario being edited."""
+@app.post("/api/scenario-editor/{eid}/save")
+def editor_save(eid: str, body: EditorMeta, me=Depends(require_user)):
+    """Save the scenario being edited. Every seat's model block passes the members' gate (P3.2.9), the ones it was
+    opened with included: a scenario saved by an administrator with a seat that describes its own provider is saved
+    by a member only once that seat names a machine."""
     ed = _editor(eid)
-    editor_meta(eid, body)
+    editor_meta(eid, body, me)
     m = ed["meta"]
+    m["seats"] = [_member_seat(seat, me, playing=False) if isinstance(seat, dict) else seat
+                  for seat in (m.get("seats") or [])]
     if not (m.get("id") or m.get("name")):
         raise HTTPException(400, "Give the scenario a name.")
     with ed["lock"]:
@@ -1190,14 +1280,41 @@ class LaunchBody(BaseModel):
     seats: list[dict] = []
 
 
-@app.post("/api/scenarios/{sid}/launch", dependencies=[Depends(require_user)])
-def scenarios_launch(sid: str, body: LaunchBody):
-    """Start a playable game from a saved scenario."""
+@app.post("/api/scenarios/{sid}/launch")
+def scenarios_launch(sid: str, body: LaunchBody, me=Depends(require_cap("create_games")),
+                     sdb: DbSession = Depends(get_db)):
+    """Start a playable game from a saved scenario, as the caller's lobby game: it counts against their game limit,
+    it has its row in the games index with them as its owner, and every seat's model block, the scenario's own
+    included, passes the members' gate (P3.2.9) and admission before anything starts."""
+    _game_limit(sdb, me)
+    checked: list = []
+
+    def check(seat: dict) -> dict:
+        """One seat as the scenario and the request make it, through the members' gate."""
+        seat = _member_seat(seat, me)
+        checked.append(seat)
+        return seat
+
     try:
         scn = engine_api.load_scenario(sid)
-        s = manager.create_from_scenario(scn, body.seats, body.name or scn["name"])
+        # made but not yet registered: a refusal below leaves nothing behind, on the disk or in the list
+        s = manager.create_from_scenario(scn, body.seats, body.name or scn["name"], register=False, start=False,
+                                         check_seat=check)
     except (ActionError, ValueError) as e:
         raise HTTPException(400, str(e))
+    _authorize_seats(sdb, me, checked)
+    s.owner_id = me.id
+    manager.register_new(s)
+    try:
+        ownership.register(sdb, s, me, visibility=access.PRIVATE)
+        sdb.flush()
+    except BaseException:
+        sdb.rollback()                # as create_game: the request's write undone before the stop writes the row
+        manager.delete(s.id)
+        raise
+    s.start()
+    audit.record(sdb, "game.created", actor=me, object_type="game", object_id=s.id, scenario=sid,
+                 seats=len(s.seats), visibility=access.PRIVATE)
     return s.info(include_tokens=True)
 
 
@@ -1325,7 +1442,7 @@ def probe_run_open(rid: str, case: str, rep: int):
     path = _probe_call(runner._run_dir, rid) / f"{case}-{rep}.citar"
     if not path.exists():
         raise HTTPException(404, "No saved game for that case.")
-    s = manager.load(path)
+    s = manager.load(path, kind="probe")      # a probe's game, should the index not have it: never a lobby game
     return {"game_id": s.id, "spectator_token": s.spectator_token}
 
 
@@ -1498,12 +1615,17 @@ class DeleteSaveBody(BaseModel):
 @app.post("/api/saves/delete")
 def delete_save(body: DeleteSaveBody, request: Request, p: Principal = Depends(principal),
                 sdb: DbSession = Depends(get_db)):
-    """Delete a save."""
+    """Delete a save, or every save of its game. A game none of whose saves are left, and that is not open, is
+    deleted from the games index too."""
     _require_save_access(sdb, p, body.path, access.MANAGE)
     try:
-        return {"deleted": manager.delete_save(body.path, body.whole_game)}
+        deleted = manager.delete_save(body.path, body.whole_game)
     except KeyError:
         raise HTTPException(404, "Save not found.")
+    gid = (body.path or "").replace("\\", "/").split("/")[0]
+    if gid and manager.get(gid) is None and not any((SAVE_DIR / gid).glob("*.citar")):
+        ownership.delete(sdb, gid, actor=p.user)
+    return {"deleted": deleted}
 
 
 @app.post("/api/saves/load")
@@ -1522,12 +1644,15 @@ def load_save(body: LoadBody, request: Request, p: Principal = Depends(principal
         s = manager.load(path)
     except ValueError as e:        # a save that does not load (LoadError): its message says why
         raise HTTPException(400, str(e))
-    # A save from before accounts existed has no owner; whoever loads it becomes one.
+    # The load indexed the game (ownership.index_loaded). A save whose row has no owner (its row was made by
+    # the load, or by a database set aside for 0.1.6's) belongs to whoever loads it.
     row = ownership.row_for(sdb, s.id)
     if row is None:
-        row = ownership.register(sdb, s, p.user, visibility="private")
+        row = ownership.register(sdb, s, p.user, visibility=access.PRIVATE)
     elif row.owner_id is None and p.user is not None:
         row.owner_id = p.user.id
+        row.data_sharing = p.user.data_sharing      # its new owner's default, as for a game they create
+        s.owner_id = p.user.id
     return s.info(include_tokens=True)
 
 
@@ -1557,12 +1682,35 @@ class ShareBody(BaseModel):
 @app.get("/api/games/{gid}/sharing")
 def get_sharing(gid: str, request: Request, p: Principal = Depends(principal),
                 sdb: DbSession = Depends(get_db)):
-    """Who can see this game, and by what link."""
+    """Who can see this game, and by what link; for whoever manages it, also who it is shared with and the last
+    unpublish (who took it down, when and why)."""
     s, row, perms = _gate(sdb, gid, p, access.VIEW, request)
     out = ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
     if row is not None and access.MANAGE in perms:
         out["shared_with"] = access.shared_with(sdb, row)
+        out["unpublished"] = access.last_unpublished(sdb, row, p.user.id if p.user else None)
     return out
+
+
+class UnpublishBody(BaseModel):
+    """Why a game is being taken down: the owner sees it."""
+    reason: str = ""
+
+
+@app.post("/api/games/{gid}/unpublish")
+def unpublish_game(gid: str, body: UnpublishBody, request: Request, p: Principal = Depends(principal),
+                   sdb: DbSession = Depends(get_db)):
+    """Take a game down (P3.2.3): it becomes private, its share link is rotated so every copy of it dies, and the
+    audit log keeps who did it and why, which its owner sees. For a moderator on a game published to the internet
+    (or a link they were given), and for whoever manages it; nothing else of the game is a moderator's to touch."""
+    me = require_user(request, p)
+    s, row, perms = _gate(sdb, gid, p, access.VIEW, request)
+    if row is None:
+        raise HTTPException(404, "That game is not registered.")
+    if access.MODERATE not in perms and access.MANAGE not in perms:
+        perms.require(access.MODERATE)
+    access.unpublish(sdb, row, actor=me, reason=body.reason)
+    return ownership.to_client(row, access.on(sdb, me, row), base_url=citar_settings.get().public_origin)
 
 
 @app.put("/api/games/{gid}/sharing")

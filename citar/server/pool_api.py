@@ -241,7 +241,7 @@ def list_groups(request: Request, p: Principal = Depends(principal), s: Session 
     out = []
     for group in pool.groups_for(s, me):
         perms = access.on(s, me, group)
-        owner = s.get(User, group.owner_id)
+        owner = s.get(User, group.owner_id) if group.owner_id else None
         entry = {
             "id": group.id, "name": group.name, "description": group.description,
             "visibility": group.visibility, "owner": owner.public() if owner else None,
@@ -324,10 +324,10 @@ class WindowBody(BaseModel):
 
 
 class BudgetBody(BaseModel):
-    """A spending budget: an amount, a period, and what happens when it is reached."""
+    """A spending budget, in credits: an amount, a period, and what happens when it is reached."""
     period: str = "month"
     amount: float = 0.0
-    currency: str = "USD"
+    unit: str = "credits"
     behavior: str = "hard"
 
 

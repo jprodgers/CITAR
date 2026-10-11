@@ -62,22 +62,24 @@ must clear all of:
   exponential backoff and a lockout that is logged.
 - **Disposable-domain blocklist** for email signups, refreshed from a vendored list.
 - **Email verification** before any resource can be created.
-- **A probation state**: brand-new accounts can play and watch but cannot register servers, invite
-  anyone, or publish anything publicly until an admin or moderator clears them (configurable, and
-  off by default for SSO accounts from providers with verified email).
+- **A probation state**: brand-new accounts can play, watch and share with other members, but cannot
+  register servers, invite anyone, or publish anything to the whole internet until an admin or
+  moderator clears them (configurable, and off by default for SSO accounts from providers with
+  verified email).
 
 ### Roles
 
 | Role | Can |
 | --- | --- |
 | **admin** | Everything. Server settings, user roles, invites, suspend/delete, global server pool, all data. |
-| **moderator** | Review and act on reported content, suspend accounts, unpublish public games/reports, read the audit log. No role changes, no server settings, no access to private data that was not reported. |
+| **moderator** | Review and act on reported content, suspend accounts, unpublish what was published to the internet (`global` games, reports and items, and `link` ones whose link they were given), read the audit log. No role changes, no server settings, no access to private data that was not reported, and no control of anybody's things: unpublishing is all a moderator may do to them. |
 | **user** | Own games, servers, reports and data; whatever grants they have been given. |
 
 Roles are coarse. Fine-grained things are per-account capability flags an admin can set:
-`can_register_servers`, `can_run_reports`, `can_publish_public`, `invite_quota`,
-`max_concurrent_games`, `max_seats_per_game`. Defaults come from a server-settings template so an
-admin changes the policy once rather than per user.
+`register_servers`, `run_reports`, `publish_global` (it was `publish_public` before 0.1.6),
+`create_games`, `invite`, plus `invite_quota`, `max_concurrent_games`, `max_seats_per_game`. Defaults
+come from a server-settings template so an admin changes the policy once rather than per user; a
+template saved before a capability existed falls back to the built-in default for it.
 
 ---
 
@@ -85,24 +87,67 @@ admin changes the policy once rather than per user.
 
 One module, `citar/auth/access.py`, answers a single question:
 
-    permissions(viewer, object) -> set of {"view", "play", "manage", "admin"}
+    access.on(session, viewer, object) -> set of {"view", "play", "manage", "moderate", "admin"}
 
-Every route asks it. Nothing hand-rolls a check.
+Every route asks it. Nothing hand-rolls a check. A caller who may not even see the object gets 404,
+never 403: a 403 would confirm that it exists.
 
 ### Visibility
 
-Each shareable object (game, report, dataset, server group) carries:
+Each shareable object (game, report and the other owned items, server group) carries:
 
-- `visibility`: `private` | `allowlist` | `link` | `public`
-- an **ACL** of `(user, permission)` entries for `allowlist`
-- a secret slug for `link` — unguessable, revocable, and rotating it kills every old link
+- `visibility`, on a ladder of five levels (0.1.6):
 
-Games separate **play** from **watch**, so a private game between two people can still have a public
-spectator link. Reports and collected data use the same four levels, so a user can publish an
-analysis while the underlying game stays private.
+  | Level | Who may view | Listed for |
+  | --- | --- | --- |
+  | `private` | the owner and admins | the owner and admins |
+  | `allowlist` | the owner, admins and the accounts with an ACL entry | the same |
+  | `link` | the same, and anyone presenting the link's key | nobody else: unlisted |
+  | `server` | the same, and every signed-in member in good standing (active or on probation) | members |
+  | `global` | anyone on the internet, no account needed | everyone |
 
-`public` means listed and readable by anyone on the internet, no account required. `link` means
-readable by anyone holding the URL but never listed or indexed (`X-Robots-Tag: noindex`).
+- an **ACL** of `(user, permission)` entries, which count at every level, so sharing with one person
+  never needs a wider level;
+- a secret slug for `link`: unguessable, revocable, and rotating it kills every old link.
+
+Making something `global` needs the `publish_global` capability (members do not have it by default,
+and probation never does); `server` needs nothing, since it stays among members. The levels live in
+one tuple, `access.VISIBILITY`, with one validator, `access.check_visibility`; the old `public` level
+is gone (it is `global`), and a test scans the code for any visibility string off the ladder.
+
+Games separate **play** from **watch**, so a private game between two people can still have a
+spectator link. Reports and collected data use the same levels, so a user can publish an analysis
+while the underlying game stays private.
+
+`link` objects are readable by anyone holding the URL but never listed or indexed
+(`X-Robots-Tag: noindex`). The share URL offered to the owner carries the key for `link`, and is the
+object's plain address for `server` and `global`.
+
+### Moderation
+
+A moderator's only extra permission is **moderate**: on a `global` object, and on a `link` object
+presented with its key, a moderator may view it and **unpublish** it
+(`POST /api/games/{gid}/unpublish`, with a reason). Unpublishing makes the object private, rotates
+its slug so every shared link dies, and writes an audit row with the reason. The owner sees the
+reason in the game's sharing panel, and that a moderator (or an administrator) took it down, never
+which one: administrators have the audit log. Every control (pause, seats, sharing, delete, stop, rerun) needs **manage**,
+which only the owner, an ACL manager and administrators have, so a moderator who has taken something
+down has no further way in. On a `server` object a moderator is a member like any other; below `link`,
+nothing.
+
+### The games index
+
+Each game has a row in `games` (`citar/server/ownership.py`): its owner, visibility, data sharing, turn
+and status. The status is `playing` while the game is played, `finished` once it is over, `closed`
+when its session stopped before the end (the lobby's **End game**), and `playing` again when it is
+loaded. The session's save writer keeps it, after each round's autosave is on the disk, and so does
+the session's stop: never under the game's lock. Only lobby games in `setup` or `playing` count
+against an account's `max_concurrent_games`; benchmark and probe games are limited by their own
+queues. At boot, a row still `playing` whose game did not come back is closed. Closing a game keeps
+its saves its owner's; deleting every save of it deletes the game. A game loaded without a row (its
+database was set aside, or a probe's case opened to be looked at) gets one, owned by nobody, private
+and pooling nothing (only administrators reach it); the administrator who loads such a save from the
+Saves list owns it from then on, with their own pooling default.
 
 ### Data pooling
 
@@ -217,14 +262,32 @@ SQLite in WAL mode via SQLAlchemy 2.0, with Alembic migrations, and the Postgres
 tested from day one so moving is a connection-string change. Game saves stay as files on disk,
 referenced by a DB row that carries owner, visibility and ACL.
 
-Tables: `user`, `identity`, `session`, `invite`, `email_token`, `capability`, `server`,
-`server_group`, `group_member`, `grant`, `availability_window`, `budget`, `budget_reservation`,
-`game`, `acl_entry`, `report`, `dataset`, `audit_log`, `rate_limit`, `worker_token`, `setting`.
+Tables (`citar/db/models.py`): `users`, `identities`, `auth_sessions`, `invites`, `email_tokens`,
+`servers`, `server_groups`, `access_grants`, `availability_windows`, `budgets`, `budget_entries`,
+`worker_tokens`, `hardware_classes`, `games`, `owned_items`, `acl_entries`, `compute_events`,
+`compute_rollups`, `audit_log`, `rate_limits`, `settings_kv`. A report is an owned item of kind
+`report`; deleting an account leaves its machines and groups ownerless (managed by admins), never
+deletes them.
 
-**Migration.** `scripts/migrate_to_accounts.py` creates the first admin account, imports
-`config/servers.json` into the tables as that account's servers, and assigns every existing save,
-report, benchmark run and probe run to it. It is idempotent and takes a backup first. Nothing you
-have is lost or reset.
+**The 0.1.6 baseline.** 0.1.6 starts the schema afresh: one revision, `0016a_baseline`, holds every
+table and column the 0.1.6 features need (profiles, owned items, the compute ledger, machine settings),
+so later changes add behaviour rather than migrations. A database from 0.1.5 or an earlier 0.1.6 build
+(revisions `f064316a6b34` and `767c824c2fcb`) is **not migrated**:
+
+- on SQLite, the first start of 0.1.6 writes the database's log into its file, lets go of it, and
+  **renames** it (with any `-wal` and `-shm` beside it) to `citar-0.1.5-<YYYYmmdd-HHMMSS>.db` in the
+  same folder, then starts on a fresh database. Nothing is deleted, and the boot's warning names the
+  new file. If the rename fails (on Windows, another process has the file open: another CITAR, a
+  database browser, a backup or sync tool), the renames already made are undone and the server
+  refuses to start, naming the file: it never runs on the old database, or on half of it renamed;
+- on Postgres, the server refuses to start: create a new database and point `CITAR_DB_URL` at it, or
+  drop the old schema;
+- a database at a revision this version does not know (a newer version's) refuses the boot, naming
+  the revision.
+
+Accounts, servers, grants and sharing start empty. Saved games stay on disk and are indexed again as
+they are loaded (a game restored at start, or loaded from the Saves list by an administrator, gets its
+row back, owned by whoever loads it).
 
 ---
 

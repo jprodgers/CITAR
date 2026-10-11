@@ -61,6 +61,7 @@ refcheck/baseline/python/*.jsonl -text
 *.exe  binary
 *.citar binary
 *.citarscn binary
+*.db     binary
 
 # Generated: keep these out of diffs and language statistics.
 crates/citar-engine/data/ruleset/*.json linguist-generated=true

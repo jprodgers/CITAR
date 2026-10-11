@@ -31,14 +31,14 @@ ROLE_DEFAULTS: dict = {
         "create_games": True,
         "register_servers": True,
         "run_reports": True,
-        "publish_public": False,
+        "publish_global": False,
         "invite": False,
     },
     "moderator": {
         "create_games": True,
         "register_servers": True,
         "run_reports": True,
-        "publish_public": True,
+        "publish_global": True,
         "invite": True,
     },
     "admin": dict.fromkeys(CAPABILITIES, True),
@@ -46,7 +46,7 @@ ROLE_DEFAULTS: dict = {
 
 #: Probation is the holding state for a brand-new account: it can play and watch but cannot add
 #: hardware, invite anyone or publish. These are the capabilities it loses until it is cleared.
-PROBATION_DENIES = ("register_servers", "invite", "publish_public")
+PROBATION_DENIES = ("register_servers", "invite", "publish_global")
 
 DEFAULTS: dict = {
     # open | invite | closed. Boots from CITAR_REGISTRATION, then lives here.
@@ -166,8 +166,12 @@ def can(user: Optional[User], capability: str) -> bool:
     overrides = user.caps or {}
     if capability in overrides:
         return bool(overrides[capability])
-    role_defaults = get("role_defaults") or ROLE_DEFAULTS
-    return bool((role_defaults.get(user.role) or {}).get(capability, False))
+    # Role defaults an admin saved before a capability existed (or after one was renamed) do not name
+    # it: the built-in default applies, rather than a silent False for everyone.
+    stored = (get("role_defaults") or {}).get(user.role) or {}
+    if capability in stored:
+        return bool(stored[capability])
+    return bool((ROLE_DEFAULTS.get(user.role) or {}).get(capability, False))
 
 
 def capabilities(user: Optional[User]) -> dict:

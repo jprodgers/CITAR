@@ -28,7 +28,7 @@ os.environ["CITAR_BEHIND_PROXY"] = "0"
 
 from citar import aggregate, db, settings
 from citar.auth import access, accounts, policy
-from citar.db.models import Base, Game, Report, User
+from citar.db.models import Base, Game, OwnedItem, User
 
 settings.reset()
 db.configure(os.environ["CITAR_DB_URL"])
@@ -168,7 +168,9 @@ class ReportSharing(unittest.TestCase):
             self.admin = accounts.create_user(s, handle="zara", email="z@example.com",
                                               password="a long enough phrase", role="admin",
                                               status="active", email_verified=True).id
-            r = Report(owner_id=self.owner, name="Model comparison", visibility="private")
+            # a report is an owned item of kind "report" (P3.2.4)
+            r = OwnedItem(kind="report", ref="rep-1", owner_id=self.owner, name="Model comparison",
+                          visibility="private", meta={"scope": "own"})
             s.add(r)
             s.flush()
             self.report_id, self.slug = r.id, r.slug
@@ -176,7 +178,7 @@ class ReportSharing(unittest.TestCase):
     def _perms(self, handle_id, **kw):
         with db.session() as s:
             viewer = s.get(User, handle_id) if handle_id else None
-            return access.on(s, viewer, s.get(Report, self.report_id), **kw)
+            return access.on(s, viewer, s.get(OwnedItem, self.report_id), **kw)
 
     def test_private_report_is_owner_only(self):
         self.assertIn(access.MANAGE, self._perms(self.owner))
@@ -185,22 +187,22 @@ class ReportSharing(unittest.TestCase):
 
     def test_link_shared_report_needs_the_key(self):
         with db.session() as s:
-            s.get(Report, self.report_id).visibility = "link"
+            s.get(OwnedItem, self.report_id).visibility = "link"
         self.assertFalse(self._perms(None))
         self.assertIn(access.VIEW, self._perms(None, slug=self.slug))
 
-    def test_public_report_is_readable_by_anyone(self):
+    def test_global_report_is_readable_by_anyone(self):
         with db.session() as s:
-            s.get(Report, self.report_id).visibility = "public"
+            s.get(OwnedItem, self.report_id).visibility = "global"
         self.assertIn(access.VIEW, self._perms(None))
         self.assertNotIn(access.MANAGE, self._perms(None))
 
     def test_publishing_a_report_needs_the_capability(self):
         from fastapi import HTTPException
         with db.session() as s:
-            row, owner = s.get(Report, self.report_id), s.get(User, self.owner)
+            row, owner = s.get(OwnedItem, self.report_id), s.get(User, self.owner)
             with self.assertRaises(HTTPException) as caught:
-                access.set_visibility(s, row, "public", actor=owner)
+                access.set_visibility(s, row, "global", actor=owner)
             self.assertEqual(caught.exception.status_code, 403)
             # Link sharing is not publishing: it is not listed and not indexed.
             access.set_visibility(s, row, "link", actor=owner)
@@ -212,7 +214,7 @@ class ReportSharing(unittest.TestCase):
         with db.session() as s:
             s.add(Game(id="secret1", owner_id=self.owner, name="private game",
                        data_sharing="private", visibility="private", kind="game"))
-            s.get(Report, self.report_id).visibility = "public"
+            s.get(OwnedItem, self.report_id).visibility = "global"
         self.assertIn(access.VIEW, self._perms(None))
         with db.session() as s:
             game_perms = access.on(s, None, s.get(Game, "secret1"))
@@ -220,7 +222,7 @@ class ReportSharing(unittest.TestCase):
 
     def test_rotating_the_key_kills_old_links(self):
         with db.session() as s:
-            row = s.get(Report, self.report_id)
+            row = s.get(OwnedItem, self.report_id)
             row.visibility = "link"
             old = row.slug
             access.rotate_slug(s, row, actor=s.get(User, self.owner))

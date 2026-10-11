@@ -744,10 +744,98 @@ SEAT_OVERRIDES = ("persona", "max_tool_calls_per_turn", "max_turn_seconds", "rea
                   "max_tokens", "temperature", "max_steps_per_turn", "stall_steps", "reconnect_seconds", "on_disconnect")
 
 
-def resolve_llm(llm: dict, with_key: bool = True) -> dict:
-    """Turn a seat's llm block into the agent config: provider, endpoint, key, model and inference settings. Seat
-    blocks without a server_id (tests, scripts) are passed through unchanged."""
+#: What a member's seat block keeps (design/phase3-features.md P3.2.9): which machine, which model and load
+#: profile, and the seat's own overrides. Everything else (a provider, a base URL, a key, a key variable, a
+#: timeout, unknown keys) decides what the server dials or sends, and only an administrator may set it.
+MEMBER_LLM_KEYS = ("server_id", "model", "model_id", "profile_id") + SEAT_OVERRIDES
+
+#: What an inline dry-run block may keep besides: the dry-run provider dials nothing and reads no key.
+DRYRUN_LLM_KEYS = ("dry_run_delay", "dry_run_negotiation")
+
+
+class SeatBlockError(ValueError):
+    """A member's model block the server refuses (``member_llm``), with the HTTP status to answer."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def llm_block(block) -> dict:
+    """A seat's model block as a dict (empty for none), or ``SeatBlockError`` (400) for anything that is not an
+    object: a string, a number or a list in its place is a malformed request, from an administrator too."""
+    if block is None:
+        return {}
+    if not isinstance(block, dict):
+        raise SeatBlockError(400, "A seat's model settings are an object naming a machine.")
+    return dict(block)
+
+
+def _is_admin(user) -> bool:
+    """Whether an account may describe a machine inline: an administrator in good standing (the local owner is
+    one)."""
+    return user is not None and getattr(user, "role", None) == "admin" and \
+        getattr(user, "status", None) in ("probation", "active")
+
+
+def member_llm(block: Optional[dict], user, *, required: bool = False) -> dict:
+    """The one gate on a seat's model block from a person (P3.2.9): a member may name a machine, never describe one.
+
+    An administrator's block is returned as it is: inline blocks (a provider, a base URL, a key variable) are how
+    admins, tests and scripts give a raw provider. For anyone else the block keeps ``MEMBER_LLM_KEYS`` only, and:
+
+    * a block without a ``server_id`` is refused (400, "Pick a machine for this seat") unless its provider is
+      ``dryrun``, which dials nothing (it keeps ``DRYRUN_LLM_KEYS`` too);
+    * a machine of ``config/servers.json`` is not a row until the registry merge (package 3-05), and nothing
+      admits a member to it, so it is refused (403) unless its provider is ``dryrun``: without this a member could
+      spend the host's GPU or the site's API key with no grant;
+    * a ``server_id`` that names no machine is refused (400);
+    * a pooled machine (a row) is kept, and ``pool.seats.authorize`` decides whether this member may use it.
+
+    An empty block is returned empty, unless ``required`` (the block of a model seat in a game being made or
+    changed: such a seat must name a machine). Raises ``SeatBlockError`` with the status to answer, for anything
+    but an object (``llm_block``) whoever sends it.
+    """
+    block = llm_block(block)
+    if _is_admin(user) or (not block and not required):
+        return block
+    sid = block.get("server_id")
+    if not sid:
+        if str(block.get("provider") or "").lower() == "dryrun":
+            out = {k: block[k] for k in MEMBER_LLM_KEYS + DRYRUN_LLM_KEYS if k in block}
+            out["provider"] = "dryrun"
+            return out
+        raise SeatBlockError(400, "Pick a machine for this seat: a seat names one of the machines you may use, "
+                                  "not an address or a key.")
+    out = {k: block[k] for k in MEMBER_LLM_KEYS if k in block}
+    registry = find(sid)
+    if registry is not None:
+        if (registry.get("connection") or {}).get("provider") != "dryrun":
+            raise SeatBlockError(403, "Only an administrator can seat this machine until it is shared.")
+        return out
+    from .pool import seats as pool_seats
+    if pool_seats.lookup(sid) is None:
+        raise SeatBlockError(400, "There is no such machine. Pick a machine for this seat.")
+    return out
+
+
+def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> dict:
+    """Turn a seat's llm block into the agent config: provider, endpoint, key, model and inference settings.
+
+    A block with a ``server_id`` is built from that machine, taking only the seat overrides from the seat. A block
+    without one (an administrator's inline block, tests, scripts) is passed through unchanged, but only when
+    ``inline_ok``: the session's owner is an administrator, or the session has no owner. Otherwise it raises
+    ``ServerError`` ("this seat has no machine"), and the seat plays no model (P3.2.9). An inline dry-run block is
+    the exception, whoever owns the session: the dry-run provider dials nothing and reads no key, which is why
+    ``member_llm`` admits it from members; it keeps only what ``member_llm`` keeps."""
     if not llm or not llm.get("server_id"):
+        if not inline_ok:
+            if str((llm or {}).get("provider") or "").lower() == "dryrun":
+                out = {k: llm[k] for k in MEMBER_LLM_KEYS + DRYRUN_LLM_KEYS if k in llm}
+                out["provider"] = "dryrun"
+                return out
+            raise ServerError("This seat has no machine: only an administrator can give a seat a model "
+                              "configuration of its own. Pick a machine for this seat.")
         return dict(llm or {})
     if find(llm["server_id"]) is None:
         # not in the registry: a machine from the Servers page, played through its helper
