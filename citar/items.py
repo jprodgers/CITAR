@@ -150,7 +150,8 @@ def register(session, kind: str, ref: str, owner, name: str = "", *, path=None,
     row.collection = bool(collection)
     row.updated_at = _now()
     session.flush()
-    who = actor if actor is not None else (owner if isinstance(owner, User) else None)
+    who = actor if actor is not None else (owner if isinstance(owner, User)
+                                           else session.get(User, row.owner_id) if row.owner_id else None)
     audit.record(session, f"{kind}.created", actor=who, object_type=kind, object_id=row.id, ref=row.ref,
                  owner=row.owner_id, visibility=visibility)
     return row
