@@ -151,15 +151,11 @@ def fork_profile(pid: str, body: ForkBody, request: Request, user: User = Depend
     items.require(s, "bot_profile", pid, user, access.VIEW, slug=_key(request))
     check_cap(user, "edit_bots")
     try:
-        src = profiles.get(pid)
-        name = body.name or f"{src['name']} (copy)"
+        name = profiles.fork_name(pid, body.name)
         new = profiles.new_id(name)
+        # the row before the file, as every producer: adoption never meets a file whose row is still to come
         items.register(s, "bot_profile", new, user, name, path=profiles.PROFILES_DIR / f"{new}.json")
-        return profiles.save({"id": new, "name": name, "description": src.get("description", ""),
-                              "tags": [t for t in src.get("tags", []) if t not in ("yardstick", "snapshot", "control")],
-                              "engine": src["engine"], "aggression": src.get("aggression"),
-                              "params": src.get("params") or {}, "parent": pid},
-                             user=user.handle, note=f"forked from {src['name']}")
+        return profiles.fork(pid, name, user=user.handle, as_id=new)
     except _REFUSED as e:
         raise _fail(e)
 
