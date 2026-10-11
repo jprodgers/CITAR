@@ -7,6 +7,12 @@ Overall score (0-100) = weighted mix of
   * Reliability - clean turn endings, few rejected orders, little looping (all games).
   * Speed - average turn time on a log scale: 20s or less = 100, 30 minutes or more = 0 (all games).
 Models without benchmark games get no overall score (the benchmark is the big part).
+
+Pooling (design/phase3-features.md P3.2.4): a member's figures are made from their own games and the games
+other members pool (``aggregate.scope_for``: the game's row says `pool` and its owner has not opted out), and a
+model's pooled part only when enough other accounts are behind it (``aggregate.publishable``); other members'
+games are counted, never named. An administrator's are made from every game, as before. Python lines this
+replaces: ``_reports`` reading every save whatever its owner's choice (``scoring.py:87-115`` at ``d93345a``).
 """
 from __future__ import annotations
 
@@ -14,9 +20,17 @@ import math
 from pathlib import Path
 from typing import Optional
 
-from .. import engine_api
+from .. import aggregate, engine_api
 from .metrics import Metrics
 from .session import SAVE_DIR, SessionManager
+
+
+def viewer_scope(session, viewer) -> Optional[aggregate.Scope]:
+    """The games ``viewer``'s figures may be made from (``aggregate.scope_for``), or None for an administrator in
+    good standing, whose figures cover every game."""
+    if viewer is not None and viewer.role == "admin" and viewer.status == "active":
+        return None
+    return aggregate.scope_for(session, viewer)
 
 _digest_cache: dict[str, tuple[float, dict]] = {}
 
@@ -84,11 +98,14 @@ def _benchmark_from_state(sess: dict, seats: list, state: dict) -> Optional[dict
             "score": scores.get(llm), "best_bot_score": max([v for k, v in scores.items() if k != llm] or [0])}
 
 
-def _reports(manager: SessionManager) -> dict:
-    """{game_id: {"name", "turn", "summary", "benchmark"}} for running games and the latest save of every other game."""
+def _reports(manager: SessionManager, allowed: Optional[set] = None) -> dict:
+    """{game_id: {"name", "turn", "summary", "benchmark"}} for running games and the latest save of every other game;
+    only the games in ``allowed`` when it is given (a member's scope), whose saves alone are read."""
     from .benchmarks import game_progress
     out = {}
     for s in list(manager.sessions.values()):
+        if allowed is not None and s.id not in allowed:
+            continue
         with s.lock:
             # dry-run seats test a setup; they are not models and don't count toward scores
             dry = {st.player for st in s.seats if st.type == "llm" and st.llm.get("provider") == "dryrun"}
@@ -105,7 +122,7 @@ def _reports(manager: SessionManager) -> dict:
         seen = set(out)
         for p in sorted(SAVE_DIR.glob("*/*.citar"), key=lambda p: -p.stat().st_mtime):
             gid = p.parent.name
-            if gid in seen:
+            if gid in seen or (allowed is not None and gid not in allowed):
                 continue
             seen.add(gid)
             d = _digest_save(p)
@@ -114,19 +131,55 @@ def _reports(manager: SessionManager) -> dict:
     return out
 
 
-def compare_models(manager: SessionManager, reports: Optional[dict] = None) -> list[dict]:
-    """Aggregate AI metrics per model across all running games and saved games (latest save per game)."""
-    reports = reports if reports is not None else _reports(manager)
+def _label(row: dict):
+    """The model a seat's metrics are filed under (its controller for a seat with no model: a bot, a person)."""
+    return row.get("model") or row.get("controller")
+
+
+def _published(reports: dict, scope: Optional[aggregate.Scope]) -> tuple:
+    """For a member's ``scope``: per model, the games its figures may use, and the models whose pooled part was
+    withheld with how many accounts it had (``aggregate.publishable``); (None, {}) for an administrator."""
+    if scope is None:
+        return None, {}
+    by_model: dict = {}
+    for gid, rep in reports.items():
+        for row in rep["summary"].values():
+            if row.get("turns"):
+                by_model.setdefault(_label(row), set()).add(gid)
+        b = rep.get("benchmark")
+        if b and b.get("model"):
+            by_model.setdefault(b["model"], set()).add(gid)
+    return aggregate.publishable(scope, by_model)
+
+
+def _withheld_note(contributors: int) -> str:
+    """Why a model's pooled figures are not shown."""
+    return (f"Pooled results from {contributors} other account{'s' if contributors != 1 else ''}: at least "
+            f"{aggregate.min_contributors()} are needed before they are shown as an average.")
+
+
+def compare_models(manager: SessionManager, reports: Optional[dict] = None,
+                   scope: Optional[aggregate.Scope] = None) -> list[dict]:
+    """Aggregate AI metrics per model across running games and saved games (latest save per game): every game for an
+    administrator (``scope`` None); for a member, their own games and the pooled ones (``viewer_scope``), a model's
+    pooled part only when enough accounts are behind it, and only their own games named (``games_list``; the
+    others are counted in ``pooled_games``). A model whose figures were all withheld is a row with ``withheld``
+    and the reason."""
+    reports = reports if reports is not None else _reports(manager, None if scope is None else scope.game_ids)
+    allowed, withheld = _published(reports, scope)
     by_model: dict = {}
     for gid, rep in reports.items():
         for pid, row in rep["summary"].items():
             if not row.get("turns"):
                 continue
-            key = row.get("model") or row.get("controller")
+            key = _label(row)
+            if allowed is not None and gid not in allowed.get(key, ()):
+                continue
             agg = by_model.setdefault(key, {"model": key, "controller": row.get("controller"), "games": 0, "turns": 0,
                                             "_wall": 0.0, "_steps": 0.0, "_calls": 0.0, "_errors": 0.0, "_repeats": 0.0,
                                             "_out": 0.0, "_model_s_tok": [], "malformed_calls": 0, "blocked_repeats": 0,
-                                            "stall_nudges": 0, "end_reasons": {}, "max_turn_s": 0.0, "game_list": []})
+                                            "stall_nudges": 0, "end_reasons": {}, "max_turn_s": 0.0, "game_list": [],
+                                            "pooled_games": 0})
             n = row["turns"]
             agg["games"] += 1
             agg["turns"] += n
@@ -144,7 +197,10 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None) -> l
             agg["max_turn_s"] = max(agg["max_turn_s"], row["max_turn_s"])
             for k, v in row["end_reasons"].items():
                 agg["end_reasons"][k] = agg["end_reasons"].get(k, 0) + v
-            agg["game_list"].append(f"{rep['name']} (T{rep['turn']})")
+            if scope is None or gid in scope.own_ids:
+                agg["game_list"].append(f"{rep['name']} (T{rep['turn']})")
+            else:
+                agg["pooled_games"] += 1
     out = []
     for agg in by_model.values():
         t = max(1, agg["turns"])
@@ -158,9 +214,26 @@ def compare_models(manager: SessionManager, reports: Optional[dict] = None) -> l
             "output_tokens_per_s": round(sum(agg["_model_s_tok"]) / len(agg["_model_s_tok"]), 1) if agg["_model_s_tok"] else None,
             "malformed_calls": agg["malformed_calls"], "blocked_repeats": agg["blocked_repeats"],
             "stall_nudges": agg["stall_nudges"], "clean_turn_end_rate": round(clean_ends / t, 3),
-            "end_reasons": agg["end_reasons"], "games_list": agg["game_list"],
+            "end_reasons": agg["end_reasons"], "games_list": agg["game_list"], "pooled_games": agg["pooled_games"],
+            "pooled_withheld": withheld.get(agg["model"]),
         })
     out.sort(key=lambda r: (r["controller"] != "llm", r["avg_turn_s"]))
+    shown = {r["model"] for r in out}
+    controllers = _controllers(reports) if withheld else {}
+    for key, contributors in sorted(withheld.items(), key=lambda kv: str(kv[0])):
+        if key not in shown and key in controllers:
+            out.append({"model": key, "controller": controllers[key], "withheld": True,
+                        "contributors": contributors, "reason": _withheld_note(contributors)})
+    return out
+
+
+def _controllers(reports: dict) -> dict:
+    """Each model label's controller (``llm``, ``bot``...), from the seats' metrics."""
+    out: dict = {}
+    for rep in reports.values():
+        for row in rep["summary"].values():
+            if row.get("turns"):
+                out.setdefault(_label(row), row.get("controller"))
     return out
 
 
@@ -178,16 +251,27 @@ def speed_score(avg_turn_s: float) -> float:
     return round(100 * max(0.0, min(1.0, (hi - t) / (hi - lo))), 1)
 
 
-def model_scores(manager: SessionManager, weights: dict) -> dict:
-    """Every model's overall score and its components."""
-    reports = _reports(manager)
-    metrics = {m["model"]: m for m in compare_models(manager, reports) if m["controller"] == "llm"}
+def model_scores(manager: SessionManager, weights: dict, scope: Optional[aggregate.Scope] = None) -> dict:
+    """Every model's overall score and its components: from every game for an administrator (``scope`` None), from a
+    member's own and the pooled games for a member, as ``compare_models`` says. A member is shown the games behind a
+    score only when they are their own (``games``; ``pooled_games`` counts the rest), and is told which models' pooled
+    figures were withheld (``withheld``) and what their scope holds (``scope``)."""
+    reports = _reports(manager, None if scope is None else scope.game_ids)
+    allowed, withheld = _published(reports, scope)
+    metrics = {m["model"]: m for m in compare_models(manager, reports, scope)
+               if m["controller"] == "llm" and not m.get("withheld")}
     bench: dict[str, list] = {}
+    pooled: dict[str, int] = {}
     for gid, rep in reports.items():
         b = rep.get("benchmark")
         if not b or not b.get("model") or b.get("performance") is None or b["turns"] < 1:
             continue
-        bench.setdefault(b["model"], []).append({**b, "game_id": gid, "game": rep["name"]})
+        if allowed is not None and gid not in allowed.get(b["model"], ()):
+            continue
+        own = scope is None or gid in scope.own_ids
+        bench.setdefault(b["model"], []).append({**b, "game_id": gid, "game": rep["name"], "_own": own})
+        if not own:
+            pooled[b["model"]] = pooled.get(b["model"], 0) + 1
     wb, wr, ws = (float(weights.get(k, 0)) for k in ("benchmark", "reliability", "speed"))
     rows = []
     for model in sorted((set(metrics) | set(bench)) - {"llm", None}):   # "llm" = seats with no model id (tests)
@@ -205,8 +289,19 @@ def model_scores(manager: SessionManager, weights: dict) -> dict:
             "benchmark_games": len(games), "benchmark_turns": turns,
             "benchmark_finished": sum(1 for g in games if g["phase"] != "playing"),
             "wins": sum(1 for g in games if g["performance"] == 100.0 and g["phase"] != "playing"),
-            "games": sorted(games, key=lambda g: -g["turns"]),
+            # another member's game is a number in these figures, never a name or an id
+            "games": sorted(({k: v for k, v in g.items() if k != "_own"} for g in games if g["_own"]),
+                            key=lambda g: -g["turns"]),
+            "pooled_games": pooled.get(model, 0),
+            "pooled_withheld": withheld.get(model),
             "metrics": m,
         })
     rows.sort(key=lambda r: (r["overall"] is None, -(r["overall"] or 0), -(r["benchmark"] or 0)))
-    return {"weights": {"benchmark": wb, "reliability": wr, "speed": ws}, "models": rows}
+    out = {"weights": {"benchmark": wb, "reliability": wr, "speed": ws}, "models": rows}
+    if scope is not None:
+        shown = {r["model"] for r in rows}
+        out["scope"] = scope.client()
+        out["withheld"] = [{"model": k, "contributors": n, "reason": _withheld_note(n)}
+                           for k, n in sorted(withheld.items(), key=lambda kv: str(kv[0]))
+                           if k not in shown and k not in (None, "llm", "bot", "human", "mcp")]
+    return out

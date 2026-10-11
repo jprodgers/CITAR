@@ -5,7 +5,7 @@
     saves/reports/<id>/report.html    the report
 
 A spec:
-    {"title", "range": {"preset": all|today|24h|7d|30d|90d|365d|custom, "from", "to"},
+    {"title", "pooling": own|pooled|both, "range": {"preset": all|today|24h|7d|30d|90d|365d|custom, "from", "to"},
      "scope": {"servers": [ids], "models": [keys], "kinds": [game, benchmark, probe, lab, report],
                "items": [{"kind": game|benchmark_run|probe|probe_run|lab_experiment|suite|activity, "id", "name"}]},
      "sections": [...], "options": {"electricity_basis": full|marginal, "lifespan_range": [2, 6]},
@@ -46,6 +46,11 @@ PRESETS = {
             "sections": ["summary", "lab", "costs", "servers", "data_quality", "methodology"]},
     "everything": {"name": "Everything", "description": "Every section.", "sections": ALL_SECTIONS},
 }
+
+#: What a report's figures come from (design/phase3-features.md P3.2.4): ``own``, the activities its owner may see
+#: (their own, those shared with them, members' and published ones; everything for an administrator); ``pooled``,
+#: only the averages other accounts pool, each withheld until enough accounts are behind it; ``both``.
+POOLING = ("own", "pooled", "both")
 
 
 def _now() -> float:
@@ -88,9 +93,11 @@ def normalize_spec(d: dict) -> dict:
     except (TypeError, ValueError):
         raise ValueError("A report's lifespan range is two numbers of years.") from None
     preset = d.get("preset")
+    pooling = d.get("pooling")
     return {
         "title": (str(d.get("title") or "").strip() or "CITAR report")[:120],
         "preset": preset if isinstance(preset, str) and preset in PRESETS else None,
+        "pooling": pooling if isinstance(pooling, str) and pooling in POOLING else "own",
         "range": {"preset": rng.get("preset") if rng.get("preset") in ("all", "today", "24h", "7d", "30d", "90d", "365d", "custom") else "all",
                   "from": str(rng.get("from") or "")[:10], "to": str(rng.get("to") or "")[:10]},
         "scope": {"servers": [str(s) for s in _part(scope, "servers", list, "a list")][:50],
@@ -363,13 +370,15 @@ class ReportRunner:
                 pool_seats.release(sid, holder)
 
     def run(self, rid: str):
-        """Build one report: gather, cost, render, write."""
+        """Build one report: gather (what its owner may see: ``reach.Reach``), cost, render, write."""
         from .data import gather
+        from .reach import Reach
         from .render import render, narrative_brief
-        spec = self.spec(rid)
+        spec = normalize_spec(self.spec(rid))
         t0 = _now()
         self._set(rid, status="running", started=t0, progress="Collecting data")
-        data = gather(spec, progress=lambda msg: self._set(rid, progress=msg))
+        data = gather(spec, progress=lambda msg: self._set(rid, progress=msg),
+                      reach=Reach.of(self.meta(rid).get("owner_id")))
         narrative, note = "", ""
         if spec["narrative"]["enabled"]:
             self._set(rid, progress="Writing the analysis with a model")
@@ -489,11 +498,17 @@ def _complete_on_worker(cfg: dict, system: str, prompt: str, busy_wait: float = 
     return text, {"input_tokens": conv.usage.get("input_tokens", 0), "output_tokens": conv.usage.get("output_tokens", 0)}, cfg.get("model")
 
 
-def scope_options() -> dict:
-    """What the report builder can pick from: servers, models, and recent items (runs, experiments, games)."""
+def scope_options(reach=None) -> dict:
+    """What the report builder can pick from: servers, models, and recent items (runs, experiments, games), as far as
+    ``reach`` goes (``reach.Reach``, the asker's: a member is offered what their report could gather, and the machines
+    they may see; everything by default)."""
     from .. import servers, usage
+    from .reach import Reach
+    reach = reach or Reach()
     reg = servers.with_pooled()
-    ledger = usage.read()
+    ledger = reach.ledger(usage.read())
+    if not reach.everything:
+        reg = {**reg, "servers": [sv for sv in reg["servers"] if sv["id"] in reach.names]}
     items: dict = {}
     models = set()
     for a in ledger["acts"].values():

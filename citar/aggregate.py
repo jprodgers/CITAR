@@ -58,7 +58,8 @@ class Scope:
 
     `own` is everything the viewer owns, whatever its sharing setting. `pooled` is everybody
     else's games that are marked as contributing. A report says which it used, so a number is
-    never silently a mix of the two.
+    never silently a mix of the two. `owner_of` names each game's owner, so a figure can be
+    withheld when too few accounts are behind it (`publishable`).
     """
     viewer: Optional[User]
     include_own: bool = True
@@ -67,6 +68,7 @@ class Scope:
     own_ids: set = field(default_factory=set)
     pooled_ids: set = field(default_factory=set)
     contributors: set = field(default_factory=set)
+    owner_of: dict = field(default_factory=dict)
 
     @property
     def enough_contributors(self) -> bool:
@@ -92,37 +94,71 @@ class Scope:
                 "description": self.describe()}
 
 
-def scope_for(session, viewer: Optional[User], *, include_own: bool = True,
-              include_pooled: bool = True, kinds: Optional[Iterable] = None) -> Scope:
-    """Work out which games this viewer's analysis may read."""
-    scope = Scope(viewer=viewer, include_own=include_own, include_pooled=include_pooled)
-    stmt = select(Game).where(Game.deleted_at.is_(None))
+def _games(session, kinds: Optional[Iterable] = None):
+    """Every live game row as (id, owner id, whether it pools), in one query: a game pools when its row says
+    `pool` and its owner is an account that has not opted out (``users.data_sharing``) or left. Opting out
+    is the account's word over all of its games, the ones it made before as much as the ones to come, so it
+    is read here, when an average is made, and never copied onto the rows."""
+    stmt = (select(Game.id, Game.owner_id, Game.data_sharing, User.data_sharing, User.status)
+            .join(User, User.id == Game.owner_id, isouter=True)
+            .where(Game.deleted_at.is_(None)))
     if kinds:
         stmt = stmt.where(Game.kind.in_(list(kinds)))
+    for gid, owner_id, game_sharing, owner_sharing, owner_status in session.execute(stmt):
+        pools = bool(owner_id) and game_sharing == "pool" and owner_sharing == "pool" and owner_status != "deleted"
+        yield gid, owner_id, pools
 
-    for game in session.scalars(stmt):
-        mine = bool(viewer and game.owner_id == viewer.id)
-        if mine:
+
+def scope_for(session, viewer: Optional[User], *, include_own: bool = True,
+              include_pooled: bool = True, kinds: Optional[Iterable] = None) -> Scope:
+    """Work out which games this viewer's analysis may read: the viewer's own (pooled or not), and everybody
+    else's that pool (``_games``). Rows only: a save with no row in the games index is nobody's, and pools
+    nothing."""
+    scope = Scope(viewer=viewer, include_own=include_own, include_pooled=include_pooled)
+    for gid, owner_id, pools in _games(session, kinds):
+        if viewer is not None and owner_id == viewer.id:
             # Your own games are always readable by you, pooled or not. Private mode keeps your
             # results out of everybody else's averages; it does not hide them from you.
             if include_own:
-                scope.own_ids.add(game.id)
-                scope.game_ids.add(game.id)
+                scope.own_ids.add(gid)
+                scope.game_ids.add(gid)
+                scope.owner_of[gid] = owner_id
             continue
-        if include_pooled and game.data_sharing == "pool" and game.owner_id:
-            scope.pooled_ids.add(game.id)
-            scope.game_ids.add(game.id)
-            scope.contributors.add(game.owner_id)
+        if include_pooled and pools:
+            scope.pooled_ids.add(gid)
+            scope.game_ids.add(gid)
+            scope.contributors.add(owner_id)
+            scope.owner_of[gid] = owner_id
     return scope
 
 
 def pooled_game_ids(session, *, kinds: Optional[Iterable] = None) -> set:
     """Every game contributing to the public averages, regardless of viewer."""
-    stmt = select(Game).where(Game.deleted_at.is_(None), Game.data_sharing == "pool",
-                              Game.owner_id.is_not(None))
-    if kinds:
-        stmt = stmt.where(Game.kind.in_(list(kinds)))
-    return {g.id for g in session.scalars(stmt)}
+    return {gid for gid, _owner, pools in _games(session, kinds) if pools}
+
+
+def publishable(scope: Scope, games_by_label: dict, *, threshold: Optional[int] = None) -> tuple:
+    """Which of each label's games a figure for this viewer may be made from (``scope``'s games, grouped by a
+    label such as a model): the viewer's own always, and everybody else's only when at least ``threshold``
+    (``min_contributors``) other accounts are behind them. Counting the others alone matters: a figure
+    made of the viewer's games and one other account's is that account's games with the viewer's
+    subtracted out.
+
+    Returns ``({label: games}, {label: contributors})``: the second names the labels whose pooled part was
+    withheld, with how many accounts it had, for the page to say "not enough data yet" rather than imply
+    there is none."""
+    limit = threshold if threshold is not None else min_contributors()
+    allowed, withheld = {}, {}
+    for label, gids in games_by_label.items():
+        gids = set(gids) & scope.game_ids
+        own = gids & scope.own_ids
+        others = gids - own
+        owners = {scope.owner_of.get(g) for g in others} - {None}
+        if others and len(owners) < limit:
+            withheld[label] = len(owners)
+            others = set()
+        allowed[label] = own | others
+    return allowed, withheld
 
 
 # ---------------------------------------------------------------------------- withholding
@@ -152,11 +188,11 @@ def summarize_sharing(session) -> dict:
     """How much of the server is pooled — for the admin console and the about page."""
     total = pooled = private = 0
     contributors = set()
-    for game in session.scalars(select(Game).where(Game.deleted_at.is_(None))):
+    for _gid, owner_id, pools in _games(session):
         total += 1
-        if game.data_sharing == "pool" and game.owner_id:
+        if pools:
             pooled += 1
-            contributors.add(game.owner_id)
+            contributors.add(owner_id)
         else:
             private += 1
     accounts = list(session.scalars(select(User).where(User.status.in_(("active", "probation")))))

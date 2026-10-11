@@ -62,13 +62,14 @@ def _filter_board(board: list, seen: Optional[set]) -> list:
 
 
 @router.get("/profiles")
-def list_profiles(p: Principal = Depends(principal), s: Session = Depends(get_db)):
-    """The profiles the caller may see with their ratings, best first, and which one "Best bot" currently stands
-    for. Each says what the caller may do to it."""
-    seen = items.listed(s, "bot_profile", p.user)
+def list_profiles(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+    """The profiles the caller may see (and the one a share key opens) with their ratings, best first, and which one
+    "Best bot" currently stands for. Each says what the caller may do to it."""
+    key = _key(request)
+    seen = items.listed(s, "bot_profile", p.user, slug=key)
     board = _filter_board(ratings.rankings(history=False)["entries"], seen)
     shown = [x for x in ratings.ranked_profiles(board) if seen is None or x["id"] in seen]
-    perms = items.permissions_by_ref(s, "bot_profile", p.user, [x["id"] for x in shown])
+    perms = items.permissions_by_ref(s, "bot_profile", p.user, [x["id"] for x in shown], slug=key)
     return {"profiles": [dict(x, **perms.get(x["id"], {})) for x in shown], "default": profiles.DEFAULT_PROFILE,
             "best": ratings.best_profile(board)}
 

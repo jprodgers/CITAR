@@ -79,43 +79,24 @@ def _narrative_gate(s: Session, spec: dict, user) -> None:
 
 
 @router.get("/api/reports")
-def reports_list(p: Principal = Depends(principal), s: Session = Depends(get_db)):
-    """The reports the caller may see, newest first, each with what they may do to it."""
-    seen = items.listed(s, "report", p.user)
+def reports_list(request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
+    """The reports the caller may see (and the one a share key opens), newest first, each with what they may do to
+    it."""
+    key = _key(request)
+    seen = items.listed(s, "report", p.user, slug=key)
     out = [m for m in reports_runner().list() if seen is None or m.get("id") in seen]
-    perms = items.permissions_by_ref(s, "report", p.user, [m["id"] for m in out])
+    perms = items.permissions_by_ref(s, "report", p.user, [m["id"] for m in out], slug=key)
     return [dict(m, **perms.get(m["id"], {})) for m in out]
 
 
 @router.get("/api/reports/options")
-def reports_options(me=Depends(require_user), s: Session = Depends(get_db)):
-    """What the report builder can pick from: machines, models, and recent items. A member is offered the items
-    they may see and the machines they may use (their own and shared ones; of the site's registry, the dry-run
-    ones)."""
+def reports_options(me=Depends(require_user)):
+    """What the report builder can pick from: machines, models, and recent items. A member is offered what their
+    report could gather (``reach.Reach``: the activities of the things they may see) and the machines they may see
+    (their own and shared ones; of the site's registry, the dry-run ones)."""
     from ..reports import scope_options
-    opts = scope_options()
-    if _is_admin(me):
-        return opts
-    from .. import servers
-    from ..db.models import Server
-    from . import ownership
-    games = ownership.visible_ids(s, me) or set()
-    kinds = {"benchmark_run": "benchmark_run", "probe": "probe", "probe_run": "probe_run",
-             "lab_experiment": "lab_experiment"}
-    seen = {kind: items.visible_refs(s, kind, me) for kind in kinds}
-    opts["items"] = [i for i in opts.get("items", [])
-                     if (i.get("kind") == "game" and i.get("id") in games)
-                     or (i.get("kind") in seen and i.get("id") in seen[i["kind"]])]
-    machines = []
-    for sv in opts.get("servers", []):
-        row = s.get(Server, sv["id"])
-        if row is not None:
-            if access.VIEW in access.on(s, me, row):
-                machines.append(sv)
-        elif ((servers.find(sv["id"]) or {}).get("connection") or {}).get("provider") == "dryrun":
-            machines.append(sv)
-    opts["servers"] = machines
-    return opts
+    from ..reports.reach import Reach
+    return scope_options(Reach.of(me.id))
 
 
 @router.post("/api/reports")

@@ -317,7 +317,8 @@ def s_models(x: Ctx) -> str:
         if m is not None and c.get("per_turn") is not None and not c.get("incomplete"):
             pts.append({"name": k, "x": c["per_turn"], "y": m})
     if not rows:
-        return '<p class="muted">No AI model activity in this scope.</p>'
+        none = "" if x.data.get("pooling") == "pooled" else '<p class="muted">No AI model activity in this scope.</p>'
+        return none + _pooled_html(x)
     head = ["Configuration", "Games", "Performance (0–100)", "Wins", "Avg turn", "Tool error rate", "Clean turn ends",
             "Prompt tokens / turn", "Output tokens / turn", "Cost / model turn"]
     out = [x.f("models"), '<p class="lead">Performance is the benchmark measure: 100 for a win, 0 if eliminated, otherwise the '
@@ -334,7 +335,33 @@ def s_models(x: Ctx) -> str:
     if len(perf) >= 2:
         out.append(C.hbar("Mean game performance", sorted(perf, key=lambda kv: -kv[1]), fmt=lambda v: f"{v:.0f}",
                           color_index=x.color_of))
+    out.append(_pooled_html(x))
     return "".join(out)
+
+
+def _pooled_html(x: Ctx) -> str:
+    """The pooled figures (a report whose ``pooling`` is ``pooled`` or ``both``): per model, the averages over the
+    games other accounts pool, never one account's alone; a model with too few accounts behind it is named with
+    the reason, not its numbers."""
+    d = x.data
+    if d.get("pooling") not in ("pooled", "both"):
+        return ""
+    if d.get("pooled_error"):
+        return f'<h3>Pooled figures</h3><p class="bad">The pooled figures could not be read: {esc(d["pooled_error"])}</p>'
+    rows = [r for r in d.get("pooled") or [] if r.get("controller") == "llm"]
+    lead = ('<h3>Pooled figures</h3><p class="lead">Averages over the games other accounts let feed the pooled '
+            'figures (not this report\'s own activities). A model is shown only once enough different accounts '
+            'have played it, so no average is one person\'s results.</p>')
+    if not rows:
+        return lead + '<p class="muted">No pooled results yet.</p>'
+    table = []
+    for r in rows:
+        if r.get("withheld"):
+            table.append([r["model"], "–", "–", "–", "–", "–", r.get("reason") or ""])
+            continue
+        table.append([r["model"], r["games"], f"{r['turns']:,}", f"{r['avg_turn_s']:.0f}s",
+                      f"{r['avg_errors']:.2f}", f"{100 * r['clean_turn_end_rate']:.0f}%", ""])
+    return lead + C.table(["Model", "Games", "Turns", "Avg turn", "Errors / turn", "Clean turn ends", ""], table)
 
 
 def s_benchmarks(x: Ctx) -> str:
@@ -645,6 +672,10 @@ def scope_text(data: dict) -> str:
         parts.append("types: " + ", ".join(sc["kinds"]))
     if sc.get("items"):
         parts.append(f"{len(sc['items'])} selected item(s)")
+    if data.get("reach") == "owner":
+        parts.append("what its owner may see, with costs on their own machines")
+    if data.get("pooling") in ("pooled", "both"):
+        parts.append("pooled figures only" if data["pooling"] == "pooled" else "with pooled figures")
     return " · ".join(parts)
 
 
