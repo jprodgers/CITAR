@@ -8,7 +8,7 @@ same orders through the same rules.
 |---|---|---|
 | **Human** | You, in the browser | Nothing |
 | **Scripted bot** | The built-in rule-based AI | Pick an aggression level |
-| **LLM** | A model the server drives | Pick a server, model and load profile |
+| **LLM** | A model the server drives | Pick a machine, model and load profile |
 | **MCP client** | An external agent — Claude Code, Claude Desktop | Copy the command from Join / Seats |
 
 ---
@@ -64,6 +64,22 @@ From testing with `qwen3-27b` and similar:
 - **Model size** — a 4B model plays a coherent early game and falls apart around the mid-game. A
   27B model plays a recognisable game of Civ and takes five to ten minutes a turn on a consumer
   GPU. See the [FAQ](Questions#how-strong-are-the-models).
+
+### A seat names a machine
+
+A seat's model settings name one of the machines on the Servers page (its `server_id`), a model and
+a load profile, plus the seat's own overrides (persona, effort, limits). They never describe a
+machine: on a server with accounts, a member's seat that carries a base URL, an API key or the name of
+an environment variable to read one from is refused ("Pick a machine for this seat"), when a game is
+created, when a seat is changed, when a scenario is saved and when one is launched. Otherwise
+anybody could make the server dial any address with any of its keys. A machine the member may not
+use is refused too, and until the registry merge the machines of `config/servers.json` are an
+administrator's to seat (unless they are dry runs). The dry-run provider is the exception: it dials
+nothing, so anyone may use it.
+
+Administrators, and the owner of a local install (who is one), can still give a seat a model
+configuration of its own, as tests and scripts do. A seat in a member's game that somehow has one
+plays no model at all: its turns are skipped and the game says the seat has no machine.
 
 ### Changing a model mid-game
 
