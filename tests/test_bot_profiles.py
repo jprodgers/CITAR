@@ -31,6 +31,26 @@ def _clear_profiles():
             profiles.delete(p["id"])
 
 
+#: What the Bots page's routes read of a request when they are called as functions: no share key.
+_REQUEST = SimpleNamespace(query_params={}, headers={})
+
+
+@contextlib.contextmanager
+def _as_admin():
+    """A database session and an administrator in it, for calling the Bots page's routes as functions: a profile and
+    an experiment are owned items (design/phase3-features.md P3.2.4), registered in the request's session."""
+    import secrets
+    from citar import db
+    from citar.auth import accounts
+    if not db.configured():
+        db.configure()
+    db.create_all()
+    with db.session() as s:
+        admin = accounts.create_user(s, handle="bots" + secrets.token_hex(3), role="admin", status="active",
+                                     email_verified=True)
+        yield s, admin
+
+
 def _latest() -> str:
     return next(v["id"] for v in engine_api.bot_versions() if v["latest"])
 
@@ -221,8 +241,6 @@ class ProfileTests(unittest.TestCase):
 class BotsPageTests(unittest.TestCase):
     """The Bots page's API (citar/server/bots_api.py) in the shapes the page reads."""
 
-    admin = SimpleNamespace(handle="tester")
-
     def tearDown(self):
         _clear_profiles()
 
@@ -245,8 +263,8 @@ class BotsPageTests(unittest.TestCase):
             bots_api.param_schema("frozen_7149efb1")
         self.assertEqual((e.exception.status_code, e.exception.detail),
                          (404, profiles.ARCHIVED.format(engine="frozen_7149efb1")))
-        with self.assertRaises(HTTPException) as e:
-            bots_api.create_profile(bots_api.ProfileBody(name="Old", engine="frozen_7149efb1"), user=self.admin)
+        with _as_admin() as (s, admin), self.assertRaises(HTTPException) as e:
+            bots_api.create_profile(bots_api.ProfileBody(name="Old", engine="frozen_7149efb1"), user=admin, s=s)
         self.assertEqual((e.exception.status_code, e.exception.detail),
                          (400, profiles.ARCHIVED.format(engine="frozen_7149efb1")))
 
@@ -254,13 +272,14 @@ class BotsPageTests(unittest.TestCase):
         from citar.server import bots_api
         body = bots_api.ProfileBody(name="Page made", engine="basic", aggression=0.6,
                                     params={"war_prep_rate": "3", "lux_buy": "on"}, note="from the page")
-        made = bots_api.create_profile(body, user=self.admin)
-        self.assertEqual(made["params"], engine_api.bot_clean_params("basic", body.params))
-        shown = bots_api.get_profile(made["id"])["profile"]
-        self.assertEqual((shown["params"], shown["aggression"], shown["rev"]), (made["params"], 0.6, 1))
-        self.assertEqual(shown["fingerprint"], profiles.fingerprint("basic", made["params"], 0.6))
-        edited = bots_api.update_profile(made["id"], bots_api.ProfileBody(
-            name="Page made", engine="basic", aggression=0.6, params=shown["params"]), user=self.admin)
+        with _as_admin() as (s, admin):
+            made = bots_api.create_profile(body, user=admin, s=s)
+            self.assertEqual(made["params"], engine_api.bot_clean_params("basic", body.params))
+            shown = bots_api.get_profile(made["id"], _REQUEST, p=SimpleNamespace(user=admin), s=s)["profile"]
+            self.assertEqual((shown["params"], shown["aggression"], shown["rev"]), (made["params"], 0.6, 1))
+            self.assertEqual(shown["fingerprint"], profiles.fingerprint("basic", made["params"], 0.6))
+            edited = bots_api.update_profile(made["id"], bots_api.ProfileBody(
+                name="Page made", engine="basic", aggression=0.6, params=shown["params"]), _REQUEST, user=admin, s=s)
         self.assertEqual(edited["rev"], 1, "the page sending back what it read is no new revision")
 
 
@@ -337,21 +356,25 @@ class LabTests(unittest.TestCase):
     def test_api_queues_an_ab_experiment(self):
         from citar import lab
         from citar.server import bots_api
-        admin = SimpleNamespace(handle="tester")
+        with _as_admin() as (s, admin):
+            self._queue_experiment(lab, bots_api, s, admin)
+
+    def _queue_experiment(self, lab, bots_api, s, admin):
         spec = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard", "classic-production"],
-                                                                 games=2, name="api-ab"), user=admin)
+                                                                 games=2, name="api-ab"), user=admin, s=s)
         try:
             self.assertEqual([s["profile"] for s in spec["seats"]],
                              ["standard", "classic-production", "standard", "classic-production"])
             self.assertEqual({s["bot"] for s in spec["seats"]}, {_latest()})
             self.assertTrue((lab.QUEUE / "api-ab.json").exists())
             again = bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard"], name="api-ab"),
-                                              user=admin)
+                                              user=admin, s=s)
             self.assertEqual(again["name"], "api-ab-2", "names never overwrite an experiment")
             (lab.QUEUE / "api-ab-2.json").unlink()
             from fastapi import HTTPException
             with self.assertRaises(HTTPException):
-                bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard"], maps=["mars"]), user=admin)
+                bots_api.queue_experiment(bots_api.ExperimentBody(profiles=["standard"], maps=["mars"]), user=admin,
+                                          s=s)
         finally:
             (lab.QUEUE / "api-ab.json").unlink(missing_ok=True)
 

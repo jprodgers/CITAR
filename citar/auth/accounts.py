@@ -445,6 +445,7 @@ def ensure_local_owner(session) -> User:
                        status="active", is_local_owner=True, email_verified=True,
                        tz=_local_timezone())
     audit.record(session, "user.local_owner_created", actor=user, object_type="user", object_id=user.id)
+    on_first_admin(session, user)
     return user
 
 
@@ -474,4 +475,28 @@ def bootstrap_admin(session, *, handle: str, email: str, password: str) -> User:
     user = create_user(session, handle=handle, email=email, password=password, role="admin",
                        status="active", email_verified=True, display_name=handle)
     audit.record(session, "user.bootstrap_admin", actor=user, object_type="user", object_id=user.id)
+    on_first_admin(session, user)
     return user
+
+
+def on_first_admin(session, user: Optional[User]) -> None:
+    """Called by every path that makes an account an administrator (``admin_cli create-admin`` and ``set-role``, the
+    setup wizard, ``bootstrap_admin``, an invitation with the admin role, the local owner): the work that waits for
+    an administrator on a fresh server-mode database runs now, in ``session``'s transaction, rather than at the next
+    boot. Today that is adopting the item files nobody owns (``items.adopt_orphans``, design/phase3-features.md
+    P3.2.4), which is idempotent, so a later administrator only adopts what has appeared since. Nothing for an
+    account that is not an active administrator."""
+    if user is None or user.role != "admin" or user.status != "active":
+        return
+    from .. import items
+    from . import policy
+    session.flush()
+    try:
+        # in a savepoint: whatever adoption meets (a file a producer is writing this moment, a row it cannot
+        # make) must not take the new administrator with it; the next start adopts what this did not
+        with session.begin_nested():
+            items.register_system(session)
+            items.adopt_orphans(session, items.first_admin(session) or user)
+    except Exception:
+        policy.invalidate()                      # the marker it may have cached was rolled back
+        log.warning("adopting the item files nobody owns failed; the next start tries again", exc_info=True)

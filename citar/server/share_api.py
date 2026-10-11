@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import aggregate, settings
+from .. import aggregate, items, settings
 from ..auth import access, accounts, audit
 from ..auth.deps import Principal, get_db, principal, require_user
 from ..db.models import OwnedItem, User
@@ -166,16 +166,14 @@ def public_report(report_id: str, request: Request, p: Principal = Depends(princ
     one thing: render the stored HTML. No game list, no metadata beyond what the report itself
     contains, and noindex so a shared link does not become a search result.
     """
-    from pathlib import Path
-
     row = _row(s, report_id)
     if row is None or row.deleted_at is not None:
         raise HTTPException(404, "No such report.")
     access.on(s, p.user, row, slug=_share_key(request)).require(access.VIEW)
 
     html = ""
-    if row.path:
-        candidate = Path(row.path)
+    candidate = items.file_path(row)       # the row keeps it relative to the state directory
+    if candidate is not None:
         # The stored path is written by the report builder, but it is still a path from the
         # database being turned into a file read — resolve it and refuse anything outside the
         # reports directory rather than trusting the row.

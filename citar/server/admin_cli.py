@@ -72,6 +72,7 @@ def cmd_create_admin(args) -> int:
             print(f"error: {exc}")
             return 1
         audit.record(s, "user.bootstrap_admin", actor=user, object_type="user", object_id=user.id)
+        accounts.on_first_admin(s, user)
         print(f"Created administrator '{user.handle}' <{user.email}>.")
         print(f"Sign in at {settings.get().url('/')}")
     return 0
@@ -113,6 +114,7 @@ def cmd_set_role(args) -> int:
         before, user.role = user.role, args.role
         audit.record(s, "user.role_changed", actor_label="admin_cli", object_type="user",
                      object_id=user.id, **{"from": before, "to": args.role})
+        accounts.on_first_admin(s, user)
         print(f"{user.handle}: {before} -> {args.role}")
     return 0
 

@@ -175,12 +175,13 @@ def _refusal(noun: str, permission: str, viewer_id: Optional[str]) -> str:
 # ---------------------------------------------------------------------------- the gate
 
 def on(session, viewer: Optional[User], obj, *, slug: Optional[str] = None,
-       seat_holder: bool = False) -> Access:
+       seat_holder: bool = False, acl: Optional[Set[str]] = None) -> Access:
     """Resolve what `viewer` may do with `obj`.
 
     `slug` is the secret from a shared link, when the caller presented one. `seat_holder` is set by
     game routes when the caller proved they hold a seat token, which grants play regardless of the
-    account.
+    account. `acl` is the viewer's allowlist permissions on `obj` when the caller already read them
+    for a whole listing (`acl_permissions_for`); otherwise they are read here.
     """
     if obj is None:
         return Access(set(), reason="No such item.")
@@ -218,7 +219,7 @@ def on(session, viewer: Optional[User], obj, *, slug: Optional[str] = None,
             # object a moderator is a member like any other.
             granted |= {VIEW, MODERATE}
 
-        granted |= _acl_permissions(session, object_type, object_id, viewer.id)
+        granted |= acl if acl is not None else _acl_permissions(session, object_type, object_id, viewer.id)
 
     if published or (visibility == SERVER and is_member(viewer)):
         granted.add(VIEW)
@@ -271,13 +272,25 @@ def _acl_permissions(session, object_type: str, object_id: str, user_id: str) ->
         AclEntry.user_id == user_id))
     granted: Set[str] = set()
     for row in rows:
-        if row.permission == MANAGE:
-            granted |= {VIEW, PLAY, MANAGE}
-        elif row.permission == PLAY:
-            granted |= {VIEW, PLAY}
-        elif row.permission == VIEW:
-            granted.add(VIEW)
+        granted |= _IMPLIES.get(row.permission, set())
     return granted
+
+
+#: What each allowlist permission grants: a higher one implies the lower ones.
+_IMPLIES = {MANAGE: {VIEW, PLAY, MANAGE}, PLAY: {VIEW, PLAY}, VIEW: {VIEW}}
+
+
+def acl_permissions_for(session, object_type: str, object_ids, user_id: str) -> dict:
+    """`_acl_permissions` for many objects of one type in one query, for a listing: {object id: permissions},
+    with an object that has no entry for the viewer left out."""
+    out: dict = {}
+    ids = list(object_ids)
+    if not ids:
+        return out
+    for row in session.scalars(select(AclEntry).where(
+            AclEntry.object_type == object_type, AclEntry.object_id.in_(ids), AclEntry.user_id == user_id)):
+        out.setdefault(row.object_id, set()).update(_IMPLIES.get(row.permission, set()))
+    return out
 
 
 def _server_access(session, viewer: Optional[User], server: Server, *, slug: Optional[str]) -> Access:
@@ -492,18 +505,22 @@ def shared_with(session, obj) -> list:
     return list(out.values())
 
 
-#: Where an object opens in the web client, by its object_type.
-_PAGES = {"game": "game", "report": "reports", "server_group": "servers"}
+#: Where an object opens in the web client, by its object_type (an owned item's kind).
+_PAGES = {"game": "game", "server_group": "servers", "report": "reports", "benchmark_suite": "benchmarks",
+          "benchmark_run": "benchmarks", "probe": "probes", "probe_run": "probes", "lab_experiment": "lab",
+          "scenario": "scenarios", "map": "editor", "bot_profile": "bots"}
 
 
 def share_url(obj, base: str) -> Optional[str]:
     """The link to hand out (P3.2.3): for `link` it carries the key; for `server` and `global` it is
-    the object's plain address, which members (or everyone) open without one. None below `link`."""
+    the object's plain address, which members (or everyone) open without one. None below `link`.
+    An owned item is addressed by its id on disk (its `ref`), as its page names it."""
     visibility = getattr(obj, "visibility", PRIVATE)
     if visibility not in (LINK, SERVER, GLOBAL):
         return None
     page = _PAGES.get(object_type_of(obj), "")
     if not page:
         return None
-    url = f"{base.rstrip('/')}/#/{page}/{obj.id}"
+    ident = obj.ref if isinstance(obj, OwnedItem) else obj.id
+    url = f"{base.rstrip('/')}/#/{page}/{ident}"
     return f"{url}?k={obj.slug}" if visibility == LINK else url

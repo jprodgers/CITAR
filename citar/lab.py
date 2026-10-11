@@ -1078,6 +1078,7 @@ def main(argv=None):
     pl.add_argument("out")
     s = sub.add_parser("submit")
     s.add_argument("specs", nargs="+")
+    s.add_argument("--owner", default=None, help="the account the experiments belong to (default: the first admin)")
     rep = sub.add_parser("report")
     rep.add_argument("names", nargs="+")
     sub.add_parser("status")
@@ -1095,6 +1096,9 @@ def main(argv=None):
             for spec in (data if isinstance(data, list) else [data]):
                 s = submit(spec)
                 print(f"queued {s['name']}: {s['games']} games, seats {[x['label'] + '=' + x['bot'] for x in s['seats']]}")
+                # an owned item (design/phase3-features.md P3.2.4), registered when the server's database is here
+                from . import items
+                print(f"  {items.register_offline('lab_experiment', s['name'], s['name'], QUEUE / (s['name'] + '.json'), args.owner)}")
     elif args.cmd == "report":
         cmd_report(args.names)
     elif args.cmd == "status":

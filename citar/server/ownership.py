@@ -139,6 +139,48 @@ def index_loaded(gs, kind: Optional[str] = None) -> Optional[str]:
         return None
 
 
+def register_quietly(gs, owner_id: Optional[str], *, kind: str, item: Optional[Tuple[str, str]] = None) -> None:
+    """Index a game a run of somebody's just made (a benchmark job's game; design/phase3-features.md P3.2.4): its
+    row has the run's owner and the visibility of the run's item ``item`` = (kind, ref), private when the run has
+    no row yet. In a database session of its own, from the runner's thread, before the game starts; never with the
+    game's lock held. Never raises (a game that could not be indexed is the server's, reached by administrators);
+    nothing in a process that has not opened its database."""
+    if not db.configured():
+        return
+    try:
+        from .. import items
+        with db.session() as s:
+            owner = s.get(User, owner_id) if owner_id else None
+            visibility = items.visibility_of(s, *item) if item else access.PRIVATE
+            register(s, gs, owner, kind=kind, visibility=visibility,
+                     data_sharing=None if owner is not None else "private")
+    except Exception:
+        log.warning("could not index game %s of %s", getattr(gs, "id", "?"), item, exc_info=True)
+
+
+def claim_quietly(gs, owner_id: Optional[str], *, item: Optional[Tuple[str, str]] = None) -> None:
+    """Give a game loaded again for a run (a benchmark job reloaded after a restart or opened to be watched, a probe
+    case opened to be looked at) its run's owner, when its row has none: ``index_loaded`` makes an ownerless row for
+    a save it does not know. The row takes the owner's pooling default and the visibility of the run's item ``item``
+    = (kind, ref); the session takes the owner. Never raises; nothing without a database or an owner."""
+    if not owner_id or not db.configured():
+        return
+    try:
+        from .. import items
+        with db.session() as s:
+            row = s.get(GameRow, gs.id)
+            owner = s.get(User, owner_id)
+            if row is None or owner is None or row.owner_id is not None:
+                return
+            row.owner_id = owner.id
+            row.data_sharing = owner.data_sharing or "pool"
+            if item:
+                row.visibility = items.visibility_of(s, *item)
+            gs.owner_id = owner.id
+    except Exception:
+        log.warning("could not give game %s its run's owner", getattr(gs, "id", "?"), exc_info=True)
+
+
 def close_orphans(live_ids) -> list:
     """Close every row left `setup` or `playing` with no live session (a failed restore, a deleted
     save folder, a crash between registration and the first save), so no row counts against a
@@ -251,16 +293,18 @@ def to_client(row: Optional[GameRow], perms: access.Access, *, base_url: str = "
 # ---------------------------------------------------------------------------- migration
 
 def adopt_orphans(session, owner: User) -> int:
-    """Give every unowned game to `owner`.
-
-    Runs once when a single-user installation gains accounts: everything that existed before there
-    were owners belongs to the person who has been running the server.
-    """
-    rows = list(session.scalars(select(GameRow).where(GameRow.owner_id.is_(None))))
+    """Give every unowned game row to `owner`, with `owner`'s pooling default (a row nobody owned pooled
+    nothing: `register_existing`), and the live session its owner. Part of the items' adoption
+    (``items.adopt_orphans``: at boot when an administrator exists, and when the first one is made),
+    which writes the audit row; returns how many rows were adopted."""
+    from .session import all_sessions
+    rows = list(session.scalars(select(GameRow).where(GameRow.owner_id.is_(None), GameRow.deleted_at.is_(None))))
+    live = {s.id: s for s in all_sessions()}
     for row in rows:
         row.owner_id = owner.id
-    if rows:
-        audit.record(session, "migration.games_adopted", actor=owner, count=len(rows))
+        row.data_sharing = owner.data_sharing or "pool"
+        if row.id in live:
+            live[row.id].owner_id = owner.id
     return len(rows)
 
 

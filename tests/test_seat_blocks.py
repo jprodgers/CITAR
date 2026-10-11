@@ -406,6 +406,9 @@ class Scenarios(SeatCase):
         self.assertEqual(r.status_code, 200, r.text)
         sid = r.json()["id"]
         self.scenarios.append(sid)
+        r = self.client.put(f"/api/items/scenario/{sid}/sharing", json={"visibility": "server"},
+                            headers=self.headers["zara"])
+        self.assertEqual(r.status_code, 200, r.text)
         # the member's save of it, as it stands, is refused too
         eid2 = self.post("member", "/api/scenario-editor", {"source": "scenario", "scenario": sid}).json()["editor_id"]
         self.assertEqual(self.post("member", f"/api/scenario-editor/{eid2}/save", {"name": "copy"}).status_code, 400)

@@ -70,7 +70,9 @@ function machineCard(m, refresh) {
         : el("span", { class: "pill live" }, "running")) : it.position === 1 ? "next" : it.position),
       el("td", {}, it.label, it.kind === "benchmark" ? el("div", { class: "muted small" }, it.run) : null),
       el("td", {}, KIND_LABEL[it.kind] || it.kind),
-      el("td", {}, first ? priorityControl(it.kind, it.group, it.priority || 0, refresh, top) : el("span", { class: "muted" }, it.priority)),
+      // controls only on work the caller manages; others' work is "someone's <kind>" (design P3.2.4)
+      el("td", {}, first && it.can_manage !== false ? priorityControl(it.kind, it.group, it.priority || 0, refresh, top)
+        : el("span", { class: "muted" }, it.priority)),
       el("td", { class: "muted small" }, it.now ? (it.state && it.state !== "running" ? `${it.state}; keeps its place on the machine` : "using the machine")
         : outranks ? "higher priority: starts once the running work finishes its current turn"
           : (it.waiting || "").replace(/^waiting:? ?(for )?/, ""))));
@@ -100,9 +102,10 @@ function cpuCard(cpu, refresh) {
     el("th", {}, "Priority"), el("th", {}, "State")));
   cpu.experiments.forEach((e, n) => table.append(el("tr", { class: n === 0 ? "q-next" : "" },
     el("td", {}, n === 0 ? "next" : n + 1),
-    el("td", {}, e.name, e.note ? el("div", { class: "muted small" }, e.note) : null),
+    el("td", {}, e.name || e.label, e.note ? el("div", { class: "muted small" }, e.note) : null),
     el("td", {}, `${e.done}/${e.games}${e.running ? ` (+${e.running} playing)` : ""}`),
-    el("td", {}, priorityControl("lab", e.name, e.priority || 0, refresh)),
+    el("td", {}, e.can_manage !== false && e.name ? priorityControl("lab", e.name, e.priority || 0, refresh)
+      : el("span", { class: "muted" }, e.priority)),
     el("td", { class: "muted small" }, e.state))));
   card.append(table);
   return card;

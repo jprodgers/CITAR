@@ -300,10 +300,17 @@ def save(data: dict, user: Optional[str] = None, note: str = "") -> dict:
     return rec
 
 
-def fork(pid: str, name: Optional[str] = None, user: Optional[str] = None) -> dict:
-    """A new saved profile copying another (built-in or saved)."""
+def fork_name(pid: str, name: Optional[str] = None) -> str:
+    """The name a copy of ``pid`` gets: ``name``, else the source's own with "(copy)"."""
+    return name or f"{get(pid)['name']} (copy)"
+
+
+def fork(pid: str, name: Optional[str] = None, user: Optional[str] = None, *, as_id: Optional[str] = None) -> dict:
+    """A new saved profile copying another (built-in or saved). ``as_id`` is the id it is saved under when the
+    caller chose it first (the Bots page's route registers the copy's row before writing it); otherwise one is made
+    from its name."""
     src = get(pid)
-    return save({"name": name or f"{src['name']} (copy)", "description": src.get("description", ""),
+    return save({"id": as_id, "name": fork_name(pid, name), "description": src.get("description", ""),
                  "tags": [t for t in src.get("tags", []) if t not in ("yardstick", "snapshot", "control")],
                  "engine": src["engine"], "aggression": src.get("aggression"), "params": src.get("params") or {},
                  "parent": pid}, user=user, note=f"forked from {src['name']}")

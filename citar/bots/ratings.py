@@ -450,13 +450,34 @@ def _plays(p: dict) -> bool:
         return False
 
 
-def best_profile(board: Optional[list] = None) -> str:
+def everyones_profiles() -> Optional[set]:
+    """The profiles every member of the server may see, which are the only ones "Best bot" may stand for: the
+    shipped ones and those shared `server` or `global` (design/phase3-features.md P3.2.4). Otherwise a member whose
+    seat asks for "best" would play, and have recorded in their game, a profile that is someone else's private one,
+    and the Bots page would name one the server does not play. None (every profile) in a process that has not opened
+    the server's database: a command-line tool's profiles are its operator's."""
+    from .. import db
+    builtin = {b["id"] for b in profiles.BUILTIN}
+    if not db.configured():
+        return None
+    try:
+        from .. import items
+        with db.session() as s:
+            return builtin | items.everyones_refs(s, "bot_profile")
+    except Exception:           # never a reason a game cannot be made: the shipped profiles are everybody's
+        return builtin
+
+
+def best_profile(board: Optional[list] = None, *, among: Optional[set] = None) -> str:
     """The id "Best bot" stands for: the highest-rated profile whose rating describes its current settings (its
     current revision, or the same settings on an earlier build of the latest version), else the highest-rated at
     all, else Standard. Never the idle bot, an archived profile or one that cannot play (a saved profile on a frozen
-    snapshot of 0.1.5)."""
+    snapshot of 0.1.5), and only one of ``among``: by default ``everyones_profiles()``, so it is the same profile
+    whoever asks, a seat or the Bots page."""
     try:
+        allowed = among if among is not None else everyones_profiles()
         ranked = [p for p in ranked_profiles(board) if p["engine"] != "idle" and not p.get("archived")
+                  and (allowed is None or p["id"] in allowed)
                   and _plays(p) and p["rating"] and p["rating"].get("rated")]
     except Exception:           # ratings must never stop a game from being created
         return profiles.DEFAULT_PROFILE

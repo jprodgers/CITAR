@@ -39,6 +39,7 @@ __all__ = [
     # maps and scenarios on disk
     "list_maps", "load_map", "save_map", "delete_map", "validate_map", "map_summary", "blank_map", "generate_map",
     "scenario_ops_help", "list_scenarios", "load_scenario", "scenario_summary", "delete_scenario",
+    "map_ref", "map_file", "map_dir", "scenario_ref", "scenario_file", "scenario_dir",
     # bots and headless games
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",

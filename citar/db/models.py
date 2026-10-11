@@ -111,6 +111,14 @@ CAPABILITIES = (
     "publish_global",       # may make a game, a report or another item readable by the whole internet
     "create_games",         # may start games at all
     "invite",               # may mint invite codes, up to invite_quota
+    # Owned items (design/phase3-features.md P3.2.4): the job types a member may start.
+    "run_benchmarks",       # may save benchmark suites and start runs
+    "run_probes",           # may save probes and run them
+    "run_lab",              # may queue lab experiments, which use the server's own CPU
+    "edit_bots",            # may create, fork and edit bot profiles
+    # Task classes (P3.3.7): the hooks future restrictions read.
+    "full_llm",             # may seat a model that plays every turn
+    "partial_llm",          # may use pooled prompts (a hybrid seat's diplomacy, a report's narrative)
 )
 
 

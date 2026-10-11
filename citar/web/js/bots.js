@@ -11,7 +11,10 @@ const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"
 const charted = new Map();          // entry id -> colour
 let rankOpts = { difficulty: "Prince", factorial: false, minSeats: 1 };
 
-const isAdmin = () => { const u = auth.user(); return !!u && u.role === "admin"; };
+// Profiles and lab experiments are owned items: making one takes a capability (edit_bots, run_lab: an
+// administrator's by default), changing one managing it (the server says so per profile: can_manage).
+const canEditBots = () => auth.can("edit_bots");
+const canRunLab = () => auth.can("run_lab");
 const field = (label, input, hint) => el("div", { class: "field" }, el("label", {}, label), input,
   hint ? el("span", { class: "muted small" }, hint) : null);
 
@@ -30,7 +33,7 @@ export async function renderBots(root, rules, sub) {
   const tab = new URLSearchParams(location.hash.split("?")[1] || "").get("tab") || "profiles";
   const intro = el("div", { class: "card" },
     el("div", { class: "row" }, el("h2", { style: { margin: 0 } }, "Bots"), el("span", { class: "grow" }),
-      isAdmin() ? el("button", { onclick: () => newProfile() }, "New profile") : null,
+      canEditBots() ? el("button", { onclick: () => newProfile() }, "New profile") : null,
       el("button", { class: "primary", onclick: () => abDialog(rules) }, "A/B test…")),
     el("p", { class: "muted small" },
       "A profile is the scripted bot with a chosen code version, aggression and parameter overrides — every number " +
@@ -87,7 +90,7 @@ async function newProfile() {
 }
 
 async function forkProfile(p) {
-  if (!isAdmin()) { toast("Only administrators can create profiles.", "error"); return; }
+  if (!canEditBots()) { toast("Your account cannot create bot profiles; an administrator can allow it.", "error"); return; }
   try {
     const f = await api.forkBotProfile(p.id, `${p.name} (copy)`);
     toast(`Forked ${p.name}`);
@@ -293,7 +296,7 @@ async function renderProfile(page, rules, pid) {
   let schema, refused = null;
   try { schema = await api.botSchema(saved.engine); }
   catch (e) { refused = e.message; schema = { engine: saved.engine, groups: [] }; }
-  const owner = !saved.builtin && isAdmin();
+  const owner = !saved.builtin && !!saved.can_manage;
   const editable = owner && !refused;
   const draft = { name: saved.name, description: saved.description || "", tags: [...(saved.tags || [])], engine: saved.engine,
     aggression: saved.aggression, params: JSON.parse(JSON.stringify(saved.params || {})), archived: !!saved.archived, parent: saved.parent };
@@ -572,7 +575,7 @@ export function profileSelect(obj, key = "profile", onChange = null, { best = fa
 // A/B experiment form
 // ---------------------------------------------------------------------------------------------------------------------
 export async function abDialog(rules, preselect = []) {
-  if (!isAdmin()) { toast("Only administrators can queue lab experiments.", "error"); return; }
+  if (!canRunLab()) { toast("Your account cannot queue lab experiments; an administrator can allow it.", "error"); return; }
   const { profiles } = await api.botProfiles();      // ranking order
   const chosen = new Set(preselect.length ? preselect : []);
   if (chosen.size === 1 && !chosen.has("standard")) chosen.add("standard");

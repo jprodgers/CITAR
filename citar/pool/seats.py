@@ -15,22 +15,24 @@ from typing import Optional
 # ---------------------------------------------------------------------------- who is using a machine
 # Game sessions are found through every SessionManager; work that runs games outside one (a probe
 # case plays in an unregistered session) holds a claim instead, for as long as it runs.
-_claims: dict[str, set] = {}
+#: server id -> {holder label: (queue kind, id) of the work, or None}
+_claims: dict[str, dict] = {}
 _claims_lock = threading.Lock()
 
 
-def claim(server_id: Optional[str], holder: str) -> None:
-    """Mark a machine as in use by something that is not a registered game (a probe run, say)."""
+def claim(server_id: Optional[str], holder: str, ref: Optional[tuple] = None) -> None:
+    """Mark a machine as in use by something that is not a registered game (a probe run, say). ``ref`` is the work's
+    (queue kind, id), so the Queue page can name it only to those who may see it (``occupants``)."""
     if server_id:
         with _claims_lock:
-            _claims.setdefault(server_id, set()).add(holder)
+            _claims.setdefault(server_id, {})[holder] = ref
 
 
 def release(server_id: Optional[str], holder: str) -> None:
     """Undo :func:`claim`."""
     if server_id:
         with _claims_lock:
-            _claims.get(server_id, set()).discard(holder)
+            _claims.get(server_id, {}).pop(holder, None)
 
 
 def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list[str]:
@@ -43,6 +45,13 @@ def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list
     This is what lets queued benchmarks and probes wait for a machine instead of fighting a running
     game for its single slot.
     """
+    return [occ["label"] for occ in occupants(server_id, exclude)]
+
+
+def occupants(server_id: Optional[str], exclude: frozenset = frozenset()) -> list[dict]:
+    """``occupied`` with what each holder is: {"label", "kind" (the queue's kind: game, benchmark, probe, report;
+    None when a claim did not say), "id" (a game's id, a run's)}. A benchmark job's game is a game of kind
+    benchmark, named by its run."""
     if not server_id:
         return []
     from ..server.session import all_sessions
@@ -57,9 +66,16 @@ def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list
         # the bots play on to the end
         if any(seat.type == "llm" and (seat.llm or {}).get("server_id") == server_id and _alive(s, seat.player)
                for seat in s.seats):
-            out.append(f"game “{s.name}”")
+            bench = getattr(s, "benchmark", None) or {}
+            if bench.get("run_id"):
+                out.append({"label": f"game “{s.name}”", "kind": "benchmark", "id": bench["run_id"]})
+            else:
+                out.append({"label": f"game “{s.name}”", "kind": "game", "id": s.id})
     with _claims_lock:
-        out.extend(sorted(_claims.get(server_id, ())))
+        held = dict(_claims.get(server_id, {}))
+    for holder in sorted(held):
+        kind, ident = held[holder] or (None, None)
+        out.append({"label": holder, "kind": kind, "id": ident})
     return out
 
 
@@ -197,13 +213,18 @@ def describe(llm: dict, pooled: dict) -> dict:
             "missing_server": False, "restricted_until": clock_text(pooled, end), "pooled": True}
 
 
-def authorize(session, user, seats: list[dict]) -> None:
+def authorize(session, user, seats: list[dict], purpose: str = "game", *, queued: bool = False) -> None:
     """Refuse a game whose LLM seats use pooled machines the creator may not use for games right now.
 
     Raises ValueError with the admission system's own explanation (no grant, outside a window, budget
     spent, machine offline...), except to somebody who may not even see the machine: they are told only
     that they may not use it, since the explanation names the machine and its group. The machines of
-    ``config/servers.json`` are not rows, and ``servers.member_llm`` decides about them.
+    ``config/servers.json`` are not rows, and ``servers.member_llm`` decides about them. ``purpose`` is the
+    work the seats do (``admission.PURPOSES``): a benchmark run's machines are admitted for `benchmark`, a
+    probe run's subject for `probe` (design/phase3-features.md P3.2.4: "create" is the capability plus
+    admission where the work runs on a machine). ``queued`` is for work that waits its turn (a run): who may is
+    decided now, when is the runner's, so a refusal that only says "not yet" (outside a window, a spent period,
+    the helper offline, every slot busy) lets it through.
     """
     from ..auth import access
     from ..db.models import Server
@@ -216,10 +237,20 @@ def authorize(session, user, seats: list[dict]) -> None:
         server = session.get(Server, llm["server_id"])
         if server is None:
             continue
-        decision = admission.check(session, user, server, "game", online=hub().is_online(server.id),
+        decision = admission.check(session, user, server, purpose, online=hub().is_online(server.id),
                                    in_flight=hub().in_flight(server.id))
         # "busy right now" is fine for a game: its turns take their place in the machine's queue
+        if queued and (decision.temporary or decision.code == "offline"):
+            continue
         if not decision.allowed and decision.code != "concurrency":
             if access.VIEW not in access.on(session, user, server):
                 raise ValueError("You may not use that machine. Pick one of the machines you may use.")
             raise ValueError(f"{server.name}: {decision.reason}")
+
+
+def admit(session, user, server_ids, purpose: str) -> None:
+    """``authorize`` for work that names machines rather than seats and waits its turn for them (a benchmark run's
+    machines, a probe run's subject, a report's narrative): may ``user`` use each pooled one for ``purpose`` at all.
+    Raises ValueError as ``authorize`` does."""
+    authorize(session, user, [{"type": "llm", "llm": {"server_id": sid}} for sid in server_ids if sid], purpose,
+              queued=True)
