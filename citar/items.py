@@ -28,7 +28,6 @@ from __future__ import annotations
 import gzip
 import json
 import logging
-import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional, Tuple
@@ -132,16 +131,16 @@ def register(session, kind: str, ref: str, owner, name: str = "", *, path=None,
         row.updated_at = _now()
         session.flush()
         return row
-    if row is None:
-        row = OwnedItem(kind=kind, ref=str(ref))
-        session.add(row)
-    else:
+    if row is not None:
+        # a deleted item's row goes, with its allowlist: the new item gets an id, a link and a history of its own
+        # (an old unpublish must not show on it), while the audit log keeps the old one's under its id
         for entry in session.scalars(select(AclEntry).where(AclEntry.object_type == kind,
                                                             AclEntry.object_id == row.id)):
             session.delete(entry)
-        row.slug = secrets.token_urlsafe(16)
-        row.deleted_at = None
-        row.created_at = _now()
+        session.delete(row)
+        session.flush()
+    row = OwnedItem(kind=kind, ref=str(ref))
+    session.add(row)
     row.owner_id = _owner_id(owner)
     row.name = str(name or ref)[:160]
     row.visibility = visibility

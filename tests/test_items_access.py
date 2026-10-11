@@ -832,11 +832,14 @@ class SystemItemsAndAdoption(ItemCase):
     def test_a_deleted_items_id_is_a_new_item(self):
         ref = self.make("map", "allowlist", share_with="reader")
         with db.session() as s:
-            old_slug = items.get(s, "map", ref).slug
+            old = items.get(s, "map", ref)
+            old_id, old_slug = old.id, old.slug
+            access.unpublish(s, old, actor=s.get(User, self.ids["admin"]), reason="old")
             items.delete(s, "map", ref)
             row = items.register(s, "map", ref, self.ids["stranger"], "again")
             self.assertEqual((row.owner_id, row.visibility), (self.ids["stranger"], "private"))
-            self.assertNotEqual(row.slug, old_slug)
+            self.assertNotEqual((row.id, row.slug), (old_id, old_slug))
+            self.assertIsNone(access.last_unpublished(s, row), "the old item's unpublish is not the new one's")
             self.assertEqual(list(s.scalars(select(AclEntry).where(AclEntry.object_id == row.id))), [])
 
 
