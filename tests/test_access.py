@@ -550,6 +550,59 @@ class GameRoutes(unittest.TestCase):
                     self.manager.load(sess_dir() / gid / "autosave.citar")
                     self._set_visibility("private")
 
+    def test_loading_a_save_by_stranger_acl_viewer_owner_admin_and_anonymous(self):
+        """``/api/saves/load`` (3-01 made it give the session its owner): another member and an anonymous caller get
+        404, an ACL viewer 403, the owner and an administrator 200; the game stays its owner's whoever loads it."""
+        gid = self.game.id
+        self.game.save("kept")
+        owner_id = self.row.owner_id
+        for who, want in ((None, (401, 404)), ("other", (404,)), ("reader", (403,)), ("owner", (200,)),
+                          ("zara", (200,))):
+            with self.subTest(load=who or "anonymous"):
+                r = self.client.post("/api/saves/load", json={"path": f"{gid}/kept.citar"},
+                                     headers=self.headers.get(who, {}))
+                self.assertIn(r.status_code, want, r.text)
+                s = self.manager.get(gid)
+                self.assertEqual(s.owner_id if r.status_code == 200 else owner_id, owner_id)
+                with db.session() as sdb:
+                    row = sdb.get(GameRow, gid)
+                    self.assertEqual((row.owner_id, row.status), (owner_id, "playing"))
+
+    def test_launching_a_scenario_by_anonymous_member_owner_and_admin(self):
+        """``/api/scenarios/{sid}/launch`` (3-01 made it a lobby game): anonymous 401; a member 200, owning the game it
+        made, and 429 over their game limit; an administrator 200. Scenarios have no owner yet (package 3-02)."""
+        from citar import engine_api
+        r = self.client.post("/api/scenario-editor", json={"source": "generate", "players": [{"type": "bot"}, {"type": "bot"}],
+                                                            "config": {"map_size": "duel", "seed": 3, "barbarians": "off"}},
+                             headers=self.headers["zara"])
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(f"/api/scenario-editor/{r.json()['editor_id']}/save", json={"name": "launch table"},
+                             headers=self.headers["zara"])
+        self.assertEqual(r.status_code, 200, r.text)
+        sid = r.json()["id"]
+        made = []
+        try:
+            self.assertEqual(self.client.post(f"/api/scenarios/{sid}/launch", json={}).status_code, 401)
+            with db.session() as s:
+                accounts.by_handle(s, "other").max_concurrent_games = 1
+            for who, want in (("other", 200), ("other", 429), ("owner", 200), ("zara", 200)):
+                with self.subTest(launch=who):
+                    r = self.client.post(f"/api/scenarios/{sid}/launch", json={"name": f"{who}'s"},
+                                         headers=self.headers[who])
+                    self.assertEqual(r.status_code, want, r.text)
+                    if r.status_code == 200:
+                        gid = r.json()["id"]
+                        made.append(gid)
+                        with db.session() as s:
+                            row = s.get(GameRow, gid)
+                            user = accounts.by_handle(s, who)
+                            self.assertEqual((row.owner_id, row.kind, row.status), (user.id, "game", "playing"))
+                        self.assertEqual(self.manager.get(gid).owner_id, user.id)
+        finally:
+            for gid in made:
+                self.manager.delete(gid)
+            engine_api.delete_scenario(sid)
+
     def test_creating_and_launching_need_an_account(self):
         for path, body in (("/api/games", {"seats": [{"type": "bot"}]}),
                            ("/api/scenarios/none/launch", {}),
