@@ -782,7 +782,7 @@ As `ops/phase1-common.md`: a worktree per package (`.claude/worktrees/p-3-xx`, b
 9. **The automatic archive of an old database.** Rename only, after a WAL checkpoint, logged with the new path; a failed rename refuses the boot; Postgres refuses; the owner's port-8799 instance gets a fresh database on its first Phase 3 start (its saves on disk are untouched and re-indexed on load).
 10. **Members turning the server against its own network or keys.** Closed by P3.2.8 and P3.2.9 in the first and fifth packages, each with tests that patch every outbound path and record nothing.
 11. **Self-reported work.** Helpers' generation time is bounded by the server's own observation and over-reporting is flagged; plan C2's attribution holds without trusting the helper's clock.
-12. **Nineteen packages in sequence.** Each sized like 2-11 or smaller (two, 3-04 and 3-10, at the upper bound, name where to split if they run long), with gates a reviewer can rerun locally, and wall-clock recorded.
+12. **Nineteen packages in sequence.** Each sized like 2-11 or smaller (three, 3-04, 3-10 and 3-14, at the upper bound, name where to split if they run long), with gates a reviewer can rerun locally, and wall-clock recorded.
 
 ## P3.12 Work breakdown at a glance
 
@@ -1034,7 +1034,7 @@ Each package is sized for one implementation session (2-11's size or smaller: 2-
 ### 3-14: Hybrid seats: the agent, the diplomat, the veto, the seat sites
 
 - **Depends on:** 3-13
-- **Estimated size:** ~1,300 Python + ~120 Rust + ~700 tests
+- **Estimated size:** ~1,300 Python + ~120 Rust + ~700 tests (at the upper bound: if it runs long, the seat sites of P3.6.7 and the diplomat metrics split off as a package of their own after it)
 - **Scope:** P3.6.2-P3.6.7 and P3.6.11: `Seat.hybrid`, `SEAT_TYPES`, `normalize_hybrid` and the presets, the seat's `handicap` key; the engine's controller, handicap and automatic decisions at creation, seat update and scenario launch; `HybridAgent` (the turn, the triggers, the diplomat phase holding the seat's responder, chats through the responders, the fallback); `DIPLOMAT_SYSTEM` (with both timeouts) and the diplomat's message; the tools per category, the session's tool filter and the veto; Rust: `Game.bot_evaluate` in citar-py, `EngineGame.bot_evaluate` in the facade, `normalize_seats` keeping `hybrid`; `Seat.model_seat`, `task_class`, `has_bot` and the Python half of P3.6.7's table; the diplomat metrics; the dry-run diplomat (proposes a trade to a met civilization, votes when a vote is open, annexes a captured city, answers chats as configured). Docs: `AI_PLAYERS.md` (hybrid seats), `ARCHITECTURE.md`, `docs/API.md` (the seat).
 - **Gates:**
   1. For each of the ten categories, a seeded 4-seat small game with one hybrid seat whose model owns only that category (the dry-run diplomat acting in it where it can), 60 rounds: the bot takes no action of that category (from the drives' action counts and the events: no trade offer, no war declared, no spy moved, no city-state gift, no engine UN vote, no automatic annexation, as the category goes) and the model's actions in it happen. With every category the bot's (a test-only configuration) and no phase triggered, the hybrid seat's events, turn by turn for 60 rounds, equal a bot seat's with the same handicap in the same game.
