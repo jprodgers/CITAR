@@ -112,6 +112,26 @@ class Baseline(BootCase):
         self.assertEqual(tuple(module.HARDWARE_CLASSES), models.HARDWARE_CLASS_SEEDS)
         self.assertEqual((module.revision, module.down_revision), (HEAD, None))
 
+    def test_the_baseline_renders_for_postgres(self):
+        """No Postgres here: alembic's offline mode writes the revision's SQL for the dialect without connecting,
+        which is what an operator reviews before running it, and what shows every type has a Postgres form."""
+        import io
+        from alembic import command
+        from alembic.config import Config
+        from citar import paths
+        out = io.StringIO()
+        cfg = Config(output_buffer=out)
+        cfg.set_main_option("script_location", str(paths.migrations_dir()))
+        cfg.set_main_option("sqlalchemy.url", "postgresql://citar@localhost/citar")
+        cfg.attributes["configure_logger"] = False
+        command.upgrade(cfg, "head", sql=True)
+        sql = out.getvalue()
+        for table in models.Base.metadata.tables:
+            self.assertIn(f"CREATE TABLE {table} (", sql)
+        self.assertEqual(sql.count("INSERT INTO hardware_classes"), 3)
+        self.assertIn("JSON", sql)
+        self.assertIn("TIMESTAMP WITH TIME ZONE", sql)
+
     def test_one_revision_only(self):
         names = sorted(p.name for p in (ROOT / "citar" / "migrations" / "versions").glob("*.py"))
         self.assertEqual(names, ["0016a_baseline.py"])

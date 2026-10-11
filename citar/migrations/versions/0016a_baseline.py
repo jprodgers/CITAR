@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -409,6 +409,14 @@ def upgrade() -> None:
     op.create_index('ix_budget_entries_budget_period', 'budget_entries', ['budget_id', 'period_key'], unique=False)
     op.create_index(op.f('ix_budget_entries_period_key'), 'budget_entries', ['period_key'], unique=False)
 
+    if context.is_offline_mode():
+        # SQL to review (`alembic upgrade head --sql`): a JSON value has no literal form, so the rows are written
+        # out as SQL both SQLite and Postgres take
+        for c in HARDWARE_CLASSES:
+            op.execute(f"INSERT INTO hardware_classes (id, kind, name, rate, match, priority, is_default, updated_at, "
+                       f"updated_by) VALUES ('{c['id']}', '{c['kind']}', '{c['name']}', {c['rate']!r}, '{{}}', 0, "
+                       f"true, CURRENT_TIMESTAMP, NULL)")
+        return
     classes = sa.table(
         "hardware_classes", sa.column("id", sa.String), sa.column("kind", sa.String), sa.column("name", sa.String),
         sa.column("rate", sa.Float), sa.column("match", sa.JSON), sa.column("priority", sa.Integer),
