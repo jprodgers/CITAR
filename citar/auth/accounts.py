@@ -489,6 +489,14 @@ def on_first_admin(session, user: Optional[User]) -> None:
     if user is None or user.role != "admin" or user.status != "active":
         return
     from .. import items
+    from . import policy
     session.flush()
-    items.register_system(session)
-    items.adopt_orphans(session, items.first_admin(session) or user)
+    try:
+        # in a savepoint: whatever adoption meets (a file a producer is writing this moment, a row it cannot
+        # make) must not take the new administrator with it; the next start adopts what this did not
+        with session.begin_nested():
+            items.register_system(session)
+            items.adopt_orphans(session, items.first_admin(session) or user)
+    except Exception:
+        policy.invalidate()                      # the marker it may have cached was rolled back
+        log.warning("adopting the item files nobody owns failed; the next start tries again", exc_info=True)

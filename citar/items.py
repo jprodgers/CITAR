@@ -110,14 +110,15 @@ def get(session, kind: str, ref: str, *, deleted: bool = False) -> Optional[Owne
 
 def register(session, kind: str, ref: str, owner, name: str = "", *, path=None,
              visibility: str = access.PRIVATE, meta: Optional[dict] = None, collection: bool = False,
-             actor: Optional[User] = None) -> OwnedItem:
+             actor: Optional[User] = None, audit_row: bool = True) -> OwnedItem:
     """The row for an item just written to disk.
 
     A new item gets a row owned by ``owner`` (an account, an id, or None for a system item) at ``visibility``. An
     item that has a live row keeps its owner, visibility, sharing and slug, and only takes the new name, path and
     meta: saving changes the item, never who owns it (the route checked MANAGE). An id whose item was deleted is a
     new item: nothing of the old one carries over, its allowlist and its share link included. ``actor`` is recorded
-    in the audit row of a new item (the owner when not given)."""
+    in the audit row of a new item (the owner when not given). Adoption and the shipped items pass ``audit_row``
+    False: nobody made those items, and adoption writes one row for everything it adopted."""
     check_kind(kind)
     access.check_visibility(visibility)
     row = get(session, kind, ref, deleted=True)
@@ -149,10 +150,11 @@ def register(session, kind: str, ref: str, owner, name: str = "", *, path=None,
     row.collection = bool(collection)
     row.updated_at = _now()
     session.flush()
-    who = actor if actor is not None else (owner if isinstance(owner, User)
-                                           else session.get(User, row.owner_id) if row.owner_id else None)
-    audit.record(session, f"{kind}.created", actor=who, object_type=kind, object_id=row.id, ref=row.ref,
-                 owner=row.owner_id, visibility=visibility)
+    if audit_row:
+        who = actor if actor is not None else (owner if isinstance(owner, User)
+                                               else session.get(User, row.owner_id) if row.owner_id else None)
+        audit.record(session, f"{kind}.created", actor=who, object_type=kind, object_id=row.id, ref=row.ref,
+                     owner=row.owner_id, visibility=visibility)
     return row
 
 
@@ -174,18 +176,6 @@ def delete(session, kind: str, ref: str, *, actor: Optional[User] = None) -> Opt
     row.deleted_at = _now()
     audit.record(session, f"{kind}.deleted", actor=actor, object_type=kind, object_id=row.id, ref=row.ref)
     return row
-
-
-def delete_quietly(kind: str, ref: str) -> None:
-    """``delete`` in a database session of its own, for producers that remove items outside a request (a run removed
-    by the scheduler). Never raises; nothing in a process that has not opened its database."""
-    if not db.configured():
-        return
-    try:
-        with db.session() as s:
-            delete(s, kind, ref)
-    except Exception:
-        log.warning("could not mark %s %s deleted", kind, ref, exc_info=True)
 
 
 # ---------------------------------------------------------------------------- the gate
@@ -268,20 +258,36 @@ def visible(session, kind: str, viewer: Optional[User], *, limit: int = 500) -> 
                                 .order_by(OwnedItem.created_at.desc()).limit(limit)))
 
 
+def everyones_refs(session, kind: str) -> set:
+    """The ids on disk of the live items of ``kind`` every member may see: `global` and `server` ones (the shipped
+    items among them): what a choice the server makes for whoever asks picks from ("Best bot")."""
+    return set(session.scalars(select(OwnedItem.ref).where(
+        OwnedItem.kind == kind, OwnedItem.deleted_at.is_(None),
+        OwnedItem.visibility.in_((access.GLOBAL, access.SERVER)))))
+
+
+#: How many ids go in one ``IN (...)`` (SQLite's older builds allow 999 parameters in a statement).
+_CHUNK = 500
+
+
 def permissions_by_ref(session, kind: str, viewer: Optional[User], refs) -> dict:
-    """``Access.client()`` for each of ``refs`` that has a row, for a listing to say which controls to show."""
-    out = {}
-    for ref in refs:
-        row = get(session, kind, ref)
-        if row is not None:
-            out[ref] = access.on(session, viewer, row).client()
-    return out
-
-
-def owner_of(session, kind: str, ref: str) -> Optional[str]:
-    """The id of an item's owner (None for none, or no row)."""
-    row = get(session, kind, ref)
-    return row.owner_id if row is not None else None
+    """``Access.client()`` for each of ``refs`` that has a live row, for a listing to say which controls to show. Two
+    queries per few hundred items rather than two per item: the pages that list items poll every few seconds."""
+    refs = list(dict.fromkeys(str(r) for r in refs))
+    rows: list = []
+    for i in range(0, len(refs), _CHUNK):
+        rows += session.scalars(select(OwnedItem).where(OwnedItem.kind == kind, OwnedItem.deleted_at.is_(None),
+                                                        OwnedItem.ref.in_(refs[i:i + _CHUNK])))
+    acl: dict = {}
+    if viewer is not None:
+        ids = [row.id for row in rows]
+        for i in range(0, len(ids), _CHUNK):
+            for object_id, granted in access.acl_permissions_for(session, kind, ids[i:i + _CHUNK],
+                                                                 viewer.id).items():
+                acl[object_id] = granted
+    return {row.ref: access.on(session, viewer, row,
+                               acl=acl.get(row.id, set()) if viewer is not None else None).client()
+            for row in rows}
 
 
 def visibility_of(session, kind: str, ref: str) -> str:
@@ -324,7 +330,7 @@ def register_system(session) -> int:
     for kind, ref, name in system_items():
         row = get(session, kind, ref, deleted=True)
         if row is None or row.deleted_at is not None:
-            register(session, kind, ref, None, name, visibility=access.GLOBAL)
+            register(session, kind, ref, None, name, visibility=access.GLOBAL, audit_row=False)
             made += 1
         elif row.owner_id is not None:
             log.warning("the shipped %s %s had an owner; it is the server's", kind, ref)
@@ -334,65 +340,79 @@ def register_system(session) -> int:
 
 # ---------------------------------------------------------------------------- adoption
 
-def _read_json(p: Path) -> dict:
-    """A JSON file's object, or {} when it does not read as one."""
-    try:
-        d = json.loads(p.read_text(encoding="utf-8"))
-        return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
+def _json_object(p: Path) -> dict:
+    """A JSON file's object ({} for any other JSON value); raises when the file does not read as JSON."""
+    d = json.loads(p.read_text(encoding="utf-8"))
+    return d if isinstance(d, dict) else {}
 
 
-def _files(kind: str) -> Iterator[Tuple[str, str, Path, Optional[str]]]:
-    """Every item of ``kind`` on disk, as (ref, name, path, the owner id its file records or None)."""
+def _on_disk(kind: str) -> Iterator[Tuple[str, Path]]:
+    """Every item of ``kind`` on disk, as (ref, the path its row keeps), from the folders' listings alone: adoption
+    reads a file only when its id has no row, so a start costs a listing per folder, not a parse per item."""
     if kind in ("benchmark_suite", "benchmark_run"):
         folder = paths.bench_path("suites" if kind == "benchmark_suite" else "runs")
         for p in sorted(folder.glob("*.json")) if folder.exists() else ():
-            d = _read_json(p)
-            yield p.stem, d.get("name") or p.stem, p, d.get("owner_id")
+            yield p.stem, p
     elif kind == "probe":
         from . import probes
         for p in sorted(probes.BASE.glob("*.json")) if probes.BASE.exists() else ():
-            d = _read_json(p)
-            yield p.stem, d.get("name") or p.stem, p, d.get("owner_id")
+            yield p.stem, p
     elif kind == "probe_run":
         from . import probes
         for p in sorted(probes.RUNS.glob("*/run.json")) if probes.RUNS.exists() else ():
-            d = _read_json(p)
-            yield p.parent.name, d.get("name") or p.parent.name, p.parent, d.get("owner_id")
+            yield p.parent.name, p.parent
     elif kind == "lab_experiment":
         from . import lab
         for folder in (lab.QUEUE, lab.DONE):
             for p in sorted(folder.glob("*.json")) if folder.exists() else ():
-                d = _read_json(p)
-                yield p.stem, d.get("name") or p.stem, p, d.get("owner_id")
+                yield p.stem, p
     elif kind == "scenario":
         from . import engine_api
         folder = engine_api.scenario_dir()
         for p in sorted(folder.glob("*.citarscn")) if folder.exists() else ():
-            try:
-                with gzip.open(p, "rt", encoding="utf-8") as f:
-                    d = json.load(f)
-            except (OSError, ValueError):
-                d = {}
-            yield p.stem, (d.get("name") if isinstance(d, dict) else None) or p.stem, p, None
+            yield p.stem, p
     elif kind == "map":
         from . import engine_api
         folder = engine_api.map_dir()
         for p in sorted(folder.glob("*.json")) if folder.exists() else ():
-            yield p.stem, _read_json(p).get("name") or p.stem, p, None
+            yield p.stem, p
     elif kind == "bot_profile":
         from .bots import profiles
         builtin = {b["id"] for b in profiles.BUILTIN}
         folder = profiles.PROFILES_DIR
         for p in sorted(folder.glob("*.json")) if folder.exists() else ():
             if p.stem not in builtin:
-                yield p.stem, _read_json(p).get("name") or p.stem, p, None
+                yield p.stem, p
     elif kind == "report":
         from .reports import REPORTS
         for p in sorted(REPORTS.glob("*/meta.json")) if REPORTS.exists() else ():
-            d = _read_json(p)
-            yield p.parent.name, d.get("title") or p.parent.name, p.parent / "report.html", d.get("owner_id")
+            yield p.parent.name, p.parent / "report.html"
+
+
+def _describe(kind: str, path: Path) -> Tuple[Optional[str], Optional[str]]:
+    """What an item's file says of it: (its name, the owner id it records), either None when it says none. Raises
+    whatever reading it raises (a truncated or corrupt file): the caller decides what an unreadable file becomes."""
+    if kind == "scenario":
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            d = json.load(f)
+        return (d.get("name") if isinstance(d, dict) else None), None
+    if kind == "probe_run":
+        d = _json_object(path / "run.json")
+    elif kind == "report":
+        d = _json_object(path.parent / "meta.json")
+        return d.get("title"), d.get("owner_id")
+    else:
+        d = _json_object(path)
+    owner = d.get("owner_id") if kind in ("benchmark_suite", "benchmark_run", "probe", "probe_run",
+                                          "lab_experiment") else None
+    return d.get("name"), owner
+
+
+#: The longest id and path a row keeps (``OwnedItem.ref``, ``OwnedItem.path``): a file whose id or path would not
+#: fit is left, logged, for whoever put it there to rename (PostgreSQL refuses a longer value, which would stop
+#: the whole adoption).
+_REF_MAX = OwnedItem.__table__.c.ref.type.length
+_PATH_MAX = OwnedItem.__table__.c.path.type.length
 
 
 def first_admin(session) -> Optional[User]:
@@ -408,22 +428,35 @@ def first_admin(session) -> Optional[User]:
 def adopt_orphans(session, owner: User) -> dict:
     """Register every item file with no row (P3.2.4): to the account its file records (a run's or a report's
     ``owner_id``) when that account exists, else to ``owner``; private. Also gives ``owner`` the games index's rows
-    that have no owner (``ownership.adopt_orphans``). One audit row when anything was adopted, and the
-    ``orphans_adopted`` marker either way. Returns the count per kind (and ``game``)."""
+    that have no owner (``ownership.adopt_orphans``). One audit row when anything was adopted (the items get none of
+    their own: nobody made them now), and the ``orphans_adopted`` marker either way. Returns the count per kind (and
+    ``game``).
+
+    Only files whose id has no live row are read. A file that does not read (half-written, truncated, corrupt) is
+    still adopted, under its id, by ``owner``: private, so it is nobody else's, and an administrator's to remove
+    through its route; it is logged so it can be looked at."""
     from .auth import policy
     from .server import ownership
     counts: dict = {}
     for kind in KINDS:
         known = set(session.scalars(select(OwnedItem.ref).where(OwnedItem.kind == kind,
                                                                 OwnedItem.deleted_at.is_(None))))
-        for ref, name, path, recorded in _files(kind):
+        for ref, path in _on_disk(kind):
             if ref in known:
                 continue
-            holder = session.get(User, recorded) if recorded else None
+            known.add(ref)
+            if len(ref) > _REF_MAX or len(relpath(path) or "") > _PATH_MAX:
+                log.warning("not adopting %s %s: its id or path is too long for a row (%s)", kind, ref[:40], path)
+                continue
+            try:
+                name, recorded = _describe(kind, path)
+            except Exception as e:      # whatever a damaged file raises (EOFError, zlib.error, UnicodeError...)
+                log.warning("%s %s does not read (%s: %s); adopted under its id", kind, ref, type(e).__name__, e)
+                name, recorded = None, None
+            holder = session.get(User, recorded) if isinstance(recorded, str) and recorded else None
             if holder is None or holder.status == "deleted":
                 holder = owner
-            register(session, kind, ref, holder, name, path=path, actor=owner)
-            known.add(ref)
+            register(session, kind, ref, holder, str(name or ref), path=path, actor=owner, audit_row=False)
             counts[kind] = counts.get(kind, 0) + 1
     games = ownership.adopt_orphans(session, owner)
     if games:
@@ -473,13 +506,27 @@ def register_offline(kind: str, ref: str, name: str, path, owner_handle: Optiona
 def on_boot() -> Optional[dict]:
     """At the server's start, once the runners are back: the system items' rows, then adoption when there is an
     administrator (a fresh server-mode database has none until ``create-admin`` or the setup flow makes one, which
-    adopts through ``accounts.on_first_admin``). Returns what was adopted, None when nobody could adopt."""
+    adopts through ``accounts.on_first_admin``). Returns what was adopted, None when nobody could adopt.
+
+    Never raises: neither is a reason for the server not to start. Each runs in a transaction of its own, so a
+    failed adoption (logged) keeps the shipped items' rows and is tried again at the next start; meanwhile what it
+    did not adopt answers 404, as before."""
+    from .auth import policy
     if not db.configured():
         return None
-    with db.session() as s:
-        register_system(s)
-        admin = first_admin(s)
-        if admin is None:
-            log.info("No administrator yet: item files without an owner stay unreachable until one is made.")
-            return None
-        return adopt_orphans(s, admin)
+    try:
+        with db.session() as s:
+            register_system(s)
+    except Exception:
+        log.warning("could not register the shipped items", exc_info=True)
+    try:
+        with db.session() as s:
+            admin = first_admin(s)
+            if admin is None:
+                log.info("No administrator yet: item files without an owner stay unreachable until one is made.")
+                return None
+            return adopt_orphans(s, admin)
+    except Exception:
+        policy.invalidate()                      # the marker it may have cached was rolled back
+        log.warning("adopting the item files nobody owns failed; the next start tries again", exc_info=True)
+        return None
