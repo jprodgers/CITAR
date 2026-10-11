@@ -59,7 +59,7 @@ INTENTIONALLY_PUBLIC = {
     "/auth/verify": "the token in the emailed link is the credential",
     "/auth/reset": "hands the token to the form; consumes nothing",
     "/api/invites/check": "lets the signup form validate a code before creating anything",
-    "/api/games": "list is filtered per viewer; anonymous sees only public games",
+    "/api/games": "list is filtered per viewer; anonymous sees only global games",
     "/ws/games/{gid}": "seat token, share key or session, checked in the handler",
     "/ws/worker": "worker token is the credential, checked as the first frame",
     "/openapi.json": "FastAPI's own schema",

@@ -226,6 +226,8 @@ export const api = {
     request("POST", `/api/games/${gid}/sharing/users`, { handle, permission }),
   unshareGameWith: (gid, handle) =>
     request("DELETE", `/api/games/${gid}/sharing/users/${encodeURIComponent(handle)}`),
+  // a moderator's (or the owner's) take-down: private, a new link, and the reason the owner sees
+  unpublishGame: (gid, reason) => request("POST", `/api/games/${gid}/unpublish`, { reason }),
 };
 
 export function connectWS(gid, token, onMessage, onClose) {
