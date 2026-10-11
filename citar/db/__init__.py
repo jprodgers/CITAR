@@ -78,6 +78,13 @@ def engine() -> Engine:
     return _engine or configure()
 
 
+def configured() -> bool:
+    """Whether this process has opened its database: the server (at boot) and the tests do; command-line tools
+    that play games without a server (``citar bench``) do not, and code that only indexes what they do (the games
+    index of ``citar.server.ownership``) leaves the database alone rather than opening the default one."""
+    return _engine is not None
+
+
 def create_all():
     """Create any missing tables, and the rows the baseline revision seeds. Alembic owns migrations; this is for
     tests, and for a version-less database the boot stamps (``boot.migrate``)."""

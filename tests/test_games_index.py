@@ -219,6 +219,26 @@ class Loading(IndexCase):
         self.assertIsNotNone(_row(gid).deleted_at)
 
 
+class NoDatabase(unittest.TestCase):
+    def test_a_process_that_never_opened_its_database_leaves_it_alone(self):
+        """``citar bench`` plays games without a server: the index must not open (or create, or put in WAL mode) the
+        default database for them."""
+        import subprocess
+        import sys
+        data = Path(tempfile.mkdtemp(prefix="citar_index_nodb_"))
+        env = {k: v for k, v in os.environ.items() if k != "CITAR_DB_URL"}
+        env["CITAR_DATA_DIR"] = str(data)
+        code = ("from citar import db; from citar.server import ownership; "
+                "ownership.sync_quietly('g1', turn=3, phase='playing', stopped=True); "
+                "print(ownership.index_loaded(object()), db.configured())")
+        out = subprocess.run([sys.executable, "-c", code], cwd=str(Path(__file__).resolve().parent.parent), env=env,
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.split(), ["None", "False"])
+        self.assertEqual(list(data.iterdir()), [])
+        shutil.rmtree(data, ignore_errors=True)
+
+
 class Boot(IndexCase):
     def test_a_playing_row_whose_save_folder_went_is_closed_at_boot(self):
         gid = self.create()

@@ -104,8 +104,11 @@ def sync_quietly(gid: str, *, turn: int, phase: Optional[str], stopped: bool = F
     """``sync`` in a database session of its own, from the session's save writer (after a round's
     autosave) or from its stop, never with the game's lock held.
 
-    Never raises: a game in progress must not stop because the index could not be written.
+    Never raises: a game in progress must not stop because the index could not be written. Does nothing in a
+    process that has not opened its database (a command-line tool playing games without a server).
     """
+    if not db.configured():
+        return
     try:
         with db.session() as s:
             sync(s, gid, turn=turn, phase=phase, stopped=stopped)
@@ -118,7 +121,9 @@ def index_loaded(gs) -> Optional[str]:
     a game without a row one (``register_existing``, owned by nobody, private), mark its row as
     loaded (`playing`, or `finished` for a game that is over), and return the row's owner for the
     session. Never raises: an index that cannot be written leaves the game owned by nobody, which
-    only administrators reach."""
+    only administrators reach. Nothing in a process that has not opened its database."""
+    if not db.configured():
+        return None
     try:
         with db.session() as s:
             row = s.get(GameRow, gs.id)

@@ -1,11 +1,12 @@
 """The session's overhead (design/phase3-features.md P3.9.7): a 4-bot small game played through the session driver
 against the same game driven by ``EngineGame.drive`` alone, measured in the same run.
 
-    python scripts/session_overhead.py [--rounds 100] [--runs 5] [--seed 5002] [--json OUT]
+    python scripts/session_overhead.py [--rounds 100] [--runs 5] [--seed 5002] [--json OUT] [--no-index]
 
 Each run plays ``--rounds`` rounds of the same game (same seed, same four default bots) twice, alternating: once
 through ``SessionManager.create`` and the session's driver thread (its drives, metrics, responders, broadcasts,
-autosaves and their writer), once in a plain loop of ``EngineGame.drive`` with every bot seat, one seat's turn a call.
+autosaves and their writer, and the game's row in the games index, kept once a round from the writer, in a database
+of the run's own), once in a plain loop of ``EngineGame.drive`` with every bot seat, one seat's turn a call.
 The ratio of the two medians is the session's overhead. This laptop throttles, so a ratio is only ever compared with
 one measured the same way; package 3-01 recorded the first in its as-built note, and later packages may let it grow by
 at most 25%.
@@ -46,11 +47,18 @@ def _config(seed: int) -> dict:
     return {"map_size": "small", "seed": seed}
 
 
-def through_session(seed: int, rounds: int, timeout: float = 900.0) -> float:
-    """Seconds for ``rounds`` rounds of the game under a session's driver, from its start to the round after."""
+def through_session(seed: int, rounds: int, timeout: float = 900.0, index: bool = True) -> float:
+    """Seconds for ``rounds`` rounds of the game under a session's driver, from its start to the round after. With
+    ``index`` the game has its row in the games index (in the run's own database), as a lobby game has, so the
+    session keeps it as a server does: once a round, from its save writer."""
+    from citar import db
+    from citar.server import ownership
     from citar.server import session as sess
     manager = sess.SessionManager()
     s = manager.create(_config(seed), [{"type": "bot"}] * 4, name="overhead", track=False, start=False)
+    if index:
+        with db.session() as sdb:
+            ownership.register(sdb, s, None)
     try:
         t0 = time.perf_counter()
         s.start()
@@ -94,24 +102,39 @@ def main(argv=None) -> int:
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--seed", type=int, default=5002)
     ap.add_argument("--json", help="also write the numbers to this file")
+    ap.add_argument("--no-index", action="store_true",
+                    help="no games-index row and no database, as the sessions of 3-01's first measurement")
     args = ap.parse_args(argv)
     base = _isolate()
     sys.path.insert(0, str(ROOT))
     try:
-        from citar import engine_api
+        from citar import db, engine_api
+        if not args.no_index:
+            db.configure(os.environ["CITAR_DB_URL"])
+            db.create_all()
         build = engine_api.build_info()
+        index = not args.no_index
+
+        def session_path(seed, rounds):
+            """The session's path, with or without its row."""
+            return through_session(seed, rounds, index=index)
+
         through_drive(args.seed, 5)                 # warm both paths once: the first game loads the ruleset
-        through_session(args.seed, 5)
+        session_path(args.seed, 5)
         session_s, drive_s = [], []
         for i in range(args.runs):
             # alternate which goes first, so a throttle that sets in during a run falls on both
-            order = (through_session, through_drive) if i % 2 == 0 else (through_drive, through_session)
+            order = (session_path, through_drive) if i % 2 == 0 else (through_drive, session_path)
             for fn in order:
                 t = fn(args.seed, args.rounds)
-                (session_s if fn is through_session else drive_s).append(t)
-                print(f"run {i + 1} {fn.__name__}: {t:.2f} s", flush=True)
+                (session_s if fn is session_path else drive_s).append(t)
+                print(f"run {i + 1} {'through_session' if fn is session_path else 'through_drive'}: {t:.2f} s",
+                      flush=True)
+        if index:
+            db.dispose()
         ms, md = statistics.median(session_s), statistics.median(drive_s)
-        out = {"rounds": args.rounds, "runs": args.runs, "seed": args.seed, "build_id": build.get("build_id"),
+        out = {"rounds": args.rounds, "runs": args.runs, "seed": args.seed, "index": index,
+               "build_id": build.get("build_id"),
                "label": build.get("label"), "session_s": session_s, "drive_s": drive_s,
                "session_median_s": ms, "drive_median_s": md, "ratio": ms / md}
         print(f"session median {ms:.2f} s, drive median {md:.2f} s, ratio {ms / md:.3f}", flush=True)
