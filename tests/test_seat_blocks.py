@@ -477,13 +477,16 @@ class Agents(SeatCase):
     """Whatever a seat's block says, a member's game dials nothing it describes (``resolve_llm``'s passthrough)."""
 
     def test_an_inline_block_in_a_members_game_plays_no_model(self):
+        # The second seat starts human, so the game waits at its first turn: two bots alone could play on past
+        # turn 3, or to the end, before the test pauses them, and the model seat would never get a turn to watch.
         r = self.post("member", "/api/games", {"name": "agents", "config": CONFIG,
-                                               "seats": [{"type": "bot"}, {"type": "bot"}]})
+                                               "seats": [{"type": "bot"}, {"type": "human"}]})
         gid = r.json()["id"]
         self.games.append(gid)
         s = self.manager.get(gid)
         with s.lock:
             s.paused = True
+            start = s.game.turn
         # put there behind the routes' back, as a game restored from an old save might have it
         s.update_seat(1, type="llm", llm=dict(INLINE["api_key_env"]))
         agent = s.get_agent(1)
@@ -491,10 +494,15 @@ class Agents(SeatCase):
         self.assertIsInstance(agent, NoMachineAgent)
         s.resume()
         end = time.time() + 30
-        while time.time() < end and s.game.turn < 3:
+        texts: list[str] = []
+        while time.time() < end:
+            with s.lock:
+                turn = s.game.turn
+                texts = [e["text"] for e in s.game.events(last=500) if e.get("type") == "agent_error"]
+            if turn >= start + 2 and texts:
+                break
             time.sleep(0.05)
-        self.assertGreaterEqual(s.game.turn, 3, "the seat's turns were skipped, the game went on")
-        texts = [e["text"] for e in s.game.events(last=500) if e.get("type") == "agent_error"]
+        self.assertGreaterEqual(turn, start + 2, "the seat's turns were skipped, the game went on")
         self.assertTrue(any("no machine" in t for t in texts), texts)
 
     def test_an_admins_game_keeps_its_inline_block(self):

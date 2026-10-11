@@ -61,7 +61,9 @@ class BootCase(unittest.TestCase):
     """Each test boots against a database file of its own, and puts the process's engine back after."""
 
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="citar_migrate_"))
+        # resolved, as the boot resolves the path it names: Windows runners keep TEMP under an 8.3 short name
+        # (C:\Users\RUNNER~1\...), which the boot's messages spell out in full
+        self.dir = Path(tempfile.mkdtemp(prefix="citar_migrate_")).resolve()
         self.path = self.dir / "citar.db"
         self._previous = db._url
 
