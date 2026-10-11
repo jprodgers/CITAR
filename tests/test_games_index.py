@@ -57,6 +57,49 @@ def _row(gid: str):
         return row
 
 
+def _write_lock_free() -> bool:
+    """Whether another connection could write the database now: no transaction anywhere holds SQLite's write lock."""
+    import sqlite3
+    con = sqlite3.connect(str(_TMP / "test.db"), timeout=0.05, isolation_level=None)
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("ROLLBACK")
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        con.close()
+
+
+class _IndexWrites:
+    """Records, at each write of the games index the stop and the load make, whether the write lock was free: the
+    route that closed or loaded the game holds no write of its own while the index writes on the same thread."""
+
+    def __init__(self):
+        self.free: list = []
+
+    def __enter__(self):
+        real_sync, real_loaded = ownership.sync_quietly, ownership.index_loaded
+
+        def sync(gid, **kw):
+            self.free.append(("sync", _write_lock_free()))
+            return real_sync(gid, **kw)
+
+        def loaded(gs, **kw):
+            self.free.append(("loaded", _write_lock_free()))
+            return real_loaded(gs, **kw)
+        self._patches = [mock.patch.object(ownership, "sync_quietly", sync),
+                         mock.patch.object(ownership, "index_loaded", loaded)]
+        for p in self._patches:
+            p.start()
+        return self
+
+    def __exit__(self, *exc):
+        for p in reversed(self._patches):
+            p.stop()
+        return False
+
+
 def _wait(cond, timeout: float = 15.0) -> bool:
     end = time.time() + timeout
     while time.time() < end:
@@ -170,6 +213,109 @@ class Statuses(IndexCase):
         self.assertEqual(_row(gid).status, "playing")
 
 
+class IdleSignIn(IndexCase):
+    """A request whose sign-in was last seen over a minute ago writes its ``last_seen_at``. The request's own
+    database session must not still hold that write when the route closes or loads a game, whose row the games
+    index writes from a session of its own on the same thread: under SQLite the index would wait out the whole busy
+    timeout (10 s) and then give up, leaving a closed game counting against its owner's limit."""
+
+    def _age_sign_ins(self):
+        from datetime import timedelta
+        from sqlalchemy import select
+        from citar.db.models import AuthSession
+        with db.session() as s:
+            for row in s.scalars(select(AuthSession)):
+                row.last_seen_at = row.last_seen_at - timedelta(minutes=5)
+
+    def _timed(self, method, path, **kw):
+        t0 = time.perf_counter()
+        r = self.client.request(method, path, headers=self.headers["member"], **kw)
+        return r, time.perf_counter() - t0
+
+    def test_closing_and_loading_after_an_idle_spell_write_the_row_at_once(self):
+        self.set_limit(1)
+        gid = self.create()
+        self.assertTrue(self.manager.get(gid).flush_saves(30))
+        self._age_sign_ins()
+        with _IndexWrites() as writes:
+            r, took = self._timed("DELETE", f"/api/games/{gid}")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertLess(took, 2.0, "closing waited on the request's own write")
+        self.assertEqual(writes.free, [("sync", True)])
+        self.assertEqual(_row(gid).status, "closed")
+        self._age_sign_ins()
+        with _IndexWrites() as writes:
+            r, took = self._timed("POST", "/api/saves/load", json={"path": f"{gid}/autosave.citar"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertLess(took, 2.0, "loading waited on the request's own write")
+        self.assertEqual(writes.free, [("loaded", True)])
+        self.assertEqual(_row(gid).status, "playing")
+        self.assertEqual(self.manager.get(gid).owner_id, self.ids["member"])
+        self.create(expect=429)                       # loaded, it counts again
+
+    def test_the_sign_in_is_still_marked_seen(self):
+        from sqlalchemy import select
+        from citar.db.models import AuthSession
+        self._age_sign_ins()
+        with db.session() as s:
+            before = {r.id: r.last_seen_at for r in s.scalars(select(AuthSession))}
+        r = self.client.get("/api/games", headers=self.headers["member"])
+        self.assertEqual(r.status_code, 200, r.text)
+        with db.session() as s:
+            row = s.scalar(select(AuthSession).where(AuthSession.user_id == self.ids["member"]))
+            self.assertGreater(row.last_seen_at, before[row.id])
+
+
+class FailedRegistration(IndexCase):
+    """A game the index could not take is closed again (create_game, the scenario launch). The request has written
+    to the index by then; that write is undone before the close, whose own write of the row would otherwise wait
+    behind it for the whole busy timeout."""
+
+    def _failing_register(self):
+        real = ownership.register
+
+        def register(session, gs, owner, **kw):
+            real(session, gs, owner, **kw)       # the row is written (flushed), as when a later step fails
+            raise RuntimeError("the index refused it")
+        return mock.patch.object(ownership, "register", register)
+
+    def _attempt(self, path, body):
+        from fastapi.testclient import TestClient
+        client = TestClient(self.app.app, base_url="https://citar.test", raise_server_exceptions=False)
+        live = set(self.manager.sessions)
+        t0 = time.perf_counter()
+        with self._failing_register(), _IndexWrites() as writes:
+            r = client.post(path, json=body, headers=self.headers["member"])
+        took = time.perf_counter() - t0
+        client.close()
+        self.assertEqual(r.status_code, 500, r.text)
+        self.assertLess(took, 2.0, "the close waited on the request's own write")
+        self.assertIn(("sync", True), writes.free)
+        self.assertNotIn(("sync", False), writes.free, "the request's write was still open when the game was closed")
+        self.assertEqual(set(self.manager.sessions), live, "the game is not left running")
+        from sqlalchemy import func, select
+        with db.session() as s:
+            self.assertEqual(s.scalar(select(func.count()).select_from(GameRow)), 0, "no row is left")
+
+    def test_a_new_game_the_index_refuses_is_closed_at_once(self):
+        self._attempt("/api/games", {"name": "refused", "config": CONFIG, "seats": HUMAN_FIRST})
+
+    def test_a_launch_the_index_refuses_is_closed_at_once(self):
+        from citar import engine_api
+        r = self.client.post("/api/scenario-editor", json={"source": "generate", "config": CONFIG,
+                                                            "players": [{"type": "human"}, {"type": "bot"}]},
+                             headers=self.headers["member"])
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(f"/api/scenario-editor/{r.json()['editor_id']}/save", json={"name": "refused launch"},
+                             headers=self.headers["member"])
+        self.assertEqual(r.status_code, 200, r.text)
+        sid = r.json()["id"]
+        try:
+            self._attempt(f"/api/scenarios/{sid}/launch", {"name": "refused"})
+        finally:
+            engine_api.delete_scenario(sid)
+
+
 class Limit(IndexCase):
     def test_benchmark_rows_do_not_count_against_the_lobby_limit(self):
         with db.session() as s:
@@ -198,16 +344,42 @@ class Loading(IndexCase):
         s = self.manager.load(sess.SAVE_DIR / gid / "autosave.citar")
         row = _row(gid)
         self.assertEqual((row.status, row.kind, row.owner_id, row.visibility), ("playing", "game", None, "private"))
+        self.assertEqual(row.data_sharing, "private", "a game nobody owns pools nothing")
         self.assertIsNone(s.owner_id)
+
+    def test_an_opened_probe_case_is_a_probes_game_not_a_lobby_game(self):
+        """``POST /api/probe-runs/{rid}/open/{case}/{rep}`` loads a case's saved end state to be looked at: its row,
+        should it have none, is of kind `probe` and pools nothing, so it never counts as a lobby game."""
+        import types
+        case = self.manager.create(CONFIG, HUMAN_FIRST, "probe p/c", start=False, track=False)
+        run_dir = Path(tempfile.mkdtemp(prefix="citar_index_probe_"))
+        try:
+            case.save_copy(run_dir / "c1-0.citar")
+            self.manager.delete(case.id)
+            self.games.append(case.id)
+            self.assertIsNone(_row(case.id))
+            runner = types.SimpleNamespace(_run_dir=lambda rid: run_dir)
+            with mock.patch.object(self.app, "_probes", return_value=runner):
+                r = self.client.post("/api/probe-runs/r1/open/c1/0", headers=self.headers["zara"])
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["game_id"], case.id)
+            row = _row(case.id)
+            self.assertEqual((row.kind, row.owner_id, row.data_sharing, row.status),
+                             ("probe", None, "private", "playing"))
+        finally:
+            shutil.rmtree(run_dir, ignore_errors=True)
 
     def test_whoever_loads_an_ownerless_save_owns_it(self):
         gid = self._closed_game_without_a_row()
         # a save whose game has no row is an administrator's to load
         r = self.client.post("/api/saves/load", json={"path": f"{gid}/autosave.citar"}, headers=self.headers["member"])
         self.assertEqual(r.status_code, 404, r.text)
+        with db.session() as s:
+            s.get(User, self.ids["zara"]).data_sharing = "pool"
         r = self.client.post("/api/saves/load", json={"path": f"{gid}/autosave.citar"}, headers=self.headers["zara"])
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(_row(gid).owner_id, self.ids["zara"])
+        self.assertEqual((_row(gid).owner_id, _row(gid).data_sharing), (self.ids["zara"], "pool"),
+                         "its new owner, with their default for pooling")
         self.assertEqual(self.manager.get(gid).owner_id, self.ids["zara"])
 
     def test_deleting_every_save_deletes_the_game(self):

@@ -1624,7 +1624,7 @@ class SessionManager:
         self.track(s)
         s.autosave(force=True)
 
-    def load(self, path: Path) -> GameSession:
+    def load(self, path: Path, kind: Optional[str] = None) -> GameSession:
         """Load a save into a live session, paused.
 
         The save is read first, while a running session of its game plays on, and as much of it is loaded as can be
@@ -1634,7 +1634,8 @@ class SessionManager:
         running session holds (the OS lock keeps every other reader and writer out): its history is read once that
         session is stopped, its writer drained and its journal closed. If it then does not load, the running game comes
         back from its own autosave, so a bad save never closes a game. Raises what stopped the load (``ValueError`` for
-        a save that does not load).
+        a save that does not load). ``kind`` is the games index's kind for a game that has no row yet
+        (``ownership.index_loaded``): `probe` for a probe case opened to be looked at.
         """
         path = Path(path)
         with self._loading:
@@ -1655,16 +1656,16 @@ class SessionManager:
                 if running:                      # a game closed before the load stays closed
                     self._reopen(live, paused)
                 raise
-            self._register_loaded(s)
+            self._register_loaded(s, kind=kind)
             return s
 
-    def _register_loaded(self, s: GameSession):
+    def _register_loaded(self, s: GameSession, kind: Optional[str] = None):
         """A loaded session joins the live ones, paused, its driver started. Its row in the games index says
         it is played again (one is made for a game without: ``ownership.index_loaded``), and gives the session its
         owner, before the driver starts."""
         from . import ownership
         s.registered = True
-        s.owner_id = ownership.index_loaded(s)
+        s.owner_id = ownership.index_loaded(s, kind=kind)
         s._indexed = (s.game.turn, s.game.phase)
         with self.lock:
             self.sessions[s.id] = s

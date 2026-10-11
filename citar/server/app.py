@@ -566,7 +566,10 @@ def create_game(body: CreateGame, request: Request,
             access.set_visibility(sdb, row, body.visibility, actor=me)
         sdb.flush()
     except BaseException:
-        manager.delete(s.id)          # a game the index could not take is not left running unowned
+        # a game the index could not take is not left running unowned; the request's write is undone first, or
+        # the stop's own write of the row would wait behind it
+        sdb.rollback()
+        manager.delete(s.id)
         raise
     s.start()
     audit.record(sdb, "game.created", actor=me, object_type="game", object_id=s.id,
@@ -1291,6 +1294,7 @@ def scenarios_launch(sid: str, body: LaunchBody, me=Depends(require_cap("create_
         ownership.register(sdb, s, me, visibility=access.PRIVATE)
         sdb.flush()
     except BaseException:
+        sdb.rollback()                # as create_game: the request's write undone before the stop writes the row
         manager.delete(s.id)
         raise
     s.start()
@@ -1423,7 +1427,7 @@ def probe_run_open(rid: str, case: str, rep: int):
     path = _probe_call(runner._run_dir, rid) / f"{case}-{rep}.citar"
     if not path.exists():
         raise HTTPException(404, "No saved game for that case.")
-    s = manager.load(path)
+    s = manager.load(path, kind="probe")      # a probe's game, should the index not have it: never a lobby game
     return {"game_id": s.id, "spectator_token": s.spectator_token}
 
 
@@ -1632,6 +1636,7 @@ def load_save(body: LoadBody, request: Request, p: Principal = Depends(principal
         row = ownership.register(sdb, s, p.user, visibility=access.PRIVATE)
     elif row.owner_id is None and p.user is not None:
         row.owner_id = p.user.id
+        row.data_sharing = p.user.data_sharing      # its new owner's default, as for a game they create
         s.owner_id = p.user.id
     return s.info(include_tokens=True)
 

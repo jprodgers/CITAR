@@ -113,22 +113,24 @@ def sync_quietly(gid: str, *, turn: int, phase: Optional[str], stopped: bool = F
         with db.session() as s:
             sync(s, gid, turn=turn, phase=phase, stopped=stopped)
     except Exception:
-        log.debug("could not sync game row for %s", gid, exc_info=True)
+        log.warning("could not put turn %s (%s%s) on the row of game %s", turn, phase, ", stopped" if stopped else "",
+                    gid, exc_info=True)
 
 
-def index_loaded(gs) -> Optional[str]:
-    """A session just loaded from disk (the load route, ``restore_live``, a benchmark's reload): give
-    a game without a row one (``register_existing``, owned by nobody, private), mark its row as
-    loaded (`playing`, or `finished` for a game that is over), and return the row's owner for the
-    session. Never raises: an index that cannot be written leaves the game owned by nobody, which
-    only administrators reach. Nothing in a process that has not opened its database."""
+def index_loaded(gs, kind: Optional[str] = None) -> Optional[str]:
+    """A session just loaded from disk (the load route, ``restore_live``, a benchmark's reload, a probe
+    case opened to be looked at): give a game without a row one (``register_existing``, owned by nobody,
+    private, of ``kind`` when the caller knows it), mark its row as loaded (`playing`, or `finished` for a
+    game that is over), and return the row's owner for the session. Never raises: an index that cannot
+    be written leaves the game owned by nobody, which only administrators reach. Nothing in a process
+    that has not opened its database."""
     if not db.configured():
         return None
     try:
         with db.session() as s:
             row = s.get(GameRow, gs.id)
             if row is None:
-                row = register_existing(s, gs, None)
+                row = register_existing(s, gs, None, kind=kind)
             else:
                 _apply(row, gs.game.turn, gs.game.phase, stopped=False)
             return row.owner_id if row is not None else None
@@ -262,10 +264,15 @@ def adopt_orphans(session, owner: User) -> int:
     return len(rows)
 
 
-def register_existing(session, gs, owner: Optional[User]) -> Optional[GameRow]:
+def register_existing(session, gs, owner: Optional[User], *, kind: Optional[str] = None) -> Optional[GameRow]:
     """Index a session that has no row yet: a game loaded from a save whose row is gone (the database
-    was renamed aside for 0.1.6's, or the save came from elsewhere). Returns None when it has one."""
+    was renamed aside for 0.1.6's, or the save came from elsewhere), or a probe case opened to be looked
+    at. ``kind`` is the caller's when it knows it (`probe`); otherwise `benchmark` for a benchmark's game
+    and `game` for the rest. A row with no owner pools nothing (`data_sharing = private`): nobody chose
+    to pool it, and whoever comes to own it (the load route) sets their own default. Returns None when it
+    has one."""
     if session.get(GameRow, gs.id) is not None:
         return None
-    kind = "benchmark" if getattr(gs, "benchmark", None) else "game"
-    return register(session, gs, owner, kind=kind, visibility=access.PRIVATE)
+    kind = kind or ("benchmark" if getattr(gs, "benchmark", None) else "game")
+    return register(session, gs, owner, kind=kind, visibility=access.PRIVATE,
+                    data_sharing=None if owner is not None else "private")
