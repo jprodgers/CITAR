@@ -36,12 +36,12 @@ class PoolError(ValueError):
 
 def create_group(session, owner: User, *, name: str, description: str = "",
                  visibility: str = "private") -> ServerGroup:
-    """Create a server group."""
+    """Create a server group. Its visibility is on the ladder, and `global` needs `publish_global`, as a
+    change of it does (``access.set_visibility``)."""
     name = (name or "").strip()[:120]
     if not name:
         raise PoolError("Give the group a name.")
-    if visibility not in ("private", "allowlist", "link", "public"):
-        raise PoolError("Visibility is private, allowlist, link or public.")
+    access.check_publish(owner, visibility)
     group = ServerGroup(owner_id=owner.id, name=name, description=(description or "").strip(),
                         visibility=visibility)
     session.add(group)
@@ -164,7 +164,7 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
     from .. import servers as registry
 
     perms = access.on(session, viewer, server)
-    owner = session.get(User, server.owner_id)
+    owner = session.get(User, server.owner_id) if server.owner_id else None
     base = {
         "id": server.id,
         "name": server.name,
@@ -292,7 +292,6 @@ def create_grant(session, actor: User, group: ServerGroup, *, subject_type: str 
     if budget:
         budgets.set_budget(session, grant, period=budget.get("period", "month"),
                            amount=float(budget.get("amount") or 0),
-                           currency=budget.get("currency", "USD"),
                            behavior=budget.get("behavior", "hard"))
     audit.record(session, "grant.created", actor=actor, object_type="server_group",
                  object_id=group.id, subject=subject_handle or "everyone",

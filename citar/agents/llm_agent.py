@@ -689,3 +689,42 @@ class LLMAgent:
             self._record_usage(conv)
             usage = getattr(conv, "usage", {})
             session.metrics.negotiation(pid, time.time() - t0, steps, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
+
+
+class NoMachineAgent:
+    """A model seat with no machine to play on (P3.2.9): its block names no machine, and the game's owner is not
+    an administrator, so nothing the block says is dialled.
+
+    Its turn is skipped as a disconnected seat's would be under the "skip" policy, never by pausing the whole game
+    (no machine comes back by itself); it says why on its first turn, and every turn in the seat's thoughts. It
+    answers no chat: the session's responder declines what it leaves, as for a model that failed to answer.
+    """
+
+    def __init__(self, reason: str):
+        self.cfg: dict = {}
+        self.reason = reason
+        self.last_error: str | None = reason
+        self.cancelled = False
+        self.usage_total: dict = {}
+        self._told = False
+
+    def cancel(self):
+        """Nothing runs: there is nothing to stop."""
+        self.cancelled = True
+
+    def play_turn(self, session, pid: int):
+        """Skip the turn, saying why."""
+        with session.lock:
+            g = session.game
+            if g.current != pid or g.phase != "playing":
+                return
+            session.metrics.set_end_reason(pid, "disconnected")
+            g.add_thought(pid, f"(this seat has no machine: {self.reason[:300]})", "system")
+            if not self._told:
+                self._told = True
+                g.emit("agent_error", f"{g.player_name(pid)}'s AI has no machine to play on, so its turns are "
+                                      f"skipped: {self.reason[:300]}", None, player=pid)
+
+    def respond_negotiation(self, session, pid: int, nid: int):
+        """No answer: the responder declines it."""
+        return None

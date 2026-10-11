@@ -59,7 +59,7 @@ class Principal:
             return {"authenticated": False, "user": None, "capabilities": {}}
         return {
             "authenticated": True,
-            "user": self.user.public(full=True),
+            "user": self.user.account(),
             "capabilities": policy.capabilities(self.user),
             "csrf_token": self.auth_session.csrf_token if self.auth_session else "",
             "session_id": self.auth_session.id if self.auth_session else "",
@@ -177,7 +177,7 @@ def _denial_message(user: User, capability: str) -> str:
     friendly = {
         "register_servers": "Your account is not allowed to register servers.",
         "run_reports": "Your account is not allowed to build reports.",
-        "publish_public": "Your account is not allowed to publish to the public internet.",
+        "publish_global": "Your account is not allowed to publish to the whole internet.",
         "create_games": "Your account is not allowed to start games.",
         "invite": "Your account cannot create invitations.",
     }

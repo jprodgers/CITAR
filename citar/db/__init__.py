@@ -79,8 +79,20 @@ def engine() -> Engine:
 
 
 def create_all():
-    """Create any missing tables. Alembic owns migrations; this is for tests and first boot."""
+    """Create any missing tables, and the rows the baseline revision seeds. Alembic owns migrations; this is for
+    tests, and for a version-less database the boot stamps (``boot.migrate``)."""
     Base.metadata.create_all(engine())
+    seed_defaults()
+
+
+def seed_defaults():
+    """Add the default hardware classes (``models.HARDWARE_CLASS_SEEDS``) that are missing, as the baseline
+    revision does, so a database made by ``create_all`` prices compute the same way as a migrated one."""
+    from .models import HardwareClass, HARDWARE_CLASS_SEEDS
+    with session() as s:
+        for seed in HARDWARE_CLASS_SEEDS:
+            if s.get(HardwareClass, seed["id"]) is None:
+                s.add(HardwareClass(**seed, match={}, priority=0, is_default=True))
 
 
 @contextlib.contextmanager

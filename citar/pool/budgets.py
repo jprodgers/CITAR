@@ -3,14 +3,13 @@
 No money moves anywhere. A budget is **accounting and admission control**: it stops work being
 scheduled, and it pauses work that crosses the line. Nobody is charged and nothing is billed.
 
-Cost comes from the existing usage ledger priced by `citar/costing.py`, which already handles
-electricity tariffs, straight-line depreciation, lease costs, hourly rates for rented machines and
-per-token API prices. Deriving budgets from it rather than recording a number at the time means
-correcting a wrong electricity rate later also corrects every budget that was measured with it.
+A budget is counted in credits, the compute ledger's unit (`Budget.unit`; design/phase3-features.md
+P3.4.6): package 3-10 makes it reserve and settle per request against `compute_events`. The estimate
+below still prices an activity from the usage ledger through `citar/costing.py` until then.
 
 Two things here are easy to get wrong and are handled deliberately:
 
-*A period ends at the owner's midnight, not UTC's.* "$100 per month" means their month. An owner in
+*A period ends at the owner's midnight, not UTC's.* "1,000 credits per month" means their month. An owner in
 New York gets a month that runs from the 1st at 00:00 Eastern; computing it in UTC would move the
 boundary by five hours and, twice a year, by a different five hours.
 
@@ -29,7 +28,7 @@ from typing import Optional
 
 from sqlalchemy import select
 
-from ..db.models import AccessGrant, Budget, BudgetEntry, Server, ServerGroup, User
+from ..db.models import BUDGET_UNITS, AccessGrant, Budget, BudgetEntry, Server, ServerGroup, User
 from .windows import zone
 
 log = logging.getLogger("citar.budgets")
@@ -99,7 +98,7 @@ class BudgetState:
     limit: float
     spent: float
     reserved: float
-    currency: str = "USD"
+    unit: str = "credits"
     period: str = "month"
     key: str = ""
 
@@ -131,9 +130,9 @@ class BudgetState:
                 "limit": round(self.limit, 4), "spent": round(self.spent, 4),
                 "reserved": round(self.reserved, 4), "committed": round(self.committed, 4),
                 "remaining": round(self.remaining, 4), "fraction": round(self.fraction, 4),
-                "currency": self.currency, "behavior": self.budget.behavior,
+                "unit": self.unit, "behavior": self.budget.behavior,
                 "exhausted": self.exhausted,
-                "label": f"{self.currency} {self.committed:.2f} of {self.limit:.2f} "
+                "label": f"{self.committed:.2f} of {self.limit:.2f} {self.unit} "
                          f"{period_label(self.period, self.key)}"}
 
 
@@ -146,7 +145,7 @@ def owner_tz(session, grant: AccessGrant) -> str:
     group = session.get(ServerGroup, grant.group_id)
     if group is None:
         return "UTC"
-    owner = session.get(User, group.owner_id)
+    owner = session.get(User, group.owner_id) if group.owner_id else None
     return owner.tz if owner is not None else "UTC"
 
 
@@ -164,7 +163,7 @@ def state(session, grant: AccessGrant, *, when: Optional[datetime] = None) -> Bu
     # An entry that is still open counts at its estimate; that is the whole point of a reservation.
     reserved = sum(r.reserved for r in rows if r.actual is None and r.closed_at is None)
     return BudgetState(budget=budget, limit=float(budget.amount or 0.0), spent=spent,
-                       reserved=reserved, currency=budget.currency or "USD",
+                       reserved=reserved, unit=budget.unit or "credits",
                        period=budget.period, key=key)
 
 
@@ -283,9 +282,9 @@ def over_budget_activities(session) -> list:
 
 # ---------------------------------------------------------------------------- editing
 
-def set_budget(session, grant: AccessGrant, *, period: str, amount: float, currency: str = "USD",
-               behavior: str = "hard") -> Optional[Budget]:
-    """Create, update or (with amount <= 0) remove a grant's budget."""
+def set_budget(session, grant: AccessGrant, *, period: str, amount: float, behavior: str = "hard",
+               unit: str = "credits") -> Optional[Budget]:
+    """Create, update or (with amount <= 0) remove a grant's budget, in credits (the only unit)."""
     if period not in PERIODS:
         raise ValueError(f"Budget period must be one of {', '.join(PERIODS)}.")
     if behavior not in ("hard", "soft"):
@@ -300,7 +299,9 @@ def set_budget(session, grant: AccessGrant, *, period: str, amount: float, curre
         session.add(budget)
     budget.period = period
     budget.amount = float(amount)
-    budget.currency = (currency or "USD")[:8]
+    if unit not in BUDGET_UNITS:
+        raise ValueError(f"A budget is counted in {', '.join(BUDGET_UNITS)}.")
+    budget.unit = unit
     budget.behavior = behavior
     session.flush()
     return budget

@@ -95,6 +95,10 @@ class GameSession:
         self.metrics = Metrics()
         self._metrics_current: Optional[tuple] = None
         self.benchmark: Optional[dict] = None   # {"run_id", "job_id", "suite", "scenario", "model", ...} for benchmark games
+        # The account the game belongs to, from its row in the games index (ownership.register and index_loaded), or the
+        # benchmark or probe run's owner; None for the server's own (tests, scripts). Read by the model seats' gate
+        # (_inline_llm_allowed) and, from Phase 3's scheduler and ledger on, as the consumer of the game's compute.
+        self.owner_id: Optional[str] = None
         self.usage_act: Optional[str] = None    # usage ledger activity id (usage.py)
         self.crashed: Optional[dict] = None     # {"message", "turn", "at"} once the engine stopped (_crashed)
         self._autosaved: Optional[tuple] = None  # (turn, phase) of the last autosave
@@ -102,6 +106,7 @@ class GameSession:
         self.journal = None                      # this session's timeline, opened at its first save (_timeline)
         # what the saves cost under the lock (_snapshot): {"saves", "total_s", "max_s", "last_s"}; P2.5.3's budget is 10 ms
         self.save_lock = {"saves": 0, "total_s": 0.0, "max_s": 0.0, "last_s": 0.0}
+        self._indexed: Optional[tuple] = None    # (turn, phase) last put on the games index row (_autosave_landed)
         self._writer = SaveWriter(self)
         game.subscribe(self._on_event)
         self._track_turn()
@@ -236,6 +241,10 @@ class GameSession:
                 self.autosave()
         else:
             self.cond.notify_all()
+            if g.phase != "playing":
+                # a game that ended inside a turn (a capital taken, a vote won): its last autosave, which also tells the
+                # games index it is finished; autosave() takes it once (it skips an unchanged turn and phase)
+                self.autosave()
         self._broadcast({"type": "update", "version": self.version, "turn": g.turn, "current_player": g.current,
                          "phase": g.phase})
 
@@ -452,17 +461,34 @@ class GameSession:
             # the bot draws from the game's seed, so the same map seed plays the same game
             agent = BotAgent(**{k: v for k, v in seat.bot.items() if k in ("aggression", "profile")})
         elif seat.type == "llm":
-            from ..agents.llm_agent import LLMAgent
+            from ..agents.llm_agent import LLMAgent, NoMachineAgent
             from .. import servers
             try:
-                cfg = servers.resolve_llm(seat.llm)
+                agent = LLMAgent(servers.resolve_llm(seat.llm, inline_ok=self._inline_llm_allowed(seat.llm)))
             except servers.ServerError as e:
-                self.game.emit("agent_error", f"{self.game.player_name(pid)}'s AI: {e} Pick a server for this seat.", None, player=pid)
-                cfg = dict(seat.llm)
-            agent = LLMAgent(cfg)
+                # Never the seat's block as it is: without a machine to build it from, that block is an address and
+                # a key variable somebody typed in, and only an administrator's game may dial one (P3.2.9).
+                agent = NoMachineAgent(str(e))
         if agent is not None:
             self.agents[pid] = agent
         return agent
+
+    def _inline_llm_allowed(self, llm: dict) -> bool:
+        """Whether a seat's model block may describe its own provider, address and key rather than name a machine
+        (``servers.resolve_llm``'s ``inline_ok``): when the game has no owner (tests, scripts), or its owner is an
+        administrator. Read from the database when an agent is made, off the game's lock, and only for a block
+        without a machine: a member's game never dials what a seat's block says (P3.2.9)."""
+        if not llm or llm.get("server_id") or self.owner_id is None:
+            return True
+        try:
+            from .. import db
+            from ..db.models import User
+            with db.session() as s:
+                owner = s.get(User, self.owner_id)
+                return owner is not None and owner.role == "admin" and owner.status in ("probation", "active")
+        except Exception:
+            traceback.print_exc()
+            return False
 
     def start(self):
         """Start the turn driver."""
@@ -720,7 +746,9 @@ class GameSession:
             except Exception:
                 pass
         final, failed = None, None
+        was_stopped = self._stop
         with self.lock:                 # no autosave is between its check and its snapshot as the writer closes
+            index = (self.game.turn, self.game.phase)
             if save_as is not None:
                 try:
                     if self.read_only:
@@ -737,6 +765,10 @@ class GameSession:
         self._writer.close()
         if self.journal is not None:
             self.journal.close()
+        if not was_stopped and not self.read_only:
+            # the games index: closed before its end, or finished (P3.2.5); off the lock, after the last save
+            from . import ownership
+            ownership.sync_quietly(self.id, turn=index[0], phase=index[1], stopped=True)
         if failed is not None:
             raise failed
         return final.result() if final is not None else None
@@ -927,7 +959,8 @@ class GameSession:
             journal = self._timeline()
             snap = self.game.save_snapshot(journal)
             job = SaveJob(snap, journal, self.folder / f"{name}.citar", autosave,
-                          json.dumps(self._session_record()).encode(), self.metrics.json_parts(), self.game.turn)
+                          json.dumps(self._session_record()).encode(), self.metrics.json_parts(), self.game.turn,
+                          self.game.phase)
             self._writer.submit(job)
             took = time.perf_counter() - t0
             st = self.save_lock
@@ -1060,6 +1093,16 @@ class GameSession:
             return
         self.flush_saves(self.AUTOSAVE_WAIT_SECONDS)
 
+    def _autosave_landed(self, turn: int, phase: str):
+        """A round's autosave is on the disk: put the game's turn and status on its row in the games index (P3.2.5).
+        Called on the save writer's thread, after the save counts as written, so neither the game's lock nor a wait
+        for the saves (``flush_saves``) ever waits on the database. Nothing for a game opened only to be read."""
+        if self.read_only or (turn, phase) == self._indexed:
+            return
+        self._indexed = (turn, phase)
+        from . import ownership
+        ownership.sync_quietly(self.id, turn=turn, phase=phase)
+
     def save_writer_stats(self) -> dict:
         """What the session's saves cost off the lock, and the turn of the autosave on the disk (``SaveWriter.stats``)."""
         return self._writer.stats()
@@ -1115,13 +1158,15 @@ class SaveJob:
     """One save the writer writes: the snapshot taken under the lock, its journal, where it goes, and copies of the
     session's record and metrics as JSON (the metrics in pieces, joined off the lock). ``result`` waits for it."""
 
-    __slots__ = ("snap", "journal", "path", "autosave", "session", "metrics", "turn", "done", "error", "superseded",
-                 "ticket")
+    __slots__ = ("snap", "journal", "path", "autosave", "session", "metrics", "turn", "phase", "done", "error",
+                 "superseded", "ticket")
 
-    def __init__(self, snap, journal, path: Path, autosave: bool, session: bytes, metrics, turn: int = 0):
+    def __init__(self, snap, journal, path: Path, autosave: bool, session: bytes, metrics, turn: int = 0,
+                 phase: str = "playing"):
         self.snap, self.journal, self.path, self.autosave = snap, journal, path, autosave
         self.session, self.metrics = session, metrics
         self.turn = turn                 # the game's turn when it was taken
+        self.phase = phase               # and its phase
         self.ticket = 0                  # its place in the writer's order (SaveWriter.submit)
         self.done = threading.Event()
         self.error: Optional[BaseException] = None
@@ -1243,6 +1288,15 @@ class SaveWriter:
                     if job.autosave and job.error is None:
                         st["autosave_turn"] = job.turn
                     self._cv.notify_all()
+                if job.autosave and job.error is None:
+                    # only now, once the save counts as written: a wait for the saves never waits on the database
+                    s = self._session()
+                    if s is not None:
+                        try:
+                            s._autosave_landed(job.turn, job.phase)
+                        except Exception:
+                            traceback.print_exc()
+                    s = None
                 job = passed = None
 
     def stats(self) -> dict:
@@ -1473,12 +1527,13 @@ class SessionManager:
         _MANAGERS.add(self)
 
     def create(self, config: dict, seats_cfg: list[dict], name: str = "", track: bool = True,
-               start: bool = True) -> GameSession:
+               start: bool = True, owner_id: Optional[str] = None) -> GameSession:
         """Create a game from a lobby configuration and start its session.
 
         ``start=False`` leaves the game stopped so the caller can finish setting it up first: the driver plays
         the first AI turn at once, so anything that turn reads (``benchmark``, which exempts the game from the
-        lobby's quiet hours and queue) must be in place before ``start()``.
+        lobby's quiet hours and queue, ``owner_id``, which decides what its model seats may dial) must be in place
+        before ``start()``.
         """
         players = []
         seats = []
@@ -1496,6 +1551,7 @@ class SessionManager:
         cfg["players"] = players
         game = EngineGame.new(cfg)
         s = GameSession(game, seats, name)
+        s.owner_id = owner_id
         s.open_timeline()                    # before anything can reach the session, so before anything can save it
         s.registered = True
         with self.lock:
@@ -1524,9 +1580,12 @@ class SessionManager:
             traceback.print_exc()
 
     def create_from_scenario(self, scn: dict, seats_cfg: Optional[list] = None, name: str = "",
-                             register: bool = True, start: bool = True) -> GameSession:
+                             register: bool = True, start: bool = True,
+                             check_seat: Optional[Callable[[dict], dict]] = None) -> GameSession:
         """A new game from a scenario's saved state. Seats default to the scenario's; a "script" seat (probes) is
-        driven from outside, so in a normal game it behaves like a human seat."""
+        driven from outside, so in a normal game it behaves like a human seat. ``check_seat`` sees each seat as the
+        scenario's defaults and ``seats_cfg`` make it, before anything is set up, and returns it (cleaned) or raises:
+        the launch route's gate on members' model blocks (P3.2.9)."""
         g = EngineGame.from_state(scn["state"])
         defaults = scn.get("seats") or []
         seats = []
@@ -1535,6 +1594,8 @@ class SessionManager:
             sc = dict(defaults[pid]) if pid < len(defaults) else {}
             if seats_cfg and pid < len(seats_cfg) and seats_cfg[pid]:
                 sc.update({k: v for k, v in seats_cfg[pid].items() if v is not None})
+            if check_seat is not None:
+                sc = check_seat(sc)
             stype = sc.get("type") or "bot"
             if stype == "script":
                 stype = "human"
@@ -1592,8 +1653,13 @@ class SessionManager:
             return s
 
     def _register_loaded(self, s: GameSession):
-        """A loaded session joins the live ones, paused, its driver started."""
+        """A loaded session joins the live ones, paused, its driver started. Its row in the games index says
+        it is played again (one is made for a game without: ``ownership.index_loaded``), and gives the session its
+        owner, before the driver starts."""
+        from . import ownership
         s.registered = True
+        s.owner_id = ownership.index_loaded(s)
+        s._indexed = (s.game.turn, s.game.phase)
         with self.lock:
             self.sessions[s.id] = s
         s.paused = True

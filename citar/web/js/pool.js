@@ -141,7 +141,7 @@ function grantDialog(group, existing, onSaved) {
       note: note.value,
       windows: windows.value(),
       budget: amount > 0
-        ? { period: budgetPeriod.value, amount, currency: "USD", behavior: budgetBehavior.value }
+        ? { period: budgetPeriod.value, amount, unit: "credits", behavior: budgetBehavior.value }
         : null,
     };
     try {
@@ -167,12 +167,12 @@ function grantDialog(group, existing, onSaved) {
         el("span", { class: "field-label" }, "Simultaneous games"), concurrency,
         el("span", { class: "muted small" }, "0 uses the server's own limit.")),
       el("div", { class: "field" },
-        el("span", { class: "field-label" }, "Spend cap"),
+        el("span", { class: "field-label" }, "Spend cap (credits)"),
         el("div", { class: "row gap wrap" }, budgetAmount, budgetPeriod),
         budgetBehavior,
         el("span", { class: "muted small" },
-          "Accounting only — nobody is charged and no money moves. The cap is measured from the "
-          + "usage ledger and stops work being scheduled. Periods end at your midnight.")),
+          "Accounting only — nobody is charged and no money moves. Credits are the compute ledger's unit "
+          + "(about one per GPU generation-second); the cap stops work being scheduled. Periods end at your midnight.")),
       el("label", { class: "field" }, el("span", { class: "field-label" }, "Note"), note)),
     footer: [el("button", { onclick: () => m.close() }, "Cancel"),
              el("button", { class: "primary", onclick: save }, "Save")],

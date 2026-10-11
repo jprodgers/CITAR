@@ -268,7 +268,7 @@ def cmd_workers(args) -> int:
             print("No servers registered.")
             return 0
         for server in rows:
-            owner = s.get(User, server.owner_id)
+            owner = s.get(User, server.owner_id) if server.owner_id else None
             toks = list(s.scalars(select(WorkerToken).where(WorkerToken.server_id == server.id)))
             live = [t for t in toks if t.revoked_at is None]
             last = max((t.last_seen_at for t in live if t.last_seen_at), default=None)

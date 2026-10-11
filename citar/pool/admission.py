@@ -218,8 +218,8 @@ def _check_grant(session, user: User, server: Server, grant: AccessGrant, purpos
                      (f"The budget for “{group_name}” is used up "
                       if used_up else
                       f"The budget for “{group_name}” has too little left to start new work ")
-                     + f"({budget_state.currency} {budget_state.committed:.2f} of "
-                     f"{budget_state.limit:.2f} {budgets.period_label(budget_state.period, budget_state.key)}). "
+                     + f"({budget_state.committed:.2f} of {budget_state.limit:.2f} {budget_state.unit} "
+                     f"{budgets.period_label(budget_state.period, budget_state.key)}). "
                      + (f"It resets {windows._relative(period_end, now)}."
                         if budget_state.period != "total"
                         else "Its owner would have to raise it."),

@@ -1,17 +1,22 @@
 """Sharing reports and datasets, and reading what has been shared.
 
-Reports get the same visibility ladder as games — private, allowlist, link, public — set
+Reports get the same visibility ladder as games — private, allowlist, link, server, global — set
 independently of the games they draw on. That separation is the point: an analysis can be published
 while the games behind it stay private, which is the normal case for somebody who wants to show a
 conclusion without handing over their raw results.
 
-A public report is readable with no account at all. That is the only route in this application that
+A report is an owned item of kind `report` (`owned_items`, design/phase3-features.md P3.2.4), named
+here by its id on disk (the row's `ref`); its scope is in the row's `meta`. Package 3-03 moves these
+routes onto the generic item routes.
+
+A global report is readable with no account at all. That is the only route in this application that
 serves somebody else's content to an anonymous stranger, so it is deliberately narrow: it renders
 the stored HTML and nothing else, it is marked `noindex`, and it never includes the underlying
 game list unless the owner also shared those.
 """
 from __future__ import annotations
 
+import html as _html
 import logging
 from typing import Optional
 
@@ -24,7 +29,7 @@ from sqlalchemy.orm import Session
 from .. import aggregate, settings
 from ..auth import access, accounts, audit
 from ..auth.deps import Principal, get_db, principal, require_user
-from ..db.models import Report, User
+from ..db.models import OwnedItem, User
 
 log = logging.getLogger("citar.share_api")
 router = APIRouter()
@@ -36,32 +41,43 @@ def _share_key(request: Request) -> Optional[str]:
             or request.headers.get("x-citar-share-key"))
 
 
+REPORT = "report"
+
+
+def _row(s: Session, report_id: str) -> Optional[OwnedItem]:
+    """A report's row, by its id on disk."""
+    return s.scalar(select(OwnedItem).where(OwnedItem.kind == REPORT, OwnedItem.ref == report_id))
+
+
 def _report(s: Session, report_id: str, viewer: Optional[User], permission: str,
-            request: Request) -> Report:
+            request: Request) -> OwnedItem:
     """A report the viewer has a permission on, or 404."""
-    row = s.get(Report, report_id)
+    row = _row(s, report_id)
     if row is None:
         raise HTTPException(404, "No such report.")
     access.on(s, viewer, row, slug=_share_key(request)).require(permission)
     return row
 
 
-def _to_client(s: Session, row: Report, perms: access.Access) -> dict:
+def _to_client(s: Session, row: OwnedItem, perms: access.Access) -> dict:
     """A report as the viewer may see it, with their permissions on it."""
     owner = s.get(User, row.owner_id) if row.owner_id else None
     out = {
-        "id": row.id, "name": row.name, "visibility": row.visibility, "scope": row.scope,
+        "id": row.ref, "name": row.name, "visibility": row.visibility,
+        "scope": (row.meta or {}).get("scope", "own"),
         "owner": owner.public() if owner else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         **perms.client(),
     }
     if access.MANAGE in perms:
         base = settings.get().public_origin
-        if row.visibility in ("link", "public"):
-            out["share_url"] = f"{base}/#/reports/{row.id}?k={row.slug}"
-        if row.visibility == "public":
-            out["public_url"] = f"{base}/r/{row.id}"
+        if row.visibility in (access.LINK, access.SERVER, access.GLOBAL):
+            key = f"?k={row.slug}" if row.visibility == access.LINK else ""
+            out["share_url"] = f"{base}/#/reports/{row.ref}{key}"
+        if row.visibility == access.GLOBAL:
+            out["public_url"] = f"{base}/r/{row.ref}"
         out["shared_with"] = access.shared_with(s, row)
+        out["unpublished"] = access.last_unpublished(s, row)
     return out
 
 
@@ -70,8 +86,11 @@ def _to_client(s: Session, row: Report, perms: access.Access) -> dict:
 @router.get("/api/shared/reports")
 def list_reports(request: Request, p: Principal = Depends(principal),
                  s: Session = Depends(get_db)):
-    """Reports this caller may see: their own, anything shared with them, and public ones."""
-    rows = access.visible(s, Report, p.user, order_by=Report.created_at.desc())
+    """Reports this caller may see: their own, anything shared with them, members' ones for a member,
+    and global ones."""
+    rows = list(s.scalars(select(OwnedItem).where(OwnedItem.kind == REPORT,
+                                                  access.visible_filter(OwnedItem, p.user))
+                          .order_by(OwnedItem.created_at.desc()).limit(200)))
     return {"reports": [_to_client(s, r, access.on(s, p.user, r)) for r in rows]}
 
 
@@ -149,7 +168,7 @@ def public_report(report_id: str, request: Request, p: Principal = Depends(princ
     """
     from pathlib import Path
 
-    row = s.get(Report, report_id)
+    row = _row(s, report_id)
     if row is None or row.deleted_at is not None:
         raise HTTPException(404, "No such report.")
     access.on(s, p.user, row, slug=_share_key(request)).require(access.VIEW)
@@ -167,13 +186,13 @@ def public_report(report_id: str, request: Request, p: Principal = Depends(princ
             if root in resolved.parents and resolved.is_file():
                 html = resolved.read_text(encoding="utf-8", errors="replace")
             else:
-                log.warning("report %s points outside the reports directory: %s", row.id, row.path)
+                log.warning("report %s points outside the reports directory: %s", row.ref, row.path)
         except Exception:
-            log.exception("could not read report %s", row.id)
+            log.exception("could not read report %s", row.ref)
 
     if not html:
         html = ("<!doctype html><meta charset='utf-8'><title>Report</title>"
-                f"<body style='font-family:sans-serif;padding:40px'><h1>{row.name or 'Report'}</h1>"
+                f"<body style='font-family:sans-serif;padding:40px'><h1>{_html.escape(row.name or 'Report')}</h1>"
                 "<p>This report has not been generated yet.</p>")
 
     return HTMLResponse(html, headers={

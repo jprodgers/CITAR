@@ -93,7 +93,7 @@ def lookup(server_id: Optional[str]) -> Optional[dict]:
             sv = s.get(Server, server_id)
             if sv is None:
                 return None
-            owner = s.get(User, sv.owner_id)
+            owner = s.get(User, sv.owner_id) if sv.owner_id else None
             return {"id": sv.id, "name": sv.name, "provider": sv.provider, "enabled": sv.enabled,
                     "config": dict(sv.config or {}), "owner_tz": (owner.tz if owner else None) or "UTC"}
     except Exception:
@@ -201,18 +201,25 @@ def authorize(session, user, seats: list[dict]) -> None:
     """Refuse a game whose LLM seats use pooled machines the creator may not use for games right now.
 
     Raises ValueError with the admission system's own explanation (no grant, outside a window, budget
-    spent, machine offline...).
+    spent, machine offline...), except to somebody who may not even see the machine: they are told only
+    that they may not use it, since the explanation names the machine and its group. The machines of
+    ``config/servers.json`` are not rows, and ``servers.member_llm`` decides about them.
     """
+    from ..auth import access
     from ..db.models import Server
     from ..server.workers import hub
     from . import admission
     for seat in seats:
         llm = seat.get("llm") or {}
-        if seat.get("type") != "llm" or not llm.get("server_id") or lookup(llm["server_id"]) is None:
+        if seat.get("type") != "llm" or not llm.get("server_id"):
             continue
         server = session.get(Server, llm["server_id"])
+        if server is None:
+            continue
         decision = admission.check(session, user, server, "game", online=hub().is_online(server.id),
                                    in_flight=hub().in_flight(server.id))
         # "busy right now" is fine for a game: its turns take their place in the machine's queue
         if not decision.allowed and decision.code != "concurrency":
+            if access.VIEW not in access.on(session, user, server):
+                raise ValueError("You may not use that machine. Pick one of the machines you may use.")
             raise ValueError(f"{server.name}: {decision.reason}")
