@@ -117,6 +117,7 @@ run on 2026-09-20 and CITAR opened the restored database and read its accounts.
 
 ```bash
 sudo citar-admin create-admin --handle NAME --email you@example.com   # first admin
+sudo citar-admin create-user --handle NAME --email them@example.com --role moderator   # active, verified
 sudo citar-admin list-users
 sudo citar-admin set-role NAME moderator
 sudo citar-admin set-status NAME suspended --reason "why"
@@ -126,7 +127,8 @@ sudo citar-admin policy registration invite       # open | invite | closed
 ```
 
 Passwords are always prompted for, never passed as arguments — an argument ends up in the shell
-history and in the process list.
+history and in the process list. A script gives `create-user` its password on standard input instead
+(`--password-stdin`, the first line).
 
 **Locked out entirely?** The CLI does not need the web app or a session. `create-admin --force`
 adds another administrator.

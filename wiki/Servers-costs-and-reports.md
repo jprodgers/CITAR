@@ -111,7 +111,8 @@ useful property of the design: you do not have to know your electricity tariff b
    comparison over time*, *Model behaviour in scenarios*, *Bot lab experiments*, *Everything* — or
    tick sections yourself.
 2. Choose the period and scope: activity types, servers, models, or specific benchmark runs, probe
-   runs, lab experiments and games.
+   runs, lab experiments and games. **Data** says what the figures come from: what you may see (the
+   default), that plus pooled averages, or pooled averages only (below).
 3. Options: count electricity as the full draw or only the extra power the work caused, and the
    lifespan range for the depreciation sensitivity table.
 4. Optionally have a model write an analysis — pick server, model and profile, plus instructions.
@@ -121,7 +122,32 @@ useful property of the design: you do not have to know your electricity tariff b
 **View** opens it in place; **Open in new tab** and **Download** give a single self-contained HTML
 file — inline SVG charts with hover values and a data table under each, light and dark themes,
 printable, no internet needed. **Re-run** makes a fresh one with current data; **Edit copy** loads
-its choices back into the builder.
+its choices back into the builder. **Share** (for the report's owner) sets who can see it, as for a
+game: members, a link, people by name, or the whole internet (an administrator's permission); a report
+shared by link or published has a page for people with no account, `/r/<key>` or `/r/<id>`. The
+phone site's Reports tab lists the same reports.
+
+### What a report contains
+
+Building a report needs the `run_reports` capability; the report is yours, private until you share
+it. What it gathers depends on whose it is:
+
+- **A member's report** covers what its owner may see: the activities of their own games, benchmark
+  runs, probe runs, lab experiments and reports, and of those shared with them, with members or with
+  everyone. Another member's private game or run is not in it, not even by name.
+- **Costs are counted on your own machines only.** An activity that also ran on the server's own
+  machines or on another member's (your game's engine on the CITAR host, your seat on a machine shared
+  with you) keeps its outcome and its usage, but not what it cost there; a data-quality note says how
+  many such activities there were. The servers, hardware, costs-over-time and lifespan sections show
+  your machines and no one else's.
+- **Pooled averages** (Data: "plus pooled averages" or "pooled averages only") add, in the model
+  comparison, per-model figures over the games other members pool (each game's own pooling setting
+  and its owner's), each model shown only once enough different accounts are behind it, so no
+  average is one person's results.
+- **An administrator's report** covers everything on the server, every machine priced.
+
+A report is built when it runs, with what its owner may see then: sharing something with you later
+does not change a report already built; **Re-run** builds it again.
 
 ### Sections
 
