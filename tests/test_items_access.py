@@ -13,6 +13,7 @@ The other gates: every producer writes its row when its item is made through its
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import secrets
@@ -37,12 +38,12 @@ os.environ.setdefault("CITAR_SECRET_KEY", "test-secret-key-that-is-long-enough-t
 os.environ["CITAR_REQUIRE_HTTPS"] = "0"
 os.environ["CITAR_BEHIND_PROXY"] = "0"
 
-from sqlalchemy import select
+from sqlalchemy import event, func, select
 
 from citar import db, engine_api, items, lab, probes, settings
 from citar.auth import access, accounts, policy, sessions
 from citar.bots import profiles
-from citar.db.models import AclEntry, AuditLog, Base, Game as GameRow, User
+from citar.db.models import AclEntry, AuditLog, Base, Game as GameRow, OwnedItem, Server, ServerGroup, User
 
 settings.reset()
 db.configure(os.environ["CITAR_DB_URL"])
@@ -761,6 +762,7 @@ class SystemItemsAndAdoption(ItemCase):
         for who in ("owner", "admin"):
             self.assertEqual(self.call(who, "GET", f"/api/maps/{ref}").status_code, 404, "nobody's until adopted")
         with db.session() as s:
+            before = s.scalar(select(func.count()).select_from(AuditLog))
             counts = items.adopt_orphans(s, items.first_admin(s))
         self.assertGreaterEqual(counts.get("map", 0), 1)    # other suites' maps on the shared disk may be strays too
         row = self.row("map", ref)
@@ -768,11 +770,14 @@ class SystemItemsAndAdoption(ItemCase):
         with db.session() as s:
             audits = list(s.scalars(select(AuditLog).where(AuditLog.action == "migration.items_adopted")))
             self.assertEqual(len(audits), 1)
+            self.assertEqual(s.scalar(select(func.count()).select_from(AuditLog)) - before, 1,
+                             "one audit row for everything adopted, none per item: nobody made them now")
             self.assertIsNotNone(policy.marker(s, "orphans_adopted"))
         self.assertEqual(self.call("admin", "GET", f"/api/maps/{ref}").status_code, 200)
         self.assertEqual(self.call("owner", "GET", f"/api/maps/{ref}").status_code, 404)
-        with db.session() as s:
+        with db.session() as s, mock.patch.object(items, "_describe", side_effect=AssertionError("read")) as read:
             self.assertEqual(items.adopt_orphans(s, items.first_admin(s)), {}, "adopting twice adopts nothing")
+            self.assertEqual(read.call_count, 0, "a file whose id has a row is not read: a start lists, not parses")
 
     def test_a_file_that_names_its_owner_goes_back_to_them(self):
         """A run's file records its owner: adopted, it is theirs, not the administrator's; a report's too."""
@@ -828,6 +833,73 @@ class SystemItemsAndAdoption(ItemCase):
         ref = self._stray()
         self.assertEqual(admin_cli.cmd_set_role(SimpleNamespace(handle="olive", role="admin")), 0)
         self.assertEqual(self.row("map", ref).owner_id, self.ids["owner"])
+
+    def _damaged_scenarios(self):
+        """Two scenario files that do not read, as a crash mid-write or a bad disk leaves them: one cut short (gzip
+        raises EOFError), one whose compressed data is garbage (zlib.error). Removed by the test's cleanup."""
+        folder = engine_api.scenario_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        cut = "cut-" + secrets.token_hex(3)
+        whole = gzip.compress(json.dumps({"name": "whole", "state": {"x": list(range(4000))}}).encode())
+        (folder / f"{cut}.citarscn").write_bytes(whole[:len(whole) // 2])
+        bad = "bad-" + secrets.token_hex(3)
+        (folder / f"{bad}.citarscn").write_bytes(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff" + b"\xff\xfe" * 64)
+        self.addCleanup(lambda: [(folder / f"{r}.citarscn").unlink(missing_ok=True) for r in (cut, bad)])
+        return cut, bad
+
+    def test_an_unreadable_file_stops_neither_the_boot_nor_the_first_administrator(self):
+        """A damaged item file is adopted under its id by the administrator (private: nobody else's, theirs to remove)
+        and the files after it are adopted as usual: neither the boot nor ``create-admin`` fails on it."""
+        from citar.server import admin_cli
+        cut, bad = self._damaged_scenarios()
+        ref = self._stray()
+        counts = items.on_boot()
+        self.assertGreaterEqual(counts.get("map", 0), 1)
+        self.assertEqual(self.row("map", ref).owner_id, self.ids["admin"])
+        for damaged in (cut, bad):
+            row = self.row("scenario", damaged)
+            self.assertEqual((row.owner_id, row.visibility, row.name), (self.ids["admin"], "private", damaged))
+            self.assertEqual(self.call("owner", "GET", f"/api/scenarios/{damaged}").status_code, 404)
+            self.assertEqual(self.call("admin", "DELETE", f"/api/scenarios/{damaged}").status_code, 200,
+                             "the administrator may remove it through its route")
+        # a fresh server-mode database: the first administrator is made with damaged files on the disk
+        with db.session() as s:
+            for user in s.scalars(select(User).where(User.role == "admin")):
+                user.role = "user"
+        cut, bad = self._damaged_scenarios()
+        ref = self._stray()
+        with mock.patch.object(admin_cli, "_prompt_password", return_value="a long enough phrase"):
+            code = admin_cli.cmd_create_admin(SimpleNamespace(handle="firstadmin", email="first@example.com",
+                                                              name="", force=False))
+        self.assertEqual(code, 0)
+        with db.session() as s:
+            first = accounts.by_handle(s, "firstadmin")
+            self.assertEqual(first.role, "admin")
+            self.assertEqual(items.get(s, "map", ref).owner_id, first.id)
+            self.assertEqual(items.get(s, "scenario", cut).owner_id, first.id)
+
+    def test_a_failed_adoption_keeps_the_administrator_and_the_boot(self):
+        """Whatever adoption meets, it never takes the new administrator with it, nor stops the server's start: it is
+        rolled back alone and tried again at the next start."""
+        from citar.server import admin_cli
+        with db.session() as s:
+            for user in s.scalars(select(User).where(User.role == "admin")):
+                user.role = "user"
+        ref = self._stray()
+        with mock.patch.object(items, "adopt_orphans", side_effect=RuntimeError("disk on fire")):
+            with mock.patch.object(admin_cli, "_prompt_password", return_value="a long enough phrase"):
+                code = admin_cli.cmd_create_admin(SimpleNamespace(handle="firstadmin", email="first@example.com",
+                                                                  name="", force=False))
+            self.assertEqual(code, 0)
+            self.assertIsNone(items.on_boot(), "a failed adoption is logged, not raised")
+        with db.session() as s:
+            self.assertEqual(accounts.by_handle(s, "firstadmin").role, "admin")
+            self.assertIsNone(items.get(s, "map", ref), "nothing adopted: it answers 404 until the next start")
+            self.assertIsNone(policy.marker(s, "orphans_adopted"))
+            self.assertEqual(items.get(s, "bot_profile", "standard").visibility, "global",
+                             "the shipped items' rows are written apart from adoption")
+        self.assertGreaterEqual(items.on_boot().get("map", 0), 1, "the next start adopts it")
+        self.assertIsNotNone(self.row("map", ref))
 
     def test_a_deleted_items_id_is_a_new_item(self):
         ref = self.make("map", "allowlist", share_with="reader")
@@ -996,6 +1068,43 @@ class ModelBlocks(ItemCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.made.append(("report", r.json()["id"]))
 
+    def test_a_report_narrative_is_admitted_to_its_pooled_machine(self):
+        """A pooled machine a member has no grant on (another account's, in a private group) is refused for their
+        report's narrative, on a new report and on a rerun, without being named and with no report made; their own
+        machine is theirs to use."""
+        with db.session() as s:
+            group = ServerGroup(owner_id=self.ids["admin"], name="Admin's box", visibility="private")
+            s.add(group)
+            s.flush()
+            s.add(Server(id="sv_private", owner_id=self.ids["admin"], group_id=group.id, name="Admin's GPU",
+                         kind="owned", provider="worker", reach="worker", config={"models": [{"key": "m"}]}))
+            s.add(Server(id="sv_mine", owner_id=self.ids["owner"], name="Olive's GPU", kind="owned",
+                         provider="worker", reach="worker", config={"models": [{"key": "m"}]}))
+
+        def reports():
+            with db.session() as s:
+                return s.scalar(select(func.count()).select_from(OwnedItem).where(OwnedItem.kind == "report"))
+        before = reports()
+        narrative = {"enabled": True, "server_id": "sv_private", "model_id": "m"}
+        r = self.call("owner", "POST", "/api/reports", {"title": "n", "narrative": narrative})
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertNotIn("Admin", r.json()["detail"], "a machine the member cannot see is not named")
+        self.assertEqual(reports(), before, "no report was made")
+        rid = self.make("report")
+        from citar.server import reports_api
+        spec_file = reports_api.reports_runner().dir / rid / "spec.json"
+        spec_file.write_text(json.dumps({"title": "rerun", "narrative": narrative}), encoding="utf-8")
+        before = reports()
+        r = self.call("owner", "POST", f"/api/reports/{rid}/rerun")
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(reports(), before, "no report was made")
+        r = self.call("owner", "POST", "/api/reports", {"title": "n", "narrative": dict(narrative, server_id="sv_mine")})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.made.append(("report", r.json()["id"]))
+        r = self.call("admin", "POST", "/api/reports", {"title": "n", "narrative": narrative})
+        self.assertEqual(r.status_code, 200, "an administrator may use any machine")
+        self.made.append(("report", r.json()["id"]))
+
     def test_another_members_run_shows_no_machine_address(self):
         """A run or a probe run another member may see carries no machine's address or key variable."""
         ref = self.make("benchmark_run", "server")
@@ -1010,6 +1119,151 @@ class ModelBlocks(ItemCase):
         seen = self.call("stranger", "GET", f"/api/probe-runs/{rid}").json()
         self.assertNotIn("10.0.0.6", json.dumps(seen))
         self.assertNotIn(SECRET_VAR, json.dumps(seen))
+
+
+class BadBodies(ItemCase):
+    def test_a_body_of_the_wrong_shape_is_a_400(self):
+        """A member's request whose item references, suite or report specification has the wrong shape is refused
+        with 400, never a 500 (the test client raises a server error)."""
+        pid = self.make("probe")
+        r = self.call("owner", "POST", "/api/games", {"name": "g", "config": CONFIG, "seats": BOTS})
+        self.assertEqual(r.status_code, 200, r.text)
+        gid = r.json()["id"]
+        self.addCleanup(lambda: self.manager.delete(gid))
+        r = self.call("owner", "POST", "/api/scenario-editor", {"source": "generate", "config": CONFIG,
+                                                               "players": [{"type": "bot"}, {"type": "bot"}]})
+        eid = r.json()["editor_id"]
+        servers_ = [{"server_id": "sv_dryrun", "models": [{"model_id": "m_dry"}]}]
+        bad = [
+            ("POST", "/api/games", {"config": CONFIG, "seats": [{"type": "bot", "bot": {"profile": ["x"]}},
+                                                               {"type": "bot"}]}),
+            ("POST", f"/api/games/{gid}/seats/1", {"type": "bot", "bot": {"profile": {"a": 1}}}),
+            ("POST", f"/api/scenarios/{self.base_scenario}/launch", {"seats": [{"type": "bot",
+                                                                                "bot": {"profile": [1]}}]}),
+            ("POST", f"/api/scenario-editor/{eid}/save", {"name": "bad", "seats": [{"type": "bot",
+                                                                                   "bot": {"profile": [1]}},
+                                                                                  {"type": "bot"}]}),
+            ("POST", "/api/benchmarks/suites", {"name": "x", "servers": servers_,
+                                                "scenarios": [{"name": "s", "bot_profile": ["x"]}]}),
+            ("POST", "/api/benchmarks/suites", {"id": 5, "name": "x", "servers": servers_}),
+            ("POST", "/api/benchmarks/suites", {"id": ["a"], "name": "x", "servers": servers_}),
+            ("POST", "/api/benchmarks/suites", {"name": ["x"], "servers": servers_}),
+            ("POST", "/api/benchmarks/runs", {"suite": {"name": "x", "servers": [{"server_id": "sv_dryrun",
+                                                                                  "models": [5]}]}}),
+            ("POST", f"/api/probes/{pid}/run", {"llm": {"provider": "bot", "profile": ["x"]}}),
+            ("POST", "/api/reports", {"title": "x", "narrative": "yes"}),
+            ("POST", "/api/reports", {"title": "x", "scope": [1]}),
+            ("POST", "/api/reports", {"title": "x", "range": 3}),
+            ("POST", "/api/reports", {"title": "x", "scope": {"servers": 4}}),
+            ("POST", "/api/reports", {"title": "x", "sections": "summary"}),
+            ("POST", "/api/reports", {"title": "x", "options": {"lifespan_range": [{}, 2]}}),
+            ("POST", "/api/reports", {"title": "x", "narrative": {"enabled": True, "server_id": ["sv_dryrun"]}}),
+        ]
+        for method, path, body in bad:
+            with self.subTest(route=f"{method} {path}", body=body):
+                r = self.call("owner", method, path, body)
+                self.assertEqual(r.status_code, 400, r.text[:300])
+        # a preset that is not one is no preset, as before
+        r = self.call("owner", "POST", "/api/reports", {"title": "x", "preset": ["x"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.made.append(("report", r.json()["id"]))
+
+
+class ItemsInsideOthers(ItemCase):
+    """Using an item in something else needs VIEW on it when the thing is run or launched, not only when it is saved:
+    sharing the outer item does not share the inner one."""
+
+    def test_a_shared_probe_runs_only_for_those_who_see_its_scenario(self):
+        theirs = self.make("scenario", owner="reader", share_with="owner")     # shared with the probe's owner only
+        body = {"name": "On theirs", "scenario": theirs, "subject": 1, "counterparty": 0,
+                "cases": [{"id": "hi", "kind": "message", "message": "Hi."}]}
+        self.assertEqual(self.call("owner", "PUT", "/api/probes/on-theirs", body).status_code, 200)
+        self.made.append(("probe", "on-theirs"))
+        r = self.call("owner", "PUT", "/api/items/probe/on-theirs/sharing", {"visibility": "server"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.call("stranger", "GET", "/api/probes/on-theirs").status_code, 200)
+        r = self.call("stranger", "POST", "/api/probes/on-theirs/run", {"llm": {"provider": "bot"}})
+        self.assertEqual(r.status_code, 404, r.text)
+        for who in ("owner", "reader", "admin"):
+            with self.subTest(caller=who):
+                r = self.call(who, "POST", "/api/probes/on-theirs/run", {"llm": {"provider": "bot"}})
+                self.assertEqual(r.status_code, 200, r.text)
+                self.made.append(("probe_run", r.json()["id"]))
+
+    def test_a_launch_checks_the_profiles_the_scenarios_own_seats_play(self):
+        mine = self.make("bot_profile", share_with=None)
+        r = self.call("owner", "POST", "/api/scenario-editor", {"source": "generate", "config": CONFIG,
+                                                               "players": [{"type": "bot"}, {"type": "bot"}]})
+        eid = r.json()["editor_id"]
+        r = self.call("owner", "POST", f"/api/scenario-editor/{eid}/save",
+                      {"name": "With my bot", "seats": [{"type": "bot", "bot": {"profile": mine}}, {"type": "bot"}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        sid = r.json()["id"]
+        self.made.append(("scenario", sid))
+        self.assertEqual(engine_api.load_scenario(sid)["seats"][0]["bot"]["profile"], mine)
+        r = self.call("owner", "PUT", f"/api/items/scenario/{sid}/sharing", {"visibility": "server"})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.call("stranger", "POST", f"/api/scenarios/{sid}/launch", {"name": "theirs"})
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertNotIn("theirs", {s.name for s in self.manager.sessions.values()})
+        # a seat the launch gives a profile of its own plays that one instead
+        for who, body in (("stranger", {"name": "own seat", "seats": [{"type": "bot", "bot": {"profile": "standard"}}]}),
+                          ("owner", {"name": "owners"})):
+            with self.subTest(caller=who):
+                r = self.call(who, "POST", f"/api/scenarios/{sid}/launch", body)
+                self.assertEqual(r.status_code, 200, r.text)
+                self.manager.delete(r.json()["id"])
+
+
+class BestBot(ItemCase):
+    def test_best_is_a_profile_every_member_may_see(self):
+        """"Best bot" stands for the best-rated profile every member may see (the shipped ones, `server` and `global`
+        ones), the same one for a seat, the lab and the Bots page, whoever asks: never a member's private profile,
+        however it ranks."""
+        from citar.bots import ratings
+        from citar.server import session as sess
+        private = self.make("bot_profile", share_with=None)
+        shared = self.make("bot_profile", "server", share_with=None)
+        board = [{"id": pid, "name": pid, "engine": "basic", "archived": False, "rating_same_settings": True,
+                  "rating": {"rated": True, "rating": rating}}
+                 for pid, rating in ((private, 1700), (shared, 1600), ("standard", 1500))]
+        with mock.patch.object(ratings, "ranked_profiles", lambda board_=None: [dict(p) for p in board]):
+            self.assertEqual(ratings.best_profile(), shared)
+            self.assertEqual(sess._pin_best({"profile": "best"}), {"profile": shared, "chosen_as": "best"})
+            self.assertEqual(profiles.resolve("best")["profile"], shared)
+            for who in ("owner", "stranger", "admin", "anonymous"):
+                with self.subTest(caller=who):
+                    r = self.call(who, "GET", "/api/bots/profiles")
+                    self.assertEqual(r.json()["best"], shared, r.text[:300])
+            self.assertEqual(ratings.best_profile(among={private, shared}), private, "a caller may name the pool")
+            with db.session() as s:
+                items.get(s, "bot_profile", shared).visibility = "private"
+            self.assertEqual(ratings.best_profile(), "standard")
+
+
+class ListingPermissions(ItemCase):
+    def test_a_listings_permissions_are_each_items_in_two_queries(self):
+        """``permissions_by_ref`` answers what ``access.on`` answers for each item, with a fixed number of queries
+        however many items the listing has."""
+        refs = [self.make("map", v, share_with="reader") for v in ("private", "server", "global", "link", "private")]
+        refs.append("no-row-" + secrets.token_hex(3))
+        statements: list = []
+
+        def count(*_a, **_k):
+            statements.append(1)
+        event.listen(db.engine(), "before_cursor_execute", count)
+        self.addCleanup(event.remove, db.engine(), "before_cursor_execute", count)
+        for who in ("owner", "reader", "stranger", "mod", "admin", "anonymous"):
+            with db.session() as s:
+                viewer = s.get(User, self.ids[who]) if who in self.ids else None
+                statements.clear()
+                got = items.permissions_by_ref(s, "map", viewer, refs)
+                queries = len(statements)
+                want = {ref: access.on(s, viewer, items.get(s, "map", ref)).client()
+                        for ref in refs if items.get(s, "map", ref) is not None}
+            with self.subTest(caller=who):
+                self.assertEqual(got, want)
+                self.assertLessEqual(queries, 2 if viewer is not None else 1)
 
 
 if __name__ == "__main__":
