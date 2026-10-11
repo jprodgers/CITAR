@@ -4,12 +4,14 @@ A seat's model block decides which address the server dials and which key it sen
 a machine (`servers.member_llm`): a block with a base URL, a key variable or a provider of its own and no machine is
 refused on every route that takes one (a new game, a seat change, a scenario's seats and its launch), a machine of
 the registry is an administrator's until it is shared, and a pooled machine needs admission. While these requests
-run, every way out is watched (`NoOutbound`: the network transports, the OpenAI and Anthropic clients, and reads of
-the key variables), and nothing may be used. An administrator's inline block is still accepted.
+run, every way out is watched (`NoOutbound`: the network transports, the OpenAI and Anthropic clients, processes
+started (the `lms` command line of an LM Studio machine), and reads of the key variables), and nothing may be used.
+An administrator's inline block is still accepted.
 """
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -78,16 +80,17 @@ class _WatchedEnviron(dict):
 
 class NoOutbound:
     """Records, and refuses, every way a request could leave the server or reach its keys: httpx's network
-    transports (the test client's own transport is not one), constructing the OpenAI or Anthropic client, and
+    transports (the test client's own transport is not one), constructing the OpenAI or Anthropic client, starting
+    a process (``subprocess.run`` and ``subprocess.Popen``, which the LM Studio command line goes through), and
     reading a watched environment variable. ``calls`` is what was tried."""
 
     def __init__(self):
         self.calls: list = []
         self._patches = []
 
-    def _refuse(self, what):
+    def _refuse(self, what, method=True):
         def refused(*args, **kwargs):
-            self.calls.append((what, args[1:2]))
+            self.calls.append((what, args[1:2] if method else args[:1]))
             raise RuntimeError(f"{what} was called")
         return refused
 
@@ -98,6 +101,8 @@ class NoOutbound:
             mock.patch.object(httpx.AsyncHTTPTransport, "handle_async_request", self._refuse("httpx async")),
             mock.patch.object(openai_provider, "OpenAI", self._refuse("OpenAI client")),
             mock.patch.object(anthropic, "Anthropic", self._refuse("Anthropic client")),
+            mock.patch.object(subprocess, "run", self._refuse("subprocess.run", method=False)),
+            mock.patch.object(subprocess, "Popen", self._refuse("subprocess.Popen", method=False)),
             mock.patch.object(os, "environ", _WatchedEnviron(os.environ, self.calls)),
         ]
         for p in self._patches:
@@ -216,6 +221,43 @@ class NewGames(SeatCase):
     def test_an_unknown_machine_is_refused(self):
         self.assertIn("no such machine", self.create("member", {"server_id": "sv_nowhere"}, 400)["detail"].lower())
 
+    def test_a_seat_that_plays_no_model_is_never_refused_for_its_block(self):
+        """The lobby sends ``llm: s.llm`` for every seat, so a seat switched to a model seat and back to a bot carries
+        the lobby's default block, which names no machine. Nothing plays it: a member's is dropped (or cleaned), an
+        administrator's kept."""
+        lobby_default = {"server_id": None, "model_id": None, "model": "", "profile_id": None,
+                         "max_tool_calls_per_turn": 150, "persona": ""}
+        for seats, kept in (([{"type": "human"}, {"type": "bot", "llm": lobby_default}], {}),
+                            ([{"type": "human", "llm": {"server_id": "sv_api"}}, {"type": "bot"}], None),
+                            ([{"type": "human"}, {"type": "bot", "llm": INLINE["api_key_env"]}], {}),
+                            ([{"type": "human"}, {"type": "bot", "llm": {"server_id": "sv_dryrun", "base_url": "u"}}],
+                             {"server_id": "sv_dryrun"})):
+            with self.subTest(seats=seats):
+                r = self.post("member", "/api/games", {"name": "no model", "config": CONFIG, "seats": seats})
+                self.assertEqual(r.status_code, 200, r.text)
+                self.games.append(r.json()["id"])
+                s = self.manager.get(r.json()["id"])
+                self.assertEqual([seat.type for seat in s.seats], ["human", "bot"])
+                if kept is not None:
+                    self.assertEqual(dict(s.seats[1].llm), kept)
+                self.assertEqual(dict(s.seats[0].llm), {})
+        r = self.post("zara", "/api/games", {"name": "admin's bot", "config": CONFIG,
+                                             "seats": [{"type": "human"}, {"type": "bot", "llm": INLINE["base_url"]}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.games.append(r.json()["id"])
+        self.assertEqual(dict(self.manager.get(r.json()["id"]).seats[1].llm), INLINE["base_url"])
+
+    def test_a_block_that_is_not_an_object_is_refused_for_anyone(self):
+        for who in ("member", "zara"):
+            for block in ("x", 5, [1], True):
+                for stype in ("llm", "bot"):
+                    with self.subTest(who=who, block=block, seat=stype):
+                        r = self.post(who, "/api/games", {"name": "bad", "config": CONFIG,
+                                                          "seats": [{"type": "human"}, {"type": stype, "llm": block}]})
+                        self.assertEqual(r.status_code, 400, r.text)
+                        self.assertIn("object", r.json()["detail"])
+        self.assertEqual([g for g in self.manager.sessions.values() if g.name == "bad"], [])
+
 
 class SeatChanges(SeatCase):
     def _bot_game(self):
@@ -266,6 +308,47 @@ class SeatChanges(SeatCase):
         r = self.post("member", f"/api/games/{gid}/seats/1", {"type": "llm"})
         self.assertEqual(r.status_code, 403, r.text)
         self.assertEqual(self.manager.get(gid).seats[1].type, "bot")
+
+    def test_renaming_a_model_seat_checks_nothing(self):
+        """A new name leaves the seat's block as it was admitted: a machine outside its window or over its budget must
+        not stop its seat being renamed, and an ACL manager may rename an administrator's inline seat."""
+        from citar.pool import seats as pool_seats
+        r = self.post("member", "/api/games", {"name": "renamed", "config": CONFIG, "seats": [
+            {"type": "human"}, {"type": "llm", "llm": {"server_id": "sv_dryrun", "model": "dry-run"}}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        gid = r.json()["id"]
+        self.games.append(gid)
+
+        def closed(*_a, **_k):
+            raise ValueError("That machine is outside its hours.")
+        with mock.patch.object(pool_seats, "authorize", closed):
+            for body in ({"name": "Napoleon"}, {"type": "llm", "name": "Josephine"}):
+                with self.subTest(body=body):
+                    r = self.post("member", f"/api/games/{gid}/seats/1", body)
+                    self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(self.manager.get(gid).seats[1].name, "Josephine")
+            # a new block is admitted again
+            r = self.post("member", f"/api/games/{gid}/seats/1",
+                          {"llm": {"server_id": "sv_dryrun", "model": "dry-run", "persona": "bold"}})
+            self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(self._seat(gid), ("llm", {"server_id": "sv_dryrun", "model": "dry-run"}))
+
+        from citar.auth import access
+        from citar.db.models import Game as GameRow
+        r = self.post("zara", "/api/games", {"name": "admin's inline", "config": CONFIG,
+                                             "seats": [{"type": "human"}, {"type": "llm", "llm": INLINE["base_url"]}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        gid = r.json()["id"]
+        self.games.append(gid)
+        with db.session() as s:
+            access.grant(s, s.get(GameRow, gid), s.get(User, self.ids["member"]), access.MANAGE,
+                         actor=s.get(User, self.ids["zara"]))
+        r = self.post("member", f"/api/games/{gid}/seats/1", {"name": "Wellington"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self._seat(gid), ("llm", INLINE["base_url"]))
+        # the manager's own block is a member's
+        r = self.post("member", f"/api/games/{gid}/seats/1", {"llm": INLINE["openai_compatible"]})
+        self.assertEqual(r.status_code, 400, r.text)
 
     def test_a_dry_run_seat_change_is_accepted(self):
         gid = self._bot_game()
@@ -348,6 +431,27 @@ class Scenarios(SeatCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.games.append(r.json()["id"])
 
+    def test_a_scenarios_bot_seat_with_a_block_is_saved_and_launched(self):
+        lobby_default = {"server_id": None, "model": "", "persona": ""}
+        eid = self._editor("member")
+        seats = [{"type": "human"}, {"type": "bot", "llm": lobby_default}]
+        r = self.post("member", f"/api/scenario-editor/{eid}/meta", {"seats": seats})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.post("member", f"/api/scenario-editor/{eid}/save",
+                      {"name": "members bots", "seats": [{"type": "human"}, {"type": "bot", "llm": INLINE["base_url"]}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        sid = r.json()["id"]
+        self.scenarios.append(sid)
+        r = self.post("member", f"/api/scenarios/{sid}/launch",
+                      {"name": "bots launched", "seats": [{}, {"type": "bot", "llm": lobby_default}]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.games.append(r.json()["id"])
+        s = self.manager.get(r.json()["id"])
+        self.assertEqual((s.seats[1].type, dict(s.seats[1].llm)), ("bot", {}))
+        r = self.post("member", f"/api/scenarios/{sid}/launch",
+                      {"name": "bad block", "seats": [{}, {"type": "bot", "llm": "x"}]})
+        self.assertEqual(r.status_code, 400, r.text)
+
     def test_a_refused_launch_leaves_nothing_behind(self):
         from citar.server import session as sess
         with db.session() as s:
@@ -417,9 +521,18 @@ class Watch(SeatCase):
             openai_provider.OpenAI(base_url="http://127.0.0.1:9/v1", api_key="k")
         with self.assertRaises(RuntimeError):
             anthropic.Anthropic(api_key="k")
+        with self.assertRaises(RuntimeError):
+            subprocess.run(["lms", "ls", "--json"], capture_output=True)
+        with self.assertRaises(RuntimeError):
+            subprocess.Popen(["lms", "ls"])
+        from citar.server import lmstudio
+        with self.assertRaises(RuntimeError):
+            lmstudio._run(["lms", "ls"], timeout=1)     # the way the server reaches the LM Studio command line
         self.assertEqual(os.environ.get(SECRET_VAR), "sk-the-servers-own-secret")
         self.assertEqual(self.client.get("/api/rules").status_code, 200)
-        self.assertEqual([c[0] for c in self.watch.calls], ["httpx", "OpenAI client", "Anthropic client", "env"])
+        self.assertEqual([c[0] for c in self.watch.calls],
+                         ["httpx", "OpenAI client", "Anthropic client", "subprocess.run", "subprocess.Popen",
+                          "subprocess.run", "env"])
         self.watch.calls.clear()
 
 

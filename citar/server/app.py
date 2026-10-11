@@ -220,14 +220,26 @@ def _member_seat(seat: dict, user, *, playing: bool = True) -> dict:
     """One seat from a person, its model block through ``servers.member_llm`` (P3.2.9): a member's seat names a
     machine and never describes one. ``playing`` is for a seat of a game being made or changed, where a model seat
     without a machine is refused too; a scenario's seats are defaults its launch may still fill in. Returns the seat
-    with its block cleaned; raises the refusal as HTTP."""
+    with its block cleaned; raises the refusal as HTTP.
+
+    A seat that plays no model (a bot, a person, an MCP client) is never refused for its block, which nothing plays:
+    the lobby sends the block a seat had while it was a model seat, and a scenario's bot seats keep theirs. Such a
+    block is kept as the gate cleans it (an administrator's as it is, a member's to the machine it names), or dropped
+    where the gate would refuse it; making the seat a model seat later checks the block it then has
+    (``update_seat``). Only a block that is not an object at all is refused, on any seat."""
     from .. import servers
-    llm = seat.get("llm")
-    required = playing and seat.get("type") in MODEL_SEATS
-    if not llm and not required:
-        return seat
     try:
-        return {**seat, "llm": servers.member_llm(llm, user, required=required)}
+        llm = servers.llm_block(seat.get("llm"))
+        model_seat = seat.get("type") in MODEL_SEATS
+        required = playing and model_seat
+        if not llm and not required:
+            return seat
+        try:
+            return {**seat, "llm": servers.member_llm(llm, user, required=required)}
+        except servers.SeatBlockError:
+            if model_seat:
+                raise
+            return {**seat, "llm": {}}
     except servers.SeatBlockError as e:
         raise HTTPException(e.status, str(e)) from None
 
@@ -621,16 +633,19 @@ def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
                 p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
     """Change who controls a seat (e.g. hand a bot seat to an MCP client, or take over as human).
 
-    A new model block goes through the same gates as a new game's (P3.2.9): a member's names a machine, and the
-    caller must be admitted to a pooled machine it names. A refusal leaves the seat as it was."""
+    A new model block, or a seat made a model seat, goes through the same gates as a new game's (P3.2.9): a member's
+    block names a machine, and the caller must be admitted to a pooled machine it names. A refusal leaves the seat as
+    it was."""
     s, _row, _perms = _gate(sdb, gid, p, access.MANAGE, request)
     if not 0 <= pid < len(s.seats):
         raise HTTPException(404, "No such seat.")
     llm = body.llm
     seat = s.seats[pid]
     new_type = body.type or seat.type
-    if llm is not None or new_type in MODEL_SEATS:
-        # the block the seat will play with: the new one, or the one it has when only its type changes
+    if llm is not None or (new_type in MODEL_SEATS and new_type != seat.type):
+        # the block the seat will play with: the new one, or the one it has when only its type makes it a model seat.
+        # A change that leaves a model seat's block as it is (a new name) checks nothing: that block was checked when
+        # it was set, and a machine's window or budget must not stop its seat being renamed.
         checked = _member_seat({"type": new_type, "llm": llm if llm is not None else dict(seat.llm)}, p.user)
         if new_type in MODEL_SEATS:
             _authorize_seats(sdb, p.user, [checked])

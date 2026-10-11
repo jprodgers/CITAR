@@ -761,6 +761,16 @@ class SeatBlockError(ValueError):
         self.status = status
 
 
+def llm_block(block) -> dict:
+    """A seat's model block as a dict (empty for none), or ``SeatBlockError`` (400) for anything that is not an
+    object: a string, a number or a list in its place is a malformed request, from an administrator too."""
+    if block is None:
+        return {}
+    if not isinstance(block, dict):
+        raise SeatBlockError(400, "A seat's model settings are an object naming a machine.")
+    return dict(block)
+
+
 def _is_admin(user) -> bool:
     """Whether an account may describe a machine inline: an administrator in good standing (the local owner is
     one)."""
@@ -783,9 +793,10 @@ def member_llm(block: Optional[dict], user, *, required: bool = False) -> dict:
     * a pooled machine (a row) is kept, and ``pool.seats.authorize`` decides whether this member may use it.
 
     An empty block is returned empty, unless ``required`` (the block of a model seat in a game being made or
-    changed: such a seat must name a machine). Raises ``SeatBlockError`` with the status to answer.
+    changed: such a seat must name a machine). Raises ``SeatBlockError`` with the status to answer, for anything
+    but an object (``llm_block``) whoever sends it.
     """
-    block = dict(block or {})
+    block = llm_block(block)
     if _is_admin(user) or (not block and not required):
         return block
     sid = block.get("server_id")
