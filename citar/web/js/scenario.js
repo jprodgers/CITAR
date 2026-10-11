@@ -2,6 +2,7 @@
 // The editor works on a game held by the server; every change is a scenario operation (see /api/scenario-ops), so
 // what you click here can also be written into probe files as "setup".
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { MapRenderer, modelFromView } from "./render.js";
 import { pageHeader } from "./nav.js";
@@ -49,7 +50,8 @@ function drawList(card, list, rules, refresh) {
           catch (e) { toast(e.message, "error"); }
         } }, "Edit"),
         el("button", { class: "small", onclick: () => { location.hash = `#/probes?scenario=${encodeURIComponent(s.id)}`; } }, "Probe…"),
-        el("button", { class: "small", onclick: async () => {
+        shareButton("scenario", s.id, s.name, s, refresh),
+        s.can_manage === false ? null : el("button", { class: "small", onclick: async () => {
           if (!(await confirmBox("Delete scenario", `Delete "${s.name}"? Games already started from it are kept.`))) return;
           try { await api.deleteScenario(s.id); refresh(); } catch (e) { toast(e.message, "error"); }
         } }, "Delete")))));

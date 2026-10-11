@@ -1,6 +1,7 @@
 // Probes page (#/probes): write probe files (a scenario + a queue of cases: deal offers, messages or whole turns),
 // run them against a model and watch the results come in. Every case starts from the scenario's saved state.
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { profileSelect } from "./bots.js";
 import { el, clear, toast, modal, confirmBox, keepPlace } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
@@ -113,6 +114,8 @@ function drawRuns(card, runs, ctx) {
       el("td", {}, r.summary && r.summary.pass_rate != null ? `${Math.round(r.summary.pass_rate * 100)}%` : "–"),
       el("td", { class: "small" }, Object.entries(outcomes).map(([k, v]) => el("span", { class: `pill ${OUTCOME_CLASS[k] || ""}`, style: { marginRight: "3px" } }, `${k} ${v}`))),
       el("td", {}, el("div", { class: "row" },
+        shareButton("probe_run", r.id, r.name, r, ctx.refresh),
+        r.can_manage === false ? null :
         (["running", "queued"].includes(r.status) || r.status.startsWith("waiting")) ? el("button", { class: "small", onclick: async (e) => { e.stopPropagation(); await api.probeStop(r.id); ctx.refresh(); } }, "Stop") :
           el("button", { class: "small", onclick: async (e) => {
             e.stopPropagation();

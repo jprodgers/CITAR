@@ -30,8 +30,8 @@ async function request(method, url, body) {
   }
   // A share link puts its key in the page URL; pass it along so link-shared games and reports
   // work for somebody who is not signed in.
-  const shareKey = new URLSearchParams((location.hash.split("?")[1] || "")).get("k");
-  if (shareKey) opts.headers["x-citar-share-key"] = shareKey;
+  const key = shareKey();
+  if (key) opts.headers["x-citar-share-key"] = key;
 
   const res = await fetch(url, opts);
   let data = null;
@@ -228,15 +228,57 @@ export const api = {
     request("DELETE", `/api/games/${gid}/sharing/users/${encodeURIComponent(handle)}`),
   // a moderator's (or the owner's) take-down: private, a new link, and the reason the owner sees
   unpublishGame: (gid, reason) => request("POST", `/api/games/${gid}/unpublish`, { reason }),
+  // every other shareable thing (a report, a benchmark run, a probe run, a scenario, a map, a bot profile...)
+  itemSharing: (kind, ref) => request("GET", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing`),
+  setItemVisibility: (kind, ref, visibility) =>
+    request("PUT", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing`, { visibility }),
+  rotateItemLink: (kind, ref) => request("POST", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing/rotate`),
+  shareItemWith: (kind, ref, handle, permission) =>
+    request("POST", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing/users`, { handle, permission }),
+  unshareItemWith: (kind, ref, handle) =>
+    request("DELETE", `/api/items/${kind}/${encodeURIComponent(ref)}/sharing/users/${encodeURIComponent(handle)}`),
+  unpublishItem: (kind, ref, reason) =>
+    request("POST", `/api/items/${kind}/${encodeURIComponent(ref)}/unpublish`, { reason }),
 };
 
+// The share key the page was opened with (`#/...?k=<key>`), or "". A link-shared game or report carries its key in
+// the URL; every request passes it on (the x-citar-share-key header, or `k` where a header cannot go).
+export function shareKey() {
+  return new URLSearchParams(location.hash.split("?")[1] || "").get("k") || "";
+}
+
+// The page's own share key, as a query to append to a link (`?k=...`), so a link-shared game or report keeps it from
+// one of its pages to the next.
+function keyQuery() {
+  const key = shareKey();
+  return key ? `?k=${encodeURIComponent(key)}` : "";
+}
+
+// A game screen's address: with a seat or spectator token (`#/game/<gid>/<token>[/<player>]`), or with none for a
+// viewer the server knows by account or share key (`#/game/<gid>`, `#/game/<gid>/-/<player>` to look through one
+// civilization's eyes).
+export function gameLink(gid, token, asPlayer) {
+  const t = token ? encodeURIComponent(token) : "-";
+  const as = asPlayer != null && asPlayer !== "" ? `/${t}/${asPlayer}` : (token ? `/${t}` : "");
+  return `#/game/${gid}${as}${keyQuery()}`;
+}
+
+// A game's recap, with a token or none, as gameLink.
+export function replayLink(gid, token) {
+  return `#/replay/${gid}${token ? "/" + encodeURIComponent(token) : ""}${keyQuery()}`;
+}
+
+// The live game socket. A seat or spectator token, or none: a signed-in viewer is known by the session cookie, and a
+// link-shared game's viewer by the share key the page was opened with (`k`, which a socket can carry only in its URL).
 export function connectWS(gid, token, onMessage, onClose) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   let ws = null;
   let closed = false;
   let retry = 500;
+  const key = shareKey();
+  const query = `token=${encodeURIComponent(token || "")}` + (key ? `&k=${encodeURIComponent(key)}` : "");
   function open() {
-    ws = new WebSocket(`${proto}://${location.host}/ws/games/${gid}?token=${encodeURIComponent(token)}`);
+    ws = new WebSocket(`${proto}://${location.host}/ws/games/${gid}?${query}`);
     ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)); } catch (err) { console.error(err); } };
     ws.onopen = () => { retry = 500; };
     ws.onclose = () => {

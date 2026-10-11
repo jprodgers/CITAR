@@ -1,6 +1,7 @@
 // Bots page: bot profiles (named, revisioned configurations of the scripted bot), their parameter editor, the
 // rankings computed from every lab game, and a form that queues an A/B experiment between profiles.
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { el, clear, toast, modal, confirmBox, fmt } from "./util.js";
 import { pageHeader } from "./nav.js";
 import * as auth from "./auth.js";
@@ -321,6 +322,7 @@ async function renderProfile(page, rules, pid) {
         saved.builtin ? el("span", { class: "pill muted" }, "built-in: fork it to change it") : el("span", { class: "pill" }, `revision ${saved.rev}`),
         refused ? null : el("button", { onclick: () => forkProfile(saved) }, "Fork"),
         refused ? null : el("button", { onclick: () => abDialog(rules, [saved.id]) }, "A/B test…"),
+        saved.builtin ? null : shareButton("bot_profile", saved.id, saved.name, saved, () => {}),
         owner ? el("button", { class: "danger", onclick: async () => {
           if (!(await confirmBox("Delete profile", `Delete ${saved.name}? Its games stay in the rankings under its fingerprint.`))) return;
           try { await api.deleteBotProfile(saved.id); location.hash = "#/bots"; } catch (e) { toast(e.message, "error"); }

@@ -2,6 +2,7 @@
 // then save the map (saves/maps/<id>.json) and play or build scenarios on it. Editing happens in the browser; the
 // server validates on save. Controls: left-drag paints, right- or middle-drag pans, wheel zooms, Ctrl+Z undoes.
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { el, clear, toast, modal, prompt as askText, confirmBox } from "./util.js";
 import { MapRenderer } from "./render.js";
 import { mapOptionsForm } from "./mapoptions.js";
@@ -534,10 +535,11 @@ class MapEditor {
       ...maps.map((mp) => el("tr", { class: "clickable" },
         el("td", { onclick: () => { close(); this.guard(() => this.open(mp.id)); } }, el("b", {}, mp.name), el("div", { class: "muted small" }, mp.description || mp.id)),
         el("td", {}, `${mp.width}×${mp.height}`), el("td", {}, `${mp.starts} + ${mp.cs_starts} cs`),
-        el("td", {}, el("button", { class: "small", onclick: async () => {
-          if (!(await confirmBox("Delete map", `Delete map "${mp.name}"? This can't be undone.`, "Delete"))) return;
-          try { await api.deleteMap(mp.id); close(); this.openDialog(); } catch (e) { toast(e.message, "error"); }
-        } }, "Delete")))));
+        el("td", {}, el("div", { class: "row" }, shareButton("map", mp.id, mp.name, mp, () => {}),
+          mp.can_manage === false ? null : el("button", { class: "small", onclick: async () => {
+            if (!(await confirmBox("Delete map", `Delete map "${mp.name}"? This can't be undone.`, "Delete"))) return;
+            try { await api.deleteMap(mp.id); close(); this.openDialog(); } catch (e) { toast(e.message, "error"); }
+          } }, "Delete"))))));
     close = modal({ title: "Open map", content: maps.length ? list : el("p", { class: "muted" }, "No saved maps yet.") }).close;
   }
 

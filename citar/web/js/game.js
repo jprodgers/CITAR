@@ -1,5 +1,5 @@
 // The in-game screen: map, top bar, unit/city panels, side feeds, spectator controls.
-import { api, connectWS } from "./api.js";
+import { api, connectWS, gameLink, replayLink } from "./api.js";
 import { el, clear, toast, fmt, signed, nameOf, prompt, confirmBox, modal } from "./util.js";
 import { MapRenderer, modelFromView, TERRAIN_COLORS } from "./render.js";
 import { hexDistance, neighbors } from "./hex.js";
@@ -794,7 +794,9 @@ export class GameScreen {
       const want = this._pauseWanted && Date.now() - this._pauseWanted.at < 5000 ? this._pauseWanted.paused : null;
       if (want === sess.paused) this._pauseWanted = null;             // the server has caught up
       const paused = want ?? sess.paused;
-      if (!stopped) tb.append(el("button", { class: "small", onclick: () => {
+      // pausing, the AI delay and a named save are for whoever manages the game (the server says: can_manage)
+      const manages = v.can_manage !== false;
+      if (!stopped && manages) tb.append(el("button", { class: "small", onclick: () => {
         this._pauseWanted = { paused: !paused, at: Date.now() };
         this.renderTopbar();
         api.control(this.gid, { paused: !paused });
@@ -803,24 +805,24 @@ export class GameScreen {
         const delay = el("select", { onchange: (ev) => api.control(this.gid, { ai_delay: +ev.target.value }) },
           ...[0, 0.5, 1, 2, 5].map((d) => el("option", { value: d, selected: sess.ai_delay === d }, `delay ${d}s`)));
         const viewAs = el("select", { onchange: (ev) => {
-          location.hash = `#/game/${this.gid}/${encodeURIComponent(this.token)}` + (ev.target.value !== "" ? `/${ev.target.value}` : "");
+          location.hash = gameLink(this.gid, this.token, ev.target.value);
         } }, el("option", { value: "", selected: this.asPlayer == null }, "God view"),
           ...sess.players.filter((p) => p.kind === "major").map((p) => el("option", { value: p.id, selected: this.asPlayer === p.id }, `View as ${p.name}`)));
-        if (!stopped) tb.append(delay);
+        if (!stopped && manages) tb.append(delay);
         tb.append(viewAs);
-        if (v.phase !== "playing" || sess.god_view_allowed) tb.append(el("button", { class: "small", onclick: () => { location.hash = `#/replay/${this.gid}/${encodeURIComponent(this.token)}`; } }, "Recap"));
+        if (v.phase !== "playing" || sess.god_view_allowed) tb.append(el("button", { class: "small", onclick: () => { location.hash = replayLink(this.gid, this.token); } }, "Recap"));
       }
     }
     if (v.session && v.session.seats.some((s) => s.type !== "human")) {
       tb.append(el("button", { class: "small", title: "AI performance metrics", onclick: () => openMetrics(this.gid) }, "📊 AI stats"));
     }
-    tb.append(el("button", { class: "small", onclick: async () => { const r = await api.save(this.gid, null); toast(`Saved: ${r.saved}`); } }, "Save"));
+    if (v.can_manage !== false) tb.append(el("button", { class: "small", onclick: async () => { const r = await api.save(this.gid, null); toast(`Saved: ${r.saved}`); } }, "Save"));
     tb.append(el("button", { class: "small", onclick: () => openHelp(this) }, "?"));
     const box = clear(this.turnBox);
     if (v.phase !== "playing") {
       const w = v.players.find((p) => p.id === v.winner);
       box.append(el("span", { class: "pill" }, `Game over: ${w ? w.name : "no winner"} (${v.victory || ""})`),
-        el("button", { class: "primary", onclick: () => { location.hash = `#/replay/${this.gid}/${encodeURIComponent(this.token)}`; } }, "Watch recap"));
+        el("button", { class: "primary", onclick: () => { location.hash = replayLink(this.gid, this.token); } }, "Watch recap"));
     } else if (this.myTurn) {
       const needs = v.units.filter((u) => u.owner === this.you && !u.activity && u.moves > 0).length;
       // things that usually need a decision this turn get their own button right next to End Turn

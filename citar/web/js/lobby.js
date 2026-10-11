@@ -1,5 +1,5 @@
 // Lobby: running games, saves, and the new-game form.
-import { api } from "./api.js";
+import { api, gameLink, replayLink } from "./api.js";
 import { profileSelect, profileFor } from "./bots.js";
 import { mapOptionsForm } from "./mapoptions.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
@@ -7,6 +7,7 @@ import { openMetrics } from "./metrics.js";
 import { setupState, welcomeBanner } from "./setup.js";
 import { pageHeader } from "./nav.js";
 import { registry } from "./servers.js";
+import { shareButton } from "./share.js";
 
 // Civilization colours (the server sends the same palette as rules.player_colors), most distinct first.
 const COLORS = ["#aa0000", "#0000aa", "#00aa00", "#aaaa00", "#50006e", "#c85a00", "#ff00e6", "#299bcc",
@@ -122,32 +123,37 @@ function renderGames(card, games, refresh, meta) {
         g.current_player === p.id && g.phase === "playing" ? el("span", { class: "pill", style: { marginLeft: "6px" } }, "to move") : null));
     });
     const actions = el("div", { class: "btn-grid" });
+    // seats, tokens and closing are the game's managers'; a game shared with this viewer is theirs to watch
+    const sharing = g.sharing || {};
+    const manages = !!sharing.can_manage;
     const openInfo = async () => {
       const info = await api.game(g.id);
       showConnectInfo(info, meta);
     };
-    if (g.phase === "playing" && g.seats.some((s) => s.type === "human")) {
+    if (manages && g.phase === "playing" && g.seats.some((s) => s.type === "human")) {
       actions.appendChild(el("button", { class: "primary", title: "Play the first human seat", onclick: async () => playHuman(await api.game(g.id)) }, "▶ Play"));
     }
-    actions.appendChild(el("button", { class: g.seats.some((s) => s.type === "human") ? "" : "primary", onclick: openInfo }, "Join / Seats"));
+    if (manages) actions.appendChild(el("button", { class: g.seats.some((s) => s.type === "human") ? "" : "primary", onclick: openInfo }, "Join / Seats"));
     if (g.seats.some((s) => s.type !== "human")) actions.appendChild(el("button", { onclick: () => openMetrics(g.id) }, "📊 Stats"));
-    if (g.god_view_allowed) actions.appendChild(el("button", { onclick: async () => {
-      const info = await api.game(g.id);
-      location.hash = `#/game/${g.id}/${encodeURIComponent(info.spectator_token)}`;
-    } }, "Watch"));
+    // a manager watches with the spectator token; anyone else by their account (the server checks it)
+    const token = async () => (manages ? (await api.game(g.id)).spectator_token : "");
+    if (g.god_view_allowed) actions.appendChild(el("button", { onclick: async () => { location.hash = gameLink(g.id, await token()); } }, "Watch"));
     if (g.phase !== "playing" || g.god_view_allowed) {
-      actions.appendChild(el("button", { onclick: async () => {
-        const info = await api.game(g.id);
-        location.hash = `#/replay/${g.id}/${encodeURIComponent(info.spectator_token)}`;
-      } }, "Recap"));
+      actions.appendChild(el("button", { onclick: async () => { location.hash = replayLink(g.id, await token()); } }, "Recap"));
     }
-    actions.appendChild(el("button", { class: "danger", onclick: async () => {
-      if (await confirmBox("End game", `Stop "${g.name}"? (Saves on disk are kept.)`)) { await api.deleteGame(g.id); refresh(); }
-    } }, "Close"));
+    const share = shareButton("game", g.id, g.name, sharing, refresh);
+    if (share) actions.appendChild(share);
+    if (manages) {
+      actions.appendChild(el("button", { class: "danger", onclick: async () => {
+        if (await confirmBox("End game", `Stop "${g.name}"? (Saves on disk are kept.)`)) { await api.deleteGame(g.id); refresh(); }
+      } }, "Close"));
+    }
     const status = g.crashed ? `stopped by an engine error on turn ${g.crashed.turn}` : g.phase === "playing" ? (g.paused ? "paused" : "playing") :
       `over — ${g.players[g.winner] ? g.players[g.winner].name : "no one"} (${g.victory || ""})`;
     table.appendChild(el("tr", {},
-      el("td", {}, el("div", {}, el("b", {}, g.name)), el("div", { class: "muted" }, `${g.config.map_type}, ${g.config.map_size}, ${status}`),
+      el("td", {}, el("div", {}, el("b", {}, g.name), !manages ? el("span", { class: "pill", style: { marginLeft: "6px" } }, "shared with you") : null,
+        sharing.visibility && sharing.visibility !== "private" && manages ? el("span", { class: "pill", style: { marginLeft: "6px" }, title: "Who can see it (Share)" }, VISIBILITY_LABEL[sharing.visibility] || sharing.visibility) : null),
+        el("div", { class: "muted" }, `${g.config.map_type}, ${g.config.map_size}, ${status}`),
         g.benchmark ? el("a", { class: "pill live", href: "#/benchmarks", title: `Run: ${g.benchmark.run_name}` }, `Benchmark · ${g.benchmark.run_name}`) : null),
       el("td", {}, g.config.turn_limit ? `${Math.min(g.turn, g.config.turn_limit)} / ${g.config.turn_limit}` : `${g.turn}`),
       el("td", {}, players), el("td", {}, actions)));
@@ -163,8 +169,12 @@ async function playHuman(info) {
   if (info.paused && !info.seats.some((s) => s.type === "llm")) {
     try { await api.control(info.id, { paused: false }); } catch (e) { /* the game screen shows the paused state */ }
   }
-  location.hash = `#/game/${info.id}/${encodeURIComponent(human.token)}`;
+  location.hash = gameLink(info.id, human.token);
 }
+
+// How a game's visibility reads in the list.
+const VISIBILITY_LABEL = { allowlist: "shared with people", link: "shared by link", server: "members can see",
+  global: "public" };
 
 export function showConnectInfo(info, meta) {
   const body = el("div", { class: "col" });
