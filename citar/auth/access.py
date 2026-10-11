@@ -394,7 +394,8 @@ def rotate_slug(session, obj, *, actor: User) -> str:
 
 def unpublish(session, obj, *, actor: User, reason: str = "") -> None:
     """Take something down (P3.2.3): private, a new slug so every shared link dies, and an audit row
-    with the reason, which the owner sees on the item. The caller has checked MODERATE or MANAGE."""
+    with the reason, which the owner sees on the item (``last_unpublished``), and the role the actor took it
+    down in. The caller has checked MODERATE or MANAGE."""
     import secrets
 
     from . import audit
@@ -403,12 +404,14 @@ def unpublish(session, obj, *, actor: User, reason: str = "") -> None:
     obj.slug = secrets.token_urlsafe(16)
     object_type = object_type_of(obj)
     audit.record(session, f"{object_type}.unpublished", actor=actor, object_type=object_type,
-                 object_id=obj.id, reason=(reason or "").strip()[:1000], **{"from": before})
+                 object_id=obj.id, reason=(reason or "").strip()[:1000], by_role=actor.role, **{"from": before})
 
 
-def last_unpublished(session, obj) -> Optional[dict]:
-    """The latest unpublish of an object (who, when, why), for its owner to see; None if it never
-    was, or was published again since."""
+def last_unpublished(session, obj, viewer_id: Optional[str] = None) -> Optional[dict]:
+    """The latest unpublish of an object (when, why, and by whom as ``unpublished_by`` words it), for
+    whoever manages it; None if it never was, or was published again since. Never the actor's handle: a
+    moderator's name shown to the member whose game they took down invites a quarrel with that person,
+    and administrators have the audit log."""
     from ..db.models import AuditLog
     object_type = object_type_of(obj)
     row = session.scalar(select(AuditLog).where(
@@ -417,8 +420,23 @@ def last_unpublished(session, obj) -> Optional[dict]:
         .order_by(AuditLog.id.desc()).limit(1))
     if row is None or row.action != f"{object_type}.unpublished":
         return None
-    return {"at": row.at.isoformat() if row.at else None, "by": row.actor_label,
+    return {"at": row.at.isoformat() if row.at else None, "by": unpublished_by(row, obj, viewer_id),
             "reason": (row.detail or {}).get("reason", "")}
+
+
+def unpublished_by(entry, obj, viewer_id: Optional[str] = None) -> str:
+    """Who took an object down, as its managers are told: "you", "its owner", "an administrator",
+    "a moderator", or "someone who manages it" (an account on its allowlist with manage)."""
+    if viewer_id is not None and entry.actor_id == viewer_id:
+        return "you"
+    if entry.actor_id is not None and entry.actor_id == getattr(obj, "owner_id", None):
+        return "its owner"
+    role = (entry.detail or {}).get("by_role")
+    if role == "admin":
+        return "an administrator"
+    if role == "moderator":
+        return "a moderator"
+    return "someone who manages it"
 
 
 def grant(session, obj, user: User, permission: str, *, actor: User) -> AclEntry:

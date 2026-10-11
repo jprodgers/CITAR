@@ -1688,7 +1688,7 @@ def get_sharing(gid: str, request: Request, p: Principal = Depends(principal),
     out = ownership.to_client(row, perms, base_url=citar_settings.get().public_origin)
     if row is not None and access.MANAGE in perms:
         out["shared_with"] = access.shared_with(sdb, row)
-        out["unpublished"] = access.last_unpublished(sdb, row)
+        out["unpublished"] = access.last_unpublished(sdb, row, p.user.id if p.user else None)
     return out
 
 

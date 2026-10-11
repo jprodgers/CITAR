@@ -319,11 +319,27 @@ class AccessModel(unittest.TestCase):
             self.assertEqual(row.visibility, "private")
             self.assertNotEqual(row.slug, game.slug)
             seen = access.last_unpublished(s, row)
-            self.assertEqual((seen["by"], seen["reason"]), ("maggie (moderator)", "spam"))
+            self.assertEqual((seen["by"], seen["reason"]), ("a moderator", "spam"))
+            self.assertEqual(access.last_unpublished(s, row, self.mod.id)["by"], "you")
             # published again, the old unpublish is no longer the item's news
             access.set_visibility(s, row, "server", actor=s.get(User, self.owner_id))
             s.flush()
             self.assertIsNone(access.last_unpublished(s, row))
+
+    def test_who_unpublished_is_told_as_a_role_never_a_handle(self):
+        for actor, viewer, said in ((self.admin, self.owner_id, "an administrator"),
+                                    (self.owner, self.admin.id, "its owner"),
+                                    (self.owner, self.owner_id, "you"),
+                                    (self.reader, self.owner_id, "someone who manages it")):
+            with self.subTest(actor=actor.handle, viewer=viewer):
+                game = self._game("global")
+                with db.session() as s:
+                    row = s.get(GameRow, game.id)
+                    access.unpublish(s, row, actor=s.get(User, actor.id), reason="r")
+                    s.flush()
+                    seen = access.last_unpublished(s, row, viewer)
+                self.assertEqual(seen["by"], said)
+                self.assertEqual(set(seen), {"at", "by", "reason"})     # nothing else of the actor
 
     def test_access_client_does_not_clobber_the_rows_visibility(self):
         """A stale permission snapshot must not overwrite a visibility that was just changed.
@@ -581,9 +597,11 @@ class GameRoutes(unittest.TestCase):
                 r = self.client.request(method, f"/api/games/{self.game.id}{path}", json=body,
                                         headers=self.headers["maggie"])
                 self.assertEqual(r.status_code, 404, r.text)
-        # the owner sees who took it down and why
-        seen = self._get("/sharing", "owner").json()["unpublished"]
-        self.assertEqual((seen["by"], seen["reason"]), ("maggie (moderator)", "spam in the game's name"))
+        # the owner sees that a moderator took it down, and why; never which moderator
+        sharing = self._get("/sharing", "owner").json()
+        seen = sharing["unpublished"]
+        self.assertEqual((seen["by"], seen["reason"]), ("a moderator", "spam in the game's name"))
+        self.assertNotIn("maggie", repr(sharing))
 
     def test_on_a_server_game_a_moderator_is_a_member(self):
         self._set_visibility("server")

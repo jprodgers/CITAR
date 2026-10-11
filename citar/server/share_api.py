@@ -77,7 +77,7 @@ def _to_client(s: Session, row: OwnedItem, perms: access.Access) -> dict:
         if row.visibility == access.GLOBAL:
             out["public_url"] = f"{base}/r/{row.ref}"
         out["shared_with"] = access.shared_with(s, row)
-        out["unpublished"] = access.last_unpublished(s, row)
+        out["unpublished"] = access.last_unpublished(s, row, perms.viewer_id)
     return out
 
 
