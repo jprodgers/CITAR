@@ -885,6 +885,26 @@ class BenchmarkGames(ItemCase):
             self.app.scheduler = saved
 
 
+class CommandLine(ItemCase):
+    def test_lab_submit_registers_its_experiment(self):
+        """``citar lab submit`` registers what it queues when the server's database is there: to ``--owner``, else to
+        the first administrator."""
+        import contextlib
+        import io
+        for owner, expect in ((None, "admin"), ("olive", "owner")):
+            name = "cli-" + secrets.token_hex(3)
+            spec = self.dir / f"{name}.json"
+            spec.write_text(json.dumps({"name": name, "games": 1, "seats": [{"bot": "basic"}, {"bot": "basic"}]}),
+                            encoding="utf-8")
+            self.made.append(("lab_experiment", name))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                lab.main(["submit", str(spec)] + (["--owner", owner] if owner else []))
+            with self.subTest(owner=owner):
+                self.assertIn("registered to", out.getvalue())
+                self.assertEqual(self.row("lab_experiment", name).owner_id, self.ids[expect])
+
+
 class ModelBlocks(ItemCase):
     """Gate 5 (P3.2.9): a member's suite or probe subject that describes a machine (a base URL, a key, a key
     variable) instead of naming one is refused, and nothing is dialled or read while it is."""
@@ -934,6 +954,32 @@ class ModelBlocks(ItemCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.made.append(("probe_run", r.json()["id"]))
         self.assertEqual(r.json()["llm"], {"server_id": "sv_dryrun", "model": "dry-run"})
+
+    def test_a_report_narrative_names_a_machine_the_member_may_use(self):
+        """A member's report writes its analysis on a machine they may use: never one of the site's own registry
+        machines (403), and it must name one (400); a dry run is anyone's."""
+        def ask(narrative):
+            return self.call("owner", "POST", "/api/reports", {"title": "n", "narrative": {"enabled": True, **narrative}})
+        self.assertEqual(ask({"server_id": "sv_api", "model_id": "m_opus"}).status_code, 403)
+        self.assertEqual(ask({}).status_code, 400)
+        r = ask({"server_id": "sv_dryrun", "model_id": "m_dry"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.made.append(("report", r.json()["id"]))
+
+    def test_another_members_run_shows_no_machine_address(self):
+        """A run or a probe run another member may see carries no machine's address or key variable."""
+        ref = self.make("benchmark_run", "server")
+        self.app._scheduler().runs[ref]["suite"]["servers"][0]["base_url"] = "http://10.0.0.5:1234/v1"
+        runs = self.call("stranger", "GET", "/api/benchmarks/runs").json()
+        self.assertNotIn("10.0.0.5", json.dumps(runs))
+        self.assertIn("10.0.0.5", json.dumps(self.call("admin", "GET", "/api/benchmarks/runs").json()))
+        rid = self.make("probe_run", "server")
+        run = json.loads((probes.RUNS / rid / "run.json").read_text(encoding="utf-8"))
+        run["llm"] = {"provider": "openai_compatible", "base_url": "http://10.0.0.6/v1", "api_key_env": SECRET_VAR}
+        (probes.RUNS / rid / "run.json").write_text(json.dumps(run), encoding="utf-8")
+        seen = self.call("stranger", "GET", f"/api/probe-runs/{rid}").json()
+        self.assertNotIn("10.0.0.6", json.dumps(seen))
+        self.assertNotIn(SECRET_VAR, json.dumps(seen))
 
 
 if __name__ == "__main__":

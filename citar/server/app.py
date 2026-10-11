@@ -951,7 +951,9 @@ def _run_games_follow(sdb: DbSession, row) -> None:
     import secrets as _sec
     from sqlalchemy import select as _select
     from ..db.models import Game as _GameRow
-    run = _scheduler().runs.get(row.ref)
+    # the scheduler the server made at its start, never one made here: making one reloads games, whose rows it writes
+    # from sessions of its own while this request holds its write
+    run = scheduler.runs.get(row.ref) if scheduler is not None else None
     ids = [j["game_id"] for j in (run or {}).get("jobs", []) if j.get("game_id")]
     if not ids:
         return
@@ -1067,6 +1069,10 @@ def bench_start_run(body: RunBody, request: Request, me=Depends(require_cap("run
 def bench_runs(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
     """The runs the caller may see, with per-game progress and what they may do to each."""
     out = _scheduler().list_runs(items.listed(sdb, "benchmark_run", me))
+    if not _is_admin(me):
+        # a machine's address is its owner's and the administrators' (the registry's routes are theirs)
+        for r in out:
+            r["servers"] = [{k: v for k, v in sv.items() if k != "base_url"} for sv in r.get("servers", [])]
     perms = items.permissions_by_ref(sdb, "benchmark_run", me, [r["id"] for r in out])
     return [dict(r, **perms.get(r["id"], {})) for r in out]
 
@@ -1666,6 +1672,9 @@ def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb
     runner = _probes()
     _row, perms = items.require(sdb, "probe_run", rid, p.user, access.VIEW, slug=_share_key(request))
     run = _probe_call(runner.get_run, rid)
+    if not _is_admin(p.user):
+        # an administrator's subject may describe its machine (P3.2.9); its address and key variable stay theirs
+        run["llm"] = {k: v for k, v in (run.get("llm") or {}).items() if k not in DESCRIBING_KEYS}
     return {"run": run, "results": runner.results(rid), "status": _probe_status(sdb, p.user, runner),
             **perms.client()}
 
