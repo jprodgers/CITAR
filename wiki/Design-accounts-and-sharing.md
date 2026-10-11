@@ -151,7 +151,8 @@ rules:
 - **Making one** needs the kind's capability (above): a suite or a run `run_benchmarks`, a probe or a
   probe run `run_probes`, an experiment `run_lab`, a profile `edit_bots`, a map or a scenario
   `create_games`, a report `run_reports`. It is the maker's, `private`. Work that runs on a machine
-  (a benchmark run, a probe run) is admitted to each machine it names, as a game's seats are.
+  (a benchmark run, a probe run, a report's written analysis) is admitted to each machine it names,
+  as a game's seats are: the member's own machine, or one of a group they hold a grant on.
 - **Reading one** needs view: its owner, administrators, its allowlist, and members or the whole
   internet as its visibility says. Listings show only what the caller may see; a `link` item is never
   listed.
@@ -159,7 +160,9 @@ rules:
   rerunning a report, its queue priority, its sharing) needs manage: its owner, an ACL manager or an
   administrator. Saving under an id that is somebody else's is refused before anything is written.
 - **Using one** in something else (a map in a game, a scenario in a probe, a bot profile in a seat or
-  an experiment, a suite in a run) needs view on it.
+  an experiment, a suite in a run) needs view on it, when the thing is run or launched as well as
+  when it is saved: a probe shared wider than its scenario runs only for those who may see the
+  scenario, and a scenario's own seats' profiles are checked at its launch.
 - A **benchmark run's games** are its owner's, at the run's visibility, and follow it when its
   visibility changes or it is taken down. A probe case opened to be looked at is the run's owner's.
 - A suite's machines and a probe's subject **name** machines and never describe them (no base URL,
@@ -174,7 +177,10 @@ rules:
   administrator is made on a fresh server (`citar admin create-admin`, `set-role`, the setup wizard, an
   invitation with the admin role): each goes to the account its file names (a run's or a report's
   owner), else to the first administrator (in local mode, the local owner), `private`, with one audit
-  row for the lot. Games in the index that nobody owns are adopted the same way.
+  row for the lot. Games in the index that nobody owns are adopted the same way. A file that does not
+  read (cut short, corrupt) is adopted under its id by that administrator, who can remove it, and is
+  logged; nothing adoption meets stops the server's start or the making of an administrator (a failed
+  adoption is rolled back alone and tried again at the next start).
 
 The sharing routes are the same for every kind: `/api/items/{kind}/{ref}/sharing` (see the
 [API](HTTP-and-tool-API#owned-items)).

@@ -74,6 +74,9 @@ Their own routes (`/api/benchmarks/...`, `/api/probes/...`, `/api/probe-runs/...
 `/api/scenarios/...`, `/api/scenario-editor/...`, `/api/bots/...`, `/api/lab/...`, `/api/reports/...`)
 answer 404 for an item the caller may not see and 403 for one they may see but not change; listings
 carry `can_view`, `can_manage` and `can_moderate` per item. A `link` item opens with its key as `?k=`.
+A body of the wrong shape (an item named by anything but its id, a report specification whose parts
+are not objects or lists) is a 400. A report's narrative that names a pooled machine the caller is not
+admitted to is a 403, as a run's machine is.
 An item is addressed here by its kind and its id on disk (`ref`), as its own routes name it:
 
 | Method and path | |
