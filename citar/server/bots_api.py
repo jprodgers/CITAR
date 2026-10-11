@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from .. import items
 from ..auth import access
-from ..auth.deps import Principal, get_db, principal, require_cap, require_user
+from ..auth.deps import Principal, check_cap, get_db, principal, require_cap, require_user
 from ..bots import profiles, ratings
 from ..db.models import User
 
@@ -144,10 +144,12 @@ class ForkBody(BaseModel):
 
 
 @router.post("/profiles/{pid}/fork")
-def fork_profile(pid: str, body: ForkBody, request: Request, user: User = Depends(require_cap("edit_bots")),
+def fork_profile(pid: str, body: ForkBody, request: Request, user: User = Depends(require_user),
                  s: Session = Depends(get_db)):
-    """Copy a profile the caller may see (built-in or saved) into a new, editable one: the caller's."""
+    """Copy a profile the caller may see (built-in or saved) into a new, editable one: the caller's (``edit_bots``,
+    asked after the profile, so a stranger learns nothing of a private one from the refusal)."""
     items.require(s, "bot_profile", pid, user, access.VIEW, slug=_key(request))
+    check_cap(user, "edit_bots")
     try:
         src = profiles.get(pid)
         name = body.name or f"{src['name']} (copy)"
