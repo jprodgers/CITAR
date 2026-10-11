@@ -902,6 +902,9 @@ class GameCsrf(ItemCase):
             self.assertEqual(self.call("owner", "POST", path, {"paused": True}).status_code, 200)
             self.assertEqual(self.client.post(f"/api/games/{gid}/unpublish", json={},
                                               headers=cookie_only).status_code, 403)
+            for route in ("/api/saves/load", "/api/saves/delete"):
+                self.assertEqual(self.client.post(route, json={"path": f"{gid}/autosave.citar"},
+                                                  headers=cookie_only).status_code, 403, route)
             spectator = self.manager.get(gid).spectator_token
             r = self.client.get(f"/api/games/{gid}/view?token={spectator}", headers=cookie_only)
             self.assertEqual(r.status_code, 200, "a read needs no token")

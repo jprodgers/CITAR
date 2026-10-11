@@ -1979,6 +1979,7 @@ def delete_save(body: DeleteSaveBody, request: Request, p: Principal = Depends(p
                 sdb: DbSession = Depends(get_db)):
     """Delete a save, or every save of its game. A game none of whose saves are left, and that is not open, is
     deleted from the games index too."""
+    _csrf(request, p)
     _require_save_access(sdb, p, body.path, access.MANAGE)
     try:
         deleted = manager.delete_save(body.path, body.whole_game)
@@ -1998,6 +1999,7 @@ def load_save(body: LoadBody, request: Request, p: Principal = Depends(principal
     Games with AI seats start paused, so their model configuration can be checked before anything
     spends tokens against a stale endpoint.
     """
+    _csrf(request, p)
     _require_save_access(sdb, p, body.path, access.MANAGE)
     path = (SAVE_DIR / body.path).resolve()
     if SAVE_DIR.resolve() not in path.parents or not path.exists():
@@ -2016,6 +2018,14 @@ def load_save(body: LoadBody, request: Request, p: Principal = Depends(principal
         row.data_sharing = p.user.data_sharing      # its new owner's default, as for a game they create
         s.owner_id = p.user.id
     return s.info(include_tokens=True)
+
+
+def _csrf(request: Request, p: Principal) -> None:
+    """A write by a caller a session cookie signed in carries the session's CSRF token (``_gate``'s rule, for the
+    save routes, which have no game token to excuse it)."""
+    if p.auth_session is not None:
+        from ..auth.deps import _enforce_csrf
+        _enforce_csrf(request, p)
 
 
 def _require_save_access(sdb: DbSession, p: Principal, rel_path: str, permission: str):
