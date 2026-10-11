@@ -895,9 +895,11 @@ def _may_use(sdb: DbSession, user, kind: str, ref) -> None:
     """Whether ``user`` may use the item ``kind``/``ref`` in something they make (a map in a game, a scenario in a
     probe, a bot profile in a seat): VIEW on it, a 404 otherwise. A file with no row is an administrator's to use
     (it is reached by nobody else until adoption gives it an owner); a built-in bot profile and the "best" one are
-    everybody's."""
+    everybody's. Anything but an id is a 400."""
     if not ref:
         return
+    if not isinstance(ref, str):
+        raise HTTPException(400, f"A {items.noun(kind)} is named by its id.")
     if kind == "bot_profile":
         from ..bots import profiles as _profiles
         if ref == _profiles.BEST or ref in {b["id"] for b in _profiles.BUILTIN}:
@@ -948,9 +950,8 @@ def _admit(sdb: DbSession, user, server_ids, purpose: str) -> None:
     """Admission for work that will queue for its machines (a run): may ``user`` use each pooled machine for
     ``purpose`` at all (``pool.seats.authorize``, ``queued``: when is the runner's business). A 403 with the reason."""
     from ..pool import seats as pool_seats
-    seats = [{"type": "llm", "llm": {"server_id": sid}} for sid in server_ids if sid]
     try:
-        pool_seats.authorize(sdb, user, seats, purpose, queued=True)
+        pool_seats.admit(sdb, user, server_ids, purpose)
     except ValueError as e:
         raise HTTPException(403, str(e)) from None
 
@@ -1028,13 +1029,15 @@ def bench_save_suite(body: dict, me=Depends(require_user), sdb: DbSession = Depe
     from .benchmarks import normalize_suite
     sch = _scheduler()
     sid = body.get("id") if isinstance(body, dict) else None
+    if sid and not isinstance(sid, str):
+        raise HTTPException(400, "A suite's id is a string of letters, digits, - and _.")
     exists = bool(sid) and _bench_call(sch._suite_path, sid).exists()
     if sid:
         items.writable(sdb, "benchmark_suite", sid, me, exists=exists)
     else:
         items.check_create(me, "benchmark_suite")
     _suite_gate(sdb, me, body)
-    suite = normalize_suite(body)
+    suite = _bench_call(normalize_suite, body)
     items.register(sdb, "benchmark_suite", suite["id"], me, suite["name"], path=sch._suite_path(suite["id"]))
     return _bench_call(sch.save_suite, suite)
 
@@ -1488,11 +1491,12 @@ def scenarios_launch(sid: str, body: LaunchBody, request: Request, me=Depends(re
     scenario's own included, passes the members' gate (P3.2.9) and admission before anything starts."""
     items.require(sdb, "scenario", sid, me, access.VIEW, slug=_share_key(request))
     _game_limit(sdb, me)
-    _seat_profiles(sdb, me, body.seats)
     checked: list = []
 
     def check(seat: dict) -> dict:
-        """One seat as the scenario and the request make it, through the members' gate."""
+        """One seat as the scenario and the request make it, through the members' gate: its bot profile one the
+        caller may see, whichever of the two named it."""
+        _seat_profiles(sdb, me, [seat])
         seat = _member_seat(seat, me)
         checked.append(seat)
         return seat
@@ -1642,7 +1646,11 @@ def probes_run(pid: str, body: ProbeRunBody, request: Request, me=Depends(requir
                sdb: DbSession = Depends(get_db)):
     """Run a probe the caller may see: every case, from the same starting state, against one model. The run is the
     caller's, and its subject passes the members' gate."""
+    from .. import probes as P
     items.require(sdb, "probe", pid, me, access.VIEW, slug=_share_key(request))
+    # the cases play on the probe's scenario, and an opened case is its state: a probe shared wider than its
+    # scenario runs only for those who may see the scenario too
+    _probe_scenario(sdb, me, _probe_call(P.load_probe, pid))
     llm = _probe_subject(sdb, me, body.llm)
     return _probe_call(_probes().start, pid, llm, body.repeats, body.name, body.cases, owner_id=me.id, session=sdb)
 

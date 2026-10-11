@@ -246,3 +246,11 @@ def authorize(session, user, seats: list[dict], purpose: str = "game", *, queued
             if access.VIEW not in access.on(session, user, server):
                 raise ValueError("You may not use that machine. Pick one of the machines you may use.")
             raise ValueError(f"{server.name}: {decision.reason}")
+
+
+def admit(session, user, server_ids, purpose: str) -> None:
+    """``authorize`` for work that names machines rather than seats and waits its turn for them (a benchmark run's
+    machines, a probe run's subject, a report's narrative): may ``user`` use each pooled one for ``purpose`` at all.
+    Raises ValueError as ``authorize`` does."""
+    authorize(session, user, [{"type": "llm", "llm": {"server_id": sid}} for sid in server_ids if sid], purpose,
+              queued=True)

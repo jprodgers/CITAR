@@ -157,7 +157,16 @@ def _resolve_pooled(group: dict, pooled: dict) -> dict:
 
 
 def normalize_suite(d: dict) -> dict:
-    """Fill defaults and ids so hand-written or older suite files keep working."""
+    """Fill defaults and ids so hand-written or older suite files keep working. A suite of the wrong shape (a
+    model entry that is a number, a name that is a list...) is a ValueError, which the routes answer with 400."""
+    try:
+        return _normalize_suite(d)
+    except (TypeError, AttributeError) as e:
+        raise ValueError(f"That is not a benchmark suite ({e}).") from None
+
+
+def _normalize_suite(d: dict) -> dict:
+    """``normalize_suite``'s work, on a suite of the right shape."""
     s = {"id": d.get("id") or _new_id("suite_"), "name": (d.get("name") or "Untitled suite").strip()[:80],
          "description": d.get("description") or "", "mode": d.get("mode") if d.get("mode") in ("sequential", "parallel") else "sequential",
          "repeats": max(1, min(20, int(d.get("repeats") or 1))), "created": d.get("created") or _now(), "updated": _now()}
@@ -365,7 +374,7 @@ class BenchmarkScheduler:
         The id reaches this from a URL, so it is validated rather than trusted - a path separator here
         would be a way to read or write files outside the benchmark directory.
         """
-        if not re.fullmatch(r"[A-Za-z0-9_\-]+", suite_id or ""):
+        if not isinstance(suite_id, str) or not re.fullmatch(r"[A-Za-z0-9_\-]+", suite_id):
             raise KeyError(suite_id)
         return self.suites_dir / f"{suite_id}.json"
 

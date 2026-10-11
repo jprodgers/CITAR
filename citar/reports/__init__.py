@@ -53,30 +53,58 @@ def _now() -> float:
     return time.time()
 
 
+def _part(d: dict, key: str, kind: type, what: str):
+    """``d[key]`` when it is a ``kind`` (an empty one when it is missing or empty); a ValueError naming ``what``
+    otherwise, so a request with a wrong shape is a 400, never a 500."""
+    v = d.get(key)
+    if not v:
+        return kind()
+    if not isinstance(v, kind):
+        raise ValueError(f"A report's {key} is {what}.")
+    return v
+
+
+def _ref(v, key: str) -> Optional[str]:
+    """A narrative's machine, model or profile: an id, or None."""
+    if not v:
+        return None
+    if not isinstance(v, str):
+        raise ValueError(f"A report's narrative names its {key} by its id.")
+    return v
+
+
 def normalize_spec(d: dict) -> dict:
-    """Validate a report specification and fill in its defaults."""
+    """Validate a report specification and fill in its defaults. A ValueError for one with a wrong shape."""
     d = d or {}
-    rng = d.get("range") or {}
-    scope = d.get("scope") or {}
-    opts = d.get("options") or {}
-    narr = d.get("narrative") or {}
-    lo, hi = (opts.get("lifespan_range") or [2, 6])[:2] if isinstance(opts.get("lifespan_range"), list) else (2, 6)
-    lo, hi = max(1, min(20, int(lo))), max(1, min(30, int(hi)))
+    if not isinstance(d, dict):
+        raise ValueError("A report's specification is an object.")
+    rng = _part(d, "range", dict, "an object")
+    scope = _part(d, "scope", dict, "an object")
+    opts = _part(d, "options", dict, "an object")
+    narr = _part(d, "narrative", dict, "an object")
+    try:
+        lo, hi = (opts.get("lifespan_range") or [2, 6])[:2] if isinstance(opts.get("lifespan_range"), list) else (2, 6)
+        lo, hi = max(1, min(20, int(lo))), max(1, min(30, int(hi)))
+    except (TypeError, ValueError):
+        raise ValueError("A report's lifespan range is two numbers of years.") from None
+    preset = d.get("preset")
     return {
         "title": (str(d.get("title") or "").strip() or "CITAR report")[:120],
-        "preset": d.get("preset") if d.get("preset") in PRESETS else None,
+        "preset": preset if isinstance(preset, str) and preset in PRESETS else None,
         "range": {"preset": rng.get("preset") if rng.get("preset") in ("all", "today", "24h", "7d", "30d", "90d", "365d", "custom") else "all",
                   "from": str(rng.get("from") or "")[:10], "to": str(rng.get("to") or "")[:10]},
-        "scope": {"servers": [str(s) for s in scope.get("servers") or []][:50],
-                  "models": [str(s) for s in scope.get("models") or []][:50],
-                  "kinds": [k for k in scope.get("kinds") or [] if k in ("game", "benchmark", "probe", "lab", "report")],
+        "scope": {"servers": [str(s) for s in _part(scope, "servers", list, "a list")][:50],
+                  "models": [str(s) for s in _part(scope, "models", list, "a list")][:50],
+                  "kinds": [k for k in _part(scope, "kinds", list, "a list") if k in ("game", "benchmark", "probe", "lab", "report")],
                   "items": [{"kind": str(i.get("kind")), "id": str(i.get("id")), "name": str(i.get("name") or "")[:120]}
-                            for i in scope.get("items") or [] if isinstance(i, dict) and i.get("id")][:200]},
-        "sections": [s for s in d.get("sections") or PRESETS["model_comparison"]["sections"] if s in ALL_SECTIONS] or ["summary"],
+                            for i in _part(scope, "items", list, "a list") if isinstance(i, dict) and i.get("id")][:200]},
+        "sections": [s for s in _part(d, "sections", list, "a list") or PRESETS["model_comparison"]["sections"]
+                     if s in ALL_SECTIONS] or ["summary"],
         "options": {"electricity_basis": "marginal" if opts.get("electricity_basis") == "marginal" else "full",
                     "lifespan_range": [min(lo, hi), max(lo, hi)]},
-        "narrative": {"enabled": bool(narr.get("enabled")), "server_id": narr.get("server_id") or None,
-                      "model_id": narr.get("model_id") or None, "profile_id": narr.get("profile_id") or None,
+        "narrative": {"enabled": bool(narr.get("enabled")), "server_id": _ref(narr.get("server_id"), "machine"),
+                      "model_id": _ref(narr.get("model_id"), "model"),
+                      "profile_id": _ref(narr.get("profile_id"), "profile"),
                       "instructions": str(narr.get("instructions") or "")[:2000]},
     }
 

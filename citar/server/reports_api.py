@@ -53,18 +53,29 @@ def _is_admin(user) -> bool:
     return user is not None and user.role == "admin" and user.status == "active"
 
 
-def _narrative_gate(spec: dict, user) -> None:
-    """A report's written analysis runs on a machine the spec names: a member's names one they may use, never
-    the site's own (P3.2.9, ``servers.member_llm``: a registry machine is an administrator's until it is shared).
-    Who may use a pooled machine for pooled prompts is admission's, package 3-09's."""
+#: The kind of work a report's narrative is for admission (``admission.PURPOSES``): one prompt on a machine, as a
+#: game's turn is. Package 3-09 gives pooled prompts a purpose of their own.
+NARRATIVE_PURPOSE = "game"
+
+
+def _narrative_gate(s: Session, spec: dict, user) -> None:
+    """A report's written analysis runs on the machine its (normalized) spec names: a member's names one they may
+    use, never the site's own (P3.2.9, ``servers.member_llm``: a registry machine is an administrator's until it is
+    shared), and is admitted to it (``pool.seats.admit``: their own machine, or a group's they hold a grant on; a
+    machine they cannot see is refused without being named). When it may run is the runner's business."""
     from .. import servers
-    narrative = (spec or {}).get("narrative") or {}
-    if not isinstance(narrative, dict) or not narrative.get("enabled") or _is_admin(user):
+    from ..pool import seats as pool_seats
+    narrative = spec["narrative"]
+    if not narrative.get("enabled") or _is_admin(user):
         return
     try:
-        servers.member_llm({"server_id": narrative.get("server_id")}, user, required=True)
+        checked = servers.member_llm({"server_id": narrative.get("server_id")}, user, required=True)
     except servers.SeatBlockError as e:
         raise HTTPException(e.status, str(e)) from None
+    try:
+        pool_seats.admit(s, user, [checked.get("server_id")], NARRATIVE_PURPOSE)
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from None
 
 
 @router.get("/api/reports")
@@ -110,8 +121,10 @@ def reports_options(me=Depends(require_user), s: Session = Depends(get_db)):
 @router.post("/api/reports")
 def reports_start(body: dict, me=Depends(require_cap("run_reports")), s: Session = Depends(get_db)):
     """Start building a report: the caller's."""
-    _narrative_gate(body, me)
-    return _call(reports_runner().start, body, owner_id=me.id, session=s)
+    from ..reports import normalize_spec
+    spec = _call(normalize_spec, body)
+    _narrative_gate(s, spec, me)
+    return _call(reports_runner().start, spec, owner_id=me.id, session=s)
 
 
 @router.get("/api/reports/{rid}")
@@ -126,10 +139,11 @@ def reports_get(rid: str, request: Request, p: Principal = Depends(principal), s
 def reports_rerun(rid: str, request: Request, me=Depends(require_cap("run_reports")), s: Session = Depends(get_db)):
     """Build a fresh report from the same specification, with current data: for whoever manages the report, and
     the new one is theirs."""
+    from ..reports import normalize_spec
     items.require(s, "report", rid, me, access.MANAGE, slug=_key(request))
     r = reports_runner()
-    spec = _call(r.spec, rid)
-    _narrative_gate(spec, me)
+    spec = _call(normalize_spec, _call(r.spec, rid))
+    _narrative_gate(s, spec, me)
     return _call(r.start, spec, owner_id=me.id, session=s)
 
 
