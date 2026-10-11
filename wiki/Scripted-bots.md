@@ -67,7 +67,7 @@ game keeps its bot when the rankings change. Benchmarks default to Standard.
 The frozen snapshots of 0.1.5's Python bot (and the built-in profiles v0, v1 and 22 Sep that played
 them) were archived with 0.1.5: a profile, seat or experiment that names one is refused with
 a message saying so. A saved profile of 0.1.5 on a snapshot stays listed: its page shows it read-only
-with that message, an administrator can delete it, and it is never the Best bot.
+with that message, its owner (or an administrator) can delete it, and it is never the Best bot.
 
 The **Bots** page lists them, edits them and ranks them:
 
@@ -117,7 +117,12 @@ Versions, schemas, cleaning, fingerprints and the build id come from the engine
 [MODDING.md](Modding#playing-a-modded-ruleset)) has its own build id, so its fingerprints and
 ratings are its own.
 
-HTTP (signed in; changes need an administrator): `GET /api/bots/profiles`, `GET|PUT|DELETE
+A saved profile and a lab experiment belong to whoever made them, and are shared like a game
+([owned items](Design-accounts-and-sharing#owned-items)): creating or forking a profile needs the `edit_bots`
+permission and queueing an experiment `run_lab`, both an administrator's by default; changing or
+deleting a profile needs managing it. The built-in profiles are the server's, readable by everyone.
+
+HTTP: `GET /api/bots/profiles`, `GET|PUT|DELETE
 /api/bots/profiles/{id}`, `POST /api/bots/profiles`, `POST /api/bots/profiles/{id}/fork`,
 `GET /api/bots/schema?engine=basic` (`{engine, groups}`: the version's schema), `GET
 /api/bots/engines`, `GET /api/bots/rankings`, and `POST /api/bots/experiments` to queue an A/B

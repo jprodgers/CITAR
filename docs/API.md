@@ -64,7 +64,29 @@ These take a signed-in account (a seat token is not one); see
 | `PUT /api/games/{id}/sharing` | `{"visibility", "data_sharing", "rotate_slug"}`; `global` needs the `publish_global` permission |
 | `POST /api/games/{id}/sharing/users`, `DELETE .../sharing/users/{handle}` | Share with one account (`view`, `play` or `manage`), or stop |
 | `POST /api/games/{id}/unpublish` | `{"reason"}`: make it private and kill its links, for a moderator on a published game or for whoever manages it. The owner sees the reason |
-| `POST /api/scenarios/{id}/launch` | Start a game from a scenario: your game, under the same seat rule and game limit |
+| `POST /api/scenarios/{id}/launch` | Start a game from a scenario you may see: your game, under the same seat rule and game limit |
+
+### Owned items
+
+Benchmark suites and runs, probes and probe runs, lab experiments, scenarios, maps, bot profiles and
+reports each have an owner and a visibility, like a game ([the rules](server/ACCOUNTS.md#owned-items)).
+Their own routes (`/api/benchmarks/...`, `/api/probes/...`, `/api/probe-runs/...`, `/api/maps/...`,
+`/api/scenarios/...`, `/api/scenario-editor/...`, `/api/bots/...`, `/api/lab/...`, `/api/reports/...`)
+answer 404 for an item the caller may not see and 403 for one they may see but not change; listings
+carry `can_view`, `can_manage` and `can_moderate` per item. A `link` item opens with its key as `?k=`.
+An item is addressed here by its kind and its id on disk (`ref`), as its own routes name it:
+
+| Method and path | |
+|---|---|
+| `GET /api/items/{kind}/{ref}/sharing` | Its owner, visibility, share link, who it is shared with and its last unpublish (as a game's) |
+| `PUT /api/items/{kind}/{ref}/sharing` | `{"visibility"}`; `global` needs `publish_global` |
+| `POST /api/items/{kind}/{ref}/sharing/users`, `DELETE .../sharing/users/{handle}` | Share with one account (`view`, `play` or `manage`), or stop |
+| `POST /api/items/{kind}/{ref}/sharing/rotate` | A new share link; every copy of the old one stops working |
+| `POST /api/items/{kind}/{ref}/unpublish` | `{"reason"}`: make it private and kill its links, for a moderator on a published item or for whoever manages it |
+| `POST /api/queue/priority` | `{"kind", "id", "priority"}`: move your own work (a benchmark run, a probe run, a report, a lobby game, a lab experiment) up or down the queue |
+
+`kind` is one of `benchmark_suite`, `benchmark_run`, `probe`, `probe_run`, `lab_experiment`,
+`scenario`, `map`, `bot_profile` and `report`. These take a signed-in account.
 
 ---
 

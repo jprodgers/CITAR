@@ -73,13 +73,29 @@ must clear all of:
 | --- | --- |
 | **admin** | Everything. Server settings, user roles, invites, suspend/delete, global server pool, all data. |
 | **moderator** | Review and act on reported content, suspend accounts, unpublish what was published to the internet (`global` games, reports and items, and `link` ones whose link they were given), read the audit log. No role changes, no server settings, no access to private data that was not reported, and no control of anybody's things: unpublishing is all a moderator may do to them. |
-| **user** | Own games, servers, reports and data; whatever grants they have been given. |
+| **user** | Own games, servers, reports, benchmarks, probes and data; whatever grants they have been given. |
 
-Roles are coarse. Fine-grained things are per-account capability flags an admin can set:
-`register_servers`, `run_reports`, `publish_global` (it was `publish_public` before 0.1.6),
-`create_games`, `invite`, plus `invite_quota`, `max_concurrent_games`, `max_seats_per_game`. Defaults
-come from a server-settings template so an admin changes the policy once rather than per user; a
-template saved before a capability existed falls back to the built-in default for it.
+Roles are coarse. Fine-grained things are per-account capability flags an admin can set, plus
+`invite_quota`, `max_concurrent_games` and `max_seats_per_game`:
+
+| Capability | Lets an account | Members by default |
+| --- | --- | --- |
+| `create_games` | start games, launch scenarios, save maps and scenarios | yes |
+| `register_servers` | add machines and share them | yes (not on probation) |
+| `run_reports` | build reports | yes |
+| `run_benchmarks` | save benchmark suites and start runs | yes |
+| `run_probes` | save probes and run them | yes |
+| `run_lab` | queue lab experiments, which run on the server's own CPU | no |
+| `edit_bots` | create, fork and edit bot profiles, which benchmarks are measured against | no |
+| `full_llm` | seat a model that plays every turn | yes |
+| `partial_llm` | use pooled prompts (a hybrid seat's diplomacy, a report's written analysis) | yes |
+| `publish_global` | make something readable by the whole internet (`publish_public` before 0.1.6) | no |
+| `invite` | mint invitation codes, up to `invite_quota` | no |
+
+Defaults come from a server-settings template so an admin changes the policy once rather than per
+user; a template saved before a capability existed falls back to the built-in default for it.
+`full_llm` and `partial_llm` restrict nothing yet: they are where a future rule (say, on the compute
+ratio) switches an account's model use off.
 
 ---
 
@@ -94,7 +110,7 @@ never 403: a 403 would confirm that it exists.
 
 ### Visibility
 
-Each shareable object (game, report and the other owned items, server group) carries:
+Each shareable object (game, owned item, server group) carries:
 
 - `visibility`, on a ladder of five levels (0.1.6):
 
@@ -123,14 +139,55 @@ while the underlying game stays private.
 (`X-Robots-Tag: noindex`). The share URL offered to the owner carries the key for `link`, and is the
 object's plain address for `server` and `global`.
 
+### Owned items
+
+Every job a member can start is an **owned item**, with an owner and a visibility on the ladder
+above, and the same sharing as a game: benchmark suites and runs, probes and probe runs, lab
+experiments, scenarios, maps, bot profiles and reports. Their files stay where they always were (the
+benchmark folder, `saves/probes/`, `saves/scenarios/`, `saves/maps/`, `saves/bots/profiles/`,
+`saves/lab/`, `saves/reports/`); a row in `owned_items` (`citar/items.py`) says whose each one is. The
+rules:
+
+- **Making one** needs the kind's capability (above): a suite or a run `run_benchmarks`, a probe or a
+  probe run `run_probes`, an experiment `run_lab`, a profile `edit_bots`, a map or a scenario
+  `create_games`, a report `run_reports`. It is the maker's, `private`. Work that runs on a machine
+  (a benchmark run, a probe run) is admitted to each machine it names, as a game's seats are.
+- **Reading one** needs view: its owner, administrators, its allowlist, and members or the whole
+  internet as its visibility says. Listings show only what the caller may see; a `link` item is never
+  listed.
+- **Changing one** (saving over it, deleting it, pausing or cancelling a run, stopping a probe run,
+  rerunning a report, its queue priority, its sharing) needs manage: its owner, an ACL manager or an
+  administrator. Saving under an id that is somebody else's is refused before anything is written.
+- **Using one** in something else (a map in a game, a scenario in a probe, a bot profile in a seat or
+  an experiment, a suite in a run) needs view on it.
+- A **benchmark run's games** are its owner's, at the run's visibility, and follow it when its
+  visibility changes or it is taken down. A probe case opened to be looked at is the run's owner's.
+- A suite's machines and a probe's subject **name** machines and never describe them (no base URL,
+  key or key variable), as a seat's model does (see [AI players](../AI_PLAYERS.md)); a report's
+  written analysis names a machine its maker may use.
+- The **shipped bot profiles** (Standard, Classic production, Idle) are the server's: `global`, and
+  only administrators manage them (they cannot be changed, only forked).
+- A file of one of these kinds with **no row** is nobody's, and every route answers 404 for it,
+  administrators included. Such files are left by a crash between writing the file and its row, by a
+  file copied in by hand, by `citar lab submit` where no server database is at hand, and by everything
+  from before 0.1.6. They are **adopted** at every start that has an administrator, and when the first
+  administrator is made on a fresh server (`citar admin create-admin`, `set-role`, the setup wizard, an
+  invitation with the admin role): each goes to the account its file names (a run's or a report's
+  owner), else to the first administrator (in local mode, the local owner), `private`, with one audit
+  row for the lot. Games in the index that nobody owns are adopted the same way.
+
+The sharing routes are the same for every kind: `/api/items/{kind}/{ref}/sharing` (see the
+[API](../API.md#owned-items)).
+
 ### Moderation
 
 A moderator's only extra permission is **moderate**: on a `global` object, and on a `link` object
 presented with its key, a moderator may view it and **unpublish** it
-(`POST /api/games/{gid}/unpublish`, with a reason). Unpublishing makes the object private, rotates
+(`POST /api/games/{gid}/unpublish` or `POST /api/items/{kind}/{ref}/unpublish`, with a reason). Unpublishing makes the object private, rotates
 its slug so every shared link dies, and writes an audit row with the reason. The owner sees the
-reason in the game's sharing panel, and that a moderator (or an administrator) took it down, never
-which one: administrators have the audit log. Every control (pause, seats, sharing, delete, stop, rerun) needs **manage**,
+reason in the item's sharing panel, and that a moderator (or an administrator) took it down, never
+which one: administrators have the audit log. A benchmark run taken down takes its games down with
+it. Every control (pause, seats, sharing, delete, stop, rerun) needs **manage**,
 which only the owner, an ACL manager and administrators have, so a moderator who has taken something
 down has no further way in. On a `server` object a moderator is a member like any other; below `link`,
 nothing.
