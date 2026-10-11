@@ -1279,11 +1279,15 @@ def scenarios_launch(sid: str, body: LaunchBody, me=Depends(require_cap("create_
 
     try:
         scn = engine_api.load_scenario(sid)
-        s = manager.create_from_scenario(scn, body.seats, body.name or scn["name"], start=False, check_seat=check)
+        # made but not yet registered: a refusal below leaves nothing behind, on the disk or in the list
+        s = manager.create_from_scenario(scn, body.seats, body.name or scn["name"], register=False, start=False,
+                                         check_seat=check)
     except (ActionError, ValueError) as e:
         raise HTTPException(400, str(e))
+    _authorize_seats(sdb, me, checked)
+    s.owner_id = me.id
+    manager.register_new(s)
     try:
-        _authorize_seats(sdb, me, checked)
         ownership.register(sdb, s, me, visibility=access.PRIVATE)
         sdb.flush()
     except BaseException:

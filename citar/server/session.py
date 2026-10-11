@@ -1608,15 +1608,21 @@ class SessionManager:
                               llm=sc.get("llm") or {}, bot=_pin_best(sc.get("bot") or {})))
         s = GameSession(g, seats, name or scn.get("name") or "Scenario")
         if register:
-            s.open_timeline()                # before anything can reach the session, so before anything can save it
-            s.registered = True
-            with self.lock:
-                self.sessions[s.id] = s
-            self.track(s)
-            s.autosave(force=True)
+            self.register_new(s)
         if start:
             s.start()
         return s
+
+    def register_new(self, s: GameSession):
+        """A new game made with ``register=False`` joins the live ones: its timeline, the list, the usage ledger and
+        its first autosave, as ``create_from_scenario`` does with ``register``. For a caller that checks the game
+        before anything of it reaches the disk (the scenario launch's admission). Not started."""
+        s.open_timeline()                    # before anything can reach the session, so before anything can save it
+        s.registered = True
+        with self.lock:
+            self.sessions[s.id] = s
+        self.track(s)
+        s.autosave(force=True)
 
     def load(self, path: Path) -> GameSession:
         """Load a save into a live session, paused.

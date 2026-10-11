@@ -348,6 +348,26 @@ class Scenarios(SeatCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.games.append(r.json()["id"])
 
+    def test_a_refused_launch_leaves_nothing_behind(self):
+        from citar.server import session as sess
+        with db.session() as s:
+            s.add(Server(id="sv_unshared", owner_id=self.ids["lender"], name="Unshared box", kind="owned",
+                         provider="worker", reach="worker", config={}))
+        eid = self._editor("member")
+        r = self.post("member", f"/api/scenario-editor/{eid}/save", {"name": "members open", "seats": self._seats({})})
+        self.assertEqual(r.status_code, 200, r.text)
+        sid = r.json()["id"]
+        self.scenarios.append(sid)
+        def folders():
+            return {p.name for p in sess.SAVE_DIR.iterdir()} if sess.SAVE_DIR.exists() else set()
+        before = folders()
+        live = set(self.manager.sessions)
+        r = self.post("member", f"/api/scenarios/{sid}/launch",
+                      {"name": "refused", "seats": [{}, {"type": "llm", "llm": {"server_id": "sv_unshared", "model": "m"}}]})
+        self.assertEqual(r.status_code, 403, r.text)
+        self.assertEqual(set(self.manager.sessions), live)
+        self.assertEqual(folders(), before)
+
 
 class Agents(SeatCase):
     """Whatever a seat's block says, a member's game dials nothing it describes (``resolve_llm``'s passthrough)."""
