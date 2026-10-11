@@ -492,18 +492,22 @@ def shared_with(session, obj) -> list:
     return list(out.values())
 
 
-#: Where an object opens in the web client, by its object_type.
-_PAGES = {"game": "game", "report": "reports", "server_group": "servers"}
+#: Where an object opens in the web client, by its object_type (an owned item's kind).
+_PAGES = {"game": "game", "server_group": "servers", "report": "reports", "benchmark_suite": "benchmarks",
+          "benchmark_run": "benchmarks", "probe": "probes", "probe_run": "probes", "lab_experiment": "lab",
+          "scenario": "scenarios", "map": "editor", "bot_profile": "bots"}
 
 
 def share_url(obj, base: str) -> Optional[str]:
     """The link to hand out (P3.2.3): for `link` it carries the key; for `server` and `global` it is
-    the object's plain address, which members (or everyone) open without one. None below `link`."""
+    the object's plain address, which members (or everyone) open without one. None below `link`.
+    An owned item is addressed by its id on disk (its `ref`), as its page names it."""
     visibility = getattr(obj, "visibility", PRIVATE)
     if visibility not in (LINK, SERVER, GLOBAL):
         return None
     page = _PAGES.get(object_type_of(obj), "")
     if not page:
         return None
-    url = f"{base.rstrip('/')}/#/{page}/{obj.id}"
+    ident = obj.ref if isinstance(obj, OwnedItem) else obj.id
+    url = f"{base.rstrip('/')}/#/{page}/{ident}"
     return f"{url}?k={obj.slug}" if visibility == LINK else url

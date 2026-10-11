@@ -261,19 +261,36 @@ class ReportRunner:
         return None
 
     # ------------------------------------------------------------------ running
-    def start(self, spec: dict) -> dict:
-        """Queue a report to be built."""
+    def start(self, spec: dict, *, owner_id: Optional[str] = None, session=None) -> dict:
+        """Queue a report to be built. ``owner_id`` is the account asking for it: the report is theirs
+        (design/phase3-features.md P3.2.4), its meta records them, and the runner writes its row in ``owned_items``
+        (kind ``report``, its specification in the row's meta): in ``session`` when given (a request's, committed
+        before the report is queued), else in a session of its own when the process has its database. A report
+        made where there is none (a script) has no row until adoption gives it one, to the owner it records."""
         spec = normalize_spec(spec)
         rid = datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
         p = self._path(rid)
+        self._register(rid, spec, owner_id, session)
         p.mkdir(parents=True, exist_ok=True)
         (p / "spec.json").write_text(json.dumps(spec, indent=1), encoding="utf-8")
         m = self._set(rid, title=spec["title"], preset=spec.get("preset"), status="queued", created=_now(), started=None,
-                      finished=None, progress="Waiting", error=None, summary=None, narrative=spec["narrative"]["enabled"])
+                      finished=None, progress="Waiting", error=None, summary=None, narrative=spec["narrative"]["enabled"],
+                      owner_id=owner_id)
         with self.lock:
             self.queue.append(rid)
         self._wake()
         return m
+
+    def _register(self, rid: str, spec: dict, owner_id: Optional[str], session) -> None:
+        """The report's row (``start``)."""
+        from .. import db, items
+        path = self._path(rid) / "report.html"
+        if session is not None:
+            items.register(session, "report", rid, owner_id, spec["title"], path=path, meta={"spec": spec})
+            session.commit()
+        elif db.configured():
+            with db.session() as s:
+                items.register(s, "report", rid, owner_id, spec["title"], path=path, meta={"spec": spec})
 
     POLL_SECONDS = 5.0
 
@@ -306,7 +323,7 @@ class ReportRunner:
             sid = self._machine(rid)
             from ..pool import seats as pool_seats
             holder = f"report “{self.meta(rid).get('title') or rid}”"
-            pool_seats.claim(sid, holder)         # benchmarks and probes wait while the model writes
+            pool_seats.claim(sid, holder, ("report", rid))     # benchmarks and probes wait while the model writes
             self._current = rid
             try:
                 self.run(rid)

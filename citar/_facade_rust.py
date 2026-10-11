@@ -51,6 +51,7 @@ __all__ = [
     "resolve_name", "ruleset_counts", "check_ruleset", "tool_list", "tool_kind", "state_summary",
     "list_maps", "load_map", "save_map", "delete_map", "validate_map", "map_summary", "blank_map", "generate_map",
     "scenario_ops_help", "list_scenarios", "load_scenario", "scenario_summary", "delete_scenario",
+    "map_ref", "map_file", "map_dir", "scenario_ref", "scenario_file", "scenario_dir",
     "bot_instance", "bot_versions", "bot_schema", "bot_clean_params", "bot_fingerprint", "DIPLOMACY_CATEGORIES",
     "item_category", "proposal_categories", "bot_set_diplomacy", "bot_owns_negotiation", "run_game",
     "build_info",
@@ -217,6 +218,28 @@ def _map_path(map_id: str) -> Path:
     return MAP_DIR / f"{map_id}.json"
 
 
+def _ref(name) -> str:
+    """The id a map or a scenario named ``name`` is saved under (the slug ``save_map`` and ``save_scenario`` make),
+    or "" when nothing of the name is left."""
+    return re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-")[:60]
+
+
+def map_ref(name) -> str:
+    """The id ``save_map`` saves a map asked for as ``name`` under; "" when nothing of it is left (the save would
+    then make up an id). The server checks who owns that id before it writes anything."""
+    return _ref(name)
+
+
+def map_file(map_id: str) -> Path:
+    """Where a map's file is (whether or not it exists). Raises MapError for an id that is no plain slug."""
+    return _map_path(map_id)
+
+
+def map_dir() -> Path:
+    """The folder of saved maps."""
+    return MAP_DIR
+
+
 def list_maps() -> list[dict]:
     """Saved maps, in summary, the newest first. A file that does not read as a map is left out."""
     MAP_DIR.mkdir(parents=True, exist_ok=True)
@@ -302,6 +325,22 @@ def _scenario_path(sid: str) -> Path:
     if not isinstance(sid, str) or not _ID.fullmatch(sid):
         raise _action_error(f"Invalid scenario id '{sid}'.")
     return SCENARIO_DIR / f"{sid}.citarscn"
+
+
+def scenario_ref(name) -> str:
+    """The id ``EngineGame.save_scenario`` saves a scenario asked for as ``name`` under; "" when nothing of it is
+    left."""
+    return _ref(name)
+
+
+def scenario_file(sid: str) -> Path:
+    """Where a scenario's file is (whether or not it exists). Raises ActionError for an id that is no plain slug."""
+    return _scenario_path(sid)
+
+
+def scenario_dir() -> Path:
+    """The folder of saved scenarios."""
+    return SCENARIO_DIR
 
 
 def list_scenarios() -> list[dict]:

@@ -348,9 +348,11 @@ class Loading(IndexCase):
         self.assertIsNone(s.owner_id)
 
     def test_an_opened_probe_case_is_a_probes_game_not_a_lobby_game(self):
-        """``POST /api/probe-runs/{rid}/open/{case}/{rep}`` loads a case's saved end state to be looked at: its row,
-        should it have none, is of kind `probe` and pools nothing, so it never counts as a lobby game."""
+        """``POST /api/probe-runs/{rid}/open/{case}/{rep}`` loads a case's saved end state to be looked at, for whoever
+        may see the run (3-02): its row, should it have none, is of kind `probe`, so it never counts as a lobby game,
+        and is the run's owner's, with their pooling default, at the run's visibility."""
         import types
+        from citar import items
         case = self.manager.create(CONFIG, HUMAN_FIRST, "probe p/c", start=False, track=False)
         run_dir = Path(tempfile.mkdtemp(prefix="citar_index_probe_"))
         try:
@@ -358,14 +360,20 @@ class Loading(IndexCase):
             self.manager.delete(case.id)
             self.games.append(case.id)
             self.assertIsNone(_row(case.id))
+            with db.session() as s:
+                items.register(s, "probe_run", "r1", self.ids["member"], "a member's run")
+                s.get(User, self.ids["member"]).data_sharing = "private"
             runner = types.SimpleNamespace(_run_dir=lambda rid: run_dir)
             with mock.patch.object(self.app, "_probes", return_value=runner):
-                r = self.client.post("/api/probe-runs/r1/open/c1/0", headers=self.headers["zara"])
+                r = self.client.post("/api/probe-runs/r2/open/c1/0", headers=self.headers["zara"])
+                self.assertEqual(r.status_code, 404, "a run with no row is nobody's, an administrator's either")
+                r = self.client.post("/api/probe-runs/r1/open/c1/0", headers=self.headers["member"])
             self.assertEqual(r.status_code, 200, r.text)
             self.assertEqual(r.json()["game_id"], case.id)
             row = _row(case.id)
-            self.assertEqual((row.kind, row.owner_id, row.data_sharing, row.status),
-                             ("probe", None, "private", "playing"))
+            self.assertEqual((row.kind, row.owner_id, row.data_sharing, row.status, row.visibility),
+                             ("probe", self.ids["member"], "private", "playing", "private"))
+            self.assertEqual(self.manager.get(case.id).owner_id, self.ids["member"])
         finally:
             shutil.rmtree(run_dir, ignore_errors=True)
 

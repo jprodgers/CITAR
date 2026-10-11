@@ -26,6 +26,11 @@ from ..db.models import CAPABILITIES, Setting, User
 #: hardware and analysing results is the point of the site, not a privilege. What `user` cannot do
 #: by default is publish to the whole internet, which is the one action with consequences outside
 #: this server.
+#:
+#: The owned items' capabilities (design/phase3-features.md P3.2.4): benchmarks and probes are a member's by
+#: default; the lab (it runs on the server's own CPU) and bot editing (profiles are what every benchmark is measured
+#: against) stay with administrators unless an administrator grants them. `full_llm` and `partial_llm` are on for
+#: everyone: they are the hooks a later restriction turns off (P3.3.7).
 ROLE_DEFAULTS: dict = {
     "user": {
         "create_games": True,
@@ -33,6 +38,12 @@ ROLE_DEFAULTS: dict = {
         "run_reports": True,
         "publish_global": False,
         "invite": False,
+        "run_benchmarks": True,
+        "run_probes": True,
+        "run_lab": False,
+        "edit_bots": False,
+        "full_llm": True,
+        "partial_llm": True,
     },
     "moderator": {
         "create_games": True,
@@ -40,6 +51,12 @@ ROLE_DEFAULTS: dict = {
         "run_reports": True,
         "publish_global": True,
         "invite": True,
+        "run_benchmarks": True,
+        "run_probes": True,
+        "run_lab": False,
+        "edit_bots": False,
+        "full_llm": True,
+        "partial_llm": True,
     },
     "admin": dict.fromkeys(CAPABILITIES, True),
 }
@@ -132,6 +149,37 @@ def set(key: str, value: Any, *, session=None, actor: Optional[User] = None) -> 
             _write(s)
     with _lock:
         _cache[key] = value
+    return value
+
+
+#: What the server records in the same table for itself, beside the operator's policy: one-time work that has been
+#: done (design/phase3-features.md P3.2.4's `orphans_adopted`; P3.2.8's `registry_imported`). Not policy: the console
+#: cannot set them (``set`` refuses a key that is not in DEFAULTS), and they are read from the table, never the cache.
+MARKERS = ("orphans_adopted", "registry_imported")
+
+
+def marker(session, key: str) -> Any:
+    """A marker's value, None when it was never set, read from the database in ``session``."""
+    if key not in MARKERS:
+        raise KeyError(f"Unknown marker {key!r}.")
+    row = session.get(Setting, key)
+    if row is None:
+        return None
+    return row.value.get("v") if isinstance(row.value, dict) else row.value
+
+
+def set_marker(session, key: str, value: Any) -> Any:
+    """Record a marker in ``session``'s transaction."""
+    if key not in MARKERS:
+        raise KeyError(f"Unknown marker {key!r}.")
+    row = session.get(Setting, key)
+    if row is None:
+        session.add(Setting(key=key, value={"v": value}))
+    else:
+        row.value = {"v": value}
+    with _lock:
+        if _loaded:
+            _cache[key] = value
     return value
 
 

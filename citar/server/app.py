@@ -22,6 +22,8 @@ from ..engine_api import ActionError, EngineCrash, EngineGame
 from .session import CRASHED, SessionManager, GameSession, SAVE_DIR
 from .benchmarks import BenchmarkScheduler
 from .admin_api import router as admin_router
+from .items_api import router as items_router
+from .reports_api import router as reports_router
 from .setup_api import router as setup_router
 from .auth_api import router as auth_router
 from .pool_api import router as pool_router
@@ -29,7 +31,8 @@ from .share_api import router as share_router
 from .bots_api import router as bots_router
 from .. import settings as citar_settings
 from ..auth import access, audit
-from ..auth.deps import Principal, get_db, principal, require_cap, require_user
+from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
+from .. import items
 from . import ownership
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -40,6 +43,8 @@ app.include_router(pool_router)
 app.include_router(share_router)
 app.include_router(bots_router)
 app.include_router(admin_router)
+app.include_router(reports_router)
+app.include_router(items_router)
 app.include_router(setup_router)
 manager = SessionManager()
 scheduler: Optional[BenchmarkScheduler] = None
@@ -87,9 +92,10 @@ async def _startup():
     if scheduler is None:
         scheduler = BenchmarkScheduler(manager)   # reloads benchmark games that were in progress
     _probes()                                     # resumes probe runs that were queued or running
-    from .admin_api import reports_runner
+    from .reports_api import reports_runner
     reports_runner()                              # resumes queued reports (some wait for a model machine)
     _close_orphan_rows()                          # now that everything that comes back is back
+    items.on_boot()                               # shipped items' rows; strays adopted when there is an admin
     asyncio.create_task(_close_finished_loop())   # finished lobby games leave the list after a while
     from .. import usage
     usage.start_power_sampler()                   # live power samples of this machine for cost reports
@@ -487,7 +493,8 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
     workers = hub().status()
     out = {"version": __version__, "uptime": round(time.time() - _STARTED), "user": p.user.handle, "admin": admin,
            "mode": "server" if citar_settings.get().server_mode else "local", "games": games,
-           "benchmarks": ({k: v for k, v in scheduler.status().items() if k != "log"} if scheduler else None),
+           "benchmarks": ({k: v for k, v in scheduler.status(items.listed(sdb, "benchmark_run", p.user)).items()
+                           if k != "log"} if scheduler else None),
            "workers_online": len(workers) if admin else None}
     if admin:
         host = {"python": sys.version.split()[0], "platform": sys.platform}
@@ -564,6 +571,8 @@ def create_game(body: CreateGame, request: Request,
         raise HTTPException(403, f"Your account is limited to {me.max_seats_per_game} seats per game.")
     _game_limit(sdb, me)
     access.check_publish(me, body.visibility)
+    _may_use(sdb, me, "map", (body.config or {}).get("map"))     # a custom map, and bot profiles, the caller may see
+    _seat_profiles(sdb, me, body.seats)
     seats = [_member_seat(seat, me) for seat in body.seats]
     _authorize_seats(sdb, me, seats)
     try:
@@ -642,6 +651,8 @@ def update_seat(gid: str, pid: int, body: SeatUpdate, request: Request,
     llm = body.llm
     seat = s.seats[pid]
     new_type = body.type or seat.type
+    if isinstance(body.bot, dict):
+        _may_use(sdb, p.user, "bot_profile", body.bot.get("profile"))
     if llm is not None or (new_type in MODEL_SEATS and new_type != seat.type):
         # the block the seat will play with: the new one, or the one it has when only its type makes it a model seat.
         # A change that leaves a model seat's block as it is (a new name) checks nothing: that block was checked when
@@ -850,20 +861,114 @@ def errors(gid: str, request: Request, p: Principal = Depends(principal),
 # ----------------------------------------------------------------------------
 # benchmarks & model scores
 # ----------------------------------------------------------------------------
-def _bench_call(fn, *args):
+def _bench_call(fn, *args, **kw):
     """Call a scheduler method, turning its errors into HTTP status codes."""
     try:
-        return fn(*args)
+        return fn(*args, **kw)
     except KeyError as e:
         raise HTTPException(404, f"Not found: {e}")
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.get("/api/benchmarks/status", dependencies=[Depends(require_user)])
-def bench_status():
-    """What the benchmark scheduler is doing: running jobs, queues, restricted servers."""
-    return _scheduler().status()
+def _is_admin(user) -> bool:
+    """Whether an account is an administrator in good standing, who sees and manages every item."""
+    return user is not None and user.role == "admin" and user.status == "active"
+
+
+#: What a member's suite or probe subject may not carry (P3.2.9): keys that describe a machine, the address the
+#: server would dial and the key it would send, instead of naming one.
+DESCRIBING_KEYS = ("base_url", "api_key", "api_key_env")
+
+
+def _may_use(sdb: DbSession, user, kind: str, ref) -> None:
+    """Whether ``user`` may use the item ``kind``/``ref`` in something they make (a map in a game, a scenario in a
+    probe, a bot profile in a seat): VIEW on it, a 404 otherwise. A file with no row is an administrator's to use
+    (it is reached by nobody else until adoption gives it an owner); a built-in bot profile and the "best" one are
+    everybody's."""
+    if not ref:
+        return
+    if kind == "bot_profile":
+        from ..bots import profiles as _profiles
+        if ref == _profiles.BEST or ref in {b["id"] for b in _profiles.BUILTIN}:
+            return
+    row = items.get(sdb, kind, str(ref))
+    if row is None:
+        if _is_admin(user):
+            return
+        raise HTTPException(404, f"No such {items.noun(kind)}.")
+    access.on(sdb, user, row).require(access.VIEW)
+
+
+def _seat_profiles(sdb: DbSession, user, seats) -> None:
+    """Each bot seat's profile, which ``user`` must be able to see (``_may_use``)."""
+    for seat in seats or []:
+        if isinstance(seat, dict) and isinstance(seat.get("bot"), dict):
+            _may_use(sdb, user, "bot_profile", seat["bot"].get("profile"))
+
+
+def _suite_gate(sdb: DbSession, user, suite: dict) -> None:
+    """A suite's model entries through the members' gate (P3.2.9): a member's suite names the machines its models
+    play on and never describes one (a base URL, a key, a key variable: 400), and each machine passes
+    ``servers.member_llm`` (a registry machine is an administrator's until it is shared: 403; an unknown one: 400).
+    Its scenarios' bot profiles must be ones ``user`` may see. An administrator's suite is taken as it is."""
+    from .. import servers
+    if not isinstance(suite, dict):
+        raise HTTPException(400, "A suite is an object.")
+    for sc in suite.get("scenarios") or []:
+        if isinstance(sc, dict):
+            _may_use(sdb, user, "bot_profile", sc.get("bot_profile"))
+    if _is_admin(user):
+        return
+    for group in suite.get("servers") or []:
+        if not isinstance(group, dict):
+            raise HTTPException(400, "A suite's machines are objects naming a machine.")
+        for entry in [group] + [m for m in group.get("models") or [] if isinstance(m, dict)]:
+            bad = [k for k in DESCRIBING_KEYS if entry.get(k) not in (None, "")]
+            if bad:
+                raise HTTPException(400, "A suite names the machines its models play on; it does not describe "
+                                         f"them ({', '.join(bad)}). Pick one of the machines you may use.")
+        try:
+            servers.member_llm({"server_id": group.get("server_id")}, user, required=True)
+        except servers.SeatBlockError as e:
+            raise HTTPException(e.status, str(e)) from None
+
+
+def _admit(sdb: DbSession, user, server_ids, purpose: str) -> None:
+    """Admission for work that will queue for its machines (a run): may ``user`` use each pooled machine for
+    ``purpose`` at all (``pool.seats.authorize``, ``queued``: when is the runner's business). A 403 with the reason."""
+    from ..pool import seats as pool_seats
+    seats = [{"type": "llm", "llm": {"server_id": sid}} for sid in server_ids if sid]
+    try:
+        pool_seats.authorize(sdb, user, seats, purpose, queued=True)
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from None
+
+
+def _run_games_follow(sdb: DbSession, row) -> None:
+    """A benchmark run's games are shown as the run is (P3.2.4): when the run's visibility changes, or it is taken
+    down, its games' rows follow it, and an unpublished run's games get new share links too."""
+    import secrets as _sec
+    from sqlalchemy import select as _select
+    from ..db.models import Game as _GameRow
+    run = _scheduler().runs.get(row.ref)
+    ids = [j["game_id"] for j in (run or {}).get("jobs", []) if j.get("game_id")]
+    if not ids:
+        return
+    for game in sdb.scalars(_select(_GameRow).where(_GameRow.id.in_(ids))):
+        if game.visibility != row.visibility and row.visibility == access.PRIVATE:
+            game.slug = _sec.token_urlsafe(16)
+        game.visibility = row.visibility
+
+
+items.VISIBILITY_HOOKS["benchmark_run"] = _run_games_follow
+
+
+@app.get("/api/benchmarks/status")
+def bench_status(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """What the benchmark scheduler is doing: running jobs, queues, restricted servers. A member's counts and log
+    cover the runs they may see."""
+    return _scheduler().status(items.listed(sdb, "benchmark_run", me))
 
 
 @app.get("/api/benchmarks/settings", dependencies=[Depends(require_user)])
@@ -872,16 +977,19 @@ def bench_settings():
     return _scheduler().get_settings()
 
 
-@app.put("/api/benchmarks/settings", dependencies=[Depends(require_user)])
+@app.put("/api/benchmarks/settings", dependencies=[Depends(require_role("admin"))])
 def bench_update_settings(body: dict):
-    """Change the scoring weights."""
+    """Change the scoring weights: the server's own, so an administrator's."""
     return _bench_call(_scheduler().update_settings, body)
 
 
-@app.get("/api/benchmarks/suites", dependencies=[Depends(require_user)])
-def bench_suites():
-    """Every saved benchmark suite."""
-    return _scheduler().list_suites()
+@app.get("/api/benchmarks/suites")
+def bench_suites(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The saved benchmark suites the caller may see, each with what they may do to it."""
+    seen = items.listed(sdb, "benchmark_suite", p.user)
+    out = [s for s in _scheduler().list_suites() if seen is None or s["id"] in seen]
+    perms = items.permissions_by_ref(sdb, "benchmark_suite", p.user, [s["id"] for s in out])
+    return [dict(s, **perms.get(s["id"], {})) for s in out]
 
 
 @app.get("/api/benchmarks/suites/new", dependencies=[Depends(require_user)])
@@ -894,22 +1002,37 @@ def bench_new_suite():
     return normalize_suite({"name": "New benchmark suite", "servers": [{"server_id": first["id"], "models": []}] if first else []})
 
 
-@app.get("/api/benchmarks/suites/{suite_id}", dependencies=[Depends(require_user)])
-def bench_suite(suite_id: str):
-    """One suite."""
+@app.get("/api/benchmarks/suites/{suite_id}")
+def bench_suite(suite_id: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """One suite, for whoever may see it."""
+    items.require(sdb, "benchmark_suite", suite_id, p.user, access.VIEW, slug=_share_key(request))
     return _bench_call(_scheduler().get_suite, suite_id)
 
 
-@app.post("/api/benchmarks/suites", dependencies=[Depends(require_user)])
-def bench_save_suite(body: dict):
-    """Create or update a suite."""
-    return _bench_call(_scheduler().save_suite, body)
+@app.post("/api/benchmarks/suites")
+def bench_save_suite(body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Create a suite (``run_benchmarks``; it is the caller's) or replace one they manage. Its model entries name
+    machines (P3.2.9)."""
+    from .benchmarks import normalize_suite
+    sch = _scheduler()
+    sid = body.get("id") if isinstance(body, dict) else None
+    exists = bool(sid) and _bench_call(sch._suite_path, sid).exists()
+    if sid:
+        items.writable(sdb, "benchmark_suite", sid, me, exists=exists)
+    else:
+        items.check_create(me, "benchmark_suite")
+    _suite_gate(sdb, me, body)
+    suite = normalize_suite(body)
+    items.register(sdb, "benchmark_suite", suite["id"], me, suite["name"], path=sch._suite_path(suite["id"]))
+    return _bench_call(sch.save_suite, suite)
 
 
-@app.delete("/api/benchmarks/suites/{suite_id}", dependencies=[Depends(require_user)])
-def bench_delete_suite(suite_id: str):
-    """Delete a suite. Its finished runs are kept."""
+@app.delete("/api/benchmarks/suites/{suite_id}")
+def bench_delete_suite(suite_id: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Delete a suite the caller manages. Its finished runs are kept."""
+    items.require(sdb, "benchmark_suite", suite_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().delete_suite, suite_id)
+    items.delete(sdb, "benchmark_suite", suite_id, actor=me)
     return {"deleted": suite_id}
 
 
@@ -920,21 +1043,32 @@ class RunBody(BaseModel):
     name: Optional[str] = None
 
 
-@app.post("/api/benchmarks/runs", dependencies=[Depends(require_user)])
-def bench_start_run(body: RunBody):
-    """Start a benchmark run."""
+@app.post("/api/benchmarks/runs")
+def bench_start_run(body: RunBody, request: Request, me=Depends(require_cap("run_benchmarks")),
+                    sdb: DbSession = Depends(get_db)):
+    """Start a benchmark run, the caller's: of a suite they may see, or of one given inline. Every model entry
+    passes the members' gate for the caller (P3.2.9), whoever saved the suite, and the caller must be admitted to
+    each pooled machine for benchmarks."""
     sch = _scheduler()
-    suite = body.suite or (_bench_call(sch.get_suite, body.suite_id) if body.suite_id else None)
-    if not suite:
+    if body.suite_id:
+        items.require(sdb, "benchmark_suite", body.suite_id, me, access.VIEW, slug=_share_key(request))
+        suite = _bench_call(sch.get_suite, body.suite_id)
+    elif body.suite:
+        suite = body.suite
+    else:
         raise HTTPException(400, "Give a suite_id or a suite.")
-    run = _bench_call(sch.create_run, suite, body.name)
+    _suite_gate(sdb, me, suite)
+    _admit(sdb, me, [g.get("server_id") for g in suite.get("servers") or [] if isinstance(g, dict)], "benchmark")
+    run = _bench_call(sch.create_run, suite, body.name, owner_id=me.id, session=sdb)
     return {"id": run["id"], "jobs": len(run["jobs"])}
 
 
-@app.get("/api/benchmarks/runs", dependencies=[Depends(require_user)])
-def bench_runs():
-    """Every run, with per-game progress."""
-    return _scheduler().list_runs()
+@app.get("/api/benchmarks/runs")
+def bench_runs(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """The runs the caller may see, with per-game progress and what they may do to each."""
+    out = _scheduler().list_runs(items.listed(sdb, "benchmark_run", me))
+    perms = items.permissions_by_ref(sdb, "benchmark_run", me, [r["id"] for r in out])
+    return [dict(r, **perms.get(r["id"], {})) for r in out]
 
 
 class RunControl(BaseModel):
@@ -942,23 +1076,32 @@ class RunControl(BaseModel):
     action: str
 
 
-@app.post("/api/benchmarks/runs/{run_id}/control", dependencies=[Depends(require_user)])
-def bench_run_control(run_id: str, body: RunControl):
-    """Pause, resume or cancel a whole run."""
+@app.post("/api/benchmarks/runs/{run_id}/control")
+def bench_run_control(run_id: str, body: RunControl, request: Request, me=Depends(require_user),
+                      sdb: DbSession = Depends(get_db)):
+    """Pause, resume, cancel or remove a whole run the caller manages."""
+    items.require(sdb, "benchmark_run", run_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().control_run, run_id, body.action)
+    if body.action == "remove":
+        items.delete(sdb, "benchmark_run", run_id, actor=me)
     return {"ok": True}
 
 
-@app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/control", dependencies=[Depends(require_user)])
-def bench_job_control(run_id: str, job_id: str, body: RunControl):
-    """Pause, resume, skip or retry one game in a run."""
+@app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/control")
+def bench_job_control(run_id: str, job_id: str, body: RunControl, request: Request, me=Depends(require_user),
+                      sdb: DbSession = Depends(get_db)):
+    """Pause, resume, skip or retry one game in a run the caller manages."""
+    items.require(sdb, "benchmark_run", run_id, me, access.MANAGE, slug=_share_key(request))
     _bench_call(_scheduler().control_job, run_id, job_id, body.action)
     return {"ok": True}
 
 
-@app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/watch", dependencies=[Depends(require_user)])
-def bench_job_watch(run_id: str, job_id: str):
-    """Open a running benchmark game so it can be watched live."""
+@app.post("/api/benchmarks/runs/{run_id}/jobs/{job_id}/watch")
+def bench_job_watch(run_id: str, job_id: str, request: Request, me=Depends(require_user),
+                    sdb: DbSession = Depends(get_db)):
+    """Open a benchmark game so it can be watched live, for whoever may see its run. Opening one that is not
+    running loads it on the server, which is why this needs an account as well as the run's VIEW."""
+    items.require(sdb, "benchmark_run", run_id, me, access.VIEW, slug=_share_key(request))
     s = _bench_call(_scheduler().open_job_game, run_id, job_id)
     return {"game_id": s.id, "spectator_token": s.spectator_token, "phase": s.game.phase}
 
@@ -974,35 +1117,51 @@ def _map_call(fn, *args, **kw):
         raise HTTPException(400, str(e))
 
 
-@app.get("/api/maps", dependencies=[Depends(require_user)])
-def maps_list():
-    """Saved maps."""
-    return engine_api.list_maps()
+def _with_perms(sdb: DbSession, kind: str, user, entries: list, key: str = "id") -> list:
+    """A listing's entries, each with what ``user`` may do to it (``Access.client``), for the page's buttons."""
+    perms = items.permissions_by_ref(sdb, kind, user, [e[key] for e in entries])
+    return [dict(e, **perms.get(e[key], {})) for e in entries]
 
 
-@app.get("/api/maps/{map_id}", dependencies=[Depends(require_user)])
-def maps_get(map_id: str):
-    """One saved map."""
+@app.get("/api/maps")
+def maps_list(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The saved maps the caller may see."""
+    seen = items.listed(sdb, "map", p.user)
+    return _with_perms(sdb, "map", p.user, [m for m in engine_api.list_maps() if seen is None or m["id"] in seen])
+
+
+@app.get("/api/maps/{map_id}")
+def maps_get(map_id: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """One saved map, for whoever may see it."""
+    items.require(sdb, "map", map_id, p.user, access.VIEW, slug=_share_key(request))
     return _map_call(engine_api.load_map, map_id)
 
 
-@app.put("/api/maps/{map_id}", dependencies=[Depends(require_user)])
-def maps_put(map_id: str, body: dict):
-    """Create or replace a saved map."""
+@app.put("/api/maps/{map_id}")
+def maps_put(map_id: str, body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Create a map (``create_games``; it is the caller's) or replace one the caller manages. The id it is saved under
+    is checked before anything is written."""
+    ref = engine_api.map_ref(map_id)
+    if not ref:
+        raise HTTPException(400, f"Invalid map id '{map_id}'.")
+    items.writable(sdb, "map", ref, me, exists=_map_call(engine_api.map_file, ref).exists())
     body = dict(body)
-    body["id"] = map_id
+    body["id"] = ref
+    items.register(sdb, "map", ref, me, str(body.get("name") or ref), path=engine_api.map_file(ref))
     clean, warnings = _map_call(engine_api.save_map, body)
     return {"map": engine_api.map_summary(clean), "warnings": warnings}
 
 
-@app.delete("/api/maps/{map_id}", dependencies=[Depends(require_user)])
-def maps_delete(map_id: str):
-    """Delete a saved map."""
+@app.delete("/api/maps/{map_id}")
+def maps_delete(map_id: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Delete a saved map the caller manages."""
+    items.require(sdb, "map", map_id, me, access.MANAGE, slug=_share_key(request))
     _map_call(engine_api.delete_map, map_id)
+    items.delete(sdb, "map", map_id, actor=me)
     return {"deleted": map_id}
 
 
-@app.post("/api/maps/validate", dependencies=[Depends(require_user)])
+@app.post("/api/maps/validate", dependencies=[Depends(require_cap("create_games"))])
 def maps_validate(body: dict):
     """Check a map for problems - unreachable starts, missing resources - without saving it."""
     clean, warnings = _map_call(engine_api.validate_map, body)
@@ -1026,7 +1185,7 @@ class MapGenBody(BaseModel):
     resources: Optional[dict] = None  # density and per-resource rules, as in a game's config
 
 
-@app.post("/api/maps/generate", dependencies=[Depends(require_user)])
+@app.post("/api/maps/generate", dependencies=[Depends(require_cap("create_games"))])
 def maps_generate(body: MapGenBody):
     """Generate a map, for the editor to start from."""
     sizes = engine_api.map_sizes()
@@ -1061,14 +1220,15 @@ def maps_from_game(gid: str, request: Request, p: Principal = Depends(principal)
 import secrets as _secrets
 import threading as _threading
 
-EDITORS: dict[str, dict] = {}     # editor id -> {"game" (EngineGame), "undo": [state dicts], "meta", "lock", "t"}
+EDITORS: dict[str, dict] = {}     # editor id -> {"game" (EngineGame), "undo", "meta", "lock", "t", "owner"}
 EDITOR_UNDO = 25
 
 
-def _editor(eid: str) -> dict:
-    """The open scenario editor with this id, or a 404."""
+def _editor(eid: str, user) -> dict:
+    """The open scenario editor with this id, for the account that opened it or an administrator; a 404 for anyone
+    else (P3.2.4: an editing session is its creator's), as for one that has expired."""
     ed = EDITORS.get(eid)
-    if ed is None:
+    if ed is None or (user is None or (ed.get("owner") != user.id and not _is_admin(user))):
         raise HTTPException(404, "This scenario editor session has expired; reopen the scenario.")
     ed["t"] = time.time()
     return ed
@@ -1098,9 +1258,12 @@ class EditorOpen(BaseModel):
 @app.post("/api/scenario-editor")
 def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(principal),
                 sdb: DbSession = Depends(get_db)):
-    """Open a scenario editor and return its id. An editor opened on a live game or a save holds that game's whole
-    state, every civilization's included, so it needs what the game's god view does not: managing the game."""
-    require_user(request, p)
+    """Open a scenario editor and return its id: the caller's (``create_games``), on a map or a scenario they may
+    see. An editor opened on a live game or a save holds that game's whole state, every civilization's included, so
+    it needs what the game's god view does not: managing the game."""
+    me = require_user(request, p)
+    from ..auth.deps import check_cap
+    check_cap(me, "create_games")
     meta = {"id": "", "name": "", "description": "", "seats": None}
     try:
         if body.source in ("map", "generate"):
@@ -1108,7 +1271,10 @@ def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(princ
             if body.source == "map":
                 if not body.map:
                     raise HTTPException(400, "Choose a map.")
+                _may_use(sdb, me, "map", body.map)
                 cfg["map"] = body.map
+            elif cfg.get("map"):
+                _may_use(sdb, me, "map", cfg["map"])
             players = body.players or [{"type": "human"}, {"type": "llm"}]
             if len(players) > engine_api.max_players():
                 raise HTTPException(400, "Too many players.")
@@ -1119,6 +1285,7 @@ def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(princ
             meta["seats"] = [{"type": pl.get("type") or "bot"} for pl in players]
             meta["name"] = f"Scenario on {cfg.get('map') or cfg.get('map_type', 'a new map')}"
         elif body.source == "scenario":
+            _may_use(sdb, me, "scenario", body.scenario or "")
             data = engine_api.load_scenario(body.scenario or "")
             g = EngineGame.from_state(data["state"])
             meta.update({k: data.get(k) for k in ("id", "name", "description", "seats")})
@@ -1147,14 +1314,14 @@ def editor_open(body: EditorOpen, request: Request, p: Principal = Depends(princ
     for k in [k for k, v in EDITORS.items() if time.time() - v["t"] > 3600]:
         EDITORS.pop(k, None)
     eid = _secrets.token_hex(4)
-    EDITORS[eid] = {"game": g, "undo": [], "meta": meta, "lock": _threading.Lock(), "t": time.time()}
+    EDITORS[eid] = {"game": g, "undo": [], "meta": meta, "lock": _threading.Lock(), "t": time.time(), "owner": me.id}
     return _editor_payload(eid, EDITORS[eid])
 
 
-@app.get("/api/scenario-editor/{eid}", dependencies=[Depends(require_user)])
-def editor_get(eid: str):
+@app.get("/api/scenario-editor/{eid}")
+def editor_get(eid: str, me=Depends(require_user)):
     """The current state of an open editor."""
-    return _editor_payload(eid, _editor(eid))
+    return _editor_payload(eid, _editor(eid, me))
 
 
 class EditorOps(BaseModel):
@@ -1162,10 +1329,10 @@ class EditorOps(BaseModel):
     ops: list[dict]
 
 
-@app.post("/api/scenario-editor/{eid}/ops", dependencies=[Depends(require_user)])
-def editor_ops(eid: str, body: EditorOps):
+@app.post("/api/scenario-editor/{eid}/ops")
+def editor_ops(eid: str, body: EditorOps, me=Depends(require_user)):
     """Apply edits to the scenario being edited, keeping an undo step."""
-    ed = _editor(eid)
+    ed = _editor(eid, me)
     with ed["lock"]:
         g = ed["game"]
         before = g.state_dict()
@@ -1179,10 +1346,10 @@ def editor_ops(eid: str, body: EditorOps):
         return _editor_payload(eid, ed, results)
 
 
-@app.post("/api/scenario-editor/{eid}/undo", dependencies=[Depends(require_user)])
-def editor_undo(eid: str):
+@app.post("/api/scenario-editor/{eid}/undo")
+def editor_undo(eid: str, me=Depends(require_user)):
     """Undo the last set of edits."""
-    ed = _editor(eid)
+    ed = _editor(eid, me)
     with ed["lock"]:
         if not ed["undo"]:
             raise HTTPException(400, "Nothing to undo.")
@@ -1201,7 +1368,7 @@ class EditorMeta(BaseModel):
 @app.post("/api/scenario-editor/{eid}/meta")
 def editor_meta(eid: str, body: EditorMeta, me=Depends(require_user)):
     """Rename the scenario being edited, or set its seats (a member's model blocks name machines, P3.2.9)."""
-    ed = _editor(eid)
+    ed = _editor(eid, me)
     seats = None
     if body.seats is not None:
         seats = [_member_seat(seat, me, playing=False) if isinstance(seat, dict) else seat
@@ -1215,30 +1382,42 @@ def editor_meta(eid: str, body: EditorMeta, me=Depends(require_user)):
 
 
 @app.post("/api/scenario-editor/{eid}/save")
-def editor_save(eid: str, body: EditorMeta, me=Depends(require_user)):
-    """Save the scenario being edited. Every seat's model block passes the members' gate (P3.2.9), the ones it was
-    opened with included: a scenario saved by an administrator with a seat that describes its own provider is saved
-    by a member only once that seat names a machine."""
-    ed = _editor(eid)
+def editor_save(eid: str, body: EditorMeta, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Save the scenario being edited: a new scenario is the caller's (``create_games``), and one already saved under
+    that id needs MANAGE on it, both checked before anything is written. Every seat's model block passes the members'
+    gate (P3.2.9), the ones it was opened with included: a scenario saved by an administrator with a seat that
+    describes its own provider is saved by a member only once that seat names a machine. Its bot seats' profiles
+    must be ones the caller may see."""
+    ed = _editor(eid, me)
     editor_meta(eid, body, me)
     m = ed["meta"]
     m["seats"] = [_member_seat(seat, me, playing=False) if isinstance(seat, dict) else seat
                   for seat in (m.get("seats") or [])]
     if not (m.get("id") or m.get("name")):
         raise HTTPException(400, "Give the scenario a name.")
+    _seat_profiles(sdb, me, m["seats"])
+    ref = engine_api.scenario_ref(m.get("id") or m["name"])
+    if not ref:
+        raise HTTPException(400, "Give the scenario a name with a letter or a digit in it.")
+    try:
+        path = engine_api.scenario_file(ref)
+    except ActionError as e:
+        raise HTTPException(400, str(e))
+    items.writable(sdb, "scenario", ref, me, exists=path.exists())
+    items.register(sdb, "scenario", ref, me, m.get("name") or ref, path=path)
     with ed["lock"]:
         try:
-            summ = ed["game"].save_scenario(m.get("id") or m["name"], m.get("name") or m["id"],
-                                            m.get("description", ""), m.get("seats"))
+            summ = ed["game"].save_scenario(ref, m.get("name") or ref, m.get("description", ""), m.get("seats"))
         except ActionError as e:
             raise HTTPException(400, str(e))
     m["id"] = summ["id"]
     return summ
 
 
-@app.delete("/api/scenario-editor/{eid}", dependencies=[Depends(require_user)])
-def editor_close(eid: str):
+@app.delete("/api/scenario-editor/{eid}")
+def editor_close(eid: str, me=Depends(require_user)):
     """Close an editor and release its game."""
+    _editor(eid, me)
     EDITORS.pop(eid, None)
     return {"closed": eid}
 
@@ -1249,28 +1428,33 @@ def scenario_ops_help():
     return engine_api.scenario_ops_help()
 
 
-@app.get("/api/scenarios", dependencies=[Depends(require_user)])
-def scenarios_list():
-    """Saved scenarios."""
-    return engine_api.list_scenarios()
+@app.get("/api/scenarios")
+def scenarios_list(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The saved scenarios the caller may see."""
+    seen = items.listed(sdb, "scenario", p.user)
+    return _with_perms(sdb, "scenario", p.user,
+                       [s for s in engine_api.list_scenarios() if seen is None or s["id"] in seen])
 
 
-@app.get("/api/scenarios/{sid}", dependencies=[Depends(require_user)])
-def scenarios_get(sid: str):
-    """One scenario."""
+@app.get("/api/scenarios/{sid}")
+def scenarios_get(sid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """One scenario, for whoever may see it."""
+    items.require(sdb, "scenario", sid, p.user, access.VIEW, slug=_share_key(request))
     try:
         return engine_api.scenario_summary(engine_api.load_scenario(sid))
     except ActionError as e:
         raise HTTPException(404, str(e))
 
 
-@app.delete("/api/scenarios/{sid}", dependencies=[Depends(require_user)])
-def scenarios_delete(sid: str):
-    """Delete a scenario."""
+@app.delete("/api/scenarios/{sid}")
+def scenarios_delete(sid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Delete a scenario the caller manages."""
+    items.require(sdb, "scenario", sid, me, access.MANAGE, slug=_share_key(request))
     try:
         engine_api.delete_scenario(sid)
     except ActionError as e:
         raise HTTPException(400, str(e))
+    items.delete(sdb, "scenario", sid, actor=me)
     return {"deleted": sid}
 
 
@@ -1281,12 +1465,14 @@ class LaunchBody(BaseModel):
 
 
 @app.post("/api/scenarios/{sid}/launch")
-def scenarios_launch(sid: str, body: LaunchBody, me=Depends(require_cap("create_games")),
+def scenarios_launch(sid: str, body: LaunchBody, request: Request, me=Depends(require_cap("create_games")),
                      sdb: DbSession = Depends(get_db)):
-    """Start a playable game from a saved scenario, as the caller's lobby game: it counts against their game limit,
-    it has its row in the games index with them as its owner, and every seat's model block, the scenario's own
-    included, passes the members' gate (P3.2.9) and admission before anything starts."""
+    """Start a playable game from a saved scenario the caller may see, as the caller's lobby game: it counts against
+    their game limit, it has its row in the games index with them as its owner, and every seat's model block, the
+    scenario's own included, passes the members' gate (P3.2.9) and admission before anything starts."""
+    items.require(sdb, "scenario", sid, me, access.VIEW, slug=_share_key(request))
     _game_limit(sdb, me)
+    _seat_profiles(sdb, me, body.seats)
     checked: list = []
 
     def check(seat: dict) -> dict:
@@ -1342,11 +1528,19 @@ def _probe_call(fn, *a, **kw):
         raise HTTPException(400, str(e))
 
 
-@app.get("/api/probes", dependencies=[Depends(require_user)])
-def probes_list():
-    """Saved probes."""
+def _probe_scenario(sdb: DbSession, user, data) -> None:
+    """A probe plays on a scenario, which the caller must be able to see: checking a probe reads its scenario's
+    civilizations, so without this a probe would be a way to read somebody's private scenario."""
+    if isinstance(data, dict) and data.get("scenario"):
+        _may_use(sdb, user, "scenario", data["scenario"])
+
+
+@app.get("/api/probes")
+def probes_list(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The saved probes the caller may see."""
     from .. import probes as P
-    return P.list_probes()
+    seen = items.listed(sdb, "probe", p.user)
+    return _with_perms(sdb, "probe", p.user, [x for x in P.list_probes() if seen is None or x["id"] in seen])
 
 
 @app.get("/api/probes/example", dependencies=[Depends(require_user)])
@@ -1356,34 +1550,44 @@ def probes_example(scenario: str, subject: int = 1, counterparty: int = 0):
     return P.example_probe(scenario, subject, counterparty)
 
 
-@app.get("/api/probes/{pid}", dependencies=[Depends(require_user)])
-def probes_get(pid: str):
-    """One probe."""
+@app.get("/api/probes/{pid}")
+def probes_get(pid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """One probe, for whoever may see it."""
     from .. import probes as P
+    items.require(sdb, "probe", pid, p.user, access.VIEW, slug=_share_key(request))
     return _probe_call(P.load_probe, pid)
 
 
-@app.put("/api/probes/{pid}", dependencies=[Depends(require_user)])
-def probes_put(pid: str, body: dict):
-    """Create or replace a probe."""
+@app.put("/api/probes/{pid}")
+def probes_put(pid: str, body: dict, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Create a probe (``run_probes``; it is the caller's) or replace one the caller manages, on a scenario they may
+    see. The id it is saved under is checked before anything is written."""
     from .. import probes as P
+    ref = P.slug(pid)
+    path = _probe_call(P._path, ref)
+    items.writable(sdb, "probe", ref, me, exists=path.exists())
+    _probe_scenario(sdb, me, body)
     body = dict(body)
-    body["id"] = pid
+    body["id"] = ref
+    items.register(sdb, "probe", ref, me, str(body.get("name") or ref)[:100], path=path)
     return _probe_call(P.save_probe, body)
 
 
-@app.post("/api/probes/validate", dependencies=[Depends(require_user)])
-def probes_validate(body: dict):
-    """Check a probe's cases against its scenario without running them."""
+@app.post("/api/probes/validate")
+def probes_validate(body: dict, me=Depends(require_cap("run_probes")), sdb: DbSession = Depends(get_db)):
+    """Check a probe's cases against its scenario, one the caller may see, without running them."""
     from .. import probes as P
+    _probe_scenario(sdb, me, body)
     return _probe_call(P.validate, body)
 
 
-@app.delete("/api/probes/{pid}", dependencies=[Depends(require_user)])
-def probes_delete(pid: str):
-    """Delete a probe."""
+@app.delete("/api/probes/{pid}")
+def probes_delete(pid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Delete a probe the caller manages."""
     from .. import probes as P
+    items.require(sdb, "probe", pid, me, access.MANAGE, slug=_share_key(request))
     _probe_call(P.delete_probe, pid)
+    items.delete(sdb, "probe", pid, actor=me)
     return {"deleted": pid}
 
 
@@ -1395,71 +1599,171 @@ class ProbeRunBody(BaseModel):
     cases: Optional[list[str]] = None
 
 
-@app.post("/api/probes/{pid}/run", dependencies=[Depends(require_user)])
-def probes_run(pid: str, body: ProbeRunBody):
-    """Run a probe: every case, from the same starting state, against one model."""
-    return _probe_call(_probes().start, pid, body.llm, body.repeats, body.name, body.cases)
+def _probe_subject(sdb: DbSession, user, llm) -> dict:
+    """A probe run's subject through the members' gate (P3.2.9), as it will be played: the scripted bot (``provider:
+    bot``, a profile the caller may see), or a model on a machine the caller names, never describes, and is admitted
+    to for probes."""
+    from .. import servers
+    llm = servers.llm_block(llm) if not isinstance(llm, dict) else dict(llm)
+    if str(llm.get("provider") or "").lower() == "bot":
+        _may_use(sdb, user, "bot_profile", llm.get("profile"))
+        return {k: llm[k] for k in ("provider", "aggression", "profile") if k in llm}
+    if not _is_admin(user):
+        bad = [k for k in DESCRIBING_KEYS if llm.get(k) not in (None, "")]
+        if bad:
+            raise HTTPException(400, "A probe's subject names the machine its model plays on; it does not describe "
+                                     f"it ({', '.join(bad)}). Pick one of the machines you may use.")
+    try:
+        checked = servers.member_llm(llm, user, required=True)
+    except servers.SeatBlockError as e:
+        raise HTTPException(e.status, str(e)) from None
+    _admit(sdb, user, [checked.get("server_id")], "probe")
+    return checked
 
 
-@app.get("/api/probe-runs", dependencies=[Depends(require_user)])
-def probe_runs():
-    """Every probe run."""
+@app.post("/api/probes/{pid}/run")
+def probes_run(pid: str, body: ProbeRunBody, request: Request, me=Depends(require_cap("run_probes")),
+               sdb: DbSession = Depends(get_db)):
+    """Run a probe the caller may see: every case, from the same starting state, against one model. The run is the
+    caller's, and its subject passes the members' gate."""
+    items.require(sdb, "probe", pid, me, access.VIEW, slug=_share_key(request))
+    llm = _probe_subject(sdb, me, body.llm)
+    return _probe_call(_probes().start, pid, llm, body.repeats, body.name, body.cases, owner_id=me.id, session=sdb)
+
+
+def _probe_status(sdb: DbSession, user, runner) -> dict:
+    """The probe runner's status as ``user`` may see it: the queue and the live cases of the runs they may see only
+    (a live case carries the subject's thoughts)."""
+    status = runner.status()
+    seen = items.listed(sdb, "probe_run", user)
+    if seen is None:
+        return status
+    live = status.get("live") or {}
+    return {"queue": [r for r in status.get("queue", []) if r in seen],
+            "live": live if live.get("run") in seen else {},
+            "running": [r for r in status.get("running", []) if r.get("run") in seen]}
+
+
+@app.get("/api/probe-runs")
+def probe_runs(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The probe runs the caller may see."""
     runner = _probes()
+    seen = items.listed(sdb, "probe_run", p.user)
     out = []
     for r in runner.list_runs():
+        if seen is not None and r.get("id") not in seen:
+            continue
         out.append({k: r.get(k) for k in ("id", "name", "status", "done", "created", "started", "finished",
                                           "summary", "error", "repeats")} |
                    {"total": len(r.get("jobs", [])), "probe_id": r["probe"].get("id"), "probe_name": r["probe"].get("name"),
                     "model": r.get("llm", {}).get("model"), "provider": r.get("llm", {}).get("provider")})
-    return {"runs": out, "status": runner.status()}
+    return {"runs": _with_perms(sdb, "probe_run", p.user, out), "status": _probe_status(sdb, p.user, runner)}
 
 
-@app.get("/api/probe-runs/{rid}", dependencies=[Depends(require_user)])
-def probe_run(rid: str):
-    """One probe run, with per-case results."""
+@app.get("/api/probe-runs/{rid}")
+def probe_run(rid: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """One probe run, with per-case results, for whoever may see it."""
     runner = _probes()
+    _row, perms = items.require(sdb, "probe_run", rid, p.user, access.VIEW, slug=_share_key(request))
     run = _probe_call(runner.get_run, rid)
-    return {"run": run, "results": runner.results(rid), "status": runner.status()}
+    return {"run": run, "results": runner.results(rid), "status": _probe_status(sdb, p.user, runner),
+            **perms.client()}
 
 
-@app.post("/api/probe-runs/{rid}/stop", dependencies=[Depends(require_user)])
-def probe_run_stop(rid: str):
-    """Stop a probe run in progress."""
+@app.post("/api/probe-runs/{rid}/stop")
+def probe_run_stop(rid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Stop a probe run in progress that the caller manages."""
+    items.require(sdb, "probe_run", rid, me, access.MANAGE, slug=_share_key(request))
     return _probe_call(_probes().stop, rid)
 
 
-@app.delete("/api/probe-runs/{rid}", dependencies=[Depends(require_user)])
-def probe_run_delete(rid: str):
-    """Delete a probe run."""
+@app.delete("/api/probe-runs/{rid}")
+def probe_run_delete(rid: str, request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Delete a probe run the caller manages."""
+    items.require(sdb, "probe_run", rid, me, access.MANAGE, slug=_share_key(request))
     _probe_call(_probes().delete, rid)
+    items.delete(sdb, "probe_run", rid, actor=me)
     return {"deleted": rid}
 
 
-@app.post("/api/probe-runs/{rid}/open/{case}/{rep}", dependencies=[Depends(require_user)])
-def probe_run_open(rid: str, case: str, rep: int):
-    """Opens the saved end state of one case as a (paused) game for inspection."""
+@app.post("/api/probe-runs/{rid}/open/{case}/{rep}")
+def probe_run_open(rid: str, case: str, rep: int, request: Request, me=Depends(require_user),
+                   sdb: DbSession = Depends(get_db)):
+    """Opens the saved end state of one case as a (paused) game for inspection, for whoever may see the run: the
+    game is the run's owner's, at the run's visibility. Opening it loads it on the server, which is why this needs an
+    account as well as the run's VIEW."""
     runner = _probes()
+    row, _perms = items.require(sdb, "probe_run", rid, me, access.VIEW, slug=_share_key(request))
     path = _probe_call(runner._run_dir, rid) / f"{case}-{rep}.citar"
     if not path.exists():
         raise HTTPException(404, "No saved game for that case.")
+    owner_id = row.owner_id
     s = manager.load(path, kind="probe")      # a probe's game, should the index not have it: never a lobby game
+    ownership.claim_quietly(s, owner_id, item=("probe_run", rid))
     return {"game_id": s.id, "spectator_token": s.spectator_token}
 
 
-@app.get("/api/lab", dependencies=[Depends(require_user)])
-def lab_overview():
-    """What the bot lab is doing: runner health, experiments, per-game progress and the log."""
+# ----------------------------------------------------------------------------
+# the lab and the work queue
+# ----------------------------------------------------------------------------
+@app.get("/api/lab")
+def lab_overview(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """What the bot lab is doing: runner health, experiments, per-game progress and the log. A member sees the
+    experiments they may see; the log and the side runs, which name every experiment and the server's own jobs,
+    are an administrator's."""
     from .. import lab
-    return lab.overview()
+    out = lab.overview()
+    seen = items.listed(sdb, "lab_experiment", me)
+    if seen is None:
+        return out
+    out["experiments"] = _with_perms(sdb, "lab_experiment", me,
+                                     [e for e in out.get("experiments", []) if e.get("name") in seen], key="name")
+    out["running"] = [r for r in out.get("running", []) if r.get("exp") in seen]
+    out["log"] = []
+    out["side_runs"] = []
+    return out
 
 
-@app.get("/api/queue", dependencies=[Depends(require_user)])
-def work_queue_view():
+#: The queue's kinds and the item each one's ``id`` (its run) names; a game is its row in the games index.
+_QUEUE_ITEMS = {"benchmark": "benchmark_run", "probe": "probe_run", "report": "report", "lab": "lab_experiment"}
+#: How work the caller may not see is named on the Queue page (P3.2.4).
+_SOMEONES = {"benchmark": "someone's benchmark run", "probe": "someone's probe run", "report": "someone's report",
+             "game": "someone's game", "lab": "someone's lab experiment"}
+
+
+def _queue_access(sdb: DbSession, user, kind: str, ident: str) -> access.Access:
+    """What ``user`` may do with one piece of queued work: its item's permissions, a game's through its row."""
+    if kind == "game":
+        row = ownership.row_for(sdb, ident)
+        return access.on(sdb, user, row) if row is not None else access.Access(set())
+    item = _QUEUE_ITEMS.get(kind)
+    if item is None:
+        return access.Access(set())
+    return items.resolve(sdb, item, ident, user)[1]
+
+
+def _queue_entry(sdb: DbSession, user, it: dict, cache: dict) -> dict:
+    """One queued or running item as ``user`` may see it: work they cannot see is "someone's <kind>", with no name,
+    no run and no reason that would name other work; ``can_manage`` says whether its priority is theirs to change."""
+    key = (it.get("kind"), it.get("group"))
+    if key not in cache:
+        cache[key] = _queue_access(sdb, user, *key)
+    perms = cache[key]
+    out = dict(it, can_manage=access.MANAGE in perms)
+    if access.VIEW not in perms:
+        out.update(label=_SOMEONES.get(it.get("kind"), "someone's work"), run=None, waiting=None, server=None,
+                   id=None, group=None)
+    return out
+
+
+@app.get("/api/queue")
+def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
     """Everything waiting to run, in the order it will run.
 
     Per model machine: what is using it now, and the benchmark jobs and probe runs waiting for it, best
     first (see citar.pool.queue). Then this server's CPU: the lab's experiments, the lab runner, and the
-    load average, since the lab's bot games share the CPU with every game being played here.
+    load average, since the lab's bot games share the CPU with every game being played here. Work the caller may
+    not see is "someone's <kind>" (P3.2.4); which machines a member is shown is package 3-09's (P3.3.8).
     """
     import os
     from .. import lab, servers as registry
@@ -1468,69 +1772,108 @@ def work_queue_view():
     from .workers import hub
     _scheduler()
     _probes()
-    from .admin_api import reports_runner
+    from .reports_api import reports_runner
     reports_runner()                  # registers queued reports with the shared queue
-    items = work_queue.waiting()
+    items_waiting = work_queue.waiting()
     active = work_queue.running()
     names = {sv["id"]: sv["name"] for sv in registry.list_servers()}
-    from .. import db as _db
-    with _db.session() as s:
-        for sv in s.query(Server):
-            names[sv.id] = sv.name
-    ids = list(dict.fromkeys([i["server_id"] for i in active + items if i.get("server_id")] +
+    for sv in sdb.query(Server):
+        names[sv.id] = sv.name
+    ids = list(dict.fromkeys([i["server_id"] for i in active + items_waiting if i.get("server_id")] +
                              [sid for sid in names if pool_seats.occupied(sid)]))
+    admin = _is_admin(me)
+    cache: dict = {}
     machines = []
     for sid in ids:
-        waiting = [dict(it, position=n + 1) for n, it in enumerate(i for i in items if i.get("server_id") == sid)]
+        waiting = [_queue_entry(sdb, me, dict(it, position=n + 1), cache)
+                   for n, it in enumerate(i for i in items_waiting if i.get("server_id") == sid)]
+        busy = pool_seats.occupied(sid) if admin else _occupants(sdb, me, sid, cache)
         machines.append({"server_id": sid, "name": names.get(sid, sid), "online": hub().is_online(sid) or None,
-                         "busy_with": pool_seats.occupied(sid), "waiting": waiting,
-                         "running": [i for i in active if i.get("server_id") == sid]})
+                         "busy_with": busy, "waiting": waiting,
+                         "running": [_queue_entry(sdb, me, i, cache) for i in active if i.get("server_id") == sid]})
     try:
         overview = lab.overview()
     except Exception:
         overview = {"experiments": [], "runner": {}}
+    experiments = sorted([e for e in overview.get("experiments", []) if e.get("state") != "complete"],
+                         key=lambda e: (-(e.get("priority") or 0), e.get("submitted") or ""))
+    if not admin:
+        shown = []
+        for e in experiments:
+            perms = _queue_access(sdb, me, "lab", e.get("name"))
+            if access.VIEW in perms:
+                shown.append(dict(e, can_manage=access.MANAGE in perms))
+            else:
+                shown.append({"name": None, "label": _SOMEONES["lab"], "state": e.get("state"),
+                              "priority": e.get("priority"), "games": e.get("games"), "done": e.get("done"),
+                              "running": e.get("running"), "can_manage": False})
+        experiments = shown
     cpu = {"cpus": os.cpu_count(), "load": [round(x, 2) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None,
-           "lab_runner": overview.get("runner"), "lab_running": overview.get("running", []),
-           "experiments": sorted([e for e in overview.get("experiments", []) if e.get("state") != "complete"],
-                                 key=lambda e: (-(e.get("priority") or 0), e.get("submitted") or ""))}
+           "lab_runner": overview.get("runner"),
+           "lab_running": overview.get("running", []) if admin else [],
+           "experiments": experiments}
     return {"machines": machines, "cpu": cpu}
 
 
+def _occupants(sdb: DbSession, user, server_id: str, cache: dict) -> list:
+    """What is using a machine, as a member may be told: the names of the games and runs they may see, and
+    "someone's <kind>" for the rest (``pool.seats.occupants``)."""
+    from ..pool import seats as pool_seats
+    out = []
+    for occ in pool_seats.occupants(server_id):
+        kind, ident = occ.get("kind"), occ.get("id")
+        key = (kind, ident)
+        if key not in cache:
+            cache[key] = _queue_access(sdb, user, kind, ident) if kind and ident else access.Access(set())
+        out.append(occ["label"] if access.VIEW in cache[key] else _SOMEONES.get(kind, "someone's work"))
+    return out
+
+
 class PriorityBody(BaseModel):
-    """A new priority for a benchmark run, a probe run, a report or a lab experiment. Higher goes first."""
+    """A new priority for a benchmark run, a probe run, a report, a lobby game or a lab experiment. Higher goes
+    first."""
     kind: str
     id: str
     priority: int
 
 
-@app.post("/api/queue/priority", dependencies=[Depends(require_user)])
-def work_queue_priority(body: PriorityBody):
-    """Move work up or down the queue."""
+@app.post("/api/queue/priority")
+def work_queue_priority(body: PriorityBody, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Move work up or down the queue: the caller's own work, or work they manage (P3.2.4). A game is managed
+    through its row in the games index."""
     import json as _json
     from ..pool import queue as work_queue
+    if body.kind not in work_queue.KINDS and body.kind != "lab":
+        raise HTTPException(400, "kind is benchmark, probe, report, game or lab.")
+    if body.kind == "game":
+        row = ownership.row_for(sdb, body.id)
+        if row is None:
+            raise HTTPException(404, "No such game.")
+        access.on(sdb, me, row).require(access.MANAGE)
+    else:
+        items.require(sdb, _QUEUE_ITEMS[body.kind], body.id, me, access.MANAGE)
     if body.kind in work_queue.KINDS:
         return {"kind": body.kind, "id": body.id, "priority": work_queue.set_priority(body.kind, body.id, body.priority)}
-    if body.kind == "lab":
-        from .. import lab
-        import re as _re
-        if not _re.fullmatch(r"[A-Za-z0-9._-]{1,80}", body.id or ""):
-            raise HTTPException(400, "Invalid experiment name.")
-        path = lab.QUEUE / f"{body.id}.json"
-        if not path.exists():
-            raise HTTPException(404, "No queued experiment of that name.")
-        spec = _json.loads(path.read_text(encoding="utf-8"))
-        spec["priority"] = max(-100, min(100, body.priority))
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(_json.dumps(spec, indent=1), encoding="utf-8")
-        tmp.replace(path)
-        return {"kind": "lab", "id": body.id, "priority": spec["priority"]}
-    raise HTTPException(400, "kind is benchmark, probe, report, game or lab.")
-
-
-@app.get("/api/lab/report/{name}", dependencies=[Depends(require_user)])
-def lab_report(name: str):
-    """The results of one lab experiment."""
     from .. import lab
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9._-]{1,80}", body.id or ""):
+        raise HTTPException(400, "Invalid experiment name.")
+    path = lab.QUEUE / f"{body.id}.json"
+    if not path.exists():
+        raise HTTPException(404, "No queued experiment of that name.")
+    spec = _json.loads(path.read_text(encoding="utf-8"))
+    spec["priority"] = max(-100, min(100, body.priority))
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(_json.dumps(spec, indent=1), encoding="utf-8")
+    tmp.replace(path)
+    return {"kind": "lab", "id": body.id, "priority": spec["priority"]}
+
+
+@app.get("/api/lab/report/{name}")
+def lab_report(name: str, request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The results of one lab experiment, for whoever may see it."""
+    from .. import lab
+    items.require(sdb, "lab_experiment", name, p.user, access.VIEW, slug=_share_key(request))
     if not (lab.QUEUE / f"{name}.json").exists() and not (lab.DONE / f"{name}.json").exists():
         raise HTTPException(404, f"No experiment '{name}'.")
     return {"name": name, "text": lab.report_text(name)}

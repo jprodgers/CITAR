@@ -489,8 +489,12 @@ class ProbeRunner:
         return out
 
     def start(self, probe_id: str, llm: dict, repeats: Optional[int] = None, name: str = "",
-              cases: Optional[list] = None) -> dict:
-        """Start a probe run against a model."""
+              cases: Optional[list] = None, *, owner_id: Optional[str] = None, session=None) -> dict:
+        """Start a probe run against a model. ``owner_id`` is the account starting it (design/phase3-features.md
+        P3.2.4): the run is theirs, its file records them, and the games its cases play are theirs. With ``session``
+        (a request's) the run's row in ``owned_items`` is written and committed there before the run is queued; a run
+        started without one (a script, a test) has no row until adoption gives it one, to the owner its file
+        records."""
         probe = validate(load_probe(probe_id))
         n_rep = max(1, min(50, int(repeats or probe.get("repeats") or 1)))
         chosen = [c for c in probe["cases"] if not cases or c["id"] in cases]
@@ -508,7 +512,11 @@ class ProbeRunner:
         run = {"id": rid, "name": name or f"{probe['name']} · {model}", "probe": probe, "llm": {k: v for k, v in llm.items() if k != "api_key"},
                "repeats": n_rep, "jobs": [{"case": c["id"], "rep": r} for c in chosen for r in range(n_rep)],
                "status": "queued", "done": 0, "created": time.time(), "started": None, "finished": None,
-               "summary": {}, "error": None}
+               "summary": {}, "error": None, "owner_id": owner_id}
+        if session is not None:
+            from . import items
+            items.register(session, "probe_run", rid, owner_id, run["name"], path=self._run_dir(rid))
+            session.commit()
         self._write(run)
         with self.lock:
             self.queue.append(rid)
@@ -631,7 +639,7 @@ class ProbeRunner:
                                  server_id=run["llm"].get("server_id"), model=run["llm"].get("model"))
         server_id = run["llm"].get("server_id")
         self._wait_free(rid, server_id)
-        pool_seats.claim(server_id, f"probe run “{run['name']}”")
+        pool_seats.claim(server_id, f"probe run “{run['name']}”", ("probe", rid))
         try:
             self._run_cases(rid, run, probe, scn, done, cases, act)
         finally:

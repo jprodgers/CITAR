@@ -1,5 +1,6 @@
-"""HTTP API for the Servers page (server registry, keys, hardware, model loading, electricity plans) and the Reports
-page (report builder, runs, generated HTML)."""
+"""HTTP API for the Servers page (server registry, keys, hardware, model loading, electricity plans). The Reports page's
+routes, administrator-only here until 0.1.6, are ``reports_api``'s: a report is an owned item (design/phase3-features.md
+P3.2.4)."""
 from __future__ import annotations
 
 import threading
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .. import costing, hwinfo, keystore, paths, servers as S
@@ -295,78 +296,3 @@ def plans_delete(pid: str):
     """Delete an electricity plan."""
     _call(S.delete_plan, pid)
     return {"deleted": pid}
-
-
-# ----------------------------------------------------------------------------- reports
-_runner = None
-
-
-def reports_runner():
-    """The report runner, created on first use."""
-    global _runner
-    if _runner is None:
-        from ..reports import ReportRunner
-        _runner = ReportRunner()
-    return _runner
-
-
-@router.get("/api/reports")
-def reports_list():
-    """Every report, newest first."""
-    return reports_runner().list()
-
-
-@router.get("/api/reports/options")
-def reports_options():
-    """What can be reported on: activity types, servers, models, runs and experiments."""
-    from ..reports import scope_options
-    return scope_options()
-
-
-@router.post("/api/reports")
-def reports_start(body: dict):
-    """Start building a report."""
-    return _call(reports_runner().start, body)
-
-
-@router.get("/api/reports/{rid}")
-def reports_get(rid: str):
-    """One report's metadata and progress."""
-    r = reports_runner()
-    return {"meta": _call(r.meta, rid), "spec": _call(r.spec, rid)}
-
-
-@router.post("/api/reports/{rid}/rerun")
-def reports_rerun(rid: str):
-    """Build a fresh report from the same specification, with current data."""
-    r = reports_runner()
-    return _call(r.start, _call(r.spec, rid))
-
-
-@router.get("/api/reports/{rid}/html")
-def reports_html(rid: str):
-    """A report's HTML, for viewing in place."""
-    p = _call(reports_runner().html_path, rid)
-    # Shown in a frame on the Reports page, so this page (and only this one) may be framed by the site itself.
-    # A report is static HTML and inline SVG with no scripts; its own policy says so.
-    return HTMLResponse(p.read_text(encoding="utf-8"), headers={
-        "Cache-Control": "no-cache", "X-Frame-Options": "SAMEORIGIN",
-        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; "
-                                   "font-src data:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"})
-
-
-@router.get("/api/reports/{rid}/download")
-def reports_download(rid: str):
-    """A report as a self-contained file."""
-    r = reports_runner()
-    p = _call(r.html_path, rid)
-    meta = r.meta(rid)
-    safe = "".join(ch if ch.isalnum() or ch in "-_ " else "_" for ch in meta.get("title") or "report").strip() or "report"
-    return FileResponse(p, media_type="text/html", filename=f"{safe} {rid[:15]}.html")
-
-
-@router.delete("/api/reports/{rid}")
-def reports_delete(rid: str):
-    """Delete a report."""
-    _call(reports_runner().delete, rid)
-    return {"deleted": rid}

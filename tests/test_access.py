@@ -570,7 +570,8 @@ class GameRoutes(unittest.TestCase):
 
     def test_launching_a_scenario_by_anonymous_member_owner_and_admin(self):
         """``/api/scenarios/{sid}/launch`` (3-01 made it a lobby game): anonymous 401; a member 200, owning the game it
-        made, and 429 over their game limit; an administrator 200. Scenarios have no owner yet (package 3-02)."""
+        made, and 429 over their game limit; an administrator 200. The scenario is the administrator's (3-02), shared
+        with members (`server`): while it is private a member's launch is a 404."""
         from citar import engine_api
         r = self.client.post("/api/scenario-editor", json={"source": "generate", "players": [{"type": "bot"}, {"type": "bot"}],
                                                             "config": {"map_size": "duel", "seed": 3, "barbarians": "off"}},
@@ -583,6 +584,11 @@ class GameRoutes(unittest.TestCase):
         made = []
         try:
             self.assertEqual(self.client.post(f"/api/scenarios/{sid}/launch", json={}).status_code, 401)
+            r = self.client.post(f"/api/scenarios/{sid}/launch", json={}, headers=self.headers["other"])
+            self.assertEqual(r.status_code, 404, r.text)
+            r = self.client.put(f"/api/items/scenario/{sid}/sharing", json={"visibility": "server"},
+                                headers=self.headers["zara"])
+            self.assertEqual(r.status_code, 200, r.text)
             with db.session() as s:
                 accounts.by_handle(s, "other").max_concurrent_games = 1
             for who, want in (("other", 200), ("other", 429), ("owner", 200), ("zara", 200)):

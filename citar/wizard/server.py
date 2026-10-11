@@ -499,6 +499,7 @@ def _create_admin(plan: ServerPlan) -> None:
                 email_verified=True, display_name=plan.admin["handle"])
             audit.record(session, "user.bootstrap_admin", actor=user,
                          object_type="user", object_id=user.id)
+            accounts.on_first_admin(session, user)
         prompts.note(f"Created administrator '{user.handle}'.")
     except Exception as exc:
         prompts.note(f"Could not create the account ({type(exc).__name__}: {exc}).")

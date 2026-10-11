@@ -25,6 +25,7 @@ from typing import Optional
 
 from .. import paths
 from .. import servers as REG
+from . import ownership
 from .session import SAVE_DIR, SessionManager, GameSession
 
 def _bench_dir() -> Path:
@@ -314,9 +315,10 @@ class BenchmarkScheduler:
         """Mark a run as needing to be written."""
         self._dirty.add(run["id"])
 
-    def _log(self, msg: str):
-        """Append to the scheduler's log, which the Benchmarks page shows."""
-        self.log.append({"t": _now(), "msg": msg})
+    def _log(self, msg: str, run: Optional[str] = None):
+        """Append to the scheduler's log, which the Benchmarks page shows. ``run`` is the run a line is about: a
+        member's page shows only the lines of runs they may see (``status``)."""
+        self.log.append({"t": _now(), "msg": msg, "run": run})
         del self.log[:-200]
 
     # ------------------------------------------------------------------ settings
@@ -394,8 +396,14 @@ class BenchmarkScheduler:
         return models * scen * max(1, int(suite.get("repeats") or 1))
 
     # ------------------------------------------------------------------ runs
-    def create_run(self, suite: dict, name: Optional[str] = None) -> dict:
-        """Expand a suite into a run with one job per game."""
+    def create_run(self, suite: dict, name: Optional[str] = None, *, owner_id: Optional[str] = None,
+                   session=None) -> dict:
+        """Expand a suite into a run with one job per game. ``owner_id`` is the account starting it: the run is theirs
+        (design/phase3-features.md P3.2.4), its file records them, and its games' rows in the games index are theirs
+        too, at the run's visibility. With ``session`` (a request's), the run's row in ``owned_items`` is written and
+        committed there before any job can start: a job's thread writes its game's row while it holds this
+        scheduler's lock, so a request must not hold an open write while it waits for that lock (``tick``). A run made
+        without one (a script, a test) has no row until adoption gives it one, to the owner its file records."""
         suite = normalize_suite(suite)
         suite["servers"] = [resolve_group(g) for g in suite["servers"]]
         missing = [f"{g['name']}: {m.get('model') or m.get('model_id')}" for g in suite["servers"]
@@ -420,11 +428,17 @@ class BenchmarkScheduler:
         if not jobs:
             raise ValueError("This suite has no enabled models and scenarios to run.")
         run = {"id": _new_id("run_"), "name": name or suite["name"], "suite_id": suite["id"], "suite": suite,
-               "status": "running", "created": _now(), "started": _now(), "finished": None, "jobs": jobs}
+               "owner_id": owner_id, "status": "running", "created": _now(), "started": _now(), "finished": None,
+               "jobs": jobs}
+        if session is not None:
+            from .. import items
+            items.register(session, "benchmark_run", run["id"], owner_id, run["name"],
+                           path=self.runs_dir / f"{run['id']}.json")
+            session.commit()
         with self.lock:
             self.runs[run["id"]] = run
             self._touch(run)
-            self._log(f"Started run '{run['name']}' with {len(jobs)} jobs.")
+            self._log(f"Started run '{run['name']}' with {len(jobs)} jobs.", run["id"])
             self._flush()
         self.tick()
         return run
@@ -572,6 +586,7 @@ class BenchmarkScheduler:
                 if (folder / name).exists():
                     s = self.manager.load(folder / name)
                     s.owner_id = run.get("owner_id") or s.owner_id
+                    ownership.claim_quietly(s, run.get("owner_id"), item=("benchmark_run", run["id"]))
                     if job["status"] in ("done", "failed", "cancelled"):
                         job["closed_view_at"] = _now()
                     return s
@@ -616,12 +631,13 @@ class BenchmarkScheduler:
                         try:
                             reloaded = self.manager.load(path)   # loads paused
                             reloaded.owner_id = run.get("owner_id") or reloaded.owner_id
+                            ownership.claim_quietly(reloaded, run.get("owner_id"), item=("benchmark_run", run["id"]))
                         except Exception as e:
                             job.update({"status": "failed", "error": f"Could not reload the game: {e}", "finished": _now()})
                             continue
                         if job["status"] != "paused" or job["pause_reason"] != "user":
                             job["status"], job["pause_reason"] = "resuming", None
-                        self._log(f"Reloaded {job['label']} / {job['scenario_name']} after restart.")
+                        self._log(f"Reloaded {job['label']} / {job['scenario_name']} after restart.", run["id"])
                     self._touch(run)
             self._flush()
 
@@ -736,7 +752,7 @@ class BenchmarkScheduler:
         states = [j["status"] for j in run["jobs"]]
         if run["status"] == "running" and all(st in ("done", "failed", "cancelled") for st in states):
             run["status"], run["finished"] = "done", _now()
-            self._log(f"Run '{run['name']}' finished.")
+            self._log(f"Run '{run['name']}' finished.", run["id"])
             self._touch(run)
 
     PREEMPT_GRACE = 900        # seconds a model's turn in progress may run on before higher-priority work takes over
@@ -771,7 +787,7 @@ class BenchmarkScheduler:
             job.pop("preempt_since", None)
             self._pause_job(job, "preempted", first)
             self._log(f"{job['label']} · {job['scenario_name']} #{job['repeat']} paused on {job['server_name']} "
-                      f"for {first['label']} (priority {first['priority']}).")
+                      f"for {first['label']} (priority {first['priority']}).", run["id"])
             self._touch(run)
         elif self._preempted(job) and run["status"] == "running" and machine not in self._restricted:
             ours = frozenset(j["game_id"] for r in self.runs.values() for j in r["jobs"] if j.get("game_id"))
@@ -868,11 +884,11 @@ class BenchmarkScheduler:
                 try:
                     run, job = self._job(run_id, job_id)
                 except KeyError:
-                    self._log(f"job thread failed after the run went away: {detail}")
+                    self._log(f"job thread failed after the run went away: {detail}", run_id)
                     return
                 job.update({"status": "failed", "error": detail, "finished": _now()})
-                self._log(f"{job.get('label', job_id)}: {detail}")
-                self.log.append({"t": _now(), "msg": traceback.format_exc()})
+                self._log(f"{job.get('label', job_id)}: {detail}", run_id)
+                self._log(traceback.format_exc(), run_id)
                 self._touch(run)
                 self._flush()
 
@@ -909,7 +925,7 @@ class BenchmarkScheduler:
         except Exception as e:
             with self.lock:
                 job.update({"status": "failed", "error": str(e), "finished": _now()})
-                self._log(f"{job['label']}: {e}")
+                self._log(f"{job['label']}: {e}", run["id"])
                 self._touch(run)
                 self._flush()
             return
@@ -946,16 +962,18 @@ class BenchmarkScheduler:
                 self._flush()
                 return
             s.ai_delay = 0
-            s.owner_id = run.get("owner_id")    # the run's owner owns its games (package 3-02 records it)
+            s.owner_id = run.get("owner_id")
             s.benchmark = {"run_id": run["id"], "job_id": job["id"], "run_name": run["name"], "suite_id": run["suite_id"],
                            "scenario": sc["name"], "scenario_id": sc["id"], "model": job["model"], "server": job["server_name"],
                            "repeat": job["repeat"], "llm_player": 0, "turn_limit": s.game.turn_limit,
                            "server_id": job["server_id"], "profile": job.get("profile")}
+            # the run's owner owns its games' rows, at the run's visibility (P3.2.4), before the first save syncs them
+            ownership.register_quietly(s, run.get("owner_id"), kind="benchmark", item=("benchmark_run", run["id"]))
             self.manager.track(s)
             s.autosave(force=True)
             s.start()       # only now: a game started before `benchmark` is set plays its first turn as a lobby game
             job.update({"status": "running", "game_id": s.id, "load_seconds": load_s, "tool_mode": llm.get("tool_mode")})
-            self._log(f"Started {job['label']} on {sc['name']} (game {s.id}).")
+            self._log(f"Started {job['label']} on {sc['name']} (game {s.id}).", run["id"])
             self._touch(run)
             self._flush()
 
@@ -1005,12 +1023,13 @@ class BenchmarkScheduler:
         try:
             self._record_progress(run, job, s)       # reads still answer on a crashed game; the job fails regardless
         except Exception:
-            self._log(f"{job['label']}: no progress read after the crash: {traceback.format_exc(limit=2)}")
+            self._log(f"{job['label']}: no progress read after the crash: {traceback.format_exc(limit=2)}", run["id"])
         crash = s.crashed or {}
         job.update({"status": "failed", "finished": _now(), "pause_reason": None,
                     "error": f"The engine stopped on turn {crash.get('turn')}: {str(crash.get('message') or '')[:300]}"})
         s.stop()
-        self._log(f"{job['label']} on {job['scenario_name']}: the engine stopped on turn {crash.get('turn')}.")
+        self._log(f"{job['label']} on {job['scenario_name']}: the engine stopped on turn {crash.get('turn')}.",
+                  run["id"])
         self._touch(run)
 
     def _finish_job(self, run: dict, job: dict, s: GameSession):
@@ -1028,24 +1047,30 @@ class BenchmarkScheduler:
                 s.save("benchmark")
         except Exception as e:
             job["error"] = f"Could not save the finished game: {e}"
-        self._log(f"Finished {job['label']} on {job['scenario_name']}: {job['result'].get('outcome')}.")
+        self._log(f"Finished {job['label']} on {job['scenario_name']}: {job['result'].get('outcome')}.", run["id"])
         self._touch(run)
 
     # ------------------------------------------------------------------ views
-    def status(self) -> dict:
-        """What the scheduler is doing now, for the page header and the badge."""
+    def status(self, visible: Optional[set] = None) -> dict:
+        """What the scheduler is doing now, for the page header and the badge. ``visible`` is the runs the caller may
+        see (None: every run, an administrator's view): the counts and the log cover only those, and a log line about
+        no run (a machine's quiet hours, the scheduler's own errors) is an administrator's."""
         with self.lock:
-            active = [j for r in self.runs.values() for j in r["jobs"] if j["status"] in ("running", "loading", "resuming")]
+            runs = [r for r in self.runs.values() if visible is None or r["id"] in visible]
+            active = [j for r in runs for j in r["jobs"] if j["status"] in ("running", "loading", "resuming")]
+            log = [e for e in self.log if visible is None or e.get("run") in visible]
             return {"restricted": REG.restriction_status(), "active_jobs": len(active),
-                    "queued_jobs": sum(1 for r in self.runs.values() if r["status"] == "running"
+                    "queued_jobs": sum(1 for r in runs if r["status"] == "running"
                                        for j in r["jobs"] if j["status"] == "queued"),
-                    "log": self.log[-30:]}
+                    "log": log[-30:]}
 
-    def list_runs(self) -> list[dict]:
-        """Every run with its jobs, for the Runs view."""
+    def list_runs(self, visible: Optional[set] = None) -> list[dict]:
+        """Every run with its jobs, for the Runs view; only the runs in ``visible`` when it is given."""
         with self.lock:
             out = []
             for run in sorted(self.runs.values(), key=lambda r: -r["created"]):
+                if visible is not None and run["id"] not in visible:
+                    continue
                 r = {k: v for k, v in run.items() if k != "suite"}
                 r["mode"] = run["suite"]["mode"]
                 r["servers"] = [{"id": sv["id"], "name": sv["name"], "base_url": sv.get("base_url"), "provider": sv.get("provider"),

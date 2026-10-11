@@ -182,6 +182,14 @@ def require_cap(capability: str) -> Callable:
     return dependency
 
 
+def check_cap(user: User, capability: str) -> User:
+    """``require_cap`` for a route that learns only in its body which capability it needs (creating an item rather
+    than changing one it may manage): raises the same 403, with the same reason."""
+    if not policy.can(user, capability):
+        raise HTTPException(403, _denial_message(user, capability))
+    return user
+
+
 def _denial_message(user: User, capability: str) -> str:
     """Say *why*, so the person can act on it rather than guessing."""
     if user.status == "probation" and capability in policy.PROBATION_DENIES:
@@ -193,6 +201,14 @@ def _denial_message(user: User, capability: str) -> str:
         "publish_global": "Your account is not allowed to publish to the whole internet.",
         "create_games": "Your account is not allowed to start games.",
         "invite": "Your account cannot create invitations.",
+        "run_benchmarks": "Your account is not allowed to run benchmarks.",
+        "run_probes": "Your account is not allowed to run probes.",
+        "run_lab": "Lab experiments run on this server's own CPU; an administrator has to allow your account to "
+                   "queue them.",
+        "edit_bots": "Bot profiles are what every benchmark is measured against; an administrator has to allow your "
+                     "account to edit them.",
+        "full_llm": "Your account is not allowed to seat a model that plays every turn.",
+        "partial_llm": "Your account is not allowed to use pooled prompts.",
     }
     return friendly.get(capability, f"Your account lacks the {capability} permission.")
 
