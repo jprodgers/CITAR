@@ -894,7 +894,7 @@ class Helper:
         out = open(self.log, "w", encoding="utf-8")
         env = {k: v for k, v in os.environ.items() if not k.startswith("CITAR_WORKER_")}
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "citar.worker", "--server", h.server.base, "--token", token,
+            [sys.executable, "-m", "citar.worker", "--server", h.server.base, f"--token={token}",
              "--base-url", endpoint.url, "--provider", "openai_compatible", "--name", name, "--no-hardware",
              "--config", str(empty)],
             cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -939,12 +939,26 @@ def _until_offline(who: "Account", sid: str, limit: float = 10.0) -> Optional[fl
     return None
 
 
+def _until_unlisted(admin: "Account", sid: str, limit: float = 10.0) -> Optional[float]:
+    """Seconds until no helper connection of ``sid`` is left on the server, as an administrator's ``/api/status``
+    lists them (a deleted machine has no page of its own to ask), or None past ``limit``."""
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < limit:
+        r = admin.get("/api/status")
+        if r.status_code == 200 and sid not in {w.get("server_id") for w in r.json().get("workers") or []}:
+            return round(time.perf_counter() - t0, 3)
+        time.sleep(0.05)
+    return None
+
+
 def _accounts_machines(h: Harness) -> None:
     """3-05's checks (design/phase3-features.md P3.2.8): the registry file imported once, under its ids, when the first
     administrator was made, and renamed; a member's machine CITAR would dial refused unless it is the dry run; a
     member's dry-run machine and helper machine (a real helper behind the scripted endpoint) playing her games; the
-    host-touching routes 404 on a helper machine with nothing dialled; another member's machine 404; the model probe
-    an administrator's; a revoked token, a disabled machine and a deleted one dropping the helper within a second."""
+    host-touching routes and the key routes 404 on a helper machine with nothing dialled; another member's machine 404,
+    and named in no listing of another member's (the lobby's availability, the quiet hours); a machine body of the
+    wrong shape 400 and the site's electricity plan 403 for a member; the model probe an administrator's; a revoked
+    token, a disabled machine and a deleted one dropping the helper within a second."""
     r = h.report
     admin, alice, bob = (h.accounts[k] for k in ("admin", "alice", "bob"))
     trap = h.endpoint
@@ -1111,11 +1125,15 @@ def _accounts_machines(h: Harness) -> None:
                 f"offline after {gone} s", seconds=gone)
         alice.put(f"/api/pool/servers/{hid}", json={"enabled": True})
         third = connect()
+        before = admin.get("/api/status")
+        listed = third is not None and before.status_code == 200 and hid in {      # connected before the delete
+            w.get("server_id") for w in before.json().get("workers") or []}
         deleted = alice.delete(f"/api/pool/servers/{hid}")
-        gone = _until_offline(alice, hid) if deleted.status_code == 200 else None
+        gone = _until_unlisted(admin, hid) if deleted.status_code == 200 else None
         r.check("deleting the machine drops its helper within a second and leaves no connection",
-                third is not None and deleted.status_code == 200 and third.exited(15)
-                and alice.get(f"/api/pool/servers/{hid}").status_code == 404, f"HTTP {deleted.status_code}")
+                listed and deleted.status_code == 200 and gone is not None and gone <= 1.0 and third.exited(15)
+                and alice.get(f"/api/pool/servers/{hid}").status_code == 404,
+                f"HTTP {deleted.status_code}; no connection left after {gone} s", seconds=gone)
     finally:
         for helper in helpers:
             helper.stop()

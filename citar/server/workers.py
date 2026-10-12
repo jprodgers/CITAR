@@ -76,6 +76,9 @@ class WorkerConnection:
         self.last_seen = time.time()
         self.pending: dict = {}
         self.closed = False
+        #: Why it closed, once it did (``fail_all``): (message, retryable). A request opened after that fails at once
+        #: with the same error, rather than wait out its deadline for an answer nothing will send.
+        self._failure: Optional[tuple] = None
         self._lock = threading.RLock()
 
     # -------------------------------------------------------------- state
@@ -125,8 +128,12 @@ class WorkerConnection:
 
     # -------------------------------------------------------------- requests
     def open_request(self, request_id: str) -> Pending:
-        """Register a request and return something to wait on."""
+        """Register a request and return something to wait on. Raises WorkerError when the connection has closed
+        meanwhile (``submit`` took it just before a drop or a disconnect failed everything in flight)."""
         with self._lock:
+            if self.closed:
+                message, retryable = self._failure or ("The worker disconnected.", True)
+                raise WorkerError(message, refusal="closed" if retryable else "dropped", retryable=retryable)
             pending = Pending(id=request_id)
             self.pending[request_id] = pending
             return pending
@@ -146,9 +153,13 @@ class WorkerConnection:
         pending.event.set()
 
     def fail_all(self, message: str, *, retryable: bool = True):
-        """Called when the connection drops: nothing in flight can ever be answered. ``retryable`` is false when the
-        machine was taken away (``WorkerHub.drop``): waiting for it to come back would be waiting for nothing."""
+        """Called when the connection drops: nothing in flight can ever be answered, and nothing more is taken
+        (``closed``, set under the same lock ``open_request`` checks it under). ``retryable`` is false when the machine
+        was taken away (``WorkerHub.drop``): waiting for it to come back would be waiting for nothing."""
         with self._lock:
+            self.closed = True
+            if self._failure is None:
+                self._failure = (message, retryable)
             pending, self.pending = list(self.pending.values()), {}
         for item in pending:
             item.error = WorkerError(message, refusal="" if retryable else "dropped", retryable=retryable)
@@ -183,6 +194,30 @@ class WorkerHub:
             previous.fail_all("Replaced by a newer connection from the same worker.")
         return previous
 
+    async def admit(self, connection: WorkerConnection) -> Optional[str]:
+        """Register a helper whose hello ``authenticate`` let in, then check its token, machine and owner again
+        (``still_allowed``): a revoke, a disable, a delete or a suspension committed between that check and the
+        registration found nothing to drop (``drop`` runs after its commit), and this second look, made once the
+        connection can be found, sees it. Either the change committed before this look, which then refuses the
+        helper, or after it, when the change's own ``drop`` finds the connection. Returns why the helper may not serve
+        (it is dropped, its socket left to the caller to close), or None. A previous connection of the machine is
+        closed."""
+        previous = self.register(connection)
+        if previous is not None and previous.ws is not None:
+            try:
+                await previous.ws.close(code=4409)
+            except Exception:
+                pass
+        try:
+            refused = await asyncio.to_thread(still_allowed, [(connection.server_id, connection.token_id)])
+        except Exception:
+            log.exception("could not check the new worker for %s again", connection.server_id)
+            refused = {}
+        reason = next(iter(refused.values()), None)
+        if reason:
+            self.drop(connection.server_id, reason, token_id=connection.token_id, close=False)
+        return reason
+
     def unregister(self, connection: WorkerConnection):
         """Forget a worker that has disconnected, failing anything still waiting on it."""
         with self._lock:
@@ -206,21 +241,22 @@ class WorkerHub:
         connection = self.get(server_id)
         return connection.in_flight if connection else 0
 
-    def drop(self, server_id: str, reason: str, *, token_id: Optional[str] = None) -> bool:
+    def drop(self, server_id: str, reason: str, *, token_id: Optional[str] = None, close: bool = True) -> bool:
         """Disconnect a machine's helper because it may no longer serve: its token revoked (``token_id``: only a
         connection made with that token), its machine disabled or deleted, its owner suspended. Pending requests fail
         as not retryable, the helper is told why (a ``shutdown`` frame, which stops it rather than have it reconnect
-        to a refusal) and its socket is closed. Call it after the change that took the machine away is committed:
-        the helper's next hello must find it. Returns whether a connection was dropped."""
+        to a refusal) and its socket is closed (``close`` false: the caller, the socket's own handler, does that).
+        Call it after the change that took the machine away is committed: the helper's next hello must find it; a
+        helper whose hello was checked before that commit is checked again once registered (``admit``). Returns
+        whether a connection was dropped."""
         with self._lock:
             connection = self._workers.get(server_id)
             if connection is None or (token_id is not None and connection.token_id != token_id):
                 return False
             del self._workers[server_id]
-        connection.closed = True
         connection.fail_all(f"The machine's helper was disconnected: {reason}", retryable=False)
         log.info("dropped the worker for %s: %s", server_id, reason)
-        if connection.loop is not None and connection.ws is not None:
+        if close and connection.loop is not None and connection.ws is not None:
             async def close():
                 try:
                     await connection.ws.send_text(P.frame(P.SHUTDOWN, reason=reason))

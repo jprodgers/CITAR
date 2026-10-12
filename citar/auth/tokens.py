@@ -21,8 +21,12 @@ TOKEN_BYTES = 32
 
 
 def generate() -> str:
-    """A new random token."""
-    return secrets.token_urlsafe(TOKEN_BYTES)
+    """A new random token, never starting with ``-``: one in 64 of URL-safe base64 would, and a command line given
+    ``--token -x...`` (the helper's, the one the Servers page shows) reads it as an option and refuses to start."""
+    while True:
+        token = secrets.token_urlsafe(TOKEN_BYTES)
+        if not token.startswith("-"):
+            return token
 
 
 def hash_token(token: str) -> str:

@@ -73,6 +73,14 @@ class Protocol(unittest.TestCase):
     def test_summary_is_readable(self):
         self.assertIn("request", P.summarize({"t": P.REQUEST, "id": "a", "model": "m", "messages": []}))
 
+    def test_a_token_never_starts_like_an_option(self):
+        """One URL-safe token in 64 starts with "-", and ``citar-worker --token -x...`` (the command the Servers page
+        shows) then reads it as an option and does not start: none is handed out."""
+        drawn = iter(["-starts-like-an-option", "a-usable-token"])
+        with mock.patch.object(tokens.secrets, "token_urlsafe", lambda n: next(drawn)):
+            self.assertEqual(tokens.generate(), "a-usable-token")
+        self.assertFalse(any(tokens.generate().startswith("-") for _ in range(2000)))
+
 
 class Hub(unittest.TestCase):
     """The hub without a socket: registration, liveness, and the failure paths."""
@@ -160,6 +168,27 @@ class Hub(unittest.TestCase):
         self.assertEqual(self.hub.in_flight("sv1"), 2)
         c.resolve("a", result={})
         self.assertEqual(self.hub.in_flight("sv1"), 1)
+
+    def test_a_request_on_a_connection_dropped_meanwhile_fails_at_once(self):
+        """``submit`` can take a connection just before a drop fails everything in flight: the request it then opens
+        fails at once, as the drop failed the others, rather than wait out its deadline for nothing."""
+        c = self._connection()
+        self.hub.register(c)
+        t0 = time.perf_counter()
+        with mock.patch.object(self.hub, "get", return_value=c):        # handed out, then dropped
+            self.assertTrue(self.hub.drop("sv1", "its worker token was revoked"))
+            with self.assertRaises(W.WorkerError) as caught:
+                self.hub.submit("sv1", P.Request(id="late", model="m1", messages=[], timeout=30), timeout=30)
+        self.assertLess(time.perf_counter() - t0, 1.0)
+        self.assertEqual((caught.exception.refusal, caught.exception.retryable), ("dropped", False))
+        self.assertIn("revoked", str(caught.exception))
+        self.assertEqual(c.in_flight, 0)
+        gone = self._connection("sv2")
+        self.hub.register(gone)
+        self.hub.unregister(gone)                                       # a disconnect: worth trying again later
+        with self.assertRaises(W.WorkerError) as caught:
+            gone.open_request("after")
+        self.assertEqual((caught.exception.refusal, caught.exception.retryable), ("closed", True))
 
 
 class PooledWork(unittest.TestCase):
@@ -846,6 +875,16 @@ class Revocation(unittest.TestCase):
         self.assertLessEqual(took, limit, f"dropped after {took:.2f} s")
         return took
 
+    def stopped_within(self, thread: threading.Thread, t0: float, limit: float = 1.0) -> float:
+        """Seconds from ``t0`` until the helper itself has stopped: its socket closed at both ends and its run over,
+        told why by the shutdown frame (the hub's bookkeeping alone, ``offline_within``, is not the socket); fails
+        past ``limit``."""
+        thread.join(timeout=limit + 5)
+        took = time.perf_counter() - t0
+        self.assertFalse(thread.is_alive(), "the helper is still running")
+        self.assertLessEqual(took, limit, f"the helper stopped after {took:.2f} s")
+        return took
+
     def refused_now(self, server_id: str) -> None:
         """The machine's next request is refused at once: no helper is connected."""
         with self.assertRaises(W.WorkerError) as caught:
@@ -859,8 +898,7 @@ class Revocation(unittest.TestCase):
         r = self.call("lena", "DELETE", f"/api/pool/servers/{sid}/workers/tokens/{tid}")
         self.assertEqual(r.status_code, 200, r.text)
         self.offline_within(sid, t0)
-        thread.join(timeout=10)
-        self.assertFalse(thread.is_alive(), "told why (shutdown), the helper stops rather than reconnect")
+        self.stopped_within(thread, t0)                 # told why (shutdown), it stops rather than reconnect
         self.refused_now(sid)
         _again, _loop, again = self.helper(sid, token, wait=False)
         again.join(timeout=15)
@@ -901,8 +939,7 @@ class Revocation(unittest.TestCase):
         r = self.call("lena", "PUT", f"/api/pool/servers/{sid}", {"enabled": False})
         self.assertEqual(r.status_code, 200, r.text)
         self.offline_within(sid, t0)
-        thread.join(timeout=10)
-        self.assertFalse(thread.is_alive())
+        self.stopped_within(thread, t0)
         self.refused_now(sid)
         self.assertIsNone(W.authenticate(token), "a disabled machine's helper is refused at hello")
         self.assertEqual(self.call("lena", "PUT", f"/api/pool/servers/{sid}", {"enabled": True}).status_code, 200)
@@ -916,8 +953,7 @@ class Revocation(unittest.TestCase):
         r = self.call("lena", "DELETE", f"/api/pool/servers/{sid}")
         self.assertEqual(r.status_code, 200, r.text)
         self.offline_within(sid, t0)
-        thread.join(timeout=10)
-        self.assertFalse(thread.is_alive())
+        self.stopped_within(thread, t0)
         self.assertNotIn(sid, W.hub()._workers, "no connection is left")
         self.refused_now(sid)
         with db.session() as s:
@@ -926,36 +962,70 @@ class Revocation(unittest.TestCase):
 
     def test_deleting_it_through_the_registry_routes_drops_it_too(self):
         sid, token, _tid = self.machine(self.lena_id, "deleted through the registry")
-        self.helper(sid, token)
+        _worker, _loop, thread = self.helper(sid, token)
         t0 = time.perf_counter()
         self.assertEqual(self.call("lena", "DELETE", f"/api/servers/{sid}").status_code, 200)
         self.offline_within(sid, t0)
+        self.stopped_within(thread, t0)
 
     def test_suspending_the_owner_drops_their_helpers(self):
         sid, token, _tid = self.machine(self.moe_id, "moe's box")
-        self.helper(sid, token)
+        _worker, _loop, thread = self.helper(sid, token)
         t0 = time.perf_counter()
         r = self.call("ada", "PATCH", f"/api/admin/users/{self.moe_id}", {"status": "suspended", "reason": "tests"})
         self.assertEqual(r.status_code, 200, r.text)
         self.offline_within(sid, t0)
+        self.stopped_within(thread, t0)
         self.assertIsNone(W.authenticate(token), "a suspended account's machine is refused at hello")
         self.assertEqual(self.call("ada", "PATCH", f"/api/admin/users/{self.moe_id}", {"status": "active"}).status_code,
                          200)
         self.assertTrue(_soon(lambda: W.authenticate(token) is not None))
 
     def test_a_change_made_elsewhere_drops_it_within_a_ping(self):
-        """``admin_cli`` or another process revokes a token in the database: the keep-alive's check finds it."""
+        """``admin_cli`` or another process revokes a token in the database, where no route can drop the helper: the
+        keep-alive (the hub's own ``ping_loop``, on the server's event loop, here every 0.1 s) finds it at its next
+        round and drops it."""
         from datetime import datetime, timezone
         sid, token, tid = self.machine(self.lena_id, "revoked elsewhere")
-        self.helper(sid, token)
+        _worker, _loop, thread = self.helper(sid, token)
+        self.assertEqual(W.hub().get(sid).token_id, tid)
+        keep_alive = asyncio.run_coroutine_threadsafe(W.hub().ping_loop(interval=0.1), W.hub()._loop)
+        self.addCleanup(keep_alive.cancel)
+        time.sleep(0.3)
+        self.assertTrue(W.hub().is_online(sid), "a helper that may serve is left alone")
+        t0 = time.perf_counter()
         with db.session() as s:
             s.get(WorkerToken, tid).revoked_at = datetime.now(timezone.utc)
-        self.assertEqual(W.still_allowed([(sid, tid)]), {(sid, tid): "its worker token was revoked"})
-        connection = W.hub().get(sid)
-        self.assertEqual(connection.token_id, tid)
-        for (server_id, token_id), reason in W.still_allowed([(sid, tid)]).items():
-            W.hub().drop(server_id, reason, token_id=token_id)
+        self.offline_within(sid, t0)
+        self.stopped_within(thread, t0)
+        self.assertFalse(keep_alive.done(), "the keep-alive goes on")
+
+    def test_a_revoke_between_the_hello_and_its_registration_still_drops_it(self):
+        """A revoke that commits after the hello's check and before the connection is registered finds nothing to
+        drop; the hub's second look once it is registered (``WorkerHub.admit``) refuses it, and the helper, told why,
+        stops."""
+        from datetime import datetime, timezone
+        sid, token, tid = self.machine(self.lena_id, "revoked mid-hello")
+        real = W.authenticate
+        missed = []
+
+        def checked_then_revoked(raw):
+            identity = real(raw)
+            if identity is not None:
+                with db.session() as s:
+                    s.get(WorkerToken, tid).revoked_at = datetime.now(timezone.utc)
+                missed.append(W.hub().drop(sid, "its worker token was revoked", token_id=tid))
+            return identity
+        with mock.patch.object(W, "authenticate", checked_then_revoked):
+            _worker, _loop, thread = self.helper(sid, token, wait=False)
+            t0 = time.perf_counter()
+            thread.join(timeout=10)
+        self.assertEqual(missed, [False], "the revoke's own drop came too early to find the connection")
+        self.assertFalse(thread.is_alive(), "told to stop at its hello, the helper does not reconnect")
+        self.assertLess(time.perf_counter() - t0, 5.0)
         self.assertFalse(W.hub().is_online(sid))
+        self.assertNotIn(sid, W.hub()._workers)
+        self.refused_now(sid)
 
     def test_a_drop_names_its_token(self):
         """Revoking one of a machine's tokens drops a helper connected with it, never one connected with another."""

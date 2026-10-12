@@ -2266,12 +2266,12 @@ async def worker_socket(websocket: WebSocket):
         server_id, server_name, token_id = identity
 
         connection = WorkerConnection(websocket, server_id, hello, asyncio.get_running_loop(), token_id=token_id)
-        previous = hub().register(connection)
-        if previous is not None:
-            try:
-                await previous.ws.close(code=4409)
-            except Exception:
-                pass
+        refused = await hub().admit(connection)
+        if refused:
+            # taken away between the hello's check and the registration: told why, as a drop tells a helper
+            await websocket.send_text(P.frame(P.SHUTDOWN, reason=refused))
+            await websocket.close(code=4403)
+            return
         await websocket.send_text(P.welcome_frame(P.Welcome(
             server_id=server_id, server_name=server_name,
             ping_seconds=citar_settings.get().worker_ping_seconds)))
