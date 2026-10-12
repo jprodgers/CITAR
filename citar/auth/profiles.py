@@ -4,7 +4,7 @@ An account shows other people a handle (always), and a display name, an avatar, 
 it owns and, from package 3-10, its compute ratio, each field `private`, `server` (members) or `global` (anyone) as
 the account chooses (`users.field_visibility`, defaults in `models.USER_FIELD_DEFAULTS`). The `profile` field is the
 page's own gate: a field shows when the viewer reaches both its level and the profile's. The rule itself lives on
-the account (`User.visible_fields`, `User.public(viewer)`), so everywhere an account appears applies the same one;
+the account (`User.visible_fields`, and `User.public` for a viewer), so everywhere an account appears applies the same one;
 this module is what the routes add around it:
 
 - the edits an account makes to its own profile (``update``: the bio's and the links' limits, known levels only,
@@ -288,7 +288,7 @@ def _level(field: str):
 def directory(session, viewer: User, q: str = "", offset: int = 0) -> dict:
     """The members' directory (``GET /api/users``): accounts that are ``listed`` and in good standing (probation or
     active), newest first, ``PAGE`` at a time from ``offset``, each with what shows to ``viewer``
-    (``User.public(viewer)``, the bio's first line when the bio shows, and whether its page opens). ``q`` matches a
+    (``User.public`` for the viewer, the bio's first line when the bio shows, and whether its page opens). ``q`` matches a
     handle, and a display name only where the caller may see it: the account's own, an administrator's view, or a
     member's of an account whose profile and display name are `server` or `global`, so searching for a hidden name
     finds nothing."""
