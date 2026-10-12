@@ -973,13 +973,16 @@ class ProbeRunner:
                 if rid in self._stop_run:
                     break
             self._set_live(rid, {"run": rid, "case": job["case"], "rep": job["rep"], "since": time.time()})
-            rec = run_case(self.manager, scn, probe, cases[job["case"]], run["llm"],
-                           save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar", live=self.lives[rid],
-                           should_stop=lambda: rid in self._stop_run, usage_act=act, owner_id=run.get("owner_id"),
-                           run_id=rid, run_name=run.get("name"),
-                           on_ticket=lambda t: self.asking.__setitem__(rid, t) if t is not None
-                           else self.asking.pop(rid, None),
-                           wait_benchmark=lambda: self._wait_benchmark(rid, server_id))
+            from . import ledger
+            # the case's own CPU on this thread is the run's (P3.4.3); its game's drives are units of their own
+            with ledger.cpu_unit(act):
+                rec = run_case(self.manager, scn, probe, cases[job["case"]], run["llm"],
+                               save_path=self._run_dir(rid) / f"{job['case']}-{job['rep']}.citar",
+                               live=self.lives[rid], should_stop=lambda: rid in self._stop_run, usage_act=act,
+                               owner_id=run.get("owner_id"), run_id=rid, run_name=run.get("name"),
+                               on_ticket=lambda t: self.asking.__setitem__(rid, t) if t is not None
+                               else self.asking.pop(rid, None),
+                               wait_benchmark=lambda: self._wait_benchmark(rid, server_id))
             rec["rep"] = job["rep"]
             with open(self._run_dir(rid) / "results.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, default=str) + "\n")

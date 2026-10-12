@@ -48,6 +48,7 @@ from typing import Optional
 from sqlalchemy import event
 from sqlalchemy.orm import Session as _OrmSession
 
+from . import ledger as _ledger  # noqa: F401  (a machine whose hardware changes is classified again: its flush hook)
 from . import paths
 from .db.models import Server as _ServerRow, Setting as _Setting, User as _User
 
@@ -646,7 +647,10 @@ def _read() -> tuple:
                             "owner_id": row.owner_id, "owner_tz": zones.get(row.owner_id) or "UTC",
                             "group_id": row.group_id, "is_host": bool(row.is_host),
                             "server_resource": bool(row.server_resource), "max_concurrent": row.max_concurrent or 1,
-                            "capabilities": dict(row.capabilities or {}), "config": cfg}
+                            "capabilities": dict(row.capabilities or {}), "config": cfg,
+                            # the compute ledger's pricing (P3.4.3): the machine's classes and what they are read from
+                            "gpu_class_id": row.gpu_class_id, "cpu_class_id": row.cpu_class_id,
+                            "class_override": bool(row.class_override), "hardware": sv.get("hardware") or {}}
     known = {sv["id"] for sv in reg["servers"]}
     reg["aliases"] = {old: new for old, new in reg["aliases"].items() if old not in known}
     return reg, meta
@@ -742,6 +746,12 @@ def machine(server_id: Optional[str]) -> Optional[dict]:
         return None
     m = _state()[1].get(server_id)
     return {**m, "config": copy.deepcopy(m["config"])} if m else None
+
+
+def machine_facts(server_id: Optional[str]) -> Optional[dict]:
+    """``machine`` without the copy, for a reader that only reads (the compute ledger's writer, which prices thousands
+    of events a second from the cache): the cached dict itself, never to be changed. None for no such machine."""
+    return _state()[1].get(server_id or "") if server_id else None
 
 
 def machine_settings(server_id: Optional[str]) -> Optional[dict]:

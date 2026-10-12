@@ -14,6 +14,11 @@ Method, per server and per minute:
     plan's fixed fee spread over the household's monthly kWh.
   * API servers: tokens x the model's per-million prices (input, output, cache reads, cache writes).
 Everything is computed with the configuration in force at the time of use (effective-dated cost periods).
+
+What was held, and when, is the usage ledger's (``citar/usage.py``: activities, held time, power samples); the work
+done (generation seconds, tokens, the host's CPU seconds) is the compute ledger's (``compute_events``, read through
+``usage.read``'s ``work``; design/phase3-features.md P3.4.7). Generation seconds are bounded by what the server saw
+(P3.3.4), so a request's wait for its machine is never priced as busy energy.
 """
 from __future__ import annotations
 
@@ -163,11 +168,18 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
                                 "servers": defaultdict(_new_cost), "models": defaultdict(_new_cost)}
         return acts_out[act_id]
 
-    # ---- per server, per minute: who held it and what work they did
+    # ---- per server, per minute: who held it and what work they did. The time held comes from the usage ledger's
+    # spans; the work (generation seconds, tokens, the host's CPU seconds) from the compute ledger's events (``work``,
+    # design/phase3-features.md P3.4.7), so time a request waited for its machine is never charged as work. A span
+    # written before package 3-10 carries its own work, which counts as it did. Work of an activity the usage ledger
+    # does not know (a machine's test, a game with no model seat) is the compute ledger's alone: it has nothing held
+    # to price against.
     days: dict = defaultdict(lambda: defaultdict(float))     # date -> srv -> cost (full basis)
     hours: dict = defaultdict(lambda: defaultdict(float))    # "YYYY-MM-DD HH:00" -> srv -> cost
     buckets: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0])))   # srv -> m -> act -> [held, busy, cpu]
-    for sp in ledger["spans"]:
+    known = ledger["acts"]
+    work = [w for w in ledger.get("work") or [] if w.get("act") in known]
+    for sp in list(ledger["spans"]) + work:
         srv = aliases.get(sp.get("srv"), sp.get("srv")) or "unassigned"
         t0, t1 = float(sp["t0"]), float(sp["t1"])
         if since:

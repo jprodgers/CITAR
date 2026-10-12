@@ -1000,17 +1000,17 @@ class SeatLeases(unittest.TestCase):
         s = _session([{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}, {"type": "bot"}])
         self.addCleanup(_close, s)
         seen = []
-        real_cap, real_read = pool_seats.consumer_cap, S.read_settings
+        real_terms, real_read = pool_seats.consumer_terms, S.read_settings
 
-        def cap(*a, **kw):
+        def terms(*a, **kw):
             seen.append(("grant", s._lease_lock.locked()))
-            return real_cap(*a, **kw)
+            return real_terms(*a, **kw)
 
         def read(server_id):
             seen.append(("row", s._lease_lock.locked()))
             return real_read(server_id)
         S.reset()
-        with mock.patch.object(pool_seats, "consumer_cap", cap), mock.patch.object(S, "read_settings", read):
+        with mock.patch.object(pool_seats, "consumer_terms", terms), mock.patch.object(S, "read_settings", read):
             self.assertIsNotNone(s.lease_for(0))
         self.assertEqual(seen, [("grant", False), ("row", False)])
 

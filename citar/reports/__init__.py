@@ -479,7 +479,9 @@ class ReportRunner:
         t0 = _now()
         meta = self._set(rid, status="running", started=t0, progress="Collecting data", waiting=None,
                          waiting_note=None)
-        with self._cpu:
+        from .. import ledger
+        # gathering and rendering use the host's CPU for the report's owner (P3.4.3: a unit of work, charged to it)
+        with self._cpu, ledger.cpu_unit(f"report:{rid}"):
             data = gather(spec, progress=lambda msg: self._set(rid, progress=msg),
                           reach=Reach.of(meta.get("owner_id")))
         narrative, note = "", ""
@@ -487,7 +489,7 @@ class ReportRunner:
             self._set(rid, progress="Writing the analysis with a model")
             narrative, note = self._narrative(rid, spec, narrative_brief(data))
         self._set(rid, progress="Rendering")
-        with self._cpu:
+        with self._cpu, ledger.cpu_unit(f"report:{rid}"):
             page, summary = render(data, narrative, note)
         from ..fsutil import write_text
         write_text(self._path(rid) / "report.html", page)

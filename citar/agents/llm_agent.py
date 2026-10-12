@@ -647,6 +647,13 @@ class LLMAgent:
         except Exception as e:
             if self._halted(session):
                 return
+            if getattr(e, "code", None) == "budget":
+                # the grant's hard budget refused the request (design/phase3-features.md P3.4.6): the game pauses with
+                # the budget's reason, as for quiet hours, and resumes by itself when the budget's period turns
+                self._end_reason(session, pid, "budget")
+                self._thought(session, pid, f"(the machine's budget refused the request: {e})", "system")
+                session.pause_for_budget(pid, str(e), getattr(e, "budget", None), getattr(e, "retry_at", None))
+                return
             session.errors.append({"t": time.time(), "player": pid, "where": "llm play_turn", "trace": traceback.format_exc()})
             self._end_reason(session, pid, "error")
             self._report_failure(session, pid, e)

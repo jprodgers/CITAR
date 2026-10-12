@@ -31,6 +31,7 @@ from .share_api import router as share_router
 from .bots_api import router as bots_router
 from .users_api import router as users_router
 from .admin_users_api import router as admin_users_router
+from .ledger_api import router as ledger_router
 from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
@@ -51,6 +52,7 @@ app.include_router(items_router)
 app.include_router(setup_router)
 app.include_router(users_router)
 app.include_router(admin_users_router)
+app.include_router(ledger_router)
 manager = SessionManager()
 scheduler: Optional[BenchmarkScheduler] = None
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -108,6 +110,8 @@ async def _startup():
     usage.start_power_sampler(follow_host=True)   # live power samples of the host for cost reports (a host made
                                                   # later, by the first administrator, from then on)
     usage.tracker().start()
+    from .. import ledger
+    ledger.get().ensure_threads()                 # the compute ledger's writer, and its rollups (a first pass now)
 
 
 def _close_orphan_rows() -> list:
@@ -144,6 +148,11 @@ def _shutdown():
             if s.usage_act:
                 usage.finish_session(s)
         usage.tracker().flush()
+    except Exception:
+        pass
+    try:
+        from .. import ledger
+        ledger.get().stop(timeout=10.0)           # the writer drains what it has (the tracker's last CPU included)
     except Exception:
         pass
 

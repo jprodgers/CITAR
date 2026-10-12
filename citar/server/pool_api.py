@@ -10,6 +10,7 @@ machine and deleting one drop its helper's connection once the change is committ
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -412,6 +413,8 @@ def update_grant(grant_id: str, body: GrantBody, request: Request,
         raise _fail(exc)
     audit.record(s, "grant.updated", actor=me, object_type="server_group", object_id=grant.group_id)
     _saved(s)
+    # the work already running under the grant is held to its budget as it is now (P3.4.6)
+    budgets.keeper().reload_grant(s, grant.id)
     return pool.grant_to_client(s, grant, me)
 
 
@@ -430,6 +433,7 @@ def revoke_grant(grant_id: str, request: Request, p: Principal = Depends(princip
     except pool.PoolError as exc:
         raise _fail(exc)
     _saved(s)
+    budgets.keeper().reload_grant(s, grant_id)          # its budget went with it
     return {"revoked": grant_id}
 
 
@@ -566,7 +570,9 @@ def test_server(server_id: str, request: Request, model: str = "",
     until the helper's late answer. A caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all
     (another answers at once, ``code`` ``duplicate`` or ``too_many``), at most ``server_test``'s rate
     (``citar.auth.ratelimit``; 429 past it), and the request's database connection is given back before the wait.
-    The test is not metered: it belongs to no activity.
+    The test is an activity of its own in the compute ledger (``test:<id>``, design/phase3-features.md P3.4.2): used
+    by the caller, given by the machine's owner, counted against the grant's budget when it has one; it has no usage
+    record, so no cost report lists it.
     """
     import time as _time
 
@@ -610,9 +616,10 @@ def test_server(server_id: str, request: Request, model: str = "",
     ticket, timer = None, None
     try:
         ticket = prompt_scheduler.get().ticket(
-            server.id, chosen, cls="test", activity=None, consumer=me.id, label=f"test of {server.name}",
-            start_within=wait, steps=1, cap=int(grant.concurrency or 0) if grant is not None else 0,
-            one_per_consumer=True)
+            server.id, chosen, cls="test", activity=f"test:{secrets.token_hex(6)}", consumer=me.id,
+            label=f"test of {server.name}", start_within=wait, steps=1,
+            cap=int(grant.concurrency or 0) if grant is not None else 0, one_per_consumer=True,
+            budget=budgets.keeper().handle(s, grant))
         if ticket.state != "queued":
             return {"ok": False, "stage": "queue", "model": chosen, "reason": ticket.reason,
                     "code": ticket.error.code if ticket.error else None,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import threading
 import time
@@ -10,9 +11,10 @@ import weakref
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Callable, Optional
 
-from .. import engine_api
+from .. import engine_api, ledger
 from ..engine_api import ActionError, EngineCrash, EngineGame
 from .metrics import Metrics
 from .. import paths
@@ -20,6 +22,7 @@ from .. import paths
 # CITAR_SAVE_DIR lets the test suite keep its throwaway games out of the real save folder;
 # citar.paths decides the rest (a checkout writes beside the code, an install writes per-user).
 SAVE_DIR = paths.saves_path()
+log = logging.getLogger("citar.session")
 SEAT_TYPES = ("human", "mcp", "llm", "bot")
 #: What a player is told when the engine has stopped after an internal error (GameSession._crashed).
 CRASHED = ("The game engine stopped after an internal error, so this game takes no more moves. It is paused as it "
@@ -197,7 +200,7 @@ class GameSession:
             return {"ok": False, "error": CRASHED}
         if name == "end_turn":
             self._hold_for_autosave(pid)     # only when it is pid's turn, and pid's ends the round
-        with self.lock:
+        with ledger.cpu_unit(self.cpu_activity), self.lock:
             before_turn, before_current = self.game.turn, self.game.current
             kind = engine_api.tool_kind(name) or "unknown"
             t0 = time.perf_counter()
@@ -429,7 +432,9 @@ class GameSession:
         try:
             agent = self.get_agent(pid, answering=True)
             if agent is not None:
-                agent.respond_negotiation(self, pid, nid)
+                # the answer's CPU is this game's, whichever thread runs it (P3.4.3)
+                with ledger.cpu_unit(self.cpu_activity):
+                    agent.respond_negotiation(self, pid, nid)
         except EngineCrash as e:
             self._crashed(str(e))
         except Exception:
@@ -616,13 +621,15 @@ class GameSession:
         if lease is not None:
             if new_owner:
                 # made when the game was registered, before its owner was known (a save loaded by a member whose game
-                # had no owner yet): the owner's grant caps it from now on (a database read, off every lock)
-                lease.cap = pool_seats.consumer_cap(self.owner_id, sid, self._cap_purpose())
+                # had no owner yet): the owner's grant caps it, and its budget counts it, from now on (a database
+                # read, off every lock)
+                lease.cap, lease.budget = pool_seats.consumer_terms(self.owner_id, sid, self._cap_purpose())
             return lease
         if self._leases_ended():
             return None
-        # off every lock: the grant's concurrency and the machine (its row read on first use) are database reads
-        cap = pool_seats.consumer_cap(self.owner_id, sid, self._cap_purpose())
+        # off every lock: the grant's concurrency and budget and the machine (its row read on first use) are database
+        # reads
+        cap, budget = pool_seats.consumer_terms(self.owner_id, sid, self._cap_purpose())
         sched = prompt_scheduler.get()
         sched.machine(sid)
         with self._lease_lock:
@@ -637,7 +644,8 @@ class GameSession:
                 self._let_go(pid, lease)
             lease = sched.lease(sid, model, kind=kind, activity=self.usage_act, consumer=self.owner_id,
                                 label=self.lease_label or f"game “{self.name}”", cap=cap, game=self.id,
-                                ref=self._lease_ref(), on_status=self._lease_status if kind == "benchmark" else None)
+                                ref=self._lease_ref(), on_status=self._lease_status if kind == "benchmark" else None,
+                                budget=budget, on_budget=lambda payload, pid=pid: self._budget_warning(pid, payload))
             self.leases[pid] = lease
             return lease
 
@@ -774,6 +782,60 @@ class GameSession:
             bench["drains"] = int(bench.get("drains") or 0) + 1
             if payload.get("contaminated"):
                 bench["contaminated"] = True
+
+    @property
+    def cpu_activity(self) -> str:
+        """The activity this game's CPU is charged to in the compute ledger (P3.4.3): its usage ledger's, else its
+        own (a game with no model seat has no usage record, but its drives use the host's CPU all the same)."""
+        return self.usage_act or f"game:{self.id}"
+
+    def _budget_warning(self, pid: int, payload: dict) -> None:
+        """A request of seat ``pid`` took a soft budget past its amount (once a period; on the scheduler's notifier
+        thread, no machine lock held): the game's log says so to whoever plays and watches it. The work goes on."""
+        text = (payload or {}).get("warning")
+        if not text or self._stop or self.crashed:
+            return
+        try:
+            with self.lock:
+                self.game.emit("agent_error", f"{self.game.player_name(pid)}'s machine: {text}", None, player=pid)
+        except Exception:
+            log.debug("could not tell game %s of a soft budget", self.id, exc_info=True)
+
+    BUDGET_POLL_SECONDS = 30.0        # how often a game paused by a spent budget checks whether its period has turned
+
+    def pause_for_budget(self, pid: int, message: str, budget: Optional[dict], retry_at: Optional[datetime] = None):
+        """A hard budget refused a request of seat ``pid`` (P3.4.6): pause the whole game with the budget's reason, as
+        quiet hours do, and resume it by itself when the budget's period turns (``budget``: its ``id`` and the period
+        ``key`` it was spent in). A budget counted in total never turns: the game waits for a person (or the machine's
+        owner raising it, then Resume). Called from the seat's own turn, on the driver thread."""
+        from ..pool import budgets as pool_budgets
+        until = retry_at.timestamp() if retry_at is not None else None
+        reason = {"kind": "budget", "player": pid, "message": message, "since": time.time(), "until": until,
+                  "budget": (budget or {}).get("id"), "period": (budget or {}).get("key")}
+        self.suspend(reason)
+        with self.lock:
+            self.game.emit("game_paused", f"Game paused: {message}"
+                           + (" It resumes by itself when the budget's period ends." if until else ""), None,
+                           player=pid)
+        if not reason["budget"] or until is None:
+            return
+
+        def watch():
+            """Resume once the budget's period has turned, unless the pause has since become someone else's."""
+            while not self._stop:
+                time.sleep(self.BUDGET_POLL_SECONDS)
+                if self._stop or not self.paused or self.pause_reason is not reason:
+                    return
+                key = pool_budgets.keeper().current_key(reason["budget"])
+                if key is None or key != reason["period"]:
+                    with self.lock:
+                        if not self.paused or self.pause_reason is not reason:
+                            return
+                        self.game.emit("game_resumed", "A new budget period has begun; the game has resumed.", None,
+                                       player=pid)
+                    self.resume()
+                    return
+        threading.Thread(target=watch, name=f"budget-{self.id}-{pid}", daemon=True).start()
 
     def _inline_llm_allowed(self, llm: dict) -> bool:
         """Whether a seat's model block may describe its own provider, address and key rather than name a machine
@@ -1140,7 +1202,9 @@ class GameSession:
             if lease is not None:
                 lease.activate()
             try:
-                agent.play_turn(self, pid)
+                # the turn's CPU on this thread is this game's (P3.4.3); its time waiting for models costs none
+                with ledger.cpu_unit(self.cpu_activity):
+                    agent.play_turn(self, pid)
             except EngineCrash as e:
                 self._crashed(str(e))
             except Exception as e:

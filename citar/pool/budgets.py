@@ -1,46 +1,56 @@
-"""Spend caps on shared servers.
+"""Spend caps on shared machines, in credits (design/phase3-features.md P3.4.6).
 
 No money moves anywhere. A budget is **accounting and admission control**: it stops work being
 scheduled, and it pauses work that crosses the line. Nobody is charged and nothing is billed.
 
-A budget is counted in credits, the compute ledger's unit (`Budget.unit`; design/phase3-features.md
-P3.4.6): package 3-10 makes it reserve and settle per request against `compute_events`. The estimate
-below still prices an activity from the usage ledger through `citar/costing.py` until then.
+A budget belongs to a grant and is counted in credits, the compute ledger's unit (`Budget.unit`), per
+period (a day, a week, a month or in total) in the machine owner's time zone, hard or soft. It is kept
+per request, against the ledger:
 
-Two things here are easy to get wrong and are handled deliberately:
+*Reserve.* When a request of a lease or a ticket under a grant with a budget is given its slot, the
+scheduler reserves an estimate (``Keeper.reserve``): the machine's mean credits per step for that model
+(at least ``MIN_RESERVE``), or on an online API the price of the request's ``max_tokens`` of output plus
+its input, times the class rate. A hard budget whose spent plus reserved would pass its amount refuses
+the request (``BudgetExceeded``, with the period's end as ``retry_at``): a lobby game pauses until the
+period turns, a ticket is refused and its caller falls back. A hard budget on an API whose model has no
+price refuses every request, rather than letting unpriced steps through at 0. Everything here runs in
+memory, under the keeper's own lock: the request path never reads the database.
 
-*A period ends at the owner's midnight, not UTC's.* "1,000 credits per month" means their month. An owner in
-New York gets a month that runs from the 1st at 00:00 Eastern; computing it in UTC would move the
-boundary by five hours and, twice a year, by a different five hours.
+*Settle.* The ledger's writer prices each step's event and settles it (``settle_entries`` in the same
+transaction as the event, then ``Keeper.settle``): the step's credits go to the entry of (budget,
+activity, period) and its reservation is released. A step that never ran releases its reservation.
 
-*Cost is only known afterwards.* A game started with $2 of headroom can spend $40 before anything
-notices, because the ledger lands minutes later. So every activity opens a **reservation** against a
-conservative estimate at launch, and that estimate is replaced by the real figure as the ledger
-arrives. Without the reservation the cap is advisory; with it, the worst case is bounded by one
-estimate rather than by an entire unattended run.
+*Soft* budgets never refuse: the request that takes one past its amount carries a warning (once a
+period), which the scheduler hands to the binding's ``on_budget`` (a game's log says so) and an audit
+row records; the machine owner's Servers page shows the meter over its amount.
+
+*A period ends at the owner's midnight, not UTC's.* "1,000 credits per month" means their month. An
+owner in New York gets a month that runs from the 1st at 00:00 Eastern; computing it in UTC would move
+the boundary by five hours and, twice a year, by a different five hours.
+
+``refresh_from_ledger`` rebuilds a period's entries from ``compute_events``: an administrator's repair.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import secrets
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import select
 
-from ..db.models import BUDGET_UNITS, AccessGrant, Budget, BudgetEntry, Server, ServerGroup, User
+from ..db.models import BUDGET_UNITS, AccessGrant, Budget, BudgetEntry, ServerGroup, User
 from .windows import zone
 
 log = logging.getLogger("citar.budgets")
 
 PERIODS = ("day", "week", "month", "total")
 
-#: What to reserve when nothing better is known: one hour of the server's own hourly cost. Deliberately
-#: conservative — reserving too little is how a cap gets blown, and reserving too much only delays
-#: work that the true-up releases within a minute or two.
-DEFAULT_RESERVE_HOURS = 1.0
-#: Floor for an API-priced server, whose hourly cost is zero but whose token cost is not.
-MIN_RESERVE = 0.25
+#: The least a request reserves, in credits (P3.4.6: "at least 1"), and the least a hard budget must have left to
+#: admit new work at all (``admission.check``).
+MIN_RESERVE = 1.0
 
 
 # ---------------------------------------------------------------------------- periods
@@ -123,15 +133,19 @@ class BudgetState:
         return min(1.0, self.committed / self.limit) if self.limit > 0 else 0.0
 
     def client(self) -> dict:
-        """The budget state as the client shows it."""
+        """The budget state as the client shows it. A soft budget past its amount says so (``warning``): the note on
+        the machine owner's Servers page."""
         if self.budget is None:
             return {"limited": False}
+        over = self.limit > 0 and self.committed >= self.limit
         return {"limited": True, "period": self.period, "period_key": self.key,
                 "limit": round(self.limit, 4), "spent": round(self.spent, 4),
                 "reserved": round(self.reserved, 4), "committed": round(self.committed, 4),
                 "remaining": round(self.remaining, 4), "fraction": round(self.fraction, 4),
                 "unit": self.unit, "behavior": self.budget.behavior,
                 "exhausted": self.exhausted,
+                "warning": (f"Past its soft budget {period_label(self.period, self.key)}: work goes on."
+                            if over and self.budget.behavior == "soft" else None),
                 "label": f"{self.committed:.2f} of {self.limit:.2f} {self.unit} "
                          f"{period_label(self.period, self.key)}"}
 
@@ -139,7 +153,7 @@ class BudgetState:
 def owner_tz(session, grant: AccessGrant) -> str:
     """A budget's period boundaries follow the *server owner's* clock, not the user's.
 
-    The cap protects the owner's wallet, so it is their month that matters. A user in Tokyo
+    The cap protects the owner's machine, so it is their month that matters. A user in Tokyo
     spending against a New York owner's budget rolls over at New York's midnight.
     """
     group = session.get(ServerGroup, grant.group_id)
@@ -150,7 +164,8 @@ def owner_tz(session, grant: AccessGrant) -> str:
 
 
 def state(session, grant: AccessGrant, *, when: Optional[datetime] = None) -> BudgetState:
-    """Where a grant's budget stands right now."""
+    """Where a grant's budget stands right now: the period's settled entries, plus what this process has reserved
+    for requests running under it (``Keeper``)."""
     budget = session.scalar(select(Budget).where(Budget.grant_id == grant.id))
     if budget is None:
         return BudgetState(budget=None, limit=0.0, spent=0.0, reserved=0.0)
@@ -160,131 +175,330 @@ def state(session, grant: AccessGrant, *, when: Optional[datetime] = None) -> Bu
     rows = list(session.scalars(select(BudgetEntry).where(
         BudgetEntry.budget_id == budget.id, BudgetEntry.period_key == key)))
     spent = sum(r.actual for r in rows if r.actual is not None)
-    # An entry that is still open counts at its estimate; that is the whole point of a reservation.
+    # an entry from before per-request settling (one reservation per activity) counts at its estimate while open
     reserved = sum(r.reserved for r in rows if r.actual is None and r.closed_at is None)
+    reserved += keeper().reserved(budget.id, key)
     return BudgetState(budget=budget, limit=float(budget.amount or 0.0), spent=spent,
                        reserved=reserved, unit=budget.unit or "credits",
                        period=budget.period, key=key)
 
 
-# ---------------------------------------------------------------------------- reservations
+# ---------------------------------------------------------------------------- the keeper: reservations in memory
 
-def estimate_cost(session, server: Server, *, hours: float = DEFAULT_RESERVE_HOURS) -> float:
-    """A conservative guess at what one activity on this server will cost.
+class BudgetExceeded(Exception):
+    """A hard budget refuses a request. ``retry_at`` (aware UTC) is when its period ends (None for a total budget,
+    or an API model with no price: waiting does not help)."""
 
-    Uses the registry's own hourly profile, so a machine with a known electricity tariff and
-    depreciation produces a real number rather than a guess.
-    """
-    try:
-        from .. import costing, servers as registry
-        config = server.config or {}
-        if not config.get("power"):
-            return MIN_RESERVE
-        profile = costing.hourly_profile(config, registry.load(), busy_fraction=1.0)
-        return max(MIN_RESERVE, float(profile.get("total") or 0.0) * hours)
-    except Exception:
-        # Costing depends on the registry file and a lot of optional configuration. A budget must
-        # never be the reason a game cannot start, so fall back rather than propagate.
-        log.debug("could not estimate cost for server %s", server.id, exc_info=True)
-        return MIN_RESERVE
+    def __init__(self, message: str, *, budget_id: str, key: str, retry_at: Optional[datetime] = None):
+        super().__init__(message)
+        self.budget_id = budget_id
+        self.key = key
+        self.retry_at = retry_at
 
 
-def reserve(session, grant: AccessGrant, activity_id: str, *, user_id: Optional[str] = None,
-            amount: float = MIN_RESERVE, when: Optional[datetime] = None) -> Optional[BudgetEntry]:
-    """Claim headroom before work starts. Returns None when the grant has no budget."""
-    budget = session.scalar(select(Budget).where(Budget.grant_id == grant.id))
-    if budget is None:
-        return None
-    existing = session.scalar(select(BudgetEntry).where(
-        BudgetEntry.budget_id == budget.id, BudgetEntry.activity_id == activity_id))
-    if existing is not None:
-        return existing
-    tz = owner_tz(session, grant)
-    entry = BudgetEntry(
-        budget_id=budget.id, activity_id=activity_id, user_id=user_id,
-        reserved=max(0.0, float(amount)),
-        # Fixed once, at open time, so a game running across a month boundary keeps counting against
-        # the period it started in instead of silently jumping budgets mid-flight.
-        period_key=period_key(budget.period, when, tz))
-    session.add(entry)
-    session.flush()
-    return entry
+@dataclass
+class Reservation:
+    """One request's hold on a budget: settled by the ledger's writer once its event is written, or released."""
+    budget_id: str
+    activity: str
+    consumer: Optional[str]
+    key: str
+    amount: float
+    id: str = field(default_factory=lambda: secrets.token_hex(6))
+    #: Set when the request took a soft budget past its amount (once a period): the words to tell the consumer.
+    warning: Optional[str] = None
+    done: bool = False
 
 
-def settle(session, activity_id: str, actual: float) -> int:
-    """Replace an estimate with the measured cost."""
-    rows = list(session.scalars(select(BudgetEntry).where(BudgetEntry.activity_id == activity_id)))
-    for row in rows:
-        row.actual = max(0.0, float(actual))
-        row.closed_at = datetime.now(timezone.utc)
-    return len(rows)
+@dataclass
+class Account:
+    """A budget as the keeper holds it: its terms, the current period's settled spend, and the reservations open."""
+    budget_id: str
+    grant_id: str
+    amount: float
+    behavior: str
+    period: str
+    tz: str
+    group: str
+    key: str
+    spent: float
+    open: dict = field(default_factory=dict)          # reservation id -> Reservation
+    warned: Optional[str] = None                      # the period a soft budget's warning went out in
+
+    def reserved(self, key: Optional[str] = None) -> float:
+        """What the open reservations of period ``key`` (the current one by default) hold."""
+        key = key or self.key
+        return sum(r.amount for r in self.open.values() if r.key == key)
 
 
-def release(session, activity_id: str) -> int:
-    """Drop a reservation for work that never ran."""
-    rows = list(session.scalars(select(BudgetEntry).where(
-        BudgetEntry.activity_id == activity_id, BudgetEntry.actual.is_(None))))
-    for row in rows:
-        session.delete(row)
-    return len(rows)
+class Keeper:
+    """Every budget this process has made a binding under, in memory (P3.4.6): reserved on the request path without
+    the database, settled by the ledger's writer. ``clock`` gives the aware UTC now (tests move it)."""
+
+    def __init__(self, clock: Optional[Callable[[], datetime]] = None):
+        self.lock = threading.Lock()
+        self.accounts: dict[str, Account] = {}
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    # ---- loading (database reads: off every lock but the keeper's own, never on the request path)
+    def handle(self, session, grant: Optional[AccessGrant]) -> Optional[str]:
+        """The id of ``grant``'s budget, its account loaded (or kept) here; None when it has none. Called where a
+        binding is made (a lease, a ticket), which may read the database."""
+        if grant is None:
+            return None
+        budget = session.scalar(select(Budget).where(Budget.grant_id == grant.id))
+        if budget is None:
+            return None
+        with self.lock:
+            known = budget.id in self.accounts
+        if not known:
+            self._load(session, budget, grant)
+        return budget.id
+
+    def reload(self, session, budget_id: str) -> None:
+        """Read a budget again (its owner changed it, ``refresh_from_ledger`` rebuilt it); forget a deleted one."""
+        budget = session.get(Budget, budget_id)
+        grant = session.get(AccessGrant, budget.grant_id) if budget is not None else None
+        if budget is None or grant is None:
+            with self.lock:
+                self.accounts.pop(budget_id, None)
+            return
+        self._load(session, budget, grant)
+
+    def reload_grant(self, session, grant_id: str) -> None:
+        """A grant's budget changed or went: read whatever it has now."""
+        with self.lock:
+            ids = [a.budget_id for a in self.accounts.values() if a.grant_id == grant_id]
+        for bid in ids:
+            self.reload(session, bid)
+        budget = session.scalar(select(Budget).where(Budget.grant_id == grant_id))
+        if budget is not None and budget.id not in ids:
+            with self.lock:
+                known = budget.id in self.accounts
+            if known:
+                self.reload(session, budget.id)
+
+    def _load(self, session, budget: Budget, grant: AccessGrant) -> None:
+        tz = owner_tz(session, grant)
+        key = period_key(budget.period, self.clock(), tz)
+        spent = sum(r.actual or 0.0 for r in session.scalars(select(BudgetEntry).where(
+            BudgetEntry.budget_id == budget.id, BudgetEntry.period_key == key)))
+        group = session.get(ServerGroup, grant.group_id)
+        with self.lock:
+            old = self.accounts.get(budget.id)
+            self.accounts[budget.id] = Account(
+                budget_id=budget.id, grant_id=grant.id, amount=float(budget.amount or 0.0),
+                behavior=budget.behavior or "hard", period=budget.period or "month", tz=tz,
+                group=group.name if group is not None else "that group", key=key, spent=spent,
+                open=old.open if old is not None else {}, warned=old.warned if old is not None else None)
+
+    def forget(self, budget_id: str) -> None:
+        with self.lock:
+            self.accounts.pop(budget_id, None)
+
+    # ---- the request path (in memory only)
+    def _turn(self, a: Account) -> None:
+        """The account's current period: a turned period starts with nothing spent. Keeper's lock held."""
+        key = period_key(a.period, self.clock(), a.tz)
+        if key != a.key:
+            a.key, a.spent = key, 0.0
+
+    def current_key(self, budget_id: str) -> Optional[str]:
+        """The budget's current period (a game paused for it resumes when this changes), or None for no such one."""
+        with self.lock:
+            a = self.accounts.get(budget_id)
+            if a is None:
+                return None
+            self._turn(a)
+            return a.key
+
+    def reserve(self, budget_id: Optional[str], activity: Optional[str], consumer: Optional[str], estimate: float,
+                *, unpriced: bool = False) -> Optional[Reservation]:
+        """Hold ``estimate`` credits (at least ``MIN_RESERVE``) of a budget for one request, or raise
+        ``BudgetExceeded`` when a hard budget's spent plus reserved would pass its amount (or ``unpriced``: an API
+        model with no price, which a hard budget cannot keep). None when there is no such budget."""
+        if not budget_id:
+            return None
+        with self.lock:
+            a = self.accounts.get(budget_id)
+            if a is None:
+                return None
+            self._turn(a)
+            amount = max(MIN_RESERVE, float(estimate or 0.0))
+            committed = a.spent + a.reserved()
+            hard = a.behavior == "hard" and a.amount > 0
+            if hard and unpriced:
+                raise BudgetExceeded(f"The budget for “{a.group}” cannot be kept: this model has no price, so its "
+                                     "budget cannot be kept.", budget_id=a.budget_id, key=a.key)
+            if hard and committed + amount > a.amount:
+                end = period_bounds(a.period, a.key, a.tz)[1] if a.period != "total" else None
+                raise BudgetExceeded(
+                    f"The budget for “{a.group}” is used up ({committed:.2f} of {a.amount:.2f} credits "
+                    f"{period_label(a.period, a.key)}, and this request would take about {amount:.2f} more). "
+                    + ("It resets when the period ends." if end is not None else "Its owner would have to raise it."),
+                    budget_id=a.budget_id, key=a.key, retry_at=end)
+            r = Reservation(budget_id=a.budget_id, activity=activity or "", consumer=consumer, key=a.key,
+                            amount=amount)
+            if a.behavior == "soft" and a.amount > 0 and committed + amount >= a.amount and a.warned != a.key:
+                a.warned = a.key
+                r.warning = (f"Past the soft budget for “{a.group}” ({committed + amount:.2f} of {a.amount:.2f} "
+                             f"credits {period_label(a.period, a.key)}); the work goes on.")
+            a.open[r.id] = r
+            return r
+
+    def settle(self, r: Optional[Reservation], credits: float) -> None:
+        """The request's event was written with ``credits``: they count as spent in its period, the hold goes."""
+        if r is None or r.done:
+            return
+        with self.lock:
+            r.done = True
+            a = self.accounts.get(r.budget_id)
+            if a is None:
+                return
+            a.open.pop(r.id, None)
+            self._turn(a)
+            if r.key == a.key:
+                a.spent += max(0.0, float(credits or 0.0))
+
+    def release(self, r: Optional[Reservation]) -> None:
+        """The request never ran (or its event could not be written): the hold goes, nothing is spent."""
+        if r is None or r.done:
+            return
+        with self.lock:
+            r.done = True
+            a = self.accounts.get(r.budget_id)
+            if a is not None:
+                a.open.pop(r.id, None)
+
+    def reserved(self, budget_id: str, key: Optional[str] = None) -> float:
+        """What the open reservations of a budget hold (in period ``key``, the current one by default)."""
+        with self.lock:
+            a = self.accounts.get(budget_id)
+            return a.reserved(key) if a is not None else 0.0
+
+    def account(self, budget_id: str) -> Optional[dict]:
+        """A budget's live state, for tests and status: amount, spent, reserved, period."""
+        with self.lock:
+            a = self.accounts.get(budget_id)
+            if a is None:
+                return None
+            self._turn(a)
+            return {"amount": a.amount, "spent": a.spent, "reserved": a.reserved(), "key": a.key,
+                    "behavior": a.behavior, "period": a.period}
 
 
-def refresh_from_ledger(session, *, since: Optional[float] = None) -> int:
-    """True up open reservations against what the usage ledger actually recorded.
+_KEEPER: Optional[Keeper] = None
+_KEEPER_LOCK = threading.Lock()
 
-    Called periodically. This is what turns the cap from advisory into real: a long game's estimate
-    is replaced by its running cost every time this runs, so the admission controller sees the
-    truth rather than a number chosen at launch.
-    """
-    open_rows = list(session.scalars(select(BudgetEntry).where(BudgetEntry.closed_at.is_(None))))
-    if not open_rows:
-        return 0
-    try:
-        from .. import costing
-        priced = costing.compute(since=since)
-    except Exception:
-        log.debug("could not price the usage ledger", exc_info=True)
-        return 0
 
-    acts = priced.get("acts") or {}
-    updated = 0
-    for row in open_rows:
-        act = acts.get(row.activity_id)
-        if not act:
+def keeper() -> Keeper:
+    """The process's budget keeper, made on first use."""
+    global _KEEPER
+    with _KEEPER_LOCK:
+        if _KEEPER is None:
+            _KEEPER = Keeper()
+        return _KEEPER
+
+
+def reset_keeper(clock: Optional[Callable[[], datetime]] = None) -> Keeper:
+    """A fresh keeper (tests), on ``clock`` when given."""
+    global _KEEPER
+    with _KEEPER_LOCK:
+        _KEEPER = Keeper(clock)
+        return _KEEPER
+
+
+# ---------------------------------------------------------------------------- settling (the ledger's writer)
+
+def settle_entries(session, settled: list) -> None:
+    """Add each settled request's credits to its entry of (budget, activity, period), made on first use; in the
+    ledger writer's transaction, with the events. ``settled`` is ``[(Reservation, credits)]``."""
+    totals: dict = {}
+    for r, credits in settled:
+        if r is None:
             continue
-        total = 0.0
-        for cost in (act.get("servers") or {}).values():
-            try:
-                total += costing.total(cost)
-            except Exception:
+        key = (r.budget_id, r.activity, r.key)
+        cur = totals.setdefault(key, [0.0, r.consumer])
+        cur[0] += max(0.0, float(credits or 0.0))
+    for (budget_id, activity, key), (credits, consumer) in totals.items():
+        if session.get(Budget, budget_id) is None:
+            continue                     # deleted meanwhile: nothing to count against
+        entry = session.scalar(select(BudgetEntry).where(
+            BudgetEntry.budget_id == budget_id, BudgetEntry.activity_id == activity[:64],
+            BudgetEntry.period_key == key))
+        if entry is None:
+            entry = BudgetEntry(budget_id=budget_id, activity_id=activity[:64], user_id=consumer, reserved=0.0,
+                                actual=0.0, period_key=key)
+            session.add(entry)
+        entry.actual = float(entry.actual or 0.0) + credits
+
+
+def refresh_from_ledger(session, budget: Optional[Budget] = None, *, key: Optional[str] = None,
+                        when: Optional[datetime] = None) -> int:
+    """Rebuild a period's entries of ``budget`` (every budget when None; the current period, or ``key``) from
+    ``compute_events``: the administrator's repair, when an entry was lost (the server stopped between an event and its
+    settling) or the credits were repriced. An event counts against a grant's budget when the grant admits its
+    consumer for its kind of work on its machine: its consumer the grant's account (for a grant to everyone, any member
+    without a grant of their own on the group), its machine in the grant's group and not theirs, its consumer no
+    administrator, not self-use, and its purpose (``ledger.purpose_of``) among the grant's. Returns the entries
+    written; the keeper reads the budgets again."""
+    from sqlalchemy import func
+    from .. import ledger
+    from ..db.models import ComputeEvent, Server
+    budgets = [budget] if budget is not None else list(session.scalars(select(Budget)))
+    written = 0
+    for b in budgets:
+        grant = session.get(AccessGrant, b.grant_id)
+        if grant is None:
+            continue
+        tz = owner_tz(session, grant)
+        k = key or period_key(b.period, when, tz)
+        start, end = period_bounds(b.period, k, tz)
+        machines = {sid: owner for sid, owner in session.execute(
+            select(Server.id, Server.owner_id).where(Server.group_id == grant.group_id))}
+        if not machines:
+            continue
+        admins = {uid for (uid,) in session.execute(select(User.id).where(User.role == "admin"))}
+        own_grants = {uid for (uid,) in session.execute(select(AccessGrant.subject_user_id).where(
+            AccessGrant.group_id == grant.group_id, AccessGrant.subject_type == "user",
+            AccessGrant.enabled.is_(True)))}
+        q = select(ComputeEvent.activity, ComputeEvent.consumer_id, ComputeEvent.machine_id, ComputeEvent.task_class,
+                   ComputeEvent.activity_kind, func.sum(ComputeEvent.credits)).where(
+            ComputeEvent.at >= start, ComputeEvent.at < end, ComputeEvent.self_use.is_(False),
+            ComputeEvent.machine_id.in_(list(machines)), ComputeEvent.consumer_id.isnot(None))
+        if grant.subject_type == "user":
+            q = q.where(ComputeEvent.consumer_id == grant.subject_user_id)
+        q = q.group_by(ComputeEvent.activity, ComputeEvent.consumer_id, ComputeEvent.machine_id,
+                       ComputeEvent.task_class, ComputeEvent.activity_kind)
+        purposes = set(grant.purposes or [])
+        per: dict = {}
+        for activity, consumer, machine, task_class, kind, credits in session.execute(q):
+            if consumer in admins or consumer == machines.get(machine):
                 continue
-        if total > 0:
-            # Keep it as a live reservation rather than settling: the activity may still be running,
-            # and `reserved` is what the admission check reads for in-flight work.
-            row.reserved = max(row.reserved if row.actual is None else 0.0, total)
-            updated += 1
-    return updated
-
-
-def over_budget_activities(session) -> list:
-    """Activity ids whose grant has a hard cap that is now exhausted — these get paused."""
-    out = []
-    for grant in session.scalars(select(AccessGrant).where(AccessGrant.enabled.is_(True))):
-        st = state(session, grant)
-        if st.budget is None or st.budget.behavior != "hard" or not st.exhausted:
-            continue
-        rows = session.scalars(select(BudgetEntry).where(
-            BudgetEntry.budget_id == st.budget.id, BudgetEntry.period_key == st.key,
-            BudgetEntry.closed_at.is_(None)))
-        out += [r.activity_id for r in rows]
-    return out
+            if grant.subject_type != "user" and consumer in own_grants:
+                continue
+            if purposes and ledger.purpose_of(task_class, kind) not in purposes:
+                continue
+            cur = per.setdefault(activity, [0.0, consumer])
+            cur[0] += float(credits or 0.0)
+        for entry in session.scalars(select(BudgetEntry).where(BudgetEntry.budget_id == b.id,
+                                                               BudgetEntry.period_key == k)):
+            session.delete(entry)
+        session.flush()
+        for activity, (credits, consumer) in per.items():
+            session.add(BudgetEntry(budget_id=b.id, activity_id=activity[:64], user_id=consumer, reserved=0.0,
+                                    actual=credits, period_key=k))
+            written += 1
+        session.flush()
+    return written
 
 
 # ---------------------------------------------------------------------------- editing
 
 def set_budget(session, grant: AccessGrant, *, period: str, amount: float, behavior: str = "hard",
                unit: str = "credits") -> Optional[Budget]:
-    """Create, update or (with amount <= 0) remove a grant's budget, in credits (the only unit)."""
+    """Create, update or (with amount <= 0) remove a grant's budget, in credits (the only unit). The keeper reads it
+    again once the change is committed (``Keeper.reload_grant``, the routes')."""
     if period not in PERIODS:
         raise ValueError(f"Budget period must be one of {', '.join(PERIODS)}.")
     if behavior not in ("hard", "soft"):
