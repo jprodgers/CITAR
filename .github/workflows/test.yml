@@ -230,6 +230,10 @@ jobs:
             node --check "$file" || failed=1
           done
           exit $failed
+      - name: Test the client's pure modules
+        # citar/web/tests: the parts of the client with no DOM or network (the Servers page's rules, machines.js).
+        # Node 22 takes the test files as a pattern, not a folder.
+        run: node --test "citar/web/tests/*.test.mjs"
 
   package:
     name: wheel installs and runs
