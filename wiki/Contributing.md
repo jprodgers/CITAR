@@ -55,7 +55,14 @@ it as CommonJS and misses errors that break the whole module graph in a browser:
 cp citar/web/js/thing.js /tmp/thing.mjs && node --check /tmp/thing.mjs
 ```
 
-CI runs all of this on Linux, Windows and macOS.
+The client's pure parts (no DOM, no network: `citar/web/js/machines.js`, the Servers page's rules) have Node tests
+in `citar/web/tests/`. Node 22 or later takes the files as a pattern, not a folder:
+
+```bash
+node --test "citar/web/tests/*.test.mjs"     # or `npm test` in citar/web
+```
+
+CI runs all of this on Linux, Windows and macOS (the front-end checks on Linux).
 
 ## Conventions
 
