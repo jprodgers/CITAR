@@ -591,6 +591,7 @@ class MadeWay(LeaseCase):
         self.assertIsNotNone(answer)
         self.assertEqual(len(labels("sv_gpu")), 1)
         self.assertIsNone(g.get_agent(1))
+        self.assertIsNone(g.lease_for(1), "nor is the answer's lease anybody else's")
         g._answered(1)                          # the answer ends: its agent and lease go
         self.assertTrue(answer.cancelled)
         self.assertNotIn(1, g.agents)
@@ -599,6 +600,21 @@ class MadeWay(LeaseCase):
         agent = g.get_agent(1)
         self.assertIs(agent.binding, g.leases[1])
         self.assertFalse(agent.binding.released)
+
+    def test_a_make_way_pause_landing_while_a_lease_is_made_leaves_none(self):
+        """lease_for reads the grant off every lock: a make-way pause that lands then (it sets the pause before it
+        releases the leases) leaves no lease made after it."""
+        g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}])
+        g.release_leases([1], for_good=False)           # the seat's lease is made again on first use
+        real = pool_seats.consumer_cap
+
+        def cap_while_suspended(*a, **kw):
+            g.suspend({"kind": "queue", "message": "making way"})
+            return real(*a, **kw)
+        with mock.patch.object(pool_seats, "consumer_cap", cap_while_suspended):
+            self.assertIsNone(g.lease_for(1))
+        self.assertEqual(labels("sv_gpu"), [])
+        self.assertNotIn(1, g.leases)
 
     def test_an_agent_made_across_a_make_way_pause_is_not_kept_and_the_seat_plays_after_the_resume(self):
         """The benchmark scheduler (or a make-way watcher) suspends the game on its own thread while the driver makes
@@ -720,7 +736,7 @@ class LookedAtAfterARestart(LeaseCase):
 
 class GrantPurposes(LeaseCase):
     """A seat's lease is capped by the grant for the work its game was admitted for (P3.3.7): a benchmark game's by
-    the grant for benchmarks."""
+    the grant for benchmarks, when the member has another grant on the machine for games."""
 
     def test_a_benchmark_games_lease_is_capped_by_the_grant_for_benchmarks(self):
         from citar.auth import accounts
@@ -737,16 +753,21 @@ class GrantPurposes(LeaseCase):
                          group_id=group.id, max_concurrent=2,
                          config={"connection": {"provider": "dryrun"}, "models": [{"key": "dry-run"}]})
             s.add(row)
-            s.add(AccessGrant(group_id=group.id, subject_type="everyone", purposes=["benchmark"], concurrency=1))
+            s.add(AccessGrant(group_id=group.id, subject_type="everyone", purposes=["game"], concurrency=3))
+            s.add(AccessGrant(group_id=group.id, subject_type="user", subject_user_id=member.id,
+                              purposes=["benchmark"], concurrency=1))
             s.flush()
             sid, member_id = row.id, member.id
         self.assertEqual(pool_seats.consumer_cap(member_id, sid, "benchmark"), 1)
+        self.assertEqual(pool_seats.consumer_cap(member_id, sid), 3, "her games are held to the other grant")
         seats = [{"type": "llm", "llm": {"server_id": sid, "model": "dry-run"}}, {"type": "bot"}]
         g = self.manager.create(CONFIG, seats, name="bench cap", start=False, owner_id=member_id)
         g.benchmark = {"run_id": "run-cap", "job_id": "job-cap", "llm_player": 0}
         lease = g.lease_for(0)
         self.assertEqual((lease.kind, lease.consumer, lease.cap), ("benchmark", member_id, 1),
-                         "her benchmark game is held to her grant's concurrency")
+                         "her benchmark game is held to her grant for benchmarks")
+        lobby = self.manager.create(CONFIG, seats, name="game cap", start=False, owner_id=member_id)
+        self.assertEqual(lobby.lease_for(0).cap, 3, "her lobby game to the grant for games")
         # a lease made before the game had its owner takes her grant's cap for benchmarks when she is given it
         later = self.manager.create(CONFIG, seats, name="bench cap later", start=False)
         later.benchmark = {"run_id": "run-cap-2", "job_id": "job-cap-2", "llm_player": 0}
