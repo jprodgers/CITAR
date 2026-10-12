@@ -74,7 +74,7 @@ export function helperCard({ args = null, compact = false } = {}) {
     const h = mine || HELPERS[0];
     const steps = el("ol", { class: "helper-steps" },
       el("li", {}, "Start LM Studio (or Ollama) on that machine and load a model."),
-      el("li", {}, "Issue a worker token: Servers → your machine → Worker."),
+      el("li", {}, "Issue a worker token: Servers → your machine → Helper."),
       el("li", {}, "Run the helper. Double-clicked, it asks for this server's address and the token once and remembers them; ",
         "or give them on the command line:"));
     body.append(steps);

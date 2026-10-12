@@ -270,7 +270,8 @@ def list_groups(request: Request, p: Principal = Depends(principal), s: Session 
         if access.MANAGE in perms:
             entry["grants"] = [pool.grant_to_client(s, g, me)
                                for g in s.query(AccessGrant).filter(AccessGrant.group_id == group.id)]
-            entry["share_url"] = (f"/#/servers/groups/{group.id}?k={group.slug}"
+            # the Servers page's address for the group (#/pool/groups/<id>), with the link's key
+            entry["share_url"] = (f"/#/pool/groups/{group.id}?k={group.slug}"
                                   if group.visibility == "link" else None)
         else:
             # A guest sees the terms that apply to *them*, not everybody else's grants.

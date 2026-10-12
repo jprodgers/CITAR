@@ -285,6 +285,8 @@ button.active { border-color: var(--accent); background: #22324f; }
 
 /* ---------- servers ---------- */
 .server-card .issues { margin: 6px 0 0; padding-left: 18px; }
+/* the machine or group an address of the Servers page names (#/pool/<id>, #/pool/groups/<gid>) */
+.card.focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
 .server-card .model-chip.live { border-color: #2f7a45; background: #173a22; }
 .small { font-size: 12px; }
 .tabbar { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }

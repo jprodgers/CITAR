@@ -56,7 +56,7 @@ function renderStatus(card, status, settings, ctx) {
     el("h2", { style: { margin: 0 } }, "Scheduler"),
     el("span", { class: `pill ${status.active_jobs ? "live" : ""}` }, status.active_jobs ? `● ${status.active_jobs} running` : "idle"),
     status.queued_jobs ? el("span", { class: "muted" }, `${status.queued_jobs} queued`) : null,
-    ...(status.restricted || []).map((r) => el("a", { class: "pill quiet", href: "#/servers" }, `🌙 ${r.name} restricted until ${r.until}`)),
+    ...(status.restricted || []).map((r) => el("a", { class: "pill quiet", href: "#/pool" }, `🌙 ${r.name} restricted until ${r.until}`)),
     el("span", { class: "muted" }, "Restricted hours are set per server on the Servers page."),
     el("span", { class: "grow" }),
     el("button", { onclick: () => openSettings(settings, ctx) }, "⚙ Scoring"),
