@@ -1,9 +1,10 @@
-// The account page: the account, the profile (who sees what of it), password, linked sign-ins, devices,
-// invitations.
+// The account page: the account, the profile (who sees what of it), the compute it gave and used, password, linked
+// sign-ins, devices, invitations.
 import { api } from "./api.js";
 import { el, clear, toast, confirmBox } from "./util.js";
 import { pageHeader } from "./nav.js";
 import * as auth from "./auth.js";
+import * as compute from "./compute.js";
 
 function card(title, subtitle, ...content) {
   return el("section", { class: "card" },
@@ -116,6 +117,53 @@ function profileCard(me, root) {
       el("a", { href: `${self}?as=visitor` }, "View as a visitor")));
 }
 
+// The Compute card (design/phase3-features.md P3.4.4): what the account's machines gave other members and what its
+// work used of theirs and the site's, in credits, with the ratio, by machine and by kind of work, over a range.
+function computeCard() {
+  const range = el("select", { "aria-label": "Range" }, ...compute.RANGES.map(([v, text]) =>
+    el("option", { value: v, selected: v === "30d" }, text)));
+  const body = el("div", { class: "col gap" }, el("span", { class: "muted" }, "Loading…"));
+  const head = (...cells) => el("thead", {}, el("tr", {}, ...cells.map((c) => el("th", {}, c))));
+  const show = async () => {
+    try {
+      const d = await api.ledgerMe(range.value);
+      clear(body);
+      body.appendChild(el("div", { class: "kv compute-ratio" }, el("span", { class: "k" }, "Ratio (given ÷ used)"),
+        el("span", { class: "v" }, el("b", {}, compute.ratioText(d.ratio)))));
+      body.appendChild(el("div", { class: "table-wrap" }, el("table", { class: "list compute" },
+        head("", "Credits", "GPU time", "CPU time", "Tokens in / out"),
+        el("tbody", {},
+          el("tr", {}, el("td", {}, "Given"), ...compute.sideCells(d.given).map((c) => el("td", {}, c))),
+          el("tr", {}, el("td", {}, "Used"), ...compute.sideCells(d.used).map((c) => el("td", {}, c)))))));
+      if (d.by_machine && d.by_machine.length) {
+        body.appendChild(el("h3", {}, "By machine"));
+        body.appendChild(el("div", { class: "table-wrap" }, el("table", { class: "list compute" },
+          head("Machine", "Given", "Used"),
+          el("tbody", {}, ...d.by_machine.map((m) => el("tr", {}, el("td", {}, m.name),
+            el("td", {}, compute.credits(m.given)), el("td", {}, compute.credits(m.used))))))));
+      }
+      if (d.by_activity && d.by_activity.length) {
+        body.appendChild(el("h3", {}, "By kind of work"));
+        body.appendChild(el("div", { class: "table-wrap" }, el("table", { class: "list compute" },
+          head("Work", "Given", "Used"),
+          el("tbody", {}, ...d.by_activity.map((k) => el("tr", {}, el("td", {}, compute.kindLabel(k.kind)),
+            el("td", {}, compute.credits(k.given)), el("td", {}, compute.credits(k.used))))))));
+      }
+      const own = d.own_use || {};
+      body.appendChild(el("span", { class: "muted small" }, own.events
+        ? `Your own work on your own machines (counted on neither side): ${compute.credits(own.credits)} credits.`
+        : "Your own work on your own machines counts on neither side."));
+    } catch (e) { clear(body); body.appendChild(el("span", { class: "bad" }, e.message)); }
+  };
+  range.onchange = show;
+  show();
+  return card("Compute",
+    "What your machines gave other members, and what your games, reports, probes and runs used of other members' "
+    + "machines and the site's, in credits: a GPU's generation second is about one credit, a CPU core's second a "
+    + "twentieth of one, an online API's work its token cost.",
+    el("label", { class: "field" }, el("span", { class: "field-label" }, "Range"), range), body);
+}
+
 export async function renderAccount(root) {
   const me = auth.user();
   if (!me) { auth.renderSignInWall(root); return {}; }
@@ -164,6 +212,9 @@ export async function renderAccount(root) {
 
   // ------------------------------------------------------------------ profile
   page.appendChild(profileCard(me, root));
+
+  // ------------------------------------------------------------------ compute
+  page.appendChild(computeCard());
 
   // ------------------------------------------------------------------ password
   const current = el("input", { type: "password", autocomplete: "current-password" });

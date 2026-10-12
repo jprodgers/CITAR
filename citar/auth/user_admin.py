@@ -179,8 +179,18 @@ def search(session, *, text: str = "", role: Optional[str] = None, status: Optio
         stmt = stmt.where(User.status == status)
     offset = min(max(0, int(offset or 0)), OFFSET_MAX)
     rows = list(session.scalars(stmt.order_by(User.created_at.desc(), User.id).offset(offset).limit(USERS_PAGE + 1)))
-    return {"users": [to_client(u) for u in rows[:USERS_PAGE]], "offset": offset,
-            "next": offset + USERS_PAGE if len(rows) > USERS_PAGE else None}
+    page = rows[:USERS_PAGE]
+    # each account's last 30 days of the compute ledger (P3.4.4): given, used and the ratio, one read for the page
+    from .. import ledger
+    since = ledger.range_start("30d")
+    totals = ledger.totals(session, [u.id for u in page], since)
+    users = []
+    for u in page:
+        t = totals[u.id]
+        users.append({**to_client(u), "compute_30d": {
+            "given": round(t["given"]["credits"], 4), "used": round(t["used"]["credits"], 4),
+            "ratio": ledger.ratio(t["given"]["credits"], t["used"]["credits"])}})
+    return {"users": users, "offset": offset, "next": offset + USERS_PAGE if len(rows) > USERS_PAGE else None}
 
 
 def audit_page(session, *, actor: Optional[str] = None, action: Optional[str] = None,

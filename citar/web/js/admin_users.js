@@ -8,6 +8,7 @@ import { api } from "./api.js";
 import { el, clear, toast, modal } from "./util.js";
 import { pageHeader } from "./nav.js";
 import { avatarOf } from "./people.js";
+import * as compute from "./compute.js";
 
 const ROLES = ["user", "moderator", "admin"];
 const STATUSES = ["active", "probation", "suspended"];
@@ -36,7 +37,7 @@ export async function renderAdminUsers(root) {
     el("h2", {}, "Users"),
     el("div", { class: "row gap wrap" }, q, role, status),
     el("div", { class: "table-wrap" }, el("table", { class: "list admin-users" },
-      el("thead", {}, el("tr", {}, ...["Account", "Email", "Role", "Status", "Trust", "Joined", "Last seen"].map((h) => el("th", {}, h)))),
+      el("thead", {}, el("tr", {}, ...["Account", "Email", "Role", "Status", "Trust", "Compute (30 days)", "Joined", "Last seen"].map((h) => el("th", {}, h)))),
       body)),
     el("div", { class: "row center" }, more)));
 
@@ -53,6 +54,8 @@ export async function renderAdminUsers(root) {
         el("td", {}, u.role),
         el("td", {}, el("span", { class: `pill status-${u.status}` }, u.status), u.listed ? null : el("span", { class: "muted small" }, " unlisted")),
         el("td", {}, u.trust_tier),
+        el("td", { class: "compute-cell", title: "Credits its machines gave others · credits its work used · the ratio" },
+          compute.adminCell(u.compute_30d)),
         el("td", {}, when(u.created_at)),
         el("td", {}, when(u.last_seen_at))));
     }
@@ -60,7 +63,7 @@ export async function renderAdminUsers(root) {
   function show(pageData, reset) {
     if (reset) clear(body);
     rows(pageData.users);
-    if (reset && !pageData.users.length) body.appendChild(el("tr", {}, el("td", { colSpan: 7, class: "muted" }, "No account matches.")));
+    if (reset && !pageData.users.length) body.appendChild(el("tr", {}, el("td", { colSpan: 8, class: "muted" }, "No account matches.")));
     offset = pageData.next || 0;
     more.style.display = pageData.next ? "" : "none";
   }
