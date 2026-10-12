@@ -223,7 +223,8 @@ class SessionTests(unittest.TestCase):
 
     def test_a_busy_machine_is_waited_for_not_treated_as_a_disconnect(self):
         """Two games sharing a machine take turns on its slot. 'Busy' must never pause a game or skip a turn,
-        however short the reconnect window."""
+        however short the reconnect window: the prompt scheduler absorbs it (it holds the machine's capacity at what
+        is in flight and queues the request again; design/phase3-features.md P3.3.3), so the seat names a machine."""
         free_at = time.time() + 3
 
         class Busy(ConnectionError):
@@ -238,7 +239,8 @@ class SessionTests(unittest.TestCase):
         ScriptedConversation.scripts = {}
         with mock.patch("citar.agents.llm_agent.make_conversation", SharedConversation):
             s = self.manager.create({"map_size": "duel", "seed": 4, "on_disconnect": "pause", "reconnect_seconds": 1},
-                                    [{"type": "llm", "llm": {"provider": "mock"}}, {"type": "bot"}])
+                                    [{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}},
+                                     {"type": "bot"}])
             self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the turn should be played once the slot frees")
             self.assertFalse(s.paused)
             self.manager.delete(s.id)

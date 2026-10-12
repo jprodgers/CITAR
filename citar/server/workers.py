@@ -38,22 +38,45 @@ STALE_AFTER = 70.0
 
 
 class WorkerError(RuntimeError):
-    """The worker could not do it. `refusal` distinguishes "busy" from "broken"."""
+    """The worker could not do it. `refusal` distinguishes "busy" from "broken". ``unfinished``: the request was sent
+    and then given up (cancelled, or the wait ran out) without the helper's answer, which may still come: the
+    scheduler keeps its slot draining until it does (design/phase3-features.md P3.3.3)."""
 
-    def __init__(self, message: str, *, refusal: str = "", retryable: bool = False):
+    def __init__(self, message: str, *, refusal: str = "", retryable: bool = False, unfinished: bool = False):
         super().__init__(message)
         self.refusal = refusal
         self.retryable = retryable
+        self.unfinished = unfinished
 
 
 @dataclass
 class Pending:
-    """A request in flight, waiting for its answer on another thread."""
+    """A request in flight, waiting for its answer on another thread. ``sent`` and ``done_at`` (monotonic) are when
+    its frame went out and when the helper's answer came: the generation time the server observed (P3.3.4)."""
     id: str
     event: threading.Event = field(default_factory=threading.Event)
     result: Optional[dict] = None
     error: Optional[WorkerError] = None
     started: float = field(default_factory=time.time)
+    sent: float = field(default_factory=time.monotonic)
+    done_at: Optional[float] = None
+
+
+def _scheduler():
+    """The process's prompt scheduler, if one was made (the hub's pushes need none otherwise)."""
+    from ..pool import scheduler
+    return scheduler.current()
+
+
+def _helper_changed(server_id: str) -> None:
+    """Tell the scheduler a helper connected, disconnected or reported its models (P3.3.2: at once, not at its next
+    read). Never raises."""
+    try:
+        sched = _scheduler()
+        if sched is not None:
+            sched.helper_changed(server_id)
+    except Exception:
+        log.exception("could not tell the scheduler about %s's helper", server_id)
 
 
 class WorkerConnection:
@@ -144,13 +167,36 @@ class WorkerConnection:
         with self._lock:
             pending = self.pending.pop(request_id, None)
         if pending is None:
-            # A late answer to something already timed out or cancelled. Dropping it is correct —
-            # the caller has moved on — but it is worth knowing it happened.
-            log.debug("worker %s answered unknown request %s", self.server_id, request_id)
+            # A late answer to something already timed out or cancelled: the caller has moved on, but the helper has
+            # only now finished it, so the slot the scheduler kept draining for it is free again (P3.3.3).
+            log.debug("worker %s answered request %s after it was given up", self.server_id, request_id)
+            try:
+                sched = _scheduler()
+                if sched is not None and request_id:
+                    sched.late_frame(self.server_id, request_id)
+            except Exception:
+                log.exception("could not hand a late frame to the scheduler")
             return
+        pending.done_at = time.monotonic()
         pending.result = result
         pending.error = error
         pending.event.set()
+
+    def cancel(self, request_id: str) -> bool:
+        """Give up a request in flight (non-blocking): its caller's wait ends with an ``unfinished`` error, and the
+        helper is sent ``CANCEL``. Returns whether it was still in flight."""
+        with self._lock:
+            pending = self.pending.pop(request_id, None)
+        if pending is None:
+            return False
+        pending.error = WorkerError("The request was cancelled.", refusal="cancelled", retryable=False,
+                                    unfinished=True)
+        pending.event.set()
+        try:
+            self.send_threadsafe(P.frame(P.CANCEL, id=request_id))
+        except Exception:
+            pass
+        return True
 
     def fail_all(self, message: str, *, retryable: bool = True):
         """Called when the connection drops: nothing in flight can ever be answered, and nothing more is taken
@@ -192,6 +238,7 @@ class WorkerHub:
         if previous is not None:
             previous.closed = True
             previous.fail_all("Replaced by a newer connection from the same worker.")
+        _helper_changed(connection.server_id)
         return previous
 
     async def admit(self, connection: WorkerConnection) -> Optional[str]:
@@ -225,6 +272,11 @@ class WorkerHub:
                 del self._workers[connection.server_id]
         connection.closed = True
         connection.fail_all("The worker disconnected.")
+        _helper_changed(connection.server_id)
+
+    def models_changed(self, connection: WorkerConnection):
+        """A helper reported its models again (a catalog frame): the scheduler's loaded-model rule reads them."""
+        _helper_changed(connection.server_id)
 
     def get(self, server_id: str) -> Optional[WorkerConnection]:
         """The connection for a server id, if it is online."""
@@ -255,6 +307,7 @@ class WorkerHub:
                 return False
             del self._workers[server_id]
         connection.fail_all(f"The machine's helper was disconnected: {reason}", retryable=False)
+        _helper_changed(server_id)
         log.info("dropped the worker for %s: %s", server_id, reason)
         if close and connection.loop is not None and connection.ws is not None:
             async def close():
@@ -290,7 +343,10 @@ class WorkerHub:
     def submit(self, server_id: str, request: P.Request, *, timeout: Optional[float] = None) -> dict:
         """Send a completion to a worker and wait for the answer. Blocking; call from a game thread.
 
-        Never call this from the event loop — it blocks the calling thread by design.
+        Never call this from the event loop — it blocks the calling thread by design. The answer carries
+        ``observed_s``: the seconds from sending the request frame to receiving its answer, the bound on the generation
+        time the scheduler credits (P3.3.4). The busy check is a safety net only: the scheduler (``citar.pool.
+        scheduler``) counts the helper's slots, draining ones included, and sends nothing a helper has no slot for.
         """
         connection = self.get(server_id)
         if connection is None:
@@ -305,24 +361,35 @@ class WorkerHub:
         deadline = timeout if timeout is not None else request.timeout
         pending = connection.open_request(request.id)
         try:
+            pending.sent = time.monotonic()
             connection.send_threadsafe(P.request_frame(request))
         except Exception as exc:
             connection.resolve(request.id)
             raise WorkerError(f"Could not reach the worker: {exc}", retryable=True) from exc
 
         # A little grace beyond the worker's own deadline, so the worker's error — which says what
-        # actually went wrong — normally arrives before this fires.
+        # actually went wrong — normally arrives before this fires. When it does fire the helper may still be
+        # generating: the request is unfinished, and its slot drains until the late answer (P3.3.3).
         if not pending.event.wait(deadline + 15):
-            connection.resolve(request.id)
-            try:
-                connection.send_threadsafe(P.frame(P.CANCEL, id=request.id))
-            except Exception:
-                pass
-            raise WorkerError(f"The worker did not answer within {deadline:.0f}s.", retryable=True)
+            if connection.cancel(request.id):
+                raise WorkerError(f"The worker did not answer within {deadline:.0f}s.", retryable=True,
+                                  unfinished=True)
 
         if pending.error is not None:
             raise pending.error
-        return pending.result or {}
+        result = pending.result or {}
+        if pending.done_at is not None:
+            result["observed_s"] = round(max(0.0, pending.done_at - pending.sent), 3)
+        return result
+
+    def cancel(self, server_id: str, request_id: str) -> bool:
+        """Give up a request in flight on a machine's helper (``WorkerConversation.close``; non-blocking): its caller
+        stops waiting, and the helper is sent ``CANCEL``, which today's helper ignores, finishing the completion:
+        the scheduler keeps the request's slot draining until that late answer (P3.3.3). Returns whether it was still
+        in flight."""
+        with self._lock:
+            connection = self._workers.get(server_id)
+        return connection.cancel(request_id) if connection is not None else False
 
     def broadcast(self, frame_text: str):
         """Send a frame to every connected worker."""

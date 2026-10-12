@@ -10,10 +10,11 @@ machine and deleting one drop its helper's connection once the change is committ
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -529,7 +530,8 @@ def revoke_worker_token(server_id: str, token_id: str, request: Request,
 
 
 @router.post("/servers/{server_id}/test")
-def test_server(server_id: str, request: Request, model: str = "", p: Principal = Depends(principal),
+def test_server(server_id: str, request: Request, model: str = "",
+                wait: float = Query(120.0, ge=1.0, le=120.0), p: Principal = Depends(principal),
                 s: Session = Depends(get_db)):
     """Send a trivial completion to a server and report what came back.
 
@@ -537,16 +539,22 @@ def test_server(server_id: str, request: Request, model: str = "", p: Principal 
     same as checking that the model behind it will answer — a worker can be online with LM Studio
     closed, or with the named model not loaded — and the difference is worth one round trip before
     somebody schedules a six-hour benchmark against it.
+
+    The completion is a ``test`` ticket of the prompt scheduler (design/phase3-features.md P3.3.3): it waits for a
+    slot like any pooled prompt, on a model the helper has loaded (unless its owner allows swaps), and goes through
+    ``make_conversation`` like every model call. ``wait`` is how long the caller waits for the reply (1 to 120
+    seconds): then the ticket is cancelled, and a request the helper is still generating keeps its slot draining
+    until the helper's late answer.
     """
     import time as _time
 
-    from ..worker import protocol as P
-    from .workers import WorkerError, hub
+    from ..agents.providers import make_conversation
+    from ..pool import scheduler as prompt_scheduler
+    from .workers import hub
 
     me = require_user(request, p)
     server = _server(s, server_id, me, access.VIEW)
-    decision = admission.check(s, me, server, "game",
-                               online=_liveness(server.id), in_flight=_load(server.id))
+    decision = admission.check(s, me, server, "game", online=_liveness(server.id), in_flight=None)
     if not decision.allowed:
         return {"ok": False, "stage": "admission", "reason": decision.reason}
 
@@ -556,34 +564,59 @@ def test_server(server_id: str, request: Request, model: str = "", p: Principal 
                 "reason": "No worker is connected for this server." if server.reach == "worker" else
                 "The server dials this machine itself; this test is for a machine's CITAR helper."}
 
-    chosen = model or next((m.get("key") for m in connection.models
-                            # Embedding models cannot answer a chat completion; skip them so the
-                            # default pick is something that can actually reply.
-                            if m.get("key") and "embed" not in m["key"].lower()), None)
+    # Embedding models cannot answer a chat completion; skip them so the default pick is something that can
+    # actually reply, and a loaded one first: a pooled prompt never makes the helper load a model it was not asked to.
+    chat = [m for m in connection.models if m.get("key") and "embed" not in m["key"].lower()]
+    chosen = model or next((m["key"] for m in chat if m.get("loaded")), None) or next((m["key"] for m in chat), None)
     if not chosen:
         return {"ok": False, "stage": "model",
                 "reason": "The worker reported no chat-capable models."}
 
+    grant = decision.grant
+    ticket = prompt_scheduler.get().ticket(
+        server.id, chosen, cls="test", activity=f"test:{server.id}", consumer=me.id, label=f"test of {server.name}",
+        start_within=wait, steps=1, cap=int(grant.concurrency or 0) if grant is not None else 0)
+    if ticket.state != "queued":
+        return {"ok": False, "stage": "queue", "model": chosen, "reason": ticket.reason,
+                "code": ticket.error.code if ticket.error else None,
+                "retry_at": ticket.retry_at.isoformat() if ticket.retry_at else None}
+    # Enough headroom that a reasoning model still has budget left for a visible answer after its thinking: a
+    # 24-token cap produced 21 reasoning tokens and an empty reply, which looks like a broken server rather than a
+    # too-small budget.
+    conv = make_conversation({"provider": "worker", "server_id": server.id, "model": chosen, "max_tokens": 256,
+                              "temperature": 0, "timeout": 120}, "", [], binding=ticket)
+    conv.messages.clear()                   # the request is the user's line alone, no system prompt
+    conv.add_user_text("Reply with exactly: CITAR OK")
+    conv.request_timeout = 120
+    timer = threading.Timer(wait, ticket.cancel, kwargs={"reason": f"given up after {wait:.0f} s"})
+    timer.daemon = True
     started = _time.time()
+    timer.start()
     try:
-        answer = hub().submit(server.id, P.Request(
-            id=f"test-{me.id[:6]}-{int(started)}", model=chosen,
-            messages=[{"role": "user", "content": "Reply with exactly: CITAR OK"}],
-            # Enough headroom that a reasoning model still has budget left for a visible answer
-            # after its thinking: a 24-token cap produced 21 reasoning tokens and an empty reply,
-            # which looks like a broken server rather than a too-small budget.
-            tools=[], tool_mode="native", params={"max_tokens": 256, "temperature": 0},
-            timeout=120, activity="server-test"), timeout=120)
-    except WorkerError as exc:
+        step = conv.step()
+    except prompt_scheduler.SchedulerError as exc:
+        return {"ok": False, "stage": "queue", "model": chosen, "reason": str(exc), "code": exc.code,
+                "cancelled": ticket.state == "cancelled"}
+    except Exception as exc:
+        if ticket.state == "cancelled":
+            return {"ok": False, "stage": "completion", "model": chosen, "cancelled": True,
+                    "reason": f"No reply within {wait:.0f} s: the test was cancelled (a helper that is still "
+                              "generating it keeps its slot until it finishes)."}
+        cause = exc.__cause__
         return {"ok": False, "stage": "completion", "model": chosen, "reason": str(exc),
-                "refusal": exc.refusal, "retryable": exc.retryable}
+                "refusal": getattr(cause, "refusal", "") or getattr(exc, "refusal", ""),
+                "retryable": bool(getattr(cause, "retryable", False))}
+    finally:
+        timer.cancel()
+        ticket.close()
 
     elapsed = round(_time.time() - started, 2)
     audit.record(s, "server.tested", actor=me, object_type="server", object_id=server.id,
                  model=chosen, seconds=elapsed)
-    return {"ok": True, "model": chosen, "seconds": elapsed,
-            "reply": (answer.get("text") or "").strip()[:400],
-            "usage": answer.get("usage") or {},
+    return {"ok": True, "model": chosen, "seconds": elapsed, "gen_s": round(conv.last_gen_s, 3),
+            "queue_s": round(conv.last_queue_s, 3),
+            "reply": (step.text or "").strip()[:400],
+            "usage": dict(conv.usage),
             "worker": {"hostname": connection.hostname, "provider": connection.provider}}
 
 

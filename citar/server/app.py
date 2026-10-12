@@ -540,6 +540,10 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
         out["workers"] = [{"server_id": w["server_id"], "hostname": w["hostname"], "models": len(w["models"] or []),
                            "in_flight": w["in_flight"], "max_concurrent": w["max_concurrent"], "alive": w["alive"]}
                           for w in workers]
+        # the prompt scheduler's machines (design/phase3-features.md P3.3.2): slots, leases, pooled prompts, what drains
+        from ..pool import scheduler as prompt_scheduler
+        sched = prompt_scheduler.current()
+        out["machines"] = sched.status() if sched is not None else []
     return out
 
 
@@ -2300,6 +2304,7 @@ async def worker_socket(websocket: WebSocket):
                     refusal=data.get("refusal") or "", retryable=bool(data.get("retryable"))))
             elif kind == P.CATALOG:
                 connection.models = list(data.get("models") or [])
+                hub().models_changed(connection)
                 await asyncio.to_thread(record_connection, server_id, models=connection.models)
             elif kind == P.PONG:
                 pass

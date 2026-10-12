@@ -26,7 +26,7 @@ def _new_turn(pid: int, turn: int) -> dict:
     """A blank record for one seat's turn."""
     return {
         "player": pid, "turn": turn, "started": time.time(), "ended": None, "wall_s": None,
-        "model_steps": 0, "model_s": 0.0, "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+        "model_steps": 0, "model_s": 0.0, "queue_s": 0.0, "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
         "tool_calls": 0, "actions_ok": 0, "queries": 0, "errors": 0, "repeats": 0, "malformed": 0,
         "blocked_repeats": 0, "stall_nudges": 0, "by_tool": {}, "signatures": {}, "error_samples": [],
         "end_reason": None, "controller": None, "model": None,
@@ -206,13 +206,16 @@ class Metrics:
             rec["repeats"] += 1
 
     def model_step(self, pid: int, seconds: float, input_tokens: int = 0, output_tokens: int = 0,
-                   reasoning_tokens: int = 0, malformed: int = 0):
-        """Record one model step: its duration and its tokens."""
+                   reasoning_tokens: int = 0, malformed: int = 0, queue_s: float = 0.0):
+        """Record one model step: its generation time (``seconds``: what the model spent on it, bounded by what the
+        server observed), the time it waited for the machine apart (``queue_s``, never counted as the model's), and its
+        tokens (design/phase3-features.md P3.3.4)."""
         rec = self.current(pid)
         if rec is None:
             return
         rec["model_steps"] += 1
         rec["model_s"] = round(rec["model_s"] + seconds, 3)
+        rec["queue_s"] = round(rec.get("queue_s", 0.0) + max(0.0, queue_s or 0.0), 3)
         rec["peak_prompt_tokens"] = max(rec.get("peak_prompt_tokens", 0), input_tokens or 0)
         rec["slowest_step_s"] = round(max(rec.get("slowest_step_s", 0.0), seconds), 2)
         rec["input_tokens"] += input_tokens or 0
@@ -293,6 +296,10 @@ class Metrics:
                 "total_s": round(sum(walls), 1),
                 "avg_model_steps": round(sum(r["model_steps"] for r in turns) / n, 2),
                 "avg_step_s": round(model_s / max(1, sum(r["model_steps"] for r in turns)), 2),
+                # generation time and the time waited for the machine, per turn, apart (P3.3.4): the speed score
+                # reads the first only
+                "avg_model_s": round(model_s / n, 2),
+                "avg_queue_s": round(sum(r.get("queue_s", 0.0) for r in turns) / n, 2),
                 "avg_tool_calls": round(tool_calls / n, 2),
                 "avg_actions_ok": round(sum(r["actions_ok"] for r in turns) / n, 2),
                 "avg_queries": round(sum(r["queries"] for r in turns) / n, 2),

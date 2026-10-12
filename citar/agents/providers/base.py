@@ -52,12 +52,23 @@ class Conversation:
             client.close()
 
 
-def make_conversation(cfg: dict, system: str, tools: list[dict]) -> Conversation:
+def make_conversation(cfg: dict, system: str, tools: list[dict], binding=None) -> Conversation:
     """Build a conversation for a resolved model configuration.
 
     The one place provider choice happens. Everything upstream deals in a configuration; everything
-    downstream deals in a conversation.
+    downstream deals in a conversation. With a ``binding`` (a lease or a ticket of ``citar.pool.scheduler``) it is
+    wrapped in a ``ScheduledConversation``, whose every step takes the binding's slot on its machine first and is
+    metered to the scheduler's listeners (design/phase3-features.md P3.3.4).
     """
+    inner = _provider_conversation(cfg, system, tools)
+    if binding is None:
+        return inner
+    from ...pool.scheduler import ScheduledConversation
+    return ScheduledConversation(inner, binding, cfg)
+
+
+def _provider_conversation(cfg: dict, system: str, tools: list[dict]) -> Conversation:
+    """The provider's own conversation for ``cfg``."""
     provider = (cfg.get("provider") or "anthropic").lower()
     if provider == "anthropic":
         from .anthropic_provider import AnthropicConversation

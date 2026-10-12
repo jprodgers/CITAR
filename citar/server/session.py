@@ -107,9 +107,17 @@ class GameSession:
         # what the saves cost under the lock (_snapshot): {"saves", "total_s", "max_s", "last_s"}; P2.5.3's budget is 10 ms
         self.save_lock = {"saves": 0, "total_s": 0.0, "max_s": 0.0, "last_s": 0.0}
         self._indexed: Optional[tuple] = None    # (turn, phase) last put on the games index row (_autosave_landed)
+        # The model seats' leases on their machines (design/phase3-features.md P3.3.3): a lease belongs to the seat,
+        # not to its agent, and every request the seat makes is one of its (lease_for). ``lease_kind`` overrides the
+        # kind a game's leases take (a probe's turn case: probe_case).
+        self.leases: dict = {}
+        self.lease_kind: Optional[str] = None
+        self._lease_lock = threading.Lock()
         self._writer = SaveWriter(self)
         game.subscribe(self._on_event)
         self._track_turn()
+        from ..pool import scheduler as prompt_scheduler
+        prompt_scheduler.watch_session(self)     # test mode: the scheduler's acquire is never entered with self.lock
 
     # ------------------------------------------------------------------
     # Seats & auth
@@ -304,6 +312,7 @@ class GameSession:
             self.metrics.pause()
             for pid in list(self.agents):
                 self.cancel_agent(pid)
+            self.release_leases()
             self.metrics.interrupt_open()
             self._metrics_current = None
             self.errors.append({"t": time.time(), "where": "engine", "trace": str(message)})
@@ -464,14 +473,52 @@ class GameSession:
             from ..agents.llm_agent import LLMAgent, NoMachineAgent
             from .. import servers
             try:
-                agent = LLMAgent(servers.resolve_llm(seat.llm, inline_ok=self._inline_llm_allowed(seat.llm)))
+                cfg = servers.resolve_llm(seat.llm, inline_ok=self._inline_llm_allowed(seat.llm))
             except servers.ServerError as e:
                 # Never the seat's block as it is: without a machine to build it from, that block is an address and
                 # a key variable somebody typed in, and only an administrator's game may dial one (P3.2.9).
                 agent = NoMachineAgent(str(e))
+            else:
+                agent = LLMAgent(cfg, binding=self.lease_for(pid, cfg.get("model") or ""))
         if agent is not None:
             self.agents[pid] = agent
         return agent
+
+    def lease_for(self, pid: int, model: str = ""):
+        """The seat's lease on its machine (design/phase3-features.md P3.3.3), made on first use; package 3-08 makes it
+        when the session is registered. It belongs to the seat, not to its agent: an agent made again (a seat change,
+        a resume) binds to the same lease while its seat names the same machine. Its kind is ``benchmark`` in a
+        benchmark game, ``lease_kind`` when set (a probe's turn case), else ``game`` (a lobby game: it lends its slot
+        while the seat is idle). Its consumer is the game's owner, capped by the concurrency of the grant that lets
+        the owner use the machine. A seat with no machine gets an unscheduled lease (its calls pass through, metered).
+        None for a seat that plays no model. Reads the database on first use: never with the session's lock held."""
+        seat = self.seats[pid] if pid < len(self.seats) else None
+        if seat is None or seat.type != "llm":
+            return None
+        sid = (seat.llm or {}).get("server_id") or None
+        with self._lease_lock:
+            lease = self.leases.get(pid)
+            if lease is not None and not lease.released and lease.server_id == sid:
+                lease.activity, lease.consumer = self.usage_act, self.owner_id
+                return lease
+            if lease is not None:
+                lease.release()
+            from ..pool import scheduler as prompt_scheduler, seats as pool_seats
+            kind = "benchmark" if self.benchmark else (self.lease_kind or "game")
+            lease = prompt_scheduler.get().lease(
+                sid, model or (seat.llm or {}).get("model") or "", kind=kind, activity=self.usage_act,
+                consumer=self.owner_id, label=f"game “{self.name}”", cap=pool_seats.consumer_cap(self.owner_id, sid))
+            self.leases[pid] = lease
+            return lease
+
+    def release_leases(self, pids=None) -> None:
+        """Release the leases of ``pids`` (every seat's when None): the seat no longer plays its machine (a seat change,
+        the game stopped or crashed). Non-blocking: allowed with the session's lock held (P3.3.9)."""
+        with self._lease_lock:
+            for pid in list(self.leases) if pids is None else list(pids):
+                lease = self.leases.pop(pid, None)
+                if lease is not None:
+                    lease.release()
 
     def _inline_llm_allowed(self, llm: dict) -> bool:
         """Whether a seat's model block may describe its own provider, address and key rather than name a machine
@@ -518,6 +565,7 @@ class GameSession:
         """
         with self.lock:
             seat = self.seats[pid]
+            before = (seat.type, (seat.llm or {}).get("server_id"))
             if type:
                 if type not in SEAT_TYPES:
                     raise ValueError(f"Unknown seat type '{type}' (one of {', '.join(SEAT_TYPES)}).")
@@ -534,6 +582,8 @@ class GameSession:
             if name is not None:
                 seat.name = name
             self.cancel_agent(pid)
+            if (seat.type, (seat.llm or {}).get("server_id")) != before:
+                self.release_leases([pid])      # another machine, or no model: the seat's next agent makes its own
             self.cond.notify_all()
 
     def set_paused(self, paused: bool):
@@ -760,6 +810,7 @@ class GameSession:
             self.paused = True
         for pid in list(self.agents):
             self.cancel_agent(pid)
+        self.release_leases()
         with self.lock:
             self.cond.notify_all()
         self._writer.close()
@@ -801,6 +852,10 @@ class GameSession:
             agent = self.get_agent(pid)
             self.agent_status[pid] = "thinking"
             self._broadcast({"type": "agent", "player": pid, "status": "thinking"})
+            # the seat is mid-turn: its lease's slot is kept from pooled prompts until the turn is over (P3.3.3)
+            lease = self.leases.get(pid)
+            if lease is not None:
+                lease.activate()
             try:
                 agent.play_turn(self, pid)
             except EngineCrash as e:
@@ -812,6 +867,9 @@ class GameSession:
                     self.errors.append({"t": time.time(), "player": pid, "where": "play_turn", "trace": traceback.format_exc()})
                     self._broadcast({"type": "agent_error", "player": pid,
                                      "text": f"{g.player_name(pid)}'s AI failed: {e}"})
+            finally:
+                if lease is not None:
+                    lease.idle()
             if self._stop or self.crashed:
                 break
             if getattr(agent, "cancelled", False):

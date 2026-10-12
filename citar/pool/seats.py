@@ -223,6 +223,33 @@ def liveness(server) -> tuple:
     return hub().is_online(server.id), hub().in_flight(server.id)
 
 
+def consumer_cap(user_id: Optional[str], server_id: Optional[str], purpose: str = "game") -> int:
+    """The concurrency of the grant that lets ``user_id`` use ``server_id`` for ``purpose`` (``AccessGrant.concurrency``;
+    design/phase3-features.md P3.3.7): the prompt scheduler's cap on that consumer's running requests on the machine,
+    leases and tickets together. 0 for no cap: the machine's owner, an administrator, no account (the server's own
+    work), no machine, a grant with none, or no grant at all (admission has refused that already). Reads the
+    database."""
+    if not user_id or not server_id:
+        return 0
+    from .. import db
+    from ..db.models import Server, User
+    from . import admission
+    if not db.configured():
+        return 0
+    try:
+        with db.session() as s:
+            user, server = s.get(User, user_id), s.get(Server, server_id)
+            if user is None or server is None:
+                return 0
+            grant = admission.check(s, user, server, purpose, in_flight=None).grant
+            return max(0, int(grant.concurrency or 0)) if grant is not None else 0
+    except Exception:
+        import logging
+        logging.getLogger("citar.pool").warning("could not read the grant for %s on %s", user_id, server_id,
+                                                exc_info=True)
+        return 0
+
+
 def admit(session, user, server_ids, purpose: str) -> None:
     """``authorize`` for work that names machines rather than seats and waits its turn for them (a benchmark run's
     machines, a probe run's subject, a report's narrative): may ``user`` use each pooled one for ``purpose`` at all.
