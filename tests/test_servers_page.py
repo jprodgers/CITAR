@@ -6,8 +6,9 @@ says its route would take it. ``mayCall`` reads each route's gate from ``machine
 tested in Node (``citar/web/tests/machines.test.mjs``: a member never may call an ``admin`` or ``host`` route, and
 dials only their own dry run). This module holds the other half, statically:
 
-- every request of servers.js and pool.js goes through ``call`` (no other use of ``api``), and names a route in
-  ``GATES``; every ``may`` names one too;
+- every request of servers.js and pool.js goes through ``call`` (no other use of ``api``, aliases included), and
+  names a route in ``GATES``; every ``may`` names one too; nothing else in them, or in the other modules they import,
+  reaches the network (what they import from api.js, ``fetch``, ``request``, sockets, dynamic imports);
 - every name in ``GATES`` is an ``api.js`` function whose method and path are a route of the app;
 - each route's gate as the server's code declares it (its dependencies: ``require_role("admin")``,
   ``require_cap("register_servers")``; the gate its body calls: ``_dialled``, ``_not_a_helper``, ``_row``/``_server``
@@ -57,6 +58,23 @@ JS = ROOT / "citar" / "web" / "js"
 #: The Servers page's own modules: every request they make goes through ``call``.
 PAGE_MODULES = ("pool.js", "servers.js")
 
+#: What the page's modules may import from ``api.js``: servers.js the ``api`` object its ``call`` uses, pool.js nothing.
+API_IMPORTS = {"servers.js": "{ api }", "pool.js": None}
+
+#: The modules the page imports that are held to it elsewhere: ``nav.js`` (the header, below) and ``auth.js`` (the
+#: session, and the sign-in wall a visitor gets instead of the page). Any other module it imports makes no request.
+HELD_ELSEWHERE = ("api.js", "nav.js", "auth.js", "servers.js")
+
+#: Every other way JavaScript reaches the network: none may appear in the page's code, so a request cannot go around
+#: ``call`` (``api.js``'s own ``request``, a plain ``fetch``, a socket, a beacon, a module loaded at run time).
+NETWORK = re.compile(r"\bfetch\s*\(|\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|\bsendBeacon\b"
+                     r"|(?<![\w.$])request\s*\(|\bimport\s*\(")
+
+#: A use of the identifier ``api`` (with the rest of its line, up to 40 characters): not an object's key
+#: (``{ api: "Online API" }``), not part of a word, a path or a quoted value (``"/api/servers"``, ``kind === "api"``).
+#: So an alias (``const a = api``), an argument or ``api.x`` all count, not only ``api.`` and ``api[``.
+API_USE = re.compile(r"(?<![\w$.\"'/`-])api(?![\w$\"'/`:-])[^\n]{0,40}")
+
 
 def api_routes() -> dict:
     """``api.js``'s functions: {name: (METHOD, path)}, the path's template parts as ``{}`` and its query dropped."""
@@ -83,12 +101,24 @@ def page_gates() -> dict:
     return dict(re.findall(r'^\s+(\w+): "([\w-]+)",', block, re.M))
 
 
-def _code(module: str) -> str:
-    """A module's code without its imports and comments (a comment may name a call it does not make)."""
+def _code(module: str, *, imports: bool = False) -> str:
+    """A module's code without its comments (a comment may name a call it does not make), and without its static
+    imports unless ``imports``. An import ends at its own semicolon, so nothing after it goes with it."""
     text = (JS / module).read_text(encoding="utf-8")
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    text = re.sub(r"(?ms)^import\b.*?;$", "", text)
+    if not imports:
+        text = re.sub(r"(?m)^import\s[^;]*;$", "", text)
     return re.sub(r"(?m)^\s*//.*$|(?<=[;,{}()\s])//[^\n\"'`]*$", "", text)
+
+
+def _imports(module: str) -> dict:
+    """A module's static imports: {the module it imports from: what it imports (``{ a, b }``, ``* as x``, or "" for
+    one imported for its effects)}."""
+    text = (JS / module).read_text(encoding="utf-8")
+    out = {}
+    for what, source in re.findall(r"""(?m)^import\s+(?:([^;]*?)\s+from\s+)?["']([^"']+)["'];""", text):
+        out[source.removeprefix("./")] = re.sub(r"\s+", " ", what or "").strip()
+    return out
 
 
 def _closure(fn) -> dict:
@@ -175,10 +205,22 @@ class ServersPageCalls(unittest.TestCase):
 
     def test_every_request_of_the_page_goes_through_its_gate(self):
         """servers.js and pool.js use ``api`` only inside ``call`` (``api[name](...)``, after ``mayCall``), and every
-        ``call`` and ``may`` names a route of ``GATES``."""
+        ``call`` and ``may`` names a route of ``GATES``. Nothing else in them reaches the network: they import only
+        ``api`` from api.js (servers.js) or nothing of it (pool.js), and use no ``fetch``, ``request``, socket or
+        dynamic import; the other modules they import make no request either."""
         for module in PAGE_MODULES:
+            imports = _imports(module)
+            self.assertIn("util.js", imports, f"{module}: the import reader read nothing")
+            self.assertEqual(imports.get("api.js"), API_IMPORTS[module], f"{module} imports from api.js")
+            self.assertEqual(NETWORK.findall(_code(module, imports=True)), [],
+                             f"{module} reaches the network around call()")
+            for other in sorted(set(imports) - set(HELD_ELSEWHERE)):
+                with self.subTest(module=module, imports=other):
+                    self.assertNotIn("api.js", _imports(other), f"{other}, imported by {module}, imports api.js")
+                    self.assertEqual(NETWORK.findall(_code(other, imports=True)), [],
+                                     f"{other}, imported by {module}, makes a request")
             code = _code(module)
-            uses = [m.group(0) for m in re.finditer(r"\bapi\b[.\[][^\n]{0,40}", code)]
+            uses = API_USE.findall(code)
             allowed = ["api[name](...args);"] if module == "servers.js" else []
             self.assertEqual(sorted(uses), allowed, f"{module} uses api outside call()")
             names = set(re.findall(r"""\b(?:call|may)\(\s*["'](\w+)["']""", code))
