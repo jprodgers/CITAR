@@ -32,6 +32,13 @@ def _fail(exc: Exception, status: int = 400) -> HTTPException:
     return HTTPException(403 if isinstance(exc, pool.ReachRefused) else status, str(exc))
 
 
+def _saved(s: Session) -> None:
+    """Commit the request's change before it answers. The request's session would otherwise commit only after the
+    answer is sent (FastAPI ends a request-scoped dependency after the response), and the Servers page reads a change
+    back at once: a card redrawn after its dialog saves would show what was there before."""
+    s.commit()
+
+
 def _drop(s: Session, server_id: str, reason: str, *, token_id: Optional[str] = None) -> None:
     """Commit the request's change, then disconnect the machine's helper (P3.2.8): its next hello finds the change
     and is refused, and nothing it was doing is waited for."""
@@ -136,6 +143,7 @@ def create_server(body: ServerBody, request: Request,
         server = pool.create_server(s, me, body.config, group_id=body.group_id, reach=body.reach)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return pool.public_server(s, server, me)
 
 
@@ -181,6 +189,8 @@ def update_server(server_id: str, body: ServerUpdate, request: Request,
         server.group_id = body.group_id or None
     if disabled:
         _drop(s, server.id, "its machine was disabled")
+    else:
+        _saved(s)
     return pool.public_server(s, server, me)
 
 
@@ -202,6 +212,7 @@ def set_costing(server_id: str, body: Costing, request: Request,
         pool.set_costing(s, me, server, body.model_dump())
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return pool.public_server(s, server, me)
 
 
@@ -233,6 +244,7 @@ def set_quiet_hours(server_id: str, body: QuietHours, request: Request,
         pool.set_quiet_hours(s, me, server, body.restricted_hours)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return pool.public_server(s, server, me)
 
 
@@ -298,6 +310,7 @@ def create_group(body: GroupBody, request: Request,
                                   visibility=body.visibility)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return {"id": group.id, "name": group.name, "visibility": group.visibility}
 
 
@@ -311,6 +324,7 @@ def update_group(group_id: str, body: GroupBody, request: Request,
     group.description = (body.description or "").strip()
     if body.visibility != group.visibility:
         access.set_visibility(s, group, body.visibility, actor=me)
+    _saved(s)
     return {"id": group.id, "name": group.name, "visibility": group.visibility}
 
 
@@ -326,6 +340,7 @@ def delete_group(group_id: str, request: Request, p: Principal = Depends(princip
         server.group_id = None
     audit.record(s, "server_group.deleted", actor=me, object_type="server_group", object_id=group.id)
     s.delete(group)
+    _saved(s)
     return {"deleted": group_id}
 
 
@@ -378,6 +393,7 @@ def create_grant(group_id: str, body: GrantBody, request: Request,
             budget=body.budget.model_dump() if body.budget else None)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return pool.grant_to_client(s, grant, me)
 
 
@@ -405,6 +421,7 @@ def update_grant(grant_id: str, body: GrantBody, request: Request,
     except ValueError as exc:
         raise _fail(exc)
     audit.record(s, "grant.updated", actor=me, object_type="server_group", object_id=grant.group_id)
+    _saved(s)
     return pool.grant_to_client(s, grant, me)
 
 
@@ -416,10 +433,13 @@ def revoke_grant(grant_id: str, request: Request, p: Principal = Depends(princip
     grant = s.get(AccessGrant, grant_id)
     if grant is None:
         raise HTTPException(404, "No such grant.")
+    # the group's gate first: a grant of a group the caller may not see is a 404, as the group is
+    _group(s, grant.group_id, me, access.MANAGE)
     try:
         pool.revoke_grant(s, me, grant)
     except pool.PoolError as exc:
         raise _fail(exc)
+    _saved(s)
     return {"revoked": grant_id}
 
 
@@ -480,6 +500,8 @@ def create_worker_token(server_id: str, body: TokenBody, request: Request,
     s.flush()
     audit.record(s, "worker.token_issued", actor=me, object_type="server", object_id=server.id,
                  label=row.label)
+    # the helper may connect with it the moment it is shown
+    _saved(s)
     return {
         "id": row.id, "token": raw, "prefix": row.prefix,
         "command": _worker_command(server).replace("YOUR_TOKEN", raw),

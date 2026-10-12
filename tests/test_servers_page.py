@@ -14,15 +14,41 @@ dials only their own dry run). This module holds the other half, statically:
   with MANAGE or VIEW, ``_group`` with MANAGE, ``check_cap``) is the gate ``GATES`` gives it, so a route made stricter
   on the server fails here until the page's table follows;
 - the page's header (``nav.js``) calls only routes any member may.
+
+And the routes 3-06 changed for the page, over the app (``PageRoutes``): the pool's routes that change something
+commit before they answer (the page reads a change back at once), with P3.9.1's callers (the owner and an
+administrator 200, another member 404 or, on a group shared with him, 403, a visitor 401); a group's link is the
+page's address; a member's listing leaves out the issue asking for an electricity plan, which only an administrator
+can name.
 """
 from __future__ import annotations
 
+import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import inspect
+import os
 import re
 import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+_TMP = Path(tempfile.mkdtemp(prefix="citar_servers_page_"))
+os.environ["CITAR_DATA_DIR"] = str(_TMP)
+os.environ["CITAR_DB_URL"] = "sqlite:///" + (_TMP / "test.db").as_posix()
+os.environ.setdefault("CITAR_MODE", "server")
+os.environ.setdefault("CITAR_PUBLIC_ORIGIN", "https://citar.test")
+os.environ.setdefault("CITAR_SECRET_KEY", "test-secret-key-that-is-long-enough-to-pass")
+os.environ["CITAR_REQUIRE_HTTPS"] = "0"
+os.environ["CITAR_BEHIND_PROXY"] = "0"
+
+from sqlalchemy import event
+
+from citar import db, pool, servers, settings
+from citar.auth import accounts, policy, sessions
+from citar.db.models import AccessGrant, Base, ServerGroup, User
+
+settings.reset()
 
 ROOT = Path(__file__).resolve().parent.parent
 JS = ROOT / "citar" / "web" / "js"
@@ -102,7 +128,7 @@ def server_gate(route) -> str:
     if re.search(r"_server\(s, \w+, me, access\.VIEW\)", source):
         return "view"
     if (re.search(r"_(server|group)\(s, [\w.]+, me, access\.MANAGE\)", source)
-            or re.search(r"_(row|server)\(s, sid, me\)", source) or "pool.revoke_grant(" in source):
+            or re.search(r"_(row|server)\(s, sid, me\)", source)):
         return "manage"
     return "member"
 
@@ -126,6 +152,8 @@ def tearDownModule():
     audit = sys.modules.get("audit_routes")
     if audit is not None:
         shutil.rmtree(getattr(audit, "_TMP", ""), ignore_errors=True)
+    db.dispose()
+    shutil.rmtree(_TMP, ignore_errors=True)
 
 
 class ServersPageCalls(unittest.TestCase):
@@ -191,6 +219,166 @@ class ServersPageCalls(unittest.TestCase):
         self.assertTrue(names)
         for name in sorted(names):
             self.assertEqual(server_gate(self.routes[self.api[name]]), "member", name)
+
+
+class PageRoutes(unittest.TestCase):
+    """The routes the page writes through, by alice on her own helper machine and group, by bob (another member),
+    zara (an administrator) and a visitor."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from citar.auth.deps import get_db
+        from citar.server import app as appmod
+        db.dispose()
+        db.configure(os.environ["CITAR_DB_URL"])
+        Base.metadata.drop_all(db.engine())
+        db.create_all()
+        policy.invalidate()
+        servers.invalidate()
+        self.client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(self.client.close)
+        self.headers, self.ids = {}, {}
+        with db.session() as s:
+            for handle, role in (("alice", "user"), ("bob", "user"), ("zara", "admin")):
+                user = accounts.create_user(s, handle=handle, email=f"{handle}@example.com",
+                                            password="a long enough phrase", role=role, status="active",
+                                            email_verified=True)
+                row, raw = sessions.start(s, user)
+                self.headers[handle] = {"cookie": f"{sessions.COOKIE_NAME}={raw}",
+                                        sessions.CSRF_HEADER: row.csrf_token, "origin": "https://citar.test"}
+                self.ids[handle] = user.id
+            alice = s.get(User, self.ids["alice"])
+            self.helper = pool.create_server(s, alice, {"name": "Alice GPU", "kind": "owned",
+                                                        "connection": {"provider": "lmstudio"}}).id
+            self.group = pool.create_group(s, alice, name="Alice's", visibility="link").id
+        # What the request's session still held, flushed or not, when the route returned. The request-scoped
+        # session commits only after the answer is sent, so anything left here was not yet there for a reader.
+        self.pending: list = []
+
+        def recording_db():
+            with db.session() as s:
+                flushed = {"n": 0}
+                event.listen(s, "after_flush", lambda *_: flushed.__setitem__("n", flushed["n"] + 1))
+                event.listen(s, "after_commit", lambda *_: flushed.__setitem__("n", 0))
+                yield s
+                self.pending.append(flushed["n"] > 0 or bool(s.new or s.dirty or s.deleted))
+
+        appmod.app.dependency_overrides[get_db] = recording_db
+        self.addCleanup(appmod.app.dependency_overrides.pop, get_db, None)
+
+    def call(self, who, method, path, body=None):
+        self.pending.clear()
+        return self.client.request(method, path, json=body,
+                                   headers=self.headers.get(who, {"origin": "https://citar.test"}))
+
+    def grant(self, subject="everyone", handle=None) -> str:
+        """A grant on alice's group, made as her."""
+        with db.session() as s:
+            group = s.get(ServerGroup, self.group)
+            return pool.create_grant(s, s.get(User, self.ids["alice"]), group, subject_type=subject,
+                                     subject_handle=handle, purposes=["game"]).id
+
+    def test_a_change_is_committed_before_the_answer(self):
+        """Each pool route the page writes through commits before it answers, so the page's read-back sees it."""
+        gid = self.group
+        routes = [
+            ("POST", "/api/pool/servers", {"config": {"name": "Box", "connection": {"provider": "ollama"}},
+                                           "reach": "worker"}),
+            ("PUT", f"/api/pool/servers/{self.helper}", {"group_id": gid}),
+            ("PUT", f"/api/pool/servers/{self.helper}", {"enabled": True}),
+            ("PUT", f"/api/pool/servers/{self.helper}/costing", {"costs": [{"from": "2000-01-01", "fixed_monthly": 5}]}),
+            ("PUT", f"/api/pool/servers/{self.helper}/quiet-hours", {"restricted_hours": {"enabled": True, "windows": [
+                {"days": [0], "start": "22:00", "end": "06:00"}]}}),
+            ("POST", f"/api/pool/servers/{self.helper}/workers/tokens", {"label": "t"}),
+            ("POST", "/api/pool/groups", {"name": "Another"}),
+            ("PUT", f"/api/pool/groups/{gid}", {"name": "Renamed", "visibility": "link"}),
+            ("POST", f"/api/pool/groups/{gid}/grants", {"subject_type": "everyone", "purposes": ["game"]}),
+        ]
+        for method, path, body in routes:
+            with self.subTest(route=f"{method} {path}"):
+                r = self.call("alice", method, path, body)
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(self.pending, [False], "the change was still uncommitted when the route answered")
+        grant = self.grant()
+        for method, path, body in (("PUT", f"/api/pool/grants/{grant}", {"subject_type": "everyone", "purposes": []}),
+                                   ("DELETE", f"/api/pool/grants/{grant}", None),
+                                   ("DELETE", f"/api/pool/groups/{gid}", None)):
+            with self.subTest(route=f"{method} {path}"):
+                r = self.call("alice", method, path, body)
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(self.pending, [False])
+
+    def test_the_changed_routes_by_caller(self):
+        """P3.9.1 for the routes 3-06 changed: the owner and an administrator 200, another member 404, a visitor 401;
+        a route that makes something needs only an account that may."""
+        owned = [("PUT", f"/api/pool/servers/{self.helper}", {"enabled": True}),
+                 ("PUT", f"/api/pool/servers/{self.helper}/costing", {"costs": [{"from": "2000-01-01"}]}),
+                 ("PUT", f"/api/pool/servers/{self.helper}/quiet-hours", {"restricted_hours": {"enabled": False}}),
+                 ("POST", f"/api/pool/servers/{self.helper}/workers/tokens", {"label": "t"}),
+                 ("PUT", f"/api/pool/groups/{self.group}", {"name": "Alice's", "visibility": "link"}),
+                 ("POST", f"/api/pool/groups/{self.group}/grants", {"subject_type": "everyone", "purposes": ["game"]})]
+        for method, path, body in owned:
+            with self.subTest(route=f"{method} {path}"):
+                self.assertEqual(self.call("bob", method, path, body).status_code, 404)
+                self.assertEqual(self.call("anon", method, path, body).status_code, 401)
+                self.assertEqual(self.call("alice", method, path, body).status_code, 200)
+                self.assertEqual(self.call("zara", method, path, body).status_code, 200)
+        for method, path, body in (("POST", "/api/pool/servers", {"config": {"name": "B"}, "reach": "worker"}),
+                                   ("POST", "/api/pool/groups", {"name": "G"})):
+            with self.subTest(route=f"{method} {path}"):
+                self.assertEqual(self.call("anon", method, path, body).status_code, 401)
+                for who in ("bob", "zara"):
+                    self.assertEqual(self.call(who, method, path, body).status_code, 200)
+        grant = self.grant()
+        for method, path, body in (("PUT", f"/api/pool/grants/{grant}", {"subject_type": "everyone", "purposes": []}),
+                                   ("DELETE", f"/api/pool/grants/{grant}", None)):
+            with self.subTest(route=f"{method} {path}"):
+                self.assertEqual(self.call("bob", method, path, body).status_code, 404)
+                self.assertEqual(self.call("anon", method, path, body).status_code, 401)
+        self.assertEqual(self.call("alice", "PUT", f"/api/pool/grants/{grant}",
+                                   {"subject_type": "everyone", "purposes": []}).status_code, 200)
+        self.assertEqual(self.call("zara", "DELETE", f"/api/pool/grants/{grant}").status_code, 200)
+        self.assertEqual(self.call("bob", "DELETE", f"/api/pool/groups/{self.group}").status_code, 404)
+        self.assertEqual(self.call("anon", "DELETE", f"/api/pool/groups/{self.group}").status_code, 401)
+        self.assertEqual(self.call("alice", "DELETE", f"/api/pool/groups/{self.group}").status_code, 200)
+
+    def test_a_member_given_the_group_may_not_change_it(self):
+        """Bob, whom alice's group gives access to, sees the group and her machine in it (the page lists both to
+        him) but changes neither, and his listing carries no configuration. The machine's routes say 403 (he may see
+        it); the group's say 404, as to anyone without MANAGE on it (his access is through the group, not to it)."""
+        self.assertEqual(self.call("alice", "PUT", f"/api/pool/servers/{self.helper}", {"group_id": self.group})
+                         .status_code, 200)
+        grant = self.grant("user", "bob")
+        listed = {s["id"]: s for s in self.call("bob", "GET", "/api/pool/servers").json()["servers"]}
+        self.assertFalse(listed[self.helper]["can_manage"])
+        self.assertNotIn("config", listed[self.helper])
+        self.assertNotIn(self.helper, {s["id"] for s in self.call("bob", "GET", "/api/servers").json()["servers"]})
+        for method, path, body, code in (
+                ("PUT", f"/api/pool/groups/{self.group}", {"name": "Bob's"}, 404),
+                ("POST", f"/api/pool/groups/{self.group}/grants", {"subject_type": "everyone"}, 404),
+                ("PUT", f"/api/pool/grants/{grant}", {"subject_type": "everyone"}, 404),
+                ("DELETE", f"/api/pool/grants/{grant}", None, 404),
+                ("DELETE", f"/api/pool/groups/{self.group}", None, 404),
+                ("PUT", f"/api/pool/servers/{self.helper}", {"enabled": False}, 403),
+                ("PUT", f"/api/pool/servers/{self.helper}/quiet-hours", {"restricted_hours": {}}, 403),
+                ("POST", f"/api/pool/servers/{self.helper}/workers/tokens", {"label": "t"}, 403)):
+            with self.subTest(route=f"{method} {path}"):
+                self.assertEqual(self.call("bob", method, path, body).status_code, code)
+        with db.session() as s:
+            self.assertIsNotNone(s.get(AccessGrant, grant))
+
+    def test_a_groups_link_is_the_pages_address(self):
+        groups = {g["id"]: g for g in self.call("alice", "GET", "/api/pool/groups").json()["groups"]}
+        self.assertRegex(groups[self.group]["share_url"], rf"^/#/pool/groups/{self.group}\?k=[\w-]+$")
+
+    def test_a_members_listing_asks_her_for_no_electricity_plan(self):
+        """Only an administrator names a plan in a machine's costs (pool.check_plans): the issue that asks for one
+        is on an administrator's listing of her machine, not on hers."""
+        mine = {s["id"]: s for s in self.call("alice", "GET", "/api/servers").json()["servers"]}[self.helper]
+        theirs = {s["id"]: s for s in self.call("zara", "GET", "/api/servers").json()["servers"]}[self.helper]
+        self.assertIn(servers.NO_PLAN_ISSUE, theirs["issues"])
+        self.assertNotIn(servers.NO_PLAN_ISSUE, mine["issues"])
+        self.assertEqual([i for i in theirs["issues"] if i != servers.NO_PLAN_ISSUE], mine["issues"])
 
 
 if __name__ == "__main__":

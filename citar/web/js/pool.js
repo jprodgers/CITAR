@@ -272,8 +272,9 @@ export async function renderPool(root) {
   root.appendChild(pageHeader("pool"));
   const page = el("div", { class: "page" });
   const head = el("div");
+  const notice = el("div");                 // what the address asked for and the page could not show; never redrawn
   const body = el("div");
-  page.append(head, body);
+  page.append(head, notice, body);
   root.appendChild(page);
 
   let data = null;
@@ -294,11 +295,14 @@ export async function renderPool(root) {
   }
 
   // the machine or group the address names
+  // (one the viewer may not see reads as one that is not there: the server answers 404 for both)
   const target = poolTarget(location.hash);
+  const missing = (what) => notice.appendChild(el("div", { class: "card not-found" },
+    el("p", {}, `That ${what} is not here, or it has not been shared with you.`)));
   if (target.machine) {
     const m = data.machines.find((x) => x.id === target.machine);
     const card = m && body.querySelector(`[data-machine="${CSS.escape(m.id)}"]`);
-    if (!card) toast("That machine is not one you can see.", "error", 6000);
+    if (!card) missing("machine");
     else {
       focus(card);
       if (m.reg) openConnection(m.reg, quiet);
@@ -306,7 +310,7 @@ export async function renderPool(root) {
   } else if (target.group) {
     const card = body.querySelector(`[data-group="${CSS.escape(target.group)}"]`);
     if (card) focus(card);
-    else toast("That group is not one you can see.", "error", 6000);
+    else missing("group");
   }
 
   // live status (a helper connecting, quiet hours starting) without disturbing a dialog or the reader's place

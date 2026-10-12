@@ -1761,6 +1761,11 @@ def hardware_summary(hw: dict) -> str:
 
 
 # ----------------------------------------------------------------------------- checks
+#: The issue of an owned machine whose costs name no electricity plan: only an administrator can act on it (the plans
+#: are the site's bill, ``pool.check_plans``), so a member's Servers page leaves it out.
+NO_PLAN_ISSUE = "No electricity plan selected."
+
+
 def issues(server: dict, reg: Optional[dict] = None) -> list[str]:
     """What's missing for good cost numbers (shown on the Servers page and in report data-quality notes)."""
     reg = reg or load()
@@ -1781,7 +1786,7 @@ def issues(server: dict, reg: Optional[dict] = None) -> list[str]:
         elif pw.get("source") == "guess":
             out.append("Power figures are rough guesses from the hardware class; measure them for better numbers.")
         if kind == "owned" and not per.get("electricity_plan_id"):
-            out.append("No electricity plan selected.")
+            out.append(NO_PLAN_ISSUE)
         pl = next((p for p in reg["electricity_plans"] if p["id"] == per.get("electricity_plan_id")), None)
         if pl:
             cur = pl["periods"][-1]
