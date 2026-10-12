@@ -149,7 +149,7 @@ def live_models(server_id: str) -> list[dict]:
 
 
 def resolve(llm: dict, pooled: dict) -> dict:
-    """The agent configuration for a seat on a pooled server: the ``worker`` provider, which sends every
+    """The agent configuration for a seat on a helper machine: the ``worker`` provider, which sends every
     request down the helper's connection."""
     from ..servers import SEAT_OVERRIDES
     key = llm.get("model") or llm.get("model_id") or ""
@@ -170,7 +170,7 @@ def resolve(llm: dict, pooled: dict) -> dict:
 
 
 def describe(llm: dict, pooled: dict) -> dict:
-    """Display info for a seat on a pooled server, in the shape ``servers.describe_seat`` returns."""
+    """Display info for a seat on a helper machine, in the shape ``servers.describe_seat`` returns."""
     key = llm.get("model") or llm.get("model_id")
     end = restricted(pooled)
     return {"server_id": pooled["id"], "server": pooled["name"], "model": key, "label": key, "profile": None,

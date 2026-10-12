@@ -29,7 +29,8 @@ Environment variables win over both, and are how the systemd unit points a deplo
 ``CITAR_STATE_DIR``     Base for all state. Sets saves, config and benchmarks in one go.
 ``CITAR_SAVE_DIR``      Saved games, and everything filed under them (maps, scenarios,
                         probes, lab, reports, usage, balance).
-``CITAR_CONFIG_DIR``    The server registry (``servers.json``) and its siblings.
+``CITAR_CONFIG_DIR``    The helper's ``worker.json``, and a pre-0.1.6 ``servers.json`` until it
+                        is imported into the database (``citar.pool.registry_import``).
 ``CITAR_BENCH_DIR``     Benchmark suites and runs.
 ``CITAR_DATA_DIR``      Private state: the accounts database and the generated secret key.
                         Never the checkout, even in development — see ``data_dir``.

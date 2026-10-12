@@ -257,7 +257,7 @@ def _finish(plan: LocalPlan, args) -> None:
     from .. import paths
 
     prompts.heading("Done")
-    prompts.note(f"Settings:   {paths.config_path('servers.json')}")
+    prompts.note("Machines:   the Servers page (the server's database; a first start imports what this wrote)")
     prompts.note(f"Saved games: {paths.saves_path()}")
     prompts.say("")
     prompts.note(f"Start CITAR with:   citar serve --port {plan.port}")

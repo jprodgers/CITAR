@@ -474,8 +474,8 @@ class Server(Base):
     #: The site's one number for this machine's LLM slots (P3.2.8); a helper's own ceiling caps it.
     max_concurrent: Mapped[int] = mapped_column(Integer, default=1)
 
-    # Filled in by the registry merge (3-05), the scheduler (3-07), the ledger (3-10) and the machine settings
-    # dialog (3-18); see design/phase3-features.md P3.2.2 and P3.8.2.
+    # Filled in by the registry merge (3-05: is_host, server_resource), the scheduler (3-07), the ledger (3-10) and
+    # the machine settings dialog (3-18); see design/phase3-features.md P3.2.2 and P3.8.2.
     #: The machine running CITAR.
     is_host: Mapped[bool] = mapped_column(Boolean, default=False)
     #: The site provides it (the host, an online API an admin registers), so it is the server's in the ledger.
