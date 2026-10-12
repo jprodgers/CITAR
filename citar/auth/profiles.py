@@ -14,7 +14,7 @@ this module is what the routes add around it:
   never a wider one);
 - the directory (``directory``: listed accounts in good standing, newest first, a search that matches a display name
   only where the caller may see it, so a hidden name is never revealed by its hits);
-- avatars on disk (``store_avatar``, ``avatar_file``, ``remove_avatar``): ``<data dir>/avatars/<user id>-<sha256[:12]>
+- avatars on disk (``store_avatar``, ``avatar_file``, ``remove_replaced``): ``<data dir>/avatars/<user id>-<sha256[:12]>
   .<ext>``, written there and nowhere else, the format and size checked by ``citar.auth.images`` first.
 """
 from __future__ import annotations
@@ -23,6 +23,7 @@ import hashlib
 import logging
 import os
 import re
+import secrets
 import unicodedata
 from pathlib import Path
 from typing import Optional
@@ -342,14 +343,14 @@ def avatar_file(user: User) -> Optional[Path]:
 
 def store_avatar(user: User, data: bytes) -> images.ImageInfo:
     """Check ``data`` (``images.inspect``, which raises ``ImageError`` with the rule), write it as the account's
-    avatar and point the account at it. The file goes to the avatars folder under a temporary name first and is
-    renamed into place, so a reader never sees half of it. The previous file stays until ``remove_stale`` runs after
-    the change is committed."""
+    avatar and point the account at it. The file goes to the avatars folder under a temporary name of its own first
+    and is renamed into place, so a reader never sees half of it. The file it replaced stays until the change is
+    committed (``remove_replaced``)."""
     info = images.inspect(data)
     digest = hashlib.sha256(data).hexdigest()[:12]
     folder = avatars_dir()
     name = f"{user.id}-{digest}.{info.ext}"
-    tmp = folder / f".{name}.part"
+    tmp = folder / f".{name}.{secrets.token_hex(4)}.part"
     try:
         tmp.write_bytes(data)
         os.replace(tmp, folder / name)
@@ -363,19 +364,20 @@ def store_avatar(user: User, data: bytes) -> images.ImageInfo:
     return info
 
 
-def remove_stale(user: User) -> int:
-    """Remove the account's avatar files other than the one it points at (all of them when it has none): the one an
-    upload replaced or a delete dropped, and any a failed request left. Returns how many went; a file another
-    process holds is logged and left for the next change."""
-    folder = avatars_dir()
-    keep = Path(user.avatar_path).name if user.avatar_path else None
-    removed = 0
-    for path in folder.glob(f"{user.id}-*"):
-        if path.name == keep or not path.is_file():
-            continue
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            log.warning("could not remove the old avatar %s", path, exc_info=True)
-    return removed
+def remove_replaced(previous: Optional[str], current: Optional[str]) -> bool:
+    """Remove the avatar file ``previous`` (a stored ``avatar_path``) once a committed change replaced it with
+    ``current``: only that file, so a second upload of the same account's, landing at the same moment, never loses
+    the file its row points at (the worst such a race leaves is an unused file). A path outside the avatars folder
+    is never touched; a file another process holds is logged and left. Returns whether a file went."""
+    if not previous or previous == current:
+        return False
+    folder = avatars_dir().resolve()
+    path = (paths.data_dir() / previous).resolve()
+    if path.parent != folder or not path.is_file():
+        return False
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        log.warning("could not remove the replaced avatar %s", path, exc_info=True)
+        return False

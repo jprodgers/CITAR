@@ -98,6 +98,7 @@ async def upload_avatar(request: Request, me=Depends(require_user), s: Session =
 
 def _save_avatar(s: Session, me, data: bytes) -> dict:
     """Check and store an upload as the caller's avatar, commit, then remove the file it replaced."""
+    previous = me.avatar_path
     try:
         info = profiles.store_avatar(me, data)
     except images.ImageError as exc:
@@ -105,19 +106,19 @@ def _save_avatar(s: Session, me, data: bytes) -> dict:
     audit.record(s, "user.avatar_set", actor=me, object_type="user", object_id=me.id,
                  format=info.format, width=info.width, height=info.height, bytes=len(data))
     s.commit()
-    profiles.remove_stale(me)
+    profiles.remove_replaced(previous, me.avatar_path)
     return {"ok": True, "user": me.account()}
 
 
 @router.delete("/api/auth/me/avatar")
 def delete_avatar(request: Request, me=Depends(require_user), s: Session = Depends(get_db)):
     """Remove the caller's uploaded avatar (the sign-in provider's picture, if any, shows again)."""
-    had = bool(me.avatar_path)
+    previous = me.avatar_path
     me.avatar_path = None
-    if had:
+    if previous:
         audit.record(s, "user.avatar_removed", actor=me, object_type="user", object_id=me.id)
     s.commit()
-    profiles.remove_stale(me)
+    profiles.remove_replaced(previous, None)
     return {"ok": True, "user": me.account()}
 
 

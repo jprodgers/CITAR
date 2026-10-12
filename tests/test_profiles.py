@@ -610,6 +610,26 @@ class Avatars(Base_):
         self.assertEqual(self.mine(), [])
         self.assertEqual(self.get("/api/users/pat/avatar", "pat").status_code, 404)
 
+    def test_only_the_replaced_file_goes(self):
+        """Two uploads of one account at the same moment: each removes only the file it replaced, never the other's
+        new one, which the row may point at; nothing outside the avatars folder is ever removed."""
+        from citar import paths
+        folder = profiles.avatars_dir()
+        uid = self.ids["pat"]
+        for name in ("old", "theirs", "mine"):
+            (folder / f"{uid}-{name}.png").write_bytes(b"x")
+        self.assertTrue(profiles.remove_replaced(f"avatars/{uid}-old.png", f"avatars/{uid}-mine.png"))
+        self.assertEqual(self.mine(), [f"{uid}-mine.png", f"{uid}-theirs.png"])
+        self.assertFalse(profiles.remove_replaced(f"avatars/{uid}-mine.png", f"avatars/{uid}-mine.png"))
+        outside = paths.data_dir() / "keep-me.txt"
+        outside.write_text("x")
+        try:
+            self.assertFalse(profiles.remove_replaced("keep-me.txt", None))
+            self.assertFalse(profiles.remove_replaced("avatars/../keep-me.txt", None))
+            self.assertTrue(outside.exists())
+        finally:
+            outside.unlink()
+
     def test_nothing_is_written_outside_the_avatars_folder(self):
         from citar import paths
         roots = [paths.data_dir(), paths.save_dir(), paths.config_dir()]
