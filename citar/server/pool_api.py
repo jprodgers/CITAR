@@ -280,11 +280,10 @@ def list_groups(request: Request, p: Principal = Depends(principal), s: Session 
                         for sv in s.query(Server).filter(Server.group_id == group.id)],
         }
         if access.MANAGE in perms:
+            # No share link: a group's machines are shared by its grants alone, and no route takes a group's key
+            # (a `link` group admits nobody by it yet), so a link would open nothing for whoever it was given to.
             entry["grants"] = [pool.grant_to_client(s, g, me)
                                for g in s.query(AccessGrant).filter(AccessGrant.group_id == group.id)]
-            # the Servers page's address for the group (#/pool/groups/<id>), with the link's key
-            entry["share_url"] = (f"/#/pool/groups/{group.id}?k={group.slug}"
-                                  if group.visibility == "link" else None)
         else:
             # A guest sees the terms that apply to *them*, not everybody else's grants.
             mine = admission.grants_for(s, me, group.id)

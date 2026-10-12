@@ -17,9 +17,10 @@ dials only their own dry run). This module holds the other half, statically:
 
 And the routes 3-06 changed for the page, over the app (``PageRoutes``): the pool's routes that change something
 commit before they answer (the page reads a change back at once), with P3.9.1's callers (the owner and an
-administrator 200, another member 404 or, on a group shared with him, 403, a visitor 401); a group's link is the
-page's address; a member's listing leaves out the issue asking for an electricity plan, which only an administrator
-can name.
+administrator 200, another member 404 or, on a group shared with him, 403, a visitor 401); a group's listing hands
+out no share link (its grants share it, and no route takes its key); the pool's listing reads a machine's quiet
+hours on the clock that pauses its work, as /api/servers and the header do; a member's listing leaves out the issue
+asking for an electricity plan, which only an administrator can name.
 """
 from __future__ import annotations
 
@@ -367,13 +368,20 @@ class PageRoutes(unittest.TestCase):
         with db.session() as s:
             self.assertIsNotNone(s.get(AccessGrant, grant))
 
-    def test_a_groups_link_is_the_pages_address(self):
-        """The group's manager reads its link as the page's address; another member's listing has no such group,
-        and a visitor gets 401."""
+    def test_a_group_hands_out_no_link(self):
+        """A group's machines are shared by its grants alone: no route takes a group's key, so its listing hands its
+        manager no share link that would open nothing. Another member does not see the group, with its key or
+        without, and a visitor gets 401."""
         groups = {g["id"]: g for g in self.call("alice", "GET", "/api/pool/groups").json()["groups"]}
-        self.assertRegex(groups[self.group]["share_url"], rf"^/#/pool/groups/{self.group}\?k=[\w-]+$")
-        self.assertNotIn(self.group, {g["id"] for g in self.call("bob", "GET", "/api/pool/groups").json()["groups"]})
-        self.assertEqual(self.call("anon", "GET", "/api/pool/groups").status_code, 401)
+        self.assertEqual(groups[self.group]["visibility"], "link")
+        self.assertNotIn("share_url", groups[self.group])
+        with db.session() as s:
+            key = s.get(ServerGroup, self.group).slug
+        self.assertTrue(key)
+        for path in ("/api/pool/groups", f"/api/pool/groups?k={key}"):
+            with self.subTest(path=path):
+                self.assertNotIn(self.group, {g["id"] for g in self.call("bob", "GET", path).json()["groups"]})
+                self.assertEqual(self.call("anon", "GET", path).status_code, 401)
 
     def test_quiet_hours_are_read_on_the_clock_that_pauses_the_work(self):
         """The pool's listing (the cards' "quiet until"), /api/servers and the page's header agree on when a machine

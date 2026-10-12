@@ -1173,7 +1173,7 @@ def _accounts_servers_page(h: Harness) -> None:
     the routes it calls. A member's page lists her machine the server dials (her dry run, from 3-05's checks) and her
     helper machine (a real helper behind the scripted endpoint) side by side, hers to manage, and nothing of the
     site's; the reads and saves its dialogs make on them answer; sharing one through a group from the page shows it to
-    another member, his to use and not to manage, with the group's link the page's own address; an administrator's
+    another member, his to use and not to manage, through its grant (the group hands out no share link); an administrator's
     page lists the site's machines and the members' alike, each his to manage. With ``--keep`` the helper stays
     connected for the browser checklist (A4), its pid in the evidence."""
     r = h.report
@@ -1238,7 +1238,7 @@ def _accounts_servers_page(h: Harness) -> None:
         put = alice.put(f"/api/pool/servers/{hid}", json={"group_id": gid})
         grant = alice.post(f"/api/pool/groups/{gid}/grants", json={"subject_type": "everyone", "purposes": ["game"]})
         mine_groups = {g.get("id"): g for g in alice.get("/api/pool/groups").json().get("groups", [])}
-        link = (mine_groups.get(gid) or {}).get("share_url") or ""
+        mine_group = mine_groups.get(gid) or {}
         his = {s.get("id"): s for s in bob.get("/api/pool/servers").json().get("servers", [])}
         shared = his.get(hid) or {}
         his_regs = {s.get("id") for s in bob.get("/api/servers").json().get("servers", [])}
@@ -1258,8 +1258,11 @@ def _accounts_servers_page(h: Harness) -> None:
                 json.dumps({"made": [group.status_code, put.status_code, grant.status_code], "his": {
                     f: shared.get(f) for f in ("group_id", "can_manage")}, "refused": refused,
                     "test": his_test.status_code}))
-        r.check("a group's link is the Servers page's own address (#/pool/groups/<id>, with its key)",
-                link.startswith(f"/#/pool/groups/{gid}?k="), link)
+        r.check("a group's listing hands its manager no share link: its grants share it (bob's above), and no route "
+                "takes a group's key, so a link would open nothing",
+                mine_group.get("visibility") == "link" and "share_url" not in mine_group
+                and bool(mine_group.get("grants")),
+                json.dumps({k: mine_group.get(k) for k in ("visibility", "share_url")}))
 
         # ---- an administrator's page: the site's machines and the members' alike, each his to manage
         his_pool = {s.get("id"): s for s in admin.get("/api/pool/servers").json().get("servers", [])}
@@ -1272,7 +1275,7 @@ def _accounts_servers_page(h: Harness) -> None:
                 and admin_regs[hid].get("reach") == "worker",
                 json.dumps(sorted(set(his_pool))))
         r.data["servers_page"] = {"member": sorted(listed), "member_shared": sorted(his), "admin": sorted(his_pool),
-                                  "group": gid, "group_link": link}
+                                  "group": gid}
     finally:
         if helper is not None and h.keep and helper.proc.poll() is None:
             # left connected for the browser checklist; the scripted endpoint goes with the harness

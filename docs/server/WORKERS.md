@@ -96,7 +96,9 @@ plans** and **Settings** (the currency, which machine is the host). A control is
 it from you: `citar/web/js/machines.js` holds the page's copy of the routes' gates, and `tests/test_servers_page.py`
 holds it to the server's own, so a member's page never calls a route that would refuse them. An address of the page
 before 0.1.6 still works: `#/servers` opens it and `#/servers/<id>` opens that machine (`#/pool/<id>`); a group's
-link is `#/pool/groups/<id>`.
+address is `#/pool/groups/<id>`, which highlights it for whoever it is shared with. A group shares its machines
+through its grants alone (a grant to everyone shares them with every member): a group whose visibility is `link`
+admits nobody by its key yet, so there is no link to hand out.
 
 ## Revocation
 

@@ -147,7 +147,7 @@ machines behind a CITAR helper, `reach: "worker"`); who may do what is in
 | `POST /api/llm/models` | List the models at a base URL ("Detect models"): an administrator's, the `dryrun` provider excepted (403 before anything is dialled) |
 | `PUT /api/pool/servers/{id}` | `{"enabled": false}` disconnects its helper at once; switching to `reach: "direct"` follows the rule above |
 | `DELETE /api/pool/servers/{id}/workers/tokens/{token}` | Revoke a worker token: a helper connected with it is disconnected at once, and refused if it says hello again |
-| `GET /api/pool/groups` | The server groups the caller may see, with their machines; a group's manager gets every grant, anyone else their own terms. A `link` group's `share_url` is the Servers page's address for it, `/#/pool/groups/<id>?k=<key>` |
+| `GET /api/pool/groups` | The server groups the caller may see, with their machines; a group's manager gets every grant, anyone else their own terms. Its grants are what share it: no route takes a group's key, so a `link` group admits nobody by it yet and the listing hands out no share link |
 
 The pool's routes that change something (a machine, its costs or quiet hours, a group, a grant, a worker token)
 commit before they answer, so a page that reads the change back at once (the Servers page redrawing a card after its
