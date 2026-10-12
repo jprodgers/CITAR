@@ -1,10 +1,16 @@
 """Admission control: may this person run this work on that server, right now?
 
-Every LLM seat in a game passes through `check()` before the game starts. The checks run in a fixed
-order, cheapest and most absolute first, and each failure produces a **specific, quotable reason**:
+Every model seat in a game passes through `check()` before the game starts, and every pooled prompt when its ticket
+is made. The checks run in a fixed order, cheapest and most absolute first, and each failure produces a **specific,
+quotable reason**:
 
     grant exists  ->  purpose allowed  ->  inside a window  ->  budget remains
                   ->  concurrency slot free  ->  server actually online
+
+**Admission decides who may, the prompt scheduler when** (design/phase3-features.md P3.3.7): leases and tickets are
+admitted with ``in_flight=None``, which skips the concurrency step, so a busy machine queues the work rather than
+refusing it, and the grant's ``concurrency`` becomes the scheduler's cap on that person's running requests
+(``Decision.grant``). The step stays for a caller that asks it with a count.
 
 A generic "access denied" is close to useless here. The interesting cases are all temporary — the
 overnight box opens at midnight, the budget resets on the 1st, somebody else has the only slot — and
@@ -30,10 +36,13 @@ from . import budgets, windows
 
 log = logging.getLogger("citar.admission")
 
-PURPOSES = ("game", "benchmark", "probe", "scenario", "lab")
+#: The kinds of work a grant may be limited to. ``game`` is a model seat that plays every turn (task class *full*),
+#: ``pooled`` one prompt at a time (task class *partial*: a hybrid seat's diplomacy and chat answers, a probe's offer
+#: and message cases, a report's written analysis, the Servers page's test; design/phase3-features.md P3.3.7).
+PURPOSES = ("game", "pooled", "benchmark", "probe", "scenario", "lab")
 
 PURPOSE_LABELS = {
-    "game": "ordinary games", "benchmark": "benchmarks", "probe": "probes",
+    "game": "ordinary games", "pooled": "pooled prompts", "benchmark": "benchmarks", "probe": "probes",
     "scenario": "scenarios", "lab": "lab runs",
 }
 

@@ -3,8 +3,9 @@
 A model seat's lease is made when its game's session is registered (created, loaded paused, brought back by
 ``restore_live``, reloaded by a benchmark, launched from a scenario) and released when the seat changes or is
 eliminated, the game ends, stops, crashes or makes way; ``pool.seats.occupied()`` lists the leases live on a machine,
-so a queued benchmark job waits for every game that will want the machine, whoever moves first. A probe run and a
-report's narrative hold a non-lending lease for their runs. A benchmark job's start waits for the machine's pooled
+so a queued benchmark job waits for every game that will want the machine, whoever moves first. A probe's turn case
+holds a non-lending lease for the case; a report's narrative and a probe's offer and message cases are pooled prompts
+and hold none (package 3-09: ``tests/test_pooled_work.py``). A benchmark job's start waits for the machine's pooled
 requests to drain (``drain_s``); a drain cut short by its bound marks the job ``contaminated`` and leaves its timing out
 of the speed score.
 """
@@ -282,8 +283,9 @@ class Registration(LeaseCase):
 # ---------------------------------------------------------------------------- gate 2
 
 class OccupiedIsTheLeases(LeaseCase):
-    """Gate 2: occupied() is the scheduler's live leases; benchmark jobs wait for lease slots; probe runs and reports
-    hold theirs for their runs; the usage ledger counts only leased machines."""
+    """Gate 2: occupied() is the scheduler's live leases; benchmark jobs wait for lease slots; the usage ledger counts
+    only leased machines. (A probe run's and a report's holding of their machines became package 3-09's tickets and
+    turn-case leases: ``tests/test_pooled_work.py``.)"""
 
     def test_occupied_lists_exactly_the_live_leases(self):
         sched = S.get()
@@ -297,13 +299,14 @@ class OccupiedIsTheLeases(LeaseCase):
         label = f"game “{two.name}”"
         self.assertEqual(same(), [label, label], "one per lease: a game with two model seats there holds two")
         self.assertEqual(pool_seats.held_text(pool_seats.occupied("sv_dryrun")), label, "named once in a sentence")
-        report = sched.lease("sv_dryrun", "dry-run", kind="report", label="report “r”", ref=("report", "r1"))
+        bench = sched.lease("sv_dryrun", "dry-run", kind="benchmark", label="benchmark run “b”", ref=("benchmark", "b1"))
         probe = sched.lease("sv_dryrun", "dry-run", kind="probe_case", label="probe run “p”", ref=("probe", "p1"))
-        self.assertEqual(same(), [label, label, "report “r”", "probe run “p”"])
+        self.assertEqual(same(), [label, label, "benchmark run “b”", "probe run “p”"])
         self.assertEqual([(o["kind"], o["id"]) for o in pool_seats.occupants("sv_dryrun")],
-                         [("game", two.id), ("game", two.id), ("report", "r1"), ("probe", "p1")])
-        self.assertEqual(pool_seats.occupied("sv_dryrun", exclude=frozenset({two.id})), ["report “r”", "probe run “p”"])
-        report.release()
+                         [("game", two.id), ("game", two.id), ("benchmark", "b1"), ("probe", "p1")])
+        self.assertEqual(pool_seats.occupied("sv_dryrun", exclude=frozenset({two.id})),
+                         ["benchmark run “b”", "probe run “p”"])
+        bench.release()
         two.update_seat(2, type="bot")
         self.assertEqual(same(), [label, "probe run “p”"])
         probe.release()
@@ -326,65 +329,6 @@ class OccupiedIsTheLeases(LeaseCase):
         a.update_seat(2, type="bot")                         # one lease left: a slot for the job
         self.assertTrue(until(lambda: (sch.tick() or True) and job["status"] in ("loading", "running"), 15), job)
         sch.control_run(run["id"], "cancel")
-
-    def test_a_probe_run_holds_its_lease_for_the_run_and_its_cases_play_under_it(self):
-        from citar import engine_api as E, probes as P
-        from citar.engine_api import EngineGame
-        E.save_map(dict(E.generate_map(40, 26, "pangaea", 2, 2, seed=11, name="lease-map"), id="lease-map"))
-        g = EngineGame.new({"map": "lease-map", "players": [{"controller": "human"}, {"controller": "llm"}],
-                            "seed": 5, "speed": "Quick"})
-        g.apply_ops([{"op": "set_player", "player": "all", "gold": 500}, {"op": "meet", "a": 0, "b": 1}])
-        g.save_scenario("lease-scn", "Lease scenario", "", [{"type": "script"}, {"type": "llm"}])
-        self.addCleanup(E.delete_scenario, "lease-scn")
-        probe = P.validate({"id": "lease-probe", "scenario": "lease-scn", "subject": 1, "counterparty": 0, "cases": [
-            {"id": "gift", "kind": "offer", "give": [{"type": "gold", "amount": 100}], "receive": []},
-            {"id": "turn", "kind": "turn"}]})
-        runner = P.ProbeRunner.__new__(P.ProbeRunner)
-        runner.manager, runner.lock, runner._stop_run, runner._thread = self.manager, threading.Lock(), set(), None
-        runner.lives, runner._workers, runner._loaded = {}, {}, {}
-        rid = f"lease-run-{int(time.time() * 1000) % 100000}"
-        runner._write({"id": rid, "name": "lease run", "probe": probe, "llm": dict(GPU), "repeats": 1,
-                       "jobs": [{"case": "gift", "rep": 0}, {"case": "turn", "rep": 0}], "status": "queued", "done": 0,
-                       "created": time.time(), "started": None, "finished": None, "summary": {}, "owner_id": None})
-        events, seen = [], []
-        S.get().add_listener(events.append)
-        worker = threading.Thread(target=runner._run, args=(rid,), daemon=True)
-        worker.start()
-        while worker.is_alive():
-            seen.append(tuple(labels("sv_gpu")))
-            time.sleep(0.02)
-        worker.join()
-        held = [x for x in seen if x]
-        self.assertTrue(held, "the run held its machine while it ran")
-        self.assertEqual(set(held), {("probe run “lease run”",)},
-                         "one lease for the whole run: no case made one of its own")
-        self.assertEqual(labels("sv_gpu"), [], "released when the run is over")
-        self.assertEqual(runner.get_run(rid)["status"], "finished", runner.get_run(rid))
-        self.assertTrue(events, "the cases asked the model")
-        self.assertEqual({(e.machine, e.cls, e.activity, e.task_class) for e in events},
-                         {("sv_gpu", "probe_case", f"probe:{rid}", "full")})
-
-    def test_a_report_holds_its_lease_while_its_narrative_is_written(self):
-        from citar import reports
-        runner = reports.ReportRunner(self.dir / "reports")
-        runner.POLL_SECONDS = 0.05
-        events, seen = [], []
-        S.get().add_listener(events.append)
-        m = runner.start({"title": "Lease report", "sections": ["summary"],
-                          "narrative": {"enabled": True, "server_id": "sv_gpu", "model_id": "m_gpu"}})
-        deadline = time.monotonic() + 60
-        while runner.meta(m["id"])["status"] in ("queued", "running") and time.monotonic() < deadline:
-            seen.append(tuple(labels("sv_gpu")))
-            time.sleep(0.02)
-        meta = runner.meta(m["id"])
-        self.assertEqual(meta["status"], "done", meta.get("error"))
-        self.assertIn("Dry run narrative", runner.html_path(m["id"]).read_text(encoding="utf-8"))
-        self.assertIn(("report “Lease report”",), seen, "the report held its machine while it was built")
-        self.assertEqual({x for x in seen if x}, {("report “Lease report”",)})
-        self.assertTrue(until(lambda: labels("sv_gpu") == [], 5), "released when it is built")
-        self.assertEqual([(e.machine, e.cls, e.activity) for e in events],
-                         [("sv_gpu", "report", f"report:{m['id']}")], "one scheduled request, metered to the report")
-        shutil.rmtree(runner.dir, ignore_errors=True)
 
     def test_the_usage_ledger_counts_only_leased_machines(self):
         from citar import usage
@@ -801,108 +745,6 @@ class GrantPurposes(LeaseCase):
         later.owner_id = member_id
         self.assertIs(later.lease_for(0), early)
         self.assertEqual((early.consumer, early.cap), (member_id, 1))
-
-
-class ReportOnHelper(LeaseCase):
-    """A report whose narrative a helper machine writes waits in the queue while the helper is offline, holding nothing,
-    and rides out a helper that drops while it is built (as the narrative's polling of a helper did before)."""
-
-    def setUp(self):
-        super().setUp()
-        from citar import reports
-        from citar.db.models import Server
-        with db.session() as s:
-            row = Server(owner_id=None, name="Helper box", kind="owned", provider="lmstudio", reach="worker",
-                         config={"models": [{"key": "helper-model"}]})
-            s.add(row)
-            s.flush()
-            self.sid = row.id
-        servers.invalidate()
-        self.reports = reports
-        self.runner = reports.ReportRunner(self.dir / "reports")
-        self.runner.POLL_SECONDS = 0.05
-        self.runner.RETRY_MIN_SECONDS = 0.05
-        self.runner.RECONNECT_POLL_SECONDS = 0.1
-        self.calls: list = []
-
-    def start(self):
-        return self.runner.start({"title": "Helper report", "sections": ["summary"],
-                                  "narrative": {"enabled": True, "server_id": self.sid, "model_id": "helper-model"}})
-
-    def built(self, rid: str) -> dict:
-        self.assertTrue(until(lambda: self.runner.meta(rid)["status"] not in ("queued", "running"), 30))
-        return self.runner.meta(rid)
-
-    def test_a_report_waits_in_the_queue_while_its_helper_is_offline(self):
-        online = {"on": False}
-
-        def complete(cfg, system, prompt, binding):
-            self.calls.append((binding.kind, binding.server_id))
-            return "Written on the helper.", 0.5
-        with mock.patch.object(self.reports, "_helper_online", lambda sid: online["on"]), \
-                mock.patch.object(self.reports, "complete", complete):
-            m = self.start()
-            self.assertTrue(until(lambda: self.runner.meta(m["id"]).get("waiting"), 10))
-            time.sleep(0.3)
-            meta = self.runner.meta(m["id"])
-            self.assertEqual((meta["status"], meta["waiting"]), ("queued", "Helper box's helper is offline"))
-            self.assertEqual(labels(self.sid), [], "it holds nothing while it waits")
-            self.assertEqual(self.calls, [], "and asks nothing of a helper that is not there")
-            online["on"] = True
-            meta = self.built(m["id"])
-        self.assertEqual(meta["status"], "done", meta.get("error"))
-        self.assertIn("Written on the helper.", self.runner.html_path(m["id"]).read_text(encoding="utf-8"))
-        self.assertEqual(self.calls, [("report", self.sid)])
-
-    def test_a_helper_that_drops_while_the_report_is_built_is_waited_for(self):
-        from citar.agents.providers.worker_provider import WorkerConnectionError
-        answers = [WorkerConnectionError("the helper disconnected"), WorkerConnectionError("not connected")]
-
-        def complete(cfg, system, prompt, binding):
-            self.calls.append(time.perf_counter())
-            if answers:
-                raise answers.pop(0)
-            return "Written after the helper came back.", 0.5
-        with mock.patch.object(self.reports, "_helper_online", lambda sid: True), \
-                mock.patch.object(self.reports, "complete", complete):
-            meta = self.built(self.start()["id"])
-        self.assertEqual(meta["status"], "done", meta.get("error"))
-        self.assertEqual(len(self.calls), 3, "tried again once the helper was back")
-        self.assertGreaterEqual(self.calls[1] - self.calls[0], 0.04, "never in a tight loop")
-        self.assertIn("Written after the helper came back.",
-                      self.runner.html_path(meta["id"]).read_text(encoding="utf-8"))
-
-    def test_the_wait_is_bounded_and_other_failures_are_not_retried(self):
-        from citar.agents.providers.worker_provider import WorkerConnectionError
-        self.runner.RECONNECT_SECONDS = 0.3
-        notes, narrative = [], self.runner._narrative
-
-        def noted(*a, **kw):
-            out = narrative(*a, **kw)
-            notes.append(out[1])
-            return out
-        self.runner._narrative = noted
-
-        def gone(cfg, system, prompt, binding):
-            self.calls.append("gone")
-            raise WorkerConnectionError("the helper is not connected")
-        with mock.patch.object(self.reports, "_helper_online", lambda sid: True), \
-                mock.patch.object(self.reports, "complete", gone):
-            meta = self.built(self.start()["id"])
-        self.assertEqual(meta["status"], "done", "the report is built without its narrative")
-        self.assertTrue(notes[-1].startswith("The narrative failed: WorkerConnectionError"), notes)
-        self.assertGreater(len(self.calls), 1)
-        self.calls.clear()
-
-        def refused(cfg, system, prompt, binding):
-            self.calls.append("refused")
-            raise RuntimeError("the machine refused the request")
-        with mock.patch.object(self.reports, "_helper_online", lambda sid: True), \
-                mock.patch.object(self.reports, "complete", refused):
-            meta = self.built(self.start()["id"])
-        self.assertEqual(meta["status"], "done")
-        self.assertEqual(self.calls, ["refused"], "a refusal is not a dropped helper: not tried again")
-        self.assertTrue(notes[-1].startswith("The narrative failed: RuntimeError"), notes)
 
 
 class SpeedScoreLeavesContaminatedTimingsOut(unittest.TestCase):

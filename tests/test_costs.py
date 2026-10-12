@@ -210,18 +210,20 @@ class LedgerAndReportTests(unittest.TestCase):
 
 
 class ReportQueueTests(unittest.TestCase):
-    def test_a_report_waits_in_the_machine_queue(self):
+    def test_a_reports_narrative_waits_in_its_machines_line(self):
         """A report whose analysis is written by a model used to run at once, busy machine or not, and was not in
-        the queue at all."""
-        from unittest import mock
+        any queue at all. Its narrative is a pooled prompt now (package 3-09): while a benchmark holds the machine, a
+        report without a model is built at once and the one with waits as a ticket in the machine's line (its place
+        its progress), in no job queue; it is built once the benchmark is gone."""
         from citar import reports
-        from citar.pool import queue as work_queue
-        busy = {"on": True}
+        from citar.pool import queue as work_queue, scheduler as S
+        S.reset()
+        self.addCleanup(S.reset)
         runner = reports.ReportRunner(Path(tempfile.mkdtemp(prefix="citar-reports-")))
-        runner.POLL_SECONDS = 0.2
-        holder = {"label": "game “x”", "kind": "game", "id": "x", "game": "x"}
-        with mock.patch("citar.pool.seats.occupants",
-                        lambda sid, exclude=frozenset(): [holder] if busy["on"] and sid == "sv_dryrun" else []):
+        self.addCleanup(shutil.rmtree, runner.dir, ignore_errors=True)
+        bench = S.get().lease("sv_dryrun", "dry-run", kind="benchmark", label="benchmark run “x”",
+                              ref=("benchmark", "x"))
+        try:
             plain = runner.start({"title": "No model", "sections": ["summary"]})
             m = runner.start({"title": "Written", "sections": ["summary"],
                               "narrative": {"enabled": True, "server_id": "sv_dryrun", "model_id": "m_dry"}})
@@ -229,19 +231,22 @@ class ReportQueueTests(unittest.TestCase):
             while runner.meta(plain["id"])["status"] != "done" and time.time() < deadline:
                 time.sleep(0.1)
             self.assertEqual(runner.meta(plain["id"])["status"], "done", "a report without a model does not wait")
-            time.sleep(0.6)
-            meta = runner.meta(m["id"])
-            self.assertEqual(meta["status"], "queued")
-            self.assertIn("in use by", meta["waiting"])
-            queued = [it for it in work_queue.waiting("sv_dryrun") if it["kind"] == "report"]
-            self.assertEqual([it["id"] for it in queued], [m["id"]])
-            busy["on"] = False
-            while runner.meta(m["id"])["status"] in ("queued", "running") and time.time() < deadline:
+            while not runner.meta(m["id"]).get("progress", "").startswith("Waiting for Dry run")                     and time.time() < deadline:
                 time.sleep(0.1)
+            meta = runner.meta(m["id"])
+            self.assertEqual(meta["status"], "running")
+            self.assertTrue(meta["progress"].startswith("Waiting for Dry run: 1st in line"), meta["progress"])
+            waiting = S.get().machine("sv_dryrun").view()["waiting"]
+            self.assertEqual([(t["class"], t["label"]) for t in waiting], [("report", "report “Written”")])
+            self.assertEqual([it for it in work_queue.waiting("sv_dryrun") if it["kind"] == "report"], [],
+                             "reports are in no job queue")
+        finally:
+            bench.release()
+        while runner.meta(m["id"])["status"] in ("queued", "running") and time.time() < deadline:
+            time.sleep(0.1)
         meta = runner.meta(m["id"])
         self.assertEqual(meta["status"], "done", meta.get("error"))
         self.assertIn("Dry run narrative", runner.html_path(m["id"]).read_text(encoding="utf-8"))
-        shutil.rmtree(runner.dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

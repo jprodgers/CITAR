@@ -114,7 +114,8 @@ class TestRoute(unittest.TestCase):
                 self.ids[handle] = user.id
             alice = s.get(User, self.ids["alice"])
             group = pool.create_group(s, alice, name="Alice's", visibility="private")
-            pool.create_grant(s, alice, group, subject_type="user", subject_handle="bob", purposes=["game"])
+            # a test is a pooled prompt (P3.3.7): his grant covers them as well as games
+            pool.create_grant(s, alice, group, subject_type="user", subject_handle="bob", purposes=["game", "pooled"])
             self.machines = {}
             for key in ("gpu", "spare", "picky"):
                 row = Server(owner_id=alice.id, name=f"Alice {key}", kind="owned", provider="lmstudio", reach="worker",
@@ -218,6 +219,9 @@ class TestRoute(unittest.TestCase):
         his.start()
         machine = S.get().machine(self.machines["gpu"])
         self.assertTrue(_until(lambda: len(machine.waiting) == 1), "his test waits for the slot")
+        # a measurable wait: answered within a millisecond of his arrival, his queue time (rounded to the millisecond
+        # by the route) could read 0
+        time.sleep(0.05)
 
         for helper in self.helpers.values():
             helper.answer_held()

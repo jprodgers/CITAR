@@ -296,9 +296,10 @@ class PooledWork(unittest.TestCase):
                 both.set()
             release.wait(10)
         runner._run = fake_run
-        # a lobby game's seat holding the busy machine (the leases are what occupied() lists)
-        held = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “long one”",
-                                            ref=("game", "long-one"))
+        # a benchmark holding the busy machine: a probe run waits for it (a lobby game's lease would not hold it up,
+        # its prompts run on the slots the game's seat lends; package 3-09)
+        held = prompt_scheduler.get().lease(self.server_id, "m1", kind="benchmark", label="benchmark run “long one”",
+                                            ref=("benchmark", "long-one"))
         loop = threading.Thread(target=runner._loop, daemon=True)
         try:
             loop.start()
@@ -308,7 +309,7 @@ class PooledWork(unittest.TestCase):
             self.assertEqual(waiting["status"], "waiting (machine busy)")
             # the note names the holder to whoever may see it (the run's route); its stored text names nobody
             self.assertIn("long one", seats.note_text(waiting["waiting_note"], lambda h: h["label"]))
-            self.assertEqual(waiting["waiting"], "waiting for someone's game")
+            self.assertEqual(waiting["waiting"], "waiting for someone's benchmark run")
         finally:
             held.release()
             release.set()
@@ -345,22 +346,29 @@ class PooledWork(unittest.TestCase):
             work_queue.set_priority("benchmark", run["id"], 0)
             work_queue.register("probe", lambda: [])
 
-    def test_a_probe_run_holds_its_machine(self):
-        """A probe run's lease on its subject's machine (``ProbeRunner._lease``, held for the run) is what occupied()
-        lists, as the Queue page names it: a probe run, which never lends its slot."""
-        from citar import probes
-        from citar.pool import seats
-        run = {"name": "x", "llm": {"server_id": self.server_id, "model": "m1"}, "owner_id": None}
-        lease = probes.ProbeRunner._lease("pr-x", run, "probe:pr-x")
+    def test_a_lobby_game_does_not_hold_a_probe_run_up_but_a_benchmark_does(self):
+        """A probe run's prompts are tickets and its turn cases take a lease each (package 3-09): a lobby game's lease
+        on its machine leaves it free to start (its prompts run on the slots the game's seat lends), a benchmark's
+        holds it."""
+        from citar.pool import scheduler as prompt_scheduler
+        runner = self._bare_runner()
+        rid = f"test-beside-{int(time.time() * 1000) % 100000}"
+        runner._write({"id": rid, "name": "beside", "llm": {"server_id": self.server_id}, "status": "queued",
+                       "jobs": []})
+        game = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “a lobby game”",
+                                            ref=("game", "lobby-1"))
         try:
-            self.assertEqual(seats.occupied(self.server_id), ["probe run “x”"])
-            self.assertEqual([(o["kind"], o["id"]) for o in seats.occupants(self.server_id)], [("probe", "pr-x")])
-            self.assertEqual((lease.kind, lease.lends, lease.activity), ("probe_case", False, "probe:pr-x"))
+            self.assertFalse(runner._machine_busy(rid), "a lobby game holds no probe run up")
+            bench = prompt_scheduler.get().lease(self.server_id, "m1", kind="benchmark", label="benchmark run “b”",
+                                                 ref=("benchmark", "b-1"))
+            try:
+                self.assertTrue(runner._machine_busy(rid), "a benchmark does")
+                self.assertEqual(runner.get_run(rid)["waiting"], "waiting for someone's benchmark run")
+            finally:
+                bench.release()
+            self.assertFalse(runner._machine_busy(rid))
         finally:
-            lease.release()
-        self.assertEqual(seats.occupied(self.server_id), [])
-        self.assertIsNone(probes.ProbeRunner._lease("pr-y", {"name": "y", "llm": {"provider": "bot"}}, "probe:pr-y"),
-                          "the bot as the subject holds no machine")
+            game.release()
 
 
 class QuietHours(unittest.TestCase):

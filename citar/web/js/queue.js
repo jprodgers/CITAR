@@ -1,6 +1,10 @@
 // Queue page: all the work waiting to run, in the order it will run, with priorities you can change.
-// Model machines take benchmark jobs and probe runs from one queue (citar.pool.queue); this server's CPU takes the
-// lab's experiments. Higher priority goes first; equal priorities go in the order they were queued.
+// Each model machine you may see (yours, those your grants reach) shows its slots, the seats that play every turn on it
+// (leases), its jobs (benchmark jobs and probe runs, from one queue: citar.pool.queue) and its pooled prompts (reports'
+// written analyses, probes' offers and messages, machine tests: the prompt scheduler's tickets), each list in the order
+// it will run. Other members' work you may not see is "someone's ..." with no name; machines you may not see are only
+// counted. This server's CPU takes the lab's experiments. Higher priority goes first; equal priorities go in the order
+// they were queued (and pooled prompts take turns between members).
 import { getCsrfToken } from "./api.js";
 import { el, clear, toast } from "./util.js";
 import { pageHeader, bar } from "./nav.js";
@@ -11,15 +15,18 @@ async function get(url) {
   return res.json();
 }
 
-async function setPriority(kind, id, priority) {
-  const res = await fetch("/api/queue/priority", {
+async function post(url, body) {
+  const res = await fetch(url, {
     method: "POST", credentials: "same-origin",
     headers: { "Content-Type": "application/json", "x-citar-csrf": getCsrfToken() },
-    body: JSON.stringify({ kind, id, priority }),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).detail) || res.statusText);
   return res.json();
 }
+
+const setPriority = (kind, id, priority) => post("/api/queue/priority", { kind, id, priority });
+const cancelPrompt = (id) => post(`/api/queue/tickets/${encodeURIComponent(id)}/cancel`);
 
 // ▲ / ▼ and the number: one step moves work past everything at the default priority; ⤒ puts it above everything
 // on its machine - running work included, which then makes way at its next safe point
@@ -39,20 +46,38 @@ function priorityControl(kind, id, value, refresh, top) {
 }
 
 const KIND_LABEL = { benchmark: "benchmark job", probe: "probe run", report: "report (written analysis)", game: "game" };
+const LEASE_KIND = { game: "game", benchmark: "benchmark", probe_case: "probe turn case" };
+const LEASE_STATE = {
+  active: ["live", "mid-turn"],
+  lending: ["", "between turns: lends its slot"],
+  held: ["quiet", "holds its slot"],
+};
+const PROMPT_CLASS = { report: "report", probe: "probe case", chat: "chat answer", diplomat: "diplomat", test: "machine test" };
 
-function machineCard(m, refresh) {
-  const card = el("div", { class: "card q-machine" });
-  card.append(el("div", { class: "row" },
-    el("h3", { style: { margin: 0 } }, m.name),
-    el("span", { class: `pill ${m.online ? "live" : ""}` }, m.online ? "helper connected" : m.online === false ? "offline" : "—"),
-    el("span", { class: "grow" }),
-    el("span", { class: "muted" }, `${m.waiting.length} waiting`)));
+// a duration in words: "12 s", "3 min", "1 h 05 min"
+function secs(s) {
+  if (s == null) return "—";
+  if (s < 60) return `${Math.round(s)} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  const m = Math.round(s / 60);
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min`;
+}
+
+function leasesBlock(m) {
+  if (!(m.leases || []).length) return null;
+  return el("div", { class: "q-leases" },
+    el("div", { class: "muted small" }, "Seats that play every turn here:"),
+    el("ul", { class: "q-list" }, ...m.leases.map((l) => {
+      const [pill, text] = LEASE_STATE[l.state] || ["", l.state];
+      return el("li", {}, l.label, l.member ? el("span", { class: "muted" }, ` · ${l.member}`) : null, " ",
+        el("span", { class: `pill ${pill}` }, text),
+        el("span", { class: "muted small" }, ` ${LEASE_KIND[l.kind] || l.kind}${l.waiting ? " · its next step is waiting" : ""}`));
+    })));
+}
+
+function jobsBlock(m, refresh) {
   const running = m.running || [];
-  const others = m.busy_with.filter((b) => !running.some((r) => b.includes(r.run || r.label)));
-  if (!running.length && !m.waiting.length) {
-    card.append(el("p", { class: "muted" }, m.busy_with.length ? `In use by ${m.busy_with.join(", ")}.` : "Free, and nothing waiting."));
-    return card;
-  }
+  if (!running.length && !m.waiting.length) return null;
   // one ranked list: what runs now, then what waits, in the order it will run. Runs are prioritised as a whole,
   // so the controls sit on the first item of each run.
   const all = [...running.map((it) => ({ ...it, now: true })), ...m.waiting];
@@ -71,14 +96,60 @@ function machineCard(m, refresh) {
       el("td", {}, it.label, it.kind === "benchmark" ? el("div", { class: "muted small" }, it.run) : null),
       el("td", {}, KIND_LABEL[it.kind] || it.kind),
       // controls only on work the caller manages; others' work is "someone's <kind>" (design P3.2.4)
-      el("td", {}, first && it.can_manage !== false ? priorityControl(it.kind, it.group, it.priority || 0, refresh, top)
+      el("td", {}, first && it.can_manage && it.group ? priorityControl(it.kind, it.group, it.priority || 0, refresh, top)
         : el("span", { class: "muted" }, it.priority)),
       el("td", { class: "muted small" }, it.now ? (it.state && it.state !== "running" ? `${it.state}; keeps its place on the machine` : "using the machine")
         : outranks ? "higher priority: starts once the running work finishes its current turn"
           : (it.waiting || "").replace(/^waiting:? ?(for )?/, ""))));
   }
-  card.append(table);
-  if (others.length) card.append(el("p", { class: "muted small" }, `Also holding the machine: ${others.join(", ")}.`));
+  return el("div", {}, el("div", { class: "muted small" }, "Jobs:"), table);
+}
+
+function promptsBlock(m, refresh) {
+  const prompts = m.prompts || { running: [], waiting: [] };
+  const rows = [...prompts.running.map((p) => ({ ...p, now: true })), ...prompts.waiting];
+  if (!rows.length) return null;
+  const table = el("table", { class: "q-table" }, el("tr", {}, el("th", {}, "#"), el("th", {}, "What"), el("th", {}, "Kind"),
+    el("th", {}, "Model"), el("th", {}, "Priority"), el("th", {}, "Waited"), el("th", {}, "Starts"), el("th", {}, "")));
+  for (const p of rows) {
+    const cancel = p.can_cancel && p.id
+      ? el("button", { class: "small", title: "Cancel this prompt: its caller goes on without it",
+        onclick: async () => { try { await cancelPrompt(p.id); refresh(); } catch (e) { toast(e.message, "error"); } } }, "Cancel")
+      : null;
+    const state = p.now
+      ? el("span", { class: "pill live" }, p.draining ? "finishing" : p.borrowing ? "running on a lent slot" : "running")
+      : p.position === 1 ? "next" : p.position;
+    table.append(el("tr", { class: p.now ? "q-now-row" : p.position === 1 ? "q-next" : "" },
+      el("td", {}, state),
+      el("td", {}, p.label, p.member ? el("div", { class: "muted small" }, p.member) : null),
+      el("td", {}, PROMPT_CLASS[p.class] || p.class),
+      el("td", { class: "muted small" }, p.model || "—"),
+      el("td", {}, p.can_manage && p.ref ? priorityControl(p.ref[0], p.ref[1], p.priority || 0, refresh)
+        : el("span", { class: "muted" }, p.priority)),
+      el("td", { class: "muted small" }, p.now ? `${secs(p.waited_s)} · running ${secs(p.running_s)}` : secs(p.waited_s)),
+      el("td", { class: "muted small" }, p.now ? "—"
+        : `in about ${secs(p.eta_s)}${p.starts_within_s != null ? ` (gives up after ${secs(p.starts_within_s)})` : ""}`),
+      el("td", {}, cancel)));
+  }
+  return el("div", {}, el("div", { class: "muted small" }, "Pooled prompts:"), table);
+}
+
+function machineCard(m, refresh) {
+  const card = el("div", { class: "card q-machine" });
+  const waitingPrompts = ((m.prompts || {}).waiting || []).length;
+  const slots = m.capacity != null ? `${m.in_flight} of ${m.capacity} slot${m.capacity === 1 ? "" : "s"} in use` : null;
+  card.append(el("div", { class: "row" },
+    el("h3", { style: { margin: 0 } }, m.name),
+    el("span", { class: `pill ${m.online ? "live" : ""}` }, m.online ? "helper connected" : m.online === false ? "offline" : "—"),
+    el("span", { class: "grow" }),
+    slots ? el("span", { class: "muted" }, slots) : null,
+    el("span", { class: "muted" }, ` · ${m.waiting.length + waitingPrompts} waiting`)));
+  const blocks = [leasesBlock(m), jobsBlock(m, refresh), promptsBlock(m, refresh)].filter(Boolean);
+  if (!blocks.length) {
+    card.append(el("p", { class: "muted" }, m.busy_with.length ? `In use by ${m.busy_with.join(", ")}.` : "Free, and nothing waiting."));
+    return card;
+  }
+  card.append(...blocks);
   return card;
 }
 
@@ -117,15 +188,22 @@ export async function renderQueue(root) {
   page.appendChild(pageHeader("queue"));
   const body = el("div");
   page.append(el("div", { class: "card" }, el("h2", { style: { margin: 0 } }, "Queue"),
-    el("p", { class: "muted" }, "Everything that uses a model machine (games, benchmark jobs, probe runs and reports with a written analysis) is in one ranked list per machine; the lab has its own on this server's CPU. ",
-      "Higher priority runs first, then whatever has waited longest. Put something above the running work (⤒ top) and the running work makes way at its next safe point, ",
+    el("p", { class: "muted" }, "Each model machine you may use shows the seats that play every turn on it, its jobs (benchmark jobs and probe runs) ",
+      "and its pooled prompts (reports' written analyses, probes' offers and messages, machine tests), each in the order it will run. ",
+      "A seat lends its slot to pooled prompts between its turns, and gets it back within one short prompt. ",
+      "Higher priority runs first, then whatever has waited longest; pooled prompts also take turns between members. ",
+      "Put a job above the running work (⤒ top) and the running work makes way at its next safe point, ",
       "a game after the model's current turn and a probe run between cases, then carries on when it is back on top.")), body);
   const refresh = async () => {
     try {
       const q = await get("/api/queue");
       clear(body);
-      if (!q.machines.length) body.append(el("div", { class: "card" }, el("p", { class: "muted" }, "Nothing is waiting for a model machine.")));
+      if (!q.machines.length) body.append(el("div", { class: "card" }, el("p", { class: "muted" }, "Nothing is waiting for a model machine you may use.")));
       for (const m of q.machines) body.append(machineCard(m, refresh));
+      if (q.others_busy) {
+        body.append(el("p", { class: "muted small" },
+          `${q.others_busy} other machine${q.others_busy === 1 ? " is" : "s are"} busy.`));
+      }
       body.append(cpuCard(q.cpu, refresh));
     } catch (e) { toast(e.message, "error"); }
   };

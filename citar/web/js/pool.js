@@ -21,8 +21,11 @@ import {
 import * as auth from "./auth.js";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// what a grant may be limited to (citar.pool.admission.PURPOSES): "game" is a model seat that plays every turn,
+// "pooled" one prompt at a time (a report's written analysis, a probe's offer or message, a machine test, later a
+// hybrid seat's diplomacy)
 const PURPOSES = [
-  ["game", "Ordinary games"], ["benchmark", "Benchmarks"], ["probe", "Probes"],
+  ["game", "Ordinary games"], ["pooled", "Pooled prompts"], ["benchmark", "Benchmarks"], ["probe", "Probes"],
   ["scenario", "Scenarios"], ["lab", "Lab runs"],
 ];
 const ICON = { owned: "🖥", leased: "☁", api: "🔑", test: "🧪" };

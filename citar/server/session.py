@@ -111,16 +111,17 @@ class GameSession:
         # The model seats' leases on their machines (design/phase3-features.md P3.3.3): a lease belongs to the seat,
         # not to its agent, and every request the seat makes is one of its (lease_for). They are made when the session
         # is registered (``start``: open_leases) and released when a seat changes or is eliminated, the game ends,
-        # stops or crashes, or makes way for other work. ``lease_kind`` overrides the kind a game's leases take (a
-        # probe's turn case: probe_case).
+        # stops or crashes, or makes way for other work. ``lease_kind`` overrides the kind a game's leases take, and
+        # ``lease_ref`` and ``lease_label`` the work they serve and how it is named (a probe's turn case: probe_case,
+        # its probe run).
         self.leases: dict = {}
         self.lease_kind: Optional[str] = None
+        self.lease_ref: Optional[tuple] = None
+        self.lease_label: Optional[str] = None
         self._lease_lock = threading.Lock()
         # set once every seat's lease is released for good (the game ended, stopped or crashed): a lease made after
         # that would hold its machine for a game that plays no more, and nothing would ever release it
         self._leases_closed = False
-        # seats whose lease another holds and releases (a probe run's, adopt_lease): the session never releases it
-        self._adopted: set = set()
         # seats eliminated since the session began: no lease is made for them again
         self._seats_out: set = set()
         # open_leases asked for by a thread that held the game's lock (it reads the database): the driver does it
@@ -570,6 +571,25 @@ class GameSession:
                 return agent
         return None
 
+    def prompt_agent(self, pid: int):
+        """A model seat's agent for pooled prompts (design/phase3-features.md P3.3.3: a probe's offer and message
+        cases), made fresh: it is bound to no lease, so the seat holds none while it answers, and its caller gives it
+        each prompt's ticket (``agent.binding``) before it asks. A seat whose block names no machine its game may use
+        gets a ``NoMachineAgent``, as ``get_agent`` gives it. Reads the database: never call it with the game's lock
+        held."""
+        from ..agents.llm_agent import LLMAgent, NoMachineAgent
+        from .. import servers
+        seat = self.seats[pid]
+        block = seat.llm
+        try:
+            agent = LLMAgent(servers.resolve_llm(block, inline_ok=self._inline_llm_allowed(block)))
+        except servers.ServerError as e:
+            agent = NoMachineAgent(str(e))
+        with self.lock:
+            self.cancel_agent(pid)
+            self.agents[pid] = agent        # the game's stop cancels it
+        return agent
+
     def lease_for(self, pid: int, model: str = "", *, answering: bool = False):
         """The seat's lease on its machine (design/phase3-features.md P3.3.3): made when the session is registered
         (``open_leases``), else on first use (a game opened only to be looked at, a probe case played outside a run).
@@ -616,8 +636,8 @@ class GameSession:
             if lease is not None:
                 self._let_go(pid, lease)
             lease = sched.lease(sid, model, kind=kind, activity=self.usage_act, consumer=self.owner_id,
-                                label=f"game “{self.name}”", cap=cap, game=self.id, ref=self._lease_ref(),
-                                on_status=self._lease_status if kind == "benchmark" else None)
+                                label=self.lease_label or f"game “{self.name}”", cap=cap, game=self.id,
+                                ref=self._lease_ref(), on_status=self._lease_status if kind == "benchmark" else None)
             self.leases[pid] = lease
             return lease
 
@@ -636,7 +656,10 @@ class GameSession:
         return self.CAP_PURPOSES.get(self._lease_kind(), "game")
 
     def _lease_ref(self) -> tuple:
-        """The work this game's leases serve, as the shared queue names it: its benchmark run, or the game."""
+        """The work this game's leases serve, as the shared queue names it: its benchmark run, the probe run a case is
+        part of (``lease_ref``), or the game."""
+        if self.lease_ref:
+            return tuple(self.lease_ref)
         run = (self.benchmark or {}).get("run_id") if isinstance(self.benchmark, dict) else None
         return ("benchmark", run) if run else ("game", self.id)
 
@@ -646,9 +669,8 @@ class GameSession:
 
     def _still_lease(self, pid: int, lease, sid: Optional[str], kind: str) -> bool:
         """Whether ``lease`` is still the seat's for machine ``sid``: live, on that machine, of the kind the game's
-        leases take now (a lease its holder lends the seat keeps its own kind). Leases' lock held."""
-        return lease is not None and not lease.released and lease.server_id == sid and \
-            (lease.kind == kind or pid in self._adopted)
+        leases take now. Leases' lock held."""
+        return lease is not None and not lease.released and lease.server_id == sid and lease.kind == kind
 
     def _live_lease(self, pid: int, sid: Optional[str], model: str, kind: str) -> tuple:
         """The seat's lease when it still plays ``sid``, brought up to date (its activity, consumer and model), and
@@ -660,38 +682,21 @@ class GameSession:
             lease = self.leases.get(pid)
             if not self._still_lease(pid, lease, sid, kind):
                 return None, False
-            new_owner = pid not in self._adopted and lease.consumer != self.owner_id
+            new_owner = lease.consumer != self.owner_id
             return self._renewed(pid, lease, model), new_owner
 
     def _renewed(self, pid: int, lease, model: str):
-        """``lease`` with the game's activity and owner (unless another holds it: ``adopt_lease``), and the model its
-        seat plays now (a model changed on the same machine keeps the lease: the loaded-model rule and the ETA read
-        the new one). Leases' lock held."""
-        if pid not in self._adopted:
-            lease.activity, lease.consumer = self.usage_act, self.owner_id
+        """``lease`` with the game's activity and owner, and the model its seat plays now (a model changed on the same
+        machine keeps the lease: the loaded-model rule and the ETA read the new one). Leases' lock held."""
+        lease.activity, lease.consumer = self.usage_act, self.owner_id
         if model and lease.model != model:
             lease.set_model(model)
         return lease
 
     def _let_go(self, pid: int, lease) -> None:
-        """The seat no longer plays under ``lease``: released, unless another holds it (``adopt_lease``), which
-        releases it itself. Leases' lock held; non-blocking."""
+        """The seat no longer plays under ``lease``: released. Leases' lock held; non-blocking."""
         self.leases.pop(pid, None)
-        if pid in self._adopted:
-            self._adopted.discard(pid)
-        else:
-            lease.release()
-
-    def adopt_lease(self, pid: int, lease) -> None:
-        """Play seat ``pid`` under a lease its caller holds and will release (a probe run's, held for the whole run
-        while its cases come and go, P3.3.3): every request of the seat is that lease's, and this session never
-        releases it."""
-        with self._lease_lock:
-            old = self.leases.get(pid)
-            if old is not None and old is not lease:
-                self._let_go(pid, old)
-            self.leases[pid] = lease
-            self._adopted.add(pid)
+        lease.release()
 
     def release_leases(self, pids=None, *, for_good: Optional[bool] = None) -> None:
         """Release the leases of ``pids`` (every seat's when None): the seat no longer plays its machine (a seat change,

@@ -93,15 +93,6 @@ def _liveness(server_id: str) -> Optional[bool]:
         return None
 
 
-def _load(server_id: str) -> Optional[int]:
-    """How many activities currently hold this server."""
-    try:
-        from .workers import hub
-        return hub().in_flight(server_id)
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------- servers
 
 @router.get("/servers")
@@ -116,8 +107,8 @@ def list_servers(request: Request, purpose: str = "game", p: Principal = Depends
     me = require_user(request, p)
     out = []
     for server in pool.servers_for(s, me):
-        decision = admission.check(s, me, server, purpose,
-                                   online=_liveness(server.id), in_flight=_load(server.id))
+        # no capacity step (P3.3.7): a machine busy right now queues the work, it does not refuse it
+        decision = admission.check(s, me, server, purpose, online=_liveness(server.id), in_flight=None)
         entry = pool.public_server(s, server, me)
         entry["admission"] = decision.client()
         entry["online"] = _liveness(server.id)
@@ -155,8 +146,7 @@ def get_server(server_id: str, request: Request, p: Principal = Depends(principa
     me = require_user(request, p)
     server = _server(s, server_id, me, access.VIEW)
     out = pool.public_server(s, server, me)
-    out["admission"] = admission.check(s, me, server, online=_liveness(server_id),
-                                       in_flight=_load(server_id)).client()
+    out["admission"] = admission.check(s, me, server, online=_liveness(server_id), in_flight=None).client()
     return out
 
 
@@ -568,9 +558,10 @@ def test_server(server_id: str, request: Request, model: str = "",
     closed, or with the named model not loaded — and the difference is worth one round trip before
     somebody schedules a six-hour benchmark against it.
 
-    The completion is a ``test`` ticket of the prompt scheduler (design/phase3-features.md P3.3.3): it waits for a
-    slot like any pooled prompt, on a model the helper has loaded (unless its owner allows swaps), and goes through
-    ``make_conversation`` like every model call. ``wait`` is how long the caller waits for the reply (1 to 120
+    The completion is a ``test`` ticket of the prompt scheduler (design/phase3-features.md P3.3.3): a pooled prompt,
+    admitted as every one is (P3.3.7: ``partial_llm`` and a grant for ``pooled``, its concurrency the caller's cap), it
+    waits for a slot like any pooled prompt, on a model the helper has loaded (unless its owner allows swaps), and goes
+    through ``make_conversation`` like every model call. ``wait`` is how long the caller waits for the reply (1 to 120
     seconds): then the ticket is cancelled, and a request the helper is still generating keeps its slot draining
     until the helper's late answer. A caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all
     (another answers at once, ``code`` ``duplicate`` or ``too_many``), at most ``server_test``'s rate
@@ -590,9 +581,12 @@ def test_server(server_id: str, request: Request, model: str = "",
         ratelimit.check("server_test", me.id)
     except ratelimit.RateLimited as exc:
         raise HTTPException(429, str(exc), headers={"Retry-After": str(exc.retry_after)}) from None
-    decision = admission.check(s, me, server, "game", online=_liveness(server.id), in_flight=None)
+    from ..auth import policy
+    if not policy.can(me, "partial_llm"):
+        return {"ok": False, "stage": "admission", "reason": policy.denial(me, "partial_llm"), "code": "capability"}
+    decision = admission.check(s, me, server, "pooled", online=_liveness(server.id), in_flight=None)
     if not decision.allowed:
-        return {"ok": False, "stage": "admission", "reason": decision.reason}
+        return {"ok": False, "stage": "admission", "reason": decision.reason, "code": decision.code}
 
     connection = hub().get(server.id)
     if connection is None:
@@ -686,7 +680,7 @@ def availability(request: Request, purpose: str = "game", p: Principal = Depends
     now = datetime.now(timezone.utc)
     usable, blocked = [], []
     for server, decision in admission.usable_servers(s, me, purpose, now=now,
-                                                     liveness=_liveness, load=_load,
+                                                     liveness=_liveness,
                                                      only=lambda row: pool.visible(s, me, row)):
         entry = {"id": server.id, "name": server.name, "provider": server.provider,
                  "models": [m.get("key") for m in (server.config or {}).get("models") or []],
