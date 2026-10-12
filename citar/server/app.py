@@ -2366,8 +2366,13 @@ async def worker_socket(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception:
-        import traceback
-        traceback.print_exc()
+        from starlette.websockets import WebSocketState
+        if not (connection is not None and connection.closed
+                and websocket.application_state != WebSocketState.CONNECTED):
+            import traceback
+            traceback.print_exc()
+        # else the hub dropped the helper (a revoked token, a disabled machine) and closed its socket before this
+        # loop's next receive: an ordinary end, not an error
     finally:
         if connection is not None:
             hub().unregister(connection)
