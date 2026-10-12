@@ -237,13 +237,15 @@ class SessionTests(unittest.TestCase):
                 return super().step()
 
         ScriptedConversation.scripts = {}
-        with mock.patch("citar.agents.llm_agent.make_conversation", SharedConversation):
+        with mock.patch("citar.agents.llm_agent.make_conversation", SharedConversation), \
+                self.assertLogs("citar.scheduler", level="WARNING") as logged:
             s = self.manager.create({"map_size": "duel", "seed": 4, "on_disconnect": "pause", "reconnect_seconds": 1},
                                     [{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}},
                                      {"type": "bot"}])
             self.assertTrue(self._wait(lambda: s.game.turn >= 2), "the turn should be played once the slot frees")
             self.assertFalse(s.paused)
             self.manager.delete(s.id)
+        self.assertTrue(any("refused a request as busy" in line for line in logged.output), "the mismatch is logged")
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "end_turn")
 

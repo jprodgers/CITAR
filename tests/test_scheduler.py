@@ -14,15 +14,31 @@ import tests  # noqa: F401  (temporary saves folder and registry; must be import
 import copy
 import random
 import statistics
+import tempfile
 import threading
 import time
 import types
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
+from citar import db, servers
 from citar.agents.providers.base import Conversation, StepResult, ToolCall
+from citar.db.models import Base
 from citar.pool import scheduler as S
+
+_URL = "sqlite:///" + (Path(tempfile.mkdtemp(prefix="citar_scheduler_")) / "test.db").as_posix()
+
+
+def setUpModule():
+    """This module's own database, with the test registry's machines (its game sessions play ``sv_gpu``): whatever
+    database another module left configured, or the environment names once every module is imported, is not its."""
+    db.dispose()
+    db.configure(_URL)
+    Base.metadata.drop_all(db.engine())
+    db.create_all()
+    servers.invalidate()
 
 
 class FakeClock:
