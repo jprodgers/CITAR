@@ -368,8 +368,12 @@ class PageRoutes(unittest.TestCase):
             self.assertIsNotNone(s.get(AccessGrant, grant))
 
     def test_a_groups_link_is_the_pages_address(self):
+        """The group's manager reads its link as the page's address; another member's listing has no such group,
+        and a visitor gets 401."""
         groups = {g["id"]: g for g in self.call("alice", "GET", "/api/pool/groups").json()["groups"]}
         self.assertRegex(groups[self.group]["share_url"], rf"^/#/pool/groups/{self.group}\?k=[\w-]+$")
+        self.assertNotIn(self.group, {g["id"] for g in self.call("bob", "GET", "/api/pool/groups").json()["groups"]})
+        self.assertEqual(self.call("anon", "GET", "/api/pool/groups").status_code, 401)
 
     def test_a_members_listing_asks_her_for_no_electricity_plan(self):
         """Only an administrator names a plan in a machine's costs (pool.check_plans): the issue that asks for one
@@ -379,6 +383,8 @@ class PageRoutes(unittest.TestCase):
         self.assertIn(servers.NO_PLAN_ISSUE, theirs["issues"])
         self.assertNotIn(servers.NO_PLAN_ISSUE, mine["issues"])
         self.assertEqual([i for i in theirs["issues"] if i != servers.NO_PLAN_ISSUE], mine["issues"])
+        self.assertNotIn(self.helper, {s["id"] for s in self.call("bob", "GET", "/api/servers").json()["servers"]})
+        self.assertEqual(self.call("anon", "GET", "/api/servers").status_code, 401)
 
 
 if __name__ == "__main__":

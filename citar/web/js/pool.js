@@ -414,7 +414,8 @@ function machineCard(m, data, reload) {
   const models = el("div", { class: "row wrap", style: { marginTop: "6px" } });
   const chips = modelChips(m);
   models.append(el("span", { class: "muted small" }, chips.length ? "Models:" : helper ? "No models reported yet." : "No models in the catalog yet."), ...chips);
-  const group = m.group_id ? data.groups.find((x) => x.id === m.group_id) : null;
+  // a group the viewer is not given (another member's, on an administrator's page) is named only as "shared"
+  const group = m.group_id ? data.groups.find((x) => x.id === m.group_id) || { name: "its owner's group" } : null;
   const card = el("section", { class: "card server-card", "data-machine": m.id },
     el("div", { class: "row wrap" },
       el("span", { class: "server-icon" }, ICON[m.kind] || "🖥"),
@@ -519,11 +520,14 @@ function actions(m, data, reload) {
 // Which group shares a machine: everyone the group's access reaches may use it, on those terms.
 function sharingDialog(m, groups, reload) {
   const mine = groups.filter((x) => x.can_manage);
-  const current = groups.find((x) => x.id === m.group_id);
+  // the group it is in stays the choice until another is picked, also one this page does not list (another
+  // member's group, on an administrator's page): saving must never unshare it by accident
+  const current = m.group_id && !mine.some((x) => x.id === m.group_id)
+    ? (groups.find((x) => x.id === m.group_id) || { id: m.group_id, name: "its owner's group" }) : null;
   const select = el("select", {},
-    el("option", { value: "" }, "— not shared —"),
+    el("option", { value: "", selected: !m.group_id }, "— not shared —"),
     ...mine.map((x) => el("option", { value: x.id, selected: x.id === m.group_id }, x.name)),
-    current && !current.can_manage ? el("option", { value: current.id, selected: true }, current.name) : null);
+    current ? el("option", { value: current.id, selected: true }, `${current.name} (as it is)`) : null);
   const dialog = modal({
     title: `Sharing “${m.name}”`, narrow: true,
     content: el("div", { class: "col gap" },
