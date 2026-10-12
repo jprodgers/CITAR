@@ -572,12 +572,37 @@ class MadeWay(LeaseCase):
         self.assertTrue(g._made_way(), "the game still makes way")
         self.assertEqual(pool_seats.occupied("sv_gpu"), [], "the answer's lease went with the answer")
         self.assertNotIn(1, g.agents, "and the agent bound to it")
-        # so the work it made way for starts, rather than waiting for a game that waits for it
+        # so the work it made way for (ranked ahead of it, as what makes a game make way is) starts, rather than
+        # waiting for a game that waits for it; the game is in the shared queue as a server registers it
+        from citar.pool import queue as work_queue
+        session_mod.register_games_with_queue()
         sch, run, job = self.bench("sv_gpu")
+        work_queue.set_priority("benchmark", run["id"], 5)
+        self.addCleanup(work_queue.set_priority, "benchmark", run["id"], 0)
         self.assertTrue(until(lambda: (sch.tick() or True) and job["status"] in ("loading", "running"), 15), job)
         sch.control_run(run["id"], "cancel")
         g.resume()
         self.assertEqual(pool_seats.occupied("sv_gpu"), [f"game “{g.name}”"], "the resume makes its lease again")
+
+    def test_a_bot_that_answers_while_made_way_keeps_its_agent(self):
+        """A bot's answer holds no lease: its agent (and the bot's memory in it) stays when the answer ends."""
+        g = self.game([{"type": "human"}, {"type": "bot"}, {"type": "llm", "llm": GPU}], map_size="small")
+        g.suspend({"kind": "queue", "message": "making way"})
+        bot = g.get_agent(1)
+        with g.lock:
+            if not g.game.has_met(0, 1):
+                g.game.meet(0, 1)
+        r = g.call_tool(0, "open_negotiation", {"to": 1, "message": "Hello, bot."})
+        self.assertTrue(r["ok"], r)
+        nid = r["result"]["negotiation_id"]
+
+        def answered():
+            with g.lock:
+                head = g.game.negotiation_head(nid)
+            return head["awaiting"] != 1 and not g._answering
+        self.assertTrue(until(answered, 30), "the bot answers the person")
+        self.assertIs(g.agents.get(1), bot)
+        self.assertEqual(labels("sv_gpu"), [])
 
     def test_the_driver_gets_no_agent_and_makes_no_lease_while_made_way(self):
         g = self.made_way()

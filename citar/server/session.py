@@ -451,7 +451,8 @@ class GameSession:
                 self._answering[pid] = left
                 return
             self._answering.pop(pid, None)
-            if self._made_way():
+            if self._made_way() and self.leases.get(pid) is not None:
+                # a model seat's (a bot's answer holds no lease, and its agent keeps the bot's memory)
                 self.cancel_agent(pid)
                 self.release_leases([pid], for_good=False)
 
