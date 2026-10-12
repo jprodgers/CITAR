@@ -187,7 +187,8 @@ function renderJob(run, job, ctx) {
     el("td", {}, p.score != null ? el("span", {}, el("b", { style: { color: COLORS.llm } }, p.score), " vs ", el("span", { style: { color: COLORS.bot } }, p.best_bot_score)) : "–",
       perf != null ? el("div", { class: "small" }, bar(perf / 100, `performance ${Math.round(perf)}`, perf >= 50 ? "good" : "bad")) : null),
     el("td", {}, trend),
-    el("td", {}, secs(p.avg_turn_s), p.max_turn_s ? el("div", { class: "muted small" }, `max ${secs(p.max_turn_s)}`) : null),
+    el("td", {}, secs(p.avg_turn_s), p.max_turn_s ? el("div", { class: "muted small" }, `max ${secs(p.max_turn_s)}`) : null,
+      drainNote(p)),
     el("td", {}, p.turns_played ? `${p.avg_errors ?? 0} / ${p.avg_repeats ?? 0}` : "–"),
     el("td", { class: clean == null ? "" : clean >= 90 ? "good" : "warn" }, clean == null ? "–" : `${clean}%`),
     el("td", { class: "actions" },
@@ -205,6 +206,22 @@ function renderJob(run, job, ctx) {
     rows.push(el("tr", { class: "job-note" }, el("td", { colspan: 10, class: "muted small" }, "💭 ", p.last_thought)));
   }
   return rows;
+}
+
+// How long the job's model waited for pooled prompts to drain off its machine before its first request, and whether
+// that wait was cut short by its bound: then the pooled work overlapped the benchmark, and the job's timing is left
+// out of the model's speed score (design/phase3-features.md P3.3.3).
+function drainNote(p) {
+  if (p.contaminated) {
+    return el("div", { class: "warn small", title: `Pooled prompts were still running on the machine when the model's first `
+      + `request went ahead (after ${secs(p.drain_s)}), so this game's timing is left out of the speed score.` },
+    "timing contaminated");
+  }
+  if (p.drain_s >= 0.1) {
+    return el("div", { class: "muted small", title: "The model's first request waited for pooled prompts already running on "
+      + "its machine to finish, so none overlapped the benchmark." }, `drained ${secs(p.drain_s)}`);
+  }
+  return null;
 }
 
 function drawSpark(canvas, series) {

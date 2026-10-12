@@ -5,8 +5,8 @@ the caller slept and retried, metering a request each time; a machine CITAR dial
 cancelled request on a helper freed its slot in the hub while the helper went on generating. Here every call of a
 scheduled machine (any row of the ``servers`` table) takes a slot first, and gives it back when it ends.
 
-**Machines** (``Machine``): one per ``servers.id``, made on first use and shared by the process (game sessions, and
-later the benchmark, probe and report runners). Capacity is the row's ``max_concurrent`` (``servers.machine_settings``),
+**Machines** (``Machine``): one per ``servers.id``, made on first use and shared by the process (game sessions, the
+benchmark scheduler's games, probe runs and report narratives). Capacity is the row's ``max_concurrent`` (``servers.machine_settings``),
 capped by the connected helper's own ceiling; a helper machine that is offline has no known capacity, so its lease
 requests pass through (the provider's connection error drives the reconnect window) and its tickets are refused as
 temporary. A disabled row refuses everything. The row's settings are read again by a request that finds them more than
@@ -15,8 +15,10 @@ most that often), or at once through ``refresh``; the helper's state is pushed b
 or reports its models (``helper_changed``). The scheduler's own thread never reads the database.
 
 **Bindings.** A ``Lease`` (task class *full*) is a model seat that plays every turn; it belongs to the session's seat
-(``GameSession.lease_for``), not to its agent, and is *active* while its seat is mid-turn and *idle* (lending its slot,
-for a ``game`` lease) otherwise. A ``Ticket`` (task class *partial*) is one pooled prompt of up to ``steps`` calls: a
+(``GameSession.lease_for``), not to its agent, is made when the session is registered and released when the seat stops
+playing that machine (``GameSession.open_leases``, package 3-08), and is *active* while its seat is mid-turn and *idle*
+(lending its slot, for a ``game`` lease) otherwise. A probe run and a report's narrative hold a lease too, for the
+run, lending nothing; the leases live on a machine are what ``pool.seats.occupied`` lists. A ``Ticket`` (task class *partial*) is one pooled prompt of up to ``steps`` calls: a
 chat answer, a diplomat phase, a probe case, a report's narrative, the Servers page's test. The rules, which
 ``tests/test_scheduler.py`` holds as invariants over random schedules:
 
