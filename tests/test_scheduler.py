@@ -708,12 +708,19 @@ class Wrapper(unittest.TestCase):
 # ---------------------------------------------------------------------------- gate 7: locks
 
 def _session(seats=None):
-    """A real game session, not started, on a small map."""
+    """A real game session, not started, on a small map. Close it with ``_close``."""
     from citar.server.session import SessionManager
     manager = SessionManager()
-    return manager.create({"map_size": "duel", "seed": 7, "barbarians": "off"},
-                          seats or [{"type": "llm", "llm": {"provider": "dryrun", "dry_run_delay": 30}},
-                                    {"type": "bot"}], track=False, start=False)
+    s = manager.create({"map_size": "duel", "seed": 7, "barbarians": "off"},
+                       seats or [{"type": "llm", "llm": {"provider": "dryrun", "dry_run_delay": 30}},
+                                 {"type": "bot"}], track=False, start=False)
+    s.test_manager = manager
+    return s
+
+
+def _close(s) -> None:
+    """Close a game as the lobby does: stopped, and its live mark removed, so no later test's server restores it."""
+    s.test_manager.delete(s.id)
 
 
 class Locks(unittest.TestCase):
@@ -733,7 +740,7 @@ class Locks(unittest.TestCase):
                 lease.acquire()
         self.assertIn("session lock", str(caught.exception))
         self.assertIsNotNone(lease.acquire(), "and fine without it")
-        s.stop()
+        _close(s)
 
     def _blocked_agent(self, s, sched):
         """The seat's agent with a conversation waiting for its machine (another holds the one slot)."""
@@ -780,7 +787,7 @@ class Locks(unittest.TestCase):
                 self.assertIsInstance(out.get("e"), S.Cancelled)
                 self.assertEqual([r for r in m.waiting if r.binding.server_id == "sv_gpu" and r.binding in
                                   s.leases.values()], [])
-                s.stop()
+                _close(s)
                 for lease in list(m.leases):
                     lease.release()
 
@@ -814,7 +821,7 @@ class Locks(unittest.TestCase):
         self.assertTrue(delivered.wait(5), "the callback ran once the game's lock was free")
         worker.join(5)
         m.finish(g, gen_s=1)
-        s.stop()
+        _close(s)
 
     def test_the_notifier_survives_a_failing_callback_and_is_started_again(self):
         sched = S.Scheduler(settings=lambda sid: S.MachineSettings(known=True, slots=1, name="box"))
@@ -901,7 +908,7 @@ class TimeAccounting(unittest.TestCase):
         self.assertEqual(rec["end_reason"], "end_turn")
         self.assertEqual(rec["queue_s"], 900.0)
         self.assertEqual(rec["model_s"], 60.0, "the model's own time: generation only")
-        s.stop()
+        _close(s)
 
 
 # ---------------------------------------------------------------------------- gate 5's unit part, P3.9.7

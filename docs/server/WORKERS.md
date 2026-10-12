@@ -164,6 +164,36 @@ If the GPU is in a room somebody sleeps in:
 or per weekday, `"Sat 23:00-08:00"`. During a window the worker takes no new work. Benchmarks and
 lab runs pause; a game somebody is playing warns rather than stopping.
 
+### When a machine is busy
+
+Everything that asks a model something goes through the server's **prompt scheduler**, which keeps one queue per
+machine (the design is `design/phase3-features.md` P3.3). A machine has as many slots as its **LLM slots** setting
+(`max_concurrent`), capped by the helper's own `--max-concurrent`; the scheduler sends a machine no more requests than
+it has slots, so a busy machine **queues** work instead of refusing it, and nothing sleeps and retries:
+
+- A game's model seat holds a **lease** on its machine for as long as it plays. Its requests are served in the order
+  they come, before any pooled prompt. While the seat waits on something else (another side's answer in a chat, a
+  paused game, its next turn) a lobby game's lease lends its slot.
+- A **pooled prompt** (one short job: the Servers page's test today; chat answers, report narratives and probe cases
+  as later packages move them on) takes a free slot that no seat in the middle of its turn needs, only on a model the
+  helper has loaded (unless the machine allows swaps), and never inside the machine's quiet hours. One that borrows an
+  idle game's slot gives it back after one capped step when that game's turn comes. A benchmark game on the machine
+  holds it: pooled prompts are refused or wait, and the benchmark's first request waits up to two minutes for those
+  already running to finish (`drain_s`; a benchmark that had to go ahead anyway is marked `contaminated`).
+- **Cancelling drains on today's helper.** When the server gives up a request (a game is closed or paused, a seat is
+  changed, a prompt is cancelled or runs out of time), it sends the helper `CANCEL`. The helper of this version ignores
+  it and finishes the completion, so the scheduler keeps that slot taken (*draining*) until the helper's late answer
+  arrives, or the request's own timeout plus 15 seconds has passed. The helper is therefore never sent more requests
+  than it has slots, and never has to answer `busy`. A `busy` refusal anyway (a helper restarted with fewer slots) is
+  absorbed: the scheduler holds the machine at what it has in flight until a slot frees, and queues the request again.
+- **Generation time is what the server saw.** A step is credited the smaller of the helper's own `duration` and the
+  time from sending the request to receiving its answer; time spent queueing is recorded apart and never counted as the
+  model's (nor against its turn's time limit, nor in its speed score). A helper that claims more than the server
+  observed (by over 10% and a second) three times within an hour gets `overreports` in its machine's flags, with an
+  audit row. Token counts are capped at the request's `max_tokens` and the model's context.
+
+An administrator's `GET /api/status` lists what the scheduler holds for each machine.
+
 ### What the server can and cannot do
 
 It can ask your machine to run a completion with one of the models you exposed. That is the whole

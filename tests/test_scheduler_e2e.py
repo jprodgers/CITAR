@@ -124,8 +124,11 @@ class HelperBase(unittest.TestCase):
             cls.port = probe.getsockname()[1]
         cls.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=cls.port, log_level="error"))
         cls.thread = threading.Thread(target=cls.server.run, daemon=True)
-        cls.thread.start()
-        _until(lambda: cls.server.started, 15)
+        # the server's start brings back the games other test modules left marked as open: not this one's business
+        from citar.server.session import SessionManager
+        with mock.patch.object(SessionManager, "restore_live", lambda self: []):
+            cls.thread.start()
+            _until(lambda: cls.server.started, 15)
 
     @classmethod
     def tearDownClass(cls):
@@ -453,6 +456,56 @@ class OneSlot(unittest.TestCase):
             s.set_paused(True)
         rec = next(r for r in s.metrics.data["turns"] if r["player"] == 0 and r["turn"] == 1)
         self.assertEqual(rec["end_reason"], "end_turn")
+
+
+class GrantCap(unittest.TestCase):
+    """The per-consumer cap comes from the grant (``AccessGrant.concurrency``; P3.3.7): a member whose grant has
+    concurrency 1 gets a lease capped at 1, so the scheduler never runs two of her requests at once there; the
+    machine's owner and a game with no owner are not capped."""
+
+    @classmethod
+    def setUpClass(cls):
+        _database()
+
+    def test_a_seats_lease_carries_its_owners_grant_concurrency(self):
+        from citar.auth import accounts
+        from citar.db.models import AccessGrant, ServerGroup
+        from citar.pool import seats as pool_seats
+        from citar.server.session import SessionManager
+        S.reset()
+        self.addCleanup(S.reset)
+        with db.session() as s:
+            owner = accounts.create_user(s, handle="lender", email="l@x.cc", password="a long enough phrase",
+                                         status="active", email_verified=True)
+            member = accounts.create_user(s, handle="borrower", email="b@x.cc", password="a long enough phrase",
+                                          status="active", email_verified=True)
+            group = ServerGroup(owner_id=owner.id, name="lent", visibility="server")
+            s.add(group)
+            s.flush()
+            row = Server(owner_id=owner.id, name="lent box", kind="test", provider="dryrun", reach="direct",
+                         group_id=group.id, max_concurrent=2,
+                         config={"connection": {"provider": "dryrun"}, "models": [{"key": "dry-run"}]})
+            s.add(row)
+            s.add(AccessGrant(group_id=group.id, subject_type="everyone", concurrency=1))
+            s.flush()
+            sid, owner_id, member_id = row.id, owner.id, member.id
+        self.assertEqual(pool_seats.consumer_cap(member_id, sid), 1)
+        self.assertEqual(pool_seats.consumer_cap(owner_id, sid), 0, "the owner is not capped on her own machine")
+        self.assertEqual(pool_seats.consumer_cap(None, sid), 0, "nor is the server's own work")
+        manager = SessionManager()
+        game = manager.create({"map_size": "duel", "seed": 41, "barbarians": "off"},
+                              [{"type": "llm", "llm": {"server_id": sid, "model": "dry-run"}}, {"type": "bot"}],
+                              start=False, owner_id=member_id)
+        self.addCleanup(manager.delete, game.id)
+        lease = game.lease_for(0)
+        self.assertEqual((lease.server_id, lease.consumer, lease.cap, lease.kind), (sid, member_id, 1, "game"))
+        m = lease.machine
+        first = m.take(m.submit(lease))
+        second = m.submit(lease)
+        self.assertIsNotNone(first)
+        self.assertIsNone(m.take(second), "her second request waits though a slot is free")
+        m.finish(first, gen_s=1)
+        self.assertIsNotNone(m.take(second))
 
 
 if __name__ == "__main__":
