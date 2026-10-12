@@ -146,7 +146,7 @@ class ReportReach(unittest.TestCase):
         self.assertIn(f"Alice game {self.w.tag}", page)
         self.assertIn(f"Alice home rig {self.w.tag}", page, "her own machine and its costs are hers")
         self.assertIn(f"Bob shared game {self.w.tag}", page, "a game bob shared with members is one she may see")
-        self.assertIn("Costs are counted on your own machines only", page)
+        self.assertIn("Costs are counted on the report owner's own machines only", page)
 
     def test_a_members_costs_are_on_their_own_machines_only(self):
         data, _page = self.build("alice")

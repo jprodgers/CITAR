@@ -165,9 +165,9 @@ class Reach:
         names = [sv["name"] for sv in reg["servers"] if sv["id"] in self.machines]
         notes = [n for n in cost.get("notes") or [] if any(name and name in n for name in names)]
         if elsewhere:
-            notes.append(f"Costs are counted on your own machines only: {elsewhere} of these activities also ran on "
-                         "machines that are not yours (the server's own, or other members'), and what they cost there "
-                         "is not part of this report.")
+            notes.append(f"Costs are counted on the report owner's own machines only: {elsewhere} of these activities "
+                         "also ran on machines that are not theirs (the server's own, or other members'), and what they "
+                         "cost there is not part of this report.")
         return {**cost, "acts": acts,
                 "servers": {srv: v for srv, v in cost["servers"].items() if srv in self.machines},
                 "days": {d: {srv: v for srv, v in day.items() if srv in self.machines} for d, day in cost["days"].items()},
