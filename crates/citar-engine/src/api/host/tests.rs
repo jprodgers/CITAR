@@ -368,6 +368,36 @@ fn a_restarted_journal_starts_at_zero_with_the_whole_history() {
 }
 
 #[test]
+fn a_whole_save_of_a_game_made_from_a_state_alone_counts_the_history_it_holds() {
+    // A scenario's start saved whole before it ever began a journal of its own (a probe case's
+    // copy): its state counts the history of the game it was taken from, which it does not have.
+    let mut g = duel();
+    end_turns(&mut g, 4);
+    let state = g.snapshot().to_json().expect("it writes");
+    let (mut alone, _) = load_with(&g, &state, &[]);
+    let fresh = alone.save_whole().expect("it saves");
+    assert!(fresh.history.is_none(), "nothing played yet: no history");
+    assert!(!load_with(&g, &fresh.state, &[]).1, "and none missing");
+    end_turns(&mut alone, 2);
+    alone.add_thought(GREECE, "A note.", None);
+    let (heads, host) = (alone.state().chronicle().clone(), alone.state().host().0.clone());
+    let save = alone.save_whole().expect("it saves");
+    assert_eq!(alone.state().chronicle(), &heads, "the game itself counts what it counted");
+    assert_eq!(alone.state().host().0, host);
+    let chunks: Vec<Vec<u8>> = save.history.into_iter().collect();
+    let (back, incomplete) = load_with(&g, &save.state, &chunks);
+    assert!(!incomplete, "the history the game holds, whole");
+    assert_eq!(back.event_rows(None), alone.event_rows(None));
+    assert_eq!(back.stats_rows(None), alone.stats_rows(None));
+    assert_eq!(back.thought_rows(None, 0), alone.thought_rows(None, 0));
+    assert_eq!(back.state().host().0.next_event_id, host.next_event_id, "ids given stay given");
+    sound(&back);
+    // The copy is the game that its own new journal makes of it.
+    alone.restart_journal().expect("it recounts");
+    assert_eq!(back.digest().ok(), alone.digest().ok());
+}
+
+#[test]
 fn phases_have_pythons_names() {
     assert_eq!((phase_name(Phase::Playing), phase_name(Phase::Over)), ("playing", "over"));
 }

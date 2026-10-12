@@ -751,10 +751,12 @@ class EngineGame:
         return cls._load(state, None)
 
     def to_save(self) -> dict:
-        """The game as one value: {"state" (the state as state_dict gives it, its journal position counting the
-        chunk), "journal" (the whole history as one journal chunk, base64 text, or None before there is any)}, built
-        fresh under the game's lock; :meth:`from_save` reads it back. The game's own journal does not move. A session
-        saves through :meth:`save_snapshot` and the container instead."""
+        """The game as one value: {"state" (the state as state_dict gives it, its history counts recounted from the
+        chunk, as a new journal recounts them: a game made from a state alone, a scenario's start, counts the history it
+        holds and not the history of the game the state was taken from), "journal" (the whole history as one journal
+        chunk, base64 text, or None before there is any)}, built fresh under the game's lock; :meth:`from_save` reads
+        it back with its whole history. The game's own journal does not move. A session saves through
+        :meth:`save_snapshot` and the container instead."""
         state, chunk = self._g.save()
         return {"state": json.loads(state), "journal": None if chunk is None else base64.b64encode(chunk).decode()}
 
