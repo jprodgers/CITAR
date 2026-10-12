@@ -11,7 +11,9 @@ citar/
   agents/     adapters that let a model take a seat
   server/     FastAPI app, sessions, turn driver, benchmark scheduler
   auth/       accounts, sessions, permissions
-  pool/       shared hardware: groups, grants, budgets, availability
+  pool/       shared hardware: groups, grants, budgets, availability, the prompt scheduler
+  ledger.py   the compute ledger: who gave and who used compute, in credits; rollups, the ratio
+  usage.py, costing.py   what each activity held, and its price
   db/         SQLAlchemy models
   reports/    report building and rendering
   worker/     the outbound agent that serves models from another machine

@@ -221,8 +221,13 @@ def _hardware_changed(session, _context, _instances) -> None:
         if obj in session.new or state.attrs.config.history.has_changes() or state.attrs.kind.history.has_changes():
             rows.append(obj)
     if rows:
-        with session.no_autoflush:
-            reclassify(session, rows)
+        try:
+            with session.no_autoflush:
+                reclassify(session, rows)
+        except Exception:
+            # a database without the classes yet (a test's, made before its tables): the machine is saved all the
+            # same, and priced by ``class_of`` from its hardware whatever its row says
+            log.debug("could not classify machine(s) %s", [r.id for r in rows], exc_info=True)
 
 
 def _listen() -> None:
@@ -361,7 +366,11 @@ class Ledger:
         self.ensure_threads()
 
     def flush(self, timeout: float = 10.0) -> bool:
-        """Wait until everything queued so far is written (or failed). Returns whether it was within ``timeout``."""
+        """Wait until everything queued so far is written (or failed). Returns whether it was within ``timeout``. A
+        ledger with no threads writes it on the calling thread."""
+        if not self.background:
+            self.drain()
+            return True
         self._hurry.set()
         deadline = time.monotonic() + timeout
         try:

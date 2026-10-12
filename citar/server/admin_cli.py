@@ -16,6 +16,7 @@ Chiefly: creating the first administrator of a fresh server, and getting back in
     python -m citar.server.admin_cli policy registration invite
     python -m citar.server.admin_cli reprice --since 2026-10-01 [--until 2026-10-08]
     python -m citar.server.admin_cli set-collection benchmark_run br_1234 on
+    python -m citar.server.admin_cli refresh-budgets [--period 2026-10]
 
 Passwords are always prompted for, never taken as an argument: a password on the command line ends
 up in the shell history and in the process list where every other user on the box can read it. A
@@ -457,6 +458,19 @@ def cmd_reprice(args) -> int:
     return 0
 
 
+def cmd_refresh_budgets(args) -> int:
+    """Rebuild the budgets' entries of their current period (or ``--period``) from the compute ledger's events
+    (``pool.budgets.refresh_from_ledger``): the repair for an entry lost when the server stopped between an event and
+    its settling, or for credits repriced. A running server reads its budgets again when one is next used or edited."""
+    from ..pool import budgets
+    with db.session() as s:
+        n = budgets.refresh_from_ledger(s, key=args.period)
+        audit.record(s, "budgets.refreshed", actor_label="admin_cli", object_type="budget", entries=n,
+                     period=args.period)
+    print(f"{n} budget entr{'y' if n == 1 else 'ies'} rebuilt from the compute ledger.")
+    return 0
+
+
 def cmd_set_collection(args) -> int:
     """Mark an owned item (a benchmark run, a probe run, a report, a lab experiment) as the server's own data
     collection, or not: its compute is then used by nobody, and given by whoever's machine served it (P3.4.2)."""
@@ -595,6 +609,10 @@ def main(argv=None) -> int:
     p.add_argument("--since", required=True, help="YYYY-MM-DD (UTC)")
     p.add_argument("--until", default=None, help="YYYY-MM-DD (UTC); default now")
     p.set_defaults(func=cmd_reprice)
+
+    p = subparsers.add_parser("refresh-budgets", help="rebuild the grants' budget entries from the compute ledger")
+    p.add_argument("--period", default=None, help="a period key (2026-10, 2026-W41, 2026-10-12); default the current")
+    p.set_defaults(func=cmd_refresh_budgets)
 
     p = subparsers.add_parser("set-collection", help="mark an owned item as the server's own data collection")
     p.add_argument("kind", choices=("benchmark_run", "probe_run", "report", "lab_experiment"))

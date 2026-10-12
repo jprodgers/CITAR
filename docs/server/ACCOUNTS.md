@@ -22,7 +22,7 @@ So the plan is deliberately additive:
 | --- | --- |
 | Engine, rules, bots, mapgen, scenarios, probes | Every one gains an owning account |
 | `saves/**` game files, replays, autosaves | Indexed by a DB row that carries owner + visibility |
-| `citar/usage.py` ledger format | Rows gain an `owner` and a `server owner`, for budgets |
+| `citar/usage.py` ledger format | Keeps activities, held time and power; the work moves to the compute ledger, with a consumer and a provider, for the ratio and budgets |
 | The cost model in `citar/servers.py` | Moves into the DB, per-owner, with grants and budgets |
 | Vanilla-ES-module frontend, hash routing | Gains auth screens, an account menu and an admin console |
 
@@ -390,7 +390,7 @@ A **grant** gives a subject (a user, or everyone) permission to use a group, opt
 So the two examples from the brief are both just grants:
 
     General pool:     grant to everyone, all purposes, all hours, no budget, 2 concurrent games.
-    Overnight box:    grant to everyone, purpose=scenarios, 00:00–06:00 owner-local, $100/month.
+    Overnight box:    grant to everyone, purpose=scenarios, 00:00–06:00 owner-local, 100,000 credits/month.
 
 ### Time zones
 
@@ -406,13 +406,51 @@ owner's midnight year-round. The UI always shows both readings:
 Budgets are **accounting and admission control, not payments.** No money moves; nobody is charged.
 A budget is a cap that stops work from being scheduled.
 
-Spend comes from the existing usage ledger priced by `citar/costing.py`, which already handles
-electricity, depreciation, lease costs, hourly rates and per-token API prices. New work:
+A grant's budget is counted in **credits**, the compute ledger's unit ([below](#the-compute-ledger-and-the-ratio)),
+per day, week, month or in total, in the machine owner's time zone (a "month" ends at their midnight), and it is
+**hard** or **soft**. It is kept per request:
 
-- ledger rows gain `owner` (who ran it) and `server_owner` (whose hardware paid for it)
-- a rolling **budget meter** per (grant, period) that a game must reserve against before it starts
-- reservations, so a long game cannot silently blow past a cap that was nearly exhausted at launch
-- soft caps (warn, keep going) and hard caps (refuse to start, pause running work at the boundary)
+- **Reserve.** When a request of work admitted under the grant (a seat's step, a pooled prompt) is given its slot on
+  the machine, it reserves an estimate: the machine's mean credits per step for that model (at least 1), or on an
+  online API the price of the request's `max_tokens` of output plus its input, times the API class's rate. If a hard
+  budget's spent plus reserved would pass its amount, the request is **refused** with the period's end as when to try
+  again: a lobby game **pauses** with the budget's reason (as for quiet hours) and resumes by itself when the period
+  turns; a pooled prompt is refused and its caller falls back (a report is written without its analysis, a probe case
+  records the refusal). A hard budget on an online API whose model has no price refuses every request ("this model
+  has no price, so its budget cannot be kept") rather than letting unpriced work through at 0.
+- **Settle.** Each step's credits, priced from its event, are counted against the budget at once, and written to the
+  budget's entry for that activity and period; the reservation goes.
+- **Soft** budgets only warn: the request that takes one past its amount is let through, the game's log says so (once
+  a period), an audit row records it, and the machine owner's Servers page shows the meter over its amount.
+- `refresh_from_ledger` (in `citar/pool/budgets.py`) rebuilds a period's entries from the ledger's events: an
+  administrator's repair, when an entry was lost or the credits repriced.
+
+The machine's owner and administrators are not held to grants, so their own work on the machine has no budget.
+
+### The compute ledger and the ratio
+
+Every model step on a machine and every second of the host's CPU spent on somebody's work is one row of the **compute
+ledger** (`compute_events`; `citar/ledger.py`): the machine, the activity it served (a game, a benchmark run's game,
+a probe run, a report, a lab game, a machine test), its **consumer** (the activity's owner) and its **provider** (the
+machine's owner), the generation seconds or CPU core-seconds, the tokens, and the **credits** they are worth, priced
+when the event is written from the machine's hardware class ([Configuration](../CONFIGURATION.md#credits-and-hardware-classes)).
+
+- The consumer is null for the server's own data collection (an item an administrator marked with
+  `citar admin set-collection`), whose compute counts as given by whoever's machine served it and used by nobody.
+- The provider is null for a machine the site provides (the host, an online API an administrator registered).
+- **Self-use** (the same member on both sides, or the server on both) counts on **neither** side: a member's own games
+  on their own GPU are no gift and no use. Another member's game or pooled prompt on your machine is **given**; your
+  games on the server's CPU, or on somebody else's GPU, are **used**.
+- Generation time is the smaller of what a helper reports and what the server observed (a modified helper cannot
+  raise its owner's credits past the time the server waited for it).
+- The **ratio** is given credits over used credits ("only given" when nothing was used).
+
+Who sees it: your own, by machine and by kind of work, on the **Account** page's Compute card
+(`GET /api/ledger/me?range=24h|7d|30d|all`); anyone else's when its `ratio` profile field shows to you (private by
+default, so the account and administrators; `GET /api/users/{handle}/ratio`), and administrators always, on the
+admin users page's 30-day column. A profile shows the ratio line under the same rule. Totals read hourly rollups for
+complete hours and the raw events for the rest, so they are current to the event. Nothing restricts anyone by their
+ratio in 0.1.6; a later admission rule may.
 
 ### Admission control
 
@@ -476,7 +514,9 @@ deletes them.
 
 **The 0.1.6 baseline.** 0.1.6 starts the schema afresh: one revision, `0016a_baseline`, holds every
 table and column the 0.1.6 features need (profiles, owned items, the compute ledger, machine settings),
-so later changes add behaviour rather than migrations. A database from 0.1.5 or an earlier 0.1.6 build
+so later changes add behaviour rather than migrations; a change that cannot is a revision on top of it
+(`0016b_compute_cache_tokens`: the ledger keeps a step's cached input tokens, which an online API prices
+apart). A database from 0.1.5 or an earlier 0.1.6 build
 (revisions `f064316a6b34` and `767c824c2fcb`) is **not migrated**:
 
 - on SQLite, the first start of 0.1.6 writes the database's log into its file, lets go of it, and
@@ -541,4 +581,4 @@ Each phase ends green (full test suite) and committed.
 | Anti-bot | hCaptcha, plus rate limits, verification, disposable-domain blocking, probation |
 | Game compute | VPS runs games; workers serve models only, with the queue boundary left clean |
 | Local workflow | Single-user local mode, auto-login, existing data migrated to that account |
-| Budgets | Accounting and admission control only — no payment processing anywhere |
+| Budgets | Accounting and admission control only, in credits — no payment processing anywhere |

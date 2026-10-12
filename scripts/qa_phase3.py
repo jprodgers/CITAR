@@ -38,9 +38,11 @@ the next request waits; 3-08: a lobby game's lease made when it is registered an
 brings it back, a benchmark job waiting for it, and a one-job benchmark started beside a running test, which it
 cancels and waits to drain, ``drain_s`` in its result; 3-09: two members' report analyses and probe cases waiting as
 pooled prompts behind a lobby game's seat mid-turn, their Queue pages, and the order they are served in, none while the
-seat is mid-turn; ``--hold-line`` keeps them waiting for the browser checklist), and later ``ledger``, ``chat``,
-``hybrid``, ``minimap``,
-``machines``; ``all`` runs every part written so far. It needs the
+seat is mid-turn; ``--hold-line`` keeps them waiting for the browser checklist), ``ledger`` (3-10: bob's helper
+machine serving alice's lobby game and her report's analysis, his given and her used read through ``/api/ledger/me``
+against the compute ledger's events in the instance's database, her own machine's work on neither side, the ratio
+following its visibility; with ``--keep`` the server stays up for the browser checklist's B1), and later ``chat``,
+``hybrid``, ``minimap``, ``machines``; ``all`` runs every part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
 from __future__ import annotations
@@ -76,7 +78,7 @@ DEV_SERVER_PORT = 8799
 #: The owner's dev server's directory: never a harness's, whatever is in it.
 OWNER_PLAY_DIR = Path("C:/dev/citar-play")
 #: Parts a later package writes (P3.9.4): asked for now, the harness says so and refuses.
-LATER = {"ledger": "3-10", "chat": "3-11 to 3-13", "hybrid": "3-14 to 3-16", "minimap": "3-17", "machines": "3-18"}
+LATER = {"chat": "3-11 to 3-13", "hybrid": "3-14 to 3-16", "minimap": "3-17", "machines": "3-18"}
 
 
 def _dev_server():
@@ -1957,8 +1959,192 @@ def _queue_pooled_prompts(h: Harness) -> None:
         scripted.close()
 
 
+def _ledger_rows(state: Path, sql: str, args: tuple = ()) -> list:
+    """Rows of the instance's own database, read-only (the server keeps writing it: SQLite's write-ahead log lets a
+    reader see what is committed)."""
+    import sqlite3
+    con = sqlite3.connect(f"file:{(state / 'citar.db').as_posix()}?mode=ro", uri=True, timeout=10)
+    try:
+        return con.execute(sql, args).fetchall()
+    finally:
+        con.close()
+
+
+def part_ledger(h: Harness) -> None:
+    """3-10's checks (design/phase3-features.md P3.4): bob's helper machine (a real helper behind the scripted
+    endpoint, one slot, 0.3 s a completion) shared with alice for games and pooled prompts serves her lobby game and
+    her report's analysis; she also plays a game on a dry-run machine of her own. The compute ledger's events (read
+    from the instance's database) put every completion the endpoint served on bob's machine, consumed by alice and
+    given by bob, with the helper's reported and the server's observed times and generation time bounded by them; bob's
+    given and alice's used, as ``/api/ledger/me`` tells each, equal the events' sums; her own machine's work is
+    self-use, on neither side; her ratio follows its visibility (private, then members)."""
+    r = h.report
+    admin, alice, bob, mod = (h.accounts[k] for k in ("admin", "alice", "bob", "mod"))
+    scripted = FakeEndpoint(delay=0.3, max_trades=0)
+    helper: Optional[Helper] = None
+    games: list = []
+    state = h.server.state
+    data = r.data.setdefault("ledger", {})
+
+    def turn(gid: str) -> int:
+        got = alice.get(f"/api/games/{gid}")
+        return (got.json().get("turn") or 0) if got.status_code == 200 else 0
+
+    try:
+        made = bob.post("/api/pool/servers", json={"config": {"name": f"QA ledger helper {h.tag}", "kind": "owned",
+                                                              "connection": {"provider": "openai_compatible",
+                                                                             "max_parallel": 1}},
+                                                   "reach": "worker"})
+        hid = made.json().get("id") if made.status_code == 200 else ""
+        tok = bob.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa ledger"}) if hid else None
+        if tok is not None and tok.status_code == 200:
+            helper = Helper(h, tok.json().get("token", ""), scripted, "qa-ledger-helper")
+        group = bob.post("/api/pool/groups", json={"name": f"QA ledger group {h.tag}", "visibility": "private"})
+        group_id = group.json().get("id") if group.status_code == 200 else ""
+        put = bob.put(f"/api/pool/servers/{hid}", json={"group_id": group_id})
+        grant = bob.post(f"/api/pool/groups/{group_id}/grants",
+                         json={"subject_type": "user", "handle": alice.handle, "purposes": ["game", "pooled"]})
+        online = bool(helper and wait_until(lambda: _online(bob, hid), 60, 0.25))
+        dry = alice.post("/api/servers", json={"name": f"QA ledger alice dry {h.tag}", "kind": "test",
+                                               "connection": {"provider": "dryrun", "dry_run_delay": 0.1},
+                                               "models": [{"key": "dry-run"}]})
+        dry_id = dry.json().get("id") if dry.status_code == 200 else ""
+        r.check("bob's helper machine (its real helper connected) shared with alice for games and pooled prompts, and "
+                "a dry-run machine of alice's own",
+                online and (group.status_code, put.status_code, grant.status_code, dry.status_code) ==
+                (200, 200, 200, 200),
+                f"online {online}; group {group.status_code}, put {put.status_code}, grant {grant.status_code}, "
+                f"dry {dry.status_code}")
+        data["machines"] = {"bob_helper": hid, "alice_dry": dry_id}
+        ids = dict(_ledger_rows(state, "SELECT handle, id FROM users"))
+        a_id, b_id = ids.get(alice.handle), ids.get(bob.handle)
+        start = time.time()
+
+        # ---- alice's lobby game on bob's machine, and one on her own
+        for sid, model, seed in ((hid, scripted.MODEL, 3331), (dry_id, "dry-run", 3332)):
+            g = alice.post("/api/games", json={"name": f"QA ledger game {len(games) + 1} {h.tag}",
+                                               "config": {**CONFIG, "seed": seed},
+                                               "seats": [{"type": "llm", "llm": {"server_id": sid, "model": model}},
+                                                         {"type": "bot"}]})
+            if g.status_code == 200:
+                games.append(g.json()["id"])
+        played = len(games) == 2 and wait_until(lambda: all(turn(g) >= 3 for g in games), 240, 1.0)
+        for g in games:
+            alice.post(f"/api/games/{g}/control", json={"paused": True})
+        # ---- her report, its analysis written on bob's machine
+        rep_ = alice.post("/api/reports", json={"title": f"QA ledger report {h.tag}", "sections": ["summary"],
+                                                "narrative": {"enabled": True, "server_id": hid,
+                                                              "model_id": scripted.MODEL}})
+        rid = rep_.json().get("id", "") if rep_.status_code == 200 else ""
+        built = bool(rid) and wait_until(
+            lambda: ((alice.get(f"/api/reports/{rid}").json().get("meta") or {}).get("status") in ("done", "failed")),
+            180, 1.0)
+        status = (alice.get(f"/api/reports/{rid}").json().get("meta") or {}) if rid else {}
+        r.check("alice's games each played three rounds (one on bob's machine, one on her own) and her report was "
+                "built with its analysis written on bob's machine",
+                bool(played) and status.get("status") == "done" and status.get("narrative_written") is True,
+                f"turns {[turn(g) for g in games]}; report {status.get('status')} "
+                f"narrative {status.get('narrative_written')}")
+        time.sleep(4.0)                          # the ledger's writer inserts what it has every 2 s
+
+        # ---- the events on bob's machine: one a completion the endpoint served, alice's, given by bob
+        served = [q for q in scripted.completions() if q["t"] >= start - 1]
+        events = _ledger_rows(state, "SELECT activity, activity_kind, task_class, consumer_id, provider_id, kind, "
+                                     "gen_s, reported_s, observed_s, credits, self_use FROM compute_events "
+                                     "WHERE machine_id = ? ORDER BY id", (hid,))
+        game_act, report_act = f"game:{games[0]}" if games else "", f"report:{rid}"
+        acts = {(e[0], e[2]) for e in events}
+        honest = all(e[7] is not None and e[8] is not None and e[6] <= min(e[7], e[8]) + 1e-6 for e in events)
+        r.check("every completion bob's helper served is one event on his machine: alice's (her game's full seat and "
+                "her report's pooled prompt), given by bob, each with the helper's reported and the server's observed "
+                "time and its generation time no more than either",
+                len(events) == len(served) and len(served) > 3 and acts == {(game_act, "full"), (report_act, "partial")}
+                and all(e[3] == a_id and e[4] == b_id and e[5] == "gpu" and not e[10] for e in events) and honest,
+                f"{len(events)} events, {len(served)} completions; activities {sorted(acts)}; honest {honest}",
+                events=len(events), completions=len(served))
+        own = _ledger_rows(state, "SELECT count(*), sum(self_use), sum(credits) FROM compute_events "
+                                  "WHERE machine_id = ? AND kind = 'gpu'", (dry_id,))[0]
+        r.check("her game on her own machine is self-use: its events count on neither side",
+                (own[0] or 0) > 0 and own[0] == own[1], f"{own[0]} events, {own[1]} self-use, {own[2]} credits")
+
+        # ---- given and used as each is told, against the events (stable between two reads: CPU lands each minute)
+        def sums():
+            given = _ledger_rows(state, "SELECT coalesce(sum(credits), 0), count(*) FROM compute_events "
+                                        "WHERE provider_id = ? AND self_use = 0", (b_id,))[0]
+            used = _ledger_rows(state, "SELECT coalesce(sum(credits), 0), count(*) FROM compute_events "
+                                       "WHERE consumer_id = ? AND self_use = 0", (a_id,))[0]
+            mine = _ledger_rows(state, "SELECT coalesce(sum(credits), 0) FROM compute_events "
+                                       "WHERE consumer_id = ? AND self_use = 1", (a_id,))[0][0]
+            return given, used, mine
+        seen: dict = {}
+
+        def agrees():
+            before = sums()
+            his = bob.get("/api/ledger/me?range=all").json()
+            hers = alice.get("/api/ledger/me?range=all").json()
+            after = sums()
+            seen.update(before=before, his=his, hers=hers)
+            return before == after and abs(his["given"]["credits"] - before[0][0]) < 1e-3 \
+                and his["given"]["events"] == before[0][1] and abs(hers["used"]["credits"] - before[1][0]) < 1e-3 \
+                and hers["used"]["events"] == before[1][1] and hers["given"]["credits"] == 0 \
+                and abs(hers["own_use"]["credits"] - before[2]) < 1e-3
+        matched = wait_until(agrees, 90, 2.0)
+        his, hers = seen.get("his") or {}, seen.get("hers") or {}
+        machines = {m["name"]: m for m in his.get("by_machine") or []}
+        her_machines = {m["name"]: m for m in hers.get("by_machine") or []}
+        r.check("bob's given and alice's used, as /api/ledger/me tells each, equal the events' sums; her own machine's "
+                "work is hers alone (own use), and nobody was given anything of it",
+                bool(matched) and f"QA ledger helper {h.tag}" in machines
+                and f"QA ledger helper {h.tag}" in her_machines,
+                json.dumps({"bob_given": his.get("given"), "alice_used": (hers.get("used") or {}).get("credits"),
+                            "events": seen.get("before"), "alice_own": hers.get("own_use")}, default=str)[:700],
+                bob_given=(his.get("given") or {}).get("credits"), alice_used=(hers.get("used") or {}).get("credits"))
+        kinds = {k["kind"]: k for k in hers.get("by_activity") or []}
+        r.check("alice's use is told by kind of work (her games, her report) and her ratio is given over used",
+                {"game", "report"} <= set(kinds) and (hers.get("ratio") or {}).get("text") == "0.00",
+                json.dumps({"kinds": sorted(kinds), "ratio": hers.get("ratio")}))
+
+        # ---- the ratio's visibility (P3.2.6, P3.4.4): private by default, then members
+        path = f"/api/users/{alice.handle}/ratio"
+        hidden = (bob.get(path).status_code, h.anonymous().get(path).status_code, mod.get(path).status_code)
+        for_admin = admin.get(path)
+        shown = alice.put("/api/auth/me", json={"field_visibility": {"ratio": "server"}})
+        to_member = bob.get(path)
+        to_visitor = h.anonymous().get(path)
+        profile = bob.get(f"/api/users/{alice.handle}").json()
+        r.check("her ratio, private, is 404 to another member, a moderator and a visitor and the totals to an "
+                "administrator; made visible to members, bob reads it (and her profile carries it), a visitor still "
+                "gets 404",
+                hidden == (404, 404, 404) and for_admin.status_code == 200
+                and abs(for_admin.json()["used"]["credits"] - (hers.get("used") or {}).get("credits", -1)) < 1.0
+                and shown.status_code == 200 and to_member.status_code == 200 and to_visitor.status_code == 404
+                and "ratio" in profile,
+                json.dumps({"hidden": hidden, "admin": for_admin.status_code, "member": to_member.status_code,
+                            "visitor": to_visitor.status_code}))
+        listed = {u["handle"]: u for u in admin.get("/api/admin/users").json().get("users") or []}
+        r.check("the administrators' users page shows each account's 30 days of compute",
+                (listed.get(bob.handle) or {}).get("compute_30d", {}).get("given", 0) > 0
+                and (listed.get(alice.handle) or {}).get("compute_30d", {}).get("used", 0) > 0,
+                json.dumps({k: (listed.get(k) or {}).get("compute_30d") for k in (alice.handle, bob.handle)}))
+        data.update({"games": games, "report": rid, "events_on_helper": len(events), "completions": len(served),
+                     "bob_given": his.get("given"), "alice_used": hers.get("used"), "alice_own": hers.get("own_use"),
+                     "alice_by_machine": hers.get("by_machine"), "ratio": hers.get("ratio")})
+        if h.keep:
+            # the browser checklist's B1 reads this instance: alice's ratio back to private for its first look
+            alice.put("/api/auth/me", json={"field_visibility": {"ratio": "private"}})
+    finally:
+        for g in games:
+            try:
+                alice.delete(f"/api/games/{g}")
+            except httpx.HTTPError:
+                pass
+        if helper is not None:
+            helper.stop()
+        scripted.close()
+
+
 #: The parts written so far, in the order ``all`` runs them.
-PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue}
+PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts, "queue": part_queue, "ledger": part_ledger}
 
 
 # ---------------------------------------------------------------------------- the run

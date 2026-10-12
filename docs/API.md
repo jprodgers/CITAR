@@ -135,6 +135,26 @@ may see it: a hidden display name is the handle, a hidden picture `null`.
 
 The admin routes answer 404 to any account that is not an administrator, and 401 to a visitor.
 
+### The compute ledger
+
+What each account's machines gave other members and what its work used, in credits
+([the rules](server/ACCOUNTS.md#the-compute-ledger-and-the-ratio)). A side's figures are `{"credits", "gpu_s",
+"cpu_s", "tokens_in", "tokens_out", "events", "by_kind": {"gpu"|"cpu"|"api": {"seconds", "credits", "events"}}}`, and
+the ratio `{"value", "text"}` (`value` null when nothing was used: `text` "only given" or "nothing yet"). `range` is
+`24h`, `7d`, `30d` (the default) or `all`; another is a 400.
+
+| Method and path | |
+|---|---|
+| `GET /api/ledger/me?range=` | The caller's own: `given`, `used`, `ratio`, `by_machine` (`{"id", "name", "given", "used", "gpu_s", "cpu_s", "events"}`; a machine the caller may not see now has no `id` and is named only as whose it is), `by_activity` (by kind of work: `game`, `benchmark`, `probe`, `report`, `lab`, `test`) and `own_use` (the caller's work on the caller's own machines, counted on neither side). 401 to a visitor |
+| `GET /api/users/{handle}/ratio?range=` | `{"handle", "range", "since", "given", "used", "ratio"}` when the account's `ratio` profile field shows to the caller (private by default: the account and administrators); 404 otherwise, alike for no such account. Open to visitors for a `global` ratio. A profile (`GET /api/users/{handle}`) carries the same as `ratio` (30 days) under the same rule, and `GET /api/admin/users` each account's 30 days as `compute_30d` (`{"given", "used", "ratio"}`) |
+| `GET /api/admin/hardware-classes` | Administrators: every class (`{"id", "kind", "name", "rate", "match", "priority", "is_default", "updated_at", "updated_by", "machines"}`), each with the machines it prices now |
+| `POST /api/admin/hardware-classes` | A class: `{"kind": "gpu"|"cpu"|"api", "name", "rate", "match": {"gpu_name", "vram_gb_min", "cpu_name", "cores_min"}, "priority", "is_default"}` (a regular expression that does not compile, an unknown key, a rate outside 0 to 10⁹, a priority outside -1000 to 1000: 400). One marked the default replaces its kind's |
+| `PUT /api/admin/hardware-classes/{id}` | Change any field but its kind (400). A kind always keeps a default: unmarking the default is a 409. The new rate prices the events written after it ([reprice](CONFIGURATION.md#credits-and-hardware-classes) a period) |
+| `DELETE /api/admin/hardware-classes/{id}` | Remove a class that is not its kind's default (409 for the default) |
+
+The class routes answer 404 to any signed-in account that is not an administrator and 401 to a visitor; every change
+is an audit row, and every machine not pinned is classified again.
+
 ### Machines
 
 Every machine is a row (the host, online APIs and LAN machines the server dials itself, `reach: "direct"`, and
@@ -158,7 +178,7 @@ machines behind a CITAR helper, `reach: "worker"`); who may do what is in
 | `PUT /api/pool/servers/{id}` | `{"enabled": false}` disconnects its helper at once; switching to `reach: "direct"` follows the rule above |
 | `DELETE /api/pool/servers/{id}/workers/tokens/{token}` | Revoke a worker token: a helper connected with it is disconnected at once, and refused if it says hello again |
 | `GET /api/pool/groups` | The server groups the caller may see, with their machines; a group's manager gets every grant, anyone else their own terms. Its grants are what share it: no route takes a group's key, so a `link` group admits nobody by it yet and the listing hands out no share link |
-| `POST /api/pool/servers/{id}/test?model=&wait=` | The Servers page's test: one short completion through the machine's helper, as a `test` prompt of the [prompt scheduler](server/WORKERS.md#when-a-machine-is-busy) (it waits for a slot, on a model the helper has loaded unless its owner allows swaps). `wait` (1 to 120 seconds, default 120) is how long the caller waits for the reply: then the test is cancelled (`"cancelled": true`, `code` `cancelled`; `benchmark` when a benchmark game took the machine meanwhile), and the request the helper is still generating keeps its slot until it finishes. A reply carries `seconds`, the generation time `gen_s` and the time it waited for the machine, `queue_s`; a refusal names its `stage` (`admission`, `connection`, `model`, `queue`, `completion`), its reason and, from the queue, its `code` (`not_loaded`, `quiet_hours`, `benchmark`, ...). A caller has one test of a machine waiting at a time (another answers `code` `duplicate`) and two in all (`too_many`), at most 20 in ten minutes (429 past that, with `Retry-After`). The test is not metered. Anyone who may use the machine |
+| `POST /api/pool/servers/{id}/test?model=&wait=` | The Servers page's test: one short completion through the machine's helper, as a `test` prompt of the [prompt scheduler](server/WORKERS.md#when-a-machine-is-busy) (it waits for a slot, on a model the helper has loaded unless its owner allows swaps). `wait` (1 to 120 seconds, default 120) is how long the caller waits for the reply: then the test is cancelled (`"cancelled": true`, `code` `cancelled`; `benchmark` when a benchmark game took the machine meanwhile), and the request the helper is still generating keeps its slot until it finishes. A reply carries `seconds`, the generation time `gen_s` and the time it waited for the machine, `queue_s`; a refusal names its `stage` (`admission`, `connection`, `model`, `queue`, `completion`), its reason and, from the queue, its `code` (`not_loaded`, `quiet_hours`, `benchmark`, ...). A caller has one test of a machine waiting at a time (another answers `code` `duplicate`) and two in all (`too_many`), at most 20 in ten minutes (429 past that, with `Retry-After`). The test is a compute-ledger activity of its own (`test:<id>`): used by the caller, given by the machine's owner, counted against the grant's budget; no cost report lists it. Anyone who may use the machine |
 | `GET /api/status` | A check-in for the phone site. An administrator's also lists the scheduler's `machines`: each one's slots, what is in flight and draining, what waits, its leases (each with its `kind`, `label`, the `game` session holding it and the work it serves as `ref`, `[kind, id]`) and pooled prompts, and its counters (`busy_refusals`, `late_frames`, `drain_timeouts`, `drains_dropped`, ...); a member's and a moderator's do not |
 
 The pool's routes that change something (a machine, its costs or quiet hours, a group, a grant, a worker token)

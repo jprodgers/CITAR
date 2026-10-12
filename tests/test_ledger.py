@@ -68,7 +68,7 @@ UTC = timezone.utc
 
 
 def tearDownModule():
-    ledger.reset(background=False)
+    ledger.reset()                    # the process's ledger as a server has it, for the modules after this one
     db.dispose()
     shutil.rmtree(_TMP, ignore_errors=True)
 
@@ -142,6 +142,13 @@ class World(unittest.TestCase):
     BACKGROUND = False
 
     def setUp(self):
+        # games other modules left playing feed the process's usage tracker, whose flush hands the ledger their CPU:
+        # stopped (and the ledger made afresh) before this database is, so no stray event lands in it
+        if usage._tracker is not None:
+            usage._tracker.stop()
+            usage._tracker = None
+        self.led = ledger.reset(background=self.BACKGROUND)
+        self.addCleanup(lambda: ledger.reset(background=False))
         db.dispose()
         db.configure(_URL)
         Base.metadata.drop_all(db.engine())
@@ -149,8 +156,6 @@ class World(unittest.TestCase):
         policy.invalidate()
         S.reset()
         self.addCleanup(S.reset)
-        self.led = ledger.reset(background=self.BACKGROUND)
-        self.addCleanup(lambda: ledger.reset(background=False))
         self.now = datetime(2026, 10, 12, 15, 0, tzinfo=UTC)
         self.keeper = budgets.reset_keeper(clock=lambda: self.now)
         self.addCleanup(budgets.reset_keeper)

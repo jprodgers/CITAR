@@ -113,15 +113,29 @@ The machines are rows of the server's database since 0.1.6, edited on the Server
 Every game with an AI seat, benchmark game, probe run, lab game and report narrative is written to
 `saves/usage/*.jsonl`:
 
+- the activity: what it was, whose run or experiment it belongs to
 - which servers it held, and for how long
-- how long each model spent generating
-- tokens: input, output, reasoning, cache reads and cache writes
-- CPU time on the host
 - one-minute power samples of the host
 
-**The ledger holds no prices.** Reports price it with the settings in force at the time, so
+The **work** each activity did is the compute ledger's (`compute_events` in the database; how it is counted is in
+[Accounts](server/ACCOUNTS.md#the-compute-ledger-and-the-ratio)), which costing reads beside it:
+
+- how long each model spent generating, per model step: the time the model worked, bounded by what the server saw of
+  a helper's answer, never the time the request waited for its machine in the prompt scheduler's line;
+- tokens: input, output, reasoning, cache reads and cache writes;
+- the host's CPU time, measured per unit of work (a game's drives and engine calls, a chat answer, a report's build, a
+  probe case), so a thread that serves several games charges each its own time; a lab game's CPU from its result.
+
+So a minute in which a game's seat waited ten seconds for a machine busy with somebody else's work is charged ten
+seconds less busy energy than before 0.1.6, when the ledger counted the whole call. The held time, which fixed costs
+and idle power are split by, is unchanged. Spans written before 0.1.6 carry their own work, and are priced as they
+were.
+
+**The ledgers hold no prices.** Reports price them with the settings in force at the time, so
 correcting a rate later corrects every report that touches that period. This is the single most
 useful property of the design: you do not have to know your electricity tariff before you start.
+(The compute ledger's own credits are another unit, priced when each event is written, for the ratio and budgets:
+[Configuration](CONFIGURATION.md#credits-and-hardware-classes).)
 
 ---
 

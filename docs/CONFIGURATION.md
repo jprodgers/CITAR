@@ -166,6 +166,55 @@ The alternatives, chosen per machine:
 
 Keys are stored under the machine's id, which the import keeps.
 
+### Credits and hardware classes
+
+The compute ledger counts what each member's machines **gave** other members and what their work **used** of others'
+machines and the site's ([Accounts](server/ACCOUNTS.md#the-compute-ledger-and-the-ratio)), in **credits**. An event's
+credits are priced when it is written, from the machine's **hardware class** of its kind:
+
+| Kind | Credits | Default class and rate |
+|---|---|---|
+| `gpu` | a model step's generation seconds × the rate | GPU (unclassified): 1.0 |
+| `cpu` | the host's CPU core-seconds × the rate | CPU core (unclassified): 0.05 |
+| `api` | a step's token cost at the model's prices, in the registry's currency, × the rate | Online API: 1,000 |
+
+The compute rates are an energy proxy, one credit for roughly 300 W for a second (an unclassified GPU's
+generation-second; a CPU core is about 15 W); an online API's 1,000 credits per unit of currency is roughly the
+generation time a home GPU spends producing what that much buys from an API, so a member who uses the site's paid key is
+counted in the same unit as one who uses a member's GPU. An API step whose model has no price is credited 0 and flagged
+`unpriced`.
+
+A machine's class of a kind is the first class of that kind, by priority (highest first), whose **match** fits the
+machine's hardware, else the kind's default:
+
+| Match key | Fits when |
+|---|---|
+| `gpu_name` | a regular expression matches one of its GPUs' names (case ignored) |
+| `vram_gb_min` | its largest GPU has at least that much memory |
+| `cpu_name` | a regular expression matches its CPU's model |
+| `cores_min` | its CPU has at least that many cores (else threads) |
+
+The class follows the hardware: a helper's hello, the hardware dialog or a scan that changes it classifies the machine
+again, unless an administrator pinned its classes (`class_override`; the machine settings dialog's). Each kind keeps
+one default class, which cannot be removed.
+
+Administrators edit the classes over HTTP (`GET`/`POST /api/admin/hardware-classes`,
+`PUT`/`DELETE /api/admin/hardware-classes/{id}`; [API](API.md#the-compute-ledger)). A new rate applies to the events
+written after it; to recompute a period at today's classes, rates and token prices:
+
+```bash
+citar admin reprice --since 2026-10-01 [--until 2026-10-08]     # UTC dates; the hours' rollups follow
+```
+
+An item an administrator marks as the server's own data collection counts as given by whoever's machine served it and
+used by nobody:
+
+```bash
+citar admin set-collection benchmark_run <run id> on
+```
+
+Budgets on grants are counted in the same credits ([Accounts](server/ACCOUNTS.md#budgets)).
+
 ### Workers
 
 | Variable | Default | Meaning |

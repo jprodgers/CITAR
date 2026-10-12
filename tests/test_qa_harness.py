@@ -117,7 +117,7 @@ class Refusals(unittest.TestCase):
         self.assertEqual(_snapshot(stand_in), before, "every file is as it was")
 
     def test_a_part_not_written_yet(self):
-        r = subprocess.run([sys.executable, str(SCRIPT), "ledger", "--dir", str(self.tmp / "x")], cwd=str(ROOT),
+        r = subprocess.run([sys.executable, str(SCRIPT), "chat", "--dir", str(self.tmp / "x")], cwd=str(ROOT),
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("not written yet", r.stdout)

@@ -34,7 +34,7 @@ from . import __version__
 
 #: Sub-commands that delegate: name -> (import path, attribute, one-line help).
 DELEGATES = {
-    "admin": ("citar.server.admin_cli", "main", "accounts, invitations, policies and worker tokens"),
+    "admin": ("citar.server.admin_cli", "main", "accounts, invitations, policies, worker tokens and the compute ledger"),
     "worker": ("citar.worker.__main__", "main", "serve this machine's models to a remote CITAR server"),
     "mcp": ("citar.agents.mcp_server", "main", "MCP bridge for an external AI client"),
     "bench": ("citar.bench", "main", "benchmark models from the command line"),

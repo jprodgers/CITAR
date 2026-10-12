@@ -69,6 +69,11 @@ class BootCase(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp(prefix="citar_migrate_")).resolve()
         self.path = self.dir / "citar.db"
         self._previous = db._url
+        # the compute ledger's writer (fed by games other modules left playing) writes to whatever database is
+        # configured: here it would hold open the file a test renames. It queues, unwritten, until this test is done.
+        from citar import ledger
+        ledger.reset(background=False)
+        self.addCleanup(ledger.reset)
 
     def tearDown(self):
         db.dispose()
