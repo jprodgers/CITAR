@@ -45,7 +45,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .fsutil import replace as _fs_replace
+from .fsutil import read_text as _fs_read, replace as _fs_replace
 from typing import Optional
 
 from . import engine_api, paths
@@ -167,7 +167,7 @@ def list_probes() -> list[dict]:
     out = []
     for p in sorted(BASE.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
-            d = json.loads(p.read_text(encoding="utf-8"))
+            d = json.loads(_fs_read(p))
             out.append({"id": d.get("id"), "name": d.get("name"), "description": d.get("description", ""),
                         "scenario": d.get("scenario"), "cases": len(d.get("cases") or []), "repeats": d.get("repeats", 1),
                         "subject": d.get("subject"), "counterparty": d.get("counterparty"),
@@ -182,7 +182,7 @@ def load_probe(pid: str) -> dict:
     p = _path(pid)
     if not p.exists():
         raise ProbeError(f"No probe '{pid}'.")
-    return json.loads(p.read_text(encoding="utf-8"))
+    return json.loads(_fs_read(p))
 
 
 def save_probe(data: dict) -> dict:
@@ -621,7 +621,7 @@ class ProbeRunner:
         p = self._run_dir(rid) / "run.json"
         if not p.exists():
             raise ProbeError(f"No run '{rid}'.")
-        return json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(_fs_read(p))
 
     def results(self, rid: str) -> list[dict]:
         """The per-case results of a run."""
@@ -641,7 +641,7 @@ class ProbeRunner:
         out = []
         for p in sorted(RUNS.glob("*/run.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
-                out.append(json.loads(p.read_text(encoding="utf-8")))
+                out.append(json.loads(_fs_read(p)))
             except (OSError, ValueError):
                 pass
         return out

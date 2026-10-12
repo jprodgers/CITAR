@@ -27,6 +27,13 @@ def replace(src, dst):
     retry(lambda: os.replace(src, dst))
 
 
+def read_text(path) -> str:
+    """Read a file another thread replaces (``replace``), retrying while it is locked: on Windows, for the moment a
+    replace takes, the file is the old one pending deletion, which nothing can open."""
+    path = Path(path)
+    return retry(lambda: path.read_text(encoding="utf-8"))
+
+
 def write_text(path, text: str):
     """Atomic write: a temporary file next to the target, then a (retried) replace."""
     path = Path(path)
