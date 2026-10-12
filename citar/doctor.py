@@ -264,7 +264,7 @@ def _check_ruleset(r: Report) -> None:
 
 
 def _check_providers(r: Report) -> None:
-    """Every model endpoint in the registry, and whether it answers right now."""
+    """Every machine the server dials (the server's database, read where this runs), and whether it answers now."""
     r.section("Model providers")
     try:
         from . import servers as registry
@@ -287,6 +287,9 @@ def _check_providers(r: Report) -> None:
         connection = server.get("connection") or {}
         provider = connection.get("provider", "none")
         base_url = connection.get("base_url") or ""
+        if registry.is_helper(server.get("id")):
+            r.line(OK, name, "reached through its CITAR helper, which dials it (nothing for this computer to reach)")
+            continue
         if provider in ("none", "dryrun"):
             r.line(OK, name, f"{provider} - nothing to reach")
             continue
