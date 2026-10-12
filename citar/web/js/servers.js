@@ -184,7 +184,7 @@ export function openSettings(onSaved) {
 
 // ---------------------------------------------------------------------------- connection and models
 
-const target = (S) => S;          // a dialog's copy carries what the gates read: can_manage, reach, is_host, connection
+// A dialog's copy of a machine (`S`) is what the gates read of it: can_manage, reach, is_host and its connection.
 
 /** The machine's connection and its models (with LM Studio's load profiles), and its name, kind and notes. */
 export function openConnection(original, onSaved, { isNew = false } = {}) {
@@ -263,7 +263,7 @@ function connection(S, draw) {
     const st = S.key_status || { backend: "none", present: false };
     box.appendChild(el("div", { class: "row" },
       el("span", { class: st.present ? "good small" : "muted small" }, st.present ? `🔑 key stored (${KEY_BACKENDS[st.backend]})` : st.backend === "none" ? "No API key." : "🔑 no key found yet"),
-      !S.isNew && may("storeKey", target(S)) ? el("button", { class: "small", onclick: () => openKey(S, (r) => { S.key_status = r.key_status; draw(); }) }, "API key…") : null,
+      !S.isNew && may("storeKey", S) ? el("button", { class: "small", onclick: () => openKey(S, (r) => { S.key_status = r.key_status; draw(); }) }, "API key…") : null,
       S.isNew ? el("span", { class: "muted small" }, "Save the machine first, then store its key.") : null));
   }
   if (!admin) box.appendChild(el("p", { class: "muted small" }, "A machine the server connects to itself is an administrator's to point at an address: yours is the dry run, which dials nothing."));
@@ -284,11 +284,11 @@ function models(S, draw) {
   const loadState = {};
   const helper = S.reach === "worker";
   const lm = c.provider === "lmstudio" && !helper;
-  const canDetect = !S.isNew && DETECTABLE.includes(c.provider) && may("detectModels", target(S));
+  const canDetect = !S.isNew && DETECTABLE.includes(c.provider) && may("detectModels", S);
   const detect = async () => {
     status.textContent = "Contacting the server…";
     try {
-      const r = await call("detectModels", target(S), S.id);
+      const r = await call("detectModels", S, S.id);
       clear(detected);
       if (!r.ok) { status.textContent = r.error; status.className = "bad small"; return; }
       status.className = "good small";
@@ -343,7 +343,7 @@ function models(S, draw) {
 function modelEditor(S, m, loadState, redraw) {
   const c = S.connection;
   const lm = c.provider === "lmstudio" && S.reach !== "worker";
-  const loads = lm && !S.isNew && may("loadModel", target(S));
+  const loads = lm && !S.isNew && may("loadModel", S);
   const open = modelEditor.open || (modelEditor.open = new Set());
   const expanded = open.has(m.id);
   const row = el("div", { class: `model-edit ${m.enabled ? "" : "disabled"}` });
@@ -387,15 +387,15 @@ function modelEditor(S, m, loadState, redraw) {
         loads ? el("div", { class: "col" },
           el("button", { class: "small", title: "Memory estimate (lms --estimate-only)", onclick: async () => {
             est.style.display = "block"; est.textContent = "Estimating…";
-            try { const r = await call("estimateLoad", target(S), S.id, m.id, p.id); est.textContent = r.text || r.error; } catch (e) { est.textContent = e.message + " (save the machine first)"; }
+            try { const r = await call("estimateLoad", S, S.id, m.id, p.id); est.textContent = r.text || r.error; } catch (e) { est.textContent = e.message + " (save the machine first)"; }
           } }, "Estimate"),
           el("button", { class: "small", title: "Load now with this profile", onclick: async () => {
-            try { await call("loadModel", target(S), S.id, m.id, p.id); toast(`Loading ${m.key}…`); pollLoad(S, m.key); } catch (e) { toast(e.message, "error"); }
+            try { await call("loadModel", S, S.id, m.id, p.id); toast(`Loading ${m.key}…`); pollLoad(S, m.key); } catch (e) { toast(e.message, "error"); }
           } }, "Load now"),
           el("button", { class: "small", title: "Read the settings this model is loaded with right now in LM Studio and copy them into this profile",
             onclick: async () => {
               try {
-                const r = await call("loadedConfig", target(S), S.id, m.id);
+                const r = await call("loadedConfig", S, S.id, m.id);
                 Object.assign(p, r.profile, { id: p.id, name: p.name, loaded_by: "citar" });
                 toast("Copied the settings the model is loaded with"); redraw();
               } catch (e) { toast(e.message, "error", 7000); }
@@ -436,7 +436,7 @@ function modelEditor(S, m, loadState, redraw) {
         m.profiles.push({ ...clone(last), id: newId("p_"), name: `Profile ${m.profiles.length + 1}` }); redraw();
       } }, "+ Add profile"),
       loads ? el("button", { class: "small", onclick: async () => {
-        try { await call("unloadModel", target(S), S.id, m.id); toast("Unloaded"); } catch (e) { toast(e.message, "error"); }
+        try { await call("unloadModel", S, S.id, m.id); toast("Unloaded"); } catch (e) { toast(e.message, "error"); }
       } }, "Unload now") : null), est);
   }
   if (S.kind === "api" || S.kind === "leased") {
@@ -457,7 +457,7 @@ async function pollLoad(S, key) {
   for (let i = 0; i < 600; i++) {
     await new Promise((r) => setTimeout(r, 2000));
     try {
-      const st = (await call("serverLoading", target(S), S.id))[key];
+      const st = (await call("serverLoading", S, S.id))[key];
       if (st && st.status === "done") { toast(`${key} is loaded${st.seconds ? ` (${Math.round(st.seconds)}s)` : ""}`); return; }
       if (st && st.status === "failed") { toast(st.error, "error", 8000); return; }
     } catch (e) { return; }
@@ -471,7 +471,7 @@ export function openHardware(original, onSaved) {
   const S = clone(original);
   S.can_manage = true;
   const rates = el("div", { class: "muted small" });
-  const showRates = () => call("serverRates", target(S), S.id).then((r) => {
+  const showRates = () => call("serverRates", S, S.id).then((r) => {
     rates.textContent = `With the saved settings an hour costs ≈ ${money(r.idle.total)} idle and ${money(r.busy.total)} with the model generating` +
       (r.busy.kwh_price != null ? ` (electricity ${money(r.busy.kwh_price)}/kWh).` : " (no electricity rate).");
   }).catch(() => {});
@@ -487,7 +487,7 @@ function hardware(S, draw) {
     const f = e.target.files[0]; if (!f) return;
     try {
       const data = JSON.parse(await f.text());
-      const r = await call("importHardware", target(S), S.id, data);
+      const r = await call("importHardware", S, S.id, data);
       Object.assign(S, { hardware: r.hardware, power: r.power, hardware_summary: r.hardware_summary });
       toast(`Imported hardware of ${data.hostname || "the machine"}`); draw();
     } catch (err) { toast(`Import failed: ${err.message}`, "error"); }
@@ -500,10 +500,10 @@ function hardware(S, draw) {
       el("code", {}, "--no-hardware"), "), and its scan replaces the details here.") : null,
     el("div", { class: "card inner" },
       el("h3", {}, "Collect automatically"),
-      may("collectHardware", target(S)) ? el("div", { class: "row" }, el("button", { class: "primary small", onclick: async () => {
+      may("collectHardware", S) ? el("div", { class: "row" }, el("button", { class: "primary small", onclick: async () => {
         try {
           toast("Collecting… (a few seconds)");
-          const r = await call("collectHardware", target(S), S.id);
+          const r = await call("collectHardware", S, S.id);
           Object.assign(S, { hardware: r.hardware, power: r.power, hardware_summary: r.hardware_summary }); draw();
         } catch (e) { toast(e.message, "error"); }
       } }, "Collect from this PC"), el("span", { class: "muted small" }, "CPU, GPUs, RAM, disks and local model runtimes.")) : null,
@@ -516,7 +516,7 @@ function hardware(S, draw) {
         el("div", { class: "row" }, el("a", { href: "/api/hardware-collector/collect_hardware.ps1", download: "collect_hardware.ps1" }, "collect_hardware.ps1"),
           el("span", { class: "muted small" }, "Windows, no Python needed"))),
       el("pre", {}, "python3 collect_hardware.py > my-machine.json\nsh collect_hardware.sh > my-machine.json\npowershell -ExecutionPolicy Bypass -File collect_hardware.ps1 > my-machine.json"),
-      may("importHardware", target(S)) ? el("div", { class: "row" }, file, el("button", { class: "small", onclick: () => file.click() }, "Import JSON…")) : null),
+      may("importHardware", S) ? el("div", { class: "row" }, file, el("button", { class: "small", onclick: () => file.click() }, "Import JSON…")) : null),
     el("h3", { class: "section" }, "Details (edit or enter manually)"),
     el("div", { class: "grid2" },
       field("Form", sel(hw.system, "form", [["", "unknown"], ["desktop", "desktop"], ["laptop", "laptop"], ["server", "server"]])),
@@ -569,7 +569,7 @@ export function openCosts(original, onSaved) {
   const S = clone(original);
   S.can_manage = true;
   const rates = el("div", { class: "muted small" });
-  const showRates = () => call("serverRates", target(S), S.id).then((r) => {
+  const showRates = () => call("serverRates", S, S.id).then((r) => {
     rates.textContent = S.kind === "api" ? (r.idle.total ? `Fixed ${money(r.idle.total)}/h + tokens` : "Pay per token") :
       `With the saved settings an hour costs ≈ ${money(r.idle.total)} idle and ${money(r.busy.total)} with the model generating.`;
   }).catch(() => {});
@@ -732,7 +732,7 @@ export function openKey(original, done) {
       body.appendChild(el("div", { class: "row" }, secret, el("button", { class: "small primary", onclick: async () => {
         if (!secret.value.trim()) { toast("Paste the key first", "error"); return; }
         try {
-          const r = await call("storeKey", target(S), S.id, k.backend, secret.value.trim(), null);
+          const r = await call("storeKey", S, S.id, k.backend, secret.value.trim(), null);
           secret.value = "";
           toast("Key stored");
           changed(r);
@@ -741,19 +741,19 @@ export function openKey(original, done) {
     }
     if (k.backend === "env") {
       body.appendChild(el("div", { class: "row" }, el("button", { class: "small", onclick: async () => {
-        try { changed(await call("storeKey", target(S), S.id, "env", null, k.env)); } catch (e) { toast(e.message, "error"); }
+        try { changed(await call("storeKey", S, S.id, "env", null, k.env)); } catch (e) { toast(e.message, "error"); }
       } }, "Use this variable")));
     }
     if (k.backend === "none" && status.backend !== "none") {
       body.appendChild(el("div", { class: "row" }, el("button", { class: "small", onclick: async () => {
-        try { changed(await call("storeKey", target(S), S.id, "none", null, null)); } catch (e) { toast(e.message, "error"); }
+        try { changed(await call("storeKey", S, S.id, "none", null, null)); } catch (e) { toast(e.message, "error"); }
       } }, "Use no key")));
     }
     body.appendChild(el("div", { class: status.present ? "good small" : "muted small" }, status.backend === "none" ? "No key configured." :
       status.present ? `A key is stored${status.hint ? " (ends " + status.hint.slice(1) + ")" : ""}.` : status.locked ? "The key file is locked." : "No key found yet."));
     if (status.present && status.backend !== "env") body.appendChild(el("button", { class: "small danger", onclick: async () => {
       if (!(await confirmBox("Remove key", "Remove the stored key for this machine?"))) return;
-      try { changed(await call("deleteKey", target(S), S.id)); } catch (e) { toast(e.message, "error"); }
+      try { changed(await call("deleteKey", S, S.id)); } catch (e) { toast(e.message, "error"); }
     } }, "Remove key"));
   };
   draw();
