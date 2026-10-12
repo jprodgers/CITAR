@@ -59,14 +59,16 @@ class WorkerError(RuntimeError):
 
 @dataclass
 class Pending:
-    """A request in flight, waiting for its answer on another thread. ``sent`` and ``done_at`` (monotonic) are when
-    its frame went out and when the helper's answer came: the generation time the server observed (P3.3.4)."""
+    """A request in flight, waiting for its answer on another thread. ``sent`` and ``done_at`` (``perf_counter``) are
+    when its frame went out and when the helper's answer came: the generation time the server observed (P3.3.4).
+    Not ``monotonic``, which ticks every 15.6 ms on Windows before Python 3.13: a helper's honest duration, inside
+    this window, could read a tick longer than it."""
     id: str
     event: threading.Event = field(default_factory=threading.Event)
     result: Optional[dict] = None
     error: Optional[WorkerError] = None
     started: float = field(default_factory=time.time)
-    sent: float = field(default_factory=time.monotonic)
+    sent: float = field(default_factory=time.perf_counter)
     done_at: Optional[float] = None
 
 
@@ -188,7 +190,7 @@ class WorkerConnection:
             except Exception:
                 log.exception("could not hand a late frame to the scheduler")
             return
-        pending.done_at = time.monotonic()
+        pending.done_at = time.perf_counter()
         pending.result = result
         pending.error = error
         pending.event.set()
@@ -372,7 +374,7 @@ class WorkerHub:
         deadline = timeout if timeout is not None else request.timeout
         pending = connection.open_request(request.id)
         try:
-            pending.sent = time.monotonic()
+            pending.sent = time.perf_counter()
             connection.send_threadsafe(P.request_frame(request))
         except Exception as exc:
             connection.resolve(request.id)

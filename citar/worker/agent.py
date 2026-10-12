@@ -229,11 +229,11 @@ class Worker:
                     return
                 self.in_flight += 1
             try:
-                started = time.time()
+                started = time.perf_counter()     # a duration: never the wall clock, which can be set back
                 # The completion is blocking and CPU/GPU-bound, so it runs on a thread and the
                 # event loop stays free to answer pings and accept a cancel.
                 result = await asyncio.to_thread(self._complete, data)
-                result["duration"] = round(time.time() - started, 3)
+                result["duration"] = round(time.perf_counter() - started, 3)
                 result["id"] = request_id
                 await websocket.send(P.frame(P.DONE, **result))
                 log.info("completed %s in %.1fs (%d tool calls)", request_id,

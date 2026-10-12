@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -218,9 +219,16 @@ class Listing(Base_):
 
     def test_every_account_filtered_and_paged(self):
         with db.session() as s:
-            for i in range(55):
-                accounts.create_user(s, handle=f"acct{i:02d}", email=f"acct{i:02d}@example.com", status="active")
-            accounts.create_user(s, handle="hidden1", status="suspended", display_name="Quiet One").listed = False
+            made = [accounts.create_user(s, handle=f"acct{i:02d}", email=f"acct{i:02d}@example.com", status="active")
+                    for i in range(55)]
+            hidden = accounts.create_user(s, handle="hidden1", status="suspended", display_name="Quiet One")
+            hidden.listed = False
+            s.flush()
+            # a second apart: Windows' clock before Python 3.13 can give accounts made in one loop the same moment,
+            # which the listing orders by id (stable paging, but not this test's "newest")
+            base = made[0].created_at
+            for i, u in enumerate(made + [hidden]):
+                u.created_at = base + timedelta(seconds=i)
         r = self.client.get("/api/admin/users", headers=self.headers["ada"])
         body = r.json()
         self.assertEqual((len(body["users"]), body["next"]), (50, 50))

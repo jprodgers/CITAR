@@ -1166,10 +1166,12 @@ class Scheduler:
     #: The class of its machines (a test's audited one checks the rules at every grant).
     machine_class = Machine
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
+    def __init__(self, *, clock: Callable[[], float] = time.perf_counter, wall: Callable[[], float] = time.time,
                  settings: Optional[Callable[[str], MachineSettings]] = None,
                  helper: Optional[Callable[[str], dict]] = None, drain_seconds: float = BENCHMARK_DRAIN_SECONDS,
                  background: bool = True):
+        # perf_counter, not monotonic: both never go back, but on Windows before Python 3.13 monotonic ticks every
+        # 15.6 ms, which metered a short step's generation and queue time as 0 and moved a step's edges by a tick
         self.clock = clock
         self.wall = wall
         self._read = settings or read_settings

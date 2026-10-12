@@ -409,7 +409,12 @@ class OneSlot(unittest.TestCase):
         m = self.sched.machine("sv_gpu")
         steps = sorted((e.at - e.gen_s, e.at) for e in self.events if e.machine == "sv_gpu")
         self.assertGreaterEqual(len(steps), 2 * 5 * 2)
-        overlaps = [(a, b) for a, b in zip(steps, steps[1:]) if b[0] < a[1] - 0.005]
+        # A step's edges are rebuilt from its wall-clock stamp, taken just after its slot is freed, less its
+        # generation time: each edge is off by the wall clock's tick (15.6 ms on Windows before Python 3.13) and
+        # the next step may start before the last one's stamp. Two steps really in flight together overlap by
+        # most of their 50 ms; the scheduler's own count (max_in_flight, below) is exact.
+        tol = 0.005 + 2 * time.get_clock_info("time").resolution + time.get_clock_info("perf_counter").resolution
+        overlaps = [(a, b) for a, b in zip(steps, steps[1:]) if b[0] < a[1] - tol]
         self.assertEqual(overlaps, [], "never more than one request in flight (from the listener's steps)")
         self.assertEqual(m.max_in_flight, 1)
         self.assertEqual(m.counters["busy_refusals"], 0)
