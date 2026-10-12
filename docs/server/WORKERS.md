@@ -180,8 +180,10 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   answer in a chat, a paused game, its next turn) a lobby game's lease lends its slot. A seat's lease is held to the
   concurrency of the grant its game was admitted for: a benchmark game's to the owner's grant for benchmarks.
 - **What the machine is busy with** is its leases: queued benchmark jobs wait for them, and the Queue page lists
-  them. A probe's turn case holds a lease on its model's machine for the case (lending nothing); a probe run waits to
-  start only for a benchmark holding its machine (and for work ranked ahead of it there). What a queued job or run says
+  them. A probe's turn case holds a lease on its model's machine for the case (lending nothing), so it waits, as a
+  benchmark job does, until the leases there leave a slot free (a lobby game's seat on a one-slot machine holds it up);
+  its offer and message cases do not wait for a lobby game. A probe run waits for a benchmark holding its machine
+  before each case, saying so (and to start, for work ranked ahead of it there). What a queued job or run says
   it waits for names only the work its reader may see; anyone else's game or run is "someone's game" or "someone's
   benchmark run", and a game paused to make way says only what kind of work it makes way for.
 - A **pooled prompt** is one short job of a few model calls: a report's written analysis, each answer of a probe's
@@ -194,11 +196,13 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   one-slot home GPU serves pooled prompts beside a game. A prompt that borrows an idle seat's slot runs under its
   class's cap (a report's analysis five minutes and 4,096 tokens a step, a probe's answer and a chat two minutes and
   1,024, a test 30 seconds and 256), and gives the slot back after its current step as soon as the seat's turn comes:
-  the seat waits for at most that one capped step. A benchmark game on the machine holds it: pooled prompts are refused
-  or, for those that wait for benchmarks (a report's analysis, a probe's answers), wait until it is gone, and the
-  benchmark's first request waits up to two minutes for those already running to finish (`drain_s` in the job's
-  result; a benchmark that had to go ahead anyway is marked `contaminated`, and its timing is left out of the model's
-  speed score).
+  the seat waits for at most that one capped step. A probe's answer cut off that way (or by a benchmark) is asked
+  again once the slot is free, up to three times, and is never scored as the model's own answer: one that never ran
+  whole is recorded as an error, not as a failure of the model. A benchmark game on the machine holds it: pooled
+  prompts are refused or, for a report's analysis (which waits for benchmarks), wait until it is gone, and a probe run
+  whose answer is refused waits for the benchmark as a run, saying so; the benchmark's first request waits up to two
+  minutes for those already running to finish (`drain_s` in the job's result; a benchmark that had to go ahead anyway
+  is marked `contaminated`, and its timing is left out of the model's speed score).
 - **Who may use a machine for pooled prompts** is a grant's **pooled prompts** purpose (`pooled`), beside **ordinary
   games** (`game`: a model seat that plays every turn) and the rest. Each prompt is admitted when it is made: the
   account needs `partial_llm` (and the work's own permission, `run_reports` or `run_probes`) and a grant for `pooled`,
@@ -207,6 +211,9 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
   refused says why (no grant for pooled prompts, outside the window, the helper offline...). A report whose analysis
   waits for an offline helper, the machine's quiet hours or a grant's window waits up to half an hour to start (and
   rides out a helper that drops while it writes for as long), then the report is built without it, saying why.
+  A grant limited to **ordinary games** does not cover pooled prompts: a member who should be able to test the
+  machine, have reports written on it or run a probe's offers and messages there needs **pooled prompts** ticked
+  too (a grant with nothing ticked covers every kind of work).
 - **Cancelling drains on today's helper.** When the server gives up a request (a game is closed or paused, a seat is
   changed, a prompt is cancelled or runs out of time), it sends the helper `CANCEL`. The helper of this version ignores
   it and finishes the completion, so the scheduler keeps that slot taken (*draining*) until the helper's late answer

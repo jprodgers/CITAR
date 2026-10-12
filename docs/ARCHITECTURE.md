@@ -333,7 +333,8 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
   `_crashed` change, cancel and release in one hold of that lock), and makes again one whose lease was released. A
   lease is capped by the owner's grant for the work its game was admitted for (`benchmark`, `probe`, else `game`). `pool.seats.occupied()` lists the leases live on a machine, which is what
   benchmark jobs wait for and `usage.session_servers` counts as held. A probe's turn case holds a non-lending
-  `probe_case` lease for the case (`GameSession.lease_ref`/`lease_label` name it for its run). It is *active* while its
+  `probe_case` lease for the case (`GameSession.lease_ref`/`lease_label` name it for its run), made once the
+  machine's leases leave a slot (`ProbeRunner._wait_machine`, the job rule). It is *active* while its
   seat is
   mid-turn (the driver calls `activate()` and `idle()` around `play_turn`) and *idle* otherwise; the agent also idles
   it while it waits on a chat reply or a pause, so a seat waiting on its counterpart never keeps the slot the
@@ -348,7 +349,11 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
   for `pooled`, with `in_flight=None`, so a busy machine queues it; the grant's concurrency is the consumer's cap), and
   a refusal is its `refused` with the admission's reason. Model seats are admitted by their task class
   (`pool.seats.seat_class`: `llm` full, `hybrid` partial). `Machine.view` is what the Queue page lists
-  (`/api/queue`, told per viewer by `server/work_access.py`).
+  (`/api/queue`, told per viewer by `server/work_access.py`). A probe's answer is asked again when the machine cut it
+  off (`yielded`, `borrow_cap`, `benchmark`), and its ticket does not wait for benchmarks: the probe run waits for one
+  as a run (`ProbeRunner._wait_machine`, with its waiting note). The report runner builds each report on a thread of
+  its own; a build whose narrative waits for its machine is not counted against `MAX_BUILDS`, and each member has at
+  most `NARRATIVES_PER_OWNER` narratives under way.
 - **The rules**: in flight (draining included) never above capacity; lease requests first and in arrival order; a
   ticket only on a slot no active or non-lending lease needs, on a loaded model, outside quiet hours, under its
   consumer's cap and never beside a benchmark; tickets by priority, then round-robin across members, then first come.

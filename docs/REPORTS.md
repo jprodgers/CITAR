@@ -145,7 +145,11 @@ useful property of the design: you do not have to know your electricity tariff b
    game lends, and waits for a benchmark to finish. It may wait half an hour to start (an offline
    helper, the machine's quiet hours, a grant's window included) and rides out a helper that drops
    while it writes for as long; past that, or when the machine will not take it (the model not loaded,
-   no grant), the report is built without it and says why. Reports are built several at a time.
+   no grant), the report is built without it, and its Analysis section (and the Reports list) says why.
+   Reports are built several at a time, and one whose analysis waits for its machine holds up no other
+   report; each member has at most two analyses under way, and their next report with one waits,
+   queued. A report being built can be deleted: its prompt leaves the machine's line. One the server
+   restarted under is built again when it comes back (up to twice).
 5. **Run report.**
 
 **View** opens it in place; **Open in new tab** and **Download** give a single self-contained HTML

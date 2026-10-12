@@ -86,7 +86,12 @@ anyone else it reaches gets neither its traceback nor its owner, and a specifica
 could have chosen (the scope's items and machines they may see; of the narrative only `enabled`).
 A body of the wrong shape (an item named by anything but its id, a report specification whose parts
 are not objects or lists) is a 400. A report's narrative that names a pooled machine the caller is not
-admitted to (a grant for `pooled` prompts, P3.3.7) is a 403, as a run's machine is. What queued work waits for (a benchmark job's `waiting` in
+admitted to (a grant for `pooled` prompts, P3.3.7) is a 403, as a run's machine is. A probe run's subject
+(`POST /api/probes/{id}/run`) is admitted for what its chosen cases are: `probe` for a turn case,
+`pooled` (and `partial_llm`) for an offer or message case; one it is not admitted for is a 403 naming the
+purpose. A report's record carries `narrative_written` and `narrative_note` (who wrote its analysis, or
+why it was skipped or failed); `DELETE /api/reports/{id}` deletes a report being built too (its
+narrative's prompt leaves the machine's line). What queued work waits for (a benchmark job's `waiting` in
 `GET /api/benchmarks/runs`, a probe run's in `GET /api/probe-runs/{id}`, a report's `waiting` and
 `progress`, a Queue page entry's `waiting`) names only the games and runs the caller may see; the rest
 are "someone's game", "someone's benchmark run" and so on.
