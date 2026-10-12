@@ -502,7 +502,7 @@ class PublicCallers(unittest.TestCase):
         ("citar/pool/__init__.py", 'base["config"] = registry.public(config)'),
         ("citar/pool/__init__.py", 'log.debug("registry.public() failed for server %s", server.id, exc_info=True)'),
         ("citar/pool/__init__.py", '"subject": subject.public(viewer) if subject else None,'),
-        ("citar/server/admin_api.py", '"host_server_id": reg.get("host_server_id"), "servers": [S.public(sv, reg) for sv in mine],'),
+        ("citar/server/admin_api.py", 'listed = [S.public(sv, reg) for sv in mine]'),
         ("citar/server/admin_api.py", 'return S.public(S.get(sv["id"]))'),
         ("citar/server/admin_api.py", 'return S.public(S.get(saved["id"]))'),
         ("citar/server/app.py", 'pid, extra = seat.player, {"seat": seat.public()}'),

@@ -133,7 +133,7 @@ machines behind a CITAR helper, `reach: "worker"`); who may do what is in
 
 | Method and path | |
 |---|---|
-| `GET /api/servers` | The machines the caller manages (every one for an administrator), each with `reach`, `enabled`, `is_host`, `max_concurrent` (its slots) and its configuration; the electricity plans (a member sees only the names of those an administrator put in the member's machines) and the key backends the caller may choose |
+| `GET /api/servers` | The machines the caller manages (every one for an administrator), each with `reach`, `enabled`, `is_host`, `max_concurrent` (its slots) and its configuration; the electricity plans (a member sees only the names of those an administrator put in the member's machines, and no issue asking for a plan) and the key backends the caller may choose |
 | `GET /api/servers/new` | A blank machine to start from: `reach` is `worker` for a member unless the provider is `dryrun`. Needs `register_servers` |
 | `POST /api/servers` | Create a machine, or save one the caller manages (by its `id`). A machine the server dials (`reach: "direct"`, the default for a new one) is an administrator's unless its provider is `dryrun`, and so are the `env` key backend, `is_host` and an electricity plan in its costs: 403 with the reason. A member's new machine gets an id from the server (an `id` in the body names only a machine to save). A body of the wrong shape (a list where an object belongs) is a 400, here and on the pool's routes |
 | `DELETE /api/servers/{id}` | Remove it (its tokens, and the key its row stores) and disconnect its helper |
@@ -147,6 +147,11 @@ machines behind a CITAR helper, `reach: "worker"`); who may do what is in
 | `POST /api/llm/models` | List the models at a base URL ("Detect models"): an administrator's, the `dryrun` provider excepted (403 before anything is dialled) |
 | `PUT /api/pool/servers/{id}` | `{"enabled": false}` disconnects its helper at once; switching to `reach: "direct"` follows the rule above |
 | `DELETE /api/pool/servers/{id}/workers/tokens/{token}` | Revoke a worker token: a helper connected with it is disconnected at once, and refused if it says hello again |
+| `GET /api/pool/groups` | The server groups the caller may see, with their machines; a group's manager gets every grant, anyone else their own terms. Its grants are what share it: no route takes a group's key, so a `link` group admits nobody by it yet and the listing hands out no share link |
+
+The pool's routes that change something (a machine, its costs or quiet hours, a group, a grant, a worker token)
+commit before they answer, so a page that reads the change back at once (the Servers page redrawing a card after its
+dialog saves) sees it.
 
 `POST /api/pool/import-registry` is gone: a pre-0.1.6 `config/servers.json` is imported once by the server itself
 ([Configuration](Configuration#the-machines-in-the-database-not-a-file)). The first-run setup wizard's

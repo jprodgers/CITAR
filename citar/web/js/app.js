@@ -10,9 +10,9 @@ import { renderBots } from "./bots.js";
 import { renderEditor } from "./editor.js";
 import { renderScenarios, renderScenarioEditor } from "./scenario.js";
 import { renderProbes } from "./probes.js";
-import { renderServers } from "./servers.js";
 import { renderReports } from "./reports.js";
 import { renderPool } from "./pool.js";
+import { legacyServersTarget } from "./machines.js";
 import { renderAccount } from "./account.js";
 import { renderSetup } from "./setup.js";
 import { renderConsole } from "./console.js";
@@ -83,6 +83,11 @@ async function route() {
     catch (e) { /* the sign-in screen still renders without it */ booted = true; }
   }
 
+  // The Servers page's old addresses (`#/servers`, `#/servers/<id>`, a group's `#/servers/groups/<gid>`) lead to the
+  // one Servers page, `#/pool`, opening that machine; replaced, so Back does not land on the old address again.
+  const moved = legacyServersTarget(location.hash);
+  if (moved) { location.replace(moved); return; }
+
   // the path only: a query (`?k=<share key>`, `?next=`, a page's own filters) never ends up in an id
   const parts = location.hash.replace(/^#\/?/, "").split("?")[0].split("/");
   const page = parts[0] || "";
@@ -142,9 +147,8 @@ async function route() {
     } else if (parts[0] === "account") {
       screen = await renderAccount(root);
     } else if (parts[0] === "pool") {
+      // `#/pool/<id>` opens a machine, `#/pool/groups/<gid>` shows a group (the page reads the address itself)
       screen = await renderPool(root);
-    } else if (parts[0] === "servers") {
-      screen = await renderServers(root, parts[1] || null);
     } else if (parts[0] === "reports") {
       screen = await renderReports(root, parts[1] || null);
     } else if (parts[0] === "queue") {

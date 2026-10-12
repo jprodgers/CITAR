@@ -70,6 +70,36 @@ their owner keeps nothing of them once made a member. A machine body of the wron
 belongs, say) is refused with 400 on every route that saves one. Removing a machine removes the key its row stores,
 in the OS credential store or the key file, as well.
 
+## The Servers page
+
+**Servers** in the navigation (`#/pool`) is one page for every machine, the ones the server dials and the helper
+machines side by side, with the server groups that share them below. A member sees their own machines and the ones
+a group shares with them; an administrator sees every machine: the site's (the host and its online APIs), their own
+and the members'. Each machine is a card, and the card of a machine you manage carries its editors, each a dialog:
+
+| On a machine's card | What it does | Shown to |
+|---|---|---|
+| Test | Sends the model a one-line request through the helper | Anyone the machine is listed to, on a helper machine |
+| Test connection | Asks a machine the server dials for its models | Administrators; a member on their own dry run |
+| Connection & models | Name, kind, provider, slots (requests at once), the model catalogue and LM Studio's load profiles; Estimate, Load now, Copy loaded settings and Unload now on a machine the server drives | Its owner and administrators (the actions on loading: administrators) |
+| Hardware & power | The hardware (imported from a collector, or typed in; Collect from this PC on the host), the power figures | Its owner and administrators (Collect: administrators, on the host) |
+| Costs | Components and cost periods (an electricity plan is an administrator's to name) | Its owner and administrators |
+| Quiet hours | When nothing runs on it, for anyone | Its owner and administrators |
+| API key | Where the server keeps the key of a machine it dials (an environment variable: administrators) | Its owner and administrators, on a machine the server dials |
+| Helper | Its worker tokens (issue, revoke) and how to run the helper | Its owner and administrators, on a helper machine |
+| Sharing | The server group that shares it | Its owner and administrators |
+| Disable, Enable, Remove | Disabling and removing drop its helper at once (below) | Its owner and administrators |
+
+The page's head has **Add a machine** (a helper machine or the dry run for anyone who may register machines; a
+machine the server connects to itself for administrators), **New group**, and for administrators **Electricity
+plans** and **Settings** (the currency, which machine is the host). A control is shown only when its route would take
+it from you: `citar/web/js/machines.js` holds the page's copy of the routes' gates, and `tests/test_servers_page.py`
+holds it to the server's own, so a member's page never calls a route that would refuse them. An address of the page
+before 0.1.6 still works: `#/servers` opens it and `#/servers/<id>` opens that machine (`#/pool/<id>`); a group's
+address is `#/pool/groups/<id>`, which highlights it for whoever it is shared with. A group shares its machines
+through its grants alone (a grant to everyone shares them with every member): a group whose visibility is `link`
+admits nobody by its key yet, so there is no link to hand out.
+
 ## Revocation
 
 Taking a machine away from its helper takes effect at once: **revoking the token** it connected with,

@@ -137,8 +137,13 @@ def servers_list(me: User = Depends(require_user), s: Session = Depends(get_db))
         owned = {row.id for row in s.query(Server).filter(Server.owner_id == me.id)
                  if not access.is_site_machine(row)}
         mine = [sv for sv in reg["servers"] if sv["id"] in owned]
+    listed = [S.public(sv, reg) for sv in mine]
+    if not _is_admin(me):
+        # a member names no electricity plan (pool.check_plans): an issue asking them to is not theirs to act on
+        for sv in listed:
+            sv["issues"] = [i for i in sv["issues"] if i != S.NO_PLAN_ISSUE]
     return {"currency": reg["currency"], "currency_symbol": reg["currency_symbol"],
-            "host_server_id": reg.get("host_server_id"), "servers": [S.public(sv, reg) for sv in mine],
+            "host_server_id": reg.get("host_server_id"), "servers": listed,
             "electricity_plans": _plans_for(me, reg["electricity_plans"], mine), "key_backends": _backends_for(me),
             "restricted": pool.visible_restrictions(s, me), "anthropic_prices": S.ANTHROPIC_PRICES,
             "can_dial": _is_admin(me)}

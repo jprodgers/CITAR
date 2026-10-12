@@ -1,0 +1,9 @@
+{
+  "name": "citar-web",
+  "private": true,
+  "description": "The CITAR web client: ES modules served as they are, with no build step. `npm test` here (or `node --test \"citar/web/tests/*.test.mjs\"` from the checkout) tests their pure parts.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

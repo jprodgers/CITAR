@@ -29,7 +29,9 @@ The harness:
 Parts: ``accounts`` (3-03: sharing of games and reports, ``/r/{slug}``, a moderator's unpublish, members' model
 blocks, a member's report gathering only what they may see; 3-04: profiles, avatars, the directory, the admin users
 routes, ``admin_cli``'s commands, probation and a suspension; 3-05: the registry's import, members' machines, a
-helper machine with a real helper, the machine routes' gates and dropped helpers; 3-06 adds its own), and later ``queue``,
+helper machine with a real helper, the machine routes' gates and dropped helpers; 3-06: the one Servers page, what it
+lists to a member, another member and an administrator, the reads and saves of its dialogs, sharing a machine from it;
+with ``--keep`` its helper machine's helper stays connected for the browser checklist), and later ``queue``,
 ``ledger``, ``chat``, ``hybrid``, ``minimap``, ``machines``; ``all`` runs every part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
@@ -463,9 +465,11 @@ class Harness:
     """What a part is given: the report, the server, the signed-in accounts, the fake endpoint, a tag that makes
     this run's names unique, and an anonymous client maker."""
 
-    def __init__(self, report: Report, server: Server, accounts: dict, endpoint: FakeEndpoint):
+    def __init__(self, report: Report, server: Server, accounts: dict, endpoint: FakeEndpoint, *, keep: bool = False):
         self.report, self.server, self.accounts, self.endpoint = report, server, accounts, endpoint
         self.tag = secrets.token_hex(3)
+        #: ``--keep``: the server stays up for the browser checklist, and so does what a part leaves for it to show
+        self.keep = keep
 
     def anonymous(self, **headers) -> httpx.Client:
         """A client with no account (and the headers given, a share key's say)."""
@@ -514,11 +518,12 @@ def _ids(listing) -> set:
 
 
 def part_accounts(h: Harness) -> None:
-    """The ``accounts`` part: 3-03's sharing checks, 3-04's profiles and administration, then 3-05's machines. Each
-    runs whatever the others found."""
+    """The ``accounts`` part: 3-03's sharing checks, 3-04's profiles and administration, 3-05's machines, then 3-06's
+    Servers page. Each runs whatever the others found."""
     _accounts_sharing(h)
     _accounts_profiles(h)
     _accounts_machines(h)
+    _accounts_servers_page(h)
 
 
 def _accounts_sharing(h: Harness) -> None:
@@ -1163,6 +1168,125 @@ def _accounts_machines(h: Harness) -> None:
         scripted.close()
 
 
+def _accounts_servers_page(h: Harness) -> None:
+    """3-06's checks (design/phase3-features.md P3.2.8, the one Servers page): what the page reads and writes, over
+    the routes it calls. A member's page lists her machine the server dials (her dry run, from 3-05's checks) and her
+    helper machine (a real helper behind the scripted endpoint) side by side, hers to manage, and nothing of the
+    site's; the reads and saves its dialogs make on them answer; sharing one through a group from the page shows it to
+    another member, his to use and not to manage, through its grant (the group hands out no share link); an administrator's
+    page lists the site's machines and the members' alike, each his to manage. With ``--keep`` the helper stays
+    connected for the browser checklist (A4), its pid in the evidence."""
+    r = h.report
+    admin, alice, bob = (h.accounts[k] for k in ("admin", "alice", "bob"))
+    machines = r.data.setdefault("machines", {})
+    dry_id = machines.get("alice_dry", "")
+    scripted = FakeEndpoint(delay=0.05)
+    helper: Optional[Helper] = None
+    try:
+        made = alice.post("/api/pool/servers", json={"config": {"name": f"QA alice page helper {h.tag}", "kind": "owned",
+                                                                "connection": {"provider": "lmstudio"}},
+                                                     "reach": "worker"})
+        hid = made.json().get("id") if made.status_code == 200 else ""
+        machines["alice_page_helper"] = hid
+        t = alice.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa page"}) if hid else None
+        if t is not None and t.status_code == 200:
+            helper = Helper(h, t.json().get("token", ""), scripted, "qa-page-helper")
+        online = bool(helper and wait_until(lambda: _online(alice, hid), 60, 0.25))
+
+        # ---- her page: both of her machines, side by side, hers to manage; nothing of the site's
+        pool = alice.get("/api/pool/servers").json().get("servers", [])
+        listed = {s.get("id"): s for s in pool}
+        regs = {s.get("id"): s for s in alice.get("/api/servers").json().get("servers", [])}
+        site = {"sv_qa_host", "sv_qa_api", "sv_qa_dry"}
+        live = [m.get("key") for m in (listed.get(hid) or {}).get("live_models") or []]
+        r.check("a member's Servers page lists her machine the server dials and her helper machine side by side, both "
+                "hers to manage (with their configuration), and nothing of the site's",
+                {dry_id, hid} <= set(listed) and set(regs) == {dry_id, hid} and not (site & set(listed))
+                and listed[dry_id].get("reach") == "direct" and listed[hid].get("reach") == "worker"
+                and all(listed[x].get("can_manage") and listed[x].get("config") for x in (dry_id, hid)),
+                json.dumps({k: {f: v.get(f) for f in ("reach", "can_manage")} for k, v in listed.items()}))
+        r.check("her helper machine's card shows its helper online with the model it reported", online and scripted.MODEL in live,
+                f"online {online}; live models {live}")
+
+        # ---- the reads and saves her page's dialogs make on her machines
+        codes = {"rates (direct)": alice.get(f"/api/servers/{dry_id}/rates").status_code,
+                 "rates (helper)": alice.get(f"/api/servers/{hid}/rates").status_code,
+                 "helper and tokens": alice.get(f"/api/pool/servers/{hid}/workers").status_code,
+                 "test connection (her dry run)": alice.post(f"/api/servers/{dry_id}/detect").status_code}
+        tested = alice.post(f"/api/pool/servers/{hid}/test")
+        codes["test (through the helper)"] = tested.status_code
+        view = dict(regs.get(hid) or {})
+        view["connection"] = dict(view.get("connection") or {}, max_parallel=2)
+        view["description"] = "set from the Servers page's connection dialog"
+        saved = alice.post("/api/servers", json=view)
+        codes["connection & models: save"] = saved.status_code
+        quiet = alice.put(f"/api/pool/servers/{hid}/quiet-hours", json={"restricted_hours": {
+            "enabled": False, "windows": [{"days": [5, 6], "start": "23:00", "end": "07:00"}], "grace_minutes": 10}})
+        codes["quiet hours: save"] = quiet.status_code
+        after = alice.get(f"/api/pool/servers/{hid}").json() if saved.status_code == 200 else {}
+        r.check("the reads and saves of her page's dialogs answer on her machines (rates, the helper's tokens, her dry run's "
+                "test, a test through the helper, the connection dialog's save and the quiet hours'), and the saved "
+                "helper machine stays a helper machine with its new slots",
+                set(codes.values()) == {200} and tested.json().get("ok") is True
+                and saved.json().get("reach") == "worker" and after.get("max_concurrent") == 2
+                and (after.get("restricted_hours") or {}).get("windows", [{}])[0].get("start") == "23:00",
+                json.dumps({**codes, "test": tested.json() if tested.status_code == 200 else tested.text[:120]})[:600])
+
+        # ---- sharing from the page: a group, her helper machine in it, every member given access
+        group = alice.post("/api/pool/groups", json={"name": f"QA page group {h.tag}", "visibility": "link"})
+        gid = group.json().get("id") if group.status_code == 200 else ""
+        put = alice.put(f"/api/pool/servers/{hid}", json={"group_id": gid})
+        grant = alice.post(f"/api/pool/groups/{gid}/grants", json={"subject_type": "everyone", "purposes": ["game"]})
+        mine_groups = {g.get("id"): g for g in alice.get("/api/pool/groups").json().get("groups", [])}
+        mine_group = mine_groups.get(gid) or {}
+        his = {s.get("id"): s for s in bob.get("/api/pool/servers").json().get("servers", [])}
+        shared = his.get(hid) or {}
+        his_regs = {s.get("id") for s in bob.get("/api/servers").json().get("servers", [])}
+        refused = {"rates": bob.get(f"/api/servers/{hid}/rates").status_code,
+                   "tokens": bob.get(f"/api/pool/servers/{hid}/workers").status_code,
+                   "quiet hours": bob.put(f"/api/pool/servers/{hid}/quiet-hours",
+                                          json={"restricted_hours": {"enabled": True}}).status_code}
+        his_test = bob.post(f"/api/pool/servers/{hid}/test")
+        # he may see it, so a route of hers says 403 where it reads the machine itself and 404 where it reads her
+        # registry (admin_api's routes say nothing of a machine one does not manage)
+        r.check("sharing her helper machine through a group from the page shows it on another member's page, his to use "
+                "(a test through it answers) and not to manage (no configuration; its dialogs' routes refuse him)",
+                (group.status_code, put.status_code, grant.status_code) == (200, 200, 200)
+                and shared.get("group_id") == gid and shared.get("can_manage") is False and "config" not in shared
+                and hid not in his_regs and refused == {"rates": 404, "tokens": 403, "quiet hours": 403}
+                and his_test.status_code == 200,
+                json.dumps({"made": [group.status_code, put.status_code, grant.status_code], "his": {
+                    f: shared.get(f) for f in ("group_id", "can_manage")}, "refused": refused,
+                    "test": his_test.status_code}))
+        r.check("a group's listing hands its manager no share link: its grants share it (bob's above), and no route "
+                "takes a group's key, so a link would open nothing",
+                mine_group.get("visibility") == "link" and "share_url" not in mine_group
+                and bool(mine_group.get("grants")),
+                json.dumps({k: mine_group.get(k) for k in ("visibility", "share_url")}))
+
+        # ---- an administrator's page: the site's machines and the members' alike, each his to manage
+        his_pool = {s.get("id"): s for s in admin.get("/api/pool/servers").json().get("servers", [])}
+        admin_regs = {s.get("id"): s for s in admin.get("/api/servers").json().get("servers", [])}
+        every = site | {dry_id, hid}
+        r.check("an administrator's Servers page lists the site's machines and the members' alike, each his to manage, "
+                "the host marked as the host and the API as the site's",
+                every <= set(his_pool) and every <= set(admin_regs) and all(his_pool[x].get("can_manage") for x in every)
+                and admin_regs["sv_qa_host"].get("is_host") is True and admin_regs["sv_qa_api"].get("server_resource") is True
+                and admin_regs[hid].get("reach") == "worker",
+                json.dumps(sorted(set(his_pool))))
+        r.data["servers_page"] = {"member": sorted(listed), "member_shared": sorted(his), "admin": sorted(his_pool),
+                                  "group": gid}
+    finally:
+        if helper is not None and h.keep and helper.proc.poll() is None:
+            # left connected for the browser checklist; the scripted endpoint goes with the harness
+            r.data["kept_helper"] = {"pid": helper.proc.pid, "machine": machines.get("alice_page_helper")}
+            r.note(f"the page's helper is kept connected (pid {helper.proc.pid}); stop it with the server")
+        else:
+            if helper is not None:
+                helper.stop()
+            scripted.close()
+
+
 #: The parts written so far, in the order ``all`` runs them.
 PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts}
 
@@ -1234,7 +1358,7 @@ def run(args) -> tuple:
         report.note(f"the server is up at {server.public} (dir {state})")
         report.data["server"]["start_s"] = round(time.perf_counter() - t0, 1)
         accounts = make_accounts(server, report, args.part == "all")
-        harness = Harness(report, server, accounts, endpoint)
+        harness = Harness(report, server, accounts, endpoint, keep=args.keep)
         for name in parts:
             report.note(f"part: {name}")
             try:
