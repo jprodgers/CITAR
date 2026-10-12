@@ -272,7 +272,9 @@ function connection(S, draw, original, isNew) {
     c.provider !== "none" ? field("Games at once", num(c, "max_parallel", { min: 1, max: 16 }), "How many games may use this server at the same time.") : null,
     ["lmstudio", "ollama", "openai_compatible", "anthropic"].includes(c.provider) ? field("Request timeout (s)", num(c, "timeout", { min: 5, placeholder: "default" })) : null,
     c.provider === "dryrun" ? field("Seconds per pretend call", num(c, "dry_run_delay", { min: 0, step: 0.5 })) : null));
-  if (["anthropic", "openai_compatible", "ollama", "lmstudio"].includes(c.provider)) box.appendChild(keySection(S, draw, isNew));
+  // a helper machine's key (if its model server needs one) stays on that machine, with its helper: the server holds none
+  if (S.reach === "worker") box.appendChild(el("p", { class: "muted small" }, "The CITAR helper on this machine reaches its model server; an API key it needs is set there, not here."));
+  else if (["anthropic", "openai_compatible", "ollama", "lmstudio"].includes(c.provider)) box.appendChild(keySection(S, draw, isNew));
   return box;
 }
 

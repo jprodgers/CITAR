@@ -80,7 +80,7 @@ class Reach:
         names: dict = {}
         if viewer is not None:
             for row in s.scalars(select(Server)):
-                if row.owner_id == viewer.id:
+                if row.owner_id == viewer.id and not access.is_site_machine(row):
                     machines.add(row.id)
                     names[row.id] = row.name
                 elif access.VIEW in access.on(s, viewer, row):

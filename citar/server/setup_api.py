@@ -16,8 +16,10 @@ a checklist in a document does.
 Authorisation is the ordinary kind. Looking for model servers on this computer (``/scan``) and registering
 one the server dials (``/apply``) touch the CITAR host and make the server request addresses, so they are an
 administrator's (design/phase3-features.md P3.2.8; in local mode the auto-signed-in owner is one): a member's
-machine joins through the CITAR helper, and anyone else signed in gets 404. The banner's state and dismissing it
-need ``register_servers``, and offer setup to administrators only. The console routes are administrator-only.
+machine joins through the CITAR helper, and anyone else signed in gets 404. The banner's state needs
+``register_servers`` and offers setup to administrators only (with this computer's folders for them alone);
+dismissing the offer and offering it again set a site-wide policy, so they are an administrator's too (404 for
+anyone else). The console routes are administrator-only.
 None is exempt because "setup is special": a setup endpoint that skipped authorisation would be the single most
 useful thing on the server to an attacker.
 """
@@ -78,7 +80,8 @@ def setup_state(me: User = Depends(require_cap("register_servers"))):
         "dismissed": bool(policy.get("setup_dismissed", False)),
         "playable_models": _playable_models(),
         "mode": "server" if cfg.server_mode else "local",
-        "paths": paths.describe(),
+        # where this computer keeps its data: the host's business, as the key backends' paths are (admin_api)
+        "paths": paths.describe() if me.role == "admin" else None,
     }
 
 
@@ -181,20 +184,21 @@ def setup_apply(body: ApplyBody, me: User = Depends(require_admin_hidden)):
 
 
 @router.post("/api/setup/dismiss")
-def setup_dismiss(me: User = Depends(require_cap("register_servers"))):
+def setup_dismiss(me: User = Depends(require_admin_hidden)):
     """Stop offering first-run setup.
 
     Recorded rather than inferred: somebody who chose to play against the scripted bots has finished
     setting up, even though the test for "is a model configured" still answers no, and being asked
-    again on every page load would be nagging.
+    again on every page load would be nagging. A site-wide policy, and only administrators are offered setup: an
+    administrator's.
     """
     policy.set("setup_dismissed", True, actor=me)
     return {"dismissed": True}
 
 
 @router.post("/api/setup/reopen")
-def setup_reopen(me: User = Depends(require_cap("register_servers"))):
-    """Offer first-run setup again; the Servers page links here."""
+def setup_reopen(me: User = Depends(require_admin_hidden)):
+    """Offer first-run setup again (to administrators); the Servers page links here."""
     policy.set("setup_dismissed", False, actor=me)
     return {"dismissed": False}
 

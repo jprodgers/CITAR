@@ -1078,6 +1078,29 @@ def _accounts_machines(h: Harness) -> None:
         r.check("another member gets 404 on her helper machine's configuration",
                 bob.get(f"/api/servers/{hid}/rates").status_code == 404
                 and bob.get(f"/api/pool/servers/{hid}/workers").status_code == 404)
+        keys = (alice.post(f"/api/servers/{hid}/key", json={"backend": "file", "key": "sk-qa-not-stored"}).status_code,
+                alice.delete(f"/api/servers/{hid}/key").status_code)
+        r.check("the key routes are 404 on her helper machine (the server holds no key of a helper machine's)",
+                keys == (404, 404), f"{keys}")
+        bad = (alice.post("/api/servers", json={"name": f"QA bad {h.tag}", "connection": "lmstudio"}).status_code,
+               alice.post("/api/pool/servers", json={"config": {"name": f"QA bad {h.tag}", "models": [1]}}).status_code,
+               alice.put(f"/api/pool/servers/{hid}", json={"config": {"name": "QA bad", "costs": "x"}}).status_code,
+               alice.put(f"/api/pool/servers/{hid}/costing",
+                         json={"costs": [{"from": "2000-01-01", "electricity_plan_id": "ep_qa"}]}).status_code)
+        names = {sv.get("name") for sv in admin.get("/api/servers").json().get("servers", [])}
+        r.check("a machine of the wrong shape is a 400 on every route that saves one, and the site's electricity plan "
+                "is no member's to price a machine with (403); nothing was written",
+                bad == (400, 400, 400, 403) and f"QA bad {h.tag}" not in names and "QA bad" not in names, f"{bad}")
+        sees = {}
+        for who, account in (("bob", bob), ("admin", admin)):
+            got = account.get("/api/pool/availability").json()
+            status = account.get("/api/benchmarks/status").json()
+            sees[who] = ({e.get("id") for e in got.get("usable", []) + got.get("blocked", [])}
+                         | {e.get("id") for e in status.get("restricted", [])})
+        site = {hid, "sv_qa_host", "sv_qa_api", "sv_qa_dry"}
+        r.check("another member's lobby availability names neither her helper machine nor the site's unshared "
+                "machines; an administrator's names them all", not (sees["bob"] & site) and site <= sees["admin"],
+                json.dumps({k: sorted(v) for k, v in sees.items()}))
 
         # her game plays through the helper and the scripted policy
         served = len(scripted.completions())

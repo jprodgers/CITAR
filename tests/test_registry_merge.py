@@ -454,18 +454,202 @@ class Routes(unittest.TestCase):
         self.quiet()
 
     def test_the_key_routes_env_backend_is_an_administrators(self):
-        r = self.call("alice", "POST", f"/api/servers/{self.helper}/key", {"backend": "env", "env": SECRET_VAR})
+        dry = self.call("alice", "POST", "/api/servers", {"name": "Alice's dry run", "kind": "test",
+                                                          "connection": {"provider": "dryrun"}}).json()["id"]
+        r = self.call("alice", "POST", f"/api/servers/{dry}/key", {"backend": "env", "env": SECRET_VAR})
         self.assertEqual(r.status_code, 403, r.text)
-        self.assertEqual(self.call("bob", "POST", f"/api/servers/{self.helper}/key",
+        self.assertEqual(self.call("bob", "POST", f"/api/servers/{dry}/key",
                                    {"backend": "file", "key": "x"}).status_code, 404)
-        self.assertEqual(self.call("anon", "DELETE", f"/api/servers/{self.helper}/key").status_code, 401)
-        r = self.call("alice", "POST", f"/api/servers/{self.helper}/key", {"backend": "none"})
+        self.assertEqual(self.call("anon", "DELETE", f"/api/servers/{dry}/key").status_code, 401)
+        r = self.call("alice", "POST", f"/api/servers/{dry}/key", {"backend": "none"})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.call("alice", "DELETE", f"/api/servers/{self.helper}/key").status_code, 200)
+        self.assertEqual(self.call("alice", "DELETE", f"/api/servers/{dry}/key").status_code, 200)
         self.quiet()
         r = self.call("zara", "POST", "/api/servers/sv_api/key", {"backend": "env", "env": "CITAR_TEST_NO_KEY"})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["key_status"]["backend"], "env")
+
+    def test_a_helper_machine_has_no_key_on_the_server(self):
+        """The server never reads a helper machine's key, so the key routes are 404 on one, for its owner and for an
+        administrator alike, and nothing is stored."""
+        keystore.unlock("a passphrase for this test")
+        for who in ("alice", "zara"):
+            with self.subTest(who=who):
+                r = self.call(who, "POST", f"/api/servers/{self.helper}/key", {"backend": "file", "key": "sk-member-secret"})
+                self.assertEqual(r.status_code, 404, r.text)
+                self.assertEqual(self.call(who, "DELETE", f"/api/servers/{self.helper}/key").status_code, 404)
+        self.assertIsNone(keystore.get({"id": self.helper, "connection": {"key": {"backend": "file"}}}))
+        self.assertEqual(servers.stored_key(servers.machine(self.helper)["config"]).get("backend"), "none")
+        self.quiet()
+
+    def test_a_removed_machine_takes_its_stored_key_with_it(self):
+        """A key stored while a machine was one the server dials stays where the row says, whatever the machine's
+        registry view shows once it is a helper machine (no key): saving that view keeps it, the key routes no longer
+        reach it, and deleting the machine, through either family of routes, removes it from the keystore."""
+        keystore.unlock("a passphrase for this test")
+        hw = {"format": "citar-hardware", "cpu": {"model": "Ryzen", "threads": 16}}
+        for route in ("/api/servers/{}", "/api/pool/servers/{}"):
+            with self.subTest(route=route):
+                made = self.call("zara", "POST", "/api/servers", {
+                    "name": "Keyed box", "kind": "owned",
+                    "connection": {"provider": "openai_compatible", "base_url": "http://192.168.1.9:8080/v1"}})
+                sid = made.json()["id"]
+                r = self.call("zara", "POST", f"/api/servers/{sid}/key", {"backend": "file", "key": "sk-site-secret-1"})
+                self.assertEqual(r.status_code, 200, r.text)
+                view = {"id": sid, "connection": {"key": {"backend": "file"}}}
+                self.assertEqual(keystore.get(view), "sk-site-secret-1")
+                r = self.call("zara", "POST", "/api/servers", {**servers.get(sid), "reach": "worker"})
+                self.assertEqual((r.status_code, r.json()["reach"]), (200, "worker"), r.text)
+                self.assertEqual(servers.get(sid)["connection"]["key"]["backend"], "none", "the view shows no key")
+                self.assertEqual(self.call("zara", "POST", f"/api/servers/{sid}/hardware", hw).status_code, 200)
+                self.assertEqual(self.call("zara", "POST", "/api/servers",
+                                           {**servers.get(sid), "notes": "saved from its view"}).status_code, 200)
+                stored = servers.machine(sid)["config"]["connection"]
+                self.assertEqual((stored["key"]["backend"], stored["base_url"]), ("file", "http://192.168.1.9:8080/v1"),
+                                 "saving the view keeps what the row stores")
+                self.assertEqual(self.call("zara", "DELETE", f"/api/servers/{sid}/key").status_code, 404)
+                self.assertEqual(self.call("zara", "DELETE", route.format(sid)).status_code, 200)
+                self.assertIsNone(servers.find(sid))
+                self.assertIsNone(keystore.get(view), "the key went with its machine")
+
+    def test_a_machine_of_the_wrong_shape_is_a_400_on_every_route_that_saves_one(self):
+        """Every part of a machine body arrives from a browser: the wrong JSON shape anywhere is the caller's 400 on
+        each route that creates or saves a machine, for a member and an administrator alike, and nothing is written."""
+        bad = {"connection a string": {"connection": "lmstudio"},
+               "connection.key a string": {"connection": {"provider": "dryrun", "key": "sk"}},
+               "power a string": {"power": "300 W"}, "models: [1]": {"models": [1]},
+               "costs a string": {"costs": "free"}, "costs: [1]": {"costs": [1]},
+               "a plan id that is a list": {"costs": [{"electricity_plan_id": ["ep_home"]}]},
+               "components a string": {"components": "PC"},
+               "restricted_hours a string": {"restricted_hours": "nights"},
+               "windows: [1]": {"restricted_hours": {"windows": [1]}},
+               "a window's days a number": {"restricted_hours": {"windows": [{"days": 5}]}},
+               "inference a list": {"models": [{"key": "m", "inference": ["auto"]}]},
+               "profiles: [1]": {"models": [{"key": "m", "profiles": [1]}]}}
+        with db.session() as s:
+            rows = s.query(Server).count()
+        stored = servers.machine(self.helper)["config"]
+        mine = servers.get(self.helper)
+        for name, part in bad.items():
+            for who in ("alice", "zara"):
+                for method, path, body in (("POST", "/api/servers", {"name": "Bad", "kind": "test", **part}),
+                                           ("POST", "/api/servers", {**mine, **part}),
+                                           ("POST", "/api/pool/servers", {"config": {"name": "Bad", **part}}),
+                                           ("PUT", f"/api/pool/servers/{self.helper}", {"config": {**stored, **part}})):
+                    with self.subTest(body=name, who=who, route=f"{method} {path}"):
+                        r = self.call(who, method, path, body)
+                        self.assertEqual(r.status_code, 400, r.text)
+        with db.session() as s:
+            self.assertEqual(s.query(Server).count(), rows, "no machine was made")
+        self.assertEqual(servers.machine(self.helper)["config"], stored, "and hers is as it was")
+        self.quiet()
+
+    def test_listings_name_only_machines_the_caller_may_see(self):
+        """The lobby's availability and the quiet hours in the benchmark scheduler's status and the phone site's
+        overview name another member's private machine, and the site's machines nobody shared, to nobody but their
+        owner and administrators (P3.9.1: they are 404 to the rest)."""
+        from citar.server import app as appmod
+        from citar.server.benchmarks import BenchmarkScheduler
+        always = {"enabled": True, "windows": [{"days": list(range(7)), "start": "00:00", "end": "12:00"},
+                                               {"days": list(range(7)), "start": "12:00", "end": "00:00"}]}
+        with db.session() as s:
+            for sid in ("sv_gpu", self.helper):
+                row = s.get(Server, sid)
+                row.config = {**row.config, "restricted_hours": always}
+        saved = appmod.scheduler
+        appmod.scheduler = BenchmarkScheduler(appmod.manager, Path(tempfile.mkdtemp(prefix="citar_merge_status_")),
+                                              autostart=False)
+        try:
+            def named(who):
+                avail = self.call(who, "GET", "/api/pool/availability").json()
+                return ({e["id"] for e in avail["usable"] + avail["blocked"]},
+                        {e["id"] for e in self.call(who, "GET", "/api/benchmarks/status").json()["restricted"]},
+                        {e["id"] for e in self.call(who, "GET", "/api/status").json()["benchmarks"]["restricted"]})
+            self.assertEqual(named("bob"), (set(), set(), set()))
+            self.assertEqual(named("alice"), ({self.helper}, {self.helper}, {self.helper}))
+            everything = {"sv_host", "sv_dryrun", "sv_gpu", "sv_api", self.helper}
+            self.assertEqual(named("zara"), (everything, {"sv_gpu", self.helper}, {"sv_gpu", self.helper}))
+            tests.share_with_members("sv_gpu")
+            self.assertEqual(named("bob"), ({"sv_gpu"}, {"sv_gpu"}, {"sv_gpu"}), "once shared, its users see it")
+            for path in ("/api/pool/availability", "/api/benchmarks/status", "/api/status"):
+                self.assertEqual(self.call("anon", "GET", path).status_code, 401)
+        finally:
+            appmod.scheduler.stop()
+            appmod.scheduler = saved
+
+    def test_the_sites_machines_are_administrators_whoever_owns_them(self):
+        """The import makes the first administrator the owner of the host and the site's API. Once that account is a
+        member, owning them gives it nothing: not their configuration, their key or their deletion, nor a seat on
+        them without a grant."""
+        from citar.pool import admission
+        with db.session() as s:
+            for sid in ("sv_host", "sv_api"):
+                s.get(Server, sid).owner_id = self.ids["bob"]        # bob was that administrator; a member now
+        hw = {"format": "citar-hardware", "cpu": {"model": "Ryzen", "threads": 16}}
+        for method, path, body in (("DELETE", "/api/servers/sv_host", None), ("DELETE", "/api/servers/sv_api", None),
+                                   ("POST", "/api/servers/sv_api/key", {"backend": "none"}),
+                                   ("DELETE", "/api/servers/sv_api/key", None),
+                                   ("POST", "/api/servers/sv_host/hardware", hw),
+                                   ("GET", "/api/servers/sv_host/rates", None),
+                                   ("POST", "/api/servers", {**servers.get("sv_host"), "notes": "mine"}),
+                                   ("GET", "/api/pool/servers/sv_api", None),
+                                   ("PUT", "/api/pool/servers/sv_api", {"enabled": False}),
+                                   ("DELETE", "/api/pool/servers/sv_api", None)):
+            with self.subTest(route=f"{method} {path}"):
+                self.assertEqual(self.call("bob", method, path, body).status_code, 404)
+        self.assertEqual(self.call("bob", "GET", "/api/servers").json()["servers"], [])
+        self.assertEqual(self.call("bob", "GET", "/api/pool/servers").json()["servers"], [])
+        with db.session() as s:
+            bob = s.get(User, self.ids["bob"])
+            self.assertFalse(admission.check(s, bob, s.get(Server, "sv_api")).allowed, "no seat without a grant")
+        self.assertEqual(self.call("zara", "GET", "/api/servers/sv_host/rates").status_code, 200)
+        self.assertEqual(self.call("zara", "PUT", "/api/pool/servers/sv_api", {"enabled": True}).status_code, 200)
+        self.quiet()
+
+    def test_a_member_prices_no_machine_with_the_sites_electricity_plans(self):
+        """The plans are the household's bill: a member names none in a machine's costs (403), and where an
+        administrator put one there the member keeps it but is never shown its price per kWh."""
+        plan = [{"from": "2000-01-01", "electricity_plan_id": "ep_home"}]
+        stored = servers.machine(self.helper)["config"]
+        for method, path, body in (("POST", "/api/servers", {**servers.get(self.helper), "costs": plan}),
+                                   ("POST", "/api/servers", {"name": "Mine", "kind": "owned", "costs": plan,
+                                                             "connection": {"provider": "dryrun"}}),
+                                   ("POST", "/api/pool/servers", {"config": {"name": "Mine", "costs": plan}}),
+                                   ("PUT", f"/api/pool/servers/{self.helper}", {"config": {**stored, "costs": plan}}),
+                                   ("PUT", f"/api/pool/servers/{self.helper}/costing", {"costs": plan})):
+            with self.subTest(route=f"{method} {path}"):
+                r = self.call("alice", method, path, body)
+                self.assertEqual(r.status_code, 403, r.text)
+                self.assertIn("electricity", r.json()["detail"])
+        new = self.call("alice", "GET", "/api/servers/new?kind=owned&provider=dryrun").json()
+        self.assertIsNone(new["costs"][0]["electricity_plan_id"])
+        self.assertEqual(self.call("alice", "GET", "/api/servers").json()["electricity_plans"], [])
+        r = self.call("zara", "PUT", f"/api/pool/servers/{self.helper}/costing",
+                      {"power": {"idle_w": 100, "gpu_max_w": 200}, "costs": plan})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.call("alice", "POST", "/api/servers", {**servers.get(self.helper), "notes": "the plan stays"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.call("alice", "GET", "/api/servers").json()["electricity_plans"],
+                         [{"id": "ep_home", "name": "Home"}], "the name of the plan her machine has")
+        for path in (f"/api/servers/{self.helper}/rates", f"/api/pool/servers/{self.helper}/rates"):
+            with self.subTest(route=path):
+                for side in self.call("alice", "GET", path).json().values():
+                    self.assertFalse(side["kwh_price"])
+                    self.assertFalse(side["energy"])
+                self.assertGreater(self.call("zara", "GET", path).json()["busy"]["kwh_price"], 0)
+
+    def test_a_members_new_machine_gets_an_id_of_the_servers_choosing(self):
+        """Seats, suites and the usage ledger name machines by id: a member may not make a machine under an id of
+        their choosing (a removed machine's, say). An administrator may."""
+        r = self.call("alice", "POST", "/api/servers", {"id": "sv_removed_once", "name": "Mine", "kind": "test",
+                                                        "connection": {"provider": "dryrun"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotEqual(r.json()["id"], "sv_removed_once")
+        self.assertIsNone(servers.find("sv_removed_once"))
+        self.assertEqual(servers.machine(r.json()["id"])["owner_id"], self.ids["alice"])
+        r = self.call("zara", "POST", "/api/servers", {"id": "sv_chosen", "name": "Site's", "kind": "test",
+                                                       "connection": {"provider": "dryrun"}})
+        self.assertEqual((r.status_code, r.json()["id"]), (200, "sv_chosen"))
 
     def test_a_member_manages_their_own_machines_configuration_only(self):
         mine = servers.get(self.helper)
@@ -532,7 +716,9 @@ class Routes(unittest.TestCase):
         self.assertEqual(self.call("anon", "POST", "/api/llm/models", body).status_code, 401)
         r = self.call("alice", "POST", "/api/llm/models", {"provider": "dryrun"})
         self.assertEqual((r.status_code, r.json()["models"]), (200, ["dry-run"]))
-        self.quiet()
+        r = self.call("alice", "POST", "/api/llm/models", {"provider": "dryrun", "api_key_env": SECRET_VAR})
+        self.assertEqual((r.status_code, r.json()["models"]), (200, ["dry-run"]))
+        self.quiet()                                    # the dry run's answer reads no variable it is given
         r = self.call("zara", "POST", "/api/llm/models", body)
         self.assertEqual(r.status_code, 200)
         self.assertIn("httpx", [c[0] for c in self.watch.calls], "an administrator's probe dials")
@@ -540,11 +726,20 @@ class Routes(unittest.TestCase):
 
     def test_the_setup_wizards_host_routes_are_an_administrators(self):
         for path, body in (("/api/setup/scan", None), ("/api/setup/apply", {"provider": "lmstudio",
-                                                                            "base_url": self.LOCAL})):
-            self.assertEqual(self.call("alice", "POST", path, body).status_code, 404)
-            self.assertEqual(self.call("anon", "POST", path, body).status_code, 401)
-        self.assertFalse(self.call("alice", "GET", "/api/setup/state").json()["needed"], "setup is not a member's")
+                                                                            "base_url": self.LOCAL}),
+                           ("/api/setup/dismiss", None), ("/api/setup/reopen", None)):
+            with self.subTest(route=path):
+                self.assertEqual(self.call("alice", "POST", path, body).status_code, 404)
+                self.assertEqual(self.call("anon", "POST", path, body).status_code, 401)
+        state = self.call("alice", "GET", "/api/setup/state").json()
+        self.assertFalse(state["needed"], "setup is not a member's")
+        self.assertIsNone(state["paths"], "nor where this computer keeps its data")
+        self.assertFalse(state["dismissed"], "a member set no site-wide policy")
         self.quiet()
+        self.assertEqual(self.call("zara", "POST", "/api/setup/dismiss").json(), {"dismissed": True})
+        self.assertTrue(self.call("zara", "GET", "/api/setup/state").json()["dismissed"])
+        self.assertIsNotNone(self.call("zara", "GET", "/api/setup/state").json()["paths"])
+        self.assertEqual(self.call("zara", "POST", "/api/setup/reopen").json(), {"dismissed": False})
 
     def test_the_collector_script_is_any_members(self):
         self.assertEqual(self.call("alice", "GET", "/api/hardware-collector/collect_hardware.py").status_code, 200)

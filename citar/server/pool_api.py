@@ -208,14 +208,14 @@ def set_costing(server_id: str, body: Costing, request: Request,
 @router.get("/servers/{server_id}/rates")
 def machine_rates(server_id: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
     """What an hour on this machine costs, idle and with the model busy."""
-    from .. import costing, servers as registry
+    from .. import servers as registry
     me = require_user(request, p)
     _server(s, server_id, me, access.MANAGE)
     reg = registry.with_pooled()
     sv = next((x for x in reg["servers"] if x["id"] == server_id), None)
     if sv is None:
         raise HTTPException(404, "No such server.")
-    return {"idle": costing.hourly_profile(sv, reg, busy_fraction=0.0), "busy": costing.hourly_profile(sv, reg, busy_fraction=1.0)}
+    return pool.machine_rates(sv, reg, me)
 
 
 class QuietHours(BaseModel):
@@ -239,11 +239,14 @@ def set_quiet_hours(server_id: str, body: QuietHours, request: Request,
 @router.delete("/servers/{server_id}")
 def delete_server(server_id: str, request: Request, p: Principal = Depends(principal),
                   s: Session = Depends(get_db)):
-    """Remove a machine from the pool."""
+    """Remove a machine from the pool: its row, then (once that is committed) its helper's connection and the key its
+    stored configuration keeps."""
+    from .. import servers as registry
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
-    pool.delete_server(s, me, server)
+    config = pool.delete_server(s, me, server)
     _drop(s, server_id, "its machine was deleted")
+    registry.forget_key(server_id, config)
     return {"deleted": server_id}
 
 
@@ -569,13 +572,15 @@ def availability(request: Request, purpose: str = "game", p: Principal = Depends
                  s: Session = Depends(get_db)):
     """What this account could run right now, and when the rest becomes available.
 
-    This is what the lobby asks before offering model seats.
+    This is what the lobby asks before offering model seats. Only machines the account may see are named, usable or
+    not: another member's private machine, or one of the site's nobody shared, is 404 to it anywhere else (P3.9.1).
     """
     me = require_user(request, p)
     now = datetime.now(timezone.utc)
     usable, blocked = [], []
     for server, decision in admission.usable_servers(s, me, purpose, now=now,
-                                                     liveness=_liveness, load=_load):
+                                                     liveness=_liveness, load=_load,
+                                                     only=lambda row: pool.visible(s, me, row)):
         entry = {"id": server.id, "name": server.name, "provider": server.provider,
                  "models": [m.get("key") for m in (server.config or {}).get("models") or []],
                  **decision.client()}

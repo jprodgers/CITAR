@@ -34,7 +34,7 @@ from .admin_users_api import router as admin_users_router
 from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
-from .. import items
+from .. import items, pool
 from . import ownership
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -405,10 +405,11 @@ def probe_models(body: ModelProbe, me=Depends(require_user)):
     if provider != "dryrun" and not _is_admin(me):
         raise HTTPException(403, "Only an administrator can have the server fetch an address. A machine you add "
                                  "reports its models through its CITAR helper.")
+    if provider == "dryrun":
+        # answered before the key's variable is read: the dry run needs none, and it is anybody's to ask
+        return {"ok": True, "models": ["dry-run"], "loaded": ["dry-run"], "details": {}}
     key = os.environ.get(body.api_key_env) if body.api_key_env else None
     try:
-        if provider == "dryrun":
-            return {"ok": True, "models": ["dry-run"], "loaded": ["dry-run"], "details": {}}
         if provider == "anthropic":
             if not key and not os.environ.get("ANTHROPIC_API_KEY"):
                 return {"ok": False, "error": f"Environment variable {body.api_key_env or 'ANTHROPIC_API_KEY'} is not set on the server."}
@@ -515,7 +516,8 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
     workers = hub().status()
     out = {"version": __version__, "uptime": round(time.time() - _STARTED), "user": p.user.handle, "admin": admin,
            "mode": "server" if citar_settings.get().server_mode else "local", "games": games,
-           "benchmarks": ({k: v for k, v in scheduler.status(items.listed(sdb, "benchmark_run", p.user)).items()
+           "benchmarks": ({k: v for k, v in scheduler.status(items.listed(sdb, "benchmark_run", p.user),
+                                                             pool.visible_restrictions(sdb, p.user)).items()
                            if k != "log"} if scheduler else None),
            "workers_online": len(workers) if admin else None}
     if admin:
@@ -1002,8 +1004,8 @@ items.VISIBILITY_HOOKS["benchmark_run"] = _run_games_follow
 @app.get("/api/benchmarks/status")
 def bench_status(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
     """What the benchmark scheduler is doing: running jobs, queues, restricted servers. A member's counts and log
-    cover the runs they may see."""
-    return _scheduler().status(items.listed(sdb, "benchmark_run", me))
+    cover the runs they may see, and the machines in their quiet hours those the member may see."""
+    return _scheduler().status(items.listed(sdb, "benchmark_run", me), pool.visible_restrictions(sdb, me))
 
 
 @app.get("/api/benchmarks/settings", dependencies=[Depends(require_user)])

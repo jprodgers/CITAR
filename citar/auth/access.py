@@ -293,12 +293,21 @@ def acl_permissions_for(session, object_type: str, object_ids, user_id: str) -> 
     return out
 
 
+def is_site_machine(server: Server) -> bool:
+    """Whether a machine is the site's: the CITAR host, or one the site provides (``server_resource``: its online
+    APIs, whose keys are the site's). Its ``owner_id`` (the administrator who imported or registered it) gives no
+    rights of its own: an administrator in good standing manages it, and anyone else reaches it only through a
+    grant, so an administrator later made a member keeps nothing of it (design/phase3-features.md P3.2.8)."""
+    return bool(getattr(server, "is_host", False) or getattr(server, "server_resource", False))
+
+
 def _server_access(session, viewer: Optional[User], server: Server, *, slug: Optional[str]) -> Access:
     """A server's visibility comes from its group; its *configuration* stays private to its owner.
 
     Being allowed to run a model on somebody's machine is not being allowed to read its API key
     reference, its electricity tariff or what it cost them. So a grant yields `view` only, and
-    `manage` is the owner and administrators alone.
+    `manage` is the owner and administrators alone. The site's machines (``is_site_machine``) have no
+    owner but the administrators.
     """
     viewer_id = viewer.id if viewer is not None else None
     granted: Set[str] = set()
@@ -306,7 +315,7 @@ def _server_access(session, viewer: Optional[User], server: Server, *, slug: Opt
     if viewer is not None:
         if viewer.role == "admin":
             granted |= set(ALL)
-        elif server.owner_id and viewer.id == server.owner_id:
+        elif server.owner_id and viewer.id == server.owner_id and not is_site_machine(server):
             granted |= {VIEW, PLAY, MANAGE}
         elif group is not None:
             if VIEW in on(session, viewer, group, slug=slug).permissions:

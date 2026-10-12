@@ -32,12 +32,15 @@ from citar.db.models import Base, Game as GameRow
 from citar.reports import data as report_data, render as report_render
 from citar.reports.reach import Reach
 
-#: A machine priced like the test registry's GPU box: power, a component, the registry's electricity plan.
+#: A machine priced like the test registry's GPU box: power, a component, the registry's electricity plan (which an
+#: administrator puts in a member's machine's costs: a member names none, ``pool.check_plans``).
 RIG = {"kind": "owned", "connection": {"provider": "dryrun", "max_parallel": 1},
        "power": {"idle_w": 50, "cpu_max_w": 100, "gpu_max_w": 300, "sampling": "off"},
        "components": [{"name": "Box", "price": 876.6, "purchased": "2020-01-01", "lifespan_years": 10}],
        "costs": [{"from": "2000-01-01", "electricity_plan_id": "ep_home", "fixed_monthly": 0}],
        "models": [{"id": "m_rig", "key": "rig-model"}]}
+#: The same machine as its member owner registers it: no plan.
+UNPRICED_RIG = {k: v for k, v in RIG.items() if k != "costs"}
 
 
 def _db():
@@ -63,9 +66,12 @@ class World:
                                          password="a long enough phrase", role=role, status="active",
                                          email_verified=True)
                 self.users[handle] = u.id
-            alice, bob = (s.get(accounts.User, self.users[h]) for h in ("alice", "bob"))
-            self.alice_rig = pool.create_server(s, alice, {**RIG, "name": f"Alice home rig {t}"}).id
-            self.bob_rig = pool.create_server(s, bob, {**RIG, "name": f"Bob private rig {t}"}).id
+            alice, bob, zara = (s.get(accounts.User, self.users[h]) for h in ("alice", "bob", "zara"))
+            alice_rig = pool.create_server(s, alice, {**UNPRICED_RIG, "name": f"Alice home rig {t}"})
+            bob_rig = pool.create_server(s, bob, {**UNPRICED_RIG, "name": f"Bob private rig {t}"})
+            for rig in (alice_rig, bob_rig):
+                pool.set_costing(s, zara, rig, {"costs": RIG["costs"]})
+            self.alice_rig, self.bob_rig = alice_rig.id, bob_rig.id
             self.games = {"alice": f"ga{t}", "bob": f"gb{t}", "shared": f"gs{t}", "bench": f"gx{t}"}
             for key, owner, kind, visibility in (("alice", alice, "game", "private"), ("bob", bob, "game", "private"),
                                                  ("shared", bob, "game", "server"),
@@ -431,7 +437,7 @@ class PublicReportPage(unittest.TestCase):
         from citar.server import reports_api
         with db.session() as s:
             alice = accounts.by_handle(s, "alice")
-            rig = pool.create_server(s, alice, {**RIG, "name": "Alice private rig"}).id
+            rig = pool.create_server(s, alice, {**UNPRICED_RIG, "name": "Alice private rig"}).id
             for gid, visibility in (("g-private-qa", "private"), ("g-global-qa", "global")):
                 s.add(GameRow(id=gid, owner_id=alice.id, name=gid, kind="game", visibility=visibility,
                               data_sharing="pool", status="finished"))

@@ -1057,15 +1057,18 @@ class BenchmarkScheduler:
         self._touch(run)
 
     # ------------------------------------------------------------------ views
-    def status(self, visible: Optional[set] = None) -> dict:
+    def status(self, visible: Optional[set] = None, restricted: Optional[list] = None) -> dict:
         """What the scheduler is doing now, for the page header and the badge. ``visible`` is the runs the caller may
         see (None: every run, an administrator's view): the counts and the log cover only those, and a log line about
-        no run (a machine's quiet hours, the scheduler's own errors) is an administrator's."""
+        no run (a machine's quiet hours, the scheduler's own errors) is an administrator's. ``restricted`` is the
+        machines in their quiet hours the caller may see (``pool.visible_restrictions``; None: every one)."""
+        if restricted is None:
+            restricted = REG.restriction_status()
         with self.lock:
             runs = [r for r in self.runs.values() if visible is None or r["id"] in visible]
             active = [j for r in runs for j in r["jobs"] if j["status"] in ("running", "loading", "resuming")]
             log = [e for e in self.log if visible is None or e.get("run") in visible]
-            return {"restricted": REG.restriction_status(), "active_jobs": len(active),
+            return {"restricted": restricted, "active_jobs": len(active),
                     "queued_jobs": sum(1 for r in runs if r["status"] == "running"
                                        for j in r["jobs"] if j["status"] == "queued"),
                     "log": log[-30:]}

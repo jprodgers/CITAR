@@ -822,10 +822,41 @@ def _set_host(s, server_id: Optional[str]) -> None:
         row.is_host = True
 
 
+#: What the registry's view of a helper machine leaves out of its connection (``row_registry``): a save of that view
+#: keeps what the row stores for these rather than blanking it (``apply_row``).
+HELPER_HIDDEN = ("base_url", "manage_loading", "key")
+
+
+def stored_key(config) -> dict:
+    """The key block a row's stored ``config`` names (``{}`` for none): where its API key is, whatever the registry's
+    view of the machine shows (a helper machine's shows none)."""
+    conn = config.get("connection") if isinstance(config, dict) else None
+    key = conn.get("key") if isinstance(conn, dict) else None
+    return key if isinstance(key, dict) else {}
+
+
+def forget_key(server_id: str, config) -> None:
+    """Remove the key a removed machine's stored ``config`` keeps in the OS credential store or the key file (call it
+    once the removal is committed). The ``env`` and ``none`` backends store nothing."""
+    from . import keystore
+    backend = stored_key(config).get("backend")
+    if backend in ("keyring", "file"):
+        keystore.delete(server_id, backend)
+
+
 def apply_row(row, sv: dict) -> None:
     """Write a normalized server into its row: the configuration, and the columns that mirror it (name, kind,
-    provider) or replace a part of it (``max_concurrent``)."""
-    row.config = stored_config(sv)
+    provider) or replace a part of it (``max_concurrent``). On a helper machine (the row's ``reach``, set first) the
+    parts of the connection its registry view hides (``HELPER_HIDDEN``) keep what the row stored: that view, saved back
+    by its owner's editor, would otherwise blank the key a switch from ``direct`` left in the keystore, and nothing
+    could find it to remove it."""
+    cfg = stored_config(sv)
+    old = (row.config or {}).get("connection") if isinstance(row.config, dict) else None
+    if (row.reach or "worker") == "worker" and isinstance(old, dict):
+        for k in HELPER_HIDDEN:
+            if k in old:
+                cfg["connection"][k] = copy.deepcopy(old[k])
+    row.config = cfg
     row.name = (sv.get("name") or "Unnamed server")[:120]
     row.kind = sv.get("kind") or "owned"
     row.provider = (sv.get("connection") or {}).get("provider") or "none"

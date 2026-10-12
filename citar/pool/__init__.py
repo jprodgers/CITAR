@@ -39,8 +39,14 @@ class PoolError(ValueError):
 
 
 class ReachRefused(PoolError):
-    """A member asked for a machine CITAR would dial (``reach = direct``) with a provider that dials something: only
-    an administrator may (P3.2.8). The routes answer 403 with the reason."""
+    """A member asked for what only an administrator may give a machine: a machine CITAR would dial (``reach =
+    direct``) with a provider that dials something, the ``env`` key backend, or the site's electricity plans
+    (P3.2.8). The routes answer 403 with the reason."""
+
+
+def _site_admin(actor: Optional[User]) -> bool:
+    """An administrator in good standing (probation included, as ``access.on`` reads the role)."""
+    return actor is not None and actor.role == "admin" and actor.status in ("active", "probation")
 
 
 def check_reach(actor: Optional[User], reach: str, provider: str) -> None:
@@ -48,7 +54,7 @@ def check_reach(actor: Optional[User], reach: str, provider: str) -> None:
     run, which dials nothing. A helper machine (``worker``) is anybody's to register: the helper dials out to us."""
     if reach != "direct" or (provider or "").lower() == "dryrun":
         return
-    if actor is not None and actor.role == "admin" and actor.status in ("active", "probation"):
+    if _site_admin(actor):
         return
     raise ReachRefused("Only an administrator can add a machine the CITAR server connects to itself: it would make "
                        "the server request an address on its own network. Register it as a helper machine (run the "
@@ -62,10 +68,30 @@ def check_key_backend(actor: Optional[User], normalized: dict) -> None:
     backend = ((normalized.get("connection") or {}).get("key") or {}).get("backend")
     if backend != "env":
         return
-    if actor is not None and actor.role == "admin" and actor.status in ("active", "probation"):
+    if _site_admin(actor):
         return
     raise ReachRefused("Only an administrator can point a machine's key at one of the server's environment "
                        "variables. Store the key itself instead.")
+
+
+def _plan_ids(costs) -> set:
+    """The electricity plans a machine's cost periods name."""
+    return {p.get("electricity_plan_id") for p in costs if isinstance(p, dict)
+            and isinstance(p.get("electricity_plan_id"), str) and p.get("electricity_plan_id")} if isinstance(
+        costs, list) else set()
+
+
+def check_plans(actor: Optional[User], normalized: dict, stored: Optional[dict] = None) -> None:
+    """Refuse a member naming one of the site's electricity plans in a machine's costs: the plans are the household's
+    bill (an administrator's, ``/api/electricity-plans``), and a machine priced with one would tell its owner the
+    tariff (its rates, its reports). A plan the row already names (``stored``, its stored config: an administrator
+    put it there) stays."""
+    if _site_admin(actor):
+        return
+    added = _plan_ids(normalized.get("costs")) - _plan_ids((stored or {}).get("costs"))
+    if added:
+        raise ReachRefused("Only an administrator can price a machine with the site's electricity plans. Leave the "
+                           "plan out of your machine's costs.")
 
 
 # ---------------------------------------------------------------------------- groups
@@ -121,6 +147,7 @@ def create_server(session, owner: User, config: dict, *, group_id: Optional[str]
         raise PoolError("reach is 'worker' or 'direct'.")
     check_reach(owner, reach, (normalized.get("connection") or {}).get("provider") or "none")
     check_key_backend(owner, normalized)
+    check_plans(owner, normalized)
     if group_id:
         group = session.get(ServerGroup, group_id)
         if group is None or group.owner_id != owner.id:
@@ -152,8 +179,9 @@ def update_server(session, actor: User, server: Server, config: dict, *,
     new_reach = reach if reach in ("worker", "direct") else (server.reach or "worker")
     check_reach(actor, new_reach, (normalized.get("connection") or {}).get("provider") or "none")
     check_key_backend(actor, normalized)
+    check_plans(actor, normalized, server.config)
+    server.reach = new_reach                    # first: a helper machine's row keeps what its view hides (apply_row)
     registry.apply_row(server, normalized)
-    server.reach = new_reach
     if group_id != "__keep__":
         if group_id:
             group = session.get(ServerGroup, group_id)
@@ -164,12 +192,15 @@ def update_server(session, actor: User, server: Server, config: dict, *,
     return server
 
 
-def delete_server(session, actor: User, server: Server) -> None:
-    """Remove a machine from the pool, revoking its tokens."""
+def delete_server(session, actor: User, server: Server) -> dict:
+    """Remove a machine from the pool, revoking its tokens. Returns the configuration it stored, for the caller to
+    remove its key with (``servers.forget_key``) once this is committed."""
     access.on(session, actor, server).require(access.MANAGE)
+    config = dict(server.config or {})
     audit.record(session, "server.deleted", actor=actor, object_type="server", object_id=server.id,
                  name=server.name)
     session.delete(server)
+    return config
 
 
 def servers_for(session, user: Optional[User], *, owned_only: bool = False) -> list:
@@ -177,13 +208,45 @@ def servers_for(session, user: Optional[User], *, owned_only: bool = False) -> l
     if user is None:
         return []
     if owned_only:
-        return list(session.scalars(select(Server).where(Server.owner_id == user.id)
-                                    .order_by(Server.name)))
+        # the site's machines are administrators' whoever is named their owner (access.is_site_machine)
+        return [s for s in session.scalars(select(Server).where(Server.owner_id == user.id).order_by(Server.name))
+                if user.role == "admin" or not access.is_site_machine(s)]
     if user.role == "admin":
         return list(session.scalars(select(Server).order_by(Server.name)))
     group_ids = {g.id for g in groups_for(session, user)}
     return [s for s in session.scalars(select(Server).order_by(Server.name))
-            if s.owner_id == user.id or (s.group_id and s.group_id in group_ids)]
+            if (s.owner_id == user.id and not access.is_site_machine(s)) or (s.group_id and s.group_id in group_ids)]
+
+
+def visible(session, viewer: Optional[User], server: Server) -> bool:
+    """Whether ``viewer`` may see ``server`` at all (VIEW: its owner, administrators, anyone its group reaches). Every
+    listing that names machines asks this, so another member's private machine, or one of the site's nobody shared,
+    is never named to someone who would get 404 for it (P3.9.1)."""
+    return viewer is not None and access.VIEW in access.on(session, viewer, server)
+
+
+def visible_restrictions(session, viewer: Optional[User]) -> list:
+    """The machines in their quiet hours right now (``servers.restriction_status``) that ``viewer`` may see: the
+    Servers page's header, the benchmark scheduler's status and the phone site's overview all show this list."""
+    from .. import servers as registry
+    out = []
+    for entry in registry.restriction_status():
+        row = session.get(Server, entry["id"])
+        if row is not None and visible(session, viewer, row):
+            out.append(entry)
+    return out
+
+
+def machine_rates(sv: dict, reg: dict, viewer: Optional[User]) -> dict:
+    """What an hour on a machine (its registry dict ``sv``) costs, idle and with the model busy. For anyone but an
+    administrator the energy goes unpriced when the machine's costs name one of the site's electricity plans (an
+    administrator put it there, ``check_plans``): its price per kWh is the household's tariff, which the energy's cost
+    and the total would tell."""
+    from .. import costing
+    if not _site_admin(viewer) and any(c.get("electricity_plan_id") for c in sv.get("costs") or []):
+        sv = dict(sv, costs=[dict(c, electricity_plan_id=None) for c in sv["costs"]])
+    return {"idle": costing.hourly_profile(sv, reg, busy_fraction=0.0),
+            "busy": costing.hourly_profile(sv, reg, busy_fraction=1.0)}
 
 
 def public_server(session, server: Server, viewer: Optional[User]) -> dict:
@@ -260,6 +323,7 @@ def set_costing(session, actor: User, server: Server, body: dict) -> dict:
     for period in normalized["costs"]:
         if period.get("electricity_plan_id") and period["electricity_plan_id"] not in plans:
             raise PoolError(f"Unknown electricity plan '{period['electricity_plan_id']}'.")
+    check_plans(actor, normalized, server.config)
     for key in ("power", "components", "costs"):
         config[key] = normalized[key]
     if body.get("former_ids") is not None:

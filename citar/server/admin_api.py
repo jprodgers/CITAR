@@ -7,9 +7,12 @@ router, because what a route touches decides who may call it:
 
 * a machine's own configuration (``GET /api/servers`` lists, ``POST /api/servers`` creates or saves, ``DELETE``,
   ``/hardware``, ``/rates``, ``/key``): its owner or an administrator (MANAGE on the row; another member's machine is
-  404). A machine the server dials itself (``reach = direct``) is an administrator's to create or switch to, unless
-  its provider is the dry run (403 with the reason, ``pool.check_reach``), and the ``env`` key backend, which names
-  one of the server's own environment variables, is an administrator's (``pool.check_key_backend``);
+  404; the site's machines, the host and its online APIs, are administrators' whoever is named their owner). A
+  machine the server dials itself (``reach = direct``) is an administrator's to create or switch to, unless its
+  provider is the dry run (403 with the reason, ``pool.check_reach``); so are the ``env`` key backend, which names
+  one of the server's own environment variables (``pool.check_key_backend``), the site's electricity plans in a
+  machine's costs (``pool.check_plans``) and a new machine's id. ``/key`` is only for a machine the server dials: a
+  helper machine has no key on the server (404). A body of the wrong shape is a 400 (``servers.normalize_server``);
 * the routes that dial a machine or drive LM Studio on the CITAR host (``/detect``, ``/state``, ``/load``,
   ``/unload``, ``/loading``, ``/loaded-config``, ``/estimate``): the owner or an administrator **and** a machine the
   server dials, or the host; for anyone but an administrator, only the dry run, whose provider dials nothing. A
@@ -33,7 +36,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .. import costing, hwinfo, keystore, paths, pool, servers as S
+from .. import hwinfo, keystore, paths, pool, servers as S
 from ..auth import access, audit
 from ..auth.deps import check_cap, get_db, require_role, require_user
 from ..db.models import Server, User
@@ -62,11 +65,20 @@ def _is_admin(user: Optional[User]) -> bool:
 
 
 def _row(s: Session, sid: str, me: User, permission: str = access.MANAGE) -> Server:
-    """A machine's row the caller has ``permission`` on, or a 404 that says nothing of whether it exists."""
+    """A machine's row the caller has ``permission`` on, or a 404 that says nothing of whether it exists. The site's
+    machines (the host, the site's online APIs: ``access.is_site_machine``) are administrators' whoever is named their
+    owner (``access.on``)."""
     row = s.get(Server, sid) if isinstance(sid, str) else None
     if row is None or permission not in access.on(s, me, row):
         raise HTTPException(404, "No such server.")
     return row
+
+
+def _not_a_helper(row: Server) -> None:
+    """404 for a helper machine (``reach = worker``) on a route about what only a machine the server dials has: the
+    server never reads a helper machine's key, its helper does."""
+    if (row.reach or "worker") == "worker":
+        raise HTTPException(404, "No such server.")
 
 
 def _server(s: Session, sid: str, me: User) -> dict:
@@ -93,12 +105,14 @@ def _dialled(s: Session, sid: str, me: User) -> dict:
     return sv
 
 
-def _plans_for(me: User, plans: list) -> list:
-    """The electricity plans as the caller may see them: an administrator's whole tariffs; for a member, which plans
-    there are (to name one in a machine's costs), not what the household pays."""
+def _plans_for(me: User, plans: list, machines: list) -> list:
+    """The electricity plans as the caller may see them: an administrator's whole tariffs; for a member, only the
+    names of those an administrator put in the member's own machines' costs (a member names none,
+    ``pool.check_plans``), never what the household pays."""
     if _is_admin(me):
         return plans
-    return [{"id": p["id"], "name": p["name"]} for p in plans]
+    named = {c.get("electricity_plan_id") for sv in machines for c in sv.get("costs") or []}
+    return [{"id": p["id"], "name": p["name"]} for p in plans if p["id"] in named]
 
 
 def _backends_for(me: User) -> dict:
@@ -111,16 +125,6 @@ def _backends_for(me: User) -> dict:
             "file": {k: v for k, v in backends["file"].items() if k in ("available", "unlocked", "note")}}
 
 
-def _visible_restrictions(s: Session, me: User) -> list:
-    """The machines in their quiet hours that the caller may see."""
-    out = []
-    for entry in S.restriction_status():
-        row = s.get(Server, entry["id"])
-        if row is not None and access.VIEW in access.on(s, me, row):
-            out.append(entry)
-    return out
-
-
 # ----------------------------------------------------------------------------- servers
 @router.get("/api/servers")
 def servers_list(me: User = Depends(require_user), s: Session = Depends(get_db)):
@@ -130,12 +134,13 @@ def servers_list(me: User = Depends(require_user), s: Session = Depends(get_db))
     if _is_admin(me):
         mine = reg["servers"]
     else:
-        owned = {sid for (sid,) in s.query(Server.id).filter(Server.owner_id == me.id)}
+        owned = {row.id for row in s.query(Server).filter(Server.owner_id == me.id)
+                 if not access.is_site_machine(row)}
         mine = [sv for sv in reg["servers"] if sv["id"] in owned]
     return {"currency": reg["currency"], "currency_symbol": reg["currency_symbol"],
             "host_server_id": reg.get("host_server_id"), "servers": [S.public(sv, reg) for sv in mine],
-            "electricity_plans": _plans_for(me, reg["electricity_plans"]), "key_backends": _backends_for(me),
-            "restricted": _visible_restrictions(s, me), "anthropic_prices": S.ANTHROPIC_PRICES,
+            "electricity_plans": _plans_for(me, reg["electricity_plans"], mine), "key_backends": _backends_for(me),
+            "restricted": pool.visible_restrictions(s, me), "anthropic_prices": S.ANTHROPIC_PRICES,
             "can_dial": _is_admin(me)}
 
 
@@ -146,7 +151,8 @@ def servers_new(kind: str = "owned", provider: str = "lmstudio", me: User = Depe
     check_cap(me, "register_servers")
     sv = S.normalize_server(S.default_server(kind if kind in S.KINDS else "owned", provider if provider in S.PROVIDERS else "none"))
     reg = S.load()
-    if kind in ("owned", "leased") and reg["electricity_plans"]:
+    if kind in ("owned", "leased") and reg["electricity_plans"] and _is_admin(me):
+        # the site's plans are an administrator's to price a machine with (pool.check_plans)
         sv["costs"][0]["electricity_plan_id"] = reg["electricity_plans"][0]["id"]
     if provider == "anthropic":
         sv["connection"]["key"] = {"backend": "keyring" if keystore.backends()["keyring"]["available"] else "env",
@@ -160,15 +166,17 @@ def servers_new(kind: str = "owned", provider: str = "lmstudio", me: User = Depe
 @router.get("/api/servers/restricted")
 def servers_restricted(me: User = Depends(require_user), s: Session = Depends(get_db)):
     """Which of the machines the caller may see are inside a restricted window right now."""
-    return {"restricted": _visible_restrictions(s, me)}
+    return {"restricted": pool.visible_restrictions(s, me)}
 
 
 @router.post("/api/servers")
 def servers_save(body: dict = Body(...), me: User = Depends(require_user), s: Session = Depends(get_db)):
     """Create or save a machine. Saving one needs MANAGE on it (404 otherwise); creating one needs
     ``register_servers``. Only an administrator makes a machine the server dials (``reach``, by default ``direct`` for
-    a new one, as the registry's always were) unless its provider is the dry run, chooses the host, or names an
-    environment variable for its key."""
+    a new one, as the registry's always were) unless its provider is the dry run, chooses the host, names an
+    environment variable for its key, prices it with the site's electricity plans, or chooses a new machine's id
+    (a member's gets a new one: an id once a removed machine's would take over what still names it, its seats and its
+    usage)."""
     sid = body.get("id")
     row = s.get(Server, sid) if isinstance(sid, str) and sid else None
     if row is not None:
@@ -176,11 +184,15 @@ def servers_save(body: dict = Body(...), me: User = Depends(require_user), s: Se
             raise HTTPException(404, "No such server.")
     else:
         check_cap(me, "register_servers")
+        if not _is_admin(me):
+            body = {k: v for k, v in body.items() if k != "id"}
     reach = body.get("reach") if body.get("reach") in S.REACHES else None
     normalized = _call(S.normalize_server, body)
+    body = {**body, "id": normalized["id"]}
     new_reach = reach or (row.reach if row is not None else "direct")
     _call(pool.check_reach, me, new_reach, normalized["connection"]["provider"])
     _call(pool.check_key_backend, me, normalized)
+    _call(pool.check_plans, me, normalized, row.config if row is not None else None)
     if not _is_admin(me) and (body.get("is_host") or (body.get("is_host") is False and row is not None and row.is_host)):
         raise HTTPException(403, "Only an administrator chooses which machine is the host.")
     sv = _call(S.upsert, body, actor=me, reach=reach, session=s)
@@ -192,17 +204,17 @@ def servers_save(body: dict = Body(...), me: User = Depends(require_user), s: Se
 
 @router.delete("/api/servers/{sid}")
 def servers_delete(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
-    """Remove a machine its caller manages: its stored key, its row, and its helper's connection."""
+    """Remove a machine its caller manages: its row, then (once that is committed) its helper's connection and the key
+    its stored configuration keeps (``servers.forget_key``: from what the row stores, which the registry's view of a
+    helper machine does not show)."""
     from .workers import hub
-    _row(s, sid, me)
-    sv = S.find(sid)
-    backend = ((sv or {}).get("connection") or {}).get("key", {}).get("backend")
-    if backend in ("keyring", "file"):
-        keystore.delete(sid, backend)
-    audit.record(s, "server.deleted", actor=me, object_type="server", object_id=sid, name=(sv or {}).get("name"))
+    row = _row(s, sid, me)
+    config, name = dict(row.config or {}), row.name
+    audit.record(s, "server.deleted", actor=me, object_type="server", object_id=sid, name=name)
     S.delete(sid, session=s)
     s.commit()
     hub().drop(sid, "its machine was deleted")
+    S.forget_key(sid, config)
     return {"deleted": sid}
 
 
@@ -334,8 +346,7 @@ def servers_import_hardware(sid: str, body: dict = Body(...), me: User = Depends
 def servers_rates(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
     """What this server costs per hour, idle and busy."""
     sv = _server(s, sid, me)
-    reg = S.load()
-    return {"idle": costing.hourly_profile(sv, reg, busy_fraction=0.0), "busy": costing.hourly_profile(sv, reg, busy_fraction=1.0)}
+    return pool.machine_rates(sv, S.load(), me)
 
 
 @router.get("/api/hardware-collector/{name}")
@@ -363,15 +374,19 @@ class KeyBody(BaseModel):
 
 @router.post("/api/servers/{sid}/key")
 def servers_key(sid: str, body: KeyBody, me: User = Depends(require_user), s: Session = Depends(get_db)):
-    """Store (or point to) a server's API key. The key is never returned; only its status. The ``env`` backend names
-    one of the server's own environment variables, so only an administrator may choose it."""
+    """Store (or point to) the API key of a machine the server dials. The key is never returned; only its status. The
+    ``env`` backend names one of the server's own environment variables, so only an administrator may choose it. A
+    helper machine has no key on the server (its helper holds whatever its model server needs): 404."""
+    row = _row(s, sid, me)
+    _not_a_helper(row)
     sv = _server(s, sid, me)
     if body.backend not in ("keyring", "env", "file", "none"):
         raise HTTPException(400, "Unknown key backend.")
     if body.backend == "env" and not _is_admin(me):
         raise HTTPException(403, "Only an administrator can point a machine's key at one of the server's environment "
                                  "variables. Store the key itself instead.")
-    old = sv["connection"]["key"]["backend"]
+    stored = S.stored_key(row.config)
+    old = stored.get("backend") or "none"
     if body.backend in ("keyring", "file"):
         if body.key:
             _call(keystore.store, sid, body.backend, body.key)
@@ -380,20 +395,22 @@ def servers_key(sid: str, body: KeyBody, me: User = Depends(require_user), s: Se
     if old in ("keyring", "file") and old != body.backend:
         keystore.delete(sid, old)
     sv = dict(sv)
-    env = (body.env or sv["connection"]["key"].get("env") or "").strip() if body.backend == "env" else ""
+    env = (body.env or stored.get("env") or "").strip() if body.backend == "env" else ""
     sv["connection"] = dict(sv["connection"], key={"backend": body.backend, "env": env})
-    saved = _call(S.upsert, sv, actor=me)
+    saved = _call(S.upsert, sv, actor=me, session=s)
     audit.record(s, "server.key", actor=me, object_type="server", object_id=sid, backend=body.backend)
+    s.commit()
     return {"key_status": keystore.status(saved)}
 
 
 @router.delete("/api/servers/{sid}/key")
 def servers_key_delete(sid: str, me: User = Depends(require_user), s: Session = Depends(get_db)):
-    """Delete a stored API key."""
+    """Delete the stored API key of a machine the server dials (the backend its row stores names where it is). A
+    helper machine has none on the server: 404."""
+    row = _row(s, sid, me)
+    _not_a_helper(row)
+    S.forget_key(sid, row.config)
     sv = _server(s, sid, me)
-    backend = sv["connection"]["key"]["backend"]
-    if backend in ("keyring", "file"):
-        keystore.delete(sid, backend)
     return {"key_status": keystore.status(sv)}
 
 
