@@ -74,4 +74,5 @@ def use(s, *, ticking: bool = True) -> FakeClock:
     s.clock = clock
     s.chat.clock = clock
     s.chat._last = clock.now()
+    s.chat.note()               # the chats open now are timed from here, as a clock's first look times them
     return clock
