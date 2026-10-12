@@ -13,7 +13,9 @@ A spec:
 """
 from __future__ import annotations
 
+import collections
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -24,6 +26,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from .. import paths
+
+log = logging.getLogger("citar.reports")
 
 REPORTS = paths.saves_path("reports")
 ALL_SECTIONS = ["summary", "costs", "cost_per_unit", "efficiency", "servers", "server_trend", "models", "benchmarks", "probes", "behavior",
@@ -134,6 +138,10 @@ class NarrativeRefused(RuntimeError):
     the machine disabled), or one that does not clear before the narrative's start deadline (``START_SECONDS``)."""
 
 
+class _Deleted(Exception):
+    """The report was deleted while it was built: its build stops at its next step (``ReportRunner._set``)."""
+
+
 def _ordinal(n: int) -> str:
     """1st, 2nd, 3rd, 4th..."""
     return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
@@ -142,17 +150,24 @@ def _ordinal(n: int) -> str:
 class ReportRunner:
     """Builds reports in the background and keeps the results.
 
-    Each queued report is built on a thread of its own, up to ``MAX_BUILDS`` at once, highest queue priority first, then
-    oldest; gathering and rendering (the server's own disk and CPU) go one at a time. A report's written analysis is a
-    pooled prompt (design/phase3-features.md P3.3.3, P3.3.5): a ``report`` ticket on the machine its specification
-    names, admitted when it is made (``pool.seats.ticket``: the owner's grant for ``pooled``), waiting for a benchmark
-    that holds the machine rather than refused by it, and at most ``START_SECONDS`` to start. So a report holds no
-    lease, never occupies its machine, and is not in the shared job queue: its prompt waits in the machine's queue
-    with every other pooled prompt, by priority (the report's queue priority, which its ticket follows), then
-    round-robin across members, then arrival."""
+    Each queued report is built on a thread of its own, highest queue priority first, then the member with the fewest
+    builds under way (members take turns), then oldest; gathering and rendering (the server's own disk and CPU) go one at
+    a time. A report's written analysis is a pooled prompt (design/phase3-features.md P3.3.3, P3.3.5): a ``report``
+    ticket on the machine its specification names, admitted when it is made (``pool.seats.ticket``: the owner's grant
+    for ``pooled``), waiting for a benchmark that holds the machine rather than refused by it, and at most
+    ``START_SECONDS`` to start. So a report holds no lease, never occupies its machine, and is not in the shared job
+    queue: its prompt waits in the machine's queue with every other pooled prompt, by priority (the report's queue
+    priority, which its ticket follows), then round-robin across members, then arrival. A build whose narrative waits
+    for its machine does not count against ``MAX_BUILDS``, so it holds up no other report; each member has at most
+    ``NARRATIVES_PER_OWNER`` such builds under way, and their next one stays queued meanwhile."""
 
-    #: Reports built at once: most of a build is waiting for its narrative's machine.
+    #: Reports gathering or rendering at once (a build waiting for, or writing, its narrative is not counted).
     MAX_BUILDS = 4
+    #: One member's reports building their narratives at once: their next report with a narrative waits, queued.
+    NARRATIVES_PER_OWNER = 2
+    #: How many times a report the server restarted under is queued again: a build that brings the server down fails
+    #: after that rather than doing so for ever.
+    MAX_RESTARTS = 2
     #: How long a narrative may wait to start (its ticket's deadline), a refusal that says "not yet" (the helper
     #: offline, the machine's quiet hours, the grant's window) included; one whose end is known to come later is given
     #: up at once.
@@ -172,7 +187,14 @@ class ReportRunner:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.queue: list[str] = []
-        self._builds: dict = {}                 # report id -> the thread building it
+        #: the reports being built: id -> {"thread", "owner", "narrative"} (under ``lock``; a build removes its own)
+        self._builds: dict = {}
+        #: builds waiting for (or writing) their narrative: not counted against MAX_BUILDS
+        self._waiting: set = set()
+        #: the ticket each building report's narrative is asked on now (``delete`` cancels it)
+        self._asking: dict = {}
+        #: reports deleted while they were built: hidden, and removed once their build lets go
+        self._deleting: set = set()
         self._thread: Optional[threading.Thread] = None
         self._kick = threading.Event()
         self._cpu = threading.Lock()            # gathering and rendering, one report at a time
@@ -181,7 +203,15 @@ class ReportRunner:
         requeue = []
         for m in self.list():
             if m["status"] == "running":
-                self._set(m["id"], status="failed", error="The CITAR server restarted while this report was running; run it again.")
+                # its build is idempotent (gather, narrative, render): queued again, a bounded number of times
+                restarts = int(m.get("restarts") or 0) + 1
+                if restarts > self.MAX_RESTARTS:
+                    self._set(m["id"], status="failed", finished=_now(),
+                              error="The CITAR server restarted while this report was running; run it again.")
+                    continue
+                self._set(m["id"], status="queued", restarts=restarts, started=None,
+                          progress="Waiting (the CITAR server restarted while it was being built)")
+                requeue.append(m["id"])
             elif m["status"] == "queued":
                 requeue.append(m["id"])
         for rid in reversed(requeue):          # list() is newest first
@@ -214,13 +244,18 @@ class ReportRunner:
         return dict(m, progress=place) if place and m.get("status") == "running" else m
 
     def meta(self, rid: str) -> dict:
-        """A report's metadata."""
+        """A report's metadata (KeyError for one being deleted)."""
+        if rid in self._deleting:
+            raise KeyError(rid)
         return self._live(self._stored(rid))
 
     def _set(self, rid: str, **fields) -> dict:
-        """Update a report's metadata."""
+        """Update a report's metadata. Raises ``_Deleted`` for a report deleted while it is built, so its build stops
+        at its next step and never writes it again."""
         from ..fsutil import write_text
         with self.lock:
+            if rid in self._deleting:
+                raise _Deleted(rid)
             p = self._path(rid)
             try:
                 m = self._stored(rid)
@@ -232,13 +267,15 @@ class ReportRunner:
             return m
 
     def list(self) -> list[dict]:
-        """Every report, newest first."""
+        """Every report, newest first (not one being deleted)."""
         out = []
         for p in sorted(self.dir.glob("*/meta.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
-                out.append(self._live(json.loads(p.read_text(encoding="utf-8"))))
+                m = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                pass
+                continue
+            if m.get("id") not in self._deleting:
+                out.append(self._live(m))
         return out
 
     def spec(self, rid: str) -> dict:
@@ -248,19 +285,27 @@ class ReportRunner:
     def html_path(self, rid: str) -> Path:
         """Where a report's HTML lives."""
         p = self._path(rid) / "report.html"
-        if not p.exists():
+        if rid in self._deleting or not p.exists():
             raise KeyError(rid)
         return p
 
     def delete(self, rid: str):
-        """Delete a report and everything it produced. A queued report is taken out of the queue."""
-        m = self.meta(rid)
-        if m["status"] == "running":
-            raise ValueError("The report is still running.")
+        """Delete a report and everything it produced. A queued report is taken out of the queue; one being built is
+        hidden at once, its narrative's ticket cancelled (a prompt waiting for its machine leaves the line), and its
+        files removed once its build lets go of it, at the build's next step."""
+        self.meta(rid)                          # KeyError: no such report
+        ticket = None
         with self.lock:
             if rid in self.queue:
                 self.queue.remove(rid)
-        shutil.rmtree(self._path(rid), ignore_errors=True)
+            building = rid in self._builds
+            if building:
+                self._deleting.add(rid)
+                ticket = self._asking.get(rid)
+        if not building:
+            shutil.rmtree(self._path(rid), ignore_errors=True)
+        elif ticket is not None:
+            ticket.cancel("deleted")
 
     # ------------------------------------------------------------------ running
     def start(self, spec: dict, *, owner_id: Optional[str] = None, session=None) -> dict:
@@ -302,65 +347,141 @@ class ReportRunner:
                 self._thread = threading.Thread(target=self._loop, daemon=True, name="reports")
                 self._thread.start()
 
-    def _ranked(self) -> list:
-        """The queued reports, highest queue priority first, then oldest. Lock held."""
+    def _ranked(self) -> tuple:
+        """The queued reports as the dispatcher weighs them, and those whose record cannot be read (taken out of the
+        queue; the caller fails them once the lock is let go). Each: {"rid", "rank" (minus its queue priority),
+        "created", "owner", "narrative"}. Lock held."""
         from ..pool import queue as work_queue
-        ranked = []
+        ranked, unreadable = [], []
         for rid in list(self.queue):
             try:
-                created = float(self._stored(rid).get("created") or 0)
+                m = self._stored(rid)
             except KeyError:
-                self.queue.remove(rid)
+                self.queue.remove(rid)          # deleted meanwhile
                 continue
-            ranked.append(((-work_queue.priority("report", rid), created), rid))
-        return [rid for _, rid in sorted(ranked)]
+            except (OSError, ValueError) as e:
+                self.queue.remove(rid)
+                unreadable.append((rid, e))
+                continue
+            ranked.append({"rid": rid, "rank": -work_queue.priority("report", rid),
+                           "created": float(m.get("created") or 0), "owner": m.get("owner_id"),
+                           "narrative": bool(m.get("narrative"))})
+        return ranked, unreadable
 
     def _loop(self):
-        """The dispatcher: start the best-ranked queued reports, each on a thread of its own, up to ``MAX_BUILDS``."""
+        """The dispatcher: start what may start (``_dispatch``), then wait for a wake or ``POLL_SECONDS``. A pass that
+        fails is logged and the dispatcher carries on (P3.9.2), so queued reports are never left without one."""
         while True:
             self._kick.clear()                  # a wake from here on is seen by the next look
-            with self.lock:
-                self._builds = {rid: t for rid, t in self._builds.items() if t.is_alive()}
-                if not self.queue and not self._builds:
-                    self._thread = None
+            try:
+                if not self._dispatch():
                     return
-                starting = []
-                for rid in self._ranked():
-                    if len(self._builds) >= self.MAX_BUILDS:
-                        break
-                    self.queue.remove(rid)
-                    t = threading.Thread(target=self._build, args=(rid,), daemon=True, name=f"report-{rid}")
-                    self._builds[rid] = t
-                    starting.append(t)
-            for t in starting:
-                t.start()
+            except Exception:
+                log.exception("the reports' dispatcher failed in a pass; it looks again shortly")
             self._kick.wait(self.POLL_SECONDS)
 
+    def _dispatch(self) -> bool:
+        """One pass: start the queued reports that may start, each on a thread of its own: while fewer than
+        ``MAX_BUILDS`` builds gather or render (one waiting for its narrative is not counted), the best by queue
+        priority, then the member with the fewest builds under way, then the oldest; a report with a narrative only
+        while its member has fewer than ``NARRATIVES_PER_OWNER`` narratives under way. Returns False when nothing is
+        queued or building (the dispatcher's thread ends)."""
+        starting = []
+        with self.lock:
+            if not self.queue and not self._builds:
+                self._thread = None
+                return False
+            ranked, unreadable = self._ranked()
+            active = sum(1 for rid in self._builds if rid not in self._waiting)
+            owners = collections.Counter(b["owner"] for b in self._builds.values())
+            narrating = collections.Counter(b["owner"] for b in self._builds.values() if b["narrative"])
+            while ranked and active < self.MAX_BUILDS:
+                eligible = [r for r in ranked
+                            if not (r["narrative"] and narrating[r["owner"]] >= self.NARRATIVES_PER_OWNER)]
+                if not eligible:
+                    break
+                best = min(eligible, key=lambda r: (r["rank"], owners[r["owner"]], r["created"]))
+                ranked.remove(best)
+                rid = best["rid"]
+                self.queue.remove(rid)
+                t = threading.Thread(target=self._build, args=(rid,), daemon=True, name=f"report-{rid}")
+                self._builds[rid] = {"thread": t, "owner": best["owner"], "narrative": best["narrative"]}
+                owners[best["owner"]] += 1
+                narrating[best["owner"]] += best["narrative"]
+                active += 1
+                starting.append((rid, t))
+        for rid, e in unreadable:
+            self._fail_unreadable(rid, e)
+        for rid, t in starting:
+            try:
+                t.start()
+            except RuntimeError:
+                log.exception("could not start the build of report %s", rid)
+                with self.lock:
+                    self._builds.pop(rid, None)
+                    self.queue.append(rid)
+        return True
+
+    def _fail_unreadable(self, rid: str, error: Exception) -> None:
+        """A queued report whose record cannot be read (after ``_stored``'s retries): failed, with the reason, on a new
+        record (its title from its specification when that reads), rather than tried again on every pass."""
+        from ..fsutil import write_text
+        log.warning("report %s cannot be read and is failed: %s", rid, error)
+        try:
+            title = self.spec(rid).get("title")
+        except (OSError, ValueError, KeyError):
+            title = None
+        try:
+            with self.lock:
+                write_text(self._path(rid) / "meta.json", json.dumps(
+                    {"id": rid, "title": title or rid, "status": "failed", "finished": _now(), "progress": "Failed",
+                     "error": f"The report's record could not be read: {type(error).__name__}: {error}"}, indent=1))
+        except OSError:
+            log.exception("report %s could not be marked failed", rid)
+
     def _build(self, rid: str):
-        """One report's thread: build it, recording a failure instead of losing it; then let the dispatcher start the
-        next."""
+        """One report's thread: build it, recording a failure instead of losing it; a report deleted while it was built
+        is removed once its build has let go of it; then let the dispatcher start the next."""
         try:
             self.run(rid)
+        except _Deleted:
+            pass
         except Exception as e:
-            self._set(rid, status="failed", error=f"{type(e).__name__}: {e}", trace=traceback.format_exc(limit=8),
-                      finished=_now())
+            try:
+                self._set(rid, status="failed", error=f"{type(e).__name__}: {e}", trace=traceback.format_exc(limit=8),
+                          finished=_now())
+            except _Deleted:
+                pass
+            except Exception:
+                log.exception("report %s failed and could not be marked failed", rid)
         finally:
-            self._places.pop(rid, None)
+            with self.lock:
+                self._builds.pop(rid, None)
+                self._waiting.discard(rid)
+                self._asking.pop(rid, None)
+                self._places.pop(rid, None)
+                gone = rid in self._deleting
+            if gone:
+                shutil.rmtree(self._path(rid), ignore_errors=True)
+                with self.lock:
+                    self._deleting.discard(rid)
             self._kick.set()
 
     def run(self, rid: str):
         """Build one report: gather (what its owner may see: ``reach.Reach``), cost, render, write; its narrative, when
         it has one, is a ``report`` ticket on the machine it names (``_narrative``), waited for with nothing else of
-        the build held."""
+        the build held. What became of the narrative (``narrative_note``: who wrote it, or why it was skipped or failed)
+        is in the report's page and its record (``narrative_written``)."""
         from .data import gather
         from .reach import Reach
         from .render import render, narrative_brief
         spec = normalize_spec(self.spec(rid))
         t0 = _now()
-        self._set(rid, status="running", started=t0, progress="Collecting data", waiting=None, waiting_note=None)
+        meta = self._set(rid, status="running", started=t0, progress="Collecting data", waiting=None,
+                         waiting_note=None)
         with self._cpu:
             data = gather(spec, progress=lambda msg: self._set(rid, progress=msg),
-                          reach=Reach.of(self.meta(rid).get("owner_id")))
+                          reach=Reach.of(meta.get("owner_id")))
         narrative, note = "", ""
         if spec["narrative"]["enabled"]:
             self._set(rid, progress="Writing the analysis with a model")
@@ -371,14 +492,14 @@ class ReportRunner:
         from ..fsutil import write_text
         write_text(self._path(rid) / "report.html", page)
         self._set(rid, status="done", finished=_now(), progress="Done", summary=summary, seconds=round(_now() - t0, 1),
-                  size=len(page.encode("utf-8")))
+                  size=len(page.encode("utf-8")), narrative_note=note or None,
+                  narrative_written=bool(narrative) if spec["narrative"]["enabled"] else None)
 
     def _status(self, rid: str, name: str, payload: dict) -> None:
         """The narrative's ticket's news (the scheduler's notifier thread, no lock held): where it is in its machine's
         line while it waits, shown as the report's progress (``_places``: nothing is written to the disk here)."""
         state = payload.get("state")
-        build = self._builds.get(rid)
-        if build is None or not build.is_alive():
+        if rid not in self._builds:
             self._places.pop(rid, None)         # news that came after the build was over
             return
         if state == "queued" and payload.get("position"):
@@ -393,7 +514,9 @@ class ReportRunner:
         ``pooled`` with ``run_reports`` when it is made (``pool.seats.ticket``), following the report's queue priority,
         waiting for a benchmark that holds the machine, one step, to start by ``deadline`` (on ``time.perf_counter``).
         A refusal that says "not yet" (the helper offline, the machine's quiet hours, the grant's window or budget)
-        is waited out while it may clear before the deadline; anything else raises ``NarrativeRefused``."""
+        is waited out while it may clear before the deadline; anything else raises ``NarrativeRefused``. The ticket is
+        the report's to cancel (``_asking``: ``delete``); one made after the report was deleted is cancelled at once
+        and the build stops (``_Deleted``)."""
         from ..pool import queue as work_queue, seats as pool_seats
         meta = self._stored(rid)
         title = meta.get("title") or rid
@@ -405,6 +528,12 @@ class ReportRunner:
                 priority=work_queue.priority("report", rid), start_within=max(1.0, left), steps=1,
                 wait_for_benchmark=True, on_status=lambda payload: self._status(rid, sv["name"], payload))
             if ticket.state == "queued":
+                with self.lock:
+                    self._asking[rid] = ticket
+                    deleted = rid in self._deleting
+                if deleted:
+                    ticket.cancel("deleted")
+                    raise _Deleted(rid)
                 return ticket
             error = ticket.error
             clears = error.retry_at if error is not None else None
@@ -412,13 +541,14 @@ class ReportRunner:
                     clears is not None and (clears - datetime.now()).total_seconds() > left):
                 raise NarrativeRefused(ticket.reason or "the machine refused the prompt")
             self._set(rid, progress=f"Waiting: {ticket.reason}")
-            self._pause(sv["id"], deadline, clears)
+            self._pause(rid, sv["id"], deadline, clears)
             self._set(rid, progress="Writing the analysis with a model")
 
-    def _pause(self, server_id: str, deadline: float, clears: Optional[datetime] = None) -> None:
+    def _pause(self, rid: str, server_id: str, deadline: float, clears: Optional[datetime] = None) -> None:
         """Wait before trying a refused or dropped narrative again: at least ``RETRY_MIN_SECONDS``, at most
         ``RECONNECT_POLL_SECONDS``, sooner when a helper machine's helper is back, never past ``deadline`` or the moment
-        the refusal clears (``clears``). The build's thread holds nothing while it waits."""
+        the refusal clears (``clears``), nor once the report is deleted. The build's thread holds nothing while it
+        waits."""
         now = time.perf_counter()
         latest = min(deadline, now + self.RECONNECT_POLL_SECONDS)
         if clears is not None:
@@ -426,15 +556,16 @@ class ReportRunner:
         soonest = now + self.RETRY_MIN_SECONDS
         from .. import servers
         helper = servers.is_helper(server_id)
-        while time.perf_counter() < latest:
+        while time.perf_counter() < latest and rid not in self._deleting:
             if time.perf_counter() >= soonest and helper and _helper_online(server_id):
                 return
             time.sleep(0.25)
 
     def _complete_waiting(self, rid: str, sv: dict, cfg: dict, prompt: str) -> tuple[str, float]:
-        """``complete`` on the narrative's ticket (``_ticket``), riding out a helper that drops or reconnects while
-        the analysis is written: a connection error worth waiting out (``WorkerConnectionError``: the helper not
-        connected, gone mid-request) is tried again on a new ticket once the helper is back, for up to
+        """``complete`` on the narrative's ticket (``_ticket``), riding out what is not the narrative's own failure: a
+        benchmark that took the machine mid-request (the ticket cancelled, code ``benchmark``) is waited for on a new
+        ticket within the start deadline; a connection error worth waiting out (``WorkerConnectionError``: the helper
+        not connected, gone mid-request) is tried again on a new ticket once the helper is back, for up to
         ``RECONNECT_SECONDS`` from the first drop; anything else fails at once."""
         from ..agents.providers.worker_provider import WorkerConnectionError
         start_by = time.perf_counter() + self.START_SECONDS
@@ -443,7 +574,15 @@ class ReportRunner:
             ticket = self._ticket(rid, sv, cfg, start_by if dropped_by is None else dropped_by)
             try:
                 return complete(cfg, NARRATIVE_SYSTEM, prompt, ticket)
-            except WorkerConnectionError as e:
+            except Exception as e:
+                if ticket.error is not None and ticket.error.code == "benchmark" and rid not in self._deleting:
+                    # a benchmark's drain took the slot: the next ticket waits for the benchmark, by the deadline
+                    if time.perf_counter() >= start_by:
+                        raise NarrativeRefused(ticket.reason) from e
+                    self._set(rid, progress=f"Waiting: {ticket.reason}")
+                    continue
+                if not isinstance(e, WorkerConnectionError):
+                    raise
                 if dropped_by is None:
                     dropped_by = time.perf_counter() + self.RECONNECT_SECONDS
                 if time.perf_counter() >= dropped_by:
@@ -451,13 +590,30 @@ class ReportRunner:
                 self._set(rid, progress=f"Waiting for {sv['name']}'s helper: {e}")
             finally:
                 ticket.close()
-            self._pause(sv["id"], dropped_by)
+                with self.lock:
+                    if self._asking.get(rid) is ticket:
+                        del self._asking[rid]
+            self._pause(rid, sv["id"], dropped_by)
             self._set(rid, progress="Writing the analysis with a model")
 
     def _narrative(self, rid: str, spec: dict, brief: str) -> tuple[str, str]:
         """Ask the chosen model for the written analysis, as a ``report`` ticket on its machine (a scheduled request
-        like every model call, P3.3.4: the usage ledger's listener meters it to the report's activity)."""
+        like every model call, P3.3.4: the usage ledger's listener meters it to the report's activity). Returns the
+        text and the note the report shows under it (who wrote it, or why it was skipped or failed). While it waits
+        for its machine the build does not count against ``MAX_BUILDS`` (``_waiting``)."""
+        with self.lock:
+            self._waiting.add(rid)
+        self._kick.set()                        # its place among the builds goes to another report meanwhile
+        try:
+            return self._narrate(rid, spec, brief)
+        finally:
+            with self.lock:
+                self._waiting.discard(rid)
+
+    def _narrate(self, rid: str, spec: dict, brief: str) -> tuple[str, str]:
+        """``_narrative``'s work: the machine and model the specification names, the usage record, the ticket."""
         from .. import servers, usage
+        from ..pool.scheduler import SchedulerError
         n = spec["narrative"]
         sv = servers.find(n["server_id"])
         if sv is None:
@@ -479,7 +635,10 @@ class ReportRunner:
             self._load_model(sv, cfg)
             text, secs = self._complete_waiting(rid, sv, cfg, prompt)
             return text, f"Written by {cfg['model']} on {sv['name']} in {secs:.0f}s from the computed figures above."
-        except NarrativeRefused as e:
+        except _Deleted:
+            raise
+        except (NarrativeRefused, SchedulerError) as e:
+            # the machine would not take it, or its prompt was cancelled (the Queue page): not the model's failure
             return "", f"The narrative was skipped: {e}"
         except Exception as e:
             return "", f"The narrative failed: {type(e).__name__}: {e}"

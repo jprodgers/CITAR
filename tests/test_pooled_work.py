@@ -415,12 +415,14 @@ class _ReportCase(World):
         return self.runner.start({"title": title, "sections": ["summary"],
                                   "narrative": {"enabled": True, "server_id": sid, "model_id": model_id}})
 
-    def built(self, rid: str, sid: str = "sv_gpu", timeout: float = 60.0) -> dict:
+    def built(self, rid: str, sid: str = "sv_gpu", timeout: float = 60.0, runner=None) -> dict:
+        runner = runner or self.runner
+
         def done():
             self.seen_leases.append(tuple(lease.kind for lease in S.get().leases(sid)))
-            return self.runner.meta(rid)["status"] not in ("queued", "running")
-        self.assertTrue(until(done, timeout), self.runner.meta(rid))
-        return self.runner.meta(rid)
+            return runner.meta(rid)["status"] not in ("queued", "running")
+        self.assertTrue(until(done, timeout), runner.meta(rid))
+        return runner.meta(rid)
 
     def waiting_report(self, sid="sv_gpu"):
         return [t for t in S.get().machine(sid).view()["waiting"] if t["class"] == "report"]
@@ -531,6 +533,77 @@ class Reports(_ReportCase):
         seat.idle()
         self.assertEqual(self.built(m["id"])["status"], "done")
 
+    def test_deleting_a_report_whose_narrative_waits_cancels_its_prompt(self):
+        """A report whose narrative waits in its machine's line (a seat mid-turn holds the one slot) is deleted: it is
+        gone from the list at once, its prompt leaves the line, its files go once its build lets go, and its narrative
+        never ran."""
+        seat = S.get().lease("sv_gpu", "dry-run", kind="game", label="game “lobby”", ref=("game", "g-lobby"))
+        self.addCleanup(seat.release)
+        seat.activate()
+        m = self.start()
+        self.assertTrue(until(self.waiting_report), "the narrative waits in the machine's line")
+        self.assertEqual(self.runner.meta(m["id"])["status"], "running")
+        self.runner.delete(m["id"])
+        self.assertNotIn(m["id"], [x["id"] for x in self.runner.list()], "gone from the list at once")
+        with self.assertRaises(KeyError):
+            self.runner.meta(m["id"])
+        self.assertTrue(until(lambda: not self.waiting_report(), 10), "its prompt left the line")
+        self.assertTrue(until(lambda: not (self.runner.dir / m["id"]).exists(), 10), "its files went")
+        self.assertTrue(until(lambda: not self.runner._builds, 10))
+        self.assertEqual(self.record.narratives(), [])
+        self.assertEqual(self.runner._deleting, set())
+        seat.idle()
+
+    def test_a_report_the_server_restarted_under_is_built_again(self):
+        """A report the server restarted under (left ``running``) is queued again by the next runner and built, its
+        restart counted; one restarted under ``MAX_RESTARTS`` times already fails, so a build that brings the server
+        down does not do so for ever."""
+        from citar import reports
+        plain = {"title": "Plain", "sections": ["summary"]}
+        first = self.runner.start(plain)
+        again = self.runner.start(plain)
+        for m in (first, again):
+            self.assertEqual(self.built(m["id"])["status"], "done")
+        self.runner._set(first["id"], status="running", progress="Collecting data")     # as a crash leaves it
+        self.runner._set(again["id"], status="running", restarts=reports.ReportRunner.MAX_RESTARTS)
+        restarted = reports.ReportRunner(self.runner.dir)
+        meta = self.built(first["id"], runner=restarted)
+        self.assertEqual((meta["status"], meta.get("restarts")), ("done", 1), meta)
+        failed = restarted.meta(again["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("restarted while this report was running", failed["error"])
+
+    def test_the_dispatcher_survives_a_failed_pass_and_fails_a_report_it_cannot_read(self):
+        """A pass of the reports' dispatcher that fails (a disk error reading the queue) is logged and the dispatcher
+        looks again, so the queued report is built; a queued report whose record cannot be read is failed with the
+        reason (its title from its specification), not tried on every pass, and the next report is still built."""
+        self.runner.POLL_SECONDS = 0.1
+        ranked, calls = self.runner._ranked, []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("the disk hiccuped")
+            return ranked()
+        with self.assertLogs("citar.reports", "ERROR"), mock.patch.object(self.runner, "_ranked", flaky):
+            m = self.runner.start({"title": "After a hiccup", "sections": ["summary"]})
+            self.assertEqual(self.built(m["id"])["status"], "done")
+        rid = "20261012-000000-beef"
+        d = self.runner.dir / rid
+        d.mkdir(parents=True)
+        (d / "spec.json").write_text(json.dumps({"title": "Broken one"}), encoding="utf-8")
+        (d / "meta.json").write_text("{not json", encoding="utf-8")
+        with self.runner.lock:
+            self.runner.queue.append(rid)
+        with self.assertLogs("citar.reports", "WARNING"):
+            self.runner._wake()
+            later = self.runner.start({"title": "After the broken one", "sections": ["summary"]})
+            self.assertEqual(self.built(later["id"])["status"], "done")
+        meta = self.runner.meta(rid)
+        self.assertEqual((meta["status"], meta["title"]), ("failed", "Broken one"), meta)
+        self.assertIn("could not be read", meta["error"])
+        self.assertNotIn(rid, self.runner.queue)
+
     def _completing(self, order: list):
         def complete(cfg, system, prompt, binding):
             # the ticket's slot is taken: one at a time, in the scheduler's order
@@ -639,14 +712,53 @@ class ReportOnHelper(_ReportCase):
             notes.append(out[1])
             return out
         self.runner._narrative = noted
-        meta = self.built(self.start(self.sid, "helper-model")["id"], self.sid)
+        m = self.start(self.sid, "helper-model")
+        meta = self.built(m["id"], self.sid)
         self.assertEqual(meta["status"], "done")
         self.assertTrue(notes[-1].startswith("The narrative was skipped: The model is not loaded"), notes)
+        # the reader is told why the report has no analysis: on its page, and in its record for the Reports list
+        page = self.runner.html_path(m["id"]).read_text(encoding="utf-8")
+        self.assertIn('<section id="narrative">', page)
+        self.assertIn("The narrative was skipped: The model is not loaded", page)
+        self.assertEqual((meta["narrative_written"], meta["narrative_note"]), (False, notes[-1]))
+
+    def test_narratives_waiting_for_their_machine_hold_up_no_other_report(self):
+        """Four narratives of two members wait for an offline helper: a report with no narrative is built at once
+        beside them (the waiting builds do not count against ``MAX_BUILDS``); a member's third narrative stays
+        queued while two of theirs are under way, and another member's starts; all are built once the helper is
+        back."""
+        tests.share_with_members(self.sid)
+
+        def narrated(title, who):
+            return self.runner.start({"title": title, "sections": ["summary"], "narrative": {
+                "enabled": True, "server_id": self.sid, "model_id": "helper-model"}}, owner_id=self.ids[who])
+
+        def offline(m):
+            return "offline" in (self.runner.meta(m["id"]).get("progress") or "")
+        waiting = [narrated(f"{who} {i}", who) for who in ("bob", "dave") for i in (1, 2)]
+        self.assertTrue(until(lambda: all(offline(m) for m in waiting), 15),
+                        [self.runner.meta(m["id"]) for m in waiting])
+        third = narrated("bob 3", "bob")
+        t0 = time.perf_counter()
+        plain = self.runner.start({"title": "No narrative", "sections": ["summary"]}, owner_id=self.ids["alice"])
+        self.assertEqual(self.built(plain["id"], self.sid, timeout=15)["status"], "done")
+        self.assertLess(time.perf_counter() - t0, 10.0, "built at once, beside the waiting narratives")
+        other = narrated("ray 1", "ray")
+        self.assertTrue(until(lambda: offline(other), 15), "another member's narrative starts")
+        time.sleep(0.3)
+        self.assertEqual(self.runner.meta(third["id"])["status"], "queued", "bob's third waits for one of his two")
+        self.connect()
+        for m in waiting + [third, other]:
+            meta = self.built(m["id"], self.sid)
+            self.assertEqual((meta["status"], meta.get("narrative_written")), ("done", True), meta)
 
 
 # ---------------------------------------------------------------------------- gate 3: probes on tickets
 
-class Probes(World):
+class _ProbeScenario(World):
+    """A two-player scenario (a script and the subject, met, with gold) and a probe on it with an offer, a message
+    and a turn case."""
+
     @classmethod
     def setUpClass(cls):
         from citar import engine_api as E
@@ -672,6 +784,8 @@ class Probes(World):
         except Exception:
             pass
 
+
+class Probes(_ProbeScenario):
     def setUp(self):
         super().setUp()
         from citar import probes as P
@@ -735,23 +849,36 @@ class Probes(World):
 
     def test_a_case_whose_prompt_is_refused_says_why(self):
         """dave's grant on alice's machine covers pooled prompts, gina's games only: a probe run of gina's has its
-        offer case's answer refused when its ticket is made, and the case says why; dave's answers."""
+        offer case's answer refused when its ticket is made, and the case says why, scored for nobody (the model was
+        never asked); dave's answers."""
         rid = self.run_probe(owner=self.ids["gina"], llm={"server_id": self.box, "model": "dry-run"}, cases=("gift",))
         self.runner._run(rid)
         rec = self.runner.results(rid)[0]
-        self.assertEqual(rec["outcome"], "no_response", rec)
+        self.assertEqual((rec["outcome"], rec["passed"]), ("error", None), rec)
         self.assertIn("The prompt was not asked", rec["error"] or "")
         self.assertIn("pooled prompts", rec["error"])
         rid = self.run_probe(owner=self.ids["dave"], llm={"server_id": self.box, "model": "dry-run"}, cases=("gift",))
         self.runner._run(rid)
         self.assertEqual(self.runner.results(rid)[0]["outcome"], "accept")
 
+    def _seat_mid_turn(self):
+        """A lobby game's seat on the one-slot machine, mid-turn with a request of its own on the slot: a prompt waits
+        in the machine's line behind it. Returns (the lease, a function that ends the turn)."""
+        seat = S.get().lease("sv_gpu", "dry-run", kind="game", label="game “lobby”", ref=("game", "g-lobby"))
+        self.addCleanup(seat.release)
+        seat.activate()
+        grant = seat.acquire()
+
+        def end_turn():
+            seat.finish(grant, gen_s=0.01)
+            seat.idle()
+        return seat, end_turn
+
     def test_stopping_a_run_cancels_an_answer_waiting_for_its_machine(self):
-        """A benchmark holds the machine: the run's offer case's answer waits for it (its ticket waits for
-        benchmarks); stopping the run cancels that ticket, and the run ends at once, stopped."""
-        bench = S.get().lease("sv_gpu", "dry-run", kind="benchmark", label="benchmark run “b”",
-                              ref=("benchmark", "b"))
-        self.addCleanup(bench.release)
+        """A lobby seat mid-turn holds the one slot: the run's offer case's answer waits in the machine's line;
+        stopping the run cancels that ticket, and the run ends at once, stopped, the case not scored."""
+        _seat, end_turn = self._seat_mid_turn()
+        self.addCleanup(end_turn)
         rid = self.run_probe(cases=("gift", "hello"))
         worker = threading.Thread(target=self.runner._run, args=(rid,), daemon=True)
         worker.start()
@@ -766,6 +893,165 @@ class Probes(World):
         self.assertLess(time.perf_counter() - t0, 10.0)
         self.assertEqual(self.runner.get_run(rid)["status"], "stopped")
         self.assertEqual(S.get().machine("sv_gpu").view()["waiting"], [], "nothing left in the line")
+        rec = self.runner.results(rid)[0]
+        self.assertEqual((rec["outcome"], rec["passed"]), ("stopped", None), rec)
+
+    def test_a_stop_that_lands_while_the_answers_ticket_is_made_cancels_it(self):
+        """The run is stopped after the answer's ticket is made and before the runner knows of it (so ``stop`` finds
+        nothing to cancel): the answer notices the stop and cancels its own ticket, rather than waiting up to an hour
+        for the slot a lobby seat holds."""
+        _seat, end_turn = self._seat_mid_turn()
+        self.addCleanup(end_turn)
+        stopped: list = []
+
+        def on_ticket(ticket):
+            if ticket is not None and not stopped:
+                stopped.append(ticket)      # the stop lands here: the runner never heard of this ticket
+        t0 = time.perf_counter()
+        with mock.patch.object(self.P, "PROBE_START_SECONDS", 60.0):
+            rec = self.P.run_case(self.manager, self.P.engine_api.load_scenario("pooled-scn"), self.probe,
+                                  self.probe["cases"][0], {"server_id": "sv_gpu", "model": "dry-run"},
+                                  should_stop=lambda: bool(stopped), on_ticket=on_ticket, run_id="r-race")
+        self.assertLess(time.perf_counter() - t0, 10.0, "the answer did not wait for its slot")
+        self.assertEqual(stopped[0].state, "cancelled")
+        self.assertEqual((rec["outcome"], rec["passed"]), ("stopped", None), rec)
+        self.assertEqual(S.get().machine("sv_gpu").view()["waiting"], [])
+
+    def _interrupting(self, seat, times: int):
+        """The dry run's answer in two steps (text first, then its tool call), the lobby seat's turn beginning between
+        them the first ``times`` times it is asked: the seat asks for the slot the answer borrowed, so the answer's
+        second step is refused (``yielded``); the seat plays its turn's one request and goes idle again."""
+        from citar.agents.providers import dryrun
+        from citar.agents.providers.base import StepResult
+        original = dryrun.DryRunConversation._negotiate
+        left = {"n": times}
+
+        def seat_turn():
+            seat.activate()
+            grant = seat.acquire()
+            time.sleep(0.05)
+            seat.finish(grant, gen_s=0.05)
+            seat.idle()
+
+        def two_steps(conv):
+            if conv._step == 1 and left["n"] > 0:
+                left["n"] -= 1
+                threading.Thread(target=seat_turn, daemon=True).start()
+                self.assertTrue(until(lambda: S.get().machine("sv_gpu").view()["lease_requests"], 5))
+                return StepResult(text="Let me think about this offer.", tool_calls=[])
+            conv._step = 1                  # the next step answers as the dry run's first would
+            return original(conv)
+        return mock.patch.object(dryrun.DryRunConversation, "_negotiate", two_steps)
+
+    def test_an_answer_a_lobby_seat_cut_off_is_asked_again(self):
+        """The subject's answer runs on the slot an idle lobby seat lends; the seat's turn begins between the answer's
+        two steps and takes its slot back, so the answer's ticket is refused its second step. That is the machine's
+        contention, not the model's answer: it is asked again on a new ticket once the seat is idle, and the case is the
+        model's own (accept, passed), as on a free machine."""
+        seat = S.get().lease("sv_gpu", "dry-run", kind="game", label="game “lobby”", ref=("game", "g-lobby"))
+        self.addCleanup(seat.release)
+        seat.idle()
+        events: list = []
+        S.get().add_listener(events.append)
+        with self._interrupting(seat, 1):
+            rec = self.P.run_case(self.manager, self.P.engine_api.load_scenario("pooled-scn"), self.probe,
+                                  self.probe["cases"][0], {"server_id": "sv_gpu", "model": "dry-run"},
+                                  run_id="r-yield", run_name="yield run")
+        self.assertEqual((rec["outcome"], rec["passed"], rec["error"]), ("accept", True, None), rec)
+        self.assertEqual(sum(1 for e in events if e.cls == "probe"), 2, "the cut-off answer's step, then the answer")
+        self.assertEqual([c["tool"] for c in rec["tool_calls"]], ["respond_negotiation"])
+
+    def test_an_answer_cut_off_every_time_is_not_scored(self):
+        """An answer cut off on every try (``PROBE_ANSWER_TRIES``) records why and is not scored as the model's."""
+        seat = S.get().lease("sv_gpu", "dry-run", kind="game", label="game “lobby”", ref=("game", "g-lobby"))
+        self.addCleanup(seat.release)
+        seat.idle()
+        with self._interrupting(seat, 2), mock.patch.object(self.P, "PROBE_ANSWER_TRIES", 2):
+            rec = self.P.run_case(self.manager, self.P.engine_api.load_scenario("pooled-scn"), self.probe,
+                                  self.probe["cases"][0], {"server_id": "sv_gpu", "model": "dry-run"},
+                                  run_id="r-yield", run_name="yield run")
+        self.assertEqual((rec["outcome"], rec["passed"]), ("error", None), rec)
+        self.assertIn("cut off 2 times", rec["error"] or "")
+
+    def test_a_benchmark_that_takes_the_machine_between_cases_is_waited_for(self):
+        """A benchmark takes the machine after the run's first case: the run waits for it at the job level, saying so
+        (its status and waiting note), with no prompt waiting silently in the machine's line, and its next case
+        answers once the benchmark lets the machine go."""
+        self.runner.BENCHMARK_POLL_SECONDS = 0.1
+        rid = self.run_probe(cases=("gift", "hello"))
+        held = {}
+        original = self.P.run_case
+
+        def run_case(*a, **kw):
+            rec = original(*a, **kw)
+            if rec["case"] == "gift":
+                held["bench"] = S.get().lease("sv_gpu", "dry-run", kind="benchmark", label="benchmark run “b”",
+                                              ref=("benchmark", "b"))
+            return rec
+        with mock.patch.object(self.P, "run_case", run_case):
+            worker = threading.Thread(target=self.runner._run, args=(rid,), daemon=True)
+            worker.start()
+            self.assertTrue(until(lambda: self.runner.get_run(rid)["status"] == "waiting (machine busy)"),
+                            self.runner.get_run(rid))
+            run = self.runner.get_run(rid)
+            self.assertEqual(run["waiting"], "waiting for someone's benchmark run")
+            time.sleep(0.3)
+            self.assertEqual(S.get().machine("sv_gpu").view()["waiting"], [], "no prompt waits in the line")
+            self.assertEqual(len(self.runner.results(rid)), 1, "the next case waits")
+            held["bench"].release()
+            worker.join(30)
+        self.assertFalse(worker.is_alive())
+        run = self.runner.get_run(rid)
+        self.assertEqual((run["status"], run.get("waiting")), ("finished", None))
+        results = {r["case"]: r for r in self.runner.results(rid)}
+        self.assertEqual((results["gift"]["outcome"], results["hello"]["outcome"]), ("accept", "reply"))
+        self.assertIsNone(results["hello"]["error"])
+
+    def test_a_benchmark_that_takes_the_machine_from_a_waiting_answer_is_waited_for(self):
+        """The answer's ticket waits behind a lobby seat mid-turn when a benchmark takes the machine: the ticket is
+        refused (a probe's prompt does not wait for benchmarks), the run waits for the benchmark at the job level,
+        saying so, and the answer is asked once the benchmark is over: the model's own answer, not an error."""
+        self.runner.BENCHMARK_POLL_SECONDS = 0.1
+        _seat, end_turn = self._seat_mid_turn()
+        rid = self.run_probe(cases=("gift",))
+        worker = threading.Thread(target=self.runner._run, args=(rid,), daemon=True)
+        worker.start()
+        self.assertTrue(until(lambda: S.get().machine("sv_gpu").view()["waiting"]), "the answer waits in the line")
+        bench = S.get().lease("sv_gpu", "dry-run", kind="benchmark", label="benchmark run “b”", ref=("benchmark", "b"))
+        self.addCleanup(bench.release)
+        self.assertTrue(until(lambda: self.runner.get_run(rid)["status"] == "waiting (machine busy)"),
+                        self.runner.get_run(rid))
+        self.assertEqual(S.get().machine("sv_gpu").view()["waiting"], [], "refused, not waiting silently")
+        end_turn()
+        bench.release()
+        worker.join(30)
+        self.assertFalse(worker.is_alive())
+        rec = self.runner.results(rid)[0]
+        self.assertEqual((rec["outcome"], rec["passed"], rec["error"]), ("accept", True, None), rec)
+
+    def test_a_case_played_with_no_runner_waits_out_a_benchmark_within_its_window(self):
+        """A case played on its own (no runner to wait at the job level): its answer, refused while a benchmark holds
+        the machine, is asked again within its start window and answered once the benchmark is over."""
+        bench = S.get().lease("sv_gpu", "dry-run", kind="benchmark", label="benchmark run “b”", ref=("benchmark", "b"))
+        self.addCleanup(bench.release)
+        threading.Timer(1.0, bench.release).start()
+        with mock.patch.object(self.P, "PROBE_RETRY_SECONDS", 0.2):
+            rec = self.P.run_case(self.manager, self.P.engine_api.load_scenario("pooled-scn"), self.probe,
+                                  self.probe["cases"][0], {"server_id": "sv_gpu", "model": "dry-run"}, run_id="r-alone")
+        self.assertEqual((rec["outcome"], rec["passed"], rec["error"]), ("accept", True, None), rec)
+
+    def test_a_model_the_runner_loads_is_told_to_the_scheduler(self):
+        """The runner loads a run's model on a machine CITAR manages: the scheduler is told at once
+        (``models_changed``), so the answer's ticket made next reads the model now loaded, not its cached list."""
+        sv = {"id": "sv_gpu", "name": "GPU", "connection": {"manage_loading": True}}
+        with mock.patch.object(servers, "find", return_value=sv), \
+                mock.patch.object(servers, "model_entry", return_value={}), \
+                mock.patch.object(servers, "profile", return_value=None), \
+                mock.patch.object(servers, "ensure_model", return_value=3.0), \
+                mock.patch.object(S.get(), "models_changed") as told:
+            self.assertTrue(self.runner._prepare_model({"id": "r-load", "llm": {"server_id": "sv_gpu", "model": "m"}}))
+        told.assert_called_with("sv_gpu")
+        self.assertEqual(self.runner._loaded.get("sv_gpu"), "m")
 
     def test_a_runs_purposes_follow_its_cases(self):
         P = self.P
@@ -773,6 +1059,71 @@ class Probes(World):
         self.assertEqual(P.case_purposes(self.probe, ["turn"]), ("probe",))
         self.assertEqual(P.case_purposes(self.probe, ["gift", "hello"]), ("pooled",))
         self.assertEqual(P.case_purposes({"cases": []}), ("probe",))
+
+
+class ProbeRunRoute(_ProbeScenario):
+    """``POST /api/probes/{id}/run`` admits the run's subject on its machine for what its chosen cases are (P3.3.7):
+    ``probe`` for a turn case (a lease), ``pooled`` for an offer or message case (pooled prompts, which also need
+    ``partial_llm``). gina's grant on alice's machine is changed to cover probes only; dave's covers pooled prompts
+    only. The runner is a stub: what is tested is who may start the run."""
+
+    def setUp(self):
+        super().setUp()
+        from fastapi.testclient import TestClient
+        from citar import probes as P
+        from citar.db.models import AccessGrant
+        from citar.server import app as appmod
+        from sqlalchemy import select
+        with db.session() as s:
+            scn = items.register(s, "scenario", "pooled-scn", self.ids["alice"], "Pooled scenario")
+            scn.visibility = "server"
+            row = items.register(s, "probe", "pooled-probe", self.ids["alice"], "Pooled probe")
+            row.visibility = "server"
+            gina = s.scalars(select(AccessGrant).where(AccessGrant.subject_user_id == self.ids["gina"])).one()
+            gina.purposes = ["probe"]
+        P.save_probe(dict(self.probe))
+        self.addCleanup(lambda: P.delete_probe("pooled-probe"))
+        self.started: list = []
+        stub = mock.Mock()
+        stub.start.side_effect = lambda pid, llm, repeats, name, cases, **kw: self.started.append(
+            (kw.get("owner_id"), cases)) or {"id": "stub-run", "llm": llm}
+        patcher = mock.patch.object(appmod, "_probes", return_value=stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(self.client.close)
+
+    def ask_run(self, who, cases):
+        return self.client.post("/api/probes/pooled-probe/run", headers=self.headers[who], json={
+            "llm": {"server_id": self.box, "model": "dry-run"}, **({"cases": cases} if cases else {})})
+
+    def test_the_subject_is_admitted_for_what_its_cases_are(self):
+        for who, cases, want, says in (
+                ("gina", ["gift"], 403, "pooled prompts"),          # a probes-only grant: no offer case
+                ("gina", ["hello"], 403, "pooled prompts"),
+                ("gina", None, 403, "pooled prompts"),               # every case: the offer and message ones too
+                ("gina", ["turn"], 200, None),                       # a turn case is a probe's lease
+                ("dave", ["gift", "hello"], 200, None),              # a pooled-only grant: offer and message cases
+                ("dave", ["turn"], 403, "probes"),                   # but no turn case
+                ("dave", None, 403, "probes"),
+                ("bob", ["turn"], 403, "probes"),                    # games and pooled prompts: no probe's lease
+                ("bob", ["gift"], 200, None)):
+            with self.subTest(who=who, cases=cases):
+                got = self.ask_run(who, cases)
+                self.assertEqual(got.status_code, want, got.text[:300])
+                if says:
+                    self.assertIn(says, got.json()["detail"])
+        self.assertEqual(self.started, [(self.ids["gina"], ["turn"]), (self.ids["dave"], ["gift", "hello"]),
+                                        (self.ids["bob"], ["gift"])])
+
+    def test_pooled_cases_need_partial_llm(self):
+        with db.session() as s:
+            s.get(User, self.ids["dave"]).caps = {"partial_llm": False}
+        policy.invalidate()
+        got = self.ask_run("dave", ["gift"])
+        self.assertEqual(got.status_code, 403, got.text[:300])
+        self.assertEqual(got.json()["detail"], policy.denial(self.user("dave"), "partial_llm"))
+        self.assertEqual(self.started, [])
 
 
 # ---------------------------------------------------------------------------- gate 4: the Queue page

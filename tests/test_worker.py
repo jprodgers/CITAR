@@ -346,10 +346,10 @@ class PooledWork(unittest.TestCase):
             work_queue.set_priority("benchmark", run["id"], 0)
             work_queue.register("probe", lambda: [])
 
-    def test_a_lobby_game_does_not_hold_a_probe_run_up_but_a_benchmark_does(self):
-        """A probe run's prompts are tickets and its turn cases take a lease each (package 3-09): a lobby game's lease
-        on its machine leaves it free to start (its prompts run on the slots the game's seat lends), a benchmark's
-        holds it."""
+    def test_a_lobby_game_does_not_hold_up_offer_and_message_cases_but_a_benchmark_does(self):
+        """A probe run's offer and message cases are tickets (package 3-09): a lobby game's lease on its machine
+        leaves the run free to start and its next such case free to play (its prompts run on the slots the game's seat
+        lends); a benchmark's lease holds both up, the run saying what it waits for."""
         from citar.pool import scheduler as prompt_scheduler
         runner = self._bare_runner()
         rid = f"test-beside-{int(time.time() * 1000) % 100000}"
@@ -359,6 +359,12 @@ class PooledWork(unittest.TestCase):
                                             ref=("game", "lobby-1"))
         try:
             self.assertFalse(runner._machine_busy(rid), "a lobby game holds no probe run up")
+            waited = {}
+            worker = threading.Thread(target=lambda: waited.setdefault("w", runner._wait_machine(
+                rid, self.server_id, full=False)), daemon=True)
+            worker.start()
+            worker.join(5)
+            self.assertEqual(waited.get("w"), False, "nor its next message case")
             bench = prompt_scheduler.get().lease(self.server_id, "m1", kind="benchmark", label="benchmark run “b”",
                                                  ref=("benchmark", "b-1"))
             try:
@@ -367,6 +373,48 @@ class PooledWork(unittest.TestCase):
             finally:
                 bench.release()
             self.assertFalse(runner._machine_busy(rid))
+        finally:
+            game.release()
+
+    def test_a_turn_case_waits_while_leases_fill_the_machines_slots(self):
+        """A turn case plays on a lease of its own that never lends (package 3-09): on the one-slot machine a lobby
+        game's lease fills, the run waits before it, saying so ("waiting for someone's game"), and plays once the game
+        lets the machine go; on two slots one lease leaves room for it."""
+        from citar.pool import scheduler as prompt_scheduler
+        runner = self._bare_runner()
+        runner.BENCHMARK_POLL_SECONDS = 0.05
+        rid = f"test-turn-{int(time.time() * 1000) % 100000}"
+        runner._write({"id": rid, "name": "turns", "llm": {"server_id": self.server_id}, "status": "running",
+                       "jobs": []})
+        game = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “a lobby game”",
+                                            ref=("game", "lobby-1"))
+        waited = {}
+        worker = threading.Thread(target=lambda: waited.setdefault("w", runner._wait_machine(
+            rid, self.server_id, full=True)), daemon=True)
+        try:
+            worker.start()
+            deadline = time.perf_counter() + 10
+            while runner.get_run(rid).get("waiting") is None and time.perf_counter() < deadline:
+                time.sleep(0.02)
+            run = runner.get_run(rid)
+            self.assertEqual((run["status"], run["waiting"]), ("waiting (machine busy)", "waiting for someone's game"))
+            time.sleep(0.2)
+            self.assertTrue(worker.is_alive(), "the turn case waits while the game fills the one slot")
+        finally:
+            game.release()
+        worker.join(5)
+        self.assertEqual(waited.get("w"), True)
+        run = runner.get_run(rid)
+        self.assertEqual((run["status"], run.get("waiting")), ("running", None))
+        with db.session() as s:
+            s.get(Server, self.server_id).max_concurrent = 2
+        from citar import servers
+        servers.invalidate()
+        prompt_scheduler.get().refresh(self.server_id)
+        game = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “a lobby game”",
+                                            ref=("game", "lobby-1"))
+        try:
+            self.assertFalse(runner._wait_machine(rid, self.server_id, full=True), "a second slot is left for it")
         finally:
             game.release()
 

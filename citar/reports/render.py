@@ -681,17 +681,19 @@ def scope_text(data: dict) -> str:
 
 
 def render(data: dict, narrative: str = "", narrative_note: str = "") -> tuple[str, dict]:
-    """Returns (html, summary) - summary holds headline numbers for the Reports list."""
+    """Returns (html, summary) - summary holds headline numbers for the Reports list. The analysis section shows the
+    narrative and its note (who wrote it); a narrative that was skipped or failed shows its note alone, so the reader
+    is told why the report has no analysis."""
     x = Ctx(data)
     spec = data["spec"]
     sections = [s for s in spec.get("sections") or ["summary"] if s in SECTIONS or s == "narrative"]
-    if narrative and "narrative" not in sections:
+    if (narrative or narrative_note) and "narrative" not in sections:
         sections.insert(1 if sections and sections[0] == "summary" else 0, "narrative")
     body, toc = [], []
     for key in sections:
         title = SECTION_TITLES.get(key, key)
         if key == "narrative":
-            if not narrative:
+            if not narrative and not narrative_note:
                 continue
             inner = narrative_html(narrative) + (f'<p class="muted">{esc(narrative_note)}</p>' if narrative_note else "")
         else:

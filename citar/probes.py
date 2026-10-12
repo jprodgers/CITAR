@@ -26,11 +26,13 @@ peace_treaty, declaration_of_friendship, research_agreement, defensive_pact, dec
 Runs live in saves/probes/runs/<run id>/ (run.json, results.jsonl and one save per case for inspection).
 
 A case's model calls go through the prompt scheduler (design/phase3-features.md P3.3.3, P3.3.5): each answer of an
-offer or message case is a ``probe`` ticket (a pooled prompt, admitted for ``pooled`` when it is made, waiting for a
-benchmark that holds the machine rather than refused by it), and a turn case holds a ``probe_case`` lease for the case
-only, lending nothing. So a run holds its machine only while a turn case plays, and its offer and message cases run
-beside a lobby game on the slots its seat lends between its turns. A run waits at the job level (``pool.queue``) only
-for a benchmark that holds its machine and for work that ranks ahead of it there.
+offer or message case is a ``probe`` ticket (a pooled prompt, admitted for ``pooled`` when it is made), and a turn case
+holds a ``probe_case`` lease for the case only, lending nothing. So a run holds its machine only while a turn case
+plays, and its offer and message cases run beside a lobby game on the slots its seat lends between its turns; an answer
+the machine cuts off (the seat needing its slot back, a benchmark taking the machine) is asked again, never scored as
+the model's. A run waits at the job level (``pool.queue``, saying what for) for a benchmark that holds its machine
+(before every case, and when one takes the machine mid-answer: an answer's ticket does not wait for benchmarks), for
+work that ranks ahead of it there, and before a turn case for the leases that fill its machine's slots.
 """
 from __future__ import annotations
 
@@ -58,6 +60,14 @@ CASE_KINDS = ("offer", "message", "turn")
 PROBE_START_SECONDS = 3600.0
 #: The longest pause between two tries of a temporarily refused answer.
 PROBE_RETRY_SECONDS = 15.0
+#: How an answer's ticket can end by the machine's doing rather than the model's (the scheduler's codes): the lobby seat
+#: whose idle slot it borrowed needed it back (``yielded``), the borrowed time ran out (``borrow_cap``), a benchmark took
+#: the machine (``benchmark``). The answer is asked again on a fresh ticket while the negotiation still waits for it, at
+#: most ``PROBE_ANSWER_TRIES`` times in all; a case whose answer never ran whole records why and is not scored.
+INTERRUPTIONS = ("yielded", "borrow_cap", "benchmark")
+PROBE_ANSWER_TRIES = 3
+#: How the scheduler ends a ticket that did not run its answer: the case is not the model's to score.
+NOT_RUN = ("cancelled", "expired", "disabled") + INTERRUPTIONS
 # What the scripted counterparty says with each answer: every negotiation entry carries a message
 SCRIPT_LINES = {"accept": "Agreed.", "reject": "No deal.", "counter": "How about this instead?", "reply": "Noted."}
 
@@ -222,13 +232,16 @@ def _items_text(g, items) -> str:
 def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_path: Optional[Path] = None,
              live: Optional[dict] = None, should_stop=lambda: False, usage_act: Optional[str] = None,
              owner_id: Optional[str] = None, run_id: Optional[str] = None, run_name: Optional[str] = None,
-             on_ticket=None) -> dict:
+             on_ticket=None, wait_benchmark=None) -> dict:
     """Plays one case on a fresh copy of the scenario and returns its record. ``owner_id`` is the probe run's owner,
     the case game's owner (``GameSession.owner_id``) and the consumer of its prompts. A model subject's answers in an
     offer or message case are ``probe`` tickets, one per answer (``_answer``), and its turn in a turn case plays on a
     ``probe_case`` lease the case's seat holds for the case only (released when the case's game stops); both name the
     run (``run_id``, ``run_name``) on the Queue page. ``on_ticket(ticket)`` is told of each answer's ticket while it
-    is asked, and ``on_ticket(None)`` after (the runner cancels it when the run is stopped)."""
+    is asked, and ``on_ticket(None)`` after (the runner cancels it when the run is stopped); ``wait_benchmark()`` waits
+    while a benchmark holds the machine (the runner's job-level wait, which says so) and returns whether it waited.
+    An answer that was not asked or did not run whole (refused, cut off, stopped) is the case's ``error``: its outcome
+    is ``error`` (``stopped`` for a stopped run) and it is not scored (``passed`` None)."""
     subject, cp = probe["subject"], probe.get("counterparty")
     seats = [None] * len(scn.get("seats") or [])
     seats = [{} for _ in range(max(len(seats), subject + 1, (cp or 0) + 1))]
@@ -256,6 +269,7 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
     t0 = time.time()
     thought_mark = g.thought_count()
     calls: list = []
+    not_run = False                     # an answer the machine did not run: the case is not the model's to score
     orig_call = s.call_tool
 
     def recording_call(pid, name, args=None, *a, **kw):
@@ -314,9 +328,12 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
                     break
                 if prompts:
                     refused = _answer(s, agent, subject, nid, on_ticket=on_ticket, should_stop=should_stop,
-                                      usage_act=usage_act, owner_id=owner_id, run_id=run_id, run_name=run_name)
+                                      usage_act=usage_act, owner_id=owner_id, run_id=run_id, run_name=run_name,
+                                      wait_benchmark=wait_benchmark)
                     if refused:
-                        rec["error"] = refused
+                        rec["error"], not_run = refused, True
+                        rec["outcome"] = "stopped" if should_stop() else "error"
+                        break
                     answer = None
                 else:
                     answer = agent.respond_negotiation(s, subject, nid)
@@ -421,59 +438,101 @@ def run_case(manager, scn: dict, probe: dict, case: dict, llm_cfg: dict, save_pa
         rec["error"] = f"The engine stopped on turn {s.crashed['turn']}: {str(s.crashed['message'])[:300]}"
         rec["passed"] = False
         return rec
-    rec["passed"] = _check(case, rec)
+    rec["passed"] = None if not_run else _check(case, rec)
     return rec
 
 
 def _answer(s, agent, subject: int, nid: int, *, on_ticket, should_stop, usage_act: Optional[str],
-            owner_id: Optional[str], run_id: Optional[str], run_name: Optional[str]) -> Optional[str]:
+            owner_id: Optional[str], run_id: Optional[str], run_name: Optional[str],
+            wait_benchmark=None) -> Optional[str]:
     """One answer of a model subject to the case's negotiation, as a ``probe`` ticket on its machine (P3.3.3): admitted
-    for ``pooled`` when it is made (``pool.seats.ticket``, with ``run_probes``), following the run's queue priority,
-    waiting for a benchmark that holds the machine rather than refused by it, at most ``PROBE_START_SECONDS`` to start.
-    A refusal that says "not yet" (the helper offline, the machine's quiet hours, a grant's window) is tried again
-    within that time; stopping the run cancels the ticket (``on_ticket``). Returns why the answer was not asked
-    (a refusal, an expiry, a cancel), else None. A subject with no machine to play on (``NoMachineAgent``) answers
-    nothing, as before."""
-    cfg = getattr(agent, "cfg", None) or {}
+    for ``pooled`` when it is made (``pool.seats.ticket``, with ``run_probes``), following the run's queue priority, at
+    most ``PROBE_START_SECONDS`` to start (``_probe_ticket``). Stopping the run cancels the ticket (``on_ticket``; a stop
+    that lands while the ticket is made is noticed here, since the runner found nothing to cancel then). An answer the
+    machine cut off (``INTERRUPTIONS``: the lobby seat whose idle slot it borrowed took it back, its borrowed time ran
+    out, a benchmark took the machine) is asked again on a fresh ticket while the negotiation still waits for it, up to
+    ``PROBE_ANSWER_TRIES`` times: contention is not the model's failure. Returns why the answer was not asked or did not
+    run whole (a refusal, an expiry, a cancel, the tries spent), else None: what the model did is the case's. A subject
+    with no machine to play on (``NoMachineAgent``) answers nothing, as before."""
     if not hasattr(agent, "binding"):
         agent.respond_negotiation(s, subject, nid)
         return None
+    tries = 0
+    while True:
+        ticket, why = _probe_ticket(s, agent, should_stop=should_stop, usage_act=usage_act, owner_id=owner_id,
+                                    run_id=run_id, run_name=run_name, wait_benchmark=wait_benchmark)
+        if ticket is None:
+            return why
+        if on_ticket is not None:
+            on_ticket(ticket)
+        if should_stop():
+            ticket.cancel("stopped")
+        agent.binding = ticket
+        try:
+            agent.respond_negotiation(s, subject, nid)
+        finally:
+            agent.binding = None
+            if on_ticket is not None:
+                on_ticket(None)
+            ticket.close()
+        code = ticket.error.code if ticket.error is not None else None
+        if code not in NOT_RUN or not _awaits(s, nid, subject):
+            return None                 # the model answered, or chose not to: that is the case's result
+        if code in INTERRUPTIONS and not should_stop():
+            tries += 1
+            if tries < PROBE_ANSWER_TRIES:
+                continue
+            return f"The answer was cut off {tries} times by the machine's other work: {ticket.reason}"
+        return f"The prompt did not run: {ticket.reason}"
+
+
+def _probe_ticket(s, agent, *, should_stop, usage_act: Optional[str], owner_id: Optional[str],
+                  run_id: Optional[str], run_name: Optional[str], wait_benchmark=None) -> tuple:
+    """The ticket one answer is asked on (``_answer``): (the ticket, None) once one is queued, else (None, why not).
+    A refusal that says "not yet" (the helper offline, the machine's quiet hours, a grant's window) is tried again
+    within ``PROBE_START_SECONDS``. The ticket does not wait for benchmarks: one refused because a benchmark holds the
+    machine waits for it at the job level (``wait_benchmark``: the run says what it waits for, as long as the benchmark
+    lasts, and the answer's window starts again after), rather than as a prompt that waits silently for an hour and
+    expires; without the runner's wait it is tried again within the window."""
     from .pool import queue as work_queue, seats as pool_seats
+    cfg = getattr(agent, "cfg", None) or {}
     sid = cfg.get("server_id") or None
     deadline = time.perf_counter() + PROBE_START_SECONDS
     while True:
-        left = max(1.0, deadline - time.perf_counter())
+        if should_stop():
+            return None, "The prompt was not asked: the run was stopped."
         ticket = pool_seats.ticket(
             sid, cfg.get("model") or "", cls="probe", consumer=owner_id, capability="run_probes",
             activity=usage_act, label=f"probe run “{run_name or run_id or s.name}”",
             ref=("probe", run_id) if run_id else None,
-            priority=work_queue.priority("probe", run_id) if run_id else 0, start_within=left,
-            steps=getattr(agent, "max_negotiation_calls", 20), wait_for_benchmark=True)
+            priority=work_queue.priority("probe", run_id) if run_id else 0,
+            start_within=max(1.0, deadline - time.perf_counter()),
+            steps=getattr(agent, "max_negotiation_calls", 20), wait_for_benchmark=False)
         if ticket.state == "queued":
-            break
+            return ticket, None
         error = ticket.error
+        benchmark = error is not None and error.code == "benchmark"
+        if benchmark and wait_benchmark is not None and wait_benchmark():
+            deadline = max(deadline, time.perf_counter() + PROBE_START_SECONDS)
+            continue
         clears = (error.retry_at - datetime.now()).total_seconds() if error is not None and error.retry_at else None
-        if error is None or not error.temporary or should_stop() or time.perf_counter() >= deadline or (
-                clears is not None and time.perf_counter() + clears > deadline):
-            return f"The prompt was not asked: {ticket.reason}"
-        wake = time.perf_counter() + PROBE_RETRY_SECONDS
+        now = time.perf_counter()
+        if error is None or not (error.temporary or benchmark) or should_stop() or now >= deadline or (
+                clears is not None and now + clears > deadline):
+            return None, f"The prompt was not asked: {ticket.reason}"
+        # a benchmark's last request still draining (the runner saw no benchmark to wait for) clears within seconds
+        wake = now + (1.0 if benchmark and wait_benchmark is not None else PROBE_RETRY_SECONDS)
         if clears is not None:
-            wake = min(wake, time.perf_counter() + max(1.0, clears))
+            wake = min(wake, now + max(1.0, clears))
         while time.perf_counter() < min(wake, deadline) and not should_stop():
             time.sleep(0.25)
-    if on_ticket is not None:
-        on_ticket(ticket)
-    agent.binding = ticket
-    try:
-        agent.respond_negotiation(s, subject, nid)
-    finally:
-        agent.binding = None
-        if on_ticket is not None:
-            on_ticket(None)
-        ticket.close()
-    if ticket.error is not None and ticket.error.code in ("cancelled", "expired", "benchmark", "disabled"):
-        return f"The prompt did not run: {ticket.reason}"
-    return None
+
+
+def _awaits(s, nid: int, subject: int) -> bool:
+    """Whether the case's negotiation still waits for the subject's answer."""
+    with s.lock:
+        n = s.game.negotiation_head(nid)
+        return n["status"] == "open" and n["awaiting"] == subject
 
 
 def _record_bot_actions(calls: list, counts) -> None:
@@ -799,12 +858,29 @@ class ProbeRunner:
 
     @staticmethod
     def _benchmarks(server_id) -> list:
-        """The benchmark runs holding a machine (a live benchmark lease), each once: a probe run waits for them, its
-        turn cases' leases would share the machine with a benchmark's steps (and its tickets would wait anyway). Lobby
-        games, other probe runs' turn cases and pooled prompts do not hold a run up: its prompts run on the slots a
-        lobby seat lends, as the scheduler's rules allow (P3.3.3, P3.3.5)."""
+        """The benchmark runs holding a machine (a live benchmark lease), each once: a probe run waits for them before
+        every case (no pooled prompt starts beside a benchmark, and a turn case's lease would share the machine with
+        its steps). Lobby games and pooled prompts do not hold an offer or message case up: its prompts run on the
+        slots a lobby seat lends, as the scheduler's rules allow (P3.3.3, P3.3.5)."""
         from .pool import seats as pool_seats
         return [h for h in pool_seats.holders(server_id) if h.get("kind") == "benchmark"]
+
+    @staticmethod
+    def _slots_held(server_id) -> list:
+        """What fills a machine's slots with leases (a lobby game's seat, another run's turn case), each once, or
+        nothing while a slot is left: a turn case's own lease, which never lends, waits for one, as a benchmark job
+        does (the job-level rule: fewer leases than the machine's slots, P3.3.5). A helper machine whose helper is
+        offline is taken at its row's number."""
+        from . import servers
+        from .pool import scheduler as prompt_scheduler, seats as pool_seats
+        occs = pool_seats.occupants(server_id)
+        if not occs:
+            return []
+        machine = prompt_scheduler.get().machine(server_id)
+        slots = machine.capacity() if machine is not None else None
+        if slots is None:
+            slots = int((servers.machine_settings(server_id) or {}).get("slots") or 1)
+        return pool_seats.distinct(occs) if len(occs) >= max(1, slots) else []
 
     def _machine_busy(self, rid: str) -> bool:
         """Whether a queued run cannot start yet - a benchmark holds its machine, or higher-priority work is waiting
@@ -831,40 +907,57 @@ class ProbeRunner:
             self._write(run)
         return bool(held)
 
-    #: How often a run waiting for a benchmark looks again.
+    #: How often a run waiting for its machine looks again (it notices a stop at once).
     BENCHMARK_POLL_SECONDS = 15.0
 
-    def _wait_benchmark(self, rid: str, server_id):
-        """Before a turn case: wait while a benchmark holds the run's machine, so the case's lease never plays beside a
-        benchmark's steps (P3.3.5)."""
+    def _wait_benchmark(self, rid: str, server_id) -> bool:
+        """Wait while a benchmark holds the run's machine: before every case, and when one took the machine from an
+        answer (``run_case``'s ``wait_benchmark``). Returns whether it waited."""
+        return self._wait_machine(rid, server_id, full=False)
+
+    def _wait_machine(self, rid: str, server_id, *, full: bool) -> bool:
+        """Wait, saying so, while a benchmark holds the run's machine (``_benchmarks``) and, before a turn case
+        (``full``: a lease of its own that never lends), while leases fill its slots (``_slots_held``), so the case
+        never plays its turn beside a benchmark's steps or step by step against a lobby game's seat (P3.3.5). The run's
+        status and waiting note say what it waits for; the live panel's case is put back after. Returns whether it
+        waited; a stopped run stops waiting at once."""
         from .pool import seats as pool_seats
-        waited = False
+        waited, before = False, self.lives.get(rid)
         while server_id and rid not in self._stop_run:
-            held = self._benchmarks(server_id)
+            held = self._benchmarks(server_id) or (self._slots_held(server_id) if full else [])
             if not held:
                 break
-            if not waited:
-                waited = True
-                run = self.get_run(rid)
+            note = pool_seats.note("waiting for ", held)
+            run = self.get_run(rid)
+            if not waited or run.get("waiting_note") != note:
                 run["status"] = "waiting (machine busy)"
-                _set_waiting(run, pool_seats.note("waiting for ", held))
+                _set_waiting(run, note)
                 self._write(run)
+            if not waited:
                 # the live panel is shown to whoever may see the run: what holds the machine is the run's waiting
                 # note, which its route tells each viewer as they may see it
-                self._set_live(rid, {"run": rid, "case": "(waiting: a benchmark holds the machine)",
-                                     "since": time.time()})
-            time.sleep(self.BENCHMARK_POLL_SECONDS)
+                self._set_live(rid, {"run": rid, "case": "(waiting: the machine is in use)", "since": time.time()})
+            waited = True
+            wake = time.perf_counter() + self.BENCHMARK_POLL_SECONDS
+            while time.perf_counter() < wake and rid not in self._stop_run:
+                time.sleep(0.25)
         if waited:
             run = self.get_run(rid)
             run["status"] = "running"
             _set_waiting(run, None)
             self._write(run)
+            if before is not None:
+                self.lives[rid] = before
+        return waited
 
     def _run_cases(self, rid, run, probe, scn, done, cases, act):
-        """Every case of a run, in order, with the configured repeats: a turn case once no benchmark holds the
-        machine (``_wait_benchmark``), on a lease for the case; an offer or message case on tickets."""
+        """Every case of a run, in order, with the configured repeats, each once no benchmark holds the machine
+        (``_wait_machine``): a turn case also once a slot is free of leases, then on a lease for the case; an offer or
+        message case on tickets."""
         from . import usage
         self._prepare_model(run)
+        server_id = run["llm"].get("server_id")
+        model_subject = run["llm"].get("provider") != "bot"
         for job in run["jobs"]:
             if rid in self._stop_run:
                 break
@@ -875,8 +968,8 @@ class ProbeRunner:
                 return
             if self._wait_quiet(rid, run["llm"]):
                 self._prepare_model(run)
-            if cases[job["case"]].get("kind") == "turn" and run["llm"].get("provider") != "bot":
-                self._wait_benchmark(rid, run["llm"].get("server_id"))
+            if model_subject:
+                self._wait_machine(rid, server_id, full=cases[job["case"]].get("kind") == "turn")
                 if rid in self._stop_run:
                     break
             self._set_live(rid, {"run": rid, "case": job["case"], "rep": job["rep"], "since": time.time()})
@@ -885,7 +978,8 @@ class ProbeRunner:
                            should_stop=lambda: rid in self._stop_run, usage_act=act, owner_id=run.get("owner_id"),
                            run_id=rid, run_name=run.get("name"),
                            on_ticket=lambda t: self.asking.__setitem__(rid, t) if t is not None
-                           else self.asking.pop(rid, None))
+                           else self.asking.pop(rid, None),
+                           wait_benchmark=lambda: self._wait_benchmark(rid, server_id))
             rec["rep"] = job["rep"]
             with open(self._run_dir(rid) / "results.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, default=str) + "\n")
@@ -908,7 +1002,8 @@ class ProbeRunner:
     # ---------------------------------------------------------------- models
     def _prepare_model(self, run: dict) -> bool:
         """Loads the run's model with its load profile on a server CITAR manages (LM Studio), swapping out a model this
-        runner loaded earlier but never one the user loaded."""
+        runner loaded earlier but never one the user loaded. The prompt scheduler is told at once (``models_changed``),
+        so an answer's ticket made next reads the model now loaded rather than the list it cached a moment ago."""
         from . import servers
         llm = run["llm"]
         sv = servers.find(llm.get("server_id"))
@@ -928,6 +1023,9 @@ class ProbeRunner:
             run = self.get_run(run["id"])
             run["error"] = f"Could not load {model}: {e}"
             self._write(run)
+        finally:
+            from .pool import scheduler as prompt_scheduler
+            prompt_scheduler.get().models_changed(sv["id"])
         return True
 
     def _wait_quiet(self, rid: str, llm: dict) -> bool:
