@@ -102,7 +102,7 @@ function jobsBlock(m, refresh) {
         : outranks ? "higher priority: starts once the running work finishes its current turn"
           : (it.waiting || "").replace(/^waiting:? ?(for )?/, ""))));
   }
-  return el("div", {}, el("div", { class: "muted small" }, "Jobs:"), table);
+  return el("div", {}, el("div", { class: "muted small" }, "Jobs:"), el("div", { class: "table-wrap" }, table));
 }
 
 function promptsBlock(m, refresh) {
@@ -131,7 +131,8 @@ function promptsBlock(m, refresh) {
         : `in about ${secs(p.eta_s)}${p.starts_within_s != null ? ` (gives up after ${secs(p.starts_within_s)})` : ""}`),
       el("td", {}, cancel)));
   }
-  return el("div", {}, el("div", { class: "muted small" }, "Pooled prompts:"), table);
+  // wide: scrolls sideways inside its card on a phone, its Cancel buttons never cut off
+  return el("div", {}, el("div", { class: "muted small" }, "Pooled prompts:"), el("div", { class: "table-wrap" }, table));
 }
 
 function machineCard(m, refresh) {

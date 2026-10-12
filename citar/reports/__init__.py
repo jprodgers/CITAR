@@ -377,6 +377,10 @@ class ReportRunner:
         """The narrative's ticket's news (the scheduler's notifier thread, no lock held): where it is in its machine's
         line while it waits, shown as the report's progress (``_places``: nothing is written to the disk here)."""
         state = payload.get("state")
+        build = self._builds.get(rid)
+        if build is None or not build.is_alive():
+            self._places.pop(rid, None)         # news that came after the build was over
+            return
         if state == "queued" and payload.get("position"):
             eta = payload.get("eta_s")
             self._places[rid] = (f"Waiting for {name}: {_ordinal(int(payload['position']))} in line"

@@ -452,11 +452,13 @@ def _answer(s, agent, subject: int, nid: int, *, on_ticket, should_stop, usage_a
         if ticket.state == "queued":
             break
         error = ticket.error
-        if error is None or not error.temporary or should_stop() or time.perf_counter() >= deadline:
+        clears = (error.retry_at - datetime.now()).total_seconds() if error is not None and error.retry_at else None
+        if error is None or not error.temporary or should_stop() or time.perf_counter() >= deadline or (
+                clears is not None and time.perf_counter() + clears > deadline):
             return f"The prompt was not asked: {ticket.reason}"
         wake = time.perf_counter() + PROBE_RETRY_SECONDS
-        if error.retry_at is not None:
-            wake = min(wake, time.perf_counter() + max(1.0, (error.retry_at - datetime.now()).total_seconds()))
+        if clears is not None:
+            wake = min(wake, time.perf_counter() + max(1.0, clears))
         while time.perf_counter() < min(wake, deadline) and not should_stop():
             time.sleep(0.25)
     if on_ticket is not None:

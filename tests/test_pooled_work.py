@@ -330,6 +330,47 @@ class UpdateSeat(World):
                     self.assertEqual((seat.type, seat.llm.get("server_id")), ("llm", sid))
 
 
+class ServersPageTest(World):
+    """The Servers page's test is a pooled prompt (P3.3.7): on a helper machine in alice's group, dave (a grant for
+    pooled prompts) gets the helper's reply and gina (a grant for games only) is refused at admission, naming the
+    purpose; with ``partial_llm`` off, dave is refused too."""
+
+    def setUp(self):
+        super().setUp()
+        from fastapi.testclient import TestClient
+        from citar.server import app as appmod, pool_api
+        self.client = TestClient(appmod.app, base_url="https://citar.test")
+        self.addCleanup(self.client.close)
+        pool_api._tests_waiting.clear()
+        with db.session() as s:
+            group_id = s.get(Server, self.box).group_id
+            row = Server(owner_id=self.ids["alice"], name="Alice helper", kind="owned", provider="lmstudio",
+                         reach="worker", group_id=group_id, max_concurrent=1, config={"models": [{"key": "m"}]})
+            s.add(row)
+            s.flush()
+            self.helper_box = row.id
+        servers.invalidate()
+        helper = StubHelper(self.helper_box, [{"key": "m", "loaded": True}])
+        W.hub().register(helper)
+        self.addCleanup(W.hub().unregister, helper)
+
+    def ask(self, who):
+        got = self.client.post(f"/api/pool/servers/{self.helper_box}/test", params={"wait": 10},
+                               headers=self.headers[who])
+        self.assertEqual(got.status_code, 200, got.text[:300])
+        return got.json()
+
+    def test_the_test_needs_a_grant_for_pooled_prompts(self):
+        self.assertTrue(self.ask("dave").get("ok"), "a grant for pooled prompts")
+        refused = self.ask("gina")
+        self.assertEqual((refused.get("ok"), refused.get("stage"), refused.get("code")), (False, "admission", "purpose"))
+        self.assertIn("pooled prompts", refused.get("reason", ""))
+        with db.session() as s:
+            s.get(User, self.ids["dave"]).caps = {"partial_llm": False}
+        off = self.ask("dave")
+        self.assertEqual((off.get("ok"), off.get("stage"), off.get("code")), (False, "admission", "capability"))
+
+
 # ---------------------------------------------------------------------------- gate 2: reports on tickets
 
 class _Recorded:
@@ -354,7 +395,9 @@ class _Recorded:
         return [x for x in self.steps if x["narrative"]]
 
 
-class Reports(World):
+class _ReportCase(World):
+    """A report runner of the test's own, the dry run's steps recorded."""
+
     def setUp(self):
         super().setUp()
         from citar import reports
@@ -381,6 +424,9 @@ class Reports(World):
 
     def waiting_report(self, sid="sv_gpu"):
         return [t for t in S.get().machine(sid).view()["waiting"] if t["class"] == "report"]
+
+
+class Reports(_ReportCase):
 
     def test_no_narrative_step_starts_while_the_lobby_seat_is_mid_turn(self):
         """A lobby game's seat on the one-slot machine is mid-turn: the report's narrative waits in the machine's
@@ -467,6 +513,24 @@ class Reports(World):
                 self.assertEqual(self.built(m["id"])["status"], "done")
         self.assertEqual(order, ["dave 2", "bob 1", "dave 1", "bob 2"])
 
+    def test_a_narratives_ticket_carries_its_reports_priority_from_the_start(self):
+        """A report raised on the Queue page before its narrative's ticket is made: the ticket is made with that
+        priority (its class's base plus its report's), not only told of changes after."""
+        seat = S.get().lease("sv_gpu", "dry-run", kind="game", label="game “lobby”", ref=("game", "g-lobby"))
+        self.addCleanup(seat.release)
+        seat.activate()
+        with self.runner._cpu:              # the build waits to gather: its ticket is not made yet
+            m = self.start()
+            work_queue.set_priority("report", m["id"], 7)
+            self.addCleanup(work_queue.set_priority, "report", m["id"], 0)
+        self.assertTrue(until(self.waiting_report))
+        waiting = self.waiting_report()[0]
+        self.assertEqual(waiting["priority"], 7)
+        ticket = next(t for t in S.get().machine("sv_gpu")._tickets() if t.ref == ("report", m["id"]))
+        self.assertEqual(ticket.priority, S.BASE_PRIORITY["report"] + 7)
+        seat.idle()
+        self.assertEqual(self.built(m["id"])["status"], "done")
+
     def _completing(self, order: list):
         def complete(cfg, system, prompt, binding):
             # the ticket's slot is taken: one at a time, in the scheduler's order
@@ -480,7 +544,7 @@ class Reports(World):
         return complete
 
 
-class ReportOnHelper(Reports):
+class ReportOnHelper(_ReportCase):
     """A narrative on a helper machine: it waits for an offline helper holding nothing, rides out a helper that drops,
     and gives up when it must (package 3-08's behaviour, on tickets)."""
 
