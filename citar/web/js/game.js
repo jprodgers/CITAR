@@ -24,6 +24,7 @@ export class GameScreen {
     this.thoughts = [];
     this.sideTab = "events";
     this.agentStatus = {};
+    this.agentWait = {};    // player -> where its model call waits for its machine ({machine, position, eta_s})
     this._refreshTimer = null;
     this._inflight = false;
     this._pending = false;
@@ -262,6 +263,8 @@ export class GameScreen {
       if (this.sideTab === "thoughts") this.renderSide();
     } else if (m.type === "agent") {
       this.agentStatus[m.player] = m.status;
+      if (m.status === "queued") this.agentWait[m.player] = m;
+      else delete this.agentWait[m.player];
       this.renderTopbar();
     } else if (m.type === "control") {
       this.scheduleRefresh(10);
@@ -863,7 +866,9 @@ export class GameScreen {
         })());
     } else {
       const st = this.agentStatus[v.current_player];
-      box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)" : st === "paused" ? " (paused mid-turn)" : ""}`));
+      const note = st === "thinking" ? " (thinking…)" : st === "reconnecting" ? " (reconnecting to its model server…)"
+        : st === "paused" ? " (paused mid-turn)" : st === "queued" ? ` (${queuedText(this.agentWait[v.current_player])})` : "";
+      box.append(el("span", { class: "pill" }, `Turn ${v.turn} · waiting for ${cur ? cur.name || "?" : "?"}${note}`));
     }
   }
 
@@ -1049,4 +1054,22 @@ function gptTitle(e) {
 
 function happyTitle(h) {
   return Object.entries(h.breakdown || {}).map(([k, v]) => `${k} ${signed(v)}`).join(", ") + ` (luxuries: ${h.luxury_types.join(", ") || "none"}) — ${h.status}`;
+}
+
+/** A model seat's wait for its machine, as the scheduler placed its call (its `agent` message: `machine`, `position`,
+ * `eta_s`; design/phase3-features.md P3.3.3): "waiting for Test GPU box: 2nd in line, about 40 s". Without a place (a
+ * page opened mid-wait), "waiting for its machine…". */
+export function queuedText(w) {
+  if (!w) return "waiting for its machine…";
+  const where = w.machine ? `waiting for ${w.machine}` : "waiting for its machine";
+  const parts = [];
+  if (w.position) parts.push(`${ordinal(w.position)} in line`);
+  if (w.eta_s != null) parts.push(`about ${Math.max(1, Math.round(w.eta_s))} s`);
+  return parts.length ? `${where}: ${parts.join(", ")}` : `${where}…`;
+}
+
+function ordinal(n) {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" })[n % 10] || "th";
+  return `${n}${suffix}`;
 }

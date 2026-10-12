@@ -119,9 +119,12 @@ class RandomSchedules(unittest.TestCase):
     def test_the_rules_hold_over_500_random_schedules(self):
         stats = {"grants": 0, "tickets": 0, "drained": 0, "late": 0, "benchmarks": 0, "contaminated": 0,
                  "yielded": 0, "busy": 0, "expired": 0}
-        for seed in range(self.SEEDS):
-            with self.subTest(seed=seed):
-                self._run(seed, stats)
+        # the schedules' busy refusals and contaminated drains are logged as warnings by design; captured here, so the
+        # suite's output keeps what matters
+        with self.assertLogs("citar.scheduler", level="WARNING"):
+            for seed in range(self.SEEDS):
+                with self.subTest(seed=seed):
+                    self._run(seed, stats)
         # the schedules exercised what they were meant to
         for k in ("grants", "tickets", "drained", "late", "benchmarks", "busy", "expired"):
             self.assertGreater(stats[k], 0, k)
@@ -494,7 +497,9 @@ class Rules(unittest.TestCase):
         m.finish(g, unfinished=(g.request_id, 900.0))      # a helper that never answers
         first = m.submit(bench)
         clock.advance(121)
-        sched.tick()
+        with self.assertLogs("citar.scheduler", level="WARNING") as logged:
+            sched.tick()
+        self.assertIn("contaminated", logged.output[0])
         self.assertIsNotNone(granted(m, first), "the bound reached, it goes ahead")
         self.assertTrue(bench.contaminated)
         self.assertEqual(bench.drain_s, 121)
@@ -532,7 +537,9 @@ class Rules(unittest.TestCase):
         m = sched.machine("box")
         lease = sched.lease("box", "m", kind="game")
         g1, g2, g3 = (granted(m, m.submit(lease)) for _ in range(3))
-        m.busy(g3)                                          # the helper had only two slots after all
+        with self.assertLogs("citar.scheduler", level="WARNING") as logged:
+            m.busy(g3)                                      # the helper had only two slots after all
+        self.assertIn("refused a request as busy", logged.output[0], "the mismatch is logged")
         self.assertEqual(m.capacity(), 2)
         self.assertIsNone(granted(m, g3.request), "back at the head of the queue")
         m.finish(g1, gen_s=1)                               # a frame frees a slot: the capacity comes back
@@ -540,7 +547,8 @@ class Rules(unittest.TestCase):
         self.assertIsNotNone(granted(m, g3.request))
         # with no frame at all the lowering lapses after a while (no sleep: a waiter's tick, or the scheduler's)
         g4 = granted(m, m.submit(lease))
-        m.busy(g4)
+        with self.assertLogs("citar.scheduler", level="WARNING"):
+            m.busy(g4)
         clock.advance(S.BUSY_HOLD_SECONDS + 0.1)
         sched.tick()
         self.assertIsNone(m.busy_cap)
@@ -556,6 +564,85 @@ class Rules(unittest.TestCase):
             m.step_ticket(t)
         self.assertEqual(caught.exception.code, "steps")
         self.assertEqual(m.slots, [])
+
+    def test_a_drain_ends_when_the_helpers_connection_goes(self):
+        """A v1 helper answers only over the socket a request went out on: once that connection is gone (the helper
+        disconnected, or a reconnect replaced it), no late frame can come, and the slot comes back at once rather than
+        after the request's timeout (a turn's, up to half an hour)."""
+        state = {"online": True, "helper_slots": 1, "helper_loaded": frozenset(), "contexts": {}, "connection": 1}
+        sched, clock = make(reach="worker", slots=1, helper=state)
+        m = sched.machine("box")
+        lease = sched.lease("box", "m", kind="game")
+        with self.assertLogs("citar.scheduler", level="INFO"):
+            # the helper restarts (disconnects, then a new process connects) while a cancelled request drains
+            g = granted(m, m.submit(lease))
+            m.finish(g, unfinished=(g.request_id, 1815.0, 1))
+            m.apply_helper(dict(state))                         # a catalog on the same connection: still draining
+            self.assertTrue(m.slots and m.slots[0].draining)
+            m.apply_helper({"online": False})
+            self.assertEqual(m.slots, [], "its connection went, and its drain with it")
+            m.apply_helper({**state, "connection": 2})
+            g = granted(m, m.submit(lease))
+            self.assertIsNotNone(g, "the next request goes at once")
+            # a new connection replacing the old one, with no disconnect between
+            m.finish(g, unfinished=(g.request_id, 900.0, 2))
+            self.assertTrue(m.slots[0].draining)
+            m.apply_helper({**state, "connection": 3})
+            self.assertEqual(m.slots, [])
+            # a request whose connection went while its caller was still unwinding never drains
+            g = granted(m, m.submit(lease))
+            m.apply_helper({**state, "connection": 4})
+            m.finish(g, unfinished=(g.request_id, 900.0, 3))
+            self.assertEqual(m.slots, [])
+        self.assertEqual((m.counters["drains_dropped"], m.counters["drain_timeouts"]), (3, 0))
+        self.assertIsNotNone(granted(m, m.submit(lease)))
+
+    def test_a_busy_answer_to_a_request_let_through_while_the_helper_seemed_offline_never_loops(self):
+        """With the helper thought offline (a connection past its liveness that revived with no push), lease requests
+        pass through. A ``busy`` answer to one says the helper is there: the request is held (not sent again at once)
+        and the helper's state read again; once the hub sees it, the request waits for a real slot."""
+        state = {"online": False, "helper_slots": None, "helper_loaded": frozenset(), "contexts": {}, "connection": None}
+        sched, clock = make(reach="worker", slots=1, helper=state)
+        m = sched.machine("box")
+        lease = sched.lease("box", "m", kind="game")
+        g = granted(m, m.submit(lease))
+        self.assertTrue(g.pass_through, "capacity unknown: let through")
+        with self.assertLogs("citar.scheduler", level="WARNING"):
+            lease.busy(g)                                       # the hub still says offline
+        self.assertIsNone(granted(m, g.request), "held, not sent again at once")
+        clock.advance(S.BUSY_HOLD_SECONDS + 0.1)
+        sched.tick()
+        again = granted(m, g.request)
+        self.assertTrue(again.pass_through, "one more try once the hold is over, not a loop")
+        state.update(online=True, helper_slots=1, connection=5)    # the hub sees the helper now
+        with self.assertLogs("citar.scheduler", level="WARNING"):
+            lease.busy(again)
+        self.assertEqual(m.capacity(), 1, "the busy answer read the helper's state again")
+        got = granted(m, again.request)
+        self.assertFalse(got.pass_through, "a slot this time")
+        m.finish(got, gen_s=1)
+        self.assertEqual(m.slots, [], "and the slot comes back")
+
+    def test_one_ticket_of_a_class_per_consumer_when_asked(self):
+        """``one_per_consumer`` (the Servers page's test): a consumer's second ticket of that class on a machine, while
+        the first is queued or running, is refused at once; another consumer's, another class's, or one after the
+        first is over, is not."""
+        sched, _ = make(slots=1)
+        m = sched.machine("box")
+
+        def test_of(consumer, cls="test"):
+            return sched.ticket("box", "m", cls=cls, consumer=consumer, one_per_consumer=True)
+        first = test_of("a")
+        self.assertEqual(first.state, "queued")
+        second = test_of("a")
+        self.assertEqual((second.state, second.error.code), ("refused", "duplicate"))
+        self.assertEqual(test_of("b").state, "queued")
+        self.assertEqual(test_of("a", "chat").state, "queued")
+        g = granted(m, m.submit(first))
+        self.assertEqual(test_of("a").error.code, "duplicate", "running counts too")
+        m.finish(g, gen_s=1)
+        first.close()
+        self.assertEqual(test_of("a").state, "queued", "once it is over, another may start")
 
 
 # ---------------------------------------------------------------------------- the conversation wrapper
@@ -614,18 +701,19 @@ class NoBusyWait(unittest.TestCase):
         conv = S.ScheduledConversation(inner, lease)
         sleeps, out = [], {}
         real_sleep = time.sleep
-        worker = threading.current_thread()
-
-        def recording_sleep(seconds):
-            if threading.current_thread() is not worker:
-                sleeps.append(seconds)
-            return real_sleep(seconds)
 
         def run():
             out["result"] = conv.step()
+        t = threading.Thread(target=run, name="no-busy-wait-step")
 
-        with mock.patch("time.sleep", recording_sleep):
-            t = threading.Thread(target=run)
+        def recording_sleep(seconds):
+            # the stepping thread's only: threads other modules left running (game drivers, the scripted endpoint's
+            # handlers) sleep as they please meanwhile
+            if threading.current_thread() is t:
+                sleeps.append(seconds)
+            return real_sleep(seconds)
+
+        with mock.patch("time.sleep", recording_sleep), self.assertLogs("citar.scheduler", level="WARNING") as logged:
             t.start()
             for expected in (1, 2, 3):
                 deadline = time.monotonic() + 5
@@ -638,6 +726,7 @@ class NoBusyWait(unittest.TestCase):
         self.assertFalse(t.is_alive())
         self.assertEqual(out["result"].text, "done")
         self.assertEqual(sleeps, [], "the request waited on the machine's condition, never in a sleep")
+        self.assertEqual(sum("refused a request as busy" in line for line in logged.output), 3, "each mismatch logged")
         self.assertEqual(inner.calls, 4)
         self.assertEqual(len(events), 1, "one request metered")
         self.assertEqual(events[0].usage["input_tokens"], 100)
@@ -836,8 +925,126 @@ class Locks(unittest.TestCase):
         dead.join(5)
         sched._stop.clear()
         again = threading.Event()
-        sched._notify(lambda p: again.set(), None)
+        with self.assertLogs("citar.scheduler", level="WARNING") as logged:
+            sched._notify(lambda p: again.set(), None)
+        self.assertIn("starting it again", logged.output[0])
         self.assertTrue(again.wait(5), "a stopped notifier is started again")
+
+
+# ---------------------------------------------------------------------------- a seat's lease and status
+
+class SeatLeases(unittest.TestCase):
+    """A seat's lease against its game's end, its model and the database (GameSession.lease_for)."""
+
+    def setUp(self):
+        S.reset()
+        self.addCleanup(S.reset)
+
+    def test_no_lease_is_made_once_the_game_has_stopped_or_crashed(self):
+        sched = S.get()
+        for how in ("stop", "crash"):
+            with self.subTest(how=how):
+                s = _session([{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}, {"type": "bot"}])
+                s.benchmark = {"run_id": "r", "job_id": "j", "llm_player": 0}
+                self.assertIsNotNone(s.get_agent(0))
+                self.assertEqual([lease.kind for lease in sched.leases("sv_gpu")], ["benchmark"])
+                if how == "stop":
+                    _close(s)
+                else:
+                    s._crashed("a test's crash")
+                self.assertEqual(sched.leases("sv_gpu"), [])
+                # what the driver or a chat's responder does when it looked at the game just before
+                self.assertIsNone(s.get_agent(0))
+                self.assertIsNone(s.lease_for(0))
+                self.assertEqual(sched.leases("sv_gpu"), [], "no lease left holding the machine")
+                t = sched.ticket("sv_gpu", "dry-run", cls="test", consumer="someone")
+                self.assertEqual(t.state, "queued", f"not held by a benchmark: {t.reason}")
+                t.close()
+                if how == "crash":
+                    _close(s)
+
+    def test_a_seats_model_changed_on_the_same_machine_is_its_leases(self):
+        sched = S.get()
+        s = _session([{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}, {"type": "bot"}])
+        self.addCleanup(_close, s)
+        lease = s.lease_for(0, "dry-run")
+        self.assertIs(s.lease_for(0, "other-model"), lease, "the same machine: the same lease")
+        self.assertEqual(lease.model, "other-model", "playing the model its seat plays now")
+        s.update_seat(0, llm={"server_id": "sv_gpu", "model": "dry-run-2"})
+        self.assertTrue(lease.released, "a seat given another model lets its lease go")
+        fresh = s.lease_for(0)
+        self.assertEqual((fresh.server_id, fresh.model), ("sv_gpu", "dry-run-2"))
+        self.assertEqual([x.model for x in sched.leases("sv_gpu")], ["dry-run-2"])
+
+    def test_the_leases_lock_is_never_held_over_a_database_read(self):
+        """``release_leases`` takes the leases' lock under the session's (update_seat, a crash), so ``lease_for`` reads
+        the grant and the machine's row before it takes that lock: a thread holding the game's lock never waits on a
+        database read."""
+        from citar.pool import seats as pool_seats
+        s = _session([{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}, {"type": "bot"}])
+        self.addCleanup(_close, s)
+        seen = []
+        real_cap, real_read = pool_seats.consumer_cap, S.read_settings
+
+        def cap(*a, **kw):
+            seen.append(("grant", s._lease_lock.locked()))
+            return real_cap(*a, **kw)
+
+        def read(server_id):
+            seen.append(("row", s._lease_lock.locked()))
+            return real_read(server_id)
+        S.reset()
+        with mock.patch.object(pool_seats, "consumer_cap", cap), mock.patch.object(S, "read_settings", read):
+            self.assertIsNotNone(s.lease_for(0))
+        self.assertEqual(seen, [("grant", False), ("row", False)])
+
+
+class SeatStatus(unittest.TestCase):
+    """A seat whose model call waits for its machine shows it on the game screen (its status ``queued``, with its
+    place), as a helper's busy answers showed before the scheduler, and ``thinking`` again once the call runs."""
+
+    def setUp(self):
+        S.reset()
+        self.addCleanup(S.reset)
+
+    def test_a_seat_waiting_for_its_machine_shows_queued_with_its_place(self):
+        sched = S.get()
+        s = _session([{"type": "llm", "llm": {"server_id": "sv_gpu", "model": "dry-run"}}, {"type": "bot"}])
+        self.addCleanup(_close, s)
+        m = sched.machine("sv_gpu")
+        holder = sched.lease("sv_gpu", "dry-run", kind="game")
+        self.addCleanup(holder.release)
+        agent = s.get_agent(0)
+        seen = []
+        s.subscribers.append(lambda msg: seen.append(msg) if msg.get("type") == "agent" else None)
+
+        def step(status):
+            """One step of the seat's while the one slot is held: (its status while it waits, what was broadcast)."""
+            seen.clear()
+            held = m.take(m.submit(holder))
+            s.agent_status[0] = status
+            conv = S.ScheduledConversation(Inner([lambda: StepResult(text="ok")]), agent.binding)
+            t = threading.Thread(target=agent._step, args=(s, 0, conv), daemon=True)
+            t.start()
+            deadline = time.monotonic() + 5
+            while not m.waiting and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.05)
+            waiting = s.agent_status.get(0)
+            m.finish(held, gen_s=1)
+            t.join(5)
+            self.assertFalse(t.is_alive())
+            return waiting, list(seen)
+        waiting, sent = step("thinking")
+        self.assertEqual(waiting, "queued")
+        self.assertEqual(sent[0], {"type": "agent", "player": 0, "status": "queued", "machine": "Test GPU box",
+                                   "position": 1, "eta_s": sent[0]["eta_s"]})
+        self.assertGreater(sent[0]["eta_s"], 0)
+        self.assertEqual([msg["status"] for msg in sent], ["queued", "thinking"])
+        self.assertEqual(s.agent_status[0], "thinking")
+        # out of its turn (answering a chat), the seat's status is left as it is
+        waiting, sent = step("idle")
+        self.assertEqual((waiting, sent, s.agent_status[0]), ("idle", [], "idle"))
 
 
 # ---------------------------------------------------------------------------- gate 6: time accounting
@@ -859,7 +1066,7 @@ class TimeAccounting(unittest.TestCase):
             model, activity, consumer = "m", None, None
             sched = types.SimpleNamespace(clock=clock, wall=clock, emit=lambda e: None)
 
-            def acquire(self, conv=None, halted=None):
+            def acquire(self, conv=None, halted=None, on_wait=None):
                 clock.advance(180)
                 return S.Grant(None, "rid", 180.0, pass_through=True)
 

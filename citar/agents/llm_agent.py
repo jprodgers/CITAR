@@ -13,6 +13,7 @@ the turn's ``max_turn_seconds`` (P3.3.4), and the request's timeout is set only 
 from __future__ import annotations
 
 import json
+import threading
 import time
 import traceback
 
@@ -138,6 +139,9 @@ class LLMAgent:
         self._active: set = set()
         self._waited = 0.0          # seconds this turn spent waiting for the server to come back (not counted against it)
         self._chat_left: dict = {}  # (negotiation id, entries) -> seconds still allowed for the answer (see _wait_left)
+        # this seat's model calls waiting for their machine now (its turn's and its chat answers'), for its status
+        self._machine_waits = 0
+        self._waits_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     def cancel(self):
@@ -175,6 +179,27 @@ class LLMAgent:
         session.agent_status[pid] = status
         session._broadcast({"type": "agent", "player": pid, "status": status})
 
+    def _waiting_for_machine(self, session, pid: int, place):
+        """A model call of the seat waits for its machine (``place``: its ``position``, ``eta_s`` and the ``machine``'s
+        name; ``ScheduledConversation.on_wait``, on the waiting thread), or no longer does (None). A seat mid-turn shows
+        "queued" (with its place) on the game screen while any of its calls waits, and "thinking" again once none
+        does, as it showed a helper's busy answers before the scheduler. A chat answered out of turn leaves the seat's
+        status as it is."""
+        with self._waits_lock:
+            self._machine_waits = max(0, self._machine_waits + (1 if place is not None else -1))
+            first, last = place is not None and self._machine_waits == 1, place is None and self._machine_waits == 0
+            status = session.agent_status.get(pid)
+            if first and status == "thinking":
+                session.agent_status[pid] = "queued"
+                note = {"type": "agent", "player": pid, "status": "queued", "machine": place.get("machine"),
+                        "position": place.get("position"), "eta_s": place.get("eta_s")}
+            elif last and status == "queued":
+                session.agent_status[pid] = "thinking"
+                note = {"type": "agent", "player": pid, "status": "thinking"}
+            else:
+                return
+        session._broadcast(note)
+
     def _step(self, session, pid: int, conv, deadline: float | None = None):
         """One model call (timed and metered), riding out connection problems.
 
@@ -197,6 +222,7 @@ class LLMAgent:
         scheduled = hasattr(conv, "budget")
         if scheduled:
             conv.halted = lambda: self._halted(session)
+            conv.on_wait = lambda place: self._waiting_for_machine(session, pid, place)
         while True:
             if self._halted(session):
                 raise _Halted()

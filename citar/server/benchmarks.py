@@ -48,6 +48,9 @@ DEFAULT_SETTINGS = {
 
 ACTIVE = ("loading", "running", "resuming", "paused")      # job states that hold a slot on their server
 FINISHED_SESSION_GRACE = 600                                 # seconds a finished benchmark game stays open for viewers
+#: The model seat's statuses that mean it is in the middle of its turn: thinking, or waiting for its machine (the
+#: prompt scheduler's queue, design/phase3-features.md P3.3.3), which a pause's grace waits out the same way.
+MID_TURN = ("thinking", "queued")
 
 
 def _new_id(prefix: str = "") -> str:
@@ -697,7 +700,7 @@ class BenchmarkScheduler:
                         continue
                     s = self.manager.get(job["game_id"]) if job["game_id"] else None
                     mid_turn = bool(s and s.game.current == (s.benchmark or {}).get("llm_player", 0)
-                                    and s.agent_status.get((s.benchmark or {}).get("llm_player", 0)) == "thinking")
+                                    and s.agent_status.get((s.benchmark or {}).get("llm_player", 0)) in MID_TURN)
                     if mid_turn and _now() - st["since"] < grace:
                         pending = True
                         job["pause_pending"] = "restricted"
@@ -782,7 +785,7 @@ class BenchmarkScheduler:
                     self._touch(run)
                 return
             pid = (s.benchmark or {}).get("llm_player", 0)
-            mid_turn = s.game.current == pid and s.agent_status.get(pid) == "thinking"
+            mid_turn = s.game.current == pid and s.agent_status.get(pid) in MID_TURN
             since = job.setdefault("preempt_since", _now())
             if mid_turn and _now() - since < self.PREEMPT_GRACE:
                 if job.get("pause_pending") != "preempted":

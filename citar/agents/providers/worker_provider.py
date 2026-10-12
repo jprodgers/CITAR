@@ -65,8 +65,9 @@ class WorkerConversation(Conversation):
         self.last_reported_s: Optional[float] = None
         self.last_observed_s: Optional[float] = None
         self.last_request_id: Optional[str] = None
-        #: (request id, seconds left) when the last step ended without the helper's answer (cancelled, or the hub's
-        #: wait ran out): the helper may still be generating it, so its slot drains (P3.3.3).
+        #: (request id, seconds left, the connection's serial) when the last step ended without the helper's answer
+        #: (cancelled, or the hub's wait ran out): the helper may still be generating it, so its slot drains until that
+        #: answer comes, the bound passes or that connection goes (P3.3.3).
         self.unfinished: Optional[tuple] = None
         self._inflight: Optional[str] = None
         self._closed = False
@@ -115,8 +116,10 @@ class WorkerConversation(Conversation):
             answer = hub().submit(self.server_id, request, timeout=timeout)
         except WorkerError as exc:
             if getattr(exc, "unfinished", False):
-                # sent, then given up (cancelled, or the hub's wait ran out): the helper may still be generating it
-                self.unfinished = (rid, max(0.0, started + timeout - time.time()) + DRAIN_GRACE_SECONDS)
+                # sent, then given up (cancelled, or the hub's wait ran out): the helper may still be generating it,
+                # and its answer can come only over the connection it went out on
+                self.unfinished = (rid, max(0.0, started + timeout - time.time()) + DRAIN_GRACE_SECONDS,
+                                   getattr(exc, "connection", None))
             # A dropped worker is worth waiting for: the agent retries it for the game's reconnect window and then
             # applies the disconnect policy. A "busy" refusal is the scheduler's to handle (it lowers the machine's
             # capacity and queues the request again; P3.3.3). Anything else - a refusal, a machine closed for the

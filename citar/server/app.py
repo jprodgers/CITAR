@@ -509,7 +509,7 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
         phase = s.game.phase
         games["over" if phase != "playing" else "paused" if s.paused else "playing"] += 1
         statuses = list(s.agent_status.values())
-        games["ai_thinking"] += statuses.count("thinking")
+        games["ai_thinking"] += statuses.count("thinking") + statuses.count("queued")   # queued: mid-turn too
         games["ai_reconnecting"] += statuses.count("reconnecting")
         if any(getattr(a, "last_error", None) for a in s.agents.values()) or (s.pause_reason or {}).get("kind") == "disconnect":
             games["problems"] += 1

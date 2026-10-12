@@ -23,6 +23,7 @@ another process) drops it within a ping (design/phase3-features.md P3.2.8).
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import threading
 import time
@@ -36,17 +37,24 @@ log = logging.getLogger("citar.workers")
 #: How long after the last frame a worker is presumed gone. Three missed pings.
 STALE_AFTER = 70.0
 
+#: Each connection's own number (``WorkerConnection.serial``): the prompt scheduler tells a helper's reconnect from the
+#: connection it had, since a request sent over a socket that has gone can never be answered.
+_SERIALS = itertools.count(1)
+
 
 class WorkerError(RuntimeError):
     """The worker could not do it. `refusal` distinguishes "busy" from "broken". ``unfinished``: the request was sent
-    and then given up (cancelled, or the wait ran out) without the helper's answer, which may still come: the
-    scheduler keeps its slot draining until it does (design/phase3-features.md P3.3.3)."""
+    and then given up (cancelled, or the wait ran out) without the helper's answer, which may still come over
+    ``connection`` (the serial of the connection it went out on): the scheduler keeps its slot draining until it does
+    or that connection goes (design/phase3-features.md P3.3.3)."""
 
-    def __init__(self, message: str, *, refusal: str = "", retryable: bool = False, unfinished: bool = False):
+    def __init__(self, message: str, *, refusal: str = "", retryable: bool = False, unfinished: bool = False,
+                 connection: Optional[int] = None):
         super().__init__(message)
         self.refusal = refusal
         self.retryable = retryable
         self.unfinished = unfinished
+        self.connection = connection
 
 
 @dataclass
@@ -97,6 +105,9 @@ class WorkerConnection:
         self.hardware = hello.get("hardware")
         self.connected_at = time.time()
         self.last_seen = time.time()
+        #: This connection's own number (unique in the process): a request's late answer comes back only over the
+        #: socket it went out on, so the scheduler drops what drains on a connection that is gone (P3.3.3).
+        self.serial = next(_SERIALS)
         self.pending: dict = {}
         self.closed = False
         #: Why it closed, once it did (``fail_all``): (message, retryable). A request opened after that fails at once
@@ -190,7 +201,7 @@ class WorkerConnection:
         if pending is None:
             return False
         pending.error = WorkerError("The request was cancelled.", refusal="cancelled", retryable=False,
-                                    unfinished=True)
+                                    unfinished=True, connection=self.serial)
         pending.event.set()
         try:
             self.send_threadsafe(P.frame(P.CANCEL, id=request_id))
@@ -373,7 +384,7 @@ class WorkerHub:
         if not pending.event.wait(deadline + 15):
             if connection.cancel(request.id):
                 raise WorkerError(f"The worker did not answer within {deadline:.0f}s.", retryable=True,
-                                  unfinished=True)
+                                  unfinished=True, connection=connection.serial)
 
         if pending.error is not None:
             raise pending.error
