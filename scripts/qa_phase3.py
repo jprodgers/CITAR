@@ -38,11 +38,13 @@ import os
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
@@ -565,16 +567,18 @@ def _accounts_sharing(h: Harness) -> None:
         who.post(f"/api/games/{g}/control", json={"paused": True})
 
 
-def _png(width: int, height: int) -> bytes:
-    """A small, whole PNG (one colour), made here: the harness adds no image library."""
-    import struct
-    import zlib
+def _chunk(kind: bytes, data: bytes) -> bytes:
+    """A PNG chunk with its checksum."""
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+def _png(width: int, height: int, *, author: str = "") -> bytes:
+    """A small, whole PNG (one colour), made here: the harness adds no image library. ``author`` goes in a tEXt
+    chunk, as the program that saved a picture often puts its owner's name there."""
     rows = b"".join(b"\x00" + b"\x3c\x78\xd8" * width for _ in range(height))
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+    text = _chunk(b"tEXt", b"Author\0" + author.encode("latin-1")) if author else b""
+    return (b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) + text
+            + _chunk(b"IDAT", zlib.compress(rows)) + _chunk(b"IEND", b""))
 
 
 def _accounts_profiles(h: Harness) -> None:
@@ -599,7 +603,8 @@ def _accounts_profiles(h: Harness) -> None:
     r.check("a javascript: link and a bio over 1,000 characters are refused (400) and change nothing",
             js.status_code == 400 and long.status_code == 400 and kept["bio"].startswith("QA bio")
             and kept["links"][0]["url"] == "https://example.com/qa", f"HTTP {js.status_code} / {long.status_code}")
-    up = alice.post("/api/auth/me/avatar", files={"file": ("me.png", _png(48, 48), "image/png")})
+    author = f"Alice Author QA {h.tag}"
+    up = alice.post("/api/auth/me/avatar", files={"file": ("me.png", _png(48, 48, author=author), "image/png")})
     avatar = up.json()["user"]["avatar"] if up.status_code == 200 else ""
     got = bob.get(avatar) if avatar else None
     r.check("an avatar (a PNG checked by its header) is served to a member as image/png, nosniff and sandboxed",
@@ -607,6 +612,14 @@ def _accounts_profiles(h: Harness) -> None:
             and got.headers.get("x-content-type-options") == "nosniff"
             and got.headers.get("content-security-policy") == "default-src 'none'; sandbox",
             f"upload HTTP {up.status_code} {up.text[:120]}")
+    r.check("the picture's metadata (a tEXt chunk naming its author) is left out of what is served",
+            got is not None and got.content == _png(48, 48) and author.encode() not in got.content,
+            f"{len(got.content) if got is not None else 0} bytes served")
+    garbled = alice.post("/api/auth/me/avatar", content=b"--x\r\n" + bytes(range(256)) + b"\r\n--x--\r\n",
+                         headers={"content-type": "multipart/form-data; boundary=zz"})
+    r.check("an upload that is not a well-formed form is a 400, and the picture stays",
+            garbled.status_code == 400 and alice.get("/api/auth/me").json()["user"]["avatar"] == avatar,
+            f"HTTP {garbled.status_code} {garbled.text[:120]}")
     r.check("a visitor gets 404 for the picture while it is members-only", bool(avatar) and anon.get(avatar).status_code == 404)
     svg = alice.post("/api/auth/me/avatar", files={"file": ("x.png", b"<svg xmlns='http://www.w3.org/2000/svg'/>",
                                                            "image/png")})
@@ -630,6 +643,11 @@ def _accounts_profiles(h: Harness) -> None:
     r.check("and a visitor sees her picture", anon.get(avatar).status_code == 200)
     r.check("a member's directory search for her private name finds nothing",
             bob.get("/api/users", params={"q": name}).json().get("users") == [])
+    huge = str(2 ** 63)
+    pages = (bob.get("/api/users", params={"offset": huge}), admin.get("/api/admin/users", params={"offset": huge}),
+             admin.get("/api/admin/audit", params={"before": huge}))
+    r.check("a page number past SQLite's integer is a 422 on the directory, the users list and the audit log",
+            [x.status_code for x in pages] == [422, 422, 422], str([x.status_code for x in pages]))
     alice.put("/api/auth/me", json={"listed": False})
     r.check("hidden from the directory, her page still opens",
             alice.handle not in [u["handle"] for u in bob.get("/api/users").json()["users"]]
@@ -659,6 +677,10 @@ def _accounts_profiles(h: Harness) -> None:
             and bob.get("/api/auth/me").json()["capabilities"].get("run_lab") is False)
     last = admin.patch(f"/api/admin/users/{admin_id}", json={"role": "user"})
     r.check("the last administrator cannot demote themselves (409)", last.status_code == 409, last.text[:200])
+    zero = admin.patch(f"/api/admin/users/{bob_id}", json={"max_concurrent_games": 0})
+    r.check("a game limit of 0, which the server would read as its default, is refused (400)",
+            zero.status_code == 400 and admin.get(f"/api/admin/users/{bob_id}").json()["user"]["max_concurrent_games"] == 3,
+            zero.text[:200])
 
     # ---- the command line, on the server's own database
     runs = [h.server.cli(*args) for args in (("set-trust", bob.handle, "trusted"),
@@ -676,6 +698,11 @@ def _accounts_profiles(h: Harness) -> None:
         entries = []
     r.check("admin_cli audit lists the command line's three changes and the administrator's two",
             [e["actor"] for e in entries[:3]] == ["admin_cli"] * 3 and len(entries) == 5, listing.stdout[-300:])
+    by_cli = admin.get("/api/admin/audit", params={"actor": "admin_cli", "object_id": bob_id,
+                                                   "action": "user.updated"}).json().get("entries", [])
+    r.check("the audit log's actor filter finds the command line's changes by its name",
+            [e["id"] for e in by_cli] == [e["id"] for e in entries[:3]],
+            f"{[e['id'] for e in by_cli]} against {[e['id'] for e in entries[:3]]}")
 
     # ---- probation and a suspension
     admin.patch(f"/api/admin/users/{bob_id}", json={"status": "probation"})
