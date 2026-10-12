@@ -164,7 +164,8 @@ function drawTurnChart(canvas, turns, seats) {
 export async function renderComparison(card) {
   clear(card);
   card.appendChild(el("div", { class: "row" }, el("h2", { style: { margin: 0 } }, "Model comparison"),
-    el("span", { class: "muted" }, "Aggregated over running and saved games (autosaves)."), el("span", { class: "grow" }),
+    el("span", { class: "muted" }, "Aggregated over running and saved games (autosaves): yours, and the games other members pool " +
+      "(an administrator's cover every game)."), el("span", { class: "grow" }),
     el("button", { class: "small", onclick: () => renderComparison(card) }, "Refresh")));
   let rows;
   try { rows = await api.compareModels(); } catch (e) { card.appendChild(el("p", { class: "bad" }, e.message)); return; }
@@ -173,7 +174,15 @@ export async function renderComparison(card) {
   const table = el("table", { class: "list" }, el("tr", {}, ...["Model", "Games", "Turns", "Avg turn", "Max turn", "Steps/turn", "Calls/turn",
     "Errors/turn", "Repeats/turn", "Malformed", "Stall nudges", "Out tok/turn", "Tok/s", "Clean ends", "Turn ends"].map((h) => th(h))));
   for (const r of rows) {
-    table.appendChild(el("tr", { title: r.games_list.join("\n") },
+    // a model whose pooled figures need more accounts behind them: named, with the reason, and no numbers
+    if (r.withheld) {
+      table.appendChild(el("tr", {}, el("td", {}, el("b", {}, r.model)), el("td", { colspan: 14, class: "muted" }, r.reason)));
+      continue;
+    }
+    // your own games are named; other members' pooled games are counted, never named
+    const games = [...(r.games_list || []), r.pooled_games ? `+ ${r.pooled_games} pooled game(s) of other members` : null,
+      r.pooled_withheld ? `(pooled games of ${r.pooled_withheld} other account(s) left out: too few to show)` : null];
+    table.appendChild(el("tr", { title: games.filter(Boolean).join("\n") },
       el("td", {}, el("b", {}, r.model)), el("td", {}, r.games), el("td", {}, r.turns), el("td", {}, secs(r.avg_turn_s)),
       el("td", {}, secs(r.max_turn_s)), el("td", {}, r.avg_model_steps), el("td", {}, r.avg_tool_calls),
       el("td", {}, r.avg_errors), el("td", { class: r.avg_repeats > 2 ? "bad" : "" }, r.avg_repeats), el("td", {}, r.malformed_calls),

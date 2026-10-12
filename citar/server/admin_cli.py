@@ -3,6 +3,7 @@
 Chiefly: creating the first administrator of a fresh server, and getting back in when nobody can.
 
     python -m citar.server.admin_cli create-admin --handle jimmie --email you@example.com
+    python -m citar.server.admin_cli create-user --handle sam --email sam@example.com [--role moderator]
     python -m citar.server.admin_cli list-users
     python -m citar.server.admin_cli set-role jimmie admin
     python -m citar.server.admin_cli reset-password jimmie
@@ -10,7 +11,8 @@ Chiefly: creating the first administrator of a fresh server, and getting back in
     python -m citar.server.admin_cli policy registration invite
 
 Passwords are always prompted for, never taken as an argument: a password on the command line ends
-up in the shell history and in the process list where every other user on the box can read it.
+up in the shell history and in the process list where every other user on the box can read it. A
+script gives ``create-user`` one on its standard input instead (``--password-stdin``).
 """
 from __future__ import annotations
 
@@ -75,6 +77,36 @@ def cmd_create_admin(args) -> int:
         accounts.on_first_admin(s, user)
         print(f"Created administrator '{user.handle}' <{user.email}>.")
         print(f"Sign in at {settings.get().url('/')}")
+    return 0
+
+
+def _read_password(args) -> str:
+    """The new account's password: prompted (twice), or the first line of standard input with ``--password-stdin``
+    (for a script, as ``docker login`` takes one: never an argument, which the process list would show). A password
+    from standard input is checked like a typed one."""
+    if not getattr(args, "password_stdin", False):
+        return _prompt_password()
+    password = sys.stdin.readline().rstrip("\r\n")
+    passwords.check(password)
+    return password
+
+
+def cmd_create_user(args) -> int:
+    """Create an account that is ready to use: active, its email address taken as verified, with the role given
+    (design/phase3-features.md P3.2.7; the QA harness makes its accounts with it). An administrator made this way
+    adopts the item files nobody owns, as every path that makes one does (``accounts.on_first_admin``)."""
+    with db.session() as s:
+        try:
+            password = _read_password(args)
+            user = accounts.create_user(s, handle=args.handle, email=args.email, password=password, role=args.role,
+                                        status="active", email_verified=True, display_name=args.name or args.handle)
+        except (accounts.AccountError, passwords.PasswordError) as exc:
+            print(f"error: {exc}")
+            return 1
+        audit.record(s, "user.created", actor_label="admin_cli", object_type="user", object_id=user.id,
+                     role=user.role)
+        accounts.on_first_admin(s, user)
+        print(f"Created {user.role} '{user.handle}' <{user.email}>.")
     return 0
 
 
@@ -367,6 +399,15 @@ def main(argv=None) -> int:
     p.add_argument("--name", default="")
     p.add_argument("--force", action="store_true", help="add another admin even if one exists")
     p.set_defaults(func=cmd_create_admin)
+
+    p = subparsers.add_parser("create-user", help="create an active account with a verified email")
+    p.add_argument("--handle", required=True)
+    p.add_argument("--email", required=True)
+    p.add_argument("--name", default="")
+    p.add_argument("--role", default="user", choices=["user", "moderator", "admin"])
+    p.add_argument("--password-stdin", dest="password_stdin", action="store_true",
+                   help="read the password from the first line of standard input instead of prompting")
+    p.set_defaults(func=cmd_create_user)
 
     p = subparsers.add_parser("list-users", help="list every account")
     p.set_defaults(func=cmd_list_users)

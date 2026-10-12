@@ -217,6 +217,28 @@ be new, empty or one an earlier soak left (it refuses any other, and the dev ser
 python scripts/server_soak.py C:/dev/server-soak --json server-soak.json    # a free port, its own state
 ```
 
+**The Phase 3 QA script** checks each feature of the accounts, queue, ledger, chat, hybrid, minimap
+and machine work end to end, over HTTP and the game socket, on a server-mode dev server of its own
+(design/phase3-features.md P3.9.4). It makes an administrator, two members and a moderator with
+`citar admin create-user`, signs them in as a browser would (a cookie and the CSRF token), serves a
+fake OpenAI-compatible endpoint that records every connection it gets, runs the part's checks, and
+writes each check and its numbers to `<dir>/qa-<part>.json` (with the throwaway accounts' password, for
+the browser checklist). It exits 2, touching nothing, for the dev server's port 8799, a port in use,
+a directory holding anything without its `.qa-phase3` marker, the owner's `C:/dev/citar-play`,
+CITAR's own data directory or a source checkout. Once it has taken the directory it never refuses: it
+exits 0 when every check passed and 1 when one failed, a directory it could not empty, a server that
+did not start, an account it could not make and a part that stopped on an error each counting as a
+failed check, with the evidence written all the same.
+Each package adds its part; `all` runs every part written so far:
+
+```bash
+python scripts/qa_phase3.py accounts --dir C:/dev/qa-phase3          # about a minute; a free port
+python scripts/qa_phase3.py accounts --dir C:/dev/qa-phase3 --keep   # leave the server up for the browser
+```
+
+`--keep` leaves the server running at the address it prints (the public origin, `localhost`), for the
+browser checklist of P3.9.5; stop it when you are done.
+
 **Build outside synced folders.** A `target/` directory inside OneDrive (or Dropbox, or iCloud)
 fails with "os error 32" when the sync client locks a file mid-build, and uploads gigabytes of
 build output. Point `CARGO_TARGET_DIR` somewhere else, one directory per checkout or worktree so

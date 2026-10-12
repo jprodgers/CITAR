@@ -1,5 +1,6 @@
 """Collects everything a report needs for its scope: priced activities from the usage ledger, game outcomes and AI
-metrics from save files, benchmark runs, probe runs and lab experiments, joined on the server registry."""
+metrics from save files, benchmark runs, probe runs and lab experiments, joined on the server registry. What a
+member's report may gather is cut to what its owner may see (``reach.Reach``, design/phase3-features.md P3.2.4)."""
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .. import costing, servers as S, usage as U
+from .reach import Reach, pooled_models
 
 _save_cache: dict = {}
 
@@ -161,7 +163,7 @@ def _in_scope(a: dict, info: dict, scope: dict, servers_by_id: dict) -> bool:
         if not ok:
             return False
     want_srv = set(scope.get("servers") or [])
-    if want_srv and not (want_srv & set(a["servers"])):
+    if want_srv and not (want_srv & set(a.get("ran_on") or a["servers"])):
         return False
     want_models = set(scope.get("models") or [])
     if want_models:
@@ -171,28 +173,37 @@ def _in_scope(a: dict, info: dict, scope: dict, servers_by_id: dict) -> bool:
     return True
 
 
-def gather(spec: dict, progress=lambda msg: None) -> dict:
-    """Collect everything a report needs from the ledger and the run records.
+def gather(spec: dict, progress=lambda msg: None, *, reach: Optional[Reach] = None) -> dict:
+    """Collect everything a report needs from the ledger and the run records, as far as ``reach`` goes (the report
+    owner's: everything for an administrator's report and by default).
 
     Separate from pricing and from rendering, so that what is measured, what it cost and how it is
     presented can each be changed without disturbing the other two.
     """
+    reach = reach or Reach()
     since, until = time_range(spec)
-    reg = S.with_pooled()
-    servers_by_id = {s["id"]: s for s in reg["servers"]}
-    servers_by_id.update({old: servers_by_id[new] for old, new in (reg.get("aliases") or {}).items() if new in servers_by_id})
+    full = S.with_pooled()
+    reg = reach.registry(full)
+    servers_by_id = {s["id"]: s for s in full["servers"]}
+    servers_by_id.update({old: servers_by_id[new] for old, new in (full.get("aliases") or {}).items() if new in servers_by_id})
+    servers_by_id = reach.labels(servers_by_id)
     basis = (spec.get("options") or {}).get("electricity_basis", "full")
+    pooling = spec.get("pooling") or "own"
     progress("Reading the usage ledger")
     ledger = U.read(since, until)
+    seen = reach.ledger(ledger)
     if since is None:       # "all time": from the first recorded use
-        since = min((float(sp["t0"]) for sp in ledger["spans"]), default=until - 86400)
+        since = min((float(sp["t0"]) for sp in seen["spans"]), default=until - 86400)
     progress("Pricing usage")
-    cost = costing.compute(since, until, reg, ledger)
+    # priced over the whole ledger, so a minute a machine shared is split among everyone who held it; then cut
+    cost = reach.cost(costing.compute(since, until, full, ledger))
     scope = spec.get("scope") or {}
     acts = []
     bench_ids, probe_ids, lab_exps = set(), set(), set()
     game_ids = []
-    for act_id, a in cost["acts"].items():
+    # a report of pooled figures only has no activities of its own
+    in_scope = cost["acts"].items() if pooling != "pooled" else ()
+    for act_id, a in in_scope:
         info = a["info"]
         if not _in_scope(a, info, scope, servers_by_id):
             continue
@@ -236,14 +247,20 @@ def gather(spec: dict, progress=lambda msg: None) -> dict:
             "symbol": reg.get("currency_symbol", "$"), "currency": reg.get("currency", "USD"), "basis": basis,
             "cost": cost, "acts": sorted(acts, key=lambda r: r["start"] or 0), "servers_by_id": servers_by_id,
             "benchmark_runs": _benchmark_runs(bench_ids), "probe_runs": _probe_runs(probe_ids), "lab": _lab(lab_exps),
-            "ledger_rows": len(ledger["spans"])}
+            "ledger_rows": len(seen["spans"]), "pooling": pooling, "reach": "everything" if reach.everything else "owner"}
+    if pooling in ("pooled", "both"):
+        progress("Pooled figures")
+        try:
+            data["pooled"] = pooled_models(None if reach.everything else reach.owner_id)
+        except Exception as e:          # the report's own figures still stand without them
+            data["pooled_error"] = f"{type(e).__name__}: {e}"
     lo = (spec.get("options") or {}).get("lifespan_range") or [2, 6]
     if "depreciation" in sections:
         progress("Depreciation sensitivity")
         sens = {}
         ids = {r["id"] for r in acts}
         for years in range(int(lo[0]), int(lo[1]) + 1):
-            alt = costing.compute(since, until, reg, ledger, lifespan_override=years)
+            alt = reach.cost(costing.compute(since, until, full, ledger, lifespan_override=years))
             sens[years] = {"allocated": sum(costing.total(a["total"], basis) for k, a in alt["acts"].items() if k in ids),
                            "depreciation": sum(a["total"]["depreciation"] for k, a in alt["acts"].items() if k in ids)}
         data["sensitivity"] = sens

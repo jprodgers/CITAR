@@ -1,6 +1,7 @@
 // Bots page: bot profiles (named, revisioned configurations of the scripted bot), their parameter editor, the
 // rankings computed from every lab game, and a form that queues an A/B experiment between profiles.
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { el, clear, toast, modal, confirmBox, fmt } from "./util.js";
 import { pageHeader } from "./nav.js";
 import * as auth from "./auth.js";
@@ -289,7 +290,13 @@ function ratingChart(series) {
 async function renderProfile(page, rules, pid) {
   let info, engines;
   try { [info, { engines }] = await Promise.all([api.botProfile(pid), engineList()]); }
-  catch (e) { page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots"))); return {}; }
+  catch (e) {
+    // a profile this viewer may not see, or that is not there, is the router's "not found" page (its sign-in for a
+    // visitor whose link is old)
+    if (e.status === 404) throw e;
+    page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots")));
+    return {};
+  }
   const saved = info.profile;
   // A profile whose code the engine refuses (a frozen snapshot of 0.1.5) has no schema: it is shown read-only with
   // the refusal, and its owner can still delete it.
@@ -321,6 +328,7 @@ async function renderProfile(page, rules, pid) {
         saved.builtin ? el("span", { class: "pill muted" }, "built-in: fork it to change it") : el("span", { class: "pill" }, `revision ${saved.rev}`),
         refused ? null : el("button", { onclick: () => forkProfile(saved) }, "Fork"),
         refused ? null : el("button", { onclick: () => abDialog(rules, [saved.id]) }, "A/B test…"),
+        saved.builtin ? null : shareButton("bot_profile", saved.id, saved.name, saved, () => {}),
         owner ? el("button", { class: "danger", onclick: async () => {
           if (!(await confirmBox("Delete profile", `Delete ${saved.name}? Its games stay in the rankings under its fingerprint.`))) return;
           try { await api.deleteBotProfile(saved.id); location.hash = "#/bots"; } catch (e) { toast(e.message, "error"); }

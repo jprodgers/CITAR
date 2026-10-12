@@ -1,175 +1,63 @@
-"""Sharing reports and datasets, and reading what has been shared.
+"""A published report's own page, and the pooling settings.
 
-Reports get the same visibility ladder as games — private, allowlist, link, server, global — set
-independently of the games they draw on. That separation is the point: an analysis can be published
-while the games behind it stay private, which is the normal case for somebody who wants to show a
-conclusion without handing over their raw results.
+A report is an owned item of kind `report` (`owned_items`, design/phase3-features.md P3.2.4): its routes are
+``reports_api``'s and its sharing is the generic item routes' (``items_api``: ``/api/items/report/{ref}/sharing``),
+which the web client's sharing dialog uses for every kind. What stays here is the one page that shows a report to
+somebody with no account, and the account's pooling choice.
 
-A report is an owned item of kind `report` (`owned_items`, design/phase3-features.md P3.2.4), named
-here by its id on disk (the row's `ref`); its scope is in the row's `meta`. Package 3-03 moves these
-routes onto the generic item routes.
+``/r/{slug}`` is a report published to the internet (`global`), by its id or its share key, or one shared by link
+(`link`), by its share key. That is the only route in this application that serves somebody else's content to an
+anonymous stranger, so it is deliberately narrow: it renders the stored HTML and nothing else, it is marked
+`noindex`, and it answers 404 for everything else, the report's own owner included (who reads it in the app).
 
-A global report is readable with no account at all. That is the only route in this application that
-serves somebody else's content to an anonymous stranger, so it is deliberately narrow: it renders
-the stored HTML and nothing else, it is marked `noindex`, and it never includes the underlying
-game list unless the owner also shared those.
+Python lines this replaces: the ``/api/shared/reports*`` routes and ``/r/{report_id}`` of ``share_api.py`` at
+``3069d25`` (the report sharing routes, now ``items_api``'s).
 """
 from __future__ import annotations
 
 import html as _html
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from .. import aggregate, items, settings
-from ..auth import access, accounts, audit
+from .. import aggregate, items
+from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_user
-from ..db.models import OwnedItem, User
+from ..db.models import OwnedItem
 
 log = logging.getLogger("citar.share_api")
 router = APIRouter()
 
-
-def _share_key(request: Request) -> Optional[str]:
-    """The share key a request carries, if any."""
-    return (request.query_params.get("k") or request.query_params.get("key")
-            or request.headers.get("x-citar-share-key"))
-
-
 REPORT = "report"
 
 
-def _row(s: Session, report_id: str) -> Optional[OwnedItem]:
-    """A report's row, by its id on disk."""
-    return s.scalar(select(OwnedItem).where(OwnedItem.kind == REPORT, OwnedItem.ref == report_id))
+def public_report_row(s: Session, key: str):
+    """The live report ``/r/{slug}`` serves, or None: a `link` or `global` report whose share key is ``key``, or a
+    `global` report whose id is ``key``. The key is compared by the database's index, as every slug is."""
+    if not key or len(key) > 120:
+        return None
+    return s.scalar(select(OwnedItem).where(
+        OwnedItem.kind == REPORT, OwnedItem.deleted_at.is_(None),
+        or_((OwnedItem.slug == key) & OwnedItem.visibility.in_((access.LINK, access.GLOBAL)),
+            (OwnedItem.ref == key) & (OwnedItem.visibility == access.GLOBAL))).limit(1))
 
 
-def _report(s: Session, report_id: str, viewer: Optional[User], permission: str,
-            request: Request) -> OwnedItem:
-    """A report the viewer has a permission on, or 404."""
-    row = _row(s, report_id)
-    if row is None:
-        raise HTTPException(404, "No such report.")
-    access.on(s, viewer, row, slug=_share_key(request)).require(permission)
-    return row
-
-
-def _to_client(s: Session, row: OwnedItem, perms: access.Access) -> dict:
-    """A report as the viewer may see it, with their permissions on it."""
-    owner = s.get(User, row.owner_id) if row.owner_id else None
-    out = {
-        "id": row.ref, "name": row.name, "visibility": row.visibility,
-        "scope": (row.meta or {}).get("scope", "own"),
-        "owner": owner.public() if owner else None,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        **perms.client(),
-    }
-    if access.MANAGE in perms:
-        base = settings.get().public_origin
-        if row.visibility in (access.LINK, access.SERVER, access.GLOBAL):
-            key = f"?k={row.slug}" if row.visibility == access.LINK else ""
-            out["share_url"] = f"{base}/#/reports/{row.ref}{key}"
-        if row.visibility == access.GLOBAL:
-            out["public_url"] = f"{base}/r/{row.ref}"
-        out["shared_with"] = access.shared_with(s, row)
-        out["unpublished"] = access.last_unpublished(s, row, perms.viewer_id)
-    return out
-
-
-# ---------------------------------------------------------------------------- listing
-
-@router.get("/api/shared/reports")
-def list_reports(request: Request, p: Principal = Depends(principal),
-                 s: Session = Depends(get_db)):
-    """Reports this caller may see: their own, anything shared with them, members' ones for a member,
-    and global ones."""
-    rows = list(s.scalars(select(OwnedItem).where(OwnedItem.kind == REPORT,
-                                                  access.visible_filter(OwnedItem, p.user))
-                          .order_by(OwnedItem.created_at.desc()).limit(200)))
-    return {"reports": [_to_client(s, r, access.on(s, p.user, r)) for r in rows]}
-
-
-@router.get("/api/shared/reports/{report_id}")
-def get_report(report_id: str, request: Request, p: Principal = Depends(principal),
-               s: Session = Depends(get_db)):
-    """One shared report, if the viewer may see it."""
-    row = _report(s, report_id, p.user, access.VIEW, request)
-    return _to_client(s, row, access.on(s, p.user, row, slug=_share_key(request)))
-
-
-# ---------------------------------------------------------------------------- sharing
-
-class ShareBody(BaseModel):
-    """A report's visibility and its public link."""
-    visibility: Optional[str] = None
-    rotate_slug: bool = False
-
-
-@router.put("/api/shared/reports/{report_id}/sharing")
-def set_sharing(report_id: str, body: ShareBody, request: Request,
-                p: Principal = Depends(principal), s: Session = Depends(get_db)):
-    """Change a report's visibility."""
-    me = require_user(request, p)
-    row = _report(s, report_id, me, access.MANAGE, request)
-    if body.visibility is not None:
-        access.set_visibility(s, row, body.visibility, actor=me)
-    if body.rotate_slug:
-        access.rotate_slug(s, row, actor=me)
-    return _to_client(s, row, access.on(s, me, row))
-
-
-class ShareWithBody(BaseModel):
-    """The account to share a report with."""
-    handle: str
-    permission: str = "view"
-
-
-@router.post("/api/shared/reports/{report_id}/users")
-def share_with(report_id: str, body: ShareWithBody, request: Request,
-               p: Principal = Depends(principal), s: Session = Depends(get_db)):
-    """Share a report with one account."""
-    me = require_user(request, p)
-    row = _report(s, report_id, me, access.MANAGE, request)
-    target = accounts.by_handle(s, body.handle)
-    if target is None or target.status in ("deleted", "suspended"):
-        raise HTTPException(404, f"No account called '{body.handle}'.")
-    access.grant(s, row, target, body.permission, actor=me)
-    return {"shared_with": access.shared_with(s, row)}
-
-
-@router.delete("/api/shared/reports/{report_id}/users/{handle}")
-def unshare_with(report_id: str, handle: str, request: Request,
-                 p: Principal = Depends(principal), s: Session = Depends(get_db)):
-    """Stop sharing a report with an account."""
-    me = require_user(request, p)
-    row = _report(s, report_id, me, access.MANAGE, request)
-    target = accounts.by_handle(s, handle)
-    if target is None:
-        raise HTTPException(404, f"No account called '{handle}'.")
-    access.revoke(s, row, target, actor=me)
-    return {"shared_with": access.shared_with(s, row)}
-
-
-# ---------------------------------------------------------------------------- public read
-
-@router.get("/r/{report_id}", response_class=HTMLResponse)
-def public_report(report_id: str, request: Request, p: Principal = Depends(principal),
-                  s: Session = Depends(get_db)):
-    """A published report, readable without an account.
+@router.get("/r/{slug}", response_class=HTMLResponse)
+def public_report(slug: str, s: Session = Depends(get_db)):
+    """A published report, readable without an account: a `global` one by its id or share key, a `link` one by its
+    share key (P3.2.4); 404 for anything else.
 
     The only route that serves one person's content to an anonymous stranger, so it does exactly
     one thing: render the stored HTML. No game list, no metadata beyond what the report itself
     contains, and noindex so a shared link does not become a search result.
     """
-    row = _row(s, report_id)
-    if row is None or row.deleted_at is not None:
+    row = public_report_row(s, slug)
+    if row is None:
         raise HTTPException(404, "No such report.")
-    access.on(s, p.user, row, slug=_share_key(request)).require(access.VIEW)
 
     html = ""
     candidate = items.file_path(row)       # the row keeps it relative to the state directory
@@ -178,8 +66,8 @@ def public_report(report_id: str, request: Request, p: Principal = Depends(princ
         # database being turned into a file read — resolve it and refuse anything outside the
         # reports directory rather than trusting the row.
         try:
-            from ..server.session import SAVE_DIR
-            root = (SAVE_DIR / "reports").resolve()
+            from .reports_api import reports_runner
+            root = reports_runner().dir.resolve()
             resolved = candidate.resolve()
             if root in resolved.parents and resolved.is_file():
                 html = resolved.read_text(encoding="utf-8", errors="replace")
@@ -198,7 +86,9 @@ def public_report(report_id: str, request: Request, p: Principal = Depends(princ
         "Referrer-Policy": "no-referrer",
         # A report is authored HTML from this server, but it is rendered at an origin that also
         # serves the application, so keep it from reaching back into the API.
-        "Content-Security-Policy": "default-src 'self'; script-src 'none'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+                                   "font-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+        "Cache-Control": "no-cache",
     })
 
 
@@ -237,7 +127,9 @@ def set_pooling(body: PoolingBody, request: Request, p: Principal = Depends(prin
     """Opt this account's data in or out of pooling.
 
     Opting out is retroactive: the account's history leaves everybody else's averages too, which is
-    what makes it a real choice rather than a setting for the future only.
+    what makes it a real choice rather than a setting for the future only (``aggregate.scope_for`` reads
+    the account's choice when an average is made). Opting in again pools the games whose own setting
+    allows it; it is also the default a new game takes.
     """
     me = require_user(request, p)
     if body.data_sharing not in ("pool", "private"):
@@ -247,8 +139,9 @@ def set_pooling(body: PoolingBody, request: Request, p: Principal = Depends(prin
         audit.record(s, "user.data_sharing", actor=me, object_type="user", object_id=me.id,
                      ip=p.ip, **{"from": before, "to": body.data_sharing})
     return {"data_sharing": me.data_sharing,
-            "note": ("Your existing games keep their own setting; this is the default for new "
-                     "ones. Change a single game from its sharing panel.")}
+            "note": ("Opted out, none of your games feeds anybody else's averages, the ones you played "
+                     "before included; you still see your own figures. Opted in, each game follows its own "
+                     "setting (new games take this one; change a single game from its sharing panel).")}
 
 
 class ApplyAllBody(BaseModel):

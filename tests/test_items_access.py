@@ -556,6 +556,50 @@ class Table(ItemCase):
                     self.assertEqual(r.status_code, 200, r.text[:300])
                     self.assertEqual(set(ids(r.json())) & set(refs.values()), {refs["global"]})
 
+    def test_a_share_key_lists_its_item_and_nothing_else(self):
+        """3-03: a listing asked with a share key (the page a link opens) shows the one `link` item the key opens, to
+        whoever holds it, as something they may see and not change; another item's key, a private item's key or no
+        key shows nothing more; the owner and an administrator list it anyway (P3.9.1 for the changed listings)."""
+        listings = {"benchmark_suite": ("/api/benchmarks/suites", lambda j: j),
+                    "benchmark_run": ("/api/benchmarks/runs", lambda j: j),
+                    "map": ("/api/maps", lambda j: j),
+                    "scenario": ("/api/scenarios", lambda j: j),
+                    "probe": ("/api/probes", lambda j: j),
+                    "probe_run": ("/api/probe-runs", lambda j: j["runs"]),
+                    "lab_experiment": ("/api/lab", lambda j: [dict(x, id=x["name"]) for x in j["experiments"]]),
+                    "bot_profile": ("/api/bots/profiles", lambda j: j["profiles"]),
+                    "report": ("/api/reports", lambda j: j)}
+        self.assertEqual(set(listings), set(items.KINDS))
+        members_only = {"benchmark_run", "lab_experiment"}
+        for kind, (path, entries) in listings.items():
+            linked = self.make(kind, "link", share_with=None)
+            other = self.make(kind, "link", share_with=None)
+            private = self.make(kind, "private", share_with=None)
+            key, private_key = self.row(kind, linked).slug, self.row(kind, private).slug
+            mine = {linked, other, private}
+
+            def listed(who, k=None, path=path, entries=entries, mine=mine):
+                r = self.client.get(path, headers={**self.headers[who], **({"x-citar-share-key": k} if k else {})})
+                self.assertEqual(r.status_code, 200, f"{who} on {path}: {r.text[:300]}")
+                return {e["id"]: e for e in entries(r.json()) if e["id"] in mine}
+
+            with self.subTest(kind=kind):
+                self.assertEqual(set(listed("stranger")), set(), "unlisted without the key")
+                got = listed("stranger", key)
+                self.assertEqual(set(got), {linked}, "the key lists its own item only")
+                self.assertTrue(got[linked]["can_view"])
+                self.assertFalse(got[linked]["can_manage"], "holding the link is seeing, not managing")
+                self.assertEqual(set(listed("stranger", private_key)), set(), "a private item's key opens nothing")
+                self.assertTrue(listed("owner", key)[linked]["can_manage"])
+                self.assertEqual(set(listed("admin")), mine)
+                r = self.client.get(path, headers={"x-citar-share-key": key})
+                if kind in members_only:
+                    self.assertEqual(r.status_code, 401)
+                else:
+                    self.assertEqual(r.status_code, 200, r.text[:300])
+                    self.assertEqual({e["id"] for e in entries(r.json()) if e["id"] in mine}, {linked},
+                                     "a visitor holding the link sees it listed too")
+
 
 class Priority(ItemCase):
     def test_queue_priority_is_the_managers(self):

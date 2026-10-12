@@ -243,12 +243,28 @@ def visible_refs(session, kind: str, viewer: Optional[User]) -> set:
                                                            access.visible_filter(OwnedItem, viewer))))
 
 
-def listed(session, kind: str, viewer: Optional[User]) -> Optional[set]:
-    """What a listing of ``kind`` shows ``viewer``: ``visible_refs``, or None (everything, files that have no row
-    yet included) for an administrator in good standing."""
+def keyed_ref(session, kind: str, slug: Optional[str]) -> Optional[str]:
+    """The item of ``kind`` a share key opens (``slug``: a `link` or `global` item's), or None. A listing shows it to
+    whoever presents the key, which is how a link to a page that lists items opens on that item; without the key it
+    stays unlisted (P3.2.3)."""
+    if not slug or len(slug) > 120:
+        return None
+    return session.scalar(select(OwnedItem.ref).where(
+        OwnedItem.kind == kind, OwnedItem.slug == slug, OwnedItem.deleted_at.is_(None),
+        OwnedItem.visibility.in_((access.LINK, access.GLOBAL))).limit(1))
+
+
+def listed(session, kind: str, viewer: Optional[User], *, slug: Optional[str] = None) -> Optional[set]:
+    """What a listing of ``kind`` shows ``viewer``: ``visible_refs``, plus the item a share key ``slug`` opens
+    (``keyed_ref``), or None (everything, files that have no row yet included) for an administrator in good
+    standing. A suspended or deleted account's key opens nothing, as ``access.on`` gives it nothing."""
     if viewer is not None and viewer.role == "admin" and viewer.status == "active":
         return None
-    return visible_refs(session, kind, viewer)
+    refs = visible_refs(session, kind, viewer)
+    keyed = keyed_ref(session, kind, slug) if viewer is None or viewer.status not in ("suspended", "deleted") else None
+    if keyed is not None:
+        refs.add(keyed)
+    return refs
 
 
 def visible(session, kind: str, viewer: Optional[User], *, limit: int = 500) -> list:
@@ -270,9 +286,10 @@ def everyones_refs(session, kind: str) -> set:
 _CHUNK = 500
 
 
-def permissions_by_ref(session, kind: str, viewer: Optional[User], refs) -> dict:
-    """``Access.client()`` for each of ``refs`` that has a live row, for a listing to say which controls to show. Two
-    queries per few hundred items rather than two per item: the pages that list items poll every few seconds."""
+def permissions_by_ref(session, kind: str, viewer: Optional[User], refs, *, slug: Optional[str] = None) -> dict:
+    """``Access.client()`` for each of ``refs`` that has a live row, for a listing to say which controls to show (with
+    the share key ``slug`` the listing was asked with, which opens its one item). Two queries per few hundred items
+    rather than two per item: the pages that list items poll every few seconds."""
     refs = list(dict.fromkeys(str(r) for r in refs))
     rows: list = []
     for i in range(0, len(refs), _CHUNK):
@@ -285,7 +302,7 @@ def permissions_by_ref(session, kind: str, viewer: Optional[User], refs) -> dict
             for object_id, granted in access.acl_permissions_for(session, kind, ids[i:i + _CHUNK],
                                                                  viewer.id).items():
                 acl[object_id] = granted
-    return {row.ref: access.on(session, viewer, row,
+    return {row.ref: access.on(session, viewer, row, slug=slug,
                                acl=acl.get(row.id, set()) if viewer is not None else None).client()
             for row in rows}
 
@@ -305,12 +322,24 @@ def client(session, row: OwnedItem, perms: access.Access) -> dict:
            "owner": owner.public() if owner is not None else None, "system": row.owner_id is None,
            "created_at": row.created_at.isoformat() if row.created_at else None, **perms.client()}
     if access.MANAGE in perms:
-        url = access.share_url(row, settings.get().public_origin)
+        base = settings.get().public_origin
+        url = access.share_url(row, base)
         if url:
             out["share_url"] = url
+        page = public_url(row, base)
+        if page:
+            out["public_url"] = page
         out["shared_with"] = access.shared_with(session, row)
         out["unpublished"] = access.last_unpublished(session, row, perms.viewer_id)
     return out
+
+
+def public_url(row: OwnedItem, base: str) -> Optional[str]:
+    """A report's page for people with no account (``/r/{slug}``, ``share_api``): by its share key when it is shared
+    by `link`, by its id when it is `global`; None for anything else."""
+    if row.kind != "report" or row.visibility not in (access.LINK, access.GLOBAL):
+        return None
+    return f"{base.rstrip('/')}/r/{row.slug if row.visibility == access.LINK else row.ref}"
 
 
 # ---------------------------------------------------------------------------- system items

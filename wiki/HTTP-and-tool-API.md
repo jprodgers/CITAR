@@ -36,13 +36,15 @@ still work and still grant exactly one seat.
 | `GET /api/tools` | Every tool with its JSON schema. The authoritative reference |
 | `POST /api/games/{id}/tool` | Call a tool: `{"tool": "...", "args": {...}}` |
 | `GET /api/games/{id}/wait` | Long-poll until it is your turn or a negotiation needs an answer |
-| `GET /api/games/{id}/view` | The game as this seat sees it, as JSON |
+| `GET /api/games/{id}/view` | The game as this seat sees it, as JSON. With no seat token, a spectator's view for an account (or a `link` key) the game's visibility lets see it, while no person is playing; `can_manage` says whether the caller may pause, slow down or save it |
 | `GET /api/games` | Games visible to the caller |
 | `GET /api/rules` | The whole ruleset |
 | `GET /api/games/{id}/metrics` | Per-seat, per-turn metrics |
 | `GET /api/games/{id}/metrics.csv` | The same, as CSV |
-| `GET /api/games/{id}/replay` | Every turn's state, for the recap |
-| `WS /ws/games/{id}` | Live updates |
+| `GET /api/games/{id}/replay` | Every turn's state, for the recap: once the game is over, or live for whoever may watch an AI-only game (its spectator token, or an account or key that may see it) |
+| `WS /ws/games/{id}` | Live updates: `?token=` a seat or spectator token, or none for the account signed in (its cookie), and `&k=` a `link` game's key |
+| `GET /api/models/scores`, `GET /api/metrics/compare` | Per-model scores and metrics. A member's are made from their own games and the games other members pool, a model's pooled part only once enough accounts are behind it (`pooled_withheld`, or a row with `withheld` and the reason); other members' games are counted (`pooled_games`), never named. `scores` also says what the member's scope holds (`scope`). An administrator's cover every game |
+| `GET /r/{slug}` | A report's page for people with no account: a `link` report by its key, a `global` one by its id or key; 404 for anything else |
 
 A tool call returns the tool's result, or an error describing what the rules refused and why. Rule
 refusals are 400 with a readable message — `"That tile is not adjacent"` — because the message is
@@ -73,7 +75,15 @@ reports each have an owner and a visibility, like a game ([the rules](Design-acc
 Their own routes (`/api/benchmarks/...`, `/api/probes/...`, `/api/probe-runs/...`, `/api/maps/...`,
 `/api/scenarios/...`, `/api/scenario-editor/...`, `/api/bots/...`, `/api/lab/...`, `/api/reports/...`)
 answer 404 for an item the caller may not see and 403 for one they may see but not change; listings
-carry `can_view`, `can_manage` and `can_moderate` per item. A `link` item opens with its key as `?k=`.
+carry `can_view`, `can_manage` and `can_moderate` per item. A `link` item opens with its key as `?k=`
+(or the `x-citar-share-key` header), and a listing asked with a key shows the one item it opens to
+whoever holds it. A report's sharing block also gives `public_url`, its `/r/` page, when it is shared
+by `link` or published. (`/api/shared/reports...`, the old report sharing routes, are gone: a report
+is shared through the routes below like every other item.) What a report gathers follows its owner
+([Reports](Servers-costs-and-reports#what-a-report-contains)); its specification takes `"pooling": "own" | "both" |
+"pooled"`. `GET /api/reports/{id}` gives a report's managers its whole metadata and specification;
+anyone else it reaches gets neither its traceback nor its owner, and a specification cut to what they
+could have chosen (the scope's items and machines they may see; of the narrative only `enabled`).
 A body of the wrong shape (an item named by anything but its id, a report specification whose parts
 are not objects or lists) is a 400. A report's narrative that names a pooled machine the caller is not
 admitted to is a 403, as a run's machine is.

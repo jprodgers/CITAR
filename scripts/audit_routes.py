@@ -60,6 +60,7 @@ INTENTIONALLY_PUBLIC = {
     "/auth/reset": "hands the token to the form; consumes nothing",
     "/api/invites/check": "lets the signup form validate a code before creating anything",
     "/api/games": "list is filtered per viewer; anonymous sees only global games",
+    "/r/{slug}": "a report published to everyone (by id or key) or shared by link (by its key); 404 for anything else",
     "/ws/games/{gid}": "seat token, share key or session, checked in the handler",
     "/ws/worker": "worker token is the credential, checked as the first frame",
     "/openapi.json": "FastAPI's own schema",
@@ -72,7 +73,7 @@ INTENTIONALLY_PUBLIC = {
 GATE_NAMES = ("require_user", "require_admin", "require_moderator", "require_cap", "require_role")
 #: Calls in a body that perform the check themselves.
 BODY_GATES = ("require_user(", "_gate(", ".require(", "access.on(", "ownership.require(",
-              "require_cap(", "_report(", "_server(", "_group(",
+              "require_cap(", "_server(", "_group(",
               # The saves routes filter by viewer or call their own checker.
               "_require_save_access(", "visible_ids(",
               # Owned items (design/phase3-features.md P3.2.4): a route resolves its item through the gate, and a

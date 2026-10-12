@@ -734,6 +734,8 @@ def view(gid: str, request: Request, token: Optional[str] = None, as_player: Opt
             raise HTTPException(403, "Invalid token.")  # unreachable: _gate already checked
         extra["session"] = s.info()
         extra["version"] = s.version
+        # which controls the game screen offers (pause, the AI delay, a named save): the routes check it again
+        extra["can_manage"] = access.MANAGE in perms
         body = s.game.view_json(pid, extra)
     return Response(body, media_type="application/json")
 
@@ -839,11 +841,12 @@ def game_metrics_csv(gid: str, request: Request, p: Principal = Depends(principa
                     headers={"Content-Disposition": f'attachment; filename="citar-{gid}-metrics.csv"'})
 
 
-@app.get("/api/metrics/compare", dependencies=[Depends(require_user)])
-def compare_models():
-    """Aggregate AI metrics per model across all running games and saved games (latest save per game)."""
-    from .scoring import compare_models as compare
-    return compare(manager)
+@app.get("/api/metrics/compare")
+def compare_models(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Aggregate AI metrics per model across running and saved games (latest save per game): an administrator's over
+    every game, a member's over their own and the pooled ones (``scoring.viewer_scope``, P3.2.4)."""
+    from .scoring import compare_models as compare, viewer_scope
+    return compare(manager, scope=viewer_scope(sdb, me))
 
 
 @app.get("/api/games/{gid}/debug/errors")
@@ -997,12 +1000,13 @@ def bench_update_settings(body: dict):
 
 
 @app.get("/api/benchmarks/suites")
-def bench_suites(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """The saved benchmark suites the caller may see, each with what they may do to it."""
-    seen = items.listed(sdb, "benchmark_suite", p.user)
+def bench_suites(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The saved benchmark suites the caller may see (and the one a share key opens), each with what they may do to
+    it."""
+    key = _share_key(request)
+    seen = items.listed(sdb, "benchmark_suite", p.user, slug=key)
     out = [s for s in _scheduler().list_suites() if seen is None or s["id"] in seen]
-    perms = items.permissions_by_ref(sdb, "benchmark_suite", p.user, [s["id"] for s in out])
-    return [dict(s, **perms.get(s["id"], {})) for s in out]
+    return _with_perms(sdb, "benchmark_suite", p.user, out, slug=key)
 
 
 @app.get("/api/benchmarks/suites/new", dependencies=[Depends(require_user)])
@@ -1079,15 +1083,16 @@ def bench_start_run(body: RunBody, request: Request, me=Depends(require_cap("run
 
 
 @app.get("/api/benchmarks/runs")
-def bench_runs(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
-    """The runs the caller may see, with per-game progress and what they may do to each."""
-    out = _scheduler().list_runs(items.listed(sdb, "benchmark_run", me))
+def bench_runs(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """The runs the caller may see (and the one a share key opens), with per-game progress and what they may do to
+    each."""
+    key = _share_key(request)
+    out = _scheduler().list_runs(items.listed(sdb, "benchmark_run", me, slug=key))
     if not _is_admin(me):
         # a machine's address is its owner's and the administrators' (the registry's routes are theirs)
         for r in out:
             r["servers"] = [{k: v for k, v in sv.items() if k != "base_url"} for sv in r.get("servers", [])]
-    perms = items.permissions_by_ref(sdb, "benchmark_run", me, [r["id"] for r in out])
-    return [dict(r, **perms.get(r["id"], {})) for r in out]
+    return _with_perms(sdb, "benchmark_run", me, out, slug=key)
 
 
 class RunControl(BaseModel):
@@ -1136,17 +1141,20 @@ def _map_call(fn, *args, **kw):
         raise HTTPException(400, str(e))
 
 
-def _with_perms(sdb: DbSession, kind: str, user, entries: list, key: str = "id") -> list:
-    """A listing's entries, each with what ``user`` may do to it (``Access.client``), for the page's buttons."""
-    perms = items.permissions_by_ref(sdb, kind, user, [e[key] for e in entries])
+def _with_perms(sdb: DbSession, kind: str, user, entries: list, key: str = "id", *, slug: Optional[str] = None) -> list:
+    """A listing's entries, each with what ``user`` may do to it (``Access.client``, with the share key ``slug`` the
+    listing was asked with), for the page's buttons."""
+    perms = items.permissions_by_ref(sdb, kind, user, [e[key] for e in entries], slug=slug)
     return [dict(e, **perms.get(e[key], {})) for e in entries]
 
 
 @app.get("/api/maps")
-def maps_list(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """The saved maps the caller may see."""
-    seen = items.listed(sdb, "map", p.user)
-    return _with_perms(sdb, "map", p.user, [m for m in engine_api.list_maps() if seen is None or m["id"] in seen])
+def maps_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The saved maps the caller may see (and the one a share key opens)."""
+    key = _share_key(request)
+    seen = items.listed(sdb, "map", p.user, slug=key)
+    return _with_perms(sdb, "map", p.user, [m for m in engine_api.list_maps() if seen is None or m["id"] in seen],
+                       slug=key)
 
 
 @app.get("/api/maps/{map_id}")
@@ -1448,11 +1456,12 @@ def scenario_ops_help():
 
 
 @app.get("/api/scenarios")
-def scenarios_list(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """The saved scenarios the caller may see."""
-    seen = items.listed(sdb, "scenario", p.user)
+def scenarios_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The saved scenarios the caller may see (and the one a share key opens)."""
+    key = _share_key(request)
+    seen = items.listed(sdb, "scenario", p.user, slug=key)
     return _with_perms(sdb, "scenario", p.user,
-                       [s for s in engine_api.list_scenarios() if seen is None or s["id"] in seen])
+                       [s for s in engine_api.list_scenarios() if seen is None or s["id"] in seen], slug=key)
 
 
 @app.get("/api/scenarios/{sid}")
@@ -1556,11 +1565,13 @@ def _probe_scenario(sdb: DbSession, user, data) -> None:
 
 
 @app.get("/api/probes")
-def probes_list(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """The saved probes the caller may see."""
+def probes_list(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The saved probes the caller may see (and the one a share key opens)."""
     from .. import probes as P
-    seen = items.listed(sdb, "probe", p.user)
-    return _with_perms(sdb, "probe", p.user, [x for x in P.list_probes() if seen is None or x["id"] in seen])
+    key = _share_key(request)
+    seen = items.listed(sdb, "probe", p.user, slug=key)
+    return _with_perms(sdb, "probe", p.user, [x for x in P.list_probes() if seen is None or x["id"] in seen],
+                       slug=key)
 
 
 @app.get("/api/probes/example", dependencies=[Depends(require_user)])
@@ -1669,10 +1680,11 @@ def _probe_status(sdb: DbSession, user, runner) -> dict:
 
 
 @app.get("/api/probe-runs")
-def probe_runs(p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
-    """The probe runs the caller may see."""
+def probe_runs(request: Request, p: Principal = Depends(principal), sdb: DbSession = Depends(get_db)):
+    """The probe runs the caller may see (and the one a share key opens)."""
     runner = _probes()
-    seen = items.listed(sdb, "probe_run", p.user)
+    key = _share_key(request)
+    seen = items.listed(sdb, "probe_run", p.user, slug=key)
     out = []
     for r in runner.list_runs():
         if seen is not None and r.get("id") not in seen:
@@ -1681,7 +1693,7 @@ def probe_runs(p: Principal = Depends(principal), sdb: DbSession = Depends(get_d
                                           "summary", "error", "repeats")} |
                    {"total": len(r.get("jobs", [])), "probe_id": r["probe"].get("id"), "probe_name": r["probe"].get("name"),
                     "model": r.get("llm", {}).get("model"), "provider": r.get("llm", {}).get("provider")})
-    return {"runs": _with_perms(sdb, "probe_run", p.user, out), "status": _probe_status(sdb, p.user, runner)}
+    return {"runs": _with_perms(sdb, "probe_run", p.user, out, slug=key), "status": _probe_status(sdb, p.user, runner)}
 
 
 @app.get("/api/probe-runs/{rid}")
@@ -1734,17 +1746,19 @@ def probe_run_open(rid: str, case: str, rep: int, request: Request, me=Depends(r
 # the lab and the work queue
 # ----------------------------------------------------------------------------
 @app.get("/api/lab")
-def lab_overview(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+def lab_overview(request: Request, me=Depends(require_user), sdb: DbSession = Depends(get_db)):
     """What the bot lab is doing: runner health, experiments, per-game progress and the log. A member sees the
     experiments they may see; the log and the side runs, which name every experiment and the server's own jobs,
     are an administrator's."""
     from .. import lab
     out = lab.overview()
-    seen = items.listed(sdb, "lab_experiment", me)
+    key = _share_key(request)
+    seen = items.listed(sdb, "lab_experiment", me, slug=key)
     if seen is None:
         return out
     out["experiments"] = _with_perms(sdb, "lab_experiment", me,
-                                     [e for e in out.get("experiments", []) if e.get("name") in seen], key="name")
+                                     [e for e in out.get("experiments", []) if e.get("name") in seen], key="name",
+                                     slug=key)
     out["running"] = [r for r in out.get("running", []) if r.get("exp") in seen]
     out["log"] = []
     out["side_runs"] = []
@@ -1906,11 +1920,12 @@ def lab_report(name: str, request: Request, p: Principal = Depends(principal), s
     return {"name": name, "text": lab.report_text(name)}
 
 
-@app.get("/api/models/scores", dependencies=[Depends(require_user)])
-def models_scores():
-    """Every model's overall score and its components."""
-    from .scoring import model_scores
-    return model_scores(manager, _scheduler().get_settings()["score_weights"])
+@app.get("/api/models/scores")
+def models_scores(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """Every model's overall score and its components, over the games the caller's figures may use (as
+    ``/api/metrics/compare``)."""
+    from .scoring import model_scores, viewer_scope
+    return model_scores(manager, _scheduler().get_settings()["score_weights"], scope=viewer_scope(sdb, me))
 
 
 # ----------------------------------------------------------------------------
@@ -1922,11 +1937,13 @@ def replay(gid: str, request: Request, token: Optional[str] = None,
     """The whole game, turn by turn, for the recap.
 
     Gated on viewing the game, like everything else about it: a finished private game is still
-    private. The spectator token counts as view, so watching an AI-only game live still works.
+    private. Whoever may watch it (the spectator token, or an account or share key the ladder lets see it)
+    may replay an AI-only game live; a seat's own token sees it once it is over, as the view route says.
     """
-    s, _row, _perms = _gate(sdb, gid, p, access.VIEW, request, token)
+    s, _row, perms = _gate(sdb, gid, p, access.VIEW, request, token)
     tok = _token(request, token)
-    if not (s.game.phase != "playing" or (s.is_spectator(tok) and s.god_view_allowed())):
+    watcher = s.is_spectator(tok) or (s.seat_for_token(tok) is None and access.VIEW in perms)
+    if not (s.game.phase != "playing" or (watcher and s.god_view_allowed())):
         raise HTTPException(403, "The recap is available when the game is over (or to spectators of AI-only games).")
     return Response(_replay_payload(s), media_type="application/json")
 

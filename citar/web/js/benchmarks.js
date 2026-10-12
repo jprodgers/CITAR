@@ -1,6 +1,7 @@
 // Benchmarks page: scheduler status, live runs grouped by server, and the suite library/editor. Suites pick servers,
 // models and load profiles from the server registry (Servers page), which also holds each server's restricted hours.
 import { api } from "./api.js";
+import { shareButton } from "./share.js";
 import { profileSelect } from "./bots.js";
 import { el, clear, toast, modal, confirmBox } from "./util.js";
 import { pageHeader, secs, bar } from "./nav.js";
@@ -123,9 +124,10 @@ function renderRun(run, ctx) {
     el("div", { class: "grow run-progress" }, bar(sm.turns_total ? sm.turns_done / sm.turns_total : 0,
       `${sm.turns_done.toLocaleString()} / ${sm.turns_total.toLocaleString()} turns`)),
     el("span", { class: "muted" }, counts), eta ? el("span", { class: "muted" }, eta) : null,
-    run.status === "running" ? control("pause", "⏸ Pause") : null,
-    run.status === "paused" ? control("resume", "▶ Resume", "small primary") : null,
-    active ? control("cancel", "Cancel", "small danger") : control("remove", "Remove", "small")));
+    run.status === "running" && run.can_manage !== false ? control("pause", "⏸ Pause") : null,
+    run.status === "paused" && run.can_manage !== false ? control("resume", "▶ Resume", "small primary") : null,
+    shareButton("benchmark_run", run.id, run.name, run, ctx.refresh),
+    run.can_manage === false ? null : active ? control("cancel", "Cancel", "small danger") : control("remove", "Remove", "small")));
   if (!open) return box;
 
   for (const sv of run.servers) {
@@ -155,7 +157,8 @@ function renderJob(run, job, ctx) {
       location.hash = `#/game/${r.game_id}/${encodeURIComponent(r.spectator_token)}`;
     } catch (e) { toast(e.message, "error"); }
   };
-  const act = (action, label, cls = "small") => el("button", { class: cls, onclick: async (e) => {
+  // a job's controls are its run's managers' (can_manage), as the run's own are; a viewer still watches
+  const act = (action, label, cls = "small") => run.can_manage === false ? null : el("button", { class: cls, onclick: async (e) => {
     e.stopPropagation();
     try { await api.jobControl(run.id, job.id, action); ctx.refresh(); } catch (err) { toast(err.message, "error"); }
   } }, label);

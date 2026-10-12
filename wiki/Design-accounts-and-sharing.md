@@ -139,6 +139,61 @@ while the underlying game stays private.
 (`X-Robots-Tag: noindex`). The share URL offered to the owner carries the key for `link`, and is the
 object's plain address for `server` and `global`.
 
+### Sharing in the web client
+
+Every shareable thing has a **Share** button where it is listed, for whoever manages it: games in the
+lobby, reports, benchmark runs, probe runs, scenarios, maps and bot profiles. Its dialog sets the
+visibility on the ladder above (the `global` choice only for accounts with `publish_global`), shows the
+share link with **Copy** and, for `link`, **New link** (rotating the key, so every old copy stops
+working), lists the people it is shared with by handle and what each may do (view, play for a game,
+manage), adds one by handle and removes one. A game's dialog also holds its pooling choice; a report's
+gives the page for people with no account (below). If a moderator took the thing down, the dialog says
+so and why. A moderator who does not manage something sees an **Unpublish** button instead, on what is
+published to the internet or a link they were given, which asks for the reason its owner will read.
+
+Share links open where they point:
+
+- a game's link (`#/game/<id>`, with `?k=<key>` for `link`) opens the game screen with no seat token:
+  the account, or the key, is the credential, and the key travels with the screen's own links (the
+  recap, looking through one civilization's eyes) and on its live socket. A game with a person playing
+  in it can be watched only once it is over, as before;
+- a report's link (`#/reports/<id>`) opens the report, its frame and its download carrying the key;
+- the other kinds' links open their page, whose list shows the item the key opens to whoever holds the
+  key (and only them: it stays unlisted for everyone else);
+- these pages open without signing in, so a visitor with a `global` thing's link, or a `link`'s key,
+  sees it. Anything the viewer may not see is the same **Not found** page as something that does not
+  exist, offering a visitor the sign-in.
+
+In the lobby a game shared with you shows "shared with you" and can be watched and replayed; its seats,
+playing it and closing it are its managers'.
+
+### Reports
+
+A report is an owned item like the others, and what it **gathers** follows its owner
+(`citar/reports/reach.py`; [Reports](Servers-costs-and-reports#what-a-report-contains)):
+
+- a member's report covers the activities of what its owner may see: their own games, runs, probe
+  runs, experiments and reports, and those shared with them, with members or with everyone. Another
+  member's private game, run or probe run is not in it, not even by name or id;
+- it prices **only the owner's own machines**: an activity that also ran on the server's machines or
+  on another member's keeps its outcome and its usage, but not what it cost there (a note in the
+  report says how many did), and no other machine's configuration, tariff, depreciation or hardware
+  appears, nor a pricing note about one;
+- figures wider than that come only as **pooled averages** (the report's "Data" choice: what you may
+  see, plus pooled averages, or pooled averages only), per model, over the games other accounts pool,
+  each withheld until enough accounts are behind it;
+- an administrator's report sees everything, as before;
+- an owner not in good standing when it is built (suspended, say; an administrator too) reaches only
+  what is published to everyone, with no machine priced;
+- whoever a report is shared with reads the report; of its specification they get only the items and
+  machines of its scope they may see and whether it has a written analysis (not its instructions or
+  the machine and model that wrote it), and of a failed build its error, not its traceback.
+
+A report shared by `link` or published `global` also has a page for people with no account:
+`/r/<key>` for a `link` report (its key, never its id), `/r/<id>` (or its key) for a `global` one, and
+**404** for anything else, its owner's own private report included (who reads it in the app). The page
+is the report's HTML and nothing else, `noindex`, with a policy that lets it load nothing.
+
 ### Owned items
 
 Every job a member can start is an **owned item**, with an owner and a visibility on the ladder
@@ -214,17 +269,25 @@ Saves list owns it from then on, with their own pooling default.
 
 ### Data pooling
 
-Every account has `data_sharing`: `pool` (default) or `private`, overridable per game.
+Every account has `data_sharing`: `pool` (default) or `private`, and so does each game (a new game
+takes its owner's setting; its sharing dialog changes it).
 
-- **pool** — the game's metrics feed the server-wide aggregates, model scorecards and averages.
-- **private** — the data is excluded from every aggregate and only the owner (and whoever they grant)
-  can analyse it. Requires the `can_run_reports` capability to be useful, which is where private
-  analysis lives.
+- **pool** — the game's metrics feed the pooled figures other members see.
+- **private** — the data is excluded from every pooled figure; its owner still sees it in their own
+  figures and reports.
 
-The aggregation layer filters on this flag at query time, not at write time, so a user flipping from
-private to pooled retroactively contributes and flipping back retroactively withdraws. Aggregates
-carry a minimum-contributor threshold so a public average can never be reversed into one private
-user's numbers.
+A game **pools** when its own setting is `pool` and its owner's account is `pool` too: opting the
+account out withdraws every one of its games, the ones played before included, and opting back in
+returns those whose own setting allows it. The filter is applied when a figure is made
+(`aggregate.scope_for`), never when a game is recorded.
+
+The **Models** page (`/api/models/scores`) and its comparison (`/api/metrics/compare`) are made, for a
+member, from their own games and the pooled ones. Other members' games are counted (`pooled_games`),
+never named. A model's pooled part is shown only when at least `aggregate_min_contributors` (3 by
+default, a console setting) other accounts are behind it; below that it is withheld, with how many
+there were, and the member sees their own games' figures alone. Counting the other accounts only
+matters: a figure made of your games and one other person's is that person's figure with yours
+subtracted. An administrator's figures cover every game.
 
 ---
 

@@ -609,6 +609,41 @@ class GameRoutes(unittest.TestCase):
                 self.manager.delete(gid)
             engine_api.delete_scenario(sid)
 
+    def test_watching_and_replaying_with_no_token(self):
+        """3-03's view and replay routes (P3.9.1): an AI-only game is watched and replayed with no token by whoever
+        the ladder lets see it, the view saying whether they manage it (``can_manage``, the screen's controls); a
+        stranger and a visitor get 404, a member 404 too until it is shared with members, then 200, and a visitor
+        holding a link's key 200."""
+        gid = self.game.id
+        for who, want, manages in ((None, 404, None), ("other", 404, None), ("maggie", 404, None),
+                                   ("reader", 200, False), ("owner", 200, True), ("zara", 200, True)):
+            with self.subTest(who=who or "anonymous"):
+                view = self.client.get(f"/api/games/{gid}/view", headers=self.headers.get(who, {}))
+                replay = self.client.get(f"/api/games/{gid}/replay", headers=self.headers.get(who, {}))
+                self.assertEqual((view.status_code, replay.status_code), (want, want), view.text[:200])
+                if want == 200:
+                    self.assertIs(view.json()["can_manage"], manages)
+        # a moderator on a `global` game (P3.9.1): reads 200, managing nothing, and control 403; a visitor reads too
+        self._set_visibility("global")
+        for who in ("maggie", None):
+            with self.subTest(who=who or "anonymous", visibility="global"):
+                view = self.client.get(f"/api/games/{gid}/view", headers=self.headers.get(who, {}))
+                replay = self.client.get(f"/api/games/{gid}/replay", headers=self.headers.get(who, {}))
+                self.assertEqual((view.status_code, replay.status_code), (200, 200), view.text[:200])
+                self.assertIs(view.json()["can_manage"], False)
+        self.assertEqual(self._post("/control", "maggie", {"paused": True}).status_code, 403)
+        self.assertIn(self._post("/control", None, {"paused": True}).status_code, (401, 403))
+        self._set_visibility("server")
+        self.assertEqual(self.client.get(f"/api/games/{gid}/view", headers=self.headers["other"]).status_code, 200)
+        self.assertEqual(self.client.get(f"/api/games/{gid}/replay", headers=self.headers["other"]).status_code, 200)
+        self.assertEqual(self.client.get(f"/api/games/{gid}/view").status_code, 404)
+        self._set_visibility("link")
+        with db.session() as s:
+            key = s.get(GameRow, gid).slug
+        self.assertEqual(self.client.get(f"/api/games/{gid}/view", headers={"x-citar-share-key": key}).status_code,
+                         200)
+        self.assertEqual(self.client.get(f"/api/games/{gid}/replay", params={"k": key}).status_code, 200)
+
     def test_creating_and_launching_need_an_account(self):
         for path, body in (("/api/games", {"seats": [{"type": "bot"}]}),
                            ("/api/scenarios/none/launch", {}),

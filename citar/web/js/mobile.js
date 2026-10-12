@@ -181,19 +181,17 @@ async function benchPage() {
 
 async function reportsPage() {
   titleEl.textContent = "Reports";
-  let list = [];
-  if (auth.isAdmin()) {
-    const r = await api.reports();
-    list = (Array.isArray(r) ? r : r.reports || []).map((x) => ({ id: x.id, name: x.title || x.name || x.id, status: x.status,
-      when: x.created || x.created_at, url: x.status === "done" || !x.status ? `/api/reports/${x.id}/html` : null }));
-  } else {
-    const r = await api.get("/api/shared/reports");
-    list = (r.reports || []).map((x) => ({ id: x.id, name: x.name, when: x.created_at, url: x.public_url || `/r/${x.id}` }));
-  }
-  if (!list.length) return [section(null, empty("No reports yet."))];
+  // the reports this account may see (its own, shared with it, members' and published ones), as the desktop's
+  // Reports page lists them (/api/reports, the report item routes)
+  const r = await api.reports();
+  const list = (Array.isArray(r) ? r : r.reports || []).map((x) => ({ id: x.id, name: x.title || x.name || x.id,
+    status: x.status, when: x.created || x.created_at, mine: x.can_manage,
+    url: x.status === "done" ? `/api/reports/${encodeURIComponent(x.id)}/html` : null }));
+  if (!list.length) return [section(null, empty("No reports yet. Build one on the desktop site."))];
   return [section(null, ...list.slice(0, 40).map((x) => el(x.url ? "a" : "div", { class: "m-row", href: x.url || null, target: x.url ? "_blank" : null, rel: "noopener" },
     el("div", { class: "m-row-main" }, el("div", { class: "m-row-title" }, x.name),
-      el("div", { class: "muted small" }, x.when ? new Date(typeof x.when === "number" ? x.when * 1000 : x.when).toLocaleString() : "")),
+      el("div", { class: "muted small" }, [x.when ? new Date(typeof x.when === "number" ? x.when * 1000 : x.when).toLocaleString() : "",
+        x.mine === false ? "shared with you" : ""].filter(Boolean).join(" · "))),
     x.status && x.status !== "done" ? el("span", { class: "m-pill" }, x.status) : el("span", { class: "muted" }, "›"))))];
 }
 
