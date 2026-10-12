@@ -124,7 +124,7 @@ sudo citar-admin set-status NAME suspended --reason "why"     # the reason is re
 sudo citar-admin set-caps NAME run_lab=on publish_global=default   # on, off, or back to the role's default
 sudo citar-admin set-limits NAME --games 4 --seats 8 --invites 2
 sudo citar-admin set-trust NAME trusted              # new | provisional | trusted | quarantined
-sudo citar-admin audit --actor NAME --action 'user.*' --limit 50   # --json for a script
+sudo citar-admin audit --actor NAME --action 'user.*' --limit 50   # --json for a script; --actor admin_cli: these commands' own
 sudo citar-admin reset-password NAME
 sudo citar-admin invite --role user --uses 1
 sudo citar-admin policy registration invite       # open | invite | closed

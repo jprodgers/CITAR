@@ -139,9 +139,13 @@ It is checked by its header alone (`citar/auth/images.py`): the magic bytes, the
 cut-short or damaged file is refused) and the size read from the header; nothing is decoded and no image library
 is involved. SVG, GIF, HTML and anything else are refused with the rule. It is stored as
 `<data dir>/avatars/<user id>-<hash>.<ext>` (never beside the code or the saves; the previous one is removed)
-and served from `/api/users/<handle>/avatar` with the type its header proved, `nosniff` and a policy that lets
-it load and run nothing, to whoever its field shows to. Without an upload, a sign-in provider's picture shows,
-under the same field.
+**without its metadata**: a picture goes to everyone its field reaches, so the Exif a phone or a camera writes
+(where and when the photo was taken, the camera's serial number), XMP, IPTC, PNG text chunks and comments are
+left out, and so is anything after a JPEG's end. Only whole segments or chunks are dropped, nothing is decoded or
+re-encoded: the pixels are the upload's, and what changes how it looks (an ICC colour profile, gamma, the pixel
+size, an animation) stays. It is served from `/api/users/<handle>/avatar` with the type its header proved,
+`nosniff` and a policy that lets it load and run nothing, to whoever its field shows to. Without an upload, a
+sign-in provider's picture shows, under the same field.
 
 ### Administering accounts
 
@@ -149,13 +153,14 @@ Administrators manage accounts on the **Users** page (`#/admin/users`, beside **
 account, searchable by handle, name or email and filtered by role and status, and a drawer per account for its
 **role**, **status** (a suspension needs a reason, which the account is told when it signs in; suspending signs
 it out everywhere), **capabilities** (each the role's default, or overridden on or off), **limits**
-(`invite_quota`, `max_concurrent_games`, `max_seats_per_game`), **trust tier** (`new`, `provisional`,
-`trusted`, `quarantined`: set by hand in 0.1.6) and **directory listing**, with the account's audit rows
-beneath. Each save is one audit row naming the fields it changed with their old and new values. The server
-never loses its last active administrator: that account cannot demote itself, suspend itself or put itself on
-probation. The page's **Audit log** reads the whole log, newest first, filtered by who did it, the action (or a
-prefix: `user.*`) and the object, 100 a page. For anyone but an administrator these pages, and their routes, do
-not exist (404).
+(`invite_quota` 0 to 1,000, 0 being none; `max_concurrent_games` 1 to 100, since the `create_games` capability is
+what stops an account starting any; `max_seats_per_game` 0 to 64, 0 being the ruleset's most), **trust tier**
+(`new`, `provisional`, `trusted`, `quarantined`: set by hand in 0.1.6) and **directory listing**, with the
+account's audit rows beneath. Each save is one audit row naming the fields it changed with their old and new
+values. The server never loses its last active administrator: that account cannot demote itself, suspend itself
+or put itself on probation. The page's **Audit log** reads the whole log, newest first, filtered by who did it (a
+handle, or `admin_cli` for the command line's changes), the action (or a prefix: `user.*`) and the object, 100 a
+page. For anyone but an administrator these pages, and their routes, do not exist (404).
 
 The command line does the same on the server's database (`citar-admin`, `python -m citar.server.admin_cli`):
 `set-role`, `set-status` (`--reason` for a suspension), `set-caps NAME run_lab=on publish_global=default`,
