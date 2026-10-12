@@ -183,9 +183,16 @@ it has slots, so a busy machine **queues** work instead of refusing it, and noth
 - **Cancelling drains on today's helper.** When the server gives up a request (a game is closed or paused, a seat is
   changed, a prompt is cancelled or runs out of time), it sends the helper `CANCEL`. The helper of this version ignores
   it and finishes the completion, so the scheduler keeps that slot taken (*draining*) until the helper's late answer
-  arrives, or the request's own timeout plus 15 seconds has passed. The helper is therefore never sent more requests
-  than it has slots, and never has to answer `busy`. A `busy` refusal anyway (a helper restarted with fewer slots) is
-  absorbed: the scheduler holds the machine at what it has in flight until a slot frees, and queues the request again.
+  arrives, or the request's own timeout plus 15 seconds has passed. The helper answers only over the connection the
+  request went out on, so when that connection goes (the helper disconnects, or reconnects as a new connection) the
+  slot is given back at once. The helper is therefore never sent more requests than it has slots, and never has to
+  answer `busy`. A `busy` refusal anyway (a helper restarted with fewer slots, or one still finishing a request from
+  before its reconnect) is absorbed: the scheduler holds the machine at what it has in flight until a slot frees (at
+  most five seconds when nothing else is in flight), and queues the request again.
+- **The game screen shows the wait.** A model seat whose request waits for its machine shows "waiting for <machine>:
+  2nd in line, about 40 s" (its status `queued`) until the request runs.
+- **The Servers page's test** waits for a slot like any pooled prompt. Each person has one test of a machine waiting at
+  a time and two in all (another is refused at once), and a few dozen in ten minutes; it is not metered.
 - **Generation time is what the server saw.** A step is credited the smaller of the helper's own `duration` and the
   time from sending the request to receiving its answer; time spent queueing is recorded apart and never counted as the
   model's (nor against its turn's time limit, nor in its speed score). A helper that claims more than the server

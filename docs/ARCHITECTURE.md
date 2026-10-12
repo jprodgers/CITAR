@@ -320,7 +320,8 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
 `ScheduledConversation`, whose every step takes a slot of its binding's machine first:
 
 - A **lease** is a model seat that plays every turn. It belongs to the session's seat (`GameSession.lease_for`), not to
-  its agent, so it outlives agents made again after a seat change or a resume. It is *active* while its seat is
+  its agent, so it outlives agents made again after a seat change or a resume; a game that has stopped or crashed
+  makes none (its leases are released for good). It is *active* while its seat is
   mid-turn (the driver calls `activate()` and `idle()` around `play_turn`) and *idle* otherwise; the agent also idles
   it while it waits on a chat reply or a pause, so a seat waiting on its counterpart never keeps the slot the
   counterpart needs. A lobby game's idle lease lends its slot; a benchmark's and a probe case's never do.
@@ -336,9 +337,11 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
   call under the game's lock. Status callbacks run on the scheduler's notifier thread, after the machine's lock is let
   go.
 - **Draining and metering.** A request abandoned on a helper keeps its slot until the hub hands the scheduler the
-  helper's late frame (`late_frame`). After each step the listeners get a `StepEvent` with the generation time (bounded
-  by what the server observed), the queue time and the tokens; the usage ledger's tracker is the first listener. The
-  agent adds queue and chat waits to the turn's waited time, so they never count against `max_turn_seconds`.
+  helper's late frame (`late_frame`), or the connection it went out on goes (`helper_changed`: each connection has its
+  own `serial`). After each step the listeners get a `StepEvent` with the generation time (bounded by what the server
+  observed), the queue time and the tokens; the usage ledger's tracker is the first listener. The agent adds queue
+  and chat waits to the turn's waited time, so they never count against `max_turn_seconds`, and shows its seat as
+  `queued` (with its place) while a step waits (`ScheduledConversation.on_wait`).
 
 ### Authorisation
 
