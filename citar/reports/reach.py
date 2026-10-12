@@ -52,16 +52,20 @@ class Reach:
         """The reach of a report owned by ``owner_id``: everything for none (a script's report) or for an
         administrator in good standing, and where the process has no database (a command-line tool, which has no
         accounts to keep apart); otherwise what that account may see, read once when the report is built. An
-        account that is gone or suspended sees what an anonymous visitor would."""
+        account that is not in good standing (suspended, deleted, gone, still pending) sees what an anonymous visitor
+        would: published things only, and no machine of its own (its role, an administrator's included, counts for
+        nothing then)."""
         from .. import db
         if not owner_id or not db.configured():
             return cls()
         from ..db.models import User
         with db.session() as s:
             owner = s.get(User, owner_id)
-            if owner is not None and owner.role == "admin" and owner.status == "active":
+            standing = owner is not None and owner.active
+            # an administrator is one in ``access.on``'s sense (the role, on probation too) only in good standing
+            if standing and owner.role == "admin":
                 return cls()
-            return cls._member(s, owner if owner is not None and owner.status != "deleted" else None, owner_id)
+            return cls._member(s, owner if standing else None, owner_id)
 
     @classmethod
     def _member(cls, s, viewer, owner_id: str) -> "Reach":
@@ -142,11 +146,11 @@ class Reach:
                                  "components": [], "connection": {}})
         return out
 
-    def cost(self, cost: dict, reg: dict) -> dict:
+    def cost(self, cost: dict) -> dict:
         """``costing.compute``'s result cut to what the report may show: the activities the owner may see, each with
         its costs on the owner's machines only (its totals worked out again from them); the per-machine, per-day
-        and per-hour figures of the owner's machines; notes that name only those, and one that says how many
-        activities ran elsewhere too."""
+        and per-hour figures of the owner's machines; the notes about those machines (``_notes``), and one that
+        says how many activities ran elsewhere too."""
         if self.everything:
             return cost
         acts, elsewhere = {}, 0
@@ -162,8 +166,7 @@ class Reach:
                     total[k] += c[k]
             # ``ran_on`` keeps where it ran for the report's own machine filter (``data._in_scope``), never printed
             acts[act_id] = {**a, "servers": mine, "total": total, "ran_on": sorted(a["servers"])}
-        names = [sv["name"] for sv in reg["servers"] if sv["id"] in self.machines]
-        notes = [n for n in cost.get("notes") or [] if any(name and name in n for name in names)]
+        notes = self._notes(cost, acts)
         if elsewhere:
             notes.append(f"Costs are counted on the report owner's own machines only: {elsewhere} of these activities "
                          "also ran on machines that are not theirs (the server's own, or other members'), and what they "
@@ -174,6 +177,16 @@ class Reach:
                 "hours": {h: {srv: v for srv, v in hr.items() if srv in self.machines}
                           for h, hr in (cost.get("hours") or {}).items()},
                 "notes": notes}
+
+    def _notes(self, cost: dict, acts: dict) -> list:
+        """The pricing notes a member's report may print: those ``costing.compute`` filed under the owner's own
+        machines, and the one about usage with no machine when an activity of theirs had some. Never a note about
+        another machine, matched by its name or otherwise: a note names its machine and the model used there."""
+        by_server = cost.get("notes_by_server") or {}
+        keep = {n for srv in self.machines for n in by_server.get(srv, ())}
+        if any("unassigned" in a.get("ran_on", ()) for a in acts.values()):
+            keep.update(by_server.get("unassigned", ()))
+        return sorted(keep)
 
 
 def pooled_models(owner_id: Optional[str]) -> Optional[list]:

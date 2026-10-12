@@ -139,13 +139,22 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
     """Cost every activity in [since, until]. Returns {
         "acts": {act_id: {"info": act row, "servers": {srv: cost}, "models": {model: {...}}}},
         "servers": {srv: {"allocated": cost, "calendar": {...}, "power": {...}}},
-        "days": {date: {srv: cost}}, "notes": [...]}"""
+        "days": {date: {srv: cost}}, "notes": [...], "notes_by_server": {srv: [...]}}
+
+    ``notes_by_server`` keys each note by the machine it is about (``"unassigned"`` for usage with no machine), so
+    that a report that may show only some machines keeps only their notes (``reports.reach.Reach.cost``)."""
     reg = reg or S.with_pooled()
     ledger = ledger or U.read(since, until)
     servers = {s["id"]: s for s in reg["servers"]}
     aliases = reg.get("aliases") or {}           # a re-registered machine's old ids -> its current one
     acts_out: dict = {}
     notes: set = set()
+    notes_by_server: dict = defaultdict(set)
+
+    def note(srv: str, text: str) -> None:
+        """Record a note about one machine (``srv``)."""
+        notes.add(text)
+        notes_by_server[srv].add(text)
 
     def act_entry(act_id):
         """The cost entry for one activity, created on first use."""
@@ -196,12 +205,12 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
                 hours[_dt(t1).strftime("%Y-%m-%d %H:00")][srv] += c
             elif toks["in"] or toks["out"]:
                 sc["unpriced_tokens"] += toks["in"] + toks["out"]
-                notes.add(f"No token price for {model} on {sv['name']}; its tokens are uncosted.")
+                note(srv, f"No token price for {model} on {sv['name']}; its tokens are uncosted.")
         if sv is None:
             if srv == "unassigned":
-                notes.add("Some model usage has no server (a seat not chosen from the Servers list); it is uncosted.")
+                note(srv, "Some model usage has no server (a seat not chosen from the Servers list); it is uncosted.")
             else:
-                notes.add(f"Usage on a deleted server ({srv}) is uncosted.")
+                note(srv, f"Usage on a deleted server ({srv}) is uncosted.")
         # spread held/busy/cpu over the minutes of the span
         held, cpu = (sp.get("held") or 0.0), (sp.get("cpu") or 0.0)
         if not (held or busy or cpu):
@@ -353,7 +362,8 @@ def compute(since: Optional[float] = None, until: Optional[float] = None, reg: O
                 out["metered"] = {"kwh": kwh, "cost": cost, "minutes": len(meas["raw"]), "gpu_idle_w": meas["gpu_idle"]}
     return {"acts": acts_out, "servers": server_out, "days": {d: dict(v) for d, v in days.items()},
             "hours": {h: dict(v) for h, v in hours.items()},
-            "notes": sorted(notes), "currency": reg.get("currency", "USD"), "symbol": reg.get("currency_symbol", "$")}
+            "notes": sorted(notes), "notes_by_server": {srv: sorted(v) for srv, v in notes_by_server.items()},
+            "currency": reg.get("currency", "USD"), "symbol": reg.get("currency_symbol", "$")}
 
 
 def hourly_profile(server: dict, reg: dict, when: Optional[datetime] = None, busy_fraction: float = 1.0) -> dict:

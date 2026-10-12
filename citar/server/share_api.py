@@ -86,7 +86,7 @@ def public_report(slug: str, s: Session = Depends(get_db)):
         "Referrer-Policy": "no-referrer",
         # A report is authored HTML from this server, but it is rendered at an origin that also
         # serves the application, so keep it from reaching back into the API.
-        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; "
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
                                    "font-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
         "Cache-Control": "no-cache",
     })

@@ -196,7 +196,7 @@ def gather(spec: dict, progress=lambda msg: None, *, reach: Optional[Reach] = No
         since = min((float(sp["t0"]) for sp in seen["spans"]), default=until - 86400)
     progress("Pricing usage")
     # priced over the whole ledger, so a minute a machine shared is split among everyone who held it; then cut
-    cost = reach.cost(costing.compute(since, until, full, ledger), full)
+    cost = reach.cost(costing.compute(since, until, full, ledger))
     scope = spec.get("scope") or {}
     acts = []
     bench_ids, probe_ids, lab_exps = set(), set(), set()
@@ -260,7 +260,7 @@ def gather(spec: dict, progress=lambda msg: None, *, reach: Optional[Reach] = No
         sens = {}
         ids = {r["id"] for r in acts}
         for years in range(int(lo[0]), int(lo[1]) + 1):
-            alt = reach.cost(costing.compute(since, until, full, ledger, lifespan_override=years), full)
+            alt = reach.cost(costing.compute(since, until, full, ledger, lifespan_override=years))
             sens[years] = {"allocated": sum(costing.total(a["total"], basis) for k, a in alt["acts"].items() if k in ids),
                            "depreciation": sum(a["total"]["depreciation"] for k, a in alt["acts"].items() if k in ids)}
         data["sensitivity"] = sens
