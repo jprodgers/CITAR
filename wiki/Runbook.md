@@ -120,7 +120,11 @@ sudo citar-admin create-admin --handle NAME --email you@example.com   # first ad
 sudo citar-admin create-user --handle NAME --email them@example.com --role moderator   # active, verified
 sudo citar-admin list-users
 sudo citar-admin set-role NAME moderator
-sudo citar-admin set-status NAME suspended --reason "why"
+sudo citar-admin set-status NAME suspended --reason "why"     # the reason is required, and shown at sign-in
+sudo citar-admin set-caps NAME run_lab=on publish_global=default   # on, off, or back to the role's default
+sudo citar-admin set-limits NAME --games 4 --seats 8 --invites 2
+sudo citar-admin set-trust NAME trusted              # new | provisional | trusted | quarantined
+sudo citar-admin audit --actor NAME --action 'user.*' --limit 50   # --json for a script
 sudo citar-admin reset-password NAME
 sudo citar-admin invite --role user --uses 1
 sudo citar-admin policy registration invite       # open | invite | closed
@@ -131,7 +135,9 @@ history and in the process list. A script gives `create-user` its password on st
 (`--password-stdin`, the first line).
 
 **Locked out entirely?** The CLI does not need the web app or a session. `create-admin --force`
-adds another administrator.
+adds another administrator. The CLI changes accounts under the web page's rules (`set-role` will not demote
+the last active administrator) and each change is an audit row of `admin_cli`'s; the same changes are on the
+**Users** page (`#/admin/users`).
 
 ---
 

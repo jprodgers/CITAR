@@ -71,8 +71,8 @@ must clear all of:
 
 | Role | Can |
 | --- | --- |
-| **admin** | Everything. Server settings, user roles, invites, suspend/delete, global server pool, all data. |
-| **moderator** | Review and act on reported content, suspend accounts, unpublish what was published to the internet (`global` games, reports and items, and `link` ones whose link they were given), read the audit log. No role changes, no server settings, no access to private data that was not reported, and no control of anybody's things: unpublishing is all a moderator may do to them. |
+| **admin** | Everything. Server settings, accounts (roles, status, capabilities, limits, trust) and the audit log, invites, the global server pool, all data. |
+| **moderator** | Unpublish what was published to the internet (`global` games, reports and items, and `link` ones whose link they were given). No role changes, no server settings, no access to private data, and no control of anybody's things: unpublishing is all a moderator may do to them. Suspending accounts and reading the audit log are administrators'. |
 | **user** | Own games, servers, reports, benchmarks, probes and data; whatever grants they have been given. |
 
 Roles are coarse. Fine-grained things are per-account capability flags an admin can set, plus
@@ -96,6 +96,71 @@ Defaults come from a server-settings template so an admin changes the policy onc
 user; a template saved before a capability existed falls back to the built-in default for it.
 `full_llm` and `partial_llm` restrict nothing yet: they are where a future rule (say, on the compute
 ratio) switches an account's model use off.
+
+### Profiles and the directory
+
+Every account has a profile page, `#/u/<handle>`: its display name, a picture, a short bio (at most 1,000
+characters), up to three links (`http` or `https`, a label of at most 40 characters, an address of at most
+300) and the things it owns that the viewer may see (lobby games and every kind of owned item, 20 of each,
+newest first). From 0.1.6's compute ledger it also shows the account's ratio. The account decides, field by
+field, who sees each part, on the **Account** page's Profile card:
+
+| Field | Shows | Default |
+| --- | --- | --- |
+| `profile` | the page itself: nothing on it shows to anyone who may not open it | members |
+| `display_name` | the display name, wherever the account appears; otherwise its handle | members |
+| `avatar` | the picture, wherever the account appears | members |
+| `bio`, `links` | the bio and the links | members |
+| `items` | the list of things it owns (each still follows its own sharing) | members |
+| `ratio` | the compute ratio | only the account |
+
+Each field is `private` (the account and administrators), `server` (every signed-in member) or `global`
+(anyone, signed in or not). A visitor sees `global` fields, a member `server` and `global` ones, the
+account and administrators everything, and a field shows only to someone who may also open the page. The
+**handle always shows** wherever the account appears. An account on **probation** cannot make a field
+`global` ("New accounts can show their profile to members only"), and one put on probation later is held to
+members-only whatever it chose; a suspended, pending or deleted account shows nothing to anyone but itself
+and administrators. The page's "View as a member" and "View as a visitor" links show it as they see it.
+
+**Wherever an account appears** (a game's or an item's owner, the people a thing is shared with, a grant's
+account, a machine's or a group's owner, the directory, the inviter an invitation names), its display name and
+picture follow these fields for whoever is looking (`User.public(viewer)` in `citar/db/models.py`): a game
+published to the internet names its owner to a visitor by handle unless the owner made the display name
+`global`. An account's role and status are never part of it.
+
+**The directory** (`#/users`, the nav's **People**) lists, for signed-in members, the accounts in good
+standing (active or on probation) that are **listed**, newest first, 50 a page, each with what shows to the
+viewer. Its search matches a handle, and a display name only where the searcher may see it, so a hidden name is
+never found by searching for it. "List me in the members' directory" off takes the account out of the
+directory only: its page still opens for whoever may see it.
+
+**The picture.** A PNG, JPEG or WebP file of at most 256 KB and 1024x1024 pixels, uploaded on the Profile card.
+It is checked by its header alone (`citar/auth/images.py`): the magic bytes, the structure walked to its end (a
+cut-short or damaged file is refused) and the size read from the header; nothing is decoded and no image library
+is involved. SVG, GIF, HTML and anything else are refused with the rule. It is stored as
+`<data dir>/avatars/<user id>-<hash>.<ext>` (never beside the code or the saves; the previous one is removed)
+and served from `/api/users/<handle>/avatar` with the type its header proved, `nosniff` and a policy that lets
+it load and run nothing, to whoever its field shows to. Without an upload, a sign-in provider's picture shows,
+under the same field.
+
+### Administering accounts
+
+Administrators manage accounts on the **Users** page (`#/admin/users`, beside **Server** in the nav): every
+account, searchable by handle, name or email and filtered by role and status, and a drawer per account for its
+**role**, **status** (a suspension needs a reason, which the account is told when it signs in; suspending signs
+it out everywhere), **capabilities** (each the role's default, or overridden on or off), **limits**
+(`invite_quota`, `max_concurrent_games`, `max_seats_per_game`), **trust tier** (`new`, `provisional`,
+`trusted`, `quarantined`: set by hand in 0.1.6) and **directory listing**, with the account's audit rows
+beneath. Each save is one audit row naming the fields it changed with their old and new values. The server
+never loses its last active administrator: that account cannot demote itself, suspend itself or put itself on
+probation. The page's **Audit log** reads the whole log, newest first, filtered by who did it, the action (or a
+prefix: `user.*`) and the object, 100 a page. For anyone but an administrator these pages, and their routes, do
+not exist (404).
+
+The command line does the same on the server's database (`citar-admin`, `python -m citar.server.admin_cli`):
+`set-role`, `set-status` (`--reason` for a suspension), `set-caps NAME run_lab=on publish_global=default`,
+`set-limits NAME --games 4 --seats 8 --invites 2`, `set-trust NAME trusted` and `audit [--actor] [--action]
+[--object-type] [--object-id] [--before] [--json]`, under the same rules, each change recorded as `admin_cli`'s.
 
 ---
 
