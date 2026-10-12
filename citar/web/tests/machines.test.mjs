@@ -1,5 +1,6 @@
 // The Servers page's pure rules (citar/web/js/machines.js): the old page's addresses, what an address of the page
-// opens, and which machine routes a viewer may call. Run with `node --test citar/web/tests/`.
+// opens, and which machine routes a viewer may call. Run with `node --test "citar/web/tests/*.test.mjs"` from the
+// checkout (Node 22 and later take a pattern, not a folder), or `npm test` in citar/web.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
