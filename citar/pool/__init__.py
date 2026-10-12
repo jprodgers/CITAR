@@ -283,12 +283,19 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
         "gpus": [g.get("name") for g in (hardware.get("gpus") or [])],
         "ram_gb": (hardware.get("memory") or {}).get("ram_gb"),
     }
-    # quiet hours are public: anyone who may use the machine needs to know when it is off limits
+    # quiet hours are public: anyone who may use the machine needs to know when it is off limits. They are read on
+    # the clock that pauses its work (servers.restricted_at): a helper machine's owner's wall clock, this computer's
+    # for a machine the server dials, so the listing agrees with the scheduler and /api/servers whatever the
+    # owner's zone.
     from . import seats
     base["owner_tz"] = (owner.tz if owner else None) or "UTC"
     base["restricted_hours"] = config.get("restricted_hours") or registry.default_restricted()
-    view = {"config": config, "owner_tz": base["owner_tz"]}
-    base["restricted_until"] = seats.clock_text(view, seats.restricted(view))
+    if server.reach == "worker":
+        view = {"config": config, "owner_tz": base["owner_tz"]}
+        base["restricted_until"] = seats.clock_text(view, seats.restricted(view))
+    else:
+        end = registry.restricted({"restricted_hours": base["restricted_hours"]})
+        base["restricted_until"] = end.strftime("%H:%M") if end else None
     if access.MANAGE in perms:
         try:
             # the registry's view of the row as this request has it (its id, its slots, a helper machine's

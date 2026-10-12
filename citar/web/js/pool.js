@@ -435,7 +435,7 @@ function machineCard(m, data, reload) {
       el("span", { class: "muted small" }, describeQuiet(reg.restricted_hours, helper ? m.owner_tz : null)),
       !helper && reg.key_status && reg.key_status.backend !== "none" ? el("span", { class: reg.key_status.present ? "good small" : "warn small" },
         reg.key_status.present ? "🔑 key stored" : reg.key_status.locked ? "🔒 key file locked" : "🔑 no key yet") : null)
-      : el("div", { class: "muted small", style: { marginTop: "2px" } }, describeQuiet(m.restricted_hours, m.owner_tz)),
+      : el("div", { class: "muted small", style: { marginTop: "2px" } }, describeQuiet(m.restricted_hours, helper ? m.owner_tz : null)),
     reg && reg.issues.length ? el("ul", { class: "issues" }, ...reg.issues.map((i) => el("li", { class: "warn small" }, i))) : null,
     models,
     el("div", { style: { marginTop: "6px" } }, admissionLine(m)),

@@ -375,6 +375,44 @@ class PageRoutes(unittest.TestCase):
         self.assertNotIn(self.group, {g["id"] for g in self.call("bob", "GET", "/api/pool/groups").json()["groups"]})
         self.assertEqual(self.call("anon", "GET", "/api/pool/groups").status_code, 401)
 
+    def test_quiet_hours_are_read_on_the_clock_that_pauses_the_work(self):
+        """The pool's listing (the cards' "quiet until"), /api/servers and the page's header agree on when a machine
+        rests: a machine the server dials by this computer's clock (servers.restricted_at, what the scheduler reads),
+        whatever its owner's zone; a helper machine by its owner's. zara, an administrator, lives in Kiritimati
+        (UTC+14, never this computer's zone here or on CI); her dry run's window covers now on this computer's clock
+        and her helper machine's the same hours, which are not yet hers."""
+        from tests.registry_calls import NOW, frozen
+        with db.session() as s:
+            s.get(User, self.ids["zara"]).tz = "Pacific/Kiritimati"
+        window = {"enabled": True, "grace_minutes": 5,
+                  "windows": [{"days": [0, 1, 2, 3, 4, 5, 6], "start": "23:00", "end": "06:00"}]}
+        self.assertEqual((NOW.hour, NOW.minute), (23, 30))
+        r = self.call("zara", "POST", "/api/servers", {"name": "Zara's dry run", "kind": "test",
+                                                        "connection": {"provider": "dryrun"}, "restricted_hours": window})
+        self.assertEqual(r.status_code, 200, r.text)
+        dry = r.json()["id"]
+        r = self.call("zara", "POST", "/api/pool/servers", {"config": {"name": "Zara GPU", "restricted_hours": window,
+                                                                       "connection": {"provider": "lmstudio"}},
+                                                            "reach": "worker"})
+        self.assertEqual(r.status_code, 200, r.text)
+        helper = r.json()["id"]
+        with frozen():
+            listed = {sv["id"]: sv for sv in self.call("zara", "GET", "/api/pool/servers").json()["servers"]}
+            reg = self.call("zara", "GET", "/api/servers").json()
+            one = self.call("zara", "GET", f"/api/pool/servers/{dry}").json()
+        regs = {sv["id"]: sv for sv in reg["servers"]}
+        header = {x["id"]: x["until"] for x in reg["restricted"]}
+        self.assertEqual(listed[dry]["reach"], "direct")
+        self.assertEqual(listed[dry]["restricted_until"], "06:00")
+        self.assertEqual(regs[dry]["restricted_until"], "06:00")
+        self.assertEqual(header.get(dry), "06:00")
+        self.assertEqual((one["restricted_until"], one["config"]["restricted_until"]), ("06:00", "06:00"))
+        # 23:30 here (New York or UTC) is the next afternoon in Kiritimati: outside the helper machine's hours there
+        self.assertEqual(listed[helper]["reach"], "worker")
+        self.assertIsNone(listed[helper]["restricted_until"])
+        self.assertIsNone(regs[helper]["restricted_until"])
+        self.assertNotIn(helper, header)
+
     def test_a_members_listing_asks_her_for_no_electricity_plan(self):
         """Only an administrator names a plan in a machine's costs (pool.check_plans): the issue that asks for one
         is on an administrator's listing of her machine, not on hers."""
