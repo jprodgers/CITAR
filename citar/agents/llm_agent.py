@@ -943,16 +943,21 @@ class ChatThread:
         cause: Optional[str] = None
         try:
             while steps < a.max_negotiation_calls and calls < a.max_negotiation_calls:
+                with session.lock:
+                    n = session.game.negotiation_head(self.nid)
+                moved = n["status"] != "open" or n["awaiting"] != pid or n["entries"] != entries
+                if moved and answered:
+                    # the model's own answer (an accept or a reject closes the chat, and so its conversation)
+                    outcome = "answered"
+                    break
                 if a._halted(session) or self.cancels != start:
                     outcome = "cancelled"
                     break
+                if moved:
+                    outcome = "moved"
+                    break
                 if session.paused:
                     outcome = "paused"
-                    break
-                with session.lock:
-                    n = session.game.negotiation_head(self.nid)
-                if n["status"] != "open" or n["awaiting"] != pid or n["entries"] != entries:
-                    outcome = "answered" if answered else "moved"
                     break
                 step = a._step(session, pid, conv, chat=True)
                 steps += 1

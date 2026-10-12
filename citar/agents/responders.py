@@ -26,10 +26,10 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger("citar.responders")
 
@@ -46,33 +46,71 @@ def _size(name: str, default: int) -> int:
         return default
 
 
+class Pool:
+    """At most ``size`` daemon threads taking tasks from one queue, started as the work needs them (a thread is
+    started only when none is idle) and kept. Daemon threads, unlike ``concurrent.futures``' workers, which the
+    interpreter joins at exit: a server shutting down must not wait for a model answer stuck behind a busy machine."""
+
+    def __init__(self, size: int, prefix: str):
+        self.size = max(1, int(size))
+        self.prefix = prefix
+        self._tasks: queue.SimpleQueue = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._threads: list = []
+        self._idle = 0
+
+    def submit(self, fn: Callable, *args) -> None:
+        """Run ``fn(*args)`` on one of the pool's threads, as soon as one is free."""
+        with self._lock:
+            self._tasks.put((fn, args))
+            if self._idle == 0 and len(self._threads) < self.size:
+                t = threading.Thread(target=self._work, daemon=True,
+                                     name=f"{self.prefix}-{len(self._threads) + 1}")
+                self._threads.append(t)
+                t.start()
+
+    def _work(self) -> None:
+        while True:
+            with self._lock:
+                self._idle += 1
+            fn, args = self._tasks.get()
+            with self._lock:
+                self._idle -= 1
+            try:
+                fn(*args)
+            except BaseException:
+                log.exception("a responder task failed")
+
+    @property
+    def threads(self) -> int:
+        """How many threads it has started."""
+        with self._lock:
+            return len(self._threads)
+
+
 _POOLS: dict = {}
 _POOLS_LOCK = threading.Lock()
 
 
-def pool(kind: str) -> ThreadPoolExecutor:
-    """The process's executor for ``kind`` (``model`` or ``bot``), made on first use with its size from
+def pool(kind: str) -> Pool:
+    """The process's pool for ``kind`` (``model`` or ``bot``), made on first use with its size from
     ``CITAR_RESPONDERS`` or ``CITAR_BOT_RESPONDERS``."""
     with _POOLS_LOCK:
         ex = _POOLS.get(kind)
         if ex is None:
             if kind == "bot":
-                ex = ThreadPoolExecutor(_size("CITAR_BOT_RESPONDERS", DEFAULT_BOT_RESPONDERS),
-                                        thread_name_prefix="bot-responder")
+                ex = Pool(_size("CITAR_BOT_RESPONDERS", DEFAULT_BOT_RESPONDERS), "bot-responder")
             else:
-                ex = ThreadPoolExecutor(_size("CITAR_RESPONDERS", DEFAULT_MODEL_RESPONDERS),
-                                        thread_name_prefix="model-responder")
+                ex = Pool(_size("CITAR_RESPONDERS", DEFAULT_MODEL_RESPONDERS), "model-responder")
             _POOLS[kind] = ex
         return ex
 
 
 def reset() -> None:
-    """Forget the pools (tests that change their sizes); the old ones finish what they have."""
+    """Forget the pools (tests that change their sizes): new work goes to new ones, and the old ones' threads finish
+    what they have, then wait idle (daemon threads)."""
     with _POOLS_LOCK:
-        old = list(_POOLS.values())
         _POOLS.clear()
-    for ex in old:
-        ex.shutdown(wait=False)
 
 
 class SeatLine:
@@ -114,13 +152,7 @@ def submit(session, pid: int, nid: int, entries: int, kind: str) -> None:
         if ln.running:
             return
         ln.running = True
-    try:
-        pool(kind).submit(_drain, session, pid, ln)
-    except RuntimeError:
-        # a pool shut down by reset(): a fresh one takes it
-        with _POOLS_LOCK:
-            _POOLS.pop(kind, None)
-        pool(kind).submit(_drain, session, pid, ln)
+    pool(kind).submit(_drain, session, pid, ln)
 
 
 def _drain(session, pid: int, ln: SeatLine) -> None:

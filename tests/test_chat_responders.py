@@ -23,6 +23,7 @@ from unittest import mock
 
 from citar import db, servers
 from citar.agents import prompts, responders
+from citar.agents.providers import make_conversation as real_make_conversation
 from citar.agents.providers.base import Conversation, StepResult, ToolCall
 from citar.db.models import Base
 from citar.pool import scheduler as S
@@ -195,6 +196,22 @@ class Responders(Case):
                         {"negotiation_id": n["id"], "action": "reject", "message": "Enough."})
         self.assertTrue(until(lambda: not any(n["status"] == "open" for n in s.game.negotiations()), 30))
         self.assertTrue(until(lambda: not s._responding, 10), s._responding)
+
+    def test_an_answer_that_closes_the_chat_is_counted_as_answered(self):
+        """The model's accept closes the chat (and with it the chat's conversation, mid-exchange): still its answer."""
+        patcher = mock.patch("citar.agents.llm_agent.make_conversation", real_make_conversation)   # the dry run
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        s = self.game([{"type": "human"}, {"type": "llm", "llm": {"provider": "dryrun", "dry_run_delay": 0,
+                                                                   "dry_run_negotiation": "accept"}}])
+        r = s.call_tool(0, "open_negotiation", {"to": 1, "message": "Maps for maps?", "give": [{"type": "share_map"}],
+                                                "receive": [{"type": "share_map"}]})
+        nid = r["result"]["negotiation_id"]
+        self.assertTrue(until(lambda: s.game.negotiation_head(nid)["status"] == "accepted", 10))
+        self.assertTrue(until(lambda: s.metrics.data["negotiations"], 5))
+        rows = [x for x in s.metrics.data["negotiations"] if x["nid"] == nid]
+        self.assertEqual([(x["player"], x["outcome"], x["cause"]) for x in rows], [(1, "answered", None)])
+        self.assertNotIn(nid, s.agents[1]._threads, "the closed chat's conversation was let go")
 
     def test_a_bot_answers_at_once_while_sixteen_model_answers_wait_for_a_one_slot_machine(self):
         responders.reset()
