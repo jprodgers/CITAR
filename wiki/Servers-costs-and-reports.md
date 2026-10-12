@@ -134,12 +134,13 @@ it. What it gathers depends on whose it is:
 
 - **A member's report** covers what its owner may see: the activities of their own games, benchmark
   runs, probe runs, lab experiments and reports, and of those shared with them, with members or with
-  everyone. Another member's private game or run is not in it, not even by name.
+  everyone. Another member's private game or run is not in it, not even by name or id.
 - **Costs are counted on your own machines only.** An activity that also ran on the server's own
   machines or on another member's (your game's engine on the CITAR host, your seat on a machine shared
   with you) keeps its outcome and its usage, but not what it cost there; a data-quality note says how
   many such activities there were. The servers, hardware, costs-over-time and lifespan sections show
-  your machines and no one else's.
+  your machines and no one else's, and the data-quality notes about pricing (a model with no token
+  price, say) are about your machines only, never another's.
 - **Pooled averages** (Data: "plus pooled averages" or "pooled averages only") add, in the model
   comparison, per-model figures over the games other members pool (each game's own pooling setting
   and its owner's), each model shown only once enough different accounts are behind it, so no
@@ -147,7 +148,15 @@ it. What it gathers depends on whose it is:
 - **An administrator's report** covers everything on the server, every machine priced.
 
 A report is built when it runs, with what its owner may see then: sharing something with you later
-does not change a report already built; **Re-run** builds it again.
+does not change a report already built; **Re-run** builds it again. A report built while its owner's
+account is suspended (or otherwise not in good standing, an administrator's included) covers only
+what is published to everyone, with no machine priced.
+
+**Sharing a report shares the report.** Whoever it reaches (a member it is shared with, a visitor with
+its link) reads it, its title and its progress. Of how it was made they get only what they could have
+chosen themselves: the items and machines of its scope that they may see, and whether it has a written
+analysis, but not the analysis's instructions or the machine, model and profile that wrote it; a
+failed build shows them its error, not its traceback. Its owner and administrators see all of it.
 
 ### Sections
 

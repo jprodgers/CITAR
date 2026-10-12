@@ -223,9 +223,12 @@ and machine work end to end, over HTTP and the game socket, on a server-mode dev
 `citar admin create-user`, signs them in as a browser would (a cookie and the CSRF token), serves a
 fake OpenAI-compatible endpoint that records every connection it gets, runs the part's checks, and
 writes each check and its numbers to `<dir>/qa-<part>.json` (with the throwaway accounts' password, for
-the browser checklist). It exits 0 when every check passed, 1 when one failed, and 2, touching
-nothing, for the dev server's port 8799, a port in use, a directory holding anything without its
-`.qa-phase3` marker, the owner's `C:/dev/citar-play`, CITAR's own data directory or a source checkout.
+the browser checklist). It exits 2, touching nothing, for the dev server's port 8799, a port in use,
+a directory holding anything without its `.qa-phase3` marker, the owner's `C:/dev/citar-play`,
+CITAR's own data directory or a source checkout. Once it has taken the directory it never refuses: it
+exits 0 when every check passed and 1 when one failed, a directory it could not empty, a server that
+did not start, an account it could not make and a part that stopped on an error each counting as a
+failed check, with the evidence written all the same.
 Each package adds its part; `all` runs every part written so far:
 
 ```bash

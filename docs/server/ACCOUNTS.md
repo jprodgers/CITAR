@@ -178,11 +178,16 @@ A report is an owned item like the others, and what it **gathers** follows its o
 - it prices **only the owner's own machines**: an activity that also ran on the server's machines or
   on another member's keeps its outcome and its usage, but not what it cost there (a note in the
   report says how many did), and no other machine's configuration, tariff, depreciation or hardware
-  appears;
+  appears, nor a pricing note about one;
 - figures wider than that come only as **pooled averages** (the report's "Data" choice: what you may
   see, plus pooled averages, or pooled averages only), per model, over the games other accounts pool,
   each withheld until enough accounts are behind it;
-- an administrator's report sees everything, as before.
+- an administrator's report sees everything, as before;
+- an owner not in good standing when it is built (suspended, say; an administrator too) reaches only
+  what is published to everyone, with no machine priced;
+- whoever a report is shared with reads the report; of its specification they get only the items and
+  machines of its scope they may see and whether it has a written analysis (not its instructions or
+  the machine and model that wrote it), and of a failed build its error, not its traceback.
 
 A report shared by `link` or published `global` also has a page for people with no account:
 `/r/<key>` for a `link` report (its key, never its id), `/r/<id>` (or its key) for a `global` one, and

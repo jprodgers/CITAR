@@ -81,7 +81,9 @@ whoever holds it. A report's sharing block also gives `public_url`, its `/r/` pa
 by `link` or published. (`/api/shared/reports...`, the old report sharing routes, are gone: a report
 is shared through the routes below like every other item.) What a report gathers follows its owner
 ([Reports](REPORTS.md#what-a-report-contains)); its specification takes `"pooling": "own" | "both" |
-"pooled"`.
+"pooled"`. `GET /api/reports/{id}` gives a report's managers its whole metadata and specification;
+anyone else it reaches gets neither its traceback nor its owner, and a specification cut to what they
+could have chosen (the scope's items and machines they may see; of the narrative only `enabled`).
 A body of the wrong shape (an item named by anything but its id, a report specification whose parts
 are not objects or lists) is a 400. A report's narrative that names a pooled machine the caller is not
 admitted to is a 403, as a run's machine is.
