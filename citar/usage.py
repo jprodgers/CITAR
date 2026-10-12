@@ -275,8 +275,9 @@ def tracker() -> Tracker:
 
 # ----------------------------------------------------------------------------- game sessions
 def session_servers(s) -> dict:
-    """What a running game session holds right now: the host (its driver thread's CPU) and each LLM seat's server.
-    Returns None when the session is finished (the tracker then drops it)."""
+    """What a running game session holds right now: the host (its driver thread's CPU) and each machine one of its
+    leases is live on (design/phase3-features.md P3.3.5: a seat changed away, eliminated or made way holds nothing).
+    Nothing while it is paused or over; None when the session is finished (the tracker then drops it)."""
     if s.stopped:
         return None
     g = s.game
@@ -289,9 +290,8 @@ def session_servers(s) -> dict:
     if host:
         drv = getattr(s, "_driver", None)
         out[host] = {"threads": [drv.native_id] if drv is not None and drv.native_id else []}
-    for seat in s.seats:
-        if seat.type == "llm" and seat.llm.get("server_id") and g.is_alive(seat.player):
-            out.setdefault(seat.llm["server_id"], {"threads": []})
+    for server_id in s.leased_machines():
+        out.setdefault(server_id, {"threads": []})
     return out
 
 

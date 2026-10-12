@@ -269,7 +269,7 @@ class PooledWork(unittest.TestCase):
 
     def test_probe_runs_on_different_machines_do_not_wait_for_each_other(self):
         """One busy machine held up probe runs on every other machine, and runs went one at a time."""
-        from citar.pool import seats
+        from citar.pool import scheduler as prompt_scheduler
         runner = self._bare_runner()
         ids = []
         for n, server in (("busy", self.server_id), ("free", "sv-elsewhere"), ("third", "sv-third")):
@@ -286,7 +286,9 @@ class PooledWork(unittest.TestCase):
                 both.set()
             release.wait(10)
         runner._run = fake_run
-        seats.claim(self.server_id, "game “long one”")
+        # a lobby game's seat holding the busy machine (the leases are what occupied() lists)
+        held = prompt_scheduler.get().lease(self.server_id, "m1", kind="game", label="game “long one”",
+                                            ref=("game", "long-one"))
         loop = threading.Thread(target=runner._loop, daemon=True)
         try:
             loop.start()
@@ -296,7 +298,7 @@ class PooledWork(unittest.TestCase):
             self.assertEqual(waiting["status"], "waiting (machine busy)")
             self.assertIn("long one", waiting["waiting"])
         finally:
-            seats.release(self.server_id, "game “long one”")
+            held.release()
             release.set()
         loop.join(10)
         self.assertFalse(loop.is_alive(), "the dispatcher stops when everything has run")
@@ -331,13 +333,21 @@ class PooledWork(unittest.TestCase):
             work_queue.register("probe", lambda: [])
 
     def test_a_probe_run_holds_its_machine(self):
+        """A probe run's lease on its subject's machine (``ProbeRunner._lease``, held for the run) is what occupied()
+        lists, as the Queue page names it: a probe run, which never lends its slot."""
+        from citar import probes
         from citar.pool import seats
-        seats.claim(self.server_id, "probe run “x”")
+        run = {"name": "x", "llm": {"server_id": self.server_id, "model": "m1"}, "owner_id": None}
+        lease = probes.ProbeRunner._lease("pr-x", run, "probe:pr-x")
         try:
             self.assertEqual(seats.occupied(self.server_id), ["probe run “x”"])
+            self.assertEqual([(o["kind"], o["id"]) for o in seats.occupants(self.server_id)], [("probe", "pr-x")])
+            self.assertEqual((lease.kind, lease.lends, lease.activity), ("probe_case", False, "probe:pr-x"))
         finally:
-            seats.release(self.server_id, "probe run “x”")
+            lease.release()
         self.assertEqual(seats.occupied(self.server_id), [])
+        self.assertIsNone(probes.ProbeRunner._lease("pr-y", {"name": "y", "llm": {"provider": "bot"}}, "probe:pr-y"),
+                          "the bot as the subject holds no machine")
 
 
 class QuietHours(unittest.TestCase):

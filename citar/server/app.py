@@ -1769,7 +1769,9 @@ def probe_run_open(rid: str, case: str, rep: int, request: Request, me=Depends(r
     if not path.exists():
         raise HTTPException(404, "No saved game for that case.")
     owner_id = row.owner_id
-    s = manager.load(path, kind="probe")      # a probe's game, should the index not have it: never a lobby game
+    # a probe's game, should the index not have it (never a lobby game), opened to be looked at: it holds no machine
+    # until its subject is asked something (P3.3.3)
+    s = manager.load(path, kind="probe", leases=False)
     ownership.claim_quietly(s, owner_id, item=("probe_run", rid))
     return {"game_id": s.id, "spectator_token": s.spectator_token}
 
@@ -1860,7 +1862,8 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
     for sid in ids:
         waiting = [_queue_entry(sdb, me, dict(it, position=n + 1), cache)
                    for n, it in enumerate(i for i in items_waiting if i.get("server_id") == sid)]
-        busy = pool_seats.occupied(sid) if admin else _occupants(sdb, me, sid, cache)
+        # one line per holder: a game with two model seats on the machine holds two leases
+        busy = list(dict.fromkeys(pool_seats.occupied(sid))) if admin else _occupants(sdb, me, sid, cache)
         machines.append({"server_id": sid, "name": names.get(sid, sid), "online": hub().is_online(sid) or None,
                          "busy_with": busy, "waiting": waiting,
                          "running": [_queue_entry(sdb, me, i, cache) for i in active if i.get("server_id") == sid]})
@@ -1890,12 +1893,15 @@ def work_queue_view(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
 
 def _occupants(sdb: DbSession, user, server_id: str, cache: dict) -> list:
     """What is using a machine, as a member may be told: the names of the games and runs they may see, and
-    "someone's <kind>" for the rest (``pool.seats.occupants``)."""
+    "someone's <kind>" for the rest (``pool.seats.occupants``: the leases live on it), each holder once."""
     from ..pool import seats as pool_seats
-    out = []
+    out, seen = [], set()
     for occ in pool_seats.occupants(server_id):
         kind, ident = occ.get("kind"), occ.get("id")
         key = (kind, ident)
+        if (key, occ["label"]) in seen:
+            continue                     # another model seat of the same game
+        seen.add((key, occ["label"]))
         if key not in cache:
             cache[key] = _queue_access(sdb, user, kind, ident) if kind and ident else access.Access(set())
         out.append(occ["label"] if access.VIEW in cache[key] else _SOMEONES.get(kind, "someone's work"))

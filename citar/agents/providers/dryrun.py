@@ -7,6 +7,10 @@ import threading
 
 from .base import Conversation, StepResult, ToolCall
 
+#: What the dry run writes when it is asked for text with no tools (a report's narrative).
+DRY_NARRATIVE = ("(Dry run narrative.) This is where a model's written analysis of the figures would appear. The "
+                 "computed findings and charts below are produced without a model.")
+
 
 class DryRunConversation(Conversation):
     """A provider that answers plausibly with no model at all.
@@ -44,6 +48,9 @@ class DryRunConversation(Conversation):
         self._step += 1
         self.usage["input_tokens"] += 1000
         self.usage["output_tokens"] += 20
+        if not self._tools:
+            # a plain completion (a report's narrative): text, no orders
+            return StepResult(text=DRY_NARRATIVE, stop_reason="stop")
         if "respond_negotiation" in self._tools and "end_turn" not in self._tools:
             return self._negotiate()
         if self._step == 1:

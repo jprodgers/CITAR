@@ -90,8 +90,9 @@ TICKET_CLASSES = tuple(BASE_PRIORITY)
 BORROW_SECONDS = {"diplomat": 180.0, "chat": 120.0, "probe": 120.0, "report": 300.0, "test": 30.0}
 #: The largest ``max_tokens`` a borrowing ticket's step may ask for, by class (rule 5).
 BORROW_MAX_TOKENS = {"diplomat": 2048, "chat": 1024, "probe": 1024, "report": 4096, "test": 256}
-#: A lease's kind: a lobby game (lends its slot while idle), a benchmark game, a probe's turn case (neither lends).
-LEASE_KINDS = ("game", "benchmark", "probe_case")
+#: A lease's kind: a lobby game (lends its slot while idle), a benchmark game, a probe's turn case, a report's narrative
+#: (none of the last three lends; package 3-09 moves narratives onto tickets).
+LEASE_KINDS = ("game", "benchmark", "probe_case", "report")
 #: Calls a ticket may make once started, unless its maker says otherwise.
 DEFAULT_STEPS = 8
 #: How long a benchmark lease's first request waits for pooled requests to drain (``benchmark_drain_seconds``).
@@ -381,15 +382,21 @@ class Binding:
 
 
 class Lease(Binding):
-    """A model seat that plays every turn (task class *full*; P3.3.3). It outlives the seat's agents."""
+    """A model seat that plays every turn (task class *full*; P3.3.3). It outlives the seat's agents. ``game`` is the
+    game session whose seat holds it (None for a probe run's or a report's), and ``ref`` the work it serves as the
+    shared queue names it (``(kind, id)``: a game, a benchmark run, a probe run, a report), for ``pool.seats.occupants``
+    and the Queue page."""
     is_lease = True
     task_class = "full"
 
-    def __init__(self, sched, machine, model, *, kind: str, **kw):
+    def __init__(self, sched, machine, model, *, kind: str, game: Optional[str] = None, ref: Optional[tuple] = None,
+                 **kw):
         if kind not in LEASE_KINDS:
             raise ValueError(f"Unknown lease kind {kind!r}.")
         super().__init__(sched, machine, model, **kw)
         self.kind = kind
+        self.game = game
+        self.ref = tuple(ref) if ref else None
         self.lends = kind == "game"
         self.active = False
         self.inflight = 0
@@ -435,7 +442,8 @@ class Lease(Binding):
     def client(self) -> dict:
         """The lease as a status listing shows it."""
         return {"id": self.id, "kind": self.kind, "label": self.label, "model": self.model, "active": self.active,
-                "in_flight": self.inflight, "drain_s": self.drain_s, "contaminated": self.contaminated}
+                "in_flight": self.inflight, "drain_s": self.drain_s, "contaminated": self.contaminated,
+                "game": self.game, "ref": list(self.ref) if self.ref else None}
 
 
 class Ticket(Binding):
@@ -665,6 +673,9 @@ class Machine:
                     if lease.contaminated:
                         log.warning("benchmark lease on %s went ahead after %.0f s with %d pooled request(s) still "
                                     "in flight: its timing is contaminated", self.id, lease.drain_s, tickets)
+                    # its game records the drain in the benchmark job's result (package 3-08)
+                    self._status(lease, {"state": "drained", "drain_s": lease.drain_s,
+                                         "contaminated": lease.contaminated})
                 chosen = r
                 break
             if chosen is not None:
@@ -1262,12 +1273,15 @@ class Scheduler:
     # -------------------------------------------------------------- bindings
     def lease(self, server_id: Optional[str], model: str = "", *, kind: str = "game", activity: Optional[str] = None,
               consumer: Optional[str] = None, label: str = "", cap: int = 0,
-              on_status: Optional[Callable[[dict], None]] = None) -> Lease:
-        """A live lease for a seat on ``server_id`` (an unscheduled one when the machine has no id). A benchmark lease
-        starts the machine's drain."""
+              on_status: Optional[Callable[[dict], None]] = None, game: Optional[str] = None,
+              ref: Optional[tuple] = None) -> Lease:
+        """A live lease on ``server_id`` (an unscheduled one when the machine has no id): a game seat's (``game``, the
+        session's id), a probe run's or a report's; ``ref`` is the work it serves as the shared queue names it. A
+        benchmark lease starts the machine's drain, and its ``on_status`` hears ``drained`` (with ``drain_s`` and
+        ``contaminated``) when its first request goes ahead."""
         m = self.machine(server_id)
         lease = Lease(self, m, model, kind=kind, activity=activity, consumer=consumer, label=label, cap=cap,
-                      on_status=on_status)
+                      on_status=on_status, game=game, ref=ref)
         if m is not None:
             for conv in m.add_lease(lease):
                 try:
@@ -1310,8 +1324,9 @@ class Scheduler:
                 m.open_tickets.add(t)
         return t
 
-    def leases(self, server_id: str) -> list[Lease]:
-        """The leases live on a machine (package 3-08's benchmark job rule reads them)."""
+    def leases(self, server_id: Optional[str]) -> list[Lease]:
+        """The leases live on a machine, oldest first: what ``pool.seats.occupied`` lists, and what a benchmark job
+        waits for (P3.3.5)."""
         with self._lock:
             m = self.machines.get(server_id)
         if m is None:

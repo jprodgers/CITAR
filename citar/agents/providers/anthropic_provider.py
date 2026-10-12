@@ -56,11 +56,12 @@ class AnthropicConversation(Conversation):
             "model": self.model,
             "max_tokens": int(self.cfg.get("max_tokens") or 16000),
             "system": self.system,
-            "tools": self.tools,
             "messages": self.messages,
             "cache_control": {"type": "ephemeral"},
             "thinking": {"type": "adaptive", "display": "summarized"},
         }
+        if self.tools:
+            params["tools"] = self.tools        # a plain completion (a report's narrative) offers none
         if self.cfg.get("effort"):
             params["output_config"] = {"effort": self.cfg["effort"]}
         client = self.client

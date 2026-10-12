@@ -8,83 +8,53 @@ the machine, whichever its reach.
 """
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 from typing import Optional
 
 # ---------------------------------------------------------------------------- who is using a machine
-# Game sessions are found through every SessionManager; work that runs games outside one (a probe
-# case plays in an unregistered session) holds a claim instead, for as long as it runs.
-#: server id -> {holder label: (queue kind, id) of the work, or None}
-_claims: dict[str, dict] = {}
-_claims_lock = threading.Lock()
-
-
-def claim(server_id: Optional[str], holder: str, ref: Optional[tuple] = None) -> None:
-    """Mark a machine as in use by something that is not a registered game (a probe run, say). ``ref`` is the work's
-    (queue kind, id), so the Queue page can name it only to those who may see it (``occupants``)."""
-    if server_id:
-        with _claims_lock:
-            _claims.setdefault(server_id, {})[holder] = ref
-
-
-def release(server_id: Optional[str], holder: str) -> None:
-    """Undo :func:`claim`."""
-    if server_id:
-        with _claims_lock:
-            _claims.get(server_id, {}).pop(holder, None)
+# A machine is in use by the leases live on it (design/phase3-features.md P3.3.5): every living model seat of a
+# registered game (made when its session is registered, released when the seat changes, is eliminated or the game ends,
+# stops, crashes or makes way), a probe run's and a report's narrative's. Before package 3-08 this module walked every
+# session's seats and kept a table of "claims" for the work that was not a registered game; the scheduler's leases
+# replace both, so what waits for a machine and what the scheduler serves are the same list.
 
 
 def occupied(server_id: Optional[str], exclude: frozenset = frozenset()) -> list[str]:
-    """What is using a model server right now: the names of live games with an AI seat on it, and claims.
+    """What is using a model machine right now: the label of every lease live on it, oldest first, one per lease (a
+    game with two model seats on the machine is there twice; ``held_text`` names each holder once). ``exclude`` holds
+    game session ids the caller already accounts for (its own games).
 
-    A game counts while it is being played - not finished, not closed - even between its AI's turns,
-    because its next turn will want the machine. A paused game counts too: it resumes where it left
-    off. ``exclude`` holds session ids the caller already accounts for (its own games).
-
-    This is what lets queued benchmarks and probes wait for a machine instead of fighting a running
-    game for its single slot.
+    A game counts from its registration (created, loaded paused, restored, reloaded by its benchmark, launched from a
+    scenario) to its end, even between its seats' turns and while a person, quiet hours or a lost connection pauses
+    it, because its next turn will want the machine; a game that paused to make way for higher-priority work, an
+    eliminated seat and a finished game do not. This is what lets queued benchmarks, probe runs and reports wait for a
+    machine instead of fighting a running game for its slot.
     """
     return [occ["label"] for occ in occupants(server_id, exclude)]
 
 
 def occupants(server_id: Optional[str], exclude: frozenset = frozenset()) -> list[dict]:
-    """``occupied`` with what each holder is: {"label", "kind" (the queue's kind: game, benchmark, probe, report;
-    None when a claim did not say), "id" (a game's id, a run's)}. A benchmark job's game is a game of kind
-    benchmark, named by its run."""
+    """``occupied`` with what each lease serves: {"label", "kind" (the queue's kind: game, benchmark, probe, report;
+    None when the lease names none), "id" (a game's id, a run's or a report's), "game" (the session id of a game
+    seat's lease)}. A benchmark job's game is a game of kind benchmark, named by its run."""
     if not server_id:
         return []
-    from ..server.session import all_sessions
+    from . import scheduler
+    sched = scheduler.current()
+    if sched is None:
+        return []
     out = []
-    for s in all_sessions():
-        if s.id in exclude or s.stopped or s.game.phase != "playing":
+    for lease in sched.leases(server_id):
+        if lease.game is not None and lease.game in exclude:
             continue
-        # a game that paused to make way for higher-priority work gives the machine up until its turn comes
-        if s.paused and (s.pause_reason or {}).get("kind") == "queue":
-            continue
-        # only a seat still in the game: an eliminated model will never be asked anything again, even if
-        # the bots play on to the end
-        if any(seat.type == "llm" and (seat.llm or {}).get("server_id") == server_id and _alive(s, seat.player)
-               for seat in s.seats):
-            bench = getattr(s, "benchmark", None) or {}
-            if bench.get("run_id"):
-                out.append({"label": f"game “{s.name}”", "kind": "benchmark", "id": bench["run_id"]})
-            else:
-                out.append({"label": f"game “{s.name}”", "kind": "game", "id": s.id})
-    with _claims_lock:
-        held = dict(_claims.get(server_id, {}))
-    for holder in sorted(held):
-        kind, ident = held[holder] or (None, None)
-        out.append({"label": holder, "kind": kind, "id": ident})
+        kind, ident = lease.ref or (None, None)
+        out.append({"label": lease.label, "kind": kind, "id": ident, "game": lease.game})
     return out
 
 
-def _alive(session, pid: int) -> bool:
-    """Whether a seat's civilization is still in the game."""
-    try:
-        return session.game.is_alive(pid)
-    except Exception:
-        return True
+def held_text(held: list) -> str:
+    """The holders of a machine as a sentence part, each named once ("game “a”, report “b”")."""
+    return ", ".join(dict.fromkeys(held))
 
 
 def max_parallel(pooled: dict) -> int:

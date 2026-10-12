@@ -265,7 +265,7 @@ class ReportRunner:
             return f"{name} is in its quiet hours until {servers.restricted_text(sid, end)}"
         held = pool_seats.occupied(sid)
         if held:
-            return f"{name} is in use by {', '.join(held)}"
+            return f"{name} is in use by {pool_seats.held_text(held)}"
         m = self.meta(rid)
         first = work_queue.ahead_of(sid, "report", (-work_queue.priority("report", rid), float(m.get("created") or 0)))
         if first is not None:
@@ -355,22 +355,37 @@ class ReportRunner:
                 if rid in self.queue:
                     self.queue.remove(rid)
             self._set(rid, waiting=None)
-            sid = self._machine(rid)
-            from ..pool import seats as pool_seats
-            holder = f"report “{self.meta(rid).get('title') or rid}”"
-            pool_seats.claim(sid, holder, ("report", rid))     # benchmarks and probes wait while the model writes
+            lease = None
             self._current = rid
             try:
-                self.run(rid)
+                lease = self._lease(rid)
+                self.run(rid, lease=lease)
             except Exception as e:
                 self._set(rid, status="failed", error=f"{type(e).__name__}: {e}", trace=traceback.format_exc(limit=8),
                           finished=_now())
             finally:
                 self._current = None
-                pool_seats.release(sid, holder)
+                if lease is not None:
+                    lease.release()
 
-    def run(self, rid: str):
-        """Build one report: gather (what its owner may see: ``reach.Reach``), cost, render, write."""
+    def _lease(self, rid: str):
+        """The lease a report whose analysis a model writes holds on that machine while it is built
+        (design/phase3-features.md P3.3.3): non-lending (``report``), so ``occupied()`` lists the report and queued
+        benchmarks and probe runs wait for it, and the narrative's request is its. None for a report without a
+        narrative. Package 3-09 makes the narrative a ``report`` ticket instead."""
+        sid = self._machine(rid)
+        if not sid:
+            return None
+        from ..pool import scheduler as prompt_scheduler, seats as pool_seats
+        meta = self.meta(rid)
+        owner = meta.get("owner_id")
+        return prompt_scheduler.get().lease(
+            sid, kind="report", activity=f"report:{rid}", consumer=owner, label=f"report “{meta.get('title') or rid}”",
+            cap=pool_seats.consumer_cap(owner, sid), ref=("report", rid))
+
+    def run(self, rid: str, lease=None):
+        """Build one report: gather (what its owner may see: ``reach.Reach``), cost, render, write. ``lease`` is the
+        report's on its narrative's machine (``_lease``), which the narrative's request is made under."""
         from .data import gather
         from .reach import Reach
         from .render import render, narrative_brief
@@ -382,7 +397,7 @@ class ReportRunner:
         narrative, note = "", ""
         if spec["narrative"]["enabled"]:
             self._set(rid, progress="Writing the analysis with a model")
-            narrative, note = self._narrative(rid, spec, narrative_brief(data))
+            narrative, note = self._narrative(rid, spec, narrative_brief(data), lease)
         self._set(rid, progress="Rendering")
         page, summary = render(data, narrative, note)
         from ..fsutil import write_text
@@ -390,8 +405,9 @@ class ReportRunner:
         self._set(rid, status="done", finished=_now(), progress="Done", summary=summary, seconds=round(_now() - t0, 1),
                   size=len(page.encode("utf-8")))
 
-    def _narrative(self, rid: str, spec: dict, brief: str) -> tuple[str, str]:
-        """Ask the chosen model for the written analysis; its usage is recorded as a 'report' activity."""
+    def _narrative(self, rid: str, spec: dict, brief: str, lease=None) -> tuple[str, str]:
+        """Ask the chosen model for the written analysis, under the report's ``lease`` (a scheduled request like every
+        model call, P3.3.4: the usage ledger's listener meters it to the report's activity)."""
         from .. import servers, usage
         n = spec["narrative"]
         sv = servers.find(n["server_id"])
@@ -420,10 +436,17 @@ class ReportRunner:
                     servers.ensure_model(sv, cfg["model"], cfg.get("load"))
                 except Exception:
                     pass
-            t0 = time.perf_counter()
-            text, tokens, served = complete(cfg, NARRATIVE_SYSTEM, prompt)
-            secs = time.perf_counter() - t0
-            tr.llm(act, sv["id"], served or cfg["model"], secs, **tokens)
+            own = None
+            if lease is None:           # built outside the runner's loop (a script): a lease for the narrative alone
+                from ..pool import scheduler as prompt_scheduler
+                lease = own = prompt_scheduler.get().lease(sv["id"], kind="report", activity=act,
+                                                           label=f"report “{spec['title']}”", ref=("report", rid))
+            try:
+                lease.set_model(cfg["model"])
+                text, secs = complete(cfg, NARRATIVE_SYSTEM, prompt, lease)
+            finally:
+                if own is not None:
+                    own.release()
             return text, f"Written by {cfg['model']} on {sv['name']} in {secs:.0f}s from the computed figures above."
         except Exception as e:
             return "", f"The narrative failed: {type(e).__name__}: {e}"
@@ -434,64 +457,23 @@ class ReportRunner:
             tr.flush()
 
 
-def complete(cfg: dict, system: str, prompt: str) -> tuple[str, dict, Optional[str]]:
-    """One plain completion (no tools). Returns (text, token counts for the ledger, model that served it)."""
-    provider = cfg.get("provider")
-    if provider == "worker":
-        return _complete_on_worker(cfg, system, prompt)
-    if provider == "dryrun":
-        time.sleep(float(cfg.get("dry_run_delay") or 0))
-        text = ("(Dry run narrative.) This is where a model's written analysis of the figures would appear. The computed "
-                "findings and charts below are produced without a model.")
-        return text, {"input_tokens": len(prompt) // 4, "output_tokens": len(text) // 4}, cfg.get("model")
-    if provider == "anthropic":
-        import anthropic
-        client = anthropic.Anthropic(api_key=cfg.get("api_key"), base_url=cfg.get("base_url") or None, max_retries=3)
-        params = {"model": cfg["model"], "max_tokens": int(cfg.get("max_tokens") or 8000), "system": system,
-                      "messages": [{"role": "user", "content": prompt}]}
-        if cfg.get("effort"):
-            params["output_config"] = {"effort": cfg["effort"]}
-        r = client.messages.create(**params)
-        if r.stop_reason == "refusal":
-            raise RuntimeError("the model declined to write the analysis")
-        text = "\n".join(b.text for b in r.content if b.type == "text")
-        u = r.usage
-        return text, {"input_tokens": u.input_tokens or 0, "output_tokens": u.output_tokens or 0,
-                      "cache_read": getattr(u, "cache_read_input_tokens", 0) or 0,
-                      "cache_write": getattr(u, "cache_creation_input_tokens", 0) or 0}, getattr(r, "model", None)
-    from openai import OpenAI
-    client = OpenAI(base_url=cfg.get("base_url") or None, api_key=cfg.get("api_key") or "not-needed",
-                    timeout=float(cfg.get("timeout") or 1800), max_retries=1)
-    params = {"model": cfg["model"], "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
-    if cfg.get("reasoning_effort"):
-        params["extra_body"] = {"reasoning_effort": cfg["reasoning_effort"]}
-    if cfg.get("max_tokens"):
-        params["max_tokens"] = int(cfg["max_tokens"])
-    r = client.chat.completions.create(**params)
-    text = r.choices[0].message.content or ""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
-    toks = {}
-    if r.usage:
-        toks = {"input_tokens": r.usage.prompt_tokens or 0, "output_tokens": r.usage.completion_tokens or 0}
-    return text, toks, cfg.get("model")
-
-
-def _complete_on_worker(cfg: dict, system: str, prompt: str, busy_wait: float = 1800) -> tuple[str, dict, Optional[str]]:
-    """The same, on a machine reached through its helper. A busy machine (another game's turn) is waited for."""
-    from ..agents.providers.worker_provider import WorkerConversation, WorkerConnectionError
-    conv = WorkerConversation(dict(cfg, tool_mode="native"), system, [])
-    conv.add_user_text(prompt)
-    deadline = time.time() + busy_wait
-    while True:
-        try:
-            step = conv.step()
-            break
-        except WorkerConnectionError as e:
-            if time.time() > deadline:
-                raise
-            time.sleep(5 if getattr(e, "refusal", "") == "busy" else 15)
+def complete(cfg: dict, system: str, prompt: str, binding) -> tuple[str, float]:
+    """One plain completion (no tools) under ``binding`` (a lease or a ticket of ``citar.pool.scheduler``): the one path
+    every model call takes (``make_conversation``, P3.3.4), whatever the provider, so the request waits for its
+    machine's slot rather than polling a busy helper, and the usage ledger's listener meters it. Returns the text,
+    without a model's ``<think>`` block, and the generation seconds the scheduler measured."""
+    from ..agents.providers import make_conversation
+    conv = make_conversation(dict(cfg, tool_mode="native"), system, [], binding=binding)
+    conv.request_timeout = float(cfg.get("timeout") or 1800)
+    try:
+        conv.add_user_text(prompt)
+        step = conv.step()
+    finally:
+        conv.close()
+    if step.stop_reason == "refusal":
+        raise RuntimeError("the model declined to write the analysis")
     text = re.sub(r"<think>.*?</think>", "", step.text or "", flags=re.S).strip()
-    return text, {"input_tokens": conv.usage.get("input_tokens", 0), "output_tokens": conv.usage.get("output_tokens", 0)}, cfg.get("model")
+    return text, float(getattr(conv, "last_gen_s", 0.0) or 0.0)
 
 
 def scope_options(reach=None) -> dict:

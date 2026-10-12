@@ -645,9 +645,12 @@ def test_server(server_id: str, request: Request, model: str = "",
                     "cancelled": ticket.state == "cancelled"}
         except Exception as exc:
             if ticket.state == "cancelled":
-                return {"ok": False, "stage": "completion", "model": chosen, "cancelled": True,
-                        "reason": f"No reply within {wait:.0f} s: the test was cancelled (a helper that is still "
-                                  "generating it keeps its slot until it finishes)."}
+                code = ticket.error.code if ticket.error is not None else "cancelled"
+                why = ("a benchmark took the machine" if code == "benchmark" else
+                       f"no reply within {wait:.0f} s")
+                return {"ok": False, "stage": "completion", "model": chosen, "cancelled": True, "code": code,
+                        "reason": f"The test was cancelled: {why} (a helper that is still generating it keeps its "
+                                  "slot until it finishes)."}
             cause = exc.__cause__
             return {"ok": False, "stage": "completion", "model": chosen, "reason": str(exc),
                     "refusal": getattr(cause, "refusal", "") or getattr(exc, "refusal", ""),
