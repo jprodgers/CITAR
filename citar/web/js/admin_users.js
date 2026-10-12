@@ -212,7 +212,7 @@ function fmt(v) {
 
 // The audit log: filters and pages of 100, newest first.
 function auditCard() {
-  const actor = el("input", { placeholder: "Who (username, or admin_cli)", "aria-label": "Actor" });
+  const actor = el("input", { placeholder: "Who (or admin_cli)", title: "A username, or admin_cli for the command line's changes", "aria-label": "Actor" });
   const action = el("input", { placeholder: "Action (user.* for a prefix)", "aria-label": "Action" });
   const objType = el("input", { placeholder: "Object type", "aria-label": "Object type", style: { width: "120px" } });
   const objId = el("input", { placeholder: "Object id", "aria-label": "Object id" });
