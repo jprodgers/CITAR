@@ -25,7 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-import tests  # noqa: F401
+import tests
 # before this module's own database below: importing it points the environment at that module's
 from tests.test_seat_blocks import INLINE, SECRET_VAR, NoOutbound
 

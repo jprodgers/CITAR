@@ -5,7 +5,7 @@ probe runs, experiments and reports and of those shared with them, with costs on
 administrator's covers everything. ``/r/{slug}`` serves a `link` report by its key and a `global` one by its id (or
 key), and 404s otherwise. The usage ledger here is made up, in a folder of its own.
 """
-import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import tests  # temporary saves folder and server registry; must be imported before citar
 import json
 import os
 import secrets

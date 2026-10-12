@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import tests  # noqa: F401
+import tests
 
 _TMP = Path(tempfile.mkdtemp(prefix="citar_setup_"))
 os.environ["CITAR_DATA_DIR"] = str(_TMP)

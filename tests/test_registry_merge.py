@@ -14,7 +14,7 @@ server's environment; and LM Studio's SDK), by another member, an administrator 
 Gate 5: a suite naming the host and a helper machine resolves both through their rows, and a run's jobs start.
 Plus: the seeded test database against ``TEST_REGISTRY``, and ``servers.register_offline`` (``citar setup --local``).
 """
-import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
+import tests  # temporary saves folder and server registry; must be imported before citar
 import contextlib
 import copy
 import io
@@ -23,9 +23,7 @@ import logging
 import os
 import shutil
 import tempfile
-import time
 import unittest
-from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -41,12 +39,12 @@ os.environ.setdefault("CITAR_SECRET_KEY", "test-secret-key-that-is-long-enough-t
 os.environ["CITAR_REQUIRE_HTTPS"] = "0"
 os.environ["CITAR_BEHIND_PROXY"] = "0"
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from citar import db, keystore, pool, servers, settings  # noqa: E402
-from citar.auth import accounts, audit, policy, sessions  # noqa: E402
-from citar.db.models import AuditLog, Base, Server, Setting, User, WorkerToken  # noqa: E402
-from citar.pool import registry_import  # noqa: E402
+from citar import db, keystore, pool, servers, settings
+from citar.auth import accounts, policy, sessions
+from citar.db.models import AuditLog, Base, Server, User
+from citar.pool import registry_import
 
 settings.reset()
 
