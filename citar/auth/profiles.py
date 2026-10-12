@@ -52,7 +52,7 @@ PROBATION_GLOBAL = "New accounts can show their profile to members only."
 
 #: Characters a name or a bio may not hold: control characters, and the bidirectional overrides and isolates that
 #: make text read differently from what it is.
-_BIDI = dict.fromkeys(map(ord, "‪‫‬‭‮⁦⁧⁨⁩‎‏"))
+_BIDI = dict.fromkeys(map(ord, "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f"))
 
 
 class ProfileError(ValueError):
@@ -132,7 +132,9 @@ def clean_links(links) -> list:
 
 def clean_levels(user: User, value) -> dict:
     """The account's field levels with ``value`` (some of ``FIELDS``, each one of ``FIELD_LEVELS``) applied over its
-    current choices. `global` is refused while the account is on probation (403)."""
+    current choices. Making a field `global` is refused while the account is on probation (403); a field it made
+    `global` before it was put on probation may stay so (it shows to members only meanwhile, ``User.field_levels``),
+    so that the Account page, which sends every field, still saves."""
     if not isinstance(value, dict):
         raise ProfileError("field_visibility is an object of {field: level}.")
     unknown = sorted(set(value) - set(FIELDS))
@@ -141,8 +143,10 @@ def clean_levels(user: User, value) -> dict:
     for field, level in value.items():
         if level not in FIELD_LEVELS:
             raise ProfileError(f"A field is {', '.join(FIELD_LEVELS)}, not {level!r} ({field}).")
-    if user.status == "probation" and any(level == "global" for level in value.values()):
-        raise ProfileError(PROBATION_GLOBAL, status=403)
+    if user.status == "probation":
+        was = user.chosen_levels()
+        if any(level == "global" and was[field] != "global" for field, level in value.items()):
+            raise ProfileError(PROBATION_GLOBAL, status=403)
     current = user.field_visibility if isinstance(user.field_visibility, dict) else {}
     merged = {f: v for f, v in current.items() if f in FIELDS and v in FIELD_LEVELS}
     merged.update(value)

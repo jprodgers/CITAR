@@ -48,7 +48,8 @@ def _reset():
     Base.metadata.drop_all(db.engine())
     db.create_all()
     policy.invalidate()
-    shutil.rmtree(_TMP / "avatars", ignore_errors=True)
+    # the data directory as the server finds it (another test module may have set CITAR_DATA_DIR after this one)
+    shutil.rmtree(profiles.avatars_dir(), ignore_errors=True)
 
 
 class Base_(unittest.TestCase):
@@ -226,7 +227,7 @@ class ProfileEdits(Base_):
     """PUT /api/auth/me: the bio, the links, the levels, the directory switch."""
 
     def test_the_bio_is_cleaned_and_limited(self):
-        r = self.put_me("max", {"bio": "  Hello\x07 there‮!\r\nLine two\n\n\n\nfar  "})
+        r = self.put_me("max", {"bio": "  Hello\x07 there\u202e!\r\nLine two\n\n\n\nfar  "})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(self.user("max").bio, "Hello there!\nLine two\n\nfar")
         self.assertEqual(self.put_me("max", {"bio": "x" * 1000}).status_code, 200)
@@ -235,6 +236,11 @@ class ProfileEdits(Base_):
         self.assertIn("1,000", r.json()["detail"])
         self.assertEqual(self.user("max").bio, "x" * 1000)
         self.assertEqual(self.put_me("max", {"bio": ["not", "text"]}).status_code, 400)
+
+    def test_a_new_accounts_display_name_is_cleaned_too(self):
+        with db.session() as s:
+            user = accounts.create_user(s, handle="spoof", display_name="admin\u202e\x00 team ", status="active")
+            self.assertEqual(user.display_name, "admin team")
 
     def test_links_take_three_web_addresses(self):
         good = [{"label": "a", "url": "https://example.com/a"}, {"label": "", "url": "http://example.org"},
@@ -271,6 +277,19 @@ class ProfileEdits(Base_):
         self.assertEqual(r.json()["detail"], profiles.PROBATION_GLOBAL)
         self.assertEqual(self.put_me("newt", {"field_visibility": {"bio": "private", "profile": "server"}}).status_code,
                          200, "members-only and private are a new account's too")
+
+    def test_a_field_made_global_before_probation_may_stay_while_the_rest_saves(self):
+        """The Account page sends every field: an account put on probation after it made one `global` still saves its
+        profile, the field held to members meanwhile; making another field `global` is still refused."""
+        self.assertEqual(self.put_me("max", {"field_visibility": {"profile": "global", "bio": "global"}}).status_code, 200)
+        with db.session() as s:
+            s.get(User, self.ids["max"]).status = "probation"
+        everything = {**self.user("max").chosen_levels(), "display_name": "private"}
+        r = self.put_me("max", {"bio": "still mine", "field_visibility": everything})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.user("max").bio, "still mine")
+        self.assertEqual(self.get("/api/users/max").status_code, 404, "held to members on probation")
+        self.assertEqual(self.put_me("max", {"field_visibility": {**everything, "links": "global"}}).status_code, 403)
 
     def test_a_refused_part_changes_nothing(self):
         r = self.put_me("max", {"bio": "new bio", "display_name": "New Name",
@@ -516,7 +535,7 @@ class Avatars(Base_):
                                 headers=self.headers[who], **kw)
 
     def mine(self, handle="pat") -> list:
-        folder = _TMP / "avatars"
+        folder = profiles.avatars_dir()
         return sorted(p.name for p in folder.glob(f"{self.ids[handle]}-*")) if folder.exists() else []
 
     def test_the_corpus_is_what_the_gate_names(self):
@@ -604,7 +623,7 @@ class Avatars(Base_):
             changed = {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
             outside = sorted(k for k in changed if not (root == paths.data_dir() and k.startswith("avatars/")))
             self.assertEqual(outside, [], f"written under {root}")
-        self.assertEqual(sorted(p.name for p in (_TMP / "avatars").iterdir()), self.mine("max"),
+        self.assertEqual(sorted(p.name for p in profiles.avatars_dir().iterdir()), self.mine("max"),
                          "only max's file is left: no temporary file, nothing of pat's")
 
     def test_bad_uploads(self):
