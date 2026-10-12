@@ -299,12 +299,51 @@ class Ledger:
     # -------------------------------------------------------------- writers (any thread, never blocking)
     def step(self, event) -> None:
         """A model step of a scheduled machine (the scheduler's ``StepEvent``; ``reservation`` the budget's hold, if
-        any). One that ran on no machine row (an inline block's) is the metrics', not the ledger's."""
+        any). One that ran on no machine row (an inline block's) is the metrics', not the ledger's.
+
+        The step is priced here, on the caller's thread, from what the process has cached (the machine's row, the
+        classes, the model's prices), and its budget hold settled in memory at once (P3.4.6: the listener settles):
+        the next request of the same budget is checked against what this one cost, not against a reservation the
+        writer has yet to settle. The writer then writes the event and the budget's entry."""
+        from .pool import budgets
+        hold = getattr(event, "reservation", None)
         if not getattr(event, "machine", None):
-            from .pool import budgets
-            budgets.keeper().release(getattr(event, "reservation", None))
+            budgets.keeper().release(hold)
             return
-        self._put(("step", event))
+        try:
+            priced = self.price(event)
+        except Exception:
+            log.warning("could not price a model step on %s; it is written unpriced", event.machine, exc_info=True)
+            priced = {"kind": "gpu", "credits": 0.0, "flags": {"unpriced": True}}
+        if hold is not None:
+            budgets.keeper().settle(hold, priced["credits"])
+        if priced["kind"] != "cpu" and event.model:
+            key = (event.machine, event.model)
+            old = self._means.get(key)
+            self._means[key] = priced["credits"] if old is None else old + EWMA_ALPHA * (priced["credits"] - old)
+        self._put(("step", event, priced))
+
+    def price(self, ev) -> dict:
+        """A model step's kind (``gpu`` or ``api``), credits and flags (P3.4.3), from the cached machine, classes and
+        prices."""
+        from . import servers
+        facts = servers.machine_facts(ev.machine) or {}
+        classes = self.classes()
+        flags = {k: True for k in ("overreported", "capped_tokens") if (ev.flags or {}).get(k)}
+        if facts.get("kind") == "api":
+            u = ev.usage or {}
+            cls = class_of(facts, "api", classes)
+            cost = token_cost(_api_price(ev.machine, ev.model, datetime.fromtimestamp(ev.at, timezone.utc)), {
+                "tokens_in": int(u.get("input_tokens", 0) or 0), "tokens_out": int(u.get("output_tokens", 0) or 0),
+                "tokens_cache_read": int(u.get("cache_read_input_tokens", 0) or 0),
+                "tokens_cache_write": int(u.get("cache_creation_input_tokens", 0) or 0)})
+            if cost is None:
+                flags["unpriced"] = True
+            return {"kind": "api", "credits": round(credits_for("api", cost=cost, rate=cls["rate"] if cls else 0.0), 6),
+                    "flags": flags}
+        cls = class_of(facts, "gpu", classes)
+        return {"kind": "gpu", "credits": round(credits_for("gpu", gen_s=ev.gen_s, rate=cls["rate"] if cls else 0.0),
+                                                6), "flags": flags}
 
     def cpu(self, activity: Optional[str], seconds: float, *, at: Optional[float] = None,
             machine: Optional[str] = None, request_id: Optional[str] = None) -> None:
@@ -343,10 +382,30 @@ class Ledger:
             self._hurry.clear()
 
     def stop(self, timeout: float = 10.0) -> bool:
-        """Drain the queue (the writer writes what it has) and stop both threads: the server's shutdown."""
+        """Drain the queue (the writer writes what it has) and stop both threads: the server's shutdown. A ledger
+        with no threads (``background`` off) writes what it has on the calling thread."""
+        if not self.background:
+            self.drain()
+            self._stop.set()
+            return True
         ok = self.flush(timeout)
         self._stop.set()
         return ok
+
+    def drain(self) -> int:
+        """Write everything queued now, on the calling thread, in batches (a ledger with no threads: tests, and a
+        stop without them). Returns the rows written."""
+        written = 0
+        while True:
+            batch = []
+            while len(batch) < BATCH_EVENTS:
+                try:
+                    batch.append(self.q.get_nowait())
+                except _queue.Empty:
+                    break
+            if not batch:
+                return written
+            written += self.write(batch)
 
     # -------------------------------------------------------------- threads
     def ensure_threads(self) -> None:
@@ -420,17 +479,12 @@ class Ledger:
 
     # -------------------------------------------------------------- the writer's work
     def write(self, batch: list) -> int:
-        """Price and insert a batch, settling its budget reservations in the same transaction. Returns the rows
-        written (0 when there is no database: then nothing is kept, and each hold is released)."""
+        """Insert a batch, with the budget entries its steps settled, in one transaction. Returns the rows written
+        (0 when there is no database: then nothing is kept)."""
         from . import db
         from .pool import budgets
-        rows: list = []
-        settled: list = []
-        holds = [getattr(ev, "reservation", None) for kind, ev in batch if kind == "step"]
         try:
             if not db.configured():
-                for r in holds:
-                    budgets.keeper().release(r)
                 return 0
             from sqlalchemy import insert
             from .db.models import ComputeEvent
@@ -440,19 +494,6 @@ class Ledger:
                     s.execute(insert(ComputeEvent.__table__), rows)
                 if settled:
                     budgets.settle_entries(s, settled)
-            k = budgets.keeper()
-            done = set()
-            for r, credits in settled:
-                k.settle(r, credits)
-                done.add(id(r))
-            for r in holds:
-                if r is not None and id(r) not in done:
-                    k.release(r)
-            for row in rows:
-                if row["kind"] != "cpu" and row["model"]:
-                    key = (row["machine_id"], row["model"])
-                    old = self._means.get(key)
-                    self._means[key] = row["credits"] if old is None else old + EWMA_ALPHA * (row["credits"] - old)
             self.written += len(rows)
             for fn in list(self.listeners):
                 try:
@@ -462,8 +503,6 @@ class Ledger:
             return len(rows)
         except Exception:
             self.failures += 1
-            for r in holds:
-                budgets.keeper().release(r)
             now = time.monotonic()
             if now - self._failed_at > 60:
                 self._failed_at = now
@@ -475,56 +514,43 @@ class Ledger:
                 self._idle.notify_all()
 
     def _rows(self, session, batch: list) -> tuple:
-        """The table rows of a batch, and its settled reservations ``[(reservation, credits)]``."""
+        """The table rows of a batch, and its steps' settled budget holds ``[(reservation, credits)]`` for their
+        entries."""
         from . import servers
         classes = self.classes(session)
         host = servers.load().get("host_server_id")
         rows, settled = [], []
-        for kind, item in batch:
-            if kind == "step":
-                row = self._step_row(session, item, classes)
-                if row is None:
-                    continue
-                rows.append(row)
-                r = getattr(item, "reservation", None)
+        for item in batch:
+            if item[0] == "step":
+                _kind, ev, priced = item
+                rows.append(self._step_row(session, ev, priced))
+                r = getattr(ev, "reservation", None)
                 if r is not None:
-                    settled.append((r, row["credits"]))
+                    settled.append((r, priced["credits"]))
             else:
-                row = self._cpu_row(session, item, classes, host)
+                row = self._cpu_row(session, item[1], classes, host)
                 if row is not None:
                     rows.append(row)
         return rows, settled
 
-    def _step_row(self, session, ev, classes: list) -> Optional[dict]:
+    def _step_row(self, session, ev, priced: dict) -> dict:
         from . import servers
         facts = servers.machine_facts(ev.machine) or {}
         activity = ev.activity or (f"test:{ev.request_id}" if ev.cls == "test" else f"unassigned:{ev.request_id}")
         consumer, game_kind = self.owner_of(session, activity, ev.consumer)
         provider = None if facts.get("server_resource") or not facts else facts.get("owner_id")
-        at = datetime.fromtimestamp(ev.at, timezone.utc)
         u = ev.usage or {}
-        tokens = {"tokens_in": int(u.get("input_tokens", 0) or 0), "tokens_out": int(u.get("output_tokens", 0) or 0),
-                  "tokens_reasoning": int(u.get("reasoning_tokens", 0) or 0),
-                  "tokens_cache_read": int(u.get("cache_read_input_tokens", 0) or 0),
-                  "tokens_cache_write": int(u.get("cache_creation_input_tokens", 0) or 0)}
-        flags = {k: True for k in ("overreported", "capped_tokens") if (ev.flags or {}).get(k)}
-        if facts.get("kind") == "api":
-            ekind = "api"
-            cls = class_of(facts, "api", classes)
-            cost = token_cost(_api_price(ev.machine, ev.model, at), tokens)
-            if cost is None:
-                flags["unpriced"] = True
-            credits = credits_for("api", cost=cost, rate=cls["rate"] if cls else 0.0)
-        else:
-            ekind = "gpu"
-            cls = class_of(facts, "gpu", classes)
-            credits = credits_for("gpu", gen_s=ev.gen_s, rate=cls["rate"] if cls else 0.0)
-        return {"at": at, "activity": activity[:160], "activity_kind": activity_kind(activity, ev.cls, game_kind),
-                "task_class": ev.task_class or "full", "consumer_id": consumer, "provider_id": provider,
-                "machine_id": ev.machine[:40], "kind": ekind, "model": (ev.model or None) and str(ev.model)[:200],
+        return {"at": datetime.fromtimestamp(ev.at, timezone.utc), "activity": activity[:160],
+                "activity_kind": activity_kind(activity, ev.cls, game_kind), "task_class": ev.task_class or "full",
+                "consumer_id": consumer, "provider_id": provider, "machine_id": ev.machine[:40],
+                "kind": priced["kind"], "model": (ev.model or None) and str(ev.model)[:200],
                 "gen_s": max(0.0, float(ev.gen_s or 0.0)), "cpu_core_s": 0.0,
-                "reported_s": ev.reported_s, "observed_s": ev.observed_s, **tokens,
-                "credits": round(credits, 6), "flags": flags, "self_use": consumer == provider,
+                "reported_s": ev.reported_s, "observed_s": ev.observed_s,
+                "tokens_in": int(u.get("input_tokens", 0) or 0), "tokens_out": int(u.get("output_tokens", 0) or 0),
+                "tokens_reasoning": int(u.get("reasoning_tokens", 0) or 0),
+                "tokens_cache_read": int(u.get("cache_read_input_tokens", 0) or 0),
+                "tokens_cache_write": int(u.get("cache_creation_input_tokens", 0) or 0),
+                "credits": priced["credits"], "flags": dict(priced["flags"]), "self_use": consumer == provider,
                 "verification": "unverified", "request_id": (ev.request_id or None) and ev.request_id[:64]}
 
     def _cpu_row(self, session, item: dict, classes: list, host: Optional[str]) -> Optional[dict]:
