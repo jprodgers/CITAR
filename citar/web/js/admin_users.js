@@ -12,8 +12,10 @@ import { avatarOf } from "./people.js";
 const ROLES = ["user", "moderator", "admin"];
 const STATUSES = ["active", "probation", "suspended"];
 const TIERS = ["new", "provisional", "trusted", "quarantined"];
-const LIMITS = [["invite_quota", "Invitations", 1000], ["max_concurrent_games", "Games at once", 100],
-  ["max_seats_per_game", "Seats per game (0: no limit)", 64]];
+// [field, label, least, most]: the ranges the server takes (user_admin.LIMITS). 0 invitations is none; a member runs
+// at least one game at once (the create_games capability is what stops one making any); 0 seats is the ruleset's most.
+const LIMITS = [["invite_quota", "Invitations", 0, 1000], ["max_concurrent_games", "Games at once", 1, 100],
+  ["max_seats_per_game", "Seats per game (0: no limit)", 0, 64]];
 
 function when(iso) { return iso ? new Date(iso).toLocaleString() : "—"; }
 
@@ -100,7 +102,7 @@ async function openDrawer(id, onSaved) {
   syncReason();
   const tierSel = el("select", { "aria-label": "Trust tier" }, ...TIERS.map((t) => el("option", { value: t, selected: t === u.trust_tier }, t)));
   const listed = el("input", { type: "checkbox", checked: !!u.listed });
-  const limits = Object.fromEntries(LIMITS.map(([k, , max]) => [k, el("input", { type: "number", min: 0, max, value: u[k], "aria-label": k, style: { width: "90px" } })]));
+  const limits = Object.fromEntries(LIMITS.map(([k, , min, max]) => [k, el("input", { type: "number", min, max, step: 1, value: u[k], "aria-label": k, style: { width: "90px" } })]));
 
   // capabilities: the role's default, or an override on or off
   const capSel = {};
@@ -117,11 +119,22 @@ async function openDrawer(id, onSaved) {
   const err = el("p", { class: "bad small" });
   const save = el("button", { class: "primary", onclick: async () => {
     const change = {};
+    err.textContent = "";
+    // a limit left empty (or not a number, which a number input reads as empty) is refused here, never sent as 0
+    for (const [k, label, min, max] of LIMITS) {
+      const raw = limits[k].value.trim();
+      const v = Number(raw);
+      if (raw === "" || !Number.isInteger(v) || v < min || v > max) {
+        err.textContent = `${label} is a whole number from ${min} to ${max}.`;
+        limits[k].focus();
+        return;
+      }
+      if (v !== u[k]) change[k] = v;
+    }
     if (roleSel.value !== u.role) change.role = roleSel.value;
     if (statusSel.value !== u.status) change.status = statusSel.value;
     if (tierSel.value !== u.trust_tier) change.trust_tier = tierSel.value;
     if (listed.checked !== !!u.listed) change.listed = listed.checked;
-    for (const [k] of LIMITS) { const v = Number(limits[k].value); if (v !== u[k]) change[k] = v; }
     const caps = {};
     for (const [cap, sel] of Object.entries(capSel)) {
       const was = Object.prototype.hasOwnProperty.call(u.caps || {}, cap) ? (u.caps[cap] ? "on" : "off") : "default";
@@ -199,7 +212,7 @@ function fmt(v) {
 
 // The audit log: filters and pages of 100, newest first.
 function auditCard() {
-  const actor = el("input", { placeholder: "Who (username)", "aria-label": "Actor" });
+  const actor = el("input", { placeholder: "Who (username, or admin_cli)", "aria-label": "Actor" });
   const action = el("input", { placeholder: "Action (user.* for a prefix)", "aria-label": "Action" });
   const objType = el("input", { placeholder: "Object type", "aria-label": "Object type", style: { width: "120px" } });
   const objId = el("input", { placeholder: "Object id", "aria-label": "Object id" });

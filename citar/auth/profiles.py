@@ -47,6 +47,9 @@ URL_MAX = 300
 #: Directory page size, and items listed per kind on a profile.
 PAGE = 50
 ITEMS_PER_KIND = 20
+#: The furthest a page of accounts may start (the directory's and the admin page's ``offset``): far past any real
+#: server, and well inside the 64-bit integer SQLite takes, so a caller's number never reaches it unbounded.
+OFFSET_MAX = 1_000_000
 #: Who "view as" may ask to be: never wider than the caller already is.
 AS_RANK = {"member": 1, "visitor": 0}
 #: The refusal for a `global` field on probation (P3.2.6).
@@ -293,11 +296,11 @@ def _level(field: str):
 
 def directory(session, viewer: User, q: str = "", offset: int = 0) -> dict:
     """The members' directory (``GET /api/users``): accounts that are ``listed`` and in good standing (probation or
-    active), newest first, ``PAGE`` at a time from ``offset``, each with what shows to ``viewer``
-    (``User.public`` for the viewer, the bio's first line when the bio shows, and whether its page opens). ``q`` matches a
-    handle, and a display name only where the caller may see it: the account's own, an administrator's view, or a
-    member's of an account whose profile and display name are `server` or `global`, so searching for a hidden name
-    finds nothing."""
+    active), newest first, ``PAGE`` at a time from ``offset`` (held to 0..``OFFSET_MAX``), each with what shows to
+    ``viewer`` (``User.public`` for the viewer, the bio's first line when the bio shows, and whether its page opens).
+    ``q`` matches a handle, and a display name only where the caller may see it: the account's own, an
+    administrator's view, or a member's of an account whose profile and display name are `server` or `global`, so
+    searching for a hidden name finds nothing."""
     stmt = select(User).where(User.listed.is_(True), User.status.in_(("probation", "active")))
     q = clean_text(q or "")[:80].lower()
     if q:
@@ -309,7 +312,7 @@ def directory(session, viewer: User, q: str = "", offset: int = 0) -> dict:
             by_name = and_(by_name, or_(User.id == viewer.id,
                                         and_(_level("profile").in_(wide), _level("display_name").in_(wide))))
         stmt = stmt.where(or_(by_handle, by_name))
-    offset = max(0, int(offset or 0))
+    offset = min(max(0, int(offset or 0)), OFFSET_MAX)
     rows = list(session.scalars(stmt.order_by(User.created_at.desc(), User.id).offset(offset).limit(PAGE + 1)))
     out = []
     for user in rows[:PAGE]:

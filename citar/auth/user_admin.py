@@ -14,10 +14,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from ..db.models import CAPABILITIES, ROLES, TRUST_TIERS, AuditLog, User
-from . import accounts, audit, policy
+from . import accounts, audit, policy, profiles
 
 #: What ``apply`` changes, in the order the audit row names them.
 FIELDS = ("role", "status", "caps", "invite_quota", "max_concurrent_games", "max_seats_per_game", "trust_tier",
@@ -25,12 +25,16 @@ FIELDS = ("role", "status", "caps", "invite_quota", "max_concurrent_games", "max
 #: The statuses an administrator sets. `pending` is an address not yet confirmed and `deleted` an account gone:
 #: neither is a choice.
 STATUSES = ("active", "probation", "suspended")
-#: Each limit's range (0 seats means the ruleset's maximum).
-LIMITS = {"invite_quota": (0, 1000), "max_concurrent_games": (0, 100), "max_seats_per_game": (0, 64)}
+#: Each limit's range, as the server applies it: 0 invitations is none, 0 seats is the ruleset's maximum, and a
+#: member runs at least one lobby game (the capability `create_games` is what stops one making any).
+LIMITS = {"invite_quota": (0, 1000), "max_concurrent_games": (1, 100), "max_seats_per_game": (0, 64)}
 #: Accounts per page on the admin users page, and audit entries per page (the most, and the default).
 USERS_PAGE = 50
 AUDIT_PAGE_MAX = 200
 AUDIT_PAGE = 100
+#: The furthest a page of accounts may start (as the directory's), and the largest audit entry id (SQLite's integer).
+OFFSET_MAX = profiles.OFFSET_MAX
+ID_MAX = 2 ** 63 - 1
 
 
 class UserAdminError(ValueError):
@@ -156,7 +160,8 @@ def _like(text: str) -> str:
 def search(session, *, text: str = "", role: Optional[str] = None, status: Optional[str] = None,
            offset: int = 0) -> dict:
     """Every account (administrators see them all, hidden profiles and suspended accounts included), newest first,
-    ``USERS_PAGE`` at a time; ``text`` matches the handle, the display name or the email address."""
+    ``USERS_PAGE`` at a time from ``offset`` (held to 0..``OFFSET_MAX``); ``text`` matches the handle, the display
+    name or the email address."""
     stmt = select(User)
     text = (text or "").strip().lower()[:120]
     if text:
@@ -172,7 +177,7 @@ def search(session, *, text: str = "", role: Optional[str] = None, status: Optio
         if status not in ("pending", "probation", "active", "suspended", "deleted"):
             raise UserAdminError("status is pending, probation, active, suspended or deleted.")
         stmt = stmt.where(User.status == status)
-    offset = max(0, int(offset or 0))
+    offset = min(max(0, int(offset or 0)), OFFSET_MAX)
     rows = list(session.scalars(stmt.order_by(User.created_at.desc(), User.id).offset(offset).limit(USERS_PAGE + 1)))
     return {"users": [to_client(u) for u in rows[:USERS_PAGE]], "offset": offset,
             "next": offset + USERS_PAGE if len(rows) > USERS_PAGE else None}
@@ -181,13 +186,17 @@ def search(session, *, text: str = "", role: Optional[str] = None, status: Optio
 def audit_page(session, *, actor: Optional[str] = None, action: Optional[str] = None,
                object_type: Optional[str] = None, object_id: Optional[str] = None, before: Optional[int] = None,
                limit: int = AUDIT_PAGE) -> dict:
-    """A page of the audit log, newest first. ``actor`` is an account's id or handle; ``action`` an action, or a prefix
-    ending in ``*`` (``user.*``); ``before`` an entry's id, for the next page (``next_before``)."""
+    """A page of the audit log, newest first. ``actor`` is an account's id or handle, or the label of an actor
+    without an account (``admin_cli``, ``system``); ``action`` an action, or a prefix ending in ``*`` (``user.*``);
+    ``before`` an entry's id, for the next page (``next_before``; held to SQLite's integer range)."""
     limit = max(1, min(int(limit or AUDIT_PAGE), AUDIT_PAGE_MAX))
     stmt = select(AuditLog)
     if actor:
         found = session.get(User, actor) or accounts.by_handle(session, actor)
-        stmt = stmt.where(AuditLog.actor_id == (found.id if found is not None else actor))
+        # an account's rows by its id, whatever its handle was then (a deleted account's by the id itself); the
+        # command line's and the server's own, which have no account, by the label they were recorded under
+        by_label = and_(AuditLog.actor_id.is_(None), AuditLog.actor_label == actor)
+        stmt = stmt.where(or_(AuditLog.actor_id == (found.id if found is not None else actor), by_label))
     if action:
         if action.endswith("*"):
             stmt = stmt.where(AuditLog.action.like(_like(action[:-1])[1:], escape="\\"))
@@ -198,7 +207,7 @@ def audit_page(session, *, actor: Optional[str] = None, action: Optional[str] = 
     if object_id:
         stmt = stmt.where(AuditLog.object_id == object_id)
     if before is not None:
-        stmt = stmt.where(AuditLog.id < int(before))
+        stmt = stmt.where(AuditLog.id < min(max(int(before), 0), ID_MAX))
     rows = list(session.scalars(stmt.order_by(AuditLog.id.desc()).limit(limit + 1)))
     entries = _labelled(session, rows[:limit])
     return {"entries": entries, "next_before": entries[-1]["id"] if len(rows) > limit else None}

@@ -1,24 +1,25 @@
 """The admin users page and the audit log over HTTP (design/phase3-features.md P3.2.7).
 
     GET   /api/admin/users           every account, newest first; ?q= (handle, display name, email), ?role=, ?status=,
-                                     ?offset= by 50
+                                     ?offset= by 50 (0 to 1,000,000)
     GET   /api/admin/users/{id}      one account: everything about it, its capabilities resolved, the role defaults,
                                      and its audit rows (about it and by it)
     PATCH /api/admin/users/{id}      any of role, status (with "reason" for a suspension), caps ({cap: true | false |
                                      null}), invite_quota, max_concurrent_games, max_seats_per_game, trust_tier,
                                      listed: one audit row naming the fields (``user_admin.apply``)
-    GET   /api/admin/audit           the audit log, newest first; ?actor= (id or handle), ?action= (or a prefix
-                                     ending in *), ?object_type=, ?object_id=, ?before= (an entry's id), ?limit= (at
-                                     most 200)
+    GET   /api/admin/audit           the audit log, newest first; ?actor= (id or handle, or admin_cli), ?action= (or
+                                     a prefix ending in *), ?object_type=, ?object_id=, ?before= (an entry's id),
+                                     ?limit= (at most 200)
 
 Administrators only. A signed-in account that is not one gets 404 on every route here, as if there were none
-(``require_role("admin", hide=True)``); a visitor 401.
+(``require_role("admin", hide=True)``); a visitor 401. A paging number out of its range (an offset past 1,000,000,
+an entry id past SQLite's 64-bit integer) is a 422, never a number handed to the database.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from ..auth import policy, ratelimit, user_admin
@@ -46,7 +47,8 @@ def _call(fn, *args, **kwargs):
 
 
 @router.get("/api/admin/users")
-def list_users(q: str = "", role: Optional[str] = None, status: Optional[str] = None, offset: int = 0,
+def list_users(q: str = "", role: Optional[str] = None, status: Optional[str] = None,
+               offset: int = Query(0, ge=0, le=user_admin.OFFSET_MAX),
                me: User = Depends(require_admin_hidden), s: Session = Depends(get_db)):
     """Every account, newest first, filtered and paged (``user_admin.search``)."""
     return _call(user_admin.search, s, text=q, role=role or None, status=status or None, offset=offset)
@@ -80,7 +82,8 @@ def patch_user(uid: str, request: Request, body: dict = Body(...), me: User = De
 
 @router.get("/api/admin/audit")
 def audit_log(actor: Optional[str] = None, action: Optional[str] = None, object_type: Optional[str] = None,
-              object_id: Optional[str] = None, before: Optional[int] = None, limit: int = user_admin.AUDIT_PAGE,
+              object_id: Optional[str] = None, before: Optional[int] = Query(None, ge=1, le=user_admin.ID_MAX),
+              limit: int = user_admin.AUDIT_PAGE,
               me: User = Depends(require_admin_hidden), s: Session = Depends(get_db)):
     """A page of the audit log (``user_admin.audit_page``)."""
     return user_admin.audit_page(s, actor=actor or None, action=action or None, object_type=object_type or None,

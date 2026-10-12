@@ -151,7 +151,8 @@ class Patch(Base_):
     def test_wrong_values_are_refused_and_change_nothing(self):
         bad = [{"role": "king"}, {"status": "deleted"}, {"status": "pending"}, {"caps": {"fly": True}},
                {"caps": {"run_lab": "yes"}}, {"caps": ["run_lab"]}, {"invite_quota": -1}, {"invite_quota": True},
-               {"max_concurrent_games": 101}, {"max_seats_per_game": "8"}, {"trust_tier": "gold"},
+               {"max_concurrent_games": 101}, {"max_concurrent_games": 0}, {"max_seats_per_game": "8"},
+               {"max_seats_per_game": 65}, {"trust_tier": "gold"},
                {"listed": "no"}, {"email": "x@example.com"}, {"password_hash": "x"},
                {"trust_tier": "trusted", "role": "king"}, {"trust_tier": "trusted", "reason": 5}]
         for body in bad:
@@ -162,6 +163,32 @@ class Patch(Base_):
         self.assertEqual(self.audit_rows(), [])
         self.assertEqual(self.client.patch("/api/admin/users/u_nobody", json={"listed": False},
                                            headers=self.headers["ada"]).status_code, 404)
+
+    def test_the_limits_saved_are_the_limits_that_apply(self):
+        """Every value a limit takes is one the server applies as it reads: no game limit of 0 that the game route
+        reads as its default of 2, while 0 invitations is none and 0 seats the ruleset's most."""
+        from fastapi import HTTPException
+        from citar.db.models import Game
+        from citar.server import app as server
+        self.assertEqual(user_admin.LIMITS["max_concurrent_games"][0], 1)
+        self.assertEqual(self.patch("sam", {"max_concurrent_games": 0}).status_code, 400)
+        for cap in (1, 3):
+            with self.subTest(games=cap):
+                self.assertEqual(self.patch("sam", {"max_concurrent_games": cap}).status_code, 200)
+                with db.session() as s:
+                    s.query(Game).delete()
+                    sam = s.get(User, self.ids["sam"])
+                    for i in range(cap):
+                        server._game_limit(s, sam)            # room for one more
+                        s.add(Game(id=f"g_limit_{i}", owner_id=sam.id, kind="game", status="playing"))
+                        s.flush()
+                    with self.assertRaises(HTTPException) as refused:
+                        server._game_limit(s, sam)
+                    self.assertEqual(refused.exception.status_code, 429)
+                    self.assertIn(f"your limit is {cap}", refused.exception.detail)
+        self.assertEqual(self.patch("sam", {"invite_quota": 2, "max_seats_per_game": 8}).status_code, 200)
+        r = self.patch("sam", {"invite_quota": 0, "max_seats_per_game": 0})
+        self.assertEqual((r.status_code, r.json()["changed"]), (200, ["invite_quota", "max_seats_per_game"]))
 
     def test_the_last_admin_cannot_demote_or_suspend_themselves(self):
         for body in ({"role": "moderator"}, {"role": "user"}, {"status": "suspended", "reason": "x"},
@@ -212,6 +239,23 @@ class Listing(Base_):
         self.assertEqual(handles(role="moderator"), {"moe"})
         self.assertEqual(self.client.get("/api/admin/users", params={"role": "king"},
                                          headers=self.headers["ada"]).status_code, 400)
+
+    def test_an_offset_out_of_range_is_refused_never_handed_to_the_database(self):
+        """SQLite takes a 64-bit integer: a larger offset raised OverflowError (a 500). The route answers 422 to an
+        administrator and, as ever, 404 to anyone else; the function under the CLI holds it in range itself."""
+        for offset in (str(2 ** 63), "99999999999999999999999", "-1", str(user_admin.OFFSET_MAX + 1)):
+            with self.subTest(offset=offset):
+                r = self.client.get("/api/admin/users", params={"offset": offset}, headers=self.headers["ada"])
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertEqual(self.client.get("/api/admin/users", params={"offset": offset},
+                                                 headers=self.headers["sam"]).status_code, 404)
+        r = self.client.get("/api/admin/users", params={"offset": user_admin.OFFSET_MAX}, headers=self.headers["ada"])
+        self.assertEqual((r.status_code, r.json()["users"]), (200, []))
+        with db.session() as s:
+            for offset in (2 ** 70, -(2 ** 70)):
+                page = user_admin.search(s, offset=offset)
+                self.assertEqual(page["offset"], user_admin.OFFSET_MAX if offset > 0 else 0)
+            self.assertEqual(len(user_admin.search(s, offset=-(2 ** 70))["users"]), 3)
 
     def test_one_account_with_its_audit_rows(self):
         self.patch("sam", {"trust_tier": "provisional"})
@@ -265,6 +309,37 @@ class AuditRoute(Base_):
         self.assertTrue(all(e["id"] < ids[-1] for e in second["entries"]))
         self.assertEqual(len(self.page()["entries"]), user_admin.AUDIT_PAGE)
 
+    def test_an_entry_id_out_of_range_is_refused_never_handed_to_the_database(self):
+        for before in (str(2 ** 63), str(-(2 ** 63) - 1), "99999999999999999999999", "0", "-5"):
+            with self.subTest(before=before):
+                r = self.client.get("/api/admin/audit", params={"before": before}, headers=self.headers["ada"])
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertEqual(self.client.get("/api/admin/audit", params={"before": before},
+                                                 headers=self.headers["sam"]).status_code, 404)
+        self.assertEqual(len(self.page(before=str(2 ** 63 - 1), limit=200)["entries"]), 200)
+        with db.session() as s:
+            self.assertEqual(len(user_admin.audit_page(s, before=2 ** 80, limit=200)["entries"]), 200, "everything")
+            self.assertEqual(user_admin.audit_page(s, before=-(2 ** 80))["entries"], [], "nothing")
+
+    def test_an_actor_without_an_account_is_found_by_its_label(self):
+        """The command line's changes (``admin_cli``) and the server's own (``system``) have no account behind
+        them: the actor filter finds them by the label they were recorded under."""
+        with db.session() as s:
+            sam = s.get(User, self.ids["sam"])
+            user_admin.apply(s, sam, {"trust_tier": "trusted"}, actor_label="admin_cli")
+            audit.record(s, "test.system", object_type="thing", object_id="t9")
+        rows = self.page(actor="admin_cli")["entries"]
+        self.assertEqual([(e["actor"], e["action"], e["object_id"]) for e in rows],
+                         [("admin_cli", "user.updated", self.ids["sam"])])
+        self.assertEqual([e["action"] for e in self.page(actor="system")["entries"]], ["test.system"])
+        # a label is not an account's: "sam (user)", the label sam's own rows carry, names no actor
+        self.assertEqual(self.page(actor="sam (user)")["entries"], [])
+        # and an account that shares a label's name gets its own rows and the label's both
+        with db.session() as s:
+            self.sign_in(s, "admin_cli")
+            audit.record(s, "test.mine", actor=s.get(User, self.ids["admin_cli"]))
+        self.assertEqual({e["action"] for e in self.page(actor="admin_cli")["entries"]}, {"user.updated", "test.mine"})
+
 
 # ---------------------------------------------------------------------------------------------------------- gate 4
 
@@ -302,6 +377,10 @@ class CommandLine(Base_):
                          ["invite_quota", "max_concurrent_games", "max_seats_per_game"])
         self.assertEqual(self.cli("set-limits", "sam")[0], 1, "nothing named")
         self.assertEqual(self.cli("set-limits", "sam", "--games", "1000")[0], 1)
+        code, out = self.cli("set-limits", "sam", "--games", "0")
+        self.assertEqual(code, 1, "no game limit the server would read as its default")
+        self.assertIn("from 1 to 100", out)
+        self.assertEqual(self.admin_view("sam")["user"]["max_concurrent_games"], 4)
 
     def test_set_trust(self):
         self.assertEqual(self.cli("set-trust", "sam", "quarantined")[0], 0)
@@ -337,6 +416,17 @@ class CommandLine(Base_):
         # the API reads the same entries
         api = self.client.get("/api/admin/audit", params={"action": "user.*"}, headers=self.headers["ada"]).json()
         self.assertEqual([e["id"] for e in api["entries"]], [e["id"] for e in page["entries"]])
+        # the command line's own changes, by its label, through the CLI and the API
+        code, out = self.cli("audit", "--actor", "admin_cli", "--json")
+        self.assertEqual([(e["actor"], e["object_id"]) for e in json.loads(out)["entries"]],
+                         [("admin_cli", self.ids["sam"])])
+        api = self.client.get("/api/admin/audit", params={"actor": "admin_cli"}, headers=self.headers["ada"]).json()
+        self.assertEqual([e["object_id"] for e in api["entries"]], [self.ids["sam"]])
+        # a page number past SQLite's integer is held in range, not a traceback
+        for before in (str(2 ** 64), str(-(2 ** 64))):
+            code, out = self.cli("audit", "--before", before, "--action", "user.*", "--json")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(len(json.loads(out)["entries"]), 2 if before[0] != "-" else 0)
 
     def test_the_real_command_on_a_database_of_its_own(self):
         """The entry point as an operator runs it: a child process, its own temporary database, ``create-user`` then

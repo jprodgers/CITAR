@@ -382,6 +382,21 @@ class Directory(Base_):
         self.assertEqual(len(handles), len(set(handles)))
         self.assertEqual(set(handles), {f"page{i:02d}" for i in range(55)} | {"pat", "max", "newt", "moe", "ada"})
 
+    def test_an_offset_out_of_range_is_refused_never_handed_to_the_database(self):
+        """SQLite takes a 64-bit integer: a larger offset raised OverflowError (a 500) for any member. Now 422, and
+        ``profiles.directory`` holds its offset in range itself."""
+        for offset in ("99999999999999999999999", str(2 ** 63), "-1", str(profiles.OFFSET_MAX + 1)):
+            with self.subTest(offset=offset):
+                r = self.get("/api/users", "max", params={"offset": offset})
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertEqual(self.get("/api/users", params={"offset": offset}).status_code, 401)
+        r = self.get("/api/users", "max", params={"offset": profiles.OFFSET_MAX})
+        self.assertEqual((r.status_code, r.json()["users"], r.json()["next"]), (200, [], None))
+        with db.session() as s:
+            viewer = s.get(User, self.ids["max"])
+            self.assertEqual(profiles.directory(s, viewer, offset=2 ** 70)["offset"], profiles.OFFSET_MAX)
+            self.assertEqual(len(profiles.directory(s, viewer, offset=-(2 ** 70))["users"]), 5)
+
 
 class WhereverTheAccountAppears(Base_):
     """A private display name and avatar never reach anyone the account does not show them to: the owner of a

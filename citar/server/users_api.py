@@ -2,12 +2,13 @@
 
     GET    /api/users                   the directory: members only; listed accounts in good standing, newest first,
                                         ?q= on the handle (and the display name where the caller may see it),
-                                        ?offset= by 50
+                                        ?offset= by 50 (0 to 1,000,000; else 422)
     GET    /api/users/{handle}          a profile, for anyone its `profile` field shows to (?as=member|visitor
                                         narrows the view, for the account's own "view as" links); else 404
     GET    /api/users/{handle}/avatar   the uploaded avatar, for anyone its `avatar` field shows to; else 404
     POST   /api/auth/me/avatar          upload one's avatar (multipart, one file, at most 256 KB; PNG, JPEG or WebP
-                                        of at most 1024x1024, checked by its header)
+                                        of at most 1024x1024, checked by its header and stored without its
+                                        metadata)
     DELETE /api/auth/me/avatar          remove it
 
 The profile and its avatar are open to visitors when the account made them `global`, so neither route takes an
@@ -35,8 +36,9 @@ AVATAR_MAX_AGE = 3600
 
 
 @router.get("/api/users")
-def directory(q: str = "", offset: int = 0, me=Depends(require_user), s: Session = Depends(get_db)):
-    """The members' directory (``profiles.directory``)."""
+def directory(q: str = "", offset: int = Query(0, ge=0, le=profiles.OFFSET_MAX), me=Depends(require_user),
+              s: Session = Depends(get_db)):
+    """The members' directory (``profiles.directory``); an offset outside 0..``OFFSET_MAX`` is a 422."""
     return profiles.directory(s, me, q=q, offset=offset)
 
 

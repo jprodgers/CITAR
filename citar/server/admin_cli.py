@@ -477,9 +477,9 @@ def main(argv=None) -> int:
 
     p = subparsers.add_parser("set-limits", help="change an account's limits")
     p.add_argument("handle")
-    p.add_argument("--invites", type=int, default=None, help="invitations it may have outstanding")
-    p.add_argument("--games", type=int, default=None, help="lobby games it may run at once")
-    p.add_argument("--seats", type=int, default=None, help="seats per game (0: the ruleset's maximum)")
+    p.add_argument("--invites", type=int, default=None, help="invitations it may have outstanding (0 to 1000; 0: none)")
+    p.add_argument("--games", type=int, default=None, help="lobby games it may run at once (1 to 100)")
+    p.add_argument("--seats", type=int, default=None, help="seats per game (0 to 64; 0: the ruleset's maximum)")
     p.set_defaults(func=cmd_set_limits)
 
     p = subparsers.add_parser("set-trust", help="set an account's trust tier")
@@ -488,7 +488,8 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_set_trust)
 
     p = subparsers.add_parser("audit", help="read the audit log, newest first")
-    p.add_argument("--actor", default=None, help="an account's handle or id")
+    p.add_argument("--actor", default=None,
+                   help="an account's handle or id, or admin_cli for this command line's changes")
     p.add_argument("--action", default=None, help="an action, or a prefix ending in * (user.*)")
     p.add_argument("--object-type", dest="object_type", default=None)
     p.add_argument("--object-id", dest="object_id", default=None)
