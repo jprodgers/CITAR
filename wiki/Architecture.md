@@ -326,7 +326,12 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
   it before its seat is asked anything; it is released when the seat changes machine, model or type (`update_seat`
   makes the new one at once) or is eliminated (the engine's `eliminated` event), and for good when the game is over,
   stopped or crashed. A make-way pause (`pause_reason.kind == "queue"`) releases the leases and the resume makes them
-  again; every other pause keeps them. `pool.seats.occupied()` lists the leases live on a machine, which is what
+  again; every other pause keeps them. While a game makes way the driver gets no agent for a model seat and
+  `lease_for` makes no lease, except for a chat's answer (`lease_for(answering=True)`), whose lease and agent go when
+  the seat's last answer ends (`_answered`). `get_agent` keeps a model seat's agent only if, under the game's lock,
+  the seat still plays the block the agent was made from and its lease is live (`suspend`, `update_seat` and
+  `_crashed` change, cancel and release in one hold of that lock), and makes again one whose lease was released. A
+  lease is capped by the owner's grant for the work its game was admitted for (`benchmark`, `probe`, else `game`). `pool.seats.occupied()` lists the leases live on a machine, which is what
   benchmark jobs, probe runs and reports wait for and `usage.session_servers` counts as held. A probe run holds a
   non-lending lease for the run (its cases adopt it: `GameSession.adopt_lease`), and a report's narrative goes through
   `make_conversation` on a non-lending `report` lease. It is *active* while its seat is
