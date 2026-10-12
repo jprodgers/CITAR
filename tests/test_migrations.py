@@ -1,8 +1,9 @@
 """The 0.1.6 schema baseline and what the boot does with a database (design/phase3-features.md P3.2.2; package
 3-01's gate 1).
 
-* `0016a_baseline` builds exactly the tables of `citar/db/models.py`: an upgrade to head on an empty database, then
-  alembic's `compare_metadata`, finds nothing; the three default hardware classes are seeded.
+* `0016a_baseline` and the revisions on top of it (one line, each with an upgrade test from the one before: package
+  3-10's `0016b_compute_cache_tokens`) build exactly the tables of `citar/db/models.py`: an upgrade to head on an empty
+  database, then alembic's `compare_metadata`, finds nothing; the three default hardware classes are seeded.
 * A database at one of the two old revisions (`tests/data/citar-0.1.5.db`, built at d93345a before they were deleted)
   is renamed aside with its `-wal` and `-shm`, never migrated, and the boot comes up on a fresh one; a rename that
   fails refuses the boot and leaves the old database whole and in place.
@@ -34,7 +35,9 @@ from citar.server import boot
 
 ROOT = Path(__file__).resolve().parent.parent
 OLD_DB = ROOT / "tests" / "data" / "citar-0.1.5.db"
-HEAD = "0016a_baseline"
+#: The baseline (package 3-01) and the revisions on top of it, oldest first; the last is head.
+REVISIONS = ("0016a_baseline", "0016b_compute_cache_tokens")
+BASELINE, HEAD = REVISIONS[0], REVISIONS[-1]
 
 
 def _sqlite(path: Path) -> str:
@@ -112,7 +115,7 @@ class Baseline(BootCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self.assertEqual(tuple(module.HARDWARE_CLASSES), models.HARDWARE_CLASS_SEEDS)
-        self.assertEqual((module.revision, module.down_revision), (HEAD, None))
+        self.assertEqual((module.revision, module.down_revision), (BASELINE, None))
 
     def test_the_baseline_renders_for_postgres(self):
         """No Postgres here: alembic's offline mode writes the revision's SQL for the dialect without connecting,
@@ -134,9 +137,52 @@ class Baseline(BootCase):
         self.assertIn("JSON", sql)
         self.assertIn("TIMESTAMP WITH TIME ZONE", sql)
 
-    def test_one_revision_only(self):
-        names = sorted(p.name for p in (ROOT / "citar" / "migrations" / "versions").glob("*.py"))
-        self.assertEqual(names, ["0016a_baseline.py"])
+    def test_the_revisions_are_one_line_from_the_baseline(self):
+        """Nothing re-squashes (P3.2.2): a later change is a revision on top, each naming the one before."""
+        import importlib.util
+        folder = ROOT / "citar" / "migrations" / "versions"
+        names = sorted(p.name for p in folder.glob("*.py"))
+        self.assertEqual(names, [f"{r}.py" for r in REVISIONS])
+        chain = []
+        for name in names:
+            spec = importlib.util.spec_from_file_location(name[:-3], folder / name)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            chain.append((module.revision, module.down_revision))
+        self.assertEqual(chain, [(r, REVISIONS[i - 1] if i else None) for i, r in enumerate(REVISIONS)])
+
+    def test_the_cache_tokens_revision_upgrades_a_baseline_database_keeping_its_events(self):
+        """3-10's revision on a database at the baseline holding a compute event: the event is kept, with no cached
+        tokens; the result matches the models."""
+        from alembic import command
+        from citar.db.models import ComputeEvent
+        db.configure(_sqlite(self.path))
+        cfg = boot._alembic_config(_sqlite(self.path))
+        command.upgrade(cfg, BASELINE)
+        con = sqlite3.connect(self.path)
+        try:
+            con.execute("INSERT INTO compute_events (at, activity, activity_kind, task_class, machine_id, kind, gen_s, "
+                        "cpu_core_s, tokens_in, tokens_out, tokens_reasoning, credits, flags, self_use, verification) "
+                        "VALUES ('2026-10-01 10:00:00', 'game:g1', 'game', 'full', 'sv_gpu', 'gpu', 2.5, 0, 100, 20, "
+                        "0, 2.5, '{}', 0, 'unverified')")
+            con.commit()
+        finally:
+            con.close()
+        self.assertEqual(_revision(self.path), [BASELINE])
+        self.assertIsNone(boot.migrate())
+        self.assertEqual(_revision(self.path), [HEAD])
+        with db.session() as s:
+            ev = s.query(ComputeEvent).one()
+            self.assertEqual((ev.activity, ev.gen_s, ev.tokens_in, ev.tokens_cache_read, ev.tokens_cache_write),
+                             ("game:g1", 2.5, 100, 0, 0))
+        db.dispose()
+        engine = create_engine(_sqlite(self.path))
+        try:
+            with engine.connect() as conn:
+                ctx = MigrationContext.configure(conn, opts={"compare_type": True, "compare_server_default": True})
+                self.assertEqual(compare_metadata(ctx, models.Base.metadata), [])
+        finally:
+            engine.dispose()
 
     def test_a_database_at_head_boots_again_unchanged(self):
         self.boot()
