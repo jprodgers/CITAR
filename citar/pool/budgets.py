@@ -454,8 +454,8 @@ def refresh_from_ledger(session, budget: Optional[Budget] = None, *, key: Option
         tz = owner_tz(session, grant)
         k = key or period_key(b.period, when, tz)
         start, end = period_bounds(b.period, k, tz)
-        machines = {sid: owner for sid, owner in session.execute(
-            select(Server.id, Server.owner_id).where(Server.group_id == grant.group_id))}
+        machines = dict(session.execute(
+            select(Server.id, Server.owner_id).where(Server.group_id == grant.group_id)).all())
         if not machines:
             continue
         admins = {uid for (uid,) in session.execute(select(User.id).where(User.role == "admin"))}

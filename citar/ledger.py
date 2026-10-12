@@ -786,7 +786,7 @@ def rollup(session, hours: Optional[Iterable[datetime]] = None) -> int:
             found.add(hour_of(at))
             new_mark = max(new_mark, eid)
         hours = found
-    hours = sorted(set(hour_of(h) for h in hours))
+    hours = sorted({hour_of(h) for h in hours})
     for h in hours:
         _rollup_hour(session, h)
     if new_mark is not None and new_mark != _watermark(session):

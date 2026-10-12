@@ -2042,7 +2042,7 @@ def part_ledger(h: Harness) -> None:
         status = (alice.get(f"/api/reports/{rid}").json().get("meta") or {}) if rid else {}
         r.check("alice's games each played three rounds (one on bob's machine, one on her own) and her report was "
                 "built with its analysis written on bob's machine",
-                bool(played) and status.get("status") == "done" and status.get("narrative_written") is True,
+                bool(played) and bool(built) and status.get("status") == "done" and status.get("narrative_written") is True,
                 f"turns {[turn(g) for g in games]}; report {status.get('status')} "
                 f"narrative {status.get('narrative_written')}")
         time.sleep(4.0)                          # the ledger's writer inserts what it has every 2 s

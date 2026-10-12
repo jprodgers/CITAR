@@ -27,7 +27,7 @@ gates 1 to 7).
 """
 from __future__ import annotations
 
-import tests  # temporary saves folder and registry; must be imported before citar
+import tests  # noqa: F401  (temporary saves folder and registry; must be imported before citar)
 
 import json
 import os

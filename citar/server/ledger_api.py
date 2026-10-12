@@ -187,7 +187,7 @@ def create_class(request: Request, body: dict = Body(...), me: User = Depends(re
     if row.is_default:
         _set_default(s, row)
     audit.record(s, "hardware_class.created", actor=me, object_type="hardware_class", object_id=row.id,
-                 ip=ratelimit.client_ip(request), **{k: v for k, v in fields.items()})
+                 ip=ratelimit.client_ip(request), **fields)
     _classes_changed(s)
     s.commit()
     return _client(row, [])
