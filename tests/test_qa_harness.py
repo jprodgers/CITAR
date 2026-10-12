@@ -7,6 +7,8 @@ server and waits on the usage ledger's minute.
 """
 import tests  # noqa: F401  (temporary saves folder and server registry; must be imported before citar)
 import importlib.util
+import io
+import json
 import os
 import shutil
 import socket
@@ -14,7 +16,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "qa_phase3.py"
@@ -79,15 +83,38 @@ class Refusals(unittest.TestCase):
         self.assertEqual(_snapshot(target), before, "every file is as it was")
 
     def test_the_owners_dev_server_directory(self):
-        before = _snapshot(qa.OWNER_PLAY_DIR)
-        existed = qa.OWNER_PLAY_DIR.exists()
-        r = self.run_qa("--dir", str(qa.OWNER_PLAY_DIR))
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("owner's dev server", r.stdout)
+        """The real ``C:/dev/citar-play``, through the script: refused, and nothing of the harness's there. Its
+        files are not compared: the owner's dev server may be writing them (autosaves, the database's WAL, the
+        usage ledger) while this runs. ``test_the_owners_directory_is_left_as_it_was`` compares every file of a
+        stand-in."""
+        def names() -> set:
+            return {p.name for p in qa.OWNER_PLAY_DIR.iterdir()} if qa.OWNER_PLAY_DIR.is_dir() else set()
+        before, existed = names(), qa.OWNER_PLAY_DIR.exists()
+        for where in (qa.OWNER_PLAY_DIR, qa.OWNER_PLAY_DIR / "inside"):
+            with self.subTest(where=str(where)):
+                r = self.run_qa("--dir", str(where))
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("owner's dev server", r.stdout)
+        after = names()
         self.assertEqual(qa.OWNER_PLAY_DIR.exists(), existed)
-        self.assertEqual(_snapshot(qa.OWNER_PLAY_DIR), before)
-        r = self.run_qa("--dir", str(qa.OWNER_PLAY_DIR / "inside"))
-        self.assertEqual(r.returncode, 2, "anything inside it too")
+        self.assertFalse((after - before) & {qa.MARKER, "server.log", "qa-accounts.json", "inside"},
+                         "the harness made nothing there")
+        if before:
+            self.assertTrue(after & before, "and emptied nothing")
+
+    def test_the_owners_directory_is_left_as_it_was(self):
+        """The same refusal with a stand-in for the owner's directory, every file compared before and after."""
+        stand_in = self.tmp / "citar-play"
+        (stand_in / "saves").mkdir(parents=True)
+        (stand_in / "citar.db").write_bytes(b"the owner's")
+        (stand_in / "saves" / "game.citar").write_bytes(b"a save")
+        (stand_in / qa.MARKER).write_text("even marked", encoding="utf-8")
+        before = _snapshot(stand_in)
+        with mock.patch.object(qa, "OWNER_PLAY_DIR", stand_in), redirect_stdout(io.StringIO()) as out:
+            code = qa.main(["accounts", "--dir", str(stand_in)])
+        self.assertEqual(code, 2, out.getvalue())
+        self.assertIn("owner's dev server", out.getvalue())
+        self.assertEqual(_snapshot(stand_in), before, "every file is as it was")
 
     def test_a_part_not_written_yet(self):
         r = subprocess.run([sys.executable, str(SCRIPT), "ledger", "--dir", str(self.tmp / "x")], cwd=str(ROOT),
@@ -95,6 +122,69 @@ class Refusals(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("not written yet", r.stdout)
         self.assertFalse((self.tmp / "x").exists())
+
+
+class Failures(unittest.TestCase):
+    """Once the directory is the harness's, nothing is a refusal: a directory that cannot be emptied, a server
+    that does not start, an account that cannot be made and a part that raises are each a failed check, with
+    ``qa-<part>.json`` written, exit 1 (in-process, the server and the accounts stubbed)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="citar-qa-test-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.dir = self.tmp / "qa"
+
+    def main(self) -> tuple:
+        with redirect_stdout(io.StringIO()) as out:
+            code = qa.main(["accounts", "--dir", str(self.dir)])
+        evidence = self.dir / "qa-accounts.json"
+        return code, out.getvalue(), json.loads(evidence.read_text(encoding="utf-8")) if evidence.exists() else None
+
+    def failed(self, evidence: dict) -> list:
+        return [c for c in evidence["checks"] if not c["ok"]]
+
+    def test_a_directory_that_cannot_be_emptied(self):
+        self.dir.mkdir()
+        (self.dir / qa.MARKER).write_text("x", encoding="utf-8")
+        (self.dir / "server.log").write_text("held open by a kept server", encoding="utf-8")
+        with mock.patch.object(qa.shutil, "rmtree", side_effect=PermissionError("in use")):
+            code, out, evidence = self.main()
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("refused", out)
+        [check] = self.failed(evidence)
+        self.assertIn("could not empty", check["detail"])
+
+    def test_a_server_that_does_not_start(self):
+        with mock.patch.object(qa.Server, "start", side_effect=qa.HarnessError("the server did not start (exit 3)")):
+            code, out, evidence = self.main()
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("refused", out)
+        [check] = self.failed(evidence)
+        self.assertIn("did not start", check["detail"])
+        self.assertTrue((self.dir / qa.MARKER).is_file(), "the directory stays the harness's, for the next run")
+
+    def test_an_account_that_cannot_be_made(self):
+        made = subprocess.CompletedProcess([], 1, stdout="", stderr="That handle is taken.")
+        with mock.patch.object(qa.Server, "start", return_value=None), \
+                mock.patch.object(qa.Server, "cli", return_value=made):
+            code, out, evidence = self.main()
+        self.assertEqual(code, 1, out)
+        [check] = self.failed(evidence)
+        self.assertIn("create-user qa-admin failed", check["detail"])
+
+    def test_a_part_that_raises_keeps_the_checks_before_it(self):
+        def part(h):
+            h.report.check("a first check", True)
+            raise KeyError("id")
+        accounts = mock.patch.object(qa, "make_accounts", return_value={})
+        with mock.patch.object(qa.Server, "start", return_value=None), accounts, \
+                mock.patch.dict(qa.PARTS, {"accounts": part}):
+            code, out, evidence = self.main()
+        self.assertEqual(code, 1, out)
+        self.assertIn("a first check", [c["check"] for c in evidence["checks"] if c["ok"]])
+        [check] = self.failed(evidence)
+        self.assertEqual(check["check"], "the accounts part ran to its end")
+        self.assertIn("KeyError", check["detail"])
 
 
 class Directories(unittest.TestCase):

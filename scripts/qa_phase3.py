@@ -8,7 +8,10 @@ The harness:
 - **refuses** (exit 2, touching nothing) the dev server's own port (8799), a port something already listens on, a
   directory that holds anything without the harness's marker (``.qa-phase3``), and directories that are never a
   harness's: ``C:/dev/citar-play`` (the owner's dev server), CITAR's own per-user data directory and the source
-  checkout. A directory it may use is new, empty or one an earlier run left (marked); it empties it first;
+  checkout. A directory it may use is new, empty or one an earlier run left (marked); it empties it first. Every
+  refusal comes before that: once the directory is the harness's, anything that goes wrong (it cannot be emptied,
+  the server does not start, an account cannot be made, a part raises) is a failed check with its evidence
+  written, exit 1;
 - starts ``scripts/dev_server.py --server --registration invite`` as a child on that directory and a free port (or
   ``--port``), everything of the instance under the directory (``dev_server.instance_env``);
 - makes an administrator, two members and a moderator (a third member for ``all``) with ``admin_cli create-user``,
@@ -38,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Optional
@@ -67,7 +71,13 @@ def _dev_server():
 
 
 class Refused(Exception):
-    """The harness will not run here: a port or a directory that is not its own. Exit 2, nothing touched."""
+    """The harness will not run here: a port or a directory that is not its own. Exit 2, nothing touched: raised
+    only before ``claim``."""
+
+
+class HarnessError(Exception):
+    """The harness could not do its own part once the directory was its own (``claim``): the directory not
+    emptied, the server not started, an account not made. A failed check with the evidence written, exit 1."""
 
 
 # ---------------------------------------------------------------------------- refusals
@@ -136,8 +146,8 @@ def claim(state: Path) -> None:
         try:
             shutil.rmtree(state)
         except OSError as e:
-            raise Refused(f"could not empty {state} ({e}): a server an earlier run kept (--keep) may still be "
-                          "running on it") from None
+            raise HarnessError(f"could not empty {state} ({e}): a server an earlier run kept (--keep) may still be "
+                               "running on it") from None
     state.mkdir(parents=True)
     (state / MARKER).write_text("scripts/qa_phase3.py empties this directory at each run.\n", encoding="utf-8")
 
@@ -271,7 +281,7 @@ class Server:
                 except httpx.HTTPError:
                     pass
                 if self.proc.poll() is not None or time.perf_counter() - t0 > timeout:
-                    raise Refused(f"the server did not start (exit {self.proc.poll()}); see {self.log}")
+                    raise HarnessError(f"the server did not start (exit {self.proc.poll()}); see {self.log}")
                 time.sleep(0.25)
 
     def cli(self, *args: str, stdin: Optional[str] = None) -> subprocess.CompletedProcess:
@@ -555,7 +565,7 @@ PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts}
 
 def make_accounts(server: Server, report: Report, everyone: bool) -> dict:
     """The administrator, two members and a moderator (and a third member for ``all``), made with ``admin_cli
-    create-user`` and signed in. Raises Refused when one cannot be made or sign in: no check means anything
+    create-user`` and signed in. Raises HarnessError when one cannot be made or sign in: no check means anything
     without them."""
     password = "qa-" + secrets.token_hex(10)
     wanted = [("admin", "qa-admin", "admin"), ("alice", "qa-alice", "user"), ("bob", "qa-bob", "user"),
@@ -565,11 +575,12 @@ def make_accounts(server: Server, report: Report, everyone: bool) -> dict:
         made = server.cli("create-user", "--handle", handle, "--email", f"{handle}@example.com", "--role", role,
                           "--password-stdin", stdin=password + "\n")
         if made.returncode != 0:
-            raise Refused(f"admin_cli create-user {handle} failed: {made.stdout.strip()} {made.stderr.strip()[-400:]}")
+            raise HarnessError(f"admin_cli create-user {handle} failed: {made.stdout.strip()} "
+                               f"{made.stderr.strip()[-400:]}")
         account = Account(server, handle, role, password)
         login = account.login()
         if login.status_code != 200:
-            raise Refused(f"{handle} could not sign in: HTTP {login.status_code} {login.text[:200]}")
+            raise HarnessError(f"{handle} could not sign in: HTTP {login.status_code} {login.text[:200]}")
         out[key] = account
     report.check("the accounts were made with admin_cli create-user and signed in", True,
                  ", ".join(f"{a.handle} ({a.role})" for a in out.values()))
@@ -579,8 +590,15 @@ def make_accounts(server: Server, report: Report, everyone: bool) -> dict:
     return out
 
 
+def _trace_tail(lines: int = 6) -> str:
+    """The last lines of the exception being handled, for a failed check's detail."""
+    return " | ".join(traceback.format_exc().strip().splitlines()[-lines:])
+
+
 def run(args) -> tuple:
-    """Refuse or claim, start, check, write, stop. Returns the exit code and the report."""
+    """Refuse (Refused, nothing touched), or claim, start, check and stop. Returns the exit code and the report,
+    whose evidence ``main`` writes. Once the directory is claimed nothing raises out of here: a harness failure
+    (``HarnessError``) or a part that raises is a failed check, and the checks made before it stand."""
     parts = list(PARTS) if args.part == "all" else [args.part]
     state = Path(args.dir).expanduser()
     report = Report(args.part)
@@ -589,14 +607,22 @@ def run(args) -> tuple:
     check_dir(state)
     port = args.port or free_port()
     check_port(port)
-    claim(state)
+    # from here on the directory is the harness's: no refusal, every failure a check with its evidence (exit 1)
     state = state.resolve()
-    server = Server(state, port)
-    endpoint = FakeEndpoint()
-    report.data["server"] = {"base": server.base, "public": server.public, "dir": str(state), "log": str(server.log),
-                             "fake_endpoint": endpoint.url}
+    report.data["server"] = {"dir": str(state), "port": port}
+    try:
+        claim(state)
+    except HarnessError as e:
+        report.check("the directory was emptied and marked", False, str(e))
+        return 1, report
+    server: Optional[Server] = None
+    endpoint: Optional[FakeEndpoint] = None
     t0 = time.perf_counter()
     try:
+        server = Server(state, port)
+        endpoint = FakeEndpoint()
+        report.data["server"].update({"base": server.base, "public": server.public, "log": str(server.log),
+                                      "fake_endpoint": endpoint.url})
         server.start()
         report.note(f"the server is up at {server.public} (dir {state})")
         report.data["server"]["start_s"] = round(time.perf_counter() - t0, 1)
@@ -604,12 +630,23 @@ def run(args) -> tuple:
         harness = Harness(report, server, accounts, endpoint)
         for name in parts:
             report.note(f"part: {name}")
-            PARTS[name](harness)
+            try:
+                PARTS[name](harness)
+            except Exception:
+                # the checks already made stand; the rest of this part never ran
+                report.check(f"the {name} part ran to its end", False, _trace_tail())
         tracebacks = server.tracebacks()
         report.check("no traceback in the server's log", tracebacks == 0, f"{tracebacks} in {server.log}")
+    except HarnessError as e:
+        report.check("the harness started the server and made its accounts", False, str(e))
+    except Exception:
+        report.check("the harness ran to its end", False, _trace_tail())
     finally:
-        endpoint.close()
-        if args.keep and server.proc is not None and server.proc.poll() is None:
+        if endpoint is not None:
+            endpoint.close()
+        if server is None:
+            pass
+        elif args.keep and server.proc is not None and server.proc.poll() is None:
             report.note(f"kept running at {server.public} (pid {server.proc.pid}); stop it when the checklist is done")
             report.data["kept"] = {"pid": server.proc.pid, "url": server.public}
         else:
@@ -634,10 +671,14 @@ def main(argv=None) -> int:
         return 2
     summary = {"part": args.part, "ok": code == 0, "checks": report.checks, **report.data}
     out = Path(report.data["server"]["dir"]) / f"qa-{args.part}.json"
-    out.write_text(json.dumps(summary, indent=2, default=str) + "\n", encoding="utf-8")
+    try:
+        out.write_text(json.dumps(summary, indent=2, default=str) + "\n", encoding="utf-8")
+        where = f"evidence in {out}"
+    except OSError as e:          # a directory that could not be emptied may not take the file either
+        where = f"the evidence could not be written to {out} ({e})"
+        code = 1
     passed = sum(1 for c in report.checks if c["ok"])
-    print(f"{'OK' if code == 0 else 'FAILED'}: {passed} of {len(report.checks)} checks passed; evidence in {out}",
-          flush=True)
+    print(f"{'OK' if code == 0 else 'FAILED'}: {passed} of {len(report.checks)} checks passed; {where}", flush=True)
     return code
 
 
