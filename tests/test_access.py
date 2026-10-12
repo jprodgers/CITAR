@@ -615,14 +615,24 @@ class GameRoutes(unittest.TestCase):
         stranger and a visitor get 404, a member 404 too until it is shared with members, then 200, and a visitor
         holding a link's key 200."""
         gid = self.game.id
-        for who, want, manages in ((None, 404, None), ("other", 404, None), ("reader", 200, False),
-                                   ("owner", 200, True), ("zara", 200, True)):
+        for who, want, manages in ((None, 404, None), ("other", 404, None), ("maggie", 404, None),
+                                   ("reader", 200, False), ("owner", 200, True), ("zara", 200, True)):
             with self.subTest(who=who or "anonymous"):
                 view = self.client.get(f"/api/games/{gid}/view", headers=self.headers.get(who, {}))
                 replay = self.client.get(f"/api/games/{gid}/replay", headers=self.headers.get(who, {}))
                 self.assertEqual((view.status_code, replay.status_code), (want, want), view.text[:200])
                 if want == 200:
                     self.assertIs(view.json()["can_manage"], manages)
+        # a moderator on a `global` game (P3.9.1): reads 200, managing nothing, and control 403; a visitor reads too
+        self._set_visibility("global")
+        for who in ("maggie", None):
+            with self.subTest(who=who or "anonymous", visibility="global"):
+                view = self.client.get(f"/api/games/{gid}/view", headers=self.headers.get(who, {}))
+                replay = self.client.get(f"/api/games/{gid}/replay", headers=self.headers.get(who, {}))
+                self.assertEqual((view.status_code, replay.status_code), (200, 200), view.text[:200])
+                self.assertIs(view.json()["can_manage"], False)
+        self.assertEqual(self._post("/control", "maggie", {"paused": True}).status_code, 403)
+        self.assertIn(self._post("/control", None, {"paused": True}).status_code, (401, 403))
         self._set_visibility("server")
         self.assertEqual(self.client.get(f"/api/games/{gid}/view", headers=self.headers["other"]).status_code, 200)
         self.assertEqual(self.client.get(f"/api/games/{gid}/replay", headers=self.headers["other"]).status_code, 200)

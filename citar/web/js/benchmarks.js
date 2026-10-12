@@ -157,7 +157,8 @@ function renderJob(run, job, ctx) {
       location.hash = `#/game/${r.game_id}/${encodeURIComponent(r.spectator_token)}`;
     } catch (e) { toast(e.message, "error"); }
   };
-  const act = (action, label, cls = "small") => el("button", { class: cls, onclick: async (e) => {
+  // a job's controls are its run's managers' (can_manage), as the run's own are; a viewer still watches
+  const act = (action, label, cls = "small") => run.can_manage === false ? null : el("button", { class: cls, onclick: async (e) => {
     e.stopPropagation();
     try { await api.jobControl(run.id, job.id, action); ctx.refresh(); } catch (err) { toast(err.message, "error"); }
   } }, label);

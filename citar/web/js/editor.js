@@ -19,8 +19,9 @@ const T = { terrain: 0, features: 1, wonder: 2, river: 3, resource: 4, amount: 5
 
 export async function renderEditor(root, rules, mapId) {
   const ed = new MapEditor(root, rules);
-  if (mapId) await ed.open(decodeURIComponent(mapId));
-  else ed.load(blank(40, 26, "Ocean"), true);
+  if (!mapId) { ed.load(blank(40, 26, "Ocean"), true); return ed; }
+  try { await ed.open(decodeURIComponent(mapId), { address: true }); }
+  catch (e) { ed.destroy(); throw e; }
   return ed;
 }
 
@@ -85,8 +86,14 @@ class MapEditor {
       camp: row[T.improvement] === "Barbarian encampment", village: row[T.improvement] === "Ancient ruins" };
   }
 
-  async open(id) {
-    try { this.load(await api.map(id)); } catch (e) { toast(e.message, "error"); this.load(blank(40, 26, "Ocean"), true); }
+  // Open a map. One the address names (`address`) that this viewer may not see, or that is not there, is the
+  // router's "not found" page (the 404 is thrown to it); from the editor's own list, a toast over a blank map.
+  async open(id, { address = false } = {}) {
+    try { this.load(await api.map(id)); }
+    catch (e) {
+      if (address && e.status === 404) throw e;
+      toast(e.message, "error"); this.load(blank(40, 26, "Ocean"), true);
+    }
   }
 
   idx(x, y) { return y * this.map.width + x; }

@@ -290,7 +290,13 @@ function ratingChart(series) {
 async function renderProfile(page, rules, pid) {
   let info, engines;
   try { [info, { engines }] = await Promise.all([api.botProfile(pid), engineList()]); }
-  catch (e) { page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots"))); return {}; }
+  catch (e) {
+    // a profile this viewer may not see, or that is not there, is the router's "not found" page (its sign-in for a
+    // visitor whose link is old)
+    if (e.status === 404) throw e;
+    page.appendChild(el("div", { class: "card" }, el("p", { class: "bad" }, e.message), el("a", { href: "#/bots" }, "← Bots")));
+    return {};
+  }
   const saved = info.profile;
   // A profile whose code the engine refuses (a frozen snapshot of 0.1.5) has no schema: it is shown read-only with
   // the refusal, and its owner can still delete it.
