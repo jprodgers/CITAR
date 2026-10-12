@@ -57,6 +57,11 @@ CONFIG = {"map_size": "duel", "seed": 7, "barbarians": "off", "turn_limit": 400}
 GPU = {"server_id": "sv_gpu", "model": "dry-run"}
 
 
+def named(entry: dict) -> str:
+    """What a job, run or report waits for, every holder named (as its owner and an administrator are told it)."""
+    return pool_seats.note_text(entry.get("waiting_note"), lambda h: h["label"]) or ""
+
+
 def labels(sid: str) -> list:
     """The labels of the leases live on a machine, as the scheduler holds them."""
     return [lease.label for lease in S.get().leases(sid)]
@@ -105,7 +110,7 @@ class LeaseCase(unittest.TestCase):
         sch.tick()
         sch.tick()
         self.assertEqual(job["status"], "queued", f"the benchmark job waits for {label}: {job}")
-        self.assertIn(label, job.get("waiting") or "")
+        self.assertIn(label, named(job))
         sch.control_run(run["id"], "cancel")
 
 
@@ -317,7 +322,7 @@ class OccupiedIsTheLeases(LeaseCase):
         sch, run, job = self.bench("sv_two", "m_two")
         sch.tick()
         self.assertEqual(job["status"], "queued", "two leases fill a machine that takes two games")
-        self.assertIn(f"in use by game “{a.name}”", job["waiting"])
+        self.assertIn(f"in use by game “{a.name}”", named(job))
         a.update_seat(2, type="bot")                         # one lease left: a slot for the job
         self.assertTrue(until(lambda: (sch.tick() or True) and job["status"] in ("loading", "running"), 15), job)
         sch.control_run(run["id"], "cancel")
@@ -531,6 +536,327 @@ class BenchmarkDrain(LeaseCase):
         self.assertEqual((row["metrics"]["timed_turns"], row["metrics"]["contaminated_games"]), (clean, 1))
         self.assertIsNotNone(row["speed"])
         self.assertEqual(row["benchmark_games"], 2, "both games still count for performance")
+
+
+# ---------------------------------------------------------------------------- the fix round (the review's findings)
+
+class MadeWay(LeaseCase):
+    """A game that made way holds no lease until it resumes (P3.3.3), even when a person chats with its model seat:
+    the answer runs on a lease of its own that goes when the answer ends, and the driver never plays a model seat then.
+    An agent is never kept bound to a lease released while it was made."""
+
+    def made_way(self):
+        g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}])
+        g.suspend({"kind": "queue", "message": "making way for a benchmark run"})
+        self.assertEqual(pool_seats.occupied("sv_gpu"), [])
+        return g
+
+    def test_a_chat_answered_while_made_way_lets_its_lease_go_and_the_work_ahead_starts(self):
+        g = self.made_way()
+        events: list = []
+        S.get().add_listener(events.append)
+        with g.lock:
+            if not g.game.has_met(0, 1):
+                g.game.meet(0, 1)
+        r = g.call_tool(0, "open_negotiation", {"to": 1, "message": "Hello while you make way."})
+        self.assertTrue(r["ok"], r)
+        nid = r["result"]["negotiation_id"]
+
+        def answered():
+            with g.lock:
+                head = g.game.negotiation_head(nid)
+            return head["awaiting"] != 1 and not g._answering
+        self.assertTrue(until(answered, 30), "the model seat answers the person")
+        self.assertTrue([e for e in events if e.machine == "sv_gpu" and e.cls == "game"],
+                        "the answer's requests were the seat's lease's")
+        self.assertTrue(g._made_way(), "the game still makes way")
+        self.assertEqual(pool_seats.occupied("sv_gpu"), [], "the answer's lease went with the answer")
+        self.assertNotIn(1, g.agents, "and the agent bound to it")
+        # so the work it made way for starts, rather than waiting for a game that waits for it
+        sch, run, job = self.bench("sv_gpu")
+        self.assertTrue(until(lambda: (sch.tick() or True) and job["status"] in ("loading", "running"), 15), job)
+        sch.control_run(run["id"], "cancel")
+        g.resume()
+        self.assertEqual(pool_seats.occupied("sv_gpu"), [f"game “{g.name}”"], "the resume makes its lease again")
+
+    def test_the_driver_gets_no_agent_and_makes_no_lease_while_made_way(self):
+        g = self.made_way()
+        self.assertIsNone(g.get_agent(1), "no turn is played on a machine the game gave up")
+        self.assertIsNone(g.lease_for(1))
+        self.assertEqual(labels("sv_gpu"), [])
+        # a chat's answer in flight has its agent and lease; the driver still plays nothing on them
+        with g.lock:
+            g._answering[1] = 1
+        answer = g.get_agent(1, answering=True)
+        self.assertIsNotNone(answer)
+        self.assertEqual(len(labels("sv_gpu")), 1)
+        self.assertIsNone(g.get_agent(1))
+        g._answered(1)                          # the answer ends: its agent and lease go
+        self.assertTrue(answer.cancelled)
+        self.assertNotIn(1, g.agents)
+        self.assertEqual(labels("sv_gpu"), [])
+        g.resume()
+        agent = g.get_agent(1)
+        self.assertIs(agent.binding, g.leases[1])
+        self.assertFalse(agent.binding.released)
+
+    def test_an_agent_made_across_a_make_way_pause_is_not_kept_and_the_seat_plays_after_the_resume(self):
+        """The benchmark scheduler (or a make-way watcher) suspends the game on its own thread while the driver makes
+        the model seat's agent: the agent, bound to the lease the suspend released, is not kept, so the seat's turns
+        after the resume play on its new lease instead of failing one after another."""
+        from citar.agents import llm_agent
+        g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}])
+        real, landed = llm_agent.LLMAgent.__init__, []
+
+        def made_while_suspended(agent, cfg, binding=None):
+            real(agent, cfg, binding=binding)
+            if not landed:
+                landed.append(binding)
+                g.suspend({"kind": "queue", "message": "making way"})       # lands while the agent is made
+        with mock.patch.object(llm_agent.LLMAgent, "__init__", made_while_suspended):
+            self.assertIsNone(g.get_agent(1), "made across the pause: not kept")
+        self.assertTrue(landed[0].released)
+        self.assertNotIn(1, g.agents)
+        self.assertEqual(labels("sv_gpu"), [])
+        g.resume()
+        # the person ends her turn: the driver plays the model seat's on its new lease, ended by the model
+        self.assertTrue(g.call_tool(0, "end_turn", {})["ok"])
+        self.assertTrue(until(lambda: g.game.turn == 2 and g.game.current == 0, 60), (g.game.turn, g.game.current))
+        rec = next(r for r in g.metrics.data["turns"] if r["player"] == 1)
+        self.assertEqual(rec["end_reason"], "end_turn", g.errors)
+        self.assertEqual(rec["errors"], 0)
+        self.assertIs(g.agents[1].binding, g.leases[1])
+        self.assertFalse(g.leases[1].released)
+
+    def test_an_agent_made_across_a_seat_change_is_made_again_from_the_seat_as_it_is(self):
+        from citar.agents import llm_agent
+        g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}])
+        real, moved = llm_agent.LLMAgent.__init__, []
+
+        def made_while_moved(agent, cfg, binding=None):
+            real(agent, cfg, binding=binding)
+            if not moved:
+                moved.append(binding)
+                g.update_seat(1, llm={**GPU, "server_id": "sv_dryrun"})    # lands while the agent is made
+        with mock.patch.object(llm_agent.LLMAgent, "__init__", made_while_moved):
+            agent = g.get_agent(1)
+        self.assertTrue(moved[0].released, "the old machine's lease went with the change")
+        self.assertEqual((agent.cfg["server_id"], agent.binding.server_id), ("sv_dryrun", "sv_dryrun"),
+                         "the agent kept is the seat's new one")
+        self.assertIs(agent.binding, g.leases[1])
+        self.assertIs(g.agents[1], agent)
+        self.assertEqual((labels("sv_gpu"), len(labels("sv_dryrun"))), ([], 1))
+        # a change of the seat's settings alone keeps its lease: the agent made across it is made again all the same,
+        # from the settings as they are
+        g.cancel_agent(1)
+        changed = []
+
+        def made_while_set(agent, cfg, binding=None):
+            real(agent, cfg, binding=binding)
+            if not changed:
+                changed.append(binding)
+                g.update_seat(1, llm={**GPU, "server_id": "sv_dryrun", "max_tool_calls_per_turn": 7})
+        with mock.patch.object(llm_agent.LLMAgent, "__init__", made_while_set):
+            agent = g.get_agent(1)
+        self.assertFalse(changed[0].released, "the same machine and model: the same lease")
+        self.assertEqual(agent.cfg.get("max_tool_calls_per_turn"), 7)
+        self.assertIs(g.agents[1], agent)
+
+    def test_a_make_way_pause_names_the_work_ahead_by_its_kind_only(self):
+        """The pause is shown to whoever may watch the game: the work it makes way for may be another member's private
+        run, so it is named by its kind (P3.9.1); a benchmark job's game the same, and its run's log."""
+        from citar.pool import queue as work_queue
+        first = {"kind": "probe", "group": "secret-run", "id": "secret-run", "label": "secret probe run",
+                 "priority": 5}
+        g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}])
+        with mock.patch.object(work_queue, "preempting", lambda *a, **k: first):
+            self.assertTrue(g._make_way(1, g.seats[1]))
+        self.assertEqual(g.pause_reason["message"], "making way on Test GPU box for a probe run (priority 5)")
+        g.resume()
+        sch = BenchmarkScheduler(self.manager, self.dir / "bench-pause", autostart=False)
+        self.schedulers.append(sch)
+        job = {"status": "running", "game_id": g.id}
+        sch._pause_job(job, "preempted", first)
+        self.assertEqual(g.pause_reason["message"], "making way for a probe run (priority 5)")
+
+    def test_a_cached_agent_whose_lease_was_released_is_made_again(self):
+        g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}])
+        old = g.get_agent(1)
+        old.binding.release()                   # released behind the session's back
+        new = g.get_agent(1)
+        self.assertIsNot(new, old)
+        self.assertTrue(old.cancelled)
+        self.assertIs(new.binding, g.leases[1])
+        self.assertFalse(new.binding.released)
+
+
+class LookedAtAfterARestart(LeaseCase):
+    """A game opened only to be looked at (``load(leases=False)``: a probe case's end state) still holds no machine
+    after a restart brings it back (its live mark keeps ``leases``)."""
+
+    def test_a_game_opened_to_be_looked_at_comes_back_holding_nothing(self):
+        import json
+        folder = Path(tempfile.mkdtemp(prefix="citar-restore-view-"))
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        with mock.patch.object(session_mod, "SAVE_DIR", folder):
+            g = self.game([{"type": "human"}, {"type": "llm", "llm": GPU}])
+            path = g.save("looked-at")
+            self.manager.delete(g.id)
+            view = self.manager.load(path, leases=False)
+            self.assertEqual(labels("sv_gpu"), [])
+            mark = json.loads((folder / view.id / session_mod.GameSession.LIVE_MARK).read_text(encoding="utf-8"))
+            self.assertIs(mark["leases"], False)
+            # the server goes away with the game open
+            view.stop()
+            self.manager.sessions.pop(view.id)
+            manager2 = SessionManager()
+            manager2.restore_live()
+            self.addCleanup(lambda: [manager2.delete(sid) for sid in list(manager2.sessions)])
+            back = manager2.get(view.id)
+            self.assertIsNotNone(back)
+            self.assertFalse(back.holds_machines)
+            self.assertEqual(labels("sv_gpu"), [], "brought back, it is still only looked at")
+
+
+class GrantPurposes(LeaseCase):
+    """A seat's lease is capped by the grant for the work its game was admitted for (P3.3.7): a benchmark game's by
+    the grant for benchmarks."""
+
+    def test_a_benchmark_games_lease_is_capped_by_the_grant_for_benchmarks(self):
+        from citar.auth import accounts
+        from citar.db.models import AccessGrant, Server, ServerGroup
+        with db.session() as s:
+            owner = accounts.create_user(s, handle="lender-b", email="lb@x.cc", password="a long enough phrase",
+                                         status="active", email_verified=True)
+            member = accounts.create_user(s, handle="bencher-b", email="bb@x.cc", password="a long enough phrase",
+                                          status="active", email_verified=True)
+            group = ServerGroup(owner_id=owner.id, name="lent for benchmarks", visibility="server")
+            s.add(group)
+            s.flush()
+            row = Server(owner_id=owner.id, name="bench box", kind="test", provider="dryrun", reach="direct",
+                         group_id=group.id, max_concurrent=2,
+                         config={"connection": {"provider": "dryrun"}, "models": [{"key": "dry-run"}]})
+            s.add(row)
+            s.add(AccessGrant(group_id=group.id, subject_type="everyone", purposes=["benchmark"], concurrency=1))
+            s.flush()
+            sid, member_id = row.id, member.id
+        self.assertEqual(pool_seats.consumer_cap(member_id, sid, "benchmark"), 1)
+        seats = [{"type": "llm", "llm": {"server_id": sid, "model": "dry-run"}}, {"type": "bot"}]
+        g = self.manager.create(CONFIG, seats, name="bench cap", start=False, owner_id=member_id)
+        g.benchmark = {"run_id": "run-cap", "job_id": "job-cap", "llm_player": 0}
+        lease = g.lease_for(0)
+        self.assertEqual((lease.kind, lease.consumer, lease.cap), ("benchmark", member_id, 1),
+                         "her benchmark game is held to her grant's concurrency")
+        # a lease made before the game had its owner takes her grant's cap for benchmarks when she is given it
+        later = self.manager.create(CONFIG, seats, name="bench cap later", start=False)
+        later.benchmark = {"run_id": "run-cap-2", "job_id": "job-cap-2", "llm_player": 0}
+        early = later.lease_for(0)
+        self.assertEqual((early.consumer, early.cap), (None, 0))
+        later.owner_id = member_id
+        self.assertIs(later.lease_for(0), early)
+        self.assertEqual((early.consumer, early.cap), (member_id, 1))
+
+
+class ReportOnHelper(LeaseCase):
+    """A report whose narrative a helper machine writes waits in the queue while the helper is offline, holding nothing,
+    and rides out a helper that drops while it is built (as the narrative's polling of a helper did before)."""
+
+    def setUp(self):
+        super().setUp()
+        from citar import reports
+        from citar.db.models import Server
+        with db.session() as s:
+            row = Server(owner_id=None, name="Helper box", kind="owned", provider="lmstudio", reach="worker",
+                         config={"models": [{"key": "helper-model"}]})
+            s.add(row)
+            s.flush()
+            self.sid = row.id
+        servers.invalidate()
+        self.reports = reports
+        self.runner = reports.ReportRunner(self.dir / "reports")
+        self.runner.POLL_SECONDS = 0.05
+        self.runner.RETRY_MIN_SECONDS = 0.05
+        self.runner.RECONNECT_POLL_SECONDS = 0.1
+        self.calls: list = []
+
+    def start(self):
+        return self.runner.start({"title": "Helper report", "sections": ["summary"],
+                                  "narrative": {"enabled": True, "server_id": self.sid, "model_id": "helper-model"}})
+
+    def built(self, rid: str) -> dict:
+        self.assertTrue(until(lambda: self.runner.meta(rid)["status"] not in ("queued", "running"), 30))
+        return self.runner.meta(rid)
+
+    def test_a_report_waits_in_the_queue_while_its_helper_is_offline(self):
+        online = {"on": False}
+
+        def complete(cfg, system, prompt, binding):
+            self.calls.append((binding.kind, binding.server_id))
+            return "Written on the helper.", 0.5
+        with mock.patch.object(self.reports, "_helper_online", lambda sid: online["on"]), \
+                mock.patch.object(self.reports, "complete", complete):
+            m = self.start()
+            self.assertTrue(until(lambda: self.runner.meta(m["id"]).get("waiting"), 10))
+            time.sleep(0.3)
+            meta = self.runner.meta(m["id"])
+            self.assertEqual((meta["status"], meta["waiting"]), ("queued", "Helper box's helper is offline"))
+            self.assertEqual(labels(self.sid), [], "it holds nothing while it waits")
+            self.assertEqual(self.calls, [], "and asks nothing of a helper that is not there")
+            online["on"] = True
+            meta = self.built(m["id"])
+        self.assertEqual(meta["status"], "done", meta.get("error"))
+        self.assertIn("Written on the helper.", self.runner.html_path(m["id"]).read_text(encoding="utf-8"))
+        self.assertEqual(self.calls, [("report", self.sid)])
+
+    def test_a_helper_that_drops_while_the_report_is_built_is_waited_for(self):
+        from citar.agents.providers.worker_provider import WorkerConnectionError
+        answers = [WorkerConnectionError("the helper disconnected"), WorkerConnectionError("not connected")]
+
+        def complete(cfg, system, prompt, binding):
+            self.calls.append(time.perf_counter())
+            if answers:
+                raise answers.pop(0)
+            return "Written after the helper came back.", 0.5
+        with mock.patch.object(self.reports, "_helper_online", lambda sid: True), \
+                mock.patch.object(self.reports, "complete", complete):
+            meta = self.built(self.start()["id"])
+        self.assertEqual(meta["status"], "done", meta.get("error"))
+        self.assertEqual(len(self.calls), 3, "tried again once the helper was back")
+        self.assertGreaterEqual(self.calls[1] - self.calls[0], 0.04, "never in a tight loop")
+        self.assertIn("Written after the helper came back.",
+                      self.runner.html_path(meta["id"]).read_text(encoding="utf-8"))
+
+    def test_the_wait_is_bounded_and_other_failures_are_not_retried(self):
+        from citar.agents.providers.worker_provider import WorkerConnectionError
+        self.runner.RECONNECT_SECONDS = 0.3
+        notes, narrative = [], self.runner._narrative
+
+        def noted(*a, **kw):
+            out = narrative(*a, **kw)
+            notes.append(out[1])
+            return out
+        self.runner._narrative = noted
+
+        def gone(cfg, system, prompt, binding):
+            self.calls.append("gone")
+            raise WorkerConnectionError("the helper is not connected")
+        with mock.patch.object(self.reports, "_helper_online", lambda sid: True), \
+                mock.patch.object(self.reports, "complete", gone):
+            meta = self.built(self.start()["id"])
+        self.assertEqual(meta["status"], "done", "the report is built without its narrative")
+        self.assertTrue(notes[-1].startswith("The narrative failed: WorkerConnectionError"), notes)
+        self.assertGreater(len(self.calls), 1)
+        self.calls.clear()
+
+        def refused(cfg, system, prompt, binding):
+            self.calls.append("refused")
+            raise RuntimeError("the machine refused the request")
+        with mock.patch.object(self.reports, "_helper_online", lambda sid: True), \
+                mock.patch.object(self.reports, "complete", refused):
+            meta = self.built(self.start()["id"])
+        self.assertEqual(meta["status"], "done")
+        self.assertEqual(self.calls, ["refused"], "a refusal is not a dropped helper: not tried again")
+        self.assertTrue(notes[-1].startswith("The narrative failed: RuntimeError"), notes)
 
 
 class SpeedScoreLeavesContaminatedTimingsOut(unittest.TestCase):

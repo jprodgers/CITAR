@@ -279,7 +279,7 @@ class PooledWork(unittest.TestCase):
 
     def test_probe_runs_on_different_machines_do_not_wait_for_each_other(self):
         """One busy machine held up probe runs on every other machine, and runs went one at a time."""
-        from citar.pool import scheduler as prompt_scheduler
+        from citar.pool import scheduler as prompt_scheduler, seats
         runner = self._bare_runner()
         ids = []
         for n, server in (("busy", self.server_id), ("free", "sv-elsewhere"), ("third", "sv-third")):
@@ -306,7 +306,9 @@ class PooledWork(unittest.TestCase):
             self.assertNotIn(ids[0], started, "the busy machine's run waits")
             waiting = runner.get_run(ids[0])
             self.assertEqual(waiting["status"], "waiting (machine busy)")
-            self.assertIn("long one", waiting["waiting"])
+            # the note names the holder to whoever may see it (the run's route); its stored text names nobody
+            self.assertIn("long one", seats.note_text(waiting["waiting_note"], lambda h: h["label"]))
+            self.assertEqual(waiting["waiting"], "waiting for someone's game")
         finally:
             held.release()
             release.set()
@@ -315,7 +317,7 @@ class PooledWork(unittest.TestCase):
         self.assertEqual(set(started), set(ids))
 
     def test_one_queue_orders_benchmarks_and_probes_by_priority_then_age(self):
-        from citar.pool import queue as work_queue
+        from citar.pool import queue as work_queue, seats
         from citar.server.benchmarks import BenchmarkScheduler
         runner = self._bare_runner()
         rid = f"test-old-probe-{int(time.time() * 1000) % 100000}"
@@ -331,7 +333,8 @@ class PooledWork(unittest.TestCase):
             sch.tick()
             job = run["jobs"][0]
             self.assertEqual(job["status"], "queued", "the probe run queued an hour earlier goes first")
-            self.assertIn("old probe goes first", job["waiting"])
+            self.assertIn("old probe goes first", seats.note_text(job["waiting_note"], lambda h: h["label"]))
+            self.assertNotIn("old probe", job["waiting"], "the stored text names no other work")
             self.assertEqual([i["id"] for i in work_queue.waiting(self.server_id)], [rid, job["id"]])
             work_queue.set_priority("benchmark", run["id"], 5)
             self.assertEqual(work_queue.waiting(self.server_id)[0]["id"], job["id"])
