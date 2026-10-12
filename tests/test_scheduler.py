@@ -1120,6 +1120,10 @@ class TimeAccounting(unittest.TestCase):
             clock.advance(600)                              # ten minutes waiting for the person
             return 600.0
         s._await_reply = chat_wait
+        # the person never answers: end_turn waits until the chat clock closes the chat (package 3-11), in the
+        # session's own fake time, which the agent's clock does not see
+        from tests.chatfake import use
+        use(s)
         agent = LLMAgent({"provider": "dryrun", "max_turn_seconds": 1200}, binding=Queued())
         agent._clock = clock
         s.agents[0] = agent

@@ -35,14 +35,16 @@ class DryRunConversation(Conversation):
         self._results: list[str] = []
         self._tools = {t.get("name") for t in tools or []}
         self._text = ""
-        self._last = ""             # the latest message: what a chat's answer reads
-        self._fresh = False         # a message not answered yet
+        self._chat = ""             # the chat's latest message (one naming its negotiation): what an answer reads
+        self._pending = False       # that message is not answered yet
 
     def add_user_text(self, text: str):
-        """Keep the text: a chat's answer and a turn's proposal read it (the turn's number, the chat's offer)."""
+        """Keep the text: a turn's proposal reads it (the turn's number), and a chat's answer reads the latest message
+        that names its negotiation (a nudge to answer does not replace it)."""
         self._text += text
-        self._last = text
-        self._fresh = True
+        if re.search(r"negotiation #\d+", text):
+            self._chat = text
+            self._pending = True
 
     def add_tool_results(self, results):
         """Ignore tool results."""
@@ -55,7 +57,7 @@ class DryRunConversation(Conversation):
     def _delay(self) -> float:
         """How long this step takes: the configured delay, or a chat message's ``[dry run: wait N s]``."""
         chat = "respond_negotiation" in self._tools and "end_turn" not in self._tools
-        m = re.search(r"\[dry run: wait (\d+(?:\.\d+)?) s\]", self._last) if chat and self._fresh else None
+        m = re.search(r"\[dry run: wait (\d+(?:\.\d+)?) s\]", self._chat) if chat and self._pending else None
         return min(600.0, float(m.group(1))) if m else self.delay
 
     def step(self) -> StepResult:
@@ -86,11 +88,11 @@ class DryRunConversation(Conversation):
         """A chat's answer: each message once, with cfg["dry_run_negotiation"] (accept | reject | counter | reply),
         else accepting a deal that gives it at least as many items as it gives (a reply when nothing is on the
         table)."""
-        text = self._last
+        text = self._chat
         m = re.search(r"negotiation #(\d+)", text)
-        if not m or not self._fresh:
+        if not m or not self._pending:
             return StepResult(text="Done.", tool_calls=[])
-        self._fresh = False
+        self._pending = False
         nid = int(m.group(1))
         mode = self.cfg.get("dry_run_negotiation")
         if '"current_proposal": null' in text:

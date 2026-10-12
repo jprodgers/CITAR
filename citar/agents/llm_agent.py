@@ -841,7 +841,7 @@ class ChatThread:
         self.seen = 0                # the chat's entries the model has been told of
         self.cancels = 0             # moves on each cancel: an exchange in progress stops at its next look
         self.closed = False
-        self._unanswered = False     # the last message was not answered by a step (cut off): a retry asks again
+        self._unanswered = False     # the last message has no step after it (one was cut off): a retry asks again
         self.last_outcome: Optional[str] = None
         self.last_cause: Optional[str] = None
         self._dead = False           # its conversation was closed by a cancel: the next exchange starts a new one
@@ -979,6 +979,7 @@ class ChatThread:
                 if not step.tool_calls:
                     conv.add_user_text("Answer with respond_negotiation (accept, reject, counter or reply), with a "
                                        "message.")
+                    self._unanswered = True
                     continue
                 results = []
                 for c in step.tool_calls:

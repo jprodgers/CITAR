@@ -920,7 +920,8 @@ class Probes(_ProbeScenario):
     def _interrupting(self, seat, times: int):
         """The dry run's answer in two steps (text first, then its tool call), the lobby seat's turn beginning between
         them the first ``times`` times it is asked: the seat asks for the slot the answer borrowed, so the answer's
-        second step is refused (``yielded``); the seat plays its turn's one request and goes idle again."""
+        second step is refused (``yielded``); the seat plays its turn's one request and goes idle again. The chat keeps
+        one conversation across the tries (package 3-11), so the interruptions are counted over the case."""
         from citar.agents.providers import dryrun
         from citar.agents.providers.base import StepResult
         original = dryrun.DryRunConversation._negotiate
@@ -934,7 +935,7 @@ class Probes(_ProbeScenario):
             seat.idle()
 
         def two_steps(conv):
-            if conv._step == 1 and left["n"] > 0:
+            if left["n"] > 0:
                 left["n"] -= 1
                 threading.Thread(target=seat_turn, daemon=True).start()
                 self.assertTrue(until(lambda: S.get().machine("sv_gpu").view()["lease_requests"], 5))
