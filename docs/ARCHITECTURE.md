@@ -355,7 +355,8 @@ a file and reloading is the whole development loop.
 | `api.js` | Every HTTP call, CSRF, share keys |
 | `game.js`, `render.js`, `hex.js`, `panels.js` | The game screen and the canvas renderer |
 | `lobby.js`, `benchmarks.js`, `models.js`, `lab.js`, `probes.js`, `scenario.js`, `editor.js` | The other screens |
-| `servers.js`, `pool.js`, `reports.js`, `console.js`, `setup.js` | Machines, sharing, reports, operator console, first-run wizard |
+| `pool.js`, `servers.js`, `machines.js` | The Servers page (`#/pool`): every machine the viewer owns or may use and the groups that share them; the machines' editors as dialogs; the page's rules (its old `#/servers` addresses, and which routes a viewer may call for a machine), kept apart so Node tests them (`citar/web/tests/`) |
+| `reports.js`, `console.js`, `setup.js` | Reports, operator console, first-run wizard |
 | `auth.js`, `account.js` | Sign-in and account settings |
 
 Check a change with `node --check` on a **`.mjs` copy** of the file: on a `.js` file Node parses it
