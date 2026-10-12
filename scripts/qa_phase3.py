@@ -16,16 +16,20 @@ The harness:
   ``--port``), everything of the instance under the directory (``dev_server.instance_env``);
 - makes an administrator, two members and a moderator (a third member for ``all``) with ``admin_cli create-user``,
   passwords on standard input, and signs them in through ``/api/auth/login`` (a cookie and the CSRF token each);
-- serves a fake OpenAI-compatible endpoint on 127.0.0.1 that records every connection it accepts (the
-  ``accounts`` part's trap: a member's seat that names it must make the server dial nothing). Package 3-05 teaches
-  it the scripted policy that plays (P3.9.4);
+- writes a registry file of CITAR before 0.1.6 into the instance's ``config/`` before the server starts, which the
+  first administrator's creation imports (P3.2.8);
+- serves fake OpenAI-compatible endpoints on 127.0.0.1 that record every connection they accept and every request
+  they serve, and answer from a scripted policy that plays (P3.9.4: tool calls from the request's tools, a delay per
+  completion): one is the ``accounts`` part's trap (a member's seat or machine that names it must make the server dial
+  nothing), another serves the real CITAR helpers (``python -m citar.worker``) a part starts for a helper machine;
 - runs the part's checks, writes ``<dir>/qa-<part>.json`` (each check, its result, its numbers; the accounts and
   their throwaway password, for the browser checklist), stops the server unless ``--keep``, and exits 1 when a
   check failed, 0 when every one passed.
 
 Parts: ``accounts`` (3-03: sharing of games and reports, ``/r/{slug}``, a moderator's unpublish, members' model
 blocks, a member's report gathering only what they may see; 3-04: profiles, avatars, the directory, the admin users
-routes, ``admin_cli``'s commands, probation and a suspension; 3-05 and 3-06 add theirs), and later ``queue``,
+routes, ``admin_cli``'s commands, probation and a suspension; 3-05: the registry's import, members' machines, a
+helper machine with a real helper, the machine routes' gates and dropped helpers; 3-06 adds its own), and later ``queue``,
 ``ledger``, ``chat``, ``hybrid``, ``minimap``, ``machines``; ``all`` runs every part written so far. It needs the
 extension (``cargo xtask develop``) and the ``worker`` extra (websockets), which ``dev`` includes.
 """
@@ -35,6 +39,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -194,16 +199,29 @@ class Report:
 # ---------------------------------------------------------------------------- the fake endpoint
 
 class FakeEndpoint:
-    """A fake OpenAI-compatible endpoint on 127.0.0.1, recording every connection it accepts and every request it
-    serves (when, what). Today it answers ``/v1/models`` and a plain chat completion; package 3-05 makes it the
-    scripted policy of P3.9.4 (valid tool calls from the request's tools, a delay per completion)."""
+    """A fake OpenAI-compatible endpoint on 127.0.0.1 that plays: a **scripted policy, not canned text** (P3.9.4).
+
+    It records every connection it accepts (``connections``) and every request it serves (``requests``: when, what,
+    the tools offered, the calls it answered with, how long it took), so a part can say what reached it. A chat
+    completion is answered from the request itself (``scripted_reply``): the negotiation it is asked about is
+    answered (accepted when it gets at least as much as it gives, as the dry run does); a turn reads its units,
+    cities, empire and the players it has met, gives orders that are legal but not clever (founds a city, explores,
+    researches, builds), opens a trade with a met civilization (``share_map`` both ways, which needs no technology;
+    at most ``max_trades`` times), votes when a vote is open, and ends the turn. ``delay`` seconds pass before each
+    completion, so queues, drains and cancels can be seen. ``/models`` (and LM Studio's ``/api/v0/models``) name
+    ``MODEL``, loaded. So a real CITAR helper pointed at it exercises the hub, the hello, the requests and
+    ``Done.duration`` without a GPU."""
 
     MODEL = "qa-fake-model"
 
-    def __init__(self):
+    def __init__(self, *, delay: float = 0.05, max_trades: int = 1):
         outer = self
         self.connections: list[tuple[float, str]] = []
         self.requests: list[dict] = []
+        self.delay = delay
+        self.max_trades = max_trades
+        self.trades_opened = 0
+        self._lock = threading.Lock()
 
         class Handler(BaseHTTPRequestHandler):
             def _send(self, code: int, body: dict):
@@ -217,18 +235,26 @@ class FakeEndpoint:
             def do_GET(self):
                 outer.requests.append({"t": time.time(), "method": "GET", "path": self.path})
                 if self.path.rstrip("/").endswith("/models"):
-                    return self._send(200, {"object": "list", "data": [{"id": outer.MODEL, "object": "model"}]})
+                    return self._send(200, {"object": "list", "data": [
+                        {"id": outer.MODEL, "object": "model", "state": "loaded", "max_context_length": 32768}]})
                 self._send(404, {"error": "not found"})
 
             def do_POST(self):
                 size = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(size) if size else b""
-                outer.requests.append({"t": time.time(), "method": "POST", "path": self.path, "bytes": len(body)})
-                self._send(200, {"id": "qa-1", "object": "chat.completion", "created": int(time.time()),
-                                 "model": outer.MODEL,
-                                 "choices": [{"index": 0, "finish_reason": "stop",
-                                              "message": {"role": "assistant", "content": "(qa fake endpoint)"}}],
-                                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+                raw = self.rfile.read(size) if size else b""
+                t0 = time.time()
+                entry = {"t": t0, "method": "POST", "path": self.path, "bytes": len(raw)}
+                try:
+                    body = json.loads(raw or b"{}")
+                except ValueError:
+                    body = {}
+                if outer.delay:
+                    time.sleep(outer.delay)
+                reply, calls = outer.scripted_reply(body)
+                entry.update(tools=len(body.get("tools") or []), calls=[c["function"]["name"] for c in calls],
+                             seconds=round(time.time() - t0, 3))
+                outer.requests.append(entry)
+                self._send(200, reply)
 
             def log_message(self, *args):
                 pass
@@ -245,6 +271,114 @@ class FakeEndpoint:
         self.port = self.httpd.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}/v1"
         threading.Thread(target=self.httpd.serve_forever, daemon=True, name="qa-fake-endpoint").start()
+
+    # ------------------------------------------------------------------ the policy
+    def completions(self) -> list:
+        """The chat completions it served."""
+        return [r for r in self.requests if r.get("method") == "POST"]
+
+    def scripted_reply(self, body: dict) -> tuple:
+        """A chat completion for ``body`` (an OpenAI request) and the tool calls in it."""
+        tools = {(t.get("function") or {}).get("name") for t in body.get("tools") or [] if isinstance(t, dict)}
+        messages = [m for m in body.get("messages") or [] if isinstance(m, dict)]
+        last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
+        since = messages[last_user + 1:]
+        steps = sum(1 for m in since if m.get("role") == "assistant")
+        prompt = str(messages[last_user].get("content") or "") if last_user >= 0 else ""
+        calls: list = []
+
+        def call(name: str, args: Optional[dict] = None) -> None:
+            if name in tools:
+                calls.append({"id": f"qa_{len(self.requests)}_{len(calls)}", "type": "function",
+                              "function": {"name": name, "arguments": json.dumps(args or {})}})
+
+        if "respond_negotiation" in tools and "end_turn" not in tools:
+            found = re.search(r"negotiation #(\d+)", prompt)
+            if found and steps == 0:
+                gives = prompt.split('"you_receive"')[0].count('"type"') if '"you_receive"' in prompt else 0
+                gets = prompt.count('"type"') - gives
+                action = "reply" if '"current_proposal": null' in prompt else ("accept" if gets >= gives else "reject")
+                call("respond_negotiation", {"negotiation_id": int(found.group(1)), "action": action,
+                                             "message": f"(qa endpoint) {action}"})
+        elif steps == 0:
+            for name in ("get_units", "get_cities", "get_empire", "get_players"):
+                call(name)
+            if not calls:
+                call("end_turn")
+        elif steps == 1:
+            results = self._results(since)
+            calls += self._orders(results, tools)
+            if "vote" in prompt.lower() and "un_vote" in tools:
+                call("un_vote", {"candidate": (results.get("get_empire") or {}).get("id", "abstain")})
+            if not calls:
+                call("end_turn")
+        else:
+            call("end_turn")
+        message = {"role": "assistant", "content": "(qa endpoint) " + (", ".join(c["function"]["name"] for c in calls)
+                                                                      or "nothing to do")}
+        if calls:
+            message["tool_calls"] = calls
+        reply = {"id": f"qa-{len(self.requests)}", "object": "chat.completion", "created": int(time.time()),
+                 "model": body.get("model") or self.MODEL,
+                 "choices": [{"index": 0, "finish_reason": "tool_calls" if calls else "stop", "message": message}],
+                 "usage": {"prompt_tokens": sum(len(str(m.get("content") or "")) for m in messages) // 4,
+                           "completion_tokens": 10 + 10 * len(calls),
+                           "total_tokens": sum(len(str(m.get("content") or "")) for m in messages) // 4 + 10}}
+        return reply, calls
+
+    @staticmethod
+    def _results(since: list) -> dict:
+        """The turn's tool results by tool name: each assistant call's id matched to its tool message."""
+        names = {}
+        for m in since:
+            for c in m.get("tool_calls") or []:
+                names[c.get("id")] = (c.get("function") or {}).get("name")
+        out = {}
+        for m in since:
+            if m.get("role") == "tool" and names.get(m.get("tool_call_id")):
+                try:
+                    out[names[m["tool_call_id"]]] = json.loads(m.get("content") or "null")
+                except ValueError:
+                    pass
+        return out
+
+    def _orders(self, results: dict, tools: set) -> list:
+        """Orders that are legal but not clever, as the dry run gives (``DryRunConversation._orders``), and a trade
+        with a met civilization."""
+        units = results.get("get_units") if isinstance(results.get("get_units"), list) else []
+        cities = results.get("get_cities") if isinstance(results.get("get_cities"), list) else []
+        empire = results.get("get_empire") if isinstance(results.get("get_empire"), dict) else {}
+        players = results.get("get_players") if isinstance(results.get("get_players"), list) else []
+        calls = []
+
+        def call(name, args):
+            if name in tools:
+                calls.append({"id": f"qa_{len(self.requests)}_{len(calls)}_{name}", "type": "function",
+                              "function": {"name": name, "arguments": json.dumps(args)}})
+        # the engine names unit types as the ruleset does ("Settler")
+        settler = next((u for u in units if isinstance(u, dict) and str(u.get("type") or "").lower() == "settler"),
+                       None)
+        if settler and not cities:
+            call("found_city", {"unit_id": settler["id"]})
+        for u in units:
+            if isinstance(u, dict) and u.get("class") != "civilian" and u is not settler and not u.get("activity"):
+                call("unit_order", {"unit_id": u["id"], "order": "explore"})
+        if not empire.get("researching"):
+            call("set_research", {"tech": "pottery"})
+        for c in cities:
+            if isinstance(c, dict) and not c.get("queue"):
+                call("set_production", {"city_id": c["id"], "item": "warrior"})
+        me = empire.get("id")
+        met = [p for p in players if isinstance(p, dict) and p.get("met") and p.get("alive")
+               and p.get("kind") == "major" and p.get("id") != me and p.get("name") != empire.get("name")]
+        with self._lock:
+            trade = bool(met) and self.trades_opened < self.max_trades and "open_negotiation" in tools
+            if trade:
+                self.trades_opened += 1
+        if trade:
+            call("open_negotiation", {"to": met[0]["id"], "message": "(qa endpoint) shall we share our maps?",
+                                      "give": [{"type": "share_map"}], "receive": [{"type": "share_map"}]})
+        return calls
 
     def close(self) -> None:
         """Stop serving."""
@@ -380,10 +514,11 @@ def _ids(listing) -> set:
 
 
 def part_accounts(h: Harness) -> None:
-    """The ``accounts`` part: 3-03's sharing checks, then 3-04's profiles and administration. Each half runs whatever
-    the other found."""
+    """The ``accounts`` part: 3-03's sharing checks, 3-04's profiles and administration, then 3-05's machines. Each
+    runs whatever the others found."""
     _accounts_sharing(h)
     _accounts_profiles(h)
+    _accounts_machines(h)
 
 
 def _accounts_sharing(h: Harness) -> None:
@@ -719,6 +854,274 @@ def _accounts_profiles(h: Harness) -> None:
     r.data["profiles"] = {"alice_display_name": name, "alice_avatar": avatar, "bob_id": bob_id}
 
 
+#: The registry file a server of CITAR before 0.1.6 would have, written into the instance's ``config/`` before it
+#: starts (P3.2.8's import): a host, an online API whose key variable is not set, a dry run, an electricity plan.
+#: Nothing in it dials anything: the host has no provider, the API's key is missing.
+QA_REGISTRY = {
+    "format": "citar-servers", "version": 1, "currency": "EUR", "currency_symbol": "€", "host_server_id": "sv_qa_host",
+    "electricity_plans": [{"id": "ep_qa", "name": "QA household", "periods": [
+        {"from": "2000-01-01", "type": "flat", "rate_kwh": 0.3, "fixed_monthly": 0, "fee_allocation": "none"}]}],
+    "servers": [
+        {"id": "sv_qa_host", "name": "QA host", "kind": "owned", "connection": {"provider": "none", "max_parallel": 2},
+         "power": {"idle_w": 20, "cpu_max_w": 60, "gpu_max_w": 0},
+         "costs": [{"from": "2000-01-01", "electricity_plan_id": "ep_qa"}]},
+        {"id": "sv_qa_api", "name": "QA API", "kind": "api",
+         "connection": {"provider": "anthropic", "max_parallel": 3, "key": {"backend": "env", "env": "CITAR_QA_NO_SUCH_KEY"}},
+         "models": [{"id": "m_qa_opus", "key": "claude-opus-5"}]},
+        {"id": "sv_qa_dry", "name": "QA dry run", "kind": "test", "connection": {"provider": "dryrun", "max_parallel": 4},
+         "models": [{"id": "m_qa_dry", "key": "dry-run"}]},
+    ]}
+
+
+def write_registry(state: Path) -> Path:
+    """Put ``QA_REGISTRY`` where the instance's server reads its registry file once (``config/servers.json``)."""
+    path = state / "config" / "servers.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(QA_REGISTRY, indent=1), encoding="utf-8")
+    return path
+
+
+class Helper:
+    """A real CITAR helper (``python -m citar.worker``) as a child, connected to the instance with a worker token and
+    serving from a fake endpoint; its log in the harness's directory."""
+
+    def __init__(self, h: "Harness", token: str, endpoint: FakeEndpoint, name: str):
+        state = h.server.state
+        n = len(list(state.glob("helper-*.log"))) + 1
+        self.log = state / f"helper-{n}.log"
+        empty = state / f"helper-{n}.json"
+        empty.write_text("{}", encoding="utf-8")      # the helper reads this, never a saved helper configuration
+        out = open(self.log, "w", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CITAR_WORKER_")}
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "citar.worker", "--server", h.server.base, "--token", token,
+             "--base-url", endpoint.url, "--provider", "openai_compatible", "--name", name, "--no-hardware",
+             "--config", str(empty)],
+            cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            env={**env, "PYTHONUNBUFFERED": "1"})
+        out.close()
+
+    def exited(self, timeout: float) -> bool:
+        """Whether the helper stopped by itself within ``timeout`` seconds."""
+        try:
+            self.proc.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+    def stop(self) -> None:
+        """Stop it if it still runs."""
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
+    def text(self) -> str:
+        """What it logged."""
+        return self.log.read_text(encoding="utf-8", errors="replace") if self.log.exists() else ""
+
+
+def _online(who: "Account", sid: str) -> Optional[bool]:
+    """Whether a helper machine's helper is connected, as its owner's Servers page reads it."""
+    r = who.get(f"/api/pool/servers/{sid}/workers")
+    return r.json().get("online") if r.status_code == 200 else None
+
+
+def _until_offline(who: "Account", sid: str, limit: float = 10.0) -> Optional[float]:
+    """Seconds until the helper of ``sid`` is gone (polled every 50 ms), or None past ``limit``."""
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < limit:
+        if not _online(who, sid):
+            return round(time.perf_counter() - t0, 3)
+        time.sleep(0.05)
+    return None
+
+
+def _accounts_machines(h: Harness) -> None:
+    """3-05's checks (design/phase3-features.md P3.2.8): the registry file imported once, under its ids, when the first
+    administrator was made, and renamed; a member's machine CITAR would dial refused unless it is the dry run; a
+    member's dry-run machine and helper machine (a real helper behind the scripted endpoint) playing her games; the
+    host-touching routes 404 on a helper machine with nothing dialled; another member's machine 404; the model probe
+    an administrator's; a revoked token, a disabled machine and a deleted one dropping the helper within a second."""
+    r = h.report
+    admin, alice, bob = (h.accounts[k] for k in ("admin", "alice", "bob"))
+    trap = h.endpoint
+    state = h.server.state
+
+    # ---- the import
+    log = h.server.log.read_text(encoding="utf-8", errors="replace")
+    r.check("the boot imported nothing with no administrator yet, and said why",
+            "not imported yet: there is no administrator" in log)
+    renamed = sorted(p.name for p in (state / "config").glob("servers.json.imported-*"))
+    r.check("the registry file was imported when the first administrator was made, and renamed (never deleted)",
+            not (state / "config" / "servers.json").exists() and len(renamed) == 1, f"{renamed}")
+    listing = admin.get("/api/servers").json() if admin.get("/api/servers").status_code == 200 else {}
+    rows = {sv["id"]: sv for sv in listing.get("servers", [])}
+    r.check("every machine of the file is a row under its own id, the host the row with is_host, slots from "
+            "max_parallel, the plans and the currency carried over",
+            {"sv_qa_host", "sv_qa_api", "sv_qa_dry"} <= set(rows) and rows["sv_qa_host"].get("is_host") is True
+            and rows["sv_qa_host"].get("reach") == "direct" and rows["sv_qa_api"].get("max_concurrent") == 3
+            and listing.get("host_server_id") == "sv_qa_host" and listing.get("currency") == "EUR"
+            and [p["id"] for p in listing.get("electricity_plans", [])] == ["ep_qa"],
+            json.dumps({k: {f: v.get(f) for f in ("is_host", "reach", "max_concurrent")} for k, v in rows.items()}))
+    audit = admin.get("/api/admin/audit", params={"action": "migration.registry_imported"}).json().get("entries", [])
+    r.check("one audit row for the import", len(audit) == 1, f"{len(audit)} rows")
+    r.check("a member lists only their own machines (none yet), not the site's",
+            alice.get("/api/servers").json().get("servers") == [])
+
+    # ---- a member's machines CITAR would dial
+    before = len(trap.connections)
+    dial = alice.post("/api/servers", json={"name": f"QA alice LAN {h.tag}", "kind": "owned",
+                                            "connection": {"provider": "lmstudio", "base_url": trap.url},
+                                            "models": [{"key": trap.MODEL}]})
+    probe = alice.post("/api/llm/models", json={"provider": "openai_compatible", "base_url": trap.url,
+                                                "api_key_env": "PATH"})
+    r.check("a member's machine the server would dial is refused (403, the reason given), and so is the model probe",
+            dial.status_code == 403 and "administrator" in dial.text and probe.status_code == 403,
+            f"save HTTP {dial.status_code}, probe HTTP {probe.status_code}")
+    time.sleep(0.5)
+    r.check("and nothing connected to the address they named", len(trap.connections) == before,
+            connections=len(trap.connections) - before)
+    env_key = alice.post("/api/servers", json={"name": f"QA alice env {h.tag}", "kind": "test",
+                                               "connection": {"provider": "dryrun", "key": {"backend": "env", "env": "PATH"}}})
+    r.check("a member's machine may not name one of the server's environment variables as its key (403)",
+            env_key.status_code == 403, f"HTTP {env_key.status_code}")
+    dry = alice.post("/api/servers", json={"name": f"QA alice dry run {h.tag}", "kind": "test",
+                                           "connection": {"provider": "dryrun", "dry_run_delay": 0.2},
+                                           "models": [{"key": "dry-run"}]})
+    dry_id = dry.json().get("id") if dry.status_code == 200 else ""
+    r.check("a member's direct dry-run machine is theirs to make (it dials nothing)",
+            dry.status_code == 200 and dry.json().get("reach") == "direct", dry.text[:200])
+    r.data["machines"] = {"alice_dry": dry_id}
+    game = alice.post("/api/games", json={"name": f"QA alice dry machine {h.tag}", "config": CONFIG,
+                                          "seats": [{"type": "llm", "llm": {"server_id": dry_id, "model": "dry-run"}},
+                                                    {"type": "bot"}]})
+    gid = game.json().get("id") if game.status_code == 200 else ""
+    turned = wait_until(lambda: (alice.get(f"/api/games/{gid}").json().get("turn") or 0) >= 2, 90, 1.0) if gid else False
+    r.check("her game plays a seat on her dry-run machine", bool(turned), f"HTTP {game.status_code} {game.text[:150]}")
+    if gid:
+        alice.delete(f"/api/games/{gid}")         # closed: her game limit has room for the next one
+    r.check("another member cannot see or seat it: 404 on its configuration, 403 for a seat",
+            bob.get(f"/api/servers/{dry_id}/rates").status_code == 404
+            and bob.post("/api/servers", json={"id": dry_id, "name": "mine now", "kind": "test",
+                                               "connection": {"provider": "dryrun"}}).status_code == 404
+            and bob.post("/api/games", json={"name": "x", "config": CONFIG, "seats": [
+                {"type": "llm", "llm": {"server_id": dry_id, "model": "dry-run"}}, {"type": "bot"}]}).status_code == 403)
+    site = bob.post("/api/games", json={"name": "x", "config": CONFIG, "seats": [
+        {"type": "llm", "llm": {"server_id": "sv_qa_dry", "model": "dry-run"}}, {"type": "bot"}]})
+    r.check("the site's machines are an administrator's until shared: a member's seat on its dry run is 403, the "
+            "machine not named", site.status_code == 403 and "QA dry run" not in site.text, site.text[:200])
+
+    # ---- a helper machine behind the scripted endpoint, with a real helper
+    scripted = FakeEndpoint(delay=0.05)
+    helpers: list = []
+    try:
+        made = alice.post("/api/pool/servers", json={"config": {"name": f"QA alice helper {h.tag}", "kind": "owned",
+                                                                "connection": {"provider": "openai_compatible"}},
+                                                     "reach": "worker"})
+        hid = made.json().get("id") if made.status_code == 200 else ""
+        r.data["machines"]["alice_helper"] = hid
+
+        def token() -> str:
+            t = alice.post(f"/api/pool/servers/{hid}/workers/tokens", json={"label": "qa"})
+            return t.json().get("token", "") if t.status_code == 200 else ""
+
+        def connect() -> Optional[Helper]:
+            helper = Helper(h, token(), scripted, f"qa-helper-{len(helpers) + 1}")
+            helpers.append(helper)
+            return helper if wait_until(lambda: _online(alice, hid), 60, 0.25) else None
+
+        first = connect()
+        info = alice.get(f"/api/pool/servers/{hid}/workers").json() if hid else {}
+        r.check("a member's helper machine connects with a real helper and its hello names the endpoint's model",
+                first is not None and scripted.MODEL in [m.get("key") for m in (info.get("worker") or {}).get("models", [])],
+                f"made HTTP {made.status_code}; worker {json.dumps(info.get('worker'))[:200]}")
+
+        # the routes that dial or drive LM Studio on the host: 404 for a helper machine, with nothing sent
+        sent = len(scripted.requests), len(scripted.connections), len(trap.connections)
+        codes = {}
+        for method, path, body in (("post", "detect", None), ("get", "state", None),
+                                   ("post", "load", {"model_id": scripted.MODEL}),
+                                   ("post", "unload", {"model_id": scripted.MODEL}), ("get", "loading", None),
+                                   ("post", "loaded-config", {"model_id": scripted.MODEL}),
+                                   ("post", "estimate", {"model_id": scripted.MODEL}), ("post", "collect", None)):
+            call = getattr(alice, method)
+            got = call(f"/api/servers/{hid}/{path}", **({"json": body} if body is not None else {}))
+            codes[path] = got.status_code
+        time.sleep(0.5)
+        r.check("detect, state, load, unload, loading, loaded-config, estimate and collect are 404 on her helper "
+                "machine", set(codes.values()) == {404}, json.dumps(codes))
+        r.check("and nothing was asked of any model server meanwhile",
+                (len(scripted.requests), len(scripted.connections), len(trap.connections)) == sent,
+                f"before {sent}, after {(len(scripted.requests), len(scripted.connections), len(trap.connections))}")
+        host_wide = {path: alice.request(method, path, **kw).status_code for method, path, kw in (
+            ("GET", "/api/lmstudio/devices", {}), ("PUT", "/api/servers-settings", {"json": {"currency": "XXX"}}),
+            ("POST", "/api/keys/unlock", {"json": {"passphrase": "x"}}), ("POST", "/api/keys/lock", {}),
+            ("POST", "/api/electricity-plans", {"json": {"name": "mine"}}))}
+        r.check("the host-wide routes are 404 for a member", set(host_wide.values()) == {404}, json.dumps(host_wide))
+        r.check("another member gets 404 on her helper machine's configuration",
+                bob.get(f"/api/servers/{hid}/rates").status_code == 404
+                and bob.get(f"/api/pool/servers/{hid}/workers").status_code == 404)
+
+        # her game plays through the helper and the scripted policy
+        served = len(scripted.completions())
+        g2 = alice.post("/api/games", json={"name": f"QA alice helper game {h.tag}", "config": CONFIG,
+                                            "seats": [{"type": "llm", "llm": {"server_id": hid, "model": scripted.MODEL}},
+                                                      {"type": "bot"}]})
+        gid2 = g2.json().get("id") if g2.status_code == 200 else ""
+        if gid2:
+            # the civilizations meet, so the scripted policy has someone to open a trade with
+            alice.post(f"/api/games/{gid2}/debug/meet_all")
+        played = wait_until(lambda: (alice.get(f"/api/games/{gid2}").json().get("turn") or 0) >= 3, 120, 1.0) \
+            if gid2 else False
+        if gid2:
+            alice.post(f"/api/games/{gid2}/control", json={"paused": True})
+        mine = scripted.completions()[served:]
+        ended = sum(1 for q in mine if "end_turn" in q.get("calls", []))
+        called = {c for q in mine for c in q.get("calls", [])}
+        r.check("her game plays two turns through the helper: the scripted endpoint answered with tool calls (a city "
+                "founded, a trade opened with the civilization it met) and ended each turn",
+                bool(played) and ended >= 2 and all(q.get("tools", 0) > 0 for q in mine)
+                and {"found_city", "open_negotiation", "end_turn"} <= called,
+                f"HTTP {g2.status_code}; {len(mine)} completions, {ended} end_turn; {sorted(called)}",
+                completions=len(mine), end_turns=ended, trades=scripted.trades_opened)
+        r.data["scripted_endpoint"] = {"completions": len(mine), "end_turns": ended, "trades": scripted.trades_opened,
+                                       "calls": sorted({c for q in mine for c in q.get("calls", [])})}
+        if gid2:
+            alice.delete(f"/api/games/{gid2}")
+
+        # a revoked token, a disabled machine and a deleted one drop the helper within a second
+        tokens = alice.get(f"/api/pool/servers/{hid}/workers").json().get("tokens", [])
+        live = next((t["id"] for t in tokens if not t["revoked"]), "")
+        revoked = alice.delete(f"/api/pool/servers/{hid}/workers/tokens/{live}")
+        gone = _until_offline(alice, hid)
+        r.check("revoking the helper's token drops it within a second, and the helper stops",
+                revoked.status_code == 200 and gone is not None and gone <= 1.0 and first is not None
+                and first.exited(15), f"offline after {gone} s", seconds=gone)
+        second = connect()
+        disabled = alice.put(f"/api/pool/servers/{hid}", json={"enabled": False})
+        gone = _until_offline(alice, hid)
+        refused = Helper(h, token(), scripted, "qa-helper-disabled")
+        helpers.append(refused)
+        r.check("disabling the machine drops its helper within a second, and a helper's new hello is refused",
+                second is not None and disabled.status_code == 200 and gone is not None and gone <= 1.0
+                and second.exited(15) and refused.exited(30) and "rejected" in refused.text(),
+                f"offline after {gone} s", seconds=gone)
+        alice.put(f"/api/pool/servers/{hid}", json={"enabled": True})
+        third = connect()
+        deleted = alice.delete(f"/api/pool/servers/{hid}")
+        gone = _until_offline(alice, hid) if deleted.status_code == 200 else None
+        r.check("deleting the machine drops its helper within a second and leaves no connection",
+                third is not None and deleted.status_code == 200 and third.exited(15)
+                and alice.get(f"/api/pool/servers/{hid}").status_code == 404, f"HTTP {deleted.status_code}")
+    finally:
+        for helper in helpers:
+            helper.stop()
+        scripted.close()
+
+
 #: The parts written so far, in the order ``all`` runs them.
 PARTS: dict[str, Callable[[Harness], None]] = {"accounts": part_accounts}
 
@@ -783,6 +1186,7 @@ def run(args) -> tuple:
     try:
         server = Server(state, port)
         endpoint = FakeEndpoint()
+        report.data["server"]["registry_file"] = str(write_registry(state))
         report.data["server"].update({"base": server.base, "public": server.public, "log": str(server.log),
                                       "fake_endpoint": endpoint.url})
         server.start()

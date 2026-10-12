@@ -1027,13 +1027,20 @@ def bench_suites(request: Request, p: Principal = Depends(principal), sdb: DbSes
     return _with_perms(sdb, "benchmark_suite", p.user, out, slug=key)
 
 
-@app.get("/api/benchmarks/suites/new", dependencies=[Depends(require_user)])
-def bench_new_suite():
-    """A blank suite with sensible defaults, for the editor to start from."""
+@app.get("/api/benchmarks/suites/new")
+def bench_new_suite(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """A blank suite with sensible defaults, for the editor to start from: on the host when its caller may use it,
+    else the first machine with models they may (every machine is a row, P3.2.8; a member's suite names only those)."""
     from .benchmarks import normalize_suite
     from .. import servers as REG
+    from ..db.models import Server
+
+    def usable(sv) -> bool:
+        row = sdb.get(Server, sv["id"])
+        return row is not None and access.VIEW in access.on(sdb, me, row)
     host = REG.host()
-    first = host if host and host["models"] else next((s for s in REG.list_servers() if s["models"] and s["kind"] != "test"), None)
+    first = host if host and host["models"] and usable(host) else next(
+        (s for s in REG.list_servers() if s["models"] and s["kind"] != "test" and usable(s)), None)
     return normalize_suite({"name": "New benchmark suite", "servers": [{"server_id": first["id"], "models": []}] if first else []})
 
 

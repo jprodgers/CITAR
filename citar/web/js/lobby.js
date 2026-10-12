@@ -292,26 +292,33 @@ function pickDefault(reg) {
   return [...reg.servers].filter((s) => s.models.some((m) => m.enabled)).sort((a, b) => rank(a) - rank(b))[0];
 }
 
-// Machines from the Servers page, reached through the CITAR helper running on them, in the registry's shape so the
-// seat form can offer them beside the registry servers. Models are what the helper reports now, loaded ones first.
+// The machines the caller may use but does not manage, from the pool's list, in the registry's shape so the seat form
+// can offer them beside their own: a helper machine (reach "worker") with the models its helper reports now, loaded
+// ones first; a machine the server dials that its owner shared (the site's dry run, say) with its catalogue's keys.
 function pooledEntries(pool) {
   return (pool.servers || []).filter((s) => s.enabled !== false).map((s) => {
-    const source = (s.live_models && s.live_models.length) ? s.live_models : (s.models || []);
+    const helper = s.reach === "worker";
+    const source = (helper && s.live_models && s.live_models.length) ? s.live_models : (s.models || []);
     const models = source.filter((m) => m.key && !/embed/i.test(m.key))
       .map((m) => ({ id: m.key, key: m.key, label: (m.label || m.key) + (m.loaded ? " (loaded)" : ""), enabled: true,
                      loaded: !!m.loaded, profiles: [], inference: {}, info: {} }))
       .sort((a, b) => b.loaded - a.loaded);
-    return { id: s.id, name: s.name, kind: "pool", pooled: true, online: s.online, admission: s.admission,
-             connection: { provider: "worker", max_parallel: s.max_concurrent || 1 }, restricted_hours: { enabled: false },
-             models };
+    return { id: s.id, name: s.name, kind: helper ? "pool" : s.kind, pooled: helper, online: s.online,
+             admission: s.admission, restricted_until: s.restricted_until,
+             connection: { provider: helper ? "worker" : s.provider, max_parallel: s.max_concurrent || 1 },
+             restricted_hours: { enabled: false }, models };
   });
 }
 
+// Every machine a seat may name: the caller's own (every one for an administrator) as the registry lists them, a
+// helper machine as its helper reports it, and the machines shared with the caller (P3.2.8: every machine is a row).
 export async function seatServers(force = false) {
   const [reg, pool] = await Promise.all([
-    registry(force).catch(() => ({ servers: [] })),     // the registry is for administrators
+    registry(force).catch(() => ({ servers: [] })),
     api.poolServers("game").catch(() => ({ servers: [] }))]);
-  return { ...reg, servers: [...(reg.servers || []), ...pooledEntries(pool)] };
+  const own = (reg.servers || []).filter((s) => s.reach !== "worker");
+  const ids = new Set(own.map((s) => s.id));
+  return { ...reg, servers: [...own, ...pooledEntries(pool).filter((s) => !ids.has(s.id))] };
 }
 
 // Editable LLM seat configuration: server -> model -> load profile, plus overrides. `rerender` redraws the parent.

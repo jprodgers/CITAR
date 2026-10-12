@@ -396,11 +396,7 @@ class ReportRunner:
         n = spec["narrative"]
         sv = servers.find(n["server_id"])
         if sv is None:
-            from ..pool import seats as pool_seats
-            pooled = pool_seats.lookup(n["server_id"])
-            if pooled is None:
-                return "", f"The narrative was skipped: no server '{n['server_id']}'."
-            sv = {"id": pooled["id"], "name": pooled["name"], "pooled": True}
+            return "", f"The narrative was skipped: no server '{n['server_id']}'."
         end = servers.restricted_now(sv["id"])
         if end:
             return "", (f"The narrative was skipped: {sv['name']} is in its restricted hours until "
@@ -419,7 +415,7 @@ class ReportRunner:
         tr.register(act, lambda: {sid: {"threads": []} for sid in {sv["id"], host} if sid} if holding["on"] else None)
         prompt = brief + ("\n\nExtra instructions from the reader:\n" + n["instructions"] if n.get("instructions") else "")
         try:
-            if not sv.get("pooled"):          # CITAR does not load models on somebody else's machine
+            if not servers.is_helper(sv["id"]):        # CITAR does not load models on somebody else's machine
                 try:
                     servers.ensure_model(sv, cfg["model"], cfg.get("load"))
                 except Exception:

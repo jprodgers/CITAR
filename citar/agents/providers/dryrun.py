@@ -83,13 +83,14 @@ class DryRunConversation(Conversation):
         except (ValueError, TypeError):
             return []
         calls = []
-        settler = next((u for u in units if u.get("type") == "settler"), None)
+        # the engine names unit types as the ruleset does ("Settler")
+        settler = next((u for u in units if str(u.get("type") or "").lower() == "settler"), None)
         if settler and not cities:
             calls.append(ToolCall("d_f", "found_city", {"unit_id": settler["id"]}))
         for u in units:
-            if u.get("class") not in ("civilian",) and u.get("type") != "settler" and not u.get("activity"):
+            if u.get("class") not in ("civilian",) and u is not settler and not u.get("activity"):
                 calls.append(ToolCall(f"d_x{u['id']}", "unit_order", {"unit_id": u["id"], "order": "explore"}))
-        if not empire.get("research"):
+        if not empire.get("researching"):
             calls.append(ToolCall("d_r", "set_research", {"tech": "pottery"}))
         for c in cities:
             if not c.get("queue"):
