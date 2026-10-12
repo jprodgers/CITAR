@@ -320,11 +320,22 @@ sleeping. `make_conversation(cfg, system, tools, binding)` wraps the provider's 
 `ScheduledConversation`, whose every step takes a slot of its binding's machine first:
 
 - A **lease** is a model seat that plays every turn. It belongs to the session's seat (`GameSession.lease_for`), not to
-  its agent, so it outlives agents made again after a seat change or a resume; a game that has stopped or crashed
-  makes none (its leases are released for good). It is *active* while its seat is
+  its agent, so it outlives agents made again after a seat change or a resume. `GameSession.open_leases` makes one for
+  every living model seat with a machine when the session is registered (`start`: created, loaded paused, brought
+  back by `restore_live`, reloaded by a benchmark, launched from a scenario), so a game that will want a machine holds
+  it before its seat is asked anything; it is released when the seat changes machine, model or type (`update_seat`
+  makes the new one at once) or is eliminated (the engine's `eliminated` event), and for good when the game is over,
+  stopped or crashed. A make-way pause (`pause_reason.kind == "queue"`) releases the leases and the resume makes them
+  again; every other pause keeps them. `pool.seats.occupied()` lists the leases live on a machine, which is what
+  benchmark jobs, probe runs and reports wait for and `usage.session_servers` counts as held. A probe run holds a
+  non-lending lease for the run (its cases adopt it: `GameSession.adopt_lease`), and a report's narrative goes through
+  `make_conversation` on a non-lending `report` lease. It is *active* while its seat is
   mid-turn (the driver calls `activate()` and `idle()` around `play_turn`) and *idle* otherwise; the agent also idles
   it while it waits on a chat reply or a pause, so a seat waiting on its counterpart never keeps the slot the
-  counterpart needs. A lobby game's idle lease lends its slot; a benchmark's and a probe case's never do.
+  counterpart needs. A lobby game's idle lease lends its slot; a benchmark's, a probe's and a report's never do. A
+  benchmark lease's first request waits for the machine's pooled requests to drain; the session adds the wait to the
+  job's `drain_s` and a drain cut short to `contaminated` (`benchmark` in its saves), whose timings
+  `scoring.compare_models` leaves out of the speed score.
 - A **ticket** is one pooled prompt of a few steps (a chat answer, a diplomat phase, a probe case, a report's
   narrative, the Servers page's test), with a class, a priority and a deadline to start by.
 - **The rules**: in flight (draining included) never above capacity; lease requests first and in arrival order; a

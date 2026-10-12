@@ -171,15 +171,22 @@ machine (the design is `design/phase3-features.md` P3.3). A machine has as many 
 (`max_concurrent`), capped by the helper's own `--max-concurrent`; the scheduler sends a machine no more requests than
 it has slots, so a busy machine **queues** work instead of refusing it, and nothing sleeps and retries:
 
-- A game's model seat holds a **lease** on its machine for as long as it plays. Its requests are served in the order
-  they come, before any pooled prompt. While the seat waits on something else (another side's answer in a chat, a
-  paused game, its next turn) a lobby game's lease lends its slot.
+- A game's model seat holds a **lease** on its machine from the moment the game is created, loaded, brought back after
+  a restart or launched from a scenario (paused or not, whoever moves first), until the seat is changed or eliminated
+  or the game ends or is closed; a game paused to make way for higher-priority work gives its leases up until it
+  resumes, while any other pause (a person's, quiet hours, a lost connection) keeps them. Its requests are served in
+  the order they come, before any pooled prompt. While the seat waits on something else (another side's answer in a
+  chat, a paused game, its next turn) a lobby game's lease lends its slot.
+- **What the machine is busy with** is its leases: queued benchmark jobs, probe runs and reports wait for them, and the
+  Queue page lists them. A probe run holds a lease on its model's machine for the whole run, and a report whose
+  analysis a model writes holds one while it is built; neither lends its slot.
 - A **pooled prompt** (one short job: the Servers page's test today; chat answers, report narratives and probe cases
   as later packages move them on) takes a free slot that no seat in the middle of its turn needs, only on a model the
   helper has loaded (unless the machine allows swaps), and never inside the machine's quiet hours. One that borrows an
   idle game's slot gives it back after one capped step when that game's turn comes. A benchmark game on the machine
   holds it: pooled prompts are refused or wait, and the benchmark's first request waits up to two minutes for those
-  already running to finish (`drain_s`; a benchmark that had to go ahead anyway is marked `contaminated`).
+  already running to finish (`drain_s` in the job's result; a benchmark that had to go ahead anyway is marked
+  `contaminated`, and its timing is left out of the model's speed score).
 - **Cancelling drains on today's helper.** When the server gives up a request (a game is closed or paused, a seat is
   changed, a prompt is cancelled or runs out of time), it sends the helper `CANCEL`. The helper of this version ignores
   it and finishes the completion, so the scheduler keeps that slot taken (*draining*) until the helper's late answer
