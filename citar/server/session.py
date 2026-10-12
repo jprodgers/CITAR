@@ -421,8 +421,9 @@ class GameSession:
         This is why an agent should wait on ``wait_for_turn`` rather than polling for its own turn: a negotiation
         opened on somebody else's turn blocks that turn until it is answered. The current player's own agent handles
         the replies to the chats it opened during its turn (its loop's notes and end_turn's wait), so those are not
-        handed out. A paused game's model seats answer when it resumes. ``again`` hands out once more a chat whose key
-        is still held but which no line of its seat holds now (an answer that stopped for a pause).
+        handed out. A model seat whose machine the game paused for (``answers_held``) answers when it resumes.
+        ``again`` hands out once more a chat whose key is still held but which no line of its seat holds now (an answer
+        that stopped for such a pause).
         """
         from ..agents import responders
         current = self.game.current
@@ -438,10 +439,20 @@ class GameSession:
             key = (n["id"], n["entries"])
             if key in self._responding and (not again or responders.busy_with(self, pid, n["id"])):
                 continue
-            if seat.type == "llm" and self.paused:
+            if seat.type == "llm" and self.answers_held():
                 continue
             self._responding[key] = pid
             responders.submit(self, pid, n["id"], n["entries"], "bot" if seat.type == "bot" else "model")
+
+    #: The pauses during which a model seat's chat answers wait for the resume: the game paused because its machine is
+    #: out of reach (a disconnect), in its quiet hours, or its budget is spent, so an answer asked then could only
+    #: fail, and be declined. A person's pause and a make-way pause hold no answer (a game that made way answers on a
+    #: lease of its own for the answer, ``lease_for(answering=True)``).
+    HOLD_ANSWERS = ("disconnect", "restricted", "budget")
+
+    def answers_held(self) -> bool:
+        """Whether the game's model seats' chat answers wait for its resume (``HOLD_ANSWERS``)."""
+        return self.paused and (self.pause_reason or {}).get("kind") in self.HOLD_ANSWERS
 
     def dispatch_waiting(self, pids=None) -> None:
         """Hand out again every open chat that waits on a bot or model seat (of ``pids``, when given) and no responder

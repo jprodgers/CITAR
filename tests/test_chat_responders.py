@@ -276,6 +276,20 @@ class HaltsNeverDecline(Case):
         self.assertEqual([(h["by"], h["action"], h["message"]) for h in n["history"]][1:],
                          [(1, "reply", "seat 1 answers")])
 
+    def test_a_chat_that_comes_during_quiet_hours_waits_for_the_resume_and_one_during_a_persons_pause_does_not(self):
+        s = self.game([{"type": "human"}, self.model(1), self.model(2)])
+        s.suspend({"kind": "restricted", "message": "quiet hours", "since": time.time()})
+        r = s.call_tool(0, "open_negotiation", {"to": 1, "message": "Peace?"})
+        held = r["result"]["negotiation_id"]
+        time.sleep(0.5)
+        self.assertEqual(s.game.negotiation_head(held)["awaiting"], 1, "its machine is in its quiet hours: it waits")
+        s.resume()
+        self.assertTrue(until(lambda: s.game.negotiation_head(held)["awaiting"] == 0, 10), "answered on the resume")
+        s.set_paused(True)                                 # a person's pause holds no answer
+        r = s.call_tool(0, "open_negotiation", {"to": 2, "message": "Peace?"})
+        nid = r["result"]["negotiation_id"]
+        self.assertTrue(until(lambda: s.game.negotiation_head(nid)["awaiting"] == 0, 10))
+
     def test_a_seat_changed_mid_answer_is_answered_by_its_new_agent(self):
         Recording.hang = {1}
         s = self.game([{"type": "human"}, self.model(1)])

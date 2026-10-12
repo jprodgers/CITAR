@@ -162,7 +162,10 @@ up to `max_negotiation_calls` steps (20) per answer, on the seat's own machine. 
 a time, in the order they came. An answer that fails outright (the model could not be reached, or
 used its steps without answering) is declined, "(no response)", so the other side is not kept waiting;
 a slow one is the chat clock's. Pausing the game, quiet hours, a seat change or a server restart in
-the middle of an answer never declines the chat: the seat answers it when it comes back.
+the middle of an answer never declines the chat: the seat answers it when it comes back. A chat that
+comes while the game is paused because of the model's machine (its quiet hours, a disconnect, a spent
+budget) waits for the resume; during a pause of yours, or while the game makes way for other work, the
+model still answers.
 
 **On its own turn.** When the model sends a message in a chat, the tool waits a minute for the answer
 (`negotiation_wait_seconds`, set per seat) and shows it if it comes. An answer that comes later is put

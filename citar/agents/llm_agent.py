@@ -829,8 +829,8 @@ class ChatThread:
     tools of ``CHAT_TOOLS``, and stops when the chat moves. Its outcome (``exchange``): ``answered`` (the model answered
     it), ``moved`` (it no longer waits on the seat: answered or closed by somebody else), ``unanswered`` (the model
     used its steps without answering), ``failed`` (the model could not be asked: an error, a machine's refusal),
-    ``cancelled`` (the seat halted, or the chat clock's deadline came: ``cancel``) or ``paused`` (the game paused
-    before the model was asked: it answers when the game resumes). The session declines only ``unanswered`` and
+    ``cancelled`` (the seat halted, or the chat clock's deadline came: ``cancel``) or ``paused`` (the game paused for
+    its machine before the model was asked, ``GameSession.answers_held``: it answers when the game resumes). The session declines only ``unanswered`` and
     ``failed`` ones ("(no response)"); a slow answer is the chat clock's to decline."""
 
     def __init__(self, agent: LLMAgent, nid: int):
@@ -924,7 +924,7 @@ class ChatThread:
         exchange that was cancelled or paused."""
         a = self.agent
         start = self.cancels
-        if session.paused:
+        if session.answers_held():
             return "paused"
         fresh = self.conv is None or self._dead
         with session.lock:
@@ -966,7 +966,7 @@ class ChatThread:
                 if moved:
                     outcome = "moved"
                     break
-                if session.paused:
+                if session.answers_held():
                     outcome = "paused"
                     break
                 step = a._step(session, pid, conv, chat=True)
