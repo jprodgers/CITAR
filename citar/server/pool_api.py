@@ -529,6 +529,34 @@ def revoke_worker_token(server_id: str, token_id: str, request: Request,
     return {"revoked": token_id}
 
 
+#: How many tests of machines one account may have waiting for their reply at once, over all machines: each holds a
+#: request (and one of the server's worker threads) until its reply or its ``wait`` (at most 120 s). On one machine an
+#: account has one at a time (the scheduler's ``one_per_consumer``).
+TESTS_PER_ACCOUNT = 2
+_tests_lock = threading.Lock()
+_tests_waiting: dict = {}         # user id -> tests of theirs waiting now
+
+
+def _test_begins(user_id: str) -> bool:
+    """Count a test of ``user_id``'s as waiting, unless they have ``TESTS_PER_ACCOUNT`` waiting already."""
+    with _tests_lock:
+        n = _tests_waiting.get(user_id, 0)
+        if n >= TESTS_PER_ACCOUNT:
+            return False
+        _tests_waiting[user_id] = n + 1
+        return True
+
+
+def _test_ends(user_id: str) -> None:
+    """A test of ``user_id``'s has its answer (or gave up)."""
+    with _tests_lock:
+        n = _tests_waiting.get(user_id, 0) - 1
+        if n > 0:
+            _tests_waiting[user_id] = n
+        else:
+            _tests_waiting.pop(user_id, None)
+
+
 @router.post("/servers/{server_id}/test")
 def test_server(server_id: str, request: Request, model: str = "",
                 wait: float = Query(120.0, ge=1.0, le=120.0), p: Principal = Depends(principal),
@@ -544,16 +572,24 @@ def test_server(server_id: str, request: Request, model: str = "",
     slot like any pooled prompt, on a model the helper has loaded (unless its owner allows swaps), and goes through
     ``make_conversation`` like every model call. ``wait`` is how long the caller waits for the reply (1 to 120
     seconds): then the ticket is cancelled, and a request the helper is still generating keeps its slot draining
-    until the helper's late answer.
+    until the helper's late answer. A caller has one test of a machine at a time and ``TESTS_PER_ACCOUNT`` in all
+    (another answers at once, ``code`` ``duplicate`` or ``too_many``), at most ``server_test``'s rate
+    (``citar.auth.ratelimit``; 429 past it), and the request's database connection is given back before the wait.
+    The test is not metered: it belongs to no activity.
     """
     import time as _time
 
     from ..agents.providers import make_conversation
+    from ..auth import ratelimit
     from ..pool import scheduler as prompt_scheduler
     from .workers import hub
 
     me = require_user(request, p)
     server = _server(s, server_id, me, access.VIEW)
+    try:
+        ratelimit.check("server_test", me.id)
+    except ratelimit.RateLimited as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": str(exc.retry_after)}) from None
     decision = admission.check(s, me, server, "game", online=_liveness(server.id), in_flight=None)
     if not decision.allowed:
         return {"ok": False, "stage": "admission", "reason": decision.reason}
@@ -572,43 +608,56 @@ def test_server(server_id: str, request: Request, model: str = "",
         return {"ok": False, "stage": "model",
                 "reason": "The worker reported no chat-capable models."}
 
+    if not _test_begins(me.id):
+        return {"ok": False, "stage": "queue", "model": chosen, "code": "too_many",
+                "reason": f"You have {TESTS_PER_ACCOUNT} machine tests waiting already; try again once one has "
+                          "answered."}
     grant = decision.grant
-    ticket = prompt_scheduler.get().ticket(
-        server.id, chosen, cls="test", activity=f"test:{server.id}", consumer=me.id, label=f"test of {server.name}",
-        start_within=wait, steps=1, cap=int(grant.concurrency or 0) if grant is not None else 0)
-    if ticket.state != "queued":
-        return {"ok": False, "stage": "queue", "model": chosen, "reason": ticket.reason,
-                "code": ticket.error.code if ticket.error else None,
-                "retry_at": ticket.retry_at.isoformat() if ticket.retry_at else None}
-    # Enough headroom that a reasoning model still has budget left for a visible answer after its thinking: a
-    # 24-token cap produced 21 reasoning tokens and an empty reply, which looks like a broken server rather than a
-    # too-small budget.
-    conv = make_conversation({"provider": "worker", "server_id": server.id, "model": chosen, "max_tokens": 256,
-                              "temperature": 0, "timeout": 120}, "", [], binding=ticket)
-    conv.messages.clear()                   # the request is the user's line alone, no system prompt
-    conv.add_user_text("Reply with exactly: CITAR OK")
-    conv.request_timeout = 120
-    timer = threading.Timer(wait, ticket.cancel, kwargs={"reason": f"given up after {wait:.0f} s"})
-    timer.daemon = True
-    started = _time.time()
-    timer.start()
+    ticket, timer = None, None
     try:
-        step = conv.step()
-    except prompt_scheduler.SchedulerError as exc:
-        return {"ok": False, "stage": "queue", "model": chosen, "reason": str(exc), "code": exc.code,
-                "cancelled": ticket.state == "cancelled"}
-    except Exception as exc:
-        if ticket.state == "cancelled":
-            return {"ok": False, "stage": "completion", "model": chosen, "cancelled": True,
-                    "reason": f"No reply within {wait:.0f} s: the test was cancelled (a helper that is still "
-                              "generating it keeps its slot until it finishes)."}
-        cause = exc.__cause__
-        return {"ok": False, "stage": "completion", "model": chosen, "reason": str(exc),
-                "refusal": getattr(cause, "refusal", "") or getattr(exc, "refusal", ""),
-                "retryable": bool(getattr(cause, "retryable", False))}
+        ticket = prompt_scheduler.get().ticket(
+            server.id, chosen, cls="test", activity=None, consumer=me.id, label=f"test of {server.name}",
+            start_within=wait, steps=1, cap=int(grant.concurrency or 0) if grant is not None else 0,
+            one_per_consumer=True)
+        if ticket.state != "queued":
+            return {"ok": False, "stage": "queue", "model": chosen, "reason": ticket.reason,
+                    "code": ticket.error.code if ticket.error else None,
+                    "retry_at": ticket.retry_at.isoformat() if ticket.retry_at else None}
+        # nothing is written before the reply (the audit row comes after it): the request's database connection goes
+        # back to the pool for the wait, which may last minutes
+        s.commit()
+        # Enough headroom that a reasoning model still has budget left for a visible answer after its thinking: a
+        # 24-token cap produced 21 reasoning tokens and an empty reply, which looks like a broken server rather than
+        # a too-small budget.
+        conv = make_conversation({"provider": "worker", "server_id": server.id, "model": chosen, "max_tokens": 256,
+                                  "temperature": 0, "timeout": 120}, "", [], binding=ticket)
+        conv.messages.clear()                   # the request is the user's line alone, no system prompt
+        conv.add_user_text("Reply with exactly: CITAR OK")
+        conv.request_timeout = 120
+        timer = threading.Timer(wait, ticket.cancel, kwargs={"reason": f"given up after {wait:.0f} s"})
+        timer.daemon = True
+        started = _time.time()
+        timer.start()
+        try:
+            step = conv.step()
+        except prompt_scheduler.SchedulerError as exc:
+            return {"ok": False, "stage": "queue", "model": chosen, "reason": str(exc), "code": exc.code,
+                    "cancelled": ticket.state == "cancelled"}
+        except Exception as exc:
+            if ticket.state == "cancelled":
+                return {"ok": False, "stage": "completion", "model": chosen, "cancelled": True,
+                        "reason": f"No reply within {wait:.0f} s: the test was cancelled (a helper that is still "
+                                  "generating it keeps its slot until it finishes)."}
+            cause = exc.__cause__
+            return {"ok": False, "stage": "completion", "model": chosen, "reason": str(exc),
+                    "refusal": getattr(cause, "refusal", "") or getattr(exc, "refusal", ""),
+                    "retryable": bool(getattr(cause, "retryable", False))}
     finally:
-        timer.cancel()
-        ticket.close()
+        if timer is not None:
+            timer.cancel()
+        if ticket is not None:
+            ticket.close()
+        _test_ends(me.id)
 
     elapsed = round(_time.time() - started, 2)
     audit.record(s, "server.tested", actor=me, object_type="server", object_id=server.id,
