@@ -750,7 +750,6 @@ class Machine:
             self.max_in_flight = max(self.max_in_flight, len(self.slots))
         self.counters["granted"] += 1
         self._status(b, {"state": "thinking" if b.is_lease else "running"})
-        self._conv_status(r, {"state": "thinking"})
         self.cond.notify_all()
 
     def _end(self, r: _Request, error: SchedulerError) -> None:
@@ -768,7 +767,6 @@ class Machine:
         if error.retry_at is not None:
             payload["retry_at"] = error.retry_at.isoformat()
         self._status(b, payload)
-        self._conv_status(r, payload)
         self.cond.notify_all()
 
     def _free(self, s: _Slot, now: float, *, frame: bool) -> None:
@@ -844,11 +842,11 @@ class Machine:
             self.sched._notify(b.on_status, {"binding": b.id, "machine": self.id, **payload})
 
     def _conv_status(self, r: _Request, payload: dict) -> None:
-        """Tell the conversation a request is of (``ScheduledConversation.on_status``) where it stands, on the notifier
-        thread: a lease's requests serve its turn and its chat answers alike, and a chat's answer tells its chat
-        (``negotiation_status``). Lock held."""
-        fn = getattr(r.conv, "on_status", None) if r.conv is not None else None
-        if fn is not None:
+        """Tell the conversation a waiting request is of (``ScheduledConversation.heard``) its place in the line, on the
+        notifier thread: a lease's requests serve its turn and its chat answers alike, and a chat's answer tells its
+        chat (``negotiation_status``). Its start the conversation tells itself, on the stepping thread. Lock held."""
+        fn = getattr(r.conv, "heard", None) if r.conv is not None else None
+        if fn is not None and getattr(r.conv, "on_status", None) is not None:
             self.sched._notify(fn, {"binding": r.binding.id, "machine": self.id,
                                     "machine_name": self.settings.name or self.id, **payload})
 
@@ -1660,10 +1658,12 @@ class ScheduledConversation(Conversation):
         #: machine (its ``position``, ``eta_s`` and the ``machine``'s name) and when that wait is over (None): the
         #: agent shows its seat as waiting for the machine (``Machine.acquire``).
         self.on_wait: Optional[Callable[[Optional[dict]], None]] = None
-        #: ``on_status(payload)``: told, on the notifier thread, where this conversation's request stands in its
-        #: machine's queue (``queued`` with ``position``, ``eta_s`` and ``benchmark``) and when it is granted
-        #: (``thinking``): a chat's answer passes it on to the chat (``ChatClock.answer_status``).
+        #: ``on_status(payload)``: told where this conversation's step stands: ``queued`` (its place in its machine's
+        #: line, ``position``, ``eta_s`` and ``benchmark``; on the notifier thread, never once the step has started) and
+        #: ``thinking`` (its slot granted, on the stepping thread, before the provider is asked): a chat's answer passes
+        #: it on to the chat (``ChatClock.answer_status``).
         self.on_status: Optional[Callable[[dict], None]] = None
+        self._started = False             # the step under way has its slot: a late ``queued`` is not told
         self.last_queue_s = 0.0
         self.last_gen_s = 0.0
         self.last_event: Optional[StepEvent] = None
@@ -1698,6 +1698,21 @@ class ScheduledConversation(Conversation):
 
     def add_tool_results(self, results):
         self.inner.add_tool_results(results)
+
+    def heard(self, payload: dict) -> None:
+        """The machine's word on a waiting request of this conversation (``Machine._conv_status``, the notifier
+        thread): passed on, unless the step has started meanwhile (the notifier is behind)."""
+        if payload.get("state") == "queued" and self._started:
+            return
+        self._tell(payload)
+
+    def _tell(self, payload: dict) -> None:
+        fn = self.on_status
+        if fn is not None:
+            try:
+                fn(payload)
+            except Exception:
+                log.exception("a conversation's status hook failed")
 
     def rebind(self, binding: Binding) -> None:
         """Run the next steps on another binding (a chat's conversation answering on a fresh ticket each time, as a
@@ -1735,7 +1750,10 @@ class ScheduledConversation(Conversation):
         inner = self.inner
         queued = 0.0
         self.last_queue_s = self.last_gen_s = 0.0
+        self._started = False
         grant = b.acquire(self, self.halted, self.on_wait)
+        self._started = True
+        self._tell({"state": "thinking"})
         hold = None
         while True:
             queued += grant.queue_s
@@ -1764,8 +1782,10 @@ class ScheduledConversation(Conversation):
                 if t0 is not None and _is_busy(e) and not self._closed and grant.request is not None:
                     # the helper had no slot after all: no sleep, nothing metered; wait like any other request
                     queued += sched.clock() - t0
+                    self._started = False
                     b.busy(grant)
                     grant = b.wait(grant.request, self, self.halted)
+                    self._started = True
                     continue
                 # a request the provider abandoned (cancelled, timed out) may still be generating on its helper
                 b.finish(grant, unfinished=getattr(inner, "unfinished", None) if t0 is not None else None)

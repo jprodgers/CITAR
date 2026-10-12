@@ -940,8 +940,9 @@ class ChatThread:
         self.seen = entries
         self._unanswered = True
         self.exchanges += 1
-        if getattr(getattr(conv, "binding", None), "machine", None) is None:
-            # an unscheduled conversation hears nothing from a machine's queue: the model is asked now
+        if not hasattr(conv, "heard"):
+            # a conversation on no binding hears nothing from a machine: the model is asked now (a scheduled one says
+            # so itself when each step has its slot)
             session.chat.answer_status(self.nid, pid, {"state": "thinking"})
         a._active.add(conv)
         steps = calls = 0

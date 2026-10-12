@@ -251,6 +251,7 @@ class StatusEvents(Case):
             mine = [x for x in got[side] if x["negotiation"] == nid]
             states = [x["state"] for x in mine]
             self.assertEqual({"queued", "thinking", "waiting", "closed"}, set(states), f"{side}: {states}")
+            self.assertLess(states.index("queued"), states.index("thinking"), f"{side}: {states}")
             queued = next(x for x in mine if x["state"] == "queued")
             self.assertEqual((queued["position"], queued["waiting_on"], queued["kind"]), (1, 1, "model"))
             waiting = [x for x in mine if x["state"] == "waiting"]
