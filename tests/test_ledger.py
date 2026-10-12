@@ -509,17 +509,21 @@ class CpuAttribution(World):
         totals = {tid: 10.0}
         tracker._thread_times = lambda: dict(totals)
         tracker.holders["k"] = ("game:x", lambda: {"sv_host": {"threads": [tid]}})
-        tracker._sample()                                   # first sight: the baseline
+
+        def sample():
+            tracker._last_sample = time.time() - 5.0        # a sample's five seconds, whatever the clock's tick
+            tracker._sample()
+        sample()                                            # first sight: the baseline
         totals[tid] = 11.0                                  # one second outside any unit
-        tracker._sample()
+        sample()
         self.assertAlmostEqual(tracker.cpu_acc["game:x"], 1.0)
         tracker.unit_started(tid, 0.0)
         totals[tid] = 11.5                                  # half a unit by the next sample
-        tracker._sample()
+        sample()
         self.assertAlmostEqual(tracker.cpu_acc["game:x"], 1.0, msg="left for later while a unit runs")
         totals[tid] = 13.25                                 # the unit used 2.0 in all; 0.25 outside it after
         tracker.unit_ended(tid, "game:x", 2.0)
-        tracker._sample()
+        sample()
         self.assertAlmostEqual(tracker.cpu_acc["game:x"], 1.0 + 2.0 + 0.25)
 
 
