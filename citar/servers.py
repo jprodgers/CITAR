@@ -477,12 +477,12 @@ def stored_config(sv: dict) -> dict:
     return out
 
 
-def _row_registry(row, cfg: dict) -> dict:
+def row_registry(row, cfg: Optional[dict] = None) -> dict:
     """A row as a registry server: its config through ``normalize_server``, under the row's id, name and kind, with
     the row's slots as ``connection.max_parallel``. A helper machine's connection is the helper's to make: it carries
     no address or key here, so nothing that dials what a server dict names (detection, model loading) can reach the
-    host's LM Studio for it."""
-    cfg = _stable_ids(cfg)
+    host's LM Studio for it. ``cfg`` is the row's stored config unless given."""
+    cfg = _stable_ids(dict(row.config or {}) if cfg is None else cfg)
     conn = dict(cfg.get("connection") or {})
     conn["max_parallel"] = row.max_concurrent or 1
     sv = normalize_server({**cfg, "id": row.id, "name": row.name, "kind": row.kind, "connection": conn})
@@ -568,7 +568,7 @@ def _read() -> tuple:
         for row in rows:
             cfg = dict(row.config or {})
             try:
-                sv = _row_registry(row, cfg)
+                sv = row_registry(row, cfg)
             except Exception:
                 log.warning("machine %s has a configuration that does not read; it is left out", row.id, exc_info=True)
                 continue
@@ -878,6 +878,46 @@ def plan(plan_id: Optional[str]) -> Optional[dict]:
     return next((p for p in load()["electricity_plans"] if p["id"] == plan_id), None) if plan_id else None
 
 
+def register_offline(entries: list) -> list:
+    """Add machines from a command-line tool (``citar setup --local``), which has no database of its own open.
+
+    Into the server's database when it exists with this version's tables and its registry was imported (then the
+    rows are the registry), owned by its first administrator; otherwise into ``config/servers.json`` (made from the
+    first run's registry, ``bootstrap()``, when there is none), which the server's first start imports
+    (``citar.pool.registry_import``). An entry with ``is_host`` true becomes the host only when there is none yet.
+    Returns the entries as saved (normalized, with their ids)."""
+    from . import db, settings
+    from .auth import policy
+    saved = [normalize_server(e) for e in entries]
+    hosts = [sv["id"] for sv, e in zip(saved, entries) if e.get("is_host")]
+    engine = _offline_engine() if not db.configured() else db.engine()
+    imported = False
+    if engine is not None:
+        with _OrmSession(engine) as s:
+            imported = bool(policy.marker(s, "registry_imported"))
+    if imported:
+        from . import items
+        if not db.configured():
+            db.configure(settings.get().db_url)
+        with db.session() as s:
+            owner = items.first_admin(s)
+            has_host = s.query(_ServerRow).filter(_ServerRow.is_host.is_(True)).count() > 0
+            for sv, entry in zip(saved, entries):
+                upsert({**sv, "is_host": bool(hosts and sv["id"] == hosts[0] and not has_host)}, actor=owner,
+                       session=s)
+        return saved
+    from .fsutil import write_text
+    reg = json.loads(PATH.read_text(encoding="utf-8")) if PATH.exists() else bootstrap()
+    reg.setdefault("servers", [])
+    for sv in saved:
+        reg["servers"] = [x for x in reg["servers"] if x.get("id") != sv["id"]] + [sv]
+    if hosts and not reg.get("host_server_id"):
+        reg["host_server_id"] = hosts[0]
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    write_text(PATH, json.dumps(reg, indent=1))
+    return saved
+
+
 # ----------------------------------------------------------------------------- time lookups
 def period_at(periods: list[dict], when: datetime) -> Optional[dict]:
     """The effective-dated period in force at `when` (periods sorted by 'from')."""
@@ -1170,7 +1210,8 @@ def resolve_llm(llm: dict, with_key: bool = True, *, inline_ok: bool = True) -> 
     if prof:
         cfg["profile_id"] = prof["id"]
         cfg["load"] = dict(prof)
-    if with_key and conn["key"]["backend"] != "none":
+    # the dry run dials nothing and so needs no key: none is read for it, whatever its configuration names
+    if with_key and conn["key"]["backend"] != "none" and provider != "dryrun":
         from . import keystore
         key = keystore.get(sv)
         if key:

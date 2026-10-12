@@ -450,6 +450,8 @@ class PublicReportPage(unittest.TestCase):
         (folder / "meta.json").write_text(json.dumps({"id": self.rid, "title": "t", "status": "done", "created": 1}),
                                           encoding="utf-8")
         self.set("link")
+        # the site's dry run is a row like any machine (P3.2.8): a member reads its name once it is shared with them
+        tests.share_with_members("sv_dryrun")
         readers = (("bob", {**self.headers["bob"], "x-citar-share-key": self.slug}, ["sv_dryrun"]),
                    ("anonymous", {"x-citar-share-key": self.slug}, []))
         for who, headers, machines in readers:

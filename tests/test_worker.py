@@ -333,17 +333,18 @@ class QuietHours(unittest.TestCase):
         self.assertIsNone(seats.restricted(pooled, local(2026, 9, 21, 22, 0)))
 
     def test_benchmarks_and_probes_see_them(self):
-        """Everything asks servers.restricted_at, which falls back to the Servers-page machine."""
+        """Everything asks servers.restricted_at, which reads a helper machine's hours in its owner's zone."""
         from datetime import datetime
         from citar import servers
-        pooled = {"id": "sv_d", "name": "Desk", "owner_tz": "UTC",
-                  "config": {"restricted_hours": {"enabled": True, "grace_minutes": 5, "windows": [
-                      {"days": [0, 1, 2, 3, 4, 5, 6], "start": "00:00", "end": "23:59"}]}}}
-        with mock.patch("citar.pool.seats.lookup", lambda sid: pooled if sid == "sv_d" else None):
-            self.assertIsNotNone(servers.restricted_at("sv_d", datetime(2026, 9, 21, 12, 0)))
-            self.assertIsNone(servers.restricted_at("sv_other", datetime(2026, 9, 21, 12, 0)))
-            self.assertEqual(servers.server_name("sv_d"), "Desk")
-            self.assertEqual(servers.restriction_config("sv_d")["grace_minutes"], 5)
+        _reset()
+        with db.session() as s:
+            s.add(Server(id="sv_d", name="Desk", kind="owned", provider="lmstudio", reach="worker",
+                         config={"restricted_hours": {"enabled": True, "grace_minutes": 5, "windows": [
+                             {"days": [0, 1, 2, 3, 4, 5, 6], "start": "00:00", "end": "23:59"}]}}))
+        self.assertIsNotNone(servers.restricted_at("sv_d", datetime(2026, 9, 21, 12, 0)))
+        self.assertIsNone(servers.restricted_at("sv_other", datetime(2026, 9, 21, 12, 0)))
+        self.assertEqual(servers.server_name("sv_d"), "Desk")
+        self.assertEqual(servers.restriction_config("sv_d")["grace_minutes"], 5)
 
 
 class LocalSettings(unittest.TestCase):

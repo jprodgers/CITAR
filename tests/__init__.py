@@ -67,7 +67,24 @@ def seed_registry() -> dict:
     from citar import db
     from citar.pool import registry_import
     with db.session() as s:
-        return registry_import.run_once(s, None, data=copy.deepcopy(TEST_REGISTRY), source="tests") or {}
+        return registry_import.run_once(s, None, data=copy.deepcopy(TEST_REGISTRY), source="tests",
+                                        audit_row=False) or {}
+
+
+def share_with_members(*server_ids: str) -> str:
+    """Put some of the site's machines in a group of their own (nobody's: administrators manage it) granted to every
+    member, as an administrator who lets members use the dry run does: since the registry merge the site's machines
+    are rows like any other, and a member reaches one only through a grant (P3.2.8). Returns the group's id."""
+    from citar import db
+    from citar.db.models import AccessGrant, Server, ServerGroup
+    with db.session() as s:
+        group = ServerGroup(owner_id=None, name="The site's shared machines", visibility="server")
+        s.add(group)
+        s.flush()
+        s.add(AccessGrant(group_id=group.id, subject_type="everyone"))
+        for sid in server_ids:
+            s.get(Server, sid).group_id = group.id
+        return group.id
 
 
 def _seeded_create_all(original):

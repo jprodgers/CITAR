@@ -13,11 +13,13 @@ what is configured, what is missing, and what each gap costs them. Everything it
 from the same settings and policy the server actually uses, so it cannot drift from reality the way
 a checklist in a document does.
 
-Authorisation is the ordinary kind. The first-run routes require the ``register_servers``
-capability, which in local mode the auto-signed-in owner has and on a public server a normal member
-has for their own hardware. The console routes are administrator-only. Neither is exempt because
-"setup is special": a setup endpoint that skipped authorisation would be the single most useful
-thing on the server to an attacker.
+Authorisation is the ordinary kind. Looking for model servers on this computer (``/scan``) and registering
+one the server dials (``/apply``) touch the CITAR host and make the server request addresses, so they are an
+administrator's (design/phase3-features.md P3.2.8; in local mode the auto-signed-in owner is one): a member's
+machine joins through the CITAR helper, and anyone else signed in gets 404. The banner's state and dismissing it
+need ``register_servers``, and offer setup to administrators only. The console routes are administrator-only.
+None is exempt because "setup is special": a setup endpoint that skipped authorisation would be the single most
+useful thing on the server to an attacker.
 """
 from __future__ import annotations
 
@@ -28,10 +30,14 @@ from pydantic import BaseModel
 
 from .. import keystore, paths, servers as registry, settings
 from ..auth import policy
-from ..auth.deps import require_admin, require_cap
+from ..auth.deps import require_admin, require_cap, require_role
 from ..db.models import User
 
 router = APIRouter()
+
+#: Administrators only, and a 404 for anyone else signed in: these routes read this computer and register machines
+#: the server dials.
+require_admin_hidden = require_role("admin", hide=True)
 
 #: Providers that cannot take a seat, whatever their catalogue says.
 _NON_PLAYING = ("none", "dryrun")
@@ -67,7 +73,8 @@ def setup_state(me: User = Depends(require_cap("register_servers"))):
     """
     cfg = settings.get()
     return {
-        "needed": _playable_models() == 0 and not policy.get("setup_dismissed", False),
+        # only an administrator registers a machine the server dials; a member's joins through the helper
+        "needed": me.role == "admin" and _playable_models() == 0 and not policy.get("setup_dismissed", False),
         "dismissed": bool(policy.get("setup_dismissed", False)),
         "playable_models": _playable_models(),
         "mode": "server" if cfg.server_mode else "local",
@@ -86,7 +93,7 @@ class ScanResult(BaseModel):
 
 
 @router.post("/api/setup/scan", response_model=ScanResult)
-def setup_scan(me: User = Depends(require_cap("register_servers"))):
+def setup_scan(me: User = Depends(require_admin_hidden)):
     """Look for model servers on this machine, and read its hardware.
 
     Takes a second or two: several endpoints are probed, in parallel, with short timeouts.
@@ -130,8 +137,9 @@ class ApplyBody(BaseModel):
 
 
 @router.post("/api/setup/apply")
-def setup_apply(body: ApplyBody, me: User = Depends(require_cap("register_servers"))):
-    """Register what the wizard chose, and return the new server."""
+def setup_apply(body: ApplyBody, me: User = Depends(require_admin_hidden)):
+    """Register what the wizard chose (a machine the server dials, the administrator's), and return the new
+    server."""
     if body.provider not in registry.PROVIDERS:
         raise HTTPException(400, f"Unknown provider {body.provider!r}.")
     if body.provider not in ("anthropic",) and not body.base_url:
@@ -158,7 +166,7 @@ def setup_apply(body: ApplyBody, me: User = Depends(require_cap("register_server
         server["connection"]["key"] = {"backend": "keyring", "env": ""}
 
     try:
-        saved = registry.upsert(server)
+        saved = registry.upsert(server, actor=me)
     except registry.ServerError as exc:
         raise HTTPException(400, str(exc))
 

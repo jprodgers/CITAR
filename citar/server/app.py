@@ -392,13 +392,18 @@ class ModelProbe(BaseModel):
     api_key_env: Optional[str] = None
 
 
-# Fetches from a caller-supplied base_url, so this is an SSRF vector; never anonymous.
-@app.post("/api/llm/models", dependencies=[Depends(require_user)])
-def probe_models(body: ModelProbe):
-    """List the models an endpoint offers (used by the lobby's 'Detect models' button and to test connectivity)."""
+@app.post("/api/llm/models")
+def probe_models(body: ModelProbe, me=Depends(require_user)):
+    """List the models an endpoint offers (the lobby's 'Detect models' button, and a connectivity test). It fetches
+    a caller-supplied base URL with a key from one of the server's environment variables, so it is an
+    administrator's (P3.2.8), the dry run excepted, which dials nothing: a member's machine reports its models
+    through its helper. Refused before any address is dialled or any variable read."""
     import os
     import httpx
     provider = (body.provider or "").lower()
+    if provider != "dryrun" and not _is_admin(me):
+        raise HTTPException(403, "Only an administrator can have the server fetch an address. A machine you add "
+                                 "reports its models through its CITAR helper.")
     key = os.environ.get(body.api_key_env) if body.api_key_env else None
     try:
         if provider == "dryrun":
@@ -931,9 +936,11 @@ def _seat_profiles(sdb: DbSession, user, seats) -> None:
 def _suite_gate(sdb: DbSession, user, suite: dict) -> None:
     """A suite's model entries through the members' gate (P3.2.9): a member's suite names the machines its models
     play on and never describes one (a base URL, a key, a key variable: 400), and each machine passes
-    ``servers.member_llm`` (a registry machine is an administrator's until it is shared: 403; an unknown one: 400).
-    Its scenarios' bot profiles must be ones ``user`` may see. An administrator's suite is taken as it is."""
+    ``servers.member_llm`` (an unknown one: 400) and is one the member may see (403 otherwise, the site's own
+    included until they are shared; admission decides the rest when a run starts). Its scenarios' bot profiles must
+    be ones ``user`` may see. An administrator's suite is taken as it is."""
     from .. import servers
+    from ..db.models import Server
     if not isinstance(suite, dict):
         raise HTTPException(400, "A suite is an object.")
     for sc in suite.get("scenarios") or []:
@@ -953,6 +960,11 @@ def _suite_gate(sdb: DbSession, user, suite: dict) -> None:
             servers.member_llm({"server_id": group.get("server_id")}, user, required=True)
         except servers.SeatBlockError as e:
             raise HTTPException(e.status, str(e)) from None
+        # a suite names machines its maker may see; whether they may run it there is decided when a run starts
+        # (``_admit``), so a machine nobody shared with them is refused now without being named
+        row = sdb.get(Server, group.get("server_id"))
+        if row is None or access.VIEW not in access.on(sdb, user, row):
+            raise HTTPException(403, "You may not use that machine. Pick one of the machines you may use.")
 
 
 def _admit(sdb: DbSession, user, server_ids, purpose: str) -> None:
@@ -2244,9 +2256,9 @@ async def worker_socket(websocket: WebSocket):
             await websocket.send_text(P.error_frame(P.Failure(id="", message="That worker token was refused.")))
             await websocket.close(code=4401)
             return
-        server_id, server_name = identity
+        server_id, server_name, token_id = identity
 
-        connection = WorkerConnection(websocket, server_id, hello, asyncio.get_running_loop())
+        connection = WorkerConnection(websocket, server_id, hello, asyncio.get_running_loop(), token_id=token_id)
         previous = hub().register(connection)
         if previous is not None:
             try:

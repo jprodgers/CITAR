@@ -66,10 +66,10 @@ NARRATIVE_PURPOSE = "game"
 
 
 def _narrative_gate(s: Session, spec: dict, user) -> None:
-    """A report's written analysis runs on the machine its (normalized) spec names: a member's names one they may
-    use, never the site's own (P3.2.9, ``servers.member_llm``: a registry machine is an administrator's until it is
-    shared), and is admitted to it (``pool.seats.admit``: their own machine, or a group's they hold a grant on; a
-    machine they cannot see is refused without being named). When it may run is the runner's business."""
+    """A report's written analysis runs on the machine its (normalized) spec names: a member's names one
+    (P3.2.9, ``servers.member_llm``) and is admitted to it (``pool.seats.admit``: their own machine, or a group's they
+    hold a grant on, the site's own included; a machine they cannot see is refused without being named). When it may
+    run is the runner's business."""
     from .. import servers
     from ..pool import seats as pool_seats
     narrative = spec["narrative"]
@@ -113,7 +113,7 @@ def _meta_for(meta: dict, manages: bool = None) -> dict:
 def reports_options(me=Depends(require_user)):
     """What the report builder can pick from: machines, models, and recent items. A member is offered what their
     report could gather (``reach.Reach``: the activities of the things they may see) and the machines they may see
-    (their own and shared ones; of the site's registry, the dry-run ones)."""
+    (their own, and those shared with them: the site's own only when they are)."""
     from ..reports import scope_options
     from ..reports.reach import Reach
     return scope_options(Reach.of(me.id))
@@ -177,23 +177,12 @@ def _scope_items(s: Session, chosen: list, viewer) -> list:
 
 
 def _scope_machines(s: Session, chosen: list, viewer) -> list:
-    """The machines of a scope ``viewer`` may see: a registered one they hold VIEW on, and for a member the site's
-    dry-run machines (which a member's report may name, ``reports.reach.Reach``)."""
-    from .. import servers as S
+    """The machines of a scope ``viewer`` may see: one they hold VIEW on (every machine is a row, P3.2.8)."""
     from ..db.models import Server
-    out, registry = [], None
+    out = []
     for sid in chosen:
         row = s.get(Server, sid) if isinstance(sid, str) else None
-        if row is not None:
-            if access.VIEW in access.on(s, viewer, row):
-                out.append(sid)
-            continue
-        if viewer is None:
-            continue
-        if registry is None:
-            registry = {sv["id"] for sv in S.load().get("servers") or []
-                        if (sv.get("connection") or {}).get("provider") == "dryrun"}
-        if sid in registry:
+        if row is not None and access.VIEW in access.on(s, viewer, row):
             out.append(sid)
     return out
 

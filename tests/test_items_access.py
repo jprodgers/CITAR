@@ -66,6 +66,7 @@ def _reset():
     db.configure(os.environ["CITAR_DB_URL"])
     Base.metadata.drop_all(db.engine())
     db.create_all()
+    tests.share_with_members("sv_dryrun")         # the site's dry run, as members' suites and probes name it
     policy.invalidate()
 
 
@@ -1102,8 +1103,9 @@ class ModelBlocks(ItemCase):
         self.assertEqual(r.json()["llm"], {"server_id": "sv_dryrun", "model": "dry-run"})
 
     def test_a_report_narrative_names_a_machine_the_member_may_use(self):
-        """A member's report writes its analysis on a machine they may use: never one of the site's own registry
-        machines (403), and it must name one (400); a dry run is anyone's."""
+        """A member's report writes its analysis on a machine they may use: not one of the site's own machines
+        nobody shared with them (403), and it must name one (400); the site's dry run, shared with members here, is
+        theirs to use."""
         def ask(narrative):
             return self.call("owner", "POST", "/api/reports", {"title": "n", "narrative": {"enabled": True, **narrative}})
         self.assertEqual(ask({"server_id": "sv_api", "model_id": "m_opus"}).status_code, 403)

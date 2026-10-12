@@ -80,14 +80,26 @@ class Detection(unittest.TestCase):
         self.assertTrue(detect.describe_hardware({}))
 
 
+def _replace_machines(entries: list) -> None:
+    """Make ``entries`` the only machines (rows, as every machine is since the registry merge)."""
+    from citar.db.models import Server
+    with db.session() as s:
+        for row in s.query(Server).all():
+            s.delete(row)
+    for entry in entries:
+        registry.upsert(entry)
+
+
 class OfferingSetup(unittest.TestCase):
     """The test for "does this installation need setting up?"."""
 
-    def setUp(self):
-        self._saved = registry.snapshot()
-
     def tearDown(self):
-        registry.save(self._saved)
+        import copy
+
+        from citar import pool
+        _replace_machines([])
+        with db.session() as s:
+            pool.import_registry(s, None, registry_data=copy.deepcopy(tests.TEST_REGISTRY))
 
     def test_placeholder_servers_do_not_count_as_a_model(self):
         """A fresh registry ships a dry-run server and an API entry with no key.
@@ -95,19 +107,19 @@ class OfferingSetup(unittest.TestCase):
         Neither can take a seat, so "the registry file exists" is the wrong test for whether
         somebody has finished setting up — it would skip the wizard for everyone.
         """
-        registry.save({**registry.empty_registry(), "servers": [
+        _replace_machines([
             registry.default_server(kind="test", provider="dryrun"),
-            {**registry.default_server(kind="owned", provider="lmstudio"),
-             "connection": {"provider": "lmstudio", "base_url": "", "key": {"backend": "none"}},
-             "models": [registry.default_model("something")]},
-        ]})
+            {**registry.default_server(kind="owned", provider="openai_compatible"),
+             "connection": {"provider": "openai_compatible", "base_url": "", "key": {"backend": "none"}},
+             "models": [registry.default_model("something", "openai_compatible")]},
+        ])
         self.assertEqual(setup_api._playable_models(), 0)
 
     def test_a_reachable_server_with_a_model_counts(self):
         server = registry.default_server(kind="owned", provider="lmstudio")
         server["connection"]["base_url"] = "http://localhost:1234/v1"
         server["models"] = [registry.default_model("some-model")]
-        registry.save({**registry.empty_registry(), "servers": [registry.normalize_server(server)]})
+        _replace_machines([registry.normalize_server(server)])
         self.assertEqual(setup_api._playable_models(), 1)
 
     def test_a_disabled_model_does_not_count(self):
@@ -116,7 +128,7 @@ class OfferingSetup(unittest.TestCase):
         model = registry.default_model("some-model")
         model["enabled"] = False
         server["models"] = [model]
-        registry.save({**registry.empty_registry(), "servers": [registry.normalize_server(server)]})
+        _replace_machines([registry.normalize_server(server)])
         self.assertEqual(setup_api._playable_models(), 0)
 
     def test_embedding_models_are_filtered_out(self):

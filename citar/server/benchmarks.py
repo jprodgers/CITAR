@@ -105,21 +105,41 @@ def default_model(model_id: str = "", **kw) -> dict:
 
 
 def resolve_group(group: dict) -> dict:
-    """A suite's server group joined with the registry: display fields and each model's key (so runs keep a readable
-    record even if the registry changes later)."""
-    sv = REG.find(group.get("server_id"))
-    if sv is None:
+    """A suite's machine joined with its row: display fields, how many of its games may run at once (``max_parallel``:
+    the row's slots, ``Server.max_concurrent``) and each model's key, so runs keep a readable record even if the
+    machine changes later. Every machine is a row (design/phase3-features.md P3.2.8) and its ``reach`` decides how
+    its seats play: one CITAR dials names models from its catalogue, with load profiles; a helper machine
+    (``pooled``) names them by key, what its helper reports, with no load profiles, because CITAR does not load or
+    unload models on somebody else's machine."""
+    sid = group.get("server_id")
+    row = REG.machine(sid) if isinstance(sid, str) else None
+    sv = REG.find(sid) if row is not None else None
+    if row is None or sv is None:
+        return {"id": sid, "server_id": sid, "missing": True, "pooled": False, "name": f"(deleted server {sid})",
+                "provider": None, "base_url": None, "max_parallel": 1,
+                "models": [dict(m, missing=True) for m in group.get("models") or [] if isinstance(m, dict)]}
+    helper = row["reach"] == "worker"
+    out = {"id": sid, "server_id": sid, "missing": False, "pooled": helper, "name": sv["name"],
+           "provider": "worker" if helper else sv["connection"]["provider"],
+           "base_url": None if helper else sv["connection"].get("base_url"),
+           "max_parallel": max(1, int(row["max_concurrent"] or 1)), "models": []}
+    known = set()
+    if helper:
         from ..pool import seats as pool_seats
-        pooled = pool_seats.lookup(group.get("server_id"))
-        if pooled is not None:
-            return _resolve_pooled(group, pooled)
-    out = {"id": group.get("server_id"), "server_id": group.get("server_id"), "missing": sv is None,
-           "name": sv["name"] if sv else f"(deleted server {group.get('server_id')})",
-           "provider": sv["connection"]["provider"] if sv else None, "base_url": sv["connection"].get("base_url") if sv else None,
-           "max_parallel": sv["connection"].get("max_parallel", 1) if sv else 1, "models": []}
+        stored = {m.get("key") for m in (row["config"].get("models") or []) if isinstance(m, dict)}
+        known = stored | {m.get("key") for m in pool_seats.live_models(sid)}
     for m in group.get("models") or []:
         mm = dict(m)
-        entry = REG.model_entry(sv, m.get("model_id") or m.get("model")) if sv else None
+        if helper:
+            key = m.get("model") or m.get("model_id")
+            mm["model_id"] = mm["model"] = key
+            mm["profile_id"] = mm["profile_name"] = None
+            mm["label"] = m.get("label") or key
+            if key not in known:
+                mm["missing"] = True
+            out["models"].append(mm)
+            continue
+        entry = REG.model_entry(sv, m.get("model_id") or m.get("model"))
         if entry:
             mm["model_id"], mm["model"] = entry["id"], entry["key"]
             prof = REG.profile(entry, m.get("profile_id"))
@@ -127,30 +147,6 @@ def resolve_group(group: dict) -> dict:
             mm["profile_name"] = prof["name"] if prof else None
             mm["label"] = m.get("label") or entry.get("label") or entry["key"]
         else:
-            mm["missing"] = True
-        out["models"].append(mm)
-    return out
-
-
-def _resolve_pooled(group: dict, pooled: dict) -> dict:
-    """A suite group on a machine from the Servers page, played through its helper.
-
-    Models are named by key (what the helper reports); there are no load profiles, because CITAR does not
-    load or unload models on somebody else's machine. How many games may run on it at once is its
-    registration's max_parallel.
-    """
-    from ..pool import seats as pool_seats
-    known = {m.get("key") for m in (pooled["config"].get("models") or [])} | \
-        {m.get("key") for m in pool_seats.live_models(pooled["id"])}
-    out = {"id": pooled["id"], "server_id": pooled["id"], "missing": False, "pooled": True, "name": pooled["name"],
-           "provider": "worker", "base_url": None, "max_parallel": pool_seats.max_parallel(pooled), "models": []}
-    for m in group.get("models") or []:
-        mm = dict(m)
-        key = m.get("model") or m.get("model_id")
-        mm["model_id"] = mm["model"] = key
-        mm["profile_id"] = mm["profile_name"] = None
-        mm["label"] = m.get("label") or key
-        if key not in known:
             mm["missing"] = True
         out["models"].append(mm)
     return out
@@ -684,7 +680,8 @@ class BenchmarkScheduler:
                             self._request_resume(run, job)
                             self._touch(run)
         for sid, st in list(self._restricted.items()):
-            sv = REG.find(sid)     # None for a Servers-page machine: its helper keeps its models loaded
+            # a helper machine's models are its helper's: CITAR never unloads them (its owner's quiet hours hold)
+            sv = None if REG.is_helper(sid) else REG.find(sid)
             grace = float(REG.restriction_config(sid).get("grace_minutes", 15)) * 60
             pending = False
             for run in self.runs.values():

@@ -54,12 +54,14 @@ def read_file(path: Path) -> dict:
     return data
 
 
-def run_once(session, owner, *, data: Optional[dict] = None, source: Optional[str] = None) -> Optional[dict]:
+def run_once(session, owner, *, data: Optional[dict] = None, source: Optional[str] = None,
+             audit_row: bool = True) -> Optional[dict]:
     """Import the registry into ``session``'s transaction unless the marker says it was: ``data`` when given (the test
     suite's machines), else ``config/servers.json``, else the first run's registry. Sets the marker and writes one
-    audit row. Returns what was done (``file``: the file to rename once this commits, or None), or None when it had
-    been done already. Raises ImportFailed or a PoolError without writing anything the caller must undo: run it in a
-    savepoint or a transaction of its own."""
+    audit row (``audit_row``: the test suite's seed writes none, so every module starts with an empty log). Returns
+    what was done (``file``: the file to rename once this commits, or None), or None when it had been done already.
+    Raises ImportFailed or a PoolError without writing anything the caller must undo: run it in a savepoint or a
+    transaction of its own."""
     from .. import pool, servers
     from ..auth import audit, policy
     if policy.marker(session, MARKER):
@@ -76,9 +78,10 @@ def run_once(session, owner, *, data: Optional[dict] = None, source: Optional[st
     record = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "source": source,
               "servers": result["imported"], "owner_id": owner.id if owner else None}
     policy.set_marker(session, MARKER, record)
-    audit.record(session, "migration.registry_imported", actor=owner, actor_label=None if owner else "system",
-                 object_type="server", count=len(result["imported"]), servers=result["imported"],
-                 already_present=result["already_present"], source=source)
+    if audit_row:
+        audit.record(session, "migration.registry_imported", actor=owner, actor_label=None if owner else "system",
+                     object_type="server", count=len(result["imported"]), servers=result["imported"],
+                     already_present=result["already_present"], source=source)
     session.flush()
     return {**result, **record, "file": file}
 

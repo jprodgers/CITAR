@@ -196,9 +196,9 @@ def _ask_api_key(plan: LocalPlan, args) -> None:
 # --------------------------------------------------------------------------- apply
 
 def _apply(plan: LocalPlan) -> None:
-    """Write the registry entries. The first thing written in the whole flow."""
-    host_set = registry.load().get("host_server_id")
-
+    """Write the machines. The first thing written in the whole flow: into the server's database when it has one,
+    else into the registry file its first start imports (``servers.register_offline``)."""
+    entries = []
     for endpoint in plan.endpoints:
         server = registry.default_server(kind="owned", provider=endpoint.provider)
         server["name"] = f"{endpoint.label} (this computer)"
@@ -209,21 +209,24 @@ def _apply(plan: LocalPlan) -> None:
                             for key in endpoint.models if not _is_embedding(key)]
         server["hardware"] = detect.hardware() or {"source": "none"}
         # The machine running CITAR is also the machine running the engine and the bots, so it is
-        # the one whose CPU time and power get attributed to a game.
-        server["is_host"] = not host_set
-        saved = registry.upsert(server)
-        host_set = host_set or saved["id"]
+        # the one whose CPU time and power get attributed to a game (when there is no host yet).
+        server["is_host"] = not entries
+        entries.append(server)
 
+    api = None
     if plan.api_provider:
-        server = registry.default_server(kind="api", provider=plan.api_provider)
-        server["name"] = "Anthropic API" if plan.api_provider == "anthropic" else "Hosted API"
-        server["description"] = "Added by `citar setup`."
-        server["connection"]["base_url"] = plan.api_base_url
-        server["connection"]["key"] = {"backend": "keyring", "env": ""}
-        server["models"] = [registry.default_model(plan.api_model, plan.api_provider)]
-        saved = registry.upsert(server)
-        if plan.api_key:
-            _store_key(saved["id"], plan.api_key)
+        api = registry.default_server(kind="api", provider=plan.api_provider)
+        api["name"] = "Anthropic API" if plan.api_provider == "anthropic" else "Hosted API"
+        api["description"] = "Added by `citar setup`."
+        api["connection"]["base_url"] = plan.api_base_url
+        api["connection"]["key"] = {"backend": "keyring", "env": ""}
+        api["models"] = [registry.default_model(plan.api_model, plan.api_provider)]
+        entries.append(api)
+    if not entries:
+        return
+    saved = registry.register_offline(entries)
+    if api is not None and plan.api_key:
+        _store_key(saved[-1]["id"], plan.api_key)
 
 
 def _is_embedding(model_key: str) -> bool:

@@ -55,6 +55,19 @@ def check_reach(actor: Optional[User], reach: str, provider: str) -> None:
                        "CITAR helper on it), or use the dry-run provider.")
 
 
+def check_key_backend(actor: Optional[User], normalized: dict) -> None:
+    """Refuse the ``env`` key backend unless ``actor`` is an administrator: it names one of the server's own
+    environment variables, whose value the server would send as the key (and whose last characters the Servers
+    page would show as its hint)."""
+    backend = ((normalized.get("connection") or {}).get("key") or {}).get("backend")
+    if backend != "env":
+        return
+    if actor is not None and actor.role == "admin" and actor.status in ("active", "probation"):
+        return
+    raise ReachRefused("Only an administrator can point a machine's key at one of the server's environment "
+                       "variables. Store the key itself instead.")
+
+
 # ---------------------------------------------------------------------------- groups
 
 def create_group(session, owner: User, *, name: str, description: str = "",
@@ -107,6 +120,7 @@ def create_server(session, owner: User, config: dict, *, group_id: Optional[str]
     if reach not in ("worker", "direct"):
         raise PoolError("reach is 'worker' or 'direct'.")
     check_reach(owner, reach, (normalized.get("connection") or {}).get("provider") or "none")
+    check_key_backend(owner, normalized)
     if group_id:
         group = session.get(ServerGroup, group_id)
         if group is None or group.owner_id != owner.id:
@@ -137,6 +151,7 @@ def update_server(session, actor: User, server: Server, config: dict, *,
     normalized["id"] = server.id
     new_reach = reach if reach in ("worker", "direct") else (server.reach or "worker")
     check_reach(actor, new_reach, (normalized.get("connection") or {}).get("provider") or "none")
+    check_key_backend(actor, normalized)
     registry.apply_row(server, normalized)
     server.reach = new_reach
     if group_id != "__keep__":
@@ -213,9 +228,10 @@ def public_server(session, server: Server, viewer: Optional[User]) -> dict:
     base["restricted_until"] = seats.clock_text(view, seats.restricted(view))
     if access.MANAGE in perms:
         try:
-            base["config"] = registry.public(registry.find(server.id)
-                                             or registry.normalize_server({**config, "id": server.id,
-                                                                           "name": server.name, "kind": server.kind}))
+            # the registry's view of the row as this request has it (its id, its slots, a helper machine's
+            # connection left to the helper), committed or not
+            config = registry.row_registry(server)
+            base["config"] = registry.public(config)
             base["config"]["restricted_until"] = base["restricted_until"]
         except Exception:
             # Stored configs can predate a registry change; showing the raw dict to its owner beats
