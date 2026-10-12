@@ -1,8 +1,9 @@
 """The audit log: an append-only record of anything consequential.
 
 Written on logins and failed logins, role and capability changes, invites, grants and budget edits,
-suspensions, publishes, deletions and worker-token issuance. Moderators can read it; no application
-route updates or deletes a row.
+suspensions, publishes, deletions and worker-token issuance. Administrators read it (the admin users page's
+audit log, ``GET /api/admin/audit``, and ``admin_cli audit``, through ``citar.auth.user_admin.audit_page``); no
+application route updates or deletes a row.
 
 Two rules make it worth having when something has gone wrong:
 
@@ -11,7 +12,7 @@ its history intact and readable, instead of turning every row into "user u_9f3aâ
 
 *Detail never contains a secret.* Passwords, tokens, API keys and session ids are never written â€”
 what goes in `detail` is the shape of what happened ("role: user -> moderator"), so the log can be
-read by a moderator without becoming a second place credentials leak from.
+read without becoming a second place credentials leak from.
 """
 from __future__ import annotations
 

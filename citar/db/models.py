@@ -786,7 +786,7 @@ class ComputeRollup(Base):
 
 class AuditLog(Base):
     """Append-only record of anything consequential: logins, role changes, grants, suspensions,
-    publishes, deletions. Moderators can read it; nobody can edit it through the application."""
+    publishes, deletions. Administrators read it; nobody can edit it through the application."""
     __tablename__ = "audit_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

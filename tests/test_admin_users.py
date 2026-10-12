@@ -248,6 +248,8 @@ class AuditRoute(Base_):
         self.assertEqual(self.page(actor="nobody")["entries"], [])
         upd = self.page(action="user.*")["entries"]
         self.assertEqual([e["action"] for e in upd], ["user.updated"])
+        self.assertEqual(upd[0]["object_label"], "@sam", "an account the row is about is named by its handle")
+        self.assertNotIn("object_label", self.page(action="test.tick", limit=1)["entries"][0])
         self.assertEqual(len(self.page(object_type="thing", object_id="t3", limit=200)["entries"]), 50)
         self.assertEqual(self.page(object_type="user", object_id=self.ids["sam"])["entries"][0]["detail"]["fields"],
                          ["listed"])

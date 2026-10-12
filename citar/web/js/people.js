@@ -14,6 +14,10 @@ const KIND_LABEL = { game: "Games", report: "Reports", benchmark_run: "Benchmark
   probe_run: "Probe runs", probe: "Probes", scenario: "Scenarios", map: "Maps", bot_profile: "Bot profiles",
   lab_experiment: "Lab experiments" };
 
+// How a profile field is named to its owner.
+const FIELD_LABEL = { profile: "profile page", display_name: "display name", avatar: "picture", bio: "about", links: "links",
+  items: "shared things", ratio: "compute ratio" };
+
 // An account's picture, or its initial on a coloured disc.
 export function avatarOf(user, size = 40) {
   const style = { width: `${size}px`, height: `${size}px`, fontSize: `${Math.round(size * 0.45)}px` };
@@ -85,11 +89,13 @@ function personCard(u) {
 export async function renderProfile(root, handle) {
   const as = new URLSearchParams(location.hash.split("?")[1] || "").get("as") || "";
   const profile = await api.user(handle, as);          // a 404 reaches the router: "not found"
-  const page = el("div", { class: "lobby profile-page" });
-  root.appendChild(page);
-  if (auth.user()) page.appendChild(pageHeader("people"));
-  else page.appendChild(el("header", { class: "page-header" }, el("h1", {}, el("a", { href: "#/", class: "plain" }, "CITAR")),
+  const outer = el("div", { class: "lobby" });
+  root.appendChild(outer);
+  if (auth.user()) outer.appendChild(pageHeader("people"));
+  else outer.appendChild(el("header", { class: "page-header" }, el("h1", {}, el("a", { href: "#/", class: "plain" }, "CITAR")),
     el("span", { class: "grow" }), el("a", { class: "btn small", href: `#/login?next=${encodeURIComponent(location.hash)}` }, "Sign in")));
+  const page = el("div", { class: "profile-page" });
+  outer.appendChild(page);
 
   const self = `#/u/${encodeURIComponent(profile.handle)}`;
   if (profile.seen_as === "member" || profile.seen_as === "visitor") {
@@ -134,9 +140,10 @@ export async function renderProfile(root, handle) {
     page.appendChild(card);
   }
   if (profile.is_you && profile.seen_as === "you" && profile.levels) {
-    const hidden = Object.entries(profile.levels).filter(([, v]) => v === "private").map(([k]) => k);
+    const hidden = Object.entries(profile.levels).filter(([, v]) => v === "private").map(([k]) => FIELD_LABEL[k] || k);
     page.appendChild(el("p", { class: "muted small" }, hidden.length
-      ? `Only you (and administrators) see: ${hidden.join(", ")}.` : "Every field shows to someone besides you."));
+      ? `Only you (and administrators) see your ${hidden.join(", ")}.` : "Everything here shows to someone besides you.",
+      " ", el("a", { href: "#/account" }, "Change who sees what")));
   }
   return {};
 }

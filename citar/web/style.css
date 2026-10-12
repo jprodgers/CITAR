@@ -583,7 +583,7 @@ a.person-card:hover { border-color: var(--accent); }
 .person-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .person-bio { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .avatar { flex: 0 0 auto; }
-.profile-page { max-width: 760px; }
+.profile-page { max-width: 760px; margin: 0 auto; }
 .profile-head { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
 .profile-name { margin: 0; }
 .profile-bio { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }

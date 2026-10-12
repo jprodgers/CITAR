@@ -200,7 +200,7 @@ def audit_page(session, *, actor: Optional[str] = None, action: Optional[str] = 
     if before is not None:
         stmt = stmt.where(AuditLog.id < int(before))
     rows = list(session.scalars(stmt.order_by(AuditLog.id.desc()).limit(limit + 1)))
-    entries = [audit.to_client(e) for e in rows[:limit]]
+    entries = _labelled(session, rows[:limit])
     return {"entries": entries, "next_before": entries[-1]["id"] if len(rows) > limit else None}
 
 
@@ -209,4 +209,18 @@ def about(session, user: User, limit: int = 50) -> list:
     rows = session.scalars(select(AuditLog).where(or_(
         (AuditLog.object_type == "user") & (AuditLog.object_id == user.id), AuditLog.actor_id == user.id))
         .order_by(AuditLog.id.desc()).limit(limit))
-    return [audit.to_client(e) for e in rows]
+    return _labelled(session, list(rows))
+
+
+def _labelled(session, rows: list) -> list:
+    """Audit rows as the admin page shows them, an account they are about named by its handle (object_label):
+    one query for the page, not one per row."""
+    ids = {e.object_id for e in rows if e.object_type == "user" and e.object_id}
+    handles = dict(session.execute(select(User.id, User.handle).where(User.id.in_(ids))).all()) if ids else {}
+    out = []
+    for e in rows:
+        entry = audit.to_client(e)
+        if e.object_type == "user" and e.object_id in handles:
+            entry["object_label"] = "@" + handles[e.object_id]
+        out.append(entry)
+    return out

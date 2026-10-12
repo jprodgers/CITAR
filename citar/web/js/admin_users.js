@@ -173,7 +173,7 @@ function auditRow(e) {
     el("td", { class: "nowrap" }, when(e.at)),
     el("td", {}, e.actor),
     el("td", {}, el("code", {}, e.action)),
-    el("td", {}, e.object_type ? `${e.object_type} ${e.object_id || ""}` : "—"),
+    el("td", { title: e.object_id || "" }, e.object_type ? `${e.object_type} ${e.object_label || e.object_id || ""}` : "—"),
     el("td", { class: "audit-detail" }, describe(e.detail)));
 }
 
