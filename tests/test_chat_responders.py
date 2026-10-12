@@ -236,6 +236,26 @@ class Responders(Case):
         self.assertTrue(until(lambda: all(s.game.negotiation_head(n)["awaiting"] == 0 for n in range(1, 17)), 60))
 
 
+class Pools(unittest.TestCase):
+    """The responders' pools start a thread for every task no free thread will take, up to their size."""
+
+    def test_tasks_submitted_while_a_thread_is_free_each_get_a_thread(self):
+        pool = responders.Pool(8, "test-responder")
+        pool.submit(lambda: None)
+        self.assertTrue(until(lambda: pool._idle == 1 and pool._queued == 0, 5), "one thread, free again")
+        release, started = threading.Event(), []
+        for _ in range(8):
+            pool.submit(lambda: (started.append(1), release.wait(10)))
+        self.assertTrue(until(lambda: len(started) == 8, 5), f"{len(started)} of 8 started")
+        self.assertEqual(pool.threads, 8)
+        pool.submit(lambda: started.append(1))
+        time.sleep(0.2)
+        self.assertEqual(len(started), 8, "the ninth waits: the pool is full")
+        release.set()
+        self.assertTrue(until(lambda: len(started) == 9, 5))
+        self.assertEqual(pool.threads, 8)
+
+
 class HaltsNeverDecline(Case):
     """Gate 4: a suspension and its resume, a seat change and a server restart mid-answer."""
 
@@ -412,6 +432,62 @@ class LateReplies(unittest.TestCase):
         self.assertIn("is closed (expired: (no reply in time)). No answer is needed.", notes[2])
         for note in notes:
             self.assertNotIn("Answer with respond_negotiation", note)
+
+    def test_a_chat_somebody_else_opened_is_its_responders_until_it_closes(self):
+        """During the model's turn a chat another seat opened, waiting on the model, is answered by the seat's
+        responder: the turn is not asked to answer it too, only told when it closes."""
+        s = self.game(1)
+        # the responder itself is not under test here: the model's answers are the test's own calls
+        with mock.patch("citar.agents.llm_agent.make_conversation", Scripted), \
+                mock.patch.object(s, "_dispatch_negotiation_interrupts"):
+            Scripted.script = []
+            agent = s.get_agent(0)
+            with s.lock:
+                nid = s.game.open_negotiation_as(1, 0, "Peace?")["negotiation_id"]
+                agent._marks = agent._chat_marks(s, 0)
+            s.call_tool(0, "respond_negotiation", {"negotiation_id": nid, "action": "reply", "message": "Why?"})
+            s.call_tool(1, "respond_negotiation", {"negotiation_id": nid, "action": "reply", "message": "Because."})
+            self.assertEqual(agent._chat_news(s, 0), [], "waiting on the model, but its responder's to answer")
+            s.call_tool(1, "respond_negotiation", {"negotiation_id": nid, "action": "reject", "message": "Bye."})
+            news = agent._chat_news(s, 0)
+        self.assertEqual(len(news), 1)
+        self.assertIn("is closed (withdrawn: Bye.). No answer is needed.", news[0])
+
+    def test_an_answer_the_machine_cut_off_is_asked_again_as_it_stood(self):
+        """A chat's answer cut off by its machine (a probe's answer borrowing a lobby seat's slot) is asked again on
+        the same conversation with the same message, not told "nothing new"."""
+        from citar.pool.scheduler import MachineRefused
+        told, tries = [], []
+
+        class CutOnce(Conversation):
+            def __init__(self, cfg, system, tools):
+                self.usage = {"input_tokens": 1, "output_tokens": 1}
+                self.nid = None
+
+            def add_user_text(self, text):
+                told.append(text)
+                self.nid = self.nid or int(re.search(r"negotiation #(\d+)", text).group(1))
+
+            def add_tool_results(self, results):
+                pass
+
+            def step(self):
+                tries.append(1)
+                if len(tries) == 1:
+                    raise MachineRefused("A game playing on this machine needs its slot back.", code="yielded")
+                return StepResult(text="ok", tool_calls=[ToolCall("r", "respond_negotiation", {
+                    "negotiation_id": self.nid, "action": "reply", "message": "Here I am."})])
+        s = self.game(1)
+        with mock.patch("citar.agents.llm_agent.make_conversation", CutOnce):
+            agent = s.prompt_agent(0)
+            with s.lock:
+                nid = s.game.open_negotiation_as(1, 0, "Peace?")["negotiation_id"]
+            first = agent.respond_negotiation(s, 0, nid)
+            second = agent.respond_negotiation(s, 0, nid)
+        self.assertEqual((first, second), ("failed", "answered"))
+        self.assertEqual(len(told), 1, told)
+        rows = [(x["outcome"], x["cause"]) for x in s.metrics.data["negotiations"] if x["nid"] == nid]
+        self.assertEqual(rows, [("fallback", "refused"), ("answered", None)])
 
     def test_a_chat_the_other_side_opened_and_withdrew_is_told_as_withdrawn(self):
         view = {"id": 4, "with_name": "Rome", "status": "rejected", "you_initiated": False,

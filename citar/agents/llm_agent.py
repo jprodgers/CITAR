@@ -595,30 +595,33 @@ class LLMAgent:
     @staticmethod
     def _chat_marks(session, pid: int, known=()) -> dict:
         """The chats seat ``pid`` is in that are open, and those of ``known`` (closed since), each as (status, awaiting,
-        entries): what an answer changes. Session's lock held."""
+        entries, initiator): what an answer changes, and who opened it. Session's lock held."""
         g = session.game
-        out = {n["id"]: (n["status"], n["awaiting"], n["entries"]) for n in g.open_negotiation_heads(pid)}
+        out = {n["id"]: (n["status"], n["awaiting"], n["entries"], n["initiator"])
+               for n in g.open_negotiation_heads(pid)}
         for nid in known:
             if nid not in out:
                 try:
                     n = g.negotiation_head(nid)
                 except engine_api.ActionError:
                     continue
-                out[nid] = (n["status"], n["awaiting"], n["entries"])
+                out[nid] = (n["status"], n["awaiting"], n["entries"], n["initiator"])
         return out
 
     def _chat_news(self, session, pid: int) -> list[str]:
         """Before a step of the turn: a note for each chat the seat is in that changed since the model last heard
         (an answer after the tool's wait, a close by the chat clock), worded by where it stands, so the model is never
-        asked to answer a chat that is closed (``prompts.late_note``). Chats that closed are then forgotten."""
+        asked to answer a chat that is closed (``prompts.late_note``). Chats that closed are then forgotten. A chat
+        somebody else opened that waits on the seat is its responder's to answer (``GameSession._dispatch_negotiation_
+        interrupts``), so the turn is told only when it closes."""
         with session.lock:
             now = self._chat_marks(session, pid, self._marks)
             notes = []
             for nid, mark in sorted(now.items()):
                 if self._marks.get(nid) == mark:
                     continue
-                if nid not in self._marks and mark[0] == "open" and mark[1] != pid:
-                    continue            # one the model has not heard of that does not wait on it: nothing to say
+                if mark[0] == "open" and (mark[1] != pid or mark[3] != pid):
+                    continue            # waiting on the other side, or the responder's to answer: nothing to say
                 try:
                     notes.append(late_note(session.game.negotiation_view(nid, pid)))
                 except engine_api.ActionError:
@@ -838,6 +841,9 @@ class ChatThread:
         self.seen = 0                # the chat's entries the model has been told of
         self.cancels = 0             # moves on each cancel: an exchange in progress stops at its next look
         self.closed = False
+        self._unanswered = False     # the last message was not answered by a step (cut off): a retry asks again
+        self.last_outcome: Optional[str] = None
+        self.last_cause: Optional[str] = None
         self._dead = False           # its conversation was closed by a cancel: the next exchange starts a new one
         self._usage: dict = {}       # the conversation's usage already added to the agent's totals
         self.exchanges = 0
@@ -927,8 +933,12 @@ class ChatThread:
             return "moved"
         text, entries = told
         conv = self._conversation(session, pid, fresh)
-        conv.add_user_text(text)
+        if fresh or not self._unanswered or entries != self.seen:
+            conv.add_user_text(text)
+        # else: the same message, which a step cut off (a machine that took its slot back) never answered, is asked
+        # again as it stands, rather than told "nothing new"
         self.seen = entries
+        self._unanswered = True
         self.exchanges += 1
         if getattr(getattr(conv, "binding", None), "machine", None) is None:
             # an unscheduled conversation hears nothing from a machine's queue: the model is asked now
@@ -960,6 +970,7 @@ class ChatThread:
                     outcome = "paused"
                     break
                 step = a._step(session, pid, conv, chat=True)
+                self._unanswered = False
                 steps += 1
                 gen_s += float(getattr(conv, "last_gen_s", 0.0) or 0.0)
                 queue_s += float(getattr(conv, "last_queue_s", 0.0) or 0.0)

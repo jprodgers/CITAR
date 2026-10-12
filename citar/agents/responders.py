@@ -47,8 +47,8 @@ def _size(name: str, default: int) -> int:
 
 
 class Pool:
-    """At most ``size`` daemon threads taking tasks from one queue, started as the work needs them (a thread is
-    started only when none is idle) and kept. Daemon threads, unlike ``concurrent.futures``' workers, which the
+    """At most ``size`` daemon threads taking tasks from one queue, started as the work needs them (when the tasks
+    waiting outnumber the threads free to take them) and kept. Daemon threads, unlike ``concurrent.futures``' workers, which the
     interpreter joins at exit: a server shutting down must not wait for a model answer stuck behind a busy machine."""
 
     def __init__(self, size: int, prefix: str):
@@ -57,29 +57,34 @@ class Pool:
         self._tasks: queue.SimpleQueue = queue.SimpleQueue()
         self._lock = threading.Lock()
         self._threads: list = []
-        self._idle = 0
+        self._idle = 0               # threads waiting for a task
+        self._queued = 0             # tasks no thread has taken yet
 
     def submit(self, fn: Callable, *args) -> None:
-        """Run ``fn(*args)`` on one of the pool's threads, as soon as one is free."""
+        """Run ``fn(*args)`` on one of the pool's threads, as soon as one is free: a thread is started whenever the
+        tasks waiting outnumber the threads waiting for them, up to ``size``."""
         with self._lock:
             self._tasks.put((fn, args))
-            if self._idle == 0 and len(self._threads) < self.size:
+            self._queued += 1
+            if self._queued > self._idle and len(self._threads) < self.size:
                 t = threading.Thread(target=self._work, daemon=True,
                                      name=f"{self.prefix}-{len(self._threads) + 1}")
                 self._threads.append(t)
+                self._idle += 1          # it waits for a task from its start
                 t.start()
 
     def _work(self) -> None:
         while True:
-            with self._lock:
-                self._idle += 1
             fn, args = self._tasks.get()
             with self._lock:
                 self._idle -= 1
+                self._queued -= 1
             try:
                 fn(*args)
             except BaseException:
                 log.exception("a responder task failed")
+            with self._lock:
+                self._idle += 1
 
     @property
     def threads(self) -> int:
