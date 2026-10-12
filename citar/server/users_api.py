@@ -77,8 +77,9 @@ def avatar(handle: str, p: Principal = Depends(principal), s: Session = Depends(
 async def upload_avatar(request: Request, me=Depends(require_user), s: Session = Depends(get_db)):
     """Upload the caller's avatar: a multipart form with one file (any field name), at most ``images.MAX_BYTES``. The
     body is read only up to the limit, so an oversized upload costs the server no more than that; the file is
-    checked (``images.inspect``) before anything is written, and only under ``<data dir>/avatars/``. The previous
-    file is removed once the change is committed."""
+    checked (``images.inspect``) before anything is written, and written without its metadata (Exif, XMP, text,
+    comments), only under ``<data dir>/avatars/``. A body that is not a well-formed form is a 400. The previous file
+    is removed once the change is committed."""
     size = request.headers.get("content-length")
     # a multipart body carries its boundaries and part headers around the file: allow them a little room
     limit = images.MAX_BYTES + 16 * 1024
@@ -104,7 +105,7 @@ def _save_avatar(s: Session, me, data: bytes) -> dict:
     except images.ImageError as exc:
         raise HTTPException(400, str(exc))
     audit.record(s, "user.avatar_set", actor=me, object_type="user", object_id=me.id,
-                 format=info.format, width=info.width, height=info.height, bytes=len(data))
+                 format=info.format, width=info.width, height=info.height, bytes=len(info.data))
     s.commit()
     profiles.remove_replaced(previous, me.avatar_path)
     return {"ok": True, "user": me.account()}
@@ -125,7 +126,10 @@ def delete_avatar(request: Request, me=Depends(require_user), s: Session = Depen
 async def _the_file(request: Request, body: bytes) -> bytes:
     """The one file of a multipart form ``body`` (already read, and capped), as sent; 400 for a body that is not such
     a form. Parsed by Starlette's own form parser, which keeps a file this small in memory (``spool_max_size`` is
-    1 MiB), so nothing of the upload touches the disk before it is checked."""
+    1 MiB), so nothing of the upload touches the disk before it is checked. Starlette raises its own
+    ``MultiPartException`` for what it checks (no boundary, too many parts); the parser underneath raises a
+    ``ValueError`` (python_multipart's ``FormParserError``) for a body that does not parse, such as one whose boundary
+    is not the header's or bytes that are no form, and closes what it opened before either reaches here."""
     from starlette.datastructures import UploadFile
     from starlette.formparsers import MultiPartException, MultiPartParser
 
@@ -137,6 +141,9 @@ async def _the_file(request: Request, body: bytes) -> bytes:
                                      max_part_size=images.MAX_BYTES + 1024).parse()
     except MultiPartException as exc:
         raise HTTPException(400, f"That upload could not be read ({exc.message}). {images.RULES}") from None
+    except ValueError:
+        raise HTTPException(400, f"That upload could not be read (it is not a well-formed form). {images.RULES}") \
+            from None
     try:
         files = [v for _k, v in form.multi_items() if isinstance(v, UploadFile)]
         if len(files) != 1:

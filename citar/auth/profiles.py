@@ -15,7 +15,8 @@ this module is what the routes add around it:
 - the directory (``directory``: listed accounts in good standing, newest first, a search that matches a display name
   only where the caller may see it, so a hidden name is never revealed by its hits);
 - avatars on disk (``store_avatar``, ``avatar_file``, ``remove_replaced``): ``<data dir>/avatars/<user id>-<sha256[:12]>
-  .<ext>``, written there and nowhere else, the format and size checked by ``citar.auth.images`` first.
+  .<ext>``, written there and nowhere else, the format and size checked by ``citar.auth.images`` first and the
+  metadata (Exif, XMP, text) left out.
 """
 from __future__ import annotations
 
@@ -342,11 +343,12 @@ def avatar_file(user: User) -> Optional[Path]:
 
 
 def store_avatar(user: User, data: bytes) -> images.ImageInfo:
-    """Check ``data`` (``images.inspect``, which raises ``ImageError`` with the rule), write it as the account's
-    avatar and point the account at it. The file goes to the avatars folder under a temporary name of its own first
-    and is renamed into place, so a reader never sees half of it. The file it replaced stays until the change is
-    committed (``remove_replaced``)."""
+    """Check ``data`` (``images.inspect``, which raises ``ImageError`` with the rule), write it without its metadata
+    (``ImageInfo.data``: no Exif, XMP, text or comments) as the account's avatar and point the account at it. The file
+    goes to the avatars folder under a temporary name of its own first and is renamed into place, so a reader never
+    sees half of it. The file it replaced stays until the change is committed (``remove_replaced``)."""
     info = images.inspect(data)
+    data = info.data
     digest = hashlib.sha256(data).hexdigest()[:12]
     folder = avatars_dir()
     name = f"{user.id}-{digest}.{info.ext}"

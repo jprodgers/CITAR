@@ -14,8 +14,10 @@ import tests  # noqa: F401  (temporary saves folder and server registry; must be
 import os
 import re
 import shutil
+import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="citar_profiles_"))
@@ -511,9 +513,64 @@ class PublicCallers(unittest.TestCase):
 CORPUS = {
     "valid.png": "image/png", "valid.jpg": "image/jpeg", "valid.webp": "image/webp", "png-named.jpg": "image/png",
     "lossless.webp": "image/webp", "alpha.webp": "image/webp", "progressive.jpg": "image/jpeg",
+    "exif-gps.jpg": "image/jpeg", "metadata.png": "image/png", "metadata.webp": "image/webp",
     "image.svg": None, "html-named.png": None, "truncated.png": None, "257kb.png": None, "2000x2000.png": None,
     "image.gif": None,
 }
+#: The pictures that carry metadata (made with Pillow, which CITAR does not use: each holds the text SECRET in every
+#: kind of metadata its format has, and Exif with a GPS position), and the rest, which carry none.
+WITH_METADATA = ("exif-gps.jpg", "metadata.png", "metadata.webp")
+
+
+def _png_chunks(data: bytes) -> list:
+    """A PNG's chunk types, in order."""
+    pos, out = 8, []
+    while pos < len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        out.append(kind.decode("ascii"))
+        pos += 12 + length
+    return out
+
+
+def _jpeg_segments(data: bytes) -> list:
+    """A JPEG's marker segments before its first scan's data, as (marker, the segment's first 12 bytes after its
+    length)."""
+    pos, out = 2, []
+    while data[pos + 1] != 0xDA:
+        (length,) = struct.unpack(">H", data[pos + 2:pos + 4])
+        out.append((data[pos + 1], data[pos + 4:pos + 16]))
+        pos += 2 + length
+    return out
+
+
+def _webp_chunks(data: bytes) -> list:
+    """A WebP's chunks, as (type, payload)."""
+    pos, out = 12, []
+    while pos < len(data):
+        (length,) = struct.unpack("<I", data[pos + 4:pos + 8])
+        out.append((data[pos:pos + 4].decode("ascii"), data[pos + 8:pos + 8 + length]))
+        pos += 8 + length + (length & 1)
+    return out
+
+
+def _chunk(kind: bytes, data: bytes) -> bytes:
+    """A PNG chunk with its checksum."""
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+def _jpeg_at(data: bytes, marker: int) -> tuple:
+    """Where a JPEG's first segment of ``marker`` starts and ends, walking the segments from SOI."""
+    pos = 2
+    while True:
+        (length,) = struct.unpack(">H", data[pos + 2:pos + 4])
+        if data[pos + 1] == marker:
+            return pos, pos + 2 + length
+        pos += 2 + length
+
+
+def _riff(body: bytes) -> bytes:
+    """A WebP of the chunks ``body``."""
+    return b"RIFF" + struct.pack("<I", len(body) + 4) + b"WEBP" + body
 
 
 def _tree(root: Path) -> dict:
@@ -557,7 +614,9 @@ class Avatars(Base_):
                 self.assertTrue(avatar.startswith("/api/users/pat/avatar?v="), avatar)
                 got = self.client.get(avatar)                      # a visitor: the field is global
                 self.assertEqual(got.status_code, 200)
-                self.assertEqual(got.content, data)
+                # as stored: the upload without its metadata; a picture that carries none, byte for byte
+                self.assertEqual(got.content, images.inspect(data).data)
+                self.assertEqual(got.content == data, name not in WITH_METADATA)
                 self.assertEqual(got.headers["content-type"], mime)
                 self.assertEqual(got.headers["x-content-type-options"], "nosniff")
                 self.assertEqual(got.headers["content-security-policy"], "default-src 'none'; sandbox")
@@ -565,17 +624,69 @@ class Avatars(Base_):
                 self.assertEqual(len(self.mine()), 1, "the previous file was removed")
 
     def test_the_header_checks(self):
-        png = (AVATARS / "valid.png").read_bytes()
+        png, jpg, webp = ((AVATARS / name).read_bytes() for name in ("valid.png", "valid.jpg", "valid.webp"))
+        sof, sos = _jpeg_at(jpg, 0xC0), _jpeg_at(jpg, 0xDA)
         for why, data in {"a PNG with a bad checksum": png[:40] + bytes([png[40] ^ 1]) + png[41:],
                           "a PNG with bytes after IEND": png + b"x",
                           "a PNG without IDAT": png[:33] + png[-12:],
-                          "a JPEG without its end": (AVATARS / "valid.jpg").read_bytes()[:-2],
-                          "a WebP whose RIFF length lies": (AVATARS / "valid.webp").read_bytes()[:-1],
+                          "a JPEG without its end": jpg[:-2],
+                          "a WebP whose RIFF length lies": webp[:-1],
+                          "a PNG with a critical chunk no decoder knows": png[:33] + _chunk(b"QQQQ", b"x") + png[33:],
+                          "a PNG chunk whose type is not letters": png[:33] + _chunk(b"t3Xt", b"x") + png[33:],
+                          "a JPEG cut inside its scan": jpg[:(sos[1] + len(jpg)) // 2],
+                          "a JPEG with a scan and no frame": jpg[:sof[0]] + jpg[sof[1]:],
+                          "a JPEG with its headers and no scan": jpg[:sos[0]] + b"\xff\xd9",
+                          "a WebP whose second chunk runs past the end": _riff(webp[12:] + b"EXIF\xff\0\0\0abcd"),
+                          "a WebP with a second VP8X": _riff(webp[12:] + b"VP8X\x0a\0\0\0" + bytes(10)),
                           "nothing": b""}.items():
             with self.subTest(why=why):
                 with self.assertRaises(images.ImageError):
                     images.inspect(data)
         self.assertEqual(images.inspect(png).width, 64)
+        # what follows a JPEG's end is not part of it (a second picture, appended bytes): left out, not refused
+        self.assertEqual(images.inspect(jpg + b"<html>appended</html>").data, jpg)
+        # a WebP whose last chunk is odd and unpadded, its RIFF length counting without the pad, is whole
+        lossless = (AVATARS / "lossless.webp").read_bytes()
+        odd = _riff(lossless[12:] + b"ALPH\x03\0\0\0abc")
+        self.assertEqual(images.inspect(odd).data, _riff(lossless[12:] + b"ALPH\x03\0\0\0abc\0"))
+
+    def test_metadata_is_left_out(self):
+        """A picture goes to everyone its field reaches: Exif (a GPS position, the camera's serial number, when it was
+        taken), XMP, text chunks and comments are left out before it is stored, and what changes how it looks is
+        kept (the ICC profile, gamma, the pixel size). Nothing is decoded: the pixels are the upload's."""
+        self.set_levels("pat", {"avatar": "global", "profile": "global"})
+        for name in WITH_METADATA:
+            with self.subTest(file=name):
+                data = (AVATARS / name).read_bytes()
+                self.assertIn(b"SECRET", data)
+                r = self.upload("pat", name)
+                self.assertEqual(r.status_code, 200, r.text)
+                got = self.client.get(r.json()["user"]["avatar"]).content
+                stored = (profiles.avatars_dir() / self.mine()[0]).read_bytes()
+                self.assertEqual(got, stored)
+                for leak in (b"SECRET", b"Exif\0", b"http://ns.adobe.com/xap", b"adobe:ns:meta", b"2026:10:11"):
+                    self.assertNotIn(leak, got)
+                info, again = images.inspect(data), images.inspect(got)
+                self.assertEqual((again.width, again.height), (info.width, info.height))
+                self.assertEqual(again.data, got, "a stored picture has nothing more to leave out")
+                if name.endswith(".jpg"):
+                    segments = _jpeg_segments(got)
+                    self.assertFalse([m for m, _ in segments if m in (0xE1, 0xED, 0xFE)], "no APP1, APP13 or COM")
+                    self.assertTrue(any(m == 0xE2 and head.startswith(b"ICC_PROFILE") for m, head in segments))
+                    app0 = got[got.index(b"\xff\xe0"):][:18]
+                    self.assertEqual(app0[2:4], b"\x00\x10", "JFIF without its thumbnail")
+                    self.assertEqual(app0[16:18], b"\x00\x00")
+                elif name.endswith(".png"):
+                    chunks = _png_chunks(got)
+                    self.assertFalse({"tEXt", "zTXt", "iTXt", "eXIf", "tIME"} & set(chunks), chunks)
+                    self.assertTrue({"IHDR", "IDAT", "IEND", "iCCP", "pHYs", "gAMA"} <= set(chunks), chunks)
+                else:
+                    chunks = _webp_chunks(got)
+                    kinds = [k for k, _ in chunks]
+                    self.assertEqual(kinds, ["VP8X", "ICCP", "VP8 "])
+                    self.assertEqual(chunks[0][1][0] & 0x0C, 0, "VP8X no longer says EXIF or XMP follow")
+                    self.assertEqual(chunks[0][1][0] & 0x20, 0x20, "it still says ICC does")
+                    self.assertEqual(struct.unpack("<I", got[4:8])[0] + 8, len(got))
 
     def test_404_when_the_field_is_hidden_and_for_no_upload(self):
         self.assertEqual(self.get("/api/users/pat/avatar", "max").status_code, 404, "no upload yet")
@@ -656,6 +767,23 @@ class Avatars(Base_):
         big = self.upload("pat", "big.png", data=b"\x89PNG" + b"\0" * (300 * 1024))
         self.assertEqual(big.status_code, 413)
         self.assertEqual(self.mine(), [])
+        # bodies the form parser underneath cannot read (its errors are ValueErrors, which were a 500): a boundary
+        # that is not the header's, bytes that are no form, and a form cut short in a part's headers (no file in
+        # it); each is a 400 with the rules, the picture stays as it was and nothing is written
+        self.assertEqual(self.upload("pat", "valid.png").status_code, 200)
+        kept, before = self.mine(), _tree(profiles.avatars_dir())
+        part = (b'Content-Disposition: form-data; name="file"; filename="a.png"\r\nContent-Type: image/png\r\n\r\n'
+                + (AVATARS / "valid.png").read_bytes() + b"\r\n")
+        for why, body in (("a boundary that is not the header's", b"--x\r\n" + part + b"--x--\r\n"),
+                          ("bytes that are no form", bytes(range(256)) * 4),
+                          ("a part with no headers' end", b"--zz\r\nContent-Disposition: form-data; name=\"f\"")):
+            with self.subTest(body=why):
+                r = self.client.post("/api/auth/me/avatar", content=body, headers={
+                    **self.headers["pat"], "content-type": "multipart/form-data; boundary=zz"})
+                self.assertEqual(r.status_code, 400, r.text)
+                self.assertIn("PNG, JPEG or WebP", r.json()["detail"])
+                self.assertEqual(self.mine(), kept)
+                self.assertEqual(_tree(profiles.avatars_dir()), before)
 
 
 # ---------------------------------------------------------------------------------------------------------- P3.9.1
