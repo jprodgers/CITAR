@@ -395,6 +395,13 @@ class OccupiedIsTheLeases(LeaseCase):
         self.assertEqual(set(usage.session_servers(g)), {host, "sv_gpu"})
         g.update_seat(1, llm={**GPU, "server_id": "sv_dryrun"})
         self.assertEqual(set(usage.session_servers(g)), {host, "sv_dryrun"}, "the seat's new machine only")
+        # a game opened only to be looked at, then resumed: its model seat holds nothing until it is asked something
+        path = g.save("leases-view")
+        self.manager.delete(g.id)
+        view = self.manager.load(path, leases=False)
+        view.set_paused(False)
+        self.assertEqual(labels("sv_dryrun"), [])
+        self.assertEqual(set(usage.session_servers(view)), {host}, "no lease, no machine held")
 
 
 # ---------------------------------------------------------------------------- gate 3
