@@ -77,6 +77,14 @@ def patch_user(uid: str, request: Request, body: dict = Body(...), me: User = De
         raise HTTPException(400, "reason is text.")
     user = _user(s, uid)
     changed = _call(user_admin.apply, s, user, body, actor=me, reason=reason, ip=ratelimit.client_ip(request))
+    if user.status == "suspended" and "status" in changed:
+        # a suspended account's machines serve nobody: their helpers are dropped once the suspension is committed
+        # (and refused at their next hello, ``workers.authenticate``)
+        from ..db.models import Server
+        from .workers import hub
+        machines = [sid for (sid,) in s.query(Server.id).filter(Server.owner_id == user.id)]
+        s.commit()
+        hub().drop_many(machines, "its owner's account was suspended")
     return {"changed": changed, "user": user_admin.to_client(user)}
 
 

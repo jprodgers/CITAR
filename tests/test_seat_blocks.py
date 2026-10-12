@@ -143,6 +143,9 @@ class SeatCase(unittest.TestCase):
                 self.headers[handle] = {"cookie": f"{sessions.COOKIE_NAME}={raw}",
                                         sessions.CSRF_HEADER: row.csrf_token, "origin": "https://citar.test"}
                 self.ids[handle] = user.id
+            # every machine is a row (P3.2.8), the site's own included: the administrator shares the dry run with
+            # every member, as a site that wants members to try it does
+            self.share(s, "sv_dryrun", "everyone")
         self.games: list = []
         self.scenarios: list = []
         self.watch = NoOutbound().__enter__()
@@ -162,6 +165,16 @@ class SeatCase(unittest.TestCase):
                 pass
         self.client.close()
         self.assertEqual(self.watch.calls, [], "something was dialled or a key variable read")
+
+    def share(self, s, server_id: str, subject: str) -> None:
+        """Put one of the site's machines in a group of the administrator's and grant it to ``subject`` (a handle,
+        or "everyone"), in session ``s``."""
+        from citar import pool
+        zara = s.get(User, self.ids["zara"])
+        group = pool.create_group(s, zara, name=f"shared {server_id}", visibility="server")
+        s.get(Server, server_id).group_id = group.id
+        pool.create_grant(s, zara, group, subject_type="everyone" if subject == "everyone" else "user",
+                          subject_handle=None if subject == "everyone" else subject)
 
     def post(self, who, path, body):
         return self.client.post(path, json=body, headers=self.headers[who])
@@ -184,12 +197,19 @@ class NewGames(SeatCase):
                 self.assertIn("Pick a machine", detail)
         self.assertEqual(self.manager.sessions.keys() & set(self.games), set())
 
-    def test_a_registry_machine_is_an_admins_until_shared(self):
+    def test_a_site_machine_is_an_admins_until_shared(self):
+        """Since the registry merge (3-05) the site's machines are rows like any other, and admission decides: a
+        member may seat the API only once its owner, the administrator, grants it."""
         self.assertEqual(servers.find("sv_api")["connection"]["provider"], "anthropic")
         detail = self.create("member", {"server_id": "sv_api", "model": "claude-opus-5"}, 403)["detail"]
-        self.assertIn("administrator", detail)
+        self.assertNotIn("Test API", detail, "a machine the member cannot see is not named")
         game = self.create("zara", {"server_id": "sv_api", "model": "claude-opus-5"}, 200)
         self.assertEqual(game["seats"][1]["llm"]["server_id"], "sv_api")
+        with db.session() as s:
+            self.share(s, "sv_api", "member")
+        game = self.create("member", {"server_id": "sv_api", "model": "claude-opus-5", "api_key_env": SECRET_VAR}, 200)
+        self.assertEqual(game["seats"][1]["llm"], {"server_id": "sv_api", "model": "claude-opus-5"})
+        self.create("lender", {"server_id": "sv_api", "model": "claude-opus-5"}, 403)
 
     def test_a_dry_run_is_anyones(self):
         game = self.create("member", {"provider": "dryrun", "model": "dry-run", "dry_run_delay": 0,
@@ -200,6 +220,10 @@ class NewGames(SeatCase):
                                       "provider": "anthropic", "server": "Dry run", "persona": "calm"}, 200)
         self.assertEqual(game["seats"][1]["llm"],
                          {"server_id": "sv_dryrun", "model": "dry-run", "persona": "calm"})
+        # the site's dry-run machine is shared here (setUp); unshared, it is the administrator's like any machine
+        with db.session() as s:
+            s.get(Server, "sv_dryrun").group_id = None
+        self.create("member", {"server_id": "sv_dryrun", "model": "dry-run"}, 403)
 
     def test_an_admins_inline_block_is_accepted(self):
         for name, llm in INLINE.items():
@@ -223,15 +247,18 @@ class NewGames(SeatCase):
 
     def test_a_seat_that_plays_no_model_is_never_refused_for_its_block(self):
         """The lobby sends ``llm: s.llm`` for every seat, so a seat switched to a model seat and back to a bot carries
-        the lobby's default block, which names no machine. Nothing plays it: a member's is dropped (or cleaned), an
-        administrator's kept."""
+        the lobby's default block, which names no machine. Nothing plays it: a member's is dropped (or cleaned to the
+        machine it names, which admission checks when the seat is made a model seat), an administrator's kept."""
         lobby_default = {"server_id": None, "model_id": None, "model": "", "profile_id": None,
                          "max_tool_calls_per_turn": 150, "persona": ""}
-        for seats, kept in (([{"type": "human"}, {"type": "bot", "llm": lobby_default}], {}),
-                            ([{"type": "human", "llm": {"server_id": "sv_api"}}, {"type": "bot"}], None),
-                            ([{"type": "human"}, {"type": "bot", "llm": INLINE["api_key_env"]}], {}),
-                            ([{"type": "human"}, {"type": "bot", "llm": {"server_id": "sv_dryrun", "base_url": "u"}}],
-                             {"server_id": "sv_dryrun"})):
+        for seats, first, kept in (
+                ([{"type": "human"}, {"type": "bot", "llm": lobby_default}], {}, {}),
+                ([{"type": "human", "llm": {"server_id": "sv_api", "base_url": "u"}}, {"type": "bot"}],
+                 {"server_id": "sv_api"}, None),
+                ([{"type": "human", "llm": {"server_id": "sv_nowhere"}}, {"type": "bot"}], {}, None),
+                ([{"type": "human"}, {"type": "bot", "llm": INLINE["api_key_env"]}], {}, {}),
+                ([{"type": "human"}, {"type": "bot", "llm": {"server_id": "sv_dryrun", "base_url": "u"}}],
+                 {}, {"server_id": "sv_dryrun"})):
             with self.subTest(seats=seats):
                 r = self.post("member", "/api/games", {"name": "no model", "config": CONFIG, "seats": seats})
                 self.assertEqual(r.status_code, 200, r.text)
@@ -240,7 +267,7 @@ class NewGames(SeatCase):
                 self.assertEqual([seat.type for seat in s.seats], ["human", "bot"])
                 if kept is not None:
                     self.assertEqual(dict(s.seats[1].llm), kept)
-                self.assertEqual(dict(s.seats[0].llm), {})
+                self.assertEqual(dict(s.seats[0].llm), first)
         r = self.post("zara", "/api/games", {"name": "admin's bot", "config": CONFIG,
                                              "seats": [{"type": "human"}, {"type": "bot", "llm": INLINE["base_url"]}]})
         self.assertEqual(r.status_code, 200, r.text)

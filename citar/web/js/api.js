@@ -229,7 +229,6 @@ export const api = {
     request("POST", `/api/pool/servers/${serverId}/workers/tokens`, { label }),
   revokeWorkerToken: (serverId, tokenId) =>
     request("DELETE", `/api/pool/servers/${serverId}/workers/tokens/${tokenId}`),
-  importRegistry: () => request("POST", "/api/pool/import-registry"),
 
   // ---------------------------------------------------------------- sharing
   gameSharing: (gid) => request("GET", `/api/games/${gid}/sharing`),

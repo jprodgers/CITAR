@@ -43,7 +43,7 @@ class Reach:
     items: dict = field(default_factory=dict)
     #: ids of the machines the owner owns: the only ones whose costs the report shows
     machines: set = field(default_factory=set)
-    #: names of the machines the owner may see (their own, shared with them, dry-run ones): labels only
+    #: names of the machines the owner may see (their own, and those shared with them): labels only
     names: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------------ building one
@@ -71,7 +71,7 @@ class Reach:
     def _member(cls, s, viewer, owner_id: str) -> "Reach":
         """A member's reach (``of``), from the database session ``s``."""
         from sqlalchemy import select
-        from .. import items, servers as S
+        from .. import items
         from ..auth import access
         from ..db.models import Server
         from ..server import ownership
@@ -80,16 +80,11 @@ class Reach:
         names: dict = {}
         if viewer is not None:
             for row in s.scalars(select(Server)):
-                if row.owner_id == viewer.id:
+                if row.owner_id == viewer.id and not access.is_site_machine(row):
                     machines.add(row.id)
                     names[row.id] = row.name
                 elif access.VIEW in access.on(s, viewer, row):
                     names[row.id] = row.name
-        # the site's registry is an administrator's (P3.2.9); a member may name its dry-run machines, which cost
-        # nothing, so those may label a seat
-        for sv in S.load().get("servers") or []:
-            if (sv.get("connection") or {}).get("provider") == "dryrun":
-                names.setdefault(sv["id"], sv.get("name") or sv["id"])
         return cls(everything=False, owner_id=owner_id, games=set(games or ()),
                    items={kind: items.visible_refs(s, kind, viewer) for kind in ITEM_KINDS},
                    machines=machines, names=names)

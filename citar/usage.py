@@ -324,16 +324,33 @@ def finish_session(s, **fields):
 class PowerSampler:
     """Samples this machine's power draw every few seconds and writes one row a minute: GPU watts (nvidia-smi, all
     GPUs) and CPU utilisation. Only one process on the machine samples at a time (a heartbeat lock file), so the
-    CITAR server and the lab runner can both start one."""
+    CITAR server and the lab runner can both start one.
 
-    def __init__(self, server_id: str, writer_lock: Optional[Path] = None):
+    ``server_id`` None follows the host: whichever machine is the host is looked up at each sample, so a host that
+    appears after the start (a fresh server-mode database's, imported when its first administrator is made) or one an
+    administrator chooses later is sampled from then on, without a restart."""
+
+    def __init__(self, server_id: Optional[str] = None, writer_lock: Optional[Path] = None):
         self.server_id = server_id
-        self.lock_path = writer_lock or USAGE_DIR / f"power-{server_id}.lock"
+        self._writer_lock = writer_lock
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._beat = 0.0
         self.nvsmi = None
         import shutil
         self.nvsmi = shutil.which("nvidia-smi")
+
+    def lock_path(self, server_id: str) -> Path:
+        """The heartbeat file of whoever samples ``server_id``."""
+        return self._writer_lock or USAGE_DIR / f"power-{server_id}.lock"
+
+    def target(self) -> Optional[str]:
+        """The machine sampled now: the one given, or the host (None while there is none)."""
+        if self.server_id:
+            return self.server_id
+        from . import servers as S
+        h = S.host()
+        return h["id"] if h else None
 
     def start(self):
         """Start sampling."""
@@ -345,18 +362,19 @@ class PowerSampler:
         """Stop sampling."""
         self._stop.set()
 
-    def _own_lock(self) -> bool:
+    def _own_lock(self, server_id: str) -> bool:
         """Whether this process is the one sampling, so two CITARs do not both measure."""
         me = f"{os.getpid()}"
+        path = self.lock_path(server_id)
         try:
-            if self.lock_path.exists():
-                txt = self.lock_path.read_text(encoding="utf-8").split()
+            if path.exists():
+                txt = path.read_text(encoding="utf-8").split()
                 if txt and txt[0] != me and time.time() - float(txt[1]) < 45:
                     return False
             # refresh the heartbeat every 20 s, not every sample (the folder may sync to the cloud)
-            if time.time() - getattr(self, "_beat", 0) > 20:
+            if time.time() - self._beat > 20:
                 USAGE_DIR.mkdir(parents=True, exist_ok=True)
-                self.lock_path.write_text(f"{me} {time.time():.0f}", encoding="utf-8")
+                path.write_text(f"{me} {time.time():.0f}", encoding="utf-8")
                 self._beat = time.time()
             return True
         except (OSError, ValueError, IndexError):
@@ -383,13 +401,18 @@ class PowerSampler:
             psutil = None
         gpu, cpu, n = [], [], 0
         start = time.time()
+        current = None
         if psutil:
             psutil.cpu_percent(None)
         while not self._stop.wait(SAMPLE_SECONDS):
             try:
                 from . import servers as S
-                sv = S.find(self.server_id)
-                if sv is None or sv["power"].get("sampling") == "off" or not self._own_lock():
+                sid = self.target()
+                if sid != current:
+                    # another machine (or the first): its own minute, its own heartbeat file
+                    gpu, cpu, n, start, current, self._beat = [], [], 0, time.time(), sid, 0.0
+                sv = S.find(sid) if sid else None
+                if sv is None or sv["power"].get("sampling") == "off" or not self._own_lock(sid):
                     gpu, cpu, n, start = [], [], 0, time.time()
                     continue
                 w = self._gpu_watts()
@@ -399,10 +422,10 @@ class PowerSampler:
                     cpu.append(psutil.cpu_percent(None) / 100.0)
                 n += 1
                 if time.time() - start >= 60:
-                    row = {"k": "pw", "srv": self.server_id, "t0": round(start, 1), "t1": round(time.time(), 1), "n": n,
+                    row = {"k": "pw", "srv": sid, "t0": round(start, 1), "t1": round(time.time(), 1), "n": n,
                            "cpu_util": round(sum(cpu) / len(cpu), 4) if cpu else None,
                            "gpu_w": round(sum(gpu) / len(gpu), 2) if gpu else None}
-                    append(f"power-{self.server_id}", [row])
+                    append(f"power-{sid}", [row])
                     gpu, cpu, n, start = [], [], 0, time.time()
             except Exception:
                 traceback.print_exc()
@@ -411,16 +434,24 @@ class PowerSampler:
 _sampler: Optional[PowerSampler] = None
 
 
-def start_power_sampler():
-    """Sample the host machine's power if the registry has a host with sampling on."""
+def start_power_sampler(follow_host: bool = False):
+    """Sample the host machine's power. ``follow_host`` (the CITAR server): start now whether or not there is a host
+    yet, sampling whichever machine is the host at each sample (``PowerSampler``); otherwise (the lab runner, a
+    process of its own) only when there is a host now, and that one."""
     global _sampler
+    if _sampler is not None:
+        return _sampler
+    if follow_host:
+        _sampler = PowerSampler(None)
+        _sampler.start()
+        return _sampler
     try:
         from . import servers as S
         h = S.host()
     except Exception:
         return None
-    if h is None or _sampler is not None:
-        return _sampler
+    if h is None:
+        return None
     _sampler = PowerSampler(h["id"])
     _sampler.start()
     return _sampler

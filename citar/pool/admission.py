@@ -24,6 +24,7 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from ..auth import access
 from ..db.models import AccessGrant, AvailabilityWindow, Server, ServerGroup, User
 from . import budgets, windows
 
@@ -136,8 +137,9 @@ def check(session, user: Optional[User], server: Server, purpose: str = "game", 
                      server=server)
 
     # The owner may always use their own hardware, and administrators are not gated by grants. Both
-    # still respect the server being switched off, above.
-    if server.owner_id == user.id or user.role == "admin":
+    # still respect the server being switched off, above. The site's machines (the host, its online
+    # APIs) are no member's own, whoever imported them (access.is_site_machine).
+    if (server.owner_id == user.id and not access.is_site_machine(server)) or user.role == "admin":
         return _check_capacity(session, server, None, online=online, in_flight=in_flight, now=now)
 
     if not server.group_id:
@@ -257,15 +259,19 @@ def _check_capacity(session, server: Server, grant: Optional[AccessGrant], *,
 # ---------------------------------------------------------------------------- choosing
 
 def usable_servers(session, user: Optional[User], purpose: str = "game", *,
-                   now: Optional[datetime] = None, liveness=None, load=None) -> list:
+                   now: Optional[datetime] = None, liveness=None, load=None, only=None) -> list:
     """Every server this user could run `purpose` on, with the decision attached.
 
     Returns refused servers too, each with its reason — the lobby shows them greyed out with "opens
     in 4h 12m" rather than hiding them, so somebody can see what exists and why they cannot use it.
+    ``only(server)``, when given, chooses which servers are considered at all (the ones the user may
+    see: a refused machine they cannot see is not named to them).
     """
     now = now or datetime.now(timezone.utc)
     out = []
     for server in session.scalars(select(Server).order_by(Server.name)):
+        if only is not None and not only(server):
+            continue
         online = liveness(server.id) if liveness else None
         in_flight = load(server.id) if load else None
         decision = check(session, user, server, purpose, now=now, online=online, in_flight=in_flight)

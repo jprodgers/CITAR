@@ -1,10 +1,10 @@
 """Game seats on pooled machines.
 
-A seat's ``llm`` block names a server by id. Servers in the admin registry (``config/servers.json``)
-are dialled by CITAR itself; servers registered on the Servers page live in the database and are
-reached through the helper (worker) connected from that machine. This module turns a seat naming a
-pooled server into an agent configuration that plays through its helper, and checks that whoever
-creates the game may use the machine.
+A seat's ``llm`` block names a machine by id. Every machine is a row of the ``servers`` table (design/phase3-features.md
+P3.2.8): CITAR dials one whose ``reach`` is ``direct`` itself (``citar.servers.resolve_llm``), and plays one whose
+``reach`` is ``worker`` through the helper connected from that machine. This module turns a seat naming a helper
+machine into an agent configuration that plays through its helper, and checks that whoever creates the game may use
+the machine, whichever its reach.
 """
 from __future__ import annotations
 
@@ -88,9 +88,10 @@ def _alive(session, pid: int) -> bool:
 
 
 def max_parallel(pooled: dict) -> int:
-    """How many requests a pooled machine takes at once (its registration, or 1)."""
+    """How many requests a machine takes at once: its row's slots (``Server.max_concurrent``, the one number of
+    P3.2.8), or 1."""
     try:
-        return max(1, int(((pooled.get("config") or {}).get("connection") or {}).get("max_parallel") or 1))
+        return max(1, int(pooled.get("max_concurrent") or 1))
     except (TypeError, ValueError):
         return 1
 
@@ -99,21 +100,15 @@ _INFERENCE = ("reasoning_effort", "max_tokens", "temperature", "max_tool_calls_p
 
 
 def lookup(server_id: Optional[str]) -> Optional[dict]:
-    """A pooled server as a plain dict (id, name, provider, config, enabled), or None if there is none."""
-    if not server_id:
+    """A machine as a plain dict (id, name, provider, reach, enabled, max_concurrent, config as stored, owner_tz),
+    or None if there is none. Read from ``citar.servers``' cache of the rows, so asking costs no database query."""
+    if not server_id or not isinstance(server_id, str):
         return None
-    try:
-        from .. import db
-        from ..db.models import Server, User
-        with db.session() as s:
-            sv = s.get(Server, server_id)
-            if sv is None:
-                return None
-            owner = s.get(User, sv.owner_id) if sv.owner_id else None
-            return {"id": sv.id, "name": sv.name, "provider": sv.provider, "enabled": sv.enabled,
-                    "config": dict(sv.config or {}), "owner_tz": (owner.tz if owner else None) or "UTC"}
-    except Exception:
+    from .. import servers
+    m = servers.machine(server_id)
+    if m is None:
         return None
+    return {k: m[k] for k in ("id", "name", "provider", "reach", "enabled", "max_concurrent", "config", "owner_tz")}
 
 
 def restricted(pooled: Optional[dict], when: Optional[datetime] = None) -> Optional[datetime]:
@@ -143,37 +138,6 @@ def clock_text(pooled: Optional[dict], end: Optional[datetime]) -> Optional[str]
     return end.astimezone(zone((pooled or {}).get("owner_tz"))).strftime("%H:%M")
 
 
-def restriction_status() -> list[dict]:
-    """Pooled machines in their quiet hours right now (for the page header)."""
-    try:
-        from .. import db
-        from ..db.models import Server
-        with db.session() as s:
-            ids = [sv.id for sv in s.query(Server).all()
-                   if ((sv.config or {}).get("restricted_hours") or {}).get("enabled")]
-    except Exception:
-        return []
-    out = []
-    for sid in ids:
-        pooled = lookup(sid)
-        end = restricted(pooled)
-        if end:
-            out.append({"id": sid, "name": pooled["name"], "until": clock_text(pooled, end), "until_ts": end.timestamp()})
-    return out
-
-
-def all_machines() -> list[dict]:
-    """Every machine on the Servers page: id, name, kind and stored config."""
-    try:
-        from .. import db
-        from ..db.models import Server
-        with db.session() as s:
-            return [{"id": sv.id, "name": sv.name, "kind": sv.kind, "config": dict(sv.config or {})}
-                    for sv in s.query(Server).all()]
-    except Exception:
-        return []
-
-
 def live_models(server_id: str) -> list[dict]:
     """What the machine's helper reports right now: key, whether it is loaded, context length."""
     try:
@@ -185,7 +149,7 @@ def live_models(server_id: str) -> list[dict]:
 
 
 def resolve(llm: dict, pooled: dict) -> dict:
-    """The agent configuration for a seat on a pooled server: the ``worker`` provider, which sends every
+    """The agent configuration for a seat on a helper machine: the ``worker`` provider, which sends every
     request down the helper's connection."""
     from ..servers import SEAT_OVERRIDES
     key = llm.get("model") or llm.get("model_id") or ""
@@ -206,7 +170,7 @@ def resolve(llm: dict, pooled: dict) -> dict:
 
 
 def describe(llm: dict, pooled: dict) -> dict:
-    """Display info for a seat on a pooled server, in the shape ``servers.describe_seat`` returns."""
+    """Display info for a seat on a helper machine, in the shape ``servers.describe_seat`` returns."""
     key = llm.get("model") or llm.get("model_id")
     end = restricted(pooled)
     return {"server_id": pooled["id"], "server": pooled["name"], "model": key, "label": key, "profile": None,
@@ -218,8 +182,10 @@ def authorize(session, user, seats: list[dict], purpose: str = "game", *, queued
 
     Raises ValueError with the admission system's own explanation (no grant, outside a window, budget
     spent, machine offline...), except to somebody who may not even see the machine: they are told only
-    that they may not use it, since the explanation names the machine and its group. The machines of
-    ``config/servers.json`` are not rows, and ``servers.member_llm`` decides about them. ``purpose`` is the
+    that they may not use it, since the explanation names the machine and its group. Every machine is a row
+    (the host and the site's API rows included, since the registry merge), so every seat with a machine is
+    admitted here; a helper machine is online while its helper is connected, a machine CITAR dials has no
+    such state (``liveness``). ``purpose`` is the
     work the seats do (``admission.PURPOSES``): a benchmark run's machines are admitted for `benchmark`, a
     probe run's subject for `probe` (design/phase3-features.md P3.2.4: "create" is the capability plus
     admission where the work runs on a machine). ``queued`` is for work that waits its turn (a run): who may is
@@ -228,17 +194,16 @@ def authorize(session, user, seats: list[dict], purpose: str = "game", *, queued
     """
     from ..auth import access
     from ..db.models import Server
-    from ..server.workers import hub
     from . import admission
     for seat in seats:
         llm = seat.get("llm") or {}
         if seat.get("type") != "llm" or not llm.get("server_id"):
             continue
-        server = session.get(Server, llm["server_id"])
+        server = session.get(Server, llm["server_id"]) if isinstance(llm["server_id"], str) else None
         if server is None:
             continue
-        decision = admission.check(session, user, server, purpose, online=hub().is_online(server.id),
-                                   in_flight=hub().in_flight(server.id))
+        online, in_flight = liveness(server)
+        decision = admission.check(session, user, server, purpose, online=online, in_flight=in_flight)
         # "busy right now" is fine for a game: its turns take their place in the machine's queue
         if queued and (decision.temporary or decision.code == "offline"):
             continue
@@ -246,6 +211,16 @@ def authorize(session, user, seats: list[dict], purpose: str = "game", *, queued
             if access.VIEW not in access.on(session, user, server):
                 raise ValueError("You may not use that machine. Pick one of the machines you may use.")
             raise ValueError(f"{server.name}: {decision.reason}")
+
+
+def liveness(server) -> tuple:
+    """``(online, in_flight)`` for admission: a helper machine is online while its helper is connected, with the
+    requests it has in flight; a machine CITAR dials itself has no connection to be absent, so both are unknown
+    (None), as ``citar.server.pool_api`` reports it, rather than "offline" for ever."""
+    if (getattr(server, "reach", None) or "worker") != "worker":
+        return None, None
+    from ..server.workers import hub
+    return hub().is_online(server.id), hub().in_flight(server.id)
 
 
 def admit(session, user, server_ids, purpose: str) -> None:

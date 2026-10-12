@@ -330,6 +330,12 @@ class Worker:
             welcome = P.parse(raw)
             if welcome.get("t") == P.ERROR:
                 raise Rejected(welcome.get("message") or "The server refused this worker.")
+            if welcome.get("t") == P.SHUTDOWN:
+                # let in, then taken away before it was welcomed (its token revoked, its machine disabled meanwhile):
+                # as a shutdown at any other time, it stops rather than reconnect to a refusal
+                log.info("server asked this worker to stop: %s", welcome.get("reason", ""))
+                self.running = False
+                return
             if welcome.get("t") != P.WELCOME:
                 raise RuntimeError(f"Unexpected first frame: {welcome.get('t')}")
 

@@ -1,8 +1,11 @@
 """HTTP API for the shared server pool: servers, groups, grants, windows and budgets.
 
-Separate from `admin_api.py`, which is the old single-tenant registry and stays administrator-only.
-These routes are per-owner: an ordinary account with the `register_servers` capability can add its
-own hardware, put it in a group and decide who may use it on what terms.
+Every machine is a row (design/phase3-features.md P3.2.8); ``admin_api.py`` keeps the registry's routes (a machine's
+configuration, model loading on the host, keys, electricity plans) with a gate per route. These routes are
+per-owner: an ordinary account with the `register_servers` capability can add its own hardware, put it in a group
+and decide who may use it on what terms. A machine the server dials itself (``reach = direct``) is an
+administrator's to add, unless it is the dry run (``pool.check_reach``: 403). Revoking a worker token, disabling a
+machine and deleting one drop its helper's connection once the change is committed (``WorkerHub.drop``).
 """
 from __future__ import annotations
 
@@ -25,8 +28,16 @@ router = APIRouter(prefix="/api/pool")
 
 
 def _fail(exc: Exception, status: int = 400) -> HTTPException:
-    """Turn an internal error into an HTTP error."""
-    return HTTPException(status, str(exc))
+    """Turn an internal error into an HTTP error: 403 for a machine the caller may not make one CITAR dials."""
+    return HTTPException(403 if isinstance(exc, pool.ReachRefused) else status, str(exc))
+
+
+def _drop(s: Session, server_id: str, reason: str, *, token_id: Optional[str] = None) -> None:
+    """Commit the request's change, then disconnect the machine's helper (P3.2.8): its next hello finds the change
+    and is refused, and nothing it was doing is waited for."""
+    from .workers import hub
+    s.commit()
+    hub().drop(server_id, reason, token_id=token_id)
 
 
 def _server(s: Session, server_id: str, viewer: Optional[User], permission: str) -> Server:
@@ -154,6 +165,7 @@ def update_server(server_id: str, body: ServerUpdate, request: Request,
     """Change a machine's details."""
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
+    disabled = body.enabled is False and server.enabled
     if body.enabled is not None:
         server.enabled = body.enabled
         audit.record(s, "server.enabled" if body.enabled else "server.disabled", actor=me,
@@ -167,6 +179,8 @@ def update_server(server_id: str, body: ServerUpdate, request: Request,
         if body.group_id:
             _group(s, body.group_id, me, access.MANAGE)
         server.group_id = body.group_id or None
+    if disabled:
+        _drop(s, server.id, "its machine was disabled")
     return pool.public_server(s, server, me)
 
 
@@ -194,14 +208,14 @@ def set_costing(server_id: str, body: Costing, request: Request,
 @router.get("/servers/{server_id}/rates")
 def machine_rates(server_id: str, request: Request, p: Principal = Depends(principal), s: Session = Depends(get_db)):
     """What an hour on this machine costs, idle and with the model busy."""
-    from .. import costing, servers as registry
+    from .. import servers as registry
     me = require_user(request, p)
     _server(s, server_id, me, access.MANAGE)
     reg = registry.with_pooled()
     sv = next((x for x in reg["servers"] if x["id"] == server_id), None)
     if sv is None:
         raise HTTPException(404, "No such server.")
-    return {"idle": costing.hourly_profile(sv, reg, busy_fraction=0.0), "busy": costing.hourly_profile(sv, reg, busy_fraction=1.0)}
+    return pool.machine_rates(sv, reg, me)
 
 
 class QuietHours(BaseModel):
@@ -225,10 +239,14 @@ def set_quiet_hours(server_id: str, body: QuietHours, request: Request,
 @router.delete("/servers/{server_id}")
 def delete_server(server_id: str, request: Request, p: Principal = Depends(principal),
                   s: Session = Depends(get_db)):
-    """Remove a machine from the pool."""
+    """Remove a machine from the pool: its row, then (once that is committed) its helper's connection and the key its
+    stored configuration keeps."""
+    from .. import servers as registry
     me = require_user(request, p)
     server = _server(s, server_id, me, access.MANAGE)
-    pool.delete_server(s, me, server)
+    config = pool.delete_server(s, me, server)
+    _drop(s, server_id, "its machine was deleted")
+    registry.forget_key(server_id, config)
     return {"deleted": server_id}
 
 
@@ -484,6 +502,7 @@ def revoke_worker_token(server_id: str, token_id: str, request: Request,
         raise HTTPException(404, "No such worker token.")
     row.revoked_at = datetime.now(timezone.utc)
     audit.record(s, "worker.token_revoked", actor=me, object_type="server", object_id=server.id)
+    _drop(s, server.id, "its worker token was revoked", token_id=token_id)
     return {"revoked": token_id}
 
 
@@ -512,7 +531,8 @@ def test_server(server_id: str, request: Request, model: str = "", p: Principal 
     connection = hub().get(server.id)
     if connection is None:
         return {"ok": False, "stage": "connection",
-                "reason": "No worker is connected for this server."}
+                "reason": "No worker is connected for this server." if server.reach == "worker" else
+                "The server dials this machine itself; this test is for a machine's CITAR helper."}
 
     chosen = model or next((m.get("key") for m in connection.models
                             # Embedding models cannot answer a chat completion; skip them so the
@@ -552,33 +572,18 @@ def availability(request: Request, purpose: str = "game", p: Principal = Depends
                  s: Session = Depends(get_db)):
     """What this account could run right now, and when the rest becomes available.
 
-    This is what the lobby asks before offering model seats.
+    This is what the lobby asks before offering model seats. Only machines the account may see are named, usable or
+    not: another member's private machine, or one of the site's nobody shared, is 404 to it anywhere else (P3.9.1).
     """
     me = require_user(request, p)
     now = datetime.now(timezone.utc)
     usable, blocked = [], []
     for server, decision in admission.usable_servers(s, me, purpose, now=now,
-                                                     liveness=_liveness, load=_load):
+                                                     liveness=_liveness, load=_load,
+                                                     only=lambda row: pool.visible(s, me, row)):
         entry = {"id": server.id, "name": server.name, "provider": server.provider,
                  "models": [m.get("key") for m in (server.config or {}).get("models") or []],
                  **decision.client()}
         (usable if decision.allowed else blocked).append(entry)
     return {"purpose": purpose, "usable": usable, "blocked": blocked,
             "viewer_tz": me.tz, "now": now.isoformat()}
-
-
-# ---------------------------------------------------------------------------- migration
-
-@router.post("/import-registry")
-def import_registry(request: Request, p: Principal = Depends(principal),
-                    s: Session = Depends(get_db)):
-    """Bring config/servers.json into the database as this account's servers. Idempotent."""
-    me = require_user(request, p)
-    if me.role != "admin":
-        raise HTTPException(403, "Only an administrator can import the legacy server registry.")
-    try:
-        result = pool.import_registry(s, me)
-    except Exception as exc:
-        log.exception("registry import failed")
-        raise _fail(exc)
-    return result

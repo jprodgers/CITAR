@@ -34,15 +34,19 @@ class CostTests(unittest.TestCase):
 
     def test_servers_page_machines_are_priced_under_old_ids_too(self):
         """A machine registered through the helper used to be left out of every cost report."""
-        from unittest import mock
+        from citar import db
+        from citar.db.models import Server
         plan = S.load()["electricity_plans"][0]["id"]
-        machine = {"id": "sv_desk", "name": "Desk", "kind": "owned", "config": {
-            "power": {"idle_w": 20, "cpu_max_w": 60, "gpu_max_w": 100},
-            "components": [{"name": "Desk", "price": 876.6, "purchased": "2026-01-01", "lifespan_years": 1}],
-            "costs": [{"from": "2000-01-01", "electricity_plan_id": plan}],
-            "former_ids": ["sv_desk_old"]}}
-        with mock.patch("citar.pool.seats.all_machines", lambda: [machine]):
-            reg = S.with_pooled()
+        config = {"power": {"idle_w": 20, "cpu_max_w": 60, "gpu_max_w": 100},
+                  "components": [{"name": "Desk", "price": 876.6, "purchased": "2026-01-01", "lifespan_years": 1}],
+                  "costs": [{"from": "2000-01-01", "electricity_plan_id": plan}],
+                  "former_ids": ["sv_desk_old"]}
+        if not db.configured():
+            db.configure()
+        with db.session() as s:
+            s.add(Server(id="sv_desk", name="Desk", kind="owned", provider="lmstudio", reach="worker", config=config))
+        self.addCleanup(lambda: S.delete("sv_desk"))
+        reg = S.with_pooled()
         self.assertEqual(reg["aliases"], {"sv_desk_old": "sv_desk"})
         spans = [{"act": a, "srv": srv, "t0": T0, "t1": T0 + 3600, "held": 3600, "busy": 1800, "cpu": 0, "model": "m"}
                  for a, srv in (("new", "sv_desk"), ("old", "sv_desk_old"))]

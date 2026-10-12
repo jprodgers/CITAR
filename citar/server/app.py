@@ -34,7 +34,7 @@ from .admin_users_api import router as admin_users_router
 from .. import settings as citar_settings
 from ..auth import access, audit
 from ..auth.deps import Principal, get_db, principal, require_cap, require_role, require_user
-from .. import items
+from .. import items, pool
 from . import ownership
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -84,6 +84,8 @@ async def _startup():
     _loop = asyncio.get_running_loop()
     from .boot import startup as boot_startup
     boot_startup()                                # database, migrations, configuration checks
+    from ..pool import registry_import
+    registry_import.on_boot()                     # config/servers.json into rows, once, before any seat needs one
     from .workers import hub
     hub().attach_loop(_loop)                      # lets game threads reach connected workers
     asyncio.create_task(hub().ping_loop(citar_settings.get().worker_ping_seconds))
@@ -102,7 +104,8 @@ async def _startup():
     items.on_boot()                               # shipped items' rows; strays adopted when there is an admin
     asyncio.create_task(_close_finished_loop())   # finished lobby games leave the list after a while
     from .. import usage
-    usage.start_power_sampler()                   # live power samples of this machine for cost reports
+    usage.start_power_sampler(follow_host=True)   # live power samples of the host for cost reports (a host made
+                                                  # later, by the first administrator, from then on)
     usage.tracker().start()
 
 
@@ -390,17 +393,23 @@ class ModelProbe(BaseModel):
     api_key_env: Optional[str] = None
 
 
-# Fetches from a caller-supplied base_url, so this is an SSRF vector; never anonymous.
-@app.post("/api/llm/models", dependencies=[Depends(require_user)])
-def probe_models(body: ModelProbe):
-    """List the models an endpoint offers (used by the lobby's 'Detect models' button and to test connectivity)."""
+@app.post("/api/llm/models")
+def probe_models(body: ModelProbe, me=Depends(require_user)):
+    """List the models an endpoint offers (the lobby's 'Detect models' button, and a connectivity test). It fetches
+    a caller-supplied base URL with a key from one of the server's environment variables, so it is an
+    administrator's (P3.2.8), the dry run excepted, which dials nothing: a member's machine reports its models
+    through its helper. Refused before any address is dialled or any variable read."""
     import os
     import httpx
     provider = (body.provider or "").lower()
+    if provider != "dryrun" and not _is_admin(me):
+        raise HTTPException(403, "Only an administrator can have the server fetch an address. A machine you add "
+                                 "reports its models through its CITAR helper.")
+    if provider == "dryrun":
+        # answered before the key's variable is read: the dry run needs none, and it is anybody's to ask
+        return {"ok": True, "models": ["dry-run"], "loaded": ["dry-run"], "details": {}}
     key = os.environ.get(body.api_key_env) if body.api_key_env else None
     try:
-        if provider == "dryrun":
-            return {"ok": True, "models": ["dry-run"], "loaded": ["dry-run"], "details": {}}
         if provider == "anthropic":
             if not key and not os.environ.get("ANTHROPIC_API_KEY"):
                 return {"ok": False, "error": f"Environment variable {body.api_key_env or 'ANTHROPIC_API_KEY'} is not set on the server."}
@@ -507,7 +516,8 @@ def server_status(p: Principal = Depends(principal), sdb: DbSession = Depends(ge
     workers = hub().status()
     out = {"version": __version__, "uptime": round(time.time() - _STARTED), "user": p.user.handle, "admin": admin,
            "mode": "server" if citar_settings.get().server_mode else "local", "games": games,
-           "benchmarks": ({k: v for k, v in scheduler.status(items.listed(sdb, "benchmark_run", p.user)).items()
+           "benchmarks": ({k: v for k, v in scheduler.status(items.listed(sdb, "benchmark_run", p.user),
+                                                             pool.visible_restrictions(sdb, p.user)).items()
                            if k != "log"} if scheduler else None),
            "workers_online": len(workers) if admin else None}
     if admin:
@@ -929,9 +939,11 @@ def _seat_profiles(sdb: DbSession, user, seats) -> None:
 def _suite_gate(sdb: DbSession, user, suite: dict) -> None:
     """A suite's model entries through the members' gate (P3.2.9): a member's suite names the machines its models
     play on and never describes one (a base URL, a key, a key variable: 400), and each machine passes
-    ``servers.member_llm`` (a registry machine is an administrator's until it is shared: 403; an unknown one: 400).
-    Its scenarios' bot profiles must be ones ``user`` may see. An administrator's suite is taken as it is."""
+    ``servers.member_llm`` (an unknown one: 400) and is one the member may see (403 otherwise, the site's own
+    included until they are shared; admission decides the rest when a run starts). Its scenarios' bot profiles must
+    be ones ``user`` may see. An administrator's suite is taken as it is."""
     from .. import servers
+    from ..db.models import Server
     if not isinstance(suite, dict):
         raise HTTPException(400, "A suite is an object.")
     for sc in suite.get("scenarios") or []:
@@ -951,6 +963,11 @@ def _suite_gate(sdb: DbSession, user, suite: dict) -> None:
             servers.member_llm({"server_id": group.get("server_id")}, user, required=True)
         except servers.SeatBlockError as e:
             raise HTTPException(e.status, str(e)) from None
+        # a suite names machines its maker may see; whether they may run it there is decided when a run starts
+        # (``_admit``), so a machine nobody shared with them is refused now without being named
+        row = sdb.get(Server, group.get("server_id"))
+        if row is None or access.VIEW not in access.on(sdb, user, row):
+            raise HTTPException(403, "You may not use that machine. Pick one of the machines you may use.")
 
 
 def _admit(sdb: DbSession, user, server_ids, purpose: str) -> None:
@@ -987,8 +1004,8 @@ items.VISIBILITY_HOOKS["benchmark_run"] = _run_games_follow
 @app.get("/api/benchmarks/status")
 def bench_status(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
     """What the benchmark scheduler is doing: running jobs, queues, restricted servers. A member's counts and log
-    cover the runs they may see."""
-    return _scheduler().status(items.listed(sdb, "benchmark_run", me))
+    cover the runs they may see, and the machines in their quiet hours those the member may see."""
+    return _scheduler().status(items.listed(sdb, "benchmark_run", me), pool.visible_restrictions(sdb, me))
 
 
 @app.get("/api/benchmarks/settings", dependencies=[Depends(require_user)])
@@ -1013,13 +1030,20 @@ def bench_suites(request: Request, p: Principal = Depends(principal), sdb: DbSes
     return _with_perms(sdb, "benchmark_suite", p.user, out, slug=key)
 
 
-@app.get("/api/benchmarks/suites/new", dependencies=[Depends(require_user)])
-def bench_new_suite():
-    """A blank suite with sensible defaults, for the editor to start from."""
+@app.get("/api/benchmarks/suites/new")
+def bench_new_suite(me=Depends(require_user), sdb: DbSession = Depends(get_db)):
+    """A blank suite with sensible defaults, for the editor to start from: on the host when its caller may use it,
+    else the first machine with models they may (every machine is a row, P3.2.8; a member's suite names only those)."""
     from .benchmarks import normalize_suite
     from .. import servers as REG
+    from ..db.models import Server
+
+    def usable(sv) -> bool:
+        row = sdb.get(Server, sv["id"])
+        return row is not None and access.VIEW in access.on(sdb, me, row)
     host = REG.host()
-    first = host if host and host["models"] else next((s for s in REG.list_servers() if s["models"] and s["kind"] != "test"), None)
+    first = host if host and host["models"] and usable(host) else next(
+        (s for s in REG.list_servers() if s["models"] and s["kind"] != "test" and usable(s)), None)
     return normalize_suite({"name": "New benchmark suite", "servers": [{"server_id": first["id"], "models": []}] if first else []})
 
 
@@ -2242,15 +2266,15 @@ async def worker_socket(websocket: WebSocket):
             await websocket.send_text(P.error_frame(P.Failure(id="", message="That worker token was refused.")))
             await websocket.close(code=4401)
             return
-        server_id, server_name = identity
+        server_id, server_name, token_id = identity
 
-        connection = WorkerConnection(websocket, server_id, hello, asyncio.get_running_loop())
-        previous = hub().register(connection)
-        if previous is not None:
-            try:
-                await previous.ws.close(code=4409)
-            except Exception:
-                pass
+        connection = WorkerConnection(websocket, server_id, hello, asyncio.get_running_loop(), token_id=token_id)
+        refused = await hub().admit(connection)
+        if refused:
+            # taken away between the hello's check and the registration: told why, as a drop tells a helper
+            await websocket.send_text(P.frame(P.SHUTDOWN, reason=refused))
+            await websocket.close(code=4403)
+            return
         await websocket.send_text(P.welcome_frame(P.Welcome(
             server_id=server_id, server_name=server_name,
             ping_seconds=citar_settings.get().worker_ping_seconds)))

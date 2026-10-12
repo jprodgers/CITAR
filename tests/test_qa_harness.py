@@ -237,6 +237,82 @@ class Directories(unittest.TestCase):
             endpoint.close()
 
 
+class ScriptedEndpoint(unittest.TestCase):
+    """The fake endpoint's scripted policy (P3.9.4): valid tool calls from the request's own tools and messages."""
+
+    TOOLS = [{"type": "function", "function": {"name": n, "parameters": {"type": "object"}}}
+             for n in ("get_units", "get_cities", "get_empire", "get_players", "found_city", "unit_order", "set_research",
+                       "set_production", "open_negotiation", "un_vote", "end_turn")]
+
+    def turn(self, endpoint, prompt: str, results=None) -> list:
+        """The calls the policy answers a turn with: a briefing, then the reads' results when ``results`` is given."""
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": prompt}]
+        if results is not None:
+            calls = [{"id": f"c{i}", "type": "function", "function": {"name": n, "arguments": "{}"}}
+                     for i, n in enumerate(results)]
+            messages.append({"role": "assistant", "content": "", "tool_calls": calls})
+            messages += [{"role": "tool", "tool_call_id": f"c{i}", "content": json.dumps(v)}
+                         for i, v in enumerate(results.values())]
+        _reply, calls = endpoint.scripted_reply({"model": "m", "messages": messages, "tools": self.TOOLS})
+        return [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in calls]
+
+    def test_a_turn_reads_orders_trades_and_ends(self):
+        endpoint = qa.FakeEndpoint(delay=0)
+        try:
+            self.assertEqual([n for n, _ in self.turn(endpoint, "Your turn 1.")],
+                             ["get_units", "get_cities", "get_empire", "get_players"])
+            results = {"get_units": [{"id": 1, "type": "Settler", "class": "civilian"},
+                                     {"id": 2, "type": "Warrior", "class": "melee", "activity": None}],
+                       "get_cities": [], "get_empire": {"id": 0, "name": "England", "researching": None},
+                       "get_players": [{"id": 0, "kind": "major", "met": True, "alive": True, "name": "England"},
+                                       {"id": 1, "kind": "major", "met": True, "alive": True, "name": "Japan"},
+                                       {"id": 2, "kind": "major", "met": False, "alive": True, "name": "Unknown"}]}
+            calls = dict(self.turn(endpoint, "Your turn 1.", results))
+            self.assertEqual(calls["found_city"], {"unit_id": 1})
+            self.assertEqual(calls["unit_order"], {"unit_id": 2, "order": "explore"})
+            self.assertEqual(calls["set_research"], {"tech": "pottery"})
+            self.assertEqual(calls["open_negotiation"]["to"], 1, "a trade with the civilization it met")
+            self.assertEqual(calls["open_negotiation"]["give"], [{"type": "share_map"}])
+            again = dict(self.turn(endpoint, "Your turn 2.", results))
+            self.assertNotIn("open_negotiation", again, "one trade (max_trades)")
+            self.assertIn("un_vote", dict(self.turn(endpoint, "The United Nations vote is open.", results)))
+            messages = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "", "tool_calls": []},
+                        {"role": "assistant", "content": ""}]
+            _reply, calls = endpoint.scripted_reply({"messages": messages, "tools": self.TOOLS})
+            self.assertEqual([c["function"]["name"] for c in calls], ["end_turn"])
+        finally:
+            endpoint.close()
+
+    def test_it_answers_the_negotiation_it_is_asked_about(self):
+        endpoint = qa.FakeEndpoint(delay=0)
+        try:
+            tools = [{"type": "function", "function": {"name": "respond_negotiation"}}]
+            prompt = ('Answer negotiation #7: {"current_proposal": {"you_give": [{"type": "gold"}], '
+                      '"you_receive": [{"type": "share_map"}, {"type": "embassy"}]}}')
+            _reply, calls = endpoint.scripted_reply({"messages": [{"role": "user", "content": prompt}], "tools": tools})
+            self.assertEqual(json.loads(calls[0]["function"]["arguments"])["negotiation_id"], 7)
+            self.assertEqual(json.loads(calls[0]["function"]["arguments"])["action"], "accept")
+        finally:
+            endpoint.close()
+
+    def test_an_openai_client_reads_its_answers_and_the_log_says_when(self):
+        from citar.agents.providers.openai_provider import OpenAIConversation
+        endpoint = qa.FakeEndpoint(delay=0.2)
+        try:
+            conversation = OpenAIConversation({"base_url": endpoint.url, "model": endpoint.MODEL, "tool_mode": "native"},
+                                              "system", [{"name": "end_turn", "description": "End the turn.",
+                                                          "input_schema": {"type": "object", "properties": {}}}])
+            conversation.add_user_text("Your turn.")
+            step = conversation.step()
+            conversation.close()
+            self.assertEqual([c.name for c in step.tool_calls], ["end_turn"])
+            [served] = endpoint.completions()
+            self.assertEqual((served["tools"], served["calls"]), (1, ["end_turn"]))
+            self.assertGreaterEqual(served["seconds"], 0.2, "the delay per completion")
+        finally:
+            endpoint.close()
+
+
 class CreateUser(unittest.TestCase):
     """``admin_cli create-user``, which the harness makes its accounts with: active, verified, any role, the password
     from standard input; refused for a weak password or a taken handle."""

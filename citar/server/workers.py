@@ -14,6 +14,11 @@ the caller's own thread.
 
 Liveness is a held connection plus a recent pong, not a config flag. A server is "online" only while
 a worker is actually there — anything else means the lobby offers a machine that will not answer.
+
+A connection lasts only as long as what let it in: revoking its token, disabling or deleting its machine, or
+suspending the machine's owner drops it at once (``WorkerHub.drop``, called by those routes once their change is
+committed), and the keep-alive checks every connection again at each ping, so a change made elsewhere (``admin_cli``,
+another process) drops it within a ping (design/phase3-features.md P3.2.8).
 """
 from __future__ import annotations
 
@@ -54,9 +59,11 @@ class Pending:
 class WorkerConnection:
     """One connected agent, serving one registered server."""
 
-    def __init__(self, websocket, server_id: str, hello: dict, loop):
+    def __init__(self, websocket, server_id: str, hello: dict, loop, token_id: Optional[str] = None):
         self.ws = websocket
         self.server_id = server_id
+        #: The worker token it presented: revoking that one drops it (``WorkerHub.drop``).
+        self.token_id = token_id
         self.loop = loop
         self.hello = hello
         self.hostname = hello.get("hostname") or ""
@@ -69,6 +76,9 @@ class WorkerConnection:
         self.last_seen = time.time()
         self.pending: dict = {}
         self.closed = False
+        #: Why it closed, once it did (``fail_all``): (message, retryable). A request opened after that fails at once
+        #: with the same error, rather than wait out its deadline for an answer nothing will send.
+        self._failure: Optional[tuple] = None
         self._lock = threading.RLock()
 
     # -------------------------------------------------------------- state
@@ -118,8 +128,12 @@ class WorkerConnection:
 
     # -------------------------------------------------------------- requests
     def open_request(self, request_id: str) -> Pending:
-        """Register a request and return something to wait on."""
+        """Register a request and return something to wait on. Raises WorkerError when the connection has closed
+        meanwhile (``submit`` took it just before a drop or a disconnect failed everything in flight)."""
         with self._lock:
+            if self.closed:
+                message, retryable = self._failure or ("The worker disconnected.", True)
+                raise WorkerError(message, refusal="closed" if retryable else "dropped", retryable=retryable)
             pending = Pending(id=request_id)
             self.pending[request_id] = pending
             return pending
@@ -138,12 +152,17 @@ class WorkerConnection:
         pending.error = error
         pending.event.set()
 
-    def fail_all(self, message: str):
-        """Called when the connection drops: nothing in flight can ever be answered."""
+    def fail_all(self, message: str, *, retryable: bool = True):
+        """Called when the connection drops: nothing in flight can ever be answered, and nothing more is taken
+        (``closed``, set under the same lock ``open_request`` checks it under). ``retryable`` is false when the machine
+        was taken away (``WorkerHub.drop``): waiting for it to come back would be waiting for nothing."""
         with self._lock:
+            self.closed = True
+            if self._failure is None:
+                self._failure = (message, retryable)
             pending, self.pending = list(self.pending.values()), {}
         for item in pending:
-            item.error = WorkerError(message, refusal="", retryable=True)
+            item.error = WorkerError(message, refusal="" if retryable else "dropped", retryable=retryable)
             item.event.set()
 
 
@@ -175,6 +194,30 @@ class WorkerHub:
             previous.fail_all("Replaced by a newer connection from the same worker.")
         return previous
 
+    async def admit(self, connection: WorkerConnection) -> Optional[str]:
+        """Register a helper whose hello ``authenticate`` let in, then check its token, machine and owner again
+        (``still_allowed``): a revoke, a disable, a delete or a suspension committed between that check and the
+        registration found nothing to drop (``drop`` runs after its commit), and this second look, made once the
+        connection can be found, sees it. Either the change committed before this look, which then refuses the
+        helper, or after it, when the change's own ``drop`` finds the connection. Returns why the helper may not serve
+        (it is dropped, its socket left to the caller to close), or None. A previous connection of the machine is
+        closed."""
+        previous = self.register(connection)
+        if previous is not None and previous.ws is not None:
+            try:
+                await previous.ws.close(code=4409)
+            except Exception:
+                pass
+        try:
+            refused = await asyncio.to_thread(still_allowed, [(connection.server_id, connection.token_id)])
+        except Exception:
+            log.exception("could not check the new worker for %s again", connection.server_id)
+            refused = {}
+        reason = next(iter(refused.values()), None)
+        if reason:
+            self.drop(connection.server_id, reason, token_id=connection.token_id, close=False)
+        return reason
+
     def unregister(self, connection: WorkerConnection):
         """Forget a worker that has disconnected, failing anything still waiting on it."""
         with self._lock:
@@ -197,6 +240,41 @@ class WorkerHub:
         """How many requests are in flight to a server."""
         connection = self.get(server_id)
         return connection.in_flight if connection else 0
+
+    def drop(self, server_id: str, reason: str, *, token_id: Optional[str] = None, close: bool = True) -> bool:
+        """Disconnect a machine's helper because it may no longer serve: its token revoked (``token_id``: only a
+        connection made with that token), its machine disabled or deleted, its owner suspended. Pending requests fail
+        as not retryable, the helper is told why (a ``shutdown`` frame, which stops it rather than have it reconnect
+        to a refusal) and its socket is closed (``close`` false: the caller, the socket's own handler, does that).
+        Call it after the change that took the machine away is committed: the helper's next hello must find it; a
+        helper whose hello was checked before that commit is checked again once registered (``admit``). Returns
+        whether a connection was dropped."""
+        with self._lock:
+            connection = self._workers.get(server_id)
+            if connection is None or (token_id is not None and connection.token_id != token_id):
+                return False
+            del self._workers[server_id]
+        connection.fail_all(f"The machine's helper was disconnected: {reason}", retryable=False)
+        log.info("dropped the worker for %s: %s", server_id, reason)
+        if close and connection.loop is not None and connection.ws is not None:
+            async def close():
+                try:
+                    await connection.ws.send_text(P.frame(P.SHUTDOWN, reason=reason))
+                except Exception:
+                    pass
+                try:
+                    await connection.ws.close(code=4403)
+                except Exception:
+                    pass
+            try:
+                asyncio.run_coroutine_threadsafe(close(), connection.loop)
+            except RuntimeError:            # the loop is gone: so is the socket
+                pass
+        return True
+
+    def drop_many(self, server_ids, reason: str) -> int:
+        """``drop`` each machine of ``server_ids`` (an account's, when it is suspended); returns how many were."""
+        return sum(1 for sid in server_ids if self.drop(sid, reason))
 
     def online_ids(self) -> set:
         """The ids of every connected server."""
@@ -257,16 +335,28 @@ class WorkerHub:
                 pass
 
     async def ping_loop(self, interval: float = 20.0):
-        """Keep connections warm and notice dead ones.
+        """Keep connections warm and notice dead ones, and ones that may no longer serve.
 
         A websocket through a home router and a proxy can be silently dead for minutes; an
-        application-level ping is what turns that into a prompt, honest "offline".
+        application-level ping is what turns that into a prompt, honest "offline". Each round also checks
+        every connection's token, machine and owner again (``still_allowed``), so a change made where this
+        process could not drop the helper at once (``admin_cli``, another server process) takes effect
+        within a ping.
         """
         while True:
             await asyncio.sleep(interval)
             with self._lock:
                 connections = list(self._workers.values())
+            try:
+                refused = await asyncio.to_thread(still_allowed, [(c.server_id, c.token_id) for c in connections])
+            except Exception:
+                log.exception("could not check the workers' tokens again")
+                refused = {}
+            for (server_id, token_id), reason in refused.items():
+                self.drop(server_id, reason, token_id=token_id)
             for connection in connections:
+                if connection.closed:
+                    continue
                 if not connection.alive:
                     log.info("worker for %s went stale, dropping", connection.server_id)
                     self.unregister(connection)
@@ -296,11 +386,51 @@ def hub() -> WorkerHub:
 
 # ---------------------------------------------------------------------------- authentication
 
+def _refusal(s, token_row, server) -> Optional[str]:
+    """Why a token may not let a helper in, or None: revoked, its machine gone or switched off, the machine's owner
+    out of good standing (a suspended account's machine serves nobody)."""
+    from ..db.models import User
+    if token_row is None or token_row.revoked_at is not None:
+        return "its worker token was revoked"
+    if server is None:
+        return "its machine was deleted"
+    if not server.enabled:
+        return "its machine was disabled"
+    owner = s.get(User, server.owner_id) if server.owner_id else None
+    if owner is not None and owner.status in ("suspended", "deleted", "pending"):
+        return "its owner's account is not active"
+    return None
+
+
+def still_allowed(pairs) -> dict:
+    """``{(server_id, token_id): reason}`` for the connected helpers whose token, machine or owner no longer lets
+    them in (``pairs`` is (server id, token id) per connection); the others are left out."""
+    from .. import db
+    from ..db.models import Server, WorkerToken
+    out: dict = {}
+    if not pairs:
+        return out
+    with db.session() as s:
+        for server_id, token_id in pairs:
+            server = s.get(Server, server_id)
+            token = s.get(WorkerToken, token_id) if token_id else None
+            if token is not None and token.server_id != server_id:
+                token = None
+            if token_id:
+                reason = _refusal(s, token, server)
+            else:           # a connection made without a token row (a test's): only its machine is checked
+                reason = None if server is not None and server.enabled else "its machine was disabled or deleted"
+            if reason:
+                out[(server_id, token_id)] = reason
+    return out
+
+
 def authenticate(token: str) -> Optional[tuple]:
-    """Resolve a worker token to (server_id, server_name), or None.
+    """Resolve a worker token to (server_id, server_name, token_id), or None.
 
     Only the hash is stored, so a leaked database yields no usable worker credential. A revoked or
-    unknown token is indistinguishable from the outside.
+    unknown token is indistinguishable from the outside, and so is one whose machine is disabled or
+    whose owner is suspended.
     """
     from .. import db
     from ..auth import tokens
@@ -314,13 +444,11 @@ def authenticate(token: str) -> Optional[tuple]:
         with db.session() as s:
             row = s.scalar(select(WorkerToken).where(
                 WorkerToken.token_hash == tokens.hash_token(token)))
-            if row is None or row.revoked_at is not None:
-                return None
-            server = s.get(Server, row.server_id)
-            if server is None or not server.enabled:
+            server = s.get(Server, row.server_id) if row is not None else None
+            if _refusal(s, row, server) is not None:
                 return None
             row.last_seen_at = datetime.now(timezone.utc)
-            return server.id, server.name
+            return server.id, server.name, row.id
     except Exception:
         log.exception("worker authentication failed")
         return None
