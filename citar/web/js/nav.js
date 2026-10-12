@@ -3,10 +3,10 @@ import { api } from "./api.js";
 import { el, clear } from "./util.js";
 import * as auth from "./auth.js";
 
-const PAGES = [["games", "#/", "Games"], ["benchmarks", "#/benchmarks", "Benchmarks"], ["queue", "#/queue", "Queue"], ["models", "#/models", "Models"], ["editor", "#/editor", "Map editor"], ["scenarios", "#/scenarios", "Scenarios"], ["probes", "#/probes", "Probes"], ["bots", "#/bots", "Bots"], ["lab", "#/lab", "Lab"], ["pool", "#/pool", "Servers"], ["reports", "#/reports", "Reports"]];
+const PAGES = [["games", "#/", "Games"], ["benchmarks", "#/benchmarks", "Benchmarks"], ["queue", "#/queue", "Queue"], ["models", "#/models", "Models"], ["editor", "#/editor", "Map editor"], ["scenarios", "#/scenarios", "Scenarios"], ["probes", "#/probes", "Probes"], ["bots", "#/bots", "Bots"], ["lab", "#/lab", "Lab"], ["pool", "#/pool", "Servers"], ["reports", "#/reports", "Reports"], ["people", "#/users", "People"]];
 
-// Shown only to administrators: everything on it is server-wide configuration.
-const ADMIN_PAGES = [["console", "#/console", "Server"]];
+// Shown only to administrators: server-wide configuration, and the accounts with the audit log.
+const ADMIN_PAGES = [["console", "#/console", "Server"], ["admin-users", "#/admin/users", "Users"]];
 
 /** The signed-in account, with a link to its settings and a way out. */
 function accountMenu() {
@@ -14,7 +14,7 @@ function accountMenu() {
   if (!me) return el("a", { class: "btn small", href: "#/login" }, "Sign in");
   return el("div", { class: "account-menu" },
     el("a", { href: "#/account", class: "account-link", title: `${me.handle} (${me.role})` },
-      me.avatar_url ? el("img", { class: "avatar", src: me.avatar_url, alt: "" })
+      me.avatar ? el("img", { class: "avatar", src: me.avatar, alt: "", referrerPolicy: "no-referrer" })
                     : el("span", { class: "avatar letter" }, (me.display_name || me.handle)[0].toUpperCase()),
       el("span", { class: "account-name" }, me.display_name || me.handle)),
     auth.session() && auth.session().local_mode

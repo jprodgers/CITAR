@@ -18,6 +18,8 @@ import { renderSetup } from "./setup.js";
 import { renderConsole } from "./console.js";
 import { renderLanding } from "./landing.js";
 import { renderQueue } from "./queue.js";
+import { renderPeople, renderProfile } from "./people.js";
+import { renderAdminUsers } from "./admin_users.js";
 import * as auth from "./auth.js";
 
 let rules = null;
@@ -30,9 +32,10 @@ let booted = false;
 const PUBLIC_ROUTES = ["login", "signup", "forgot", "reset"];
 
 // Pages of one thing that open without a session too: a game or a report published to the internet, or shared by
-// link (its key in the address). The server decides by the visibility ladder (P3.2.3); what it will not show is
-// the "not found" page, which offers a visitor the sign-in.
-const OPEN_ROUTES = ["game", "replay", "reports"];
+// link (its key in the address), and a profile its owner made public (P3.2.6). The server decides by the
+// visibility ladder (P3.2.3) and the profile's fields; what it will not show is the "not found" page, which offers
+// a visitor the sign-in.
+const OPEN_ROUTES = ["game", "replay", "reports", "u"];
 
 function signedIn() { return !!(auth.session() && auth.session().authenticated); }
 
@@ -152,6 +155,12 @@ async function route() {
       screen = await renderBots(root, rules, parts[1] || null);
     } else if (parts[0] === "models") {
       screen = await renderModels(root);
+    } else if (page === "users") {
+      screen = await renderPeople(root);
+    } else if (page === "u" && parts[1]) {
+      screen = await renderProfile(root, decodeURIComponent(parts[1]));
+    } else if (page === "admin" && parts[1] === "users") {
+      screen = await renderAdminUsers(root);
     } else {
       screen = await renderLobby(root, rules);
     }

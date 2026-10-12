@@ -152,6 +152,8 @@ function renderGames(card, games, refresh, meta) {
       `over — ${g.players[g.winner] ? g.players[g.winner].name : "no one"} (${g.victory || ""})`;
     table.appendChild(el("tr", {},
       el("td", {}, el("div", {}, el("b", {}, g.name), !manages ? el("span", { class: "pill", style: { marginLeft: "6px" } }, "shared with you") : null,
+        !manages && sharing.owner ? el("a", { class: "muted small", style: { marginLeft: "6px" }, href: `#/u/${encodeURIComponent(sharing.owner.handle)}` },
+          `by ${sharing.owner.display_name !== sharing.owner.handle ? sharing.owner.display_name + " " : ""}@${sharing.owner.handle}`) : null,
         sharing.visibility && sharing.visibility !== "private" && manages ? el("span", { class: "pill", style: { marginLeft: "6px" }, title: "Who can see it (Share)" }, VISIBILITY_LABEL[sharing.visibility] || sharing.visibility) : null),
         el("div", { class: "muted" }, `${g.config.map_type}, ${g.config.map_size}, ${status}`),
         g.benchmark ? el("a", { class: "pill live", href: "#/benchmarks", title: `Run: ${g.benchmark.run_name}` }, `Benchmark · ${g.benchmark.run_name}`) : null),
