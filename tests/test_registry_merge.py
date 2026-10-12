@@ -43,7 +43,7 @@ from sqlalchemy import select
 
 from citar import db, keystore, pool, servers, settings
 from citar.auth import accounts, policy, sessions
-from citar.db.models import AuditLog, Base, Server, User
+from citar.db.models import AuditLog, Base, Server, User, WorkerToken
 from citar.pool import registry_import
 
 settings.reset()
@@ -506,6 +506,50 @@ class Routes(unittest.TestCase):
     def test_the_retired_import_route_is_gone(self):
         self.assertEqual(self.call("zara", "POST", "/api/pool/import-registry").status_code, 404)
 
+    def test_the_pool_routes_that_drop_a_helper_by_caller(self):
+        """P3.9.1 for the pool routes 3-05 changed (disable, delete, revoke): a stranger 404, a visitor 401, the
+        owner and an administrator 200."""
+        from citar.auth import tokens
+        with db.session() as s:
+            raw, hashed = tokens.new_pair()
+            token = WorkerToken(server_id=self.helper, token_hash=hashed, prefix=tokens.prefix(raw), label="t")
+            s.add(token)
+            s.flush()
+            tid = token.id
+        routes = (("PUT", f"/api/pool/servers/{self.helper}", {"enabled": False}),
+                  ("DELETE", f"/api/pool/servers/{self.helper}/workers/tokens/{tid}", None))
+        for method, path, body in routes:
+            with self.subTest(route=path):
+                self.assertEqual(self.call("bob", method, path, body).status_code, 404)
+                self.assertEqual(self.call("anon", method, path, body).status_code, 401)
+                self.assertEqual(self.call("alice", method, path, body).status_code, 200)
+                self.assertEqual(self.call("zara", method, path, body).status_code, 200)
+        self.assertEqual(self.call("bob", "DELETE", f"/api/pool/servers/{self.helper}").status_code, 404)
+        self.assertEqual(self.call("anon", "DELETE", f"/api/pool/servers/{self.helper}").status_code, 401)
+        self.assertEqual(self.call("zara", "DELETE", f"/api/pool/servers/{self.helper}").status_code, 200)
+        self.quiet()
+
+    def test_new_machines_and_suites_start_on_what_the_caller_may_use(self):
+        self.assertEqual(self.call("anon", "GET", "/api/servers/new").status_code, 401)
+        self.assertEqual(self.call("zara", "GET", "/api/servers/new?provider=lmstudio").json()["reach"], "direct")
+        self.assertEqual(self.call("alice", "GET", "/api/servers/new?provider=dryrun").json()["reach"], "direct")
+        suite = lambda who: self.call(who, "GET", "/api/benchmarks/suites/new")  # noqa: E731
+        self.assertEqual(suite("anon").status_code, 401)
+        self.assertEqual([g["server_id"] for g in suite("bob").json()["servers"]], [],
+                         "nothing of the site's for a member nobody shared a machine with")
+        self.assertEqual([g["server_id"] for g in suite("zara").json()["servers"]], ["sv_gpu"])
+        self.assertEqual([g["server_id"] for g in suite("alice").json()["servers"]], [self.helper],
+                         "her own machine")
+        self.quiet()
+
+    def test_an_administrators_setup_wizard_registers_a_machine(self):
+        r = self.call("zara", "POST", "/api/setup/apply", {"provider": "anthropic", "label": "Wizard API",
+                                                           "kind": "api", "models": ["claude-opus-5"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        row = servers.machine(r.json()["server"]["id"])
+        self.assertEqual((row["owner_id"], row["reach"], row["server_resource"]), (self.ids["zara"], "direct", True))
+        self.quiet()
+
     def test_quiet_hours_lists_only_machines_the_caller_may_see(self):
         with db.session() as s:
             for sid in ("sv_gpu", self.helper):
@@ -572,7 +616,10 @@ class Benchmarks(unittest.TestCase):
         finally:
             sch.stop()
             for sid in list(manager.sessions):
+                session = manager.get(sid)
                 manager.delete(sid)
+                if session is not None and session._driver is not None:
+                    session._driver.join(10)          # its last write to the index lands before the next test
 
 
 # ---------------------------------------------------------------------------------------------------------- the CLI
